@@ -6,7 +6,7 @@ def select_position(idx: i32) -> vec4f32 =
   else @[0.0, 0.5, 0.0, 1.0]
 
 #[vertex] def vertex_main(#[builtin(vertex_index)] vertex_index: i32) -> (#[builtin(position)] vec4f32, #[location(0)] vec3f32) =
-  let position = select_position vertex_index in
+  let position = select_position(vertex_index) in
   let color: vec3f32 = @[1.0, 0.0, 0.0] in
   (position, color)
 

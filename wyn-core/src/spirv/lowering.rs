@@ -2649,7 +2649,7 @@ def get_x(r:{x:i32, y:i32}) -> i32 = r.x
             r#"
 def test(x:i32) -> i32 =
     let f = |y:i32| x + y in
-    f 10
+    f(10)
 "#,
         )
         .unwrap();

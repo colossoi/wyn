@@ -26,9 +26,9 @@ def vertex_main(#[builtin(vertex_index)] vertex_id: i32) -> #[builtin(position)]
 ------------------------------------------------------------
 
 def rotMat(angle: f32) -> mat2f32 =
-  let c0 = f32.cos angle in
-  let c1 = f32.cos (angle + 33.0) in
-  let c2 = f32.cos (angle + 11.0) in
+  let c0 = f32.cos(angle) in
+  let c1 = f32.cos((angle + 33.0)) in
+  let c2 = f32.cos((angle + 11.0)) in
   @[[c0, c2], [c1, c0]]
 
 ------------------------------------------------------------
@@ -37,57 +37,57 @@ def rotMat(angle: f32) -> mat2f32 =
 
 def traceSimple(fragCoord: vec2f32, mx: f32, my: f32, z_offset: f32, use_mouse: f32) -> f32 =
   let r = iResolution in
-  let rx = rotMat mx in
-  let ry = rotMat my in
+  let rx = rotMat(mx) in
+  let ry = rotMat(my) in
   let (_, _, accum) = loop (i, d, accum) = (0, 0.0, 0.0) while i < 80 do
-    let fi = f32.i32 i in
+    let fi = f32.i32(i) in
 
     let p_x = (fragCoord.x + fragCoord.x - r.x) / r.y * d in
     let p_y = (fragCoord.y + fragCoord.y - r.y) / r.y * d in
     let p_z = d - 8.0 in
 
-    if f32.abs p_x > 5.0 then (80, d, accum)
+    if f32.abs(p_x) > 5.0 then (80, d, accum)
     else
       -- Apply rotation rx to xz
-      let p_xz = mul @[p_x, p_z] rx in
+      let p_xz = mul(@[p_x, p_z], rx) in
       let p2_x = p_xz.x in
       let p2_z = p_xz.y in
 
       -- Apply rotation ry based on mouse
       let (p3_x, p3_y, p3_z) = if use_mouse > 0.5 then
-        let p_yz = mul @[p_y, p2_z] ry in
+        let p_yz = mul(@[p_y, p2_z], ry) in
         (p2_x, p_yz.x, p_yz.y)
       else
-        let p_xy = mul @[p2_x, p_y] ry in
+        let p_xy = mul(@[p2_x, p_y], ry) in
         (p_xy.x, p_xy.y, p2_z)
       in
 
-      let g = @[floor (p3_x * 6.0), floor (p3_y * 6.0), floor (p3_z * 6.0)] in
-      let f = @[fract (p3_x * 6.0) - 0.5, fract (p3_y * 6.0) - 0.5, fract (p3_z * 6.0) - 0.5] in
+      let g = @[floor((p3_x * 6.0)), floor((p3_y * 6.0)), floor((p3_z * 6.0))] in
+      let f = @[fract((p3_x * 6.0)) - 0.5, fract((p3_y * 6.0)) - 0.5, fract((p3_z * 6.0)) - 0.5] in
 
       -- Dot pattern hash
-      let hash1 = fract (f32.sin (dot g @[127.1, 311.7, 74.7]) * 43758.5) in
-      let h = if magnitude f < hash1 * 0.3 + 0.1 then 1.0 else 0.0 in
+      let hash1 = fract((f32.sin((dot(g, @[127.1, 311.7, 74.7]))) * 43758.5)) in
+      let h = if magnitude(f) < hash1 * 0.3 + 0.1 then 1.0 else 0.0 in
 
       -- Angle for sparkle
-      let a = fract (f32.sin (dot g @[43.7, 78.2, 123.4]) * 127.1) * 6.28 in
+      let a = fract((f32.sin((dot(g, @[43.7, 78.2, 123.4]))) * 127.1)) * 6.28 in
 
       -- Menger fractal
       let (_, e_final, _) = loop (k, e, sc) = (0, 1.0, 2.0) while k < 3 do
-        let gk = @[f32.abs (fract (p3_x * sc) * 2.0 - 1.0),
-                   f32.abs (fract (p3_y * sc) * 2.0 - 1.0),
-                   f32.abs (fract (p3_z * sc) * 2.0 - 1.0)] in
-        let e2 = f32.min e (f32.min (f32.max gk.x gk.y) (f32.min (f32.max gk.y gk.z) (f32.max gk.x gk.z)) / sc) in
+        let gk = @[f32.abs((fract((p3_x * sc)) * 2.0 - 1.0)),
+                   f32.abs((fract((p3_y * sc)) * 2.0 - 1.0)),
+                   f32.abs((fract((p3_z * sc)) * 2.0 - 1.0))] in
+        let e2 = f32.min(e, (f32.min(f32.max(gk.x, gk.y), f32.min(f32.max(gk.y, gk.z), f32.max(gk.x, gk.z))) / sc)) in
         (k + 1, e2, sc * 0.6)
       in
 
-      let c = f32.max (f32.max (f32.max (f32.abs p3_x) (f32.abs p3_y)) (f32.abs p3_z))
-                      (dot @[f32.abs p3_x, f32.abs p3_y, f32.abs p3_z] @[0.577, 0.577, 0.577] * 0.9) - 3.0 in
+      let c = f32.max(f32.max(f32.max(f32.abs(p3_x), f32.abs(p3_y)), f32.abs(p3_z)),
+                      (dot(@[f32.abs(p3_x), f32.abs(p3_y), f32.abs(p3_z)], @[0.577, 0.577, 0.577]) * 0.9)) - 3.0 in
 
-      let s = 0.01 + 0.15 * f32.abs (f32.max (f32.max c (e_final - 0.1)) (f32.abs (f32.sin c) - 0.3) + z_offset * 0.02 - fi / 130.0) in
-      let sf = smoothstep 0.02 0.01 s in
+      let s = 0.01 + 0.15 * f32.abs((f32.max(f32.max(c, (e_final - 0.1)), (f32.abs(f32.sin(c)) - 0.3)) + z_offset * 0.02 - fi / 130.0)) in
+      let sf = smoothstep(0.02, 0.01, s) in
 
-      let contrib = 1.6 / s * (0.5 + 0.5 * f32.sin (fi * 0.3 + z_offset * 5.0) + sf * 4.0 * h * f32.sin (a + fi * 0.4 + z_offset * 5.0)) in
+      let contrib = 1.6 / s * (0.5 + 0.5 * f32.sin((fi * 0.3 + z_offset * 5.0)) + sf * 4.0 * h * f32.sin((a + fi * 0.4 + z_offset * 5.0))) in
 
       (i + 1, d + s, accum + contrib)
   in accum
@@ -110,15 +110,15 @@ def fragment_main(#[builtin(position)] fragCoord: vec4f32) -> #[location(0)] vec
   in
 
   -- Trace each color channel with chromatic aberration offset
-  let r_val = traceSimple coord m.x m.y (0.0 - 1.0) use_mouse in
-  let g_val = traceSimple coord m.x m.y 0.0 use_mouse in
-  let b_val = traceSimple coord m.x m.y 1.0 use_mouse in
+  let r_val = traceSimple(coord, m.x, m.y, (0.0 - 1.0), use_mouse) in
+  let g_val = traceSimple(coord, m.x, m.y, 0.0, use_mouse) in
+  let b_val = traceSimple(coord, m.x, m.y, 1.0, use_mouse) in
 
   -- Apply tanh tonemapping: tanh(O * O / 1e7)
   let scale = 1.0 / 10000000.0 in
-  let r_out = tanh (r_val * r_val * scale) in
-  let g_out = tanh (g_val * g_val * scale) in
-  let b_out = tanh (b_val * b_val * scale) in
+  let r_out = f32.tanh((r_val * r_val * scale)) in
+  let g_out = f32.tanh((g_val * g_val * scale)) in
+  let b_out = f32.tanh((b_val * b_val * scale)) in
 
   @[r_out, g_out, b_out, 1.0]
 

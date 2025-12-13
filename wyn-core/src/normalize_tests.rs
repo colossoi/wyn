@@ -167,13 +167,13 @@ fn test_normalize_loop_with_tuple_state() {
     // The loop produces a tuple (acc, i) on each iteration.
     let source = r#"
 def sum<[n]>(arr:[n]f32) -> f32 =
-  let (result, _) = loop (acc, i) = (0.0f32, 0) while i < length arr do
+  let (result, _) = loop (acc, i) = (0.0f32, 0) while i < length(arr) do
     (acc + arr[i], i + 1)
   in result
 
 #[vertex]
 def vertex_main(vertex_id:i32) -> #[builtin(position)] vec4f32 =
-  let result = sum [1.0f32, 1.0f32, 1.0f32] in
+  let result = sum([1.0f32, 1.0f32, 1.0f32]) in
   @[result, result, 0.0f32, 1.0f32]
 "#;
     compile_through_lowering(source).expect("Should compile with normalized loop");

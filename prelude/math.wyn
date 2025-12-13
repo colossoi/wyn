@@ -140,17 +140,17 @@ module f32	: 	(float with t = f32 with int_t = u32) = {
   type t = f32
   type int_t = u32
 
-  def i8(x: i8) -> t = __builtin_f32_from_i8 x
-  def i16(x: i16) -> t = __builtin_f32_from_i16 x
-  def i32(x: i32) -> t = __builtin_f32_from_i32 x
-  def i64(x: i64) -> t = __builtin_f32_from_i64 x
-  def u8(x: u8) -> t = __builtin_f32_from_u8 x
-  def u16(x: u16) -> t = __builtin_f32_from_u16 x
-  def u32(x: u32) -> t = __builtin_f32_from_u32 x
-  def u64(x: u64) -> t = __builtin_f32_from_u64 x
-  def f16(x: f16) -> t = __builtin_f32_from_f16 x
+  def i8(x: i8) -> t = __builtin_f32_from_i8(x)
+  def i16(x: i16) -> t = __builtin_f32_from_i16(x)
+  def i32(x: i32) -> t = __builtin_f32_from_i32(x)
+  def i64(x: i64) -> t = __builtin_f32_from_i64(x)
+  def u8(x: u8) -> t = __builtin_f32_from_u8(x)
+  def u16(x: u16) -> t = __builtin_f32_from_u16(x)
+  def u32(x: u32) -> t = __builtin_f32_from_u32(x)
+  def u64(x: u64) -> t = __builtin_f32_from_u64(x)
+  def f16(x: f16) -> t = __builtin_f32_from_f16(x)
   def f32(x: f32) -> t = x
-  def f64(x: f64) -> t = __builtin_f32_from_f64 x
+  def f64(x: f64) -> t = __builtin_f32_from_f64(x)
   def bool(x: bool) -> t = if x then 1.0f32 else 0.0f32
 
   -- Operators (registered in impl_source.rs)
@@ -167,13 +167,13 @@ module f32	: 	(float with t = f32 with int_t = u32) = {
   sig (<=) : t -> t -> bool
   sig (>=) : t -> t -> bool
 
-  def to_i64(x: t) -> i64 = __builtin_f32_to_i64 x
+  def to_i64(x: t) -> i64 = __builtin_f32_to_i64(x)
 
   def neg(x: t) -> t = 0.0f32 - x
   sig max : t -> t -> t
   sig min : t -> t -> t
   sig abs : t -> t
-  def sgn(x: t) -> t = if f32.isnan x then x else if x > 0.0f32 then 1.0f32 else if x < 0.0f32 then (0.0f32 - 1.0f32) else 0.0f32
+  def sgn(x: t) -> t = if f32.isnan(x) then x else if x > 0.0f32 then 1.0f32 else if x < 0.0f32 then (0.0f32 - 1.0f32) else 0.0f32
 
   def highest() -> t = 1.0f32 / 0.0f32
   def lowest() -> t = (0.0f32 - 1.0f32) / 0.0f32
@@ -184,18 +184,18 @@ module f32	: 	(float with t = f32 with int_t = u32) = {
   sig minimum<[n]>: [n]t -> t
 
   def recip(x: t) -> t = 1.0f32 / x
-  def from_fraction(x: i64, y: i64) -> t = __builtin_f32_from_i64 x / __builtin_f32_from_i64 y
+  def from_fraction(x: i64, y: i64) -> t = __builtin_f32_from_i64(x) / __builtin_f32_from_i64(y)
   def to_f64(x: t) -> f64 = x
 
   sig sqrt : t -> t
   sig rsqrt : t -> t
-  def cbrt(x: t) -> t = f32.pow x (1.0f32 / 3.0f32)
+  def cbrt(x: t) -> t = f32.pow(x, (1.0f32 / 3.0f32))
 
   sig exp : t -> t
   sig log : t -> t
   sig log2 : t -> t
-  def log10(x: t) -> t = f32.log x / f32.log 10.0f32
-  def log1p(x: t) -> t = f32.log (1.0f32 + x)
+  def log10(x: t) -> t = f32.log(x) / f32.log(10.0f32)
+  def log1p(x: t) -> t = f32.log((1.0f32 + x))
 
   sig sin : t -> t
   sig cos : t -> t
@@ -205,12 +205,12 @@ module f32	: 	(float with t = f32 with int_t = u32) = {
   sig atan : t -> t
 
   def pi() -> t = 3.14159265358979323846f32
-  def sinpi(x: t) -> t = f32.sin (pi * x)
-  def cospi(x: t) -> t = f32.cos (pi * x)
-  def tanpi(x: t) -> t = f32.tan (pi * x)
-  def asinpi(x: t) -> t = f32.asin x / pi
-  def acospi(x: t) -> t = f32.acos x / pi
-  def atanpi(x: t) -> t = f32.atan x / pi
+  def sinpi(x: t) -> t = f32.sin((pi() * x))
+  def cospi(x: t) -> t = f32.cos((pi() * x))
+  def tanpi(x: t) -> t = f32.tan((pi() * x))
+  def asinpi(x: t) -> t = f32.asin(x) / pi()
+  def acospi(x: t) -> t = f32.acos(x) / pi()
+  def atanpi(x: t) -> t = f32.atan(x) / pi()
 
   sig sinh : t -> t
   sig cosh : t -> t
@@ -220,8 +220,8 @@ module f32	: 	(float with t = f32 with int_t = u32) = {
   sig atanh : t -> t
 
   sig atan2 : t -> t -> t
-  def atan2pi(x: t, y: t) -> t = f32.atan2 x y / pi
-  def hypot(x: t, y: t) -> t = f32.sqrt (x * x + y * y)
+  def atan2pi(x: t, y: t) -> t = f32.atan2(x, y) / pi()
+  def hypot(x: t, y: t) -> t = f32.sqrt((x * x + y * y))
 
   def gamma(x: t) -> t = x
   def lgamma(x: t) -> t = x
@@ -243,15 +243,15 @@ module f32	: 	(float with t = f32 with int_t = u32) = {
   def nan() -> t = 0.0f32 / 0.0f32
   def e() -> t = 2.71828182845904523536f32
 
-  def from_bits(x: int_t) -> t = __builtin_f32_from_bits x
-  def to_bits(x: t) -> int_t = __builtin_f32_to_bits x
+  def from_bits(x: int_t) -> t = __builtin_f32_from_bits(x)
+  def to_bits(x: t) -> int_t = __builtin_f32_to_bits(x)
   def num_bits() -> i32 = 32
-  def get_bit(bit: i32, x: t) -> i32 = i32 0
+  def get_bit(bit: i32, x: t) -> i32 = i32(0)
   def set_bit(bit: i32, x: t, b: i32) -> t = x
 
   def epsilon() -> t = 1.1920929e-7f32
   def nextafter(x: t, y: t) -> t = x
   def ldexp(x: t, n: i32) -> t = x
-  def copysign(x: t, y: t) -> t = if y < 0.0f32 then (0.0f32 - f32.abs x) else f32.abs x
+  def copysign(x: t, y: t) -> t = if y < 0.0f32 then (0.0f32 - f32.abs(x)) else f32.abs(x)
 }
 module f16	: 	(float with t = f16 with int_t = u16)

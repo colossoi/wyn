@@ -9,7 +9,7 @@ use std::collections::{BTreeSet, HashMap};
 
 // Import type helper functions from parent module
 use super::{
-    as_arrow, bool_type, f32, function, i32, mat, record, sized_array, string, strip_unique, tuple, unique,
+    as_arrow, bool_type, count_arrows, f32, function, i32, mat, record, sized_array, string, strip_unique, tuple, unique,
     unit, vec,
 };
 
@@ -1381,6 +1381,16 @@ impl<'a> TypeChecker<'a> {
                     Err(err_type_at!(expr.h.span, "Cannot infer type of empty array"))
                 } else {
                     let first_type = self.infer_expression(&elements[0])?;
+
+                    // Futhark restriction: arrays of functions are not permitted
+                    let resolved_first = first_type.apply(&self.context);
+                    if as_arrow(&resolved_first).is_some() {
+                        bail_type_at!(
+                            expr.h.span,
+                            "Arrays of functions are not permitted"
+                        );
+                    }
+
                     for elem in &elements[1..] {
                         let elem_type = self.infer_expression(elem)?;
                         self.context.unify(&elem_type, &first_type).map_err(|_| {
@@ -1673,7 +1683,35 @@ impl<'a> TypeChecker<'a> {
                         } else {
                             format!("{}.{}", quals.join("."), name)
                         };
-                        self.arity_map.get(&full_name).copied()
+                        // First check user-defined functions
+                        if let Some(arity) = self.arity_map.get(&full_name).copied() {
+                            Some(arity)
+                        } else if self.scope_stack.lookup(&full_name).is_some() {
+                            // Name is bound locally - don't check builtins
+                            // (local variables shadow builtins, and we can't know their arity)
+                            None
+                        } else {
+                            // Check builtins - extract arity from type scheme
+                            use crate::poly_builtins::BuiltinLookup;
+                            if let Some(lookup) = self.poly_builtins.get(&full_name) {
+                                let ty = match lookup {
+                                    BuiltinLookup::Single(entry) => entry.scheme.instantiate(&mut self.context),
+                                    BuiltinLookup::Overloaded(overloads) => overloads.fresh_type(&mut self.context),
+                                };
+                                Some(count_arrows(&ty))
+                            } else if !quals.is_empty() {
+                                // Check module functions (e.g., f32.min)
+                                let module_name = &quals[0];
+                                if let Ok(type_scheme) = self.module_manager.get_module_function_type(module_name, name, &mut self.context) {
+                                    let ty = type_scheme.instantiate(&mut self.context);
+                                    Some(count_arrows(&ty))
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        }
                     }
                     ExprKind::Lambda(lambda) => Some(lambda.params.len()),
                     _ => None,
@@ -1987,6 +2025,15 @@ impl<'a> TypeChecker<'a> {
                     )
                 })?;
 
+                // Futhark restriction: functions cannot be returned from if expressions
+                let resolved_then = then_ty.apply(&self.context);
+                if as_arrow(&resolved_then).is_some() {
+                    bail_type_at!(
+                        expr.h.span,
+                        "Functions cannot be returned from if expressions"
+                    );
+                }
+
                 Ok(then_ty)
             }
 
@@ -2024,6 +2071,15 @@ impl<'a> TypeChecker<'a> {
                     // No init - create a fresh type variable
                     self.context.new_variable()
                 };
+
+                // Futhark restriction: loop parameters cannot be functions
+                let resolved_loop_var = loop_var_type.apply(&self.context);
+                if as_arrow(&resolved_loop_var).is_some() {
+                    bail_type_at!(
+                        expr.h.span,
+                        "Loop parameters cannot be functions"
+                    );
+                }
 
                 // Bind pattern to the loop variable type
                 self.bind_pattern(&loop_expr.pattern, &loop_var_type, false)?;

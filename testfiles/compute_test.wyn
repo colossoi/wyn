@@ -2,5 +2,5 @@
 #[compute(64, 1, 1)] def compute_main(
   #[builtin(global_invocation_id)] gid: vec3u32
 ) -> () =
-  let _ = debug_u32 gid.x in
+  let _ = debug_u32(gid.x) in
   ()

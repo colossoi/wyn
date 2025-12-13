@@ -185,7 +185,7 @@ def main() -> i32 =
     let x = [1, 2, 3, 4] in
     let y = [5, 6, 7, 8] in
     let z = [9, 10, 11, 12] in
-    let result = id3 x y z in
+    let result = id3(x, y, z) in
 "#;
 
     // Try consuming x - should error (x was already consumed by id3)
@@ -225,7 +225,7 @@ def id3(a: *[4]i32, b: [4]i32, c: [4]i32) -> [4]i32 = c
 def consume(arr: *[4]i32) -> i32 = arr[0]
 def main(t: ([4]i32, [4]i32, [4]i32)) -> i32 =
     let (x, y, z) = t in
-    let result = id3 x y z in
+    let result = id3(x, y, z) in
 "#;
 
     // All three should error because they share a backing store with x,
@@ -272,7 +272,7 @@ fn test_inplace_map_simple_dead_after() {
 def double(x: i32) -> i32 = x * 2
 
 def main(arr: [4]i32) -> [4]i32 =
-    map double arr
+    map(double, arr)
 "#;
     let info = analyze_inplace_map(source);
     assert!(
@@ -288,7 +288,7 @@ fn test_inplace_map_used_after() {
 def double(x: i32) -> i32 = x * 2
 
 def main(arr: [4]i32) -> (i32, [4]i32) =
-    let result = map double arr in
+    let result = map(double, arr) in
     (arr[0], result)
 "#;
     let info = analyze_inplace_map(source);
@@ -307,7 +307,7 @@ def double(x: i32) -> i32 = x * 2
 
 def main(arr: [4]i32) -> (i32, [4]i32) =
     let arr2 = arr in
-    let result = map double arr in
+    let result = map(double, arr) in
     (arr2[0], result)
 "#;
     let info = analyze_inplace_map(source);
@@ -325,7 +325,7 @@ fn test_inplace_map_nested() {
 def double(x: i32) -> i32 = x * 2
 
 def main(arr: [4]i32) -> [4]i32 =
-    map double (map double arr)
+    map(double, map(double, arr))
 "#;
     let info = analyze_inplace_map(source);
     // At least one of the maps should be eligible
@@ -343,7 +343,7 @@ fn test_inplace_map_in_let() {
 def double(x: i32) -> i32 = x * 2
 
 def main(arr: [4]i32) -> [4]i32 =
-    let result = map double arr in
+    let result = map(double, arr) in
     result
 "#;
     let info = analyze_inplace_map(source);

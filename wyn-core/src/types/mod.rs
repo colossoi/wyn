@@ -449,6 +449,23 @@ pub fn as_arrow(ty: &Type) -> Option<(&Type, &Type)> {
     }
 }
 
+/// Count the number of real arguments a function type expects
+/// e.g., (a -> b -> c) expects 2 args, (a -> b) expects 1, a expects 0
+/// Note: (unit -> a) expects 0 args (unit param is implicit)
+pub fn count_arrows(ty: &Type) -> usize {
+    match as_arrow(ty) {
+        Some((param, result)) => {
+            // Unit parameter doesn't count as a real argument
+            let param_count = match param {
+                Type::Constructed(TypeName::Unit, _) => 0,
+                _ => 1,
+            };
+            param_count + count_arrows(result)
+        }
+        None => 0,
+    }
+}
+
 /// Check if a type is an integer type (signed or unsigned)
 /// Per spec: array indices may be "any unsigned integer type",
 /// but we also accept signed integers for compatibility

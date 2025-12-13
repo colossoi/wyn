@@ -283,7 +283,7 @@ fn test_parse_builtin_attribute_on_return_type() {
 #[test]
 fn test_parse_single_attributed_return_type() {
     let entry = single_entry(
-        "#[vertex] def vertex_main() -> #[builtin(position)] vec4 = vec4 0.0f32 0.0f32 0.0f32 1.0f32",
+        "#[vertex] def vertex_main() -> #[builtin(position)] vec4 = vec4(0.0f32, 0.0f32, 0.0f32, 1.0f32)",
     );
 
     assert_eq!(entry.entry_type, Attribute::Vertex);
@@ -320,7 +320,7 @@ fn test_parse_tuple_attributed_return_type() {
 
 #[test]
 fn test_parse_unattributed_return_type() {
-    let decl = single_decl("def helper() -> vec4 = vec4 1.0f32 0.0f32 0.0f32 1.0f32");
+    let decl = single_decl("def helper() -> vec4 = vec4(1.0f32, 0.0f32, 0.0f32, 1.0f32)");
 
     // Regular decl no longer has attributed_return_type field
 
@@ -593,7 +593,7 @@ fn test_parse_lambda_in_parens() {
 #[test]
 fn test_parse_lambda_application_with_literal() {
     // Test function application: (lambda) arg with literal
-    let decl = single_decl(r#"def apply() = (|x| x + 1i32) 5i32"#);
+    let decl = single_decl(r#"def apply() = (|x| x + 1i32)(5i32)"#);
 
     // Should be a function application (eitherApplication)
     match &decl.body.kind {
@@ -607,7 +607,7 @@ fn test_parse_lambda_application_with_literal() {
 #[test]
 fn test_parse_lambda_application_with_type_hole() {
     // Test function application: (lambda) arg
-    let decl = single_decl(r#"def apply() = (|x| x + 1i32) ???"#);
+    let decl = single_decl(r#"def apply() = (|x| x + 1i32)(???)"#);
 
     // Should be a function application (either Application)
     match &decl.body.kind {
@@ -627,7 +627,7 @@ fn test_parse_simple_let_in() {
 #[test]
 fn test_parse_let_in_expression_only() {
     // Test parsing just the let..in expression by itself - just verify it parses
-    let input = r#"let f = |y| y + x in f 10"#;
+    let input = r#"let f = |y| y + x in f(10)"#;
     let tokens = tokenize(input).expect("Failed to tokenize");
     let mut parser = Parser::new(tokens);
     parser.parse_expression().expect("Failed to parse let..in expression");
@@ -636,7 +636,7 @@ fn test_parse_let_in_expression_only() {
 #[test]
 fn test_parse_let_in_with_lambda() {
     // Just verify it parses successfully - the lambda let..in structure is complex
-    let _entry = single_entry(r#"#[vertex] def main (x:i32) -> i32 = let f = |y| y + x in f 10"#);
+    let _entry = single_entry(r#"#[vertex] def main (x:i32) -> i32 = let f = |y| y + x in f(10)"#);
 }
 
 #[test]
@@ -649,13 +649,13 @@ def verts() -> [3][4]f32 =
    [-1.0f32,  3.0f32, 0.0f32, 1.0f32]]
 
 #[vertex]
-def vertex_main(vertex_id: i32) -> [4]f32 = verts[vertex_id]
+def vertex_main(vertex_id: i32) -> [4]f32 = verts()[vertex_id]
 
 def SKY_RGBA() -> [4]f32 =
-  [135f32/255f32, 206f32/255f32, 235f32/255f32, 1.0f32]
+  [135.0f32/255.0f32, 206.0f32/255.0f32, 235.0f32/255.0f32, 1.0f32]
 
 #[fragment]
-def fragment_main() -> [4]f32 = SKY_RGBA
+def fragment_main() -> [4]f32 = SKY_RGBA()
 "#;
 
     let program = parse_ok(input);
@@ -704,10 +704,10 @@ fn test_simple_identifier_parsing() {
 
 #[test]
 fn test_vector_field_access_file() {
-    let program = parse_ok("def v() -> vec3 = vec3 1.0f32 2.0f32 3.0f32\ndef x() -> f32 = v.x");
+    let program = parse_ok("def v() -> vec3 = vec3(1.0f32, 2.0f32, 3.0f32)\ndef x() -> f32 = v.x");
     assert_eq!(program.declarations.len(), 2);
 
-    // Check first declaration: def v() -> vec3 = vec3 1.0f32 2.0f32 3.0f32
+    // Check first declaration: def v() -> vec3 = vec3(1.0f32, 2.0f32, 3.0f32)
     let decl1 = match &program.declarations[0] {
         Declaration::Decl(d) => d,
         _ => panic!("Expected first declaration to be Decl"),
@@ -733,8 +733,8 @@ fn test_parse_vector_arithmetic() {
     let decl = single_decl(
         r#"
             def test_vector_arithmetic() -> f32 =
-              let v1: vec3 = vec3 1.0f32 2.0f32 3.0f32 in
-              let v2: vec3 = vec3 4.0f32 5.0f32 6.0f32 in
+              let v1: vec3 = vec3(1.0f32, 2.0f32, 3.0f32) in
+              let v2: vec3 = vec3(4.0f32, 5.0f32, 6.0f32) in
               let sum: vec3 = v1 + v2 in
               let diff: vec3 = v1 - v2 in
               let prod: vec3 = v1 * v2 in
@@ -790,7 +790,7 @@ fn test_parse_uniform_without_initializer() {
 #[test]
 fn test_uniform_with_initializer_error() {
     expect_parse_error(
-        "#[uniform(binding=0)] def material_color: vec3 = vec3 1.0f32 0.5f32 0.2f32",
+        "#[uniform(binding=0)] def material_color: vec3 = vec3(1.0f32, 0.5f32, 0.2f32)",
         |error| match error {
             CompilerError::ParseError(msg, _)
                 if msg.contains("Uniform declarations cannot have initializer values") =>
@@ -810,8 +810,8 @@ fn test_parse_multiple_shader_outputs() {
     let entry = single_entry(
         r#"
             #[fragment] def fragment_main() -> (#[location(0)] vec4, #[location(1)] vec3) =
-              let color = vec4 1.0f32 0.5f32 0.2f32 1.0f32 in
-              let normal = vec3 0.0f32 1.0f32 0.0f32 in
+              let color = vec4(1.0f32, 0.5f32, 0.2f32, 1.0f32) in
+              let normal = vec3(0.0f32, 1.0f32, 0.0f32) in
               (color, normal)
             "#,
     );
@@ -839,15 +839,15 @@ fn test_parse_complete_shader_example() {
 
             #[vertex] def vertex_main() -> (#[builtin(position)] vec4, #[location(0)] vec3) =
               let angle: f32 = time in
-              let x: f32 = sin angle in
-              let y: f32 = cos angle in
-              let position: vec4 = vec4 x y 0.0f32 1.0f32 in
+              let x: f32 = sin(angle) in
+              let y: f32 = cos(angle) in
+              let position: vec4 = vec4(x, y, 0.0f32, 1.0f32) in
               let color: vec3 = material_color in
               (position, color)
 
             #[fragment] def fragment_main() -> (#[location(0)] vec4, #[location(1)] vec3) =
-              let final_color: vec4 = vec4 1.0f32 0.5f32 0.2f32 1.0f32 in
-              let normal: vec3 = vec3 0.0f32 1.0f32 0.0f32 in
+              let final_color: vec4 = vec4(1.0f32, 0.5f32, 0.2f32, 1.0f32) in
+              let normal: vec3 = vec3(0.0f32, 1.0f32, 0.0f32) in
               (final_color, normal)
             "#,
     );
@@ -903,7 +903,7 @@ fn test_parse_attributed_return_simple() {
     let _ = env_logger::builder().is_test(true).try_init();
     // Test parsing a single attributed return type - must be an entry point
     let entry = single_entry(
-        "#[vertex] def test() -> #[builtin(position)] vec4 = vec4 0.0f32 0.0f32 0.0f32 1.0f32",
+        "#[vertex] def test() -> #[builtin(position)] vec4 = vec4(0.0f32, 0.0f32, 0.0f32, 1.0f32)",
     );
     println!("entry: {:?}", entry);
     // In new syntax, empty () means 0 params, not a unit pattern
@@ -941,8 +941,8 @@ fn test_parse_attributed_return_type() {
         r#"#[vertex]
 def test_vertex() -> #[builtin(position)] vec4 =
   let angle = 1.0f32 in
-  let s = f32.sin angle in
-  vec4 s s 0.0f32 1.0f32"#,
+  let s = f32.sin(angle) in
+  vec4(s, s, 0.0f32, 1.0f32)"#,
     );
 
     assert_eq!(entry.name, "test_vertex");
@@ -987,7 +987,7 @@ fn test_parse_nested_unique() {
 #[test]
 fn test_parse_function_application_with_array_literal() {
     let _ = env_logger::builder().is_test(true).try_init();
-    let decl = single_decl("def test() -> vec4 = to_vec4 [1.0f32, 2.0f32, 3.0f32, 4.0f32]");
+    let decl = single_decl("def test() -> vec4 = to_vec4([1.0f32, 2.0f32, 3.0f32, 4.0f32])");
 
     assert_eq!(decl.name, "test");
     assert!(matches!(
@@ -1541,7 +1541,7 @@ fn test_parse_simple_field_access() {
 fn test_parse_qualified_name() {
     // At parse time, f32.cos is parsed as field access
     // The type checker will resolve it to a module member
-    let decl = single_decl("def x() -> f32 = f32.cos 0.5f32");
+    let decl = single_decl("def x() -> f32 = f32.cos(0.5f32)");
 
     match &decl.body.kind {
         ExprKind::Application(func, args) => {
@@ -1561,7 +1561,7 @@ fn test_parse_qualified_name() {
 #[test]
 fn test_parse_nested_qualified_name() {
     // At parse time, M.N.foo is parsed as nested field access
-    let decl = single_decl("def x() -> i32 = M.N.foo 42");
+    let decl = single_decl("def x() -> i32 = M.N.foo(42)");
 
     match &decl.body.kind {
         ExprKind::Application(func, args) => {
@@ -1661,9 +1661,9 @@ fn test_ambiguity_field_access_parses_as_field() {
 }
 
 #[test]
-fn test_ambiguity_array_index_with_space_is_function_call() {
-    // f [x] with space should parse as function call with array argument
-    let decl = single_decl("def test() -> i32 = f [1, 2, 3]");
+fn test_function_call_with_array_argument() {
+    // f([x]) with parens should parse as function call with array argument
+    let decl = single_decl("def test() -> i32 = f([1, 2, 3])");
 
     assert!(matches!(&decl.body.kind, ExprKind::Application(func, args)
         if matches!(&func.kind, ExprKind::Identifier(_, name) if name == "f") && args.len() == 1 && matches!(&args[0].kind, ExprKind::ArrayLiteral(_))));
@@ -1697,9 +1697,9 @@ fn test_ambiguity_prefix_binds_tighter_than_infix() {
 }
 
 #[test]
-fn test_ambiguity_function_application_binds_tighter() {
-    // f x + y should parse as (f x) + y, not f (x + y)
-    let decl = single_decl("def test() -> i32 = f x + y");
+fn test_function_call_precedence_in_expression() {
+    // f(x) + y should parse as (f(x)) + y
+    let decl = single_decl("def test() -> i32 = f(x) + y");
 
     assert!(matches!(&decl.body.kind, ExprKind::BinaryOp(op, left, _)
         if op.op == "+" && matches!(&left.kind, ExprKind::Application(_, args) if args.len() == 1)));
@@ -1746,40 +1746,25 @@ fn test_ambiguity_pipe_operator() {
 }
 
 #[test]
-fn test_function_call_with_and_without_parens() {
-    // Test that "vec3 1.0 0.5 0.25" and "vec3 (1.0) (0.5) (0.25)" produce the same structure
-    let input1 = "def test() = vec3 1.0f32 0.5f32 0.25f32";
-    let input2 = "def test() = vec3 (1.0f32) (0.5f32) (0.25f32)";
+fn test_function_call_tuple_syntax() {
+    // Test that "vec3(1.0, 0.5, 0.25)" parses as an Application with 3 arguments
+    let input = "def test() = vec3(1.0f32, 0.5f32, 0.25f32)";
 
-    let tokens1 = tokenize(input1).unwrap();
-    let mut parser1 = Parser::new(tokens1);
-    let program1 = parser1.parse().unwrap();
+    let tokens = tokenize(input).unwrap();
+    let mut parser = Parser::new(tokens);
+    let program = parser.parse().unwrap();
 
-    let tokens2 = tokenize(input2).unwrap();
-    let mut parser2 = Parser::new(tokens2);
-    let program2 = parser2.parse().unwrap();
+    let decl = &program.declarations[0];
 
-    // Both should produce Applications with the same structure
-    let decl1 = &program1.declarations[0];
-    let decl2 = &program2.declarations[0];
-
-    if let Declaration::Decl(d1) = decl1 {
-        if let Declaration::Decl(d2) = decl2 {
-            eprintln!("Without parens: {:?}", d1.body.kind);
-            eprintln!("With parens: {:?}", d2.body.kind);
-
-            // Check that both are Applications with the same structure
-            match (&d1.body.kind, &d2.body.kind) {
-                (ExprKind::Application(func1, args1), ExprKind::Application(func2, args2)) => {
-                    // Both should call vec3 with 3 arguments
-                    assert!(matches!(&func1.kind, ExprKind::Identifier(_, name) if name == "vec3"));
-                    assert!(matches!(&func2.kind, ExprKind::Identifier(_, name) if name == "vec3"));
-                    assert_eq!(args1.len(), 3);
-                    assert_eq!(args2.len(), 3);
-                }
-                (kind1, kind2) => {
-                    panic!("Expected both to be Application, got {:?} and {:?}", kind1, kind2);
-                }
+    if let Declaration::Decl(d) = decl {
+        match &d.body.kind {
+            ExprKind::Application(func, args) => {
+                // Should call vec3 with 3 arguments
+                assert!(matches!(&func.kind, ExprKind::Identifier(_, name) if name == "vec3"));
+                assert_eq!(args.len(), 3);
+            }
+            kind => {
+                panic!("Expected Application, got {:?}", kind);
             }
         }
     }
@@ -1793,7 +1778,7 @@ fn test_span_tracking() {
   in x * 2
 
 def main() -> i32 =
-  sum"#;
+  sum()"#;
 
     let tokens = tokenize(source).expect("Failed to tokenize");
     let mut parser = Parser::new(tokens);
@@ -1839,15 +1824,20 @@ def main() -> i32 =
     if let Declaration::Decl(main_decl) = &program.declarations[1] {
         assert_eq!(main_decl.name, "main");
 
-        // The identifier should be on line 6
-        if let ExprKind::Identifier(_, name) = &main_decl.body.kind {
-            assert_eq!(name, "sum");
+        // The function call should be on line 6
+        if let ExprKind::Application(func, args) = &main_decl.body.kind {
+            if let ExprKind::Identifier(_, name) = &func.kind {
+                assert_eq!(name, "sum");
+            } else {
+                panic!("Expected Identifier in Application, got {:?}", func.kind);
+            }
+            assert!(args.is_empty(), "sum() should have no arguments");
             assert_eq!(
                 main_decl.body.h.span.start_line, 6,
-                "identifier should be on line 6"
+                "function call should be on line 6"
             );
         } else {
-            panic!("Expected Identifier, got {:?}", main_decl.body.kind);
+            panic!("Expected Application, got {:?}", main_decl.body.kind);
         }
     } else {
         panic!("Expected Decl, got {:?}", program.declarations[1]);
@@ -1888,7 +1878,7 @@ fn test_parse_pattern_y_i32() {
 
 #[test]
 fn test_parse_lambda_with_tuple_pattern() {
-    let source = r#"def test() -> i32 = let f = |(x, y)| x in f (1, 2)"#;
+    let source = r#"def test() -> i32 = let f = |(x, y)| x in f((1, 2))"#;
     let tokens = tokenize(source).expect("Failed to tokenize");
     println!("Tokens: {:#?}", tokens);
     let mut parser = Parser::new(tokens);
@@ -1907,7 +1897,7 @@ fn test_parse_lambda_with_tuple_pattern() {
 
 #[test]
 fn test_parse_lambda_with_wildcard_in_tuple() {
-    let source = r#"def test() -> i32 = let f = |(_, acc)| acc in f (1, 2)"#;
+    let source = r#"def test() -> i32 = let f = |(_, acc)| acc in f((1, 2))"#;
     let tokens = tokenize(source).expect("Failed to tokenize");
     println!("Tokens: {:#?}", tokens);
     let mut parser = Parser::new(tokens);
@@ -1965,11 +1955,11 @@ fn test_parse_function_with_typed_patterns() {
 }
 
 #[test]
-fn test_parse_curried_function_call_with_paren_expr() {
-    // Test parsing: myfunc a b (x + y)
+fn test_parse_function_call_with_paren_expr() {
+    // Test parsing: myfunc(a, b, (x + y))
     // This should parse as a function call with 3 arguments: a, b, and (x + y)
     let input = r#"
-def test() -> f32 = myfunc arg1 arg2 (x + y)
+def test() -> f32 = myfunc(arg1, arg2, (x + y))
 "#;
 
     let decl = single_decl(input);
@@ -1994,12 +1984,12 @@ def test() -> f32 = myfunc arg1 arg2 (x + y)
 }
 
 #[test]
-fn test_parse_curried_vec3_call_with_paren_expr() {
+fn test_parse_vec3_call_with_paren_expr() {
     // Test the actual failing case from de_rasterizer
     let input = r#"
 def mix3v(a: vec3f32, b: vec3f32, t: f32) -> vec3f32 = a
 
-def test(t: f32) -> vec3f32 = mix3v a b (t*2.0f32 - 1.0f32)
+def test(t: f32) -> vec3f32 = mix3v(a, b, (t*2.0f32 - 1.0f32))
 "#;
 
     let program = parse_ok(input);
@@ -2030,11 +2020,11 @@ def test(t: f32) -> vec3f32 = mix3v a b (t*2.0f32 - 1.0f32)
 
 #[test]
 fn test_parse_map_with_lambda_and_array_index() {
-    // Test parsing of: map (|e| e[0]) edges
+    // Test parsing of: map((|e| e[0]), edges)
     let input = r#"
 def test() -> [12]i32 =
   let edges : [12][2]i32 = [[0,1]] in
-  map (|e| e[0]) edges
+  map((|e| e[0]), edges)
 "#;
 
     let program = parse_ok(input);
@@ -2242,8 +2232,8 @@ fn test_parse_record_literal_multiple_fields() {
 
 #[test]
 fn test_parse_mul_mat_vec_application() {
-    // Test that `mul mat (vec4 ...)` parses as a two-argument application
-    let input = r#"def test (mat:mat4f32) -> vec4f32 = mul mat (vec4 1.0f32 2.0f32 3.0f32 4.0f32)"#;
+    // Test that `mul(mat, vec4(...))` parses as a two-argument application
+    let input = r#"def test (mat:mat4f32) -> vec4f32 = mul(mat, vec4(1.0f32, 2.0f32, 3.0f32, 4.0f32))"#;
     let decl = single_decl(input);
 
     // The body should be an Application of mul to two args
@@ -2290,7 +2280,7 @@ fn test_parse_mul_mat_vec_application() {
 
 #[test]
 fn test_operator_section_in_expression() {
-    let input = "def test() = map (+) [1, 2, 3]";
+    let input = "def test() = map((+), [1, 2, 3])";
     let decl = single_decl(input);
 
     // Should parse successfully - map applied to desugared operator section (lambda) and array
@@ -2326,34 +2316,27 @@ fn test_operator_section_in_expression() {
 
 #[test]
 fn test_operator_section_direct_application() {
-    let input = "def test(x: i32, y: i32) = (+) x y";
+    let input = "def test(x: i32, y: i32) = (+)(x, y)";
     let decl = single_decl(input);
 
     // Should parse successfully - desugared operator section (lambda) directly applied to arguments
     // (+) desugars to |x, y| x + y, then applied to x and y
     match &decl.body.kind {
-        ExprKind::Application(func, _args) => {
-            // func should be an application of lambda to x
-            if let ExprKind::Application(lambda_expr, first_args) = &func.kind {
-                assert_eq!(first_args.len(), 1, "Expected 1 argument in first application");
-                match &lambda_expr.kind {
-                    ExprKind::Lambda(lambda) => {
-                        assert_eq!(lambda.params.len(), 2, "Lambda should have 2 params");
-                        match &lambda.body.kind {
-                            ExprKind::BinaryOp(op, _, _) => {
-                                assert_eq!(op.op, "+", "Expected + operator");
-                            }
-                            other => panic!("Expected BinaryOp in lambda body, got {:?}", other),
+        ExprKind::Application(func, args) => {
+            // func should be the lambda from operator section desugaring
+            match &func.kind {
+                ExprKind::Lambda(lambda) => {
+                    assert_eq!(lambda.params.len(), 2, "Lambda should have 2 params");
+                    match &lambda.body.kind {
+                        ExprKind::BinaryOp(op, _, _) => {
+                            assert_eq!(op.op, "+", "Expected + operator");
                         }
+                        other => panic!("Expected BinaryOp in lambda body, got {:?}", other),
                     }
-                    other => panic!("Expected lambda, got {:?}", other),
                 }
-            } else if let ExprKind::Lambda(lambda) = &func.kind {
-                // Alternative: if parser creates Application(Lambda, [x, y])
-                assert_eq!(lambda.params.len(), 2, "Lambda should have 2 params");
-            } else {
-                panic!("Expected application or lambda, got {:?}", func.kind);
+                other => panic!("Expected lambda, got {:?}", other),
             }
+            assert_eq!(args.len(), 2, "Expected 2 arguments");
         }
         other => panic!("Expected application, got {:?}", other),
     }

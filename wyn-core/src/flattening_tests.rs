@@ -83,7 +83,7 @@ fn test_lambda_defunctionalization() {
 
 #[test]
 fn test_lambda_with_capture() {
-    let mir = flatten_program("def f(y) = let g = |x| x + y in g 1");
+    let mir = flatten_program("def f(y) = let g = |x| x + y in g(1)");
     let mir_str = format!("{}", mir);
 
     // Lambda should capture y
@@ -108,7 +108,7 @@ fn test_if_expression() {
 
 #[test]
 fn test_function_call() {
-    let mir = flatten_to_string("def g(y: i32) -> i32 = y + 1\ndef f(x) = g x");
+    let mir = flatten_to_string("def g(y: i32) -> i32 = y + 1\ndef f(x) = g(x)");
     assert!(mir.contains("def g"));
     assert!(mir.contains("def f"));
 }
@@ -180,7 +180,7 @@ fn test_map_with_lambda() {
     // Test map with inline lambda
     let source = r#"
 def test() -> [4]i32 =
-    map (|x: i32| x + 1) [0, 1, 2, 3]
+    map((|x: i32| x + 1), [0, 1, 2, 3])
 "#;
 
     // Parse
@@ -222,7 +222,7 @@ fn test_lambda_captures_typed_variable() {
     let mir = flatten_program(
         r#"
 def test_capture(arr: [4]i32) -> i32 =
-    let result = map (|i: i32| arr[i]) [0, 1, 2, 3] in
+    let result = map((|i: i32| arr[i]), [0, 1, 2, 3]) in
     result[0]
 "#,
     );
@@ -239,7 +239,7 @@ fn test_qualified_name_f32_sqrt() {
     let mir = flatten_program(
         r#"
 def length2(v: vec2f32) -> f32 =
-    f32.sqrt (v.x * v.x + v.y * v.y)
+    f32.sqrt((v.x * v.x + v.y * v.y))
 "#,
     );
     let mir_str = format!("{}", mir);
@@ -254,7 +254,7 @@ fn test_map_with_closure_application() {
     let mir = flatten_program(
         r#"
 def test_map(arr: [4]i32) -> [4]i32 =
-    map (|x: i32| x + 1) arr
+    map((|x: i32| x + 1), arr)
 "#,
     );
     let mir_str = format!("{}", mir);
@@ -279,7 +279,7 @@ fn test_direct_closure_call() {
         r#"
 def test_apply(x: i32) -> i32 =
     let f = |y: i32| y + x in
-    f 10
+    f(10)
 "#,
     );
     let mir_str = format!("{}", mir);
@@ -343,7 +343,7 @@ fn test_lambda_with_vector_literal() {
         r#"
 def test(v: vec3f32) -> vec4f32 =
     let f = |x: vec3f32| @[x.x, x.y, x.z, 1.0f32] in
-    f v
+    f(v)
 "#,
     );
     let mir_str = format!("{}", mir);
@@ -359,13 +359,13 @@ fn test_f32_sum_inline_definition() {
     let mir = flatten_program(
         r#"
 def mysum<[n]>(arr: [n]f32) -> f32 =
-  let (result, _) = loop (acc, i) = (0.0f32, 0) while i < length arr do
+  let (result, _) = loop (acc, i) = (0.0f32, 0) while i < length(arr) do
     (acc + arr[i], i + 1)
   in result
 
 def test() -> f32 =
   let arr = [1.0f32, 2.0f32, 3.0f32] in
-  mysum arr
+  mysum(arr)
 "#,
     );
     let mir_str = format!("{}", mir);
@@ -379,7 +379,7 @@ fn test_f32_sum_simple() {
     let source = r#"
 def test() -> f32 =
   let arr = [1.0f32, 2.0f32, 3.0f32] in
-  f32.sum arr
+  f32.sum(arr)
 "#;
 
     // This should compile successfully
@@ -410,9 +410,9 @@ fn test_f32_conversions() {
     let mir = flatten_program(
         r#"
 def test_conversions(x: i32) -> f32 =
-  let f1 = f32.i32 x in
-  let i1 = f32.to_i64 f1 in
-  let f2 = f32.i64 i1 in
+  let f1 = f32.i32(x) in
+  let i1 = f32.to_i64(f1) in
+  let f2 = f32.i64(i1) in
   f2
 "#,
     );
@@ -427,16 +427,16 @@ fn test_f32_math_operations() {
     let mir = flatten_program(
         r#"
 def test_math(x: f32) -> f32 =
-  let a = f32.sin x in
-  let b = f32.cos x in
-  let c = f32.sqrt a in
-  let d = f32.exp b in
-  let e = f32.log c in
+  let a = f32.sin(x) in
+  let b = f32.cos(x) in
+  let c = f32.sqrt(a) in
+  let d = f32.exp(b) in
+  let e = f32.log(c) in
   let f = d ** 2.0f32 in
-  let g = f32.sinh x in
-  let h = f32.asinh g in
-  let i = f32.atan2 x a in
-  f32.fma f e i
+  let g = f32.sinh(x) in
+  let h = f32.asinh(g) in
+  let i = f32.atan2(x, a) in
+  f32.fma(f, e, i)
 "#,
     );
     let mir_str = format!("{}", mir);
@@ -455,7 +455,7 @@ fn test_operator_section_direct_application() {
     // Test operator section applied directly to arguments
     let mir = flatten_program(
         r#"
-def test_add(x: i32, y: i32) -> i32 = (+) x y
+def test_add(x: i32, y: i32) -> i32 = (+)(x, y)
 "#,
     );
     let mir_str = format!("{}", mir);
@@ -469,7 +469,7 @@ fn test_operator_section_with_map() {
     // Test operator section passed to map (special higher-order function)
     let mir = flatten_program(
         r#"
-def test_map(arr: [3]i32) -> [3]i32 = map (|x: i32| (+) x 1) arr
+def test_map(arr: [3]i32) -> [3]i32 = map((|x: i32| (+)(x, 1)), arr)
 "#,
     );
     let mir_str = format!("{}", mir);
@@ -488,9 +488,9 @@ fn test_mul_overloads() {
     let mir = flatten_program(
         r#"
 def test_mul_overloads(m1: mat4f32, m2: mat4f32, v: vec4f32) -> vec4f32 =
-    let mat_result = mul m1 m2 in          -- mul_mat_mat
-    let vec_result1 = mul mat_result v in  -- mul_mat_vec
-    let vec_result2 = mul v m1 in          -- mul_vec_mat
+    let mat_result = mul(m1, m2) in          -- mul_mat_mat
+    let vec_result1 = mul(mat_result, v) in  -- mul_mat_vec
+    let vec_result2 = mul(v, m1) in          -- mul_vec_mat
     vec_result1
 "#,
     );
@@ -536,7 +536,7 @@ fn test_no_redundant_materializations_complex_expr() {
     let source = r#"
 def identity(arr: [3]i32) -> [3]i32 = arr
 def test(arr: [3]i32, i: i32) -> i32 =
-  if true then (identity arr)[i] else (identity arr)[i]
+  if true then (identity(arr))[i] else (identity(arr))[i]
 "#;
 
     // Run through normalize + hoist_materializations
@@ -627,7 +627,7 @@ fn test_curried_function_definition() {
     let mir = flatten_program(
         r#"
 def add(x: f32, y: f32) -> f32 = x + y
-def test() -> f32 = add 1.0f32 2.0f32
+def test() -> f32 = add(1.0f32, 2.0f32)
 "#,
     );
     let mir_str = format!("{}", mir);
@@ -645,7 +645,7 @@ def add(x: f32, y: f32) -> f32 = x + y
 def test() -> f32 =
     let a = 1.0f32 in
     let b = 2.0f32 in
-    add a b
+    add(a, b)
 "#,
     );
     let mir_str = format!("{}", mir);
@@ -658,9 +658,9 @@ fn test_higher_order_function_parameter() {
     // Function parameter with arrow type
     let mir = flatten_program(
         r#"
-def apply(f: f32 -> f32, x: f32) -> f32 = f x
+def apply(f: f32 -> f32, x: f32) -> f32 = f(x)
 def double(x: f32) -> f32 = x + x
-def test() -> f32 = apply double 3.0f32
+def test() -> f32 = apply(double, 3.0f32)
 "#,
     );
     let mir_str = format!("{}", mir);
@@ -674,9 +674,9 @@ fn test_binary_function_parameter() {
     // Binary function parameter (f32 -> f32 -> f32)
     let mir = flatten_program(
         r#"
-def fold2(op: f32 -> f32 -> f32, x: f32, y: f32) -> f32 = op x y
+def fold2(op: f32 -> f32 -> f32, x: f32, y: f32) -> f32 = op(x, y)
 def add(a: f32, b: f32) -> f32 = a + b
-def test() -> f32 = fold2 add 1.0f32 2.0f32
+def test() -> f32 = fold2(add, 1.0f32, 2.0f32)
 "#,
     );
     let mir_str = format!("{}", mir);
@@ -690,14 +690,14 @@ fn test_reduce_pattern() {
     let mir = flatten_program(
         r#"
 def reduce_f32(op: f32 -> f32 -> f32, init: f32, arr: [4]f32) -> f32 =
-    let x0 = op init arr[0] in
-    let x1 = op x0 arr[1] in
-    let x2 = op x1 arr[2] in
-    op x2 arr[3]
+    let x0 = op(init, arr[0]) in
+    let x1 = op(x0, arr[1]) in
+    let x2 = op(x1, arr[2]) in
+    op(x2, arr[3])
 
 def test() -> f32 =
     let arr = [1.0f32, 2.0f32, 3.0f32, 4.0f32] in
-    reduce_f32 (|x, y| x + y) 0.0f32 arr
+    reduce_f32((|x, y| x + y), 0.0f32, arr)
 "#,
     );
     let mir_str = format!("{}", mir);

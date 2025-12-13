@@ -4,27 +4,27 @@
 -- Map a function over an array
 def map<[n], A, B>(f: A -> B, xs: [n]A) -> [n]B =
   loop (i, acc) = (0, []) while i < n do
-    (i + 1, acc ++ [f xs[i]])
+    (i + 1, acc ++ [f(xs[i])])
 
 -- Map a binary function over two arrays
 def map2<[n], A, B, C>(f: A -> B -> C, xs: [n]A, ys: [n]B) -> [n]C =
   loop (i, acc) = (0, []) while i < n do
-    (i + 1, acc ++ [f xs[i] ys[i]])
+    (i + 1, acc ++ [f(xs[i], ys[i])])
 
 -- Reduce an array with a binary associative operator and neutral element
 def reduce<[n], A>(op: A -> A -> A, ne: A, xs: [n]A) -> A =
   loop (i, acc) = (0, ne) while i < n do
-    (i + 1, op acc xs[i])
+    (i + 1, op(acc, xs[i]))
 
 -- Scan (prefix sum) with a binary associative operator and neutral element
 def scan<[n], A>(op: A -> A -> A, ne: A, xs: [n]A) -> [n]A =
   loop (i, acc_val, acc_arr) = (0, ne, []) while i < n do
-    let new_val = op acc_val xs[i] in
+    let new_val = op(acc_val, xs[i]) in
     (i + 1, new_val, acc_arr ++ [new_val])
 
 -- Filter elements that satisfy a predicate
 def filter<[n], A>(p: A -> bool, xs: [n]A) -> []A =
   loop (i, acc) = (0, []) while i < n do
-    if p xs[i]
+    if p(xs[i])
     then (i + 1, acc ++ [xs[i]])
     else (i + 1, acc)

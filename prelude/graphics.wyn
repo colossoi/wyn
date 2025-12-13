@@ -15,8 +15,8 @@ module graphics32 = {
   -- Uses XYZ intrinsic Euler angles (rotate around X, then Y, then Z)
   -- Input: vec3f32 where x=pitch, y=yaw, z=roll (in radians)
   def rotation_euler(a: vec3f32) -> mat4f32 =
-    let s = [ f32.sin a.x, f32.sin a.y, f32.sin a.z ] in
-    let c = [ f32.cos a.x, f32.cos a.y, f32.cos a.z ] in
+    let s = [ f32.sin(a.x), f32.sin(a.y), f32.sin(a.z) ] in
+    let c = [ f32.cos(a.x), f32.cos(a.y), f32.cos(a.z) ] in
     @[
       [c[1]*c[2], c[1]*s[2], -s[1], 0.0f32],
       [s[0]*s[1]*c[2]-c[0]*s[2], s[0]*s[1]*s[2]+c[0]*c[2], s[0]*c[1], 0.0f32],
@@ -40,8 +40,8 @@ module graphics64 = {
   -- Uses XYZ intrinsic Euler angles (rotate around X, then Y, then Z)
   -- Input: vec3f64 where x=pitch, y=yaw, z=roll (in radians)
   def rotation_euler(a: vec3f64) -> mat4f64 =
-    let s = [ f64.sin a.x, f64.sin a.y, f64.sin a.z ] in
-    let c = [ f64.cos a.x, f64.cos a.y, f64.cos a.z ] in
+    let s = [ f64.sin(a.x), f64.sin(a.y), f64.sin(a.z) ] in
+    let c = [ f64.cos(a.x), f64.cos(a.y), f64.cos(a.z) ] in
     @[
       [c[1]*c[2], c[1]*s[2], -s[1], 0.0],
       [s[0]*s[1]*c[2]-c[0]*s[2], s[0]*s[1]*s[2]+c[0]*c[2], s[0]*c[1], 0.0],

@@ -14,29 +14,29 @@ module gdp = {
   -- Core write routine: atomically reserve 2 words and write them
   -- Simplified version - ignores wraparound edge case for MVP
   def write_two_words(word0: u32, word1: u32) -> () =
-    let pos = __gdp_atomic_add 0u 2u in  -- Reserve 2 words at write_head (index 0)
-    let idx = pos % 4093u in             -- Ring buffer data size
-    let _ = __gdp_store (idx + 3u) word0 in  -- +3 to skip header words
-    let idx1 = (idx + 1u) % 4093u in
-    __gdp_store (idx1 + 3u) word1
+    let pos = __gdp_atomic_add(0u32, 2u32) in  -- Reserve 2 words at write_head (index 0)
+    let idx = pos % 4093u32 in             -- Ring buffer data size
+    let _ = __gdp_store((idx + 3u32), word0) in  -- +3 to skip header words
+    let idx1 = (idx + 1u32) % 4093u32 in
+    __gdp_store((idx1 + 3u32), word1)
 
   -- Encode f32 to GDP format: [header, bits]
   -- Header = 0x03 | 0x100 (type=f32, size=1)
   def encode_f32(f: f32) -> () =
-    let bits = __builtin_f32_to_bits f in
-    let header = 0x03u | 0x100u in
-    write_two_words header bits
+    let bits = __builtin_f32_to_bits(f) in
+    let header = 0x03u32 | 0x100u32 in
+    write_two_words(header, bits)
 
   -- Encode i32 to GDP format: [header, bits]
   -- Header = 0x01 | 0x100 (type=i32, size=1)
   def encode_i32(i: i32) -> () =
-    let bits = __bitcast_i32_to_u32 i in
-    let header = 0x01u | 0x100u in
-    write_two_words header bits
+    let bits = __bitcast_i32_to_u32(i) in
+    let header = 0x01u32 | 0x100u32 in
+    write_two_words(header, bits)
 
   -- Encode u32 to GDP format: [header, value]
   -- Header = 0x00 | 0x100 (type=u32, size=1)
   def encode_u32(u: u32) -> () =
-    let header = 0x00u | 0x100u in
-    write_two_words header u
+    let header = 0x00u32 | 0x100u32 in
+    write_two_words(header, u)
 }

@@ -1337,50 +1337,39 @@ impl Parser {
         Ok(left)
     }
 
-    // Function application has higher precedence than binary operators
-    // Parses: f x y z, (f x) y, etc.
+    // Function application: f(x, y, z)
+    // Now uses tuple-style syntax with parentheses
     fn parse_application_expression(&mut self) -> Result<Expression> {
         trace!("parse_application_expression: next token = {:?}", self.peek());
-        let mut expr = self.parse_postfix_expression()?;
+        // Postfix expression now handles function calls with ()
+        self.parse_postfix_expression()
+    }
 
-        // Keep collecting arguments while we see primary expressions
-        // Stop at operators, commas, closing delimiters, etc.
-        while self.peek().is_some() && self.can_start_primary_expression() {
-            // Don't consume binary operators (including | and |>)
-            if matches!(self.peek(), Some(Token::BinOp(_)) | Some(Token::Pipe) | Some(Token::PipeOp)) {
-                break;
-            }
-            // Don't consume expression terminators
-            if matches!(
-                self.peek(),
-                Some(Token::Comma)
-                    | Some(Token::RightParen)
-                    | Some(Token::RightBracket)
-                    | Some(Token::In)
-                    | Some(Token::Arrow)
-            ) {
-                break;
-            }
+    /// Parse comma-separated arguments for function calls: (x, y, z)
+    /// Returns empty vec for (), single element for (x), etc.
+    fn parse_call_arguments(&mut self) -> Result<Vec<Expression>> {
+        trace!("parse_call_arguments: next token = {:?}", self.peek());
+        let mut args = Vec::new();
 
-            let arg = self.parse_postfix_expression()?;
-
-            // Convert to Application with span
-            let span = expr.h.span.merge(&arg.h.span);
-            match &mut expr.kind {
-                ExprKind::Application(_, args) => {
-                    // Additional arguments: extend existing application
-                    args.push(arg);
-                    expr.h.span = span;
-                }
-                _ => {
-                    // First argument: create new Application node
-                    expr =
-                        self.node_counter.mk_node(ExprKind::Application(Box::new(expr), vec![arg]), span);
-                }
-            }
+        // Handle empty argument list: f()
+        if self.check(&Token::RightParen) {
+            return Ok(args);
         }
 
-        Ok(expr)
+        // Parse first argument
+        args.push(self.parse_expression()?);
+
+        // Parse remaining arguments separated by commas
+        while self.check(&Token::Comma) {
+            self.advance(); // consume ','
+            // Allow trailing comma: f(x, y,)
+            if self.check(&Token::RightParen) {
+                break;
+            }
+            args.push(self.parse_expression()?);
+        }
+
+        Ok(args)
     }
 
     // Helper to check if current token can start a primary expression
@@ -1441,6 +1430,18 @@ impl Parser {
                     } else {
                         bail_parse!("Expected field name after '.'");
                     }
+                }
+                Some(Token::LeftParen) => {
+                    // Function call: f(x, y, z)
+                    let start_span = expr.h.span;
+                    self.advance(); // consume '('
+                    let args = self.parse_call_arguments()?;
+                    self.expect(Token::RightParen)?;
+                    let end_span = self.previous_span();
+                    let span = start_span.merge(&end_span);
+                    expr = self
+                        .node_counter
+                        .mk_node(ExprKind::Application(Box::new(expr), args), span);
                 }
                 _ => break,
             }
