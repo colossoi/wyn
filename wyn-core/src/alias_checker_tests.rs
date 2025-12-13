@@ -2,8 +2,8 @@ use crate::Compiler;
 use crate::alias_checker::{AliasCheckResult, AliasChecker, InPlaceMapInfo, analyze_map_inplace};
 
 fn check_alias(source: &str) -> AliasCheckResult {
-    let parsed = Compiler::parse(source).expect("parse failed");
-    let module_manager = crate::module_manager::ModuleManager::new();
+    let (module_manager, mut node_counter) = crate::cached_module_manager();
+    let parsed = Compiler::parse(source, &mut node_counter).expect("parse failed");
     let resolved = parsed.resolve(&module_manager).expect("resolve failed");
     let type_checked = resolved.type_check(&module_manager).expect("type_check failed");
 
@@ -13,8 +13,8 @@ fn check_alias(source: &str) -> AliasCheckResult {
 
 /// Helper to run through the pipeline up to alias checking (returns the AliasChecked stage)
 fn alias_check_pipeline(source: &str) -> crate::AliasChecked {
-    let parsed = Compiler::parse(source).expect("parse failed");
-    let module_manager = crate::module_manager::ModuleManager::new();
+    let (module_manager, mut node_counter) = crate::cached_module_manager();
+    let parsed = Compiler::parse(source, &mut node_counter).expect("parse failed");
     parsed
         .resolve(&module_manager)
         .expect("resolve failed")
@@ -255,8 +255,8 @@ def main(t: ([4]i32, [4]i32, [4]i32)) -> i32 =
 
 /// Helper to analyze in-place map opportunities in a source file
 fn analyze_inplace_map(source: &str) -> InPlaceMapInfo {
-    let parsed = Compiler::parse(source).expect("parse failed");
-    let module_manager = crate::module_manager::ModuleManager::new();
+    let (module_manager, mut node_counter) = crate::cached_module_manager();
+    let parsed = Compiler::parse(source, &mut node_counter).expect("parse failed");
     let resolved = parsed.resolve(&module_manager).expect("resolve failed");
     let type_checked = resolved.type_check(&module_manager).expect("type_check failed");
     let alias_checked = type_checked.alias_check().expect("alias check failed");
@@ -437,7 +437,10 @@ def main() -> i32 =
 
     // The entry should NOT be alias_free (y aliases x)
     for (_, info) in &result.liveness {
-        assert!(!info.alias_free, "Expected alias_free=false when array is aliased");
+        assert!(
+            !info.alias_free,
+            "Expected alias_free=false when array is aliased"
+        );
     }
 }
 
@@ -456,7 +459,8 @@ def main() -> i32 =
 
     // Should have 2 liveness entries (one per call)
     assert_eq!(
-        result.liveness.len(), 2,
+        result.liveness.len(),
+        2,
         "Expected 2 liveness entries for 2 array arguments"
     );
 
@@ -465,8 +469,14 @@ def main() -> i32 =
     let released_count = result.liveness.values().filter(|info| info.released).count();
     let not_released_count = result.liveness.values().filter(|info| !info.released).count();
 
-    assert_eq!(released_count, 1, "Expected exactly one use to be released (last use)");
-    assert_eq!(not_released_count, 1, "Expected exactly one use to not be released (first use)");
+    assert_eq!(
+        released_count, 1,
+        "Expected exactly one use to be released (last use)"
+    );
+    assert_eq!(
+        not_released_count, 1,
+        "Expected exactly one use to not be released (first use)"
+    );
 }
 
 #[test]
@@ -489,8 +499,14 @@ def main() -> i32 =
 
     // Fresh array literal should be alias_free and released
     for (_, info) in &result.liveness {
-        assert!(info.alias_free, "Expected alias_free=true for fresh array literal");
-        assert!(info.released, "Expected released=true for array literal (no other uses)");
+        assert!(
+            info.alias_free,
+            "Expected alias_free=true for fresh array literal"
+        );
+        assert!(
+            info.released,
+            "Expected released=true for array literal (no other uses)"
+        );
     }
 }
 

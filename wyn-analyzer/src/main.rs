@@ -9,11 +9,16 @@ use wyn_core::ast::{self, NodeCounter, NodeId, Span};
 use wyn_core::module_manager::{ModuleManager, PreElaboratedPrelude};
 use wyn_core::types::format_scheme;
 
-/// Cached prelude to avoid re-parsing for each document check
-static PRELUDE_CACHE: OnceLock<PreElaboratedPrelude> = OnceLock::new();
+/// Cached prelude data AND the node counter state after parsing it
+static PRELUDE_CACHE: OnceLock<(PreElaboratedPrelude, NodeCounter)> = OnceLock::new();
 
-fn get_prelude() -> &'static PreElaboratedPrelude {
-    PRELUDE_CACHE.get_or_init(|| ModuleManager::create_prelude().expect("Failed to create prelude cache"))
+fn get_prelude() -> (&'static PreElaboratedPrelude, NodeCounter) {
+    let (prelude, counter) = PRELUDE_CACHE.get_or_init(|| {
+        let mut nc = NodeCounter::new();
+        let prelude = ModuleManager::create_prelude(&mut nc).expect("Failed to create prelude cache");
+        (prelude, nc)
+    });
+    (prelude, counter.clone())
 }
 
 /// Cached document state after successful type checking
@@ -167,9 +172,9 @@ impl Backend {
         let mut diagnostics = Vec::new();
 
         // Try to parse and type-check the document
-        let result = wyn_core::Compiler::parse(text).and_then(|parsed| {
-            let node_counter = NodeCounter::new();
-            let module_manager = ModuleManager::from_prelude(get_prelude(), node_counter);
+        let (prelude, mut node_counter) = get_prelude();
+        let result = wyn_core::Compiler::parse(text, &mut node_counter).and_then(|parsed| {
+            let module_manager = ModuleManager::from_prelude(prelude);
             parsed.resolve(&module_manager)?.type_check(&module_manager)
         });
 

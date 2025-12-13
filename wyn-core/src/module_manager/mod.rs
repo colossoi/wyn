@@ -130,32 +130,22 @@ pub struct ModuleManager {
     pub(crate) elaborated_modules: HashMap<String, ElaboratedModule>,
     /// Set of known module names (for name resolution)
     known_modules: HashSet<String>,
-    /// Shared node counter for unique NodeIds across all modules
-    node_counter: NodeCounter,
     /// Type aliases from modules: "module.typename" -> underlying Type
     type_aliases: HashMap<String, Type>,
 }
 
 impl ModuleManager {
-    /// Create a new module manager with a fresh NodeCounter
-    pub fn new() -> Self {
-        let mut manager = Self::new_empty(NodeCounter::new());
-        if let Err(e) = manager.load_prelude_files() {
+    /// Create a new module manager and load prelude files using the provided counter
+    pub fn new(node_counter: &mut NodeCounter) -> Self {
+        let mut manager = Self::new_empty();
+        if let Err(e) = manager.load_prelude_files(node_counter) {
             eprintln!("ERROR loading prelude files: {:?}", e);
         }
         manager
     }
 
-    /// Create a new module manager with a shared NodeCounter
-    /// This ensures NodeIds don't collide with user code that was already parsed
-    pub fn new_with_counter(node_counter: NodeCounter) -> Self {
-        let mut manager = Self::new_empty(node_counter);
-        manager.load_prelude_files().ok(); // Ignore errors during initialization
-        manager
-    }
-
     /// Create an empty module manager without loading prelude (internal helper)
-    fn new_empty(node_counter: NodeCounter) -> Self {
+    fn new_empty() -> Self {
         let known_modules = [
             "f32",
             "f64",
@@ -181,26 +171,25 @@ impl ModuleManager {
             module_type_registry: HashMap::new(),
             elaborated_modules: HashMap::new(),
             known_modules,
-            node_counter,
             type_aliases: HashMap::new(),
         }
     }
 
     /// Load all prelude files automatically
-    fn load_prelude_files(&mut self) -> Result<()> {
+    fn load_prelude_files(&mut self, node_counter: &mut NodeCounter) -> Result<()> {
         // Load all prelude files using include_str!
-        self.load_str(include_str!("../../../prelude/math.wyn"))?;
-        self.load_str(include_str!("../../../prelude/graphics.wyn"))?;
-        self.load_str(include_str!("../../../prelude/gdp.wyn"))?;
-        self.load_str(include_str!("../../../prelude/rand.wyn"))?;
+        self.load_str(include_str!("../../../prelude/math.wyn"), node_counter)?;
+        self.load_str(include_str!("../../../prelude/graphics.wyn"), node_counter)?;
+        self.load_str(include_str!("../../../prelude/gdp.wyn"), node_counter)?;
+        self.load_str(include_str!("../../../prelude/rand.wyn"), node_counter)?;
         Ok(())
     }
 
     /// Create a pre-elaborated prelude by loading all prelude files
     /// This can be cached and reused across compilations
-    pub fn create_prelude() -> Result<PreElaboratedPrelude> {
-        let mut manager = Self::new_empty(NodeCounter::new());
-        manager.load_prelude_files()?;
+    pub fn create_prelude(node_counter: &mut NodeCounter) -> Result<PreElaboratedPrelude> {
+        let mut manager = Self::new_empty();
+        manager.load_prelude_files(node_counter)?;
         Ok(PreElaboratedPrelude {
             module_type_registry: manager.module_type_registry,
             elaborated_modules: manager.elaborated_modules,
@@ -210,12 +199,12 @@ impl ModuleManager {
     }
 
     /// Create a ModuleManager using a pre-elaborated prelude (avoids re-parsing)
-    pub fn from_prelude(prelude: &PreElaboratedPrelude, node_counter: NodeCounter) -> Self {
+    /// Advances the node_counter to start after all prelude NodeIds
+    pub fn from_prelude(prelude: &PreElaboratedPrelude) -> Self {
         ModuleManager {
             module_type_registry: prelude.module_type_registry.clone(),
             elaborated_modules: prelude.elaborated_modules.clone(),
             known_modules: prelude.known_modules.clone(),
-            node_counter,
             type_aliases: prelude.type_aliases.clone(),
         }
     }
@@ -262,13 +251,11 @@ impl ModuleManager {
     }
 
     /// Load and elaborate modules from a source string
-    pub fn load_str(&mut self, source: &str) -> Result<()> {
+    pub fn load_str(&mut self, source: &str, node_counter: &mut NodeCounter) -> Result<()> {
         // Parse the source
         let tokens = lexer::tokenize(source).map_err(|e| err_parse!("{}", e))?;
-        let counter = std::mem::take(&mut self.node_counter);
-        let mut parser = Parser::new_with_counter(tokens, counter);
+        let mut parser = Parser::new(tokens, node_counter);
         let program = parser.parse()?;
-        self.node_counter = parser.take_node_counter();
 
         // Register module types first
         self.register_module_types(&program)?;
@@ -1105,12 +1092,6 @@ impl ModuleManager {
             h: pattern.h.clone(),
             kind: new_kind,
         }
-    }
-}
-
-impl Default for ModuleManager {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

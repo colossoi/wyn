@@ -5,7 +5,7 @@ use crate::parser::Parser;
 use crate::{bail_parse, err_parse};
 use log::trace;
 
-impl Parser {
+impl Parser<'_> {
     /// Parse a type binding declaration:
     /// ```text
     /// type_bind ::= ("type" | "type^" | "type~") name type_param* "=" type

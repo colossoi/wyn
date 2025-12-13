@@ -15,8 +15,8 @@ fn typecheck_program(input: &str) {
 /// Helper to parse and type check source code, returning Result
 fn try_typecheck_program(input: &str) -> Result<(), CompilerError> {
     // Use the typestate API to ensure proper pipeline setup
-    let parsed = crate::Compiler::parse(input)?;
-    let module_manager = crate::module_manager::ModuleManager::new();
+    let (module_manager, mut node_counter) = crate::cached_module_manager();
+    let parsed = crate::Compiler::parse(input, &mut node_counter)?;
     let _type_checked = parsed.resolve(&module_manager)?.type_check(&module_manager)?;
     Ok(())
 }
@@ -93,12 +93,12 @@ fn check_type_hole(source: &str) -> Type {
     use crate::parser::Parser;
 
     // Parse
+    let (module_manager, mut node_counter) = crate::cached_module_manager();
     let tokens = lexer::tokenize(source).unwrap();
-    let mut parser = Parser::new(tokens);
+    let mut parser = Parser::new(tokens, &mut node_counter);
     let program = parser.parse().unwrap();
 
     // Type check
-    let module_manager = crate::module_manager::ModuleManager::new();
     let mut checker = TypeChecker::new(&module_manager);
     checker.load_builtins().unwrap();
     let _type_table = checker.check_program(&program).unwrap();

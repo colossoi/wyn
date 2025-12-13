@@ -5,7 +5,7 @@ use crate::parser::Parser;
 use crate::{bail_parse, err_parse};
 use log::trace;
 
-impl Parser {
+impl Parser<'_> {
     /// Parse a pattern in function parameter position.
     /// In this context, type annotations must be inside parentheses: (x : i32)
     /// This avoids ambiguity with function return types.

@@ -228,15 +228,23 @@ pub type TypeTable = HashMap<NodeId, TypeScheme<TypeName>>;
 // =============================================================================
 
 /// Shared state for FrontEnd (AST) passes.
-/// Holds the module manager which is used by resolve, type_check, and flatten.
+/// Holds the node counter and module manager used by parse, resolve, type_check, and flatten.
 pub struct FrontEnd {
+    pub node_counter: NodeCounter,
     pub module_manager: module_manager::ModuleManager,
 }
 
 impl FrontEnd {
-    /// Create a new FrontEnd with the given module manager.
-    pub fn new(module_manager: module_manager::ModuleManager) -> Self {
-        FrontEnd { module_manager }
+    /// Create a new FrontEnd with fresh state.
+    /// The node counter is shared between user code parsing and prelude loading
+    /// to ensure unique NodeIds across all AST nodes.
+    pub fn new() -> Self {
+        let mut node_counter = NodeCounter::new();
+        let module_manager = module_manager::ModuleManager::new(&mut node_counter);
+        FrontEnd {
+            node_counter,
+            module_manager,
+        }
     }
 }
 
@@ -261,10 +269,11 @@ impl BackEnd {
 pub struct Compiler;
 
 impl Compiler {
-    /// Parse source code into an AST. This is the entry point for the pipeline.
-    pub fn parse(source: &str) -> Result<Parsed> {
+    /// Parse source code into an AST using the provided node counter.
+    /// This ensures NodeIds don't collide with prelude modules.
+    pub fn parse(source: &str, node_counter: &mut NodeCounter) -> Result<Parsed> {
         let tokens = lexer::tokenize(source).map_err(|e| err_parse!("{}", e))?;
-        let mut parser = parser::Parser::new(tokens);
+        let mut parser = parser::Parser::new(tokens, node_counter);
         let ast = parser.parse()?;
         Ok(Parsed { ast })
     }
@@ -318,7 +327,8 @@ pub struct TypeChecked {
 impl TypeChecked {
     /// Print warnings to stderr (convenience method)
     pub fn print_warnings(&self) {
-        let mm = module_manager::ModuleManager::new();
+        let mut nc = NodeCounter::new();
+        let mm = module_manager::ModuleManager::new(&mut nc);
         let checker = type_checker::TypeChecker::new(&mm);
         for warning in &self.warnings {
             eprintln!(
@@ -354,7 +364,8 @@ pub struct AliasChecked {
 impl AliasChecked {
     /// Print warnings to stderr (convenience method)
     pub fn print_warnings(&self) {
-        let mm = module_manager::ModuleManager::new();
+        let mut nc = NodeCounter::new();
+        let mm = module_manager::ModuleManager::new(&mut nc);
         let checker = type_checker::TypeChecker::new(&mm);
         for warning in &self.warnings {
             eprintln!(
@@ -570,20 +581,26 @@ pub struct LoweredGlsl {
 #[cfg(test)]
 use std::sync::OnceLock;
 
+/// Cached prelude data AND the node counter state after parsing it
 #[cfg(test)]
-static PRELUDE_CACHE: OnceLock<module_manager::PreElaboratedPrelude> = OnceLock::new();
+static PRELUDE_CACHE: OnceLock<(module_manager::PreElaboratedPrelude, NodeCounter)> = OnceLock::new();
 
-/// Get a reference to the cached pre-elaborated prelude (test-only)
+/// Get the cached prelude and a cloned node counter (test-only)
 /// This avoids re-parsing prelude files for each test, providing ~10x speedup
 #[cfg(test)]
-fn get_prelude_cache() -> &'static module_manager::PreElaboratedPrelude {
-    PRELUDE_CACHE.get_or_init(|| {
-        module_manager::ModuleManager::create_prelude().expect("Failed to create prelude cache")
-    })
+fn get_prelude_cache() -> (&'static module_manager::PreElaboratedPrelude, NodeCounter) {
+    let (prelude, counter) = PRELUDE_CACHE.get_or_init(|| {
+        let mut nc = NodeCounter::new();
+        let prelude =
+            module_manager::ModuleManager::create_prelude(&mut nc).expect("Failed to create prelude cache");
+        (prelude, nc)
+    });
+    (prelude, counter.clone())
 }
 
-/// Create a ModuleManager using the cached prelude (test-only)
+/// Create a ModuleManager and NodeCounter using the cached prelude (test-only)
 #[cfg(test)]
-pub fn cached_module_manager(node_counter: ast::NodeCounter) -> module_manager::ModuleManager {
-    module_manager::ModuleManager::from_prelude(get_prelude_cache(), node_counter)
+pub fn cached_module_manager() -> (module_manager::ModuleManager, NodeCounter) {
+    let (prelude, node_counter) = get_prelude_cache();
+    (module_manager::ModuleManager::from_prelude(prelude), node_counter)
 }

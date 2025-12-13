@@ -1,6 +1,13 @@
 use super::*;
+use crate::ast::NodeCounter;
 use crate::error::CompilerError;
 use crate::lexer::tokenize;
+
+/// Parse tokens with a fresh node counter (for parser tests that don't need prelude)
+fn parse_tokens(tokens: Vec<LocatedToken>) -> crate::error::Result<Program> {
+    let mut nc = NodeCounter::new();
+    Parser::new(tokens, &mut nc).parse()
+}
 
 /// Helper function that expects parsing to fail with a specific error.
 /// If parsing succeeds when it shouldn't, outputs the parsed AST.
@@ -9,7 +16,8 @@ where
     F: FnOnce(&CompilerError) -> std::result::Result<(), String>,
 {
     let tokens = tokenize(input).expect("Failed to tokenize input");
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
 
     match parser.parse() {
         Ok(program) => {
@@ -31,7 +39,8 @@ where
 fn parse_ok(input: &str) -> Program {
     let tokens = tokenize(input).expect("tokenize failed");
     let tokens_clone = tokens.clone();
-    Parser::new(tokens).parse().unwrap_or_else(|e| {
+    let mut nc = NodeCounter::new();
+    Parser::new(tokens, &mut nc).parse().unwrap_or_else(|e| {
         println!("Parse failed with error: {:?}", e);
         println!("Tokens were: {:#?}", tokens_clone);
         panic!("parse failed: {:?}", e);
@@ -113,7 +122,10 @@ macro_rules! assert_typed_param_with_attrs {
                 );
             }
         } else {
-            panic!("Expected typed pattern with attributed inner, got {:?}", $param);
+            panic!(
+                "Expected typed pattern with attributed inner, got {:?}",
+                $param
+            );
         }
     };
 }
@@ -424,7 +436,8 @@ fn test_operator_precedence_equivalence() {
     fn parse_expr(input: &str) -> Expression {
         let full_input = format!("def result() -> i32 = {}", input);
         let tokens = tokenize(&full_input).expect("Failed to tokenize");
-        let mut parser = Parser::new(tokens);
+        let mut nc = NodeCounter::new();
+        let mut parser = Parser::new(tokens, &mut nc);
         let program = parser.parse().expect("Failed to parse");
         match &program.declarations[0] {
             Declaration::Decl(decl) => decl.body.clone(),
@@ -629,7 +642,8 @@ fn test_parse_let_in_expression_only() {
     // Test parsing just the let..in expression by itself - just verify it parses
     let input = r#"let f = |y| y + x in f(10)"#;
     let tokens = tokenize(input).expect("Failed to tokenize");
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     parser.parse_expression().expect("Failed to parse let..in expression");
 }
 
@@ -923,14 +937,16 @@ fn test_array_literal() {
 #[test]
 fn test_parse_array_type_directly() {
     let tokens = tokenize("[4]f32").expect("Failed to tokenize");
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     parser.parse_type().expect("Failed to parse [4]f32");
 }
 
 #[test]
 fn test_parse_array_literal() {
     let tokens = tokenize("[0.0f32, 0.5f32, 0.0f32, 1.0f32]").expect("Failed to tokenize");
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     let expr = parser.parse_expression().expect("Failed to parse array literal");
     assert!(matches!(expr.kind, ExprKind::ArrayLiteral(_)));
 }
@@ -1004,7 +1020,8 @@ fn test_parse_function_application_with_array_literal() {
 #[test]
 fn test_parse_pattern_name() {
     let tokens = tokenize("x").expect("Failed to tokenize");
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     let pattern = parser.parse_pattern().expect("Failed to parse pattern");
 
     match pattern.kind {
@@ -1018,7 +1035,8 @@ fn test_parse_pattern_name() {
 #[test]
 fn test_parse_pattern_wildcard() {
     let tokens = tokenize("_").expect("Failed to tokenize");
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     let pattern = parser.parse_pattern().expect("Failed to parse pattern");
 
     match pattern.kind {
@@ -1030,7 +1048,8 @@ fn test_parse_pattern_wildcard() {
 #[test]
 fn test_parse_pattern_unit() {
     let tokens = tokenize("()").expect("Failed to tokenize");
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     let pattern = parser.parse_pattern().expect("Failed to parse pattern");
 
     match pattern.kind {
@@ -1042,7 +1061,8 @@ fn test_parse_pattern_unit() {
 #[test]
 fn test_parse_pattern_int_literal() {
     let tokens = tokenize("42").expect("Failed to tokenize");
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     let pattern = parser.parse_pattern().expect("Failed to parse pattern");
 
     match pattern.kind {
@@ -1056,7 +1076,8 @@ fn test_parse_pattern_int_literal() {
 #[test]
 fn test_parse_pattern_negative_int_literal() {
     let tokens = tokenize("-42").expect("Failed to tokenize");
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     let pattern = parser.parse_pattern().expect("Failed to parse pattern");
 
     match pattern.kind {
@@ -1070,7 +1091,8 @@ fn test_parse_pattern_negative_int_literal() {
 #[test]
 fn test_parse_pattern_float_literal() {
     let tokens = tokenize("3.14f32").expect("Failed to tokenize");
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     let pattern = parser.parse_pattern().expect("Failed to parse pattern");
 
     match pattern.kind {
@@ -1084,7 +1106,8 @@ fn test_parse_pattern_float_literal() {
 #[test]
 fn test_parse_pattern_bool_true() {
     let tokens = tokenize("true").expect("Failed to tokenize");
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     let pattern = parser.parse_pattern().expect("Failed to parse pattern");
 
     match pattern.kind {
@@ -1098,7 +1121,8 @@ fn test_parse_pattern_bool_true() {
 #[test]
 fn test_parse_pattern_bool_false() {
     let tokens = tokenize("false").expect("Failed to tokenize");
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     let pattern = parser.parse_pattern().expect("Failed to parse pattern");
 
     match pattern.kind {
@@ -1112,7 +1136,8 @@ fn test_parse_pattern_bool_false() {
 #[test]
 fn test_parse_pattern_tuple() {
     let tokens = tokenize("(x, y, z)").expect("Failed to tokenize");
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     let pattern = parser.parse_pattern().expect("Failed to parse pattern");
 
     match pattern.kind {
@@ -1141,7 +1166,8 @@ fn test_parse_pattern_tuple() {
 #[test]
 fn test_parse_pattern_tuple_with_trailing_comma() {
     let tokens = tokenize("(x, y,)").expect("Failed to tokenize");
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     let pattern = parser.parse_pattern().expect("Failed to parse pattern");
 
     match pattern.kind {
@@ -1155,7 +1181,8 @@ fn test_parse_pattern_tuple_with_trailing_comma() {
 #[test]
 fn test_parse_pattern_single_in_parens() {
     let tokens = tokenize("(x)").expect("Failed to tokenize");
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     let pattern = parser.parse_pattern().expect("Failed to parse pattern");
 
     // Single pattern in parens should unwrap to just the pattern
@@ -1173,7 +1200,8 @@ fn test_parse_pattern_single_in_parens() {
 #[test]
 fn test_parse_pattern_empty_record() {
     let tokens = tokenize("{}").expect("Failed to tokenize");
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     let pattern = parser.parse_pattern().expect("Failed to parse pattern");
 
     match pattern.kind {
@@ -1187,7 +1215,8 @@ fn test_parse_pattern_empty_record() {
 #[test]
 fn test_parse_pattern_record_shorthand() {
     let tokens = tokenize("{ x, y }").expect("Failed to tokenize");
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     let pattern = parser.parse_pattern().expect("Failed to parse pattern");
 
     match pattern.kind {
@@ -1207,7 +1236,8 @@ fn test_parse_pattern_record_shorthand() {
 #[test]
 fn test_parse_pattern_record_with_patterns() {
     let tokens = tokenize("{ x = a, y = b }").expect("Failed to tokenize");
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     let pattern = parser.parse_pattern().expect("Failed to parse pattern");
 
     match pattern.kind {
@@ -1239,7 +1269,8 @@ fn test_parse_pattern_record_with_patterns() {
 #[test]
 fn test_parse_pattern_record_mixed() {
     let tokens = tokenize("{ x, y = b }").expect("Failed to tokenize");
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     let pattern = parser.parse_pattern().expect("Failed to parse pattern");
 
     match pattern.kind {
@@ -1259,7 +1290,8 @@ fn test_parse_pattern_record_mixed() {
 #[test]
 fn test_parse_pattern_constructor_no_args() {
     let tokens = tokenize("None").expect("Failed to tokenize");
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     let pattern = parser.parse_pattern().expect("Failed to parse pattern");
 
     match pattern.kind {
@@ -1274,7 +1306,8 @@ fn test_parse_pattern_constructor_no_args() {
 #[test]
 fn test_parse_pattern_constructor_with_args() {
     let tokens = tokenize("Some x").expect("Failed to tokenize");
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     let pattern = parser.parse_pattern().expect("Failed to parse pattern");
 
     match pattern.kind {
@@ -1294,7 +1327,8 @@ fn test_parse_pattern_constructor_with_args() {
 #[test]
 fn test_parse_pattern_constructor_multiple_args() {
     let tokens = tokenize("Point x y").expect("Failed to tokenize");
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     let pattern = parser.parse_pattern().expect("Failed to parse pattern");
 
     match pattern.kind {
@@ -1319,7 +1353,8 @@ fn test_parse_pattern_constructor_multiple_args() {
 #[test]
 fn test_parse_pattern_constructor_nested() {
     let tokens = tokenize("Just (Some x)").expect("Failed to tokenize");
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     let pattern = parser.parse_pattern().expect("Failed to parse pattern");
 
     match pattern.kind {
@@ -1347,7 +1382,8 @@ fn test_parse_pattern_constructor_nested() {
 #[test]
 fn test_parse_pattern_typed() {
     let tokens = tokenize("x : i32").expect("Failed to tokenize");
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     let pattern = parser.parse_pattern().expect("Failed to parse pattern");
 
     match pattern.kind {
@@ -1366,7 +1402,8 @@ fn test_parse_pattern_typed() {
 #[test]
 fn test_parse_pattern_tuple_typed() {
     let tokens = tokenize("(x, y) : (i32, f32)").expect("Failed to tokenize");
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     let pattern = parser.parse_pattern().expect("Failed to parse pattern");
 
     match pattern.kind {
@@ -1384,7 +1421,8 @@ fn test_parse_pattern_tuple_typed() {
 fn test_parse_pattern_lowercase_not_constructor() {
     // Lowercase identifiers should be name patterns, not constructors
     let tokens = tokenize("some").expect("Failed to tokenize");
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     let pattern = parser.parse_pattern().expect("Failed to parse pattern");
 
     assert!(matches!(&pattern.kind, PatternKind::Name(name) if name == "some"));
@@ -1751,7 +1789,8 @@ fn test_function_call_tuple_syntax() {
     let input = "def test() = vec3(1.0f32, 0.5f32, 0.25f32)";
 
     let tokens = tokenize(input).unwrap();
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     let program = parser.parse().unwrap();
 
     let decl = &program.declarations[0];
@@ -1781,7 +1820,8 @@ def main() -> i32 =
   sum()"#;
 
     let tokens = tokenize(source).expect("Failed to tokenize");
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     let program = parser.parse().expect("Failed to parse");
 
     assert_eq!(program.declarations.len(), 2);
@@ -1849,7 +1889,8 @@ fn test_parse_pattern_x_i32() {
     let source = "x:i32";
     let tokens = tokenize(source).expect("Failed to tokenize");
     println!("Tokens for 'x:i32': {:#?}", tokens);
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     match parser.parse_pattern() {
         Ok(pattern) => {
             println!("Successfully parsed pattern: {:#?}", pattern);
@@ -1865,7 +1906,8 @@ fn test_parse_pattern_y_i32() {
     let source = "y:i32";
     let tokens = tokenize(source).expect("Failed to tokenize");
     println!("Tokens for 'y:i32': {:#?}", tokens);
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     match parser.parse_pattern() {
         Ok(pattern) => {
             println!("Successfully parsed pattern: {:#?}", pattern);
@@ -1881,7 +1923,8 @@ fn test_parse_lambda_with_tuple_pattern() {
     let source = r#"def test() -> i32 = let f = |(x, y)| x in f((1, 2))"#;
     let tokens = tokenize(source).expect("Failed to tokenize");
     println!("Tokens: {:#?}", tokens);
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     match parser.parse() {
         Ok(program) => {
             println!("Parsed: {:#?}", program);
@@ -1900,7 +1943,8 @@ fn test_parse_lambda_with_wildcard_in_tuple() {
     let source = r#"def test() -> i32 = let f = |(_, acc)| acc in f((1, 2))"#;
     let tokens = tokenize(source).expect("Failed to tokenize");
     println!("Tokens: {:#?}", tokens);
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     match parser.parse() {
         Ok(program) => {
             println!("Parsed: {:#?}", program);
@@ -2495,7 +2539,8 @@ fn test_ambiguity_chained_field_access() {
 #[test]
 fn test_parse_vector_literal_simple() {
     let tokens = tokenize("@[1.0f32, 2.0f32, 3.0f32]").expect("Failed to tokenize");
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     let expr = parser.parse_expression().expect("Failed to parse vector literal");
     match &expr.kind {
         ExprKind::VecMatLiteral(elems) => {
@@ -2509,7 +2554,8 @@ fn test_parse_vector_literal_simple() {
 #[test]
 fn test_parse_vector_literal_two_elements() {
     let tokens = tokenize("@[1, 2]").expect("Failed to tokenize");
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     let expr = parser.parse_expression().expect("Failed to parse vector literal");
     match &expr.kind {
         ExprKind::VecMatLiteral(elems) => {
@@ -2522,7 +2568,8 @@ fn test_parse_vector_literal_two_elements() {
 #[test]
 fn test_parse_vector_literal_four_elements() {
     let tokens = tokenize("@[1.0f32, 2.0f32, 3.0f32, 4.0f32]").expect("Failed to tokenize");
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     let expr = parser.parse_expression().expect("Failed to parse vector literal");
     match &expr.kind {
         ExprKind::VecMatLiteral(elems) => {
@@ -2535,7 +2582,8 @@ fn test_parse_vector_literal_four_elements() {
 #[test]
 fn test_parse_matrix_literal_2x2() {
     let tokens = tokenize("@[[1, 2], [3, 4]]").expect("Failed to tokenize");
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     let expr = parser.parse_expression().expect("Failed to parse matrix literal");
     match &expr.kind {
         ExprKind::VecMatLiteral(rows) => {
@@ -2558,7 +2606,8 @@ fn test_parse_matrix_literal_2x2() {
 fn test_parse_matrix_literal_2x3() {
     let tokens =
         tokenize("@[[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]").expect("Failed to tokenize");
-    let mut parser = Parser::new(tokens);
+    let mut nc = NodeCounter::new();
+    let mut parser = Parser::new(tokens, &mut nc);
     let expr = parser.parse_expression().expect("Failed to parse matrix literal");
     match &expr.kind {
         ExprKind::VecMatLiteral(rows) => {
@@ -2949,7 +2998,6 @@ fn test_parse_function_returning_tuple_to_int() {
     }
 }
 
-
 #[test]
 fn test_parse_def_constant_simple() {
     // Constant binding: def PI: f32 = 3.14159
@@ -2962,7 +3010,9 @@ fn test_parse_def_constant_simple() {
 #[test]
 fn test_parse_def_constant_array() {
     // Constant array binding
-    let decl = single_decl("def verts: [3]vec4f32 = [@[1.0, 2.0, 3.0, 4.0], @[1.0, 2.0, 3.0, 4.0], @[1.0, 2.0, 3.0, 4.0]]");
+    let decl = single_decl(
+        "def verts: [3]vec4f32 = [@[1.0, 2.0, 3.0, 4.0], @[1.0, 2.0, 3.0, 4.0], @[1.0, 2.0, 3.0, 4.0]]",
+    );
     assert_eq!(decl.name, "verts");
     assert_eq!(decl.params.len(), 0);
     assert!(decl.ty.is_some());
@@ -2973,10 +3023,9 @@ fn test_parse_def_constant_vs_function() {
     // Ensure we can distinguish constant from function
     let const_decl = single_decl("def WIDTH: i32 = 800");
     assert_eq!(const_decl.params.len(), 0);
-    
+
     let func_decl = single_decl("def get_width() -> i32 = 800");
-    assert_eq!(func_decl.params.len(), 0);  // Also empty params, but parsed as function
-    
+    assert_eq!(func_decl.params.len(), 0); // Also empty params, but parsed as function
+
     // Both should parse successfully
 }
-

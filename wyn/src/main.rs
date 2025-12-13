@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::Instant;
 use thiserror::Error;
-use wyn_core::{Compiler, lexer, module_manager::ModuleManager, parser::Parser as WynParser};
+use wyn_core::{Compiler, lexer, parser::Parser as WynParser};
 
 /// Target output format
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -161,10 +161,16 @@ fn compile_file(
     }
 
     // Compile through the pipeline
-    let parsed = time("parse", verbose, || Compiler::parse(&source))?;
-    let module_manager = ModuleManager::new();
-    let resolved = time("resolve", verbose, || parsed.resolve(&module_manager))?;
-    let type_checked = time("type_check", verbose, || resolved.type_check(&module_manager))?;
+    // Create FrontEnd first - it owns the node counter and loads prelude
+    let mut frontend = time("frontend", verbose, || wyn_core::FrontEnd::new());
+    // Parse user code using the same counter (so IDs don't collide with prelude)
+    let parsed = time("parse", verbose, || {
+        Compiler::parse(&source, &mut frontend.node_counter)
+    })?;
+    let resolved = time("resolve", verbose, || parsed.resolve(&frontend.module_manager))?;
+    let type_checked = time("type_check", verbose, || {
+        resolved.type_check(&frontend.module_manager)
+    })?;
 
     type_checked.print_warnings();
 
@@ -177,7 +183,9 @@ fn compile_file(
     let ast_folded = time("fold_ast_constants", verbose, || {
         alias_checked.fold_ast_constants()
     });
-    let (flattened, mut backend) = time("flatten", verbose, || ast_folded.flatten(&module_manager))?;
+    let (flattened, mut backend) = time("flatten", verbose, || {
+        ast_folded.flatten(&frontend.module_manager)
+    })?;
 
     // Write initial MIR if requested (right after flattening)
     write_mir_if_requested(&flattened.mir, &output_init_mir, "initial MIR", verbose)?;
@@ -283,9 +291,9 @@ fn check_file(input: PathBuf, output_annotated: Option<PathBuf>, verbose: bool) 
     }
 
     // Type check and alias check, don't generate code
-    let parsed = Compiler::parse(&source)?;
-    let module_manager = ModuleManager::new();
-    let type_checked = parsed.resolve(&module_manager)?.type_check(&module_manager)?;
+    let mut frontend = wyn_core::FrontEnd::new();
+    let parsed = Compiler::parse(&source, &mut frontend.node_counter)?;
+    let type_checked = parsed.resolve(&frontend.module_manager)?.type_check(&frontend.module_manager)?;
 
     type_checked.print_warnings();
 
@@ -324,7 +332,8 @@ fn generate_annotated_source(
 ) -> Result<(), DriverError> {
     // Parse the source to get the AST
     let tokens = lexer::tokenize(source).map_err(|e| wyn_core::err_parse!("{}", e))?;
-    let mut parser = WynParser::new(tokens);
+    let mut node_counter = wyn_core::ast::NodeCounter::new();
+    let mut parser = WynParser::new(tokens, &mut node_counter);
     let _program = parser.parse()?;
 
     // Generate annotated code - temporarily disabled

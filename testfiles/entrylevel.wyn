@@ -32,22 +32,22 @@ def vertex_main(#[builtin(vertex_index)] vertex_id: i32) -> #[builtin(position)]
 ------------------------------------------------------------
 
 def xrot(t: f32) -> mat3f32 =
-  let c = f32.cos t in
-  let s = f32.sin t in
+  let c = f32.cos(t) in
+  let s = f32.sin(t) in
   @[[1.0, 0.0, 0.0],
     [0.0, c, 0.0 - s],
     [0.0, s, c]]
 
 def yrot(t: f32) -> mat3f32 =
-  let c = f32.cos t in
-  let s = f32.sin t in
+  let c = f32.cos(t) in
+  let s = f32.sin(t) in
   @[[c, 0.0, 0.0 - s],
     [0.0, 1.0, 0.0],
     [s, 0.0, c]]
 
 def zrot(t: f32) -> mat3f32 =
-  let c = f32.cos t in
-  let s = f32.sin t in
+  let c = f32.cos(t) in
+  let s = f32.sin(t) in
   @[[c, 0.0 - s, 0.0],
     [s, c, 0.0],
     [0.0, 0.0, 1.0]]
@@ -58,24 +58,24 @@ def zrot(t: f32) -> mat3f32 =
 
 def sdfMap(p_in: vec3f32) -> vec2f32 =
   -- p.x += sin(p.z)
-  let p1 = @[p_in.x + f32.sin p_in.z, p_in.y, p_in.z] in
+  let p1 = @[p_in.x + f32.sin(p_in.z), p_in.y, p_in.z] in
   -- p *= zrot(p.z)
-  let p = mul p1 (zrot p1.z) in
+  let p = mul(p1, zrot(p1.z)) in
 
-  let q_init = @[fract p.x * 2.0 - 1.0, fract p.y * 2.0 - 1.0, fract p.z * 2.0 - 1.0] in
+  let q_init = @[fract(p.x) * 2.0 - 1.0, fract(p.y) * 2.0 - 1.0, fract(p.z) * 2.0 - 1.0] in
 
   let (_, d_final, idx_final, _) = loop (i, d, idx, q) = (0, 1000.0, 0.0, q_init) while i < 3 do
     -- q = sign(q) * (1.0 - 1.0 / (1.0 + abs(q) * 0.8))
-    let q2 = @[sign q.x * (1.0 - 1.0 / (1.0 + f32.abs q.x * 0.8)),
-               sign q.y * (1.0 - 1.0 / (1.0 + f32.abs q.y * 0.8)),
-               sign q.z * (1.0 - 1.0 / (1.0 + f32.abs q.z * 0.8))] in
+    let q2 = @[sign(q.x) * (1.0 - 1.0 / (1.0 + f32.abs(q.x) * 0.8)),
+               sign(q.y) * (1.0 - 1.0 / (1.0 + f32.abs(q.y) * 0.8)),
+               sign(q.z) * (1.0 - 1.0 / (1.0 + f32.abs(q.z) * 0.8))] in
 
-    let md = magnitude q2 - 0.5 in
-    let ss = 0.5 + 0.5 * f32.sin (p.z + md * f32.i32 i * 6.0) in
-    let cyl = magnitude @[p.x, p.y] - 0.5 - ss in
-    let md2 = f32.max md (0.0 - cyl) in
+    let md = magnitude(q2) - 0.5 in
+    let ss = 0.5 + 0.5 * f32.sin(p.z + md * f32.i32(i) * 6.0) in
+    let cyl = magnitude(@[p.x, p.y]) - 0.5 - ss in
+    let md2 = f32.max(md, 0.0 - cyl) in
 
-    if md2 < d then (i + 1, md2, f32.i32 i, q2)
+    if md2 < d then (i + 1, md2, f32.i32(i), q2)
     else (i + 1, d, idx, q2)
   in @[d_final, idx_final]
 
@@ -85,10 +85,10 @@ def sdfMap(p_in: vec3f32) -> vec2f32 =
 
 def calcNormal(p: vec3f32) -> vec3f32 =
   let e = 0.1 in
-  let dx = (sdfMap @[p.x + e, p.y, p.z]).x - (sdfMap @[p.x - e, p.y, p.z]).x in
-  let dy = (sdfMap @[p.x, p.y + e, p.z]).x - (sdfMap @[p.x, p.y - e, p.z]).x in
-  let dz = (sdfMap @[p.x, p.y, p.z + e]).x - (sdfMap @[p.x, p.y, p.z - e]).x in
-  normalize @[dx, dy, dz]
+  let dx = (sdfMap(@[p.x + e, p.y, p.z])).x - (sdfMap(@[p.x - e, p.y, p.z])).x in
+  let dy = (sdfMap(@[p.x, p.y + e, p.z])).x - (sdfMap(@[p.x, p.y - e, p.z])).x in
+  let dz = (sdfMap(@[p.x, p.y, p.z + e])).x - (sdfMap(@[p.x, p.y, p.z - e])).x in
+  normalize(@[dx, dy, dz])
 
 ------------------------------------------------------------
 -- Ray tracing
@@ -97,7 +97,7 @@ def calcNormal(p: vec3f32) -> vec3f32 =
 def trace(o: vec3f32, r: vec3f32) -> f32 =
   let (_, t_final) = loop (i, t) = (0, 0.0) while i < 64 do
     let p = @[o.x + r.x * t, o.y + r.y * t, o.z + r.z * t] in
-    let d = (sdfMap p).x in
+    let d = (sdfMap(p)).x in
     (i + 1, t + d * 0.3)
   in t_final
 
@@ -110,15 +110,15 @@ def trace(o: vec3f32, r: vec3f32) -> f32 =
 -- TODO: Replace with actual texture sampling: texture(iChannel0, uv)
 def sampleChannel0(p: vec3f32) -> vec3f32 =
   -- Placeholder: procedural pattern
-  let ta = @[0.5 + 0.5 * f32.sin (p.y * 10.0),
-             0.5 + 0.5 * f32.sin (p.z * 10.0),
-             0.5 + 0.5 * f32.sin ((p.y + p.z) * 5.0)] in
-  let tb = @[0.5 + 0.5 * f32.sin (p.x * 10.0),
-             0.5 + 0.5 * f32.sin (p.z * 10.0),
-             0.5 + 0.5 * f32.sin ((p.x + p.z) * 5.0)] in
-  let tc = @[0.5 + 0.5 * f32.sin (p.x * 10.0),
-             0.5 + 0.5 * f32.sin (p.y * 10.0),
-             0.5 + 0.5 * f32.sin ((p.x + p.y) * 5.0)] in
+  let ta = @[0.5 + 0.5 * f32.sin(p.y * 10.0),
+             0.5 + 0.5 * f32.sin(p.z * 10.0),
+             0.5 + 0.5 * f32.sin((p.y + p.z) * 5.0)] in
+  let tb = @[0.5 + 0.5 * f32.sin(p.x * 10.0),
+             0.5 + 0.5 * f32.sin(p.z * 10.0),
+             0.5 + 0.5 * f32.sin((p.x + p.z) * 5.0)] in
+  let tc = @[0.5 + 0.5 * f32.sin(p.x * 10.0),
+             0.5 + 0.5 * f32.sin(p.y * 10.0),
+             0.5 + 0.5 * f32.sin((p.x + p.y) * 5.0)] in
   @[(ta.x + tb.x + tc.x) / 3.0,
     (ta.y + tb.y + tc.y) / 3.0,
     (ta.z + tb.z + tc.z) / 3.0]
@@ -143,24 +143,24 @@ def fragment_main(#[builtin(position)] fragCoord: vec4f32) -> #[location(0)] vec
   let uv3 = @[uv2.x * iResolution.x / iResolution.y, uv2.y] in
 
   -- Ray direction with fisheye-like distortion
-  let r_base = normalize @[uv3.x, uv3.y, 1.0 - dot uv3 uv3 * 0.33] in
+  let r_base = normalize(@[uv3.x, uv3.y, 1.0 - dot(uv3, uv3) * 0.33]) in
   -- r *= zrot(iTime * 0.25) * yrot(-sin(iTime))
-  let rot1 = zrot (iTime * 0.25) in
-  let rot2 = yrot (0.0 - f32.sin iTime) in
-  let r1 = mul r_base rot1 in
-  let r = mul r1 rot2 in
+  let rot1 = zrot(iTime * 0.25) in
+  let rot2 = yrot(0.0 - f32.sin(iTime)) in
+  let r1 = mul(r_base, rot1) in
+  let r = mul(r1, rot2) in
 
   -- Camera origin
   let oz = iTime in
-  let ox = 0.0 - f32.sin oz in
+  let ox = 0.0 - f32.sin(oz) in
   let o = @[ox, 0.0, oz] in
 
   -- Trace
-  let t = trace o r in
+  let t = trace(o, r) in
   let w = @[o.x + r.x * t, o.y + r.y * t, o.z + r.z * t] in
-  let sn = calcNormal w in
-  let fd = sdfMap w in
-  let ref = reflect r sn in
+  let sn = calcNormal(w) in
+  let fd = sdfMap(w) in
+  let ref = reflect(r, sn) in
 
   -- Material color based on index
   let diff_base = if fd.y < 0.5 then @[1.0, 0.0, 0.0]
@@ -169,22 +169,22 @@ def fragment_main(#[builtin(position)] fragCoord: vec4f32) -> #[location(0)] vec
                   else @[1.0, 1.0, 1.0] in
 
   -- Add texture from iChannel0 (triplanar)
-  let tex0 = sampleChannel0 w in
+  let tex0 = sampleChannel0(w) in
   let diff1 = @[diff_base.x + tex0.x, diff_base.y + tex0.y, diff_base.z + tex0.z] in
 
   -- Add reflection from iChannel1 (cubemap)
-  let tex1 = sampleChannel1 ref in
+  let tex1 = sampleChannel1(ref) in
   let diff2 = @[diff1.x + tex1.x, diff1.y + tex1.y, diff1.z + tex1.z] in
 
   -- Mix with white based on normal.y
-  let abs_sn_y = f32.abs sn.y in
-  let diff3 = @[mix diff2.x 1.0 abs_sn_y, mix diff2.y 1.0 abs_sn_y, mix diff2.z 1.0 abs_sn_y] in
+  let abs_sn_y = f32.abs(sn.y) in
+  let diff3 = @[mix(diff2.x, 1.0, abs_sn_y), mix(diff2.y, 1.0, abs_sn_y), mix(diff2.z, 1.0, abs_sn_y)] in
   -- Mix with red based on normal.y
-  let diff4 = @[mix 0.8 diff3.x abs_sn_y, mix 0.0 diff3.y abs_sn_y, mix 0.0 diff3.z abs_sn_y] in
+  let diff4 = @[mix(0.8, diff3.x, abs_sn_y), mix(0.0, diff3.y, abs_sn_y), mix(0.0, diff3.z, abs_sn_y)] in
 
   -- Lighting
   let neg_r = @[0.0 - r.x, 0.0 - r.y, 0.0 - r.z] in
-  let prod = f32.max (dot sn neg_r) 0.0 in
+  let prod = f32.max(dot(sn, neg_r), 0.0) in
   let diff5 = @[diff4.x * prod, diff4.y * prod, diff4.z * prod] in
 
   -- Fog
@@ -192,35 +192,35 @@ def fragment_main(#[builtin(position)] fragCoord: vec4f32) -> #[location(0)] vec
   let fc = @[diff5.x * fog, diff5.y * fog, diff5.z * fog] in
 
   -- Gamma (sqrt)
-  @[f32.sqrt fc.x, f32.sqrt fc.y, f32.sqrt fc.z, 1.0]
+  @[f32.sqrt(fc.x), f32.sqrt(fc.y), f32.sqrt(fc.z), 1.0]
 
 ------------------------------------------------------------
 -- Original GLSL (commented out)
 ------------------------------------------------------------
 
 -- const float pi = 3.14159;
--- 
+--
 -- mat3 xrot(float t)
 -- {
 --     return mat3(1.0, 0.0, 0.0,
 --                 0.0, cos(t), -sin(t),
 --                 0.0, sin(t), cos(t));
 -- }
--- 
+--
 -- mat3 yrot(float t)
 -- {
 --     return mat3(cos(t), 0.0, -sin(t),
 --                 0.0, 1.0, 0.0,
 --                 sin(t), 0.0, cos(t));
 -- }
--- 
+--
 -- mat3 zrot(float t)
 -- {
 --     return mat3(cos(t), -sin(t), 0.0,
 --                 sin(t), cos(t), 0.0,
 --                 0.0, 0.0, 1.0);
 -- }
--- 
+--
 -- vec2 map(vec3 p)
 -- {
 --     p.x += sin(p.z);
@@ -229,25 +229,25 @@ def fragment_main(#[builtin(position)] fragCoord: vec4f32) -> #[location(0)] vec
 --     vec3 q = fract(p) * 2.0 - 1.0;
 --     float idx = 0.0;
 --     for (int i = 0; i < 3; ++i) {
--- 
+--
 -- 		q = sign(q) * (1.0 - 1.0 / (1.0 + abs(q) * 0.8));
---         
+--
 --         float md = length(q) - 0.5;
---         
+--
 --         float ss = 0.5 + 0.5 * sin(p.z + md * float(i) * 6.0);
--- 
+--
 --         float cyl = length(p.xy) - 0.5 - ss;
---         
+--
 --         md = max(md, -cyl);
---         
+--
 --         if (md < d) {
 --             d = md;
 --             idx = float(i);
 --         }
---     } 
+--     }
 --     return vec2(d, idx);
 -- }
--- 
+--
 -- vec3 normal(vec3 p)
 -- {
 -- 	vec3 o = vec3(0.1, 0.0, 0.0);
@@ -255,7 +255,7 @@ def fragment_main(#[builtin(position)] fragCoord: vec4f32) -> #[location(0)] vec
 --                           map(p+o.yxy).x - map(p-o.yxy).x,
 --                           map(p+o.yyx).x - map(p-o.yyx).x));
 -- }
--- 
+--
 -- float trace(vec3 o, vec3 r)
 -- {
 --  	float t = 0.0;
@@ -266,7 +266,7 @@ def fragment_main(#[builtin(position)] fragCoord: vec4f32) -> #[location(0)] vec
 --     }
 --     return t;
 -- }
--- 
+--
 -- vec3 _texture(vec3 p)
 -- {
 --  	vec3 ta = texture(iChannel0, vec2(p.y,p.z)).xyz;
@@ -274,29 +274,29 @@ def fragment_main(#[builtin(position)] fragCoord: vec4f32) -> #[location(0)] vec
 --     vec3 tc = texture(iChannel0, vec2(p.x,p.y)).xyz;
 --     return (ta + tb + tc) / 3.0;
 -- }
--- 
+--
 -- void mainImage( out vec4 fragColor, in vec2 fragCoord )
 -- {
 -- 	vec2 uv = fragCoord.xy / iResolution.xy;
---     
+--
 --     uv = uv * 2.0 - 1.0;
---     
+--
 --     uv.x *= iResolution.x / iResolution.y;
---     
+--
 --     vec3 r = normalize(vec3(uv, 1.0 - dot(uv,uv) * 0.33));
---     
+--
 --     r *= zrot(iTime * 0.25) * yrot(-sin(iTime));
---     
+--
 --     vec3 o = vec3(0.0, 0.0, 0.0);
 --     o.z += iTime;
 --     o.x += -sin(o.z);
---     
+--
 --     float t = trace(o, r);
 --     vec3 w = o + r * t;
 --     vec3 sn = normal(w);
 --     vec2 fd = map(w);
 --     vec3 ref = reflect(r, sn);
---     
+--
 --     vec3 diff = vec3(0.0, 0.0, 0.0);
 --     if (fd.y == 0.0) {
 --         diff = vec3(1.0, 0.0, 0.0);
@@ -307,18 +307,18 @@ def fragment_main(#[builtin(position)] fragCoord: vec4f32) -> #[location(0)] vec
 --     } else {
 --         diff = vec3(1.0, 1.0, 1.0);
 --     }
---     
+--
 --     diff += _texture(w);
 --     diff += texture(iChannel1, ref).xyz;
---     
+--
 --     diff = mix(diff, vec3(1.0), abs(sn.y));
 --     diff = mix(vec3(0.8, 0.0, 0.0), diff, abs(sn.y));
---     
+--
 --     float prod = max(dot(sn, -r), 0.0);
 --     diff *= prod;
---     
+--
 --     float fog = 1.0 / (1.0 + t * t * 0.1 + fd.x * 100.0);
 --     vec3 fc = diff * fog;
---     
+--
 -- 	fragColor = vec4(sqrt(fc), 1.0);
 -- }

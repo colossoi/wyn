@@ -2543,8 +2543,8 @@ mod tests {
 
     fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
         // Use the typestate API to ensure proper compilation pipeline
-        let parsed = crate::Compiler::parse(source).expect("Parsing failed");
-        let module_manager = crate::module_manager::ModuleManager::new();
+        let (module_manager, mut node_counter) = crate::cached_module_manager();
+        let parsed = crate::Compiler::parse(source, &mut node_counter).expect("Parsing failed");
         let (flattened, _backend) = parsed
             .resolve(&module_manager)
             .expect("Name resolution failed")

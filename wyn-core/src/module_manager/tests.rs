@@ -1,10 +1,12 @@
 use super::ModuleManager;
+use crate::ast::NodeCounter;
 
 #[test]
 fn test_query_f32_sin_from_math_prelude() {
     use polytype::Context;
 
-    let manager = ModuleManager::new();
+    let mut node_counter = NodeCounter::new();
+    let manager = ModuleManager::new(&mut node_counter);
     let mut context = Context::default();
 
     // Prelude files are automatically loaded on creation

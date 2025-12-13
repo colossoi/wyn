@@ -7,8 +7,8 @@ use crate::type_checker::TypeChecker;
 
 fn flatten_program(input: &str) -> mir::Program {
     // Use the typestate API to ensure proper compilation pipeline
-    let parsed = crate::Compiler::parse(input).expect("Parsing failed");
-    let module_manager = crate::module_manager::ModuleManager::new();
+    let (module_manager, mut node_counter) = crate::cached_module_manager();
+    let parsed = crate::Compiler::parse(input, &mut node_counter).expect("Parsing failed");
     let (flattened, _backend) = parsed
         .resolve(&module_manager)
         .expect("Name resolution failed")
@@ -28,11 +28,11 @@ fn flatten_to_string(input: &str) -> String {
 
 /// Helper to check that code fails type checking (for testing error cases)
 fn should_fail_type_check(input: &str) -> bool {
+    let (module_manager, mut node_counter) = crate::cached_module_manager();
     let tokens = tokenize(input).expect("Tokenization failed");
-    let mut parser = Parser::new(tokens);
+    let mut parser = Parser::new(tokens, &mut node_counter);
     let ast = parser.parse().expect("Parsing failed");
 
-    let module_manager = crate::module_manager::ModuleManager::new();
     let mut type_checker = TypeChecker::new(&module_manager);
     type_checker.load_builtins().expect("Failed to load builtins");
     type_checker.check_program(&ast).is_err()
@@ -184,8 +184,8 @@ def test() -> [4]i32 =
 "#;
 
     // Parse
-    let parsed = crate::Compiler::parse(source).expect("Parsing failed");
-    let module_manager = crate::module_manager::ModuleManager::new();
+    let (module_manager, mut node_counter) = crate::cached_module_manager();
+    let parsed = crate::Compiler::parse(source, &mut node_counter).expect("Parsing failed");
 
     // Resolve
     let resolved = parsed.resolve(&module_manager).expect("Name resolution failed");
@@ -383,8 +383,8 @@ def test() -> f32 =
 "#;
 
     // This should compile successfully
-    let result = crate::Compiler::parse(source).and_then(|p| {
-        let mm = crate::module_manager::ModuleManager::new();
+    let (mm, mut nc) = crate::cached_module_manager();
+    let result = crate::Compiler::parse(source, &mut nc).and_then(|p| {
         p.resolve(&mm)
             .and_then(|r| r.type_check(&mm))
             .and_then(|t| t.alias_check())
@@ -540,8 +540,8 @@ def test(arr: [3]i32, i: i32) -> i32 =
 "#;
 
     // Run through normalize + hoist_materializations
-    let parsed = crate::Compiler::parse(source).expect("parse failed");
-    let mm = crate::module_manager::ModuleManager::new();
+    let (mm, mut nc) = crate::cached_module_manager();
+    let parsed = crate::Compiler::parse(source, &mut nc).expect("parse failed");
     let (flattened, _backend) = parsed
         .resolve(&mm)
         .expect("resolve failed")
@@ -703,4 +703,176 @@ def test() -> f32 =
     let mir_str = format!("{}", mir);
     println!("MIR:\n{}", mir_str);
     assert!(mir_str.contains("def reduce_f32"));
+}
+
+#[test]
+fn test_map_lambda_without_extra_parens() {
+    // Reproduce issue: map with lambda without extra parentheses around the lambda
+    // This matches the pattern: map(|v:vec3f32| ..., arr)
+    // vs the working pattern: map((|v:vec3f32| ...), arr)
+    let mir = flatten_program(
+        r#"
+def test_map_no_parens(arr: [4]i32) -> [4]i32 =
+    map(|x: i32| x + 1, arr)
+"#,
+    );
+    let mir_str = format!("{}", mir);
+    println!("MIR output:\n{}", mir_str);
+    assert!(mir_str.contains("test_map_no_parens"));
+}
+
+#[test]
+fn test_map_lambda_with_capture() {
+    // Reproduce issue: map with lambda that captures variable (like da_rasterizer)
+    // Pattern: map(|v:type| func(v, captured_var), arr)
+    let mir = flatten_program(
+        r#"
+def test_map_capture(arr: [4]i32, offset: i32) -> [4]i32 =
+    map(|x: i32| x + offset, arr)
+"#,
+    );
+    let mir_str = format!("{}", mir);
+    println!("MIR output:\n{}", mir_str);
+    assert!(mir_str.contains("test_map_capture"));
+}
+
+#[test]
+fn test_generic_function_dot2() {
+    // Reproduce issue from primitives.wyn: generic function dot2<E, T>
+    let mir = flatten_program(
+        r#"
+def dot2<E, T>(v: T) -> E = dot(v, v)
+
+def test_dot2(p: vec3f32) -> f32 =
+    dot2(p)
+"#,
+    );
+    let mir_str = format!("{}", mir);
+    println!("MIR output:\n{}", mir_str);
+    assert!(mir_str.contains("test_dot2"));
+}
+
+#[test]
+fn test_map_with_mul_capture() {
+    // Reproduce da_rasterizer issue: map with lambda capturing a mat4f32 and calling mul
+    let mir = flatten_program(
+        r#"
+def cube_corners: [8]vec3f32 =
+    [ @[-1.0, -1.0, 1.0],
+      @[-1.0, 1.0, 1.0],
+      @[1.0, 1.0, 1.0],
+      @[1.0, -1.0, 1.0],
+      @[-1.0, -1.0, -1.0],
+      @[-1.0, 1.0, -1.0],
+      @[1.0, 1.0, -1.0],
+      @[1.0, -1.0, -1.0] ]
+
+def test_map_mul(mat: mat4f32) -> [8]vec4f32 =
+    map(|v:vec3f32| mul(@[v.x, v.y, v.z, 1.0], mat), cube_corners)
+"#,
+    );
+    let mir_str = format!("{}", mir);
+    println!("MIR output:\n{}", mir_str);
+    assert!(mir_str.contains("test_map_mul"));
+}
+
+#[test]
+fn test_multiline_map_lambda() {
+    // Reproduce da_rasterizer pattern: multiline lambda with let-in inside map
+    let mir = flatten_program(
+        r#"
+def arr: [4]f32 = [1.0, 2.0, 3.0, 4.0]
+
+def test_multiline() -> [4]f32 =
+    map(|q:f32|
+              let zinv = 1.0 / q in
+              zinv,
+           arr)
+"#,
+    );
+    let mir_str = format!("{}", mir);
+    println!("MIR output:\n{}", mir_str);
+    assert!(mir_str.contains("test_multiline"));
+}
+
+#[test]
+fn test_loop_with_map() {
+    // Reproduce da_rasterizer pattern: map inside a loop
+    let mir = flatten_program(
+        r#"
+def cube: [4]f32 = [1.0, 2.0, 3.0, 4.0]
+
+def test_loop_map() -> f32 =
+    let (_, acc) = loop (idx, acc) = (0i32, 0.0f32) while idx < 4 do
+      let mat = 2.0f32 in
+      let v4s = map(|v:f32| v * mat, cube) in
+      (idx + 1, acc + v4s[0])
+    in acc
+"#,
+    );
+    let mir_str = format!("{}", mir);
+    println!("MIR output:\n{}", mir_str);
+    assert!(mir_str.contains("test_loop_map"));
+}
+
+#[test]
+fn test_da_rasterizer_minimal() {
+    // Minimal reproduction of da_rasterizer.wyn structure
+    let mir = flatten_program(
+        r#"
+#[uniform(set=1, binding=0)] def iResolution: vec2f32
+#[uniform(set=1, binding=1)] def iTime: f32
+
+def verts: [3]vec4f32 =
+  [@[-1.0, -1.0, 0.0, 1.0],
+   @[3.0, -1.0, 0.0, 1.0],
+   @[-1.0, 3.0, 0.0, 1.0]]
+
+#[vertex]
+def vertex_main(#[builtin(vertex_index)] vertex_id:i32) -> #[builtin(position)] vec4f32 = verts[vertex_id]
+
+def translation(p: vec3f32) -> mat4f32 =
+  @[
+    [1.0f32, 0.0f32, 0.0f32, p.x],
+    [0.0f32, 1.0f32, 0.0f32, p.y],
+    [0.0f32, 0.0f32, 1.0f32, p.z],
+    [0.0f32, 0.0f32, 0.0f32, 1.0f32]
+  ]
+
+def rotation_euler(a: vec3f32) -> mat4f32 =
+  let s = [f32.sin(a.x), f32.sin(a.y), f32.sin(a.z)] in
+  let c = [f32.cos(a.x), f32.cos(a.y), f32.cos(a.z)] in
+  @[
+    [c[1]*c[2], c[1]*s[2], 0.0f32 - s[1], 0.0f32],
+    [s[0]*s[1]*c[2] - c[0]*s[2], s[0]*s[1]*s[2] + c[0]*c[2], s[0]*c[1], 0.0f32],
+    [c[0]*s[1]*c[2] + s[0]*s[2], c[0]*s[1]*s[2] - s[0]*c[2], c[0]*c[1], 0.0f32],
+    [0.0f32, 0.0f32, 0.0f32, 1.0f32]
+  ]
+
+def cube_corners: [8]vec3f32 =
+    [ @[-1.0, -1.0, 1.0],
+      @[-1.0, 1.0, 1.0],
+      @[1.0, 1.0, 1.0],
+      @[1.0, -1.0, 1.0],
+      @[-1.0, -1.0, -1.0],
+      @[-1.0, 1.0, -1.0],
+      @[1.0, 1.0, -1.0],
+      @[1.0, -1.0, -1.0] ]
+
+def main_image(iResolution:vec2f32, iTime:f32, fragCoord:vec2f32) -> vec4f32 =
+  let cam = translation(@[0.0, 0.0, 10.0]) in
+  let rot = rotation_euler(@[iTime, iTime*0.86, iTime*0.473]) in
+  let rot_cam : mat4f32 = mul(rot, cam) in
+  let mat  : mat4f32 = mul(translation(@[4.0, 4.0, -4.0]), rot_cam) in
+  let v4s : [8]vec4f32 = map(|v:vec3f32| mul(@[v.x, v.y, v.z, 1.0], mat), cube_corners) in
+  v4s[0]
+
+#[fragment]
+def fragment_main(#[builtin(frag_coord)] pos:vec4f32) -> #[location(0)] vec4f32 =
+  main_image(@[iResolution.x, iResolution.y], iTime, @[pos.x, pos.y])
+"#,
+    );
+    let mir_str = format!("{}", mir);
+    println!("MIR output:\n{}", mir_str);
+    assert!(mir_str.contains("fragment_main"));
 }

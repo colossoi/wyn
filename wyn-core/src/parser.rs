@@ -42,31 +42,19 @@ fn suffix_to_type(suffix: &str) -> Type {
     Type::Constructed(type_name, vec![])
 }
 
-pub struct Parser {
+pub struct Parser<'a> {
     tokens: Vec<LocatedToken>,
     current: usize,
-    node_counter: NodeCounter,
+    node_counter: &'a mut NodeCounter,
 }
 
-impl Parser {
-    pub fn new(tokens: Vec<LocatedToken>) -> Self {
-        Parser {
-            tokens,
-            current: 0,
-            node_counter: NodeCounter::new(),
-        }
-    }
-
-    pub fn new_with_counter(tokens: Vec<LocatedToken>, node_counter: NodeCounter) -> Self {
+impl<'a> Parser<'a> {
+    pub fn new(tokens: Vec<LocatedToken>, node_counter: &'a mut NodeCounter) -> Self {
         Parser {
             tokens,
             current: 0,
             node_counter,
         }
-    }
-
-    pub fn take_node_counter(self) -> NodeCounter {
-        self.node_counter
     }
 
     /// Get the span of the current token
@@ -327,11 +315,8 @@ impl Parser {
         };
 
         // Rust-style generics: <[n], A, B> (optional)
-        let (size_params, type_params) = if self.check_binop("<") {
-            self.parse_generic_params()?
-        } else {
-            (vec![], vec![])
-        };
+        let (size_params, type_params) =
+            if self.check_binop("<") { self.parse_generic_params()? } else { (vec![], vec![]) };
 
         self.expect(Token::Colon)?;
         let ty = self.parse_type()?;
@@ -1002,8 +987,8 @@ impl Parser {
                 // Distinguish between type variable (A, B, T) and sum type (Some, None)
                 // Type variables are single uppercase letters or all-uppercase identifiers
                 // Sum types have CamelCase names (first letter upper, rest mixed)
-                let is_type_var = name.len() == 1
-                    || (name.chars().all(|c| c.is_uppercase() || c.is_ascii_digit()));
+                let is_type_var =
+                    name.len() == 1 || (name.chars().all(|c| c.is_uppercase() || c.is_ascii_digit()));
 
                 if is_type_var {
                     // Type variable like T, A, B, UV
@@ -1439,9 +1424,7 @@ impl Parser {
                     self.expect(Token::RightParen)?;
                     let end_span = self.previous_span();
                     let span = start_span.merge(&end_span);
-                    expr = self
-                        .node_counter
-                        .mk_node(ExprKind::Application(Box::new(expr), args), span);
+                    expr = self.node_counter.mk_node(ExprKind::Application(Box::new(expr), args), span);
                 }
                 _ => break,
             }
@@ -1977,12 +1960,7 @@ impl Parser {
             Ok(())
         } else {
             let span = self.current_span();
-            Err(err_parse!(
-                "Expected '{}', got {:?} at {}",
-                op,
-                self.peek(),
-                span
-            ))
+            Err(err_parse!("Expected '{}', got {:?} at {}", op, self.peek(), span))
         }
     }
 

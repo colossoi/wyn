@@ -814,7 +814,30 @@ impl Flattener {
             }
             ExprKind::LetIn(let_in) => self.flatten_let_in(let_in, span)?,
             ExprKind::Lambda(lambda) => self.flatten_lambda(lambda, expr.h.id, span)?,
-            ExprKind::Application(func, args) => self.flatten_application(func, args, &ty, span)?,
+            ExprKind::Application(func, args) => {
+                // Debug: check if type looks wrong
+                if crate::types::as_arrow(&ty).is_some() {
+                    eprintln!(
+                        "DEBUG: Application expr id={:?} has arrow type {:?}",
+                        expr.h.id, ty
+                    );
+                    eprintln!("DEBUG: func kind={:?}", func.kind);
+                    eprintln!("DEBUG: type_table entry={:?}", self.type_table.get(&expr.h.id));
+                    eprintln!("DEBUG: expr span={:?}", expr.h.span);
+                    eprintln!("DEBUG: type_table size={}", self.type_table.len());
+                    // Check for nearby IDs
+                    let target_id = match expr.h.id {
+                        crate::ast::NodeId(n) => n,
+                    };
+                    for delta in -5i32..=5i32 {
+                        let check_id = crate::ast::NodeId((target_id as i32 + delta) as u32);
+                        if let Some(t) = self.type_table.get(&check_id) {
+                            eprintln!("DEBUG: nearby id {:?} -> {:?}", check_id, t);
+                        }
+                    }
+                }
+                self.flatten_application(func, args, &ty, span)?
+            }
             ExprKind::Tuple(elems) => {
                 let elems: Result<Vec<_>> =
                     elems.iter().map(|e| self.flatten_expr(e).map(|(e, _)| e)).collect();
@@ -1479,7 +1502,13 @@ impl Flattener {
                     // Check if this is a partial application (result type is Arrow)
                     if Self::as_arrow_type(result_type).is_some() {
                         // Partial application should be rejected by type checker
-                        unreachable!("partial application should be rejected by type checker");
+                        panic!(
+                            "partial application should be rejected by type checker: function '{}' with result type {:?}, args count: {}, func expr id: {:?}",
+                            full_name,
+                            result_type,
+                            args.len(),
+                            func.h.id
+                        );
                     } else {
                         // Direct function call (not a closure)
                         Ok((
