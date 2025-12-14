@@ -3029,3 +3029,140 @@ fn test_parse_def_constant_vs_function() {
 
     // Both should parse successfully
 }
+
+// ============================================================
+// Curry/Partial Application Tests ($f(_, arg, _) syntax)
+// ============================================================
+
+#[test]
+fn test_curry_single_placeholder() {
+    // $f(_) should desugar to |_0_| f(_0_)
+    let decl = single_decl("def x() = $f(_)");
+    match &decl.body.kind {
+        ExprKind::Lambda(lambda) => {
+            assert_eq!(lambda.params.len(), 1);
+            match &lambda.params[0].kind {
+                PatternKind::Name(name) => assert_eq!(name, "_0_"),
+                other => panic!("Expected Name pattern, got {:?}", other),
+            }
+            match &lambda.body.kind {
+                ExprKind::Application(func, args) => {
+                    assert_eq!(args.len(), 1);
+                    match &func.kind {
+                        ExprKind::Identifier(_, name) => assert_eq!(name, "f"),
+                        other => panic!("Expected identifier, got {:?}", other),
+                    }
+                    match &args[0].kind {
+                        ExprKind::Identifier(_, name) => assert_eq!(name, "_0_"),
+                        other => panic!("Expected identifier, got {:?}", other),
+                    }
+                }
+                other => panic!("Expected Application in lambda body, got {:?}", other),
+            }
+        }
+        other => panic!("Expected Lambda, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_curry_with_fixed_first_arg() {
+    // $f(1, _) should desugar to |_0_| f(1, _0_)
+    let decl = single_decl("def x() = $f(1, _)");
+    match &decl.body.kind {
+        ExprKind::Lambda(lambda) => {
+            assert_eq!(lambda.params.len(), 1);
+            match &lambda.body.kind {
+                ExprKind::Application(_, args) => {
+                    assert_eq!(args.len(), 2);
+                    // First arg should be literal 1
+                    match &args[0].kind {
+                        ExprKind::IntLiteral(1) => {}
+                        other => panic!("Expected IntLiteral(1), got {:?}", other),
+                    }
+                    // Second arg should be _0_
+                    match &args[1].kind {
+                        ExprKind::Identifier(_, name) => assert_eq!(name, "_0_"),
+                        other => panic!("Expected identifier _0_, got {:?}", other),
+                    }
+                }
+                other => panic!("Expected Application, got {:?}", other),
+            }
+        }
+        other => panic!("Expected Lambda, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_curry_multiple_placeholders() {
+    // $f(_, _, 3) should desugar to |_0_, _1_| f(_0_, _1_, 3)
+    let decl = single_decl("def x() = $f(_, _, 3)");
+    match &decl.body.kind {
+        ExprKind::Lambda(lambda) => {
+            assert_eq!(lambda.params.len(), 2);
+            match &lambda.params[0].kind {
+                PatternKind::Name(name) => assert_eq!(name, "_0_"),
+                other => panic!("Expected Name pattern, got {:?}", other),
+            }
+            match &lambda.params[1].kind {
+                PatternKind::Name(name) => assert_eq!(name, "_1_"),
+                other => panic!("Expected Name pattern, got {:?}", other),
+            }
+            match &lambda.body.kind {
+                ExprKind::Application(_, args) => {
+                    assert_eq!(args.len(), 3);
+                    // Third arg should be literal 3
+                    match &args[2].kind {
+                        ExprKind::IntLiteral(3) => {}
+                        other => panic!("Expected IntLiteral(3), got {:?}", other),
+                    }
+                }
+                other => panic!("Expected Application, got {:?}", other),
+            }
+        }
+        other => panic!("Expected Lambda, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_curry_no_placeholder_is_normal_call() {
+    // $f(1, 2) with no placeholders should just be f(1, 2)
+    let decl = single_decl("def x() = $f(1, 2)");
+    match &decl.body.kind {
+        ExprKind::Application(func, args) => {
+            assert_eq!(args.len(), 2);
+            match &func.kind {
+                ExprKind::Identifier(_, name) => assert_eq!(name, "f"),
+                other => panic!("Expected identifier, got {:?}", other),
+            }
+        }
+        other => panic!("Expected Application (not Lambda), got {:?}", other),
+    }
+}
+
+#[test]
+fn test_curry_with_field_access() {
+    // $foo.bar(_, 1) should work with field access
+    let decl = single_decl("def x() = $foo.bar(_, 1)");
+    match &decl.body.kind {
+        ExprKind::Lambda(lambda) => {
+            assert_eq!(lambda.params.len(), 1);
+            match &lambda.body.kind {
+                ExprKind::Application(func, args) => {
+                    assert_eq!(args.len(), 2);
+                    match &func.kind {
+                        ExprKind::FieldAccess(base, field) => {
+                            assert_eq!(field, "bar");
+                            match &base.kind {
+                                ExprKind::Identifier(_, name) => assert_eq!(name, "foo"),
+                                other => panic!("Expected identifier, got {:?}", other),
+                            }
+                        }
+                        other => panic!("Expected FieldAccess, got {:?}", other),
+                    }
+                }
+                other => panic!("Expected Application, got {:?}", other),
+            }
+        }
+        other => panic!("Expected Lambda, got {:?}", other),
+    }
+}

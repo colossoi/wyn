@@ -23,6 +23,12 @@ fn get_matrix_types() -> &'static std::collections::HashMap<String, Type> {
     MATRIX_TYPES.get_or_init(|| types::matrix_type_constructors())
 }
 
+/// Argument in a curry expression - either a placeholder (_) or a real expression
+enum CurryArg {
+    Placeholder,
+    Expr(Expression),
+}
+
 /// Convert a type suffix string (e.g., "u32", "f64") to its Type representation
 fn suffix_to_type(suffix: &str) -> Type {
     let type_name = match suffix {
@@ -1601,6 +1607,7 @@ impl<'a> Parser<'a> {
             Some(Token::Loop) => self.parse_loop(),
             Some(Token::Match) => self.parse_match(),
             Some(Token::Assert) => self.parse_assert(),
+            Some(Token::DollarSign) => self.parse_curry_expression(),
             _ => {
                 let span = self.current_span();
                 Err(err_parse!(
@@ -1610,6 +1617,179 @@ impl<'a> Parser<'a> {
                 ))
             }
         }
+    }
+
+    /// Parse a curry expression: $expr(args) where args may contain _ placeholders
+    /// Desugars to a lambda if there are placeholders
+    fn parse_curry_expression(&mut self) -> Result<Expression> {
+        trace!("parse_curry_expression: next token = {:?}", self.peek());
+        let start_span = self.current_span();
+        self.expect(Token::DollarSign)?;
+
+        // Parse the function expression (identifier, field access, array index, but NOT call)
+        let func = self.parse_curry_base()?;
+
+        // Require parenthesized arguments
+        self.expect(Token::LeftParen)?;
+        let args = self.parse_curry_arguments()?;
+        self.expect(Token::RightParen)?;
+        let end_span = self.previous_span();
+        let span = start_span.merge(&end_span);
+
+        // Check for underscore placeholders
+        let placeholder_indices: Vec<usize> = args
+            .iter()
+            .enumerate()
+            .filter_map(|(i, arg)| {
+                if matches!(arg, CurryArg::Placeholder) {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if placeholder_indices.is_empty() {
+            // No placeholders - just a normal application
+            let real_args: Vec<Expression> = args
+                .into_iter()
+                .map(|a| match a {
+                    CurryArg::Expr(e) => e,
+                    CurryArg::Placeholder => unreachable!(),
+                })
+                .collect();
+            return Ok(self
+                .node_counter
+                .mk_node(ExprKind::Application(Box::new(func), real_args), span));
+        }
+
+        // Desugar to lambda
+        self.desugar_curry(func, args, span)
+    }
+
+    /// Parse the base of a curry expression (function without the call)
+    /// Handles identifiers, field access, and array indexing, but stops before (
+    fn parse_curry_base(&mut self) -> Result<Expression> {
+        let mut expr = self.parse_primary_expression()?;
+
+        loop {
+            match self.peek() {
+                Some(Token::LeftBracket) => {
+                    // Array indexing: arr[0]
+                    let start_span = expr.h.span;
+                    self.advance();
+                    let index = self.parse_expression()?;
+                    self.expect(Token::RightBracket)?;
+                    let end_span = self.previous_span();
+                    let span = start_span.merge(&end_span);
+                    expr = self
+                        .node_counter
+                        .mk_node(ExprKind::ArrayIndex(Box::new(expr), Box::new(index)), span);
+                }
+                Some(Token::Dot) => {
+                    // Field access: v.x
+                    let start_span = expr.h.span;
+                    self.advance();
+                    if let Some(Token::Identifier(field_name)) = self.peek().cloned() {
+                        self.advance();
+                        let end_span = self.previous_span();
+                        let span = start_span.merge(&end_span);
+                        expr = self
+                            .node_counter
+                            .mk_node(ExprKind::FieldAccess(Box::new(expr), field_name), span);
+                    } else {
+                        bail_parse!("Expected field name after '.'");
+                    }
+                }
+                // Stop before ( - that's handled by parse_curry_expression
+                _ => break,
+            }
+        }
+
+        Ok(expr)
+    }
+
+    /// Parse curry arguments, treating _ as a placeholder
+    fn parse_curry_arguments(&mut self) -> Result<Vec<CurryArg>> {
+        let mut args = Vec::new();
+
+        // Handle empty argument list
+        if self.check(&Token::RightParen) {
+            return Ok(args);
+        }
+
+        loop {
+            if self.check(&Token::Underscore) {
+                self.advance();
+                args.push(CurryArg::Placeholder);
+            } else {
+                args.push(CurryArg::Expr(self.parse_expression()?));
+            }
+
+            if !self.check(&Token::Comma) {
+                break;
+            }
+            self.advance();
+            // Allow trailing comma
+            if self.check(&Token::RightParen) {
+                break;
+            }
+        }
+
+        Ok(args)
+    }
+
+    /// Desugar curry expression to lambda
+    /// $f(a, _, b, _) -> |_0_, _1_| f(a, _0_, b, _1_)
+    fn desugar_curry(
+        &mut self,
+        func: Expression,
+        args: Vec<CurryArg>,
+        span: Span,
+    ) -> Result<Expression> {
+        // Generate lambda params: _0_, _1_, ...
+        let mut params = Vec::new();
+        let mut param_idx = 0;
+
+        for arg in &args {
+            if matches!(arg, CurryArg::Placeholder) {
+                let name = format!("_{}_", param_idx);
+                let param = self
+                    .node_counter
+                    .mk_node(PatternKind::Name(name), span.clone());
+                params.push(param);
+                param_idx += 1;
+            }
+        }
+
+        // Build argument list, replacing placeholders with param references
+        let mut param_idx = 0;
+        let call_args: Vec<Expression> = args
+            .into_iter()
+            .map(|arg| match arg {
+                CurryArg::Placeholder => {
+                    let name = format!("_{}_", param_idx);
+                    param_idx += 1;
+                    self.node_counter
+                        .mk_node(ExprKind::Identifier(vec![], name), span.clone())
+                }
+                CurryArg::Expr(e) => e,
+            })
+            .collect();
+
+        // Build the function call: func(args...)
+        let body = self
+            .node_counter
+            .mk_node(ExprKind::Application(Box::new(func), call_args), span.clone());
+
+        // Build the lambda: |_0_, _1_, ...| body
+        let lambda = LambdaExpr {
+            params,
+            return_type: None,
+            body: Box::new(body),
+        };
+
+        Ok(self.node_counter.mk_node(ExprKind::Lambda(lambda), span))
     }
 
     fn parse_array_literal(&mut self) -> Result<Expression> {
