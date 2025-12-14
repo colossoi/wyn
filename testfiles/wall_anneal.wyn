@@ -21,10 +21,10 @@ def bricks_h: [8]i32 = [2, 1, 3, 2, 1, 2, 2, 1]
 -- Output storage buffers
 -- Each chain writes its results at offset chain_id * stride
 ------------------------------------------------------------
-#[storage(binding=1)] def out_costs: []i32
-#[storage(binding=2)] def out_xs: []i32
-#[storage(binding=3)] def out_ys: []i32
-#[storage(binding=4)] def out_oris: []i32
+#[storage(binding=1)] def out_costs: [64]i32
+#[storage(binding=2)] def out_xs: [512]i32
+#[storage(binding=3)] def out_ys: [512]i32
+#[storage(binding=4)] def out_oris: [512]i32
 
 ------------------------------------------------------------
 -- Utility functions
@@ -206,15 +206,17 @@ def run_chain(seed: f32) -> (i32, [8]i32, [8]i32, [8]i32) =
 
 def write_results(chain_id: i32, cost: i32, xs: [8]i32, ys: [8]i32, oris: [8]i32) -> () =
   -- Write cost
-  let _ = out_costs[chain_id] <- cost in
+  let out_costs = out_costs with [chain_id] = cost in
 
-  -- Write xs, ys, oris (8 values each, stride = chain_id * 8)
+  -- Write xs, ys, oris using accumulator pattern (8 values each, stride = chain_id * 8)
   let base = chain_id * 8 in
-  let _ = loop _ = () for i < 8 do
-    let _ = out_xs[base + i] <- xs[i] in
-    let _ = out_ys[base + i] <- ys[i] in
-    let _ = out_oris[base + i] <- oris[i] in
-    ()
+  let (out_xs, out_ys, out_oris) =
+    loop (ox, oy, oo) = (out_xs, out_ys, out_oris) for i < 8 do
+      let j = base + i in
+      let ox = ox with [j] = xs[i] in
+      let oy = oy with [j] = ys[i] in
+      let oo = oo with [j] = oris[i] in
+      (ox, oy, oo)
   in ()
 
 ------------------------------------------------------------

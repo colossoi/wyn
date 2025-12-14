@@ -1645,6 +1645,10 @@ impl Flattener {
             PatternKind::Tuple(patterns) => {
                 self.extract_tuple_bindings(patterns, &loop_var, &init_ty, span)?
             }
+            PatternKind::Wildcard => {
+                // Wildcard pattern: no bindings needed, value is discarded
+                vec![]
+            }
             _ => {
                 bail_flatten!("Loop pattern {:?} not supported", pattern.kind);
             }
@@ -1670,6 +1674,7 @@ impl Flattener {
                 self.extract_bindings_from_pattern(inner, loop_var, init_ty, span)
             }
             PatternKind::Tuple(patterns) => self.extract_tuple_bindings(patterns, loop_var, init_ty, span),
+            PatternKind::Wildcard => Ok(vec![]), // Wildcard: no bindings
             _ => Err(err_flatten!("Loop pattern {:?} not supported", pattern.kind)),
         }
     }
@@ -1696,10 +1701,12 @@ impl Flattener {
                 PatternKind::Name(n) => n.clone(),
                 PatternKind::Typed(inner, _) => match &inner.kind {
                     PatternKind::Name(n) => n.clone(),
+                    PatternKind::Wildcard => continue, // Skip wildcards in typed patterns
                     _ => {
                         bail_flatten!("Complex loop patterns not supported");
                     }
                 },
+                PatternKind::Wildcard => continue, // Skip wildcards - no binding needed
                 _ => {
                     bail_flatten!("Complex loop patterns not supported");
                 }

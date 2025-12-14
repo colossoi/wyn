@@ -277,9 +277,20 @@ impl Constructor {
                                 args.len()
                             );
                         }
-                        // Extract size from args[0]
-                        let size = match &args[0] {
-                            PolyType::Constructed(TypeName::Size(n), _) => *n as u32,
+                        // Get element type from args[1]
+                        let elem_type = self.ast_type_to_spirv(&args[1]);
+
+                        // Extract size from args[0] - may be concrete Size(n) or Unsized for runtime arrays
+                        match &args[0] {
+                            PolyType::Constructed(TypeName::Size(n), _) => {
+                                // Fixed-size array
+                                let size_const = self.const_i32(*n as i32);
+                                self.builder.type_array(elem_type, size_const)
+                            }
+                            PolyType::Constructed(TypeName::Unsized, _) => {
+                                // Runtime array (unsized) - used for storage buffers
+                                self.builder.type_runtime_array(elem_type)
+                            }
                             _ => {
                                 panic!(
                                     "BUG: Array type has invalid size argument: {:?}. This should have been resolved during type checking. \
@@ -287,11 +298,7 @@ impl Constructor {
                                     args[0]
                                 );
                             }
-                        };
-                        // Get element type from args[1]
-                        let elem_type = self.ast_type_to_spirv(&args[1]);
-                        let size_const = self.const_i32(size as i32);
-                        self.builder.type_array(elem_type, size_const)
+                        }
                     }
                     TypeName::Vec => {
                         // Vec type with args: args[0] is size, args[1] is element type
@@ -1062,7 +1069,13 @@ fn lower_regular_function(
     constructor.begin_function(name, &param_names, &param_types, return_type)?;
 
     let result = lower_expr(constructor, body)?;
-    constructor.builder.ret_value(result)?;
+
+    // Use ret() for void functions, ret_value() for functions that return a value
+    if matches!(ret_type, PolyType::Constructed(TypeName::Unit, _)) {
+        constructor.builder.ret()?;
+    } else {
+        constructor.builder.ret_value(result)?;
+    }
 
     constructor.end_function()?;
     Ok(())
@@ -1112,8 +1125,13 @@ fn lower_entry_point_from_def(
         constructor.current_input_vars.push((var_id, input.name.clone(), input_type_id));
     }
 
-    // Create Output variables for return values
+    // Create Output variables for return values (skip Unit types - they have no output)
     for output in outputs.iter() {
+        // Skip Unit type outputs - compute shaders returning () shouldn't have output variables
+        if matches!(&output.ty, PolyType::Constructed(TypeName::Unit, _)) {
+            continue;
+        }
+
         let output_type_id = constructor.ast_type_to_spirv(&output.ty);
         let ptr_type_id = constructor.get_or_create_ptr_type(StorageClass::Output, output_type_id);
         let var_id = constructor.builder.variable(ptr_type_id, None, StorageClass::Output, None);
@@ -1501,6 +1519,16 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
             let init_val = lower_expr(constructor, init)?;
             let loop_var_type = constructor.ast_type_to_spirv(&init.ty);
             let pre_header_block = constructor.current_block.unwrap();
+
+            // Check for unit type loop accumulator - this is an error
+            // Loops must accumulate a value, not just perform side effects
+            if matches!(&init.ty, PolyType::Constructed(TypeName::Unit, _)) {
+                bail_spirv!(
+                    "Loop accumulator cannot be unit type (). \
+                     Loops must return a value - use an accumulator pattern like: \
+                     loop (acc1, acc2) = (init1, init2) for i < n do (new_acc1, new_acc2)"
+                );
+            }
 
             // Branch to header
             constructor.builder.branch(header_block_id)?;

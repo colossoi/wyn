@@ -450,6 +450,55 @@ impl ImplSource {
                 self.register(&name, BuiltinImpl::PrimOp(PrimOp::FPToUI));
             }
         }
+
+        // Integer-to-integer conversions (e.g., i32.u32 converts u32 to i32)
+        // Same-width signed<->unsigned is a bitcast
+        // Different widths use sign/zero extend or truncate
+        let signed = &["i8", "i16", "i32", "i64"];
+        let unsigned = &["u8", "u16", "u32", "u64"];
+
+        // Signed to signed, unsigned to unsigned (SConvert/UConvert handles width changes)
+        for &target in signed {
+            for &source in signed {
+                if target != source {
+                    let name = format!("{}.{}", target, source);
+                    self.register(&name, BuiltinImpl::PrimOp(PrimOp::SConvert));
+                }
+            }
+        }
+        for &target in unsigned {
+            for &source in unsigned {
+                if target != source {
+                    let name = format!("{}.{}", target, source);
+                    self.register(&name, BuiltinImpl::PrimOp(PrimOp::UConvert));
+                }
+            }
+        }
+
+        // Signed to unsigned and unsigned to signed (bitcast for same width, convert otherwise)
+        for (i, &s_ty) in signed.iter().enumerate() {
+            for (j, &u_ty) in unsigned.iter().enumerate() {
+                // signed.unsigned (e.g., i32.u32)
+                let name = format!("{}.{}", s_ty, u_ty);
+                if i == j {
+                    // Same width: bitcast
+                    self.register(&name, BuiltinImpl::PrimOp(PrimOp::Bitcast));
+                } else {
+                    // Different width: convert then bitcast (use SConvert to handle sign)
+                    self.register(&name, BuiltinImpl::PrimOp(PrimOp::SConvert));
+                }
+
+                // unsigned.signed (e.g., u32.i32)
+                let name = format!("{}.{}", u_ty, s_ty);
+                if i == j {
+                    // Same width: bitcast
+                    self.register(&name, BuiltinImpl::PrimOp(PrimOp::Bitcast));
+                } else {
+                    // Different width: use UConvert
+                    self.register(&name, BuiltinImpl::PrimOp(PrimOp::UConvert));
+                }
+            }
+        }
     }
 
     fn register_integral_ops(&mut self, ty_name: &'static str) {
