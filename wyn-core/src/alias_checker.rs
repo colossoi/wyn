@@ -163,10 +163,7 @@ impl<'a> AliasChecker<'a> {
             }
             // Update reverse mapping (store -> variables)
             for store_id in &info.stores {
-                self.store_to_vars
-                    .entry(*store_id)
-                    .or_default()
-                    .insert(name.to_string());
+                self.store_to_vars.entry(*store_id).or_default().insert(name.to_string());
             }
         }
     }
@@ -308,12 +305,9 @@ impl<'a> AliasChecker<'a> {
 
     /// Check if an expression has no aliases (only one variable references its backing stores)
     fn is_alias_free(&self, info: &AliasInfo) -> bool {
-        info.stores.iter().all(|store_id| {
-            self.store_to_vars
-                .get(store_id)
-                .map(|vars| vars.len() <= 1)
-                .unwrap_or(true)
-        })
+        info.stores
+            .iter()
+            .all(|store_id| self.store_to_vars.get(store_id).map(|vars| vars.len() <= 1).unwrap_or(true))
     }
 
     /// Check if a node's type is an array type
@@ -584,13 +578,7 @@ impl<'a> Visitor for AliasChecker<'a> {
             if self.is_array_type(arg.h.id) {
                 let alias_free = self.is_alias_free(&arg_info);
                 let released = self.expr_is_released(arg);
-                self.liveness.insert(
-                    arg.h.id,
-                    ExprLivenessInfo {
-                        alias_free,
-                        released,
-                    },
-                );
+                self.liveness.insert(arg.h.id, ExprLivenessInfo { alias_free, released });
             }
 
             // Check if this parameter is consuming (*T)
@@ -687,7 +675,6 @@ fn is_copy_type(ty: &polytype::Type<TypeName>) -> bool {
         polytype::Type::Variable(_) => true,
     }
 }
-
 
 /// Collect all variable uses in an expression, recording them in program order.
 /// This is used to determine which use of a variable is the "last use".

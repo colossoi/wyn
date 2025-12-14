@@ -1,7 +1,7 @@
 [workspace]
 members = ["wyn-core", "wyn", "wyn-analyzer"]
 resolver = "2"
-exclude = ["heavy"]
+exclude = ["extra"]
 
 [workspace.package]
 version = "0.1.0"

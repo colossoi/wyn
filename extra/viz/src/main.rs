@@ -74,6 +74,11 @@ enum Command {
         /// Number of workgroups to dispatch (Z dimension)
         #[arg(long, default_value = "1")]
         workgroups_z: u32,
+        /// Storage buffer: binding:size:type[:input.json]
+        /// Examples: "1:64:i32" (zeros), "1:64:i32:data.json" (from file)
+        /// Type: i32, u32, f32. Repeat for multiple buffers.
+        #[arg(long = "storage", value_name = "SPEC")]
+        storage_buffers: Vec<String>,
         /// Print verbose output
         #[arg(short, long)]
         verbose: bool,
@@ -296,6 +301,122 @@ async fn create_headless_device(verbose: bool) -> Result<(wgpu::Device, wgpu::Qu
         .context("failed to create logical device")
 }
 
+/// Storage buffer specification parsed from CLI
+#[derive(Debug, Clone)]
+struct StorageBufferSpec {
+    binding: u32,
+    size_elements: u32,
+    element_type: StorageElementType,
+    /// Optional path to JSON file with initial data
+    input_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum StorageElementType {
+    I32,
+    U32,
+    F32,
+}
+
+impl StorageBufferSpec {
+    /// Parse from "binding:size:type[:input.json]" format
+    /// Examples:
+    ///   "1:64:i32"           - 64 i32s initialized to zero
+    ///   "1:64:i32:data.json" - 64 i32s loaded from data.json
+    fn parse(spec: &str) -> Result<Self> {
+        let parts: Vec<&str> = spec.split(':').collect();
+        if parts.len() < 3 || parts.len() > 4 {
+            return Err(anyhow!(
+                "Invalid storage buffer spec '{}'. Expected format: binding:size:type[:input.json]",
+                spec
+            ));
+        }
+
+        let binding = parts[0]
+            .parse::<u32>()
+            .map_err(|_| anyhow!("Invalid binding number: {}", parts[0]))?;
+        let size_elements = parts[1]
+            .parse::<u32>()
+            .map_err(|_| anyhow!("Invalid size: {}", parts[1]))?;
+        let element_type = match parts[2].to_lowercase().as_str() {
+            "i32" => StorageElementType::I32,
+            "u32" => StorageElementType::U32,
+            "f32" => StorageElementType::F32,
+            other => return Err(anyhow!("Unknown element type: {}. Expected i32, u32, or f32", other)),
+        };
+
+        let input_file = if parts.len() == 4 {
+            Some(PathBuf::from(parts[3]))
+        } else {
+            None
+        };
+
+        Ok(Self {
+            binding,
+            size_elements,
+            element_type,
+            input_file,
+        })
+    }
+
+    fn byte_size(&self) -> u64 {
+        self.size_elements as u64 * 4
+    }
+
+    /// Load initial data from JSON file or return zeros
+    fn load_initial_data(&self) -> Result<Vec<u8>> {
+        match &self.input_file {
+            Some(path) => {
+                let content = fs::read_to_string(path)
+                    .with_context(|| format!("Failed to read input file: {}", path.display()))?;
+                let json: serde_json::Value = serde_json::from_str(&content)
+                    .with_context(|| format!("Failed to parse JSON from: {}", path.display()))?;
+
+                let array = json.as_array()
+                    .ok_or_else(|| anyhow!("JSON input must be an array"))?;
+
+                if array.len() != self.size_elements as usize {
+                    return Err(anyhow!(
+                        "JSON array has {} elements but buffer expects {}",
+                        array.len(),
+                        self.size_elements
+                    ));
+                }
+
+                let mut bytes = Vec::with_capacity(self.byte_size() as usize);
+                match self.element_type {
+                    StorageElementType::I32 => {
+                        for (i, val) in array.iter().enumerate() {
+                            let n = val.as_i64()
+                                .ok_or_else(|| anyhow!("Element {} is not an integer", i))?
+                                as i32;
+                            bytes.extend_from_slice(&n.to_le_bytes());
+                        }
+                    }
+                    StorageElementType::U32 => {
+                        for (i, val) in array.iter().enumerate() {
+                            let n = val.as_u64()
+                                .ok_or_else(|| anyhow!("Element {} is not a positive integer", i))?
+                                as u32;
+                            bytes.extend_from_slice(&n.to_le_bytes());
+                        }
+                    }
+                    StorageElementType::F32 => {
+                        for (i, val) in array.iter().enumerate() {
+                            let n = val.as_f64()
+                                .ok_or_else(|| anyhow!("Element {} is not a number", i))?
+                                as f32;
+                            bytes.extend_from_slice(&n.to_le_bytes());
+                        }
+                    }
+                }
+                Ok(bytes)
+            }
+            None => Ok(vec![0u8; self.byte_size() as usize]),
+        }
+    }
+}
+
 /// Create debug buffer and staging buffer for compute shaders
 fn create_compute_debug_buffers(device: &wgpu::Device, queue: &wgpu::Queue) -> (wgpu::Buffer, wgpu::Buffer) {
     let debug_buffer = device.create_buffer(&BufferDescriptor {
@@ -391,21 +512,106 @@ fn print_debug_buffer(u32_data: &[u32], verbose: bool) {
     println!("=================================\n");
 }
 
+/// Print storage buffer contents
+fn print_storage_buffer(spec: &StorageBufferSpec, data: &[u8]) {
+    println!("\n=== Storage Buffer (binding {}, {} elements) ===", spec.binding, spec.size_elements);
+
+    let u32_data: &[u32] = bytemuck::cast_slice(data);
+    let elements_to_show = (spec.size_elements as usize).min(64); // Show at most 64 elements
+
+    match spec.element_type {
+        StorageElementType::I32 => {
+            let i32_data: Vec<i32> = u32_data.iter().map(|&x| x as i32).collect();
+            for (i, chunk) in i32_data[..elements_to_show].chunks(8).enumerate() {
+                print!("  [{:3}]: ", i * 8);
+                for val in chunk {
+                    print!("{:8} ", val);
+                }
+                println!();
+            }
+        }
+        StorageElementType::U32 => {
+            for (i, chunk) in u32_data[..elements_to_show].chunks(8).enumerate() {
+                print!("  [{:3}]: ", i * 8);
+                for val in chunk {
+                    print!("{:8} ", val);
+                }
+                println!();
+            }
+        }
+        StorageElementType::F32 => {
+            let f32_data: Vec<f32> = u32_data.iter().map(|&x| f32::from_bits(x)).collect();
+            for (i, chunk) in f32_data[..elements_to_show].chunks(8).enumerate() {
+                print!("  [{:3}]: ", i * 8);
+                for val in chunk {
+                    print!("{:8.3} ", val);
+                }
+                println!();
+            }
+        }
+    }
+
+    if spec.size_elements as usize > elements_to_show {
+        println!("  ... ({} more elements)", spec.size_elements as usize - elements_to_show);
+    }
+    println!();
+}
+
 /// Run a compute shader headlessly (no window)
 async fn run_compute_shader(
     path: PathBuf,
     entry: String,
     workgroups: (u32, u32, u32),
+    storage_specs: Vec<StorageBufferSpec>,
     verbose: bool,
 ) -> Result<()> {
     let (device, queue) = create_headless_device(verbose).await?;
 
-    let (debug_buffer, staging_buffer) = create_compute_debug_buffers(&device, &queue);
+    // Create debug buffer at binding 0
+    let (debug_buffer, debug_staging_buffer) = create_compute_debug_buffers(&device, &queue);
 
-    let debug_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-        label: Some("debug_bind_group_layout"),
-        entries: &[BindGroupLayoutEntry {
-            binding: 0,
+    // Create storage buffers for each spec
+    let mut storage_buffers: Vec<(StorageBufferSpec, wgpu::Buffer, wgpu::Buffer)> = Vec::new();
+    for spec in &storage_specs {
+        let buffer = device.create_buffer(&BufferDescriptor {
+            label: Some(&format!("storage_buffer_{}", spec.binding)),
+            size: spec.byte_size(),
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Initialize from JSON file or zeros
+        let init_data = spec.load_initial_data()?;
+        if verbose && spec.input_file.is_some() {
+            println!("Loaded {} bytes for binding {} from {:?}", init_data.len(), spec.binding, spec.input_file);
+        }
+        queue.write_buffer(&buffer, 0, &init_data);
+
+        let staging = device.create_buffer(&BufferDescriptor {
+            label: Some(&format!("staging_buffer_{}", spec.binding)),
+            size: spec.byte_size(),
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        storage_buffers.push((spec.clone(), buffer, staging));
+    }
+
+    // Build bind group layout entries - binding 0 is debug buffer, rest are storage
+    let mut layout_entries = vec![BindGroupLayoutEntry {
+        binding: 0,
+        visibility: ShaderStages::COMPUTE,
+        ty: BindingType::Buffer {
+            ty: BufferBindingType::Storage { read_only: false },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }];
+
+    for (spec, _, _) in &storage_buffers {
+        layout_entries.push(BindGroupLayoutEntry {
+            binding: spec.binding,
             visibility: ShaderStages::COMPUTE,
             ty: BindingType::Buffer {
                 ty: BufferBindingType::Storage { read_only: false },
@@ -413,27 +619,46 @@ async fn run_compute_shader(
                 min_binding_size: None,
             },
             count: None,
-        }],
+        });
+    }
+
+    let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some("compute_bind_group_layout"),
+        entries: &layout_entries,
     });
 
-    let debug_bind_group = device.create_bind_group(&BindGroupDescriptor {
-        label: Some("debug_bind_group"),
-        layout: &debug_bind_group_layout,
-        entries: &[BindGroupEntry {
-            binding: 0,
+    // Build bind group entries
+    let mut bind_group_entries = vec![BindGroupEntry {
+        binding: 0,
+        resource: BindingResource::Buffer(wgpu::BufferBinding {
+            buffer: &debug_buffer,
+            offset: 0,
+            size: None,
+        }),
+    }];
+
+    for (spec, buffer, _) in &storage_buffers {
+        bind_group_entries.push(BindGroupEntry {
+            binding: spec.binding,
             resource: BindingResource::Buffer(wgpu::BufferBinding {
-                buffer: &debug_buffer,
+                buffer,
                 offset: 0,
                 size: None,
             }),
-        }],
+        });
+    }
+
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("compute_bind_group"),
+        layout: &bind_group_layout,
+        entries: &bind_group_entries,
     });
 
     let module = load_spirv_module(&device, &path)?;
 
     let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
         label: Some("compute_layout"),
-        bind_group_layouts: &[&debug_bind_group_layout],
+        bind_group_layouts: &[&bind_group_layout],
         push_constant_ranges: &[],
     });
 
@@ -448,6 +673,7 @@ async fn run_compute_shader(
 
     if verbose {
         println!("Dispatching {} x {} x {} workgroups...", workgroups.0, workgroups.1, workgroups.2);
+        println!("Storage buffers: {:?}", storage_specs.iter().map(|s| s.binding).collect::<Vec<_>>());
     }
 
     let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
@@ -460,16 +686,21 @@ async fn run_compute_shader(
             timestamp_writes: None,
         });
         cpass.set_pipeline(&pipeline);
-        cpass.set_bind_group(0, &debug_bind_group, &[]);
+        cpass.set_bind_group(0, &bind_group, &[]);
         cpass.dispatch_workgroups(workgroups.0, workgroups.1, workgroups.2);
     }
 
-    encoder.copy_buffer_to_buffer(&debug_buffer, 0, &staging_buffer, 0, DEBUG_BUFFER_SIZE);
+    // Copy all buffers to staging
+    encoder.copy_buffer_to_buffer(&debug_buffer, 0, &debug_staging_buffer, 0, DEBUG_BUFFER_SIZE);
+    for (spec, buffer, staging) in &storage_buffers {
+        encoder.copy_buffer_to_buffer(buffer, 0, staging, 0, spec.byte_size());
+    }
+
     queue.submit(Some(encoder.finish()));
     let _ = device.poll(wgpu::PollType::Wait);
 
     // Read back debug buffer
-    let buffer_slice = staging_buffer.slice(..);
+    let buffer_slice = debug_staging_buffer.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
     buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
         tx.send(result).unwrap();
@@ -480,7 +711,24 @@ async fn run_compute_shader(
         let data = buffer_slice.get_mapped_range();
         print_debug_buffer(bytemuck::cast_slice(&data), verbose);
         drop(data);
-        staging_buffer.unmap();
+        debug_staging_buffer.unmap();
+    }
+
+    // Read back storage buffers
+    for (spec, _, staging) in &storage_buffers {
+        let buffer_slice = staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            tx.send(result).unwrap();
+        });
+        let _ = device.poll(wgpu::PollType::Wait);
+
+        if rx.recv().unwrap().is_ok() {
+            let data = buffer_slice.get_mapped_range();
+            print_storage_buffer(spec, &data);
+            drop(data);
+            staging.unmap();
+        }
     }
 
     Ok(())
@@ -1389,6 +1637,7 @@ fn main() -> Result<()> {
             workgroups_x,
             workgroups_y,
             workgroups_z,
+            storage_buffers,
             verbose,
         } => {
             let entry_name = entry.unwrap_or_else(|| {
@@ -1398,10 +1647,17 @@ fn main() -> Result<()> {
                 })
             });
 
+            // Parse storage buffer specs
+            let storage_specs: Vec<StorageBufferSpec> = storage_buffers
+                .iter()
+                .map(|s| StorageBufferSpec::parse(s))
+                .collect::<Result<Vec<_>>>()?;
+
             pollster::block_on(run_compute_shader(
                 path,
                 entry_name,
                 (workgroups_x, workgroups_y, workgroups_z),
+                storage_specs,
                 verbose,
             ))?;
         }

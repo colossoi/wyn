@@ -1,4 +1,4 @@
-use super::{Type, TypeName, TypeScheme, TypeExt};
+use super::{Type, TypeExt, TypeName, TypeScheme};
 use crate::ast::*;
 use crate::error::Result;
 use crate::scope::ScopeStack;
@@ -9,8 +9,8 @@ use std::collections::{BTreeSet, HashMap};
 
 // Import type helper functions from parent module
 use super::{
-    as_arrow, bool_type, count_arrows, f32, function, i32, mat, record, sized_array, string, strip_unique, tuple, unique,
-    unit, vec,
+    as_arrow, bool_type, count_arrows, f32, function, i32, mat, record, sized_array, string, strip_unique,
+    tuple, unique, unit, vec,
 };
 
 /// Trait for generating fresh type variables
