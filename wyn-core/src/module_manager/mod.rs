@@ -1032,6 +1032,26 @@ impl ModuleManager {
                     module_functions,
                     local_bindings,
                 );
+                if let Some(step) = &mut range_expr.step {
+                    self.resolve_names_in_expr(step, module_name, module_functions, local_bindings);
+                }
+            }
+            ExprKind::Slice(slice_expr) => {
+                self.resolve_names_in_expr(
+                    &mut slice_expr.array,
+                    module_name,
+                    module_functions,
+                    local_bindings,
+                );
+                if let Some(start) = &mut slice_expr.start {
+                    self.resolve_names_in_expr(start, module_name, module_functions, local_bindings);
+                }
+                if let Some(end) = &mut slice_expr.end {
+                    self.resolve_names_in_expr(end, module_name, module_functions, local_bindings);
+                }
+                if let Some(step) = &mut slice_expr.step {
+                    self.resolve_names_in_expr(step, module_name, module_functions, local_bindings);
+                }
             }
             ExprKind::TypeAscription(inner, _) | ExprKind::TypeCoercion(inner, _) => {
                 self.resolve_names_in_expr(inner, module_name, module_functions, local_bindings);

@@ -262,6 +262,28 @@ impl BindingLifter {
                 ))
             }
 
+            ExprKind::Range {
+                start,
+                step,
+                end,
+                kind,
+            } => {
+                let start = self.lift_expr(*start)?;
+                let step = step.map(|s| self.lift_expr(*s)).transpose()?;
+                let end = self.lift_expr(*end)?;
+                Ok(Expr::new(
+                    id,
+                    ty,
+                    ExprKind::Range {
+                        start: Box::new(start),
+                        step: step.map(Box::new),
+                        end: Box::new(end),
+                        kind,
+                    },
+                    span,
+                ))
+            }
+
             // Leaf nodes - no children to process
             ExprKind::Var(_) | ExprKind::Unit => Ok(Expr::new(id, ty, expr.kind, span)),
         }
@@ -582,6 +604,14 @@ fn collect_free_vars_inner(expr: &Expr, bound: &HashSet<String>, free: &mut Hash
             for cap in captures {
                 collect_free_vars_inner(cap, bound, free);
             }
+        }
+
+        ExprKind::Range { start, step, end, .. } => {
+            collect_free_vars_inner(start, bound, free);
+            if let Some(s) = step {
+                collect_free_vars_inner(s, bound, free);
+            }
+            collect_free_vars_inner(end, bound, free);
         }
 
         ExprKind::Unit => {}

@@ -3166,3 +3166,126 @@ fn test_curry_with_field_access() {
         other => panic!("Expected Lambda, got {:?}", other),
     }
 }
+
+// =============================================================================
+// Slice parsing tests
+// =============================================================================
+
+#[test]
+fn test_slice_full() {
+    // a[i:j:s] - full slice with start, end, and step
+    let decl = single_decl("def x(a: [10]i32) = a[1:5:2]");
+    match &decl.body.kind {
+        ExprKind::Slice(slice) => {
+            assert!(slice.start.is_some());
+            assert!(slice.end.is_some());
+            assert!(slice.step.is_some());
+        }
+        other => panic!("Expected Slice, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_slice_no_step() {
+    // a[i:j] - slice without step
+    let decl = single_decl("def x(a: [10]i32) = a[1:5]");
+    match &decl.body.kind {
+        ExprKind::Slice(slice) => {
+            assert!(slice.start.is_some());
+            assert!(slice.end.is_some());
+            assert!(slice.step.is_none());
+        }
+        other => panic!("Expected Slice, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_slice_from_start() {
+    // a[:j] - slice from beginning to j
+    let decl = single_decl("def x(a: [10]i32) = a[:5]");
+    match &decl.body.kind {
+        ExprKind::Slice(slice) => {
+            assert!(slice.start.is_none());
+            assert!(slice.end.is_some());
+            assert!(slice.step.is_none());
+        }
+        other => panic!("Expected Slice, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_slice_to_end() {
+    // a[i:] - slice from i to end
+    let decl = single_decl("def x(a: [10]i32) = a[2:]");
+    match &decl.body.kind {
+        ExprKind::Slice(slice) => {
+            assert!(slice.start.is_some());
+            assert!(slice.end.is_none());
+            assert!(slice.step.is_none());
+        }
+        other => panic!("Expected Slice, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_slice_full_array() {
+    // a[:] - entire array
+    let decl = single_decl("def x(a: [10]i32) = a[:]");
+    match &decl.body.kind {
+        ExprKind::Slice(slice) => {
+            assert!(slice.start.is_none());
+            assert!(slice.end.is_none());
+            assert!(slice.step.is_none());
+        }
+        other => panic!("Expected Slice, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_slice_reverse() {
+    // a[::-1] - reverse array
+    let decl = single_decl("def x(a: [10]i32) = a[::-1]");
+    match &decl.body.kind {
+        ExprKind::Slice(slice) => {
+            assert!(slice.start.is_none());
+            assert!(slice.end.is_none());
+            assert!(slice.step.is_some());
+            // Check step is -1 (may be parsed as IntLiteral(-1) or UnaryOp("-", 1))
+            match &slice.step.as_ref().unwrap().kind {
+                ExprKind::IntLiteral(-1) => {}
+                ExprKind::UnaryOp(op, inner) if op.op == "-" => {
+                    match &inner.kind {
+                        ExprKind::IntLiteral(1) => {}
+                        other => panic!("Expected IntLiteral(1), got {:?}", other),
+                    }
+                }
+                other => panic!("Expected -1 literal or UnaryOp('-'), got {:?}", other),
+            }
+        }
+        other => panic!("Expected Slice, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_slice_with_step_only() {
+    // a[::2] - every other element
+    let decl = single_decl("def x(a: [10]i32) = a[::2]");
+    match &decl.body.kind {
+        ExprKind::Slice(slice) => {
+            assert!(slice.start.is_none());
+            assert!(slice.end.is_none());
+            assert!(slice.step.is_some());
+        }
+        other => panic!("Expected Slice, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_array_index_still_works() {
+    // a[i] - regular array indexing should still work
+    let decl = single_decl("def x(a: [10]i32) = a[5]");
+    match &decl.body.kind {
+        ExprKind::ArrayIndex(_, _) => {}
+        other => panic!("Expected ArrayIndex, got {:?}", other),
+    }
+}

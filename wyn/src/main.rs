@@ -167,7 +167,11 @@ fn compile_file(
     let parsed = time("parse", verbose, || {
         Compiler::parse(&source, &mut frontend.node_counter)
     })?;
-    let resolved = time("resolve", verbose, || parsed.resolve(&frontend.module_manager))?;
+    // Desugar ranges/slices early, before name resolution and type checking
+    let desugared = time("desugar", verbose, || {
+        parsed.desugar(&mut frontend.node_counter)
+    })?;
+    let resolved = time("resolve", verbose, || desugared.resolve(&frontend.module_manager))?;
     let type_checked = time("type_check", verbose, || {
         resolved.type_check(&frontend.module_manager)
     })?;
@@ -293,7 +297,8 @@ fn check_file(input: PathBuf, output_annotated: Option<PathBuf>, verbose: bool) 
     // Type check and alias check, don't generate code
     let mut frontend = wyn_core::FrontEnd::new();
     let parsed = Compiler::parse(&source, &mut frontend.node_counter)?;
-    let type_checked = parsed.resolve(&frontend.module_manager)?.type_check(&frontend.module_manager)?;
+    let desugared = parsed.desugar(&mut frontend.node_counter)?;
+    let type_checked = desugared.resolve(&frontend.module_manager)?.type_check(&frontend.module_manager)?;
 
     type_checked.print_warnings();
 

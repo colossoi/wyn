@@ -4,7 +4,8 @@ use crate::alias_checker::{AliasCheckResult, AliasChecker, InPlaceMapInfo, analy
 fn check_alias(source: &str) -> AliasCheckResult {
     let (module_manager, mut node_counter) = crate::cached_module_manager();
     let parsed = Compiler::parse(source, &mut node_counter).expect("parse failed");
-    let resolved = parsed.resolve(&module_manager).expect("resolve failed");
+    let desugared = parsed.desugar(&mut node_counter).expect("desugar failed");
+    let resolved = desugared.resolve(&module_manager).expect("resolve failed");
     let type_checked = resolved.type_check(&module_manager).expect("type_check failed");
 
     let checker = AliasChecker::new(&type_checked.type_table);
@@ -16,6 +17,8 @@ fn alias_check_pipeline(source: &str) -> crate::AliasChecked {
     let (module_manager, mut node_counter) = crate::cached_module_manager();
     let parsed = Compiler::parse(source, &mut node_counter).expect("parse failed");
     parsed
+        .desugar(&mut node_counter)
+        .expect("desugar failed")
         .resolve(&module_manager)
         .expect("resolve failed")
         .type_check(&module_manager)
@@ -257,10 +260,12 @@ def main(t: ([4]i32, [4]i32, [4]i32)) -> i32 =
 fn analyze_inplace_map(source: &str) -> InPlaceMapInfo {
     let (module_manager, mut node_counter) = crate::cached_module_manager();
     let parsed = Compiler::parse(source, &mut node_counter).expect("parse failed");
-    let resolved = parsed.resolve(&module_manager).expect("resolve failed");
+    let desugared = parsed.desugar(&mut node_counter).expect("desugar failed");
+    let resolved = desugared.resolve(&module_manager).expect("resolve failed");
     let type_checked = resolved.type_check(&module_manager).expect("type_check failed");
     let alias_checked = type_checked.alias_check().expect("alias check failed");
-    let (flattened, _backend) = alias_checked.flatten(&module_manager).expect("flatten failed");
+    let ast_folded = alias_checked.fold_ast_constants();
+    let (flattened, _backend) = ast_folded.flatten(&module_manager).expect("flatten failed");
 
     analyze_map_inplace(&flattened.mir)
 }
@@ -526,5 +531,143 @@ def main() -> i32 =
     assert!(
         result.liveness.is_empty(),
         "Expected no liveness info for non-array arguments"
+    );
+}
+
+// =============================================================================
+// Slice and Range Alias Tests
+// =============================================================================
+
+#[test]
+fn test_slice_creates_fresh_backing_store() {
+    // Slicing an array creates a fresh backing store (desugared to map/iota)
+    // Consuming the slice should NOT affect the original array
+    let source = r#"
+def consume(arr: *[3]i32) -> i32 = arr[0]
+
+def main(arr: [10]i32) -> i32 =
+    let sliced = arr[0:3] in
+    let _ = consume(sliced) in
+    arr[0]
+"#;
+    let result = check_alias(source);
+    // Should be OK: sliced has its own backing store, consuming it doesn't affect arr
+    assert!(
+        !result.has_errors(),
+        "Slice should create fresh backing store; consuming slice should not invalidate original"
+    );
+}
+
+#[test]
+fn test_slice_independent_of_original_array() {
+    // Multiple slices of the same array should be independent
+    let source = r#"
+def consume(arr: *[3]i32) -> i32 = arr[0]
+
+def main(arr: [10]i32) -> i32 =
+    let s1 = arr[0:3] in
+    let s2 = arr[3:6] in
+    let _ = consume(s1) in
+    consume(s2)
+"#;
+    let result = check_alias(source);
+    // Should be OK: s1 and s2 are independent fresh arrays
+    assert!(
+        !result.has_errors(),
+        "Multiple slices should be independent backing stores"
+    );
+}
+
+#[test]
+fn test_original_array_consumed_slice_still_valid() {
+    // If we consume the original array, slices (being fresh copies) are still valid
+    let source = r#"
+def consume(arr: *[10]i32) -> i32 = arr[0]
+
+def main(arr: [10]i32) -> i32 =
+    let sliced = arr[0:3] in
+    let _ = consume(arr) in
+    sliced[0]
+"#;
+    let result = check_alias(source);
+    // Should be OK: sliced is a fresh copy, not affected by consuming arr
+    assert!(
+        !result.has_errors(),
+        "Slice is a fresh copy; consuming original should not invalidate slice"
+    );
+}
+
+#[test]
+fn test_slice_assigned_to_alias_tracks_correctly() {
+    // Slice bound to variable, then aliased - consuming alias should not affect original
+    let source = r#"
+def consume(arr: *[3]i32) -> i32 = arr[0]
+
+def main(arr: [10]i32) -> i32 =
+    let sliced = arr[0:3] in
+    let alias = sliced in
+    let _ = consume(alias) in
+    arr[0]
+"#;
+    let result = check_alias(source);
+    // Should be OK: alias is aliasing the fresh slice, not the original arr
+    assert!(
+        !result.has_errors(),
+        "Slice alias consumed should not affect original array"
+    );
+}
+
+#[test]
+fn test_range_creates_fresh_backing_store() {
+    // Range expression creates a fresh backing store
+    let source = r#"
+def consume(arr: *[5]i32) -> i32 = arr[0]
+
+def main() -> i32 =
+    let range = 0..<5 in
+    consume(range)
+"#;
+    let result = check_alias(source);
+    // Should be OK: range creates a fresh array
+    assert!(
+        !result.has_errors(),
+        "Range should create fresh backing store"
+    );
+}
+
+#[test]
+fn test_range_used_multiple_times() {
+    // Range bound to variable can be used multiple times (before consuming)
+    let source = r#"
+def sum(arr: [5]i32) -> i32 = arr[0] + arr[1]
+
+def main() -> i32 =
+    let range = 0..<5 in
+    sum(range) + sum(range)
+"#;
+    let result = check_alias(source);
+    // Should be OK: sum doesn't consume, so range can be used multiple times
+    assert!(
+        !result.has_errors(),
+        "Range can be used multiple times before being consumed"
+    );
+}
+
+#[test]
+fn test_slice_with_step_creates_fresh_store() {
+    // Slice with step also creates fresh backing store
+    let source = r#"
+def consume(arr: *[3]i32) -> i32 = arr[0]
+
+def main(arr: [9]i32) -> i32 =
+    let sliced = arr[0:9:3] in
+    let _ = consume(sliced) in
+    arr[0]
+"#;
+    let result = check_alias(source);
+    // Should be OK: slice with step is also a fresh copy
+    assert!(
+        !result.has_errors(),
+        "Slice with step should create fresh backing store"
     );
 }

@@ -636,6 +636,48 @@ impl<'a> Visitor for AliasChecker<'a> {
         ControlFlow::Continue(())
     }
 
+    fn visit_expr_slice(
+        &mut self,
+        id: NodeId,
+        slice: &SliceExpr,
+    ) -> ControlFlow<Self::Break> {
+        // Visit the array and index expressions
+        self.visit_expression(&slice.array)?;
+        if let Some(start) = &slice.start {
+            self.visit_expression(start)?;
+        }
+        if let Some(end) = &slice.end {
+            self.visit_expression(end)?;
+        }
+        if let Some(step) = &slice.step {
+            self.visit_expression(step)?;
+        }
+
+        // Slices are desugared to map/iota which creates a fresh array.
+        // The slice result does not alias the original array.
+        let store_id = self.new_store();
+        self.set_result(id, AliasInfo::fresh(store_id));
+        ControlFlow::Continue(())
+    }
+
+    fn visit_expr_range(
+        &mut self,
+        id: NodeId,
+        range: &RangeExpr,
+    ) -> ControlFlow<Self::Break> {
+        // Visit the range expressions
+        self.visit_expression(&range.start)?;
+        if let Some(step) = &range.step {
+            self.visit_expression(step)?;
+        }
+        self.visit_expression(&range.end)?;
+
+        // Ranges are desugared to iota/map which creates a fresh array.
+        let store_id = self.new_store();
+        self.set_result(id, AliasInfo::fresh(store_id));
+        ControlFlow::Continue(())
+    }
+
     // Default implementation handles other cases
     fn visit_expression(&mut self, e: &Expression) -> ControlFlow<Self::Break> {
         // Use the walk function which dispatches to specific handlers
@@ -764,6 +806,21 @@ fn collect_variable_uses_in_expr(expr: &Expression, uses: &mut HashMap<String, V
         ExprKind::Range(range) => {
             collect_variable_uses_in_expr(&range.start, uses);
             collect_variable_uses_in_expr(&range.end, uses);
+            if let Some(step) = &range.step {
+                collect_variable_uses_in_expr(step, uses);
+            }
+        }
+        ExprKind::Slice(slice) => {
+            collect_variable_uses_in_expr(&slice.array, uses);
+            if let Some(start) = &slice.start {
+                collect_variable_uses_in_expr(start, uses);
+            }
+            if let Some(end) = &slice.end {
+                collect_variable_uses_in_expr(end, uses);
+            }
+            if let Some(step) = &slice.step {
+                collect_variable_uses_in_expr(step, uses);
+            }
         }
         ExprKind::TypeAscription(expr, _) | ExprKind::TypeCoercion(expr, _) => {
             collect_variable_uses_in_expr(expr, uses);
@@ -973,6 +1030,13 @@ fn collect_uses(expr: &mir::Expr) -> HashSet<String> {
                 uses.extend(collect_uses(capture));
             }
         }
+        Range { start, step, end, .. } => {
+            uses.extend(collect_uses(start));
+            if let Some(s) = step {
+                uses.extend(collect_uses(s));
+            }
+            uses.extend(collect_uses(end));
+        }
     }
 
     uses
@@ -1125,6 +1189,18 @@ fn compute_uses_after(
                 current_after.extend(collect_uses(capture));
             }
         }
+
+        Range { start, step, end, .. } => {
+            // Process end, step (if any), then start
+            let mut current_after = after.clone();
+            result.extend(compute_uses_after(end, &current_after, aliases));
+            current_after.extend(collect_uses(end));
+            if let Some(s) = step {
+                result.extend(compute_uses_after(s, &current_after, aliases));
+                current_after.extend(collect_uses(s));
+            }
+            result.extend(compute_uses_after(start, &current_after, aliases));
+        }
     }
 
     result
@@ -1249,6 +1325,14 @@ fn find_inplace_map_calls(
             for capture in captures {
                 find_inplace_map_calls(capture, uses_after, aliases, result);
             }
+        }
+
+        Range { start, step, end, .. } => {
+            find_inplace_map_calls(start, uses_after, aliases, result);
+            if let Some(s) = step {
+                find_inplace_map_calls(s, uses_after, aliases, result);
+            }
+            find_inplace_map_calls(end, uses_after, aliases, result);
         }
     }
 }

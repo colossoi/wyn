@@ -22,6 +22,7 @@ pub use types::checker as type_checker;
 pub mod alias_checker;
 pub mod ast_const_fold;
 pub mod binding_lifter;
+pub mod desugar;
 pub mod constant_folding;
 pub mod glsl;
 pub mod lowering_common;
@@ -36,6 +37,8 @@ mod alias_checker_tests;
 mod binding_lifter_tests;
 #[cfg(test)]
 mod constant_folding_tests;
+#[cfg(test)]
+mod desugar_tests;
 #[cfg(test)]
 mod flattening_tests;
 #[cfg(test)]
@@ -289,6 +292,21 @@ pub struct Parsed {
 }
 
 impl Parsed {
+    /// Desugar range and slice expressions into map/iota constructs.
+    /// Should be called before resolve() to ensure the generated identifiers
+    /// (iota, map) get properly resolved.
+    pub fn desugar(mut self, nc: &mut ast::NodeCounter) -> Result<Desugared> {
+        desugar::desugar_program(&mut self.ast, nc)?;
+        Ok(Desugared { ast: self.ast })
+    }
+}
+
+/// Range and slice expressions have been desugared to map/iota
+pub struct Desugared {
+    pub ast: ast::Program,
+}
+
+impl Desugared {
     /// Resolve names: rewrite FieldAccess -> QualifiedName and load modules
     pub fn resolve(mut self, module_manager: &module_manager::ModuleManager) -> Result<Resolved> {
         name_resolution::resolve_program(&mut self.ast, module_manager)?;
@@ -427,7 +445,7 @@ pub struct AstConstFolded {
 }
 
 impl AstConstFolded {
-    /// Flatten AST to MIR (with defunctionalization and desugaring).
+    /// Flatten AST to MIR (with defunctionalization).
     /// Returns the flattened MIR and a BackEnd for subsequent passes.
     pub fn flatten(self, module_manager: &module_manager::ModuleManager) -> Result<(Flattened, BackEnd)> {
         let builtins = impl_source::ImplSource::default().all_names();

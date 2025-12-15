@@ -488,6 +488,7 @@ pub enum ExprKind {
     Loop(LoopExpr),                           // loop expression
     Match(MatchExpr),                         // match expression
     Range(RangeExpr),                         // range expressions: a..b, a..<b, a..>b, a...b
+    Slice(SliceExpr),                         // array slicing: a[i:j:s]
     TypeAscription(Box<Expression>, Type),    // exp : type
     TypeCoercion(Box<Expression>, Type),      // exp :> type
     Assert(Box<Expression>, Box<Expression>), // assert cond exp
@@ -567,6 +568,16 @@ pub enum RangeKind {
     Exclusive,   // .. (two dots)
     ExclusiveLt, // ..<
     ExclusiveGt, // ..>
+}
+
+/// Array slice expression: a[start:end:step]
+/// All components are optional: a[:], a[i:], a[:j], a[::s], a[i:j:s]
+#[derive(Debug, Clone, PartialEq)]
+pub struct SliceExpr {
+    pub array: Box<Expression>,
+    pub start: Option<Box<Expression>>, // None = 0 (or len-1 if step < 0)
+    pub end: Option<Box<Expression>>,   // None = len (or -1 if step < 0)
+    pub step: Option<Box<Expression>>,  // None = 1
 }
 
 // Pattern types for match expressions and let bindings

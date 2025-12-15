@@ -12,6 +12,7 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
     let (module_manager, mut node_counter) = crate::cached_module_manager();
     let parsed = crate::Compiler::parse(input, &mut node_counter)?;
     let (flattened, mut backend) = parsed
+        .desugar(&mut node_counter)?
         .resolve(&module_manager)?
         .type_check(&module_manager)?
         .alias_check()?

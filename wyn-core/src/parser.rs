@@ -1391,16 +1391,10 @@ impl<'a> Parser<'a> {
         loop {
             match self.peek() {
                 Some(Token::LeftBracket) => {
-                    // Array indexing (no space before [): arr[0]
+                    // Array indexing or slicing (no space before [): arr[0] or arr[i:j:s]
                     let start_span = expr.h.span;
                     self.advance();
-                    let index = self.parse_expression()?;
-                    self.expect(Token::RightBracket)?;
-                    let end_span = self.previous_span();
-                    let span = start_span.merge(&end_span);
-                    expr = self
-                        .node_counter
-                        .mk_node(ExprKind::ArrayIndex(Box::new(expr), Box::new(index)), span);
+                    expr = self.parse_index_or_slice(expr, start_span)?;
                 }
                 Some(Token::LeftBracketSpaced) => {
                     // Space before [ means it's not array indexing, it's a new expression
@@ -1437,6 +1431,72 @@ impl<'a> Parser<'a> {
         }
 
         Ok(expr)
+    }
+
+    /// Parse either array indexing `a[i]` or array slicing `a[i:j:s]`
+    /// Called after consuming the `[` token
+    fn parse_index_or_slice(&mut self, array: Expression, start_span: Span) -> Result<Expression> {
+        // Check if we have a colon immediately ([:...])
+        let start_expr = if self.check(&Token::Colon) {
+            None
+        } else if self.check(&Token::RightBracket) {
+            // Empty brackets a[] - this is an error
+            bail_parse!("Expected index or slice expression");
+        } else {
+            // Parse the first expression (use range_expression to avoid type ascription conflict)
+            Some(Box::new(self.parse_range_expression()?))
+        };
+
+        // Check if this is a slice (colon present) or regular index
+        if self.check(&Token::Colon) {
+            // This is a slice: a[start:end:step] or a[start:end] or a[:end] etc.
+            self.advance(); // consume first ':'
+
+            // Parse optional end expression (before optional second colon)
+            let end_expr = if self.check(&Token::Colon) || self.check(&Token::RightBracket) {
+                None
+            } else {
+                Some(Box::new(self.parse_range_expression()?))
+            };
+
+            // Check for optional step
+            let step_expr = if self.check(&Token::Colon) {
+                self.advance(); // consume second ':'
+                if self.check(&Token::RightBracket) {
+                    None
+                } else {
+                    Some(Box::new(self.parse_range_expression()?))
+                }
+            } else {
+                None
+            };
+
+            self.expect(Token::RightBracket)?;
+            let end_span = self.previous_span();
+            let span = start_span.merge(&end_span);
+
+            Ok(self.node_counter.mk_node(
+                ExprKind::Slice(SliceExpr {
+                    array: Box::new(array),
+                    start: start_expr,
+                    end: end_expr,
+                    step: step_expr,
+                }),
+                span,
+            ))
+        } else {
+            // Regular array indexing
+            self.expect(Token::RightBracket)?;
+            let end_span = self.previous_span();
+            let span = start_span.merge(&end_span);
+
+            // start_expr must be Some here since we didn't see a colon
+            let index = start_expr.expect("index expression should exist for array indexing");
+            Ok(self.node_counter.mk_node(
+                ExprKind::ArrayIndex(Box::new(array), index),
+                span,
+            ))
+        }
     }
 
     fn parse_unary_expression(&mut self) -> Result<Expression> {

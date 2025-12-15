@@ -317,6 +317,19 @@ impl<'a> DefunAnalyzer<'a> {
                 }
                 self.classifications.insert(expr.h.id, StaticValue::Dyn);
             }
+            ExprKind::Slice(slice) => {
+                self.analyze_expr(&slice.array);
+                if let Some(start) = &slice.start {
+                    self.analyze_expr(start);
+                }
+                if let Some(end) = &slice.end {
+                    self.analyze_expr(end);
+                }
+                if let Some(step) = &slice.step {
+                    self.analyze_expr(step);
+                }
+                self.classifications.insert(expr.h.id, StaticValue::Dyn);
+            }
         }
     }
 
@@ -475,6 +488,18 @@ impl<'a> DefunAnalyzer<'a> {
                 self.collect_free_vars(&range.start, bound, free);
                 self.collect_free_vars(&range.end, bound, free);
                 if let Some(step) = &range.step {
+                    self.collect_free_vars(step, bound, free);
+                }
+            }
+            ExprKind::Slice(slice) => {
+                self.collect_free_vars(&slice.array, bound, free);
+                if let Some(start) = &slice.start {
+                    self.collect_free_vars(start, bound, free);
+                }
+                if let Some(end) = &slice.end {
+                    self.collect_free_vars(end, bound, free);
+                }
+                if let Some(step) = &slice.step {
                     self.collect_free_vars(step, bound, free);
                 }
             }

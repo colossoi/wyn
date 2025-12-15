@@ -255,6 +255,18 @@ pub trait MirFolder: Sized {
         walk_expr_closure(self, lambda_name, captures, expr, ctx)
     }
 
+    fn visit_expr_range(
+        &mut self,
+        start: Expr,
+        step: Option<Expr>,
+        end: Expr,
+        kind: RangeKind,
+        expr: Expr,
+        ctx: &mut Self::Ctx,
+    ) -> Result<Expr, Self::Error> {
+        walk_expr_range(self, start, step, end, kind, expr, ctx)
+    }
+
     // --- Literals ---
 
     fn visit_literal_int(&mut self, value: String, _ctx: &mut Self::Ctx) -> Result<Literal, Self::Error> {
@@ -688,6 +700,20 @@ pub fn walk_expr<V: MirFolder>(v: &mut V, e: Expr, ctx: &mut V::Ctx) -> Result<E
             };
             v.visit_expr_closure(lambda_name, captures, expr, ctx)
         }
+        ExprKind::Range {
+            start,
+            step,
+            end,
+            kind,
+        } => {
+            let expr = Expr {
+                id,
+                ty,
+                kind: ExprKind::Var(String::new()),
+                span,
+            };
+            v.visit_expr_range(*start, step.map(|s| *s), *end, kind, expr, ctx)
+        }
     }
 }
 
@@ -876,6 +902,29 @@ pub fn walk_expr_closure<V: MirFolder>(
         kind: ExprKind::Closure {
             lambda_name,
             captures,
+        },
+        ..expr
+    })
+}
+
+pub fn walk_expr_range<V: MirFolder>(
+    v: &mut V,
+    start: Expr,
+    step: Option<Expr>,
+    end: Expr,
+    kind: RangeKind,
+    expr: Expr,
+    ctx: &mut V::Ctx,
+) -> Result<Expr, V::Error> {
+    let start = v.visit_expr(start, ctx)?;
+    let step = step.map(|s| v.visit_expr(s, ctx)).transpose()?;
+    let end = v.visit_expr(end, ctx)?;
+    Ok(Expr {
+        kind: ExprKind::Range {
+            start: Box::new(start),
+            step: step.map(Box::new),
+            end: Box::new(end),
+            kind,
         },
         ..expr
     })

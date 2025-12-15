@@ -503,6 +503,17 @@ impl AstFormatter {
                     self.write_line(&format!("{}{}{}", start, op, end));
                 }
             }
+            ExprKind::Slice(slice) => {
+                let arr = self.format_simple_expr(&slice.array);
+                let start = slice.start.as_ref().map(|e| self.format_simple_expr(e)).unwrap_or_default();
+                let end = slice.end.as_ref().map(|e| self.format_simple_expr(e)).unwrap_or_default();
+                if let Some(step) = &slice.step {
+                    let step_str = self.format_simple_expr(step);
+                    self.write_line(&format!("{}[{}:{}:{}]", arr, start, end, step_str));
+                } else {
+                    self.write_line(&format!("{}[{}:{}]", arr, start, end));
+                }
+            }
             ExprKind::TypeAscription(inner, ty) => {
                 let inner_str = self.format_simple_expr(inner);
                 self.write_line(&format!("{} : {}", inner_str, ty));
@@ -927,6 +938,24 @@ impl Display for mir::ExprKind {
                     write!(f, "{}", cap)?;
                 }
                 write!(f, "])")
+            }
+            mir::ExprKind::Range {
+                start,
+                step,
+                end,
+                kind,
+            } => {
+                let kind_str = match kind {
+                    mir::RangeKind::Inclusive => "...",
+                    mir::RangeKind::Exclusive => "..",
+                    mir::RangeKind::ExclusiveLt => "..<",
+                    mir::RangeKind::ExclusiveGt => "..>",
+                };
+                if let Some(step) = step {
+                    write!(f, "{}{}{}{}{}",start, kind_str.chars().next().unwrap(), step, &kind_str[1..], end)
+                } else {
+                    write!(f, "{}{}{}", start, kind_str, end)
+                }
             }
         }
     }

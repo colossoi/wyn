@@ -175,7 +175,10 @@ impl Backend {
         let (prelude, mut node_counter) = get_prelude();
         let result = wyn_core::Compiler::parse(text, &mut node_counter).and_then(|parsed| {
             let module_manager = ModuleManager::from_prelude(prelude);
-            parsed.resolve(&module_manager)?.type_check(&module_manager)
+            parsed
+                .desugar(&mut node_counter)?
+                .resolve(&module_manager)?
+                .type_check(&module_manager)
         });
 
         match result {
@@ -350,6 +353,18 @@ fn find_in_expr(expr: &ast::Expression, line: usize, col: usize, best: &mut Opti
                 find_in_expr(step, line, col, best);
             }
             find_in_expr(&range_expr.end, line, col, best);
+        }
+        Slice(slice_expr) => {
+            find_in_expr(&slice_expr.array, line, col, best);
+            if let Some(start) = &slice_expr.start {
+                find_in_expr(start, line, col, best);
+            }
+            if let Some(end) = &slice_expr.end {
+                find_in_expr(end, line, col, best);
+            }
+            if let Some(step) = &slice_expr.step {
+                find_in_expr(step, line, col, best);
+            }
         }
     }
 }

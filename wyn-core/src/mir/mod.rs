@@ -322,6 +322,19 @@ pub enum ExprKind {
         /// Captured variables (may be empty for lambdas with no free variables).
         captures: Vec<Expr>,
     },
+
+    /// Range expression: creates an array from start to end with optional step.
+    /// Examples: `0..<n`, `1..2..10`, `10..9..>0`
+    Range {
+        /// Start value (inclusive).
+        start: Box<Expr>,
+        /// Optional step value (difference between start and second element).
+        step: Option<Box<Expr>>,
+        /// End value.
+        end: Box<Expr>,
+        /// Range kind (inclusive, exclusive, etc.).
+        kind: RangeKind,
+    },
 }
 
 /// Literal values, categorized by type class.
@@ -346,6 +359,19 @@ pub enum Literal {
     Vector(Vec<Expr>),
     /// Matrix literal (@[[1,2], [3,4]]) - outer vec is rows, inner is columns.
     Matrix(Vec<Vec<Expr>>),
+}
+
+/// The kind of range expression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RangeKind {
+    /// `...` - inclusive on both ends
+    Inclusive,
+    /// `..` - exclusive on end
+    Exclusive,
+    /// `..<` - exclusive on end (explicit)
+    ExclusiveLt,
+    /// `..>` - exclusive on end, stepping downward
+    ExclusiveGt,
 }
 
 /// The kind of loop construct.

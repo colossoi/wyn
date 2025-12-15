@@ -145,6 +145,22 @@ pub trait Visitor: Sized {
         walk_expr_if(self, if_expr)
     }
 
+    fn visit_expr_slice(
+        &mut self,
+        _id: NodeId,
+        slice: &SliceExpr,
+    ) -> ControlFlow<Self::Break> {
+        walk_expr_slice(self, slice)
+    }
+
+    fn visit_expr_range(
+        &mut self,
+        _id: NodeId,
+        range: &RangeExpr,
+    ) -> ControlFlow<Self::Break> {
+        walk_expr_range(self, range)
+    }
+
     // --- Types ---
     fn visit_type(&mut self, _t: &Type) -> ControlFlow<Self::Break> {
         ControlFlow::Continue(())
@@ -389,10 +405,8 @@ pub fn walk_expression<V: Visitor>(v: &mut V, e: &Expression) -> ControlFlow<V::
             }
             ControlFlow::Continue(())
         }
-        ExprKind::Range(range_expr) => {
-            v.visit_expression(&range_expr.start)?;
-            v.visit_expression(&range_expr.end)
-        }
+        ExprKind::Range(range_expr) => v.visit_expr_range(id, range_expr),
+        ExprKind::Slice(slice_expr) => v.visit_expr_slice(id, slice_expr),
         ExprKind::TypeAscription(expr, _) => v.visit_expression(expr),
         ExprKind::TypeCoercion(expr, _) => v.visit_expression(expr),
         ExprKind::Assert(cond, expr) => {
@@ -495,4 +509,26 @@ pub fn walk_expr_if<V: Visitor>(v: &mut V, if_expr: &IfExpr) -> ControlFlow<V::B
     v.visit_expression(&if_expr.condition)?;
     v.visit_expression(&if_expr.then_branch)?;
     v.visit_expression(&if_expr.else_branch)
+}
+
+pub fn walk_expr_slice<V: Visitor>(v: &mut V, slice: &SliceExpr) -> ControlFlow<V::Break> {
+    v.visit_expression(&slice.array)?;
+    if let Some(start) = &slice.start {
+        v.visit_expression(start)?;
+    }
+    if let Some(end) = &slice.end {
+        v.visit_expression(end)?;
+    }
+    if let Some(step) = &slice.step {
+        v.visit_expression(step)?;
+    }
+    ControlFlow::Continue(())
+}
+
+pub fn walk_expr_range<V: Visitor>(v: &mut V, range: &RangeExpr) -> ControlFlow<V::Break> {
+    v.visit_expression(&range.start)?;
+    if let Some(step) = &range.step {
+        v.visit_expression(step)?;
+    }
+    v.visit_expression(&range.end)
 }

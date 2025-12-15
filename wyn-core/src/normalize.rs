@@ -417,6 +417,34 @@ impl Normalizer {
                     span,
                 )
             }
+
+            // Range - normalize and atomize start, step, end
+            ExprKind::Range {
+                start,
+                step,
+                end,
+                kind,
+            } => {
+                let start = self.normalize_expr(*start, bindings);
+                let start = self.atomize(start, bindings);
+                let step = step.map(|s| {
+                    let s = self.normalize_expr(*s, bindings);
+                    self.atomize(s, bindings)
+                });
+                let end = self.normalize_expr(*end, bindings);
+                let end = self.atomize(end, bindings);
+                Expr::new(
+                    id,
+                    ty,
+                    ExprKind::Range {
+                        start: Box::new(start),
+                        step: step.map(Box::new),
+                        end: Box::new(end),
+                        kind,
+                    },
+                    span,
+                )
+            }
         }
     }
 
@@ -549,6 +577,12 @@ fn find_max_binding_id_in_expr(expr: &Expr) -> u64 {
         ExprKind::Attributed { expr, .. } => find_max_binding_id_in_expr(expr),
         ExprKind::Closure { captures, .. } => {
             captures.iter().map(find_max_binding_id_in_expr).max().unwrap_or(0)
+        }
+        ExprKind::Range { start, step, end, .. } => {
+            let start_max = find_max_binding_id_in_expr(start);
+            let step_max = step.as_ref().map(|s| find_max_binding_id_in_expr(s)).unwrap_or(0);
+            let end_max = find_max_binding_id_in_expr(end);
+            start_max.max(step_max).max(end_max)
         }
         ExprKind::Var(_) | ExprKind::Unit => 0,
     }

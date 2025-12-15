@@ -962,6 +962,13 @@ impl<'a> LowerCtx<'a> {
                     self.ensure_deps_lowered(cap)?;
                 }
             }
+            ExprKind::Range { start, step, end, .. } => {
+                self.ensure_deps_lowered(start)?;
+                if let Some(s) = step {
+                    self.ensure_deps_lowered(s)?;
+                }
+                self.ensure_deps_lowered(end)?;
+            }
             ExprKind::Unit => {
                 // Unit has no dependencies
             }
@@ -2349,6 +2356,79 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
             // Construct the composite
             Ok(constructor.builder.composite_construct(tuple_type, None, elem_ids)?)
         }
+
+        ExprKind::Range { start, step, end, kind } => {
+            // Extract constant values from range components
+            let start_val = try_extract_const_int(start)
+                .ok_or_else(|| err_spirv!("Range start must be a compile-time constant integer"))?;
+            let end_val = try_extract_const_int(end)
+                .ok_or_else(|| err_spirv!("Range end must be a compile-time constant integer"))?;
+
+            // Calculate stride:
+            // - If step is None, stride = 1
+            // - If step is Some(s), it's the second element, so stride = s - start
+            let stride = match step {
+                Some(s) => {
+                    let step_val = try_extract_const_int(s)
+                        .ok_or_else(|| err_spirv!("Range step must be a compile-time constant integer"))?;
+                    step_val - start_val
+                }
+                None => 1,
+            };
+            if stride == 0 {
+                bail_spirv!("Range stride cannot be zero");
+            }
+
+            // Calculate count based on kind
+            let count = match kind {
+                crate::mir::RangeKind::Inclusive | crate::mir::RangeKind::Exclusive => {
+                    // .. and ... inclusive
+                    if stride > 0 {
+                        ((end_val - start_val) / stride) + 1
+                    } else {
+                        ((start_val - end_val) / (-stride)) + 1
+                    }
+                }
+                crate::mir::RangeKind::ExclusiveLt => {
+                    // ..< exclusive end (positive direction)
+                    if stride <= 0 {
+                        bail_spirv!("Range ..< requires positive stride");
+                    }
+                    (end_val - start_val + stride - 1) / stride
+                }
+                crate::mir::RangeKind::ExclusiveGt => {
+                    // ..> exclusive end (negative direction)
+                    if stride >= 0 {
+                        bail_spirv!("Range ..> requires negative stride");
+                    }
+                    (start_val - end_val + (-stride) - 1) / (-stride)
+                }
+            };
+
+            if count <= 0 {
+                bail_spirv!("Range produces empty or negative-count array");
+            }
+
+            // Generate the array elements
+            let elem_ids: Vec<spirv::Word> = (0..count)
+                .map(|i| constructor.const_i32(start_val + i * stride))
+                .collect();
+
+            // Get element type (i32) and construct array type
+            let elem_type = constructor.i32_type;
+            let array_type = constructor.type_array(elem_type, count as u32);
+
+            // Construct the composite array
+            Ok(constructor.builder.composite_construct(array_type, None, elem_ids)?)
+        }
+    }
+}
+
+/// Try to extract a compile-time constant integer from an expression.
+fn try_extract_const_int(expr: &Expr) -> Option<i32> {
+    match &expr.kind {
+        ExprKind::Literal(crate::mir::Literal::Int(s)) => s.parse().ok(),
+        _ => None,
     }
 }
 
@@ -2574,12 +2654,15 @@ mod tests {
         let (module_manager, mut node_counter) = crate::cached_module_manager();
         let parsed = crate::Compiler::parse(source, &mut node_counter).expect("Parsing failed");
         let (flattened, _backend) = parsed
+            .desugar(&mut node_counter)
+            .expect("Desugaring failed")
             .resolve(&module_manager)
             .expect("Name resolution failed")
             .type_check(&module_manager)
             .expect("Type checking failed")
             .alias_check()
             .expect("Alias checking failed")
+            .fold_ast_constants()
             .flatten(&module_manager)
             .expect("Flattening failed");
 

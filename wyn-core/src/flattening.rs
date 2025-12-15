@@ -248,6 +248,11 @@ impl Flattener {
         }
     }
 
+    /// Check if an expression is the integer literal 0
+    fn is_zero(&self, expr: &ast::Expression) -> bool {
+        matches!(expr.kind, ast::ExprKind::IntLiteral(0))
+    }
+
     /// Convert a primitive numeric type to a string for name mangling.
     fn primitive_type_to_string(ty: &Type) -> Result<String> {
         match ty {
@@ -1009,8 +1014,34 @@ impl Flattener {
             ExprKind::Match(_) => {
                 bail_flatten!("Match expressions not yet supported");
             }
-            ExprKind::Range(_) => {
-                bail_flatten!("Range expressions should be desugared before flattening");
+            ExprKind::Range(range) => {
+                let (start, _) = self.flatten_expr(&range.start)?;
+                let step = match &range.step {
+                    Some(s) => {
+                        let (step_expr, _) = self.flatten_expr(s)?;
+                        Some(Box::new(step_expr))
+                    }
+                    None => None,
+                };
+                let (end, _) = self.flatten_expr(&range.end)?;
+                let kind = match range.kind {
+                    ast::RangeKind::Inclusive => mir::RangeKind::Inclusive,
+                    ast::RangeKind::Exclusive => mir::RangeKind::Exclusive,
+                    ast::RangeKind::ExclusiveLt => mir::RangeKind::ExclusiveLt,
+                    ast::RangeKind::ExclusiveGt => mir::RangeKind::ExclusiveGt,
+                };
+                (
+                    mir::ExprKind::Range {
+                        start: Box::new(start),
+                        step,
+                        end: Box::new(end),
+                        kind,
+                    },
+                    StaticValue::Dyn,
+                )
+            }
+            ExprKind::Slice(_) => {
+                bail_flatten!("Slice expressions should be desugared before flattening");
             }
         };
 

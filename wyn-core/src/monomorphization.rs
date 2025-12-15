@@ -402,6 +402,17 @@ impl Monomorphizer {
                 }
                 expr.kind
             }
+            ExprKind::Range {
+                start,
+                step,
+                end,
+                kind,
+            } => ExprKind::Range {
+                start: Box::new(self.process_expr(*start)?),
+                step: step.map(|s| self.process_expr(*s)).transpose()?.map(Box::new),
+                end: Box::new(self.process_expr(*end)?),
+                kind,
+            },
             ExprKind::Unit => ExprKind::Unit,
         };
 

@@ -131,6 +131,18 @@ fn resolve_expr(expr: &mut Expression, module_manager: &ModuleManager) -> Result
                 resolve_expr(step, module_manager)?;
             }
         }
+        ExprKind::Slice(slice) => {
+            resolve_expr(&mut slice.array, module_manager)?;
+            if let Some(ref mut start) = slice.start {
+                resolve_expr(start, module_manager)?;
+            }
+            if let Some(ref mut end) = slice.end {
+                resolve_expr(end, module_manager)?;
+            }
+            if let Some(ref mut step) = slice.step {
+                resolve_expr(step, module_manager)?;
+            }
+        }
         // Base cases - no sub-expressions to resolve
         ExprKind::IntLiteral(_)
         | ExprKind::FloatLiteral(_)

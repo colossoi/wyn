@@ -10,6 +10,8 @@ fn flatten_program(input: &str) -> mir::Program {
     let (module_manager, mut node_counter) = crate::cached_module_manager();
     let parsed = crate::Compiler::parse(input, &mut node_counter).expect("Parsing failed");
     let (flattened, _backend) = parsed
+        .desugar(&mut node_counter)
+        .expect("Desugaring failed")
         .resolve(&module_manager)
         .expect("Name resolution failed")
         .type_check(&module_manager)
@@ -186,9 +188,10 @@ def test() -> [4]i32 =
     // Parse
     let (module_manager, mut node_counter) = crate::cached_module_manager();
     let parsed = crate::Compiler::parse(source, &mut node_counter).expect("Parsing failed");
+    let desugared = parsed.desugar(&mut node_counter).expect("Desugaring failed");
 
     // Resolve
-    let resolved = parsed.resolve(&module_manager).expect("Name resolution failed");
+    let resolved = desugared.resolve(&module_manager).expect("Name resolution failed");
 
     // Print AST to see what NodeId(6) is
     println!("AST:");
@@ -384,23 +387,23 @@ def test() -> f32 =
 
     // This should compile successfully
     let (mm, mut nc) = crate::cached_module_manager();
-    let result = crate::Compiler::parse(source, &mut nc).and_then(|p| {
-        p.resolve(&mm)
-            .and_then(|r| r.type_check(&mm))
-            .and_then(|t| t.alias_check())
-            .map(|a| a.fold_ast_constants())
-            .and_then(|b| b.flatten(&mm))
-            .map(|(f, mut backend)| {
-                let h = f.hoist_materializations();
-                let n = h.normalize(&mut backend.node_counter);
-                (n, backend)
-            })
-            .and_then(|(n, _backend)| n.monomorphize())
-            .map(|m| m.filter_reachable())
-            .and_then(|r| r.fold_constants())
-            .and_then(|f| f.lift_bindings())
-            .and_then(|l| l.lower())
-    });
+    let result = crate::Compiler::parse(source, &mut nc)
+        .and_then(|p| p.desugar(&mut nc))
+        .and_then(|d| d.resolve(&mm))
+        .and_then(|r| r.type_check(&mm))
+        .and_then(|t| t.alias_check())
+        .map(|a| a.fold_ast_constants())
+        .and_then(|b| b.flatten(&mm))
+        .map(|(f, mut backend)| {
+            let h = f.hoist_materializations();
+            let n = h.normalize(&mut backend.node_counter);
+            (n, backend)
+        })
+        .and_then(|(n, _backend): (crate::Normalized, _)| n.monomorphize())
+        .map(|m| m.filter_reachable())
+        .and_then(|r| r.fold_constants())
+        .and_then(|f| f.lift_bindings())
+        .and_then(|l| l.lower());
     assert!(result.is_ok(), "Compilation failed: {:?}", result.err());
 }
 
@@ -543,6 +546,8 @@ def test(arr: [3]i32, i: i32) -> i32 =
     let (mm, mut nc) = crate::cached_module_manager();
     let parsed = crate::Compiler::parse(source, &mut nc).expect("parse failed");
     let (flattened, _backend) = parsed
+        .desugar(&mut nc)
+        .expect("desugar failed")
         .resolve(&mm)
         .expect("resolve failed")
         .type_check(&mm)
