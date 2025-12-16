@@ -1405,16 +1405,11 @@ impl<'a> Parser<'a> {
                     // Field access (e.g., v.x, v.y, v.z, v.w)
                     let start_span = expr.h.span;
                     self.advance();
-                    if let Some(Token::Identifier(field_name)) = self.peek().cloned() {
-                        self.advance();
-                        let end_span = self.previous_span();
-                        let span = start_span.merge(&end_span);
-                        expr = self
-                            .node_counter
-                            .mk_node(ExprKind::FieldAccess(Box::new(expr), field_name), span);
-                    } else {
-                        bail_parse!("Expected field name after '.'");
-                    }
+                    let field_name = self.expect_identifier()?;
+                    let end_span = self.previous_span();
+                    let span = start_span.merge(&end_span);
+                    expr =
+                        self.node_counter.mk_node(ExprKind::FieldAccess(Box::new(expr), field_name), span);
                 }
                 Some(Token::LeftParen) => {
                     // Function call: f(x, y, z)
@@ -1740,19 +1735,14 @@ impl<'a> Parser<'a> {
                         .mk_node(ExprKind::ArrayIndex(Box::new(expr), Box::new(index)), span);
                 }
                 Some(Token::Dot) => {
-                    // Field access: v.x
+                    // Field access (v.x)
                     let start_span = expr.h.span;
                     self.advance();
-                    if let Some(Token::Identifier(field_name)) = self.peek().cloned() {
-                        self.advance();
-                        let end_span = self.previous_span();
-                        let span = start_span.merge(&end_span);
-                        expr = self
-                            .node_counter
-                            .mk_node(ExprKind::FieldAccess(Box::new(expr), field_name), span);
-                    } else {
-                        bail_parse!("Expected field name after '.'");
-                    }
+                    let field_name = self.expect_identifier()?;
+                    let end_span = self.previous_span();
+                    let span = start_span.merge(&end_span);
+                    expr =
+                        self.node_counter.mk_node(ExprKind::FieldAccess(Box::new(expr), field_name), span);
                 }
                 // Stop before ( - that's handled by parse_curry_expression
                 _ => break,

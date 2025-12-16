@@ -735,3 +735,20 @@ def main(arr: [9]i32) -> i32 =
         "Slice with step should create fresh backing store"
     );
 }
+
+#[test]
+#[ignore] // TODO: map currently consumes its input array, preventing unzip pattern
+fn test_unzip_aliasing() {
+    // unzip needs to use the input array twice (once per output array)
+    // This tests whether we can map over the same array twice
+    let source = r#"
+def unzip(xys: [4](i32, i32)) -> ([4]i32, [4]i32) =
+    (map(|xy| let (a, _) = xy in a, xys), map(|xy| let (_, b) = xy in b, xys))
+"#;
+    let result = check_alias(source);
+    // Currently fails because xys is used twice - map consumes its input
+    assert!(
+        !result.has_errors(),
+        "unzip should be able to map over input twice (non-consuming)"
+    );
+}

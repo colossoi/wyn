@@ -1,7 +1,7 @@
 -- Second-Order Array Combinators (SOACs)
 -- Based on Futhark's prelude/soacs module
 --
--- Builtins (from builtins.wyn): map, reduce, zip, iota, length
+-- Builtins: map, reduce, zip, length, replicate
 
 ------------------------------------------------------------
 -- Mapping (multi-array variants)
@@ -9,42 +9,93 @@
 
 -- Map a ternary function over three arrays
 def map3<[n], A, B, C, D>(f: A -> B -> C -> D, xs: [n]A, ys: [n]B, zs: [n]C) -> [n]D =
-  map (|i| f(xs[i], ys[i], zs[i])) (iota n)
+  map(|i| f(xs[i], ys[i], zs[i]), 0..<length(xs))
 
 -- Map a quaternary function over four arrays
 def map4<[n], A, B, C, D, E>(f: A -> B -> C -> D -> E, as: [n]A, bs: [n]B, cs: [n]C, ds: [n]D) -> [n]E =
-  map (|i| f(as[i], bs[i], cs[i], ds[i])) (iota n)
+  map(|i| f(as[i], bs[i], cs[i], ds[i]), 0..<length(as))
 
 -- Map a 5-ary function over five arrays
 def map5<[n], A, B, C, D, E, F>(f: A -> B -> C -> D -> E -> F, as: [n]A, bs: [n]B, cs: [n]C, ds: [n]D, es: [n]E) -> [n]F =
-  map (|i| f(as[i], bs[i], cs[i], ds[i], es[i])) (iota n)
+  map(|i| f(as[i], bs[i], cs[i], ds[i], es[i]), 0..<length(as))
 
-------------------------------------------------------------
--- Boolean aggregation
-------------------------------------------------------------
-
--- Test if predicate holds for all elements
-def all<[n], A>(p: A -> bool, xs: [n]A) -> bool =
-  reduce (|a, b| a && b) true (map p xs)
-
--- Test if predicate holds for any element
-def any<[n], A>(p: A -> bool, xs: [n]A) -> bool =
-  reduce (|a, b| a || b) false (map p xs)
+-- ------------------------------------------------------------
+-- -- Boolean aggregation (requires && and || operators)
+-- ------------------------------------------------------------
+--
+-- -- Test if predicate holds for all elements
+-- def all<[n], A>(p: A -> bool, xs: [n]A) -> bool =
+--   reduce(|a, b| a && b, true, map(p, xs))
+--
+-- -- Test if predicate holds for any element
+-- def any<[n], A>(p: A -> bool, xs: [n]A) -> bool =
+--   reduce(|a, b| a || b, false, map(p, xs))
 
 ------------------------------------------------------------
 -- Zipping and unzipping
 ------------------------------------------------------------
 
--- Split an array of pairs into two arrays
--- (zip is a builtin)
-def unzip<[n], A, B>(xys: [n](A, B)) -> ([n]A, [n]B) =
-  (map (|xy| xy.0) xys, map (|xy| xy.1) xys)
+-- ------------------------------------------------------------
+-- -- unzip: Split an array of pairs into two arrays
+-- -- (zip is a builtin)
+-- -- Note: Commented out due to aliasing issues with consuming array twice
+-- ------------------------------------------------------------
+-- def unzip<[n], A, B>(xys: [n](A, B)) -> ([n]A, [n]B) = ...
 
 ------------------------------------------------------------
 -- Array generation
 ------------------------------------------------------------
 
 -- Generate array by applying function to each index
--- tabulate f = [f 0, f 1, ..., f (n-1)]
-def tabulate<[n], A>(f: i32 -> A) -> [n]A =
-  map f (iota n)
+-- tabulate size f = [f 0, f 1, ..., f (size-1)]
+def tabulate<[n], A>(size: i32, f: i32 -> A) -> [n]A =
+  map(f, 0..<size)
+
+-- Create array of n copies of a value
+-- (replicate is a builtin)
+
+------------------------------------------------------------
+-- Array slicing (using slice syntax)
+------------------------------------------------------------
+
+-- First k elements of array
+def take<[n], [k], A>(k: i32, arr: [n]A) -> [k]A =
+  arr[0:k]
+
+-- Drop first k elements of array
+def drop<[n], [k], A>(k: i32, arr: [n]A) -> [k]A =
+  arr[length(arr)-k:length(arr)]
+
+-- ------------------------------------------------------------
+-- -- Functions requiring [n+1] size arithmetic (not yet supported)
+-- ------------------------------------------------------------
+--
+-- def tail<[n], A>(arr: [n+1]A) -> [n]A = arr[1:n+1]
+-- def init<[n], A>(arr: [n+1]A) -> [n]A = arr[0:n]
+-- def head<[n], A>(arr: [n+1]A) -> A = arr[0]
+-- def last<[n], A>(arr: [n+1]A) -> A = arr[n]
+
+------------------------------------------------------------
+-- Array transformations
+------------------------------------------------------------
+
+-- Reverse an array
+def reverse<[n], A>(arr: [n]A) -> [n]A =
+  map(|i| arr[length(arr) - 1 - i], 0..<length(arr))
+
+-- Rotate array left by k positions
+def rotate<[n], A>(k: i32, arr: [n]A) -> [n]A =
+  map(|i| arr[(i + k) % length(arr)], 0..<length(arr))
+
+------------------------------------------------------------
+-- Scan (prefix sum)
+------------------------------------------------------------
+
+-- Inclusive scan: [x0, op(x0,x1), op(op(x0,x1),x2), ...]
+def scan<[n], A>(op: A -> A -> A, ne: A, arr: [n]A) -> [n]A =
+  let len = length(arr) in
+  let (_, result) =
+    loop (acc, out) = (ne, replicate(len, ne)) for i < len do
+      let new_acc = op(acc, arr[i]) in
+      (new_acc, out with [i] = new_acc)
+  in result

@@ -170,8 +170,9 @@ fn compile_file(
     // Desugar ranges/slices early, before name resolution and type checking
     let desugared = time("desugar", verbose, || parsed.desugar(&mut frontend.node_counter))?;
     let resolved = time("resolve", verbose, || desugared.resolve(&frontend.module_manager))?;
+    let ast_folded = time("fold_ast_constants", verbose, || resolved.fold_ast_constants());
     let type_checked = time("type_check", verbose, || {
-        resolved.type_check(&frontend.module_manager)
+        ast_folded.type_check(&frontend.module_manager)
     })?;
 
     type_checked.print_warnings();
@@ -182,11 +183,8 @@ fn compile_file(
         return Err(wyn_core::err_alias!("alias checking failed").into());
     }
 
-    let ast_folded = time("fold_ast_constants", verbose, || {
-        alias_checked.fold_ast_constants()
-    });
     let (flattened, mut backend) = time("flatten", verbose, || {
-        ast_folded.flatten(&frontend.module_manager)
+        alias_checked.flatten(&frontend.module_manager)
     })?;
 
     // Write initial MIR if requested (right after flattening)
@@ -296,7 +294,8 @@ fn check_file(input: PathBuf, output_annotated: Option<PathBuf>, verbose: bool) 
     let mut frontend = wyn_core::FrontEnd::new();
     let parsed = Compiler::parse(&source, &mut frontend.node_counter)?;
     let desugared = parsed.desugar(&mut frontend.node_counter)?;
-    let type_checked = desugared.resolve(&frontend.module_manager)?.type_check(&frontend.module_manager)?;
+    let resolved = desugared.resolve(&frontend.module_manager)?;
+    let type_checked = resolved.fold_ast_constants().type_check(&frontend.module_manager)?;
 
     type_checked.print_warnings();
 

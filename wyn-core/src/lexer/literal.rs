@@ -138,10 +138,12 @@ fn intpart(input: &str) -> IResult<&str, &str> {
     alt((decimal_with_underscores, digit1))(input)
 }
 
-// Pointfloat: [intpart] fraction
+// Pointfloat: intpart "." fraction
+// Note: We require digits before the decimal point to avoid parsing `.0` as a float
+// (which interferes with tuple field access like `xy.0`). Use `0.5` instead of `.5`.
 fn pointfloat(input: &str) -> IResult<&str, &str> {
     recognize(tuple((
-        opt(intpart),
+        intpart,
         char('.'),
         alt((decimal_with_underscores, digit1)),
     )))(input)
@@ -275,7 +277,8 @@ mod tests {
             Ok(("", Token::FloatLiteral(3.14)))
         );
         assert_eq!(parse_float_literal("0.5f32"), Ok(("", Token::FloatLiteral(0.5))));
-        assert_eq!(parse_float_literal(".5f32"), Ok(("", Token::FloatLiteral(0.5))));
+        // Note: .5f32 no longer parses as float (conflicts with tuple field access xy.0)
+        assert!(parse_float_literal(".5f32").is_err());
     }
 
     #[test]
@@ -372,7 +375,8 @@ mod tests {
         // Float literals without suffix should parse as f32
         assert_eq!(parse_float_literal("3.14"), Ok(("", Token::FloatLiteral(3.14))));
         assert_eq!(parse_float_literal("0.5"), Ok(("", Token::FloatLiteral(0.5))));
-        assert_eq!(parse_float_literal(".5"), Ok(("", Token::FloatLiteral(0.5))));
+        // Note: .5 no longer parses as float (conflicts with tuple field access xy.0)
+        assert!(parse_float_literal(".5").is_err());
         assert_eq!(parse_float_literal("7.0"), Ok(("", Token::FloatLiteral(7.0))));
         assert_eq!(parse_float_literal("-3.14"), Ok(("", Token::FloatLiteral(-3.14))));
     }
