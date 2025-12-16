@@ -1,11 +1,13 @@
 use crate::Compiler;
-use crate::alias_checker::{AliasCheckResult, AliasChecker, InPlaceMapInfo, analyze_map_inplace};
+use crate::alias_checker::{AliasCheckResult, AliasChecker, InPlaceInfo, analyze_inplace};
 
 fn check_alias(source: &str) -> AliasCheckResult {
     let (module_manager, mut node_counter) = crate::cached_module_manager();
     let parsed = Compiler::parse(source, &mut node_counter).expect("parse failed");
-    let resolved = parsed.resolve(&module_manager).expect("resolve failed");
-    let type_checked = resolved.type_check(&module_manager).expect("type_check failed");
+    let desugared = parsed.desugar(&mut node_counter).expect("desugar failed");
+    let resolved = desugared.resolve(&module_manager).expect("resolve failed");
+    let folded = resolved.fold_ast_constants();
+    let type_checked = folded.type_check(&module_manager).expect("type_check failed");
 
     let checker = AliasChecker::new(&type_checked.type_table);
     checker.check_program(&type_checked.ast).expect("alias check failed")
@@ -16,8 +18,11 @@ fn alias_check_pipeline(source: &str) -> crate::AliasChecked {
     let (module_manager, mut node_counter) = crate::cached_module_manager();
     let parsed = Compiler::parse(source, &mut node_counter).expect("parse failed");
     parsed
+        .desugar(&mut node_counter)
+        .expect("desugar failed")
         .resolve(&module_manager)
         .expect("resolve failed")
+        .fold_ast_constants()
         .type_check(&module_manager)
         .expect("type_check failed")
         .alias_check()
@@ -250,19 +255,21 @@ def main(t: ([4]i32, [4]i32, [4]i32)) -> i32 =
 }
 
 // =============================================================================
-// MIR In-Place Map Optimization Tests
+// MIR In-Place Optimization Tests
 // =============================================================================
 
-/// Helper to analyze in-place map opportunities in a source file
-fn analyze_inplace_map(source: &str) -> InPlaceMapInfo {
+/// Helper to analyze in-place opportunities in a source file
+fn analyze_inplace_ops(source: &str) -> InPlaceInfo {
     let (module_manager, mut node_counter) = crate::cached_module_manager();
     let parsed = Compiler::parse(source, &mut node_counter).expect("parse failed");
-    let resolved = parsed.resolve(&module_manager).expect("resolve failed");
-    let type_checked = resolved.type_check(&module_manager).expect("type_check failed");
+    let desugared = parsed.desugar(&mut node_counter).expect("desugar failed");
+    let resolved = desugared.resolve(&module_manager).expect("resolve failed");
+    let folded = resolved.fold_ast_constants();
+    let type_checked = folded.type_check(&module_manager).expect("type_check failed");
     let alias_checked = type_checked.alias_check().expect("alias check failed");
     let (flattened, _backend) = alias_checked.flatten(&module_manager).expect("flatten failed");
 
-    analyze_map_inplace(&flattened.mir)
+    analyze_inplace(&flattened.mir)
 }
 
 #[test]
@@ -274,7 +281,7 @@ def double(x: i32) -> i32 = x * 2
 def main(arr: [4]i32) -> [4]i32 =
     map(double, arr)
 "#;
-    let info = analyze_inplace_map(source);
+    let info = analyze_inplace_ops(source);
     assert!(
         !info.can_reuse_input.is_empty(),
         "Expected map call to be eligible for in-place optimization"
@@ -291,7 +298,7 @@ def main(arr: [4]i32) -> (i32, [4]i32) =
     let result = map(double, arr) in
     (arr[0], result)
 "#;
-    let info = analyze_inplace_map(source);
+    let info = analyze_inplace_ops(source);
     assert!(
         info.can_reuse_input.is_empty(),
         "Expected no in-place optimization: arr is used after map"
@@ -310,7 +317,7 @@ def main(arr: [4]i32) -> (i32, [4]i32) =
     let result = map(double, arr) in
     (arr2[0], result)
 "#;
-    let info = analyze_inplace_map(source);
+    let info = analyze_inplace_ops(source);
     assert!(
         info.can_reuse_input.is_empty(),
         "Expected no in-place optimization: alias arr2 is used after map"
@@ -327,7 +334,7 @@ def double(x: i32) -> i32 = x * 2
 def main(arr: [4]i32) -> [4]i32 =
     map(double, map(double, arr))
 "#;
-    let info = analyze_inplace_map(source);
+    let info = analyze_inplace_ops(source);
     // At least one of the maps should be eligible
     // (Outer map can be in-place since inner result is dead after)
     assert!(
@@ -346,10 +353,75 @@ def main(arr: [4]i32) -> [4]i32 =
     let result = map(double, arr) in
     result
 "#;
-    let info = analyze_inplace_map(source);
+    let info = analyze_inplace_ops(source);
     assert!(
         !info.can_reuse_input.is_empty(),
         "Expected map to be eligible for in-place when arr is dead after"
+    );
+}
+
+// =============================================================================
+// MIR In-Place ArrayWith Tests
+// =============================================================================
+
+#[test]
+fn test_inplace_with_simple_dead_after() {
+    // arr is not used after the with - should be eligible for in-place
+    let source = r#"
+def main(arr: [4]i32) -> [4]i32 =
+    arr with [0] = 42
+"#;
+    let info = analyze_inplace_ops(source);
+    assert!(
+        !info.can_reuse_input.is_empty(),
+        "Expected array_with to be eligible for in-place optimization"
+    );
+}
+
+#[test]
+fn test_inplace_with_used_after() {
+    // arr is used after the with - should NOT be eligible for in-place
+    let source = r#"
+def main(arr: [4]i32) -> (i32, [4]i32) =
+    let result = arr with [0] = 42 in
+    (arr[1], result)
+"#;
+    let info = analyze_inplace_ops(source);
+    assert!(
+        info.can_reuse_input.is_empty(),
+        "Expected no in-place optimization: arr is used after with"
+    );
+}
+
+#[test]
+fn test_inplace_with_discarded() {
+    // Result is discarded with let _ = ... - should be eligible
+    let source = r#"
+def main(arr: [4]i32) -> () =
+    let _ = arr with [0] = 42 in
+    ()
+"#;
+    let info = analyze_inplace_ops(source);
+    assert!(
+        !info.can_reuse_input.is_empty(),
+        "Expected array_with to be eligible when result is discarded"
+    );
+}
+
+#[test]
+fn test_inplace_with_chained() {
+    // Chained with operations - each should be analyzed independently
+    let source = r#"
+def main(arr: [4]i32) -> [4]i32 =
+    let arr2 = arr with [0] = 1 in
+    arr2 with [1] = 2
+"#;
+    let info = analyze_inplace_ops(source);
+    // Both operations should be eligible since arr is dead after first,
+    // and arr2 is dead after second
+    assert!(
+        info.can_reuse_input.len() >= 1,
+        "Expected at least one array_with to be eligible for in-place"
     );
 }
 
@@ -526,5 +598,140 @@ def main() -> i32 =
     assert!(
         result.liveness.is_empty(),
         "Expected no liveness info for non-array arguments"
+    );
+}
+
+// =============================================================================
+// Slice and Range Alias Tests
+// =============================================================================
+
+#[test]
+fn test_slice_creates_fresh_backing_store() {
+    // Slicing an array creates a fresh backing store (desugared to map/iota)
+    // Consuming the slice should NOT affect the original array
+    let source = r#"
+def consume(arr: *[3]i32) -> i32 = arr[0]
+
+def main(arr: [10]i32) -> i32 =
+    let sliced = arr[0:3] in
+    let _ = consume(sliced) in
+    arr[0]
+"#;
+    let result = check_alias(source);
+    // Should be OK: sliced has its own backing store, consuming it doesn't affect arr
+    assert!(
+        !result.has_errors(),
+        "Slice should create fresh backing store; consuming slice should not invalidate original"
+    );
+}
+
+#[test]
+fn test_slice_independent_of_original_array() {
+    // Multiple slices of the same array should be independent
+    let source = r#"
+def consume(arr: *[3]i32) -> i32 = arr[0]
+
+def main(arr: [10]i32) -> i32 =
+    let s1 = arr[0:3] in
+    let s2 = arr[3:6] in
+    let _ = consume(s1) in
+    consume(s2)
+"#;
+    let result = check_alias(source);
+    // Should be OK: s1 and s2 are independent fresh arrays
+    assert!(
+        !result.has_errors(),
+        "Multiple slices should be independent backing stores"
+    );
+}
+
+#[test]
+fn test_original_array_consumed_slice_still_valid() {
+    // If we consume the original array, slices (being fresh copies) are still valid
+    let source = r#"
+def consume(arr: *[10]i32) -> i32 = arr[0]
+
+def main(arr: [10]i32) -> i32 =
+    let sliced = arr[0:3] in
+    let _ = consume(arr) in
+    sliced[0]
+"#;
+    let result = check_alias(source);
+    // Should be OK: sliced is a fresh copy, not affected by consuming arr
+    assert!(
+        !result.has_errors(),
+        "Slice is a fresh copy; consuming original should not invalidate slice"
+    );
+}
+
+#[test]
+fn test_slice_assigned_to_alias_tracks_correctly() {
+    // Slice bound to variable, then aliased - consuming alias should not affect original
+    let source = r#"
+def consume(arr: *[3]i32) -> i32 = arr[0]
+
+def main(arr: [10]i32) -> i32 =
+    let sliced = arr[0:3] in
+    let alias = sliced in
+    let _ = consume(alias) in
+    arr[0]
+"#;
+    let result = check_alias(source);
+    // Should be OK: alias is aliasing the fresh slice, not the original arr
+    assert!(
+        !result.has_errors(),
+        "Slice alias consumed should not affect original array"
+    );
+}
+
+#[test]
+fn test_range_creates_fresh_backing_store() {
+    // Range expression creates a fresh backing store
+    let source = r#"
+def consume(arr: *[5]i32) -> i32 = arr[0]
+
+def main() -> i32 =
+    let range = 0..<5 in
+    consume(range)
+"#;
+    let result = check_alias(source);
+    // Should be OK: range creates a fresh array
+    assert!(!result.has_errors(), "Range should create fresh backing store");
+}
+
+#[test]
+fn test_range_used_multiple_times() {
+    // Range bound to variable can be used multiple times (before consuming)
+    let source = r#"
+def sum(arr: [5]i32) -> i32 = arr[0] + arr[1]
+
+def main() -> i32 =
+    let range = 0..<5 in
+    sum(range) + sum(range)
+"#;
+    let result = check_alias(source);
+    // Should be OK: sum doesn't consume, so range can be used multiple times
+    assert!(
+        !result.has_errors(),
+        "Range can be used multiple times before being consumed"
+    );
+}
+
+#[test]
+fn test_slice_with_step_creates_fresh_store() {
+    // Slice with step also creates fresh backing store
+    let source = r#"
+def consume(arr: *[3]i32) -> i32 = arr[0]
+
+def main(arr: [9]i32) -> i32 =
+    let sliced = arr[0:9:3] in
+    let _ = consume(sliced) in
+    arr[0]
+"#;
+    let result = check_alias(source);
+    // Should be OK: slice with step is also a fresh copy
+    assert!(
+        !result.has_errors(),
+        "Slice with step should create fresh backing store"
     );
 }

@@ -248,6 +248,11 @@ impl Flattener {
         }
     }
 
+    /// Check if an expression is the integer literal 0
+    fn is_zero(&self, expr: &ast::Expression) -> bool {
+        matches!(expr.kind, ast::ExprKind::IntLiteral(0))
+    }
+
     /// Convert a primitive numeric type to a string for name mangling.
     fn primitive_type_to_string(ty: &Type) -> Result<String> {
         match ty {
@@ -740,6 +745,47 @@ impl Flattener {
         result
     }
 
+    /// Wrap a lambda body with backing store materializations for captures/params that need them.
+    /// Similar to wrap_param_backing_stores but doesn't pop scope (caller handles that).
+    fn wrap_lambda_backing_stores(
+        &mut self,
+        body: Expr,
+        bindings: &[(String, Type, u64)],
+        span: Span,
+    ) -> Expr {
+        // Collect bindings that need backing stores (in reverse order for proper nesting)
+        let bindings_needing_stores: Vec<_> = bindings
+            .iter()
+            .filter(|(_, _, binding_id)| self.needs_backing_store.contains(binding_id))
+            .cloned()
+            .collect();
+
+        // Wrap body with backing stores for each binding that needs one
+        let mut result = body;
+        for (var_name, var_ty, binding_id) in bindings_needing_stores.into_iter().rev() {
+            let ptr_name = Self::backing_store_name(binding_id);
+            let ptr_binding_id = self.fresh_binding_id();
+            let var_expr = self.mk_expr(var_ty.clone(), mir::ExprKind::Var(var_name), span);
+            let materialize_expr = self.mk_expr(
+                types::pointer(var_ty),
+                mir::ExprKind::Materialize(Box::new(var_expr)),
+                span,
+            );
+            let result_ty = result.ty.clone();
+            result = self.mk_expr(
+                result_ty,
+                mir::ExprKind::Let {
+                    name: ptr_name,
+                    binding_id: ptr_binding_id,
+                    value: Box::new(materialize_expr),
+                    body: Box::new(result),
+                },
+                span,
+            );
+        }
+        result
+    }
+
     /// Extract parameter name from pattern
     fn extract_param_name(&self, pattern: &ast::Pattern) -> Result<String> {
         match &pattern.kind {
@@ -1009,8 +1055,34 @@ impl Flattener {
             ExprKind::Match(_) => {
                 bail_flatten!("Match expressions not yet supported");
             }
-            ExprKind::Range(_) => {
-                bail_flatten!("Range expressions should be desugared before flattening");
+            ExprKind::Range(range) => {
+                let (start, _) = self.flatten_expr(&range.start)?;
+                let step = match &range.step {
+                    Some(s) => {
+                        let (step_expr, _) = self.flatten_expr(s)?;
+                        Some(Box::new(step_expr))
+                    }
+                    None => None,
+                };
+                let (end, _) = self.flatten_expr(&range.end)?;
+                let kind = match range.kind {
+                    ast::RangeKind::Inclusive => mir::RangeKind::Inclusive,
+                    ast::RangeKind::Exclusive => mir::RangeKind::Exclusive,
+                    ast::RangeKind::ExclusiveLt => mir::RangeKind::ExclusiveLt,
+                    ast::RangeKind::ExclusiveGt => mir::RangeKind::ExclusiveGt,
+                };
+                (
+                    mir::ExprKind::Range {
+                        start: Box::new(start),
+                        step,
+                        end: Box::new(end),
+                        kind,
+                    },
+                    StaticValue::Dyn,
+                )
+            }
+            ExprKind::Slice(_) => {
+                bail_flatten!("Slice expressions should be desugared before flattening");
             }
         };
 
@@ -1233,19 +1305,44 @@ impl Flattener {
             ty: closure_type.clone(),
         }];
 
+        // Push a fresh scope for the lambda body - isolate from outer bindings
+        self.binding_ids.push_scope();
+
+        // Track binding IDs for lambda params and captures (for backing store handling)
+        let mut lambda_bindings: Vec<(String, Type, u64)> = vec![];
+
+        // Register captured variables in binding_ids (they'll be extracted from closure)
+        for (var_name, var_type) in &capture_fields {
+            let binding_id = self.fresh_binding_id();
+            self.binding_ids.insert(var_name.clone(), binding_id);
+            lambda_bindings.push((var_name.clone(), var_type.clone(), binding_id));
+        }
+
+        // Register lambda params in binding_ids
         for param in &lambda.params {
             let name = param
                 .simple_name()
                 .ok_or_else(|| err_flatten!("Complex lambda parameter patterns not supported"))?
                 .to_string();
             let ty = self.get_pattern_type(param);
+            let binding_id = self.fresh_binding_id();
+            self.binding_ids.insert(name.clone(), binding_id);
+            lambda_bindings.push((name.clone(), ty.clone(), binding_id));
             params.push(mir::Param { name, ty });
         }
 
-        // Flatten the body, then wrap with let bindings to extract free vars from closure
+        // Flatten the body (now params and captures are in scope with fresh binding IDs)
         let (flattened_body, _) = self.flatten_expr(&lambda.body)?;
+
+        // Pop scope before wrapping
+        self.binding_ids.pop_scope();
+
+        // Wrap body with backing stores for any params/captures that need them
+        let body_with_backing = self.wrap_lambda_backing_stores(flattened_body, &lambda_bindings, span);
+
+        // Then wrap with let bindings to extract free vars from closure
         let body =
-            self.wrap_body_with_closure_bindings(flattened_body, &capture_fields, &closure_type, span);
+            self.wrap_body_with_closure_bindings(body_with_backing, &capture_fields, &closure_type, span);
 
         let ret_type = body.ty.clone();
 

@@ -110,6 +110,15 @@ fn quantify(mut body: TypeScheme, vars: &BTreeSet<usize>) -> TypeScheme {
 }
 
 impl<'a> TypeChecker<'a> {
+    /// Try to extract a constant integer value from an expression.
+    /// Returns None if the expression is not a constant.
+    fn try_extract_const_int(expr: &Expression) -> Option<i32> {
+        match &expr.kind {
+            ExprKind::IntLiteral(n) => Some(*n),
+            _ => None,
+        }
+    }
+
     fn types_equal(&self, left: &Type, right: &Type) -> bool {
         match (left, right) {
             (Type::Constructed(l_name, l_args), Type::Constructed(r_name, r_args)) => {
@@ -2141,8 +2150,132 @@ impl<'a> TypeChecker<'a> {
                 todo!("Match not yet implemented in type checker")
             }
 
-            ExprKind::Range(_) => {
-                todo!("Range not yet implemented in type checker")
+            ExprKind::Range(range) => {
+                // Range expressions produce an array of integers
+                // All operands must be the same integer type
+                let start_type = self.infer_expression(&range.start)?;
+                let end_type = self.infer_expression(&range.end)?;
+
+                // Unify start and end types
+                self.context.unify(&start_type, &end_type).map_err(|_| {
+                    err_type_at!(
+                        expr.h.span,
+                        "Range start and end must have the same type: {} vs {}",
+                        self.format_type(&start_type.apply(&self.context)),
+                        self.format_type(&end_type.apply(&self.context))
+                    )
+                })?;
+
+                // Check start is an integer type (unify with i32)
+                self.context.unify(&start_type, &i32()).map_err(|_| {
+                    err_type_at!(
+                        range.start.h.span,
+                        "Range operands must be integer types, got {}",
+                        self.format_type(&start_type.apply(&self.context))
+                    )
+                })?;
+
+                // Check step type if present
+                let step_val = if let Some(step) = &range.step {
+                    let step_type = self.infer_expression(step)?;
+                    self.context.unify(&step_type, &start_type).map_err(|_| {
+                        err_type_at!(
+                            step.h.span,
+                            "Range step must match start/end type: expected {}, got {}",
+                            self.format_type(&start_type.apply(&self.context)),
+                            self.format_type(&step_type.apply(&self.context))
+                        )
+                    })?;
+                    Self::try_extract_const_int(step)
+                } else {
+                    Some(1) // Default step is 1
+                };
+
+                // Try to compute a concrete size if bounds are constant
+                let start_val = Self::try_extract_const_int(&range.start);
+                let end_val = Self::try_extract_const_int(&range.end);
+
+                let size_type = match (start_val, end_val, step_val) {
+                    (Some(start), Some(end), Some(step)) if step != 0 => {
+                        // Calculate size based on range kind
+                        let size = match range.kind {
+                            RangeKind::Inclusive => (end - start) / step + 1,
+                            RangeKind::Exclusive | RangeKind::ExclusiveLt => (end - start) / step,
+                            RangeKind::ExclusiveGt => (start - end) / step,
+                        };
+                        if size > 0 {
+                            Type::Constructed(TypeName::Size(size as usize), vec![])
+                        } else {
+                            self.context.new_variable()
+                        }
+                    }
+                    _ => self.context.new_variable(),
+                };
+
+                let elem_type = start_type.apply(&self.context);
+                Ok(Type::Constructed(TypeName::Array, vec![size_type, elem_type]))
+            }
+
+            ExprKind::Slice(slice) => {
+                // Slice expression: array[start:end:step]
+                // - array must be [n]T
+                // - start/end/step (if present) must be integers
+                // - result is [?m]T (existential size)
+
+                let array_type = self.infer_expression(&slice.array)?;
+                let array_type_stripped = strip_unique(&array_type);
+
+                // Constrain array to be Array(n, elem)
+                let size_var = self.context.new_variable();
+                let elem_var = self.context.new_variable();
+                let want_array = Type::Constructed(TypeName::Array, vec![size_var, elem_var.clone()]);
+
+                self.context.unify(&array_type_stripped, &want_array).map_err(|_| {
+                    err_type_at!(
+                        slice.array.h.span,
+                        "Cannot slice non-array type: got {}",
+                        self.format_type(&array_type.apply(&self.context))
+                    )
+                })?;
+
+                // Check start, end, step are integers (if present)
+                if let Some(start) = &slice.start {
+                    let start_type = self.infer_expression(start)?;
+                    self.context.unify(&start_type, &i32()).map_err(|_| {
+                        err_type_at!(
+                            start.h.span,
+                            "Slice start must be an integer, got {}",
+                            self.format_type(&start_type.apply(&self.context))
+                        )
+                    })?;
+                }
+
+                if let Some(end) = &slice.end {
+                    let end_type = self.infer_expression(end)?;
+                    self.context.unify(&end_type, &i32()).map_err(|_| {
+                        err_type_at!(
+                            end.h.span,
+                            "Slice end must be an integer, got {}",
+                            self.format_type(&end_type.apply(&self.context))
+                        )
+                    })?;
+                }
+
+                if let Some(step) = &slice.step {
+                    let step_type = self.infer_expression(step)?;
+                    self.context.unify(&step_type, &i32()).map_err(|_| {
+                        err_type_at!(
+                            step.h.span,
+                            "Slice step must be an integer, got {}",
+                            self.format_type(&step_type.apply(&self.context))
+                        )
+                    })?;
+                }
+
+                // Result has a fresh (existential) size and the same element type
+                let result_size = self.context.new_variable();
+                let elem_type = elem_var.apply(&self.context);
+                Ok(Type::Constructed(TypeName::Array, vec![result_size, elem_type]))
             }
 
             ExprKind::TypeAscription(expr, ascribed_ty) => {

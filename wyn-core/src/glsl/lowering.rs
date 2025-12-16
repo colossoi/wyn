@@ -446,6 +446,13 @@ impl<'a> LowerCtx<'a> {
                     }
                 }
             }
+            ExprKind::Range { start, step, end, .. } => {
+                self.collect_expr_deps(start, deps, visited)?;
+                if let Some(s) = step {
+                    self.collect_expr_deps(s, deps, visited)?;
+                }
+                self.collect_expr_deps(end, deps, visited)?;
+            }
             ExprKind::Unit => {}
         }
         Ok(())
@@ -778,6 +785,11 @@ impl<'a> LowerCtx<'a> {
                 }
                 let struct_name = self.type_to_glsl(&expr.ty);
                 Ok(format!("{}({})", struct_name, parts.join(", ")))
+            }
+
+            ExprKind::Range { .. } => {
+                // Range expressions should be desugared before GLSL lowering
+                bail_glsl!("Range expressions are not supported in GLSL lowering")
             }
         }
     }

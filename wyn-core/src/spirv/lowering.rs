@@ -4,7 +4,7 @@
 //! It uses a Constructor wrapper that handles variable hoisting automatically.
 //! Dependencies are lowered on-demand using ensure_lowered pattern.
 
-use crate::alias_checker::InPlaceMapInfo;
+use crate::alias_checker::InPlaceInfo;
 use crate::ast::TypeName;
 use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
@@ -111,8 +111,8 @@ struct Constructor {
     // The buffer is a StorageBuffer with layout: [write_head, read_head, max_loops, data[4093]]
     debug_buffer: Option<spirv::Word>,
 
-    // In-place optimization: NodeIds of map calls where input array can be reused
-    inplace_map_nodes: HashSet<crate::ast::NodeId>,
+    //// In-place optimization: NodeIds of operations where input array can be reused
+    inplace_nodes: HashSet<crate::ast::NodeId>,
 }
 
 impl Constructor {
@@ -161,7 +161,7 @@ impl Constructor {
             lambda_registry: IdArena::new(),
             impl_source: ImplSource::default(),
             debug_buffer: None,
-            inplace_map_nodes: HashSet::new(),
+            inplace_nodes: HashSet::new(),
         }
     }
 
@@ -351,6 +351,14 @@ impl Constructor {
                         }
                         let pointee_type = self.ast_type_to_spirv(&args[0]);
                         self.builder.type_pointer(None, StorageClass::Function, pointee_type)
+                    }
+                    TypeName::Unique => {
+                        // Unique type wrapper: strip and convert underlying type
+                        // Unique is only used for alias checking, has no runtime representation
+                        if args.is_empty() {
+                            panic!("BUG: Unique type requires an underlying type argument.");
+                        }
+                        self.ast_type_to_spirv(&args[0])
                     }
                     _ => {
                         panic!(
@@ -695,10 +703,10 @@ impl Constructor {
 }
 
 impl<'a> LowerCtx<'a> {
-    fn new(program: &'a Program, debug_enabled: bool, inplace_info: &InPlaceMapInfo) -> Self {
+    fn new(program: &'a Program, debug_enabled: bool, inplace_info: &InPlaceInfo) -> Self {
         let mut constructor = Constructor::new();
         constructor.lambda_registry = program.lambda_registry.clone();
-        constructor.inplace_map_nodes = inplace_info.can_reuse_input.clone();
+        constructor.inplace_nodes = inplace_info.can_reuse_input.clone();
         if debug_enabled {
             constructor.setup_debug_buffer();
         }
@@ -962,6 +970,13 @@ impl<'a> LowerCtx<'a> {
                     self.ensure_deps_lowered(cap)?;
                 }
             }
+            ExprKind::Range { start, step, end, .. } => {
+                self.ensure_deps_lowered(start)?;
+                if let Some(s) = step {
+                    self.ensure_deps_lowered(s)?;
+                }
+                self.ensure_deps_lowered(end)?;
+            }
             ExprKind::Unit => {
                 // Unit has no dependencies
             }
@@ -1024,11 +1039,7 @@ impl<'a> LowerCtx<'a> {
 }
 
 /// Lower a MIR program to SPIR-V
-pub fn lower(
-    program: &mir::Program,
-    debug_enabled: bool,
-    inplace_info: &InPlaceMapInfo,
-) -> Result<Vec<u32>> {
+pub fn lower(program: &mir::Program, debug_enabled: bool, inplace_info: &InPlaceInfo) -> Result<Vec<u32>> {
     // Use a thread with larger stack size to handle deeply nested expressions
     // Default Rust stack is 2MB on macOS which is too small for complex shaders
     const STACK_SIZE: usize = 16 * 1024 * 1024; // 16MB
@@ -1712,7 +1723,7 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
                 // 1. This map call was marked as having a dead-after input array
                 // 2. Element types match (f : T -> T)
                 let can_inplace =
-                    constructor.inplace_map_nodes.contains(&expr.id) && input_elem_type == output_elem_type;
+                    constructor.inplace_nodes.contains(&expr.id) && input_elem_type == output_elem_type;
 
                 if can_inplace {
                     // In-place optimization: use OpCompositeInsert to update array in place
@@ -1765,6 +1776,49 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
                         None,
                         result_elements,
                     )?);
+                }
+            }
+
+            // Special case for _w_array_with - check for in-place optimization
+            if func == "_w_array_with" {
+                if args.len() != 3 {
+                    bail_spirv!("_w_array_with requires 3 args (array, index, value)");
+                }
+
+                // Lower arguments
+                let arr_id = lower_expr(constructor, &args[0])?;
+                let idx_id = lower_expr(constructor, &args[1])?;
+                let val_id = lower_expr(constructor, &args[2])?;
+
+                // Check if we can do in-place update
+                let can_inplace = constructor.inplace_nodes.contains(&expr.id);
+
+                if can_inplace {
+                    // In-place optimization: use OpCompositeInsert
+                    // This creates a new SSA value but signals to the optimizer
+                    // that the input array can potentially be reused
+                    return Ok(constructor.builder.composite_insert(
+                        result_type,
+                        None,
+                        val_id,
+                        arr_id,
+                        [idx_id],
+                    )?);
+                } else {
+                    // Non-in-place: use copy-modify-load pattern
+                    let arr_var = constructor.declare_variable("_w_array_with_tmp", result_type)?;
+                    constructor.builder.store(arr_var, arr_id, None, [])?;
+
+                    // Get pointer to element and store new value
+                    let elem_type = constructor.ast_type_to_spirv(&args[2].ty);
+                    let elem_ptr_type =
+                        constructor.builder.type_pointer(None, StorageClass::Function, elem_type);
+                    let elem_ptr =
+                        constructor.builder.access_chain(elem_ptr_type, None, arr_var, [idx_id])?;
+                    constructor.builder.store(elem_ptr, val_id, None, [])?;
+
+                    // Load and return the updated array
+                    return Ok(constructor.builder.load(result_type, None, arr_var, None, [])?);
                 }
             }
 
@@ -2349,6 +2403,83 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
             // Construct the composite
             Ok(constructor.builder.composite_construct(tuple_type, None, elem_ids)?)
         }
+
+        ExprKind::Range {
+            start,
+            step,
+            end,
+            kind,
+        } => {
+            // Extract constant values from range components
+            let start_val = try_extract_const_int(start)
+                .ok_or_else(|| err_spirv!("Range start must be a compile-time constant integer"))?;
+            let end_val = try_extract_const_int(end)
+                .ok_or_else(|| err_spirv!("Range end must be a compile-time constant integer"))?;
+
+            // Calculate stride:
+            // - If step is None, stride = 1
+            // - If step is Some(s), it's the second element, so stride = s - start
+            let stride = match step {
+                Some(s) => {
+                    let step_val = try_extract_const_int(s)
+                        .ok_or_else(|| err_spirv!("Range step must be a compile-time constant integer"))?;
+                    step_val - start_val
+                }
+                None => 1,
+            };
+            if stride == 0 {
+                bail_spirv!("Range stride cannot be zero");
+            }
+
+            // Calculate count based on kind
+            let count = match kind {
+                crate::mir::RangeKind::Inclusive | crate::mir::RangeKind::Exclusive => {
+                    // .. and ... inclusive
+                    if stride > 0 {
+                        ((end_val - start_val) / stride) + 1
+                    } else {
+                        ((start_val - end_val) / (-stride)) + 1
+                    }
+                }
+                crate::mir::RangeKind::ExclusiveLt => {
+                    // ..< exclusive end (positive direction)
+                    if stride <= 0 {
+                        bail_spirv!("Range ..< requires positive stride");
+                    }
+                    (end_val - start_val + stride - 1) / stride
+                }
+                crate::mir::RangeKind::ExclusiveGt => {
+                    // ..> exclusive end (negative direction)
+                    if stride >= 0 {
+                        bail_spirv!("Range ..> requires negative stride");
+                    }
+                    (start_val - end_val + (-stride) - 1) / (-stride)
+                }
+            };
+
+            if count <= 0 {
+                bail_spirv!("Range produces empty or negative-count array");
+            }
+
+            // Generate the array elements
+            let elem_ids: Vec<spirv::Word> =
+                (0..count).map(|i| constructor.const_i32(start_val + i * stride)).collect();
+
+            // Get element type (i32) and construct array type
+            let elem_type = constructor.i32_type;
+            let array_type = constructor.type_array(elem_type, count as u32);
+
+            // Construct the composite array
+            Ok(constructor.builder.composite_construct(array_type, None, elem_ids)?)
+        }
+    }
+}
+
+/// Try to extract a compile-time constant integer from an expression.
+fn try_extract_const_int(expr: &Expr) -> Option<i32> {
+    match &expr.kind {
+        ExprKind::Literal(crate::mir::Literal::Int(s)) => s.parse().ok(),
+        _ => None,
     }
 }
 
@@ -2574,8 +2705,11 @@ mod tests {
         let (module_manager, mut node_counter) = crate::cached_module_manager();
         let parsed = crate::Compiler::parse(source, &mut node_counter).expect("Parsing failed");
         let (flattened, _backend) = parsed
+            .desugar(&mut node_counter)
+            .expect("Desugaring failed")
             .resolve(&module_manager)
             .expect("Name resolution failed")
+            .fold_ast_constants()
             .type_check(&module_manager)
             .expect("Type checking failed")
             .alias_check()
@@ -2583,7 +2717,7 @@ mod tests {
             .flatten(&module_manager)
             .expect("Flattening failed");
 
-        let inplace_info = crate::alias_checker::analyze_map_inplace(&flattened.mir);
+        let inplace_info = crate::alias_checker::analyze_inplace(&flattened.mir);
         lower(&flattened.mir, false, &inplace_info)
     }
 

@@ -1,30 +1,50 @@
 -- Second-Order Array Combinators (SOACs)
 -- Based on Futhark's prelude/soacs module
+--
+-- Builtins (from builtins.wyn): map, reduce, zip, iota, length
 
--- Map a function over an array
-def map<[n], A, B>(f: A -> B, xs: [n]A) -> [n]B =
-  loop (i, acc) = (0, []) while i < n do
-    (i + 1, acc ++ [f(xs[i])])
+------------------------------------------------------------
+-- Mapping (multi-array variants)
+------------------------------------------------------------
 
--- Map a binary function over two arrays
-def map2<[n], A, B, C>(f: A -> B -> C, xs: [n]A, ys: [n]B) -> [n]C =
-  loop (i, acc) = (0, []) while i < n do
-    (i + 1, acc ++ [f(xs[i], ys[i])])
+-- Map a ternary function over three arrays
+def map3<[n], A, B, C, D>(f: A -> B -> C -> D, xs: [n]A, ys: [n]B, zs: [n]C) -> [n]D =
+  map (|i| f(xs[i], ys[i], zs[i])) (iota n)
 
--- Reduce an array with a binary associative operator and neutral element
-def reduce<[n], A>(op: A -> A -> A, ne: A, xs: [n]A) -> A =
-  loop (i, acc) = (0, ne) while i < n do
-    (i + 1, op(acc, xs[i]))
+-- Map a quaternary function over four arrays
+def map4<[n], A, B, C, D, E>(f: A -> B -> C -> D -> E, as: [n]A, bs: [n]B, cs: [n]C, ds: [n]D) -> [n]E =
+  map (|i| f(as[i], bs[i], cs[i], ds[i])) (iota n)
 
--- Scan (prefix sum) with a binary associative operator and neutral element
-def scan<[n], A>(op: A -> A -> A, ne: A, xs: [n]A) -> [n]A =
-  loop (i, acc_val, acc_arr) = (0, ne, []) while i < n do
-    let new_val = op(acc_val, xs[i]) in
-    (i + 1, new_val, acc_arr ++ [new_val])
+-- Map a 5-ary function over five arrays
+def map5<[n], A, B, C, D, E, F>(f: A -> B -> C -> D -> E -> F, as: [n]A, bs: [n]B, cs: [n]C, ds: [n]D, es: [n]E) -> [n]F =
+  map (|i| f(as[i], bs[i], cs[i], ds[i], es[i])) (iota n)
 
--- Filter elements that satisfy a predicate
-def filter<[n], A>(p: A -> bool, xs: [n]A) -> []A =
-  loop (i, acc) = (0, []) while i < n do
-    if p(xs[i])
-    then (i + 1, acc ++ [xs[i]])
-    else (i + 1, acc)
+------------------------------------------------------------
+-- Boolean aggregation
+------------------------------------------------------------
+
+-- Test if predicate holds for all elements
+def all<[n], A>(p: A -> bool, xs: [n]A) -> bool =
+  reduce (|a, b| a && b) true (map p xs)
+
+-- Test if predicate holds for any element
+def any<[n], A>(p: A -> bool, xs: [n]A) -> bool =
+  reduce (|a, b| a || b) false (map p xs)
+
+------------------------------------------------------------
+-- Zipping and unzipping
+------------------------------------------------------------
+
+-- Split an array of pairs into two arrays
+-- (zip is a builtin)
+def unzip<[n], A, B>(xys: [n](A, B)) -> ([n]A, [n]B) =
+  (map (|xy| xy.0) xys, map (|xy| xy.1) xys)
+
+------------------------------------------------------------
+-- Array generation
+------------------------------------------------------------
+
+-- Generate array by applying function to each index
+-- tabulate f = [f 0, f 1, ..., f (n-1)]
+def tabulate<[n], A>(f: i32 -> A) -> [n]A =
+  map f (iota n)
