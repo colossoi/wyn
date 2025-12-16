@@ -10,7 +10,7 @@ use std::collections::{BTreeSet, HashMap};
 // Import type helper functions from parent module
 use super::{
     as_arrow, bool_type, count_arrows, f32, function, i32, mat, record, sized_array, string, strip_unique,
-    tuple, unique, unit, vec,
+    tuple, unit, vec,
 };
 
 /// Trait for generating fresh type variables
@@ -661,8 +661,8 @@ impl<'a> TypeChecker<'a> {
         };
         self.scope_stack.insert("length".to_string(), length_scheme);
 
-        // map: ∀a b n. (a -> b) -> *Array(n, a) -> Array(n, b)
-        // The input array is consumed (unique), output is fresh
+        // map: ∀a b n. (a -> b) -> [n]a -> [n]b
+        // The input array is borrowed (read-only), output is fresh
         // Build the type using fresh type variables for proper polymorphism
         let var_a = self.context.new_variable();
         let var_b = self.context.new_variable();
@@ -674,10 +674,10 @@ impl<'a> TypeChecker<'a> {
         let var_n_id = if let Type::Variable(id) = var_n { id } else { panic!("Expected Type::Variable") };
 
         let func_type = Type::arrow(Type::Variable(var_a_id), Type::Variable(var_b_id));
-        let input_array_type = unique(Type::Constructed(
+        let input_array_type = Type::Constructed(
             TypeName::Array,
             vec![Type::Variable(var_n_id), Type::Variable(var_a_id)],
-        ));
+        );
         let output_array_type = Type::Constructed(
             TypeName::Array,
             vec![Type::Variable(var_n_id), Type::Variable(var_b_id)],

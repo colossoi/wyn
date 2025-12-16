@@ -35,12 +35,10 @@ def map5<[n], A, B, C, D, E, F>(f: A -> B -> C -> D -> E -> F, as: [n]A, bs: [n]
 -- Zipping and unzipping
 ------------------------------------------------------------
 
--- ------------------------------------------------------------
--- -- unzip: Split an array of pairs into two arrays
--- -- (zip is a builtin)
--- -- Note: Commented out due to aliasing issues with consuming array twice
--- ------------------------------------------------------------
--- def unzip<[n], A, B>(xys: [n](A, B)) -> ([n]A, [n]B) = ...
+-- Split an array of pairs into two arrays
+-- (zip is a builtin)
+def unzip<[n], A, B>(xys: [n](A, B)) -> ([n]A, [n]B) =
+  (map(|xy| let (a, _) = xy in a, xys), map(|xy| let (_, b) = xy in b, xys))
 
 ------------------------------------------------------------
 -- Array generation
