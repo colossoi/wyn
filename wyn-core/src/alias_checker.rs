@@ -636,11 +636,7 @@ impl<'a> Visitor for AliasChecker<'a> {
         ControlFlow::Continue(())
     }
 
-    fn visit_expr_slice(
-        &mut self,
-        id: NodeId,
-        slice: &SliceExpr,
-    ) -> ControlFlow<Self::Break> {
+    fn visit_expr_slice(&mut self, id: NodeId, slice: &SliceExpr) -> ControlFlow<Self::Break> {
         // Visit the array and index expressions
         self.visit_expression(&slice.array)?;
         if let Some(start) = &slice.start {
@@ -660,11 +656,7 @@ impl<'a> Visitor for AliasChecker<'a> {
         ControlFlow::Continue(())
     }
 
-    fn visit_expr_range(
-        &mut self,
-        id: NodeId,
-        range: &RangeExpr,
-    ) -> ControlFlow<Self::Break> {
+    fn visit_expr_range(&mut self, id: NodeId, range: &RangeExpr) -> ControlFlow<Self::Break> {
         // Visit the range expressions
         self.visit_expression(&range.start)?;
         if let Some(step) = &range.step {
@@ -911,20 +903,20 @@ impl AliasCheckResult {
 
 use crate::mir;
 
-/// Result of in-place map analysis
+/// Result of in-place array operation analysis
 #[derive(Debug, Default, Clone)]
-pub struct InPlaceMapInfo {
-    /// NodeIds of map calls where input array can be reused
+pub struct InPlaceInfo {
+    /// NodeIds of operations (map, array_with) where input array can be reused
     pub can_reuse_input: HashSet<NodeId>,
 }
 
-/// Analyze MIR to find map calls that can reuse their input array.
+/// Analyze MIR to find array operations that can reuse their input array.
 ///
-/// A map call `map f arr` can reuse `arr` if:
-/// 1. `arr` is not used after the map call (nor any alias of arr)
-/// 2. Element types match (f : T -> T) - checked at lowering time
-pub fn analyze_map_inplace(mir: &mir::Program) -> InPlaceMapInfo {
-    let mut result = InPlaceMapInfo::default();
+/// An operation can reuse `arr` if:
+/// 1. `arr` is not used after the operation (nor any alias of arr)
+/// 2. Element types match (checked at lowering time for map)
+pub fn analyze_inplace(mir: &mir::Program) -> InPlaceInfo {
+    let mut result = InPlaceInfo::default();
 
     for def in &mir.defs {
         if let mir::Def::Function { body, .. } = def {
@@ -935,13 +927,13 @@ pub fn analyze_map_inplace(mir: &mir::Program) -> InPlaceMapInfo {
     result
 }
 
-fn analyze_function_body(body: &mir::Expr, result: &mut InPlaceMapInfo) {
+fn analyze_function_body(body: &mir::Expr, result: &mut InPlaceInfo) {
     // Build alias map and uses-after map
     let mut aliases: HashMap<String, HashSet<String>> = HashMap::new();
     let uses_after = compute_uses_after(body, &HashSet::new(), &mut aliases);
 
-    // Find eligible map calls
-    find_inplace_map_calls(body, &uses_after, &aliases, result);
+    // Find eligible operations
+    find_inplace_ops(body, &uses_after, &aliases, result);
 }
 
 /// Collect all variable uses in an expression (bottom-up)
@@ -1206,12 +1198,43 @@ fn compute_uses_after(
     result
 }
 
-/// Find map calls where the input array can be reused.
-fn find_inplace_map_calls(
+/// Check if an array variable can be reused (no aliases used after the given expression)
+fn can_reuse_array(
+    arr_name: &str,
+    expr_id: NodeId,
+    uses_after: &HashMap<NodeId, HashSet<String>>,
+    aliases: &HashMap<String, HashSet<String>>,
+) -> bool {
+    // Get all variables that alias arr_name
+    let mut all_aliases: HashSet<_> = std::iter::once(arr_name.to_string()).collect();
+
+    // Add variables that arr_name aliases
+    if let Some(arr_aliases) = aliases.get(arr_name) {
+        all_aliases.extend(arr_aliases.iter().cloned());
+    }
+
+    // Add variables that alias arr_name (reverse lookup)
+    for (var, var_aliases) in aliases {
+        if var_aliases.contains(arr_name) {
+            all_aliases.insert(var.clone());
+        }
+    }
+
+    // Check if any alias is used after this expression
+    if let Some(after_set) = uses_after.get(&expr_id) {
+        !all_aliases.iter().any(|alias| after_set.contains(alias))
+    } else {
+        // If no uses_after entry, conservatively assume it can be reused
+        true
+    }
+}
+
+/// Find operations (map, array_with) where the input array can be reused.
+fn find_inplace_ops(
     expr: &mir::Expr,
     uses_after: &HashMap<NodeId, HashSet<String>>,
     aliases: &HashMap<String, HashSet<String>>,
-    result: &mut InPlaceMapInfo,
+    result: &mut InPlaceInfo,
 ) {
     use mir::ExprKind::*;
 
@@ -1219,33 +1242,28 @@ fn find_inplace_map_calls(
         Call { func, args } if func == "map" && args.len() == 2 => {
             // args[0] is closure, args[1] is array
             if let Var(arr_name) = &args[1].kind {
-                // Get all variables that alias arr_name
-                let mut all_aliases: HashSet<_> = std::iter::once(arr_name.clone()).collect();
-
-                // Add variables that arr_name aliases
-                if let Some(arr_aliases) = aliases.get(arr_name) {
-                    all_aliases.extend(arr_aliases.iter().cloned());
-                }
-
-                // Add variables that alias arr_name (reverse lookup)
-                for (var, var_aliases) in aliases {
-                    if var_aliases.contains(arr_name) {
-                        all_aliases.insert(var.clone());
-                    }
-                }
-
-                // Check if any alias is used after this call
-                if let Some(after_set) = uses_after.get(&expr.id) {
-                    let any_alias_used = all_aliases.iter().any(|alias| after_set.contains(alias));
-                    if !any_alias_used {
-                        result.can_reuse_input.insert(expr.id);
-                    }
+                if can_reuse_array(arr_name, expr.id, uses_after, aliases) {
+                    result.can_reuse_input.insert(expr.id);
                 }
             }
 
             // Recurse into arguments
             for arg in args {
-                find_inplace_map_calls(arg, uses_after, aliases, result);
+                find_inplace_ops(arg, uses_after, aliases, result);
+            }
+        }
+
+        Call { func, args } if func == "_w_array_with" && args.len() == 3 => {
+            // _w_array_with(arr, idx, val) - functional array update
+            if let Var(arr_name) = &args[0].kind {
+                if can_reuse_array(arr_name, expr.id, uses_after, aliases) {
+                    result.can_reuse_input.insert(expr.id);
+                }
+            }
+
+            // Recurse into arguments
+            for arg in args {
+                find_inplace_ops(arg, uses_after, aliases, result);
             }
         }
 
@@ -1253,12 +1271,12 @@ fn find_inplace_map_calls(
         Var(_) | Literal(_) | Unit => {}
 
         BinOp { lhs, rhs, .. } => {
-            find_inplace_map_calls(lhs, uses_after, aliases, result);
-            find_inplace_map_calls(rhs, uses_after, aliases, result);
+            find_inplace_ops(lhs, uses_after, aliases, result);
+            find_inplace_ops(rhs, uses_after, aliases, result);
         }
 
         UnaryOp { operand, .. } => {
-            find_inplace_map_calls(operand, uses_after, aliases, result);
+            find_inplace_ops(operand, uses_after, aliases, result);
         }
 
         If {
@@ -1266,14 +1284,14 @@ fn find_inplace_map_calls(
             then_branch,
             else_branch,
         } => {
-            find_inplace_map_calls(cond, uses_after, aliases, result);
-            find_inplace_map_calls(then_branch, uses_after, aliases, result);
-            find_inplace_map_calls(else_branch, uses_after, aliases, result);
+            find_inplace_ops(cond, uses_after, aliases, result);
+            find_inplace_ops(then_branch, uses_after, aliases, result);
+            find_inplace_ops(else_branch, uses_after, aliases, result);
         }
 
         Let { value, body, .. } => {
-            find_inplace_map_calls(value, uses_after, aliases, result);
-            find_inplace_map_calls(body, uses_after, aliases, result);
+            find_inplace_ops(value, uses_after, aliases, result);
+            find_inplace_ops(body, uses_after, aliases, result);
         }
 
         Loop {
@@ -1283,56 +1301,56 @@ fn find_inplace_map_calls(
             body,
             ..
         } => {
-            find_inplace_map_calls(init, uses_after, aliases, result);
+            find_inplace_ops(init, uses_after, aliases, result);
             for (_, binding_expr) in init_bindings {
-                find_inplace_map_calls(binding_expr, uses_after, aliases, result);
+                find_inplace_ops(binding_expr, uses_after, aliases, result);
             }
             match kind {
                 mir::LoopKind::For { iter, .. } => {
-                    find_inplace_map_calls(iter, uses_after, aliases, result);
+                    find_inplace_ops(iter, uses_after, aliases, result);
                 }
                 mir::LoopKind::ForRange { bound, .. } => {
-                    find_inplace_map_calls(bound, uses_after, aliases, result);
+                    find_inplace_ops(bound, uses_after, aliases, result);
                 }
                 mir::LoopKind::While { cond } => {
-                    find_inplace_map_calls(cond, uses_after, aliases, result);
+                    find_inplace_ops(cond, uses_after, aliases, result);
                 }
             }
-            find_inplace_map_calls(body, uses_after, aliases, result);
+            find_inplace_ops(body, uses_after, aliases, result);
         }
 
         Call { args, .. } => {
             for arg in args {
-                find_inplace_map_calls(arg, uses_after, aliases, result);
+                find_inplace_ops(arg, uses_after, aliases, result);
             }
         }
 
         Intrinsic { args, .. } => {
             for arg in args {
-                find_inplace_map_calls(arg, uses_after, aliases, result);
+                find_inplace_ops(arg, uses_after, aliases, result);
             }
         }
 
         Attributed { expr: inner, .. } => {
-            find_inplace_map_calls(inner, uses_after, aliases, result);
+            find_inplace_ops(inner, uses_after, aliases, result);
         }
 
         Materialize(inner) => {
-            find_inplace_map_calls(inner, uses_after, aliases, result);
+            find_inplace_ops(inner, uses_after, aliases, result);
         }
 
         Closure { captures, .. } => {
             for capture in captures {
-                find_inplace_map_calls(capture, uses_after, aliases, result);
+                find_inplace_ops(capture, uses_after, aliases, result);
             }
         }
 
         Range { start, step, end, .. } => {
-            find_inplace_map_calls(start, uses_after, aliases, result);
+            find_inplace_ops(start, uses_after, aliases, result);
             if let Some(s) = step {
-                find_inplace_map_calls(s, uses_after, aliases, result);
+                find_inplace_ops(s, uses_after, aliases, result);
             }
-            find_inplace_map_calls(end, uses_after, aliases, result);
+            find_inplace_ops(end, uses_after, aliases, result);
         }
     }
 }

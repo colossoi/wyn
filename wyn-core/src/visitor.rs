@@ -145,19 +145,11 @@ pub trait Visitor: Sized {
         walk_expr_if(self, if_expr)
     }
 
-    fn visit_expr_slice(
-        &mut self,
-        _id: NodeId,
-        slice: &SliceExpr,
-    ) -> ControlFlow<Self::Break> {
+    fn visit_expr_slice(&mut self, _id: NodeId, slice: &SliceExpr) -> ControlFlow<Self::Break> {
         walk_expr_slice(self, slice)
     }
 
-    fn visit_expr_range(
-        &mut self,
-        _id: NodeId,
-        range: &RangeExpr,
-    ) -> ControlFlow<Self::Break> {
+    fn visit_expr_range(&mut self, _id: NodeId, range: &RangeExpr) -> ControlFlow<Self::Break> {
         walk_expr_range(self, range)
     }
 

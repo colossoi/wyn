@@ -22,8 +22,8 @@ pub use types::checker as type_checker;
 pub mod alias_checker;
 pub mod ast_const_fold;
 pub mod binding_lifter;
-pub mod desugar;
 pub mod constant_folding;
+pub mod desugar;
 pub mod glsl;
 pub mod lowering_common;
 pub mod materialize_hoisting;
@@ -563,7 +563,7 @@ impl Lifted {
 
     /// Lower MIR to SPIR-V with debug mode option
     pub fn lower_with_options(self, debug_enabled: bool) -> Result<Lowered> {
-        let inplace_info = alias_checker::analyze_map_inplace(&self.mir);
+        let inplace_info = alias_checker::analyze_inplace(&self.mir);
         let spirv = spirv::lower(&self.mir, debug_enabled, &inplace_info)?;
         Ok(Lowered { mir: self.mir, spirv })
     }

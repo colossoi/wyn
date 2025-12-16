@@ -3253,12 +3253,10 @@ fn test_slice_reverse() {
             // Check step is -1 (may be parsed as IntLiteral(-1) or UnaryOp("-", 1))
             match &slice.step.as_ref().unwrap().kind {
                 ExprKind::IntLiteral(-1) => {}
-                ExprKind::UnaryOp(op, inner) if op.op == "-" => {
-                    match &inner.kind {
-                        ExprKind::IntLiteral(1) => {}
-                        other => panic!("Expected IntLiteral(1), got {:?}", other),
-                    }
-                }
+                ExprKind::UnaryOp(op, inner) if op.op == "-" => match &inner.kind {
+                    ExprKind::IntLiteral(1) => {}
+                    other => panic!("Expected IntLiteral(1), got {:?}", other),
+                },
                 other => panic!("Expected -1 literal or UnaryOp('-'), got {:?}", other),
             }
         }

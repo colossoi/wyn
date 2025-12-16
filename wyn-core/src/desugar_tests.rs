@@ -253,7 +253,8 @@ def slice_test(arr: [10]i32) -> [5]i32 =
     // After desugaring, slice should become map over a range
     assert!(
         mir_str.contains("map") && mir_str.contains("..<"),
-        "Slice should be desugared to map over range. MIR:\n{}", mir_str
+        "Slice should be desugared to map over range. MIR:\n{}",
+        mir_str
     );
 }
 
@@ -269,7 +270,8 @@ def range_test() -> [5]i32 =
     // Ranges stay as ranges in MIR (they're the primitive form)
     assert!(
         mir_str.contains("0..<5"),
-        "Simple range should stay as range in MIR. MIR:\n{}", mir_str
+        "Simple range should stay as range in MIR. MIR:\n{}",
+        mir_str
     );
 }
 
@@ -285,6 +287,7 @@ def range_test() -> [5]i32 =
     // Ranges with non-zero start also stay as ranges
     assert!(
         mir_str.contains("1..<6"),
-        "Complex range should stay as range in MIR. MIR:\n{}", mir_str
+        "Complex range should stay as range in MIR. MIR:\n{}",
+        mir_str
     );
 }

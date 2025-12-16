@@ -1492,10 +1492,7 @@ impl<'a> Parser<'a> {
 
             // start_expr must be Some here since we didn't see a colon
             let index = start_expr.expect("index expression should exist for array indexing");
-            Ok(self.node_counter.mk_node(
-                ExprKind::ArrayIndex(Box::new(array), index),
-                span,
-            ))
+            Ok(self.node_counter.mk_node(ExprKind::ArrayIndex(Box::new(array), index), span))
         }
     }
 
@@ -1700,13 +1697,11 @@ impl<'a> Parser<'a> {
         let placeholder_indices: Vec<usize> = args
             .iter()
             .enumerate()
-            .filter_map(|(i, arg)| {
-                if matches!(arg, CurryArg::Placeholder) {
-                    Some(i)
-                } else {
-                    None
-                }
-            })
+            .filter_map(
+                |(i, arg)| {
+                    if matches!(arg, CurryArg::Placeholder) { Some(i) } else { None }
+                },
+            )
             .collect();
 
         if placeholder_indices.is_empty() {
@@ -1718,9 +1713,7 @@ impl<'a> Parser<'a> {
                     CurryArg::Placeholder => unreachable!(),
                 })
                 .collect();
-            return Ok(self
-                .node_counter
-                .mk_node(ExprKind::Application(Box::new(func), real_args), span));
+            return Ok(self.node_counter.mk_node(ExprKind::Application(Box::new(func), real_args), span));
         }
 
         // Desugar to lambda
@@ -1801,12 +1794,7 @@ impl<'a> Parser<'a> {
 
     /// Desugar curry expression to lambda
     /// $f(a, _, b, _) -> |_0_, _1_| f(a, _0_, b, _1_)
-    fn desugar_curry(
-        &mut self,
-        func: Expression,
-        args: Vec<CurryArg>,
-        span: Span,
-    ) -> Result<Expression> {
+    fn desugar_curry(&mut self, func: Expression, args: Vec<CurryArg>, span: Span) -> Result<Expression> {
         // Generate lambda params: _0_, _1_, ...
         let mut params = Vec::new();
         let mut param_idx = 0;
@@ -1814,9 +1802,7 @@ impl<'a> Parser<'a> {
         for arg in &args {
             if matches!(arg, CurryArg::Placeholder) {
                 let name = format!("_{}_", param_idx);
-                let param = self
-                    .node_counter
-                    .mk_node(PatternKind::Name(name), span.clone());
+                let param = self.node_counter.mk_node(PatternKind::Name(name), span.clone());
                 params.push(param);
                 param_idx += 1;
             }
@@ -1830,17 +1816,15 @@ impl<'a> Parser<'a> {
                 CurryArg::Placeholder => {
                     let name = format!("_{}_", param_idx);
                     param_idx += 1;
-                    self.node_counter
-                        .mk_node(ExprKind::Identifier(vec![], name), span.clone())
+                    self.node_counter.mk_node(ExprKind::Identifier(vec![], name), span.clone())
                 }
                 CurryArg::Expr(e) => e,
             })
             .collect();
 
         // Build the function call: func(args...)
-        let body = self
-            .node_counter
-            .mk_node(ExprKind::Application(Box::new(func), call_args), span.clone());
+        let body =
+            self.node_counter.mk_node(ExprKind::Application(Box::new(func), call_args), span.clone());
 
         // Build the lambda: |_0_, _1_, ...| body
         let lambda = LambdaExpr {

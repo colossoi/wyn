@@ -447,17 +447,16 @@ mod tests {
         let mut folder = AstConstFolder::new();
         // arr[1+2:10] should fold to arr[3:10]
         let start = make_binop("+", make_int(1), make_int(2));
-        let mut expr = make_slice(
-            make_array_ident("arr"),
-            Some(start),
-            Some(make_int(10)),
-            None,
-        );
+        let mut expr = make_slice(make_array_ident("arr"), Some(start), Some(make_int(10)), None);
         folder.fold_expr(&mut expr);
 
         if let ExprKind::Slice(slice) = &expr.kind {
             let start = slice.start.as_ref().expect("start should exist");
-            assert_eq!(start.kind, ExprKind::IntLiteral(3), "Slice start should be folded to 3");
+            assert_eq!(
+                start.kind,
+                ExprKind::IntLiteral(3),
+                "Slice start should be folded to 3"
+            );
         } else {
             panic!("Expected Slice, got {:?}", expr.kind);
         }
@@ -473,7 +472,11 @@ mod tests {
 
         if let ExprKind::Slice(slice) = &expr.kind {
             let end = slice.end.as_ref().expect("end should exist");
-            assert_eq!(end.kind, ExprKind::IntLiteral(10), "Slice end should be folded to 10");
+            assert_eq!(
+                end.kind,
+                ExprKind::IntLiteral(10),
+                "Slice end should be folded to 10"
+            );
         } else {
             panic!("Expected Slice, got {:?}", expr.kind);
         }
@@ -494,7 +497,11 @@ mod tests {
 
         if let ExprKind::Slice(slice) = &expr.kind {
             let step = slice.step.as_ref().expect("step should exist");
-            assert_eq!(step.kind, ExprKind::IntLiteral(2), "Slice step should be folded to 2");
+            assert_eq!(
+                step.kind,
+                ExprKind::IntLiteral(2),
+                "Slice step should be folded to 2"
+            );
         } else {
             panic!("Expected Slice, got {:?}", expr.kind);
         }

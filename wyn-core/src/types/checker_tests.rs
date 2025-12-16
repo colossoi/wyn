@@ -17,10 +17,8 @@ fn try_typecheck_program(input: &str) -> Result<(), CompilerError> {
     // Use the typestate API to ensure proper pipeline setup
     let (module_manager, mut node_counter) = crate::cached_module_manager();
     let parsed = crate::Compiler::parse(input, &mut node_counter)?;
-    let _type_checked = parsed
-        .desugar(&mut node_counter)?
-        .resolve(&module_manager)?
-        .type_check(&module_manager)?;
+    let _type_checked =
+        parsed.desugar(&mut node_counter)?.resolve(&module_manager)?.type_check(&module_manager)?;
     Ok(())
 }
 

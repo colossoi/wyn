@@ -175,10 +175,7 @@ impl Backend {
         let (prelude, mut node_counter) = get_prelude();
         let result = wyn_core::Compiler::parse(text, &mut node_counter).and_then(|parsed| {
             let module_manager = ModuleManager::from_prelude(prelude);
-            parsed
-                .desugar(&mut node_counter)?
-                .resolve(&module_manager)?
-                .type_check(&module_manager)
+            parsed.desugar(&mut node_counter)?.resolve(&module_manager)?.type_check(&module_manager)
         });
 
         match result {

@@ -4,7 +4,7 @@
 //! It uses a Constructor wrapper that handles variable hoisting automatically.
 //! Dependencies are lowered on-demand using ensure_lowered pattern.
 
-use crate::alias_checker::InPlaceMapInfo;
+use crate::alias_checker::InPlaceInfo;
 use crate::ast::TypeName;
 use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
@@ -111,8 +111,8 @@ struct Constructor {
     // The buffer is a StorageBuffer with layout: [write_head, read_head, max_loops, data[4093]]
     debug_buffer: Option<spirv::Word>,
 
-    // In-place optimization: NodeIds of map calls where input array can be reused
-    inplace_map_nodes: HashSet<crate::ast::NodeId>,
+    //// In-place optimization: NodeIds of operations where input array can be reused
+    inplace_nodes: HashSet<crate::ast::NodeId>,
 }
 
 impl Constructor {
@@ -161,7 +161,7 @@ impl Constructor {
             lambda_registry: IdArena::new(),
             impl_source: ImplSource::default(),
             debug_buffer: None,
-            inplace_map_nodes: HashSet::new(),
+            inplace_nodes: HashSet::new(),
         }
     }
 
@@ -695,10 +695,10 @@ impl Constructor {
 }
 
 impl<'a> LowerCtx<'a> {
-    fn new(program: &'a Program, debug_enabled: bool, inplace_info: &InPlaceMapInfo) -> Self {
+    fn new(program: &'a Program, debug_enabled: bool, inplace_info: &InPlaceInfo) -> Self {
         let mut constructor = Constructor::new();
         constructor.lambda_registry = program.lambda_registry.clone();
-        constructor.inplace_map_nodes = inplace_info.can_reuse_input.clone();
+        constructor.inplace_nodes = inplace_info.can_reuse_input.clone();
         if debug_enabled {
             constructor.setup_debug_buffer();
         }
@@ -1031,11 +1031,7 @@ impl<'a> LowerCtx<'a> {
 }
 
 /// Lower a MIR program to SPIR-V
-pub fn lower(
-    program: &mir::Program,
-    debug_enabled: bool,
-    inplace_info: &InPlaceMapInfo,
-) -> Result<Vec<u32>> {
+pub fn lower(program: &mir::Program, debug_enabled: bool, inplace_info: &InPlaceInfo) -> Result<Vec<u32>> {
     // Use a thread with larger stack size to handle deeply nested expressions
     // Default Rust stack is 2MB on macOS which is too small for complex shaders
     const STACK_SIZE: usize = 16 * 1024 * 1024; // 16MB
@@ -1719,7 +1715,7 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
                 // 1. This map call was marked as having a dead-after input array
                 // 2. Element types match (f : T -> T)
                 let can_inplace =
-                    constructor.inplace_map_nodes.contains(&expr.id) && input_elem_type == output_elem_type;
+                    constructor.inplace_nodes.contains(&expr.id) && input_elem_type == output_elem_type;
 
                 if can_inplace {
                     // In-place optimization: use OpCompositeInsert to update array in place
@@ -1772,6 +1768,49 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
                         None,
                         result_elements,
                     )?);
+                }
+            }
+
+            // Special case for _w_array_with - check for in-place optimization
+            if func == "_w_array_with" {
+                if args.len() != 3 {
+                    bail_spirv!("_w_array_with requires 3 args (array, index, value)");
+                }
+
+                // Lower arguments
+                let arr_id = lower_expr(constructor, &args[0])?;
+                let idx_id = lower_expr(constructor, &args[1])?;
+                let val_id = lower_expr(constructor, &args[2])?;
+
+                // Check if we can do in-place update
+                let can_inplace = constructor.inplace_nodes.contains(&expr.id);
+
+                if can_inplace {
+                    // In-place optimization: use OpCompositeInsert
+                    // This creates a new SSA value but signals to the optimizer
+                    // that the input array can potentially be reused
+                    return Ok(constructor.builder.composite_insert(
+                        result_type,
+                        None,
+                        val_id,
+                        arr_id,
+                        [idx_id],
+                    )?);
+                } else {
+                    // Non-in-place: use copy-modify-load pattern
+                    let arr_var = constructor.declare_variable("_w_array_with_tmp", result_type)?;
+                    constructor.builder.store(arr_var, arr_id, None, [])?;
+
+                    // Get pointer to element and store new value
+                    let elem_type = constructor.ast_type_to_spirv(&args[2].ty);
+                    let elem_ptr_type =
+                        constructor.builder.type_pointer(None, StorageClass::Function, elem_type);
+                    let elem_ptr =
+                        constructor.builder.access_chain(elem_ptr_type, None, arr_var, [idx_id])?;
+                    constructor.builder.store(elem_ptr, val_id, None, [])?;
+
+                    // Load and return the updated array
+                    return Ok(constructor.builder.load(result_type, None, arr_var, None, [])?);
                 }
             }
 
@@ -2357,7 +2396,12 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
             Ok(constructor.builder.composite_construct(tuple_type, None, elem_ids)?)
         }
 
-        ExprKind::Range { start, step, end, kind } => {
+        ExprKind::Range {
+            start,
+            step,
+            end,
+            kind,
+        } => {
             // Extract constant values from range components
             let start_val = try_extract_const_int(start)
                 .ok_or_else(|| err_spirv!("Range start must be a compile-time constant integer"))?;
@@ -2410,9 +2454,8 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
             }
 
             // Generate the array elements
-            let elem_ids: Vec<spirv::Word> = (0..count)
-                .map(|i| constructor.const_i32(start_val + i * stride))
-                .collect();
+            let elem_ids: Vec<spirv::Word> =
+                (0..count).map(|i| constructor.const_i32(start_val + i * stride)).collect();
 
             // Get element type (i32) and construct array type
             let elem_type = constructor.i32_type;
@@ -2666,7 +2709,7 @@ mod tests {
             .flatten(&module_manager)
             .expect("Flattening failed");
 
-        let inplace_info = crate::alias_checker::analyze_map_inplace(&flattened.mir);
+        let inplace_info = crate::alias_checker::analyze_inplace(&flattened.mir);
         lower(&flattened.mir, false, &inplace_info)
     }
 

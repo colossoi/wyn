@@ -168,9 +168,7 @@ fn compile_file(
         Compiler::parse(&source, &mut frontend.node_counter)
     })?;
     // Desugar ranges/slices early, before name resolution and type checking
-    let desugared = time("desugar", verbose, || {
-        parsed.desugar(&mut frontend.node_counter)
-    })?;
+    let desugared = time("desugar", verbose, || parsed.desugar(&mut frontend.node_counter))?;
     let resolved = time("resolve", verbose, || desugared.resolve(&frontend.module_manager))?;
     let type_checked = time("type_check", verbose, || {
         resolved.type_check(&frontend.module_manager)

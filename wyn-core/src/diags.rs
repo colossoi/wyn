@@ -952,7 +952,15 @@ impl Display for mir::ExprKind {
                     mir::RangeKind::ExclusiveGt => "..>",
                 };
                 if let Some(step) = step {
-                    write!(f, "{}{}{}{}{}",start, kind_str.chars().next().unwrap(), step, &kind_str[1..], end)
+                    write!(
+                        f,
+                        "{}{}{}{}{}",
+                        start,
+                        kind_str.chars().next().unwrap(),
+                        step,
+                        &kind_str[1..],
+                        end
+                    )
                 } else {
                     write!(f, "{}{}{}", start, kind_str, end)
                 }

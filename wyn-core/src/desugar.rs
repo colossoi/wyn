@@ -7,12 +7,11 @@
 //! Must run after type checking and before flattening.
 
 use crate::ast::{
-    BinaryOp, Decl, Declaration, EntryDecl, ExprKind, Expression, LambdaExpr,
-    NodeCounter, NodeCounterExt, Pattern, PatternKind, Program,
-    RangeExpr, RangeKind, SliceExpr, Span,
+    BinaryOp, Decl, Declaration, EntryDecl, ExprKind, Expression, LambdaExpr, NodeCounter, NodeCounterExt,
+    Pattern, PatternKind, Program, RangeExpr, RangeKind, SliceExpr, Span,
 };
-use crate::error::Result;
 use crate::err_flatten_at;
+use crate::error::Result;
 
 /// Desugars range and slice expressions into map/iota constructs.
 pub struct Desugarer<'a> {
@@ -176,11 +175,7 @@ impl<'a> Desugarer<'a> {
         })?;
 
         // Calculate step (default 1)
-        let step_val = slice
-            .step
-            .as_ref()
-            .map(|s| (**s).clone())
-            .unwrap_or_else(|| self.mk_int(1, span));
+        let step_val = slice.step.as_ref().map(|s| (**s).clone()).unwrap_or_else(|| self.mk_int(1, span));
 
         // Calculate count = (end - start) / step
         let diff = self.mk_binop("-", (**end).clone(), (**start).clone(), span);
@@ -229,27 +224,19 @@ impl<'a> Desugarer<'a> {
     }
 
     fn mk_ident(&mut self, name: &str, span: Span) -> Expression {
-        self.nc
-            .mk_node(ExprKind::Identifier(vec![], name.to_string()), span)
+        self.nc.mk_node(ExprKind::Identifier(vec![], name.to_string()), span)
     }
 
     fn mk_binop(&mut self, op: &str, left: Expression, right: Expression, span: Span) -> Expression {
         self.nc.mk_node(
-            ExprKind::BinaryOp(
-                BinaryOp {
-                    op: op.to_string(),
-                },
-                Box::new(left),
-                Box::new(right),
-            ),
+            ExprKind::BinaryOp(BinaryOp { op: op.to_string() }, Box::new(left), Box::new(right)),
             span,
         )
     }
 
     fn mk_call(&mut self, func_name: &str, args: Vec<Expression>, span: Span) -> Expression {
         let func = self.mk_ident(func_name, span);
-        self.nc
-            .mk_node(ExprKind::Application(Box::new(func), args), span)
+        self.nc.mk_node(ExprKind::Application(Box::new(func), args), span)
     }
 
     fn mk_lambda(&mut self, params: Vec<Pattern>, body: Expression, span: Span) -> Expression {
@@ -268,10 +255,7 @@ impl<'a> Desugarer<'a> {
     }
 
     fn mk_array_index(&mut self, array: Expression, index: Expression, span: Span) -> Expression {
-        self.nc.mk_node(
-            ExprKind::ArrayIndex(Box::new(array), Box::new(index)),
-            span,
-        )
+        self.nc.mk_node(ExprKind::ArrayIndex(Box::new(array), Box::new(index)), span)
     }
 
     fn is_zero(&self, expr: &Expression) -> bool {
