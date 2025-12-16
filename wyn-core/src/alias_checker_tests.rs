@@ -6,7 +6,8 @@ fn check_alias(source: &str) -> AliasCheckResult {
     let parsed = Compiler::parse(source, &mut node_counter).expect("parse failed");
     let desugared = parsed.desugar(&mut node_counter).expect("desugar failed");
     let resolved = desugared.resolve(&module_manager).expect("resolve failed");
-    let type_checked = resolved.type_check(&module_manager).expect("type_check failed");
+    let folded = resolved.fold_ast_constants();
+    let type_checked = folded.type_check(&module_manager).expect("type_check failed");
 
     let checker = AliasChecker::new(&type_checked.type_table);
     checker.check_program(&type_checked.ast).expect("alias check failed")
@@ -21,6 +22,7 @@ fn alias_check_pipeline(source: &str) -> crate::AliasChecked {
         .expect("desugar failed")
         .resolve(&module_manager)
         .expect("resolve failed")
+        .fold_ast_constants()
         .type_check(&module_manager)
         .expect("type_check failed")
         .alias_check()
@@ -262,10 +264,10 @@ fn analyze_inplace_ops(source: &str) -> InPlaceInfo {
     let parsed = Compiler::parse(source, &mut node_counter).expect("parse failed");
     let desugared = parsed.desugar(&mut node_counter).expect("desugar failed");
     let resolved = desugared.resolve(&module_manager).expect("resolve failed");
-    let type_checked = resolved.type_check(&module_manager).expect("type_check failed");
+    let folded = resolved.fold_ast_constants();
+    let type_checked = folded.type_check(&module_manager).expect("type_check failed");
     let alias_checked = type_checked.alias_check().expect("alias check failed");
-    let ast_folded = alias_checked.fold_ast_constants();
-    let (flattened, _backend) = ast_folded.flatten(&module_manager).expect("flatten failed");
+    let (flattened, _backend) = alias_checked.flatten(&module_manager).expect("flatten failed");
 
     analyze_inplace(&flattened.mir)
 }

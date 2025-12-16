@@ -7,9 +7,9 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
     let (flattened, mut backend) = parsed
         .desugar(&mut node_counter)?
         .resolve(&module_manager)?
+        .fold_ast_constants()
         .type_check(&module_manager)?
         .alias_check()?
-        .fold_ast_constants()
         .flatten(&module_manager)?;
     flattened
         .hoist_materializations()
@@ -29,9 +29,9 @@ fn compile_through_monomorphization(input: &str) -> Result<(), CompilerError> {
     let (flattened, mut backend) = parsed
         .desugar(&mut node_counter)?
         .resolve(&module_manager)?
+        .fold_ast_constants()
         .type_check(&module_manager)?
         .alias_check()?
-        .fold_ast_constants()
         .flatten(&module_manager)?;
     flattened.hoist_materializations().normalize(&mut backend.node_counter).monomorphize()?;
     Ok(())

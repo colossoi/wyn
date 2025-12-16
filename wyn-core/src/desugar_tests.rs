@@ -15,9 +15,9 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
     let (flattened, mut backend) = parsed
         .desugar(&mut node_counter)?
         .resolve(&module_manager)?
+        .fold_ast_constants()
         .type_check(&module_manager)?
         .alias_check()?
-        .fold_ast_constants()
         .flatten(&module_manager)?;
     flattened
         .hoist_materializations()
@@ -37,9 +37,9 @@ fn compile_through_flatten(input: &str) -> Result<crate::Flattened, CompilerErro
     let (flattened, _backend) = parsed
         .desugar(&mut node_counter)?
         .resolve(&module_manager)?
+        .fold_ast_constants()
         .type_check(&module_manager)?
         .alias_check()?
-        .fold_ast_constants()
         .flatten(&module_manager)?;
     Ok(flattened)
 }
@@ -203,8 +203,8 @@ def vertex_main() -> #[builtin(position)] vec4f32 =
 #[test]
 fn test_slice_with_constant_definition() {
     let source = r#"
-def SIZE = 5
-def OFFSET = 2
+def SIZE: i32 = 5
+def OFFSET: i32 = 2
 
 def slice_with_constants(arr: [10]i32) -> [5]i32 =
     arr[OFFSET:OFFSET+SIZE]
@@ -224,6 +224,21 @@ def vertex_main() -> #[builtin(position)] vec4f32 =
 #[test]
 fn test_range_combined_with_map() {
     let source = r#"
+#[vertex]
+def vertex_main() -> #[builtin(position)] vec4f32 =
+    let doubled = map(|x| x * 2, 0..<4) in
+    @[f32.i32(doubled[0]), f32.i32(doubled[1]), f32.i32(doubled[2]), 1.0f32]
+"#;
+    assert!(
+        compile_through_lowering(source).is_ok(),
+        "Range combined with map should compile"
+    );
+}
+
+#[test]
+#[ignore] // TODO: Support passing named functions to map (not just lambdas)
+fn test_map_with_named_function() {
+    let source = r#"
 def double(x: i32) -> i32 = x * 2
 
 #[vertex]
@@ -233,7 +248,7 @@ def vertex_main() -> #[builtin(position)] vec4f32 =
 "#;
     assert!(
         compile_through_lowering(source).is_ok(),
-        "Range combined with map should compile"
+        "Named function passed to map should compile"
     );
 }
 

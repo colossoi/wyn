@@ -110,6 +110,15 @@ fn quantify(mut body: TypeScheme, vars: &BTreeSet<usize>) -> TypeScheme {
 }
 
 impl<'a> TypeChecker<'a> {
+    /// Try to extract a constant integer value from an expression.
+    /// Returns None if the expression is not a constant.
+    fn try_extract_const_int(expr: &Expression) -> Option<i32> {
+        match &expr.kind {
+            ExprKind::IntLiteral(n) => Some(*n),
+            _ => None,
+        }
+    }
+
     fn types_equal(&self, left: &Type, right: &Type) -> bool {
         match (left, right) {
             (Type::Constructed(l_name, l_args), Type::Constructed(r_name, r_args)) => {
@@ -2167,7 +2176,7 @@ impl<'a> TypeChecker<'a> {
                 })?;
 
                 // Check step type if present
-                if let Some(step) = &range.step {
+                let step_val = if let Some(step) = &range.step {
                     let step_type = self.infer_expression(step)?;
                     self.context.unify(&step_type, &start_type).map_err(|_| {
                         err_type_at!(
@@ -2177,13 +2186,34 @@ impl<'a> TypeChecker<'a> {
                             self.format_type(&step_type.apply(&self.context))
                         )
                     })?;
-                }
+                    Self::try_extract_const_int(step)
+                } else {
+                    Some(1) // Default step is 1
+                };
 
-                // Result is an array with unknown size
-                // Use a fresh size variable (will be treated as existential)
-                let size_var = self.context.new_variable();
+                // Try to compute a concrete size if bounds are constant
+                let start_val = Self::try_extract_const_int(&range.start);
+                let end_val = Self::try_extract_const_int(&range.end);
+
+                let size_type = match (start_val, end_val, step_val) {
+                    (Some(start), Some(end), Some(step)) if step != 0 => {
+                        // Calculate size based on range kind
+                        let size = match range.kind {
+                            RangeKind::Inclusive => (end - start) / step + 1,
+                            RangeKind::Exclusive | RangeKind::ExclusiveLt => (end - start) / step,
+                            RangeKind::ExclusiveGt => (start - end) / step,
+                        };
+                        if size > 0 {
+                            Type::Constructed(TypeName::Size(size as usize), vec![])
+                        } else {
+                            self.context.new_variable()
+                        }
+                    }
+                    _ => self.context.new_variable(),
+                };
+
                 let elem_type = start_type.apply(&self.context);
-                Ok(Type::Constructed(TypeName::Array, vec![size_var, elem_type]))
+                Ok(Type::Constructed(TypeName::Array, vec![size_type, elem_type]))
             }
 
             ExprKind::Slice(slice) => {

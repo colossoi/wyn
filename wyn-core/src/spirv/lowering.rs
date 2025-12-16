@@ -352,6 +352,14 @@ impl Constructor {
                         let pointee_type = self.ast_type_to_spirv(&args[0]);
                         self.builder.type_pointer(None, StorageClass::Function, pointee_type)
                     }
+                    TypeName::Unique => {
+                        // Unique type wrapper: strip and convert underlying type
+                        // Unique is only used for alias checking, has no runtime representation
+                        if args.is_empty() {
+                            panic!("BUG: Unique type requires an underlying type argument.");
+                        }
+                        self.ast_type_to_spirv(&args[0])
+                    }
                     _ => {
                         panic!(
                             "BUG: Unknown type reached lowering: {:?}. This should have been caught during type checking.",
@@ -2701,11 +2709,11 @@ mod tests {
             .expect("Desugaring failed")
             .resolve(&module_manager)
             .expect("Name resolution failed")
+            .fold_ast_constants()
             .type_check(&module_manager)
             .expect("Type checking failed")
             .alias_check()
             .expect("Alias checking failed")
-            .fold_ast_constants()
             .flatten(&module_manager)
             .expect("Flattening failed");
 

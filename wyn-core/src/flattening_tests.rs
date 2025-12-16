@@ -14,11 +14,11 @@ fn flatten_program(input: &str) -> mir::Program {
         .expect("Desugaring failed")
         .resolve(&module_manager)
         .expect("Name resolution failed")
+        .fold_ast_constants()
         .type_check(&module_manager)
         .expect("Type checking failed")
         .alias_check()
         .expect("Borrow checking failed")
-        .fold_ast_constants()
         .flatten(&module_manager)
         .expect("Flattening failed");
     flattened.mir
@@ -193,12 +193,15 @@ def test() -> [4]i32 =
     // Resolve
     let resolved = desugared.resolve(&module_manager).expect("Name resolution failed");
 
+    // Fold AST constants (before type checking for better size inference)
+    let folded = resolved.fold_ast_constants();
+
     // Print AST to see what NodeId(6) is
     println!("AST:");
-    println!("{:#?}", resolved.ast);
+    println!("{:#?}", folded.ast);
 
     // Type check
-    let typed = resolved.type_check(&module_manager).expect("Type checking failed");
+    let typed = folded.type_check(&module_manager).expect("Type checking failed");
     println!("\nType table has {} entries", typed.type_table.len());
     for (id, scheme) in &typed.type_table {
         println!("  NodeId({:?}): {:?}", id, scheme);
@@ -209,9 +212,8 @@ def test() -> [4]i32 =
     // Alias check
     let alias_checked = typed.alias_check().expect("Alias checking failed");
 
-    // Fold AST constants and flatten
-    let (flattened, _backend) =
-        alias_checked.fold_ast_constants().flatten(&module_manager).expect("Flattening failed");
+    // Flatten
+    let (flattened, _backend) = alias_checked.flatten(&module_manager).expect("Flattening failed");
     let mir_str = format!("{}", flattened.mir);
     println!("MIR: {}", mir_str);
     assert!(mir_str.contains("def test"));
@@ -390,10 +392,10 @@ def test() -> f32 =
     let result = crate::Compiler::parse(source, &mut nc)
         .and_then(|p| p.desugar(&mut nc))
         .and_then(|d| d.resolve(&mm))
-        .and_then(|r| r.type_check(&mm))
+        .map(|r| r.fold_ast_constants())
+        .and_then(|f| f.type_check(&mm))
         .and_then(|t| t.alias_check())
-        .map(|a| a.fold_ast_constants())
-        .and_then(|b| b.flatten(&mm))
+        .and_then(|a| a.flatten(&mm))
         .map(|(f, mut backend)| {
             let h = f.hoist_materializations();
             let n = h.normalize(&mut backend.node_counter);
@@ -550,11 +552,11 @@ def test(arr: [3]i32, i: i32) -> i32 =
         .expect("desugar failed")
         .resolve(&mm)
         .expect("resolve failed")
+        .fold_ast_constants()
         .type_check(&mm)
         .expect("type_check failed")
         .alias_check()
         .expect("alias_check failed")
-        .fold_ast_constants()
         .flatten(&mm)
         .expect("flatten failed");
     let hoisted = flattened.hoist_materializations();

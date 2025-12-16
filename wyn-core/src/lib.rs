@@ -210,10 +210,11 @@ pub type TypeTable = HashMap<NodeId, TypeScheme<TypeName>>;
 // FrontEnd Pipeline (AST -> MIR):
 //   let parsed = Compiler::parse(source)?;
 //   let mut frontend = FrontEnd::new(module_manager);
-//     -> parsed.resolve(&mut frontend.module_manager)   -> Resolved
-//       -> .type_check(&mut frontend.module_manager)    -> TypeChecked
+//     -> parsed.desugar(&mut node_counter)              -> Desugared
+//       -> .resolve(&frontend.module_manager)           -> Resolved
+//       -> .fold_ast_constants()                        -> AstConstFoldedEarly
+//       -> .type_check(&frontend.module_manager)        -> TypeChecked
 //       -> .alias_check()                               -> AliasChecked
-//       -> .fold_ast_constants()                        -> AstConstFolded
 //       -> .flatten(&frontend.module_manager)           -> Flattened
 //
 // BackEnd Pipeline (MIR -> output):
@@ -320,6 +321,19 @@ pub struct Resolved {
 }
 
 impl Resolved {
+    /// Fold AST-level integer constants (required before type checking)
+    pub fn fold_ast_constants(mut self) -> AstConstFoldedEarly {
+        ast_const_fold::fold_ast_constants(&mut self.ast);
+        AstConstFoldedEarly { ast: self.ast }
+    }
+}
+
+/// AST integer constants have been folded (before type checking)
+pub struct AstConstFoldedEarly {
+    pub ast: ast::Program,
+}
+
+impl AstConstFoldedEarly {
     /// Type check the program
     pub fn type_check(self, module_manager: &module_manager::ModuleManager) -> Result<TypeChecked> {
         let mut checker = type_checker::TypeChecker::new(module_manager);
@@ -404,48 +418,7 @@ impl AliasChecked {
         self.alias_result.print_errors();
     }
 
-    /// Fold AST-level integer constants
-    pub fn fold_ast_constants(mut self) -> AstConstFolded {
-        ast_const_fold::fold_ast_constants(&mut self.ast);
-        AstConstFolded {
-            ast: self.ast,
-            type_table: self.type_table,
-            warnings: self.warnings,
-            alias_result: self.alias_result,
-        }
-    }
-
     /// Flatten AST to MIR (with defunctionalization and desugaring).
-    /// Note: Consider using fold_ast_constants() first for better optimization.
-    /// Returns the flattened MIR and a BackEnd for subsequent passes.
-    pub fn flatten(self, module_manager: &module_manager::ModuleManager) -> Result<(Flattened, BackEnd)> {
-        let builtins = impl_source::ImplSource::default().all_names();
-        let defun_analysis = defun_analysis::analyze_program(&self.ast, &self.type_table, &builtins);
-        let mut flattener = flattening::Flattener::new(self.type_table, builtins, defun_analysis);
-        let mut mir = flattener.flatten_program(&self.ast)?;
-
-        // Flatten module function declarations so they're available in SPIR-V
-        for (module_name, decl) in module_manager.get_module_function_declarations() {
-            let qualified_name = format!("{}.{}", module_name, decl.name);
-            let defs = flattener.flatten_module_decl(decl, &qualified_name)?;
-            mir.defs.extend(defs);
-        }
-
-        let node_counter = flattener.into_node_counter();
-        Ok((Flattened { mir }, BackEnd::new(node_counter)))
-    }
-}
-
-/// AST integer constants have been folded and inlined
-pub struct AstConstFolded {
-    pub ast: ast::Program,
-    pub type_table: TypeTable,
-    pub warnings: Vec<type_checker::TypeWarning>,
-    pub alias_result: alias_checker::AliasCheckResult,
-}
-
-impl AstConstFolded {
-    /// Flatten AST to MIR (with defunctionalization).
     /// Returns the flattened MIR and a BackEnd for subsequent passes.
     pub fn flatten(self, module_manager: &module_manager::ModuleManager) -> Result<(Flattened, BackEnd)> {
         let builtins = impl_source::ImplSource::default().all_names();
