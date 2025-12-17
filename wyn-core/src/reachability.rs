@@ -5,8 +5,7 @@
 //! It returns functions in topological order (callees before callers)
 //! so the lowerer can process them without forward references.
 
-use crate::mir::folder::MirFolder;
-use crate::mir::{Def, Expr, ExprKind, Literal, Program};
+use crate::mir::{Body, Def, Expr, Program};
 use std::collections::HashSet;
 
 /// Find all functions reachable from entry points, in topological order.
@@ -34,11 +33,8 @@ pub fn reachable_functions_ordered(program: &Program) -> Vec<String> {
             Def::EntryPoint { name, body, .. } => {
                 functions.insert(name.clone(), body);
             }
-            Def::Uniform { .. } => {
-                // Uniforms have no body
-            }
-            Def::Storage { .. } => {
-                // Storage buffers have no body
+            Def::Uniform { .. } | Def::Storage { .. } => {
+                // Uniforms and storage have no body
             }
         }
     }
@@ -57,7 +53,7 @@ pub fn reachable_functions_ordered(program: &Program) -> Vec<String> {
 
 fn dfs_postorder(
     name: &str,
-    functions: &std::collections::HashMap<String, &Expr>,
+    functions: &std::collections::HashMap<String, &Body>,
     visited: &mut HashSet<String>,
     in_stack: &mut HashSet<String>,
     order: &mut Vec<String>,
@@ -88,101 +84,30 @@ pub fn reachable_functions(program: &Program) -> HashSet<String> {
     reachable_functions_ordered(program).into_iter().collect()
 }
 
-/// Visitor that collects function names called in expressions
-struct CalleeCollector {
-    callees: HashSet<String>,
-}
+/// Collect all function names called in a body.
+/// Walks all expressions in the body's arena.
+fn collect_callees(body: &Body) -> HashSet<String> {
+    let mut callees = HashSet::new();
 
-impl MirFolder for CalleeCollector {
-    type Error = std::convert::Infallible;
-    type Ctx = ();
-
-    fn visit_expr_call(
-        &mut self,
-        func: String,
-        args: Vec<Expr>,
-        expr: Expr,
-        ctx: &mut Self::Ctx,
-    ) -> Result<Expr, Self::Error> {
-        // Collect the function name
-        self.callees.insert(func.clone());
-
-        // Continue traversal of arguments
-        for arg in &args {
-            self.visit_expr(arg.clone(), ctx).ok();
-        }
-
-        Ok(Expr {
-            kind: ExprKind::Call { func, args },
-            ..expr
-        })
-    }
-
-    fn visit_expr_var(
-        &mut self,
-        name: String,
-        expr: Expr,
-        _ctx: &mut Self::Ctx,
-    ) -> Result<Expr, Self::Error> {
-        // Variable references might refer to top-level constants
-        self.callees.insert(name.clone());
-        Ok(Expr {
-            kind: ExprKind::Var(name),
-            ..expr
-        })
-    }
-
-    fn visit_expr_literal(
-        &mut self,
-        lit: Literal,
-        expr: Expr,
-        ctx: &mut Self::Ctx,
-    ) -> Result<Expr, Self::Error> {
-        // Continue traversal into tuple subexpressions
-        if let Literal::Tuple(ref elems) = lit {
-            for elem in elems {
-                self.visit_expr(elem.clone(), ctx).ok();
+    for expr in &body.exprs {
+        match expr {
+            Expr::Global(name) => {
+                // Global references might refer to top-level functions or constants
+                callees.insert(name.clone());
             }
+            Expr::Call { func, .. } => {
+                callees.insert(func.clone());
+            }
+            Expr::Closure { lambda_name, .. } => {
+                // Closures reference their lambda function
+                callees.insert(lambda_name.clone());
+            }
+            // Other expressions don't introduce new callees
+            _ => {}
         }
-
-        Ok(Expr {
-            kind: ExprKind::Literal(lit),
-            ..expr
-        })
     }
 
-    fn visit_expr_closure(
-        &mut self,
-        lambda_name: String,
-        captures: Vec<Expr>,
-        expr: Expr,
-        ctx: &mut Self::Ctx,
-    ) -> Result<Expr, Self::Error> {
-        // Collect the lambda function name as a callee
-        self.callees.insert(lambda_name.clone());
-
-        // Continue traversal into captures
-        for cap in &captures {
-            self.visit_expr(cap.clone(), ctx).ok();
-        }
-
-        Ok(Expr {
-            kind: ExprKind::Closure {
-                lambda_name,
-                captures,
-            },
-            ..expr
-        })
-    }
-}
-
-/// Collect all function names called in an expression
-fn collect_callees(expr: &Expr) -> HashSet<String> {
-    let mut collector = CalleeCollector {
-        callees: HashSet::new(),
-    };
-    collector.visit_expr(expr.clone(), &mut ()).ok();
-    collector.callees
+    callees
 }
 
 /// Filter a program to only include reachable definitions, in topological order.
@@ -190,43 +115,49 @@ fn collect_callees(expr: &Expr) -> HashSet<String> {
 pub fn filter_reachable(program: Program) -> Program {
     let ordered = reachable_functions_ordered(&program);
 
+    // Destructure to preserve lambda_registry
+    let Program { defs, lambda_registry } = program;
+
     // Build a map from name to def for reordering
-    let mut def_map: std::collections::HashMap<String, Def> = program
-        .defs
+    let mut def_map: std::collections::HashMap<String, Def> = defs
         .into_iter()
         .map(|def| {
             let name = match &def {
                 Def::Function { name, .. } => name.clone(),
                 Def::Constant { name, .. } => name.clone(),
+                Def::EntryPoint { name, .. } => name.clone(),
                 Def::Uniform { name, .. } => name.clone(),
                 Def::Storage { name, .. } => name.clone(),
-                Def::EntryPoint { name, .. } => name.clone(),
             };
             (name, def)
         })
         .collect();
 
-    // Collect defs in topological order
-    let mut filtered_defs: Vec<Def> =
-        ordered.into_iter().filter_map(|name| def_map.remove(&name)).collect();
+    // Output defs in topological order, starting with reachable ones
+    let mut output_defs = Vec::new();
 
-    // Add all remaining uniforms and storage buffers (they're referenced but have no body to traverse)
-    // Collect them first to avoid iterator invalidation
-    let uniforms_and_storage: Vec<_> = def_map
-        .iter()
-        .filter(|(_, def)| matches!(def, Def::Uniform { .. } | Def::Storage { .. }))
-        .map(|(name, _)| name.clone())
-        .collect();
+    // First, add all reachable defs in order
+    for name in &ordered {
+        if let Some(def) = def_map.remove(name) {
+            output_defs.push(def);
+        }
+    }
 
-    for name in uniforms_and_storage {
-        if let Some(def) = def_map.remove(&name) {
-            // Insert uniforms/storage at the beginning so they're declared before use
-            filtered_defs.insert(0, def);
+    // Uniforms and storage buffers should always be included if they exist
+    // (they're external resources, not called functions)
+    for (_, def) in def_map {
+        match def {
+            Def::Uniform { .. } | Def::Storage { .. } => {
+                output_defs.push(def);
+            }
+            _ => {
+                // Unreachable function/constant - skip it
+            }
         }
     }
 
     Program {
-        defs: filtered_defs,
-        lambda_registry: program.lambda_registry,
+        defs: output_defs,
+        lambda_registry,
     }
 }

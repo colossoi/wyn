@@ -14,17 +14,8 @@
 //! if c then @index(__mat_0, i) else @index(__mat_0, i)
 //! ```
 
-use crate::ast::TypeName;
-use crate::mir::{Def, Expr, ExprKind, Program};
-use polytype::Type;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-// Global counter for unique binding IDs
-static NEXT_BINDING_ID: AtomicU64 = AtomicU64::new(1_000_000);
-
-fn fresh_binding_id() -> u64 {
-    NEXT_BINDING_ID.fetch_add(1, Ordering::SeqCst)
-}
+use crate::mir::{Body, Def, Expr, ExprId, Program};
+use std::collections::HashSet;
 
 /// Hoist duplicate materializations in a program.
 pub fn hoist_materializations(program: Program) -> Program {
@@ -42,10 +33,10 @@ fn hoist_in_def(def: Def) -> Def {
             params,
             ret_type,
             attributes,
-            body,
+            mut body,
             span,
         } => {
-            let body = hoist_in_expr(body);
+            hoist_in_body(&mut body);
             Def::Function {
                 id,
                 name,
@@ -61,10 +52,10 @@ fn hoist_in_def(def: Def) -> Def {
             name,
             ty,
             attributes,
-            body,
+            mut body,
             span,
         } => {
-            let body = hoist_in_expr(body);
+            hoist_in_body(&mut body);
             Def::Constant {
                 id,
                 name,
@@ -80,10 +71,10 @@ fn hoist_in_def(def: Def) -> Def {
             execution_model,
             inputs,
             outputs,
-            body,
+            mut body,
             span,
         } => {
-            let body = hoist_in_expr(body);
+            hoist_in_body(&mut body);
             Def::EntryPoint {
                 id,
                 name,
@@ -98,257 +89,174 @@ fn hoist_in_def(def: Def) -> Def {
     }
 }
 
-/// Recursively process an expression, hoisting materializations from if branches.
-fn hoist_in_expr(expr: Expr) -> Expr {
-    let Expr { id, ty, kind, span } = expr;
-
-    let kind = match kind {
-        ExprKind::If {
-            cond,
-            then_branch,
-            else_branch,
-        } => {
-            // First recurse into children
-            let cond = Box::new(hoist_in_expr(*cond));
-            let then_branch = hoist_in_expr(*then_branch);
-            let else_branch = hoist_in_expr(*else_branch);
-
-            // Collect materializations from both branches
-            let then_mats = collect_materializations(&then_branch);
-            let else_mats = collect_materializations(&else_branch);
-
-            // Find common materializations (by structural equality of inner expr)
-            let common = find_common_materializations(&then_mats, &else_mats);
-
-            if common.is_empty() {
-                // No common materializations, just return the if
-                ExprKind::If {
-                    cond,
-                    then_branch: Box::new(then_branch),
-                    else_branch: Box::new(else_branch),
-                }
+/// Process a body, hoisting common materializations from if branches.
+fn hoist_in_body(body: &mut Body) {
+    // Find all If expressions
+    let if_exprs: Vec<ExprId> = body
+        .exprs
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, expr)| {
+            if matches!(expr, Expr::If { .. }) {
+                Some(ExprId(idx as u32))
             } else {
-                // Hoist common materializations
-                let mut result_then = then_branch;
-                let mut result_else = else_branch;
-
-                // For each common materialization, create a let binding and replace occurrences
-                let mut hoisted_bindings: Vec<(String, u64, Expr)> = Vec::new();
-
-                for (inner_expr, mat_ty) in common {
-                    let binding_id = fresh_binding_id();
-                    let var_name = format!("_w_mat_{}", binding_id);
-
-                    // Replace occurrences in both branches
-                    result_then = replace_materialize(&result_then, &inner_expr, &var_name, &mat_ty);
-                    result_else = replace_materialize(&result_else, &inner_expr, &var_name, &mat_ty);
-
-                    // Create the materialization expression for the let binding
-                    let mat_expr = Expr {
-                        id,
-                        ty: mat_ty.clone(),
-                        kind: ExprKind::Materialize(Box::new(inner_expr)),
-                        span,
-                    };
-
-                    hoisted_bindings.push((var_name, binding_id, mat_expr));
-                }
-
-                // Build the if expression
-                let if_expr = Expr {
-                    id,
-                    ty: ty.clone(),
-                    kind: ExprKind::If {
-                        cond,
-                        then_branch: Box::new(result_then),
-                        else_branch: Box::new(result_else),
-                    },
-                    span,
-                };
-
-                // Wrap in let bindings (innermost first, so we build from inside out)
-                let mut result = if_expr;
-                for (var_name, binding_id, mat_expr) in hoisted_bindings.into_iter().rev() {
-                    result = Expr {
-                        id,
-                        ty: result.ty.clone(),
-                        kind: ExprKind::Let {
-                            name: var_name,
-                            binding_id,
-                            value: Box::new(mat_expr),
-                            body: Box::new(result),
-                        },
-                        span,
-                    };
-                }
-
-                return result;
+                None
             }
-        }
+        })
+        .collect();
 
-        ExprKind::Let {
-            name,
-            binding_id,
-            value,
-            body,
-        } => {
-            let value = Box::new(hoist_in_expr(*value));
-            let body = Box::new(hoist_in_expr(*body));
-            ExprKind::Let {
-                name,
-                binding_id,
-                value,
-                body,
-            }
-        }
-
-        ExprKind::BinOp { op, lhs, rhs } => {
-            let lhs = Box::new(hoist_in_expr(*lhs));
-            let rhs = Box::new(hoist_in_expr(*rhs));
-            ExprKind::BinOp { op, lhs, rhs }
-        }
-
-        ExprKind::UnaryOp { op, operand } => {
-            let operand = Box::new(hoist_in_expr(*operand));
-            ExprKind::UnaryOp { op, operand }
-        }
-
-        ExprKind::Loop {
-            loop_var,
-            init,
-            init_bindings,
-            kind,
-            body,
-        } => {
-            let init = Box::new(hoist_in_expr(*init));
-            let body = Box::new(hoist_in_expr(*body));
-            let init_bindings =
-                init_bindings.into_iter().map(|(name, expr)| (name, hoist_in_expr(expr))).collect();
-            ExprKind::Loop {
-                loop_var,
-                init,
-                init_bindings,
-                kind,
-                body,
-            }
-        }
-
-        ExprKind::Call { func, args } => {
-            let args = args.into_iter().map(hoist_in_expr).collect();
-            ExprKind::Call { func, args }
-        }
-
-        ExprKind::Intrinsic { name, args } => {
-            let args = args.into_iter().map(hoist_in_expr).collect();
-            ExprKind::Intrinsic { name, args }
-        }
-
-        ExprKind::Attributed { attributes, expr } => {
-            let expr = Box::new(hoist_in_expr(*expr));
-            ExprKind::Attributed { attributes, expr }
-        }
-
-        ExprKind::Materialize(inner) => {
-            let inner = Box::new(hoist_in_expr(*inner));
-            ExprKind::Materialize(inner)
-        }
-
-        // Literals and other simple expressions don't need recursion
-        other => other,
-    };
-
-    Expr { id, ty, kind, span }
-}
-
-/// Collect all Materialize expressions from an expression tree.
-/// Returns a list of (inner_expr, materialize_type) pairs.
-fn collect_materializations(expr: &Expr) -> Vec<(Expr, Type<TypeName>)> {
-    let mut result = Vec::new();
-    collect_materializations_rec(expr, &mut result);
-    result
-}
-
-fn collect_materializations_rec(expr: &Expr, result: &mut Vec<(Expr, Type<TypeName>)>) {
-    match &expr.kind {
-        ExprKind::Materialize(inner) => {
-            result.push((*inner.clone(), expr.ty.clone()));
-            collect_materializations_rec(inner, result);
-        }
-        ExprKind::If {
-            cond,
-            then_branch,
-            else_branch,
-        } => {
-            collect_materializations_rec(cond, result);
-            collect_materializations_rec(then_branch, result);
-            collect_materializations_rec(else_branch, result);
-        }
-        ExprKind::Let { value, body, .. } => {
-            collect_materializations_rec(value, result);
-            collect_materializations_rec(body, result);
-        }
-        ExprKind::BinOp { lhs, rhs, .. } => {
-            collect_materializations_rec(lhs, result);
-            collect_materializations_rec(rhs, result);
-        }
-        ExprKind::UnaryOp { operand, .. } => {
-            collect_materializations_rec(operand, result);
-        }
-        ExprKind::Loop {
-            init,
-            init_bindings,
-            body,
-            ..
-        } => {
-            collect_materializations_rec(init, result);
-            for (_, binding) in init_bindings {
-                collect_materializations_rec(binding, result);
-            }
-            collect_materializations_rec(body, result);
-        }
-        ExprKind::Call { args, .. } | ExprKind::Intrinsic { args, .. } => {
-            for arg in args {
-                collect_materializations_rec(arg, result);
-            }
-        }
-        ExprKind::Attributed { expr, .. } => {
-            collect_materializations_rec(expr, result);
-        }
-        ExprKind::Literal(lit) => {
-            use crate::mir::Literal;
-            match lit {
-                Literal::Tuple(exprs) | Literal::Array(exprs) | Literal::Vector(exprs) => {
-                    for e in exprs {
-                        collect_materializations_rec(e, result);
-                    }
-                }
-                Literal::Matrix(rows) => {
-                    for row in rows {
-                        for e in row {
-                            collect_materializations_rec(e, result);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        _ => {}
+    // Process each If expression
+    for if_id in if_exprs {
+        hoist_in_if(body, if_id);
     }
 }
 
-/// Find materializations that appear in both lists (by structural equality of inner expr).
+/// Try to hoist common materializations from an If expression.
+fn hoist_in_if(body: &mut Body, if_id: ExprId) {
+    // Get the then/else branch IDs
+    let (then_id, else_id) = match body.get_expr(if_id) {
+        Expr::If { then_, else_, .. } => (*then_, *else_),
+        _ => return,
+    };
+
+    // Collect Materialize expressions reachable from each branch
+    let then_mats = collect_materializations(body, then_id);
+    let else_mats = collect_materializations(body, else_id);
+
+    // Find common materializations (by structural equality of inner expression)
+    let common = find_common_materializations(body, &then_mats, &else_mats);
+
+    // Hoist each common materialization
+    for mat_id in common {
+        body.hoist_before(mat_id, if_id, None);
+    }
+}
+
+/// Collect all Materialize expression IDs reachable from an expression.
+fn collect_materializations(body: &Body, root: ExprId) -> Vec<ExprId> {
+    let mut result = Vec::new();
+    let mut visited = HashSet::new();
+    collect_materializations_rec(body, root, &mut result, &mut visited);
+    result
+}
+
+fn collect_materializations_rec(
+    body: &Body,
+    expr_id: ExprId,
+    result: &mut Vec<ExprId>,
+    visited: &mut HashSet<ExprId>,
+) {
+    if !visited.insert(expr_id) {
+        return;
+    }
+
+    let expr = body.get_expr(expr_id);
+
+    if matches!(expr, Expr::Materialize(_)) {
+        result.push(expr_id);
+    }
+
+    // Recurse into children
+    match expr {
+        Expr::Materialize(inner) => {
+            collect_materializations_rec(body, *inner, result, visited);
+        }
+        Expr::BinOp { lhs, rhs, .. } => {
+            collect_materializations_rec(body, *lhs, result, visited);
+            collect_materializations_rec(body, *rhs, result, visited);
+        }
+        Expr::UnaryOp { operand, .. } => {
+            collect_materializations_rec(body, *operand, result, visited);
+        }
+        Expr::If { cond, then_, else_ } => {
+            collect_materializations_rec(body, *cond, result, visited);
+            collect_materializations_rec(body, *then_, result, visited);
+            collect_materializations_rec(body, *else_, result, visited);
+        }
+        Expr::Let { rhs, body: let_body, .. } => {
+            collect_materializations_rec(body, *rhs, result, visited);
+            collect_materializations_rec(body, *let_body, result, visited);
+        }
+        Expr::Loop { init, init_bindings, body: loop_body, .. } => {
+            collect_materializations_rec(body, *init, result, visited);
+            for (_, binding_expr) in init_bindings {
+                collect_materializations_rec(body, *binding_expr, result, visited);
+            }
+            collect_materializations_rec(body, *loop_body, result, visited);
+        }
+        Expr::Call { args, .. } | Expr::Intrinsic { args, .. } => {
+            for arg in args {
+                collect_materializations_rec(body, *arg, result, visited);
+            }
+        }
+        Expr::Closure { captures, .. } => {
+            for cap in captures {
+                collect_materializations_rec(body, *cap, result, visited);
+            }
+        }
+        Expr::Tuple(elems) | Expr::Array(elems) | Expr::Vector(elems) => {
+            for elem in elems {
+                collect_materializations_rec(body, *elem, result, visited);
+            }
+        }
+        Expr::Matrix(rows) => {
+            for row in rows {
+                for elem in row {
+                    collect_materializations_rec(body, *elem, result, visited);
+                }
+            }
+        }
+        Expr::Range { start, step, end, .. } => {
+            collect_materializations_rec(body, *start, result, visited);
+            if let Some(s) = step {
+                collect_materializations_rec(body, *s, result, visited);
+            }
+            collect_materializations_rec(body, *end, result, visited);
+        }
+        Expr::Attributed { expr, .. } => {
+            collect_materializations_rec(body, *expr, result, visited);
+        }
+        // Atoms have no children
+        Expr::Local(_) | Expr::Global(_) | Expr::Int(_) | Expr::Float(_)
+        | Expr::Bool(_) | Expr::Unit | Expr::String(_) => {}
+    }
+}
+
+/// Find materializations that appear in both lists with structurally equal inner expressions.
 fn find_common_materializations(
-    then_mats: &[(Expr, Type<TypeName>)],
-    else_mats: &[(Expr, Type<TypeName>)],
-) -> Vec<(Expr, Type<TypeName>)> {
+    body: &Body,
+    then_mats: &[ExprId],
+    else_mats: &[ExprId],
+) -> Vec<ExprId> {
     let mut common = Vec::new();
 
-    for (then_inner, then_ty) in then_mats {
-        for (else_inner, _else_ty) in else_mats {
-            if exprs_equal(then_inner, else_inner) {
-                // Check we haven't already added this one
-                if !common.iter().any(|(e, _)| exprs_equal(e, then_inner)) {
-                    common.push((then_inner.clone(), then_ty.clone()));
+    for &then_mat in then_mats {
+        // Get the inner expression of the then-branch Materialize
+        let then_inner = match body.get_expr(then_mat) {
+            Expr::Materialize(inner) => *inner,
+            _ => continue,
+        };
+
+        for &else_mat in else_mats {
+            // Get the inner expression of the else-branch Materialize
+            let else_inner = match body.get_expr(else_mat) {
+                Expr::Materialize(inner) => *inner,
+                _ => continue,
+            };
+
+            // Check structural equality
+            if exprs_equal(body, then_inner, else_inner) {
+                // Check we haven't already added an equivalent one
+                let already_added = common.iter().any(|&existing| {
+                    let existing_inner = match body.get_expr(existing) {
+                        Expr::Materialize(inner) => *inner,
+                        _ => return false,
+                    };
+                    exprs_equal(body, existing_inner, then_inner)
+                });
+
+                if !already_added {
+                    common.push(then_mat);
                 }
             }
         }
@@ -358,246 +266,56 @@ fn find_common_materializations(
 }
 
 /// Check if two expressions are structurally equal (ignoring IDs and spans).
-fn exprs_equal(a: &Expr, b: &Expr) -> bool {
+fn exprs_equal(body: &Body, a: ExprId, b: ExprId) -> bool {
     // Types should match
-    if a.ty != b.ty {
+    if body.get_type(a) != body.get_type(b) {
         return false;
     }
 
-    match (&a.kind, &b.kind) {
-        (ExprKind::Literal(la), ExprKind::Literal(lb)) => literals_equal(la, lb),
-        (ExprKind::Unit, ExprKind::Unit) => true,
-        (ExprKind::Var(na), ExprKind::Var(nb)) => na == nb,
-        (
-            ExprKind::BinOp {
-                op: opa,
-                lhs: la,
-                rhs: ra,
-            },
-            ExprKind::BinOp {
-                op: opb,
-                lhs: lb,
-                rhs: rb,
-            },
-        ) => opa == opb && exprs_equal(la, lb) && exprs_equal(ra, rb),
-        (ExprKind::UnaryOp { op: opa, operand: oa }, ExprKind::UnaryOp { op: opb, operand: ob }) => {
-            opa == opb && exprs_equal(oa, ob)
+    match (body.get_expr(a), body.get_expr(b)) {
+        (Expr::Local(la), Expr::Local(lb)) => la == lb,
+        (Expr::Global(na), Expr::Global(nb)) => na == nb,
+        (Expr::Int(a), Expr::Int(b)) => a == b,
+        (Expr::Float(a), Expr::Float(b)) => a == b,
+        (Expr::Bool(a), Expr::Bool(b)) => a == b,
+        (Expr::String(a), Expr::String(b)) => a == b,
+        (Expr::Unit, Expr::Unit) => true,
+
+        (Expr::BinOp { op: opa, lhs: la, rhs: ra }, Expr::BinOp { op: opb, lhs: lb, rhs: rb }) => {
+            opa == opb && exprs_equal(body, *la, *lb) && exprs_equal(body, *ra, *rb)
         }
-        (ExprKind::Call { func: fa, args: aa }, ExprKind::Call { func: fb, args: ab }) => {
-            fa == fb && aa.len() == ab.len() && aa.iter().zip(ab.iter()).all(|(x, y)| exprs_equal(x, y))
+        (Expr::UnaryOp { op: opa, operand: oa }, Expr::UnaryOp { op: opb, operand: ob }) => {
+            opa == opb && exprs_equal(body, *oa, *ob)
         }
-        (ExprKind::Intrinsic { name: na, args: aa }, ExprKind::Intrinsic { name: nb, args: ab }) => {
-            na == nb && aa.len() == ab.len() && aa.iter().zip(ab.iter()).all(|(x, y)| exprs_equal(x, y))
+        (Expr::Call { func: fa, args: aa }, Expr::Call { func: fb, args: ab }) => {
+            fa == fb
+                && aa.len() == ab.len()
+                && aa.iter().zip(ab.iter()).all(|(x, y)| exprs_equal(body, *x, *y))
         }
-        (ExprKind::Materialize(ia), ExprKind::Materialize(ib)) => exprs_equal(ia, ib),
+        (Expr::Intrinsic { name: na, args: aa }, Expr::Intrinsic { name: nb, args: ab }) => {
+            na == nb
+                && aa.len() == ab.len()
+                && aa.iter().zip(ab.iter()).all(|(x, y)| exprs_equal(body, *x, *y))
+        }
+        (Expr::Materialize(ia), Expr::Materialize(ib)) => exprs_equal(body, *ia, *ib),
+
+        (Expr::Tuple(ea), Expr::Tuple(eb))
+        | (Expr::Array(ea), Expr::Array(eb))
+        | (Expr::Vector(ea), Expr::Vector(eb)) => {
+            ea.len() == eb.len()
+                && ea.iter().zip(eb.iter()).all(|(x, y)| exprs_equal(body, *x, *y))
+        }
+
+        (Expr::Matrix(ra), Expr::Matrix(rb)) => {
+            ra.len() == rb.len()
+                && ra.iter().zip(rb.iter()).all(|(rowa, rowb)| {
+                    rowa.len() == rowb.len()
+                        && rowa.iter().zip(rowb.iter()).all(|(x, y)| exprs_equal(body, *x, *y))
+                })
+        }
+
         // For simplicity, don't consider if/let/loop as equal even if structurally same
         // (they're complex and unlikely to be duplicated materializations anyway)
         _ => false,
-    }
-}
-
-fn literals_equal(a: &crate::mir::Literal, b: &crate::mir::Literal) -> bool {
-    use crate::mir::Literal;
-    match (a, b) {
-        (Literal::Int(a), Literal::Int(b)) => a == b,
-        (Literal::Float(a), Literal::Float(b)) => a == b,
-        (Literal::Bool(a), Literal::Bool(b)) => a == b,
-        (Literal::String(a), Literal::String(b)) => a == b,
-        (Literal::Tuple(a), Literal::Tuple(b))
-        | (Literal::Array(a), Literal::Array(b))
-        | (Literal::Vector(a), Literal::Vector(b)) => {
-            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| exprs_equal(x, y))
-        }
-        (Literal::Matrix(a), Literal::Matrix(b)) => {
-            a.len() == b.len()
-                && a.iter().zip(b.iter()).all(|(ra, rb)| {
-                    ra.len() == rb.len() && ra.iter().zip(rb.iter()).all(|(x, y)| exprs_equal(x, y))
-                })
-        }
-        _ => false,
-    }
-}
-
-/// Replace occurrences of @materialize(inner_expr) with a variable reference.
-fn replace_materialize(expr: &Expr, target_inner: &Expr, var_name: &str, mat_ty: &Type<TypeName>) -> Expr {
-    let Expr { id, ty, kind, span } = expr.clone();
-
-    let kind = match kind {
-        ExprKind::Materialize(inner) => {
-            if exprs_equal(&inner, target_inner) {
-                // Replace with variable reference
-                return Expr {
-                    id,
-                    ty: mat_ty.clone(),
-                    kind: ExprKind::Var(var_name.to_string()),
-                    span,
-                };
-            } else {
-                // Recurse into the inner expression
-                ExprKind::Materialize(Box::new(replace_materialize(
-                    &inner,
-                    target_inner,
-                    var_name,
-                    mat_ty,
-                )))
-            }
-        }
-
-        ExprKind::If {
-            cond,
-            then_branch,
-            else_branch,
-        } => ExprKind::If {
-            cond: Box::new(replace_materialize(&cond, target_inner, var_name, mat_ty)),
-            then_branch: Box::new(replace_materialize(&then_branch, target_inner, var_name, mat_ty)),
-            else_branch: Box::new(replace_materialize(&else_branch, target_inner, var_name, mat_ty)),
-        },
-
-        ExprKind::Let {
-            name,
-            binding_id,
-            value,
-            body,
-        } => ExprKind::Let {
-            name,
-            binding_id,
-            value: Box::new(replace_materialize(&value, target_inner, var_name, mat_ty)),
-            body: Box::new(replace_materialize(&body, target_inner, var_name, mat_ty)),
-        },
-
-        ExprKind::BinOp { op, lhs, rhs } => ExprKind::BinOp {
-            op,
-            lhs: Box::new(replace_materialize(&lhs, target_inner, var_name, mat_ty)),
-            rhs: Box::new(replace_materialize(&rhs, target_inner, var_name, mat_ty)),
-        },
-
-        ExprKind::UnaryOp { op, operand } => ExprKind::UnaryOp {
-            op,
-            operand: Box::new(replace_materialize(&operand, target_inner, var_name, mat_ty)),
-        },
-
-        ExprKind::Loop {
-            loop_var,
-            init,
-            init_bindings,
-            kind: loop_kind,
-            body,
-        } => ExprKind::Loop {
-            loop_var,
-            init: Box::new(replace_materialize(&init, target_inner, var_name, mat_ty)),
-            init_bindings: init_bindings
-                .into_iter()
-                .map(|(n, e)| (n, replace_materialize(&e, target_inner, var_name, mat_ty)))
-                .collect(),
-            kind: loop_kind,
-            body: Box::new(replace_materialize(&body, target_inner, var_name, mat_ty)),
-        },
-
-        ExprKind::Call { func, args } => ExprKind::Call {
-            func,
-            args: args
-                .into_iter()
-                .map(|a| replace_materialize(&a, target_inner, var_name, mat_ty))
-                .collect(),
-        },
-
-        ExprKind::Intrinsic { name, args } => ExprKind::Intrinsic {
-            name,
-            args: args
-                .into_iter()
-                .map(|a| replace_materialize(&a, target_inner, var_name, mat_ty))
-                .collect(),
-        },
-
-        ExprKind::Attributed {
-            attributes,
-            expr: inner,
-        } => ExprKind::Attributed {
-            attributes,
-            expr: Box::new(replace_materialize(&inner, target_inner, var_name, mat_ty)),
-        },
-
-        // Literals with nested expressions
-        ExprKind::Literal(lit) => {
-            use crate::mir::Literal;
-            let new_lit = match lit {
-                Literal::Tuple(exprs) => Literal::Tuple(
-                    exprs
-                        .into_iter()
-                        .map(|e| replace_materialize(&e, target_inner, var_name, mat_ty))
-                        .collect(),
-                ),
-                Literal::Array(exprs) => Literal::Array(
-                    exprs
-                        .into_iter()
-                        .map(|e| replace_materialize(&e, target_inner, var_name, mat_ty))
-                        .collect(),
-                ),
-                Literal::Vector(exprs) => Literal::Vector(
-                    exprs
-                        .into_iter()
-                        .map(|e| replace_materialize(&e, target_inner, var_name, mat_ty))
-                        .collect(),
-                ),
-                Literal::Matrix(rows) => Literal::Matrix(
-                    rows.into_iter()
-                        .map(|row| {
-                            row.into_iter()
-                                .map(|e| replace_materialize(&e, target_inner, var_name, mat_ty))
-                                .collect()
-                        })
-                        .collect(),
-                ),
-                other => other,
-            };
-            ExprKind::Literal(new_lit)
-        }
-
-        // Simple cases that don't contain nested expressions
-        other => other,
-    };
-
-    Expr { id, ty, kind, span }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ast::{NodeId, Span};
-
-    #[test]
-    fn test_exprs_equal_var() {
-        let span = Span::new(0, 0, 0, 0);
-        let a = Expr::new(
-            NodeId(1),
-            Type::Constructed(TypeName::Int(32), vec![]),
-            ExprKind::Var("x".to_string()),
-            span,
-        );
-        let b = Expr::new(
-            NodeId(2), // Different ID
-            Type::Constructed(TypeName::Int(32), vec![]),
-            ExprKind::Var("x".to_string()),
-            span,
-        );
-        assert!(exprs_equal(&a, &b));
-    }
-
-    #[test]
-    fn test_exprs_not_equal_different_var() {
-        let span = Span::new(0, 0, 0, 0);
-        let a = Expr::new(
-            NodeId(1),
-            Type::Constructed(TypeName::Int(32), vec![]),
-            ExprKind::Var("x".to_string()),
-            span,
-        );
-        let b = Expr::new(
-            NodeId(1),
-            Type::Constructed(TypeName::Int(32), vec![]),
-            ExprKind::Var("y".to_string()),
-            span,
-        );
-        assert!(!exprs_equal(&a, &b));
     }
 }

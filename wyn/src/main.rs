@@ -183,7 +183,7 @@ fn compile_file(
         return Err(wyn_core::err_alias!("alias checking failed").into());
     }
 
-    let (flattened, mut backend) = time("flatten", verbose, || {
+    let (flattened, _backend) = time("flatten", verbose, || {
         alias_checked.flatten(&frontend.module_manager)
     })?;
 
@@ -193,9 +193,7 @@ fn compile_file(
     let hoisted = time("hoist_materializations", verbose, || {
         flattened.hoist_materializations()
     });
-    let normalized = time("normalize", verbose, || {
-        hoisted.normalize(&mut backend.node_counter)
-    });
+    let normalized = time("normalize", verbose, || hoisted.normalize());
     let monomorphized = time("monomorphize", verbose, || normalized.monomorphize())?;
     let reachable = time("filter_reachable", verbose, || monomorphized.filter_reachable());
     let folded = time("fold_constants", verbose, || reachable.fold_constants())?;

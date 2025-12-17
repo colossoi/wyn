@@ -396,12 +396,8 @@ def test() -> f32 =
         .and_then(|f| f.type_check(&mm))
         .and_then(|t| t.alias_check())
         .and_then(|a| a.flatten(&mm))
-        .map(|(f, mut backend)| {
-            let h = f.hoist_materializations();
-            let n = h.normalize(&mut backend.node_counter);
-            (n, backend)
-        })
-        .and_then(|(n, _backend): (crate::Normalized, _)| n.monomorphize())
+        .map(|(f, _backend)| f.hoist_materializations().normalize())
+        .and_then(|n| n.monomorphize())
         .map(|m| m.filter_reachable())
         .and_then(|r| r.fold_constants())
         .and_then(|f| f.lift_bindings())

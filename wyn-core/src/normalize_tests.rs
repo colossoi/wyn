@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
     let (module_manager, mut node_counter) = crate::cached_module_manager();
     let parsed = crate::Compiler::parse(input, &mut node_counter)?;
-    let (flattened, mut backend) = parsed
+    let (flattened, _backend) = parsed
         .desugar(&mut node_counter)?
         .resolve(&module_manager)?
         .fold_ast_constants()
@@ -20,7 +20,7 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .flatten(&module_manager)?;
     flattened
         .hoist_materializations()
-        .normalize(&mut backend.node_counter)
+        .normalize()
         .monomorphize()?
         .filter_reachable()
         .fold_constants()?

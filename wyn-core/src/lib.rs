@@ -11,8 +11,7 @@ pub mod name_resolution;
 pub mod parser;
 pub mod pattern;
 pub mod poly_builtins;
-// TODO(mir-refactor): Re-enable after MIR arena refactor
-// pub mod reachability;
+pub mod reachability;
 pub mod scope;
 pub mod types;
 pub mod visitor;
@@ -27,11 +26,11 @@ pub mod lowering_common;
 
 // TODO(mir-refactor): Re-enable after MIR arena refactor
 // pub mod binding_lifter;
-// pub mod constant_folding;
+pub mod constant_folding;
 // pub mod glsl;
-// pub mod materialize_hoisting;
+pub mod materialize_hoisting;
 // pub mod monomorphization;
-// pub mod normalize;
+pub mod normalize;
 pub mod spirv;
 
 #[cfg(test)]
@@ -225,7 +224,7 @@ pub type TypeTable = HashMap<NodeId, TypeScheme<TypeName>>;
 // BackEnd Pipeline (MIR -> output):
 //   let mut backend = BackEnd::new(node_counter);
 //     -> flattened.hoist_materializations()             -> MaterializationsHoisted
-//       -> .normalize(&mut backend.node_counter)        -> Normalized
+//       -> .normalize()                                 -> Normalized
 //       -> .monomorphize()                              -> Monomorphized
 //       -> .filter_reachable()                          -> Reachable
 //       -> .fold_constants()                            -> Folded
@@ -457,9 +456,10 @@ pub struct Flattened {
 }
 
 impl Flattened {
-    /// Stub: skip all passes and go directly to Lifted
+    /// Hoist duplicate materializations from if branches.
     pub fn hoist_materializations(self) -> MaterializationsHoisted {
-        MaterializationsHoisted { mir: self.mir }
+        let mir = materialize_hoisting::hoist_materializations(self.mir);
+        MaterializationsHoisted { mir }
     }
 }
 
@@ -469,9 +469,10 @@ pub struct MaterializationsHoisted {
 }
 
 impl MaterializationsHoisted {
-    /// Stub: skip normalization
-    pub fn normalize(self, _node_counter: &mut NodeCounter) -> Normalized {
-        Normalized { mir: self.mir }
+    /// Normalize MIR to A-normal form.
+    pub fn normalize(self) -> Normalized {
+        let mir = normalize::normalize_program(self.mir);
+        Normalized { mir }
     }
 }
 
@@ -493,9 +494,10 @@ pub struct Monomorphized {
 }
 
 impl Monomorphized {
-    /// Stub: skip reachability filtering
+    /// Filter out unreachable definitions and order them topologically.
     pub fn filter_reachable(self) -> Reachable {
-        Reachable { mir: self.mir }
+        let mir = reachability::filter_reachable(self.mir);
+        Reachable { mir }
     }
 }
 
@@ -505,9 +507,10 @@ pub struct Reachable {
 }
 
 impl Reachable {
-    /// Stub: skip constant folding
+    /// Fold constant expressions in the MIR.
     pub fn fold_constants(self) -> Result<Folded> {
-        Ok(Folded { mir: self.mir })
+        let mir = constant_folding::fold_constants(self.mir)?;
+        Ok(Folded { mir })
     }
 }
 

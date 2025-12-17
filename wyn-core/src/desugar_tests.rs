@@ -21,7 +21,7 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .flatten(&module_manager)?;
     flattened
         .hoist_materializations()
-        .normalize(&mut backend.node_counter)
+        .normalize()
         .monomorphize()?
         .filter_reachable()
         .fold_constants()?

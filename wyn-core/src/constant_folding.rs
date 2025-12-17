@@ -3,130 +3,403 @@
 //! This pass evaluates constant expressions at compile time, reducing
 //! operations on literals to their computed values.
 
-use crate::error::{CompilerError, Result};
-use crate::mir::folder::MirFolder;
-use crate::mir::{Expr, ExprKind, Literal, Program};
+use crate::ast::{NodeId, Span, TypeName};
+use crate::error::Result;
+use crate::mir::{Body, Def, Expr, ExprId, LoopKind, Program};
 use crate::{bail_type_at, err_type_at};
+use polytype::Type;
+use std::collections::HashMap;
 
-/// Constant folder that performs compile-time evaluation of constant expressions.
-pub struct ConstantFolder;
-
-impl Default for ConstantFolder {
-    fn default() -> Self {
-        Self::new()
-    }
+/// Fold constants in a MIR program.
+pub fn fold_constants(program: Program) -> Result<Program> {
+    let mut folder = ConstantFolder::new();
+    folder.fold_program(program)
 }
 
-impl MirFolder for ConstantFolder {
-    type Error = CompilerError;
-    type Ctx = ();
-
-    fn visit_expr_bin_op(
-        &mut self,
-        op: String,
-        lhs: Expr,
-        rhs: Expr,
-        expr: Expr,
-        ctx: &mut Self::Ctx,
-    ) -> std::result::Result<Expr, Self::Error> {
-        // First, recursively fold the operands
-        let folded_lhs = self.visit_expr(lhs, ctx)?;
-        let folded_rhs = self.visit_expr(rhs, ctx)?;
-
-        // Try to fold if both are literals
-        if let Some(folded) = self.try_fold_binop(&op, &folded_lhs, &folded_rhs, &expr, expr.span)? {
-            return Ok(folded);
-        }
-
-        // Can't fold, return with folded children
-        Ok(Expr {
-            kind: ExprKind::BinOp {
-                op,
-                lhs: Box::new(folded_lhs),
-                rhs: Box::new(folded_rhs),
-            },
-            ..expr
-        })
-    }
-
-    fn visit_expr_unary_op(
-        &mut self,
-        op: String,
-        operand: Expr,
-        expr: Expr,
-        ctx: &mut Self::Ctx,
-    ) -> std::result::Result<Expr, Self::Error> {
-        // First, recursively fold the operand
-        let folded_operand = self.visit_expr(operand, ctx)?;
-
-        // Try to fold if operand is a literal
-        if let Some(folded) = self.try_fold_unaryop(&op, &folded_operand, &expr, expr.span)? {
-            return Ok(folded);
-        }
-
-        // Can't fold, return with folded child
-        Ok(Expr {
-            kind: ExprKind::UnaryOp {
-                op,
-                operand: Box::new(folded_operand),
-            },
-            ..expr
-        })
-    }
-
-    fn visit_expr_if(
-        &mut self,
-        cond: Expr,
-        then_branch: Expr,
-        else_branch: Expr,
-        expr: Expr,
-        ctx: &mut Self::Ctx,
-    ) -> std::result::Result<Expr, Self::Error> {
-        // First, recursively fold all branches
-        let folded_cond = self.visit_expr(cond, ctx)?;
-        let folded_then = self.visit_expr(then_branch, ctx)?;
-        let folded_else = self.visit_expr(else_branch, ctx)?;
-
-        // If condition is a constant bool, return the appropriate branch
-        if let ExprKind::Literal(Literal::Bool(b)) = &folded_cond.kind {
-            return Ok(if *b { folded_then } else { folded_else });
-        }
-
-        // Can't fold, return with folded children
-        Ok(Expr {
-            kind: ExprKind::If {
-                cond: Box::new(folded_cond),
-                then_branch: Box::new(folded_then),
-                else_branch: Box::new(folded_else),
-            },
-            ..expr
-        })
-    }
+/// Constant folder that performs compile-time evaluation of constant expressions.
+struct ConstantFolder {
+    /// Mapping from old ExprId to new ExprId in the current body.
+    expr_map: HashMap<ExprId, ExprId>,
 }
 
 impl ConstantFolder {
-    pub fn new() -> Self {
-        ConstantFolder
+    fn new() -> Self {
+        ConstantFolder {
+            expr_map: HashMap::new(),
+        }
     }
 
-    /// Convenience wrapper for tests - folds an expression by cloning it
-    pub fn fold_expr(&mut self, expr: &Expr) -> Result<Expr> {
-        self.visit_expr(expr.clone(), &mut ())
+    fn fold_program(&mut self, program: Program) -> Result<Program> {
+        let mut new_defs = Vec::new();
+
+        for def in program.defs {
+            let new_def = match def {
+                Def::Function {
+                    id,
+                    name,
+                    params,
+                    ret_type,
+                    attributes,
+                    body,
+                    span,
+                } => {
+                    let new_body = self.fold_body(body)?;
+                    Def::Function {
+                        id,
+                        name,
+                        params,
+                        ret_type,
+                        attributes,
+                        body: new_body,
+                        span,
+                    }
+                }
+                Def::Constant {
+                    id,
+                    name,
+                    ty,
+                    attributes,
+                    body,
+                    span,
+                } => {
+                    let new_body = self.fold_body(body)?;
+                    Def::Constant {
+                        id,
+                        name,
+                        ty,
+                        attributes,
+                        body: new_body,
+                        span,
+                    }
+                }
+                Def::EntryPoint {
+                    id,
+                    name,
+                    execution_model,
+                    inputs,
+                    outputs,
+                    body,
+                    span,
+                } => {
+                    let new_body = self.fold_body(body)?;
+                    Def::EntryPoint {
+                        id,
+                        name,
+                        execution_model,
+                        inputs,
+                        outputs,
+                        body: new_body,
+                        span,
+                    }
+                }
+                // Uniforms and storage have no body to fold
+                Def::Uniform { .. } | Def::Storage { .. } => def,
+            };
+            new_defs.push(new_def);
+        }
+
+        Ok(Program {
+            defs: new_defs,
+            lambda_registry: program.lambda_registry,
+        })
+    }
+
+    fn fold_body(&mut self, old_body: Body) -> Result<Body> {
+        self.expr_map.clear();
+
+        let mut new_body = Body::new();
+
+        // Copy locals (they don't change during constant folding)
+        // The LocalIds will be the same since we're just copying
+        for local in &old_body.locals {
+            new_body.alloc_local(local.clone());
+        }
+
+        // Process expressions in order (they're stored in dependency order)
+        for (old_idx, old_expr) in old_body.exprs.iter().enumerate() {
+            let old_id = ExprId(old_idx as u32);
+            let ty = old_body.get_type(old_id).clone();
+            let span = old_body.get_span(old_id);
+            let node_id = old_body.get_node_id(old_id);
+
+            let new_id = self.fold_expr(&mut new_body, old_expr, &ty, span, node_id)?;
+            self.expr_map.insert(old_id, new_id);
+        }
+
+        // Update root to point to the transformed root
+        new_body.root = self.expr_map[&old_body.root];
+
+        Ok(new_body)
+    }
+
+    fn fold_expr(
+        &mut self,
+        body: &mut Body,
+        expr: &Expr,
+        ty: &Type<TypeName>,
+        span: Span,
+        node_id: NodeId,
+    ) -> Result<ExprId> {
+        match expr {
+            // Atoms - just copy them
+            Expr::Local(local_id) => Ok(body.alloc_expr(Expr::Local(*local_id), ty.clone(), span, node_id)),
+            Expr::Global(name) => Ok(body.alloc_expr(Expr::Global(name.clone()), ty.clone(), span, node_id)),
+            Expr::Int(s) => Ok(body.alloc_expr(Expr::Int(s.clone()), ty.clone(), span, node_id)),
+            Expr::Float(s) => Ok(body.alloc_expr(Expr::Float(s.clone()), ty.clone(), span, node_id)),
+            Expr::Bool(b) => Ok(body.alloc_expr(Expr::Bool(*b), ty.clone(), span, node_id)),
+            Expr::Unit => Ok(body.alloc_expr(Expr::Unit, ty.clone(), span, node_id)),
+            Expr::String(s) => Ok(body.alloc_expr(Expr::String(s.clone()), ty.clone(), span, node_id)),
+
+            // Aggregates - map child expressions
+            Expr::Tuple(elems) => {
+                let new_elems: Vec<_> = elems.iter().map(|e| self.expr_map[e]).collect();
+                Ok(body.alloc_expr(Expr::Tuple(new_elems), ty.clone(), span, node_id))
+            }
+            Expr::Array(elems) => {
+                let new_elems: Vec<_> = elems.iter().map(|e| self.expr_map[e]).collect();
+                Ok(body.alloc_expr(Expr::Array(new_elems), ty.clone(), span, node_id))
+            }
+            Expr::Vector(elems) => {
+                let new_elems: Vec<_> = elems.iter().map(|e| self.expr_map[e]).collect();
+                Ok(body.alloc_expr(Expr::Vector(new_elems), ty.clone(), span, node_id))
+            }
+            Expr::Matrix(rows) => {
+                let new_rows: Vec<Vec<_>> = rows
+                    .iter()
+                    .map(|row| row.iter().map(|e| self.expr_map[e]).collect())
+                    .collect();
+                Ok(body.alloc_expr(Expr::Matrix(new_rows), ty.clone(), span, node_id))
+            }
+
+            // Binary operations - try to fold
+            Expr::BinOp { op, lhs, rhs } => {
+                let new_lhs = self.expr_map[lhs];
+                let new_rhs = self.expr_map[rhs];
+
+                // Try to fold if both operands are literals
+                if let Some(folded) = self.try_fold_binop(body, op, new_lhs, new_rhs, ty, span, node_id)? {
+                    return Ok(folded);
+                }
+
+                Ok(body.alloc_expr(
+                    Expr::BinOp {
+                        op: op.clone(),
+                        lhs: new_lhs,
+                        rhs: new_rhs,
+                    },
+                    ty.clone(),
+                    span,
+                    node_id,
+                ))
+            }
+
+            // Unary operations - try to fold
+            Expr::UnaryOp { op, operand } => {
+                let new_operand = self.expr_map[operand];
+
+                // Try to fold if operand is a literal
+                if let Some(folded) = self.try_fold_unaryop(body, op, new_operand, ty, span, node_id)? {
+                    return Ok(folded);
+                }
+
+                Ok(body.alloc_expr(
+                    Expr::UnaryOp {
+                        op: op.clone(),
+                        operand: new_operand,
+                    },
+                    ty.clone(),
+                    span,
+                    node_id,
+                ))
+            }
+
+            // If - try to fold on constant condition
+            Expr::If { cond, then_, else_ } => {
+                let new_cond = self.expr_map[cond];
+                let new_then = self.expr_map[then_];
+                let new_else = self.expr_map[else_];
+
+                // If condition is a constant bool, return the appropriate branch
+                if let Expr::Bool(b) = body.get_expr(new_cond) {
+                    return Ok(if *b { new_then } else { new_else });
+                }
+
+                Ok(body.alloc_expr(
+                    Expr::If {
+                        cond: new_cond,
+                        then_: new_then,
+                        else_: new_else,
+                    },
+                    ty.clone(),
+                    span,
+                    node_id,
+                ))
+            }
+
+            // Let - map subexpressions
+            Expr::Let { local, rhs, body: let_body } => {
+                let new_rhs = self.expr_map[rhs];
+                let new_body = self.expr_map[let_body];
+                Ok(body.alloc_expr(
+                    Expr::Let {
+                        local: *local,
+                        rhs: new_rhs,
+                        body: new_body,
+                    },
+                    ty.clone(),
+                    span,
+                    node_id,
+                ))
+            }
+
+            // Loop - map subexpressions
+            Expr::Loop {
+                loop_var,
+                init,
+                init_bindings,
+                kind,
+                body: loop_body,
+            } => {
+                let new_init = self.expr_map[init];
+                let new_init_bindings: Vec<_> = init_bindings
+                    .iter()
+                    .map(|(local, expr)| (*local, self.expr_map[expr]))
+                    .collect();
+                let new_kind = self.map_loop_kind(kind);
+                let new_loop_body = self.expr_map[loop_body];
+
+                Ok(body.alloc_expr(
+                    Expr::Loop {
+                        loop_var: *loop_var,
+                        init: new_init,
+                        init_bindings: new_init_bindings,
+                        kind: new_kind,
+                        body: new_loop_body,
+                    },
+                    ty.clone(),
+                    span,
+                    node_id,
+                ))
+            }
+
+            // Call - map arguments
+            Expr::Call { func, args } => {
+                let new_args: Vec<_> = args.iter().map(|e| self.expr_map[e]).collect();
+                Ok(body.alloc_expr(
+                    Expr::Call {
+                        func: func.clone(),
+                        args: new_args,
+                    },
+                    ty.clone(),
+                    span,
+                    node_id,
+                ))
+            }
+
+            // Intrinsic - map arguments
+            Expr::Intrinsic { name, args } => {
+                let new_args: Vec<_> = args.iter().map(|e| self.expr_map[e]).collect();
+                Ok(body.alloc_expr(
+                    Expr::Intrinsic {
+                        name: name.clone(),
+                        args: new_args,
+                    },
+                    ty.clone(),
+                    span,
+                    node_id,
+                ))
+            }
+
+            // Closure - map captures
+            Expr::Closure {
+                lambda_name,
+                captures,
+            } => {
+                let new_captures: Vec<_> = captures.iter().map(|e| self.expr_map[e]).collect();
+                Ok(body.alloc_expr(
+                    Expr::Closure {
+                        lambda_name: lambda_name.clone(),
+                        captures: new_captures,
+                    },
+                    ty.clone(),
+                    span,
+                    node_id,
+                ))
+            }
+
+            // Range - map subexpressions
+            Expr::Range { start, step, end, kind } => {
+                let new_start = self.expr_map[start];
+                let new_step = step.map(|s| self.expr_map[&s]);
+                let new_end = self.expr_map[end];
+                Ok(body.alloc_expr(
+                    Expr::Range {
+                        start: new_start,
+                        step: new_step,
+                        end: new_end,
+                        kind: *kind,
+                    },
+                    ty.clone(),
+                    span,
+                    node_id,
+                ))
+            }
+
+            // Materialize - map inner
+            Expr::Materialize(inner) => {
+                let new_inner = self.expr_map[inner];
+                Ok(body.alloc_expr(Expr::Materialize(new_inner), ty.clone(), span, node_id))
+            }
+
+            // Attributed - map inner
+            Expr::Attributed { attributes, expr: inner } => {
+                let new_inner = self.expr_map[inner];
+                Ok(body.alloc_expr(
+                    Expr::Attributed {
+                        attributes: attributes.clone(),
+                        expr: new_inner,
+                    },
+                    ty.clone(),
+                    span,
+                    node_id,
+                ))
+            }
+        }
+    }
+
+    fn map_loop_kind(&self, kind: &LoopKind) -> LoopKind {
+        match kind {
+            LoopKind::For { var, iter } => LoopKind::For {
+                var: *var,
+                iter: self.expr_map[iter],
+            },
+            LoopKind::ForRange { var, bound } => LoopKind::ForRange {
+                var: *var,
+                bound: self.expr_map[bound],
+            },
+            LoopKind::While { cond } => LoopKind::While {
+                cond: self.expr_map[cond],
+            },
+        }
     }
 
     /// Try to fold a binary operation on two literals.
-    /// Uses the original expr's id for the folded result.
     fn try_fold_binop(
         &self,
+        body: &mut Body,
         op: &str,
-        lhs: &Expr,
-        rhs: &Expr,
-        orig_expr: &Expr,
-        span: crate::ast::Span,
-    ) -> Result<Option<Expr>> {
-        match (&lhs.kind, &rhs.kind) {
+        lhs: ExprId,
+        rhs: ExprId,
+        ty: &Type<TypeName>,
+        span: Span,
+        node_id: NodeId,
+    ) -> Result<Option<ExprId>> {
+        let lhs_expr = body.get_expr(lhs);
+        let rhs_expr = body.get_expr(rhs);
+
+        match (lhs_expr, rhs_expr) {
             // Float operations
-            (ExprKind::Literal(Literal::Float(l)), ExprKind::Literal(Literal::Float(r))) => {
+            (Expr::Float(l), Expr::Float(r)) => {
                 let l: f64 = l.parse().map_err(|_| err_type_at!(span, "Invalid float literal"))?;
                 let r: f64 = r.parse().map_err(|_| err_type_at!(span, "Invalid float literal"))?;
 
@@ -144,11 +417,12 @@ impl ConstantFolder {
                 };
 
                 if let Some(val) = result {
-                    return Ok(Some(Expr::new(
-                        orig_expr.id,
-                        lhs.ty.clone(),
-                        ExprKind::Literal(Literal::Float(val.to_string())),
+                    let lhs_ty = body.get_type(lhs).clone();
+                    return Ok(Some(body.alloc_expr(
+                        Expr::Float(val.to_string()),
+                        lhs_ty,
                         span,
+                        node_id,
                     )));
                 }
 
@@ -164,17 +438,12 @@ impl ConstantFolder {
                 };
 
                 if let Some(val) = bool_result {
-                    return Ok(Some(Expr::new(
-                        orig_expr.id,
-                        orig_expr.ty.clone(),
-                        ExprKind::Literal(Literal::Bool(val)),
-                        span,
-                    )));
+                    return Ok(Some(body.alloc_expr(Expr::Bool(val), ty.clone(), span, node_id)));
                 }
             }
 
             // Integer operations
-            (ExprKind::Literal(Literal::Int(l)), ExprKind::Literal(Literal::Int(r))) => {
+            (Expr::Int(l), Expr::Int(r)) => {
                 let l: i64 = l.parse().map_err(|_| err_type_at!(span, "Invalid integer literal"))?;
                 let r: i64 = r.parse().map_err(|_| err_type_at!(span, "Invalid integer literal"))?;
 
@@ -198,11 +467,12 @@ impl ConstantFolder {
                 };
 
                 if let Some(val) = result {
-                    return Ok(Some(Expr::new(
-                        orig_expr.id,
-                        lhs.ty.clone(),
-                        ExprKind::Literal(Literal::Int(val.to_string())),
+                    let lhs_ty = body.get_type(lhs).clone();
+                    return Ok(Some(body.alloc_expr(
+                        Expr::Int(val.to_string()),
+                        lhs_ty,
                         span,
+                        node_id,
                     )));
                 }
 
@@ -218,17 +488,12 @@ impl ConstantFolder {
                 };
 
                 if let Some(val) = bool_result {
-                    return Ok(Some(Expr::new(
-                        orig_expr.id,
-                        orig_expr.ty.clone(),
-                        ExprKind::Literal(Literal::Bool(val)),
-                        span,
-                    )));
+                    return Ok(Some(body.alloc_expr(Expr::Bool(val), ty.clone(), span, node_id)));
                 }
             }
 
             // Boolean operations
-            (ExprKind::Literal(Literal::Bool(l)), ExprKind::Literal(Literal::Bool(r))) => {
+            (Expr::Bool(l), Expr::Bool(r)) => {
                 let result = match op {
                     "&&" => Some(*l && *r),
                     "||" => Some(*l || *r),
@@ -238,12 +503,7 @@ impl ConstantFolder {
                 };
 
                 if let Some(val) = result {
-                    return Ok(Some(Expr::new(
-                        orig_expr.id,
-                        orig_expr.ty.clone(),
-                        ExprKind::Literal(Literal::Bool(val)),
-                        span,
-                    )));
+                    return Ok(Some(body.alloc_expr(Expr::Bool(val), ty.clone(), span, node_id)));
                 }
             }
 
@@ -254,52 +514,46 @@ impl ConstantFolder {
     }
 
     /// Try to fold a unary operation on a literal.
-    /// Uses the original expr's id for the folded result.
     fn try_fold_unaryop(
         &self,
+        body: &mut Body,
         op: &str,
-        operand: &Expr,
-        orig_expr: &Expr,
-        span: crate::ast::Span,
-    ) -> Result<Option<Expr>> {
-        match (op, &operand.kind) {
+        operand: ExprId,
+        ty: &Type<TypeName>,
+        span: Span,
+        node_id: NodeId,
+    ) -> Result<Option<ExprId>> {
+        let operand_expr = body.get_expr(operand);
+
+        match (op, operand_expr) {
             // Negation of float
-            ("-", ExprKind::Literal(Literal::Float(val))) => {
+            ("-", Expr::Float(val)) => {
                 let v: f64 = val.parse().map_err(|_| err_type_at!(span, "Invalid float literal"))?;
-                Ok(Some(Expr::new(
-                    orig_expr.id,
-                    orig_expr.ty.clone(),
-                    ExprKind::Literal(Literal::Float((-v).to_string())),
+                Ok(Some(body.alloc_expr(
+                    Expr::Float((-v).to_string()),
+                    ty.clone(),
                     span,
+                    node_id,
                 )))
             }
 
             // Negation of integer
-            ("-", ExprKind::Literal(Literal::Int(val))) => {
+            ("-", Expr::Int(val)) => {
                 let v: i64 = val.parse().map_err(|_| err_type_at!(span, "Invalid integer literal"))?;
-                Ok(Some(Expr::new(
-                    orig_expr.id,
-                    orig_expr.ty.clone(),
-                    ExprKind::Literal(Literal::Int((-v).to_string())),
+                Ok(Some(body.alloc_expr(
+                    Expr::Int((-v).to_string()),
+                    ty.clone(),
                     span,
+                    node_id,
                 )))
             }
 
             // Boolean not
-            ("!", ExprKind::Literal(Literal::Bool(val))) => Ok(Some(Expr::new(
-                orig_expr.id,
-                orig_expr.ty.clone(),
-                ExprKind::Literal(Literal::Bool(!val)),
-                span,
-            ))),
+            ("!", Expr::Bool(val)) => {
+                Ok(Some(body.alloc_expr(Expr::Bool(!val), ty.clone(), span, node_id)))
+            }
 
             _ => Ok(None),
         }
     }
-}
-
-/// Fold constants in a MIR program (convenience function).
-pub fn fold_constants(program: Program) -> Result<Program> {
-    let mut folder = ConstantFolder::new();
-    folder.visit_program(program, &mut ())
 }

@@ -331,6 +331,75 @@ impl Body {
     pub fn iter_locals(&self) -> impl Iterator<Item = &LocalDecl> {
         self.locals.iter()
     }
+
+    // =========================================================================
+    // Hoist Helpers
+    // =========================================================================
+
+    /// Replace an expression with a Local reference, returning the original expression.
+    ///
+    /// This is a low-level helper for hoisting transformations. It:
+    /// 1. Creates a new local variable
+    /// 2. Replaces the expression at `expr_id` with `Expr::Local(local_id)`
+    /// 3. Returns the local ID and the original expression
+    ///
+    /// The caller is responsible for creating a Let binding with the returned expression.
+    pub fn extract_to_local(&mut self, expr_id: ExprId, name: Option<String>) -> (LocalId, Expr) {
+        let ty = self.get_type(expr_id).clone();
+        let span = self.get_span(expr_id);
+
+        // Allocate local ID first so we can use it in the name
+        let local_id = self.local_ids.next();
+        let name = name.unwrap_or_else(|| format!("_w_hoist_{}", local_id.0));
+
+        self.locals.push(LocalDecl {
+            name,
+            span,
+            ty,
+            kind: LocalKind::Let,
+        });
+
+        let original = std::mem::replace(self.get_expr_mut(expr_id), Expr::Local(local_id));
+
+        (local_id, original)
+    }
+
+    /// Hoist an expression before a target expression by wrapping target in a Let binding.
+    ///
+    /// This replaces `to_hoist` with a Local reference and wraps `target` in a Let:
+    /// ```text
+    /// Before: ... target containing to_hoist ...
+    /// After:  let _hoist_N = <original to_hoist> in ... target containing Local(_hoist_N) ...
+    /// ```
+    ///
+    /// Returns the LocalId of the new binding.
+    pub fn hoist_before(&mut self, to_hoist: ExprId, target: ExprId, name: Option<String>) -> LocalId {
+        let to_hoist_ty = self.get_type(to_hoist).clone();
+        let to_hoist_span = self.get_span(to_hoist);
+        let to_hoist_node_id = self.get_node_id(to_hoist);
+
+        // Extract the expression to hoist, replacing it with a Local reference
+        let (local_id, original_expr) = self.extract_to_local(to_hoist, name);
+
+        // Allocate the original expression as rhs for the Let
+        let rhs_id = self.alloc_expr(original_expr, to_hoist_ty, to_hoist_span, to_hoist_node_id);
+
+        // Clone the target expression and allocate as body of the Let
+        let target_ty = self.get_type(target).clone();
+        let target_span = self.get_span(target);
+        let target_node_id = self.get_node_id(target);
+        let target_expr = self.get_expr(target).clone();
+        let body_id = self.alloc_expr(target_expr, target_ty.clone(), target_span, target_node_id);
+
+        // Replace target with the Let expression
+        *self.get_expr_mut(target) = Expr::Let {
+            local: local_id,
+            rhs: rhs_id,
+            body: body_id,
+        };
+
+        local_id
+    }
 }
 
 impl Default for Body {
