@@ -20,22 +20,26 @@
 //!     y
 //! ```
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use crate::ast::Span;
-use crate::error::Result;
-use crate::mir::{Def, Expr, ExprKind, Literal, LoopKind, Program};
+use crate::ast::{NodeId, Span, TypeName};
+use crate::mir::{Body, Def, Expr, ExprId, LocalId, LoopKind, Program};
+use polytype::Type;
 
 /// A single binding in linear form, extracted from nested Let chains.
 struct LinearBinding {
-    /// The NodeId of the original Let expression
-    id: crate::ast::NodeId,
-    name: String,
-    binding_id: u64,
-    value: Expr,
-    /// Set of free variables in the value expression.
-    free_vars: HashSet<String>,
+    /// The local variable being bound.
+    local: LocalId,
+    /// The right-hand side expression (ExprId in new body).
+    rhs: ExprId,
+    /// Set of local IDs that the value depends on.
+    free_locals: HashSet<LocalId>,
+    /// Type of the binding.
+    ty: Type<TypeName>,
+    /// Span for the binding.
     span: Span,
+    /// NodeId for the binding.
+    node_id: NodeId,
 }
 
 /// Linearized representation of a Let chain.
@@ -43,29 +47,39 @@ struct LinearizedBody {
     /// Bindings in topological order (dependencies before uses).
     bindings: Vec<LinearBinding>,
     /// The final result expression (non-Let).
-    result: Expr,
+    result: ExprId,
+}
+
+/// Normalize a MIR program, hoisting loop-invariant bindings.
+pub fn lift_bindings(program: Program) -> Program {
+    let mut lifter = BindingLifter::new();
+    lifter.lift_program(program)
 }
 
 /// Binding lifter pass for hoisting loop-invariant bindings.
-pub struct BindingLifter {}
+struct BindingLifter {
+    /// Mapping from old ExprId to new ExprId in the current body.
+    expr_map: HashMap<ExprId, ExprId>,
+}
 
 impl BindingLifter {
-    pub fn new() -> Self {
-        BindingLifter {}
+    fn new() -> Self {
+        BindingLifter {
+            expr_map: HashMap::new(),
+        }
     }
 
     /// Lift bindings in all definitions in a program.
-    pub fn lift_program(&mut self, program: Program) -> Result<Program> {
-        let defs = program.defs.into_iter().map(|def| self.lift_def(def)).collect::<Result<Vec<_>>>()?;
-
-        Ok(Program {
+    fn lift_program(&mut self, program: Program) -> Program {
+        let defs = program.defs.into_iter().map(|d| self.lift_def(d)).collect();
+        Program {
             defs,
             lambda_registry: program.lambda_registry,
-        })
+        }
     }
 
     /// Lift bindings in a single definition.
-    fn lift_def(&mut self, def: Def) -> Result<Def> {
+    fn lift_def(&mut self, def: Def) -> Def {
         match def {
             Def::Function {
                 id,
@@ -76,37 +90,20 @@ impl BindingLifter {
                 body,
                 span,
             } => {
-                let body = self.lift_expr(body)?;
-                Ok(Def::Function {
+                let new_body = self.lift_body(body);
+                Def::Function {
                     id,
                     name,
                     params,
                     ret_type,
                     attributes,
-                    body,
+                    body: new_body,
                     span,
-                })
+                }
             }
-            Def::Constant {
-                id,
-                name,
-                ty,
-                attributes,
-                body,
-                span,
-            } => {
-                let body = self.lift_expr(body)?;
-                Ok(Def::Constant {
-                    id,
-                    name,
-                    ty,
-                    attributes,
-                    body,
-                    span,
-                })
-            }
-            Def::Uniform { .. } => Ok(def),
-            Def::Storage { .. } => Ok(def),
+            Def::Constant { .. } => def,
+            Def::Uniform { .. } => def,
+            Def::Storage { .. } => def,
             Def::EntryPoint {
                 id,
                 name,
@@ -116,368 +113,396 @@ impl BindingLifter {
                 body,
                 span,
             } => {
-                let body = self.lift_expr(body)?;
-                Ok(Def::EntryPoint {
+                let new_body = self.lift_body(body);
+                Def::EntryPoint {
                     id,
                     name,
                     execution_model,
                     inputs,
                     outputs,
-                    body,
+                    body: new_body,
                     span,
-                })
+                }
             }
         }
     }
 
-    /// Main recursive driver: lift bindings in an expression.
-    pub fn lift_expr(&mut self, expr: Expr) -> Result<Expr> {
-        let id = expr.id;
-        let ty = expr.ty.clone();
-        let span = expr.span;
+    /// Lift bindings in a function body.
+    fn lift_body(&mut self, old_body: Body) -> Body {
+        self.expr_map.clear();
 
-        match expr.kind {
-            ExprKind::Loop { .. } => self.lift_loop(expr),
+        let mut new_body = Body::new();
 
-            ExprKind::Let {
-                name,
-                binding_id,
-                value,
-                body,
-            } => {
-                // Recursively lift in both value and body
-                let value = self.lift_expr(*value)?;
-                let body = self.lift_expr(*body)?;
-                Ok(Expr::new(
-                    id,
-                    ty,
-                    ExprKind::Let {
-                        name,
-                        binding_id,
-                        value: Box::new(value),
-                        body: Box::new(body),
-                    },
-                    span,
-                ))
-            }
-
-            ExprKind::If {
-                cond,
-                then_branch,
-                else_branch,
-            } => {
-                let cond = self.lift_expr(*cond)?;
-                let then_branch = self.lift_expr(*then_branch)?;
-                let else_branch = self.lift_expr(*else_branch)?;
-                Ok(Expr::new(
-                    id,
-                    ty,
-                    ExprKind::If {
-                        cond: Box::new(cond),
-                        then_branch: Box::new(then_branch),
-                        else_branch: Box::new(else_branch),
-                    },
-                    span,
-                ))
-            }
-
-            ExprKind::BinOp { op, lhs, rhs } => {
-                let lhs = self.lift_expr(*lhs)?;
-                let rhs = self.lift_expr(*rhs)?;
-                Ok(Expr::new(
-                    id,
-                    ty,
-                    ExprKind::BinOp {
-                        op,
-                        lhs: Box::new(lhs),
-                        rhs: Box::new(rhs),
-                    },
-                    span,
-                ))
-            }
-
-            ExprKind::UnaryOp { op, operand } => {
-                let operand = self.lift_expr(*operand)?;
-                Ok(Expr::new(
-                    id,
-                    ty,
-                    ExprKind::UnaryOp {
-                        op,
-                        operand: Box::new(operand),
-                    },
-                    span,
-                ))
-            }
-
-            ExprKind::Call { func, args } => {
-                let args = args.into_iter().map(|a| self.lift_expr(a)).collect::<Result<Vec<_>>>()?;
-                Ok(Expr::new(id, ty, ExprKind::Call { func, args }, span))
-            }
-
-            ExprKind::Intrinsic { name, args } => {
-                let args = args.into_iter().map(|a| self.lift_expr(a)).collect::<Result<Vec<_>>>()?;
-                Ok(Expr::new(id, ty, ExprKind::Intrinsic { name, args }, span))
-            }
-
-            ExprKind::Attributed {
-                attributes,
-                expr: inner,
-            } => {
-                let inner = self.lift_expr(*inner)?;
-                Ok(Expr::new(
-                    id,
-                    ty,
-                    ExprKind::Attributed {
-                        attributes,
-                        expr: Box::new(inner),
-                    },
-                    span,
-                ))
-            }
-
-            ExprKind::Materialize(inner) => {
-                let inner = self.lift_expr(*inner)?;
-                Ok(Expr::new(id, ty, ExprKind::Materialize(Box::new(inner)), span))
-            }
-
-            ExprKind::Literal(lit) => {
-                let lit = self.lift_literal(lit)?;
-                Ok(Expr::new(id, ty, ExprKind::Literal(lit), span))
-            }
-
-            ExprKind::Closure {
-                lambda_name,
-                captures,
-            } => {
-                let captures =
-                    captures.into_iter().map(|c| self.lift_expr(c)).collect::<Result<Vec<_>>>()?;
-                Ok(Expr::new(
-                    id,
-                    ty,
-                    ExprKind::Closure {
-                        lambda_name,
-                        captures,
-                    },
-                    span,
-                ))
-            }
-
-            ExprKind::Range {
-                start,
-                step,
-                end,
-                kind,
-            } => {
-                let start = self.lift_expr(*start)?;
-                let step = step.map(|s| self.lift_expr(*s)).transpose()?;
-                let end = self.lift_expr(*end)?;
-                Ok(Expr::new(
-                    id,
-                    ty,
-                    ExprKind::Range {
-                        start: Box::new(start),
-                        step: step.map(Box::new),
-                        end: Box::new(end),
-                        kind,
-                    },
-                    span,
-                ))
-            }
-
-            // Leaf nodes - no children to process
-            ExprKind::Var(_) | ExprKind::Unit => Ok(Expr::new(id, ty, expr.kind, span)),
+        // Copy locals (they don't change during lifting, same locals are used)
+        for local in &old_body.locals {
+            new_body.alloc_local(local.clone());
         }
+
+        // Process expressions in order (they're stored in dependency order)
+        for (old_idx, old_expr) in old_body.exprs.iter().enumerate() {
+            let old_id = ExprId(old_idx as u32);
+            let ty = old_body.get_type(old_id).clone();
+            let span = old_body.get_span(old_id);
+            let node_id = old_body.get_node_id(old_id);
+
+            let new_id = self.lift_expr(&mut new_body, &old_body, old_expr, &ty, span, node_id);
+            self.expr_map.insert(old_id, new_id);
+        }
+
+        // Update root to point to the transformed root
+        new_body.root = self.expr_map[&old_body.root];
+
+        new_body
     }
 
-    /// Lift bindings in literals (tuples, arrays, etc. may contain expressions).
-    fn lift_literal(&mut self, lit: Literal) -> Result<Literal> {
-        match lit {
-            Literal::Tuple(elems) => {
-                let elems = elems.into_iter().map(|e| self.lift_expr(e)).collect::<Result<Vec<_>>>()?;
-                Ok(Literal::Tuple(elems))
+    /// Lift bindings in an expression.
+    fn lift_expr(
+        &mut self,
+        new_body: &mut Body,
+        old_body: &Body,
+        expr: &Expr,
+        ty: &Type<TypeName>,
+        span: Span,
+        node_id: NodeId,
+    ) -> ExprId {
+        match expr {
+            // Leaf nodes - just copy
+            Expr::Local(local_id) => new_body.alloc_expr(Expr::Local(*local_id), ty.clone(), span, node_id),
+            Expr::Global(name) => new_body.alloc_expr(Expr::Global(name.clone()), ty.clone(), span, node_id),
+            Expr::Int(s) => new_body.alloc_expr(Expr::Int(s.clone()), ty.clone(), span, node_id),
+            Expr::Float(s) => new_body.alloc_expr(Expr::Float(s.clone()), ty.clone(), span, node_id),
+            Expr::Bool(b) => new_body.alloc_expr(Expr::Bool(*b), ty.clone(), span, node_id),
+            Expr::Unit => new_body.alloc_expr(Expr::Unit, ty.clone(), span, node_id),
+            Expr::String(s) => new_body.alloc_expr(Expr::String(s.clone()), ty.clone(), span, node_id),
+
+            // Loop - this is where hoisting happens
+            Expr::Loop { .. } => self.lift_loop(new_body, old_body, expr, ty, span, node_id),
+
+            // Let - map subexpressions
+            Expr::Let { local, rhs, body: let_body } => {
+                let new_rhs = self.expr_map[rhs];
+                let new_let_body = self.expr_map[let_body];
+                new_body.alloc_expr(
+                    Expr::Let {
+                        local: *local,
+                        rhs: new_rhs,
+                        body: new_let_body,
+                    },
+                    ty.clone(),
+                    span,
+                    node_id,
+                )
             }
-            Literal::Array(elems) => {
-                let elems = elems.into_iter().map(|e| self.lift_expr(e)).collect::<Result<Vec<_>>>()?;
-                Ok(Literal::Array(elems))
+
+            // If - map subexpressions
+            Expr::If { cond, then_, else_ } => {
+                let new_cond = self.expr_map[cond];
+                let new_then = self.expr_map[then_];
+                let new_else = self.expr_map[else_];
+                new_body.alloc_expr(
+                    Expr::If {
+                        cond: new_cond,
+                        then_: new_then,
+                        else_: new_else,
+                    },
+                    ty.clone(),
+                    span,
+                    node_id,
+                )
             }
-            Literal::Vector(elems) => {
-                let elems = elems.into_iter().map(|e| self.lift_expr(e)).collect::<Result<Vec<_>>>()?;
-                Ok(Literal::Vector(elems))
+
+            // BinOp - map subexpressions
+            Expr::BinOp { op, lhs, rhs } => {
+                let new_lhs = self.expr_map[lhs];
+                let new_rhs = self.expr_map[rhs];
+                new_body.alloc_expr(
+                    Expr::BinOp {
+                        op: op.clone(),
+                        lhs: new_lhs,
+                        rhs: new_rhs,
+                    },
+                    ty.clone(),
+                    span,
+                    node_id,
+                )
             }
-            Literal::Matrix(rows) => {
-                let rows = rows
-                    .into_iter()
-                    .map(|row| row.into_iter().map(|e| self.lift_expr(e)).collect::<Result<Vec<_>>>())
-                    .collect::<Result<Vec<_>>>()?;
-                Ok(Literal::Matrix(rows))
+
+            // UnaryOp - map subexpressions
+            Expr::UnaryOp { op, operand } => {
+                let new_operand = self.expr_map[operand];
+                new_body.alloc_expr(
+                    Expr::UnaryOp {
+                        op: op.clone(),
+                        operand: new_operand,
+                    },
+                    ty.clone(),
+                    span,
+                    node_id,
+                )
             }
-            // Scalar literals have no sub-expressions
-            Literal::Int(_) | Literal::Float(_) | Literal::Bool(_) | Literal::String(_) => Ok(lit),
+
+            // Call - map subexpressions
+            Expr::Call { func, args } => {
+                let new_args: Vec<_> = args.iter().map(|a| self.expr_map[a]).collect();
+                new_body.alloc_expr(
+                    Expr::Call {
+                        func: func.clone(),
+                        args: new_args,
+                    },
+                    ty.clone(),
+                    span,
+                    node_id,
+                )
+            }
+
+            // Intrinsic - map subexpressions
+            Expr::Intrinsic { name, args } => {
+                let new_args: Vec<_> = args.iter().map(|a| self.expr_map[a]).collect();
+                new_body.alloc_expr(
+                    Expr::Intrinsic {
+                        name: name.clone(),
+                        args: new_args,
+                    },
+                    ty.clone(),
+                    span,
+                    node_id,
+                )
+            }
+
+            // Tuple - map subexpressions
+            Expr::Tuple(elems) => {
+                let new_elems: Vec<_> = elems.iter().map(|e| self.expr_map[e]).collect();
+                new_body.alloc_expr(Expr::Tuple(new_elems), ty.clone(), span, node_id)
+            }
+
+            // Array - map subexpressions
+            Expr::Array(elems) => {
+                let new_elems: Vec<_> = elems.iter().map(|e| self.expr_map[e]).collect();
+                new_body.alloc_expr(Expr::Array(new_elems), ty.clone(), span, node_id)
+            }
+
+            // Vector - map subexpressions
+            Expr::Vector(elems) => {
+                let new_elems: Vec<_> = elems.iter().map(|e| self.expr_map[e]).collect();
+                new_body.alloc_expr(Expr::Vector(new_elems), ty.clone(), span, node_id)
+            }
+
+            // Matrix - map subexpressions
+            Expr::Matrix(rows) => {
+                let new_rows: Vec<Vec<_>> = rows
+                    .iter()
+                    .map(|row| row.iter().map(|e| self.expr_map[e]).collect())
+                    .collect();
+                new_body.alloc_expr(Expr::Matrix(new_rows), ty.clone(), span, node_id)
+            }
+
+            // Closure - map captures
+            Expr::Closure { lambda_name, captures } => {
+                let new_captures: Vec<_> = captures.iter().map(|c| self.expr_map[c]).collect();
+                new_body.alloc_expr(
+                    Expr::Closure {
+                        lambda_name: lambda_name.clone(),
+                        captures: new_captures,
+                    },
+                    ty.clone(),
+                    span,
+                    node_id,
+                )
+            }
+
+            // Range - map subexpressions
+            Expr::Range { start, step, end, kind } => {
+                let new_start = self.expr_map[start];
+                let new_step = step.map(|s| self.expr_map[&s]);
+                let new_end = self.expr_map[end];
+                new_body.alloc_expr(
+                    Expr::Range {
+                        start: new_start,
+                        step: new_step,
+                        end: new_end,
+                        kind: *kind,
+                    },
+                    ty.clone(),
+                    span,
+                    node_id,
+                )
+            }
+
+            // Materialize - map inner
+            Expr::Materialize(inner) => {
+                let new_inner = self.expr_map[inner];
+                new_body.alloc_expr(Expr::Materialize(new_inner), ty.clone(), span, node_id)
+            }
+
+            // Attributed - map inner
+            Expr::Attributed { attributes, expr: inner } => {
+                let new_inner = self.expr_map[inner];
+                new_body.alloc_expr(
+                    Expr::Attributed {
+                        attributes: attributes.clone(),
+                        expr: new_inner,
+                    },
+                    ty.clone(),
+                    span,
+                    node_id,
+                )
+            }
         }
     }
 
     /// Lift loop-invariant bindings out of a loop.
-    fn lift_loop(&mut self, loop_expr: Expr) -> Result<Expr> {
-        let ExprKind::Loop {
+    fn lift_loop(
+        &mut self,
+        new_body: &mut Body,
+        _old_body: &Body,
+        expr: &Expr,
+        ty: &Type<TypeName>,
+        span: Span,
+        node_id: NodeId,
+    ) -> ExprId {
+        let Expr::Loop {
             loop_var,
             init,
             init_bindings,
             kind,
-            body,
-        } = loop_expr.kind
+            body: loop_body,
+        } = expr
         else {
             unreachable!("lift_loop called on non-loop expression");
         };
 
-        let id = loop_expr.id;
-        let ty = loop_expr.ty;
-        let span = loop_expr.span;
+        // 1. Map init expression
+        let new_init = self.expr_map[init];
 
-        // 1. Recursively lift in init expression
-        let init = self.lift_expr(*init)?;
+        // 2. Map init_bindings
+        let new_init_bindings: Vec<_> = init_bindings
+            .iter()
+            .map(|(local, expr)| (*local, self.expr_map[expr]))
+            .collect();
 
-        // 2. Recursively lift in init_bindings expressions
-        let init_bindings = init_bindings
-            .into_iter()
-            .map(|(name, expr)| Ok((name, self.lift_expr(expr)?)))
-            .collect::<Result<Vec<_>>>()?;
+        // 3. Map loop kind
+        let new_kind = self.map_loop_kind(kind);
 
-        // 3. Recursively lift in loop kind (iter expression or condition)
-        let kind = self.lift_loop_kind(kind)?;
+        // 4. Map loop body
+        let new_loop_body = self.expr_map[loop_body];
 
-        // 4. Recursively lift nested loops in body first
-        let body = self.lift_expr(*body)?;
-
-        // 5. Bubble up Lets from inside pure contexts (arrays, function args, etc.)
-        //    so they become visible to linearize_body
-        // let body = bubble_up_lets(body);  // TEMPORARILY DISABLED
-
-        // 6. Linearize the body
-        let LinearizedBody { bindings, result } = linearize_body(body);
+        // 5. Linearize the body to extract Let chain
+        let LinearizedBody { bindings, result } = linearize_body(new_body, new_loop_body);
 
         // If no bindings, nothing to hoist
         if bindings.is_empty() {
-            return Ok(Expr::new(
-                id,
-                ty,
-                ExprKind::Loop {
-                    loop_var,
-                    init: Box::new(init),
-                    init_bindings,
-                    kind,
-                    body: Box::new(result),
+            return new_body.alloc_expr(
+                Expr::Loop {
+                    loop_var: *loop_var,
+                    init: new_init,
+                    init_bindings: new_init_bindings,
+                    kind: new_kind,
+                    body: result,
                 },
+                ty.clone(),
                 span,
-            ));
+                node_id,
+            );
         }
 
-        // 6. Compute loop-scoped variables
-        let mut loop_vars: HashSet<String> = HashSet::new();
-        loop_vars.insert(loop_var.clone());
-        for (name, _) in &init_bindings {
-            loop_vars.insert(name.clone());
+        // 6. Compute loop-scoped variables (LocalIds)
+        let mut loop_locals: HashSet<LocalId> = HashSet::new();
+        loop_locals.insert(*loop_var);
+        for (local, _) in &new_init_bindings {
+            loop_locals.insert(*local);
         }
-        match &kind {
+        match &new_kind {
             LoopKind::For { var, .. } | LoopKind::ForRange { var, .. } => {
-                loop_vars.insert(var.clone());
+                loop_locals.insert(*var);
             }
             LoopKind::While { .. } => {}
         }
 
         // 7. Partition bindings into hoistable and remaining
-        let (hoistable, remaining) = partition_bindings(bindings, &loop_vars);
+        let (hoistable, remaining) = partition_bindings(bindings, &loop_locals);
 
         // 8. Rebuild the loop body with remaining bindings
-        let new_body = rebuild_nested_lets(remaining, result);
+        let new_loop_body_inner = rebuild_nested_lets(new_body, remaining, result);
 
         // 9. Create the new loop
-        let new_loop = Expr::new(
-            id,
-            ty,
-            ExprKind::Loop {
-                loop_var,
-                init: Box::new(init),
-                init_bindings,
-                kind,
-                body: Box::new(new_body),
+        let new_loop = new_body.alloc_expr(
+            Expr::Loop {
+                loop_var: *loop_var,
+                init: new_init,
+                init_bindings: new_init_bindings,
+                kind: new_kind,
+                body: new_loop_body_inner,
             },
+            ty.clone(),
             span,
+            node_id,
         );
 
         // 10. Wrap hoisted bindings around the loop
-        Ok(rebuild_nested_lets(hoistable, new_loop))
+        rebuild_nested_lets(new_body, hoistable, new_loop)
     }
 
-    /// Lift bindings in loop kind expressions.
-    fn lift_loop_kind(&mut self, kind: LoopKind) -> Result<LoopKind> {
+    /// Map a loop kind to new body.
+    fn map_loop_kind(&self, kind: &LoopKind) -> LoopKind {
         match kind {
-            LoopKind::For { var, iter } => {
-                let iter = self.lift_expr(*iter)?;
-                Ok(LoopKind::For {
-                    var,
-                    iter: Box::new(iter),
-                })
-            }
-            LoopKind::ForRange { var, bound } => {
-                let bound = self.lift_expr(*bound)?;
-                Ok(LoopKind::ForRange {
-                    var,
-                    bound: Box::new(bound),
-                })
-            }
-            LoopKind::While { cond } => {
-                let cond = self.lift_expr(*cond)?;
-                Ok(LoopKind::While { cond: Box::new(cond) })
-            }
+            LoopKind::For { var, iter } => LoopKind::For {
+                var: *var,
+                iter: self.expr_map[iter],
+            },
+            LoopKind::ForRange { var, bound } => LoopKind::ForRange {
+                var: *var,
+                bound: self.expr_map[bound],
+            },
+            LoopKind::While { cond } => LoopKind::While {
+                cond: self.expr_map[cond],
+            },
         }
     }
 }
 
 /// Linearize a nested Let chain into a flat list of bindings.
-fn linearize_body(mut expr: Expr) -> LinearizedBody {
+fn linearize_body(body: &Body, mut expr_id: ExprId) -> LinearizedBody {
     let mut bindings = Vec::new();
 
-    while let ExprKind::Let {
-        name,
-        binding_id,
-        value,
-        body,
-    } = expr.kind
-    {
-        let free_vars = collect_free_vars(&value);
+    while let Expr::Let { local, rhs, body: let_body } = body.get_expr(expr_id) {
+        let free_locals = collect_free_locals(body, *rhs);
+        let ty = body.get_type(expr_id).clone();
+        let span = body.get_span(expr_id);
+        let node_id = body.get_node_id(expr_id);
+
         bindings.push(LinearBinding {
-            id: expr.id,
-            name,
-            binding_id,
-            value: *value,
-            free_vars,
-            span: expr.span,
+            local: *local,
+            rhs: *rhs,
+            free_locals,
+            ty,
+            span,
+            node_id,
         });
-        expr = *body;
+        expr_id = *let_body;
     }
 
     LinearizedBody {
         bindings,
-        result: expr,
+        result: expr_id,
     }
 }
 
 /// Partition bindings into hoistable (loop-invariant) and remaining (loop-dependent).
 fn partition_bindings(
     bindings: Vec<LinearBinding>,
-    loop_vars: &HashSet<String>,
+    loop_locals: &HashSet<LocalId>,
 ) -> (Vec<LinearBinding>, Vec<LinearBinding>) {
-    let mut tainted = loop_vars.clone();
+    let mut tainted = loop_locals.clone();
     let mut hoistable = Vec::new();
     let mut remaining = Vec::new();
 
     for binding in bindings {
-        if binding.free_vars.is_disjoint(&tainted) {
+        if binding.free_locals.is_disjoint(&tainted) {
             // Can hoist - no loop dependencies
             hoistable.push(binding);
         } else {
-            // Cannot hoist - mark this name as tainted for subsequent bindings
-            tainted.insert(binding.name.clone());
+            // Cannot hoist - mark this local as tainted for subsequent bindings
+            tainted.insert(binding.local);
             remaining.push(binding);
         }
     }
@@ -486,153 +511,141 @@ fn partition_bindings(
 }
 
 /// Rebuild a nested Let chain from linear bindings.
-fn rebuild_nested_lets(bindings: Vec<LinearBinding>, result: Expr) -> Expr {
-    bindings.into_iter().rev().fold(result, |body, binding| {
-        Expr::new(
-            binding.id,
-            body.ty.clone(),
-            ExprKind::Let {
-                name: binding.name,
-                binding_id: binding.binding_id,
-                value: Box::new(binding.value),
-                body: Box::new(body),
+fn rebuild_nested_lets(body: &mut Body, bindings: Vec<LinearBinding>, result: ExprId) -> ExprId {
+    bindings.into_iter().rev().fold(result, |body_expr, binding| {
+        body.alloc_expr(
+            Expr::Let {
+                local: binding.local,
+                rhs: binding.rhs,
+                body: body_expr,
             },
+            binding.ty,
             binding.span,
+            binding.node_id,
         )
     })
 }
 
-/// Collect free variables in an expression.
-pub fn collect_free_vars(expr: &Expr) -> HashSet<String> {
+/// Collect free local variables in an expression.
+fn collect_free_locals(body: &Body, expr_id: ExprId) -> HashSet<LocalId> {
     let mut free = HashSet::new();
-    collect_free_vars_inner(expr, &HashSet::new(), &mut free);
+    collect_free_locals_inner(body, expr_id, &HashSet::new(), &mut free);
     free
 }
 
-/// Inner recursive function for collecting free variables.
-fn collect_free_vars_inner(expr: &Expr, bound: &HashSet<String>, free: &mut HashSet<String>) {
-    match &expr.kind {
-        ExprKind::Var(name) => {
-            if !bound.contains(name) {
-                free.insert(name.clone());
+/// Inner recursive function for collecting free local variables.
+fn collect_free_locals_inner(
+    body: &Body,
+    expr_id: ExprId,
+    bound: &HashSet<LocalId>,
+    free: &mut HashSet<LocalId>,
+) {
+    match body.get_expr(expr_id) {
+        Expr::Local(local_id) => {
+            if !bound.contains(local_id) {
+                free.insert(*local_id);
             }
         }
 
-        ExprKind::Let {
-            name, value, body, ..
-        } => {
-            collect_free_vars_inner(value, bound, free);
+        Expr::Let { local, rhs, body: let_body } => {
+            collect_free_locals_inner(body, *rhs, bound, free);
             let mut extended = bound.clone();
-            extended.insert(name.clone());
-            collect_free_vars_inner(body, &extended, free);
+            extended.insert(*local);
+            collect_free_locals_inner(body, *let_body, &extended, free);
         }
 
-        ExprKind::Loop {
+        Expr::Loop {
             loop_var,
             init,
             init_bindings,
             kind,
-            body,
+            body: loop_body,
         } => {
-            collect_free_vars_inner(init, bound, free);
+            collect_free_locals_inner(body, *init, bound, free);
 
-            // init_bindings reference loop_var, but their expressions are evaluated
-            // in the context where loop_var is bound
             let mut extended = bound.clone();
-            extended.insert(loop_var.clone());
+            extended.insert(*loop_var);
 
-            for (name, binding_expr) in init_bindings {
-                collect_free_vars_inner(binding_expr, &extended, free);
-                extended.insert(name.clone());
+            for (local, binding_expr) in init_bindings {
+                collect_free_locals_inner(body, *binding_expr, &extended, free);
+                extended.insert(*local);
             }
 
             match kind {
                 LoopKind::For { var, iter } => {
-                    collect_free_vars_inner(iter, bound, free);
-                    extended.insert(var.clone());
+                    collect_free_locals_inner(body, *iter, bound, free);
+                    extended.insert(*var);
                 }
                 LoopKind::ForRange { var, bound: upper } => {
-                    collect_free_vars_inner(upper, bound, free);
-                    extended.insert(var.clone());
+                    collect_free_locals_inner(body, *upper, bound, free);
+                    extended.insert(*var);
                 }
                 LoopKind::While { cond } => {
-                    collect_free_vars_inner(cond, &extended, free);
+                    collect_free_locals_inner(body, *cond, &extended, free);
                 }
             }
 
-            collect_free_vars_inner(body, &extended, free);
+            collect_free_locals_inner(body, *loop_body, &extended, free);
         }
 
-        ExprKind::BinOp { lhs, rhs, .. } => {
-            collect_free_vars_inner(lhs, bound, free);
-            collect_free_vars_inner(rhs, bound, free);
+        Expr::BinOp { lhs, rhs, .. } => {
+            collect_free_locals_inner(body, *lhs, bound, free);
+            collect_free_locals_inner(body, *rhs, bound, free);
         }
 
-        ExprKind::UnaryOp { operand, .. } => {
-            collect_free_vars_inner(operand, bound, free);
+        Expr::UnaryOp { operand, .. } => {
+            collect_free_locals_inner(body, *operand, bound, free);
         }
 
-        ExprKind::If {
-            cond,
-            then_branch,
-            else_branch,
-        } => {
-            collect_free_vars_inner(cond, bound, free);
-            collect_free_vars_inner(then_branch, bound, free);
-            collect_free_vars_inner(else_branch, bound, free);
+        Expr::If { cond, then_, else_ } => {
+            collect_free_locals_inner(body, *cond, bound, free);
+            collect_free_locals_inner(body, *then_, bound, free);
+            collect_free_locals_inner(body, *else_, bound, free);
         }
 
-        ExprKind::Call { args, .. } | ExprKind::Intrinsic { args, .. } => {
+        Expr::Call { args, .. } | Expr::Intrinsic { args, .. } => {
             for arg in args {
-                collect_free_vars_inner(arg, bound, free);
+                collect_free_locals_inner(body, *arg, bound, free);
             }
         }
 
-        ExprKind::Literal(lit) => {
-            collect_free_vars_in_literal(lit, bound, free);
-        }
-
-        ExprKind::Attributed { expr, .. } => {
-            collect_free_vars_inner(expr, bound, free);
-        }
-
-        ExprKind::Materialize(inner) => {
-            collect_free_vars_inner(inner, bound, free);
-        }
-
-        ExprKind::Closure { captures, .. } => {
-            for cap in captures {
-                collect_free_vars_inner(cap, bound, free);
-            }
-        }
-
-        ExprKind::Range { start, step, end, .. } => {
-            collect_free_vars_inner(start, bound, free);
-            if let Some(s) = step {
-                collect_free_vars_inner(s, bound, free);
-            }
-            collect_free_vars_inner(end, bound, free);
-        }
-
-        ExprKind::Unit => {}
-    }
-}
-
-/// Collect free variables in literal expressions.
-fn collect_free_vars_in_literal(lit: &Literal, bound: &HashSet<String>, free: &mut HashSet<String>) {
-    match lit {
-        Literal::Tuple(elems) | Literal::Array(elems) | Literal::Vector(elems) => {
+        Expr::Tuple(elems) | Expr::Array(elems) | Expr::Vector(elems) => {
             for elem in elems {
-                collect_free_vars_inner(elem, bound, free);
+                collect_free_locals_inner(body, *elem, bound, free);
             }
         }
-        Literal::Matrix(rows) => {
+
+        Expr::Matrix(rows) => {
             for row in rows {
                 for elem in row {
-                    collect_free_vars_inner(elem, bound, free);
+                    collect_free_locals_inner(body, *elem, bound, free);
                 }
             }
         }
-        Literal::Int(_) | Literal::Float(_) | Literal::Bool(_) | Literal::String(_) => {}
+
+        Expr::Closure { captures, .. } => {
+            for cap in captures {
+                collect_free_locals_inner(body, *cap, bound, free);
+            }
+        }
+
+        Expr::Range { start, step, end, .. } => {
+            collect_free_locals_inner(body, *start, bound, free);
+            if let Some(s) = step {
+                collect_free_locals_inner(body, *s, bound, free);
+            }
+            collect_free_locals_inner(body, *end, bound, free);
+        }
+
+        Expr::Materialize(inner) => {
+            collect_free_locals_inner(body, *inner, bound, free);
+        }
+
+        Expr::Attributed { expr, .. } => {
+            collect_free_locals_inner(body, *expr, bound, free);
+        }
+
+        // Leaf nodes - no locals to collect
+        Expr::Global(_) | Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::String(_) | Expr::Unit => {}
     }
 }

@@ -24,8 +24,7 @@ pub mod ast_const_fold;
 pub mod desugar;
 pub mod lowering_common;
 
-// TODO(mir-refactor): Re-enable after MIR arena refactor
-// pub mod binding_lifter;
+pub mod binding_lifter;
 pub mod constant_folding;
 // pub mod glsl;
 pub mod materialize_hoisting;
@@ -521,9 +520,10 @@ pub struct Folded {
 }
 
 impl Folded {
-    /// Stub: skip binding lifting
-    pub fn lift_bindings(self) -> Result<Lifted> {
-        Ok(Lifted { mir: self.mir })
+    /// Hoist loop-invariant bindings out of loops.
+    pub fn lift_bindings(self) -> Lifted {
+        let mir = binding_lifter::lift_bindings(self.mir);
+        Lifted { mir }
     }
 }
 

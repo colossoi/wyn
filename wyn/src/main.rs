@@ -197,7 +197,7 @@ fn compile_file(
     let monomorphized = time("monomorphize", verbose, || normalized.monomorphize())?;
     let reachable = time("filter_reachable", verbose, || monomorphized.filter_reachable());
     let folded = time("fold_constants", verbose, || reachable.fold_constants())?;
-    let lifted = time("lift_bindings", verbose, || folded.lift_bindings())?;
+    let lifted = time("lift_bindings", verbose, || folded.lift_bindings());
 
     // Write final MIR if requested (right before lowering)
     write_mir_if_requested(&lifted.mir, &output_final_mir, "final MIR", verbose)?;

@@ -25,7 +25,7 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .monomorphize()?
         .filter_reachable()
         .fold_constants()?
-        .lift_bindings()?
+        .lift_bindings()
         .lower()?;
     Ok(())
 }
