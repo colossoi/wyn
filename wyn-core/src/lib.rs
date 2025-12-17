@@ -26,7 +26,7 @@ pub mod lowering_common;
 
 pub mod binding_lifter;
 pub mod constant_folding;
-// pub mod glsl;
+pub mod glsl;
 pub mod materialize_hoisting;
 pub mod monomorphization;
 pub mod normalize;
@@ -545,15 +545,20 @@ impl Lifted {
     }
 
     /// Lower MIR to GLSL
-    /// TODO(mir-refactor): Re-enable after GLSL lowering is updated
     pub fn lower_glsl(self) -> Result<LoweredGlsl> {
-        Err(err_glsl!("GLSL lowering not yet implemented for new MIR"))
+        let glsl_output = glsl::lowering::lower(&self.mir)?;
+        Ok(LoweredGlsl {
+            mir: self.mir,
+            glsl: GlslOutput {
+                vertex: glsl_output.vertex,
+                fragment: glsl_output.fragment,
+            },
+        })
     }
 
     /// Lower MIR to Shadertoy-compatible GLSL (fragment shader only)
-    /// TODO(mir-refactor): Re-enable after GLSL lowering is updated
     pub fn lower_shadertoy(self) -> Result<String> {
-        Err(err_glsl!("Shadertoy lowering not yet implemented for new MIR"))
+        glsl::lowering::lower_shadertoy(&self.mir)
     }
 }
 

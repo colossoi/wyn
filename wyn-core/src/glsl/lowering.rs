@@ -8,7 +8,7 @@ use crate::bail_glsl;
 use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
 use crate::lowering_common::ShaderStage;
-use crate::mir::{Def, ExecutionModel, Expr, ExprKind, Literal, LoopKind, Program};
+use crate::mir::{Body, Def, EntryInput, ExecutionModel, Expr, ExprId, LocalId, LoopKind, Program};
 use polytype::Type as PolyType;
 use rspirv::spirv;
 use std::collections::{HashMap, HashSet};
@@ -95,11 +95,10 @@ impl<'a> LowerCtx<'a> {
 
     /// Check if a type is a struct (tuple or record) that can't be used in ternary
     fn is_struct_type(&self, ty: &PolyType<TypeName>) -> bool {
-        match ty {
-            PolyType::Constructed(TypeName::Tuple(_), _) => true,
-            PolyType::Constructed(TypeName::Record(_), _) => true,
-            _ => false,
-        }
+        matches!(
+            ty,
+            PolyType::Constructed(TypeName::Tuple(_), _) | PolyType::Constructed(TypeName::Record(_), _)
+        )
     }
 
     fn lower_program(&mut self) -> Result<GlslOutput> {
@@ -243,7 +242,7 @@ impl<'a> LowerCtx<'a> {
                 self.declared_vars.insert(name.clone());
             }
 
-            let result = self.lower_expr(body, output)?;
+            let result = self.lower_expr(body, body.root, output)?;
 
             // Write to fragColor output
             writeln!(output, "{}fragColor = {};", self.indent_str(), result).unwrap();
@@ -356,13 +355,13 @@ impl<'a> LowerCtx<'a> {
             let def = &self.program.defs[idx];
             match def {
                 Def::Function { body, .. } => {
-                    self.collect_expr_deps(body, deps, visited)?;
+                    self.collect_body_deps(body, deps, visited)?;
                 }
                 Def::Constant { body, .. } => {
-                    self.collect_expr_deps(body, deps, visited)?;
+                    self.collect_body_deps(body, deps, visited)?;
                 }
                 Def::EntryPoint { body, .. } => {
-                    self.collect_expr_deps(body, deps, visited)?;
+                    self.collect_body_deps(body, deps, visited)?;
                 }
                 Def::Uniform { .. } => {}
                 Def::Storage { .. } => {}
@@ -373,72 +372,38 @@ impl<'a> LowerCtx<'a> {
         Ok(())
     }
 
+    fn collect_body_deps(
+        &self,
+        body: &Body,
+        deps: &mut Vec<String>,
+        visited: &mut HashSet<String>,
+    ) -> Result<()> {
+        // Collect deps from all expressions in the body
+        for expr in body.iter_exprs() {
+            self.collect_expr_deps(body, expr, deps, visited)?;
+        }
+        Ok(())
+    }
+
     fn collect_expr_deps(
         &self,
+        body: &Body,
         expr: &Expr,
         deps: &mut Vec<String>,
         visited: &mut HashSet<String>,
     ) -> Result<()> {
-        match &expr.kind {
-            ExprKind::Call { func, args } => {
+        match expr {
+            Expr::Call { func, .. } => {
                 // If it's a user function (not a builtin), collect it
                 if self.def_index.contains_key(func) && self.impl_source.get(func).is_none() {
                     self.collect_deps_recursive(func, deps, visited)?;
                 }
-                for arg in args {
-                    self.collect_expr_deps(arg, deps, visited)?;
-                }
             }
-            ExprKind::Let { value, body, .. } => {
-                self.collect_expr_deps(value, deps, visited)?;
-                self.collect_expr_deps(body, deps, visited)?;
-            }
-            ExprKind::If {
-                cond,
-                then_branch,
-                else_branch,
-            } => {
-                self.collect_expr_deps(cond, deps, visited)?;
-                self.collect_expr_deps(then_branch, deps, visited)?;
-                self.collect_expr_deps(else_branch, deps, visited)?;
-            }
-            ExprKind::BinOp { lhs, rhs, .. } => {
-                self.collect_expr_deps(lhs, deps, visited)?;
-                self.collect_expr_deps(rhs, deps, visited)?;
-            }
-            ExprKind::UnaryOp { operand, .. } => {
-                self.collect_expr_deps(operand, deps, visited)?;
-            }
-            ExprKind::Loop { init, body, .. } => {
-                self.collect_expr_deps(init, deps, visited)?;
-                self.collect_expr_deps(body, deps, visited)?;
-            }
-            ExprKind::Intrinsic { args, .. } => {
-                for arg in args {
-                    self.collect_expr_deps(arg, deps, visited)?;
-                }
-            }
-            ExprKind::Attributed { expr, .. } => {
-                self.collect_expr_deps(expr, deps, visited)?;
-            }
-            ExprKind::Materialize(expr) => {
-                self.collect_expr_deps(expr, deps, visited)?;
-            }
-            ExprKind::Literal(lit) => {
-                self.collect_literal_deps(lit, deps, visited)?;
-            }
-            ExprKind::Closure {
-                lambda_name,
-                captures,
-            } => {
+            Expr::Closure { lambda_name, .. } => {
                 // Collect the lambda function as a dependency
                 self.collect_deps_recursive(lambda_name, deps, visited)?;
-                // Collect dependencies from captures
-                for cap in captures {
-                    self.collect_expr_deps(cap, deps, visited)?;
-                }
             }
-            ExprKind::Var(name) => {
+            Expr::Global(name) => {
                 // Check if this references a constant
                 if let Some(&idx) = self.def_index.get(name) {
                     if matches!(self.program.defs[idx], Def::Constant { .. }) {
@@ -446,37 +411,7 @@ impl<'a> LowerCtx<'a> {
                     }
                 }
             }
-            ExprKind::Range { start, step, end, .. } => {
-                self.collect_expr_deps(start, deps, visited)?;
-                if let Some(s) = step {
-                    self.collect_expr_deps(s, deps, visited)?;
-                }
-                self.collect_expr_deps(end, deps, visited)?;
-            }
-            ExprKind::Unit => {}
-        }
-        Ok(())
-    }
-
-    fn collect_literal_deps(
-        &self,
-        lit: &Literal,
-        deps: &mut Vec<String>,
-        visited: &mut HashSet<String>,
-    ) -> Result<()> {
-        match lit {
-            Literal::Tuple(elems) | Literal::Array(elems) | Literal::Vector(elems) => {
-                for elem in elems {
-                    self.collect_expr_deps(elem, deps, visited)?;
-                }
-            }
-            Literal::Matrix(rows) => {
-                for row in rows {
-                    for elem in row {
-                        self.collect_expr_deps(elem, deps, visited)?;
-                    }
-                }
-            }
+            // Other expressions don't introduce dependencies
             _ => {}
         }
         Ok(())
@@ -500,10 +435,11 @@ impl<'a> LowerCtx<'a> {
 
                 // Function signature
                 write!(output, "{} {}(", self.type_to_glsl(ret_type), name).unwrap();
-                for (i, param) in params.iter().enumerate() {
+                for (i, &param_id) in params.iter().enumerate() {
                     if i > 0 {
                         write!(output, ", ").unwrap();
                     }
+                    let param = body.get_local(param_id);
                     write!(output, "{} {}", self.type_to_glsl(&param.ty), param.name).unwrap();
                     // Track params as declared
                     self.declared_vars.insert(param.name.clone());
@@ -511,7 +447,7 @@ impl<'a> LowerCtx<'a> {
                 writeln!(output, ") {{").unwrap();
 
                 self.indent += 1;
-                let result = self.lower_expr(body, output)?;
+                let result = self.lower_expr(body, body.root, output)?;
                 writeln!(output, "{}return {};", self.indent_str(), result).unwrap();
                 self.indent -= 1;
 
@@ -520,7 +456,7 @@ impl<'a> LowerCtx<'a> {
             }
             Def::Constant { name, ty, body, .. } => {
                 write!(output, "const {} {} = ", self.type_to_glsl(ty), name).unwrap();
-                let val = self.lower_expr(body, output)?;
+                let val = self.lower_expr(body, body.root, output)?;
                 writeln!(output, "{};", val).unwrap();
             }
             Def::Uniform { .. } => {
@@ -613,7 +549,7 @@ impl<'a> LowerCtx<'a> {
                 self.declared_vars.insert(name.clone());
             }
 
-            let result = self.lower_expr(body, output)?;
+            let result = self.lower_expr(body, body.root, output)?;
 
             // Assign to outputs - handle tuple returns by extracting components
             for (tuple_idx, _loc) in &location_outputs {
@@ -654,155 +590,15 @@ impl<'a> LowerCtx<'a> {
         Ok(())
     }
 
-    fn lower_expr(&mut self, expr: &Expr, output: &mut String) -> Result<String> {
-        match &expr.kind {
-            ExprKind::Literal(lit) => self.lower_literal(lit, &expr.ty, output),
+    fn lower_expr(&mut self, body: &Body, expr_id: ExprId, output: &mut String) -> Result<String> {
+        let expr = body.get_expr(expr_id);
+        let ty = body.get_type(expr_id);
 
-            ExprKind::Unit => Ok("".to_string()),
+        match expr {
+            // --- Literals ---
+            Expr::Int(s) => Ok(s.clone()),
 
-            ExprKind::Var(name) => Ok(name.clone()),
-
-            ExprKind::BinOp { op, lhs, rhs } => {
-                let l = self.lower_expr(lhs, output)?;
-                let r = self.lower_expr(rhs, output)?;
-                // Handle operators that don't exist in GLSL
-                match op.as_str() {
-                    "**" => Ok(format!("pow({}, {})", l, r)),
-                    _ => Ok(format!("({} {} {})", l, op, r)),
-                }
-            }
-
-            ExprKind::UnaryOp { op, operand } => {
-                let inner = self.lower_expr(operand, output)?;
-                Ok(format!("({}{})", op, inner))
-            }
-
-            ExprKind::If {
-                cond,
-                then_branch,
-                else_branch,
-            } => {
-                // Use if-else statements for struct/tuple types (better compatibility)
-                // Use ternary for simple scalar types
-                if self.is_struct_type(&expr.ty) {
-                    let result_var = format!("_w_if_{}", self.fresh_id());
-                    let ty_str = self.type_to_glsl(&expr.ty);
-
-                    // Declare result variable
-                    writeln!(output, "{}{} {};", self.indent_str(), ty_str, result_var).unwrap();
-                    self.declared_vars.insert(result_var.clone());
-
-                    // Emit if-else
-                    let c = self.lower_expr(cond, output)?;
-                    writeln!(output, "{}if ({}) {{", self.indent_str(), c).unwrap();
-                    self.indent += 1;
-                    let t = self.lower_expr(then_branch, output)?;
-                    writeln!(output, "{}{} = {};", self.indent_str(), result_var, t).unwrap();
-                    self.indent -= 1;
-                    writeln!(output, "{}}} else {{", self.indent_str()).unwrap();
-                    self.indent += 1;
-                    let e = self.lower_expr(else_branch, output)?;
-                    writeln!(output, "{}{} = {};", self.indent_str(), result_var, e).unwrap();
-                    self.indent -= 1;
-                    writeln!(output, "{}}}", self.indent_str()).unwrap();
-
-                    Ok(result_var)
-                } else {
-                    let c = self.lower_expr(cond, output)?;
-                    let t = self.lower_expr(then_branch, output)?;
-                    let e = self.lower_expr(else_branch, output)?;
-                    Ok(format!("({} ? {} : {})", c, t, e))
-                }
-            }
-
-            ExprKind::Let {
-                name, value, body, ..
-            } => {
-                let v = self.lower_expr(value, output)?;
-                if self.declared_vars.contains(name) {
-                    // Variable already declared, just assign
-                    writeln!(output, "{}{} = {};", self.indent_str(), name, v).unwrap();
-                } else {
-                    // New variable, declare with type
-                    writeln!(
-                        output,
-                        "{}{} {} = {};",
-                        self.indent_str(),
-                        self.type_to_glsl(&value.ty),
-                        name,
-                        v
-                    )
-                    .unwrap();
-                    self.declared_vars.insert(name.clone());
-                }
-                self.lower_expr(body, output)
-            }
-
-            ExprKind::Call { func, args } => {
-                let mut arg_strs = Vec::new();
-                for arg in args {
-                    arg_strs.push(self.lower_expr(arg, output)?);
-                }
-
-                // Check if it's a builtin
-                if let Some(impl_) = self.impl_source.get(func) {
-                    self.lower_builtin_call(impl_, &arg_strs, &expr.ty)
-                } else {
-                    Ok(format!("{}({})", func, arg_strs.join(", ")))
-                }
-            }
-
-            ExprKind::Intrinsic { name, args } => {
-                let mut arg_strs = Vec::new();
-                for arg in args {
-                    arg_strs.push(self.lower_expr(arg, output)?);
-                }
-                self.lower_intrinsic(name, &arg_strs, args, &expr.ty)
-            }
-
-            ExprKind::Loop {
-                loop_var,
-                init,
-                init_bindings,
-                kind,
-                body,
-            } => self.lower_loop(loop_var, init, init_bindings, kind, body, &expr.ty, output),
-
-            ExprKind::Attributed { expr, .. } => self.lower_expr(expr, output),
-
-            ExprKind::Materialize(inner) => self.lower_expr(inner, output),
-
-            ExprKind::Closure { captures, .. } => {
-                // Lower closure as its captures tuple
-                // Empty captures become 0 (dummy value)
-                if captures.is_empty() {
-                    return Ok("0".to_string());
-                }
-                // Non-empty captures become a struct constructor
-                let mut parts = Vec::new();
-                for cap in captures {
-                    parts.push(self.lower_expr(cap, output)?);
-                }
-                let struct_name = self.type_to_glsl(&expr.ty);
-                Ok(format!("{}({})", struct_name, parts.join(", ")))
-            }
-
-            ExprKind::Range { .. } => {
-                // Range expressions should be desugared before GLSL lowering
-                bail_glsl!("Range expressions are not supported in GLSL lowering")
-            }
-        }
-    }
-
-    fn lower_literal(
-        &mut self,
-        lit: &Literal,
-        ty: &PolyType<TypeName>,
-        output: &mut String,
-    ) -> Result<String> {
-        match lit {
-            Literal::Int(s) => Ok(s.clone()),
-            Literal::Float(s) => {
+            Expr::Float(s) => {
                 // Ensure float has decimal point
                 if s.contains('.') || s.contains('e') || s.contains('E') {
                     Ok(s.clone())
@@ -810,36 +606,23 @@ impl<'a> LowerCtx<'a> {
                     Ok(format!("{}.0", s))
                 }
             }
-            Literal::Bool(b) => Ok(if *b { "true" } else { "false" }.to_string()),
-            Literal::String(s) => Ok(format!("\"{}\"", s)),
-            Literal::Vector(elems) => {
-                let mut parts = Vec::new();
-                for e in elems {
-                    parts.push(self.lower_expr(e, output)?);
-                }
-                Ok(format!("{}({})", self.type_to_glsl(ty), parts.join(", ")))
+
+            Expr::Bool(b) => Ok(if *b { "true" } else { "false" }.to_string()),
+
+            Expr::String(s) => Ok(format!("\"{}\"", s)),
+
+            Expr::Unit => Ok("".to_string()),
+
+            // --- Variables ---
+            Expr::Local(local_id) => {
+                let local = body.get_local(*local_id);
+                Ok(local.name.clone())
             }
-            Literal::Matrix(rows) => {
-                let mut parts = Vec::new();
-                // GLSL matrices are column-major, so iterate column-by-column
-                let num_cols = rows.first().map(|r| r.len()).unwrap_or(0);
-                for col in 0..num_cols {
-                    for row in rows {
-                        if col < row.len() {
-                            parts.push(self.lower_expr(&row[col], output)?);
-                        }
-                    }
-                }
-                Ok(format!("{}({})", self.type_to_glsl(ty), parts.join(", ")))
-            }
-            Literal::Array(elems) => {
-                let mut parts = Vec::new();
-                for e in elems {
-                    parts.push(self.lower_expr(e, output)?);
-                }
-                Ok(format!("{}[]({})", self.type_to_glsl(ty), parts.join(", ")))
-            }
-            Literal::Tuple(elems) => {
+
+            Expr::Global(name) => Ok(name.clone()),
+
+            // --- Aggregates ---
+            Expr::Tuple(elems) => {
                 // Empty tuples - return dummy value
                 if elems.is_empty() {
                     return Ok("0".to_string());
@@ -847,12 +630,181 @@ impl<'a> LowerCtx<'a> {
 
                 // Emit tuple as struct constructor
                 let mut parts = Vec::new();
-                for e in elems {
-                    parts.push(self.lower_expr(e, output)?);
+                for &e in elems {
+                    parts.push(self.lower_expr(body, e, output)?);
                 }
                 let struct_name = self.type_to_glsl(ty);
                 Ok(format!("{}({})", struct_name, parts.join(", ")))
             }
+
+            Expr::Array(elems) => {
+                let mut parts = Vec::new();
+                for &e in elems {
+                    parts.push(self.lower_expr(body, e, output)?);
+                }
+                Ok(format!("{}[]({})", self.type_to_glsl(ty), parts.join(", ")))
+            }
+
+            Expr::Vector(elems) => {
+                let mut parts = Vec::new();
+                for &e in elems {
+                    parts.push(self.lower_expr(body, e, output)?);
+                }
+                Ok(format!("{}({})", self.type_to_glsl(ty), parts.join(", ")))
+            }
+
+            Expr::Matrix(rows) => {
+                let mut parts = Vec::new();
+                // GLSL matrices are column-major, so iterate column-by-column
+                let num_cols = rows.first().map(|r| r.len()).unwrap_or(0);
+                for col in 0..num_cols {
+                    for row in rows {
+                        if col < row.len() {
+                            parts.push(self.lower_expr(body, row[col], output)?);
+                        }
+                    }
+                }
+                Ok(format!("{}({})", self.type_to_glsl(ty), parts.join(", ")))
+            }
+
+            // --- Operations ---
+            Expr::BinOp { op, lhs, rhs } => {
+                let l = self.lower_expr(body, *lhs, output)?;
+                let r = self.lower_expr(body, *rhs, output)?;
+                // Handle operators that don't exist in GLSL
+                match op.as_str() {
+                    "**" => Ok(format!("pow({}, {})", l, r)),
+                    _ => Ok(format!("({} {} {})", l, op, r)),
+                }
+            }
+
+            Expr::UnaryOp { op, operand } => {
+                let inner = self.lower_expr(body, *operand, output)?;
+                Ok(format!("({}{})", op, inner))
+            }
+
+            // --- Control Flow ---
+            Expr::If { cond, then_, else_ } => {
+                // Use if-else statements for struct/tuple types (better compatibility)
+                // Use ternary for simple scalar types
+                if self.is_struct_type(ty) {
+                    let result_var = format!("_w_if_{}", self.fresh_id());
+                    let ty_str = self.type_to_glsl(ty);
+
+                    // Declare result variable
+                    writeln!(output, "{}{} {};", self.indent_str(), ty_str, result_var).unwrap();
+                    self.declared_vars.insert(result_var.clone());
+
+                    // Emit if-else
+                    let c = self.lower_expr(body, *cond, output)?;
+                    writeln!(output, "{}if ({}) {{", self.indent_str(), c).unwrap();
+                    self.indent += 1;
+                    let t = self.lower_expr(body, *then_, output)?;
+                    writeln!(output, "{}{} = {};", self.indent_str(), result_var, t).unwrap();
+                    self.indent -= 1;
+                    writeln!(output, "{}}} else {{", self.indent_str()).unwrap();
+                    self.indent += 1;
+                    let e = self.lower_expr(body, *else_, output)?;
+                    writeln!(output, "{}{} = {};", self.indent_str(), result_var, e).unwrap();
+                    self.indent -= 1;
+                    writeln!(output, "{}}}", self.indent_str()).unwrap();
+
+                    Ok(result_var)
+                } else {
+                    let c = self.lower_expr(body, *cond, output)?;
+                    let t = self.lower_expr(body, *then_, output)?;
+                    let e = self.lower_expr(body, *else_, output)?;
+                    Ok(format!("({} ? {} : {})", c, t, e))
+                }
+            }
+
+            Expr::Let {
+                local,
+                rhs,
+                body: let_body,
+            } => {
+                let local_decl = body.get_local(*local);
+                let name = &local_decl.name;
+                let v = self.lower_expr(body, *rhs, output)?;
+
+                if self.declared_vars.contains(name) {
+                    // Variable already declared, just assign
+                    writeln!(output, "{}{} = {};", self.indent_str(), name, v).unwrap();
+                } else {
+                    // New variable, declare with type
+                    let rhs_ty = body.get_type(*rhs);
+                    writeln!(
+                        output,
+                        "{}{} {} = {};",
+                        self.indent_str(),
+                        self.type_to_glsl(rhs_ty),
+                        name,
+                        v
+                    )
+                    .unwrap();
+                    self.declared_vars.insert(name.clone());
+                }
+                self.lower_expr(body, *let_body, output)
+            }
+
+            Expr::Loop {
+                loop_var,
+                init,
+                init_bindings,
+                kind,
+                body: loop_body,
+            } => self.lower_loop(body, *loop_var, *init, init_bindings, kind, *loop_body, output),
+
+            // --- Calls ---
+            Expr::Call { func, args } => {
+                let mut arg_strs = Vec::new();
+                for &arg in args {
+                    arg_strs.push(self.lower_expr(body, arg, output)?);
+                }
+
+                // Check if it's a builtin
+                if let Some(impl_) = self.impl_source.get(func) {
+                    self.lower_builtin_call(impl_, &arg_strs, ty)
+                } else {
+                    Ok(format!("{}({})", func, arg_strs.join(", ")))
+                }
+            }
+
+            Expr::Intrinsic { name, args } => {
+                let mut arg_strs = Vec::new();
+                let arg_ids: Vec<ExprId> = args.clone();
+                for &arg in args {
+                    arg_strs.push(self.lower_expr(body, arg, output)?);
+                }
+                self.lower_intrinsic(body, name, &arg_strs, &arg_ids, ty)
+            }
+
+            // --- Closures ---
+            Expr::Closure { captures, .. } => {
+                // Lower closure as its captures tuple
+                // Empty captures become 0 (dummy value)
+                if captures.is_empty() {
+                    return Ok("0".to_string());
+                }
+                // Non-empty captures become a struct constructor
+                let mut parts = Vec::new();
+                for &cap in captures {
+                    parts.push(self.lower_expr(body, cap, output)?);
+                }
+                let struct_name = self.type_to_glsl(ty);
+                Ok(format!("{}({})", struct_name, parts.join(", ")))
+            }
+
+            // --- Range ---
+            Expr::Range { .. } => {
+                // Range expressions should be desugared before GLSL lowering
+                bail_glsl!("Range expressions are not supported in GLSL lowering")
+            }
+
+            // --- Special ---
+            Expr::Materialize(inner) => self.lower_expr(body, *inner, output),
+
+            Expr::Attributed { expr: inner, .. } => self.lower_expr(body, *inner, output),
         }
     }
 
@@ -927,18 +879,20 @@ impl<'a> LowerCtx<'a> {
 
     fn lower_intrinsic(
         &self,
+        body: &Body,
         name: &str,
         args: &[String],
-        arg_exprs: &[Expr],
+        arg_ids: &[ExprId],
         _ret_ty: &PolyType<TypeName>,
     ) -> Result<String> {
         match name {
             "tuple_access" => {
                 // args[0] is the tuple/vector, args[1] is the index
-                if let ExprKind::Literal(Literal::Int(idx_str)) = &arg_exprs[1].kind {
+                if let Expr::Int(idx_str) = body.get_expr(arg_ids[1]) {
                     let idx: usize = idx_str.parse().unwrap_or(0);
                     // Check if this is a vector type - use swizzle syntax
-                    if self.is_vector_type(&arg_exprs[0].ty) {
+                    let arg_ty = body.get_type(arg_ids[0]);
+                    if self.is_vector_type(arg_ty) {
                         let swizzle = match idx {
                             0 => "x",
                             1 => "y",
@@ -958,7 +912,7 @@ impl<'a> LowerCtx<'a> {
             }
             "record_access" => {
                 // args[0] is the record, args[1] is the field name (as string literal)
-                if let ExprKind::Literal(Literal::String(field)) = &arg_exprs[1].kind {
+                if let Expr::String(field) = body.get_expr(arg_ids[1]) {
                     Ok(format!("{}.{}", args[0], field))
                 } else {
                     Ok(format!("{}.{}", args[0], args[1]))
@@ -972,47 +926,52 @@ impl<'a> LowerCtx<'a> {
 
     fn lower_loop(
         &mut self,
-        loop_var: &str,
-        init: &Expr,
-        init_bindings: &[(String, Expr)],
+        body: &Body,
+        loop_var: LocalId,
+        init: ExprId,
+        init_bindings: &[(LocalId, ExprId)],
         kind: &LoopKind,
-        body: &Expr,
-        _ret_ty: &PolyType<TypeName>,
+        loop_body: ExprId,
         output: &mut String,
     ) -> Result<String> {
+        let loop_var_name = body.get_local(loop_var).name.clone();
+
         // Emit init
-        let init_val = self.lower_expr(init, output)?;
-        if self.declared_vars.contains(loop_var) {
-            writeln!(output, "{}{} = {};", self.indent_str(), loop_var, init_val).unwrap();
+        let init_val = self.lower_expr(body, init, output)?;
+        let init_ty = body.get_type(init);
+        if self.declared_vars.contains(&loop_var_name) {
+            writeln!(output, "{}{} = {};", self.indent_str(), loop_var_name, init_val).unwrap();
         } else {
             writeln!(
                 output,
                 "{}{} {} = {};",
                 self.indent_str(),
-                self.type_to_glsl(&init.ty),
-                loop_var,
+                self.type_to_glsl(init_ty),
+                loop_var_name,
                 init_val
             )
             .unwrap();
-            self.declared_vars.insert(loop_var.to_string());
+            self.declared_vars.insert(loop_var_name.clone());
         }
 
         // Emit init bindings
-        for (name, expr) in init_bindings {
-            let val = self.lower_expr(expr, output)?;
-            if self.declared_vars.contains(name) {
-                writeln!(output, "{}{} = {};", self.indent_str(), name, val).unwrap();
+        for (local_id, expr_id) in init_bindings {
+            let local_name = body.get_local(*local_id).name.clone();
+            let val = self.lower_expr(body, *expr_id, output)?;
+            let binding_ty = body.get_type(*expr_id);
+            if self.declared_vars.contains(&local_name) {
+                writeln!(output, "{}{} = {};", self.indent_str(), local_name, val).unwrap();
             } else {
                 writeln!(
                     output,
                     "{}{} {} = {};",
                     self.indent_str(),
-                    self.type_to_glsl(&expr.ty),
-                    name,
+                    self.type_to_glsl(binding_ty),
+                    local_name,
                     val
                 )
                 .unwrap();
-                self.declared_vars.insert(name.clone());
+                self.declared_vars.insert(local_name.clone());
             }
         }
 
@@ -1021,25 +980,27 @@ impl<'a> LowerCtx<'a> {
                 // Use while(true) with break to ensure condition is re-evaluated each iteration
                 writeln!(output, "{}while (true) {{", self.indent_str()).unwrap();
                 self.indent += 1;
-                let cond_str = self.lower_expr(cond, output)?;
+                let cond_str = self.lower_expr(body, *cond, output)?;
                 writeln!(output, "{}if (!{}) break;", self.indent_str(), cond_str).unwrap();
                 self.indent -= 1;
             }
             LoopKind::ForRange { var, bound } => {
-                let bound_str = self.lower_expr(bound, output)?;
+                let var_name = body.get_local(*var).name.clone();
+                let bound_str = self.lower_expr(body, *bound, output)?;
                 writeln!(
                     output,
                     "{}for (int {} = 0; {} < {}; {}++) {{",
                     self.indent_str(),
-                    var,
-                    var,
+                    var_name,
+                    var_name,
                     bound_str,
-                    var
+                    var_name
                 )
                 .unwrap();
             }
             LoopKind::For { var, iter } => {
-                let iter_str = self.lower_expr(iter, output)?;
+                let var_name = body.get_local(*var).name.clone();
+                let iter_str = self.lower_expr(body, *iter, output)?;
                 writeln!(
                     output,
                     "{}for (int _i = 0; _i < {}.length(); _i++) {{",
@@ -1048,12 +1009,13 @@ impl<'a> LowerCtx<'a> {
                 )
                 .unwrap();
                 self.indent += 1;
+                let body_ty = body.get_type(loop_body);
                 writeln!(
                     output,
                     "{}{} {} = {}[_i];",
                     self.indent_str(),
-                    self.type_to_glsl(&body.ty), // TODO: get element type
-                    var,
+                    self.type_to_glsl(body_ty), // TODO: get element type
+                    var_name,
                     iter_str
                 )
                 .unwrap();
@@ -1062,20 +1024,28 @@ impl<'a> LowerCtx<'a> {
         }
 
         self.indent += 1;
-        let body_result = self.lower_expr(body, output)?;
-        writeln!(output, "{}{} = {};", self.indent_str(), loop_var, body_result).unwrap();
+        let body_result = self.lower_expr(body, loop_body, output)?;
+        writeln!(
+            output,
+            "{}{} = {};",
+            self.indent_str(),
+            loop_var_name,
+            body_result
+        )
+        .unwrap();
 
         // Re-extract loop bindings from the updated tuple
-        for (name, expr) in init_bindings {
-            let val = self.lower_expr(expr, output)?;
-            writeln!(output, "{}{} = {};", self.indent_str(), name, val).unwrap();
+        for (local_id, expr_id) in init_bindings {
+            let local_name = body.get_local(*local_id).name.clone();
+            let val = self.lower_expr(body, *expr_id, output)?;
+            writeln!(output, "{}{} = {};", self.indent_str(), local_name, val).unwrap();
         }
 
         self.indent -= 1;
 
         writeln!(output, "{}}}", self.indent_str()).unwrap();
 
-        Ok(loop_var.to_string())
+        Ok(loop_var_name)
     }
 
     fn type_to_glsl(&mut self, ty: &PolyType<TypeName>) -> String {
