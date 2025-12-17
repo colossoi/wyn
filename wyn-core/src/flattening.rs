@@ -122,6 +122,14 @@ impl Flattener {
         format!("_w_ptr_{}", local_id.0)
     }
 
+    /// Strip Typed wrappers from a pattern, returning the innermost pattern
+    fn unwrap_typed_pattern(pattern: &ast::Pattern) -> &ast::Pattern {
+        match &pattern.kind {
+            PatternKind::Typed(inner, _) => Self::unwrap_typed_pattern(inner),
+            _ => pattern,
+        }
+    }
+
     /// Register a lambda function and return its ID.
     fn add_lambda(&mut self, name: String, arity: usize) -> LambdaId {
         self.lambda_registry.alloc(LambdaInfo { name, arity })
@@ -972,11 +980,15 @@ impl Flattener {
         span: Span,
         result_ty: &Type,
     ) -> Result<(ExprId, StaticValue)> {
+        // Strip Typed wrappers from pattern first (before flattening value)
+        // This prevents double-flattening when recursing through Typed patterns
+        let pattern = Self::unwrap_typed_pattern(&let_in.pattern);
+
         let (value_id, _) = self.flatten_expr(&let_in.value)?;
         let value_ty = self.current_body.get_type(value_id).clone();
 
-        // Check if pattern is simple (just a name)
-        match &let_in.pattern.kind {
+        // Handle the unwrapped pattern
+        match &pattern.kind {
             PatternKind::Name(name) => {
                 // Allocate local for this binding
                 self.name_to_local.push_scope();
@@ -1022,15 +1034,8 @@ impl Flattener {
                 let id = self.alloc_expr(let_expr, result_ty.clone(), span);
                 Ok((id, body_sv))
             }
-            PatternKind::Typed(inner, _) => {
-                // Recursively handle typed pattern
-                let inner_let = ast::LetInExpr {
-                    pattern: (**inner).clone(),
-                    ty: let_in.ty.clone(),
-                    value: let_in.value.clone(),
-                    body: let_in.body.clone(),
-                };
-                self.flatten_let_in(&inner_let, span, result_ty)
+            PatternKind::Typed(_, _) => {
+                unreachable!("Typed patterns should be stripped before reaching here")
             }
             PatternKind::Wildcard => {
                 // Bind to ignored variable, just for side effects
@@ -1260,6 +1265,7 @@ impl Flattener {
             body: func_body,
             span,
         };
+        eprintln!("DEBUG: Pushing lambda '{}' node_id={:?}", func_name, node_id);
         self.generated_functions.push(func);
 
         // Return the closure
