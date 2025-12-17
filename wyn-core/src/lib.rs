@@ -37,13 +37,12 @@ mod alias_checker_tests;
 #[cfg(test)]
 mod desugar_tests;
 
-// TODO(mir-refactor): Re-enable after MIR arena refactor
-// #[cfg(test)]
-// mod binding_lifter_tests;
-// #[cfg(test)]
-// mod constant_folding_tests;
-// #[cfg(test)]
-// mod flattening_tests;
+#[cfg(test)]
+mod binding_lifter_tests;
+#[cfg(test)]
+mod constant_folding_tests;
+#[cfg(test)]
+mod flattening_tests;
 // #[cfg(test)]
 // mod monomorphization_tests;
 // #[cfg(test)]
@@ -542,10 +541,7 @@ impl Lifted {
     pub fn lower_with_options(self, debug_enabled: bool) -> Result<Lowered> {
         let inplace_info = alias_checker::analyze_inplace(&self.mir);
         let spirv = spirv::lowering::lower(&self.mir, debug_enabled, &inplace_info)?;
-        Ok(Lowered {
-            mir: self.mir,
-            spirv,
-        })
+        Ok(Lowered { mir: self.mir, spirv })
     }
 
     /// Lower MIR to GLSL

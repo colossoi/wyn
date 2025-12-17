@@ -143,7 +143,9 @@ impl ConstantFolder {
         match expr {
             // Atoms - just copy them
             Expr::Local(local_id) => Ok(body.alloc_expr(Expr::Local(*local_id), ty.clone(), span, node_id)),
-            Expr::Global(name) => Ok(body.alloc_expr(Expr::Global(name.clone()), ty.clone(), span, node_id)),
+            Expr::Global(name) => {
+                Ok(body.alloc_expr(Expr::Global(name.clone()), ty.clone(), span, node_id))
+            }
             Expr::Int(s) => Ok(body.alloc_expr(Expr::Int(s.clone()), ty.clone(), span, node_id)),
             Expr::Float(s) => Ok(body.alloc_expr(Expr::Float(s.clone()), ty.clone(), span, node_id)),
             Expr::Bool(b) => Ok(body.alloc_expr(Expr::Bool(*b), ty.clone(), span, node_id)),
@@ -164,10 +166,8 @@ impl ConstantFolder {
                 Ok(body.alloc_expr(Expr::Vector(new_elems), ty.clone(), span, node_id))
             }
             Expr::Matrix(rows) => {
-                let new_rows: Vec<Vec<_>> = rows
-                    .iter()
-                    .map(|row| row.iter().map(|e| self.expr_map[e]).collect())
-                    .collect();
+                let new_rows: Vec<Vec<_>> =
+                    rows.iter().map(|row| row.iter().map(|e| self.expr_map[e]).collect()).collect();
                 Ok(body.alloc_expr(Expr::Matrix(new_rows), ty.clone(), span, node_id))
             }
 
@@ -237,7 +237,11 @@ impl ConstantFolder {
             }
 
             // Let - map subexpressions
-            Expr::Let { local, rhs, body: let_body } => {
+            Expr::Let {
+                local,
+                rhs,
+                body: let_body,
+            } => {
                 let new_rhs = self.expr_map[rhs];
                 let new_body = self.expr_map[let_body];
                 Ok(body.alloc_expr(
@@ -261,10 +265,8 @@ impl ConstantFolder {
                 body: loop_body,
             } => {
                 let new_init = self.expr_map[init];
-                let new_init_bindings: Vec<_> = init_bindings
-                    .iter()
-                    .map(|(local, expr)| (*local, self.expr_map[expr]))
-                    .collect();
+                let new_init_bindings: Vec<_> =
+                    init_bindings.iter().map(|(local, expr)| (*local, self.expr_map[expr])).collect();
                 let new_kind = self.map_loop_kind(kind);
                 let new_loop_body = self.expr_map[loop_body];
 
@@ -328,7 +330,12 @@ impl ConstantFolder {
             }
 
             // Range - map subexpressions
-            Expr::Range { start, step, end, kind } => {
+            Expr::Range {
+                start,
+                step,
+                end,
+                kind,
+            } => {
                 let new_start = self.expr_map[start];
                 let new_step = step.map(|s| self.expr_map[&s]);
                 let new_end = self.expr_map[end];
@@ -352,7 +359,10 @@ impl ConstantFolder {
             }
 
             // Attributed - map inner
-            Expr::Attributed { attributes, expr: inner } => {
+            Expr::Attributed {
+                attributes,
+                expr: inner,
+            } => {
                 let new_inner = self.expr_map[inner];
                 Ok(body.alloc_expr(
                     Expr::Attributed {

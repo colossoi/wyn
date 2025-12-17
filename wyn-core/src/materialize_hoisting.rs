@@ -96,13 +96,11 @@ fn hoist_in_body(body: &mut Body) {
         .exprs
         .iter()
         .enumerate()
-        .filter_map(|(idx, expr)| {
-            if matches!(expr, Expr::If { .. }) {
-                Some(ExprId(idx as u32))
-            } else {
-                None
-            }
-        })
+        .filter_map(
+            |(idx, expr)| {
+                if matches!(expr, Expr::If { .. }) { Some(ExprId(idx as u32)) } else { None }
+            },
+        )
         .collect();
 
     // Process each If expression
@@ -173,11 +171,18 @@ fn collect_materializations_rec(
             collect_materializations_rec(body, *then_, result, visited);
             collect_materializations_rec(body, *else_, result, visited);
         }
-        Expr::Let { rhs, body: let_body, .. } => {
+        Expr::Let {
+            rhs, body: let_body, ..
+        } => {
             collect_materializations_rec(body, *rhs, result, visited);
             collect_materializations_rec(body, *let_body, result, visited);
         }
-        Expr::Loop { init, init_bindings, body: loop_body, .. } => {
+        Expr::Loop {
+            init,
+            init_bindings,
+            body: loop_body,
+            ..
+        } => {
             collect_materializations_rec(body, *init, result, visited);
             for (_, binding_expr) in init_bindings {
                 collect_materializations_rec(body, *binding_expr, result, visited);
@@ -217,17 +222,18 @@ fn collect_materializations_rec(
             collect_materializations_rec(body, *expr, result, visited);
         }
         // Atoms have no children
-        Expr::Local(_) | Expr::Global(_) | Expr::Int(_) | Expr::Float(_)
-        | Expr::Bool(_) | Expr::Unit | Expr::String(_) => {}
+        Expr::Local(_)
+        | Expr::Global(_)
+        | Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Bool(_)
+        | Expr::Unit
+        | Expr::String(_) => {}
     }
 }
 
 /// Find materializations that appear in both lists with structurally equal inner expressions.
-fn find_common_materializations(
-    body: &Body,
-    then_mats: &[ExprId],
-    else_mats: &[ExprId],
-) -> Vec<ExprId> {
+fn find_common_materializations(body: &Body, then_mats: &[ExprId], else_mats: &[ExprId]) -> Vec<ExprId> {
     let mut common = Vec::new();
 
     for &then_mat in then_mats {
@@ -281,9 +287,18 @@ fn exprs_equal(body: &Body, a: ExprId, b: ExprId) -> bool {
         (Expr::String(a), Expr::String(b)) => a == b,
         (Expr::Unit, Expr::Unit) => true,
 
-        (Expr::BinOp { op: opa, lhs: la, rhs: ra }, Expr::BinOp { op: opb, lhs: lb, rhs: rb }) => {
-            opa == opb && exprs_equal(body, *la, *lb) && exprs_equal(body, *ra, *rb)
-        }
+        (
+            Expr::BinOp {
+                op: opa,
+                lhs: la,
+                rhs: ra,
+            },
+            Expr::BinOp {
+                op: opb,
+                lhs: lb,
+                rhs: rb,
+            },
+        ) => opa == opb && exprs_equal(body, *la, *lb) && exprs_equal(body, *ra, *rb),
         (Expr::UnaryOp { op: opa, operand: oa }, Expr::UnaryOp { op: opb, operand: ob }) => {
             opa == opb && exprs_equal(body, *oa, *ob)
         }
@@ -302,8 +317,7 @@ fn exprs_equal(body: &Body, a: ExprId, b: ExprId) -> bool {
         (Expr::Tuple(ea), Expr::Tuple(eb))
         | (Expr::Array(ea), Expr::Array(eb))
         | (Expr::Vector(ea), Expr::Vector(eb)) => {
-            ea.len() == eb.len()
-                && ea.iter().zip(eb.iter()).all(|(x, y)| exprs_equal(body, *x, *y))
+            ea.len() == eb.len() && ea.iter().zip(eb.iter()).all(|(x, y)| exprs_equal(body, *x, *y))
         }
 
         (Expr::Matrix(ra), Expr::Matrix(rb)) => {

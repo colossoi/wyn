@@ -969,13 +969,23 @@ fn collect_uses(body: &mir::Body, expr_id: mir::ExprId) -> HashSet<mir::LocalId>
             uses.extend(collect_uses(body, *then_));
             uses.extend(collect_uses(body, *else_));
         }
-        Let { local, rhs, body: let_body } => {
+        Let {
+            local,
+            rhs,
+            body: let_body,
+        } => {
             uses.extend(collect_uses(body, *rhs));
             let mut body_uses = collect_uses(body, *let_body);
             body_uses.remove(local); // Remove bound variable
             uses.extend(body_uses);
         }
-        Loop { loop_var, init, init_bindings, kind, body: loop_body } => {
+        Loop {
+            loop_var,
+            init,
+            init_bindings,
+            kind,
+            body: loop_body,
+        } => {
             uses.extend(collect_uses(body, *init));
             for (_, binding_expr) in init_bindings {
                 uses.extend(collect_uses(body, *binding_expr));
@@ -1089,7 +1099,11 @@ fn compute_uses_after(
             result.extend(compute_uses_after(body, then_, after, aliases));
             result.extend(compute_uses_after(body, else_, after, aliases));
         }
-        Let { local, rhs, body: let_body } => {
+        Let {
+            local,
+            rhs,
+            body: let_body,
+        } => {
             let (local, rhs, let_body) = (*local, *rhs, *let_body);
             // Track aliases: if rhs is Local(x), then local aliases x
             if let Local(source_local) = body.get_expr(rhs) {
@@ -1109,8 +1123,15 @@ fn compute_uses_after(
             // After body: just after
             result.extend(compute_uses_after(body, let_body, after, aliases));
         }
-        Loop { init, init_bindings, kind, body: loop_body, .. } => {
-            let (init, init_bindings, kind, loop_body) = (*init, init_bindings.clone(), kind.clone(), *loop_body);
+        Loop {
+            init,
+            init_bindings,
+            kind,
+            body: loop_body,
+            ..
+        } => {
+            let (init, init_bindings, kind, loop_body) =
+                (*init, init_bindings.clone(), kind.clone(), *loop_body);
             // Simplified: treat loop as atomic for now
             result.extend(compute_uses_after(body, init, after, aliases));
             for (_, binding_expr) in &init_bindings {
@@ -1280,13 +1301,22 @@ fn find_inplace_ops(
             find_inplace_ops(body, then_, uses_after, aliases, result);
             find_inplace_ops(body, else_, uses_after, aliases, result);
         }
-        Let { rhs, body: let_body, .. } => {
+        Let {
+            rhs, body: let_body, ..
+        } => {
             let (rhs, let_body) = (*rhs, *let_body);
             find_inplace_ops(body, rhs, uses_after, aliases, result);
             find_inplace_ops(body, let_body, uses_after, aliases, result);
         }
-        Loop { init, init_bindings, kind, body: loop_body, .. } => {
-            let (init, init_bindings, kind, loop_body) = (*init, init_bindings.clone(), kind.clone(), *loop_body);
+        Loop {
+            init,
+            init_bindings,
+            kind,
+            body: loop_body,
+            ..
+        } => {
+            let (init, init_bindings, kind, loop_body) =
+                (*init, init_bindings.clone(), kind.clone(), *loop_body);
             find_inplace_ops(body, init, uses_after, aliases, result);
             for (_, binding_expr) in &init_bindings {
                 find_inplace_ops(body, *binding_expr, uses_after, aliases, result);

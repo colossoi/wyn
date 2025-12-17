@@ -1013,14 +1013,9 @@ fn lower_regular_function(
 
     let params_to_lower = if skip_first_param { &params[1..] } else { params };
 
-    let param_names: Vec<&str> = params_to_lower
-        .iter()
-        .map(|&p| body.get_local(p).name.as_str())
-        .collect();
-    let param_types: Vec<spirv::Word> = params_to_lower
-        .iter()
-        .map(|&p| constructor.ast_type_to_spirv(&body.get_local(p).ty))
-        .collect();
+    let param_names: Vec<&str> = params_to_lower.iter().map(|&p| body.get_local(p).name.as_str()).collect();
+    let param_types: Vec<spirv::Word> =
+        params_to_lower.iter().map(|&p| constructor.ast_type_to_spirv(&body.get_local(p).ty)).collect();
     let return_type = constructor.ast_type_to_spirv(ret_type);
     constructor.begin_function(name, &param_names, &param_types, return_type)?;
 
@@ -1217,17 +1212,15 @@ fn lower_const_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId)
         Expr::Bool(b) => Ok(constructor.const_bool(*b)),
         Expr::Unit => Ok(constructor.const_i32(0)),
         Expr::Tuple(elems) => {
-            let elem_ids: Result<Vec<_>> = elems.iter()
-                .map(|&id| lower_const_expr(constructor, body, id))
-                .collect();
+            let elem_ids: Result<Vec<_>> =
+                elems.iter().map(|&id| lower_const_expr(constructor, body, id)).collect();
             let elem_ids = elem_ids?;
             let struct_type = constructor.ast_type_to_spirv(ty);
             Ok(constructor.builder.constant_composite(struct_type, elem_ids))
         }
         Expr::Array(elems) | Expr::Vector(elems) => {
-            let elem_ids: Result<Vec<_>> = elems.iter()
-                .map(|&id| lower_const_expr(constructor, body, id))
-                .collect();
+            let elem_ids: Result<Vec<_>> =
+                elems.iter().map(|&id| lower_const_expr(constructor, body, id)).collect();
             let elem_ids = elem_ids?;
             let array_type = constructor.ast_type_to_spirv(ty);
             Ok(constructor.builder.constant_composite(array_type, elem_ids))
@@ -1480,7 +1473,11 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
             }
         }
 
-        Expr::Let { local, rhs, body: let_body } => {
+        Expr::Let {
+            local,
+            rhs,
+            body: let_body,
+        } => {
             let name = &body.get_local(*local).name;
             // If binding to _, evaluate value for side effects but don't store it
             if name == "_" {
@@ -1663,7 +1660,10 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                         captures,
                     } => (lambda_name.clone(), captures.clone()),
                     other => {
-                        bail_spirv!("map closure argument must be a Closure expression, got {:?}", other);
+                        bail_spirv!(
+                            "map closure argument must be a Closure expression, got {:?}",
+                            other
+                        );
                     }
                 };
                 let is_empty_closure = captures.is_empty();
@@ -1710,8 +1710,8 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                 // Check if we can do in-place update:
                 // 1. This map call was marked as having a dead-after input array
                 // 2. Element types match (f : T -> T)
-                let can_inplace =
-                    constructor.inplace_nodes.contains(&expr_node_id) && input_elem_type == output_elem_type;
+                let can_inplace = constructor.inplace_nodes.contains(&expr_node_id)
+                    && input_elem_type == output_elem_type;
 
                 if can_inplace {
                     // In-place optimization: use OpCompositeInsert to update array in place
@@ -1812,10 +1812,8 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
             }
 
             // For all other calls, lower arguments normally
-            let arg_ids: Vec<spirv::Word> = args
-                .iter()
-                .map(|&a| lower_expr(constructor, body, a))
-                .collect::<Result<Vec<_>>>()?;
+            let arg_ids: Vec<spirv::Word> =
+                args.iter().map(|&a| lower_expr(constructor, body, a)).collect::<Result<Vec<_>>>()?;
 
             // Check for builtin vector constructors
             match func.as_str() {
@@ -2305,8 +2303,7 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                     let composite_id = if types::is_pointer(arg0_ty) {
                         // It's a pointer, load the value
                         let ptr = lower_expr(constructor, body, args[0])?;
-                        let pointee_ty =
-                            types::pointee(arg0_ty).expect("Pointer type should have pointee");
+                        let pointee_ty = types::pointee(arg0_ty).expect("Pointer type should have pointee");
                         let value_type = constructor.ast_type_to_spirv(pointee_ty);
                         constructor.builder.load(value_type, None, ptr, None, [])?
                     } else {
@@ -2385,16 +2382,12 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
             }
 
             // Lower all capture expressions
-            let elem_ids: Vec<spirv::Word> = captures
-                .iter()
-                .map(|&e| lower_expr(constructor, body, e))
-                .collect::<Result<Vec<_>>>()?;
+            let elem_ids: Vec<spirv::Word> =
+                captures.iter().map(|&e| lower_expr(constructor, body, e)).collect::<Result<Vec<_>>>()?;
 
             // Create struct type for captures
-            let elem_types: Vec<spirv::Word> = captures
-                .iter()
-                .map(|&e| constructor.ast_type_to_spirv(body.get_type(e)))
-                .collect();
+            let elem_types: Vec<spirv::Word> =
+                captures.iter().map(|&e| constructor.ast_type_to_spirv(body.get_type(e))).collect();
             let tuple_type = constructor.builder.type_struct(elem_types);
 
             // Construct the composite
@@ -2472,10 +2465,8 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
 
         Expr::Tuple(elems) => {
             // Lower all element expressions
-            let elem_ids: Vec<spirv::Word> = elems
-                .iter()
-                .map(|&e| lower_expr(constructor, body, e))
-                .collect::<Result<Vec<_>>>()?;
+            let elem_ids: Vec<spirv::Word> =
+                elems.iter().map(|&e| lower_expr(constructor, body, e)).collect::<Result<Vec<_>>>()?;
 
             // Get the tuple type
             let result_type = constructor.ast_type_to_spirv(expr_ty);
@@ -2486,10 +2477,8 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
 
         Expr::Array(elems) | Expr::Vector(elems) => {
             // Lower all element expressions
-            let elem_ids: Vec<spirv::Word> = elems
-                .iter()
-                .map(|&e| lower_expr(constructor, body, e))
-                .collect::<Result<Vec<_>>>()?;
+            let elem_ids: Vec<spirv::Word> =
+                elems.iter().map(|&e| lower_expr(constructor, body, e)).collect::<Result<Vec<_>>>()?;
 
             // Get the array/vector type
             let result_type = constructor.ast_type_to_spirv(expr_ty);

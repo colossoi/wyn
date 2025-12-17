@@ -257,13 +257,7 @@ impl Body {
     }
 
     /// Allocate a new expression with its metadata.
-    pub fn alloc_expr(
-        &mut self,
-        expr: Expr,
-        ty: Type<TypeName>,
-        span: Span,
-        node_id: NodeId,
-    ) -> ExprId {
+    pub fn alloc_expr(&mut self, expr: Expr, ty: Type<TypeName>, span: Span, node_id: NodeId) -> ExprId {
         let id = self.expr_ids.next();
         self.exprs.push(expr);
         self.types.push(ty);
@@ -536,7 +530,9 @@ pub enum Attribute {
     Location(u32),
     Vertex,
     Fragment,
-    Compute { local_size: (u32, u32, u32) },
+    Compute {
+        local_size: (u32, u32, u32),
+    },
     Uniform,
     Storage,
 }
@@ -546,7 +542,9 @@ pub enum Attribute {
 pub enum ExecutionModel {
     Vertex,
     Fragment,
-    Compute { local_size: (u32, u32, u32) },
+    Compute {
+        local_size: (u32, u32, u32),
+    },
 }
 
 /// Decoration for shader I/O.

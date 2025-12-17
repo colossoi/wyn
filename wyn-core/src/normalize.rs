@@ -44,11 +44,7 @@ impl Normalizer {
 
     /// Normalize an entire program.
     fn normalize_program(&mut self, program: Program) -> Program {
-        let defs = program
-            .defs
-            .into_iter()
-            .map(|d| self.normalize_def(d))
-            .collect();
+        let defs = program.defs.into_iter().map(|d| self.normalize_def(d)).collect();
         Program {
             defs,
             lambda_registry: program.lambda_registry,
@@ -326,7 +322,11 @@ impl Normalizer {
             }
 
             // Let - map subexpressions (let body creates its own scope for bindings)
-            Expr::Let { local, rhs, body: let_body } => {
+            Expr::Let {
+                local,
+                rhs,
+                body: let_body,
+            } => {
                 let new_rhs = self.expr_map[rhs];
                 let new_body = self.expr_map[let_body];
                 body.alloc_expr(
@@ -374,10 +374,8 @@ impl Normalizer {
                 let new_init = self.expr_map[init];
                 let (atom_init, init_binding) = self.atomize(body, new_init, node_id);
 
-                let new_init_bindings: Vec<_> = init_bindings
-                    .iter()
-                    .map(|(local, expr)| (*local, self.expr_map[expr]))
-                    .collect();
+                let new_init_bindings: Vec<_> =
+                    init_bindings.iter().map(|(local, expr)| (*local, self.expr_map[expr])).collect();
 
                 let new_kind = self.map_loop_kind(body, kind, node_id);
                 let new_loop_body = self.expr_map[loop_body];
@@ -419,7 +417,12 @@ impl Normalizer {
             }
 
             // Range - atomize start, step, end
-            Expr::Range { start, step, end, kind } => {
+            Expr::Range {
+                start,
+                step,
+                end,
+                kind,
+            } => {
                 let new_start = self.expr_map[start];
                 let new_end = self.expr_map[end];
 
@@ -466,7 +469,10 @@ impl Normalizer {
             }
 
             // Attributed - pass through (the inner expression is already normalized)
-            Expr::Attributed { attributes, expr: inner } => {
+            Expr::Attributed {
+                attributes,
+                expr: inner,
+            } => {
                 let new_inner = self.expr_map[inner];
                 body.alloc_expr(
                     Expr::Attributed {
@@ -574,7 +580,7 @@ fn is_atomic(expr: &Expr) -> bool {
     match expr {
         Expr::Local(_) | Expr::Global(_) | Expr::Unit => true,
         Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::String(_) => true,
-        Expr::Closure { .. } => true, // Closures are atomic values
+        Expr::Closure { .. } => true,           // Closures are atomic values
         Expr::Tuple(elems) => elems.is_empty(), // Empty tuple is atomic
         _ => false,
     }

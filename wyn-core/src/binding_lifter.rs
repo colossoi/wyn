@@ -168,7 +168,9 @@ impl BindingLifter {
         match expr {
             // Leaf nodes - just copy
             Expr::Local(local_id) => new_body.alloc_expr(Expr::Local(*local_id), ty.clone(), span, node_id),
-            Expr::Global(name) => new_body.alloc_expr(Expr::Global(name.clone()), ty.clone(), span, node_id),
+            Expr::Global(name) => {
+                new_body.alloc_expr(Expr::Global(name.clone()), ty.clone(), span, node_id)
+            }
             Expr::Int(s) => new_body.alloc_expr(Expr::Int(s.clone()), ty.clone(), span, node_id),
             Expr::Float(s) => new_body.alloc_expr(Expr::Float(s.clone()), ty.clone(), span, node_id),
             Expr::Bool(b) => new_body.alloc_expr(Expr::Bool(*b), ty.clone(), span, node_id),
@@ -179,7 +181,11 @@ impl BindingLifter {
             Expr::Loop { .. } => self.lift_loop(new_body, old_body, expr, ty, span, node_id),
 
             // Let - map subexpressions
-            Expr::Let { local, rhs, body: let_body } => {
+            Expr::Let {
+                local,
+                rhs,
+                body: let_body,
+            } => {
                 let new_rhs = self.expr_map[rhs];
                 let new_let_body = self.expr_map[let_body];
                 new_body.alloc_expr(
@@ -289,15 +295,16 @@ impl BindingLifter {
 
             // Matrix - map subexpressions
             Expr::Matrix(rows) => {
-                let new_rows: Vec<Vec<_>> = rows
-                    .iter()
-                    .map(|row| row.iter().map(|e| self.expr_map[e]).collect())
-                    .collect();
+                let new_rows: Vec<Vec<_>> =
+                    rows.iter().map(|row| row.iter().map(|e| self.expr_map[e]).collect()).collect();
                 new_body.alloc_expr(Expr::Matrix(new_rows), ty.clone(), span, node_id)
             }
 
             // Closure - map captures
-            Expr::Closure { lambda_name, captures } => {
+            Expr::Closure {
+                lambda_name,
+                captures,
+            } => {
                 let new_captures: Vec<_> = captures.iter().map(|c| self.expr_map[c]).collect();
                 new_body.alloc_expr(
                     Expr::Closure {
@@ -311,7 +318,12 @@ impl BindingLifter {
             }
 
             // Range - map subexpressions
-            Expr::Range { start, step, end, kind } => {
+            Expr::Range {
+                start,
+                step,
+                end,
+                kind,
+            } => {
                 let new_start = self.expr_map[start];
                 let new_step = step.map(|s| self.expr_map[&s]);
                 let new_end = self.expr_map[end];
@@ -335,7 +347,10 @@ impl BindingLifter {
             }
 
             // Attributed - map inner
-            Expr::Attributed { attributes, expr: inner } => {
+            Expr::Attributed {
+                attributes,
+                expr: inner,
+            } => {
                 let new_inner = self.expr_map[inner];
                 new_body.alloc_expr(
                     Expr::Attributed {
@@ -375,10 +390,8 @@ impl BindingLifter {
         let new_init = self.expr_map[init];
 
         // 2. Map init_bindings
-        let new_init_bindings: Vec<_> = init_bindings
-            .iter()
-            .map(|(local, expr)| (*local, self.expr_map[expr]))
-            .collect();
+        let new_init_bindings: Vec<_> =
+            init_bindings.iter().map(|(local, expr)| (*local, self.expr_map[expr])).collect();
 
         // 3. Map loop kind
         let new_kind = self.map_loop_kind(kind);
@@ -464,7 +477,12 @@ impl BindingLifter {
 fn linearize_body(body: &Body, mut expr_id: ExprId) -> LinearizedBody {
     let mut bindings = Vec::new();
 
-    while let Expr::Let { local, rhs, body: let_body } = body.get_expr(expr_id) {
+    while let Expr::Let {
+        local,
+        rhs,
+        body: let_body,
+    } = body.get_expr(expr_id)
+    {
         let free_locals = collect_free_locals(body, *rhs);
         let ty = body.get_type(expr_id).clone();
         let span = body.get_span(expr_id);
@@ -547,7 +565,11 @@ fn collect_free_locals_inner(
             }
         }
 
-        Expr::Let { local, rhs, body: let_body } => {
+        Expr::Let {
+            local,
+            rhs,
+            body: let_body,
+        } => {
             collect_free_locals_inner(body, *rhs, bound, free);
             let mut extended = bound.clone();
             extended.insert(*local);

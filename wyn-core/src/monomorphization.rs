@@ -11,10 +11,10 @@
 //!
 //! This happens after type checking and flattening, before lowering.
 
+use crate::IdArena;
 use crate::ast::TypeName;
 use crate::error::Result;
 use crate::mir::{Body, Def, Expr, ExprId, LocalDecl, Program};
-use crate::IdArena;
 use crate::mir::{LambdaId, LambdaInfo};
 use polytype::Type;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -122,7 +122,10 @@ impl TypeKey {
                     TypeName::UserVar(s) => format!("uservar_{}", s),
                     TypeName::Named(s) => s.clone(),
                     TypeName::Unique => {
-                        return TypeKey::Constructed("unique".to_string(), args.iter().map(TypeKey::from_type).collect());
+                        return TypeKey::Constructed(
+                            "unique".to_string(),
+                            args.iter().map(TypeKey::from_type).collect(),
+                        );
                     }
                     TypeName::Unit => "unit".to_string(),
                     TypeName::Tuple(n) => format!("tuple{}", n),
@@ -350,7 +353,11 @@ impl Monomorphizer {
                 then_: expr_map[then_],
                 else_: expr_map[else_],
             }),
-            Expr::Let { local, rhs, body: let_body } => Ok(Expr::Let {
+            Expr::Let {
+                local,
+                rhs,
+                body: let_body,
+            } => Ok(Expr::Let {
                 local: *local,
                 rhs: expr_map[rhs],
                 body: expr_map[let_body],
@@ -362,10 +369,8 @@ impl Monomorphizer {
                 kind,
                 body: loop_body,
             } => {
-                let new_init_bindings: Vec<_> = init_bindings
-                    .iter()
-                    .map(|(local, e)| (*local, expr_map[e]))
-                    .collect();
+                let new_init_bindings: Vec<_> =
+                    init_bindings.iter().map(|(local, e)| (*local, expr_map[e])).collect();
                 Ok(Expr::Loop {
                     loop_var: *loop_var,
                     init: expr_map[init],
@@ -381,7 +386,10 @@ impl Monomorphizer {
                     args: new_args,
                 })
             }
-            Expr::Attributed { attributes, expr: inner } => Ok(Expr::Attributed {
+            Expr::Attributed {
+                attributes,
+                expr: inner,
+            } => Ok(Expr::Attributed {
                 attributes: attributes.clone(),
                 expr: expr_map[inner],
             }),
@@ -399,13 +407,14 @@ impl Monomorphizer {
                 Ok(Expr::Vector(new_elems))
             }
             Expr::Matrix(rows) => {
-                let new_rows: Vec<Vec<_>> = rows
-                    .iter()
-                    .map(|row| row.iter().map(|e| expr_map[e]).collect())
-                    .collect();
+                let new_rows: Vec<Vec<_>> =
+                    rows.iter().map(|row| row.iter().map(|e| expr_map[e]).collect()).collect();
                 Ok(Expr::Matrix(new_rows))
             }
-            Expr::Closure { lambda_name, captures } => {
+            Expr::Closure {
+                lambda_name,
+                captures,
+            } => {
                 // Ensure lambda function is in worklist
                 if let Some(def) = self.poly_functions.get(lambda_name).cloned() {
                     self.ensure_in_worklist(lambda_name, def);
@@ -416,7 +425,12 @@ impl Monomorphizer {
                     captures: new_captures,
                 })
             }
-            Expr::Range { start, step, end, kind } => Ok(Expr::Range {
+            Expr::Range {
+                start,
+                step,
+                end,
+                kind,
+            } => Ok(Expr::Range {
                 start: expr_map[start],
                 step: step.map(|s| expr_map[&s]),
                 end: expr_map[end],
@@ -530,9 +544,7 @@ fn map_loop_kind(kind: &crate::mir::LoopKind, expr_map: &HashMap<ExprId, ExprId>
             var: *var,
             bound: expr_map[bound],
         },
-        LoopKind::While { cond } => LoopKind::While {
-            cond: expr_map[cond],
-        },
+        LoopKind::While { cond } => LoopKind::While { cond: expr_map[cond] },
     }
 }
 
@@ -754,11 +766,7 @@ fn format_subst(subst: &Substitution) -> String {
     let mut items: Vec<_> = subst.iter().collect();
     items.sort_by_key(|(k, _)| *k);
 
-    items
-        .iter()
-        .map(|(_, ty)| format_type_compact(ty))
-        .collect::<Vec<_>>()
-        .join("_")
+    items.iter().map(|(_, ty)| format_type_compact(ty)).collect::<Vec<_>>().join("_")
 }
 
 fn format_type_compact(ty: &Type<TypeName>) -> String {

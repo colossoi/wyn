@@ -8,7 +8,7 @@
 use crate::ast::{self, ExprKind, Expression, NodeCounter, NodeId, PatternKind, Span, Type, TypeName};
 use crate::defun_analysis::DefunAnalysis;
 use crate::error::Result;
-use crate::mir::{self, Body, ExprId, LambdaId, LambdaInfo, LocalId, LocalDecl, LocalKind};
+use crate::mir::{self, Body, ExprId, LambdaId, LambdaInfo, LocalDecl, LocalId, LocalKind};
 use crate::scope::ScopeStack;
 use crate::types;
 use crate::{IdArena, bail_flatten, err_flatten, err_type};
@@ -717,11 +717,8 @@ impl Flattener {
             ExprKind::Unit => (mir::Expr::Unit, StaticValue::Dyn),
 
             ExprKind::Identifier(quals, name) => {
-                let full_name = if quals.is_empty() {
-                    name.clone()
-                } else {
-                    format!("{}.{}", quals.join("."), name)
-                };
+                let full_name =
+                    if quals.is_empty() { name.clone() } else { format!("{}.{}", quals.join("."), name) };
 
                 // Get classification from DefunAnalysis
                 let sv = self.get_classification(expr.h.id);
@@ -848,7 +845,14 @@ impl Flattener {
                     if let Some(ptr_local_id) = self.lookup_local(&ptr_name) {
                         let intrinsic = mir::Expr::Intrinsic {
                             name: "index".to_string(),
-                            args: vec![self.alloc_expr(mir::Expr::Local(ptr_local_id), types::pointer(self.current_body.get_type(arr_id).clone()), span), idx_id],
+                            args: vec![
+                                self.alloc_expr(
+                                    mir::Expr::Local(ptr_local_id),
+                                    types::pointer(self.current_body.get_type(arr_id).clone()),
+                                    span,
+                                ),
+                                idx_id,
+                            ],
                         };
                         let id = self.alloc_expr(intrinsic, ty, span);
                         return Ok((id, StaticValue::Dyn));
@@ -988,8 +992,13 @@ impl Flattener {
                     // let _w_ptr_{id} = materialize(name) in body
                     let ptr_name = Self::backing_store_name(local_id);
                     let var_id = self.alloc_expr(mir::Expr::Local(local_id), value_ty.clone(), span);
-                    let materialize_id = self.alloc_expr(mir::Expr::Materialize(var_id), types::pointer(value_ty.clone()), span);
-                    let ptr_local_id = self.alloc_local(ptr_name, types::pointer(value_ty), LocalKind::Let, span);
+                    let materialize_id = self.alloc_expr(
+                        mir::Expr::Materialize(var_id),
+                        types::pointer(value_ty.clone()),
+                        span,
+                    );
+                    let ptr_local_id =
+                        self.alloc_local(ptr_name, types::pointer(value_ty), LocalKind::Let, span);
                     let body_ty = self.current_body.get_type(body_id).clone();
                     self.alloc_expr(
                         mir::Expr::Let {
@@ -1084,7 +1093,8 @@ impl Flattener {
                     let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
 
                     // Create tuple_access intrinsic
-                    let tuple_var_id = self.alloc_expr(mir::Expr::Local(tuple_local_id), tuple_ty.clone(), span);
+                    let tuple_var_id =
+                        self.alloc_expr(mir::Expr::Local(tuple_local_id), tuple_ty.clone(), span);
                     let idx_id = self.alloc_expr(mir::Expr::Int(i.to_string()), i32_type, span);
                     let extract_id = self.alloc_expr(
                         mir::Expr::Intrinsic {
@@ -1172,7 +1182,12 @@ impl Flattener {
         self.name_to_local.push_scope();
 
         // Allocate closure param as local
-        let closure_local = self.alloc_local("_w_closure".to_string(), closure_type.clone(), LocalKind::Param, span);
+        let closure_local = self.alloc_local(
+            "_w_closure".to_string(),
+            closure_type.clone(),
+            LocalKind::Param,
+            span,
+        );
         let mut param_local_ids = vec![closure_local];
 
         // Allocate lambda params as locals
@@ -1240,11 +1255,8 @@ impl Flattener {
         };
 
         // Build closure tuple
-        let closure_tuple = if capture_ids.is_empty() {
-            mir::Expr::Unit
-        } else {
-            mir::Expr::Tuple(capture_ids.clone())
-        };
+        let closure_tuple =
+            if capture_ids.is_empty() { mir::Expr::Unit } else { mir::Expr::Tuple(capture_ids.clone()) };
         let closure_tuple_id = self.alloc_expr(closure_tuple, closure_type.clone(), span);
 
         let closure_expr = mir::Expr::Closure {
@@ -1439,7 +1451,8 @@ impl Flattener {
         let (init_id, _) = self.flatten_expr(init_expr)?;
         let init_ty = self.current_body.get_type(init_id).clone();
         let loop_var_name = self.fresh_name("loop_var");
-        let loop_var_local = self.alloc_local(loop_var_name.clone(), init_ty.clone(), LocalKind::LoopVar, span);
+        let loop_var_local =
+            self.alloc_local(loop_var_name.clone(), init_ty.clone(), LocalKind::LoopVar, span);
 
         let bindings = match &pattern.kind {
             PatternKind::Name(name) => {
@@ -1484,7 +1497,9 @@ impl Flattener {
             PatternKind::Typed(inner, _) => {
                 self.extract_bindings_from_pattern(inner, loop_var_local, init_ty, span)
             }
-            PatternKind::Tuple(patterns) => self.extract_tuple_bindings(patterns, loop_var_local, init_ty, span),
+            PatternKind::Tuple(patterns) => {
+                self.extract_tuple_bindings(patterns, loop_var_local, init_ty, span)
+            }
             PatternKind::Wildcard => Ok(vec![]), // Wildcard: no bindings
             _ => Err(err_flatten!("Loop pattern {:?} not supported", pattern.kind)),
         }

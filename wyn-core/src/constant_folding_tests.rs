@@ -1,20 +1,26 @@
-#![cfg(test)]
+//! Tests for the constant folding optimization pass.
 
-use crate::ast::{NodeId, Span};
-use crate::constant_folding::ConstantFolder;
-use crate::mir::{Expr, ExprKind, Literal};
+use crate::IdArena;
+use crate::ast::{NodeId, Span, TypeName};
+use crate::constant_folding::fold_constants;
+use crate::mir::{Body, Def, Expr, ExprId, LocalDecl, LocalId, LocalKind, Program};
+use polytype::Type;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-fn i32_type() -> polytype::Type<crate::ast::TypeName> {
-    polytype::Type::Constructed(crate::ast::TypeName::Int(32), vec![])
+// =============================================================================
+// Test Helpers - Type Constructors
+// =============================================================================
+
+fn i32_type() -> Type<TypeName> {
+    Type::Constructed(TypeName::Int(32), vec![])
 }
 
-fn f32_type() -> polytype::Type<crate::ast::TypeName> {
-    polytype::Type::Constructed(crate::ast::TypeName::Float(32), vec![])
+fn f32_type() -> Type<TypeName> {
+    Type::Constructed(TypeName::Float(32), vec![])
 }
 
-fn bool_type() -> polytype::Type<crate::ast::TypeName> {
-    polytype::Type::Constructed(crate::ast::TypeName::Str("bool".into()), vec![])
+fn bool_type() -> Type<TypeName> {
+    Type::Constructed(TypeName::Str("bool".into()), vec![])
 }
 
 fn test_span() -> Span {
@@ -28,361 +34,329 @@ fn next_id() -> NodeId {
     NodeId(TEST_NODE_ID.fetch_add(1, Ordering::Relaxed))
 }
 
+// =============================================================================
+// Test Helpers - Expression Building in Body
+// =============================================================================
+
+/// Builder for creating test expressions in a Body.
+struct TestBodyBuilder {
+    body: Body,
+}
+
+impl TestBodyBuilder {
+    fn new() -> Self {
+        TestBodyBuilder { body: Body::new() }
+    }
+
+    /// Allocate a local variable.
+    fn alloc_local(&mut self, name: &str, ty: Type<TypeName>) -> LocalId {
+        self.body.alloc_local(LocalDecl {
+            name: name.to_string(),
+            span: test_span(),
+            ty,
+            kind: LocalKind::Let,
+        })
+    }
+
+    /// Create a local reference expression.
+    fn local(&mut self, local_id: LocalId) -> ExprId {
+        let ty = self.body.get_local(local_id).ty.clone();
+        self.body.alloc_expr(Expr::Local(local_id), ty, test_span(), next_id())
+    }
+
+    /// Create an integer literal expression.
+    fn int_lit(&mut self, n: i32) -> ExprId {
+        self.body.alloc_expr(Expr::Int(n.to_string()), i32_type(), test_span(), next_id())
+    }
+
+    /// Create a float literal expression.
+    fn float_lit(&mut self, n: f64) -> ExprId {
+        self.body.alloc_expr(Expr::Float(n.to_string()), f32_type(), test_span(), next_id())
+    }
+
+    /// Create a boolean literal expression.
+    fn bool_lit(&mut self, b: bool) -> ExprId {
+        self.body.alloc_expr(Expr::Bool(b), bool_type(), test_span(), next_id())
+    }
+
+    /// Create a binary operation expression.
+    fn binop(&mut self, op: &str, lhs: ExprId, rhs: ExprId, ty: Type<TypeName>) -> ExprId {
+        self.body.alloc_expr(
+            Expr::BinOp {
+                op: op.to_string(),
+                lhs,
+                rhs,
+            },
+            ty,
+            test_span(),
+            next_id(),
+        )
+    }
+
+    /// Create a unary operation expression.
+    fn unop(&mut self, op: &str, operand: ExprId, ty: Type<TypeName>) -> ExprId {
+        self.body.alloc_expr(
+            Expr::UnaryOp {
+                op: op.to_string(),
+                operand,
+            },
+            ty,
+            test_span(),
+            next_id(),
+        )
+    }
+
+    /// Create an if expression.
+    fn if_expr(&mut self, cond: ExprId, then_: ExprId, else_: ExprId) -> ExprId {
+        let ty = self.body.get_type(then_).clone();
+        self.body.alloc_expr(Expr::If { cond, then_, else_ }, ty, test_span(), next_id())
+    }
+
+    /// Create an array literal expression.
+    fn array(&mut self, elements: Vec<ExprId>, ty: Type<TypeName>) -> ExprId {
+        self.body.alloc_expr(Expr::Array(elements), ty, test_span(), next_id())
+    }
+
+    /// Finalize the body with the given root expression.
+    fn build(mut self, root: ExprId) -> Body {
+        self.body.set_root(root);
+        self.body
+    }
+}
+
+/// Create a simple test program with one constant def.
+fn make_test_program(body: Body) -> Program {
+    Program {
+        defs: vec![Def::Constant {
+            id: next_id(),
+            name: "test_const".to_string(),
+            ty: i32_type(),
+            attributes: vec![],
+            body,
+            span: test_span(),
+        }],
+        lambda_registry: IdArena::new(),
+    }
+}
+
+// =============================================================================
+// Test Helpers - Result Inspection
+// =============================================================================
+
+/// Get the root expression from the first def in the program.
+fn get_root_expr(program: &Program) -> &Expr {
+    match &program.defs[0] {
+        Def::Constant { body, .. } | Def::Function { body, .. } | Def::EntryPoint { body, .. } => {
+            body.get_expr(body.root)
+        }
+        _ => panic!("Expected def with body"),
+    }
+}
+
+/// Get the body from the first def in the program.
+fn get_body(program: &Program) -> &Body {
+    match &program.defs[0] {
+        Def::Constant { body, .. } | Def::Function { body, .. } | Def::EntryPoint { body, .. } => body,
+        _ => panic!("Expected def with body"),
+    }
+}
+
+// =============================================================================
+// Unit Tests
+// =============================================================================
+
 #[test]
 fn test_fold_float_division() {
-    let mut folder = ConstantFolder::new();
-
     // 135.0 / 255.0
-    let expr = Expr::new(
-        next_id(),
-        f32_type(),
-        ExprKind::BinOp {
-            op: "/".to_string(),
-            lhs: Box::new(Expr::new(
-                next_id(),
-                f32_type(),
-                ExprKind::Literal(Literal::Float("135.0".to_string())),
-                test_span(),
-            )),
-            rhs: Box::new(Expr::new(
-                next_id(),
-                f32_type(),
-                ExprKind::Literal(Literal::Float("255.0".to_string())),
-                test_span(),
-            )),
-        },
-        test_span(),
-    );
+    let mut b = TestBodyBuilder::new();
+    let lhs = b.float_lit(135.0);
+    let rhs = b.float_lit(255.0);
+    let div = b.binop("/", lhs, rhs, f32_type());
+    let body = b.build(div);
 
-    let result = folder.fold_expr(&expr).unwrap();
+    let program = make_test_program(body);
+    let result = fold_constants(program).unwrap();
 
-    match &result.kind {
-        ExprKind::Literal(Literal::Float(val)) => {
+    match get_root_expr(&result) {
+        Expr::Float(val) => {
             let v: f64 = val.parse().unwrap();
             assert!((v - 0.529411765).abs() < 0.000001);
         }
-        _ => panic!("Expected folded float literal, got {:?}", result),
+        other => panic!("Expected folded float literal, got {:?}", other),
     }
 }
 
 #[test]
 fn test_fold_integer_addition() {
-    let mut folder = ConstantFolder::new();
-
     // 10 + 32
-    let expr = Expr::new(
-        next_id(),
-        i32_type(),
-        ExprKind::BinOp {
-            op: "+".to_string(),
-            lhs: Box::new(Expr::new(
-                next_id(),
-                i32_type(),
-                ExprKind::Literal(Literal::Int("10".to_string())),
-                test_span(),
-            )),
-            rhs: Box::new(Expr::new(
-                next_id(),
-                i32_type(),
-                ExprKind::Literal(Literal::Int("32".to_string())),
-                test_span(),
-            )),
-        },
-        test_span(),
-    );
+    let mut b = TestBodyBuilder::new();
+    let lhs = b.int_lit(10);
+    let rhs = b.int_lit(32);
+    let add = b.binop("+", lhs, rhs, i32_type());
+    let body = b.build(add);
 
-    let result = folder.fold_expr(&expr).unwrap();
+    let program = make_test_program(body);
+    let result = fold_constants(program).unwrap();
 
-    match &result.kind {
-        ExprKind::Literal(Literal::Int(val)) => {
+    match get_root_expr(&result) {
+        Expr::Int(val) => {
             assert_eq!(val, "42");
         }
-        _ => panic!("Expected folded int literal, got {:?}", result),
+        other => panic!("Expected folded int literal, got {:?}", other),
     }
 }
 
 #[test]
 fn test_fold_constant_if_true() {
-    let mut folder = ConstantFolder::new();
-
     // if true then 1 else 2
-    let expr = Expr::new(
-        next_id(),
-        i32_type(),
-        ExprKind::If {
-            cond: Box::new(Expr::new(
-                next_id(),
-                bool_type(),
-                ExprKind::Literal(Literal::Bool(true)),
-                test_span(),
-            )),
-            then_branch: Box::new(Expr::new(
-                next_id(),
-                i32_type(),
-                ExprKind::Literal(Literal::Int("1".to_string())),
-                test_span(),
-            )),
-            else_branch: Box::new(Expr::new(
-                next_id(),
-                i32_type(),
-                ExprKind::Literal(Literal::Int("2".to_string())),
-                test_span(),
-            )),
-        },
-        test_span(),
-    );
+    let mut b = TestBodyBuilder::new();
+    let cond = b.bool_lit(true);
+    let then_ = b.int_lit(1);
+    let else_ = b.int_lit(2);
+    let if_expr = b.if_expr(cond, then_, else_);
+    let body = b.build(if_expr);
 
-    let result = folder.fold_expr(&expr).unwrap();
+    let program = make_test_program(body);
+    let result = fold_constants(program).unwrap();
 
-    match &result.kind {
-        ExprKind::Literal(Literal::Int(val)) => {
+    match get_root_expr(&result) {
+        Expr::Int(val) => {
             assert_eq!(val, "1");
         }
-        _ => panic!("Expected folded to then branch, got {:?}", result),
+        other => panic!("Expected folded to then branch, got {:?}", other),
     }
 }
 
 #[test]
 fn test_fold_constant_if_false() {
-    let mut folder = ConstantFolder::new();
-
     // if false then 1 else 2
-    let expr = Expr::new(
-        next_id(),
-        i32_type(),
-        ExprKind::If {
-            cond: Box::new(Expr::new(
-                next_id(),
-                bool_type(),
-                ExprKind::Literal(Literal::Bool(false)),
-                test_span(),
-            )),
-            then_branch: Box::new(Expr::new(
-                next_id(),
-                i32_type(),
-                ExprKind::Literal(Literal::Int("1".to_string())),
-                test_span(),
-            )),
-            else_branch: Box::new(Expr::new(
-                next_id(),
-                i32_type(),
-                ExprKind::Literal(Literal::Int("2".to_string())),
-                test_span(),
-            )),
-        },
-        test_span(),
-    );
+    let mut b = TestBodyBuilder::new();
+    let cond = b.bool_lit(false);
+    let then_ = b.int_lit(1);
+    let else_ = b.int_lit(2);
+    let if_expr = b.if_expr(cond, then_, else_);
+    let body = b.build(if_expr);
 
-    let result = folder.fold_expr(&expr).unwrap();
+    let program = make_test_program(body);
+    let result = fold_constants(program).unwrap();
 
-    match &result.kind {
-        ExprKind::Literal(Literal::Int(val)) => {
+    match get_root_expr(&result) {
+        Expr::Int(val) => {
             assert_eq!(val, "2");
         }
-        _ => panic!("Expected folded to else branch, got {:?}", result),
+        other => panic!("Expected folded to else branch, got {:?}", other),
     }
 }
 
 #[test]
 fn test_fold_array_literal() {
-    let mut folder = ConstantFolder::new();
-
     // [1 + 2, 3 * 4]
-    let expr = Expr::new(
-        next_id(),
-        i32_type(), // simplified, would be array type
-        ExprKind::Literal(Literal::Array(vec![
-            Expr::new(
-                next_id(),
-                i32_type(),
-                ExprKind::BinOp {
-                    op: "+".to_string(),
-                    lhs: Box::new(Expr::new(
-                        next_id(),
-                        i32_type(),
-                        ExprKind::Literal(Literal::Int("1".to_string())),
-                        test_span(),
-                    )),
-                    rhs: Box::new(Expr::new(
-                        next_id(),
-                        i32_type(),
-                        ExprKind::Literal(Literal::Int("2".to_string())),
-                        test_span(),
-                    )),
-                },
-                test_span(),
-            ),
-            Expr::new(
-                next_id(),
-                i32_type(),
-                ExprKind::BinOp {
-                    op: "*".to_string(),
-                    lhs: Box::new(Expr::new(
-                        next_id(),
-                        i32_type(),
-                        ExprKind::Literal(Literal::Int("3".to_string())),
-                        test_span(),
-                    )),
-                    rhs: Box::new(Expr::new(
-                        next_id(),
-                        i32_type(),
-                        ExprKind::Literal(Literal::Int("4".to_string())),
-                        test_span(),
-                    )),
-                },
-                test_span(),
-            ),
-        ])),
-        test_span(),
-    );
+    let mut b = TestBodyBuilder::new();
+    let one = b.int_lit(1);
+    let two = b.int_lit(2);
+    let add = b.binop("+", one, two, i32_type());
+    let three = b.int_lit(3);
+    let four = b.int_lit(4);
+    let mul = b.binop("*", three, four, i32_type());
+    let array = b.array(vec![add, mul], i32_type());
+    let body = b.build(array);
 
-    let result = folder.fold_expr(&expr).unwrap();
+    let program = make_test_program(body);
+    let result = fold_constants(program).unwrap();
 
-    match &result.kind {
-        ExprKind::Literal(Literal::Array(elements)) => {
+    let result_body = get_body(&result);
+    match get_root_expr(&result) {
+        Expr::Array(elements) => {
             assert_eq!(elements.len(), 2);
-            match &elements[0].kind {
-                ExprKind::Literal(Literal::Int(v)) => assert_eq!(v, "3"),
-                _ => panic!("Expected int literal"),
+            match result_body.get_expr(elements[0]) {
+                Expr::Int(v) => assert_eq!(v, "3"),
+                other => panic!("Expected int literal, got {:?}", other),
             }
-            match &elements[1].kind {
-                ExprKind::Literal(Literal::Int(v)) => assert_eq!(v, "12"),
-                _ => panic!("Expected int literal"),
+            match result_body.get_expr(elements[1]) {
+                Expr::Int(v) => assert_eq!(v, "12"),
+                other => panic!("Expected int literal, got {:?}", other),
             }
         }
-        _ => panic!("Expected array literal, got {:?}", result),
+        other => panic!("Expected array literal, got {:?}", other),
     }
 }
 
 #[test]
 fn test_fold_negation() {
-    let mut folder = ConstantFolder::new();
-
     // -42
-    let expr = Expr::new(
-        next_id(),
-        i32_type(),
-        ExprKind::UnaryOp {
-            op: "-".to_string(),
-            operand: Box::new(Expr::new(
-                next_id(),
-                i32_type(),
-                ExprKind::Literal(Literal::Int("42".to_string())),
-                test_span(),
-            )),
-        },
-        test_span(),
-    );
+    let mut b = TestBodyBuilder::new();
+    let lit = b.int_lit(42);
+    let neg = b.unop("-", lit, i32_type());
+    let body = b.build(neg);
 
-    let result = folder.fold_expr(&expr).unwrap();
+    let program = make_test_program(body);
+    let result = fold_constants(program).unwrap();
 
-    match &result.kind {
-        ExprKind::Literal(Literal::Int(val)) => {
+    match get_root_expr(&result) {
+        Expr::Int(val) => {
             assert_eq!(val, "-42");
         }
-        _ => panic!("Expected folded negation, got {:?}", result),
+        other => panic!("Expected folded negation, got {:?}", other),
     }
 }
 
 #[test]
 fn test_fold_boolean_not() {
-    let mut folder = ConstantFolder::new();
-
     // !true
-    let expr = Expr::new(
-        next_id(),
-        bool_type(),
-        ExprKind::UnaryOp {
-            op: "!".to_string(),
-            operand: Box::new(Expr::new(
-                next_id(),
-                bool_type(),
-                ExprKind::Literal(Literal::Bool(true)),
-                test_span(),
-            )),
-        },
-        test_span(),
-    );
+    let mut b = TestBodyBuilder::new();
+    let lit = b.bool_lit(true);
+    let not = b.unop("!", lit, bool_type());
+    let body = b.build(not);
 
-    let result = folder.fold_expr(&expr).unwrap();
+    let program = make_test_program(body);
+    let result = fold_constants(program).unwrap();
 
-    match &result.kind {
-        ExprKind::Literal(Literal::Bool(val)) => {
+    match get_root_expr(&result) {
+        Expr::Bool(val) => {
             assert!(!*val);
         }
-        _ => panic!("Expected folded boolean, got {:?}", result),
+        other => panic!("Expected folded boolean, got {:?}", other),
     }
 }
 
 #[test]
 fn test_fold_comparison() {
-    let mut folder = ConstantFolder::new();
-
     // 10 < 20
-    let expr = Expr::new(
-        next_id(),
-        bool_type(),
-        ExprKind::BinOp {
-            op: "<".to_string(),
-            lhs: Box::new(Expr::new(
-                next_id(),
-                i32_type(),
-                ExprKind::Literal(Literal::Int("10".to_string())),
-                test_span(),
-            )),
-            rhs: Box::new(Expr::new(
-                next_id(),
-                i32_type(),
-                ExprKind::Literal(Literal::Int("20".to_string())),
-                test_span(),
-            )),
-        },
-        test_span(),
-    );
+    let mut b = TestBodyBuilder::new();
+    let lhs = b.int_lit(10);
+    let rhs = b.int_lit(20);
+    let cmp = b.binop("<", lhs, rhs, bool_type());
+    let body = b.build(cmp);
 
-    let result = folder.fold_expr(&expr).unwrap();
+    let program = make_test_program(body);
+    let result = fold_constants(program).unwrap();
 
-    match &result.kind {
-        ExprKind::Literal(Literal::Bool(val)) => {
+    match get_root_expr(&result) {
+        Expr::Bool(val) => {
             assert!(*val);
         }
-        _ => panic!("Expected folded comparison, got {:?}", result),
+        other => panic!("Expected folded comparison, got {:?}", other),
     }
 }
 
 #[test]
 fn test_no_fold_with_variable() {
-    let mut folder = ConstantFolder::new();
-
     // x + 1 (should not fold since x is a variable)
-    let expr = Expr::new(
-        next_id(),
-        i32_type(),
-        ExprKind::BinOp {
-            op: "+".to_string(),
-            lhs: Box::new(Expr::new(
-                next_id(),
-                i32_type(),
-                ExprKind::Var("x".to_string()),
-                test_span(),
-            )),
-            rhs: Box::new(Expr::new(
-                next_id(),
-                i32_type(),
-                ExprKind::Literal(Literal::Int("1".to_string())),
-                test_span(),
-            )),
-        },
-        test_span(),
-    );
+    let mut b = TestBodyBuilder::new();
+    let x = b.alloc_local("x", i32_type());
+    let x_ref = b.local(x);
+    let one = b.int_lit(1);
+    let add = b.binop("+", x_ref, one, i32_type());
+    let body = b.build(add);
 
-    let result = folder.fold_expr(&expr).unwrap();
+    let program = make_test_program(body);
+    let result = fold_constants(program).unwrap();
 
     // Should remain a BinOp since we can't fold with a variable
-    match &result.kind {
-        ExprKind::BinOp { op, .. } => {
+    match get_root_expr(&result) {
+        Expr::BinOp { op, .. } => {
             assert_eq!(op, "+");
         }
-        _ => panic!("Expected unfoldable binop, got {:?}", result),
+        other => panic!("Expected unfoldable binop, got {:?}", other),
     }
 }

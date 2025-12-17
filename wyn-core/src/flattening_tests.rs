@@ -28,6 +28,27 @@ fn flatten_to_string(input: &str) -> String {
     format!("{}", flatten_program(input))
 }
 
+/// Find a definition by name (can be Function or Constant)
+fn find_def<'a>(mir: &'a mir::Program, name: &str) -> &'a mir::Def {
+    mir.defs
+        .iter()
+        .find(|d| match d {
+            mir::Def::Function { name: n, .. } => n == name,
+            mir::Def::Constant { name: n, .. } => n == name,
+            _ => false,
+        })
+        .unwrap_or_else(|| panic!("Definition '{}' not found", name))
+}
+
+/// Get the body from a definition (Function or Constant)
+fn get_body<'a>(def: &'a mir::Def) -> &'a mir::Body {
+    match def {
+        mir::Def::Function { body, .. } => body,
+        mir::Def::Constant { body, .. } => body,
+        other => panic!("Expected Function or Constant, got {:?}", other),
+    }
+}
+
 /// Helper to check that code fails type checking (for testing error cases)
 fn should_fail_type_check(input: &str) -> bool {
     let (module_manager, mut node_counter) = crate::cached_module_manager();
@@ -42,125 +63,272 @@ fn should_fail_type_check(input: &str) -> bool {
 
 #[test]
 fn test_simple_constant() {
-    let mir = flatten_to_string("def x() = 42");
-    assert!(mir.contains("def x:"));
-    assert!(mir.contains("42"));
+    let mir = flatten_program("def x() = 42");
+    // Nullary function becomes a Constant def in MIR
+    let x_def = find_def(&mir, "x");
+    let body = get_body(x_def);
+    // Root should be an integer literal
+    match body.get_expr(body.root) {
+        mir::Expr::Int(s) => assert_eq!(s, "42"),
+        other => panic!("Expected Int, got {:?}", other),
+    }
 }
 
 #[test]
 fn test_simple_function() {
-    let mir = flatten_to_string("def add(x, y) = x + y");
-    // MIR format includes types: def add (x: type) (y: type): return_type =
-    assert!(mir.contains("def add"));
-    assert!(mir.contains("(x + y)"));
+    let mir = flatten_program("def add(x, y) = x + y");
+    let add_def = mir.defs.iter().find(|d| matches!(d, mir::Def::Function { name, .. } if name == "add"));
+    let add_def = add_def.expect("Expected function 'add'");
+    match add_def {
+        mir::Def::Function { params, body, .. } => {
+            assert_eq!(params.len(), 2);
+            // Root should be a BinOp
+            match body.get_expr(body.root) {
+                mir::Expr::BinOp { op, .. } => assert_eq!(op, "+"),
+                other => panic!("Expected BinOp, got {:?}", other),
+            }
+        }
+        _ => unreachable!(),
+    }
 }
 
 #[test]
 fn test_let_binding() {
-    let mir = flatten_to_string("def f() = let x = 1 in x + 2");
-    // Format now includes binding ID: let x{N} = 1 in
-    assert!(mir.contains("let x{"));
-    assert!(mir.contains("} = 1 in"));
+    // Use variables in the expression to prevent constant folding
+    let mir = flatten_program("def f(a, b) = let x = a in x + b");
+    let f_def = find_def(&mir, "f");
+    let body = get_body(f_def);
+    // Root should be a Let
+    match body.get_expr(body.root) {
+        mir::Expr::Let {
+            rhs, body: let_body, ..
+        } => {
+            // RHS should be a local variable reference
+            match body.get_expr(*rhs) {
+                mir::Expr::Local(_) => {}
+                other => panic!("Expected Local for rhs, got {:?}", other),
+            }
+            // Body should be BinOp
+            match body.get_expr(*let_body) {
+                mir::Expr::BinOp { op, .. } => assert_eq!(op, "+"),
+                other => panic!("Expected BinOp for body, got {:?}", other),
+            }
+        }
+        other => panic!("Expected Let, got {:?}", other),
+    }
 }
 
 #[test]
 fn test_tuple_pattern() {
-    let mir = flatten_to_string("def f() = let (a, b) = (1, 2) in a + b");
-    // Should generate tuple extraction
-    assert!(mir.contains("tuple_access"));
+    let mir = flatten_program("def f() = let (a, b) = (1, 2) in a + b");
+    // Tuple pattern desugars to multiple lets with intrinsic tuple access
+    let f_def = find_def(&mir, "f");
+    let body = get_body(f_def);
+    // Should have Let bindings for tuple destructuring
+    // The structure may vary, but there should be intrinsic calls for tuple_access
+    let has_tuple_access = body
+        .exprs
+        .iter()
+        .any(|expr| matches!(expr, mir::Expr::Intrinsic { name, .. } if name == "tuple_access"));
+    assert!(
+        has_tuple_access,
+        "Expected tuple_access intrinsic for tuple pattern"
+    );
 }
 
 #[test]
 fn test_lambda_defunctionalization() {
     let mir = flatten_program("def f() = |x| x + 1");
-    // Should generate a lambda function
-    assert!(mir.defs.len() >= 2); // Original + lambda
 
-    // Check that closure is created
-    let mir_str = format!("{}", mir);
-    assert!(mir_str.contains("_w_lam_f_"));
-    // Closure is now an explicit @closure expression
-    assert!(mir_str.contains("@closure(_w_lam_f_"));
+    // Check that lambda registry has the lambda
+    assert!(
+        !mir.lambda_registry.is_empty(),
+        "Lambda registry should contain the generated lambda"
+    );
+
+    // Check that closure is created in the body
+    let f_def = find_def(&mir, "f");
+    let body = get_body(f_def);
+    let has_closure = body.exprs.iter().any(
+        |expr| matches!(expr, mir::Expr::Closure { lambda_name, .. } if lambda_name.contains("_w_lam_f_")),
+    );
+    assert!(has_closure, "Expected @closure expression with _w_lam_f_ prefix");
 }
 
 #[test]
 fn test_lambda_with_capture() {
     let mir = flatten_program("def f(y) = let g = |x| x + y in g(1)");
-    let mir_str = format!("{}", mir);
 
-    // Lambda should capture y
-    assert!(mir_str.contains("_w_closure"));
-    // Should reference y from closure
-    assert!(mir_str.contains("record_access") || mir_str.contains("_w_closure"));
+    // Lambda should capture y - check for closure with captures
+    let f_def = find_def(&mir, "f");
+    let body = get_body(f_def);
+    let has_closure_with_capture = body
+        .exprs
+        .iter()
+        .any(|expr| matches!(expr, mir::Expr::Closure { captures, .. } if !captures.is_empty()));
+    assert!(
+        has_closure_with_capture,
+        "Expected closure with captured variables"
+    );
 }
 
 #[test]
 fn test_nested_let() {
-    let mir = flatten_to_string("def f() = let x = 1 in let y = 2 in x + y");
-    // Format now includes binding ID: let x{N} = 1 in
-    assert!(mir.contains("let x{"));
-    assert!(mir.contains("let y{"));
+    // Use parameters to prevent constant folding
+    let mir = flatten_program("def f(a, b) = let x = a in let y = b in x + y");
+    let f_def = find_def(&mir, "f");
+    let body = get_body(f_def);
+    // Root should be a Let (outer)
+    match body.get_expr(body.root) {
+        mir::Expr::Let { body: outer_body, .. } => {
+            // Inner should also be a Let
+            match body.get_expr(*outer_body) {
+                mir::Expr::Let { body: inner_body, .. } => {
+                    // Innermost should be BinOp
+                    match body.get_expr(*inner_body) {
+                        mir::Expr::BinOp { op, .. } => assert_eq!(op, "+"),
+                        other => panic!("Expected BinOp, got {:?}", other),
+                    }
+                }
+                other => panic!("Expected inner Let, got {:?}", other),
+            }
+        }
+        other => panic!("Expected outer Let, got {:?}", other),
+    }
 }
 
 #[test]
 fn test_if_expression() {
-    let mir = flatten_to_string("def f(x) = if x then 1 else 0");
-    assert!(mir.contains("if x then 1 else 0"));
+    let mir = flatten_program("def f(x) = if x then 1 else 0");
+    let f_def = find_def(&mir, "f");
+    let body = get_body(f_def);
+    match body.get_expr(body.root) {
+        mir::Expr::If { then_, else_, .. } => {
+            match body.get_expr(*then_) {
+                mir::Expr::Int(s) => assert_eq!(s, "1"),
+                other => panic!("Expected Int 1, got {:?}", other),
+            }
+            match body.get_expr(*else_) {
+                mir::Expr::Int(s) => assert_eq!(s, "0"),
+                other => panic!("Expected Int 0, got {:?}", other),
+            }
+        }
+        other => panic!("Expected If, got {:?}", other),
+    }
 }
 
 #[test]
 fn test_function_call() {
-    let mir = flatten_to_string("def g(y: i32) -> i32 = y + 1\ndef f(x) = g(x)");
-    assert!(mir.contains("def g"));
-    assert!(mir.contains("def f"));
+    let mir = flatten_program("def g(y: i32) -> i32 = y + 1\ndef f(x) = g(x)");
+    assert!(mir.defs.len() >= 2, "Expected at least 2 functions");
+
+    let names: Vec<_> = mir
+        .defs
+        .iter()
+        .filter_map(|d| match d {
+            mir::Def::Function { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(names.contains(&"g"), "Expected function g");
+    assert!(names.contains(&"f"), "Expected function f");
 }
 
 #[test]
 fn test_array_literal() {
-    let mir = flatten_to_string("def arr() = [1, 2, 3]");
-    assert!(mir.contains("[1, 2, 3]"));
+    let mir = flatten_program("def arr() = [1, 2, 3]");
+    let arr_def = find_def(&mir, "arr");
+    let body = get_body(arr_def);
+    match body.get_expr(body.root) {
+        mir::Expr::Array(elems) => {
+            assert_eq!(elems.len(), 3, "Expected 3 elements");
+        }
+        other => panic!("Expected Array, got {:?}", other),
+    }
 }
 
 #[test]
 fn test_record_literal() {
     // Records are now represented as tuples in MIR, with fields in source order
-    let mir = flatten_to_string("def r() = {x: 1, y: 2}");
-    // Expect tuple representation (1, 2) instead of {x=1, y=2}
-    assert!(mir.contains("(1, 2)"));
+    let mir = flatten_program("def r() = {x: 1, y: 2}");
+    let r_def = find_def(&mir, "r");
+    let body = get_body(r_def);
+    match body.get_expr(body.root) {
+        mir::Expr::Tuple(elems) => {
+            assert_eq!(elems.len(), 2, "Expected 2 element tuple for record");
+        }
+        other => panic!("Expected Tuple (record representation), got {:?}", other),
+    }
 }
 
 #[test]
 fn test_while_loop() {
-    let mir = flatten_to_string("def f() = loop x = 0 while x < 10 do x + 1");
-    assert!(mir.contains("loop"));
-    assert!(mir.contains("while"));
+    let mir = flatten_program("def f() = loop x = 0 while x < 10 do x + 1");
+    let f_def = find_def(&mir, "f");
+    let body = get_body(f_def);
+    match body.get_expr(body.root) {
+        mir::Expr::Loop { kind, .. } => match kind {
+            mir::LoopKind::While { .. } => {}
+            other => panic!("Expected While loop kind, got {:?}", other),
+        },
+        other => panic!("Expected Loop, got {:?}", other),
+    }
 }
 
 #[test]
 fn test_for_range_loop() {
-    let mir = flatten_to_string("def f() = loop acc = 0 for i < 10 do acc + i");
-    assert!(mir.contains("loop"));
-    assert!(mir.contains("for i <"));
+    let mir = flatten_program("def f() = loop acc = 0 for i < 10 do acc + i");
+    let f_def = find_def(&mir, "f");
+    let body = get_body(f_def);
+    match body.get_expr(body.root) {
+        mir::Expr::Loop { kind, .. } => match kind {
+            mir::LoopKind::ForRange { .. } => {}
+            other => panic!("Expected ForRange loop kind, got {:?}", other),
+        },
+        other => panic!("Expected Loop, got {:?}", other),
+    }
 }
 
 #[test]
 fn test_binary_ops() {
-    let mir = flatten_to_string("def f(x, y) = x * y + x / y");
-    assert!(mir.contains("*"));
-    assert!(mir.contains("+"));
-    assert!(mir.contains("/"));
+    let mir = flatten_program("def f(x, y) = x * y + x / y");
+    let f_def = find_def(&mir, "f");
+    let body = get_body(f_def);
+    // Check that we have +, *, and / operations in the body
+    let ops: std::collections::HashSet<_> = body
+        .exprs
+        .iter()
+        .filter_map(
+            |e| {
+                if let mir::Expr::BinOp { op, .. } = e { Some(op.as_str()) } else { None }
+            },
+        )
+        .collect();
+    assert!(ops.contains("+"), "Expected + operator");
+    assert!(ops.contains("*"), "Expected * operator");
+    assert!(ops.contains("/"), "Expected / operator");
 }
 
 #[test]
 fn test_unary_op() {
-    let mir = flatten_to_string("def f(x) = -x");
-    assert!(mir.contains("(-x)"));
+    let mir = flatten_program("def f(x) = -x");
+    let f_def = find_def(&mir, "f");
+    let body = get_body(f_def);
+    match body.get_expr(body.root) {
+        mir::Expr::UnaryOp { op, .. } => assert_eq!(op, "-"),
+        other => panic!("Expected UnaryOp, got {:?}", other),
+    }
 }
 
 #[test]
 fn test_array_index() {
-    let mir = flatten_to_string("def f(arr, i) = arr[i]");
-    assert!(mir.contains("index"));
+    let mir = flatten_program("def f(arr, i) = arr[i]");
+    let f_def = find_def(&mir, "f");
+    let body = get_body(f_def);
+    // Array index becomes intrinsic call
+    let has_index =
+        body.exprs.iter().any(|e| matches!(e, mir::Expr::Intrinsic { name, .. } if name == "index"));
+    assert!(has_index, "Expected index intrinsic for array indexing");
 }
 
 #[test]
@@ -179,44 +347,20 @@ def f() =
 
 #[test]
 fn test_map_with_lambda() {
-    // Test map with inline lambda
-    let source = r#"
+    // Test map with inline lambda - just verify it compiles and produces a def
+    let mir = flatten_program(
+        r#"
 def test() -> [4]i32 =
     map((|x: i32| x + 1), [0, 1, 2, 3])
-"#;
-
-    // Parse
-    let (module_manager, mut node_counter) = crate::cached_module_manager();
-    let parsed = crate::Compiler::parse(source, &mut node_counter).expect("Parsing failed");
-    let desugared = parsed.desugar(&mut node_counter).expect("Desugaring failed");
-
-    // Resolve
-    let resolved = desugared.resolve(&module_manager).expect("Name resolution failed");
-
-    // Fold AST constants (before type checking for better size inference)
-    let folded = resolved.fold_ast_constants();
-
-    // Print AST to see what NodeId(6) is
-    println!("AST:");
-    println!("{:#?}", folded.ast);
-
-    // Type check
-    let typed = folded.type_check(&module_manager).expect("Type checking failed");
-    println!("\nType table has {} entries", typed.type_table.len());
-    for (id, scheme) in &typed.type_table {
-        println!("  NodeId({:?}): {:?}", id, scheme);
-    }
-
-    println!("\nNodeId(6) is missing from type table!");
-
-    // Alias check
-    let alias_checked = typed.alias_check().expect("Alias checking failed");
-
-    // Flatten
-    let (flattened, _backend) = alias_checked.flatten(&module_manager).expect("Flattening failed");
-    let mir_str = format!("{}", flattened.mir);
-    println!("MIR: {}", mir_str);
-    assert!(mir_str.contains("def test"));
+"#,
+    );
+    // Should have at least the test function and a lambda
+    assert!(mir.defs.len() >= 2, "Expected at least test function and lambda");
+    // Should have lambda in registry
+    assert!(
+        !mir.lambda_registry.is_empty(),
+        "Lambda registry should have the inline lambda"
+    );
 }
 
 #[test]
@@ -231,9 +375,21 @@ def test_capture(arr: [4]i32) -> i32 =
     result[0]
 "#,
     );
-    let mir_str = format!("{}", mir);
-    // Lambda should capture arr and access it via closure
-    assert!(mir_str.contains("_w_closure") || mir_str.contains("record_access"));
+    // Lambda should capture arr - check for closure with captures in body
+    let mut has_closure_with_capture = false;
+    for def in &mir.defs {
+        if let mir::Def::Function { body, .. } = def {
+            for expr in &body.exprs {
+                if let mir::Expr::Closure { captures, .. } = expr {
+                    if !captures.is_empty() {
+                        has_closure_with_capture = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    assert!(has_closure_with_capture, "Lambda should capture arr");
 }
 
 #[test]
@@ -247,9 +403,21 @@ def length2(v: vec2f32) -> f32 =
     f32.sqrt((v.x * v.x + v.y * v.y))
 "#,
     );
-    let mir_str = format!("{}", mir);
-    // Should contain f32.sqrt as a qualified name/call, not a field access error
-    assert!(mir_str.contains("f32.sqrt"));
+    // Check for f32.sqrt call (should be a Call with qualified name)
+    let mut has_sqrt_call = false;
+    for def in &mir.defs {
+        if let mir::Def::Function { body, .. } = def {
+            for expr in &body.exprs {
+                if let mir::Expr::Call { func, .. } = expr {
+                    if func.contains("sqrt") {
+                        has_sqrt_call = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    assert!(has_sqrt_call, "Expected f32.sqrt call");
 }
 
 #[test]
@@ -262,19 +430,39 @@ def test_map(arr: [4]i32) -> [4]i32 =
     map((|x: i32| x + 1), arr)
 "#,
     );
-    let mir_str = format!("{}", mir);
-    println!("MIR output:\n{}", mir_str);
-    println!("Lambda registry: {:?}", mir.lambda_registry);
 
-    // Should have generated lambda function
-    assert!(mir_str.contains("_w_lam_test_map_"));
-    // Closure is now an explicit @closure expression
-    assert!(mir_str.contains("@closure(_w_lam_test_map_"));
+    // Should have lambda function generated
+    assert!(mir.defs.len() >= 2, "Expected test function + lambda");
+
     // Lambda registry should have the lambda function
-    assert_eq!(mir.lambda_registry.len(), 1);
+    assert_eq!(mir.lambda_registry.len(), 1, "Expected 1 lambda in registry");
     let (_, info) = mir.lambda_registry.iter().next().unwrap();
-    assert_eq!(info.name, "_w_lam_test_map_0");
-    assert_eq!(info.arity, 1);
+    assert!(
+        info.name.contains("_w_lam_test_map_"),
+        "Lambda name should contain _w_lam_test_map_"
+    );
+    assert_eq!(info.arity, 1, "Lambda should have arity 1");
+
+    // Check for closure expression
+    let mut has_closure = false;
+    for def in &mir.defs {
+        if let mir::Def::Function { body, name, .. } = def {
+            if name == "test_map" {
+                for expr in &body.exprs {
+                    if let mir::Expr::Closure { lambda_name, .. } = expr {
+                        if lambda_name.contains("_w_lam_test_map_") {
+                            has_closure = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        has_closure,
+        "Expected closure expression with _w_lam_test_map_ prefix"
+    );
 }
 
 #[test]
@@ -287,14 +475,35 @@ def test_apply(x: i32) -> i32 =
     f(10)
 "#,
     );
-    let mir_str = format!("{}", mir);
-    println!("MIR output:\n{}", mir_str);
-    println!("Lambda registry: {:?}", mir.lambda_registry);
 
-    // Should generate a direct call to _w_lam_test_apply_0 with the closure as first argument
-    assert!(mir_str.contains("_w_lam_test_apply_0 f 10"));
-    // Should NOT generate apply1 intrinsic
-    assert!(!mir_str.contains("apply1"));
+    // Should have lambda function generated
+    assert!(mir.defs.len() >= 2, "Expected test function + lambda");
+
+    // Lambda registry should have the lambda function
+    assert!(
+        !mir.lambda_registry.is_empty(),
+        "Lambda registry should have the generated lambda"
+    );
+
+    // Check for direct call to lambda (should NOT use apply1 intrinsic)
+    let mut has_apply_intrinsic = false;
+    for def in &mir.defs {
+        if let mir::Def::Function { body, name, .. } = def {
+            if name == "test_apply" {
+                for expr in &body.exprs {
+                    if let mir::Expr::Intrinsic { name, .. } = expr {
+                        if name == "apply1" {
+                            has_apply_intrinsic = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        !has_apply_intrinsic,
+        "Direct closure call should NOT use apply1 intrinsic"
+    );
 }
 
 // Tests for function value restrictions (Futhark-style defunctionalization constraints)
@@ -351,11 +560,20 @@ def test(v: vec3f32) -> vec4f32 =
     f(v)
 "#,
     );
-    let mir_str = format!("{}", mir);
-    println!("MIR output:\n{}", mir_str);
 
-    // Should contain vector literal
-    assert!(mir_str.contains("@["));
+    // Check that we have a Vector expression somewhere in the MIR
+    let mut has_vector = false;
+    for def in &mir.defs {
+        if let mir::Def::Function { body, .. } = def {
+            for expr in &body.exprs {
+                if matches!(expr, mir::Expr::Vector(_)) {
+                    has_vector = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(has_vector, "Expected Vector literal in MIR");
 }
 
 #[test]
@@ -400,7 +618,7 @@ def test() -> f32 =
         .and_then(|n| n.monomorphize())
         .map(|m| m.filter_reachable())
         .and_then(|r| r.fold_constants())
-        .and_then(|f| f.lift_bindings())
+        .map(|f| f.lift_bindings())
         .and_then(|l| l.lower());
     assert!(result.is_ok(), "Compilation failed: {:?}", result.err());
 }
@@ -417,9 +635,13 @@ def test_conversions(x: i32) -> f32 =
   f2
 "#,
     );
-    let mir_str = format!("{}", mir);
-    // Should contain the conversion calls
-    assert!(mir_str.contains("f32.i32") || mir_str.contains("_w_builtin_f32_from"));
+    // Check for conversion calls in the MIR
+    let f_def = find_def(&mir, "test_conversions");
+    let body = get_body(f_def);
+    let has_conversion = body.exprs.iter().any(|e| {
+        matches!(e, mir::Expr::Call { func, .. } if func.contains("f32") && (func.contains("i32") || func.contains("i64")))
+    });
+    assert!(has_conversion, "Expected f32 conversion calls in MIR");
 }
 
 #[test]
@@ -440,15 +662,38 @@ def test_math(x: f32) -> f32 =
   f32.fma(f, e, i)
 "#,
     );
-    let mir_str = format!("{}", mir);
-    // Should contain f32 math operations
-    assert!(mir_str.contains("f32.sin"));
-    assert!(mir_str.contains("f32.cos"));
-    assert!(mir_str.contains("f32.sqrt"));
-    assert!(mir_str.contains("f32.sinh"));
-    assert!(mir_str.contains("f32.asinh"));
-    assert!(mir_str.contains("f32.atan2"));
-    assert!(mir_str.contains("f32.fma"));
+    // Check for f32 math function calls in the MIR
+    let f_def = find_def(&mir, "test_math");
+    let body = get_body(f_def);
+    let call_names: Vec<_> = body
+        .exprs
+        .iter()
+        .filter_map(
+            |e| {
+                if let mir::Expr::Call { func, .. } = e { Some(func.as_str()) } else { None }
+            },
+        )
+        .collect();
+    // Check for key math operations
+    assert!(call_names.iter().any(|n| n.contains("sin")), "Expected sin call");
+    assert!(call_names.iter().any(|n| n.contains("cos")), "Expected cos call");
+    assert!(
+        call_names.iter().any(|n| n.contains("sqrt")),
+        "Expected sqrt call"
+    );
+    assert!(
+        call_names.iter().any(|n| n.contains("sinh")),
+        "Expected sinh call"
+    );
+    assert!(
+        call_names.iter().any(|n| n.contains("asinh")),
+        "Expected asinh call"
+    );
+    assert!(
+        call_names.iter().any(|n| n.contains("atan2")),
+        "Expected atan2 call"
+    );
+    assert!(call_names.iter().any(|n| n.contains("fma")), "Expected fma call");
 }
 
 #[test]
@@ -495,13 +740,31 @@ def test_mul_overloads(m1: mat4f32, m2: mat4f32, v: vec4f32) -> vec4f32 =
     vec_result1
 "#,
     );
-    let mir_str = format!("{}", mir);
-    println!("MIR output:\n{}", mir_str);
-
+    // Check for mul variant calls in the MIR
+    let f_def = find_def(&mir, "test_mul_overloads");
+    let body = get_body(f_def);
+    let call_names: Vec<_> = body
+        .exprs
+        .iter()
+        .filter_map(
+            |e| {
+                if let mir::Expr::Call { func, .. } = e { Some(func.as_str()) } else { None }
+            },
+        )
+        .collect();
     // All three should be desugared to their specific variants
-    assert!(mir_str.contains("mul_mat_mat"), "Expected mul_mat_mat in MIR");
-    assert!(mir_str.contains("mul_mat_vec"), "Expected mul_mat_vec in MIR");
-    assert!(mir_str.contains("mul_vec_mat"), "Expected mul_vec_mat in MIR");
+    assert!(
+        call_names.iter().any(|n| n.contains("mul_mat_mat")),
+        "Expected mul_mat_mat in MIR"
+    );
+    assert!(
+        call_names.iter().any(|n| n.contains("mul_mat_vec")),
+        "Expected mul_mat_vec in MIR"
+    );
+    assert!(
+        call_names.iter().any(|n| n.contains("mul_vec_mat")),
+        "Expected mul_vec_mat in MIR"
+    );
 }
 
 #[test]

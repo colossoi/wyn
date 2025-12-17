@@ -923,7 +923,13 @@ impl Display for mir::Expr {
             mir::Expr::If { cond, then_, else_ } => {
                 write!(f, "if e{} then e{} else e{}", cond.0, then_.0, else_.0)
             }
-            mir::Expr::Loop { loop_var, init, kind, body, .. } => {
+            mir::Expr::Loop {
+                loop_var,
+                init,
+                kind,
+                body,
+                ..
+            } => {
                 write!(f, "loop local_{} = e{} ", loop_var.0, init.0)?;
                 match kind {
                     mir::LoopKind::For { var, iter } => {
@@ -958,7 +964,10 @@ impl Display for mir::Expr {
                 }
                 write!(f, ")")
             }
-            mir::Expr::Closure { lambda_name, captures } => {
+            mir::Expr::Closure {
+                lambda_name,
+                captures,
+            } => {
                 write!(f, "@closure({}, [", lambda_name)?;
                 for (i, cap) in captures.iter().enumerate() {
                     if i > 0 {
@@ -968,7 +977,12 @@ impl Display for mir::Expr {
                 }
                 write!(f, "])")
             }
-            mir::Expr::Range { start, step, end, kind } => {
+            mir::Expr::Range {
+                start,
+                step,
+                end,
+                kind,
+            } => {
                 let kind_str = match kind {
                     mir::RangeKind::Inclusive => "...",
                     mir::RangeKind::Exclusive => "..",

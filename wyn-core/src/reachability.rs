@@ -116,7 +116,10 @@ pub fn filter_reachable(program: Program) -> Program {
     let ordered = reachable_functions_ordered(&program);
 
     // Destructure to preserve lambda_registry
-    let Program { defs, lambda_registry } = program;
+    let Program {
+        defs,
+        lambda_registry,
+    } = program;
 
     // Build a map from name to def for reordering
     let mut def_map: std::collections::HashMap<String, Def> = defs

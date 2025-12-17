@@ -61,11 +61,7 @@ def vertex_main() -> #[builtin(position)] vec4f32 =
     @[f32.i32(sliced[0]), f32.i32(sliced[1]), 0.0f32, 1.0f32]
 "#;
     let result = compile_through_lowering(source);
-    assert!(
-        result.is_ok(),
-        "Simple slice should compile: {:?}",
-        result.err()
-    );
+    assert!(result.is_ok(), "Simple slice should compile: {:?}", result.err());
 }
 
 #[test]
@@ -267,7 +263,11 @@ def slice_test(arr: [10]i32) -> [5]i32 =
     // Verify slice desugars correctly by checking compilation succeeds
     // The actual desugaring to map over range is tested by compile_through_flatten
     let flattened = compile_through_flatten(source);
-    assert!(flattened.is_ok(), "Slice should desugar and flatten: {:?}", flattened.err());
+    assert!(
+        flattened.is_ok(),
+        "Slice should desugar and flatten: {:?}",
+        flattened.err()
+    );
 }
 
 #[test]
@@ -278,7 +278,11 @@ def range_test() -> [5]i32 =
 "#;
     // Verify range stays as primitive form by checking compilation succeeds
     let flattened = compile_through_flatten(source);
-    assert!(flattened.is_ok(), "Simple range should compile: {:?}", flattened.err());
+    assert!(
+        flattened.is_ok(),
+        "Simple range should compile: {:?}",
+        flattened.err()
+    );
 }
 
 #[test]
@@ -289,5 +293,9 @@ def range_test() -> [5]i32 =
 "#;
     // Verify complex range compiles correctly
     let flattened = compile_through_flatten(source);
-    assert!(flattened.is_ok(), "Complex range should compile: {:?}", flattened.err());
+    assert!(
+        flattened.is_ok(),
+        "Complex range should compile: {:?}",
+        flattened.err()
+    );
 }
