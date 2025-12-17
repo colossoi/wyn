@@ -11,7 +11,8 @@ pub mod name_resolution;
 pub mod parser;
 pub mod pattern;
 pub mod poly_builtins;
-pub mod reachability;
+// TODO(mir-refactor): Re-enable after MIR arena refactor
+// pub mod reachability;
 pub mod scope;
 pub mod types;
 pub mod visitor;
@@ -21,30 +22,34 @@ pub use types::checker as type_checker;
 
 pub mod alias_checker;
 pub mod ast_const_fold;
-pub mod binding_lifter;
-pub mod constant_folding;
 pub mod desugar;
-pub mod glsl;
 pub mod lowering_common;
-pub mod materialize_hoisting;
-pub mod monomorphization;
-pub mod normalize;
+
+// TODO(mir-refactor): Re-enable after MIR arena refactor
+// pub mod binding_lifter;
+// pub mod constant_folding;
+// pub mod glsl;
+// pub mod materialize_hoisting;
+// pub mod monomorphization;
+// pub mod normalize;
 pub mod spirv;
 
 #[cfg(test)]
 mod alias_checker_tests;
 #[cfg(test)]
-mod binding_lifter_tests;
-#[cfg(test)]
-mod constant_folding_tests;
-#[cfg(test)]
 mod desugar_tests;
-#[cfg(test)]
-mod flattening_tests;
-#[cfg(test)]
-mod monomorphization_tests;
-#[cfg(test)]
-mod normalize_tests;
+
+// TODO(mir-refactor): Re-enable after MIR arena refactor
+// #[cfg(test)]
+// mod binding_lifter_tests;
+// #[cfg(test)]
+// mod constant_folding_tests;
+// #[cfg(test)]
+// mod flattening_tests;
+// #[cfg(test)]
+// mod monomorphization_tests;
+// #[cfg(test)]
+// mod normalize_tests;
 
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -441,6 +446,10 @@ impl AliasChecked {
 // =============================================================================
 // BackEnd stages (MIR-based)
 // =============================================================================
+//
+// TODO(mir-refactor): These stages are stubbed out during the MIR arena refactor.
+// The pipeline currently goes: Flattened -> Lifted -> (error)
+// Once flattening produces new MIR, these will be re-enabled one by one.
 
 /// AST has been flattened to MIR
 pub struct Flattened {
@@ -448,78 +457,69 @@ pub struct Flattened {
 }
 
 impl Flattened {
-    /// Hoist duplicate materializations to let bindings
+    /// Stub: skip all passes and go directly to Lifted
     pub fn hoist_materializations(self) -> MaterializationsHoisted {
-        let mir = materialize_hoisting::hoist_materializations(self.mir);
-        MaterializationsHoisted { mir }
+        MaterializationsHoisted { mir: self.mir }
     }
 }
 
-/// Duplicate materializations have been hoisted
+/// Duplicate materializations have been hoisted (stub)
 pub struct MaterializationsHoisted {
     pub mir: mir::Program,
 }
 
 impl MaterializationsHoisted {
-    /// Normalize MIR to A-normal form
-    pub fn normalize(self, node_counter: &mut NodeCounter) -> Normalized {
-        let nc = std::mem::replace(node_counter, NodeCounter::new());
-        let (mir, nc) = normalize::normalize_program(self.mir, nc);
-        *node_counter = nc;
-        Normalized { mir }
+    /// Stub: skip normalization
+    pub fn normalize(self, _node_counter: &mut NodeCounter) -> Normalized {
+        Normalized { mir: self.mir }
     }
 }
 
-/// MIR has been normalized to A-normal form
+/// MIR has been normalized to A-normal form (stub)
 pub struct Normalized {
     pub mir: mir::Program,
 }
 
 impl Normalized {
-    /// Monomorphize: specialize polymorphic functions
+    /// Stub: skip monomorphization
     pub fn monomorphize(self) -> Result<Monomorphized> {
-        let mir = monomorphization::monomorphize(self.mir)?;
-        Ok(Monomorphized { mir })
+        Ok(Monomorphized { mir: self.mir })
     }
 }
 
-/// Program has been monomorphized
+/// Program has been monomorphized (stub)
 pub struct Monomorphized {
     pub mir: mir::Program,
 }
 
 impl Monomorphized {
-    /// Filter to only reachable functions
+    /// Stub: skip reachability filtering
     pub fn filter_reachable(self) -> Reachable {
-        let mir = reachability::filter_reachable(self.mir);
-        Reachable { mir }
+        Reachable { mir: self.mir }
     }
 }
 
-/// Unreachable code has been filtered out
+/// Unreachable code has been filtered out (stub)
 pub struct Reachable {
     pub mir: mir::Program,
 }
 
 impl Reachable {
-    /// Fold constants: evaluate constant expressions at compile time
+    /// Stub: skip constant folding
     pub fn fold_constants(self) -> Result<Folded> {
-        let mir = constant_folding::fold_constants(self.mir)?;
-        Ok(Folded { mir })
+        Ok(Folded { mir: self.mir })
     }
 }
 
-/// Constants have been folded
+/// Constants have been folded (stub)
 pub struct Folded {
     pub mir: mir::Program,
 }
 
 impl Folded {
-    /// Lift loop-invariant bindings out of loops
+    /// Stub: skip binding lifting
     pub fn lift_bindings(self) -> Result<Lifted> {
-        let mut lifter = binding_lifter::BindingLifter::new();
-        let mir = lifter.lift_program(self.mir)?;
-        Ok(Lifted { mir })
+        Ok(Lifted { mir: self.mir })
     }
 }
 
@@ -535,21 +535,21 @@ impl Lifted {
     }
 
     /// Lower MIR to SPIR-V with debug mode option
-    pub fn lower_with_options(self, debug_enabled: bool) -> Result<Lowered> {
-        let inplace_info = alias_checker::analyze_inplace(&self.mir);
-        let spirv = spirv::lower(&self.mir, debug_enabled, &inplace_info)?;
-        Ok(Lowered { mir: self.mir, spirv })
+    /// TODO(mir-refactor): Re-enable after SPIR-V lowering is updated
+    pub fn lower_with_options(self, _debug_enabled: bool) -> Result<Lowered> {
+        Err(err_spirv!("SPIR-V lowering not yet implemented for new MIR"))
     }
 
     /// Lower MIR to GLSL
+    /// TODO(mir-refactor): Re-enable after GLSL lowering is updated
     pub fn lower_glsl(self) -> Result<LoweredGlsl> {
-        let glsl = glsl::lower(&self.mir)?;
-        Ok(LoweredGlsl { mir: self.mir, glsl })
+        Err(err_glsl!("GLSL lowering not yet implemented for new MIR"))
     }
 
     /// Lower MIR to Shadertoy-compatible GLSL (fragment shader only)
+    /// TODO(mir-refactor): Re-enable after GLSL lowering is updated
     pub fn lower_shadertoy(self) -> Result<String> {
-        glsl::lower_shadertoy(&self.mir)
+        Err(err_glsl!("Shadertoy lowering not yet implemented for new MIR"))
     }
 }
 
@@ -559,10 +559,16 @@ pub struct Lowered {
     pub spirv: Vec<u32>,
 }
 
+/// GLSL output containing vertex and fragment shader sources
+pub struct GlslOutput {
+    pub vertex: Option<String>,
+    pub fragment: Option<String>,
+}
+
 /// Final stage for GLSL - contains MIR and GLSL source strings
 pub struct LoweredGlsl {
     pub mir: mir::Program,
-    pub glsl: glsl::GlslOutput,
+    pub glsl: GlslOutput,
 }
 
 // =============================================================================

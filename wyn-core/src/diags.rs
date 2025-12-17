@@ -694,7 +694,8 @@ impl Display for mir::Def {
                 }
                 // Write function signature with types
                 write!(f, "def {}", name)?;
-                for param in params.iter() {
+                for param_id in params.iter() {
+                    let param = body.get_local(*param_id);
                     write!(f, " ({}: {})", param.name, format_type(&param.ty))?;
                 }
                 write!(f, ": {}", format_type(ret_type))?;
@@ -813,8 +814,7 @@ impl Display for mir::Def {
 
 impl Display for mir::Param {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let prefix = if self.is_consumed() { "*" } else { "" };
-        write!(f, "({}{}: {})", prefix, self.name, format_type(&self.ty))
+        write!(f, "({}: {})", self.name, format_type(&self.ty))
     }
 }
 
@@ -838,113 +838,137 @@ impl Display for mir::Attribute {
     }
 }
 
-impl Display for mir::Expr {
+// TODO(mir-refactor): Full Display implementations for new MIR types.
+// For now, we provide a basic implementation that shows the structure.
+
+impl Display for mir::Body {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.kind)
+        // Simple display: just show the root expression ID and number of expressions
+        write!(
+            f,
+            "<Body: {} locals, {} exprs, root={}>",
+            self.locals.len(),
+            self.exprs.len(),
+            self.root.0
+        )
     }
 }
 
-impl Display for mir::ExprKind {
+impl Display for mir::Expr {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            mir::ExprKind::Literal(lit) => write!(f, "{}", lit),
-            mir::ExprKind::Unit => write!(f, "()"),
-            mir::ExprKind::Var(name) => write!(f, "{}", name),
-            mir::ExprKind::BinOp { op, lhs, rhs } => {
-                write!(f, "({} {} {})", lhs, op, rhs)
+            mir::Expr::Local(id) => write!(f, "local_{}", id.0),
+            mir::Expr::Global(name) => write!(f, "{}", name),
+            mir::Expr::Int(s) => write!(f, "{}", s),
+            mir::Expr::Float(s) => write!(f, "{}", s),
+            mir::Expr::Bool(b) => write!(f, "{}", b),
+            mir::Expr::Unit => write!(f, "()"),
+            mir::Expr::String(s) => write!(f, "\"{}\"", s.escape_default()),
+            mir::Expr::Tuple(ids) => {
+                write!(f, "(")?;
+                for (i, id) in ids.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "e{}", id.0)?;
+                }
+                write!(f, ")")
             }
-            mir::ExprKind::UnaryOp { op, operand } => {
-                write!(f, "({}{})", op, operand)
+            mir::Expr::Array(ids) => {
+                write!(f, "[")?;
+                for (i, id) in ids.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "e{}", id.0)?;
+                }
+                write!(f, "]")
             }
-            mir::ExprKind::If {
-                cond,
-                then_branch,
-                else_branch,
-            } => {
-                write!(f, "if {} then {} else {}", cond, then_branch, else_branch)
+            mir::Expr::Vector(ids) => {
+                write!(f, "@[")?;
+                for (i, id) in ids.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "e{}", id.0)?;
+                }
+                write!(f, "]")
             }
-            mir::ExprKind::Let {
-                name,
-                binding_id,
-                value,
-                body,
-            } => {
-                write!(f, "let {}{{{}}} = {} in\n{}", name, binding_id, value, body)
-            }
-            mir::ExprKind::Loop {
-                loop_var,
-                init,
-                init_bindings,
-                kind,
-                body,
-            } => {
-                write!(f, "loop ({}, ", loop_var)?;
-                if init_bindings.len() == 1 {
-                    let (name, binding) = &init_bindings[0];
-                    write!(f, "{}) = ({}, {})", name, init, binding)?;
-                } else {
-                    for (i, (name, _)) in init_bindings.iter().enumerate() {
-                        if i > 0 {
+            mir::Expr::Matrix(rows) => {
+                write!(f, "@[")?;
+                for (i, row) in rows.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "[")?;
+                    for (j, id) in row.iter().enumerate() {
+                        if j > 0 {
                             write!(f, ", ")?;
                         }
-                        write!(f, "{}", name)?;
+                        write!(f, "e{}", id.0)?;
                     }
-                    write!(f, ") = ({}, ", init)?;
-                    for (i, (_, binding)) in init_bindings.iter().enumerate() {
-                        if i > 0 {
-                            write!(f, ", ")?;
-                        }
-                        write!(f, "{}", binding)?;
+                    write!(f, "]")?;
+                }
+                write!(f, "]")
+            }
+            mir::Expr::BinOp { op, lhs, rhs } => {
+                write!(f, "(e{} {} e{})", lhs.0, op, rhs.0)
+            }
+            mir::Expr::UnaryOp { op, operand } => {
+                write!(f, "({}e{})", op, operand.0)
+            }
+            mir::Expr::Let { local, rhs, body } => {
+                write!(f, "let local_{} = e{} in e{}", local.0, rhs.0, body.0)
+            }
+            mir::Expr::If { cond, then_, else_ } => {
+                write!(f, "if e{} then e{} else e{}", cond.0, then_.0, else_.0)
+            }
+            mir::Expr::Loop { loop_var, init, kind, body, .. } => {
+                write!(f, "loop local_{} = e{} ", loop_var.0, init.0)?;
+                match kind {
+                    mir::LoopKind::For { var, iter } => {
+                        write!(f, "for local_{} in e{}", var.0, iter.0)?;
                     }
-                    write!(f, ")")?;
+                    mir::LoopKind::ForRange { var, bound } => {
+                        write!(f, "for local_{} < e{}", var.0, bound.0)?;
+                    }
+                    mir::LoopKind::While { cond } => {
+                        write!(f, "while e{}", cond.0)?;
+                    }
                 }
-                write!(f, " {} do {}", kind, body)
+                write!(f, " do e{}", body.0)
             }
-            mir::ExprKind::Call { func, args } => {
-                write!(f, "{}", func)?;
-                for arg in args.iter() {
-                    write!(f, " {}", arg)?;
+            mir::Expr::Call { func, args } => {
+                write!(f, "{}(", func)?;
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "e{}", arg.0)?;
                 }
-                Ok(())
+                write!(f, ")")
             }
-            mir::ExprKind::Intrinsic { name, args } => {
+            mir::Expr::Intrinsic { name, args } => {
                 write!(f, "@{}(", name)?;
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{}", arg)?;
+                    write!(f, "e{}", arg.0)?;
                 }
                 write!(f, ")")
             }
-            mir::ExprKind::Attributed { attributes, expr } => {
-                for attr in attributes {
-                    write!(f, "{} ", attr)?;
-                }
-                write!(f, "{}", expr)
-            }
-            mir::ExprKind::Materialize(inner) => {
-                write!(f, "@materialize({})", inner)
-            }
-            mir::ExprKind::Closure {
-                lambda_name,
-                captures,
-            } => {
+            mir::Expr::Closure { lambda_name, captures } => {
                 write!(f, "@closure({}, [", lambda_name)?;
                 for (i, cap) in captures.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{}", cap)?;
+                    write!(f, "e{}", cap.0)?;
                 }
                 write!(f, "])")
             }
-            mir::ExprKind::Range {
-                start,
-                step,
-                end,
-                kind,
-            } => {
+            mir::Expr::Range { start, step, end, kind } => {
                 let kind_str = match kind {
                     mir::RangeKind::Inclusive => "...",
                     mir::RangeKind::Exclusive => "..",
@@ -952,76 +976,19 @@ impl Display for mir::ExprKind {
                     mir::RangeKind::ExclusiveGt => "..>",
                 };
                 if let Some(step) = step {
-                    write!(
-                        f,
-                        "{}{}{}{}{}",
-                        start,
-                        kind_str.chars().next().unwrap(),
-                        step,
-                        &kind_str[1..],
-                        end
-                    )
+                    write!(f, "e{}..e{}{}e{}", start.0, step.0, kind_str, end.0)
                 } else {
-                    write!(f, "{}{}{}", start, kind_str, end)
+                    write!(f, "e{}{}e{}", start.0, kind_str, end.0)
                 }
             }
-        }
-    }
-}
-
-impl Display for mir::Literal {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            mir::Literal::Int(s) => write!(f, "{}", s),
-            mir::Literal::Float(s) => write!(f, "{}", s),
-            mir::Literal::Bool(b) => write!(f, "{}", b),
-            mir::Literal::String(s) => write!(f, "\"{}\"", s.escape_default()),
-            mir::Literal::Tuple(exprs) => {
-                write!(f, "(")?;
-                for (i, expr) in exprs.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", expr)?;
-                }
-                write!(f, ")")
+            mir::Expr::Materialize(inner) => {
+                write!(f, "@materialize(e{})", inner.0)
             }
-            mir::Literal::Array(exprs) => {
-                write!(f, "[")?;
-                for (i, expr) in exprs.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", expr)?;
+            mir::Expr::Attributed { attributes, expr } => {
+                for attr in attributes {
+                    write!(f, "{} ", attr)?;
                 }
-                write!(f, "]")
-            }
-            mir::Literal::Vector(exprs) => {
-                write!(f, "@[")?;
-                for (i, expr) in exprs.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", expr)?;
-                }
-                write!(f, "]")
-            }
-            mir::Literal::Matrix(rows) => {
-                write!(f, "@[")?;
-                for (i, row) in rows.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "[")?;
-                    for (j, expr) in row.iter().enumerate() {
-                        if j > 0 {
-                            write!(f, ", ")?;
-                        }
-                        write!(f, "{}", expr)?;
-                    }
-                    write!(f, "]")?;
-                }
-                write!(f, "]")
+                write!(f, "e{}", expr.0)
             }
         }
     }
@@ -1031,13 +998,13 @@ impl Display for mir::LoopKind {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             mir::LoopKind::For { var, iter } => {
-                write!(f, "for {} in {}", var, iter)
+                write!(f, "for local_{} in e{}", var.0, iter.0)
             }
             mir::LoopKind::ForRange { var, bound } => {
-                write!(f, "for {} < {}", var, bound)
+                write!(f, "for local_{} < e{}", var.0, bound.0)
             }
             mir::LoopKind::While { cond } => {
-                write!(f, "while {}", cond)
+                write!(f, "while e{}", cond.0)
             }
         }
     }

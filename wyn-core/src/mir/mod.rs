@@ -1,6 +1,11 @@
 //! MIR (Mid-level Intermediate Representation) for the Wyn compiler.
 //!
-//! This representation assumes:
+//! This representation uses an arena-based approach where:
+//! - Expressions are stored in a flat arena indexed by `ExprId`
+//! - Local variables are tracked in a separate table indexed by `LocalId`
+//! - Types, spans, and NodeIds are stored in parallel vectors
+//!
+//! Assumptions:
 //! - Type checking has already occurred; concrete types are stored with expressions
 //! - Patterns have been flattened to simple let bindings
 //! - Lambdas have been lifted to top-level functions
@@ -9,13 +14,50 @@
 
 use crate::IdArena;
 use crate::ast::{NodeId, Span, TypeName};
-use crate::types::TypeExt;
 use polytype::Type;
 
-#[cfg(test)]
-mod tests;
+// TODO(mir-refactor): Re-enable tests after MIR types are updated
+// #[cfg(test)]
+// mod tests;
 
-pub mod folder;
+// TODO(mir-refactor): Re-enable folder after MIR types are updated
+// pub mod folder;
+
+// =============================================================================
+// ID Types
+// =============================================================================
+
+/// Index into the expression arena within a Body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ExprId(pub u32);
+
+impl ExprId {
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl From<u32> for ExprId {
+    fn from(id: u32) -> Self {
+        ExprId(id)
+    }
+}
+
+/// Index into the locals table within a Body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LocalId(pub u32);
+
+impl LocalId {
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl From<u32> for LocalId {
+    fn from(id: u32) -> Self {
+        LocalId(id)
+    }
+}
 
 /// Unique identifier for a lambda/closure in the registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -27,12 +69,286 @@ impl From<u32> for LambdaId {
     }
 }
 
+// =============================================================================
+// Local Variable Tracking
+// =============================================================================
+
+/// The kind of local variable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalKind {
+    /// Function parameter
+    Param,
+    /// Let binding (includes compiler-generated temps)
+    Let,
+    /// Loop accumulator variable
+    LoopVar,
+}
+
+/// Declaration of a local variable.
+#[derive(Debug, Clone)]
+pub struct LocalDecl {
+    /// Variable name (for debugging/display).
+    pub name: String,
+    /// Source location.
+    pub span: Span,
+    /// Type of this local.
+    pub ty: Type<TypeName>,
+    /// What kind of local this is.
+    pub kind: LocalKind,
+}
+
+// =============================================================================
+// Expression Arena
+// =============================================================================
+
+/// A flat expression in the MIR arena.
+/// All nested expressions are referenced by ExprId.
+#[derive(Debug, Clone)]
+pub enum Expr {
+    // --- Atoms ---
+    /// Reference to a local variable.
+    Local(LocalId),
+    /// Reference to a global (top-level def).
+    Global(String),
+    /// Integer literal.
+    Int(String),
+    /// Float literal.
+    Float(String),
+    /// Boolean literal.
+    Bool(bool),
+    /// Unit value ().
+    Unit,
+    /// String literal.
+    String(String),
+
+    // --- Aggregates ---
+    /// Tuple literal.
+    Tuple(Vec<ExprId>),
+    /// Array literal.
+    Array(Vec<ExprId>),
+    /// Vector literal (@[1.0, 2.0, 3.0]).
+    Vector(Vec<ExprId>),
+    /// Matrix literal (@[[1,2], [3,4]]).
+    Matrix(Vec<Vec<ExprId>>),
+
+    // --- Operations ---
+    /// Binary operation.
+    BinOp {
+        op: String,
+        lhs: ExprId,
+        rhs: ExprId,
+    },
+    /// Unary operation.
+    UnaryOp {
+        op: String,
+        operand: ExprId,
+    },
+
+    // --- Binding & Control ---
+    /// Let binding: allocates a local and evaluates body with it in scope.
+    Let {
+        local: LocalId,
+        rhs: ExprId,
+        body: ExprId,
+    },
+    /// Conditional expression.
+    If {
+        cond: ExprId,
+        then_: ExprId,
+        else_: ExprId,
+    },
+    /// Unified loop construct.
+    Loop {
+        /// The loop accumulator variable.
+        loop_var: LocalId,
+        /// Initial value for the accumulator.
+        init: ExprId,
+        /// Bindings that extract from loop_var.
+        init_bindings: Vec<(LocalId, ExprId)>,
+        /// The kind of loop.
+        kind: LoopKind,
+        /// Loop body expression.
+        body: ExprId,
+    },
+
+    // --- Calls ---
+    /// Regular function call.
+    Call {
+        func: String,
+        args: Vec<ExprId>,
+    },
+    /// Compiler intrinsic call.
+    Intrinsic {
+        name: String,
+        args: Vec<ExprId>,
+    },
+
+    // --- Closures ---
+    /// A closure value (defunctionalized lambda).
+    Closure {
+        lambda_name: String,
+        captures: Vec<ExprId>,
+    },
+
+    // --- Ranges ---
+    /// Range expression: start..end or start..step..end.
+    Range {
+        start: ExprId,
+        step: Option<ExprId>,
+        end: ExprId,
+        kind: RangeKind,
+    },
+
+    // --- Special ---
+    /// Materialize a value into a variable for indexing.
+    Materialize(ExprId),
+    /// Expression with attributes attached.
+    Attributed {
+        attributes: Vec<Attribute>,
+        expr: ExprId,
+    },
+}
+
+// =============================================================================
+// Function Body
+// =============================================================================
+
+/// A function body containing the expression arena and locals table.
+#[derive(Debug, Clone)]
+pub struct Body {
+    /// ID source for locals.
+    local_ids: crate::IdSource<LocalId>,
+    /// ID source for expressions.
+    expr_ids: crate::IdSource<ExprId>,
+    /// All local variables in this body.
+    pub locals: Vec<LocalDecl>,
+    /// Expression arena.
+    pub exprs: Vec<Expr>,
+    /// Type per expression (parallel to exprs).
+    pub types: Vec<Type<TypeName>>,
+    /// Span per expression (parallel to exprs).
+    pub spans: Vec<Span>,
+    /// NodeId per expression (parallel to exprs, for diagnostics).
+    pub node_ids: Vec<NodeId>,
+    /// Root expression of the body.
+    pub root: ExprId,
+}
+
+impl Body {
+    /// Create a new empty body.
+    pub fn new() -> Self {
+        Body {
+            local_ids: crate::IdSource::new(),
+            expr_ids: crate::IdSource::new(),
+            locals: Vec::new(),
+            exprs: Vec::new(),
+            types: Vec::new(),
+            spans: Vec::new(),
+            node_ids: Vec::new(),
+            root: ExprId(0), // Will be set when root is allocated
+        }
+    }
+
+    /// Allocate a new local variable.
+    pub fn alloc_local(&mut self, decl: LocalDecl) -> LocalId {
+        let id = self.local_ids.next();
+        self.locals.push(decl);
+        id
+    }
+
+    /// Allocate a new expression with its metadata.
+    pub fn alloc_expr(
+        &mut self,
+        expr: Expr,
+        ty: Type<TypeName>,
+        span: Span,
+        node_id: NodeId,
+    ) -> ExprId {
+        let id = self.expr_ids.next();
+        self.exprs.push(expr);
+        self.types.push(ty);
+        self.spans.push(span);
+        self.node_ids.push(node_id);
+        id
+    }
+
+    /// Get an expression by ID.
+    pub fn get_expr(&self, id: ExprId) -> &Expr {
+        &self.exprs[id.index()]
+    }
+
+    /// Get a mutable reference to an expression by ID.
+    pub fn get_expr_mut(&mut self, id: ExprId) -> &mut Expr {
+        &mut self.exprs[id.index()]
+    }
+
+    /// Get the type of an expression.
+    pub fn get_type(&self, id: ExprId) -> &Type<TypeName> {
+        &self.types[id.index()]
+    }
+
+    /// Get the span of an expression.
+    pub fn get_span(&self, id: ExprId) -> Span {
+        self.spans[id.index()]
+    }
+
+    /// Get the NodeId of an expression.
+    pub fn get_node_id(&self, id: ExprId) -> NodeId {
+        self.node_ids[id.index()]
+    }
+
+    /// Get a local declaration by ID.
+    pub fn get_local(&self, id: LocalId) -> &LocalDecl {
+        &self.locals[id.index()]
+    }
+
+    /// Get a mutable reference to a local declaration by ID.
+    pub fn get_local_mut(&mut self, id: LocalId) -> &mut LocalDecl {
+        &mut self.locals[id.index()]
+    }
+
+    /// Set the root expression.
+    pub fn set_root(&mut self, root: ExprId) {
+        self.root = root;
+    }
+
+    /// Number of locals in this body.
+    pub fn num_locals(&self) -> usize {
+        self.locals.len()
+    }
+
+    /// Number of expressions in this body.
+    pub fn num_exprs(&self) -> usize {
+        self.exprs.len()
+    }
+
+    /// Iterate over all expressions in the body.
+    pub fn iter_exprs(&self) -> impl Iterator<Item = &Expr> {
+        self.exprs.iter()
+    }
+
+    /// Iterate over all locals in the body.
+    pub fn iter_locals(&self) -> impl Iterator<Item = &LocalDecl> {
+        self.locals.iter()
+    }
+}
+
+impl Default for Body {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// =============================================================================
+// Program and Definitions
+// =============================================================================
+
 /// Information about a registered lambda.
 #[derive(Debug, Clone)]
 pub struct LambdaInfo {
-    /// Name of the generated function
+    /// Name of the generated function.
     pub name: String,
-    /// Number of parameters (excluding closure parameter)
+    /// Number of parameters (excluding closure parameter).
     pub arity: usize,
 }
 
@@ -42,11 +358,10 @@ pub struct Program {
     /// All top-level definitions in the program.
     pub defs: Vec<Def>,
     /// Lambda registry: maps LambdaId -> LambdaInfo.
-    /// Used for closure dispatch in higher-order builtins like map.
     pub lambda_registry: IdArena<LambdaId, LambdaInfo>,
 }
 
-/// A top-level definition (function or constant).
+/// A top-level definition.
 #[derive(Debug, Clone)]
 pub enum Def {
     /// A function definition with parameters.
@@ -55,14 +370,14 @@ pub enum Def {
         id: NodeId,
         /// Function name.
         name: String,
-        /// Function parameters with optional uniqueness markers.
-        params: Vec<Param>,
+        /// Parameter indices into the body's locals table.
+        params: Vec<LocalId>,
         /// Return type.
         ret_type: Type<TypeName>,
-        /// Attributes attached to this function (e.g., "inline", "noinline").
+        /// Attributes.
         attributes: Vec<Attribute>,
-        /// The function body expression.
-        body: Expr,
+        /// Function body.
+        body: Body,
         /// Source location.
         span: Span,
     },
@@ -72,12 +387,12 @@ pub enum Def {
         id: NodeId,
         /// Constant name.
         name: String,
-        /// The type of this constant.
+        /// Type of the constant.
         ty: Type<TypeName>,
-        /// Attributes attached to this constant.
+        /// Attributes.
         attributes: Vec<Attribute>,
-        /// The constant value expression.
-        body: Expr,
+        /// Constant body.
+        body: Body,
         /// Source location.
         span: Span,
     },
@@ -87,51 +402,52 @@ pub enum Def {
         id: NodeId,
         /// Uniform name.
         name: String,
-        /// The type of this uniform.
+        /// Type of this uniform.
         ty: Type<TypeName>,
         /// Descriptor set number.
         set: u32,
-        /// Explicit binding number.
+        /// Binding number.
         binding: u32,
     },
-    /// A storage buffer declaration (read-write GPU memory).
+    /// A storage buffer declaration.
     Storage {
         /// Unique node identifier.
         id: NodeId,
         /// Storage buffer name.
         name: String,
-        /// The type of this storage buffer (usually runtime-sized array).
+        /// Type of this storage buffer.
         ty: Type<TypeName>,
         /// Descriptor set number.
         set: u32,
-        /// Binding number within the set.
+        /// Binding number.
         binding: u32,
-        /// Memory layout (std430, std140).
+        /// Memory layout.
         layout: crate::ast::StorageLayout,
-        /// Access mode (read, write, readwrite).
+        /// Access mode.
         access: crate::ast::StorageAccess,
     },
-    /// A shader entry point (vertex, fragment, or compute shader).
+    /// A shader entry point.
     EntryPoint {
         /// Unique node identifier.
         id: NodeId,
         /// Entry point name.
         name: String,
-        /// Execution model (vertex, fragment, compute).
+        /// Execution model.
         execution_model: ExecutionModel,
-        /// Input parameters with their I/O decorations.
+        /// Input parameters (indices into body's locals).
         inputs: Vec<EntryInput>,
-        /// Output values with their I/O decorations.
-        /// For single return: one element. For tuple return: one per tuple element.
+        /// Output decorations.
         outputs: Vec<EntryOutput>,
-        /// The entry point body expression.
-        body: Expr,
+        /// Entry point body.
+        body: Body,
         /// Source location.
         span: Span,
     },
 }
 
-/// A function parameter.
+/// A function parameter (for Def-level representation).
+/// Note: Parameters are stored as LocalId in the new MIR,
+/// this struct is kept for compatibility during transition.
 #[derive(Debug, Clone)]
 pub struct Param {
     /// Parameter name.
@@ -140,25 +456,18 @@ pub struct Param {
     pub ty: Type<TypeName>,
 }
 
-impl Param {
-    /// Whether this parameter is consumed (unique/in-place update).
-    /// Derived from whether the parameter type is unique (*T).
-    pub fn is_consumed(&self) -> bool {
-        self.ty.is_unique()
-    }
-}
+// =============================================================================
+// Supporting Types
+// =============================================================================
 
 /// An attribute that can be attached to functions or expressions.
-/// NOTE: Vertex/Fragment/Compute are deprecated for functions - use Def::EntryPoint instead.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Attribute {
     BuiltIn(spirv::BuiltIn),
     Location(u32),
     Vertex,
     Fragment,
-    Compute {
-        local_size: (u32, u32, u32),
-    },
+    Compute { local_size: (u32, u32, u32) },
     Uniform,
     Storage,
 }
@@ -168,12 +477,10 @@ pub enum Attribute {
 pub enum ExecutionModel {
     Vertex,
     Fragment,
-    Compute {
-        local_size: (u32, u32, u32),
-    },
+    Compute { local_size: (u32, u32, u32) },
 }
 
-/// Decoration for shader I/O (entry point parameters and return values).
+/// Decoration for shader I/O.
 #[derive(Debug, Clone, PartialEq)]
 pub enum IoDecoration {
     BuiltIn(spirv::BuiltIn),
@@ -183,11 +490,13 @@ pub enum IoDecoration {
 /// An input parameter to a shader entry point.
 #[derive(Debug, Clone)]
 pub struct EntryInput {
-    /// Parameter name.
+    /// LocalId of the input parameter in the body.
+    pub local: LocalId,
+    /// Parameter name (for debugging).
     pub name: String,
     /// Parameter type.
     pub ty: Type<TypeName>,
-    /// I/O decoration (location or builtin).
+    /// I/O decoration.
     pub decoration: Option<IoDecoration>,
 }
 
@@ -196,169 +505,8 @@ pub struct EntryInput {
 pub struct EntryOutput {
     /// Output type.
     pub ty: Type<TypeName>,
-    /// I/O decoration (location or builtin).
+    /// I/O decoration.
     pub decoration: Option<IoDecoration>,
-}
-
-/// The main expression type with source location and type.
-#[derive(Debug, Clone)]
-pub struct Expr {
-    /// Unique node identifier.
-    pub id: NodeId,
-    pub ty: Type<TypeName>,
-    pub kind: ExprKind,
-    pub span: Span,
-}
-
-impl Expr {
-    pub fn new(id: NodeId, ty: Type<TypeName>, kind: ExprKind, span: Span) -> Self {
-        Expr { id, ty, kind, span }
-    }
-}
-
-/// Expression kinds in MIR.
-#[derive(Debug, Clone)]
-pub enum ExprKind {
-    /// A literal value.
-    Literal(Literal),
-
-    /// Unit value ().
-    Unit,
-
-    /// A variable reference by name.
-    Var(String),
-
-    /// A binary operation.
-    BinOp {
-        /// The operator (e.g., "+", "-", "*", "/", "&&", "||", "==", "<").
-        op: String,
-        /// Left operand.
-        lhs: Box<Expr>,
-        /// Right operand.
-        rhs: Box<Expr>,
-    },
-
-    /// A unary operation.
-    UnaryOp {
-        /// The operator (e.g., "-", "!").
-        op: String,
-        /// Operand.
-        operand: Box<Expr>,
-    },
-
-    /// Conditional expression.
-    If {
-        /// Condition.
-        cond: Box<Expr>,
-        /// Then branch.
-        then_branch: Box<Expr>,
-        /// Else branch.
-        else_branch: Box<Expr>,
-    },
-
-    /// Let binding: `let name = value in body`.
-    Let {
-        /// Bound variable name.
-        name: String,
-        /// Unique binding ID for tracking backing stores.
-        binding_id: u64,
-        /// Value to bind.
-        value: Box<Expr>,
-        /// Body expression where the binding is in scope.
-        body: Box<Expr>,
-    },
-
-    /// Unified loop construct.
-    Loop {
-        /// Name for the value returned by the body each iteration.
-        loop_var: String,
-        /// Initial value for loop_var.
-        init: Box<Expr>,
-        /// Bindings that extract from loop_var for use in condition/body.
-        /// For single var: `[(x, Var(loop_var))]`
-        /// For tuple: `[(a, tuple_access(loop_var, 0)), (b, tuple_access(loop_var, 1))]`
-        init_bindings: Vec<(String, Expr)>,
-        /// The kind of loop (for, for-range, or while).
-        kind: LoopKind,
-        /// Loop body expression.
-        body: Box<Expr>,
-    },
-
-    /// Regular function call.
-    Call {
-        /// Function name.
-        func: String,
-        /// Arguments.
-        args: Vec<Expr>,
-    },
-
-    /// Compiler intrinsic call.
-    Intrinsic {
-        /// Intrinsic name (e.g., "index", "slice", "length", "assert",
-        /// "record_access", "record_update", "tuple_access").
-        name: String,
-        /// Arguments.
-        args: Vec<Expr>,
-    },
-
-    /// An expression with attributes attached.
-    Attributed {
-        /// Attributes on this expression.
-        attributes: Vec<Attribute>,
-        /// The inner expression.
-        expr: Box<Expr>,
-    },
-
-    /// Materialize a value into a variable, returning a reference to that variable.
-    /// This is used when a value needs to be stored before being indexed/accessed.
-    /// In SPIR-V, this becomes: declare OpVariable, OpStore, return pointer.
-    Materialize(Box<Expr>),
-
-    /// A closure value (defunctionalized lambda).
-    /// Represents a lambda that has been lifted to a top-level function with captured values.
-    Closure {
-        /// Name of the generated lambda function to call.
-        lambda_name: String,
-        /// Captured variables (may be empty for lambdas with no free variables).
-        captures: Vec<Expr>,
-    },
-
-    /// Range expression: creates an array from start to end with optional step.
-    /// Examples: `0..<n`, `1..2..10`, `10..9..>0`
-    Range {
-        /// Start value (inclusive).
-        start: Box<Expr>,
-        /// Optional step value (difference between start and second element).
-        step: Option<Box<Expr>>,
-        /// End value.
-        end: Box<Expr>,
-        /// Range kind (inclusive, exclusive, etc.).
-        kind: RangeKind,
-    },
-}
-
-/// Literal values, categorized by type class.
-/// The exact type is stored in out-of-band type information.
-#[derive(Debug, Clone)]
-pub enum Literal {
-    /// Integer literal (i8, i16, i32, i64, u8, u16, u32, u64).
-    /// Stored as string to preserve exact representation and support arbitrary precision.
-    Int(String),
-    /// Floating-point literal (f16, f32, f64).
-    /// Stored as string to preserve exact representation.
-    Float(String),
-    /// Boolean literal.
-    Bool(bool),
-    /// String literal (represented as UTF-8 bytes in Futhark).
-    String(String),
-    /// Tuple literal.
-    Tuple(Vec<Expr>),
-    /// Array literal.
-    Array(Vec<Expr>),
-    /// Vector literal (@[1.0, 2.0, 3.0]).
-    Vector(Vec<Expr>),
-    /// Matrix literal (@[[1,2], [3,4]]) - outer vec is rows, inner is columns.
-    Matrix(Vec<Vec<Expr>>),
 }
 
 /// The kind of range expression.
@@ -379,21 +527,21 @@ pub enum RangeKind {
 pub enum LoopKind {
     /// For loop over an array: `for x in arr`.
     For {
-        /// Loop variable name.
-        var: String,
+        /// LocalId of the loop variable.
+        var: LocalId,
         /// Array to iterate over.
-        iter: Box<Expr>,
+        iter: ExprId,
     },
     /// For loop with range bound: `for i < n`.
     ForRange {
-        /// Loop variable name.
-        var: String,
+        /// LocalId of the loop variable.
+        var: LocalId,
         /// Upper bound.
-        bound: Box<Expr>,
+        bound: ExprId,
     },
     /// While loop: `while cond`.
     While {
         /// Loop condition.
-        cond: Box<Expr>,
+        cond: ExprId,
     },
 }

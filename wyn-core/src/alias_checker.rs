@@ -912,29 +912,15 @@ pub struct InPlaceInfo {
 
 /// Analyze MIR to find array operations that can reuse their input array.
 ///
-/// An operation can reuse `arr` if:
-/// 1. `arr` is not used after the operation (nor any alias of arr)
-/// 2. Element types match (checked at lowering time for map)
-pub fn analyze_inplace(mir: &mir::Program) -> InPlaceInfo {
-    let mut result = InPlaceInfo::default();
-
-    for def in &mir.defs {
-        if let mir::Def::Function { body, .. } = def {
-            analyze_function_body(body, &mut result);
-        }
-    }
-
-    result
+/// TODO(mir-refactor): Re-implement after MIR arena refactor is complete.
+/// Currently returns empty result since MIR structure has changed.
+pub fn analyze_inplace(_mir: &mir::Program) -> InPlaceInfo {
+    InPlaceInfo::default()
 }
 
-fn analyze_function_body(body: &mir::Expr, result: &mut InPlaceInfo) {
-    // Build alias map and uses-after map
-    let mut aliases: HashMap<String, HashSet<String>> = HashMap::new();
-    let uses_after = compute_uses_after(body, &HashSet::new(), &mut aliases);
-
-    // Find eligible operations
-    find_inplace_ops(body, &uses_after, &aliases, result);
-}
+// TODO(mir-refactor): The following helper functions are commented out during MIR refactor.
+// They will be re-implemented once the new arena-based MIR is complete.
+/*
 
 /// Collect all variable uses in an expression (bottom-up)
 fn collect_uses(expr: &mir::Expr) -> HashSet<String> {
@@ -1354,3 +1340,4 @@ fn find_inplace_ops(
         }
     }
 }
+*/

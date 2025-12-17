@@ -9,7 +9,7 @@ use crate::ast::TypeName;
 use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
 use crate::lowering_common::is_empty_closure_type;
-use crate::mir::{self, Def, Expr, ExprKind, LambdaId, LambdaInfo, Literal, LoopKind, Program};
+use crate::mir::{self, Body, Def, Expr, ExprId, LambdaId, LambdaInfo, LocalId, LoopKind, Program};
 use crate::types;
 use crate::{IdArena, bail_spirv, err_spirv};
 use polytype::Type as PolyType;
@@ -824,7 +824,7 @@ impl<'a> LowerCtx<'a> {
 
                 // Evaluate the constant expression at compile time
                 // TODO: Validate that body is a literal or compile-time foldable expression
-                let const_id = lower_const_expr(&mut self.constructor, body)?;
+                let const_id = lower_const_expr(&mut self.constructor, body, body.root)?;
 
                 // Store constant ID for lookup
                 self.constructor.global_constants.insert(name.clone(), const_id);
@@ -900,85 +900,22 @@ impl<'a> LowerCtx<'a> {
         Ok(())
     }
 
-    /// Walk an expression and ensure all referenced definitions are lowered
-    fn ensure_deps_lowered(&mut self, expr: &Expr) -> Result<()> {
-        match &expr.kind {
-            ExprKind::Var(name) => {
-                self.ensure_lowered(name)?;
-            }
-            ExprKind::Call { func, args } => {
-                self.ensure_lowered(func)?;
-                for arg in args {
-                    self.ensure_deps_lowered(arg)?;
+    /// Walk a body and ensure all referenced definitions are lowered
+    fn ensure_deps_lowered(&mut self, body: &Body) -> Result<()> {
+        // With arena-based MIR, we can simply walk all expressions in the body
+        // since they're stored flat in a Vec
+        for expr in body.iter_exprs() {
+            match expr {
+                Expr::Global(name) => {
+                    self.ensure_lowered(name)?;
                 }
-            }
-            ExprKind::BinOp { lhs, rhs, .. } => {
-                self.ensure_deps_lowered(lhs)?;
-                self.ensure_deps_lowered(rhs)?;
-            }
-            ExprKind::UnaryOp { operand, .. } => {
-                self.ensure_deps_lowered(operand)?;
-            }
-            ExprKind::If {
-                cond,
-                then_branch,
-                else_branch,
-            } => {
-                self.ensure_deps_lowered(cond)?;
-                self.ensure_deps_lowered(then_branch)?;
-                self.ensure_deps_lowered(else_branch)?;
-            }
-            ExprKind::Let { value, body, .. } => {
-                self.ensure_deps_lowered(value)?;
-                self.ensure_deps_lowered(body)?;
-            }
-            ExprKind::Loop {
-                init_bindings, body, ..
-            } => {
-                for (_, init) in init_bindings {
-                    self.ensure_deps_lowered(init)?;
+                Expr::Call { func, .. } => {
+                    self.ensure_lowered(func)?;
                 }
-                self.ensure_deps_lowered(body)?;
-            }
-            ExprKind::Intrinsic { args, .. } => {
-                for arg in args {
-                    self.ensure_deps_lowered(arg)?;
+                Expr::Closure { lambda_name, .. } => {
+                    self.ensure_lowered(lambda_name)?;
                 }
-            }
-            ExprKind::Attributed { expr, .. } => {
-                self.ensure_deps_lowered(expr)?;
-            }
-            ExprKind::Materialize(inner) => {
-                self.ensure_deps_lowered(inner)?;
-            }
-            ExprKind::Literal(lit) => {
-                // Recurse into tuple element values
-                if let crate::mir::Literal::Tuple(elems) = lit {
-                    for elem in elems {
-                        self.ensure_deps_lowered(elem)?;
-                    }
-                }
-            }
-            ExprKind::Closure {
-                lambda_name,
-                captures,
-            } => {
-                // Ensure the lambda function is lowered
-                self.ensure_lowered(lambda_name)?;
-                // Recurse into captures
-                for cap in captures {
-                    self.ensure_deps_lowered(cap)?;
-                }
-            }
-            ExprKind::Range { start, step, end, .. } => {
-                self.ensure_deps_lowered(start)?;
-                if let Some(s) = step {
-                    self.ensure_deps_lowered(s)?;
-                }
-                self.ensure_deps_lowered(end)?;
-            }
-            ExprKind::Unit => {
-                // Unit has no dependencies
+                _ => {}
             }
         }
         Ok(())
@@ -1062,24 +999,32 @@ pub fn lower(program: &mir::Program, debug_enabled: bool, inplace_info: &InPlace
 fn lower_regular_function(
     constructor: &mut Constructor,
     name: &str,
-    params: &[mir::Param],
+    params: &[LocalId],
     ret_type: &PolyType<TypeName>,
-    body: &Expr,
+    body: &Body,
 ) -> Result<()> {
     // Check if first parameter is an empty closure (lambda with no captures)
     // If so, skip it - don't include in SPIR-V function signature
-    let skip_first_param =
-        if let Some(first_param) = params.first() { is_empty_closure_type(&first_param.ty) } else { false };
+    let skip_first_param = if let Some(&first_param_id) = params.first() {
+        is_empty_closure_type(&body.get_local(first_param_id).ty)
+    } else {
+        false
+    };
 
     let params_to_lower = if skip_first_param { &params[1..] } else { params };
 
-    let param_names: Vec<&str> = params_to_lower.iter().map(|p| p.name.as_str()).collect();
-    let param_types: Vec<spirv::Word> =
-        params_to_lower.iter().map(|p| constructor.ast_type_to_spirv(&p.ty)).collect();
+    let param_names: Vec<&str> = params_to_lower
+        .iter()
+        .map(|&p| body.get_local(p).name.as_str())
+        .collect();
+    let param_types: Vec<spirv::Word> = params_to_lower
+        .iter()
+        .map(|&p| constructor.ast_type_to_spirv(&body.get_local(p).ty))
+        .collect();
     let return_type = constructor.ast_type_to_spirv(ret_type);
     constructor.begin_function(name, &param_names, &param_types, return_type)?;
 
-    let result = lower_expr(constructor, body)?;
+    let result = lower_expr(constructor, body, body.root)?;
 
     // Use ret() for void functions, ret_value() for functions that return a value
     if matches!(ret_type, PolyType::Constructed(TypeName::Unit, _)) {
@@ -1098,7 +1043,7 @@ fn lower_entry_point_from_def(
     name: &str,
     inputs: &[mir::EntryInput],
     outputs: &[mir::EntryOutput],
-    body: &Expr,
+    body: &Body,
 ) -> Result<()> {
     constructor.current_is_entry_point = true;
     constructor.current_output_vars.clear();
@@ -1207,7 +1152,7 @@ fn lower_entry_point_from_def(
     }
 
     // Lower the body
-    let result = lower_expr(constructor, body)?;
+    let result = lower_expr(constructor, body, body.root)?;
 
     // Store result to output variables
     if outputs.len() > 1 {
@@ -1258,11 +1203,36 @@ fn lower_entry_point_from_def(
 /// Lower a constant expression at compile time.
 /// This is used for global constants which must be compile-time evaluable.
 /// Currently supports: literals, references to other constants, and basic arithmetic.
-fn lower_const_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word> {
-    match &expr.kind {
-        ExprKind::Literal(lit) => lower_const_literal(constructor, lit),
-
-        ExprKind::Var(name) => {
+fn lower_const_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Result<spirv::Word> {
+    let ty = body.get_type(expr_id);
+    match body.get_expr(expr_id) {
+        Expr::Int(n) => {
+            let val: i32 = n.parse().map_err(|_| err_spirv!("Invalid integer literal: {}", n))?;
+            Ok(constructor.const_i32(val))
+        }
+        Expr::Float(f) => {
+            let val: f32 = f.parse().map_err(|_| err_spirv!("Invalid float literal: {}", f))?;
+            Ok(constructor.const_f32(val))
+        }
+        Expr::Bool(b) => Ok(constructor.const_bool(*b)),
+        Expr::Unit => Ok(constructor.const_i32(0)),
+        Expr::Tuple(elems) => {
+            let elem_ids: Result<Vec<_>> = elems.iter()
+                .map(|&id| lower_const_expr(constructor, body, id))
+                .collect();
+            let elem_ids = elem_ids?;
+            let struct_type = constructor.ast_type_to_spirv(ty);
+            Ok(constructor.builder.constant_composite(struct_type, elem_ids))
+        }
+        Expr::Array(elems) | Expr::Vector(elems) => {
+            let elem_ids: Result<Vec<_>> = elems.iter()
+                .map(|&id| lower_const_expr(constructor, body, id))
+                .collect();
+            let elem_ids = elem_ids?;
+            let array_type = constructor.ast_type_to_spirv(ty);
+            Ok(constructor.builder.constant_composite(array_type, elem_ids))
+        }
+        Expr::Global(name) => {
             // Reference to another global constant
             if let Some(&const_id) = constructor.global_constants.get(name) {
                 return Ok(const_id);
@@ -1275,48 +1245,63 @@ fn lower_const_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv:
                 );
             }
             Err(err_spirv!(
-                "Global constant '{}' references undefined constant '{}'",
-                "?",
+                "Global constant references undefined constant '{}'",
                 name
             ))
         }
-
-        ExprKind::BinOp { op, .. } => {
+        Expr::BinOp { op, .. } => {
             // For now, we don't support constant folding of binary ops
-            // TODO: Implement constant folding for arithmetic operations
             Err(err_spirv!(
                 "Global constants must be literals (found binary operation '{}'). \
                  Constant folding not yet implemented.",
                 op
             ))
         }
-
-        ExprKind::UnaryOp { op, .. } => Err(err_spirv!(
+        Expr::UnaryOp { op, .. } => Err(err_spirv!(
             "Global constants must be literals (found unary operation '{}')",
             op
         )),
-
         _ => Err(err_spirv!(
             "Global constants must be literals or compile-time foldable expressions"
         )),
     }
 }
 
-fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word> {
-    match &expr.kind {
-        ExprKind::Literal(lit) => lower_literal(constructor, lit),
+fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Result<spirv::Word> {
+    let expr_ty = body.get_type(expr_id);
+    let expr_node_id = body.get_node_id(expr_id);
 
-        ExprKind::Unit => {
-            // Unit is represented as a dummy i32 constant 0
-            Ok(constructor.const_i32(0))
+    match body.get_expr(expr_id) {
+        Expr::Int(s) => {
+            let val: i32 = s.parse().map_err(|_| err_spirv!("Invalid integer literal: {}", s))?;
+            Ok(constructor.const_i32(val))
         }
 
-        ExprKind::Var(name) => {
-            // First check local environment
+        Expr::Float(s) => {
+            let val: f32 = s.parse().map_err(|_| err_spirv!("Invalid float literal: {}", s))?;
+            Ok(constructor.const_f32(val))
+        }
+
+        Expr::Bool(b) => Ok(constructor.const_bool(*b)),
+
+        Expr::Unit => Ok(constructor.const_i32(0)),
+
+        Expr::String(s) => {
+            // Strings are not really supported in SPIR-V, return a placeholder
+            Err(err_spirv!("String literals not supported in SPIR-V: {}", s))
+        }
+
+        Expr::Local(local_id) => {
+            // Look up the local variable name and find it in the environment
+            let name = &body.get_local(*local_id).name;
             if let Some(&id) = constructor.env.get(name) {
                 return Ok(id);
             }
-            // Then check global constants (these are now OpConstants, not variables)
+            Err(err_spirv!("Undefined local variable: {}", name))
+        }
+
+        Expr::Global(name) => {
+            // First check global constants (these are now OpConstants, not variables)
             if let Some(&const_id) = constructor.global_constants.get(name) {
                 return Ok(const_id);
             }
@@ -1336,18 +1321,19 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
                 constructor.uniform_load_cache.insert(name.to_string(), load_id);
                 return Ok(load_id);
             }
-            Err(err_spirv!("Undefined variable: {}", name))
+            Err(err_spirv!("Undefined global: {}", name))
         }
 
-        ExprKind::BinOp { op, lhs, rhs } => {
-            let lhs_id = lower_expr(constructor, lhs)?;
-            let rhs_id = lower_expr(constructor, rhs)?;
-            let same_out_type = constructor.ast_type_to_spirv(&lhs.ty);
+        Expr::BinOp { op, lhs, rhs } => {
+            let lhs_id = lower_expr(constructor, body, *lhs)?;
+            let rhs_id = lower_expr(constructor, body, *rhs)?;
+            let lhs_ty = body.get_type(*lhs);
+            let same_out_type = constructor.ast_type_to_spirv(lhs_ty);
             let bool_type = constructor.bool_type;
 
             use PolyType::*;
             use TypeName::*;
-            match (op.as_str(), &lhs.ty) {
+            match (op.as_str(), lhs_ty) {
                 // Float operations
                 ("+", Constructed(Float(_), _)) => {
                     Ok(constructor.builder.f_add(same_out_type, None, lhs_id, rhs_id)?)
@@ -1433,13 +1419,14 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
             }
         }
 
-        ExprKind::UnaryOp { op, operand } => {
-            let operand_id = lower_expr(constructor, operand)?;
-            let same_type = constructor.ast_type_to_spirv(&operand.ty);
+        Expr::UnaryOp { op, operand } => {
+            let operand_id = lower_expr(constructor, body, *operand)?;
+            let operand_ty = body.get_type(*operand);
+            let same_type = constructor.ast_type_to_spirv(operand_ty);
 
             use PolyType::*;
             use TypeName::*;
-            match (op.as_str(), &operand.ty) {
+            match (op.as_str(), operand_ty) {
                 ("-", Constructed(Float(_), _)) => {
                     Ok(constructor.builder.f_negate(same_type, None, operand_id)?)
                 }
@@ -1452,15 +1439,11 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
             }
         }
 
-        ExprKind::If {
-            cond,
-            then_branch,
-            else_branch,
-        } => {
-            let cond_id = lower_expr(constructor, cond)?;
+        Expr::If { cond, then_, else_ } => {
+            let cond_id = lower_expr(constructor, body, *cond)?;
 
             // Get the result type from the expression
-            let result_type = constructor.ast_type_to_spirv(&expr.ty);
+            let result_type = constructor.ast_type_to_spirv(expr_ty);
 
             // Create blocks
             let then_block_id = constructor.builder.id();
@@ -1472,14 +1455,14 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
 
             // Then block
             constructor.begin_block(then_block_id)?;
-            let then_result = lower_expr(constructor, then_branch)?;
+            let then_result = lower_expr(constructor, body, *then_)?;
             let then_exit_block = constructor.current_block.unwrap();
 
             constructor.builder.branch(merge_block_id)?;
 
             // Else block
             constructor.begin_block(else_block_id)?;
-            let else_result = lower_expr(constructor, else_branch)?;
+            let else_result = lower_expr(constructor, body, *else_)?;
             let else_exit_block = constructor.current_block.unwrap();
             constructor.builder.branch(merge_block_id)?;
 
@@ -1487,7 +1470,7 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
             constructor.begin_block(merge_block_id)?;
 
             // If result is unit type, no phi needed - unit can only be assigned to _
-            if matches!(&expr.ty, PolyType::Constructed(TypeName::Unit, _)) {
+            if matches!(expr_ty, PolyType::Constructed(TypeName::Unit, _)) {
                 // Return a dummy value - it will never be used since unit can only bind to _
                 Ok(constructor.const_i32(0))
             } else {
@@ -1497,28 +1480,27 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
             }
         }
 
-        ExprKind::Let {
-            name, value, body, ..
-        } => {
+        Expr::Let { local, rhs, body: let_body } => {
+            let name = &body.get_local(*local).name;
             // If binding to _, evaluate value for side effects but don't store it
             if name == "_" {
-                let _ = lower_expr(constructor, value)?;
-                lower_expr(constructor, body)
+                let _ = lower_expr(constructor, body, *rhs)?;
+                lower_expr(constructor, body, *let_body)
             } else {
-                let value_id = lower_expr(constructor, value)?;
+                let value_id = lower_expr(constructor, body, *rhs)?;
                 constructor.env.insert(name.clone(), value_id);
-                let result = lower_expr(constructor, body)?;
+                let result = lower_expr(constructor, body, *let_body)?;
                 constructor.env.remove(name);
                 Ok(result)
             }
         }
 
-        ExprKind::Loop {
+        Expr::Loop {
             loop_var,
             init,
             init_bindings,
             kind,
-            body,
+            body: loop_body,
         } => {
             // Create blocks for loop structure
             let header_block_id = constructor.builder.id();
@@ -1527,13 +1509,14 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
             let merge_block_id = constructor.builder.id();
 
             // Evaluate the init expression for loop_var
-            let init_val = lower_expr(constructor, init)?;
-            let loop_var_type = constructor.ast_type_to_spirv(&init.ty);
+            let init_val = lower_expr(constructor, body, *init)?;
+            let init_ty = body.get_type(*init);
+            let loop_var_type = constructor.ast_type_to_spirv(init_ty);
             let pre_header_block = constructor.current_block.unwrap();
 
             // Check for unit type loop accumulator - this is an error
             // Loops must accumulate a value, not just perform side effects
-            if matches!(&init.ty, PolyType::Constructed(TypeName::Unit, _)) {
+            if matches!(init_ty, PolyType::Constructed(TypeName::Unit, _)) {
                 bail_spirv!(
                     "Loop accumulator cannot be unit type (). \
                      Loops must return a value - use an accumulator pattern like: \
@@ -1549,34 +1532,38 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
             let header_block_idx = constructor.builder.selected_block().expect("No block selected");
 
             // Allocate phi ID for loop_var
+            let loop_var_name = body.get_local(*loop_var).name.clone();
             let loop_var_phi_id = constructor.builder.id();
-            constructor.env.insert(loop_var.clone(), loop_var_phi_id);
+            constructor.env.insert(loop_var_name.clone(), loop_var_phi_id);
 
             // For ForRange loops, also create a phi for the iteration variable
             let iter_var_phi = if let LoopKind::ForRange { var, .. } = kind {
+                let var_name = body.get_local(*var).name.clone();
                 let iter_phi_id = constructor.builder.id();
-                constructor.env.insert(var.clone(), iter_phi_id);
-                Some((var.clone(), iter_phi_id))
+                constructor.env.insert(var_name.clone(), iter_phi_id);
+                Some((var_name, iter_phi_id))
             } else {
                 None
             };
 
             // Evaluate init_bindings to bind user variables from loop_var
             // These extractions reference loop_var which is now bound to the phi
-            for (name, binding_expr) in init_bindings.iter() {
-                let val = lower_expr(constructor, binding_expr)?;
-                constructor.env.insert(name.clone(), val);
+            for (local_id, binding_expr_id) in init_bindings.iter() {
+                let val = lower_expr(constructor, body, *binding_expr_id)?;
+                let binding_name = body.get_local(*local_id).name.clone();
+                constructor.env.insert(binding_name, val);
             }
 
             // Generate condition based on loop kind
             let cond_id = match kind {
-                LoopKind::While { cond } => lower_expr(constructor, cond)?,
+                LoopKind::While { cond } => lower_expr(constructor, body, *cond)?,
                 LoopKind::ForRange { var, bound } => {
-                    let bound_id = lower_expr(constructor, bound)?;
+                    let bound_id = lower_expr(constructor, body, *bound)?;
+                    let var_name = &body.get_local(*var).name;
                     let var_id = *constructor
                         .env
-                        .get(var)
-                        .ok_or_else(|| err_spirv!("Loop variable {} not found", var))?;
+                        .get(var_name)
+                        .ok_or_else(|| err_spirv!("Loop variable {} not found", var_name))?;
                     constructor.builder.s_less_than(constructor.bool_type, None, var_id, bound_id)?
                 }
                 LoopKind::For { .. } => {
@@ -1595,7 +1582,7 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
 
             // Body block
             constructor.begin_block(body_block_id)?;
-            let body_result = lower_expr(constructor, body)?;
+            let body_result = lower_expr(constructor, body, *loop_body)?;
             constructor.builder.branch(continue_block_id)?;
 
             // Continue block - body_result is the new value for loop_var
@@ -1643,21 +1630,22 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
             constructor.begin_block(merge_block_id)?;
 
             // Clean up environment
-            constructor.env.remove(loop_var.as_str());
-            for (name, _) in init_bindings.iter() {
-                constructor.env.remove(name.as_str());
+            constructor.env.remove(&loop_var_name);
+            for (local_id, _) in init_bindings.iter() {
+                let binding_name = &body.get_local(*local_id).name;
+                constructor.env.remove(binding_name);
             }
             if let Some((ref var_name, _)) = iter_var_phi {
-                constructor.env.remove(var_name.as_str());
+                constructor.env.remove(var_name);
             }
 
             // Return the loop_var phi value as loop result
             Ok(loop_var_phi_id)
         }
 
-        ExprKind::Call { func, args } => {
+        Expr::Call { func, args } => {
             // Get the result type from the expression
-            let result_type = constructor.ast_type_to_spirv(&expr.ty);
+            let result_type = constructor.ast_type_to_spirv(expr_ty);
 
             // Special case for map - extract lambda name from closure before lowering
             if func == "map" {
@@ -1668,13 +1656,12 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
                     bail_spirv!("map requires 2 args (closure, array), got {}", args.len());
                 }
 
-                // Extract lambda name and captures from closure tuple
                 // Extract lambda name and captures from Closure expression
-                let (lambda_name, captures) = match &args[0].kind {
-                    ExprKind::Closure {
+                let (lambda_name, captures) = match body.get_expr(args[0]) {
+                    Expr::Closure {
                         lambda_name,
                         captures,
-                    } => (lambda_name.clone(), captures),
+                    } => (lambda_name.clone(), captures.clone()),
                     _ => {
                         bail_spirv!("map closure argument must be a Closure expression");
                     }
@@ -1687,12 +1674,13 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
                     constructor.const_i32(0)
                 } else {
                     // Lower the closure directly
-                    lower_expr(constructor, &args[0])?
+                    lower_expr(constructor, body, args[0])?
                 };
-                let array_val = lower_expr(constructor, &args[1])?;
+                let array_val = lower_expr(constructor, body, args[1])?;
 
                 // Get input array element type from args[1]
-                let input_elem_type = match &args[1].ty {
+                let arg1_ty = body.get_type(args[1]);
+                let input_elem_type = match arg1_ty {
                     PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 2 => {
                         constructor.ast_type_to_spirv(&type_args[1])
                     }
@@ -1700,7 +1688,7 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
                 };
 
                 // Get output array info from result type
-                let (array_size, output_elem_mir_type) = match &expr.ty {
+                let (array_size, output_elem_mir_type) = match expr_ty {
                     PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 2 => {
                         let size = match &type_args[0] {
                             PolyType::Constructed(TypeName::Size(n), _) => *n as u32,
@@ -1723,7 +1711,7 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
                 // 1. This map call was marked as having a dead-after input array
                 // 2. Element types match (f : T -> T)
                 let can_inplace =
-                    constructor.inplace_nodes.contains(&expr.id) && input_elem_type == output_elem_type;
+                    constructor.inplace_nodes.contains(&expr_node_id) && input_elem_type == output_elem_type;
 
                 if can_inplace {
                     // In-place optimization: use OpCompositeInsert to update array in place
@@ -1786,12 +1774,12 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
                 }
 
                 // Lower arguments
-                let arr_id = lower_expr(constructor, &args[0])?;
-                let idx_id = lower_expr(constructor, &args[1])?;
-                let val_id = lower_expr(constructor, &args[2])?;
+                let arr_id = lower_expr(constructor, body, args[0])?;
+                let idx_id = lower_expr(constructor, body, args[1])?;
+                let val_id = lower_expr(constructor, body, args[2])?;
 
                 // Check if we can do in-place update
-                let can_inplace = constructor.inplace_nodes.contains(&expr.id);
+                let can_inplace = constructor.inplace_nodes.contains(&expr_node_id);
 
                 if can_inplace {
                     // In-place optimization: use OpCompositeInsert
@@ -1810,7 +1798,8 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
                     constructor.builder.store(arr_var, arr_id, None, [])?;
 
                     // Get pointer to element and store new value
-                    let elem_type = constructor.ast_type_to_spirv(&args[2].ty);
+                    let arg2_ty = body.get_type(args[2]);
+                    let elem_type = constructor.ast_type_to_spirv(arg2_ty);
                     let elem_ptr_type =
                         constructor.builder.type_pointer(None, StorageClass::Function, elem_type);
                     let elem_ptr =
@@ -1823,8 +1812,10 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
             }
 
             // For all other calls, lower arguments normally
-            let arg_ids: Vec<spirv::Word> =
-                args.iter().map(|a| lower_expr(constructor, a)).collect::<Result<Vec<_>>>()?;
+            let arg_ids: Vec<spirv::Word> = args
+                .iter()
+                .map(|&a| lower_expr(constructor, body, a))
+                .collect::<Result<Vec<_>>>()?;
 
             // Check for builtin vector constructors
             match func.as_str() {
@@ -1974,9 +1965,8 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
                                         if args.len() != 1 {
                                             bail_spirv!("length expects exactly 1 argument");
                                         }
-                                        if let PolyType::Constructed(TypeName::Array, type_args) =
-                                            &args[0].ty
-                                        {
+                                        let arg0_ty = body.get_type(args[0]);
+                                        if let PolyType::Constructed(TypeName::Array, type_args) = arg0_ty {
                                             match type_args.get(0) {
                                                 Some(PolyType::Constructed(TypeName::Size(n), _)) => {
                                                     Ok(constructor.const_i32(*n as i32))
@@ -1987,7 +1977,7 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
                                                 ),
                                             }
                                         } else {
-                                            bail_spirv!("length called on non-array type: {:?}", args[0].ty)
+                                            bail_spirv!("length called on non-array type: {:?}", arg0_ty)
                                         }
                                     }
                                     Intrinsic::Placeholder => {
@@ -2007,8 +1997,7 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
                                             bail_spirv!("replicate expects exactly 2 arguments");
                                         }
                                         // Extract array size from result type
-                                        if let PolyType::Constructed(TypeName::Array, type_args) = &expr.ty
-                                        {
+                                        if let PolyType::Constructed(TypeName::Array, type_args) = expr_ty {
                                             if let Some(PolyType::Constructed(TypeName::Size(n), _)) =
                                                 type_args.get(0)
                                             {
@@ -2045,7 +2034,8 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
                                         constructor.builder.store(arr_var, arr_id, None, [])?;
 
                                         // Get pointer to element and store new value
-                                        let elem_type = constructor.ast_type_to_spirv(&args[2].ty);
+                                        let arg2_ty = body.get_type(args[2]);
+                                        let elem_type = constructor.ast_type_to_spirv(arg2_ty);
                                         let elem_ptr_type = constructor.builder.type_pointer(
                                             None,
                                             StorageClass::Function,
@@ -2134,8 +2124,8 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
                                         // Debug intrinsic: emit inline string encoding
                                         if constructor.debug_buffer.is_some() {
                                             // Extract string from the literal argument
-                                            let str_value = match &args[0].kind {
-                                                ExprKind::Literal(Literal::String(s)) => s.clone(),
+                                            let str_value = match body.get_expr(args[0]) {
+                                                Expr::String(s) => s.clone(),
                                                 _ => "????".to_string(),
                                             };
 
@@ -2290,9 +2280,9 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
             }
         }
 
-        ExprKind::Intrinsic { name, args } => {
+        Expr::Intrinsic { name, args } => {
             // Get the result type from the expression
-            let result_type = constructor.ast_type_to_spirv(&expr.ty);
+            let result_type = constructor.ast_type_to_spirv(expr_ty);
 
             match name.as_str() {
                 "tuple_access" => {
@@ -2300,26 +2290,27 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
                         bail_spirv!("tuple_access requires 2 args");
                     }
                     // Second arg should be a constant index - extract it from the literal
-                    let index = match &args[1].kind {
-                        ExprKind::Literal(Literal::Int(s)) => {
+                    let index = match body.get_expr(args[1]) {
+                        Expr::Int(s) => {
                             s.parse::<u32>().unwrap_or_else(|e| {
                                 panic!("BUG: tuple_access index '{}' failed to parse as u32: {}. Type checking should ensure valid indices.", s, e)
                             })
                         }
                         _ => {
-                            panic!("BUG: tuple_access requires a constant integer literal as second argument, got {:?}. Type checking should ensure this.", args[1].kind)
+                            panic!("BUG: tuple_access requires a constant integer literal as second argument. Type checking should ensure this.")
                         }
                     };
 
-                    let composite_id = if types::is_pointer(&args[0].ty) {
+                    let arg0_ty = body.get_type(args[0]);
+                    let composite_id = if types::is_pointer(arg0_ty) {
                         // It's a pointer, load the value
-                        let ptr = lower_expr(constructor, &args[0])?;
+                        let ptr = lower_expr(constructor, body, args[0])?;
                         let pointee_ty =
-                            types::pointee(&args[0].ty).expect("Pointer type should have pointee");
+                            types::pointee(arg0_ty).expect("Pointer type should have pointee");
                         let value_type = constructor.ast_type_to_spirv(pointee_ty);
                         constructor.builder.load(value_type, None, ptr, None, [])?
                     } else {
-                        lower_expr(constructor, &args[0])?
+                        lower_expr(constructor, body, args[0])?
                     };
 
                     Ok(constructor.builder.composite_extract(result_type, None, composite_id, [index])?)
@@ -2329,15 +2320,16 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
                         bail_spirv!("index requires 2 args");
                     }
                     // Array indexing with OpAccessChain + OpLoad
-                    let index_val = lower_expr(constructor, &args[1])?;
+                    let index_val = lower_expr(constructor, body, args[1])?;
 
-                    let array_var = if types::is_pointer(&args[0].ty) {
+                    let arg0_ty = body.get_type(args[0]);
+                    let array_var = if types::is_pointer(arg0_ty) {
                         // It's a pointer, use it directly
-                        lower_expr(constructor, &args[0])?
+                        lower_expr(constructor, body, args[0])?
                     } else {
                         // Need to store the value in a variable to get a pointer
-                        let array_val = lower_expr(constructor, &args[0])?;
-                        let array_type = constructor.ast_type_to_spirv(&args[0].ty);
+                        let array_val = lower_expr(constructor, body, args[0])?;
+                        let array_type = constructor.ast_type_to_spirv(arg0_ty);
                         let array_var = constructor.declare_variable("_w_index_tmp", array_type)?;
                         constructor.builder.store(array_var, array_val, None, [])?;
                         array_var
@@ -2355,7 +2347,7 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
                 "assert" => {
                     // Assertions are no-ops in release, return body
                     if args.len() >= 2 {
-                        lower_expr(constructor, &args[1])
+                        lower_expr(constructor, body, args[1])
                     } else {
                         Ok(constructor.const_i32(0))
                     }
@@ -2364,15 +2356,16 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
             }
         }
 
-        ExprKind::Attributed { expr, .. } => {
+        Expr::Attributed { expr, .. } => {
             // Attributes are metadata, just lower the inner expression
-            lower_expr(constructor, expr)
+            lower_expr(constructor, body, *expr)
         }
 
-        ExprKind::Materialize(inner) => {
+        Expr::Materialize(inner) => {
             // Evaluate the inner expression to get its value
-            let value_id = lower_expr(constructor, inner)?;
-            let value_type_id = constructor.ast_type_to_spirv(&inner.ty);
+            let value_id = lower_expr(constructor, body, *inner)?;
+            let inner_ty = body.get_type(*inner);
+            let value_type_id = constructor.ast_type_to_spirv(inner_ty);
 
             // Declare a function-local variable to hold the value
             let var_id = constructor.declare_variable("_mat", value_type_id)?;
@@ -2384,7 +2377,7 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
             Ok(var_id)
         }
 
-        ExprKind::Closure { captures, .. } => {
+        Expr::Closure { captures, .. } => {
             // Lower closure as a struct of captures
             // Empty closures are represented as dummy i32 constants
             if captures.is_empty() {
@@ -2392,28 +2385,32 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
             }
 
             // Lower all capture expressions
-            let elem_ids: Vec<spirv::Word> =
-                captures.iter().map(|e| lower_expr(constructor, e)).collect::<Result<Vec<_>>>()?;
+            let elem_ids: Vec<spirv::Word> = captures
+                .iter()
+                .map(|&e| lower_expr(constructor, body, e))
+                .collect::<Result<Vec<_>>>()?;
 
             // Create struct type for captures
-            let elem_types: Vec<spirv::Word> =
-                captures.iter().map(|e| constructor.ast_type_to_spirv(&e.ty)).collect();
+            let elem_types: Vec<spirv::Word> = captures
+                .iter()
+                .map(|&e| constructor.ast_type_to_spirv(body.get_type(e)))
+                .collect();
             let tuple_type = constructor.builder.type_struct(elem_types);
 
             // Construct the composite
             Ok(constructor.builder.composite_construct(tuple_type, None, elem_ids)?)
         }
 
-        ExprKind::Range {
+        Expr::Range {
             start,
             step,
             end,
             kind,
         } => {
             // Extract constant values from range components
-            let start_val = try_extract_const_int(start)
+            let start_val = try_extract_const_int(body, *start)
                 .ok_or_else(|| err_spirv!("Range start must be a compile-time constant integer"))?;
-            let end_val = try_extract_const_int(end)
+            let end_val = try_extract_const_int(body, *end)
                 .ok_or_else(|| err_spirv!("Range end must be a compile-time constant integer"))?;
 
             // Calculate stride:
@@ -2421,7 +2418,7 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
             // - If step is Some(s), it's the second element, so stride = s - start
             let stride = match step {
                 Some(s) => {
-                    let step_val = try_extract_const_int(s)
+                    let step_val = try_extract_const_int(body, *s)
                         .ok_or_else(|| err_spirv!("Range step must be a compile-time constant integer"))?;
                     step_val - start_val
                 }
@@ -2472,227 +2469,66 @@ fn lower_expr(constructor: &mut Constructor, expr: &Expr) -> Result<spirv::Word>
             // Construct the composite array
             Ok(constructor.builder.composite_construct(array_type, None, elem_ids)?)
         }
+
+        Expr::Tuple(elems) => {
+            // Lower all element expressions
+            let elem_ids: Vec<spirv::Word> = elems
+                .iter()
+                .map(|&e| lower_expr(constructor, body, e))
+                .collect::<Result<Vec<_>>>()?;
+
+            // Get the tuple type
+            let result_type = constructor.ast_type_to_spirv(expr_ty);
+
+            // Construct the composite
+            Ok(constructor.builder.composite_construct(result_type, None, elem_ids)?)
+        }
+
+        Expr::Array(elems) | Expr::Vector(elems) => {
+            // Lower all element expressions
+            let elem_ids: Vec<spirv::Word> = elems
+                .iter()
+                .map(|&e| lower_expr(constructor, body, e))
+                .collect::<Result<Vec<_>>>()?;
+
+            // Get the array/vector type
+            let result_type = constructor.ast_type_to_spirv(expr_ty);
+
+            // Construct the composite
+            Ok(constructor.builder.composite_construct(result_type, None, elem_ids)?)
+        }
+
+        Expr::Matrix(rows) => {
+            // Lower each row as a vector, then construct the matrix
+            let row_ids: Vec<spirv::Word> = rows
+                .iter()
+                .map(|row| {
+                    let elem_ids: Vec<spirv::Word> = row
+                        .iter()
+                        .map(|&e| lower_expr(constructor, body, e))
+                        .collect::<Result<Vec<_>>>()?;
+                    // Get element type from first element
+                    let elem_ty = body.get_type(row[0]);
+                    let elem_spirv_type = constructor.ast_type_to_spirv(elem_ty);
+                    let row_type = constructor.get_or_create_vec_type(elem_spirv_type, row.len() as u32);
+                    Ok(constructor.builder.composite_construct(row_type, None, elem_ids)?)
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            // Get the matrix type
+            let result_type = constructor.ast_type_to_spirv(expr_ty);
+
+            // Construct the matrix from row vectors
+            Ok(constructor.builder.composite_construct(result_type, None, row_ids)?)
+        }
     }
 }
 
 /// Try to extract a compile-time constant integer from an expression.
-fn try_extract_const_int(expr: &Expr) -> Option<i32> {
-    match &expr.kind {
-        ExprKind::Literal(crate::mir::Literal::Int(s)) => s.parse().ok(),
+fn try_extract_const_int(body: &Body, expr_id: ExprId) -> Option<i32> {
+    match body.get_expr(expr_id) {
+        Expr::Int(s) => s.parse().ok(),
         _ => None,
-    }
-}
-
-/// Lower a literal for use in global constant context
-/// Uses OpConstantComposite instead of OpCompositeConstruct for arrays/vectors
-fn lower_const_literal(constructor: &mut Constructor, lit: &Literal) -> Result<spirv::Word> {
-    match lit {
-        Literal::Int(s) => {
-            let value: i32 = s.parse().map_err(|_| err_spirv!("Invalid integer literal: {}", s))?;
-            Ok(constructor.const_i32(value))
-        }
-        Literal::Float(s) => {
-            let value: f32 = s.parse().map_err(|_| err_spirv!("Invalid float literal: {}", s))?;
-            Ok(constructor.const_f32(value))
-        }
-        Literal::Bool(b) => Ok(constructor.const_bool(*b)),
-        Literal::String(s) => {
-            // Lower string to packed u32 words (little-endian, zero-terminated)
-            let bytes: Vec<u8> = s.bytes().chain(std::iter::once(0u8)).collect();
-            let word_count = (bytes.len() + 3) / 4;
-
-            // Pack bytes into u32 words
-            let mut packed_words: Vec<u32> = Vec::with_capacity(word_count);
-            for chunk in bytes.chunks(4) {
-                let mut word: u32 = 0;
-                for (i, &byte) in chunk.iter().enumerate() {
-                    word |= (byte as u32) << (i * 8);
-                }
-                packed_words.push(word);
-            }
-
-            // Create constants for each packed word
-            let word_ids: Vec<spirv::Word> = packed_words
-                .iter()
-                .map(|&w| constructor.builder.constant_bit32(constructor.u32_type, w))
-                .collect();
-
-            // Create array type [N]u32
-            let len_const = constructor.builder.constant_bit32(constructor.i32_type, word_count as u32);
-            let array_type = constructor.builder.type_array(constructor.u32_type, len_const);
-
-            // Use constant_composite for global constants
-            Ok(constructor.builder.constant_composite(array_type, word_ids))
-        }
-        Literal::Array(elems) => {
-            let elem_ids: Vec<spirv::Word> =
-                elems.iter().map(|e| lower_const_expr(constructor, e)).collect::<Result<Vec<_>>>()?;
-            let elem_type = elems.first()
-                .map(|e| constructor.ast_type_to_spirv(&e.ty))
-                .unwrap_or_else(|| {
-                    panic!("BUG: Empty array literal reached lowering. Type checking should require explicit type annotation for empty arrays or reject them entirely.")
-                });
-            let array_type = constructor.type_array(elem_type, elem_ids.len() as u32);
-            Ok(constructor.builder.constant_composite(array_type, elem_ids))
-        }
-        Literal::Vector(elems) => {
-            let elem_ids: Vec<spirv::Word> =
-                elems.iter().map(|e| lower_const_expr(constructor, e)).collect::<Result<Vec<_>>>()?;
-            let elem_type =
-                elems.first().map(|e| constructor.ast_type_to_spirv(&e.ty)).unwrap_or(constructor.f32_type);
-            let vec_type = constructor.get_or_create_vec_type(elem_type, elem_ids.len() as u32);
-            Ok(constructor.builder.constant_composite(vec_type, elem_ids))
-        }
-        Literal::Matrix(rows) => {
-            if rows.is_empty() || rows[0].is_empty() {
-                bail_spirv!("Empty matrix literal");
-            }
-            let num_rows = rows.len();
-            let num_cols = rows[0].len();
-            let elem_type = constructor.ast_type_to_spirv(&rows[0][0].ty);
-            let col_vec_type = constructor.get_or_create_vec_type(elem_type, num_rows as u32);
-            let mut col_ids = Vec::with_capacity(num_cols);
-            for col in 0..num_cols {
-                let mut col_elem_ids = Vec::with_capacity(num_rows);
-                for row in rows {
-                    let elem_id = lower_const_expr(constructor, &row[col])?;
-                    col_elem_ids.push(elem_id);
-                }
-                let col_vec = constructor.builder.constant_composite(col_vec_type, col_elem_ids);
-                col_ids.push(col_vec);
-            }
-            let mat_type = constructor.get_or_create_mat_type(elem_type, num_rows as u32, num_cols as u32);
-            Ok(constructor.builder.constant_composite(mat_type, col_ids))
-        }
-        Literal::Tuple(_) => Err(err_spirv!("Tuple literals not yet supported in global constants")),
-    }
-}
-
-fn lower_literal(constructor: &mut Constructor, lit: &Literal) -> Result<spirv::Word> {
-    match lit {
-        Literal::Int(s) => {
-            let value: i32 = s.parse().map_err(|_| err_spirv!("Invalid integer literal: {}", s))?;
-            Ok(constructor.const_i32(value))
-        }
-        Literal::Float(s) => {
-            let value: f32 = s.parse().map_err(|_| err_spirv!("Invalid float literal: {}", s))?;
-            Ok(constructor.const_f32(value))
-        }
-        Literal::Bool(b) => Ok(constructor.const_bool(*b)),
-        Literal::String(s) => {
-            // Lower string to packed u32 words (little-endian, zero-terminated)
-            let bytes: Vec<u8> = s.bytes().chain(std::iter::once(0u8)).collect();
-            let word_count = (bytes.len() + 3) / 4;
-
-            // Pack bytes into u32 words
-            let mut packed_words: Vec<u32> = Vec::with_capacity(word_count);
-            for chunk in bytes.chunks(4) {
-                let mut word: u32 = 0;
-                for (i, &byte) in chunk.iter().enumerate() {
-                    word |= (byte as u32) << (i * 8);
-                }
-                packed_words.push(word);
-            }
-
-            // Create constants for each packed word
-            let word_ids: Vec<spirv::Word> = packed_words
-                .iter()
-                .map(|&w| constructor.builder.constant_bit32(constructor.u32_type, w))
-                .collect();
-
-            // Create array type [N]u32
-            let len_const = constructor.builder.constant_bit32(constructor.i32_type, word_count as u32);
-            let array_type = constructor.builder.type_array(constructor.u32_type, len_const);
-
-            // Construct the composite array
-            Ok(constructor.builder.composite_construct(array_type, None, word_ids)?)
-        }
-        Literal::Tuple(elems) => {
-            // Lower all elements
-            let elem_ids: Vec<spirv::Word> =
-                elems.iter().map(|e| lower_expr(constructor, e)).collect::<Result<Vec<_>>>()?;
-
-            // Create struct type for tuple from element types
-            let elem_types: Vec<spirv::Word> =
-                elems.iter().map(|e| constructor.ast_type_to_spirv(&e.ty)).collect();
-
-            // Empty tuples are represented as dummy i32 constants.
-            if elem_types.is_empty() {
-                return Ok(constructor.const_i32(0));
-            }
-
-            let tuple_type = constructor.builder.type_struct(elem_types);
-
-            // Construct the composite
-            Ok(constructor.builder.composite_construct(tuple_type, None, elem_ids)?)
-        }
-        Literal::Array(elems) => {
-            // Lower all elements
-            let elem_ids: Vec<spirv::Word> =
-                elems.iter().map(|e| lower_expr(constructor, e)).collect::<Result<Vec<_>>>()?;
-
-            // Get element type from first element
-            let elem_type = elems.first()
-                .map(|e| constructor.ast_type_to_spirv(&e.ty))
-                .unwrap_or_else(|| {
-                    panic!("BUG: Empty array literal reached lowering. Type checking should require explicit type annotation for empty arrays or reject them entirely.")
-                });
-
-            // Create array type
-            let array_type = constructor.type_array(elem_type, elem_ids.len() as u32);
-
-            // Construct the composite
-            Ok(constructor.builder.composite_construct(array_type, None, elem_ids)?)
-        }
-        Literal::Vector(elems) => {
-            // Lower all elements
-            let elem_ids: Vec<spirv::Word> =
-                elems.iter().map(|e| lower_expr(constructor, e)).collect::<Result<Vec<_>>>()?;
-
-            // Get element type from first element
-            let elem_type =
-                elems.first().map(|e| constructor.ast_type_to_spirv(&e.ty)).unwrap_or(constructor.f32_type);
-
-            // Create vector type
-            let vec_type = constructor.get_or_create_vec_type(elem_type, elem_ids.len() as u32);
-
-            // Construct the vector
-            Ok(constructor.builder.composite_construct(vec_type, None, elem_ids)?)
-        }
-        Literal::Matrix(cols) => {
-            // Matrix literal: outer array = columns, inner array = column elements
-            // Each inner array becomes a SPIR-V column directly (row-vector convention)
-            if cols.is_empty() || cols[0].is_empty() {
-                bail_spirv!("Empty matrix literal");
-            }
-
-            let num_cols = cols.len();
-            let num_rows = cols[0].len(); // elements per column
-
-            // Get element type from first element
-            let elem_type = constructor.ast_type_to_spirv(&cols[0][0].ty);
-
-            // Create column vector type (num_rows elements per column)
-            let col_vec_type = constructor.get_or_create_vec_type(elem_type, num_rows as u32);
-
-            // Build column vectors directly from inner arrays (no transpose)
-            let mut col_ids = Vec::with_capacity(num_cols);
-            for col in cols {
-                let mut col_elem_ids = Vec::with_capacity(num_rows);
-                for elem in col {
-                    let elem_id = lower_expr(constructor, elem)?;
-                    col_elem_ids.push(elem_id);
-                }
-                let col_vec = constructor.builder.composite_construct(col_vec_type, None, col_elem_ids)?;
-                col_ids.push(col_vec);
-            }
-
-            // Create matrix type: mat<rows x cols>
-            let mat_type = constructor.get_or_create_mat_type(elem_type, num_rows as u32, num_cols as u32);
-
-            // Construct the matrix from column vectors
-            Ok(constructor.builder.composite_construct(mat_type, None, col_ids)?)
-        }
     }
 }
 
