@@ -1662,8 +1662,8 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                         lambda_name,
                         captures,
                     } => (lambda_name.clone(), captures.clone()),
-                    _ => {
-                        bail_spirv!("map closure argument must be a Closure expression");
+                    other => {
+                        bail_spirv!("map closure argument must be a Closure expression, got {:?}", other);
                     }
                 };
                 let is_empty_closure = captures.is_empty();

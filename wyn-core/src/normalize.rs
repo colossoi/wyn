@@ -264,16 +264,27 @@ impl Normalizer {
                 self.wrap_bindings(body, matrix_id, ty, span, node_id, bindings)
             }
 
-            // Call - atomize all args
+            // Call - atomize args (but preserve Closures for map/reduce)
             Expr::Call { func, args } => {
                 let mut new_args = Vec::new();
                 let mut bindings = Vec::new();
 
-                for arg in args {
+                // For map/reduce, keep first arg (closure) as-is to preserve Closure structure
+                let is_soac = func == "map" || func == "reduce" || func == "filter" || func == "scan";
+
+                for (i, arg) in args.iter().enumerate() {
                     let new_arg = self.expr_map[arg];
-                    let (atom_arg, binding) = self.atomize(body, new_arg, node_id);
-                    new_args.push(atom_arg);
-                    bindings.push(binding);
+
+                    // Don't atomize the closure argument for SOACs
+                    if is_soac && i == 0 {
+                        // Keep the closure expression as-is (but still map to new body)
+                        new_args.push(new_arg);
+                        bindings.push(None);
+                    } else {
+                        let (atom_arg, binding) = self.atomize(body, new_arg, node_id);
+                        new_args.push(atom_arg);
+                        bindings.push(binding);
+                    }
                 }
 
                 let call_id = body.alloc_expr(
@@ -387,22 +398,16 @@ impl Normalizer {
                 self.wrap_bindings(body, loop_id, ty, span, node_id, vec![init_binding])
             }
 
-            // Closure - atomize captures
+            // Closure - keep captures as-is (don't wrap in Let bindings)
+            // This preserves the Closure structure for SOAC lowering
             Expr::Closure {
                 lambda_name,
                 captures,
             } => {
-                let mut new_captures = Vec::new();
-                let mut bindings = Vec::new();
+                // Just map captures to new body, don't atomize
+                let new_captures: Vec<_> = captures.iter().map(|cap| self.expr_map[cap]).collect();
 
-                for cap in captures {
-                    let new_cap = self.expr_map[cap];
-                    let (atom_cap, binding) = self.atomize(body, new_cap, node_id);
-                    new_captures.push(atom_cap);
-                    bindings.push(binding);
-                }
-
-                let closure_id = body.alloc_expr(
+                body.alloc_expr(
                     Expr::Closure {
                         lambda_name: lambda_name.clone(),
                         captures: new_captures,
@@ -410,9 +415,7 @@ impl Normalizer {
                     ty.clone(),
                     span,
                     node_id,
-                );
-                bindings.reverse();
-                self.wrap_bindings(body, closure_id, ty, span, node_id, bindings)
+                )
             }
 
             // Range - atomize start, step, end

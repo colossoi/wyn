@@ -911,11 +911,434 @@ pub struct InPlaceInfo {
 }
 
 /// Analyze MIR to find array operations that can reuse their input array.
-///
-/// TODO(mir-refactor): Re-implement after MIR arena refactor is complete.
-/// Currently returns empty result since MIR structure has changed.
-pub fn analyze_inplace(_mir: &mir::Program) -> InPlaceInfo {
-    InPlaceInfo::default()
+pub fn analyze_inplace(mir: &mir::Program) -> InPlaceInfo {
+    let mut result = InPlaceInfo::default();
+
+    for def in &mir.defs {
+        let body = match def {
+            mir::Def::Function { body, .. } => body,
+            mir::Def::Constant { body, .. } => body,
+            mir::Def::EntryPoint { body, .. } => body,
+            mir::Def::Uniform { .. } | mir::Def::Storage { .. } => continue,
+        };
+
+        // Compute uses after each expression
+        let mut aliases: HashMap<mir::LocalId, HashSet<mir::LocalId>> = HashMap::new();
+        let uses_after = compute_uses_after(body, body.root, &HashSet::new(), &mut aliases);
+
+        // Find in-place opportunities
+        find_inplace_ops(body, body.root, &uses_after, &aliases, &mut result);
+    }
+
+    result
+}
+
+/// Collect all local variable uses in an expression (bottom-up)
+fn collect_uses(body: &mir::Body, expr_id: mir::ExprId) -> HashSet<mir::LocalId> {
+    use mir::Expr::*;
+
+    let mut uses = HashSet::new();
+    let expr = body.get_expr(expr_id);
+
+    match expr {
+        Local(local_id) => {
+            uses.insert(*local_id);
+        }
+        Global(_) | Int(_) | Float(_) | Bool(_) | String(_) | Unit => {}
+        Tuple(elems) | Array(elems) | Vector(elems) => {
+            for elem in elems {
+                uses.extend(collect_uses(body, *elem));
+            }
+        }
+        Matrix(rows) => {
+            for row in rows {
+                for elem in row {
+                    uses.extend(collect_uses(body, *elem));
+                }
+            }
+        }
+        BinOp { lhs, rhs, .. } => {
+            uses.extend(collect_uses(body, *lhs));
+            uses.extend(collect_uses(body, *rhs));
+        }
+        UnaryOp { operand, .. } => {
+            uses.extend(collect_uses(body, *operand));
+        }
+        If { cond, then_, else_ } => {
+            uses.extend(collect_uses(body, *cond));
+            uses.extend(collect_uses(body, *then_));
+            uses.extend(collect_uses(body, *else_));
+        }
+        Let { local, rhs, body: let_body } => {
+            uses.extend(collect_uses(body, *rhs));
+            let mut body_uses = collect_uses(body, *let_body);
+            body_uses.remove(local); // Remove bound variable
+            uses.extend(body_uses);
+        }
+        Loop { loop_var, init, init_bindings, kind, body: loop_body } => {
+            uses.extend(collect_uses(body, *init));
+            for (_, binding_expr) in init_bindings {
+                uses.extend(collect_uses(body, *binding_expr));
+            }
+            match kind {
+                mir::LoopKind::For { iter, .. } => uses.extend(collect_uses(body, *iter)),
+                mir::LoopKind::ForRange { bound, .. } => uses.extend(collect_uses(body, *bound)),
+                mir::LoopKind::While { cond } => uses.extend(collect_uses(body, *cond)),
+            }
+            let mut body_uses = collect_uses(body, *loop_body);
+            body_uses.remove(loop_var);
+            // Remove bound variables from init_bindings
+            for (binding_local, _) in init_bindings {
+                body_uses.remove(binding_local);
+            }
+            if let mir::LoopKind::For { var, .. } | mir::LoopKind::ForRange { var, .. } = kind {
+                body_uses.remove(var);
+            }
+            uses.extend(body_uses);
+        }
+        Call { args, .. } => {
+            for arg in args {
+                uses.extend(collect_uses(body, *arg));
+            }
+        }
+        Intrinsic { args, .. } => {
+            for arg in args {
+                uses.extend(collect_uses(body, *arg));
+            }
+        }
+        Attributed { expr: inner, .. } => {
+            uses.extend(collect_uses(body, *inner));
+        }
+        Materialize(inner) => {
+            uses.extend(collect_uses(body, *inner));
+        }
+        Closure { captures, .. } => {
+            for capture in captures {
+                uses.extend(collect_uses(body, *capture));
+            }
+        }
+        Range { start, step, end, .. } => {
+            uses.extend(collect_uses(body, *start));
+            if let Some(s) = step {
+                uses.extend(collect_uses(body, *s));
+            }
+            uses.extend(collect_uses(body, *end));
+        }
+    }
+
+    uses
+}
+
+/// Compute uses-after for each expression (top-down).
+/// Returns a map from ExprId to the set of locals used STRICTLY AFTER that expression.
+/// Also populates the aliases map: local -> set of locals it aliases.
+fn compute_uses_after(
+    body: &mir::Body,
+    expr_id: mir::ExprId,
+    after: &HashSet<mir::LocalId>,
+    aliases: &mut HashMap<mir::LocalId, HashSet<mir::LocalId>>,
+) -> HashMap<mir::ExprId, HashSet<mir::LocalId>> {
+    use mir::Expr::*;
+
+    let mut result = HashMap::new();
+    result.insert(expr_id, after.clone());
+
+    let expr = body.get_expr(expr_id);
+
+    match expr {
+        Local(_) | Global(_) | Int(_) | Float(_) | Bool(_) | String(_) | Unit => {}
+        Tuple(elems) | Array(elems) | Vector(elems) => {
+            let elems = elems.clone();
+            let mut current_after = after.clone();
+            for elem in elems.iter().rev() {
+                result.extend(compute_uses_after(body, *elem, &current_after, aliases));
+                current_after.extend(collect_uses(body, *elem));
+            }
+        }
+        Matrix(rows) => {
+            let rows = rows.clone();
+            let mut current_after = after.clone();
+            for row in rows.iter().rev() {
+                for elem in row.iter().rev() {
+                    result.extend(compute_uses_after(body, *elem, &current_after, aliases));
+                    current_after.extend(collect_uses(body, *elem));
+                }
+            }
+        }
+        BinOp { lhs, rhs, .. } => {
+            let (lhs, rhs) = (*lhs, *rhs);
+            // After lhs: uses in rhs + after
+            let rhs_uses = collect_uses(body, rhs);
+            let after_lhs: HashSet<_> = rhs_uses.union(after).cloned().collect();
+            result.extend(compute_uses_after(body, lhs, &after_lhs, aliases));
+            // After rhs: just after
+            result.extend(compute_uses_after(body, rhs, after, aliases));
+        }
+        UnaryOp { operand, .. } => {
+            let operand = *operand;
+            result.extend(compute_uses_after(body, operand, after, aliases));
+        }
+        If { cond, then_, else_ } => {
+            let (cond, then_, else_) = (*cond, *then_, *else_);
+            // After cond: uses from both branches + after
+            let then_uses = collect_uses(body, then_);
+            let else_uses = collect_uses(body, else_);
+            let after_cond: HashSet<_> = then_uses.union(&else_uses).chain(after.iter()).cloned().collect();
+            result.extend(compute_uses_after(body, cond, &after_cond, aliases));
+            // After each branch: just after
+            result.extend(compute_uses_after(body, then_, after, aliases));
+            result.extend(compute_uses_after(body, else_, after, aliases));
+        }
+        Let { local, rhs, body: let_body } => {
+            let (local, rhs, let_body) = (*local, *rhs, *let_body);
+            // Track aliases: if rhs is Local(x), then local aliases x
+            if let Local(source_local) = body.get_expr(rhs) {
+                let mut alias_set = HashSet::new();
+                alias_set.insert(*source_local);
+                // Transitively include aliases of source
+                if let Some(source_aliases) = aliases.get(source_local) {
+                    alias_set.extend(source_aliases.iter().cloned());
+                }
+                aliases.insert(local, alias_set);
+            }
+            // After rhs: uses in body + after (minus local since it's being bound)
+            let mut body_uses = collect_uses(body, let_body);
+            body_uses.remove(&local);
+            let after_rhs: HashSet<_> = body_uses.union(after).cloned().collect();
+            result.extend(compute_uses_after(body, rhs, &after_rhs, aliases));
+            // After body: just after
+            result.extend(compute_uses_after(body, let_body, after, aliases));
+        }
+        Loop { init, init_bindings, kind, body: loop_body, .. } => {
+            let (init, init_bindings, kind, loop_body) = (*init, init_bindings.clone(), kind.clone(), *loop_body);
+            // Simplified: treat loop as atomic for now
+            result.extend(compute_uses_after(body, init, after, aliases));
+            for (_, binding_expr) in &init_bindings {
+                result.extend(compute_uses_after(body, *binding_expr, after, aliases));
+            }
+            match &kind {
+                mir::LoopKind::For { iter, .. } => {
+                    result.extend(compute_uses_after(body, *iter, after, aliases));
+                }
+                mir::LoopKind::ForRange { bound, .. } => {
+                    result.extend(compute_uses_after(body, *bound, after, aliases));
+                }
+                mir::LoopKind::While { cond } => {
+                    result.extend(compute_uses_after(body, *cond, after, aliases));
+                }
+            }
+            result.extend(compute_uses_after(body, loop_body, after, aliases));
+        }
+        Call { args, .. } => {
+            let args = args.clone();
+            // Process args right to left
+            let mut current_after = after.clone();
+            for arg in args.iter().rev() {
+                result.extend(compute_uses_after(body, *arg, &current_after, aliases));
+                current_after.extend(collect_uses(body, *arg));
+            }
+        }
+        Intrinsic { args, .. } => {
+            let args = args.clone();
+            let mut current_after = after.clone();
+            for arg in args.iter().rev() {
+                result.extend(compute_uses_after(body, *arg, &current_after, aliases));
+                current_after.extend(collect_uses(body, *arg));
+            }
+        }
+        Attributed { expr: inner, .. } => {
+            let inner = *inner;
+            result.extend(compute_uses_after(body, inner, after, aliases));
+        }
+        Materialize(inner) => {
+            let inner = *inner;
+            result.extend(compute_uses_after(body, inner, after, aliases));
+        }
+        Closure { captures, .. } => {
+            let captures = captures.clone();
+            let mut current_after = after.clone();
+            for capture in captures.iter().rev() {
+                result.extend(compute_uses_after(body, *capture, &current_after, aliases));
+                current_after.extend(collect_uses(body, *capture));
+            }
+        }
+        Range { start, step, end, .. } => {
+            let (start, step, end) = (*start, *step, *end);
+            // Process end, step (if any), then start
+            let mut current_after = after.clone();
+            result.extend(compute_uses_after(body, end, &current_after, aliases));
+            current_after.extend(collect_uses(body, end));
+            if let Some(s) = step {
+                result.extend(compute_uses_after(body, s, &current_after, aliases));
+                current_after.extend(collect_uses(body, s));
+            }
+            result.extend(compute_uses_after(body, start, &current_after, aliases));
+        }
+    }
+
+    result
+}
+
+/// Check if a local variable can be reused (no aliases used after the given expression)
+fn can_reuse_local(
+    local_id: mir::LocalId,
+    expr_id: mir::ExprId,
+    uses_after: &HashMap<mir::ExprId, HashSet<mir::LocalId>>,
+    aliases: &HashMap<mir::LocalId, HashSet<mir::LocalId>>,
+) -> bool {
+    // Get all locals that alias local_id
+    let mut all_aliases: HashSet<_> = std::iter::once(local_id).collect();
+
+    // Add locals that local_id aliases
+    if let Some(local_aliases) = aliases.get(&local_id) {
+        all_aliases.extend(local_aliases.iter().cloned());
+    }
+
+    // Add locals that alias local_id (reverse lookup)
+    for (var, var_aliases) in aliases {
+        if var_aliases.contains(&local_id) {
+            all_aliases.insert(*var);
+        }
+    }
+
+    // Check if any alias is used after this expression
+    if let Some(after_set) = uses_after.get(&expr_id) {
+        !all_aliases.iter().any(|alias| after_set.contains(alias))
+    } else {
+        // If no uses_after entry, conservatively assume it can be reused
+        true
+    }
+}
+
+/// Find operations (map, array_with) where the input array can be reused.
+fn find_inplace_ops(
+    body: &mir::Body,
+    expr_id: mir::ExprId,
+    uses_after: &HashMap<mir::ExprId, HashSet<mir::LocalId>>,
+    aliases: &HashMap<mir::LocalId, HashSet<mir::LocalId>>,
+    result: &mut InPlaceInfo,
+) {
+    use mir::Expr::*;
+
+    let expr = body.get_expr(expr_id);
+
+    match expr {
+        Call { func, args } if func == "map" && args.len() == 2 => {
+            let args = args.clone();
+            // args[0] is closure, args[1] is array
+            if let Local(arr_local) = body.get_expr(args[1]) {
+                if can_reuse_local(*arr_local, expr_id, uses_after, aliases) {
+                    result.can_reuse_input.insert(body.get_node_id(expr_id));
+                }
+            }
+            // Recurse into arguments
+            for arg in &args {
+                find_inplace_ops(body, *arg, uses_after, aliases, result);
+            }
+        }
+        Call { func, args } if func == "_w_array_with" && args.len() == 3 => {
+            let args = args.clone();
+            // _w_array_with(arr, idx, val) - functional array update
+            if let Local(arr_local) = body.get_expr(args[0]) {
+                if can_reuse_local(*arr_local, expr_id, uses_after, aliases) {
+                    result.can_reuse_input.insert(body.get_node_id(expr_id));
+                }
+            }
+            // Recurse into arguments
+            for arg in &args {
+                find_inplace_ops(body, *arg, uses_after, aliases, result);
+            }
+        }
+        // Recurse into all subexpressions
+        Local(_) | Global(_) | Int(_) | Float(_) | Bool(_) | String(_) | Unit => {}
+        Tuple(elems) | Array(elems) | Vector(elems) => {
+            let elems = elems.clone();
+            for elem in &elems {
+                find_inplace_ops(body, *elem, uses_after, aliases, result);
+            }
+        }
+        Matrix(rows) => {
+            let rows = rows.clone();
+            for row in &rows {
+                for elem in row {
+                    find_inplace_ops(body, *elem, uses_after, aliases, result);
+                }
+            }
+        }
+        BinOp { lhs, rhs, .. } => {
+            let (lhs, rhs) = (*lhs, *rhs);
+            find_inplace_ops(body, lhs, uses_after, aliases, result);
+            find_inplace_ops(body, rhs, uses_after, aliases, result);
+        }
+        UnaryOp { operand, .. } => {
+            let operand = *operand;
+            find_inplace_ops(body, operand, uses_after, aliases, result);
+        }
+        If { cond, then_, else_ } => {
+            let (cond, then_, else_) = (*cond, *then_, *else_);
+            find_inplace_ops(body, cond, uses_after, aliases, result);
+            find_inplace_ops(body, then_, uses_after, aliases, result);
+            find_inplace_ops(body, else_, uses_after, aliases, result);
+        }
+        Let { rhs, body: let_body, .. } => {
+            let (rhs, let_body) = (*rhs, *let_body);
+            find_inplace_ops(body, rhs, uses_after, aliases, result);
+            find_inplace_ops(body, let_body, uses_after, aliases, result);
+        }
+        Loop { init, init_bindings, kind, body: loop_body, .. } => {
+            let (init, init_bindings, kind, loop_body) = (*init, init_bindings.clone(), kind.clone(), *loop_body);
+            find_inplace_ops(body, init, uses_after, aliases, result);
+            for (_, binding_expr) in &init_bindings {
+                find_inplace_ops(body, *binding_expr, uses_after, aliases, result);
+            }
+            match &kind {
+                mir::LoopKind::For { iter, .. } => {
+                    find_inplace_ops(body, *iter, uses_after, aliases, result);
+                }
+                mir::LoopKind::ForRange { bound, .. } => {
+                    find_inplace_ops(body, *bound, uses_after, aliases, result);
+                }
+                mir::LoopKind::While { cond } => {
+                    find_inplace_ops(body, *cond, uses_after, aliases, result);
+                }
+            }
+            find_inplace_ops(body, loop_body, uses_after, aliases, result);
+        }
+        Call { args, .. } => {
+            let args = args.clone();
+            for arg in &args {
+                find_inplace_ops(body, *arg, uses_after, aliases, result);
+            }
+        }
+        Intrinsic { args, .. } => {
+            let args = args.clone();
+            for arg in &args {
+                find_inplace_ops(body, *arg, uses_after, aliases, result);
+            }
+        }
+        Attributed { expr: inner, .. } => {
+            let inner = *inner;
+            find_inplace_ops(body, inner, uses_after, aliases, result);
+        }
+        Materialize(inner) => {
+            let inner = *inner;
+            find_inplace_ops(body, inner, uses_after, aliases, result);
+        }
+        Closure { captures, .. } => {
+            let captures = captures.clone();
+            for capture in &captures {
+                find_inplace_ops(body, *capture, uses_after, aliases, result);
+            }
+        }
+        Range { start, step, end, .. } => {
+            let (start, step, end) = (*start, *step, *end);
+            find_inplace_ops(body, start, uses_after, aliases, result);
+            if let Some(s) = step {
+                find_inplace_ops(body, s, uses_after, aliases, result);
+            }
+            find_inplace_ops(body, end, uses_after, aliases, result);
+        }
+    }
 }
 
 // TODO(mir-refactor): The following helper functions are commented out during MIR refactor.

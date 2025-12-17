@@ -29,7 +29,7 @@ pub mod lowering_common;
 pub mod constant_folding;
 // pub mod glsl;
 pub mod materialize_hoisting;
-// pub mod monomorphization;
+pub mod monomorphization;
 pub mod normalize;
 pub mod spirv;
 
@@ -482,9 +482,10 @@ pub struct Normalized {
 }
 
 impl Normalized {
-    /// Stub: skip monomorphization
+    /// Monomorphize polymorphic functions.
     pub fn monomorphize(self) -> Result<Monomorphized> {
-        Ok(Monomorphized { mir: self.mir })
+        let mir = monomorphization::monomorphize(self.mir)?;
+        Ok(Monomorphized { mir })
     }
 }
 
@@ -538,9 +539,13 @@ impl Lifted {
     }
 
     /// Lower MIR to SPIR-V with debug mode option
-    /// TODO(mir-refactor): Re-enable after SPIR-V lowering is updated
-    pub fn lower_with_options(self, _debug_enabled: bool) -> Result<Lowered> {
-        Err(err_spirv!("SPIR-V lowering not yet implemented for new MIR"))
+    pub fn lower_with_options(self, debug_enabled: bool) -> Result<Lowered> {
+        let inplace_info = alias_checker::analyze_inplace(&self.mir);
+        let spirv = spirv::lowering::lower(&self.mir, debug_enabled, &inplace_info)?;
+        Ok(Lowered {
+            mir: self.mir,
+            spirv,
+        })
     }
 
     /// Lower MIR to GLSL
