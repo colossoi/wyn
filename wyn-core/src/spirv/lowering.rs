@@ -2381,13 +2381,29 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                 return Ok(constructor.const_i32(0));
             }
 
-            // Lower all capture expressions
-            let elem_ids: Vec<spirv::Word> =
-                captures.iter().map(|&e| lower_expr(constructor, body, e)).collect::<Result<Vec<_>>>()?;
+            // Filter out unit-type captures (they become void which can't be in SPIR-V structs)
+            let non_unit_captures: Vec<ExprId> = captures
+                .iter()
+                .filter(|&&e| !matches!(body.get_type(e), PolyType::Constructed(TypeName::Unit, _)))
+                .copied()
+                .collect();
+
+            // If all captures were unit, return dummy
+            if non_unit_captures.is_empty() {
+                return Ok(constructor.const_i32(0));
+            }
+
+            // Lower all non-unit capture expressions
+            let elem_ids: Vec<spirv::Word> = non_unit_captures
+                .iter()
+                .map(|&e| lower_expr(constructor, body, e))
+                .collect::<Result<Vec<_>>>()?;
 
             // Create struct type for captures
-            let elem_types: Vec<spirv::Word> =
-                captures.iter().map(|&e| constructor.ast_type_to_spirv(body.get_type(e))).collect();
+            let elem_types: Vec<spirv::Word> = non_unit_captures
+                .iter()
+                .map(|&e| constructor.ast_type_to_spirv(body.get_type(e)))
+                .collect();
             let tuple_type = constructor.builder.type_struct(elem_types);
 
             // Construct the composite

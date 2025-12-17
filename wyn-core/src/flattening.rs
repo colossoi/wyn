@@ -1220,12 +1220,20 @@ impl Flattener {
             param_local_ids.push(local_id);
         }
 
-        // Add let bindings to extract free vars from closure tuple
+        // Allocate locals for captured variables BEFORE flattening body
+        // This ensures body references resolve to the lambda's locals, not the parent's
         let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
+        let mut capture_locals = vec![];
+        for (var_name, var_type) in &free_vars {
+            let capture_local = self.alloc_local(var_name.clone(), var_type.clone(), LocalKind::Let, span);
+            capture_locals.push(capture_local);
+        }
+
+        // Now flatten the lambda body - captured vars will resolve to our new locals
         let (mut body_root, _) = self.flatten_expr(&lambda.body)?;
 
         // Wrap body with let bindings for captured vars (in reverse order)
-        for (idx, (var_name, var_type)) in free_vars.iter().enumerate().rev() {
+        for (idx, ((_var_name, var_type), capture_local)) in free_vars.iter().zip(capture_locals.iter()).enumerate().rev() {
             let closure_ref = self.alloc_expr(mir::Expr::Local(closure_local), closure_type.clone(), span);
             let idx_expr = self.alloc_expr(mir::Expr::Int(idx.to_string()), i32_type.clone(), span);
             let extract = self.alloc_expr(
@@ -1236,11 +1244,10 @@ impl Flattener {
                 var_type.clone(),
                 span,
             );
-            let capture_local = self.alloc_local(var_name.clone(), var_type.clone(), LocalKind::Let, span);
             let body_ty = self.current_body.get_type(body_root).clone();
             body_root = self.alloc_expr(
                 mir::Expr::Let {
-                    local: capture_local,
+                    local: *capture_local,
                     rhs: extract,
                     body: body_root,
                 },
@@ -1265,7 +1272,6 @@ impl Flattener {
             body: func_body,
             span,
         };
-        eprintln!("DEBUG: Pushing lambda '{}' node_id={:?}", func_name, node_id);
         self.generated_functions.push(func);
 
         // Return the closure
