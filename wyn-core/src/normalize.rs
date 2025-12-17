@@ -363,7 +363,7 @@ impl Normalizer {
                 self.wrap_bindings(body, if_id, ty, span, node_id, vec![cond_binding])
             }
 
-            // Loop - atomize init
+            // Loop - atomize init and loop kind subexpressions
             Expr::Loop {
                 loop_var,
                 init,
@@ -377,7 +377,7 @@ impl Normalizer {
                 let new_init_bindings: Vec<_> =
                     init_bindings.iter().map(|(local, expr)| (*local, self.expr_map[expr])).collect();
 
-                let new_kind = self.map_loop_kind(body, kind, node_id);
+                let (new_kind, kind_bindings) = self.map_loop_kind(body, kind, node_id);
                 let new_loop_body = self.expr_map[loop_body];
 
                 let loop_id = body.alloc_expr(
@@ -393,7 +393,10 @@ impl Normalizer {
                     node_id,
                 );
 
-                self.wrap_bindings(body, loop_id, ty, span, node_id, vec![init_binding])
+                // Combine all bindings: kind bindings first (outermost), then init binding
+                let mut all_bindings = kind_bindings;
+                all_bindings.push(init_binding);
+                self.wrap_bindings(body, loop_id, ty, span, node_id, all_bindings)
             }
 
             // Closure - keep captures as-is (don't wrap in Let bindings)
@@ -487,35 +490,46 @@ impl Normalizer {
         }
     }
 
-    /// Map a loop kind, atomizing its subexpressions.
-    fn map_loop_kind(&mut self, body: &mut Body, kind: &LoopKind, node_id: NodeId) -> LoopKind {
+    /// Map a loop kind, atomizing its subexpressions where appropriate.
+    /// Returns the new LoopKind and any bindings needed for atomization.
+    ///
+    /// Note: While conditions are NOT atomized because they must be re-evaluated
+    /// on each iteration and may reference loop variables that change.
+    /// ForRange bounds and For iterators ARE atomized because they're evaluated once.
+    fn map_loop_kind(
+        &mut self,
+        body: &mut Body,
+        kind: &LoopKind,
+        node_id: NodeId,
+    ) -> (LoopKind, Vec<Option<(LocalId, ExprId)>>) {
         match kind {
             LoopKind::For { var, iter } => {
                 let new_iter = self.expr_map[iter];
                 let (atom_iter, binding) = self.atomize(body, new_iter, node_id);
-                // Note: We can't wrap the loop kind itself, so we just atomize
-                // The iter should already be atomic after normalization of children
-                // If not, we need a different approach for loop kinds
-                let _ = binding; // Bindings in loop kind are complex - skip for now
-                LoopKind::For {
-                    var: *var,
-                    iter: atom_iter,
-                }
+                (
+                    LoopKind::For {
+                        var: *var,
+                        iter: atom_iter,
+                    },
+                    vec![binding],
+                )
             }
             LoopKind::ForRange { var, bound } => {
                 let new_bound = self.expr_map[bound];
                 let (atom_bound, binding) = self.atomize(body, new_bound, node_id);
-                let _ = binding;
-                LoopKind::ForRange {
-                    var: *var,
-                    bound: atom_bound,
-                }
+                (
+                    LoopKind::ForRange {
+                        var: *var,
+                        bound: atom_bound,
+                    },
+                    vec![binding],
+                )
             }
             LoopKind::While { cond } => {
+                // While conditions must NOT be atomized - they are re-evaluated each iteration
+                // and may reference loop variables (like `i < 16` where `i` is the loop counter)
                 let new_cond = self.expr_map[cond];
-                let (atom_cond, binding) = self.atomize(body, new_cond, node_id);
-                let _ = binding;
-                LoopKind::While { cond: atom_cond }
+                (LoopKind::While { cond: new_cond }, vec![])
             }
         }
     }

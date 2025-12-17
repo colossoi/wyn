@@ -1065,20 +1065,19 @@ impl Flattener {
                 // Push scope for pattern bindings
                 self.name_to_local.push_scope();
 
-                // Build nested lets from inside out
-                let (mut body_id, body_sv) = self.flatten_expr(&let_in.body)?;
-
-                // Extract each element (from last to first since we're building inside out)
-                for (i, pat) in patterns.iter().enumerate().rev() {
+                // FIRST: Collect pattern info and allocate locals for each element
+                // This ensures pattern-bound variables are in scope when we flatten the body
+                let mut elem_info = Vec::new();
+                for (i, pat) in patterns.iter().enumerate() {
                     let name = match &pat.kind {
-                        PatternKind::Name(n) => n.clone(),
+                        PatternKind::Name(n) => Some(n.clone()),
                         PatternKind::Typed(inner, _) => match &inner.kind {
-                            PatternKind::Name(n) => n.clone(),
+                            PatternKind::Name(n) => Some(n.clone()),
                             _ => {
                                 bail_flatten!("Nested complex patterns not supported");
                             }
                         },
-                        PatternKind::Wildcard => continue, // Skip wildcards
+                        PatternKind::Wildcard => None, // Skip wildcards
                         _ => {
                             bail_flatten!("Complex nested patterns not supported");
                         }
@@ -1090,23 +1089,38 @@ impl Flattener {
                         .unwrap_or_else(|| {
                             panic!("BUG: Tuple pattern element {} has no type. Type checking should ensure all tuple elements have types.", i)
                         });
-                    let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
+
+                    // Allocate local for this element (adds to name_to_local)
+                    let elem_local_id = name
+                        .as_ref()
+                        .map(|n| self.alloc_local(n.clone(), elem_ty.clone(), LocalKind::Let, span));
+
+                    elem_info.push((i, name, elem_ty, elem_local_id));
+                }
+
+                // NOW flatten the body - pattern-bound variables are now in scope
+                let (mut body_id, body_sv) = self.flatten_expr(&let_in.body)?;
+
+                // Build nested lets from inside out (reverse order)
+                let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
+                for (i, name, elem_ty, elem_local_id) in elem_info.into_iter().rev() {
+                    // Skip wildcards
+                    let (Some(_name), Some(elem_local_id)) = (name, elem_local_id) else {
+                        continue;
+                    };
 
                     // Create tuple_access intrinsic
                     let tuple_var_id =
                         self.alloc_expr(mir::Expr::Local(tuple_local_id), tuple_ty.clone(), span);
-                    let idx_id = self.alloc_expr(mir::Expr::Int(i.to_string()), i32_type, span);
+                    let idx_id = self.alloc_expr(mir::Expr::Int(i.to_string()), i32_type.clone(), span);
                     let extract_id = self.alloc_expr(
                         mir::Expr::Intrinsic {
                             name: "tuple_access".to_string(),
                             args: vec![tuple_var_id, idx_id],
                         },
-                        elem_ty.clone(),
+                        elem_ty,
                         span,
                     );
-
-                    // Allocate local for this element
-                    let elem_local_id = self.alloc_local(name, elem_ty, LocalKind::Let, span);
 
                     // Wrap body in let
                     let body_ty = self.current_body.get_type(body_id).clone();
