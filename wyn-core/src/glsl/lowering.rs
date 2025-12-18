@@ -623,9 +623,13 @@ impl<'a> LowerCtx<'a> {
 
             // --- Aggregates ---
             Expr::Tuple(elems) => {
-                // Empty tuples - return dummy value
+                // Empty tuples should not reach lowering - they indicate a bug
+                // (Unit values and empty closures should be handled at call sites)
                 if elems.is_empty() {
-                    return Ok("0".to_string());
+                    bail_glsl!(
+                        "BUG: Empty tuple reached GLSL lowering. Empty tuples/unit values should \
+                         be handled at call sites (let _ = ..., map with empty closures, etc.)"
+                    );
                 }
 
                 // Emit tuple as struct constructor
@@ -654,9 +658,15 @@ impl<'a> LowerCtx<'a> {
             }
 
             Expr::Matrix(rows) => {
+                if rows.is_empty() {
+                    bail_glsl!("BUG: Empty matrix (no rows) reached GLSL lowering");
+                }
+                let num_cols = rows[0].len();
+                if num_cols == 0 {
+                    bail_glsl!("BUG: Empty matrix row (no columns) reached GLSL lowering");
+                }
                 let mut parts = Vec::new();
                 // GLSL matrices are column-major, so iterate column-by-column
-                let num_cols = rows.first().map(|r| r.len()).unwrap_or(0);
                 for col in 0..num_cols {
                     for row in rows {
                         if col < row.len() {
@@ -880,7 +890,9 @@ impl<'a> LowerCtx<'a> {
             "tuple_access" => {
                 // args[0] is the tuple/vector, args[1] is the index
                 if let Expr::Int(idx_str) = body.get_expr(arg_ids[1]) {
-                    let idx: usize = idx_str.parse().unwrap_or(0);
+                    let idx: usize = idx_str
+                        .parse()
+                        .map_err(|_| crate::err_glsl!("BUG: Invalid tuple index literal: {}", idx_str))?;
                     // Check if this is a vector type - use swizzle syntax
                     let arg_ty = body.get_type(arg_ids[0]);
                     if self.is_vector_type(arg_ty) {
@@ -889,7 +901,7 @@ impl<'a> LowerCtx<'a> {
                             1 => "y",
                             2 => "z",
                             3 => "w",
-                            _ => "x",
+                            _ => bail_glsl!("BUG: Invalid vector swizzle index: {} (max is 3)", idx),
                         };
                         Ok(format!("{}.{}", args[0], swizzle))
                     } else {

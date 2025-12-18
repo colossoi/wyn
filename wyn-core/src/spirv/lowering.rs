@@ -1999,7 +1999,10 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                     if args.len() >= 2 {
                         lower_expr(constructor, body, args[1])
                     } else {
-                        Ok(constructor.const_i32(0))
+                        Err(err_spirv!(
+                            "BUG: assert intrinsic requires at least 2 arguments (condition, body), got {}",
+                            args.len()
+                        ))
                     }
                 }
                 _ => Err(err_spirv!("Unknown intrinsic: {}", name)),
