@@ -824,7 +824,7 @@ impl<'a> LowerCtx<'a> {
         }
     }
 
-    fn lower_primop(&self, op: &PrimOp, args: &[String], _ret_ty: &PolyType<TypeName>) -> Result<String> {
+    fn lower_primop(&self, op: &PrimOp, args: &[String], ret_ty: &PolyType<TypeName>) -> Result<String> {
         use PrimOp::*;
         match op {
             // GLSL.std.450 extended instructions map to GLSL functions
@@ -874,7 +874,16 @@ impl<'a> LowerCtx<'a> {
             SIToFP | UIToFP => Ok(format!("float({})", args[0])),
             FPConvert => Ok(format!("float({})", args[0])),
             SConvert | UConvert => Ok(format!("int({})", args[0])),
-            Bitcast => Ok(format!("floatBitsToInt({})", args[0])), // TODO: proper bitcast
+            Bitcast => {
+                // Choose the correct GLSL bitcast function based on target type
+                let func = match ret_ty {
+                    PolyType::Constructed(TypeName::Int(32), _) => "floatBitsToInt",
+                    PolyType::Constructed(TypeName::UInt(32), _) => "floatBitsToUint",
+                    PolyType::Constructed(TypeName::Float(32), _) => "intBitsToFloat",
+                    _ => "floatBitsToInt", // Default fallback
+                };
+                Ok(format!("{}({})", func, args[0]))
+            }
         }
     }
 
