@@ -838,8 +838,7 @@ impl Display for mir::Attribute {
     }
 }
 
-// TODO(mir-refactor): Full Display implementations for new MIR types.
-// For now, we provide a basic implementation that shows the structure.
+// Display implementations for MIR types.
 
 impl Display for mir::Body {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {

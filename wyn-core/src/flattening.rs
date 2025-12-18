@@ -321,10 +321,7 @@ impl Flattener {
         format!("_w_{}{}", prefix, self.fresh_id())
     }
 
-    // TODO(mir-refactor): Re-enable let hoisting as a separate pass
-    // Hoist inner Let expressions out of a Let's value.
-    // Transforms: let x = (let y = A in B) in C  =>  let y = A in let x = B in C
-    // This ensures materialized pointers are at the same scope level as their referents.
+    // Note: Let hoisting is now done as a separate pass (binding_lifter.rs).
 
     /// Resolve a field name to a numeric index using type information
     fn resolve_field_index(&self, obj: &Expression, field: &str) -> Result<usize> {
@@ -699,8 +696,7 @@ impl Flattener {
         }
     }
 
-    // TODO(mir-refactor): Old backing store functions removed - backing stores are now
-    // handled inline in flatten_let_in when needed
+    // Note: Backing stores are handled inline in flatten_let_in when needed.
 
     /// Extract parameter name from pattern
     fn extract_param_name(&self, pattern: &ast::Pattern) -> Result<String> {
@@ -1301,9 +1297,8 @@ impl Flattener {
         types::as_arrow(ty)
     }
 
-    // TODO(mir-refactor): wrap_body_with_closure_bindings integrated into flatten_lambda
-
-    // TODO(mir-refactor): synthesize_partial_application removed - partial application is rejected by type checker
+    // Note: Closure bindings are wrapped inline in flatten_lambda.
+    // Note: Partial application is rejected by type checker.
 
     /// Flatten an application expression
     fn flatten_application(

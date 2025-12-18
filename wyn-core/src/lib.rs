@@ -443,10 +443,6 @@ impl AliasChecked {
 // =============================================================================
 // BackEnd stages (MIR-based)
 // =============================================================================
-//
-// TODO(mir-refactor): These stages are stubbed out during the MIR arena refactor.
-// The pipeline currently goes: Flattened -> Lifted -> (error)
-// Once flattening produces new MIR, these will be re-enabled one by one.
 
 /// AST has been flattened to MIR
 pub struct Flattened {

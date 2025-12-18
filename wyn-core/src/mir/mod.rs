@@ -16,12 +16,8 @@ use crate::IdArena;
 use crate::ast::{NodeId, Span, TypeName};
 use polytype::Type;
 
-// TODO(mir-refactor): Re-enable tests after MIR types are updated
-// #[cfg(test)]
-// mod tests;
-
-// TODO(mir-refactor): Re-enable folder after MIR types are updated
-// pub mod folder;
+#[cfg(test)]
+mod tests;
 
 // =============================================================================
 // ID Types
