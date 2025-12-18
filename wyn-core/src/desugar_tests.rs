@@ -234,7 +234,6 @@ def vertex_main() -> #[builtin(position)] vec4f32 =
 }
 
 #[test]
-#[ignore] // TODO: Support passing named functions to map (not just lambdas)
 fn test_map_with_named_function() {
     let source = r#"
 def double(x: i32) -> i32 = x * 2
@@ -244,10 +243,10 @@ def vertex_main() -> #[builtin(position)] vec4f32 =
     let doubled = map(double, 0..<4) in
     @[f32.i32(doubled[0]), f32.i32(doubled[1]), f32.i32(doubled[2]), 1.0f32]
 "#;
-    assert!(
-        compile_through_lowering(source).is_ok(),
-        "Named function passed to map should compile"
-    );
+    match compile_through_lowering(source) {
+        Ok(_) => {}
+        Err(e) => panic!("Named function passed to map should compile: {e:?}"),
+    }
 }
 
 // =============================================================================

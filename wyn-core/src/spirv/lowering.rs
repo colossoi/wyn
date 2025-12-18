@@ -1488,29 +1488,35 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                     bail_spirv!("map requires 2 args (closure, array), got {}", args.len());
                 }
 
-                // Extract lambda name and captures from Closure expression
-                let (lambda_name, captures) = match body.get_expr(args[0]) {
+                // Extract lambda/function name and captures from first argument
+                // Can be either a Closure expression or a Global (named function reference)
+                let (func_name, closure_val, is_empty_closure) = match body.get_expr(args[0]) {
                     Expr::Closure {
                         lambda_name,
                         captures,
-                    } => (lambda_name.clone(), *captures),
+                    } => {
+                        let is_empty = is_empty_closure_type(body.get_type(*captures));
+                        // For empty closures, use dummy i32(0) instead of lowering
+                        // This avoids creating empty SPIR-V structs
+                        let closure_val = if is_empty {
+                            constructor.const_i32(0)
+                        } else {
+                            lower_expr(constructor, body, args[0])?
+                        };
+                        (lambda_name.clone(), closure_val, is_empty)
+                    }
+                    Expr::Global(name) => {
+                        // Named function reference - treat like empty closure
+                        (name.clone(), constructor.const_i32(0), true)
+                    }
                     other => {
                         bail_spirv!(
-                            "map closure argument must be a Closure expression, got {:?}",
+                            "map callback must be a closure or function reference, got {:?}",
                             other
                         );
                     }
                 };
-                let is_empty_closure = is_empty_closure_type(body.get_type(captures));
-
-                // For empty closures, use dummy i32(0) instead of lowering
-                // This avoids creating empty SPIR-V structs
-                let closure_val = if is_empty_closure {
-                    constructor.const_i32(0)
-                } else {
-                    // Lower the closure directly
-                    lower_expr(constructor, body, args[0])?
-                };
+                let lambda_name = func_name;
                 let array_val = lower_expr(constructor, body, args[1])?;
 
                 // Get input array element type from args[1]
