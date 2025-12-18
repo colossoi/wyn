@@ -86,6 +86,8 @@ pub enum AliasErrorKind {
         variable: String,
         consumed_var: String,
         consumed_at: NodeId,
+        /// Other variables that alias the same backing store (for better error messages)
+        aliases: Vec<String>,
     },
 }
 
@@ -193,6 +195,23 @@ impl<'a> AliasChecker<'a> {
             }
         }
         None
+    }
+
+    /// Get all variable names that alias the given backing stores, excluding a specific variable
+    fn get_aliases(&self, stores: &HashSet<BackingStoreId>, exclude: &str) -> Vec<String> {
+        let mut aliases: HashSet<String> = HashSet::new();
+        for store_id in stores {
+            if let Some(vars) = self.store_to_vars.get(store_id) {
+                for var in vars {
+                    if var != exclude {
+                        aliases.insert(var.clone());
+                    }
+                }
+            }
+        }
+        let mut result: Vec<_> = aliases.into_iter().collect();
+        result.sort(); // Deterministic ordering for tests
+        result
     }
 
     /// Consume all given backing stores
@@ -435,11 +454,14 @@ impl<'a> Visitor for AliasChecker<'a> {
         } else if let Some(stores) = self.lookup_variable(name) {
             // Check if any backing store has been consumed
             if let Some((consumed_var, consumed_at)) = self.check_stores_live(&stores) {
+                // Collect other variables that alias the same backing store
+                let aliases = self.get_aliases(&stores, name);
                 self.errors.push(AliasError {
                     kind: AliasErrorKind::UseAfterMove {
                         variable: name.to_string(),
                         consumed_var: consumed_var.to_string(),
                         consumed_at,
+                        aliases,
                     },
                     span: self.get_span(id),
                 });
@@ -892,11 +914,19 @@ impl AliasCheckResult {
                 AliasErrorKind::UseAfterMove {
                     variable,
                     consumed_var,
+                    aliases,
                     ..
                 } => {
                     eprintln!("error: use of moved value `{}`", variable);
                     eprintln!("  --> {:?}", error.span);
                     eprintln!("  = note: value was moved when `{}` was consumed", consumed_var);
+                    if !aliases.is_empty() {
+                        eprintln!(
+                            "  = note: `{}` shares backing store with: {}",
+                            variable,
+                            aliases.join(", ")
+                        );
+                    }
                 }
             }
         }

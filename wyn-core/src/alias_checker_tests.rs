@@ -219,11 +219,8 @@ def main() -> i32 =
 fn test_return_aliases_shared_backing_store() {
     // Using tuple destructuring - all three variables share a backing store
     // from the tuple. x, y, z all reference the same underlying memory.
-    //
-    // TODO: Error messages are misleading - all say "consumed_var: x" even when
-    // consuming y or z. This is because the backing store was first consumed via x,
-    // and that name is recorded. Could improve by tracking all variable names that
-    // reference each backing store.
+    // Error messages now include alias information to help users understand
+    // why seemingly unrelated variables are affected.
 
     let base = r#"
 def id3(a: *[4]i32, b: [4]i32, c: [4]i32) -> [4]i32 = c
