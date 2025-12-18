@@ -1289,7 +1289,7 @@ impl Flattener {
 
         let closure_expr = mir::Expr::Closure {
             lambda_name: func_name,
-            captures: vec![closure_tuple_id],
+            captures: closure_tuple_id,
         };
         let closure_result_type = closure_type; // Closure is represented as its captures tuple
         let id = self.alloc_expr(closure_expr, closure_result_type, span);

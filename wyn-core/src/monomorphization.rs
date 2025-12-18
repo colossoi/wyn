@@ -419,7 +419,7 @@ impl Monomorphizer {
                 if let Some(def) = self.poly_functions.get(lambda_name).cloned() {
                     self.ensure_in_worklist(lambda_name, def);
                 }
-                let new_captures: Vec<_> = captures.iter().map(|c| expr_map[c]).collect();
+                let new_captures = expr_map[captures];
                 Ok(Expr::Closure {
                     lambda_name: lambda_name.clone(),
                     captures: new_captures,

@@ -1470,7 +1470,7 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                     Expr::Closure {
                         lambda_name,
                         captures,
-                    } => (lambda_name.clone(), captures.clone()),
+                    } => (lambda_name.clone(), *captures),
                     other => {
                         bail_spirv!(
                             "map closure argument must be a Closure expression, got {:?}",
@@ -1478,7 +1478,7 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                         );
                     }
                 };
-                let is_empty_closure = captures.is_empty();
+                let is_empty_closure = is_empty_closure_type(body.get_type(captures));
 
                 // For empty closures, use dummy i32(0) instead of lowering
                 // This avoids creating empty SPIR-V structs
@@ -1999,39 +1999,10 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
         }
 
         Expr::Closure { captures, .. } => {
-            // Lower closure as a struct of captures
-            // Empty closures are represented as dummy i32 constants
-            if captures.is_empty() {
-                return Ok(constructor.const_i32(0));
-            }
-
-            // Filter out unit-type captures (they become void which can't be in SPIR-V structs)
-            let non_unit_captures: Vec<ExprId> = captures
-                .iter()
-                .filter(|&&e| !matches!(body.get_type(e), PolyType::Constructed(TypeName::Unit, _)))
-                .copied()
-                .collect();
-
-            // If all captures were unit, return dummy
-            if non_unit_captures.is_empty() {
-                return Ok(constructor.const_i32(0));
-            }
-
-            // Lower all non-unit capture expressions
-            let elem_ids: Vec<spirv::Word> = non_unit_captures
-                .iter()
-                .map(|&e| lower_expr(constructor, body, e))
-                .collect::<Result<Vec<_>>>()?;
-
-            // Create struct type for captures
-            let elem_types: Vec<spirv::Word> = non_unit_captures
-                .iter()
-                .map(|&e| constructor.ast_type_to_spirv(body.get_type(e)))
-                .collect();
-            let tuple_type = constructor.builder.type_struct(elem_types);
-
-            // Construct the composite
-            Ok(constructor.builder.composite_construct(tuple_type, None, elem_ids)?)
+            // The captures field points to a Tuple or Unit expression.
+            // Just lower it directly - Tuple handles struct construction with proper
+            // type caching, and Unit produces const_i32(0) for empty closures.
+            lower_expr(constructor, body, *captures)
         }
 
         Expr::Range {

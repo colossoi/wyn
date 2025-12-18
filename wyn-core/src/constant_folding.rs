@@ -317,7 +317,7 @@ impl ConstantFolder {
                 lambda_name,
                 captures,
             } => {
-                let new_captures: Vec<_> = captures.iter().map(|e| self.expr_map[e]).collect();
+                let new_captures = self.expr_map[captures];
                 Ok(body.alloc_expr(
                     Expr::Closure {
                         lambda_name: lambda_name.clone(),

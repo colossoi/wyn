@@ -406,7 +406,7 @@ impl Normalizer {
                 captures,
             } => {
                 // Just map captures to new body, don't atomize
-                let new_captures: Vec<_> = captures.iter().map(|cap| self.expr_map[cap]).collect();
+                let new_captures = self.expr_map[captures];
 
                 body.alloc_expr(
                     Expr::Closure {

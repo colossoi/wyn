@@ -162,10 +162,14 @@ fn test_lambda_with_capture() {
     // Lambda should capture y - check for closure with captures
     let f_def = find_def(&mir, "f");
     let body = get_body(f_def);
-    let has_closure_with_capture = body
-        .exprs
-        .iter()
-        .any(|expr| matches!(expr, mir::Expr::Closure { captures, .. } if !captures.is_empty()));
+    let has_closure_with_capture = body.exprs.iter().any(|expr| {
+        if let mir::Expr::Closure { captures, .. } = expr {
+            // Check that captures points to a non-Unit expression (i.e., has actual captures)
+            !matches!(body.exprs[captures.index()], mir::Expr::Unit)
+        } else {
+            false
+        }
+    });
     assert!(
         has_closure_with_capture,
         "Expected closure with captured variables"
@@ -381,7 +385,8 @@ def test_capture(arr: [4]i32) -> i32 =
         if let mir::Def::Function { body, .. } = def {
             for expr in &body.exprs {
                 if let mir::Expr::Closure { captures, .. } = expr {
-                    if !captures.is_empty() {
+                    // Check that captures points to a non-Unit expression
+                    if !matches!(body.exprs[captures.index()], mir::Expr::Unit) {
                         has_closure_with_capture = true;
                         break;
                     }

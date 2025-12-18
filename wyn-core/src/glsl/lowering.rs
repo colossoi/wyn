@@ -781,18 +781,9 @@ impl<'a> LowerCtx<'a> {
 
             // --- Closures ---
             Expr::Closure { captures, .. } => {
-                // Lower closure as its captures tuple
-                // Empty captures become 0 (dummy value)
-                if captures.is_empty() {
-                    return Ok("0".to_string());
-                }
-                // Non-empty captures become a struct constructor
-                let mut parts = Vec::new();
-                for &cap in captures {
-                    parts.push(self.lower_expr(body, cap, output)?);
-                }
-                let struct_name = self.type_to_glsl(ty);
-                Ok(format!("{}({})", struct_name, parts.join(", ")))
+                // Lower closure as its captures tuple directly
+                // The captures field points to a Tuple or Unit expression
+                self.lower_expr(body, *captures, output)
             }
 
             // --- Range ---
