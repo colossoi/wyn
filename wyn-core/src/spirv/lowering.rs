@@ -683,8 +683,10 @@ impl<'a> LowerCtx<'a> {
                 ..
             } => {
                 // Create a SPIR-V storage buffer variable
-                // TODO: Implement proper storage buffer lowering
-                // For now, just register it similarly to uniforms
+                // TODO: This works correctly but reuses `uniform_variables` map for storage buffers.
+                // A cleaner implementation might:
+                // 1. Rename to `descriptor_variables` (more accurate)
+                // 2. Or have separate `uniform_variables` and `storage_variables` maps
                 let storage_type = self.constructor.ast_type_to_spirv(ty);
                 let ptr_type = self
                     .constructor

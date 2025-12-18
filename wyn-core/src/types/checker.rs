@@ -632,9 +632,6 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    // TODO: Polymorphic builtins (map, zip, length) need special handling
-    // They should either be added to ImplSource with TypeScheme support,
-    // or kept separate with manual registration here
     pub fn load_builtins(&mut self) -> Result<()> {
         // Add builtin function types directly using manual construction
 
@@ -1102,7 +1099,28 @@ impl<'a> TypeChecker<'a> {
                 let (_param_types, body_type) =
                     self.check_function_with_params(&entry.params, &entry.body, &HashMap::new())?;
                 debug!("Entry point '{}' body type: {:?}", entry.name, body_type);
-                // TODO: Validate body_type against entry.return_types and entry.return_attributes
+
+                // Build expected return type from declared outputs
+                let expected_type = match entry.outputs.len() {
+                    0 => Type::Constructed(TypeName::Unit, vec![]),
+                    1 => entry.outputs[0].ty.clone(),
+                    n => Type::Constructed(
+                        TypeName::Tuple(n),
+                        entry.outputs.iter().map(|o| o.ty.clone()).collect(),
+                    ),
+                };
+
+                // Validate body type matches declared outputs
+                self.context.unify(&body_type, &expected_type).map_err(|_| {
+                    err_type_at!(
+                        entry.body.h.span,
+                        "Entry point '{}' return type mismatch: declared {}, inferred {}",
+                        entry.name,
+                        self.format_type(&expected_type),
+                        self.format_type(&body_type)
+                    )
+                })?;
+
                 Ok(())
             }
             Declaration::Uniform(uniform_decl) => {
