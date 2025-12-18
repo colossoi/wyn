@@ -109,10 +109,10 @@ pub enum Intrinsic {
     /// SAFETY: Must be fully overwritten before being read
     Uninit,
     /// Array replication: creates array filled with a value
-    /// TODO: Move to prelude as normal function once we have reduce/fold
+    /// Note: Could be moved to prelude once reduce/fold is implemented
     Replicate,
     /// Functional array update: immutable copy-with-update
-    /// TODO: Move to prelude as normal function
+    /// Note: Could be moved to prelude once array comprehensions or fold is implemented
     ArrayWith,
     /// Bitcast i32 to u32 (reinterpret bits)
     /// _w_bitcast_i32_to_u32 : i32 -> u32
@@ -131,7 +131,6 @@ impl ImplSource {
             impls: HashMap::new(),
         };
 
-        source.register_from_prim_module();
         source.register_numeric_modules();
         source.register_integral_modules();
         source.register_real_modules();
@@ -199,12 +198,6 @@ impl ImplSource {
     /// Register an implementation for a function
     fn register(&mut self, name: &str, implementation: BuiltinImpl) {
         self.impls.insert(name.to_string(), implementation);
-    }
-
-    /// Register from_prim module functions (type conversions)
-    fn register_from_prim_module(&mut self) {
-        // TODO: Implement from_prim conversions
-        // These are type conversion functions like i32.i8, i32.f32, etc.
     }
 
     /// Register numeric module functions (common to all numeric types)
@@ -527,10 +520,6 @@ impl ImplSource {
     }
 
     fn register_real_ops(&mut self, ty_name: &'static str) {
-        // TODO: These should come from a prelude module (e.g., f32.sqrt from the f32 module)
-        // rather than being hardcoded in the builtin registry. For now, we register them
-        // here so they're available for type checking and code generation.
-
         // Transcendental functions
         self.register_unop(ty_name, "sin", BuiltinImpl::PrimOp(PrimOp::GlslExt(13)));
         self.register_unop(ty_name, "cos", BuiltinImpl::PrimOp(PrimOp::GlslExt(14)));
@@ -573,8 +562,54 @@ impl ImplSource {
 
     /// Register float-specific module functions
     fn register_float_modules(&mut self) {
+        self.register_f16_conversions();
         self.register_f32_conversions();
-        // TODO: Implement f16, f64 specific conversions
+        self.register_f64_conversions();
+    }
+
+    /// Register f16 type conversion builtins
+    fn register_f16_conversions(&mut self) {
+        // User-facing conversions: f16.i32, f16.u32, etc.
+        self.register("f16.i8", BuiltinImpl::PrimOp(PrimOp::SIToFP));
+        self.register("f16.i16", BuiltinImpl::PrimOp(PrimOp::SIToFP));
+        self.register("f16.i32", BuiltinImpl::PrimOp(PrimOp::SIToFP));
+        self.register("f16.i64", BuiltinImpl::PrimOp(PrimOp::SIToFP));
+        self.register("f16.u8", BuiltinImpl::PrimOp(PrimOp::UIToFP));
+        self.register("f16.u16", BuiltinImpl::PrimOp(PrimOp::UIToFP));
+        self.register("f16.u32", BuiltinImpl::PrimOp(PrimOp::UIToFP));
+        self.register("f16.u64", BuiltinImpl::PrimOp(PrimOp::UIToFP));
+        self.register("f16.f32", BuiltinImpl::PrimOp(PrimOp::FPConvert));
+        self.register("f16.f64", BuiltinImpl::PrimOp(PrimOp::FPConvert));
+
+        // Conversions from signed integers to f16 (internal builtins)
+        self.register("_w_builtin_f16_from_i8", BuiltinImpl::PrimOp(PrimOp::SIToFP));
+        self.register("_w_builtin_f16_from_i16", BuiltinImpl::PrimOp(PrimOp::SIToFP));
+        self.register("_w_builtin_f16_from_i32", BuiltinImpl::PrimOp(PrimOp::SIToFP));
+        self.register("_w_builtin_f16_from_i64", BuiltinImpl::PrimOp(PrimOp::SIToFP));
+
+        // Conversions from unsigned integers to f16
+        self.register("_w_builtin_f16_from_u8", BuiltinImpl::PrimOp(PrimOp::UIToFP));
+        self.register("_w_builtin_f16_from_u16", BuiltinImpl::PrimOp(PrimOp::UIToFP));
+        self.register("_w_builtin_f16_from_u32", BuiltinImpl::PrimOp(PrimOp::UIToFP));
+        self.register("_w_builtin_f16_from_u64", BuiltinImpl::PrimOp(PrimOp::UIToFP));
+
+        // Conversions from other floats to f16
+        self.register("_w_builtin_f16_from_f32", BuiltinImpl::PrimOp(PrimOp::FPConvert));
+        self.register("_w_builtin_f16_from_f64", BuiltinImpl::PrimOp(PrimOp::FPConvert));
+
+        // Conversions from f16 to integers
+        self.register("_w_builtin_f16_to_i8", BuiltinImpl::PrimOp(PrimOp::FPToSI));
+        self.register("_w_builtin_f16_to_i16", BuiltinImpl::PrimOp(PrimOp::FPToSI));
+        self.register("_w_builtin_f16_to_i32", BuiltinImpl::PrimOp(PrimOp::FPToSI));
+        self.register("_w_builtin_f16_to_i64", BuiltinImpl::PrimOp(PrimOp::FPToSI));
+        self.register("_w_builtin_f16_to_u8", BuiltinImpl::PrimOp(PrimOp::FPToUI));
+        self.register("_w_builtin_f16_to_u16", BuiltinImpl::PrimOp(PrimOp::FPToUI));
+        self.register("_w_builtin_f16_to_u32", BuiltinImpl::PrimOp(PrimOp::FPToUI));
+        self.register("_w_builtin_f16_to_u64", BuiltinImpl::PrimOp(PrimOp::FPToUI));
+
+        // Bit manipulation: reinterpret bits without conversion (f16 <-> i16/u16)
+        self.register("_w_builtin_f16_from_bits", BuiltinImpl::PrimOp(PrimOp::Bitcast));
+        self.register("_w_builtin_f16_to_bits", BuiltinImpl::PrimOp(PrimOp::Bitcast));
     }
 
     /// Register f32 type conversion builtins (implementations only)
@@ -588,6 +623,8 @@ impl ImplSource {
         self.register("f32.u16", BuiltinImpl::PrimOp(PrimOp::UIToFP));
         self.register("f32.u32", BuiltinImpl::PrimOp(PrimOp::UIToFP));
         self.register("f32.u64", BuiltinImpl::PrimOp(PrimOp::UIToFP));
+        self.register("f32.f16", BuiltinImpl::PrimOp(PrimOp::FPConvert));
+        self.register("f32.f64", BuiltinImpl::PrimOp(PrimOp::FPConvert));
 
         // Conversions from signed integers to f32 (internal builtins)
         self.register("_w_builtin_f32_from_i8", BuiltinImpl::PrimOp(PrimOp::SIToFP));
@@ -618,6 +655,51 @@ impl ImplSource {
         // Bit manipulation: reinterpret bits without conversion
         self.register("_w_builtin_f32_from_bits", BuiltinImpl::PrimOp(PrimOp::Bitcast));
         self.register("_w_builtin_f32_to_bits", BuiltinImpl::PrimOp(PrimOp::Bitcast));
+    }
+
+    /// Register f64 type conversion builtins
+    fn register_f64_conversions(&mut self) {
+        // User-facing conversions: f64.i32, f64.u32, etc.
+        self.register("f64.i8", BuiltinImpl::PrimOp(PrimOp::SIToFP));
+        self.register("f64.i16", BuiltinImpl::PrimOp(PrimOp::SIToFP));
+        self.register("f64.i32", BuiltinImpl::PrimOp(PrimOp::SIToFP));
+        self.register("f64.i64", BuiltinImpl::PrimOp(PrimOp::SIToFP));
+        self.register("f64.u8", BuiltinImpl::PrimOp(PrimOp::UIToFP));
+        self.register("f64.u16", BuiltinImpl::PrimOp(PrimOp::UIToFP));
+        self.register("f64.u32", BuiltinImpl::PrimOp(PrimOp::UIToFP));
+        self.register("f64.u64", BuiltinImpl::PrimOp(PrimOp::UIToFP));
+        self.register("f64.f16", BuiltinImpl::PrimOp(PrimOp::FPConvert));
+        self.register("f64.f32", BuiltinImpl::PrimOp(PrimOp::FPConvert));
+
+        // Conversions from signed integers to f64 (internal builtins)
+        self.register("_w_builtin_f64_from_i8", BuiltinImpl::PrimOp(PrimOp::SIToFP));
+        self.register("_w_builtin_f64_from_i16", BuiltinImpl::PrimOp(PrimOp::SIToFP));
+        self.register("_w_builtin_f64_from_i32", BuiltinImpl::PrimOp(PrimOp::SIToFP));
+        self.register("_w_builtin_f64_from_i64", BuiltinImpl::PrimOp(PrimOp::SIToFP));
+
+        // Conversions from unsigned integers to f64
+        self.register("_w_builtin_f64_from_u8", BuiltinImpl::PrimOp(PrimOp::UIToFP));
+        self.register("_w_builtin_f64_from_u16", BuiltinImpl::PrimOp(PrimOp::UIToFP));
+        self.register("_w_builtin_f64_from_u32", BuiltinImpl::PrimOp(PrimOp::UIToFP));
+        self.register("_w_builtin_f64_from_u64", BuiltinImpl::PrimOp(PrimOp::UIToFP));
+
+        // Conversions from other floats to f64
+        self.register("_w_builtin_f64_from_f16", BuiltinImpl::PrimOp(PrimOp::FPConvert));
+        self.register("_w_builtin_f64_from_f32", BuiltinImpl::PrimOp(PrimOp::FPConvert));
+
+        // Conversions from f64 to integers
+        self.register("_w_builtin_f64_to_i8", BuiltinImpl::PrimOp(PrimOp::FPToSI));
+        self.register("_w_builtin_f64_to_i16", BuiltinImpl::PrimOp(PrimOp::FPToSI));
+        self.register("_w_builtin_f64_to_i32", BuiltinImpl::PrimOp(PrimOp::FPToSI));
+        self.register("_w_builtin_f64_to_i64", BuiltinImpl::PrimOp(PrimOp::FPToSI));
+        self.register("_w_builtin_f64_to_u8", BuiltinImpl::PrimOp(PrimOp::FPToUI));
+        self.register("_w_builtin_f64_to_u16", BuiltinImpl::PrimOp(PrimOp::FPToUI));
+        self.register("_w_builtin_f64_to_u32", BuiltinImpl::PrimOp(PrimOp::FPToUI));
+        self.register("_w_builtin_f64_to_u64", BuiltinImpl::PrimOp(PrimOp::FPToUI));
+
+        // Bit manipulation: reinterpret bits without conversion
+        self.register("_w_builtin_f64_from_bits", BuiltinImpl::PrimOp(PrimOp::Bitcast));
+        self.register("_w_builtin_f64_to_bits", BuiltinImpl::PrimOp(PrimOp::Bitcast));
     }
 
     /// Register vector operations (length, normalize, dot, cross, etc.)
@@ -664,7 +746,7 @@ impl ImplSource {
         // f32.sum is now implemented in the prelude (prelude/f32.wyn)
         // No need to register it here
 
-        // TODO: map and zip are registered manually in TypeChecker::load_builtins
+        // Note: map and zip are registered manually in TypeChecker::load_builtins
         // because they involve function types which need more careful handling
     }
 
