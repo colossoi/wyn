@@ -639,7 +639,7 @@ impl<'a> LowerCtx<'a> {
                 self.ensure_deps_lowered(body)?;
 
                 // Evaluate the constant expression at compile time
-                // TODO: Validate that body is a literal or compile-time foldable expression
+                // lower_const_expr validates that the expression is a compile-time constant
                 let const_id = lower_const_expr(&mut self.constructor, body, body.root)?;
 
                 // Store constant ID for lookup

@@ -1,10 +1,35 @@
 use super::ModuleManager;
-use crate::ast::NodeCounter;
+use crate::ast::{NodeCounter, TypeName};
+use polytype::Type;
+
+use polytype::{Context, TypeScheme};
+
+/// Check if a type is f32 -> f32
+fn is_f32_to_f32(ty: &Type<TypeName>) -> bool {
+    matches!(
+        ty,
+        Type::Constructed(TypeName::Arrow, args)
+            if args.len() == 2
+                && matches!(&args[0], Type::Constructed(TypeName::Float(32), _))
+                && matches!(&args[1], Type::Constructed(TypeName::Float(32), _))
+    )
+}
+
+/// Check if a type is an arrow (function) type
+fn is_arrow_type(ty: &Type<TypeName>) -> bool {
+    matches!(ty, Type::Constructed(TypeName::Arrow, _))
+}
+
+/// Extract the inner monotype from a TypeScheme (unwrapping any polytypes)
+fn get_monotype(scheme: &TypeScheme<TypeName>) -> &Type<TypeName> {
+    match scheme {
+        TypeScheme::Monotype(ty) => ty,
+        TypeScheme::Polytype { body, .. } => get_monotype(body),
+    }
+}
 
 #[test]
 fn test_query_f32_sin_from_math_prelude() {
-    use polytype::Context;
-
     let mut node_counter = NodeCounter::new();
     let manager = ModuleManager::new(&mut node_counter);
     let mut context = Context::default();
@@ -19,14 +44,17 @@ fn test_query_f32_sin_from_math_prelude() {
     let sin_type =
         manager.get_module_function_type("f32", "sin", &mut context).expect("Failed to find f32.sin");
 
-    // Should be f32 -> f32 (or t -> t where t = f32)
+    // Should be f32 -> f32
     println!("Found f32.sin with type: {:?}", sin_type);
+    let sin_mono = get_monotype(&sin_type);
+    assert!(is_f32_to_f32(sin_mono), "f32.sin should be f32 -> f32");
 
     // Also test that f32.sum is found (from module body)
     let sum_type =
         manager.get_module_function_type("f32", "sum", &mut context).expect("Failed to find f32.sum");
     println!("Found f32.sum with type: {:?}", sum_type);
 
-    // TODO: Once we can properly extract the type, assert it's f32 -> f32
-    // assert!(matches expected type structure);
+    // f32.sum takes an array of f32 and returns f32, so we just check it's a function type
+    let sum_mono = get_monotype(&sum_type);
+    assert!(is_arrow_type(sum_mono), "f32.sum should be a function type");
 }
