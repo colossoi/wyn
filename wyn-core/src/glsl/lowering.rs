@@ -1011,7 +1011,9 @@ impl<'a> LowerCtx<'a> {
                 .unwrap();
             }
             LoopKind::For { var, iter } => {
-                let var_name = body.get_local(*var).name.clone();
+                let var_decl = body.get_local(*var);
+                let var_name = var_decl.name.clone();
+                let var_ty = &var_decl.ty;
                 let iter_str = self.lower_expr(body, *iter, output)?;
                 writeln!(
                     output,
@@ -1021,12 +1023,11 @@ impl<'a> LowerCtx<'a> {
                 )
                 .unwrap();
                 self.indent += 1;
-                let body_ty = body.get_type(loop_body);
                 writeln!(
                     output,
                     "{}{} {} = {}[_i];",
                     self.indent_str(),
-                    self.type_to_glsl(body_ty), // TODO: get element type
+                    self.type_to_glsl(var_ty),
                     var_name,
                     iter_str
                 )

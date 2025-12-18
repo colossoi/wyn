@@ -288,6 +288,9 @@ pub fn tokenize(input: &str) -> Result<Vec<LocatedToken>, String> {
     let mut tokens = Vec::new();
     let mut had_whitespace = true; // Start of input counts as having whitespace
 
+    // Build line offset table once for O(log n) span calculations
+    let line_offsets = LineOffsets::new(input);
+
     while !remaining.is_empty() {
         // Check for and skip leading whitespace
         if let Ok((rest, _)) = multispace1::<&str, nom::error::Error<&str>>(remaining) {
@@ -311,7 +314,7 @@ pub fn tokenize(input: &str) -> Result<Vec<LocatedToken>, String> {
                 }
 
                 // Calculate span based on position in original input
-                let span = calculate_span(input, remaining, rest);
+                let span = calculate_span(input, &line_offsets, remaining, rest);
                 tokens.push(LocatedToken::new(token, span));
                 remaining = rest;
                 had_whitespace = false; // Next token won't have whitespace unless we skip some
@@ -324,39 +327,49 @@ pub fn tokenize(input: &str) -> Result<Vec<LocatedToken>, String> {
     Ok(tokens)
 }
 
+/// Precomputed line offset table for efficient offset-to-line-column conversion.
+/// Built once per input, then used with binary search for O(log n) lookups.
+struct LineOffsets {
+    /// Byte offsets where each line starts. line_starts[0] = 0 (line 1 starts at offset 0).
+    line_starts: Vec<usize>,
+}
+
+impl LineOffsets {
+    /// Build a line offset table from the input string. O(n) one-time cost.
+    fn new(input: &str) -> Self {
+        let mut line_starts = vec![0];
+        for (i, ch) in input.char_indices() {
+            if ch == '\n' {
+                line_starts.push(i + 1);
+            }
+        }
+        LineOffsets { line_starts }
+    }
+
+    /// Convert byte offset to (line, column) - both 1-indexed. O(log n) per lookup.
+    fn offset_to_line_col(&self, offset: usize) -> (usize, usize) {
+        // Binary search to find which line this offset is on
+        let line_idx = match self.line_starts.binary_search(&offset) {
+            Ok(idx) => idx,      // Exact match: offset is at start of line
+            Err(idx) => idx - 1, // offset is within line (idx-1)
+        };
+        let line = line_idx + 1; // 1-indexed
+        let col = offset - self.line_starts[line_idx] + 1; // 1-indexed
+        (line, col)
+    }
+}
+
 /// Calculate the span of a token given the original input and the before/after strings
-fn calculate_span(original: &str, before: &str, after: &str) -> Span {
+fn calculate_span(original: &str, line_offsets: &LineOffsets, before: &str, after: &str) -> Span {
     // Calculate byte offsets
     let start_offset = original.len() - before.len();
     let end_offset = original.len() - after.len();
 
-    // Calculate line and column for start position
-    let (start_line, start_col) = offset_to_line_col(original, start_offset);
-    let (end_line, end_col) = offset_to_line_col(original, end_offset);
+    // Calculate line and column for start and end positions
+    let (start_line, start_col) = line_offsets.offset_to_line_col(start_offset);
+    let (end_line, end_col) = line_offsets.offset_to_line_col(end_offset);
 
     Span::new(start_line, start_col, end_line, end_col)
-}
-
-/// Convert byte offset to (line, column) - both 1-indexed
-// TODO: This needs to be reworked for efficiency - currently O(n) for each token.
-// Should build a line offset table once during tokenization and use binary search.
-fn offset_to_line_col(input: &str, offset: usize) -> (usize, usize) {
-    let mut line = 1;
-    let mut col = 1;
-
-    for (i, ch) in input.chars().enumerate() {
-        if i >= offset {
-            break;
-        }
-        if ch == '\n' {
-            line += 1;
-            col = 1;
-        } else {
-            col += 1;
-        }
-    }
-
-    (line, col)
 }
 
 #[cfg(test)]
