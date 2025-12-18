@@ -197,6 +197,36 @@ impl<'a, Id: From<u32> + Copy + Eq + Hash, T> IntoIterator for &'a mut IdArena<I
 // Re-export key types for the public API
 pub use ast::TypeName;
 pub type TypeTable = HashMap<NodeId, TypeScheme<TypeName>>;
+pub type SpanTable = HashMap<NodeId, ast::Span>;
+
+/// Build a SpanTable from an AST by collecting all NodeId -> Span mappings
+pub fn build_span_table(program: &ast::Program) -> SpanTable {
+    use std::ops::ControlFlow;
+    use visitor::Visitor;
+
+    struct SpanCollector {
+        spans: SpanTable,
+    }
+
+    impl Visitor for SpanCollector {
+        type Break = ();
+
+        fn visit_expression(&mut self, e: &ast::Expression) -> ControlFlow<Self::Break> {
+            self.spans.insert(e.h.id, e.h.span);
+            visitor::walk_expression(self, e)
+        }
+    }
+
+    let mut collector = SpanCollector {
+        spans: HashMap::new(),
+    };
+
+    for decl in &program.declarations {
+        visitor::walk_declaration(&mut collector, decl);
+    }
+
+    collector.spans
+}
 
 // =============================================================================
 // Two-Level Typestate Compiler Pipeline
@@ -342,10 +372,12 @@ impl AstConstFoldedEarly {
         checker.load_builtins()?;
         let type_table = checker.check_program(&self.ast)?;
         let warnings: Vec<_> = checker.warnings().to_vec();
+        let span_table = build_span_table(&self.ast);
 
         Ok(TypeChecked {
             ast: self.ast,
             type_table,
+            span_table,
             warnings,
         })
     }
@@ -355,6 +387,7 @@ impl AstConstFoldedEarly {
 pub struct TypeChecked {
     pub ast: ast::Program,
     pub type_table: TypeTable,
+    pub span_table: SpanTable,
     pub warnings: Vec<type_checker::TypeWarning>,
 }
 
@@ -375,12 +408,13 @@ impl TypeChecked {
 
     /// Run alias checking analysis on the program
     pub fn alias_check(self) -> Result<AliasChecked> {
-        let checker = alias_checker::AliasChecker::new(&self.type_table);
+        let checker = alias_checker::AliasChecker::new(&self.type_table, &self.span_table);
         let alias_result = checker.check_program(&self.ast)?;
 
         Ok(AliasChecked {
             ast: self.ast,
             type_table: self.type_table,
+            span_table: self.span_table,
             warnings: self.warnings,
             alias_result,
         })
@@ -391,6 +425,7 @@ impl TypeChecked {
 pub struct AliasChecked {
     pub ast: ast::Program,
     pub type_table: TypeTable,
+    pub span_table: SpanTable,
     pub warnings: Vec<type_checker::TypeWarning>,
     pub alias_result: alias_checker::AliasCheckResult,
 }

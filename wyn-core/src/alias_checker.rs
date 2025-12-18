@@ -9,7 +9,7 @@ use crate::ast::*;
 use crate::error::Result;
 use crate::types::TypeExt;
 use crate::visitor::{self, Visitor};
-use crate::{NodeId, TypeTable};
+use crate::{NodeId, SpanTable, TypeTable};
 use polytype::TypeScheme;
 use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
@@ -92,6 +92,7 @@ pub enum AliasErrorKind {
 /// The alias checker that walks the AST using the visitor pattern
 pub struct AliasChecker<'a> {
     type_table: &'a TypeTable,
+    span_table: &'a SpanTable,
     /// All backing stores and their states
     stores: HashMap<BackingStoreId, StoreState>,
     /// Stack of scopes, each mapping variable names to their backing stores
@@ -111,9 +112,10 @@ pub struct AliasChecker<'a> {
 }
 
 impl<'a> AliasChecker<'a> {
-    pub fn new(type_table: &'a TypeTable) -> Self {
+    pub fn new(type_table: &'a TypeTable, span_table: &'a SpanTable) -> Self {
         Self {
             type_table,
+            span_table,
             stores: HashMap::new(),
             scopes: vec![HashMap::new()],
             store_to_vars: HashMap::new(),
@@ -123,6 +125,11 @@ impl<'a> AliasChecker<'a> {
             liveness: HashMap::new(),
             var_uses: HashMap::new(),
         }
+    }
+
+    /// Look up the span for a NodeId, falling back to a dummy span if not found
+    fn get_span(&self, id: NodeId) -> Span {
+        self.span_table.get(&id).copied().unwrap_or_else(|| Span::new(0, 0, 0, 0))
     }
 
     /// Create a new backing store and return its ID
@@ -428,14 +435,13 @@ impl<'a> Visitor for AliasChecker<'a> {
         } else if let Some(stores) = self.lookup_variable(name) {
             // Check if any backing store has been consumed
             if let Some((consumed_var, consumed_at)) = self.check_stores_live(&stores) {
-                // TODO: Pass AST or SpanTable to get actual span from NodeId
                 self.errors.push(AliasError {
                     kind: AliasErrorKind::UseAfterMove {
                         variable: name.to_string(),
                         consumed_var: consumed_var.to_string(),
                         consumed_at,
                     },
-                    span: Span::new(0, 0, 0, 0),
+                    span: self.get_span(id),
                 });
             }
             self.set_result(id, AliasInfo::references(stores));

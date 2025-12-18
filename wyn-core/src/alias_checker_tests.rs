@@ -9,7 +9,7 @@ fn check_alias(source: &str) -> AliasCheckResult {
     let folded = resolved.fold_ast_constants();
     let type_checked = folded.type_check(&module_manager).expect("type_check failed");
 
-    let checker = AliasChecker::new(&type_checked.type_table);
+    let checker = AliasChecker::new(&type_checked.type_table, &type_checked.span_table);
     checker.check_program(&type_checked.ast).expect("alias check failed")
 }
 
