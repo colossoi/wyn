@@ -385,54 +385,20 @@ impl PolyBuiltins {
 
         // TODO: zip, reduce, etc.
 
-        // GDP (GPU Debug Protocol) intrinsics - monomorphic types
-        self.register_gdp_intrinsics();
+        // Misc utility intrinsics
+        self.register_misc_intrinsics();
     }
 
-    /// Register GDP intrinsics for ring buffer access
-    fn register_gdp_intrinsics(&mut self) {
-        let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+    /// Register miscellaneous utility intrinsics
+    fn register_misc_intrinsics(&mut self) {
         let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
-        let f32_ty = Type::Constructed(TypeName::Float(32), vec![]);
-        let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
-        let string_ty = Type::Constructed(TypeName::Str("string"), vec![]);
-
-        // _w_gdp_atomic_add : u32 -> u32 -> u32 (index, delta -> old_value)
-        self.register_poly(
-            "_w_gdp_atomic_add",
-            vec![u32_ty.clone(), u32_ty.clone()],
-            u32_ty.clone(),
-        );
-
-        // _w_gdp_load : u32 -> u32 (index -> value)
-        self.register_poly("_w_gdp_load", vec![u32_ty.clone()], u32_ty.clone());
-
-        // _w_gdp_store : u32 -> u32 -> () (index, value -> ())
-        self.register_poly(
-            "_w_gdp_store",
-            vec![u32_ty.clone(), u32_ty.clone()],
-            unit_ty.clone(),
-        );
 
         // _w_bitcast_i32_to_u32 : i32 -> u32
         self.register_poly(
             "_w_bitcast_i32_to_u32",
-            vec![i32_ty.clone()],
+            vec![i32_ty],
             Type::Constructed(TypeName::UInt(32), vec![]),
         );
-
-        // Debug output intrinsics
-        // debug_i32 : i32 -> ()
-        self.register_poly("debug_i32", vec![i32_ty], unit_ty.clone());
-
-        // debug_u32 : u32 -> ()
-        self.register_poly("debug_u32", vec![u32_ty.clone()], unit_ty.clone());
-
-        // debug_f32 : f32 -> ()
-        self.register_poly("debug_f32", vec![f32_ty], unit_ty.clone());
-
-        // debug_str : String -> ()
-        self.register_poly("debug_str", vec![string_ty], unit_ty);
     }
 }
 

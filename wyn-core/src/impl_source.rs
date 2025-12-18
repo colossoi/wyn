@@ -114,24 +114,6 @@ pub enum Intrinsic {
     /// Functional array update: immutable copy-with-update
     /// TODO: Move to prelude as normal function
     ArrayWith,
-    /// Debug output: write i32 to debug ring buffer
-    DebugI32,
-    /// Debug output: write u32 to debug ring buffer
-    DebugU32,
-    /// Debug output: write f32 to debug ring buffer (6 decimal places)
-    DebugF32,
-    /// Debug output: write string literal to debug ring buffer
-    DebugStr,
-    // GDP (GPU Debug Protocol) intrinsics for ring buffer access
-    /// Atomic add on GDP buffer at index, returns old value
-    /// _w_gdp_atomic_add : u32 -> u32 -> u32 (index, delta -> old_value)
-    GdpAtomicAdd,
-    /// Load u32 from GDP buffer at index
-    /// _w_gdp_load : u32 -> u32 (index -> value)
-    GdpLoad,
-    /// Store u32 to GDP buffer at index
-    /// _w_gdp_store : u32 -> u32 -> () (index, value -> ())
-    GdpStore,
     /// Bitcast i32 to u32 (reinterpret bits)
     /// _w_bitcast_i32_to_u32 : i32 -> u32
     BitcastI32ToU32,
@@ -157,7 +139,7 @@ impl ImplSource {
         source.register_vector_operations();
         source.register_matrix_operations();
         source.register_higher_order_functions();
-        source.register_debug_intrinsics();
+        source.register_misc_intrinsics();
 
         source
     }
@@ -686,22 +668,8 @@ impl ImplSource {
         // because they involve function types which need more careful handling
     }
 
-    /// Register debug output intrinsics (implementations only)
-    /// These write to a ring buffer for shader debugging
-    fn register_debug_intrinsics(&mut self) {
-        self.register("debug_i32", BuiltinImpl::Intrinsic(Intrinsic::DebugI32));
-        self.register("debug_u32", BuiltinImpl::Intrinsic(Intrinsic::DebugU32));
-        self.register("debug_f32", BuiltinImpl::Intrinsic(Intrinsic::DebugF32));
-        self.register("debug_str", BuiltinImpl::Intrinsic(Intrinsic::DebugStr));
-
-        // GDP (GPU Debug Protocol) intrinsics for ring buffer access
-        // These are low-level primitives used by the GDP Wyn module
-        self.register(
-            "_w_gdp_atomic_add",
-            BuiltinImpl::Intrinsic(Intrinsic::GdpAtomicAdd),
-        );
-        self.register("_w_gdp_load", BuiltinImpl::Intrinsic(Intrinsic::GdpLoad));
-        self.register("_w_gdp_store", BuiltinImpl::Intrinsic(Intrinsic::GdpStore));
+    /// Register misc intrinsics
+    fn register_misc_intrinsics(&mut self) {
         self.register(
             "_w_bitcast_i32_to_u32",
             BuiltinImpl::Intrinsic(Intrinsic::BitcastI32ToU32),

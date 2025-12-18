@@ -417,101 +417,6 @@ impl StorageBufferSpec {
     }
 }
 
-/// Create debug buffer and staging buffer for compute shaders
-fn create_compute_debug_buffers(device: &wgpu::Device, queue: &wgpu::Queue) -> (wgpu::Buffer, wgpu::Buffer) {
-    let debug_buffer = device.create_buffer(&BufferDescriptor {
-        label: Some("debug_buffer"),
-        size: DEBUG_BUFFER_SIZE,
-        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-
-    let mut init_data = vec![0u32; (DEBUG_BUFFER_SIZE / 4) as usize];
-    init_data[2] = DEFAULT_MAX_LOOPS;
-    queue.write_buffer(&debug_buffer, 0, bytemuck::cast_slice(&init_data));
-
-    let staging_buffer = device.create_buffer(&BufferDescriptor {
-        label: Some("debug_staging_buffer"),
-        size: DEBUG_BUFFER_SIZE,
-        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-
-    (debug_buffer, staging_buffer)
-}
-
-/// Print decoded GDP debug output from a mapped buffer
-fn print_debug_buffer(u32_data: &[u32], verbose: bool) {
-    let write_head_global = u32_data[0] as usize;
-    let max_loops = u32_data[2] as usize;
-    let data_start = 3;
-    let data_len = 4093;
-
-    if write_head_global == 0 {
-        println!("[DEBUG] No output");
-        return;
-    }
-
-    let loop_count = write_head_global / data_len;
-    let words_to_read = write_head_global.min(data_len);
-
-    println!(
-        "\n=== Debug Output ({} words written, loops={}/{}) ===",
-        write_head_global, loop_count, max_loops
-    );
-
-    if verbose {
-        println!("Raw buffer hex (first 100 u32s):");
-        for i in 0..100.min(u32_data.len()) {
-            if i % 16 == 0 {
-                print!("\n{:04x}: ", i);
-            }
-            print!("{:08x} ", u32_data[i]);
-        }
-        println!("\n");
-    }
-
-    let data_slice = &u32_data[data_start..data_start + data_len];
-    let mut pos = 0;
-    let mut count = 0;
-
-    while pos < words_to_read {
-        let header = data_slice[pos];
-        let type_tag = header & 0xFF;
-        let size = (header >> 8) as usize;
-
-        if size == 0 || pos + 1 + size > data_len {
-            break;
-        }
-
-        match type_tag {
-            0x00 => println!("U: {}", data_slice[pos + 1]),
-            0x01 => println!("I: {}", data_slice[pos + 1] as i32),
-            0x02 => {
-                let mut bytes = Vec::new();
-                for i in 0..size {
-                    let word = data_slice[pos + 1 + i];
-                    bytes.extend_from_slice(&word.to_le_bytes());
-                }
-                while bytes.last() == Some(&0) {
-                    bytes.pop();
-                }
-                println!("S: {}", String::from_utf8_lossy(&bytes));
-            }
-            0x03 => println!("F: {}", f32::from_bits(data_slice[pos + 1])),
-            _ => {
-                println!("Unknown type: 0x{:02x}", type_tag);
-                break;
-            }
-        }
-        pos += 1 + size;
-        count += 1;
-    }
-
-    println!("({} values decoded)", count);
-    println!("=================================\n");
-}
-
 /// Print storage buffer contents
 fn print_storage_buffer(spec: &StorageBufferSpec, data: &[u8]) {
     println!("\n=== Storage Buffer (binding {}, {} elements) ===", spec.binding, spec.size_elements);
@@ -567,9 +472,6 @@ async fn run_compute_shader(
 ) -> Result<()> {
     let (device, queue) = create_headless_device(verbose).await?;
 
-    // Create debug buffer at binding 0
-    let (debug_buffer, debug_staging_buffer) = create_compute_debug_buffers(&device, &queue);
-
     // Create storage buffers for each spec
     let mut storage_buffers: Vec<(StorageBufferSpec, wgpu::Buffer, wgpu::Buffer)> = Vec::new();
     for spec in &storage_specs {
@@ -597,20 +499,10 @@ async fn run_compute_shader(
         storage_buffers.push((spec.clone(), buffer, staging));
     }
 
-    // Build bind group layout entries - binding 0 is debug buffer, rest are storage
-    let mut layout_entries = vec![BindGroupLayoutEntry {
-        binding: 0,
-        visibility: ShaderStages::COMPUTE,
-        ty: BindingType::Buffer {
-            ty: BufferBindingType::Storage { read_only: false },
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        },
-        count: None,
-    }];
-
-    for (spec, _, _) in &storage_buffers {
-        layout_entries.push(BindGroupLayoutEntry {
+    // Build bind group layout entries for storage buffers
+    let layout_entries: Vec<_> = storage_buffers
+        .iter()
+        .map(|(spec, _, _)| BindGroupLayoutEntry {
             binding: spec.binding,
             visibility: ShaderStages::COMPUTE,
             ty: BindingType::Buffer {
@@ -619,8 +511,8 @@ async fn run_compute_shader(
                 min_binding_size: None,
             },
             count: None,
-        });
-    }
+        })
+        .collect();
 
     let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
         label: Some("compute_bind_group_layout"),
@@ -628,25 +520,17 @@ async fn run_compute_shader(
     });
 
     // Build bind group entries
-    let mut bind_group_entries = vec![BindGroupEntry {
-        binding: 0,
-        resource: BindingResource::Buffer(wgpu::BufferBinding {
-            buffer: &debug_buffer,
-            offset: 0,
-            size: None,
-        }),
-    }];
-
-    for (spec, buffer, _) in &storage_buffers {
-        bind_group_entries.push(BindGroupEntry {
+    let bind_group_entries: Vec<_> = storage_buffers
+        .iter()
+        .map(|(spec, buffer, _)| BindGroupEntry {
             binding: spec.binding,
             resource: BindingResource::Buffer(wgpu::BufferBinding {
                 buffer,
                 offset: 0,
                 size: None,
             }),
-        });
-    }
+        })
+        .collect();
 
     let bind_group = device.create_bind_group(&BindGroupDescriptor {
         label: Some("compute_bind_group"),
@@ -691,28 +575,12 @@ async fn run_compute_shader(
     }
 
     // Copy all buffers to staging
-    encoder.copy_buffer_to_buffer(&debug_buffer, 0, &debug_staging_buffer, 0, DEBUG_BUFFER_SIZE);
     for (spec, buffer, staging) in &storage_buffers {
         encoder.copy_buffer_to_buffer(buffer, 0, staging, 0, spec.byte_size());
     }
 
     queue.submit(Some(encoder.finish()));
     let _ = device.poll(wgpu::PollType::Wait);
-
-    // Read back debug buffer
-    let buffer_slice = debug_staging_buffer.slice(..);
-    let (tx, rx) = std::sync::mpsc::channel();
-    buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-        tx.send(result).unwrap();
-    });
-    let _ = device.poll(wgpu::PollType::Wait);
-
-    if rx.recv().unwrap().is_ok() {
-        let data = buffer_slice.get_mapped_range();
-        print_debug_buffer(bytemuck::cast_slice(&data), verbose);
-        drop(data);
-        debug_staging_buffer.unmap();
-    }
 
     // Read back storage buffers
     for (spec, _, staging) in &storage_buffers {
@@ -735,11 +603,6 @@ async fn run_compute_shader(
 }
 
 // --- App state ---------------------------------------------------------------
-
-/// Debug buffer size: 16KB = 4096 u32s
-/// Layout: { write_head: u32, read_head: u32, max_loops: u32, data: [4093]u32 }
-const DEBUG_BUFFER_SIZE: u64 = 16384;
-const DEFAULT_MAX_LOOPS: u32 = 100; // Limit debug output to prevent GPU lockup
 
 // Uniform buffers - one per shader uniform
 // iResolution: [2]f32
@@ -770,10 +633,6 @@ struct State {
     queue: wgpu::Queue,
     config: SurfaceConfiguration,
     pipeline: RenderPipeline,
-    // Debug buffer support (optional - only present when shader uses debug intrinsics)
-    debug_buffer: Option<wgpu::Buffer>,
-    debug_staging_buffer: Option<wgpu::Buffer>,
-    debug_bind_group: Option<BindGroup>,
     // Uniform support - separate buffers for iResolution, iTime, iMouse (optional, enabled with --shadertoy)
     resolution_buffer: Option<wgpu::Buffer>,
     time_buffer: Option<wgpu::Buffer>,
@@ -843,8 +702,6 @@ impl State {
         if spirv_passthrough_supported {
             required_features |= wgpu::Features::SPIRV_SHADER_PASSTHROUGH;
         }
-        // Need writable storage from vertex shader for debug buffer
-        required_features |= wgpu::Features::VERTEX_WRITABLE_STORAGE;
 
         // v26: request_device takes a single descriptor; trace is in the descriptor
         let (device, queue) = adapter
@@ -879,88 +736,7 @@ impl State {
         };
         surface.configure(&device, &config);
 
-        // === Create debug buffer (always, shader may or may not use it) =========
-        let debug_buffer = device.create_buffer(&BufferDescriptor {
-            label: Some("debug_buffer"),
-            size: DEBUG_BUFFER_SIZE,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        // Initialize debug buffer: [write_head=0, read_head=0, max_loops=DEFAULT_MAX_LOOPS, data=zeros]
-        let mut init_data = vec![0u32; (DEBUG_BUFFER_SIZE / 4) as usize];
-        init_data[2] = DEFAULT_MAX_LOOPS; // Set max_loops
-        queue.write_buffer(&debug_buffer, 0, bytemuck::cast_slice(&init_data));
-
-        let debug_staging_buffer = device.create_buffer(&BufferDescriptor {
-            label: Some("debug_staging_buffer"),
-            size: DEBUG_BUFFER_SIZE,
-            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        // Create init guard buffer for _init function atomic guard (binding 1)
-        // Layout: { guard: u32 } initialized to 0
-        let init_guard_buffer = device.create_buffer(&BufferDescriptor {
-            label: Some("init_guard_buffer"),
-            size: 4, // Single u32
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        // Initialize to 0
-        queue.write_buffer(&init_guard_buffer, 0, bytemuck::cast_slice(&[0u32]));
-
-        // Create bind group layout for debug buffer at set=0, binding=0 and init guard at binding=1
-        let debug_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("debug_bind_group_layout"),
-            entries: &[
-                BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: ShaderStages::VERTEX_FRAGMENT,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: ShaderStages::VERTEX_FRAGMENT,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
-
-        let debug_bind_group = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("debug_bind_group"),
-            layout: &debug_bind_group_layout,
-            entries: &[
-                BindGroupEntry {
-                    binding: 0,
-                    resource: BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &debug_buffer,
-                        offset: 0,
-                        size: None,
-                    }),
-                },
-                BindGroupEntry {
-                    binding: 1,
-                    resource: BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &init_guard_buffer,
-                        offset: 0,
-                        size: None,
-                    }),
-                },
-            ],
-        });
-
-        // === Conditionally create uniform buffers (set=1) based on spec ======
+        // === Conditionally create uniform buffers based on spec ======
         // Shadertoy canonical uniform ordering:
         //   binding 0: iResolution (vec3, we use vec2)
         //   binding 1: iTime (f32)
@@ -1100,7 +876,7 @@ impl State {
                     .with_context(|| format!("load SPIR-V module {:?}", path))?;
 
                 // Build bind group layout list conditionally
-                let mut bind_group_layouts_vec = vec![&debug_bind_group_layout];
+                let mut bind_group_layouts_vec = vec![];
                 if *shadertoy {
                     if let Some(ref ubl) = uniform_bind_group_layout {
                         bind_group_layouts_vec.push(ubl);
@@ -1150,9 +926,6 @@ impl State {
             queue,
             config,
             pipeline,
-            debug_buffer: Some(debug_buffer),
-            debug_staging_buffer: Some(debug_staging_buffer),
-            debug_bind_group: Some(debug_bind_group),
             resolution_buffer,
             time_buffer,
             mouse_buffer,
@@ -1228,22 +1001,11 @@ impl State {
                     });
 
                     rpass.set_pipeline(&self.pipeline);
-                    // Set debug bind group if available (set=0)
-                    if let Some(ref bind_group) = self.debug_bind_group {
+                    // Set uniform bind group if available (set=0)
+                    if let Some(ref bind_group) = self.uniform_bind_group {
                         rpass.set_bind_group(0, bind_group, &[]);
                     }
-                    // Set uniform bind group if available (set=1)
-                    if let Some(ref bind_group) = self.uniform_bind_group {
-                        rpass.set_bind_group(1, bind_group, &[]);
-                    }
                     rpass.draw(0..3, 0..1);
-                }
-
-                // Copy debug buffer to staging buffer for readback
-                if let (Some(ref debug_buffer), Some(ref staging_buffer)) =
-                    (&self.debug_buffer, &self.debug_staging_buffer)
-                {
-                    encoder.copy_buffer_to_buffer(debug_buffer, 0, staging_buffer, 0, DEBUG_BUFFER_SIZE);
                 }
 
                 self.queue.submit(Some(encoder.finish()));
@@ -1274,7 +1036,6 @@ impl State {
                     if self.frame_count >= max {
                         eprintln!("Reached {} frames, exiting.", max);
                         self.print_memory_stats("exit");
-                        self.print_debug_output();
                         std::process::exit(0);
                     }
                 }
@@ -1299,128 +1060,6 @@ impl State {
                 // Non-fatal miscellaneous error; skip this frame.
                 eprintln!("surface error: Other; skipping frame");
             }
-        }
-    }
-
-    /// Read and print all debug output from the buffer (call on exit)
-    fn print_debug_output(&mut self) {
-        let staging_buffer = match &self.debug_staging_buffer {
-            Some(b) => b,
-            None => return,
-        };
-
-        let buffer_slice = staging_buffer.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            tx.send(result).unwrap();
-        });
-
-        // Wait for the GPU to finish
-        let _ = self.device.poll(wgpu::PollType::Wait);
-
-        if rx.recv().unwrap().is_ok() {
-            let data = buffer_slice.get_mapped_range();
-            let u32_data: &[u32] = bytemuck::cast_slice(&data);
-
-            // Buffer layout: [write_head, read_head, max_loops, data[4093]]
-            let write_head_global = u32_data[0] as usize; // Unbounded counter
-            let _read_head = u32_data[1] as usize;
-            let max_loops = u32_data[2] as usize;
-            let data_start = 3;
-            let data_len = 4093;
-
-            if write_head_global == 0 {
-                eprintln!("[DEBUG] No output");
-                return;
-            }
-
-            // Calculate actual position in ring buffer and number of loops
-            let loop_count = write_head_global / data_len;
-            let words_to_read = write_head_global.min(data_len);
-
-            eprintln!(
-                "\n=== Debug Output ({} words written, loops={}/{}) ===",
-                write_head_global, loop_count, max_loops
-            );
-
-            // Print raw hex data (first 100 words)
-            eprintln!("Raw buffer hex (first 100 u32s):");
-            for i in 0..100.min(u32_data.len()) {
-                if i % 16 == 0 {
-                    eprint!("\n{:04x}: ", i);
-                }
-                eprint!("{:08x} ", u32_data[i]);
-            }
-            eprintln!("\n");
-
-            // Simple GDP decoder - inline
-            // Format: header word + data words
-            // Header: type (bits 0-7) | size (bits 8-31)
-            // Type: 0x00=u32, 0x01=i32, 0x02=string, 0x03=f32
-            let data_slice = &u32_data[data_start..data_start + data_len];
-            let mut pos = 0;
-            let mut count = 0;
-
-            while pos < words_to_read {
-                let header = data_slice[pos];
-                let type_tag = header & 0xFF;
-                let size = (header >> 8) as usize;
-
-                if size == 0 || pos + 1 + size > data_len {
-                    // Invalid or incomplete - stop
-                    break;
-                }
-
-                match type_tag {
-                    0x00 => {
-                        // u32
-                        let value = data_slice[pos + 1];
-                        eprintln!("U: {}", value);
-                    }
-                    0x01 => {
-                        // i32
-                        let bits = data_slice[pos + 1];
-                        let value = bits as i32;
-                        eprintln!("I: {}", value);
-                    }
-                    0x02 => {
-                        // string
-                        let mut bytes = Vec::new();
-                        for i in 0..size {
-                            let word = data_slice[pos + 1 + i];
-                            bytes.push((word & 0xFF) as u8);
-                            bytes.push(((word >> 8) & 0xFF) as u8);
-                            bytes.push(((word >> 16) & 0xFF) as u8);
-                            bytes.push(((word >> 24) & 0xFF) as u8);
-                        }
-                        // Strip trailing zeros
-                        while bytes.last() == Some(&0) {
-                            bytes.pop();
-                        }
-                        let s = String::from_utf8_lossy(&bytes);
-                        eprintln!("S: {}", s);
-                    }
-                    0x03 => {
-                        // f32
-                        let bits = data_slice[pos + 1];
-                        let value = f32::from_bits(bits);
-                        eprintln!("F: {}", value);
-                    }
-                    _ => {
-                        eprintln!("Unknown type: 0x{:02x}", type_tag);
-                        break;
-                    }
-                }
-
-                pos += 1 + size;
-                count += 1;
-            }
-
-            eprintln!("({} values decoded)", count);
-            eprintln!("=================================\n");
-
-            drop(data);
-            staging_buffer.unmap();
         }
     }
 }
@@ -1524,7 +1163,6 @@ impl ApplicationHandler for App {
                 match event {
                     WindowEvent::CloseRequested => {
                         state.print_memory_stats("exit");
-                        state.print_debug_output();
                         std::process::exit(0);
                     }
                     WindowEvent::Resized(size) => state.resize(size),

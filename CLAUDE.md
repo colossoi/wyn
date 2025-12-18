@@ -84,9 +84,6 @@ cd viz && cargo run vf ../complete_shader_example.spv --vertex vertex_main --fra
            --output-annotated <FILE>
                Output annotated source code with block IDs and locations
 
-           --debug
-               Enable debug mode: include debug ring buffer for debug_i32/debug_f32/debug_str
-
        -v, --verbose
                Print verbose output
 

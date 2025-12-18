@@ -1233,7 +1233,9 @@ impl Flattener {
         let (mut body_root, _) = self.flatten_expr(&lambda.body)?;
 
         // Wrap body with let bindings for captured vars (in reverse order)
-        for (idx, ((_var_name, var_type), capture_local)) in free_vars.iter().zip(capture_locals.iter()).enumerate().rev() {
+        for (idx, ((_var_name, var_type), capture_local)) in
+            free_vars.iter().zip(capture_locals.iter()).enumerate().rev()
+        {
             let closure_ref = self.alloc_expr(mir::Expr::Local(closure_local), closure_type.clone(), span);
             let idx_expr = self.alloc_expr(mir::Expr::Int(idx.to_string()), i32_type.clone(), span);
             let extract = self.alloc_expr(

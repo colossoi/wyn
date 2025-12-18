@@ -161,7 +161,6 @@ impl ModuleManager {
             "bool",
             "graphics32",
             "graphics64",
-            "gdp",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -180,7 +179,6 @@ impl ModuleManager {
         // Load all prelude files using include_str!
         self.load_str(include_str!("../../../prelude/math.wyn"), node_counter)?;
         self.load_str(include_str!("../../../prelude/graphics.wyn"), node_counter)?;
-        self.load_str(include_str!("../../../prelude/gdp.wyn"), node_counter)?;
         self.load_str(include_str!("../../../prelude/rand.wyn"), node_counter)?;
         self.load_str(include_str!("../../../prelude/soacs.wyn"), node_counter)?;
         Ok(())
@@ -659,7 +657,7 @@ impl ModuleManager {
     }
 
     /// Builtin/intrinsic modules that shouldn't be type-checked
-    /// (their implementations use internal __builtin_* or __gdp_* functions)
+    /// (their implementations use internal __builtin_* functions)
     const BUILTIN_MODULES: &'static [&'static str] = &[
         "f32",
         "f64",
@@ -673,7 +671,6 @@ impl ModuleManager {
         "u32",
         "u64",
         "bool",
-        "gdp",
         "graphics32",
         "graphics64",
     ];

@@ -534,13 +534,8 @@ pub struct Lifted {
 impl Lifted {
     /// Lower MIR to SPIR-V
     pub fn lower(self) -> Result<Lowered> {
-        self.lower_with_options(false)
-    }
-
-    /// Lower MIR to SPIR-V with debug mode option
-    pub fn lower_with_options(self, debug_enabled: bool) -> Result<Lowered> {
         let inplace_info = alias_checker::analyze_inplace(&self.mir);
-        let spirv = spirv::lowering::lower(&self.mir, debug_enabled, &inplace_info)?;
+        let spirv = spirv::lowering::lower(&self.mir, &inplace_info)?;
         Ok(Lowered { mir: self.mir, spirv })
     }
 
