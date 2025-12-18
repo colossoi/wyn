@@ -4,6 +4,13 @@
 
 Refactoring the MIR (Mid-level Intermediate Representation) from a recursive `Box<Expr>` structure to a flat arena-based representation with explicit `ExprId` and `LocalId` indices.
 
+## Current Status
+
+- **486 tests passing**
+- **7/8 testfiles validating** (seascape.wyn fails - constant folding issue)
+- All Phase 4 MIR passes ported
+- GLSL lowering ported
+
 ## Completed Work
 
 ### Phase 1: Replace MIR Types (Complete)
@@ -25,7 +32,7 @@ Refactoring the MIR (Mid-level Intermediate Representation) from a recursive `Bo
   - `Expr::If { cond, then_, else_: ExprId }` - conditionals
   - `Expr::Loop { loop_var: LocalId, init: ExprId, init_bindings: Vec<(LocalId, ExprId)>, kind: LoopKind, body: ExprId }` - loops
   - `Expr::Call { func, args: Vec<ExprId> }`, `Expr::Intrinsic { name, args: Vec<ExprId> }` - calls
-  - `Expr::Closure { lambda_name, captures: Vec<ExprId> }` - closures
+  - `Expr::Closure { lambda_name, captures: ExprId }` - closures (captures is single ExprId pointing to tuple/unit)
   - `Expr::Range { start, step, end: ExprId, kind }` - ranges
   - `Expr::Materialize(ExprId)`, `Expr::Attributed { attributes, expr: ExprId }` - special
 - Added `Body` struct with:
@@ -59,6 +66,7 @@ Refactoring the MIR (Mid-level Intermediate Representation) from a recursive `Bo
 - Removed `binding_id: u64` tracking (LocalId provides unique identification)
 - Changed `needs_backing_store: HashSet<LocalId>` (was `HashSet<u64>`)
 - Updated `backing_store_name()` to take `LocalId`
+- **Fixed:** `flatten_application` no longer allocates dead `Expr::Global` for direct function calls
 
 ### Phase 3: SPIR-V Lowering (Complete)
 
@@ -78,95 +86,58 @@ Refactoring the MIR (Mid-level Intermediate Representation) from a recursive `Bo
 - Type access changed from `expr.ty` to `body.get_type(expr_id)`
 - Recursive calls changed from `lower_expr(constructor, &expr)` to `lower_expr(constructor, body, expr_id)`
 - Variable lookup uses `body.get_local(local_id).name`
-- Removed old `lower_literal()` and `lower_const_literal()` functions (literals handled directly)
 - Added handling for `Expr::Tuple`, `Expr::Array`, `Expr::Vector`, `Expr::Matrix` in `lower_expr`
 
-**Build status:** Compiles successfully with only warnings
+### Phase 4: MIR Passes (Complete)
 
-**Test status:** 398 tests passing, 19 failing (alias_checker and desugar tests)
+All MIR passes have been ported to the arena-based structure:
 
-## Remaining Work
+#### 4a. Reachability (`reachability.rs`) - Complete
+- Traverses `Body` to find callees
+- Uses arena iteration to walk expressions
 
-### Phase 4: Add Back MIR Passes
+#### 4b. Constant Folding (`constant_folding.rs`) - Complete
+- Creates new `Body` with folded expressions
+- Handles literal evaluation
 
-The following passes are currently commented out and need to be rewritten:
+#### 4c. Normalize (`normalize.rs`) - Complete
+- ANF transformation with fresh `LocalId`s for temporaries
+- Builds new `Body` with normalized expressions
+- Fixed loop kind bindings and let-tuple variable scoping
 
-#### 4a. Reachability (`reachability.rs`)
-- **Complexity:** Low (read-only traversal)
-- **Changes needed:**
-  - Traverse `Body` to find callees
-  - Use `body.iter_exprs()` to walk expressions
-  - Match on `Expr::Global`, `Expr::Call`, `Expr::Closure` to find dependencies
-  - No transformation, just filtering
+#### 4d. Materialize Hoisting (`materialize_hoisting.rs`) - Complete
+- Structural equality via arena traversal
+- Extracts common materializations to Let bindings
 
-#### 4b. Constant Folding (`constant_folding.rs`)
-- **Complexity:** Medium (stateless transformation)
-- **Changes needed:**
-  - Create new `Body` with folded expressions
-  - Use `body.get_expr(id)` and `body.get_type(id)` for analysis
-  - Allocate new expressions via `body.alloc_expr()`
-  - Handle `Expr::Int`, `Expr::Float`, `Expr::Bool` for constant evaluation
+#### 4e. Monomorphization (`monomorphization.rs`) - Complete
+- Type substitution on `Body`
+- Creates specialized copies of polymorphic functions
+- Fixed: only specializes polymorphic functions when called, not when referenced
 
-#### 4c. Normalize (`normalize.rs`)
-- **Complexity:** Medium-High (ANF transformation)
-- **Changes needed:**
-  - Needs fresh `LocalId`s for temporaries
-  - Build new `Body` with normalized expressions
-  - Use `body.alloc_local()` for new bindings
-  - Transform complex expressions into let-bound temporaries
+#### 4f. Binding Lifter (`binding_lifter.rs`) - Complete
+- Tracks free variables via `LocalId`
+- Analyzes loop bodies for invariant expressions
 
-#### 4d. Materialize Hoisting (`materialize_hoisting.rs`)
-- **Complexity:** Medium-High
-- **Changes needed:**
-  - Structural equality via arena traversal
-  - Extract common materializations to Let bindings
-  - Use `ExprId` for expression identity
-
-#### 4e. Monomorphization (`monomorphization.rs`)
-- **Complexity:** High
-- **Changes needed:**
-  - Type substitution on `Body`
-  - Create specialized copies of functions
-  - Update all type references in `body.types`
-
-#### 4f. Binding Lifter (`binding_lifter.rs`)
-- **Complexity:** High (loop-invariant code motion)
-- **Changes needed:**
-  - Track free variables via `LocalId`
-  - Analyze loop bodies for invariant expressions
-  - Move Let bindings outside loops
-
-### Phase 5: GLSL Lowering
+### Phase 5: GLSL Lowering (Complete)
 
 **File:** `wyn-core/src/glsl/lowering.rs`
 
-Similar changes to SPIR-V lowering:
-- Update function signatures to take `&Body, ExprId`
-- Change pattern matching from `ExprKind::*` to `Expr::*`
-- Use `body.get_type()`, `body.get_expr()`, `body.get_local()`
+- Updated function signatures to take `&Body, ExprId`
+- Changed pattern matching from `ExprKind::*` to `Expr::*`
+- Uses `body.get_type()`, `body.get_expr()`, `body.get_local()`
 
-### Phase 6: Fix Failing Tests and Cleanup
+## Remaining Work
 
-#### Alias Checker Tests (6 failing)
-- `test_inplace_map_simple_dead_after`
-- `test_inplace_map_in_let`
-- `test_inplace_map_nested`
-- `test_inplace_with_simple_dead_after`
-- `test_inplace_with_discarded`
-- `test_inplace_with_chained`
+### seascape.wyn constant folding issue
 
-**Issue:** `alias_checker.rs` needs to be updated for new MIR types.
+Error: `Global constants must be literals or compile-time foldable expressions`
 
-#### Desugar Tests (13 failing)
-- Various range and slice tests
+The SPIR-V lowering's `lower_const_expr` doesn't handle all expression types that could appear in global constants. Needs investigation into which expression type is failing.
 
-**Issue:** Likely type mismatches or missing handling in flattening.
-
-#### Cleanup Tasks
+### Cleanup Tasks
 - Remove dead code warnings
-- Re-enable MIR folder (`mir/folder.rs`) or remove if no longer needed
-- Update test files for MIR passes
-- Run full validation suite: `./scripts/validate_testfiles.sh`
+- Remove or deprecate `mir/folder.rs` (no longer used)
+- Full validation suite
 
 ## Architecture Notes
 
@@ -211,16 +182,29 @@ let ty = &local.ty;
 
 | File | Status | Notes |
 |------|--------|-------|
-| `mir/mod.rs` | Rewritten | New arena-based types |
-| `flattening.rs` | Rewritten | Produces new MIR |
-| `spirv/lowering.rs` | Rewritten | Consumes new MIR |
-| `lib.rs` | Updated | Pipeline changes |
-| `alias_checker.rs` | Needs update | Uses old patterns |
-| `materialize_hoisting.rs` | Commented out | Phase 4 |
-| `normalize.rs` | Commented out | Phase 4 |
-| `monomorphization.rs` | Commented out | Phase 4 |
-| `reachability.rs` | Commented out | Phase 4 |
-| `constant_folding.rs` | Commented out | Phase 4 |
-| `binding_lifter.rs` | Commented out | Phase 4 |
-| `mir/folder.rs` | Commented out | May deprecate |
-| `glsl/lowering.rs` | Commented out | Phase 5 |
+| `mir/mod.rs` | Complete | New arena-based types |
+| `flattening.rs` | Complete | Produces new MIR |
+| `spirv/lowering.rs` | Complete | Consumes new MIR |
+| `glsl/lowering.rs` | Complete | Consumes new MIR |
+| `lib.rs` | Complete | Pipeline changes |
+| `alias_checker.rs` | Complete | Updated for new MIR |
+| `materialize_hoisting.rs` | Complete | Ported to arena |
+| `normalize.rs` | Complete | Ported to arena |
+| `monomorphization.rs` | Complete | Ported to arena |
+| `reachability.rs` | Complete | Ported to arena |
+| `constant_folding.rs` | Complete | Ported to arena |
+| `binding_lifter.rs` | Complete | Ported to arena |
+| `mir/folder.rs` | Deprecated | No longer used |
+
+## Testfile Validation
+
+| File | Status |
+|------|--------|
+| `da_rasterizer.wyn` | PASS |
+| `entrylevel.wyn` | PASS |
+| `holodice.wyn` | PASS |
+| `lava.wyn` | PASS |
+| `primitives.wyn` | PASS |
+| `red_triangle.wyn` | PASS |
+| `red_triangle_curried.wyn` | PASS |
+| `seascape.wyn` | FAIL (constant folding) |

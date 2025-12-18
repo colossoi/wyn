@@ -1313,9 +1313,7 @@ impl Flattener {
         result_type: &Type,
         span: Span,
     ) -> Result<(ExprId, StaticValue)> {
-        let (func_id, func_sv) = self.flatten_expr(func)?;
-
-        // Flatten arguments while keeping static values for closure detection
+        // Flatten arguments
         let args_with_sv: Result<Vec<_>> = args.iter().map(|a| self.flatten_expr(a)).collect();
         let args_with_sv = args_with_sv?;
         let arg_ids: Vec<_> = args_with_sv.iter().map(|(id, _)| *id).collect();
@@ -1323,9 +1321,12 @@ impl Flattener {
         // Check if this is applying a known function name
         let call_expr = match &func.kind {
             ExprKind::Identifier(quals, name) => {
-                // Check if the identifier is bound to a known closure
+                // Get static value to check if it's a closure, without allocating an expression
+                let func_sv = self.get_classification(func.h.id);
+
                 if let StaticValue::Closure { lam_name, .. } = func_sv {
-                    // Direct call to the lambda function with closure as first argument
+                    // Closure call - need to flatten func to get the closure value as first arg
+                    let (func_id, _) = self.flatten_expr(func)?;
                     let mut all_args = vec![func_id];
                     all_args.extend(arg_ids);
                     mir::Expr::Call {
@@ -1333,6 +1334,7 @@ impl Flattener {
                         args: all_args,
                     }
                 } else {
+                    // Direct function call - no need to allocate a Global expression
                     let full_name = if quals.is_empty() {
                         name.clone()
                     } else {
@@ -1353,7 +1355,6 @@ impl Flattener {
                             func.h.id
                         );
                     } else {
-                        // Direct function call (not a closure)
                         mir::Expr::Call {
                             func: desugared_name,
                             args: arg_ids,
@@ -1363,6 +1364,7 @@ impl Flattener {
             }
             // FieldAccess in application position - must be a closure
             ExprKind::FieldAccess(_, _) => {
+                let (func_id, func_sv) = self.flatten_expr(func)?;
                 if let StaticValue::Closure { lam_name, .. } = func_sv {
                     let mut all_args = vec![func_id];
                     all_args.extend(arg_ids);
@@ -1379,9 +1381,9 @@ impl Flattener {
                 }
             }
             _ => {
-                // Closure call: check if we know the static value
+                // Other expression in function position - must be a closure
+                let (func_id, func_sv) = self.flatten_expr(func)?;
                 if let StaticValue::Closure { lam_name, .. } = func_sv {
-                    // Direct call to the lambda function with closure as first argument
                     let mut all_args = vec![func_id];
                     all_args.extend(arg_ids);
                     mir::Expr::Call {
@@ -1389,7 +1391,6 @@ impl Flattener {
                         args: all_args,
                     }
                 } else {
-                    // Unknown closure - this should not happen with proper function value restrictions
                     return Err(err_flatten!(
                         "Cannot call closure with unknown static value. \
                          Function expression: {:?}",

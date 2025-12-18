@@ -1037,6 +1037,29 @@ fn lower_const_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId)
             let array_type = constructor.ast_type_to_spirv(ty);
             Ok(constructor.builder.constant_composite(array_type, elem_ids))
         }
+        Expr::Matrix(rows) => {
+            // Lower each row as a constant vector, then construct the constant matrix
+            let row_ids: Vec<spirv::Word> = rows
+                .iter()
+                .map(|row| {
+                    let elem_ids: Vec<spirv::Word> = row
+                        .iter()
+                        .map(|&e| lower_const_expr(constructor, body, e))
+                        .collect::<Result<Vec<_>>>()?;
+                    // Get element type from first element
+                    let elem_ty = body.get_type(row[0]);
+                    let elem_spirv_type = constructor.ast_type_to_spirv(elem_ty);
+                    let row_type = constructor.get_or_create_vec_type(elem_spirv_type, row.len() as u32);
+                    Ok(constructor.builder.constant_composite(row_type, elem_ids))
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            // Get the matrix type
+            let result_type = constructor.ast_type_to_spirv(ty);
+
+            // Construct the constant matrix from row vectors
+            Ok(constructor.builder.constant_composite(result_type, row_ids))
+        }
         Expr::Global(name) => {
             // Reference to another global constant
             if let Some(&const_id) = constructor.global_constants.get(name) {
@@ -2248,6 +2271,56 @@ def get_x(r:{x:i32, y:i32}) -> i32 = r.x
 def test(x:i32) -> i32 =
     let f = |y:i32| x + y in
     f(10)
+"#,
+        )
+        .unwrap();
+        assert!(!spirv.is_empty());
+        assert_eq!(spirv[0], 0x07230203);
+    }
+
+    #[test]
+    fn test_polymorphic_dot2() {
+        // Test polymorphic function with type parameters that need proper instantiation
+        // This reproduces the primitives.wyn issue where Vec type has unresolved size variable
+        let spirv = compile_to_spirv(
+            r#"
+def dot2<E, T>(v: T) -> E = dot(v, v)
+
+def test_dot2_vec3(v: vec3f32) -> f32 = dot2(v)
+"#,
+        )
+        .unwrap();
+        assert!(!spirv.is_empty());
+        assert_eq!(spirv[0], 0x07230203);
+    }
+
+    #[test]
+    fn test_polymorphic_dot2_in_expression() {
+        // Test dot2 used in a more complex expression like in primitives.wyn
+        // sdCappedTorus: f32.sqrt(dot2(p) + ra*ra - 2.0*ra*k) - rb
+        let spirv = compile_to_spirv(
+            r#"
+def dot2<E, T>(v: T) -> E = dot(v, v)
+
+def sdCappedTorus(p: vec3f32, ra: f32, rb: f32, k: f32) -> f32 =
+  f32.sqrt(dot2(p) + ra*ra - 2.0*ra*k) - rb
+"#,
+        )
+        .unwrap();
+        assert!(!spirv.is_empty());
+        assert_eq!(spirv[0], 0x07230203);
+    }
+
+    #[test]
+    fn test_polymorphic_dot2_vec2_and_vec3() {
+        // Test dot2 with both vec2 and vec3 in same program (like primitives.wyn)
+        let spirv = compile_to_spirv(
+            r#"
+def dot2<E, T>(v: T) -> E = dot(v, v)
+
+def test_vec3(v: vec3f32) -> f32 = dot2(v)
+def test_vec2(v: vec2f32) -> f32 = dot2(v)
+def test_both(v3: vec3f32, v2: vec2f32) -> f32 = dot2(v3) + dot2(v2)
 "#,
         )
         .unwrap();
