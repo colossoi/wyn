@@ -965,15 +965,10 @@ impl Flattener {
                 let (base_id, _) = self.flatten_expr(&slice.array)?;
                 let base_ty = self.current_body.get_type(base_id).clone();
 
-                // Get array capacity and element type from base array type
-                let (cap_ty, elem_ty) = match &base_ty {
-                    Type::Constructed(TypeName::Array, args) if args.len() == 2 => {
-                        (args[0].clone(), args[1].clone())
-                    }
-                    _ => {
-                        bail_flatten!("Slice requires an array type, got {:?}", base_ty);
-                    }
-                };
+                // Verify base is an array type
+                if !matches!(&base_ty, Type::Constructed(TypeName::Array, args) if args.len() == 2) {
+                    bail_flatten!("Slice requires an array type, got {:?}", base_ty);
+                }
 
                 // Flatten start (default to 0)
                 let offset_id = if let Some(start) = &slice.start {
@@ -1002,10 +997,11 @@ impl Flattener {
                     span,
                 );
 
-                // Create slice type: Slice(cap, elem)
-                let slice_ty = types::slice(cap_ty, elem_ty);
+                // Get the type from the type table - the type checker computes concrete
+                // size when bounds are integer literals
+                let slice_ty = self.get_expr_type(expr);
 
-                // Create BorrowedSlice expression with the slice type
+                // Create BorrowedSlice expression
                 let slice_id = self.alloc_expr(
                     mir::Expr::BorrowedSlice {
                         base: base_id,

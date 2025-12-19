@@ -2273,7 +2273,7 @@ impl<'a> TypeChecker<'a> {
                 // Slice expression: array[start:end]
                 // - array must be [n]T
                 // - start/end (if present) must be integers
-                // - result is [?m]T (existential size)
+                // - result is [m]T where m = end - start (concrete if bounds are literals)
 
                 let array_type = self.infer_expression(&slice.array)?;
                 let array_type_stripped = strip_unique(&array_type);
@@ -2291,31 +2291,58 @@ impl<'a> TypeChecker<'a> {
                     )
                 })?;
 
-                // Check start, end, step are integers (if present)
-                if let Some(start) = &slice.start {
-                    let start_type = self.infer_expression(start)?;
-                    self.context.unify(&start_type, &i32()).map_err(|_| {
-                        err_type_at!(
-                            start.h.span,
-                            "Slice start must be an integer, got {}",
-                            self.format_type(&start_type.apply(&self.context))
-                        )
-                    })?;
-                }
+                // Extract integer literal value from start (default 0)
+                let start_val: Option<i32> = match &slice.start {
+                    Some(start) => {
+                        let start_type = self.infer_expression(start)?;
+                        self.context.unify(&start_type, &i32()).map_err(|_| {
+                            err_type_at!(
+                                start.h.span,
+                                "Slice start must be an integer, got {}",
+                                self.format_type(&start_type.apply(&self.context))
+                            )
+                        })?;
+                        // Try to extract literal value
+                        match &start.kind {
+                            ExprKind::IntLiteral(n) => Some(*n),
+                            _ => None,
+                        }
+                    }
+                    None => Some(0), // Default start is 0
+                };
 
-                if let Some(end) = &slice.end {
-                    let end_type = self.infer_expression(end)?;
-                    self.context.unify(&end_type, &i32()).map_err(|_| {
-                        err_type_at!(
-                            end.h.span,
-                            "Slice end must be an integer, got {}",
-                            self.format_type(&end_type.apply(&self.context))
-                        )
-                    })?;
-                }
+                // Extract integer literal value from end
+                let end_val: Option<i32> = match &slice.end {
+                    Some(end) => {
+                        let end_type = self.infer_expression(end)?;
+                        self.context.unify(&end_type, &i32()).map_err(|_| {
+                            err_type_at!(
+                                end.h.span,
+                                "Slice end must be an integer, got {}",
+                                self.format_type(&end_type.apply(&self.context))
+                            )
+                        })?;
+                        // Try to extract literal value
+                        match &end.kind {
+                            ExprKind::IntLiteral(n) => Some(*n),
+                            _ => None,
+                        }
+                    }
+                    None => None, // No default for end - would need array length
+                };
 
-                // Result has a fresh (existential) size and the same element type
-                let result_size = self.context.new_variable();
+                // Compute result size: concrete if both bounds are known, otherwise fresh variable
+                let result_size = match (start_val, end_val) {
+                    (Some(s), Some(e)) if e >= s => {
+                        // Both bounds are known literals - compute concrete size
+                        Type::Constructed(TypeName::Size((e - s) as usize), vec![])
+                    }
+                    _ => {
+                        // Dynamic bounds - use fresh type variable
+                        self.context.new_variable()
+                    }
+                };
+
                 let elem_type = elem_var.apply(&self.context);
                 Ok(Type::Constructed(TypeName::Array, vec![result_size, elem_type]))
             }

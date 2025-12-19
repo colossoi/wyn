@@ -2210,9 +2210,80 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
             Ok(constructor.builder.composite_construct(result_type, None, row_ids)?)
         }
 
-        // Slices - not yet implemented for SPIR-V
-        Expr::OwnedSlice { .. } | Expr::BorrowedSlice { .. } => {
-            Err(err_spirv!("Slice expressions not yet implemented in SPIR-V lowering"))
+        // Slices - materialize as arrays by copying elements
+        Expr::OwnedSlice { data, len: _ } => {
+            // OwnedSlice: the data is already a complete array, just return it
+            lower_expr(constructor, body, *data)
+        }
+        Expr::BorrowedSlice { base, offset, len: _ } => {
+            // BorrowedSlice: copy elements from base[offset..offset+size] into a new array
+            // The result type should be Array(Size(n), elem) from the type checker
+            let result_ty = body.get_type(expr_id);
+            match result_ty {
+                PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 2 => {
+                    match &type_args[0] {
+                        PolyType::Constructed(TypeName::Size(size), _) => {
+                            let size = *size;
+
+                            // Check if offset is constant 0
+                            let offset_is_zero = matches!(body.get_expr(*offset), Expr::Int(s) if s == "0");
+
+                            if offset_is_zero {
+                                // Optimization: if offset is 0, we can use compile-time indices
+                                let base_val = lower_expr(constructor, body, *base)?;
+                                let elem_type = constructor.ast_type_to_spirv(&type_args[1]);
+                                let mut elements = Vec::with_capacity(size);
+
+                                for i in 0..size {
+                                    let elem = constructor.builder.composite_extract(
+                                        elem_type, None, base_val, [i as u32]
+                                    )?;
+                                    elements.push(elem);
+                                }
+
+                                let result_type = constructor.ast_type_to_spirv(result_ty);
+                                Ok(constructor.builder.composite_construct(result_type, None, elements)?)
+                            } else {
+                                // For non-zero offset, use array indexing with runtime computation
+                                // We need to store the base array in a variable to use OpAccessChain
+                                let base_val = lower_expr(constructor, body, *base)?;
+                                let offset_val = lower_expr(constructor, body, *offset)?;
+                                let base_ty = body.get_type(*base);
+                                let base_spirv_ty = constructor.ast_type_to_spirv(base_ty);
+
+                                // Create a temporary variable for the base array
+                                let ptr_type = constructor.builder.type_pointer(None, spirv::StorageClass::Function, base_spirv_ty);
+                                let var = constructor.builder.variable(ptr_type, None, spirv::StorageClass::Function, None);
+                                constructor.builder.store(var, base_val, None, [])?;
+
+                                let i32_type = constructor.i32_type;
+                                let elem_type = constructor.ast_type_to_spirv(&type_args[1]);
+                                let elem_ptr_type = constructor.builder.type_pointer(None, spirv::StorageClass::Function, elem_type);
+                                let mut elements = Vec::with_capacity(size);
+
+                                for i in 0..size {
+                                    let i_const = constructor.const_i32(i as i32);
+                                    let idx = constructor.builder.i_add(i32_type, None, offset_val, i_const)?;
+                                    let ptr = constructor.builder.access_chain(elem_ptr_type, None, var, [idx])?;
+                                    let elem = constructor.builder.load(elem_type, None, ptr, None, [])?;
+                                    elements.push(elem);
+                                }
+
+                                let result_type = constructor.ast_type_to_spirv(result_ty);
+                                Ok(constructor.builder.composite_construct(result_type, None, elements)?)
+                            }
+                        }
+                        _ => Err(err_spirv!(
+                            "BorrowedSlice requires static array size, got {:?}",
+                            type_args[0]
+                        )),
+                    }
+                }
+                _ => Err(err_spirv!(
+                    "BorrowedSlice result must be Array type, got {:?}",
+                    result_ty
+                )),
+            }
         }
     }
 }
