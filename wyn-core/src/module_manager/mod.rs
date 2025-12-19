@@ -711,6 +711,30 @@ impl ModuleManager {
         if parts.len() == 2 { Some((parts[0], parts[1])) } else { None }
     }
 
+    /// Modules that are implicitly opened (their functions are available without qualification)
+    const IMPLICIT_OPEN_MODULES: &'static [&'static str] = &["soacs"];
+
+    /// Check if an unqualified name exists in any implicitly opened module.
+    /// Returns Some(module_name) if found, None otherwise.
+    pub fn resolve_implicit_open(&self, name: &str) -> Option<&str> {
+        for &module_name in Self::IMPLICIT_OPEN_MODULES {
+            if let Some(elaborated) = self.elaborated_modules.get(module_name) {
+                for item in &elaborated.items {
+                    let item_name = match item {
+                        ElaboratedItem::Spec(Spec::Sig(n, _, _)) => Some(n.as_str()),
+                        ElaboratedItem::Spec(Spec::SigOp(op, _)) => Some(op.as_str()),
+                        ElaboratedItem::Decl(decl) => Some(decl.name.as_str()),
+                        _ => None,
+                    };
+                    if item_name == Some(name) {
+                        return Some(module_name);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Elaborate a module body expression into a list of elaborated items
     /// Applies type substitutions to declaration signatures
     fn elaborate_module_body(

@@ -349,15 +349,7 @@ impl PolyBuiltins {
 
     /// Register higher-order functions like map
     fn register_higher_order_functions(&mut self, ctx: &mut impl TypeVarGenerator) {
-        // map : ∀a b n. (a -> b) -> [n]a -> [n]b
-        let a = ctx.new_variable();
-        let b = ctx.new_variable();
-        let n = ctx.new_variable();
-        let func_type = Type::arrow(a.clone(), b.clone());
-        let array_a = Type::Constructed(TypeName::Array, vec![n.clone(), a]);
-        let array_b = Type::Constructed(TypeName::Array, vec![n, b]);
-        self.register_poly("map", vec![func_type, array_a], array_b);
-
+        // map is desugared to map1 earlier in the pipeline
         // length : ∀a n. [n]a -> i32
         let a = ctx.new_variable();
         let n = ctx.new_variable();
@@ -412,16 +404,11 @@ impl PolyBuiltins {
         let result_array = Type::Constructed(TypeName::Array, vec![n, a.clone()]);
         self.register_poly("scan", vec![op_type, a, array_a], result_array);
 
-        // zip : ∀a b n. [n]a -> [n]b -> [n](a, b)
-        // Combines two arrays element-wise into array of tuples
-        let a = ctx.new_variable();
-        let b = ctx.new_variable();
-        let n = ctx.new_variable();
-        let array_a = Type::Constructed(TypeName::Array, vec![n.clone(), a.clone()]);
-        let array_b = Type::Constructed(TypeName::Array, vec![n.clone(), b.clone()]);
-        let tuple_ab = Type::Constructed(TypeName::Tuple(2), vec![a, b]);
-        let result_array = Type::Constructed(TypeName::Array, vec![n, tuple_ab]);
-        self.register_poly("zip", vec![array_a, array_b], result_array);
+        // map1..map5 : mapN f arr1 arr2 ... arrN = [f(a1,a2,...), f(b1,b2,...), ...]
+        // Note: "map" is desugared to "map1" earlier in the pipeline
+        for arity in 1..=5 {
+            self.register_map_n(ctx, arity);
+        }
 
         // scatter : ∀a n m. [n]a -> [m]i32 -> [m]a -> [n]a
         // scatter dest indices values: write values[i] to dest[indices[i]]
@@ -453,6 +440,35 @@ impl PolyBuiltins {
             vec![i32_ty],
             Type::Constructed(TypeName::UInt(32), vec![]),
         );
+    }
+
+    /// Register mapN : (a1 -> a2 -> ... -> aN -> x) -> [n]a1 -> [n]a2 -> ... -> [n]aN -> [n]x
+    fn register_map_n(&mut self, ctx: &mut impl TypeVarGenerator, arity: usize) {
+        // Create type variables for each input type + result type + size
+        let mut input_vars: Vec<Type> = (0..arity).map(|_| ctx.new_variable()).collect();
+        let result_var = ctx.new_variable();
+        let size_var = ctx.new_variable();
+
+        // Build function type: a1 -> a2 -> ... -> aN -> x
+        let mut f_type = result_var.clone();
+        for var in input_vars.iter().rev() {
+            f_type = Type::arrow(var.clone(), f_type);
+        }
+
+        // Build array types: [n]a1, [n]a2, ..., [n]aN
+        let input_arrays: Vec<Type> = input_vars
+            .drain(..)
+            .map(|v| Type::Constructed(TypeName::Array, vec![size_var.clone(), v]))
+            .collect();
+
+        // Result array: [n]x
+        let result_array = Type::Constructed(TypeName::Array, vec![size_var, result_var]);
+
+        // Args: [f, arr1, arr2, ..., arrN]
+        let mut args = vec![f_type];
+        args.extend(input_arrays);
+
+        self.register_poly(&format!("map{}", arity), args, result_array);
     }
 }
 

@@ -1607,8 +1607,8 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
 
             // SOAC (Second-Order Array Combinator) dispatch
             match func.as_str() {
-                "map" => {
-                    return lower_map(constructor, body, args, expr_ty, expr_node_id, result_type);
+                "map1" | "map2" | "map3" | "map4" | "map5" => {
+                    return lower_map_n(constructor, body, args, expr_ty, expr_node_id, result_type);
                 }
                 "reduce" => {
                     return lower_reduce(constructor, body, args, result_type);
@@ -1618,9 +1618,6 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                 }
                 "filter" => {
                     return lower_filter(constructor, body, args, result_type);
-                }
-                "zip" => {
-                    return lower_zip(constructor, body, args, result_type);
                 }
                 "scatter" => {
                     return lower_scatter(constructor, body, args, result_type);
@@ -2461,8 +2458,11 @@ fn extract_array_info(
     }
 }
 
-/// Lower `map` SOAC: map f [a,b,c] = [f(a), f(b), f(c)]
-fn lower_map(
+/// Lower `mapN` SOACs: map, map2, map3, etc.
+/// map f [a,b,c] = [f(a), f(b), f(c)]
+/// map2 f [a,b] [x,y] = [f(a,x), f(b,y)]
+/// All mapN variants share the same lowering logic.
+fn lower_map_n(
     constructor: &mut Constructor,
     body: &Body,
     args: &[ExprId],
@@ -2470,15 +2470,35 @@ fn lower_map(
     expr_node_id: NodeId,
     result_type: spirv::Word,
 ) -> Result<spirv::Word> {
-    if args.len() != 2 {
-        bail_spirv!("map requires 2 args (closure, array), got {}", args.len());
+    let num_arrays = args.len() - 1;
+    if num_arrays < 1 {
+        bail_spirv!("map requires at least 1 array argument, got {}", args.len());
     }
 
     let (func_name, closure_val, is_empty_closure) = extract_closure_info(constructor, body, args[0])?;
-    let array_val = lower_expr(constructor, body, args[1])?;
 
-    let arg1_ty = body.get_type(args[1]);
-    let (array_size, input_elem_type) = extract_array_info(constructor, arg1_ty)?;
+    // Lower all input arrays and extract their info
+    let mut array_vals = Vec::with_capacity(num_arrays);
+    let mut elem_types = Vec::with_capacity(num_arrays);
+    let mut array_size: Option<u32> = None;
+
+    for i in 1..args.len() {
+        let arr_val = lower_expr(constructor, body, args[i])?;
+        array_vals.push(arr_val);
+
+        let arr_ty = body.get_type(args[i]);
+        let (size, elem_ty) = extract_array_info(constructor, arr_ty)?;
+
+        if let Some(prev_size) = array_size {
+            if prev_size != size {
+                bail_spirv!("All arrays must have same size, got {} and {}", prev_size, size);
+            }
+        }
+        array_size = Some(size);
+        elem_types.push(elem_ty);
+    }
+
+    let array_size = array_size.unwrap();
 
     // Get result element type from the expression type
     let output_elem_type = match expr_ty {
@@ -2493,35 +2513,38 @@ fn lower_map(
         .get(&func_name)
         .ok_or_else(|| err_spirv!("Map function not found: {}", func_name))?;
 
-    // Check if we can do in-place update:
-    // 1. This map call was marked as having a dead-after input array
-    // 2. Element types match (f : T -> T)
-    let can_inplace =
-        constructor.inplace_nodes.contains(&expr_node_id) && input_elem_type == output_elem_type;
+    // In-place optimization only for single-array map with matching types
+    let can_inplace = num_arrays == 1
+        && constructor.inplace_nodes.contains(&expr_node_id)
+        && elem_types[0] == output_elem_type;
 
     if can_inplace {
         // In-place optimization: use OpCompositeInsert to update array in place
-        // This allows the SPIR-V optimizer to reuse the input array memory
-        let mut result = array_val;
+        let mut result = array_vals[0];
         for i in 0..array_size {
             let input_elem =
-                constructor.builder.composite_extract(input_elem_type, None, array_val, [i])?;
+                constructor.builder.composite_extract(elem_types[0], None, array_vals[0], [i])?;
             let call_args = if is_empty_closure { vec![input_elem] } else { vec![closure_val, input_elem] };
             let result_elem =
                 constructor.builder.function_call(output_elem_type, None, map_func_id, call_args)?;
-            // Insert the new element into the result array
             result = constructor.builder.composite_insert(result_type, None, result_elem, result, [i])?;
         }
         Ok(result)
     } else {
-        // Build result array by calling function for each element
+        // General case: extract elements from all arrays, call function, build result
         let mut result_elements = Vec::with_capacity(array_size as usize);
         for i in 0..array_size {
-            let elem = constructor.builder.composite_extract(input_elem_type, None, array_val, [i])?;
-            let call_args = if is_empty_closure { vec![elem] } else { vec![closure_val, elem] };
-            let mapped =
+            // Build call arguments: [closure?,] elem1, elem2, ..., elemN
+            let mut call_args = if is_empty_closure { vec![] } else { vec![closure_val] };
+            for (arr_idx, arr_val) in array_vals.iter().enumerate() {
+                let elem =
+                    constructor.builder.composite_extract(elem_types[arr_idx], None, *arr_val, [i])?;
+                call_args.push(elem);
+            }
+
+            let result_elem =
                 constructor.builder.function_call(output_elem_type, None, map_func_id, call_args)?;
-            result_elements.push(mapped);
+            result_elements.push(result_elem);
         }
 
         Ok(constructor.builder.composite_construct(result_type, None, result_elements)?)
@@ -2691,41 +2714,6 @@ fn lower_filter(
 
     // Create OwnedSlice struct: { len: i32, data: [cap]elem }
     Ok(constructor.builder.composite_construct(result_type, None, vec![final_count, data_array])?)
-}
-
-/// Lower `zip` SOAC: zip [a,b] [x,y] = [(a,x), (b,y)]
-fn lower_zip(
-    constructor: &mut Constructor,
-    body: &Body,
-    args: &[ExprId],
-    result_type: spirv::Word,
-) -> Result<spirv::Word> {
-    if args.len() != 2 {
-        bail_spirv!("zip requires 2 args (array1, array2), got {}", args.len());
-    }
-
-    let array1_val = lower_expr(constructor, body, args[0])?;
-    let array2_val = lower_expr(constructor, body, args[1])?;
-
-    let arg0_ty = body.get_type(args[0]);
-    let arg1_ty = body.get_type(args[1]);
-
-    let (array_size, elem1_type) = extract_array_info(constructor, arg0_ty)?;
-    let (_, elem2_type) = extract_array_info(constructor, arg1_ty)?;
-
-    // Get tuple type for result elements
-    let tuple_type = constructor.get_or_create_struct_type(vec![elem1_type, elem2_type]);
-
-    // Zip elements pairwise
-    let mut result_elements = Vec::with_capacity(array_size as usize);
-    for i in 0..array_size {
-        let elem1 = constructor.builder.composite_extract(elem1_type, None, array1_val, [i])?;
-        let elem2 = constructor.builder.composite_extract(elem2_type, None, array2_val, [i])?;
-        let tuple = constructor.builder.composite_construct(tuple_type, None, vec![elem1, elem2])?;
-        result_elements.push(tuple);
-    }
-
-    Ok(constructor.builder.composite_construct(result_type, None, result_elements)?)
 }
 
 /// Lower `scatter` SOAC: scatter dest indices values -> updated dest
@@ -2969,11 +2957,21 @@ def sum_scan(arr: [4]i32) -> [4]i32 = scan((|a, b| a + b), 0, arr)
     }
 
     #[test]
-    fn test_zip_arrays() {
-        // Zip two arrays into array of tuples
+    fn test_map_variants() {
+        // Test all map variants: map (desugars to map1), map2, map3, map4, map5
         let spirv = compile_to_spirv(
             r#"
-def zip_test(xs: [3]i32, ys: [3]f32) -> [3](i32, f32) = zip(xs, ys)
+def double(x: i32) -> i32 = x * 2
+def add(x: i32, y: i32) -> i32 = x + y
+def add3(x: i32, y: i32, z: i32) -> i32 = x + y + z
+def add4(a: i32, b: i32, c: i32, d: i32) -> i32 = a + b + c + d
+def add5(a: i32, b: i32, c: i32, d: i32, e: i32) -> i32 = a + b + c + d + e
+
+def test_map(arr: [3]i32) -> [3]i32 = map(double, arr)
+def test_map2(xs: [3]i32, ys: [3]i32) -> [3]i32 = map2(add, xs, ys)
+def test_map3(xs: [3]i32, ys: [3]i32, zs: [3]i32) -> [3]i32 = map3(add3, xs, ys, zs)
+def test_map4(a: [3]i32, b: [3]i32, c: [3]i32, d: [3]i32) -> [3]i32 = map4(add4, a, b, c, d)
+def test_map5(a: [3]i32, b: [3]i32, c: [3]i32, d: [3]i32, e: [3]i32) -> [3]i32 = map5(add5, a, b, c, d, e)
 "#,
         )
         .unwrap();

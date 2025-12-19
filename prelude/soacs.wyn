@@ -1,23 +1,32 @@
 -- Second-Order Array Combinators (SOACs)
 -- Based on Futhark's prelude/soacs module
 --
--- Builtins: map, reduce, zip, length, replicate
+-- Builtins: map (desugared to map1), map1-map5, reduce, scan, filter, scatter, length, replicate
 
 ------------------------------------------------------------
--- Mapping (multi-array variants)
+-- Zipping and unzipping
 ------------------------------------------------------------
 
--- Map a ternary function over three arrays
-def map3<[n], A, B, C, D>(f: A -> B -> C -> D, xs: [n]A, ys: [n]B, zs: [n]C) -> [n]D =
-  map(|i| f(xs[i], ys[i], zs[i]), 0..<length(xs))
+-- Combine two arrays into an array of pairs
+def zip<[n], A, B>(xs: [n]A, ys: [n]B) -> [n](A, B) =
+  map2((|x: A, y: B| (x, y)), xs, ys)
 
--- Map a quaternary function over four arrays
-def map4<[n], A, B, C, D, E>(f: A -> B -> C -> D -> E, as: [n]A, bs: [n]B, cs: [n]C, ds: [n]D) -> [n]E =
-  map(|i| f(as[i], bs[i], cs[i], ds[i]), 0..<length(as))
+-- Split an array of pairs into two arrays
+def unzip<[n], A, B>(xys: [n](A, B)) -> ([n]A, [n]B) =
+  (map((|xy: (A, B)| let (a, _) = xy in a), xys),
+   map((|xy: (A, B)| let (_, b) = xy in b), xys))
 
--- Map a 5-ary function over five arrays
-def map5<[n], A, B, C, D, E, F>(f: A -> B -> C -> D -> E -> F, as: [n]A, bs: [n]B, cs: [n]C, ds: [n]D, es: [n]E) -> [n]F =
-  map(|i| f(as[i], bs[i], cs[i], ds[i], es[i]), 0..<length(as))
+-- 3-way zip
+def zip3<[n], A, B, C>(xs: [n]A, ys: [n]B, zs: [n]C) -> [n](A, B, C) =
+  map3((|x: A, y: B, z: C| (x, y, z)), xs, ys, zs)
+
+-- 4-way zip
+def zip4<[n], A, B, C, D>(as: [n]A, bs: [n]B, cs: [n]C, ds: [n]D) -> [n](A, B, C, D) =
+  map4((|a: A, b: B, c: C, d: D| (a, b, c, d)), as, bs, cs, ds)
+
+-- 5-way zip
+def zip5<[n], A, B, C, D, E>(as: [n]A, bs: [n]B, cs: [n]C, ds: [n]D, es: [n]E) -> [n](A, B, C, D, E) =
+  map5((|a: A, b: B, c: C, d: D, e: E| (a, b, c, d, e)), as, bs, cs, ds, es)
 
 ------------------------------------------------------------
 -- Boolean aggregation
@@ -32,23 +41,6 @@ def any<[n], A>(p: A -> bool, xs: [n]A) -> bool =
   reduce((|a: bool, b: bool| a || b), false, map(p, xs))
 
 ------------------------------------------------------------
--- Map variants
-------------------------------------------------------------
-
--- Map a binary function over two arrays (curried form)
-def map2<[n], A, B, C>(f: A -> B -> C, xs: [n]A, ys: [n]B) -> [n]C =
-  map((|xy: (A, B)| let (x, y) = xy in f(x, y)), zip(xs, ys))
-
-------------------------------------------------------------
--- Zipping and unzipping
-------------------------------------------------------------
-
--- Split an array of pairs into two arrays
--- (zip is a builtin)
-def unzip<[n], A, B>(xys: [n](A, B)) -> ([n]A, [n]B) =
-  (map(|xy| let (a, _) = xy in a, xys), map(|xy| let (_, b) = xy in b, xys))
-
-------------------------------------------------------------
 -- Array generation
 ------------------------------------------------------------
 
@@ -57,29 +49,21 @@ def unzip<[n], A, B>(xys: [n](A, B)) -> ([n]A, [n]B) =
 def tabulate<[n], A>(size: i32, f: i32 -> A) -> [n]A =
   map(f, 0..<size)
 
--- Create array of n copies of a value
 -- (replicate is a builtin)
 
 ------------------------------------------------------------
--- Array slicing (using slice syntax)
+-- Array slicing
 ------------------------------------------------------------
 
+-- TODO: Requires slice syntax support in type checker
 -- First k elements of array
-def take<[n], [k], A>(k: i32, arr: [n]A) -> [k]A =
-  arr[0:k]
+-- def take<[n], [k], A>(k: i32, arr: [n]A) -> [k]A =
+--   arr[0:k]
 
+-- TODO: Requires slice syntax support in type checker
 -- Drop first k elements of array
-def drop<[n], [k], A>(k: i32, arr: [n]A) -> [k]A =
-  arr[length(arr)-k:length(arr)]
-
--- ------------------------------------------------------------
--- -- Functions requiring [n+1] size arithmetic (not yet supported)
--- ------------------------------------------------------------
---
--- def tail<[n], A>(arr: [n+1]A) -> [n]A = arr[1:n+1]
--- def init<[n], A>(arr: [n+1]A) -> [n]A = arr[0:n]
--- def head<[n], A>(arr: [n+1]A) -> A = arr[0]
--- def last<[n], A>(arr: [n+1]A) -> A = arr[n]
+-- def drop<[n], [k], A>(k: i32, arr: [n]A) -> [k]A =
+--   arr[k:length(arr)]
 
 ------------------------------------------------------------
 -- Array transformations
@@ -87,21 +71,56 @@ def drop<[n], [k], A>(k: i32, arr: [n]A) -> [k]A =
 
 -- Reverse an array
 def reverse<[n], A>(arr: [n]A) -> [n]A =
-  map(|i| arr[length(arr) - 1 - i], 0..<length(arr))
+  map((|i: i32| arr[length(arr) - 1 - i]), 0..<length(arr))
 
 -- Rotate array left by k positions
 def rotate<[n], A>(k: i32, arr: [n]A) -> [n]A =
-  map(|i| arr[(i + k) % length(arr)], 0..<length(arr))
+  map((|i: i32| arr[(i + k) % length(arr)]), 0..<length(arr))
+
+-- TODO: Requires size arithmetic in types [n * m]
+-- Flatten a 2D array into 1D
+-- def flatten<[n], [m], A>(arr: [n][m]A) -> [n * m]A =
+--   map((|i: i32| arr[i / m][i % m]), 0..<(n * m))
 
 ------------------------------------------------------------
--- Scan (prefix sum)
+-- Scatter variants
 ------------------------------------------------------------
 
--- Inclusive scan: [x0, op(x0,x1), op(op(x0,x1),x2), ...]
-def scan<[n], A>(op: A -> A -> A, ne: A, arr: [n]A) -> [n]A =
-  let len = length(arr) in
-  let (_, result) =
-    loop (acc, out) = (ne, replicate(len, ne)) for i < len do
-      let new_acc = op(acc, arr[i]) in
-      (new_acc, out with [i] = new_acc)
-  in result
+-- TODO: Requires existential size parameter for replicate result
+-- Spread: scatter values into a default array
+-- spread k default indices values = scatter (replicate k default) indices values
+-- def spread<[n], [k], A>(size: i32, default: A, indices: [n]i32, values: [n]A) -> [k]A =
+--   scatter(replicate(size, default), indices, values)
+
+------------------------------------------------------------
+-- Reduce variants
+------------------------------------------------------------
+
+-- Commutative reduce (same as reduce, but documents commutativity)
+def reduce_comm<[n], A>(op: A -> A -> A, ne: A, arr: [n]A) -> A =
+  reduce(op, ne, arr)
+
+------------------------------------------------------------
+-- Partitioning
+------------------------------------------------------------
+
+-- TODO: Requires existential types in return position
+-- Partition array by predicate into (matching, non-matching)
+-- Note: This creates two filtered copies
+-- def partition<[n], A>(p: A -> bool, arr: [n]A) -> (exists k. [k]A, exists m. [m]A) =
+--   (filter(p, arr), filter((|x: A| !(p(x))), arr))
+
+------------------------------------------------------------
+-- Index operations
+------------------------------------------------------------
+
+-- TODO: Requires existential types in return position
+-- Find indices where predicate holds
+-- def indices<[n], A>(p: A -> bool, arr: [n]A) -> (exists k. [k]i32) =
+--   filter((|i: i32| p(arr[i])), 0..<length(arr))
+
+-- TODO: Requires length on existential arrays
+-- Find first index where predicate holds, or -1
+-- def find_index<[n], A>(p: A -> bool, arr: [n]A) -> i32 =
+--   let matches = indices(p, arr) in
+--   if length(matches) > 0 then matches[0] else (0 - 1)

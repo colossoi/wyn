@@ -90,6 +90,12 @@ impl<'a> Desugarer<'a> {
                 for arg in args {
                     self.desugar_expr(arg)?;
                 }
+                // Desugar map → map1 (map is just map1 with a friendlier name)
+                if let ExprKind::Identifier(qualifiers, name) = &mut func.kind {
+                    if qualifiers.is_empty() && name == "map" {
+                        *name = "map1".to_string();
+                    }
+                }
             }
             ExprKind::LetIn(let_in) => {
                 self.desugar_expr(&mut let_in.value)?;
