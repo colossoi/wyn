@@ -133,7 +133,8 @@ pub enum TypeName {
     /// Sum type: Constructor1 type* | Constructor2 type*
     Sum(Vec<(String, Vec<Type>)>),
     /// Existential size: ?[n][m]. type
-    Existential(Vec<String>, Box<Type>),
+    /// Inner type is stored in Type::Constructed args[0], not in the TypeName.
+    Existential(Vec<String>),
     /// Pointer type (MIR only) - result of Materialize, used for indexing/access.
     /// The pointee type is stored in Type::Constructed args.
     Pointer,
@@ -184,8 +185,9 @@ impl std::fmt::Display for TypeName {
                 }
                 Ok(())
             }
-            TypeName::Existential(vars, ty) => {
-                write!(f, "?{}.{}", vars.join(" "), ty)
+            TypeName::Existential(vars) => {
+                // Inner type is in type_args[0], not here
+                write!(f, "?{}.", vars.join(" "))
             }
             TypeName::Pointer => write!(f, "Ptr"),
             TypeName::Slice => write!(f, "Slice"),
@@ -237,7 +239,7 @@ impl polytype::Name for TypeName {
                     .collect();
                 variant_strs.join(" | ")
             }
-            TypeName::Existential(vars, ty) => format!("?{}. {}", vars.join(" "), ty),
+            TypeName::Existential(vars) => format!("?{}.", vars.join(" ")),
             TypeName::Pointer => "Ptr".to_string(),
             TypeName::Slice => "Slice".to_string(),
         }
@@ -496,7 +498,7 @@ pub fn sum(variants: Vec<(String, Vec<Type>)>) -> Type {
 
 /// Create an existential size type: ?k. type or ?k l. type
 pub fn existential(size_vars: Vec<String>, inner: Type) -> Type {
-    Type::Constructed(TypeName::Existential(size_vars, Box::new(inner)), vec![])
+    Type::Constructed(TypeName::Existential(size_vars), vec![inner])
 }
 
 /// Create a size variable in array types: [n]

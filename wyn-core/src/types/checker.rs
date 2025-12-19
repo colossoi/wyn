@@ -173,9 +173,41 @@ impl<'a> TypeChecker<'a> {
     /// Existential types are only valid in function return types, not parameters.
     fn contains_existential(ty: &Type) -> bool {
         match ty {
-            Type::Constructed(TypeName::Existential(_, _), _) => true,
+            Type::Constructed(TypeName::Existential(_), _) => true,
             Type::Constructed(_, args) => args.iter().any(Self::contains_existential),
             Type::Variable(_) => false,
+        }
+    }
+
+    /// Open an existential type: ?k. T becomes T[k'/k] where k' is a fresh variable.
+    /// This is called when binding an existential value to a variable.
+    fn open_existential(&mut self, ty: Type) -> Type {
+        match ty {
+            Type::Constructed(TypeName::Existential(vars), args) if !args.is_empty() => {
+                let mut inner = args.into_iter().next().unwrap();
+                // Substitute each bound size variable with a fresh type variable
+                for var_name in vars {
+                    let fresh_var = self.context.new_variable();
+                    inner = Self::substitute_size_var(&inner, &var_name, &fresh_var);
+                }
+                inner
+            }
+            _ => ty,
+        }
+    }
+
+    /// Substitute a size variable name with a type in a type expression.
+    fn substitute_size_var(ty: &Type, var_name: &str, replacement: &Type) -> Type {
+        match ty {
+            Type::Variable(v) => Type::Variable(*v),
+            Type::Constructed(TypeName::SizeVar(name), _) if name == var_name => replacement.clone(),
+            Type::Constructed(name, args) => {
+                let new_args: Vec<Type> = args
+                    .iter()
+                    .map(|arg| Self::substitute_size_var(arg, var_name, replacement))
+                    .collect();
+                Type::Constructed(name.clone(), new_args)
+            }
         }
     }
 
@@ -1723,6 +1755,9 @@ impl<'a> TypeChecker<'a> {
                 self.scope_stack.push_scope();
                 let bound_type = let_in.ty.as_ref().unwrap_or(&value_type).clone();
 
+                // Open existential types: ?k. T becomes T[k'/k] where k' is fresh
+                let bound_type = self.open_existential(bound_type);
+
                 // Bind all names in the pattern
                 // Let bindings should be generalized for polymorphism
                 self.bind_pattern(&let_in.pattern, &bound_type, true)?;
@@ -2026,7 +2061,7 @@ impl<'a> TypeChecker<'a> {
                                     TypeName::Unit => "unit".to_string(),
                                     TypeName::Tuple(_) => "tuple".to_string(),
                                     TypeName::Sum(_) => "sum".to_string(),
-                                    TypeName::Existential(_, _) => "existential".to_string(),
+                                    TypeName::Existential(_) => "existential".to_string(),
                                     TypeName::Pointer => "pointer".to_string(),
                                     TypeName::Slice => "slice".to_string(),
                                 };

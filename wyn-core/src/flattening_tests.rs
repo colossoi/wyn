@@ -1198,3 +1198,54 @@ def product_array(arr: [4]f32) -> f32 =
     let sum_def = find_def(&mir, "product_array");
     assert!(matches!(sum_def, mir::Def::Function { .. }));
 }
+
+#[test]
+fn test_filter_basic() {
+    // Test basic filter with a predicate
+    let mir = flatten_program(
+        r#"
+def is_positive(x: i32) -> bool = x > 0
+
+def filter_positive(arr: [5]i32) -> ?k. [k]i32 =
+    filter(is_positive, arr)
+"#,
+    );
+
+    // Should have the is_positive and filter_positive functions
+    assert!(mir.defs.len() >= 2, "Expected at least 2 functions");
+    let filter_def = find_def(&mir, "filter_positive");
+    assert!(matches!(filter_def, mir::Def::Function { .. }));
+}
+
+#[test]
+fn test_filter_with_lambda() {
+    // Test filter with an inline lambda predicate
+    let mir = flatten_program(
+        r#"
+def filter_evens(arr: [4]i32) -> ?k. [k]i32 =
+    filter((|x: i32| x % 2 == 0), arr)
+"#,
+    );
+
+    // Should have the filter_evens function and a lambda
+    let filter_def = find_def(&mir, "filter_evens");
+    assert!(matches!(filter_def, mir::Def::Function { .. }));
+    assert!(!mir.lambda_registry.is_empty(), "Expected lambda in registry for filter predicate");
+}
+
+#[test]
+fn test_filter_length() {
+    // Test that length() can be called on filter result
+    let mir = flatten_program(
+        r#"
+def is_positive(x: i32) -> bool = x > 0
+
+def count_positive(arr: [5]i32) -> i32 =
+    let filtered = filter(is_positive, arr) in
+    length(filtered)
+"#,
+    );
+
+    let count_def = find_def(&mir, "count_positive");
+    assert!(matches!(count_def, mir::Def::Function { .. }));
+}

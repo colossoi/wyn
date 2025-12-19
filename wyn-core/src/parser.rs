@@ -267,9 +267,10 @@ impl<'a> Parser<'a> {
                     // Function: def foo(params) -> R = ...
                     let params = self.parse_comma_separated_params()?;
                     // Rust-style return type: -> T (optional)
+                    // Use parse_return_type to allow existential types like ?k. [k]T
                     let ty = if self.check(&Token::Arrow) {
                         self.advance();
-                        Some(self.parse_type_application()?)
+                        Some(self.parse_return_type_simple()?)
                     } else {
                         None
                     };
@@ -681,35 +682,8 @@ impl<'a> Parser<'a> {
 
     fn parse_type(&mut self) -> Result<Type> {
         trace!("parse_type: next token = {:?}", self.peek());
-        // Check for existential size: ?k. type or ?k l. type
-        if self.check(&Token::QuestionMark) {
-            return self.parse_existential_type();
-        }
-        self.parse_function_type()
-    }
-
-    fn parse_existential_type(&mut self) -> Result<Type> {
-        self.expect(Token::QuestionMark)?;
-        let mut size_vars = Vec::new();
-
-        // Parse one or more bare identifiers: ?k. or ?k l. or ?k l m.
-        while let Some(Token::Identifier(name)) = self.peek().cloned() {
-            size_vars.push(name);
-            self.advance();
-        }
-
-        if size_vars.is_empty() {
-            bail_parse!("Existential type must have at least one size variable");
-        }
-
-        self.expect(Token::Dot)?;
-        let inner_type = self.parse_function_type()?;
-
-        Ok(types::existential(size_vars, inner_type))
-    }
-
-    fn parse_function_type(&mut self) -> Result<Type> {
-        trace!("parse_function_type: next token = {:?}", self.peek());
+        // Note: existential types (?k. [k]T) are NOT allowed here.
+        // Use parse_return_type_simple for return types that allow existentials.
 
         // Check for named parameter syntax: (name: type) -> ...
         // We parse this for documentation but drop the name, keeping just the type
@@ -730,7 +704,7 @@ impl<'a> Parser<'a> {
                     // Must be followed by ->
                     if self.check(&Token::Arrow) {
                         self.advance();
-                        let return_type = self.parse_function_type()?;
+                        let return_type = self.parse_type()?;
                         // Just use the param_type directly, ignoring the name
                         return Ok(types::function(param_type, return_type));
                     } else {
@@ -750,11 +724,42 @@ impl<'a> Parser<'a> {
         // Arrow is right-associative: a -> b -> c means a -> (b -> c)
         if self.check(&Token::Arrow) {
             self.advance();
-            let right = self.parse_function_type()?; // Recursive call for right-associativity
+            let right = self.parse_type()?; // Recursive call for right-associativity
             Ok(types::function(left, right))
         } else {
             Ok(left)
         }
+    }
+
+    /// Parse a return type, which may include an existential quantifier.
+    /// Existential types (?k. [k]T) are only valid in return position.
+    fn parse_return_type_simple(&mut self) -> Result<Type> {
+        trace!("parse_return_type_simple: next token = {:?}", self.peek());
+        // Check for existential size: ?k. type or ?k l. type
+        if self.check(&Token::QuestionMark) {
+            return self.parse_existential_type();
+        }
+        self.parse_type()
+    }
+
+    fn parse_existential_type(&mut self) -> Result<Type> {
+        self.expect(Token::QuestionMark)?;
+        let mut size_vars = Vec::new();
+
+        // Parse one or more bare identifiers: ?k. or ?k l. or ?k l m.
+        while let Some(Token::Identifier(name)) = self.peek().cloned() {
+            size_vars.push(name);
+            self.advance();
+        }
+
+        if size_vars.is_empty() {
+            bail_parse!("Existential type must have at least one size variable");
+        }
+
+        self.expect(Token::Dot)?;
+        let inner_type = self.parse_type()?;
+
+        Ok(types::existential(size_vars, inner_type))
     }
 
     fn parse_type_application(&mut self) -> Result<Type> {

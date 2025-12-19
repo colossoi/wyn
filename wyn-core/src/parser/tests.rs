@@ -3234,3 +3234,44 @@ fn test_array_index_still_works() {
         other => panic!("Expected ArrayIndex, got {:?}", other),
     }
 }
+
+// ============================================================
+// Existential Type Tests (?k. [k]T syntax)
+// ============================================================
+
+#[test]
+fn test_parse_existential_type_simple() {
+    // ?k. [k]i32 - existential array type with single size variable
+    let decl = single_decl("def f() -> ?k. [k]i32 = ???");
+    assert_eq!(decl.name, "f");
+    let ty = decl.ty.as_ref().expect("Expected return type");
+    match ty {
+        Type::Constructed(TypeName::Existential(vars), args) => {
+            assert_eq!(vars, &vec!["k".to_string()]);
+            assert!(matches!(&args[0], Type::Constructed(TypeName::Array, _)));
+        }
+        _ => panic!("Expected Existential type, got {:?}", ty),
+    }
+}
+
+#[test]
+fn test_parse_existential_type_multiple_vars() {
+    // ?j k. [j][k]i32 - existential with multiple size variables
+    let decl = single_decl("def f() -> ?j k. [j][k]i32 = ???");
+    assert_eq!(decl.name, "f");
+    let ty = decl.ty.as_ref().expect("Expected return type");
+    match ty {
+        Type::Constructed(TypeName::Existential(vars), _) => {
+            assert_eq!(vars.len(), 2);
+            assert_eq!(vars[0], "j");
+            assert_eq!(vars[1], "k");
+        }
+        _ => panic!("Expected Existential type, got {:?}", ty),
+    }
+}
+
+#[test]
+fn test_parse_existential_type_in_parameter_rejected() {
+    // Existential types are only valid in return position, not parameter position
+    expect_parse_error("def len(arr: ?k. [k]i32) -> i32 = ???", |_| Ok(()));
+}

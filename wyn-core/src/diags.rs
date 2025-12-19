@@ -138,8 +138,10 @@ fn format_constructed_type(name: &TypeName, args: &[PolyType<TypeName>]) -> Stri
                 format!("{}<{}>", s, args_str.join(", "))
             }
         }
-        TypeName::Existential(vars, inner) => {
-            format!("?[{}]. {}", vars.join(", "), format_type(inner))
+        TypeName::Existential(vars) => {
+            // Inner type is in args[0]
+            let inner = if !args.is_empty() { format_type(&args[0]) } else { "?".to_string() };
+            format!("?[{}]. {}", vars.join(", "), inner)
         }
         TypeName::Pointer => {
             // Ptr<T>

@@ -101,7 +101,8 @@ impl TypeKey {
                             .collect();
                         return TypeKey::Sum(key_variants);
                     }
-                    TypeName::Existential(vars, inner) => {
+                    TypeName::Existential(vars) => {
+                        let inner = &args[0];
                         return TypeKey::Existential(vars.clone(), Box::new(TypeKey::from_type(inner)));
                     }
                     _ => {}
@@ -579,11 +580,8 @@ fn contains_variables(ty: &Type<TypeName>) -> bool {
                         return true;
                     }
                 }
-                TypeName::Existential(_, inner) => {
-                    // Check the inner type
-                    if contains_variables(inner) {
-                        return true;
-                    }
+                TypeName::Existential(_) => {
+                    // Inner type is now in args[0], checked below
                 }
                 _ => {}
             }
@@ -734,8 +732,9 @@ fn apply_subst(ty: &Type<TypeName>, subst: &Substitution) -> Type<TypeName> {
                         .collect();
                     TypeName::Sum(new_variants)
                 }
-                TypeName::Existential(vars, inner) => {
-                    TypeName::Existential(vars.clone(), Box::new(apply_subst(inner, subst)))
+                TypeName::Existential(vars) => {
+                    // Inner type is now in args, will be substituted via new_args
+                    TypeName::Existential(vars.clone())
                 }
                 _ => name.clone(),
             };

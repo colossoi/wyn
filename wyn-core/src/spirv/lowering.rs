@@ -311,6 +311,33 @@ impl Constructor {
                         }
                         self.ast_type_to_spirv(&args[0])
                     }
+                    TypeName::Slice => {
+                        // Slice type: struct { len: i32, data: [cap]elem }
+                        // args[0] is capacity type (Size(n)), args[1] is element type
+                        if args.len() < 2 {
+                            panic!(
+                                "BUG: Slice type requires 2 arguments (cap, element_type), got {}.",
+                                args.len()
+                            );
+                        }
+                        let cap = match &args[0] {
+                            PolyType::Constructed(TypeName::Size(n), _) => *n as u32,
+                            _ => {
+                                panic!("BUG: Slice type has invalid capacity argument: {:?}.", args[0]);
+                            }
+                        };
+                        let elem_type = self.ast_type_to_spirv(&args[1]);
+                        let cap_const = self.const_i32(cap as i32);
+                        let array_type = self.builder.type_array(elem_type, cap_const);
+                        // Slice struct: { i32 (len), [cap]elem (data) }
+                        self.get_or_create_struct_type(vec![self.i32_type, array_type])
+                    }
+                    TypeName::Existential(_) => {
+                        // Existential type: unwrap and convert the inner type (in args[0])
+                        // The size variable is runtime-determined, handled by Slice representation
+                        let inner = &args[0];
+                        self.ast_type_to_spirv(inner)
+                    }
                     _ => {
                         panic!(
                             "BUG: Unknown type reached lowering: {:?}. This should have been caught during type checking.",
@@ -1693,6 +1720,158 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                 return Ok(acc);
             }
 
+            // Special case for filter - sequential filtering with O(n²) static unrolling
+            if func == "filter" {
+                // filter pred array -> OwnedSlice { len: i32, data: [cap]elem }
+                // args[0] is closure tuple (_w_lambda_name, captures) for the predicate
+                // args[1] is input array
+                if args.len() != 2 {
+                    bail_spirv!("filter requires 2 args (pred, array), got {}", args.len());
+                }
+
+                // Extract lambda/function name and captures from predicate argument
+                let (pred_func_name, closure_val, is_empty_closure) = match body.get_expr(args[0]) {
+                    Expr::Closure {
+                        lambda_name,
+                        captures,
+                    } => {
+                        let is_empty = is_empty_closure_type(body.get_type(*captures));
+                        let closure_val = if is_empty {
+                            constructor.const_i32(0)
+                        } else {
+                            lower_expr(constructor, body, args[0])?
+                        };
+                        (lambda_name.clone(), closure_val, is_empty)
+                    }
+                    Expr::Global(name) => {
+                        // Named function reference - treat like empty closure
+                        (name.clone(), constructor.const_i32(0), true)
+                    }
+                    other => {
+                        bail_spirv!(
+                            "filter predicate must be a closure or function reference, got {:?}",
+                            other
+                        );
+                    }
+                };
+
+                // Lower the input array
+                let array_val = lower_expr(constructor, body, args[1])?;
+
+                // Get array size and element type from the array type
+                let arg1_ty = body.get_type(args[1]);
+                let (array_size, elem_spirv_type) = match arg1_ty {
+                    PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 2 => {
+                        let size = match &type_args[0] {
+                            PolyType::Constructed(TypeName::Size(n), _) => *n as u32,
+                            _ => bail_spirv!("Invalid array size type for filter"),
+                        };
+                        let elem = constructor.ast_type_to_spirv(&type_args[1]);
+                        (size, elem)
+                    }
+                    _ => bail_spirv!("filter input must be array type"),
+                };
+
+                // Look up the predicate function by name
+                let pred_func_id = *constructor
+                    .functions
+                    .get(&pred_func_name)
+                    .ok_or_else(|| err_spirv!("Predicate function not found: {}", pred_func_name))?;
+
+                let i32_type = constructor.i32_type;
+                let bool_type = constructor.bool_type;
+
+                // Step 1: Evaluate predicates for all elements
+                let mut preds = Vec::with_capacity(array_size as usize);
+                let mut elems = Vec::with_capacity(array_size as usize);
+                for i in 0..array_size {
+                    let elem = constructor.builder.composite_extract(
+                        elem_spirv_type, None, array_val, [i]
+                    )?;
+                    elems.push(elem);
+
+                    // Call predicate: pred(elem) or pred(closure, elem)
+                    let call_args = if is_empty_closure {
+                        vec![elem]
+                    } else {
+                        vec![closure_val, elem]
+                    };
+                    let pred_result = constructor.builder.function_call(
+                        bool_type, None, pred_func_id, call_args
+                    )?;
+                    preds.push(pred_result);
+                }
+
+                // Step 2: Compute running count (cumulative sum of predicates)
+                // cum[i] = number of passing elements in 0..=i
+                let zero = constructor.const_i32(0);
+                let one = constructor.const_i32(1);
+                let mut cum_counts = Vec::with_capacity(array_size as usize);
+                for i in 0..array_size as usize {
+                    // pred_as_int = select(pred[i], 1, 0)
+                    let pred_int = constructor.builder.select(i32_type, None, preds[i], one, zero)?;
+                    if i == 0 {
+                        cum_counts.push(pred_int);
+                    } else {
+                        let sum = constructor.builder.i_add(i32_type, None, cum_counts[i-1], pred_int)?;
+                        cum_counts.push(sum);
+                    }
+                }
+
+                // Final count = last cumulative count (or 0 if empty)
+                let final_count = if array_size > 0 {
+                    cum_counts[array_size as usize - 1]
+                } else {
+                    zero
+                };
+
+                // Step 3: Build result array using select chains
+                // For each output position j, find the element whose cum_count == j+1
+                // This is O(n²) but works for small arrays
+                let mut result_elems = Vec::with_capacity(array_size as usize);
+                for j in 0..array_size {
+                    // Find element i where cum_counts[i] == j+1 and preds[i] == true
+                    // Using nested selects: start with garbage, select backwards
+                    let j_plus_1 = constructor.const_i32((j + 1) as i32);
+
+                    // Start with the last element (or garbage/zero if array is empty)
+                    let mut selected = if array_size > 0 {
+                        elems[array_size as usize - 1]
+                    } else {
+                        zero  // This shouldn't happen, but handle gracefully
+                    };
+
+                    // Work backwards: if cum[i] == j+1 and pred[i], select elem[i]
+                    for i in (0..array_size as usize).rev() {
+                        let cum_matches = constructor.builder.i_equal(
+                            bool_type, None, cum_counts[i], j_plus_1
+                        )?;
+                        // Combined condition: cum[i] == j+1 AND pred[i]
+                        let should_select = constructor.builder.logical_and(
+                            bool_type, None, cum_matches, preds[i]
+                        )?;
+                        selected = constructor.builder.select(
+                            elem_spirv_type, None, should_select, elems[i], selected
+                        )?;
+                    }
+                    result_elems.push(selected);
+                }
+
+                // Construct the data array
+                let cap_const = constructor.const_i32(array_size as i32);
+                let array_type = constructor.builder.type_array(elem_spirv_type, cap_const);
+                let data_array = constructor.builder.composite_construct(
+                    array_type, None, result_elems
+                )?;
+
+                // Construct the slice struct { len, data }
+                let slice_struct = constructor.builder.composite_construct(
+                    result_type, None, vec![final_count, data_array]
+                )?;
+
+                return Ok(slice_struct);
+            }
+
             // Special case for _w_array_with - check for in-place optimization
             if func == "_w_array_with" {
                 if args.len() != 3 {
@@ -2408,9 +2587,41 @@ fn lower_index_intrinsic(
                     Ok(constructor.builder.load(result_type, None, elem_ptr, None, [])?)
                 }
                 _ => {
-                    // Slice value from a variable - assume owned slice layout
+                    // Slice value from a variable or function call - assume owned slice layout
                     // Extract data field (index 1) and index into it
-                    bail_spirv!("Slice indexing through variables not yet implemented")
+                    let slice_val = lower_expr(constructor, body, array_expr_id)?;
+
+                    // Extract the data array (at index 1 in the slice struct)
+                    // First, get the data array type from the slice type
+                    let (cap, elem_ty) = match arg0_ty {
+                        PolyType::Constructed(TypeName::Slice, type_args) if type_args.len() >= 2 => {
+                            let cap = match &type_args[0] {
+                                PolyType::Constructed(TypeName::Size(n), _) => *n as u32,
+                                _ => bail_spirv!("Slice has non-static capacity: {:?}", type_args[0]),
+                            };
+                            (cap, &type_args[1])
+                        }
+                        _ => bail_spirv!("Expected Slice type, got {:?}", arg0_ty),
+                    };
+                    let elem_spirv_type = constructor.ast_type_to_spirv(elem_ty);
+                    let cap_const = constructor.const_i32(cap as i32);
+                    let data_array_type = constructor.builder.type_array(elem_spirv_type, cap_const);
+
+                    // Extract the data array from the slice struct
+                    let data_array = constructor.builder.composite_extract(
+                        data_array_type, None, slice_val, [1]
+                    )?;
+
+                    // Store in a temporary variable for OpAccessChain
+                    let data_var = constructor.declare_variable("_w_slice_data_tmp", data_array_type)?;
+                    constructor.builder.store(data_var, data_array, None, [])?;
+
+                    // Index into the data array
+                    let elem_ptr_type =
+                        constructor.builder.type_pointer(None, StorageClass::Function, result_type);
+                    let elem_ptr =
+                        constructor.builder.access_chain(elem_ptr_type, None, data_var, [index_val])?;
+                    Ok(constructor.builder.load(result_type, None, elem_ptr, None, [])?)
                 }
             }
         }
