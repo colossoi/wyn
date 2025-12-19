@@ -19,17 +19,25 @@ def map4<[n], A, B, C, D, E>(f: A -> B -> C -> D -> E, as: [n]A, bs: [n]B, cs: [
 def map5<[n], A, B, C, D, E, F>(f: A -> B -> C -> D -> E -> F, as: [n]A, bs: [n]B, cs: [n]C, ds: [n]D, es: [n]E) -> [n]F =
   map(|i| f(as[i], bs[i], cs[i], ds[i], es[i]), 0..<length(as))
 
--- ------------------------------------------------------------
--- -- Boolean aggregation (requires && and || operators)
--- ------------------------------------------------------------
---
--- -- Test if predicate holds for all elements
--- def all<[n], A>(p: A -> bool, xs: [n]A) -> bool =
---   reduce(|a, b| a && b, true, map(p, xs))
---
--- -- Test if predicate holds for any element
--- def any<[n], A>(p: A -> bool, xs: [n]A) -> bool =
---   reduce(|a, b| a || b, false, map(p, xs))
+------------------------------------------------------------
+-- Boolean aggregation
+------------------------------------------------------------
+
+-- Test if predicate holds for all elements
+def all<[n], A>(p: A -> bool, xs: [n]A) -> bool =
+  reduce((|a: bool, b: bool| a && b), true, map(p, xs))
+
+-- Test if predicate holds for any element
+def any<[n], A>(p: A -> bool, xs: [n]A) -> bool =
+  reduce((|a: bool, b: bool| a || b), false, map(p, xs))
+
+------------------------------------------------------------
+-- Map variants
+------------------------------------------------------------
+
+-- Map a binary function over two arrays (curried form)
+def map2<[n], A, B, C>(f: A -> B -> C, xs: [n]A, ys: [n]B) -> [n]C =
+  map((|xy: (A, B)| let (x, y) = xy in f(x, y)), zip(xs, ys))
 
 ------------------------------------------------------------
 -- Zipping and unzipping

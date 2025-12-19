@@ -767,6 +767,11 @@ impl<'a> LowerCtx<'a> {
 
             // --- Calls ---
             Expr::Call { func, args } => {
+                // Special case for reduce - generate a loop
+                if func == "reduce" {
+                    return self.lower_reduce(body, args, ty, output);
+                }
+
                 let mut arg_strs = Vec::new();
                 for &arg in args {
                     arg_strs.push(self.lower_expr(body, arg, output)?);
@@ -1059,6 +1064,93 @@ impl<'a> LowerCtx<'a> {
         writeln!(output, "{}}}", self.indent_str()).unwrap();
 
         Ok(loop_var_name)
+    }
+
+    /// Lower a reduce call to a GLSL for loop
+    /// reduce op ne array -> scalar
+    fn lower_reduce(
+        &mut self,
+        body: &Body,
+        args: &[ExprId],
+        ret_ty: &PolyType<TypeName>,
+        output: &mut String,
+    ) -> Result<String> {
+        if args.len() != 3 {
+            bail_glsl!("reduce requires 3 args (op, ne, array), got {}", args.len());
+        }
+
+        // Extract lambda name from the operator closure
+        let op_func_name = match body.get_expr(args[0]) {
+            Expr::Closure { lambda_name, .. } => lambda_name.clone(),
+            Expr::Global(name) => name.clone(),
+            other => bail_glsl!("reduce operator must be a closure or function reference, got {:?}", other),
+        };
+
+        // Lower neutral element and array
+        let neutral_val = self.lower_expr(body, args[1], output)?;
+        let array_val = self.lower_expr(body, args[2], output)?;
+
+        // Get array size from type
+        let arr_ty = body.get_type(args[2]);
+        let array_size = match arr_ty {
+            PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 2 => {
+                match &type_args[0] {
+                    PolyType::Constructed(TypeName::Size(n), _) => *n,
+                    _ => bail_glsl!("Invalid array size type for reduce"),
+                }
+            }
+            _ => bail_glsl!("reduce input must be array type"),
+        };
+
+        // Generate accumulator variable
+        let acc_name = format!("_w_reduce_acc_{}", self.temp_counter);
+        self.temp_counter += 1;
+        let acc_ty_str = self.type_to_glsl(ret_ty);
+
+        // Emit: type acc = ne;
+        writeln!(
+            output,
+            "{}{} {} = {};",
+            self.indent_str(),
+            acc_ty_str,
+            acc_name,
+            neutral_val
+        )
+        .unwrap();
+
+        // Emit: for (int i = 0; i < N; i++) { acc = op(acc, array[i]); }
+        let loop_var = format!("_w_reduce_i_{}", self.temp_counter);
+        self.temp_counter += 1;
+
+        writeln!(
+            output,
+            "{}for (int {} = 0; {} < {}; {}++) {{",
+            self.indent_str(),
+            loop_var,
+            loop_var,
+            array_size,
+            loop_var
+        )
+        .unwrap();
+
+        self.indent += 1;
+        writeln!(
+            output,
+            "{}{} = {}({}, {}[{}]);",
+            self.indent_str(),
+            acc_name,
+            op_func_name,
+            acc_name,
+            array_val,
+            loop_var
+        )
+        .unwrap();
+        self.indent -= 1;
+
+        writeln!(output, "{}}}", self.indent_str()).unwrap();
+
+        // Return the accumulator variable name
+        Ok(acc_name)
     }
 
     fn type_to_glsl(&mut self, ty: &PolyType<TypeName>) -> String {

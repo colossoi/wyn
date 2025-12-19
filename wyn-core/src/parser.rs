@@ -1220,37 +1220,38 @@ impl<'a> Parser<'a> {
         self.parse_binary_expression_with_precedence(0)
     }
 
-    fn get_operator_precedence(op: &str) -> Option<(i32, bool)> {
+    fn get_operator_precedence(op: &str) -> Option<(u32, bool)> {
         // Returns (precedence, is_left_associative)
-        // Higher precedence binds tighter
-        // Based on SPECIFICATION.md operator precedence table
+        // Dominating precedence (higher number) binds tighter than dominated precedence
+        // Based on SPECIFICATION.md operator precedence table:
+        //   || (dominated) < && < comparisons < bitwise < shifts < +- < */% < |> < ** (dominating)
         match op {
-            "**" => Some((7, true)),                                  // Exponentiation
-            "|>" => Some((6, true)),                                  // Pipe operator
-            "*" | "/" | "%" | "//" | "%%" => Some((4, true)),         // Multiplication, division, modulo
-            "+" | "-" => Some((3, true)),                             // Addition and subtraction
-            "<<" | ">>" | ">>>" => Some((2, true)),                   // Bitwise shifts
-            "&" | "^" | "|" => Some((1, true)),                       // Bitwise operators
-            "==" | "!=" | "<" | ">" | "<=" | ">=" => Some((0, true)), // Comparison operators
-            "&&" => Some((-1, true)),                                 // Logical and
-            "||" => Some((-2, true)),                                 // Logical or
+            "||" => Some((1, true)),                                  // Logical or (most dominated)
+            "&&" => Some((2, true)),                                  // Logical and
+            "==" | "!=" | "<" | ">" | "<=" | ">=" => Some((3, true)), // Comparison operators
+            "&" | "^" | "|" => Some((4, true)),                       // Bitwise operators
+            "<<" | ">>" | ">>>" => Some((5, true)),                   // Bitwise shifts
+            "+" | "-" => Some((6, true)),                             // Addition and subtraction
+            "*" | "/" | "%" | "//" | "%%" => Some((7, true)),         // Multiplication, division, modulo
+            "|>" => Some((8, true)),                                  // Pipe operator
+            "**" => Some((9, true)),                                  // Exponentiation (most dominating binary)
             _ => None,
         }
     }
 
-    fn parse_binary_expression_with_precedence(&mut self, min_precedence: i32) -> Result<Expression> {
+    fn parse_binary_expression_with_precedence(&mut self, dominated_by: u32) -> Result<Expression> {
         trace!(
             "parse_binary_expression_with_precedence({}): next token = {:?}",
-            min_precedence,
+            dominated_by,
             self.peek()
         );
         let mut left = self.parse_unary_expression()?;
 
         loop {
             // Handle 'with' as a special left-associative operator
-            // with has precedence 8 (higher than all binary operators)
+            // with has precedence 10 (dominates all binary operators)
             // arr with [i] = v with [j] = w parses as ((arr with [i] = v) with [j] = w)
-            if self.check(&Token::With) && min_precedence <= 8 {
+            if self.check(&Token::With) && dominated_by <= 10 {
                 let start_span = left.h.span;
                 self.advance(); // consume 'with'
 
@@ -1264,8 +1265,8 @@ impl<'a> Parser<'a> {
                 self.expect(Token::RightBracket)?;
                 self.expect(Token::Assign)?;
 
-                // Parse value at precedence 9 (higher than with) for left-associativity
-                let value = self.parse_binary_expression_with_precedence(9)?;
+                // Parse value dominated by 11 for left-associativity
+                let value = self.parse_binary_expression_with_precedence(11)?;
                 let end_span = self.previous_span();
                 let span = start_span.merge(&end_span);
 
@@ -1294,22 +1295,22 @@ impl<'a> Parser<'a> {
                 None => break,
             };
 
-            // Check if this operator has high enough precedence to be parsed here
-            if precedence < min_precedence {
+            // Check if this operator dominates our current context
+            if precedence < dominated_by {
                 break;
             }
 
             // Consume the operator
             self.advance();
 
-            // Parse right side with appropriate precedence
-            let next_min_precedence = if is_left_assoc {
-                precedence + 1 // For left-associative, parse with higher precedence
+            // Parse right side: left-associative ops require dominating precedence on right
+            let right_dominated_by = if is_left_assoc {
+                precedence + 1 // Left-assoc: right side dominated by this op's level + 1
             } else {
-                precedence // For right-associative, parse with same precedence
+                precedence // Right-assoc: right side at same level
             };
 
-            let right = self.parse_binary_expression_with_precedence(next_min_precedence)?;
+            let right = self.parse_binary_expression_with_precedence(right_dominated_by)?;
 
             // Build the appropriate operation with span from left to right
             let span = left.h.span.merge(&right.h.span);
@@ -1654,6 +1655,7 @@ impl<'a> Parser<'a> {
             }
             Some(Token::LeftBrace) => self.parse_record_literal(),
             Some(Token::Pipe) => self.parse_lambda(),
+            Some(Token::BinOp(op)) if op == "||" => self.parse_lambda(), // Empty lambda: || body
             Some(Token::Let) => self.parse_let_in(),
             Some(Token::If) => self.parse_if_then_else(),
             Some(Token::Loop) => self.parse_loop(),
@@ -1935,24 +1937,32 @@ impl<'a> Parser<'a> {
         Ok(self.node_counter.mk_node(ExprKind::RecordLiteral(fields), span))
     }
 
-    /// Parse lambda: |x, y| body or |x: i32| -> i32 body
+    /// Parse lambda: |x, y| body or |x: i32| -> i32 body or || body (empty params)
     fn parse_lambda(&mut self) -> Result<Expression> {
         trace!("parse_lambda: next token = {:?}", self.peek());
         let start_span = self.current_span();
-        self.expect(Token::Pipe)?; // Opening |
 
-        let mut params = Vec::new();
-        if !self.check(&Token::Pipe) {
-            loop {
-                params.push(self.parse_pattern()?);
-                if !self.check(&Token::Comma) {
-                    break;
+        // Handle empty lambda || (tokenized as BinOp("||")) vs regular |params|
+        let params = if self.check(&Token::BinOp(String::from("||"))) {
+            self.advance(); // consume ||
+            vec![] // empty params
+        } else {
+            self.expect(Token::Pipe)?; // Opening |
+
+            let mut params = Vec::new();
+            if !self.check(&Token::Pipe) {
+                loop {
+                    params.push(self.parse_pattern()?);
+                    if !self.check(&Token::Comma) {
+                        break;
+                    }
+                    self.advance(); // consume comma
                 }
-                self.advance(); // consume comma
             }
-        }
 
-        self.expect(Token::Pipe)?; // Closing |
+            self.expect(Token::Pipe)?; // Closing |
+            params
+        };
 
         // Parse optional return type: -> type
         // Use parse_array_or_base_type to avoid consuming the body expression as a type arg

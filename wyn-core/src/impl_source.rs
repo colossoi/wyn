@@ -117,6 +117,9 @@ pub enum Intrinsic {
     /// Bitcast i32 to u32 (reinterpret bits)
     /// _w_bitcast_i32_to_u32 : i32 -> u32
     BitcastI32ToU32,
+    /// Reduce an array using a binary operator and neutral element
+    /// reduce : (a -> a -> a) -> a -> [n]a -> a
+    Reduce,
 }
 
 /// Implementation source for all builtin functions and intrinsics
@@ -748,6 +751,9 @@ impl ImplSource {
 
         // Note: map and zip are registered manually in TypeChecker::load_builtins
         // because they involve function types which need more careful handling
+
+        // reduce : (a -> a -> a) -> a -> [n]a -> a
+        self.register("reduce", BuiltinImpl::Intrinsic(Intrinsic::Reduce));
     }
 
     /// Register misc intrinsics

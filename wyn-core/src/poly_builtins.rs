@@ -383,7 +383,14 @@ impl PolyBuiltins {
         let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
         self.register_poly("_w_array_with", vec![array_a.clone(), i32_ty, a], array_a);
 
-        // TODO: zip, reduce, etc.
+        // reduce : ∀a n. (a -> a -> a) -> a -> [n]a -> a
+        let a = ctx.new_variable();
+        let n = ctx.new_variable();
+        let op_type = Type::arrow(a.clone(), Type::arrow(a.clone(), a.clone())); // a -> a -> a
+        let array_a = Type::Constructed(TypeName::Array, vec![n, a.clone()]);
+        self.register_poly("reduce", vec![op_type, a.clone(), array_a], a);
+
+        // TODO: zip, filter, scatter, etc.
 
         // Misc utility intrinsics
         self.register_misc_intrinsics();

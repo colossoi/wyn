@@ -1245,6 +1245,10 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                     Ok(constructor.builder.s_greater_than_equal(bool_type, None, lhs_id, rhs_id)?)
                 }
 
+                // Logical operations (boolean)
+                ("&&", _) => Ok(constructor.builder.logical_and(bool_type, None, lhs_id, rhs_id)?),
+                ("||", _) => Ok(constructor.builder.logical_or(bool_type, None, lhs_id, rhs_id)?),
+
                 _ => Err(err_spirv!("Unknown binary op: {}", op)),
             }
         }
@@ -1610,6 +1614,85 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                 }
             }
 
+            // Special case for reduce - sequential loop reduction
+            if func == "reduce" {
+                // reduce op ne array -> scalar
+                // args[0] is closure tuple (_w_lambda_name, captures) for the binary operator
+                // args[1] is neutral element
+                // args[2] is input array
+                if args.len() != 3 {
+                    bail_spirv!("reduce requires 3 args (op, ne, array), got {}", args.len());
+                }
+
+                // Extract lambda/function name and captures from operator argument
+                let (func_name, closure_val, is_empty_closure) = match body.get_expr(args[0]) {
+                    Expr::Closure {
+                        lambda_name,
+                        captures,
+                    } => {
+                        let is_empty = is_empty_closure_type(body.get_type(*captures));
+                        let closure_val = if is_empty {
+                            constructor.const_i32(0)
+                        } else {
+                            lower_expr(constructor, body, args[0])?
+                        };
+                        (lambda_name.clone(), closure_val, is_empty)
+                    }
+                    Expr::Global(name) => {
+                        // Named function reference - treat like empty closure
+                        (name.clone(), constructor.const_i32(0), true)
+                    }
+                    other => {
+                        bail_spirv!(
+                            "reduce operator must be a closure or function reference, got {:?}",
+                            other
+                        );
+                    }
+                };
+
+                // Lower neutral element and array
+                let neutral_val = lower_expr(constructor, body, args[1])?;
+                let array_val = lower_expr(constructor, body, args[2])?;
+
+                // Get array size from the array type
+                let arg2_ty = body.get_type(args[2]);
+                let (array_size, elem_type) = match arg2_ty {
+                    PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 2 => {
+                        let size = match &type_args[0] {
+                            PolyType::Constructed(TypeName::Size(n), _) => *n as u32,
+                            _ => bail_spirv!("Invalid array size type for reduce"),
+                        };
+                        let elem = constructor.ast_type_to_spirv(&type_args[1]);
+                        (size, elem)
+                    }
+                    _ => bail_spirv!("reduce input must be array type"),
+                };
+
+                // Look up the operator function by name
+                let op_func_id = *constructor
+                    .functions
+                    .get(&func_name)
+                    .ok_or_else(|| err_spirv!("Operator function not found: {}", func_name))?;
+
+                // Sequential reduction: acc = ne; for each elem: acc = op(acc, elem)
+                let mut acc = neutral_val;
+                for i in 0..array_size {
+                    // Extract element from array
+                    let elem = constructor.builder.composite_extract(elem_type, None, array_val, [i])?;
+
+                    // Call operator: op(acc, elem)
+                    // For empty closures, pass (acc, elem); otherwise pass (closure, acc, elem)
+                    let call_args = if is_empty_closure {
+                        vec![acc, elem]
+                    } else {
+                        vec![closure_val, acc, elem]
+                    };
+                    acc = constructor.builder.function_call(result_type, None, op_func_id, call_args)?;
+                }
+
+                return Ok(acc);
+            }
+
             // Special case for _w_array_with - check for in-place optimization
             if func == "_w_array_with" {
                 if args.len() != 3 {
@@ -1902,6 +1985,10 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                                             None,
                                             value_id,
                                         )?)
+                                    }
+                                    Intrinsic::Reduce => {
+                                        // reduce is handled specially above, should not reach here
+                                        bail_spirv!("BUG: reduce intrinsic should be handled specially")
                                     }
                                 }
                             }

@@ -1147,3 +1147,54 @@ def fragment_main(#[builtin(frag_coord)] pos:vec4f32) -> #[location(0)] vec4f32 
     println!("MIR output:\n{}", mir_str);
     assert!(mir_str.contains("fragment_main"));
 }
+
+#[test]
+fn test_reduce_with_lambda() {
+    // Test that reduce with a lambda generates correct MIR
+    let mir = flatten_program(
+        r#"
+def sum_array(arr: [4]f32) -> f32 =
+    reduce((|acc: f32, x: f32| acc + x), 0.0, arr)
+"#,
+    );
+
+    // Should have the sum_array function and a lambda function
+    assert!(mir.defs.len() >= 2, "Expected sum_array function + lambda");
+
+    // Lambda registry should have the lambda function for the binary operator
+    assert_eq!(mir.lambda_registry.len(), 1, "Expected 1 lambda in registry for reduce operator");
+    let (_, info) = mir.lambda_registry.iter().next().unwrap();
+    assert_eq!(info.arity, 2, "reduce operator lambda should have arity 2");
+
+    // Check that reduce call exists with closure
+    let mut has_reduce_call = false;
+    for def in &mir.defs {
+        if let mir::Def::Function { body, name, .. } = def {
+            if name == "sum_array" {
+                for expr in &body.exprs {
+                    if let mir::Expr::Call { func, args } = expr {
+                        if func == "reduce" && args.len() == 3 {
+                            has_reduce_call = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(has_reduce_call, "Expected reduce call with 3 arguments");
+}
+
+#[test]
+fn test_reduce_product() {
+    // Test reduce for computing product
+    let mir = flatten_program(
+        r#"
+def product_array(arr: [4]f32) -> f32 =
+    reduce((|acc: f32, x: f32| acc * x), 1.0, arr)
+"#,
+    );
+
+    // Should compile successfully
+    let sum_def = find_def(&mir, "product_array");
+    assert!(matches!(sum_def, mir::Def::Function { .. }));
+}

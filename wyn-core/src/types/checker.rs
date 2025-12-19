@@ -1607,6 +1607,19 @@ impl<'a> TypeChecker<'a> {
                         // Comparison operators return boolean
                         Ok(Type::Constructed(TypeName::Str("bool"), vec![]))
                     }
+                    "&&" | "||" => {
+                        // Logical operators require boolean operands and return boolean
+                        let bool_type = Type::Constructed(TypeName::Str("bool"), vec![]);
+                        self.context.unify(&left_type, &bool_type).map_err(|_| {
+                            err_type_at!(
+                                expr.h.span,
+                                "Logical operator '{}' requires boolean operands, got {}",
+                                op.op,
+                                self.format_type(&left_type)
+                            )
+                        })?;
+                        Ok(bool_type)
+                    }
                     "+" | "-" | "*" | "/" | "%" | "**" => {
                         // Arithmetic operators return the same type as operands
                         Ok(left_type.apply(&self.context))
