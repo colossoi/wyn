@@ -1,13 +1,14 @@
 //! Module manager for lazy loading and caching module definitions
 
 use crate::ast::{
-    Decl, Declaration, ModuleExpression, ModuleTypeExpression, Node, NodeCounter, Pattern, PatternKind,
-    Program, Spec, Type, TypeName, TypeParam,
+    Decl, Declaration, ModuleExpression, ModuleTypeExpression, Node, NodeCounter, NodeId, Pattern,
+    PatternKind, Program, Spec, Type, TypeName, TypeParam,
 };
 use crate::error::Result;
 use crate::lexer;
 use crate::parser::Parser;
 use crate::scope::ScopeStack;
+use crate::types::checker::TypeChecker;
 use crate::{bail_module, err_module, err_parse};
 use polytype::{Context, TypeScheme};
 use std::collections::{HashMap, HashSet};
@@ -122,6 +123,8 @@ pub struct PreElaboratedPrelude {
     pub type_aliases: HashMap<String, Type>,
     /// Top-level prelude function declarations (auto-imported)
     pub prelude_functions: HashMap<String, Decl>,
+    /// Type table for prelude function bodies (from type-checking during prelude creation)
+    pub prelude_type_table: HashMap<NodeId, TypeScheme<TypeName>>,
 }
 
 /// Manages lazy loading of module files
@@ -136,6 +139,8 @@ pub struct ModuleManager {
     type_aliases: HashMap<String, Type>,
     /// Top-level prelude function declarations (auto-imported)
     prelude_functions: HashMap<String, Decl>,
+    /// Type table for prelude function bodies
+    prelude_type_table: HashMap<NodeId, TypeScheme<TypeName>>,
 }
 
 impl ModuleManager {
@@ -176,6 +181,7 @@ impl ModuleManager {
             known_modules,
             type_aliases: HashMap::new(),
             prelude_functions: HashMap::new(),
+            prelude_type_table: HashMap::new(),
         }
     }
 
@@ -194,12 +200,20 @@ impl ModuleManager {
     pub fn create_prelude(node_counter: &mut NodeCounter) -> Result<PreElaboratedPrelude> {
         let mut manager = Self::new_empty();
         manager.load_prelude_files(node_counter)?;
+
+        // Type-check prelude functions to populate the type table
+        let mut checker = TypeChecker::new(&manager);
+        checker.load_builtins()?;
+        checker.check_prelude_functions()?;
+        let prelude_type_table = checker.into_type_table();
+
         Ok(PreElaboratedPrelude {
             module_type_registry: manager.module_type_registry,
             elaborated_modules: manager.elaborated_modules,
             known_modules: manager.known_modules,
             type_aliases: manager.type_aliases,
             prelude_functions: manager.prelude_functions,
+            prelude_type_table,
         })
     }
 
@@ -212,6 +226,7 @@ impl ModuleManager {
             known_modules: prelude.known_modules.clone(),
             type_aliases: prelude.type_aliases.clone(),
             prelude_functions: prelude.prelude_functions.clone(),
+            prelude_type_table: prelude.prelude_type_table.clone(),
         }
     }
 
@@ -716,6 +731,11 @@ impl ModuleManager {
     /// These are auto-imported functions from prelude files
     pub fn get_prelude_function_declarations(&self) -> Vec<&Decl> {
         self.prelude_functions.values().collect()
+    }
+
+    /// Get the type table for prelude function bodies
+    pub fn get_prelude_type_table(&self) -> &HashMap<NodeId, TypeScheme<TypeName>> {
+        &self.prelude_type_table
     }
 
     /// Check if a name is a qualified module reference (e.g., "f32.sum")

@@ -1065,6 +1065,32 @@ impl<'a> TypeChecker<'a> {
         Ok(())
     }
 
+    /// Type-check all prelude functions.
+    /// Called during prelude creation to populate the type table for prelude function bodies.
+    pub fn check_prelude_functions(&mut self) -> Result<()> {
+        // Collect all prelude function declarations to avoid borrowing issues
+        let prelude_functions: Vec<crate::ast::Decl> = self
+            .module_manager
+            .get_prelude_function_declarations()
+            .into_iter()
+            .cloned()
+            .collect();
+
+        // Type-check each prelude function
+        for decl in prelude_functions {
+            debug!("Type-checking prelude function: {}", decl.name);
+            self.check_decl(&decl)?;
+        }
+
+        Ok(())
+    }
+
+    /// Consume the type checker and return the type table.
+    /// Used to extract the prelude type table after type-checking prelude functions.
+    pub fn into_type_table(self) -> std::collections::HashMap<crate::ast::NodeId, TypeScheme> {
+        self.type_table
+    }
+
     /// Resolve type aliases in a declaration within a module context
     fn resolve_decl_type_aliases(&self, decl: &crate::ast::Decl, module_name: &str) -> crate::ast::Decl {
         // Resolve type aliases in the return type
