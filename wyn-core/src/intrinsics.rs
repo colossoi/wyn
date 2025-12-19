@@ -1,4 +1,4 @@
-// Polymorphic builtin registry
+// Polymorphic intrinsic registry
 // Provides type schemes for truly polymorphic functions (map, magnitude, matrix ops, etc.)
 // Implementations come from ImplSource
 
@@ -7,15 +7,15 @@ use crate::type_checker::TypeVarGenerator;
 use polytype::Context;
 use std::collections::HashMap;
 
-/// Entry for a builtin with its type scheme
+/// Entry for a intrinsic with its type scheme
 #[derive(Debug, Clone)]
-pub struct BuiltinEntry {
+pub struct IntrinsicEntry {
     /// Type scheme (e.g., "forall a. a -> a")
     pub scheme: TypeScheme,
 }
 
-impl BuiltinEntry {
-    /// Compute the arity (number of arguments) of this builtin
+impl IntrinsicEntry {
+    /// Compute the arity (number of arguments) of this intrinsic
     pub fn arity(&self) -> usize {
         fn count_arrows(ty: &Type) -> usize {
             match ty {
@@ -35,17 +35,17 @@ impl BuiltinEntry {
     }
 }
 
-/// Result of looking up a builtin - either a single entry or an overload set
-pub enum BuiltinLookup<'a> {
-    /// Single builtin with no overloads
-    Single(&'a BuiltinEntry),
+/// Result of looking up a intrinsic - either a single entry or an overload set
+pub enum IntrinsicLookup<'a> {
+    /// Single intrinsic with no overloads
+    Single(&'a IntrinsicEntry),
     /// Multiple overloads that need resolution based on argument types
     Overloaded(OverloadSet<'a>),
 }
 
-/// A set of overloaded builtins that need type-based resolution
+/// A set of overloaded intrinsics that need type-based resolution
 pub struct OverloadSet<'a> {
-    entries: &'a [BuiltinEntry],
+    entries: &'a [IntrinsicEntry],
     arity: usize,
 }
 
@@ -68,7 +68,7 @@ impl<'a> OverloadSet<'a> {
         &self,
         arg_types: &[Type],
         ctx: &mut Context<TypeName>,
-    ) -> Option<(&'a BuiltinEntry, Type)> {
+    ) -> Option<(&'a IntrinsicEntry, Type)> {
         for entry in self.entries {
             // Save context for backtracking
             let saved_context = ctx.clone();
@@ -117,21 +117,21 @@ impl<'a> OverloadSet<'a> {
     }
 
     /// Get the entries (for error messages)
-    pub fn entries(&self) -> &[BuiltinEntry] {
+    pub fn entries(&self) -> &[IntrinsicEntry] {
         self.entries
     }
 }
 
-/// Registry for polymorphic builtin types
-pub struct PolyBuiltins {
+/// Registry for polymorphic intrinsic types
+pub struct IntrinsicSource {
     /// Maps function name to entry or entries (for overloads)
-    builtins: HashMap<String, Vec<BuiltinEntry>>,
+    intrinsics: HashMap<String, Vec<IntrinsicEntry>>,
 }
 
-impl PolyBuiltins {
+impl IntrinsicSource {
     pub fn new(ctx: &mut impl TypeVarGenerator) -> Self {
-        let mut registry = PolyBuiltins {
-            builtins: HashMap::new(),
+        let mut registry = IntrinsicSource {
+            intrinsics: HashMap::new(),
         };
 
         registry.register_scalar_math_functions(ctx);
@@ -142,11 +142,11 @@ impl PolyBuiltins {
         registry
     }
 
-    /// Add an overload for a builtin.
+    /// Add an overload for a intrinsic.
     /// Asserts that all overloads for the same name have the same arity.
-    fn add_overload(&mut self, name: String, entry: BuiltinEntry) {
+    fn add_overload(&mut self, name: String, entry: IntrinsicEntry) {
         let new_arity = entry.arity();
-        let entries = self.builtins.entry(name.clone()).or_insert_with(Vec::new);
+        let entries = self.intrinsics.entry(name.clone()).or_insert_with(Vec::new);
         if let Some(existing) = entries.first() {
             let existing_arity = existing.arity();
             assert_eq!(
@@ -158,7 +158,7 @@ impl PolyBuiltins {
         entries.push(entry);
     }
 
-    /// Register a polymorphic builtin function
+    /// Register a polymorphic intrinsic function
     fn register_poly(&mut self, name: &str, param_types: Vec<Type>, return_type: Type) {
         let mut func_type = return_type;
         for param_type in param_types.iter().rev() {
@@ -177,18 +177,18 @@ impl PolyBuiltins {
             };
         }
 
-        let entry = BuiltinEntry { scheme };
+        let entry = IntrinsicEntry { scheme };
         self.add_overload(name.to_string(), entry);
     }
 
-    /// Get a builtin by name
-    pub fn get(&self, name: &str) -> Option<BuiltinLookup<'_>> {
-        self.builtins.get(name).map(|entries| {
+    /// Get a intrinsic by name
+    pub fn get(&self, name: &str) -> Option<IntrinsicLookup<'_>> {
+        self.intrinsics.get(name).map(|entries| {
             if entries.len() == 1 {
-                BuiltinLookup::Single(&entries[0])
+                IntrinsicLookup::Single(&entries[0])
             } else {
                 let arity = entries[0].arity();
-                BuiltinLookup::Overloaded(OverloadSet { entries, arity })
+                IntrinsicLookup::Overloaded(OverloadSet { entries, arity })
             }
         })
     }
@@ -472,7 +472,7 @@ impl PolyBuiltins {
     }
 }
 
-impl Default for PolyBuiltins {
+impl Default for IntrinsicSource {
     fn default() -> Self {
         let mut ctx = polytype::Context::<TypeName>::default();
         Self::new(&mut ctx)

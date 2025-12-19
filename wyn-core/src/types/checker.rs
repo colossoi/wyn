@@ -58,7 +58,7 @@ pub struct TypeChecker<'a> {
     context: Context<TypeName>,          // Polytype unification context
     record_field_map: HashMap<(String, String), Type>, // Map (type_name, field_name) -> field_type
     impl_source: crate::impl_source::ImplSource, // Implementation source for code generation
-    poly_builtins: crate::poly_builtins::PolyBuiltins, // Type registry for polymorphic builtins
+    intrinsics: crate::intrinsics::IntrinsicSource, // Type registry for polymorphic builtins
     module_manager: &'a crate::module_manager::ModuleManager, // Lazy module loading
     type_table: HashMap<crate::ast::NodeId, TypeScheme>, // Maps NodeId to type scheme
     warnings: Vec<TypeWarning>,          // Collected warnings
@@ -309,14 +309,14 @@ impl<'a> TypeChecker<'a> {
     pub fn new(module_manager: &'a crate::module_manager::ModuleManager) -> Self {
         let mut context = Context::default();
         let impl_source = crate::impl_source::ImplSource::new();
-        let poly_builtins = crate::poly_builtins::PolyBuiltins::new(&mut context);
+        let poly_builtins = crate::intrinsics::IntrinsicSource::new(&mut context);
 
         TypeChecker {
             scope_stack: ScopeStack::new(),
             context,
             record_field_map: HashMap::new(),
             impl_source,
-            poly_builtins,
+            intrinsics: poly_builtins,
             module_manager,
             type_table: HashMap::new(),
             warnings: Vec::new(),
@@ -1412,11 +1412,11 @@ impl<'a> TypeChecker<'a> {
 
                 // For qualified names, check builtins with full name first
                 if !quals.is_empty() {
-                    if let Some(lookup) = self.poly_builtins.get(&full_name) {
-                        use crate::poly_builtins::BuiltinLookup;
+                    if let Some(lookup) = self.intrinsics.get(&full_name) {
+                        use crate::intrinsics::IntrinsicLookup;
                         let ty = match lookup {
-                            BuiltinLookup::Single(entry) => entry.scheme.instantiate(&mut self.context),
-                            BuiltinLookup::Overloaded(overloads) => overloads.fresh_type(&mut self.context),
+                            IntrinsicLookup::Single(entry) => entry.scheme.instantiate(&mut self.context),
+                            IntrinsicLookup::Overloaded(overloads) => overloads.fresh_type(&mut self.context),
                         };
                         self.type_table.insert(expr.h.id, polytype::TypeScheme::Monotype(ty.clone()));
                         return Ok(ty);
@@ -1437,13 +1437,13 @@ impl<'a> TypeChecker<'a> {
                     debug!("Found '{}' in scope stack with type: {:?}", full_name, type_scheme);
                     // Instantiate the type scheme to get a concrete type
                     Ok(type_scheme.instantiate(&mut self.context))
-                } else if let Some(lookup) = self.poly_builtins.get(&full_name) {
+                } else if let Some(lookup) = self.intrinsics.get(&full_name) {
                     // Check polymorphic builtins for polymorphic function types
-                    use crate::poly_builtins::BuiltinLookup;
+                    use crate::intrinsics::IntrinsicLookup;
                     debug!("'{}' is a polymorphic builtin", full_name);
                     let func_type = match lookup {
-                        BuiltinLookup::Single(entry) => entry.scheme.instantiate(&mut self.context),
-                        BuiltinLookup::Overloaded(overloads) => overloads.fresh_type(&mut self.context),
+                        IntrinsicLookup::Single(entry) => entry.scheme.instantiate(&mut self.context),
+                        IntrinsicLookup::Overloaded(overloads) => overloads.fresh_type(&mut self.context),
                     };
                     debug!("Built function type for builtin '{}': {:?}", full_name, func_type);
                     Ok(func_type)
@@ -1786,11 +1786,11 @@ impl<'a> TypeChecker<'a> {
                             None
                         } else {
                             // Check builtins - extract arity from type scheme
-                            use crate::poly_builtins::BuiltinLookup;
-                            if let Some(lookup) = self.poly_builtins.get(&full_name) {
+                            use crate::intrinsics::IntrinsicLookup;
+                            if let Some(lookup) = self.intrinsics.get(&full_name) {
                                 let ty = match lookup {
-                                    BuiltinLookup::Single(entry) => entry.scheme.instantiate(&mut self.context),
-                                    BuiltinLookup::Overloaded(overloads) => overloads.fresh_type(&mut self.context),
+                                    IntrinsicLookup::Single(entry) => entry.scheme.instantiate(&mut self.context),
+                                    IntrinsicLookup::Overloaded(overloads) => overloads.fresh_type(&mut self.context),
                                 };
                                 Some(count_arrows(&ty))
                             } else if !quals.is_empty() {
@@ -1830,10 +1830,10 @@ impl<'a> TypeChecker<'a> {
                     } else {
                         format!("{}.{}", quals.join("."), name)
                     };
-                    use crate::poly_builtins::BuiltinLookup;
+                    use crate::intrinsics::IntrinsicLookup;
                     // Clone entries to release the borrow on self.poly_builtins
-                    let overload_entries = match self.poly_builtins.get(&full_name) {
-                        Some(BuiltinLookup::Overloaded(overload_set)) => {
+                    let overload_entries = match self.intrinsics.get(&full_name) {
+                        Some(IntrinsicLookup::Overloaded(overload_set)) => {
                             Some(overload_set.entries().to_vec())
                         }
                         _ => None,
@@ -1894,11 +1894,11 @@ impl<'a> TypeChecker<'a> {
                     }
 
                     // Check if this is a polymorphic builtin (e.g., magnitude, normalize)
-                    if let Some(lookup) = self.poly_builtins.get(&dotted) {
-                        use crate::poly_builtins::BuiltinLookup;
+                    if let Some(lookup) = self.intrinsics.get(&dotted) {
+                        use crate::intrinsics::IntrinsicLookup;
                         let ty = match lookup {
-                            BuiltinLookup::Single(entry) => entry.scheme.instantiate(&mut self.context),
-                            BuiltinLookup::Overloaded(overloads) => overloads.fresh_type(&mut self.context),
+                            IntrinsicLookup::Single(entry) => entry.scheme.instantiate(&mut self.context),
+                            IntrinsicLookup::Overloaded(overloads) => overloads.fresh_type(&mut self.context),
                         };
                         self.type_table.insert(expr.h.id, TypeScheme::Monotype(ty.clone()));
                         return Ok(ty);

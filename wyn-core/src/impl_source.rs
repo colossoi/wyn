@@ -588,34 +588,40 @@ impl ImplSource {
         self.register("f16.f64", BuiltinImpl::PrimOp(PrimOp::FPConvert));
 
         // Conversions from signed integers to f16 (internal builtins)
-        self.register("_w_builtin_f16_from_i8", BuiltinImpl::PrimOp(PrimOp::SIToFP));
-        self.register("_w_builtin_f16_from_i16", BuiltinImpl::PrimOp(PrimOp::SIToFP));
-        self.register("_w_builtin_f16_from_i32", BuiltinImpl::PrimOp(PrimOp::SIToFP));
-        self.register("_w_builtin_f16_from_i64", BuiltinImpl::PrimOp(PrimOp::SIToFP));
+        self.register("_w_intrinsic_f16_from_i8", BuiltinImpl::PrimOp(PrimOp::SIToFP));
+        self.register("_w_intrinsic_f16_from_i16", BuiltinImpl::PrimOp(PrimOp::SIToFP));
+        self.register("_w_intrinsic_f16_from_i32", BuiltinImpl::PrimOp(PrimOp::SIToFP));
+        self.register("_w_intrinsic_f16_from_i64", BuiltinImpl::PrimOp(PrimOp::SIToFP));
 
         // Conversions from unsigned integers to f16
-        self.register("_w_builtin_f16_from_u8", BuiltinImpl::PrimOp(PrimOp::UIToFP));
-        self.register("_w_builtin_f16_from_u16", BuiltinImpl::PrimOp(PrimOp::UIToFP));
-        self.register("_w_builtin_f16_from_u32", BuiltinImpl::PrimOp(PrimOp::UIToFP));
-        self.register("_w_builtin_f16_from_u64", BuiltinImpl::PrimOp(PrimOp::UIToFP));
+        self.register("_w_intrinsic_f16_from_u8", BuiltinImpl::PrimOp(PrimOp::UIToFP));
+        self.register("_w_intrinsic_f16_from_u16", BuiltinImpl::PrimOp(PrimOp::UIToFP));
+        self.register("_w_intrinsic_f16_from_u32", BuiltinImpl::PrimOp(PrimOp::UIToFP));
+        self.register("_w_intrinsic_f16_from_u64", BuiltinImpl::PrimOp(PrimOp::UIToFP));
 
         // Conversions from other floats to f16
-        self.register("_w_builtin_f16_from_f32", BuiltinImpl::PrimOp(PrimOp::FPConvert));
-        self.register("_w_builtin_f16_from_f64", BuiltinImpl::PrimOp(PrimOp::FPConvert));
+        self.register(
+            "_w_intrinsic_f16_from_f32",
+            BuiltinImpl::PrimOp(PrimOp::FPConvert),
+        );
+        self.register(
+            "_w_intrinsic_f16_from_f64",
+            BuiltinImpl::PrimOp(PrimOp::FPConvert),
+        );
 
         // Conversions from f16 to integers
-        self.register("_w_builtin_f16_to_i8", BuiltinImpl::PrimOp(PrimOp::FPToSI));
-        self.register("_w_builtin_f16_to_i16", BuiltinImpl::PrimOp(PrimOp::FPToSI));
-        self.register("_w_builtin_f16_to_i32", BuiltinImpl::PrimOp(PrimOp::FPToSI));
-        self.register("_w_builtin_f16_to_i64", BuiltinImpl::PrimOp(PrimOp::FPToSI));
-        self.register("_w_builtin_f16_to_u8", BuiltinImpl::PrimOp(PrimOp::FPToUI));
-        self.register("_w_builtin_f16_to_u16", BuiltinImpl::PrimOp(PrimOp::FPToUI));
-        self.register("_w_builtin_f16_to_u32", BuiltinImpl::PrimOp(PrimOp::FPToUI));
-        self.register("_w_builtin_f16_to_u64", BuiltinImpl::PrimOp(PrimOp::FPToUI));
+        self.register("_w_intrinsic_f16_to_i8", BuiltinImpl::PrimOp(PrimOp::FPToSI));
+        self.register("_w_intrinsic_f16_to_i16", BuiltinImpl::PrimOp(PrimOp::FPToSI));
+        self.register("_w_intrinsic_f16_to_i32", BuiltinImpl::PrimOp(PrimOp::FPToSI));
+        self.register("_w_intrinsic_f16_to_i64", BuiltinImpl::PrimOp(PrimOp::FPToSI));
+        self.register("_w_intrinsic_f16_to_u8", BuiltinImpl::PrimOp(PrimOp::FPToUI));
+        self.register("_w_intrinsic_f16_to_u16", BuiltinImpl::PrimOp(PrimOp::FPToUI));
+        self.register("_w_intrinsic_f16_to_u32", BuiltinImpl::PrimOp(PrimOp::FPToUI));
+        self.register("_w_intrinsic_f16_to_u64", BuiltinImpl::PrimOp(PrimOp::FPToUI));
 
         // Bit manipulation: reinterpret bits without conversion (f16 <-> i16/u16)
-        self.register("_w_builtin_f16_from_bits", BuiltinImpl::PrimOp(PrimOp::Bitcast));
-        self.register("_w_builtin_f16_to_bits", BuiltinImpl::PrimOp(PrimOp::Bitcast));
+        self.register("_w_intrinsic_f16_from_bits", BuiltinImpl::PrimOp(PrimOp::Bitcast));
+        self.register("_w_intrinsic_f16_to_bits", BuiltinImpl::PrimOp(PrimOp::Bitcast));
     }
 
     /// Register f32 type conversion builtins (implementations only)
@@ -633,34 +639,40 @@ impl ImplSource {
         self.register("f32.f64", BuiltinImpl::PrimOp(PrimOp::FPConvert));
 
         // Conversions from signed integers to f32 (internal builtins)
-        self.register("_w_builtin_f32_from_i8", BuiltinImpl::PrimOp(PrimOp::SIToFP));
-        self.register("_w_builtin_f32_from_i16", BuiltinImpl::PrimOp(PrimOp::SIToFP));
-        self.register("_w_builtin_f32_from_i32", BuiltinImpl::PrimOp(PrimOp::SIToFP));
-        self.register("_w_builtin_f32_from_i64", BuiltinImpl::PrimOp(PrimOp::SIToFP));
+        self.register("_w_intrinsic_f32_from_i8", BuiltinImpl::PrimOp(PrimOp::SIToFP));
+        self.register("_w_intrinsic_f32_from_i16", BuiltinImpl::PrimOp(PrimOp::SIToFP));
+        self.register("_w_intrinsic_f32_from_i32", BuiltinImpl::PrimOp(PrimOp::SIToFP));
+        self.register("_w_intrinsic_f32_from_i64", BuiltinImpl::PrimOp(PrimOp::SIToFP));
 
         // Conversions from unsigned integers to f32
-        self.register("_w_builtin_f32_from_u8", BuiltinImpl::PrimOp(PrimOp::UIToFP));
-        self.register("_w_builtin_f32_from_u16", BuiltinImpl::PrimOp(PrimOp::UIToFP));
-        self.register("_w_builtin_f32_from_u32", BuiltinImpl::PrimOp(PrimOp::UIToFP));
-        self.register("_w_builtin_f32_from_u64", BuiltinImpl::PrimOp(PrimOp::UIToFP));
+        self.register("_w_intrinsic_f32_from_u8", BuiltinImpl::PrimOp(PrimOp::UIToFP));
+        self.register("_w_intrinsic_f32_from_u16", BuiltinImpl::PrimOp(PrimOp::UIToFP));
+        self.register("_w_intrinsic_f32_from_u32", BuiltinImpl::PrimOp(PrimOp::UIToFP));
+        self.register("_w_intrinsic_f32_from_u64", BuiltinImpl::PrimOp(PrimOp::UIToFP));
 
         // Conversions from other floats to f32
-        self.register("_w_builtin_f32_from_f16", BuiltinImpl::PrimOp(PrimOp::FPConvert));
-        self.register("_w_builtin_f32_from_f64", BuiltinImpl::PrimOp(PrimOp::FPConvert));
+        self.register(
+            "_w_intrinsic_f32_from_f16",
+            BuiltinImpl::PrimOp(PrimOp::FPConvert),
+        );
+        self.register(
+            "_w_intrinsic_f32_from_f64",
+            BuiltinImpl::PrimOp(PrimOp::FPConvert),
+        );
 
         // Conversions from f32 to integers
-        self.register("_w_builtin_f32_to_i8", BuiltinImpl::PrimOp(PrimOp::FPToSI));
-        self.register("_w_builtin_f32_to_i16", BuiltinImpl::PrimOp(PrimOp::FPToSI));
-        self.register("_w_builtin_f32_to_i32", BuiltinImpl::PrimOp(PrimOp::FPToSI));
-        self.register("_w_builtin_f32_to_i64", BuiltinImpl::PrimOp(PrimOp::FPToSI));
-        self.register("_w_builtin_f32_to_u8", BuiltinImpl::PrimOp(PrimOp::FPToUI));
-        self.register("_w_builtin_f32_to_u16", BuiltinImpl::PrimOp(PrimOp::FPToUI));
-        self.register("_w_builtin_f32_to_u32", BuiltinImpl::PrimOp(PrimOp::FPToUI));
-        self.register("_w_builtin_f32_to_u64", BuiltinImpl::PrimOp(PrimOp::FPToUI));
+        self.register("_w_intrinsic_f32_to_i8", BuiltinImpl::PrimOp(PrimOp::FPToSI));
+        self.register("_w_intrinsic_f32_to_i16", BuiltinImpl::PrimOp(PrimOp::FPToSI));
+        self.register("_w_intrinsic_f32_to_i32", BuiltinImpl::PrimOp(PrimOp::FPToSI));
+        self.register("_w_intrinsic_f32_to_i64", BuiltinImpl::PrimOp(PrimOp::FPToSI));
+        self.register("_w_intrinsic_f32_to_u8", BuiltinImpl::PrimOp(PrimOp::FPToUI));
+        self.register("_w_intrinsic_f32_to_u16", BuiltinImpl::PrimOp(PrimOp::FPToUI));
+        self.register("_w_intrinsic_f32_to_u32", BuiltinImpl::PrimOp(PrimOp::FPToUI));
+        self.register("_w_intrinsic_f32_to_u64", BuiltinImpl::PrimOp(PrimOp::FPToUI));
 
         // Bit manipulation: reinterpret bits without conversion
-        self.register("_w_builtin_f32_from_bits", BuiltinImpl::PrimOp(PrimOp::Bitcast));
-        self.register("_w_builtin_f32_to_bits", BuiltinImpl::PrimOp(PrimOp::Bitcast));
+        self.register("_w_intrinsic_f32_from_bits", BuiltinImpl::PrimOp(PrimOp::Bitcast));
+        self.register("_w_intrinsic_f32_to_bits", BuiltinImpl::PrimOp(PrimOp::Bitcast));
     }
 
     /// Register f64 type conversion builtins
@@ -678,34 +690,40 @@ impl ImplSource {
         self.register("f64.f32", BuiltinImpl::PrimOp(PrimOp::FPConvert));
 
         // Conversions from signed integers to f64 (internal builtins)
-        self.register("_w_builtin_f64_from_i8", BuiltinImpl::PrimOp(PrimOp::SIToFP));
-        self.register("_w_builtin_f64_from_i16", BuiltinImpl::PrimOp(PrimOp::SIToFP));
-        self.register("_w_builtin_f64_from_i32", BuiltinImpl::PrimOp(PrimOp::SIToFP));
-        self.register("_w_builtin_f64_from_i64", BuiltinImpl::PrimOp(PrimOp::SIToFP));
+        self.register("_w_intrinsic_f64_from_i8", BuiltinImpl::PrimOp(PrimOp::SIToFP));
+        self.register("_w_intrinsic_f64_from_i16", BuiltinImpl::PrimOp(PrimOp::SIToFP));
+        self.register("_w_intrinsic_f64_from_i32", BuiltinImpl::PrimOp(PrimOp::SIToFP));
+        self.register("_w_intrinsic_f64_from_i64", BuiltinImpl::PrimOp(PrimOp::SIToFP));
 
         // Conversions from unsigned integers to f64
-        self.register("_w_builtin_f64_from_u8", BuiltinImpl::PrimOp(PrimOp::UIToFP));
-        self.register("_w_builtin_f64_from_u16", BuiltinImpl::PrimOp(PrimOp::UIToFP));
-        self.register("_w_builtin_f64_from_u32", BuiltinImpl::PrimOp(PrimOp::UIToFP));
-        self.register("_w_builtin_f64_from_u64", BuiltinImpl::PrimOp(PrimOp::UIToFP));
+        self.register("_w_intrinsic_f64_from_u8", BuiltinImpl::PrimOp(PrimOp::UIToFP));
+        self.register("_w_intrinsic_f64_from_u16", BuiltinImpl::PrimOp(PrimOp::UIToFP));
+        self.register("_w_intrinsic_f64_from_u32", BuiltinImpl::PrimOp(PrimOp::UIToFP));
+        self.register("_w_intrinsic_f64_from_u64", BuiltinImpl::PrimOp(PrimOp::UIToFP));
 
         // Conversions from other floats to f64
-        self.register("_w_builtin_f64_from_f16", BuiltinImpl::PrimOp(PrimOp::FPConvert));
-        self.register("_w_builtin_f64_from_f32", BuiltinImpl::PrimOp(PrimOp::FPConvert));
+        self.register(
+            "_w_intrinsic_f64_from_f16",
+            BuiltinImpl::PrimOp(PrimOp::FPConvert),
+        );
+        self.register(
+            "_w_intrinsic_f64_from_f32",
+            BuiltinImpl::PrimOp(PrimOp::FPConvert),
+        );
 
         // Conversions from f64 to integers
-        self.register("_w_builtin_f64_to_i8", BuiltinImpl::PrimOp(PrimOp::FPToSI));
-        self.register("_w_builtin_f64_to_i16", BuiltinImpl::PrimOp(PrimOp::FPToSI));
-        self.register("_w_builtin_f64_to_i32", BuiltinImpl::PrimOp(PrimOp::FPToSI));
-        self.register("_w_builtin_f64_to_i64", BuiltinImpl::PrimOp(PrimOp::FPToSI));
-        self.register("_w_builtin_f64_to_u8", BuiltinImpl::PrimOp(PrimOp::FPToUI));
-        self.register("_w_builtin_f64_to_u16", BuiltinImpl::PrimOp(PrimOp::FPToUI));
-        self.register("_w_builtin_f64_to_u32", BuiltinImpl::PrimOp(PrimOp::FPToUI));
-        self.register("_w_builtin_f64_to_u64", BuiltinImpl::PrimOp(PrimOp::FPToUI));
+        self.register("_w_intrinsic_f64_to_i8", BuiltinImpl::PrimOp(PrimOp::FPToSI));
+        self.register("_w_intrinsic_f64_to_i16", BuiltinImpl::PrimOp(PrimOp::FPToSI));
+        self.register("_w_intrinsic_f64_to_i32", BuiltinImpl::PrimOp(PrimOp::FPToSI));
+        self.register("_w_intrinsic_f64_to_i64", BuiltinImpl::PrimOp(PrimOp::FPToSI));
+        self.register("_w_intrinsic_f64_to_u8", BuiltinImpl::PrimOp(PrimOp::FPToUI));
+        self.register("_w_intrinsic_f64_to_u16", BuiltinImpl::PrimOp(PrimOp::FPToUI));
+        self.register("_w_intrinsic_f64_to_u32", BuiltinImpl::PrimOp(PrimOp::FPToUI));
+        self.register("_w_intrinsic_f64_to_u64", BuiltinImpl::PrimOp(PrimOp::FPToUI));
 
         // Bit manipulation: reinterpret bits without conversion
-        self.register("_w_builtin_f64_from_bits", BuiltinImpl::PrimOp(PrimOp::Bitcast));
-        self.register("_w_builtin_f64_to_bits", BuiltinImpl::PrimOp(PrimOp::Bitcast));
+        self.register("_w_intrinsic_f64_from_bits", BuiltinImpl::PrimOp(PrimOp::Bitcast));
+        self.register("_w_intrinsic_f64_to_bits", BuiltinImpl::PrimOp(PrimOp::Bitcast));
     }
 
     /// Register vector operations (length, normalize, dot, cross, etc.)
