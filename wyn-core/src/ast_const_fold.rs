@@ -422,11 +422,7 @@ mod tests {
         }
     }
 
-    fn make_slice(
-        array: Expression,
-        start: Option<Expression>,
-        end: Option<Expression>,
-    ) -> Expression {
+    fn make_slice(array: Expression, start: Option<Expression>, end: Option<Expression>) -> Expression {
         Expression {
             h: test_header(),
             kind: ExprKind::Slice(crate::ast::SliceExpr {
@@ -524,11 +520,7 @@ mod tests {
     fn test_fold_slice_no_fold_with_variable() {
         let mut folder = AstConstFolder::new();
         // arr[n:10] where n is not a constant - start should not fold
-        let mut expr = make_slice(
-            make_array_ident("arr"),
-            Some(make_ident("n")),
-            Some(make_int(10)),
-        );
+        let mut expr = make_slice(make_array_ident("arr"), Some(make_ident("n")), Some(make_int(10)));
         folder.fold_expr(&mut expr);
 
         if let ExprKind::Slice(slice) = &expr.kind {

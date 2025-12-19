@@ -1130,7 +1130,10 @@ impl<'a> LowerCtx<'a> {
         let op_func_name = match body.get_expr(args[0]) {
             Expr::Closure { lambda_name, .. } => lambda_name.clone(),
             Expr::Global(name) => name.clone(),
-            other => bail_glsl!("reduce operator must be a closure or function reference, got {:?}", other),
+            other => bail_glsl!(
+                "reduce operator must be a closure or function reference, got {:?}",
+                other
+            ),
         };
 
         // Lower neutral element and array

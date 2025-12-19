@@ -202,10 +202,8 @@ impl<'a> TypeChecker<'a> {
             Type::Variable(v) => Type::Variable(*v),
             Type::Constructed(TypeName::SizeVar(name), _) if name == var_name => replacement.clone(),
             Type::Constructed(name, args) => {
-                let new_args: Vec<Type> = args
-                    .iter()
-                    .map(|arg| Self::substitute_size_var(arg, var_name, replacement))
-                    .collect();
+                let new_args: Vec<Type> =
+                    args.iter().map(|arg| Self::substitute_size_var(arg, var_name, replacement)).collect();
                 Type::Constructed(name.clone(), new_args)
             }
         }

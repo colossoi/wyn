@@ -1377,6 +1377,16 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
             let init_val = lower_expr(constructor, body, *init)?;
             let init_ty = body.get_type(*init);
             let loop_var_type = constructor.ast_type_to_spirv(init_ty);
+
+            // For For loops, lower the iterable and get its length in pre-header
+            let for_loop_preheader = if let LoopKind::For { iter, .. } = kind {
+                let iter_val = lower_expr(constructor, body, *iter)?;
+                let length = lower_length_intrinsic(constructor, body, *iter, iter_val)?;
+                Some((iter_val, length))
+            } else {
+                None
+            };
+
             let pre_header_block = constructor.current_block.unwrap();
 
             // Check for unit type loop accumulator - this is an error
@@ -1401,14 +1411,23 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
             let loop_var_phi_id = constructor.builder.id();
             constructor.env.insert(loop_var_name.clone(), loop_var_phi_id);
 
-            // For ForRange loops, also create a phi for the iteration variable
-            let iter_var_phi = if let LoopKind::ForRange { var, .. } = kind {
-                let var_name = body.get_local(*var).name.clone();
-                let iter_phi_id = constructor.builder.id();
-                constructor.env.insert(var_name.clone(), iter_phi_id);
-                Some((var_name, iter_phi_id))
-            } else {
-                None
+            // For ForRange and For loops, create a phi for the iteration index
+            let iter_var_phi = match kind {
+                LoopKind::ForRange { var, .. } => {
+                    let var_name = body.get_local(*var).name.clone();
+                    let iter_phi_id = constructor.builder.id();
+                    constructor.env.insert(var_name.clone(), iter_phi_id);
+                    Some((var_name, iter_phi_id))
+                }
+                LoopKind::For { .. } => {
+                    // For-in loops need an internal index variable
+                    let iter_phi_id = constructor.builder.id();
+                    // Use a generated name that won't conflict
+                    let var_name = "_for_idx".to_string();
+                    constructor.env.insert(var_name.clone(), iter_phi_id);
+                    Some((var_name, iter_phi_id))
+                }
+                _ => None,
             };
 
             // Evaluate init_bindings to bind user variables from loop_var
@@ -1418,6 +1437,69 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                 let binding_name = body.get_local(*local_id).name.clone();
                 constructor.env.insert(binding_name, val);
             }
+
+            // For For loops, we need to bind the element variable to arr[index] in the header
+            // This happens before init_bindings are evaluated
+            let for_loop_iter_val = if let LoopKind::For { var, iter } = kind {
+                // Lower the iterable (done once, before loop header)
+                // Actually we need to lower it before the loop starts...
+                // For now, lower it here in header and it will be used each iteration
+                let iter_val = lower_expr(constructor, body, *iter)?;
+
+                // Get the index variable
+                let idx_id = *constructor
+                    .env
+                    .get("_for_idx")
+                    .ok_or_else(|| err_spirv!("For loop index not found"))?;
+
+                // Index into the array: arr[idx]
+                let iter_ty = body.get_type(*iter);
+                let elem_ty = match iter_ty {
+                    PolyType::Constructed(TypeName::Array, args) if !args.is_empty() => &args[1],
+                    PolyType::Constructed(TypeName::Slice, args) if !args.is_empty() => &args[1],
+                    _ => bail_spirv!("For-in loop over non-array type: {:?}", iter_ty),
+                };
+                let elem_spirv_ty = constructor.ast_type_to_spirv(elem_ty);
+
+                // For slices, we need to handle differently - extract data then index
+                let elem_val = match iter_ty {
+                    PolyType::Constructed(TypeName::Slice, args) if args.len() >= 2 => {
+                        // OwnedSlice struct: { i32 (len), [cap]elem (data) }
+                        // Extract the data array at index 1, then index into it
+                        // Build the array type from slice args: [cap]elem
+                        let cap = &args[0];
+                        let elem = &args[1];
+                        let array_ty =
+                            PolyType::Constructed(TypeName::Array, vec![cap.clone(), elem.clone()]);
+                        let array_spirv_ty = constructor.ast_type_to_spirv(&array_ty);
+
+                        let data_array = constructor.builder.composite_extract(
+                            array_spirv_ty,
+                            None,
+                            iter_val,
+                            [1], // data is at index 1 in owned slice
+                        )?;
+                        constructor.builder.vector_extract_dynamic(
+                            elem_spirv_ty,
+                            None,
+                            data_array,
+                            idx_id,
+                        )?
+                    }
+                    _ => {
+                        // Regular array: direct vector extract
+                        constructor.builder.vector_extract_dynamic(elem_spirv_ty, None, iter_val, idx_id)?
+                    }
+                };
+
+                // Bind the element to the loop variable
+                let var_name = body.get_local(*var).name.clone();
+                constructor.env.insert(var_name.clone(), elem_val);
+
+                Some((iter_val, var_name))
+            } else {
+                None
+            };
 
             // Generate condition based on loop kind
             let cond_id = match kind {
@@ -1432,7 +1514,14 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                     constructor.builder.s_less_than(constructor.bool_type, None, var_id, bound_id)?
                 }
                 LoopKind::For { .. } => {
-                    bail_spirv!("For-in loops not yet implemented");
+                    // Use pre-computed length from pre-header
+                    let (_, length) = for_loop_preheader
+                        .ok_or_else(|| err_spirv!("For loop preheader not initialized"))?;
+                    let idx_id = *constructor
+                        .env
+                        .get("_for_idx")
+                        .ok_or_else(|| err_spirv!("For loop index not found"))?;
+                    constructor.builder.s_less_than(constructor.bool_type, None, idx_id, length)?
                 }
             };
 
@@ -1502,6 +1591,10 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
             }
             if let Some((ref var_name, _)) = iter_var_phi {
                 constructor.env.remove(var_name);
+            }
+            // Clean up For loop element variable
+            if let Some((_, ref elem_var_name)) = for_loop_iter_val {
+                constructor.env.remove(elem_var_name);
             }
 
             // Return the loop_var phi value as loop result
@@ -1709,11 +1802,8 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
 
                     // Call operator: op(acc, elem)
                     // For empty closures, pass (acc, elem); otherwise pass (closure, acc, elem)
-                    let call_args = if is_empty_closure {
-                        vec![acc, elem]
-                    } else {
-                        vec![closure_val, acc, elem]
-                    };
+                    let call_args =
+                        if is_empty_closure { vec![acc, elem] } else { vec![closure_val, acc, elem] };
                     acc = constructor.builder.function_call(result_type, None, op_func_id, call_args)?;
                 }
 
@@ -1785,20 +1875,14 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                 let mut preds = Vec::with_capacity(array_size as usize);
                 let mut elems = Vec::with_capacity(array_size as usize);
                 for i in 0..array_size {
-                    let elem = constructor.builder.composite_extract(
-                        elem_spirv_type, None, array_val, [i]
-                    )?;
+                    let elem =
+                        constructor.builder.composite_extract(elem_spirv_type, None, array_val, [i])?;
                     elems.push(elem);
 
                     // Call predicate: pred(elem) or pred(closure, elem)
-                    let call_args = if is_empty_closure {
-                        vec![elem]
-                    } else {
-                        vec![closure_val, elem]
-                    };
-                    let pred_result = constructor.builder.function_call(
-                        bool_type, None, pred_func_id, call_args
-                    )?;
+                    let call_args = if is_empty_closure { vec![elem] } else { vec![closure_val, elem] };
+                    let pred_result =
+                        constructor.builder.function_call(bool_type, None, pred_func_id, call_args)?;
                     preds.push(pred_result);
                 }
 
@@ -1813,17 +1897,13 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                     if i == 0 {
                         cum_counts.push(pred_int);
                     } else {
-                        let sum = constructor.builder.i_add(i32_type, None, cum_counts[i-1], pred_int)?;
+                        let sum = constructor.builder.i_add(i32_type, None, cum_counts[i - 1], pred_int)?;
                         cum_counts.push(sum);
                     }
                 }
 
                 // Final count = last cumulative count (or 0 if empty)
-                let final_count = if array_size > 0 {
-                    cum_counts[array_size as usize - 1]
-                } else {
-                    zero
-                };
+                let final_count = if array_size > 0 { cum_counts[array_size as usize - 1] } else { zero };
 
                 // Step 3: Build result array using select chains
                 // For each output position j, find the element whose cum_count == j+1
@@ -1838,20 +1918,22 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                     let mut selected = if array_size > 0 {
                         elems[array_size as usize - 1]
                     } else {
-                        zero  // This shouldn't happen, but handle gracefully
+                        zero // This shouldn't happen, but handle gracefully
                     };
 
                     // Work backwards: if cum[i] == j+1 and pred[i], select elem[i]
                     for i in (0..array_size as usize).rev() {
-                        let cum_matches = constructor.builder.i_equal(
-                            bool_type, None, cum_counts[i], j_plus_1
-                        )?;
+                        let cum_matches =
+                            constructor.builder.i_equal(bool_type, None, cum_counts[i], j_plus_1)?;
                         // Combined condition: cum[i] == j+1 AND pred[i]
-                        let should_select = constructor.builder.logical_and(
-                            bool_type, None, cum_matches, preds[i]
-                        )?;
+                        let should_select =
+                            constructor.builder.logical_and(bool_type, None, cum_matches, preds[i])?;
                         selected = constructor.builder.select(
-                            elem_spirv_type, None, should_select, elems[i], selected
+                            elem_spirv_type,
+                            None,
+                            should_select,
+                            elems[i],
+                            selected,
                         )?;
                     }
                     result_elems.push(selected);
@@ -1860,13 +1942,13 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                 // Construct the data array
                 let cap_const = constructor.const_i32(array_size as i32);
                 let array_type = constructor.builder.type_array(elem_spirv_type, cap_const);
-                let data_array = constructor.builder.composite_construct(
-                    array_type, None, result_elems
-                )?;
+                let data_array = constructor.builder.composite_construct(array_type, None, result_elems)?;
 
                 // Construct the slice struct { len, data }
                 let slice_struct = constructor.builder.composite_construct(
-                    result_type, None, vec![final_count, data_array]
+                    result_type,
+                    None,
+                    vec![final_count, data_array],
                 )?;
 
                 return Ok(slice_struct);
@@ -2415,7 +2497,10 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
 
                                 for i in 0..size {
                                     let elem = constructor.builder.composite_extract(
-                                        elem_type, None, base_val, [i as u32]
+                                        elem_type,
+                                        None,
+                                        base_val,
+                                        [i as u32],
                                     )?;
                                     elements.push(elem);
                                 }
@@ -2431,19 +2516,38 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                                 let base_spirv_ty = constructor.ast_type_to_spirv(base_ty);
 
                                 // Create a temporary variable for the base array
-                                let ptr_type = constructor.builder.type_pointer(None, spirv::StorageClass::Function, base_spirv_ty);
-                                let var = constructor.builder.variable(ptr_type, None, spirv::StorageClass::Function, None);
+                                let ptr_type = constructor.builder.type_pointer(
+                                    None,
+                                    spirv::StorageClass::Function,
+                                    base_spirv_ty,
+                                );
+                                let var = constructor.builder.variable(
+                                    ptr_type,
+                                    None,
+                                    spirv::StorageClass::Function,
+                                    None,
+                                );
                                 constructor.builder.store(var, base_val, None, [])?;
 
                                 let i32_type = constructor.i32_type;
                                 let elem_type = constructor.ast_type_to_spirv(&type_args[1]);
-                                let elem_ptr_type = constructor.builder.type_pointer(None, spirv::StorageClass::Function, elem_type);
+                                let elem_ptr_type = constructor.builder.type_pointer(
+                                    None,
+                                    spirv::StorageClass::Function,
+                                    elem_type,
+                                );
                                 let mut elements = Vec::with_capacity(size);
 
                                 for i in 0..size {
                                     let i_const = constructor.const_i32(i as i32);
-                                    let idx = constructor.builder.i_add(i32_type, None, offset_val, i_const)?;
-                                    let ptr = constructor.builder.access_chain(elem_ptr_type, None, var, [idx])?;
+                                    let idx =
+                                        constructor.builder.i_add(i32_type, None, offset_val, i_const)?;
+                                    let ptr = constructor.builder.access_chain(
+                                        elem_ptr_type,
+                                        None,
+                                        var,
+                                        [idx],
+                                    )?;
                                     let elem = constructor.builder.load(elem_type, None, ptr, None, [])?;
                                     elements.push(elem);
                                 }
@@ -2481,9 +2585,7 @@ fn lower_length_intrinsic(
         PolyType::Constructed(TypeName::Array, type_args) => {
             // Static array: extract size from type
             match type_args.get(0) {
-                Some(PolyType::Constructed(TypeName::Size(n), _)) => {
-                    Ok(constructor.const_i32(*n as i32))
-                }
+                Some(PolyType::Constructed(TypeName::Size(n), _)) => Ok(constructor.const_i32(*n as i32)),
                 _ => bail_spirv!(
                     "Cannot determine compile-time array size for length: {:?}",
                     type_args.get(0)
@@ -2508,12 +2610,7 @@ fn lower_length_intrinsic(
                 _ => {
                     // Slice value from a variable - need to extract from struct
                     // For now, use CompositeExtract assuming owned slice layout (len at index 0)
-                    Ok(constructor.builder.composite_extract(
-                        i32_type,
-                        None,
-                        arg_lowered,
-                        [0],
-                    )?)
+                    Ok(constructor.builder.composite_extract(i32_type, None, arg_lowered, [0])?)
                 }
             }
         }
@@ -2547,10 +2644,8 @@ fn lower_index_intrinsic(
                 array_var
             };
 
-            let elem_ptr_type =
-                constructor.builder.type_pointer(None, StorageClass::Function, result_type);
-            let elem_ptr =
-                constructor.builder.access_chain(elem_ptr_type, None, array_var, [index_val])?;
+            let elem_ptr_type = constructor.builder.type_pointer(None, StorageClass::Function, result_type);
+            let elem_ptr = constructor.builder.access_chain(elem_ptr_type, None, array_var, [index_val])?;
             Ok(constructor.builder.load(result_type, None, elem_ptr, None, [])?)
         }
         PolyType::Constructed(TypeName::Slice, _) => {
@@ -2582,8 +2677,12 @@ fn lower_index_intrinsic(
 
                     let elem_ptr_type =
                         constructor.builder.type_pointer(None, StorageClass::Function, result_type);
-                    let elem_ptr =
-                        constructor.builder.access_chain(elem_ptr_type, None, base_var, [adjusted_index])?;
+                    let elem_ptr = constructor.builder.access_chain(
+                        elem_ptr_type,
+                        None,
+                        base_var,
+                        [adjusted_index],
+                    )?;
                     Ok(constructor.builder.load(result_type, None, elem_ptr, None, [])?)
                 }
                 _ => {
@@ -2608,9 +2707,8 @@ fn lower_index_intrinsic(
                     let data_array_type = constructor.builder.type_array(elem_spirv_type, cap_const);
 
                     // Extract the data array from the slice struct
-                    let data_array = constructor.builder.composite_extract(
-                        data_array_type, None, slice_val, [1]
-                    )?;
+                    let data_array =
+                        constructor.builder.composite_extract(data_array_type, None, slice_val, [1])?;
 
                     // Store in a temporary variable for OpAccessChain
                     let data_var = constructor.declare_variable("_w_slice_data_tmp", data_array_type)?;

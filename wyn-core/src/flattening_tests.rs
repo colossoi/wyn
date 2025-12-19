@@ -1162,7 +1162,11 @@ def sum_array(arr: [4]f32) -> f32 =
     assert!(mir.defs.len() >= 2, "Expected sum_array function + lambda");
 
     // Lambda registry should have the lambda function for the binary operator
-    assert_eq!(mir.lambda_registry.len(), 1, "Expected 1 lambda in registry for reduce operator");
+    assert_eq!(
+        mir.lambda_registry.len(),
+        1,
+        "Expected 1 lambda in registry for reduce operator"
+    );
     let (_, info) = mir.lambda_registry.iter().next().unwrap();
     assert_eq!(info.arity, 2, "reduce operator lambda should have arity 2");
 
@@ -1230,7 +1234,10 @@ def filter_evens(arr: [4]i32) -> ?k. [k]i32 =
     // Should have the filter_evens function and a lambda
     let filter_def = find_def(&mir, "filter_evens");
     assert!(matches!(filter_def, mir::Def::Function { .. }));
-    assert!(!mir.lambda_registry.is_empty(), "Expected lambda in registry for filter predicate");
+    assert!(
+        !mir.lambda_registry.is_empty(),
+        "Expected lambda in registry for filter predicate"
+    );
 }
 
 #[test]
@@ -1248,4 +1255,35 @@ def count_positive(arr: [5]i32) -> i32 =
 
     let count_def = find_def(&mir, "count_positive");
     assert!(matches!(count_def, mir::Def::Function { .. }));
+}
+
+#[test]
+fn test_for_in_loop_array() {
+    // Test for-in loop over a static array
+    let mir = flatten_program(
+        r#"
+def sum_arr(arr: [5]i32) -> i32 =
+    loop acc = 0 for x in arr do acc + x
+"#,
+    );
+
+    let sum_def = find_def(&mir, "sum_arr");
+    assert!(matches!(sum_def, mir::Def::Function { .. }));
+}
+
+#[test]
+fn test_for_in_loop_with_filter() {
+    // Test for-in loop over a filter result (slice)
+    let mir = flatten_program(
+        r#"
+def is_positive(x: i32) -> bool = x > 0
+
+def sum_positive(arr: [5]i32) -> i32 =
+    let filtered = filter(is_positive, arr) in
+    loop acc = 0 for x in filtered do acc + x
+"#,
+    );
+
+    let sum_def = find_def(&mir, "sum_positive");
+    assert!(matches!(sum_def, mir::Def::Function { .. }));
 }

@@ -1007,7 +1007,11 @@ impl Display for mir::Expr {
                 write!(f, "@owned_slice(data=e{}, len=e{})", data.0, len.0)
             }
             mir::Expr::BorrowedSlice { base, offset, len } => {
-                write!(f, "@borrowed_slice(base=e{}, offset=e{}, len=e{})", base.0, offset.0, len.0)
+                write!(
+                    f,
+                    "@borrowed_slice(base=e{}, offset=e{}, len=e{})",
+                    base.0, offset.0, len.0
+                )
             }
         }
     }

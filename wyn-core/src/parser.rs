@@ -1229,15 +1229,15 @@ impl<'a> Parser<'a> {
         // Based on SPECIFICATION.md operator precedence table:
         //   || (dominated) < && < comparisons < bitwise < shifts < +- < */% < |> < ** (dominating)
         match op {
-            "||" => Some((1, true)),                                  // Logical or (most dominated)
-            "&&" => Some((2, true)),                                  // Logical and
+            "||" => Some((1, true)), // Logical or (most dominated)
+            "&&" => Some((2, true)), // Logical and
             "==" | "!=" | "<" | ">" | "<=" | ">=" => Some((3, true)), // Comparison operators
-            "&" | "^" | "|" => Some((4, true)),                       // Bitwise operators
-            "<<" | ">>" | ">>>" => Some((5, true)),                   // Bitwise shifts
-            "+" | "-" => Some((6, true)),                             // Addition and subtraction
-            "*" | "/" | "%" | "//" | "%%" => Some((7, true)),         // Multiplication, division, modulo
-            "|>" => Some((8, true)),                                  // Pipe operator
-            "**" => Some((9, true)),                                  // Exponentiation (most dominating binary)
+            "&" | "^" | "|" => Some((4, true)), // Bitwise operators
+            "<<" | ">>" | ">>>" => Some((5, true)), // Bitwise shifts
+            "+" | "-" => Some((6, true)), // Addition and subtraction
+            "*" | "/" | "%" | "//" | "%%" => Some((7, true)), // Multiplication, division, modulo
+            "|>" => Some((8, true)), // Pipe operator
+            "**" => Some((9, true)), // Exponentiation (most dominating binary)
             _ => None,
         }
     }

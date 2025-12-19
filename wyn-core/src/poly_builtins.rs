@@ -400,8 +400,7 @@ impl PolyBuiltins {
         let k = "k".to_string();
         let k_var = Type::Constructed(TypeName::SizeVar(k.clone()), vec![]);
         let result_array = Type::Constructed(TypeName::Array, vec![k_var, a.clone()]);
-        let existential_result =
-            Type::Constructed(TypeName::Existential(vec![k]), vec![result_array]);
+        let existential_result = Type::Constructed(TypeName::Existential(vec![k]), vec![result_array]);
         self.register_poly("filter", vec![pred_type, array_a], existential_result);
 
         // TODO: scatter, etc.

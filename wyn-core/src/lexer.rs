@@ -217,8 +217,8 @@ fn parse_operator(input: &str) -> IResult<&str, Token> {
             map(tag(">>"), |s: &str| Token::BinOp(s.to_string())),  // Right shift
             map(tag("<<"), |s: &str| Token::BinOp(s.to_string())),  // Left shift
             // Logical operators (must come before single & and |)
-            map(tag("&&"), |s: &str| Token::BinOp(s.to_string())),  // Logical and
-            map(tag("||"), |s: &str| Token::BinOp(s.to_string())),  // Logical or
+            map(tag("&&"), |s: &str| Token::BinOp(s.to_string())), // Logical and
+            map(tag("||"), |s: &str| Token::BinOp(s.to_string())), // Logical or
             // Comparison operators (must come before single =, <, >)
             map(tag("=="), |s: &str| Token::BinOp(s.to_string())),
             map(tag("!="), |s: &str| Token::BinOp(s.to_string())),
