@@ -169,6 +169,16 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
+    /// Check if a type contains an existential quantifier.
+    /// Existential types are only valid in function return types, not parameters.
+    fn contains_existential(ty: &Type) -> bool {
+        match ty {
+            Type::Constructed(TypeName::Existential(_, _), _) => true,
+            Type::Constructed(_, args) => args.iter().any(Self::contains_existential),
+            Type::Variable(_) => false,
+        }
+    }
+
     /// Resolve type aliases in a type (e.g., "rand.state" -> "f32")
     /// This expands qualified type names like "module.typename" to their underlying types.
     fn resolve_type_aliases(&self, ty: &Type) -> Type {
@@ -940,6 +950,17 @@ impl<'a> TypeChecker<'a> {
                 Self::substitute_type_params_static(&resolved, type_param_bindings)
             })
             .collect();
+
+        // Validate that no parameter types contain existential quantifiers
+        // Existential types are only valid in return types, not parameters
+        for (param, param_type) in params.iter().zip(param_types.iter()) {
+            if Self::contains_existential(param_type) {
+                bail_type_at!(
+                    param.h.span,
+                    "Existential types (?k. ...) are only allowed in return types, not parameter types"
+                );
+            }
+        }
 
         // Push new scope for function parameters
         self.scope_stack.push_scope();

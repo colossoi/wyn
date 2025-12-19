@@ -181,11 +181,7 @@ impl std::fmt::Display for TypeName {
                 Ok(())
             }
             TypeName::Existential(vars, ty) => {
-                write!(f, "?")?;
-                for var in vars {
-                    write!(f, "[{}]", var)?;
-                }
-                write!(f, ".{}", ty)
+                write!(f, "?{}.{}", vars.join(" "), ty)
             }
             TypeName::Pointer => write!(f, "Ptr"),
         }
@@ -236,7 +232,7 @@ impl polytype::Name for TypeName {
                     .collect();
                 variant_strs.join(" | ")
             }
-            TypeName::Existential(vars, ty) => format!("?{}. {}", vars.join(""), ty),
+            TypeName::Existential(vars, ty) => format!("?{}. {}", vars.join(" "), ty),
             TypeName::Pointer => "Ptr".to_string(),
         }
     }
@@ -492,7 +488,7 @@ pub fn sum(variants: Vec<(String, Vec<Type>)>) -> Type {
     Type::Constructed(TypeName::Sum(variants), vec![])
 }
 
-/// Create an existential size type: ?[n][m]. type
+/// Create an existential size type: ?k. type or ?k l. type
 pub fn existential(size_vars: Vec<String>, inner: Type) -> Type {
     Type::Constructed(TypeName::Existential(size_vars, Box::new(inner)), vec![])
 }

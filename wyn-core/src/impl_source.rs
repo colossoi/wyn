@@ -120,6 +120,9 @@ pub enum Intrinsic {
     /// Reduce an array using a binary operator and neutral element
     /// reduce : (a -> a -> a) -> a -> [n]a -> a
     Reduce,
+    /// Filter an array using a predicate, returning elements that satisfy it
+    /// filter : (a -> bool) -> [n]a -> ?k. [k]a
+    Filter,
 }
 
 /// Implementation source for all builtin functions and intrinsics
@@ -754,6 +757,9 @@ impl ImplSource {
 
         // reduce : (a -> a -> a) -> a -> [n]a -> a
         self.register("reduce", BuiltinImpl::Intrinsic(Intrinsic::Reduce));
+
+        // filter : (a -> bool) -> [n]a -> ?k. [k]a
+        self.register("filter", BuiltinImpl::Intrinsic(Intrinsic::Filter));
     }
 
     /// Register misc intrinsics

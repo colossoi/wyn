@@ -681,7 +681,7 @@ impl<'a> Parser<'a> {
 
     fn parse_type(&mut self) -> Result<Type> {
         trace!("parse_type: next token = {:?}", self.peek());
-        // Check for existential size: ?[n][m]. type
+        // Check for existential size: ?k. type or ?k l. type
         if self.check(&Token::QuestionMark) {
             return self.parse_existential_type();
         }
@@ -692,12 +692,10 @@ impl<'a> Parser<'a> {
         self.expect(Token::QuestionMark)?;
         let mut size_vars = Vec::new();
 
-        // Parse one or more [name] size variables
-        while self.check(&Token::LeftBracket) || self.check(&Token::LeftBracketSpaced) {
-            self.advance(); // consume '['
-            let var_name = self.expect_identifier()?;
-            self.expect(Token::RightBracket)?;
-            size_vars.push(var_name);
+        // Parse one or more bare identifiers: ?k. or ?k l. or ?k l m.
+        while let Some(Token::Identifier(name)) = self.peek().cloned() {
+            size_vars.push(name);
+            self.advance();
         }
 
         if size_vars.is_empty() {

@@ -390,7 +390,21 @@ impl PolyBuiltins {
         let array_a = Type::Constructed(TypeName::Array, vec![n, a.clone()]);
         self.register_poly("reduce", vec![op_type, a.clone(), array_a], a);
 
-        // TODO: zip, filter, scatter, etc.
+        // filter : ∀a n. (a -> bool) -> [n]a -> ?k. [k]a
+        let a = ctx.new_variable();
+        let n = ctx.new_variable();
+        let bool_ty = Type::Constructed(TypeName::Str("bool"), vec![]);
+        let pred_type = Type::arrow(a.clone(), bool_ty); // a -> bool
+        let array_a = Type::Constructed(TypeName::Array, vec![n, a.clone()]);
+        // Existential return type: ?k. [k]a
+        let k = "k".to_string();
+        let k_var = Type::Constructed(TypeName::SizeVar(k.clone()), vec![]);
+        let result_array = Type::Constructed(TypeName::Array, vec![k_var, a.clone()]);
+        let existential_result =
+            Type::Constructed(TypeName::Existential(vec![k], Box::new(result_array)), vec![]);
+        self.register_poly("filter", vec![pred_type, array_a], existential_result);
+
+        // TODO: scatter, etc.
 
         // Misc utility intrinsics
         self.register_misc_intrinsics();

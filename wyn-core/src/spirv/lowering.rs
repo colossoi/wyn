@@ -1990,6 +1990,10 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                                         // reduce is handled specially above, should not reach here
                                         bail_spirv!("BUG: reduce intrinsic should be handled specially")
                                     }
+                                    Intrinsic::Filter => {
+                                        // filter is handled specially above, should not reach here
+                                        bail_spirv!("BUG: filter intrinsic should be handled specially")
+                                    }
                                 }
                             }
                             BuiltinImpl::CoreFn(core_fn_name) => {
