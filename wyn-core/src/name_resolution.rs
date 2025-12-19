@@ -140,17 +140,10 @@ fn resolve_expr(expr: &mut Expression, module_manager: &ModuleManager) -> Result
                 resolve_expr(end, module_manager)?;
             }
         }
-        // Check unqualified identifiers against implicitly opened modules
-        ExprKind::Identifier(quals, name) => {
-            if quals.is_empty() {
-                // Check if this name exists in an implicitly opened module
-                if let Some(module_name) = module_manager.resolve_implicit_open(name) {
-                    // Qualify the identifier with the module name
-                    *quals = vec![module_name.to_string()];
-                }
-            }
-        }
         // Base cases - no sub-expressions to resolve
+        // Note: Unqualified identifiers are resolved by the type checker
+        // which checks: scope -> intrinsics -> prelude_functions
+        ExprKind::Identifier(_, _) => {}
         ExprKind::IntLiteral(_)
         | ExprKind::FloatLiteral(_)
         | ExprKind::BoolLiteral(_)

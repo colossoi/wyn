@@ -120,6 +120,8 @@ pub struct PreElaboratedPrelude {
     pub known_modules: HashSet<String>,
     /// Type aliases from modules: "module.typename" -> underlying Type
     pub type_aliases: HashMap<String, Type>,
+    /// Top-level prelude function declarations (auto-imported)
+    pub prelude_functions: HashMap<String, Decl>,
 }
 
 /// Manages lazy loading of module files
@@ -132,6 +134,8 @@ pub struct ModuleManager {
     known_modules: HashSet<String>,
     /// Type aliases from modules: "module.typename" -> underlying Type
     type_aliases: HashMap<String, Type>,
+    /// Top-level prelude function declarations (auto-imported)
+    prelude_functions: HashMap<String, Decl>,
 }
 
 impl ModuleManager {
@@ -171,6 +175,7 @@ impl ModuleManager {
             elaborated_modules: HashMap::new(),
             known_modules,
             type_aliases: HashMap::new(),
+            prelude_functions: HashMap::new(),
         }
     }
 
@@ -194,6 +199,7 @@ impl ModuleManager {
             elaborated_modules: manager.elaborated_modules,
             known_modules: manager.known_modules,
             type_aliases: manager.type_aliases,
+            prelude_functions: manager.prelude_functions,
         })
     }
 
@@ -205,6 +211,7 @@ impl ModuleManager {
             elaborated_modules: prelude.elaborated_modules.clone(),
             known_modules: prelude.known_modules.clone(),
             type_aliases: prelude.type_aliases.clone(),
+            prelude_functions: prelude.prelude_functions.clone(),
         }
     }
 
@@ -265,9 +272,15 @@ impl ModuleManager {
         Ok(())
     }
 
-    /// Elaborate all module bindings from a parsed program
+    /// Elaborate all module bindings and top-level declarations from a parsed program
     fn elaborate_all_modules(&mut self, program: &Program) -> Result<()> {
         for decl in &program.declarations {
+            // Collect top-level function declarations for prelude
+            if let Declaration::Decl(d) = decl {
+                self.prelude_functions.insert(d.name.clone(), d.clone());
+                continue;
+            }
+
             if let Declaration::ModuleBind(mb) = decl {
                 if self.elaborated_modules.contains_key(&mb.name) {
                     bail_module!("Module '{}' is already defined", mb.name);
@@ -699,6 +712,12 @@ impl ModuleManager {
             .collect()
     }
 
+    /// Get all top-level prelude function declarations for flattening
+    /// These are auto-imported functions from prelude files
+    pub fn get_prelude_function_declarations(&self) -> Vec<&Decl> {
+        self.prelude_functions.values().collect()
+    }
+
     /// Check if a name is a qualified module reference (e.g., "f32.sum")
     pub fn is_qualified_name(name: &str) -> bool {
         name.contains('.')
@@ -711,28 +730,49 @@ impl ModuleManager {
         if parts.len() == 2 { Some((parts[0], parts[1])) } else { None }
     }
 
-    /// Modules that are implicitly opened (their functions are available without qualification)
-    const IMPLICIT_OPEN_MODULES: &'static [&'static str] = &["soacs"];
 
-    /// Check if an unqualified name exists in any implicitly opened module.
-    /// Returns Some(module_name) if found, None otherwise.
-    pub fn resolve_implicit_open(&self, name: &str) -> Option<&str> {
-        for &module_name in Self::IMPLICIT_OPEN_MODULES {
-            if let Some(elaborated) = self.elaborated_modules.get(module_name) {
-                for item in &elaborated.items {
-                    let item_name = match item {
-                        ElaboratedItem::Spec(Spec::Sig(n, _, _)) => Some(n.as_str()),
-                        ElaboratedItem::Spec(Spec::SigOp(op, _)) => Some(op.as_str()),
-                        ElaboratedItem::Decl(decl) => Some(decl.name.as_str()),
-                        _ => None,
-                    };
-                    if item_name == Some(name) {
-                        return Some(module_name);
-                    }
-                }
+    /// Check if a name is a top-level prelude function (auto-imported)
+    pub fn is_prelude_function(&self, name: &str) -> bool {
+        self.prelude_functions.contains_key(name)
+    }
+
+    /// Get a top-level prelude function declaration
+    pub fn get_prelude_function(&self, name: &str) -> Option<&Decl> {
+        self.prelude_functions.get(name)
+    }
+
+    /// Get the type of a top-level prelude function
+    /// Returns a TypeScheme for polymorphic functions
+    pub fn get_prelude_function_type(
+        &self,
+        name: &str,
+        context: &mut Context<TypeName>,
+    ) -> Option<TypeScheme<TypeName>> {
+        let decl = self.prelude_functions.get(name)?;
+
+        // Build the full function type from parameters and return type
+        let mut param_types = Vec::new();
+        for param in &decl.params {
+            if let Some(param_ty) = self.extract_type_from_pattern(param) {
+                param_types.push(param_ty);
+            } else {
+                // Parameter lacks type annotation, can't determine type
+                return None;
             }
         }
-        None
+
+        // Get return type (default to unit if not specified)
+        let return_type = decl.ty.clone().unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![]));
+
+        // Build function type by folding right-to-left
+        let mut result_type = return_type;
+        for param_ty in param_types.into_iter().rev() {
+            result_type = Type::Constructed(TypeName::Arrow, vec![param_ty, result_type]);
+        }
+
+        // Convert to TypeScheme if there are type/size parameters
+        let type_params = self.extract_type_params_from_type(&result_type);
+        Some(self.convert_to_polytype(&result_type, &type_params, context))
     }
 
     /// Elaborate a module body expression into a list of elaborated items

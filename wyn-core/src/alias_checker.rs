@@ -1304,7 +1304,7 @@ fn find_inplace_ops(
     let expr = body.get_expr(expr_id);
 
     match expr {
-        Call { func, args } if func == "map1" && args.len() == 2 => {
+        Call { func, args } if (func == "_w_intrinsic_map" || func == "map") && args.len() == 2 => {
             let args = args.clone();
             // args[0] is closure, args[1] is array
             if let Local(arr_local) = body.get_expr(args[1]) {

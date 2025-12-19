@@ -1605,22 +1605,31 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
             // Get the result type from the expression
             let result_type = constructor.ast_type_to_spirv(expr_ty);
 
-            // SOAC (Second-Order Array Combinator) dispatch
+            // SOAC (Second-Order Array Combinator) intrinsic dispatch
             match func.as_str() {
-                "map1" | "map2" | "map3" | "map4" | "map5" => {
-                    return lower_map_n(constructor, body, args, expr_ty, expr_node_id, result_type);
+                "_w_intrinsic_map" => {
+                    return lower_map(constructor, body, args, expr_ty, expr_node_id, result_type);
                 }
-                "reduce" => {
+                "_w_intrinsic_zip" => {
+                    return lower_zip(constructor, body, args, result_type);
+                }
+                "_w_intrinsic_reduce" => {
                     return lower_reduce(constructor, body, args, result_type);
                 }
-                "scan" => {
+                "_w_intrinsic_scan" => {
                     return lower_scan(constructor, body, args, result_type);
                 }
-                "filter" => {
+                "_w_intrinsic_filter" => {
                     return lower_filter(constructor, body, args, result_type);
                 }
-                "scatter" => {
+                "_w_intrinsic_scatter" => {
                     return lower_scatter(constructor, body, args, result_type);
+                }
+                "_w_intrinsic_length" => {
+                    return lower_length(constructor, body, args);
+                }
+                "_w_intrinsic_replicate" => {
+                    return lower_replicate(constructor, body, args, expr_ty, result_type);
                 }
                 _ => {} // Fall through to other special cases and regular calls
             }
@@ -2458,11 +2467,8 @@ fn extract_array_info(
     }
 }
 
-/// Lower `mapN` SOACs: map, map2, map3, etc.
-/// map f [a,b,c] = [f(a), f(b), f(c)]
-/// map2 f [a,b] [x,y] = [f(a,x), f(b,y)]
-/// All mapN variants share the same lowering logic.
-fn lower_map_n(
+/// Lower `_w_intrinsic_map`: map f [a,b,c] = [f(a), f(b), f(c)]
+fn lower_map(
     constructor: &mut Constructor,
     body: &Body,
     args: &[ExprId],
@@ -2470,35 +2476,16 @@ fn lower_map_n(
     expr_node_id: NodeId,
     result_type: spirv::Word,
 ) -> Result<spirv::Word> {
-    let num_arrays = args.len() - 1;
-    if num_arrays < 1 {
-        bail_spirv!("map requires at least 1 array argument, got {}", args.len());
+    if args.len() != 2 {
+        bail_spirv!("_w_intrinsic_map requires 2 args (function, array), got {}", args.len());
     }
 
     let (func_name, closure_val, is_empty_closure) = extract_closure_info(constructor, body, args[0])?;
 
-    // Lower all input arrays and extract their info
-    let mut array_vals = Vec::with_capacity(num_arrays);
-    let mut elem_types = Vec::with_capacity(num_arrays);
-    let mut array_size: Option<u32> = None;
-
-    for i in 1..args.len() {
-        let arr_val = lower_expr(constructor, body, args[i])?;
-        array_vals.push(arr_val);
-
-        let arr_ty = body.get_type(args[i]);
-        let (size, elem_ty) = extract_array_info(constructor, arr_ty)?;
-
-        if let Some(prev_size) = array_size {
-            if prev_size != size {
-                bail_spirv!("All arrays must have same size, got {} and {}", prev_size, size);
-            }
-        }
-        array_size = Some(size);
-        elem_types.push(elem_ty);
-    }
-
-    let array_size = array_size.unwrap();
+    // Lower the input array
+    let arr_val = lower_expr(constructor, body, args[1])?;
+    let arr_ty = body.get_type(args[1]);
+    let (array_size, elem_type) = extract_array_info(constructor, arr_ty)?;
 
     // Get result element type from the expression type
     let output_elem_type = match expr_ty {
@@ -2513,17 +2500,14 @@ fn lower_map_n(
         .get(&func_name)
         .ok_or_else(|| err_spirv!("Map function not found: {}", func_name))?;
 
-    // In-place optimization only for single-array map with matching types
-    let can_inplace = num_arrays == 1
-        && constructor.inplace_nodes.contains(&expr_node_id)
-        && elem_types[0] == output_elem_type;
+    // In-place optimization when array is dead after this use
+    let can_inplace = constructor.inplace_nodes.contains(&expr_node_id) && elem_type == output_elem_type;
 
     if can_inplace {
         // In-place optimization: use OpCompositeInsert to update array in place
-        let mut result = array_vals[0];
+        let mut result = arr_val;
         for i in 0..array_size {
-            let input_elem =
-                constructor.builder.composite_extract(elem_types[0], None, array_vals[0], [i])?;
+            let input_elem = constructor.builder.composite_extract(elem_type, None, arr_val, [i])?;
             let call_args = if is_empty_closure { vec![input_elem] } else { vec![closure_val, input_elem] };
             let result_elem =
                 constructor.builder.function_call(output_elem_type, None, map_func_id, call_args)?;
@@ -2531,24 +2515,103 @@ fn lower_map_n(
         }
         Ok(result)
     } else {
-        // General case: extract elements from all arrays, call function, build result
+        // General case: extract elements, call function, build result array
         let mut result_elements = Vec::with_capacity(array_size as usize);
         for i in 0..array_size {
-            // Build call arguments: [closure?,] elem1, elem2, ..., elemN
-            let mut call_args = if is_empty_closure { vec![] } else { vec![closure_val] };
-            for (arr_idx, arr_val) in array_vals.iter().enumerate() {
-                let elem =
-                    constructor.builder.composite_extract(elem_types[arr_idx], None, *arr_val, [i])?;
-                call_args.push(elem);
-            }
-
+            let input_elem = constructor.builder.composite_extract(elem_type, None, arr_val, [i])?;
+            let call_args = if is_empty_closure { vec![input_elem] } else { vec![closure_val, input_elem] };
             let result_elem =
                 constructor.builder.function_call(output_elem_type, None, map_func_id, call_args)?;
             result_elements.push(result_elem);
         }
-
         Ok(constructor.builder.composite_construct(result_type, None, result_elements)?)
     }
+}
+
+/// Lower `_w_intrinsic_zip`: zip [a,b,c] [x,y,z] = [(a,x), (b,y), (c,z)]
+fn lower_zip(
+    constructor: &mut Constructor,
+    body: &Body,
+    args: &[ExprId],
+    result_type: spirv::Word,
+) -> Result<spirv::Word> {
+    if args.len() != 2 {
+        bail_spirv!("_w_intrinsic_zip requires 2 args, got {}", args.len());
+    }
+
+    let arr1_val = lower_expr(constructor, body, args[0])?;
+    let arr2_val = lower_expr(constructor, body, args[1])?;
+
+    let arr1_ty = body.get_type(args[0]);
+    let arr2_ty = body.get_type(args[1]);
+
+    let (size1, elem1_type) = extract_array_info(constructor, arr1_ty)?;
+    let (size2, elem2_type) = extract_array_info(constructor, arr2_ty)?;
+
+    if size1 != size2 {
+        bail_spirv!("zip arrays must have same size, got {} and {}", size1, size2);
+    }
+
+    // Get the pair type for elements
+    let pair_type = constructor.get_or_create_struct_type(vec![elem1_type, elem2_type]);
+
+    // Build result array of pairs
+    let mut result_elements = Vec::with_capacity(size1 as usize);
+    for i in 0..size1 {
+        let elem1 = constructor.builder.composite_extract(elem1_type, None, arr1_val, [i])?;
+        let elem2 = constructor.builder.composite_extract(elem2_type, None, arr2_val, [i])?;
+        let pair = constructor.builder.composite_construct(pair_type, None, vec![elem1, elem2])?;
+        result_elements.push(pair);
+    }
+
+    Ok(constructor.builder.composite_construct(result_type, None, result_elements)?)
+}
+
+/// Lower `_w_intrinsic_length`: length [a,b,c] = 3
+fn lower_length(
+    constructor: &mut Constructor,
+    body: &Body,
+    args: &[ExprId],
+) -> Result<spirv::Word> {
+    if args.len() != 1 {
+        bail_spirv!("_w_intrinsic_length requires 1 arg, got {}", args.len());
+    }
+
+    let arr_ty = body.get_type(args[0]);
+    let (size, _) = extract_array_info(constructor, arr_ty)?;
+
+    // Return the size as an i32 constant
+    Ok(constructor.const_i32(size as i32))
+}
+
+/// Lower `_w_intrinsic_replicate`: replicate 3 x = [x, x, x]
+fn lower_replicate(
+    constructor: &mut Constructor,
+    body: &Body,
+    args: &[ExprId],
+    expr_ty: &PolyType<TypeName>,
+    result_type: spirv::Word,
+) -> Result<spirv::Word> {
+    if args.len() != 2 {
+        bail_spirv!("_w_intrinsic_replicate requires 2 args (size, value), got {}", args.len());
+    }
+
+    // Get size from the result array type
+    let size = match expr_ty {
+        PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 2 => {
+            match &type_args[0] {
+                PolyType::Constructed(TypeName::Size(n), _) => *n as u32,
+                _ => bail_spirv!("replicate size must be a literal, got {:?}", type_args[0]),
+            }
+        }
+        _ => bail_spirv!("replicate result must be array type, got {:?}", expr_ty),
+    };
+
+    let value = lower_expr(constructor, body, args[1])?;
+
+    // Build array with repeated value
+    let elements: Vec<_> = (0..size).map(|_| value).collect();
+    Ok(constructor.builder.composite_construct(result_type, None, elements)?)
 }
 
 /// Lower `reduce` SOAC: reduce op ne [a,b,c] = op(op(op(ne,a),b),c)

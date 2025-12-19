@@ -1438,18 +1438,24 @@ impl<'a> TypeChecker<'a> {
                     // Instantiate the type scheme to get a concrete type
                     Ok(type_scheme.instantiate(&mut self.context))
                 } else if let Some(lookup) = self.intrinsics.get(&full_name) {
-                    // Check polymorphic builtins for polymorphic function types
+                    // Check polymorphic intrinsics for polymorphic function types
                     use crate::intrinsics::IntrinsicLookup;
-                    debug!("'{}' is a polymorphic builtin", full_name);
+                    debug!("'{}' is a polymorphic intrinsic", full_name);
                     let func_type = match lookup {
                         IntrinsicLookup::Single(entry) => entry.scheme.instantiate(&mut self.context),
                         IntrinsicLookup::Overloaded(overloads) => overloads.fresh_type(&mut self.context),
                     };
-                    debug!("Built function type for builtin '{}': {:?}", full_name, func_type);
+                    debug!("Built function type for intrinsic '{}': {:?}", full_name, func_type);
                     Ok(func_type)
+                } else if let Some(type_scheme) = self.module_manager.get_prelude_function_type(&full_name, &mut self.context) {
+                    // Check top-level prelude functions (auto-imported)
+                    debug!("'{}' is a prelude function with type: {:?}", full_name, type_scheme);
+                    let ty = type_scheme.instantiate(&mut self.context);
+                    self.type_table.insert(expr.h.id, type_scheme);
+                    Ok(ty)
                 } else {
                     // Not found anywhere
-                    debug!("Variable lookup failed for '{}' - not in scope or builtins", full_name);
+                    debug!("Variable lookup failed for '{}' - not in scope, intrinsics, or prelude", full_name);
                     debug!("Scope stack contents: {:?}", self.scope_stack);
                     Err(err_undef_at!(expr.h.span, "{}", full_name))
                 }
