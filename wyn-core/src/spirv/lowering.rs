@@ -5,7 +5,7 @@
 //! Dependencies are lowered on-demand using ensure_lowered pattern.
 
 use crate::alias_checker::InPlaceInfo;
-use crate::ast::TypeName;
+use crate::ast::{NodeId, TypeName};
 use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
 use crate::lowering_common::is_empty_closure_type;
@@ -1605,353 +1605,27 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
             // Get the result type from the expression
             let result_type = constructor.ast_type_to_spirv(expr_ty);
 
-            // Special case for map - extract lambda name from closure before lowering
-            if func == "map" {
-                // map closure array -> array
-                // args[0] is closure tuple (_w_lambda_name, captures)
-                // args[1] is input array
-                if args.len() != 2 {
-                    bail_spirv!("map requires 2 args (closure, array), got {}", args.len());
+            // SOAC (Second-Order Array Combinator) dispatch
+            match func.as_str() {
+                "map" => {
+                    return lower_map(constructor, body, args, expr_ty, expr_node_id, result_type);
                 }
-
-                // Extract lambda/function name and captures from first argument
-                // Can be either a Closure expression or a Global (named function reference)
-                let (func_name, closure_val, is_empty_closure) = match body.get_expr(args[0]) {
-                    Expr::Closure {
-                        lambda_name,
-                        captures,
-                    } => {
-                        let is_empty = is_empty_closure_type(body.get_type(*captures));
-                        // For empty closures, use dummy i32(0) instead of lowering
-                        // This avoids creating empty SPIR-V structs
-                        let closure_val = if is_empty {
-                            constructor.const_i32(0)
-                        } else {
-                            lower_expr(constructor, body, args[0])?
-                        };
-                        (lambda_name.clone(), closure_val, is_empty)
-                    }
-                    Expr::Global(name) => {
-                        // Named function reference - treat like empty closure
-                        (name.clone(), constructor.const_i32(0), true)
-                    }
-                    other => {
-                        bail_spirv!(
-                            "map callback must be a closure or function reference, got {:?}",
-                            other
-                        );
-                    }
-                };
-                let lambda_name = func_name;
-                let array_val = lower_expr(constructor, body, args[1])?;
-
-                // Get input array element type from args[1]
-                let arg1_ty = body.get_type(args[1]);
-                let input_elem_type = match arg1_ty {
-                    PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 2 => {
-                        constructor.ast_type_to_spirv(&type_args[1])
-                    }
-                    _ => bail_spirv!("map input must be array type"),
-                };
-
-                // Get output array info from result type
-                let (array_size, output_elem_mir_type) = match expr_ty {
-                    PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 2 => {
-                        let size = match &type_args[0] {
-                            PolyType::Constructed(TypeName::Size(n), _) => *n as u32,
-                            _ => bail_spirv!("Invalid array size type"),
-                        };
-                        (size, &type_args[1])
-                    }
-                    _ => bail_spirv!("map result must be array type"),
-                };
-
-                let output_elem_type = constructor.ast_type_to_spirv(output_elem_mir_type);
-
-                // Look up the lambda function by name
-                let lambda_func_id = *constructor
-                    .functions
-                    .get(&lambda_name)
-                    .ok_or_else(|| err_spirv!("Lambda function not found: {}", lambda_name))?;
-
-                // Check if we can do in-place update:
-                // 1. This map call was marked as having a dead-after input array
-                // 2. Element types match (f : T -> T)
-                let can_inplace = constructor.inplace_nodes.contains(&expr_node_id)
-                    && input_elem_type == output_elem_type;
-
-                if can_inplace {
-                    // In-place optimization: use OpCompositeInsert to update array in place
-                    // This allows the SPIR-V optimizer to reuse the input array memory
-                    let mut result = array_val;
-                    for i in 0..array_size {
-                        let input_elem =
-                            constructor.builder.composite_extract(input_elem_type, None, array_val, [i])?;
-                        let call_args =
-                            if is_empty_closure { vec![input_elem] } else { vec![closure_val, input_elem] };
-                        let result_elem = constructor.builder.function_call(
-                            output_elem_type,
-                            None,
-                            lambda_func_id,
-                            call_args,
-                        )?;
-                        // Insert the new element into the result array
-                        result = constructor.builder.composite_insert(
-                            result_type,
-                            None,
-                            result_elem,
-                            result,
-                            [i],
-                        )?;
-                    }
-                    return Ok(result);
-                } else {
-                    // Build result array by calling lambda for each element
-                    let mut result_elements = Vec::new();
-                    for i in 0..array_size {
-                        // Extract element from input array (using input element type)
-                        let input_elem =
-                            constructor.builder.composite_extract(input_elem_type, None, array_val, [i])?;
-
-                        // Call lambda: for empty closures, only pass element; otherwise pass both
-                        let call_args =
-                            if is_empty_closure { vec![input_elem] } else { vec![closure_val, input_elem] };
-                        let result_elem = constructor.builder.function_call(
-                            output_elem_type,
-                            None,
-                            lambda_func_id,
-                            call_args,
-                        )?;
-                        result_elements.push(result_elem);
-                    }
-
-                    // Construct result array
-                    return Ok(constructor.builder.composite_construct(
-                        result_type,
-                        None,
-                        result_elements,
-                    )?);
+                "reduce" => {
+                    return lower_reduce(constructor, body, args, result_type);
                 }
-            }
-
-            // Special case for reduce - sequential loop reduction
-            if func == "reduce" {
-                // reduce op ne array -> scalar
-                // args[0] is closure tuple (_w_lambda_name, captures) for the binary operator
-                // args[1] is neutral element
-                // args[2] is input array
-                if args.len() != 3 {
-                    bail_spirv!("reduce requires 3 args (op, ne, array), got {}", args.len());
+                "scan" => {
+                    return lower_scan(constructor, body, args, result_type);
                 }
-
-                // Extract lambda/function name and captures from operator argument
-                let (func_name, closure_val, is_empty_closure) = match body.get_expr(args[0]) {
-                    Expr::Closure {
-                        lambda_name,
-                        captures,
-                    } => {
-                        let is_empty = is_empty_closure_type(body.get_type(*captures));
-                        let closure_val = if is_empty {
-                            constructor.const_i32(0)
-                        } else {
-                            lower_expr(constructor, body, args[0])?
-                        };
-                        (lambda_name.clone(), closure_val, is_empty)
-                    }
-                    Expr::Global(name) => {
-                        // Named function reference - treat like empty closure
-                        (name.clone(), constructor.const_i32(0), true)
-                    }
-                    other => {
-                        bail_spirv!(
-                            "reduce operator must be a closure or function reference, got {:?}",
-                            other
-                        );
-                    }
-                };
-
-                // Lower neutral element and array
-                let neutral_val = lower_expr(constructor, body, args[1])?;
-                let array_val = lower_expr(constructor, body, args[2])?;
-
-                // Get array size from the array type
-                let arg2_ty = body.get_type(args[2]);
-                let (array_size, elem_type) = match arg2_ty {
-                    PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 2 => {
-                        let size = match &type_args[0] {
-                            PolyType::Constructed(TypeName::Size(n), _) => *n as u32,
-                            _ => bail_spirv!("Invalid array size type for reduce"),
-                        };
-                        let elem = constructor.ast_type_to_spirv(&type_args[1]);
-                        (size, elem)
-                    }
-                    _ => bail_spirv!("reduce input must be array type"),
-                };
-
-                // Look up the operator function by name
-                let op_func_id = *constructor
-                    .functions
-                    .get(&func_name)
-                    .ok_or_else(|| err_spirv!("Operator function not found: {}", func_name))?;
-
-                // Sequential reduction: acc = ne; for each elem: acc = op(acc, elem)
-                let mut acc = neutral_val;
-                for i in 0..array_size {
-                    // Extract element from array
-                    let elem = constructor.builder.composite_extract(elem_type, None, array_val, [i])?;
-
-                    // Call operator: op(acc, elem)
-                    // For empty closures, pass (acc, elem); otherwise pass (closure, acc, elem)
-                    let call_args =
-                        if is_empty_closure { vec![acc, elem] } else { vec![closure_val, acc, elem] };
-                    acc = constructor.builder.function_call(result_type, None, op_func_id, call_args)?;
+                "filter" => {
+                    return lower_filter(constructor, body, args, result_type);
                 }
-
-                return Ok(acc);
-            }
-
-            // Special case for filter - sequential filtering with O(n²) static unrolling
-            if func == "filter" {
-                // filter pred array -> OwnedSlice { len: i32, data: [cap]elem }
-                // args[0] is closure tuple (_w_lambda_name, captures) for the predicate
-                // args[1] is input array
-                if args.len() != 2 {
-                    bail_spirv!("filter requires 2 args (pred, array), got {}", args.len());
+                "zip" => {
+                    return lower_zip(constructor, body, args, result_type);
                 }
-
-                // Extract lambda/function name and captures from predicate argument
-                let (pred_func_name, closure_val, is_empty_closure) = match body.get_expr(args[0]) {
-                    Expr::Closure {
-                        lambda_name,
-                        captures,
-                    } => {
-                        let is_empty = is_empty_closure_type(body.get_type(*captures));
-                        let closure_val = if is_empty {
-                            constructor.const_i32(0)
-                        } else {
-                            lower_expr(constructor, body, args[0])?
-                        };
-                        (lambda_name.clone(), closure_val, is_empty)
-                    }
-                    Expr::Global(name) => {
-                        // Named function reference - treat like empty closure
-                        (name.clone(), constructor.const_i32(0), true)
-                    }
-                    other => {
-                        bail_spirv!(
-                            "filter predicate must be a closure or function reference, got {:?}",
-                            other
-                        );
-                    }
-                };
-
-                // Lower the input array
-                let array_val = lower_expr(constructor, body, args[1])?;
-
-                // Get array size and element type from the array type
-                let arg1_ty = body.get_type(args[1]);
-                let (array_size, elem_spirv_type) = match arg1_ty {
-                    PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 2 => {
-                        let size = match &type_args[0] {
-                            PolyType::Constructed(TypeName::Size(n), _) => *n as u32,
-                            _ => bail_spirv!("Invalid array size type for filter"),
-                        };
-                        let elem = constructor.ast_type_to_spirv(&type_args[1]);
-                        (size, elem)
-                    }
-                    _ => bail_spirv!("filter input must be array type"),
-                };
-
-                // Look up the predicate function by name
-                let pred_func_id = *constructor
-                    .functions
-                    .get(&pred_func_name)
-                    .ok_or_else(|| err_spirv!("Predicate function not found: {}", pred_func_name))?;
-
-                let i32_type = constructor.i32_type;
-                let bool_type = constructor.bool_type;
-
-                // Step 1: Evaluate predicates for all elements
-                let mut preds = Vec::with_capacity(array_size as usize);
-                let mut elems = Vec::with_capacity(array_size as usize);
-                for i in 0..array_size {
-                    let elem =
-                        constructor.builder.composite_extract(elem_spirv_type, None, array_val, [i])?;
-                    elems.push(elem);
-
-                    // Call predicate: pred(elem) or pred(closure, elem)
-                    let call_args = if is_empty_closure { vec![elem] } else { vec![closure_val, elem] };
-                    let pred_result =
-                        constructor.builder.function_call(bool_type, None, pred_func_id, call_args)?;
-                    preds.push(pred_result);
+                "scatter" => {
+                    return lower_scatter(constructor, body, args, result_type);
                 }
-
-                // Step 2: Compute running count (cumulative sum of predicates)
-                // cum[i] = number of passing elements in 0..=i
-                let zero = constructor.const_i32(0);
-                let one = constructor.const_i32(1);
-                let mut cum_counts = Vec::with_capacity(array_size as usize);
-                for i in 0..array_size as usize {
-                    // pred_as_int = select(pred[i], 1, 0)
-                    let pred_int = constructor.builder.select(i32_type, None, preds[i], one, zero)?;
-                    if i == 0 {
-                        cum_counts.push(pred_int);
-                    } else {
-                        let sum = constructor.builder.i_add(i32_type, None, cum_counts[i - 1], pred_int)?;
-                        cum_counts.push(sum);
-                    }
-                }
-
-                // Final count = last cumulative count (or 0 if empty)
-                let final_count = if array_size > 0 { cum_counts[array_size as usize - 1] } else { zero };
-
-                // Step 3: Build result array using select chains
-                // For each output position j, find the element whose cum_count == j+1
-                // This is O(n²) but works for small arrays
-                let mut result_elems = Vec::with_capacity(array_size as usize);
-                for j in 0..array_size {
-                    // Find element i where cum_counts[i] == j+1 and preds[i] == true
-                    // Using nested selects: start with garbage, select backwards
-                    let j_plus_1 = constructor.const_i32((j + 1) as i32);
-
-                    // Start with the last element (or garbage/zero if array is empty)
-                    let mut selected = if array_size > 0 {
-                        elems[array_size as usize - 1]
-                    } else {
-                        zero // This shouldn't happen, but handle gracefully
-                    };
-
-                    // Work backwards: if cum[i] == j+1 and pred[i], select elem[i]
-                    for i in (0..array_size as usize).rev() {
-                        let cum_matches =
-                            constructor.builder.i_equal(bool_type, None, cum_counts[i], j_plus_1)?;
-                        // Combined condition: cum[i] == j+1 AND pred[i]
-                        let should_select =
-                            constructor.builder.logical_and(bool_type, None, cum_matches, preds[i])?;
-                        selected = constructor.builder.select(
-                            elem_spirv_type,
-                            None,
-                            should_select,
-                            elems[i],
-                            selected,
-                        )?;
-                    }
-                    result_elems.push(selected);
-                }
-
-                // Construct the data array
-                let cap_const = constructor.const_i32(array_size as i32);
-                let array_type = constructor.builder.type_array(elem_spirv_type, cap_const);
-                let data_array = constructor.builder.composite_construct(array_type, None, result_elems)?;
-
-                // Construct the slice struct { len, data }
-                let slice_struct = constructor.builder.composite_construct(
-                    result_type,
-                    None,
-                    vec![final_count, data_array],
-                )?;
-
-                return Ok(slice_struct);
+                _ => {} // Fall through to other special cases and regular calls
             }
 
             // Special case for _w_array_with - check for in-place optimization
@@ -2735,6 +2409,379 @@ fn try_extract_const_int(body: &Body, expr_id: ExprId) -> Option<i32> {
     }
 }
 
+// =============================================================================
+// SOAC (Second-Order Array Combinator) lowering helpers
+// =============================================================================
+
+/// Extract closure information from a SOAC operator argument.
+/// Returns (function_name, closure_value, is_empty_closure).
+fn extract_closure_info(
+    constructor: &mut Constructor,
+    body: &Body,
+    arg_expr_id: ExprId,
+) -> Result<(String, spirv::Word, bool)> {
+    match body.get_expr(arg_expr_id) {
+        Expr::Closure {
+            lambda_name,
+            captures,
+        } => {
+            let is_empty = is_empty_closure_type(body.get_type(*captures));
+            let closure_val = if is_empty {
+                constructor.const_i32(0)
+            } else {
+                lower_expr(constructor, body, arg_expr_id)?
+            };
+            Ok((lambda_name.clone(), closure_val, is_empty))
+        }
+        Expr::Global(name) => {
+            // Named function reference - treat like empty closure
+            Ok((name.clone(), constructor.const_i32(0), true))
+        }
+        other => {
+            bail_spirv!("Expected closure or function reference, got {:?}", other);
+        }
+    }
+}
+
+/// Extract array size and element type from an array type.
+fn extract_array_info(
+    constructor: &mut Constructor,
+    ty: &PolyType<TypeName>,
+) -> Result<(u32, spirv::Word)> {
+    match ty {
+        PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 2 => {
+            let size = match &type_args[0] {
+                PolyType::Constructed(TypeName::Size(n), _) => *n as u32,
+                _ => bail_spirv!("Invalid array size type"),
+            };
+            let elem_type = constructor.ast_type_to_spirv(&type_args[1]);
+            Ok((size, elem_type))
+        }
+        _ => bail_spirv!("Expected array type, got {:?}", ty),
+    }
+}
+
+/// Lower `map` SOAC: map f [a,b,c] = [f(a), f(b), f(c)]
+fn lower_map(
+    constructor: &mut Constructor,
+    body: &Body,
+    args: &[ExprId],
+    expr_ty: &PolyType<TypeName>,
+    expr_node_id: NodeId,
+    result_type: spirv::Word,
+) -> Result<spirv::Word> {
+    if args.len() != 2 {
+        bail_spirv!("map requires 2 args (closure, array), got {}", args.len());
+    }
+
+    let (func_name, closure_val, is_empty_closure) = extract_closure_info(constructor, body, args[0])?;
+    let array_val = lower_expr(constructor, body, args[1])?;
+
+    let arg1_ty = body.get_type(args[1]);
+    let (array_size, input_elem_type) = extract_array_info(constructor, arg1_ty)?;
+
+    // Get result element type from the expression type
+    let output_elem_type = match expr_ty {
+        PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 2 => {
+            constructor.ast_type_to_spirv(&type_args[1])
+        }
+        _ => bail_spirv!("map result must be array type, got {:?}", expr_ty),
+    };
+
+    let map_func_id = *constructor
+        .functions
+        .get(&func_name)
+        .ok_or_else(|| err_spirv!("Map function not found: {}", func_name))?;
+
+    // Check if we can do in-place update:
+    // 1. This map call was marked as having a dead-after input array
+    // 2. Element types match (f : T -> T)
+    let can_inplace =
+        constructor.inplace_nodes.contains(&expr_node_id) && input_elem_type == output_elem_type;
+
+    if can_inplace {
+        // In-place optimization: use OpCompositeInsert to update array in place
+        // This allows the SPIR-V optimizer to reuse the input array memory
+        let mut result = array_val;
+        for i in 0..array_size {
+            let input_elem =
+                constructor.builder.composite_extract(input_elem_type, None, array_val, [i])?;
+            let call_args = if is_empty_closure { vec![input_elem] } else { vec![closure_val, input_elem] };
+            let result_elem =
+                constructor.builder.function_call(output_elem_type, None, map_func_id, call_args)?;
+            // Insert the new element into the result array
+            result = constructor.builder.composite_insert(result_type, None, result_elem, result, [i])?;
+        }
+        Ok(result)
+    } else {
+        // Build result array by calling function for each element
+        let mut result_elements = Vec::with_capacity(array_size as usize);
+        for i in 0..array_size {
+            let elem = constructor.builder.composite_extract(input_elem_type, None, array_val, [i])?;
+            let call_args = if is_empty_closure { vec![elem] } else { vec![closure_val, elem] };
+            let mapped =
+                constructor.builder.function_call(output_elem_type, None, map_func_id, call_args)?;
+            result_elements.push(mapped);
+        }
+
+        Ok(constructor.builder.composite_construct(result_type, None, result_elements)?)
+    }
+}
+
+/// Lower `reduce` SOAC: reduce op ne [a,b,c] = op(op(op(ne,a),b),c)
+fn lower_reduce(
+    constructor: &mut Constructor,
+    body: &Body,
+    args: &[ExprId],
+    result_type: spirv::Word,
+) -> Result<spirv::Word> {
+    if args.len() != 3 {
+        bail_spirv!("reduce requires 3 args (op, ne, array), got {}", args.len());
+    }
+
+    let (func_name, closure_val, is_empty_closure) = extract_closure_info(constructor, body, args[0])?;
+    let neutral_val = lower_expr(constructor, body, args[1])?;
+    let array_val = lower_expr(constructor, body, args[2])?;
+
+    let arg2_ty = body.get_type(args[2]);
+    let (array_size, elem_type) = extract_array_info(constructor, arg2_ty)?;
+
+    let op_func_id = *constructor
+        .functions
+        .get(&func_name)
+        .ok_or_else(|| err_spirv!("Operator function not found: {}", func_name))?;
+
+    // Sequential reduction
+    let mut acc = neutral_val;
+    for i in 0..array_size {
+        let elem = constructor.builder.composite_extract(elem_type, None, array_val, [i])?;
+        let call_args = if is_empty_closure { vec![acc, elem] } else { vec![closure_val, acc, elem] };
+        acc = constructor.builder.function_call(result_type, None, op_func_id, call_args)?;
+    }
+
+    Ok(acc)
+}
+
+/// Lower `scan` SOAC (inclusive): scan op ne [a,b,c] = [a, op(a,b), op(op(a,b),c)]
+fn lower_scan(
+    constructor: &mut Constructor,
+    body: &Body,
+    args: &[ExprId],
+    result_type: spirv::Word,
+) -> Result<spirv::Word> {
+    if args.len() != 3 {
+        bail_spirv!("scan requires 3 args (op, ne, array), got {}", args.len());
+    }
+
+    let (func_name, closure_val, is_empty_closure) = extract_closure_info(constructor, body, args[0])?;
+    let _neutral_val = lower_expr(constructor, body, args[1])?; // Used for empty arrays
+    let array_val = lower_expr(constructor, body, args[2])?;
+
+    let arg2_ty = body.get_type(args[2]);
+    let (array_size, elem_type) = extract_array_info(constructor, arg2_ty)?;
+
+    let op_func_id = *constructor
+        .functions
+        .get(&func_name)
+        .ok_or_else(|| err_spirv!("Operator function not found: {}", func_name))?;
+
+    // Build result array: inclusive scan
+    let mut result_elements = Vec::with_capacity(array_size as usize);
+
+    if array_size > 0 {
+        // First element is just array[0]
+        let first_elem = constructor.builder.composite_extract(elem_type, None, array_val, [0])?;
+        result_elements.push(first_elem);
+
+        // Subsequent elements: acc = op(acc, array[i])
+        let mut acc = first_elem;
+        for i in 1..array_size {
+            let elem = constructor.builder.composite_extract(elem_type, None, array_val, [i])?;
+            let call_args = if is_empty_closure { vec![acc, elem] } else { vec![closure_val, acc, elem] };
+            acc = constructor.builder.function_call(elem_type, None, op_func_id, call_args)?;
+            result_elements.push(acc);
+        }
+    }
+
+    Ok(constructor.builder.composite_construct(result_type, None, result_elements)?)
+}
+
+/// Lower `filter` SOAC: filter pred [a,b,c] = elements where pred is true
+fn lower_filter(
+    constructor: &mut Constructor,
+    body: &Body,
+    args: &[ExprId],
+    result_type: spirv::Word,
+) -> Result<spirv::Word> {
+    if args.len() != 2 {
+        bail_spirv!("filter requires 2 args (pred, array), got {}", args.len());
+    }
+
+    let (func_name, closure_val, is_empty_closure) = extract_closure_info(constructor, body, args[0])?;
+    let array_val = lower_expr(constructor, body, args[1])?;
+
+    let arg1_ty = body.get_type(args[1]);
+    let (array_size, elem_type) = extract_array_info(constructor, arg1_ty)?;
+
+    let pred_func_id = *constructor
+        .functions
+        .get(&func_name)
+        .ok_or_else(|| err_spirv!("Predicate function not found: {}", func_name))?;
+
+    // Build cumulative count array (how many elements pass up to each index)
+    let mut cumulative_counts = Vec::with_capacity(array_size as usize);
+    let mut count_exprs = Vec::with_capacity(array_size as usize);
+
+    for i in 0..array_size {
+        let elem = constructor.builder.composite_extract(elem_type, None, array_val, [i])?;
+        let call_args = if is_empty_closure { vec![elem] } else { vec![closure_val, elem] };
+        let pred_result =
+            constructor.builder.function_call(constructor.bool_type, None, pred_func_id, call_args)?;
+
+        // Convert bool to i32 (1 if true, 0 if false)
+        let one = constructor.const_i32(1);
+        let zero = constructor.const_i32(0);
+        let count_inc = constructor.builder.select(constructor.i32_type, None, pred_result, one, zero)?;
+
+        // Cumulative count
+        let cumulative = if i == 0 {
+            count_inc
+        } else {
+            constructor.builder.i_add(
+                constructor.i32_type,
+                None,
+                cumulative_counts[i as usize - 1],
+                count_inc,
+            )?
+        };
+        cumulative_counts.push(cumulative);
+        count_exprs.push((pred_result, elem));
+    }
+
+    // Build output array using select chains
+    let mut output_elements = Vec::with_capacity(array_size as usize);
+    let undef_elem = constructor.builder.undef(elem_type, None);
+
+    for out_idx in 0..array_size {
+        let out_idx_const = constructor.const_i32(out_idx as i32 + 1);
+        let mut result_elem = undef_elem;
+
+        for in_idx in (0..array_size).rev() {
+            let (pred_result, in_elem) = count_exprs[in_idx as usize];
+            let cum_count = cumulative_counts[in_idx as usize];
+
+            // Check if this input element should go to this output slot
+            let matches_slot =
+                constructor.builder.i_equal(constructor.bool_type, None, cum_count, out_idx_const)?;
+            let should_use =
+                constructor.builder.logical_and(constructor.bool_type, None, pred_result, matches_slot)?;
+            result_elem = constructor.builder.select(elem_type, None, should_use, in_elem, result_elem)?;
+        }
+        output_elements.push(result_elem);
+    }
+
+    // Create output array
+    let cap_const = constructor.const_i32(array_size as i32);
+    let data_array_type = constructor.builder.type_array(elem_type, cap_const);
+    let data_array = constructor.builder.composite_construct(data_array_type, None, output_elements)?;
+
+    // Final count is the last cumulative count
+    let final_count =
+        if array_size > 0 { cumulative_counts[array_size as usize - 1] } else { constructor.const_i32(0) };
+
+    // Create OwnedSlice struct: { len: i32, data: [cap]elem }
+    Ok(constructor.builder.composite_construct(result_type, None, vec![final_count, data_array])?)
+}
+
+/// Lower `zip` SOAC: zip [a,b] [x,y] = [(a,x), (b,y)]
+fn lower_zip(
+    constructor: &mut Constructor,
+    body: &Body,
+    args: &[ExprId],
+    result_type: spirv::Word,
+) -> Result<spirv::Word> {
+    if args.len() != 2 {
+        bail_spirv!("zip requires 2 args (array1, array2), got {}", args.len());
+    }
+
+    let array1_val = lower_expr(constructor, body, args[0])?;
+    let array2_val = lower_expr(constructor, body, args[1])?;
+
+    let arg0_ty = body.get_type(args[0]);
+    let arg1_ty = body.get_type(args[1]);
+
+    let (array_size, elem1_type) = extract_array_info(constructor, arg0_ty)?;
+    let (_, elem2_type) = extract_array_info(constructor, arg1_ty)?;
+
+    // Get tuple type for result elements
+    let tuple_type = constructor.get_or_create_struct_type(vec![elem1_type, elem2_type]);
+
+    // Zip elements pairwise
+    let mut result_elements = Vec::with_capacity(array_size as usize);
+    for i in 0..array_size {
+        let elem1 = constructor.builder.composite_extract(elem1_type, None, array1_val, [i])?;
+        let elem2 = constructor.builder.composite_extract(elem2_type, None, array2_val, [i])?;
+        let tuple = constructor.builder.composite_construct(tuple_type, None, vec![elem1, elem2])?;
+        result_elements.push(tuple);
+    }
+
+    Ok(constructor.builder.composite_construct(result_type, None, result_elements)?)
+}
+
+/// Lower `scatter` SOAC: scatter dest indices values -> updated dest
+fn lower_scatter(
+    constructor: &mut Constructor,
+    body: &Body,
+    args: &[ExprId],
+    result_type: spirv::Word,
+) -> Result<spirv::Word> {
+    if args.len() != 3 {
+        bail_spirv!(
+            "scatter requires 3 args (dest, indices, values), got {}",
+            args.len()
+        );
+    }
+
+    let dest_val = lower_expr(constructor, body, args[0])?;
+    let indices_val = lower_expr(constructor, body, args[1])?;
+    let values_val = lower_expr(constructor, body, args[2])?;
+
+    let dest_ty = body.get_type(args[0]);
+    let indices_ty = body.get_type(args[1]);
+
+    let (dest_size, elem_type) = extract_array_info(constructor, dest_ty)?;
+    let (scatter_size, _) = extract_array_info(constructor, indices_ty)?;
+
+    // For each destination index, check if any scatter index points to it
+    // This is O(n*m) but necessary for static unrolling
+    let mut result_elements = Vec::with_capacity(dest_size as usize);
+
+    for dest_idx in 0..dest_size {
+        let dest_idx_const = constructor.const_i32(dest_idx as i32);
+        let orig_elem = constructor.builder.composite_extract(elem_type, None, dest_val, [dest_idx])?;
+
+        // Check each scatter operation (in reverse order so later writes win)
+        let mut result_elem = orig_elem;
+        for scatter_idx in (0..scatter_size).rev() {
+            let index = constructor.builder.composite_extract(
+                constructor.i32_type,
+                None,
+                indices_val,
+                [scatter_idx],
+            )?;
+            let value =
+                constructor.builder.composite_extract(elem_type, None, values_val, [scatter_idx])?;
+
+            let matches =
+                constructor.builder.i_equal(constructor.bool_type, None, index, dest_idx_const)?;
+            result_elem = constructor.builder.select(elem_type, None, matches, value, result_elem)?;
+        }
+        result_elements.push(result_elem);
+    }
+
+    Ok(constructor.builder.composite_construct(result_type, None, result_elements)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2901,6 +2948,46 @@ def dot2<E, T>(v: T) -> E = dot(v, v)
 def test_vec3(v: vec3f32) -> f32 = dot2(v)
 def test_vec2(v: vec2f32) -> f32 = dot2(v)
 def test_both(v3: vec3f32, v2: vec2f32) -> f32 = dot2(v3) + dot2(v2)
+"#,
+        )
+        .unwrap();
+        assert!(!spirv.is_empty());
+        assert_eq!(spirv[0], 0x07230203);
+    }
+
+    #[test]
+    fn test_scan_inclusive() {
+        // Inclusive scan (prefix sum): scan (+) 0 [1,2,3] = [1, 3, 6]
+        let spirv = compile_to_spirv(
+            r#"
+def sum_scan(arr: [4]i32) -> [4]i32 = scan((|a, b| a + b), 0, arr)
+"#,
+        )
+        .unwrap();
+        assert!(!spirv.is_empty());
+        assert_eq!(spirv[0], 0x07230203);
+    }
+
+    #[test]
+    fn test_zip_arrays() {
+        // Zip two arrays into array of tuples
+        let spirv = compile_to_spirv(
+            r#"
+def zip_test(xs: [3]i32, ys: [3]f32) -> [3](i32, f32) = zip(xs, ys)
+"#,
+        )
+        .unwrap();
+        assert!(!spirv.is_empty());
+        assert_eq!(spirv[0], 0x07230203);
+    }
+
+    #[test]
+    fn test_scatter_update() {
+        // Scatter: write values to array at given indices
+        let spirv = compile_to_spirv(
+            r#"
+def scatter_test(dest: [5]i32, indices: [2]i32, values: [2]i32) -> [5]i32 =
+    scatter(dest, indices, values)
 "#,
         )
         .unwrap();

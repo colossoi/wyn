@@ -403,7 +403,41 @@ impl PolyBuiltins {
         let existential_result = Type::Constructed(TypeName::Existential(vec![k]), vec![result_array]);
         self.register_poly("filter", vec![pred_type, array_a], existential_result);
 
-        // TODO: scatter, etc.
+        // scan : ∀a n. (a -> a -> a) -> a -> [n]a -> [n]a
+        // Inclusive scan (prefix sum): scan op ne [a,b,c] = [a, op(a,b), op(op(a,b),c)]
+        let a = ctx.new_variable();
+        let n = ctx.new_variable();
+        let op_type = Type::arrow(a.clone(), Type::arrow(a.clone(), a.clone())); // a -> a -> a
+        let array_a = Type::Constructed(TypeName::Array, vec![n.clone(), a.clone()]);
+        let result_array = Type::Constructed(TypeName::Array, vec![n, a.clone()]);
+        self.register_poly("scan", vec![op_type, a, array_a], result_array);
+
+        // zip : ∀a b n. [n]a -> [n]b -> [n](a, b)
+        // Combines two arrays element-wise into array of tuples
+        let a = ctx.new_variable();
+        let b = ctx.new_variable();
+        let n = ctx.new_variable();
+        let array_a = Type::Constructed(TypeName::Array, vec![n.clone(), a.clone()]);
+        let array_b = Type::Constructed(TypeName::Array, vec![n.clone(), b.clone()]);
+        let tuple_ab = Type::Constructed(TypeName::Tuple(2), vec![a, b]);
+        let result_array = Type::Constructed(TypeName::Array, vec![n, tuple_ab]);
+        self.register_poly("zip", vec![array_a, array_b], result_array);
+
+        // scatter : ∀a n m. [n]a -> [m]i32 -> [m]a -> [n]a
+        // scatter dest indices values: write values[i] to dest[indices[i]]
+        let a = ctx.new_variable();
+        let n = ctx.new_variable();
+        let m = ctx.new_variable();
+        let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+        let dest_array = Type::Constructed(TypeName::Array, vec![n.clone(), a.clone()]);
+        let indices_array = Type::Constructed(TypeName::Array, vec![m.clone(), i32_ty]);
+        let values_array = Type::Constructed(TypeName::Array, vec![m, a.clone()]);
+        let result_array = Type::Constructed(TypeName::Array, vec![n, a]);
+        self.register_poly(
+            "scatter",
+            vec![dest_array, indices_array, values_array],
+            result_array,
+        );
 
         // Misc utility intrinsics
         self.register_misc_intrinsics();
