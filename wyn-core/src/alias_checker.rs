@@ -673,14 +673,11 @@ impl<'a> Visitor for AliasChecker<'a> {
         if let Some(end) = &slice.end {
             self.visit_expression(end)?;
         }
-        if let Some(step) = &slice.step {
-            self.visit_expression(step)?;
-        }
 
-        // Slices are desugared to map/iota which creates a fresh array.
-        // The slice result does not alias the original array.
-        let store_id = self.new_store();
-        self.set_result(id, AliasInfo::fresh(store_id));
+        // Borrowed slices alias the original array - the slice is a view into the base.
+        // The slice inherits the stores from the base array.
+        let base_info = self.get_result(slice.array.h.id);
+        self.set_result(id, AliasInfo::references(base_info.stores));
         ControlFlow::Continue(())
     }
 
@@ -837,9 +834,6 @@ fn collect_variable_uses_in_expr(expr: &Expression, uses: &mut HashMap<String, V
             }
             if let Some(end) = &slice.end {
                 collect_variable_uses_in_expr(end, uses);
-            }
-            if let Some(step) = &slice.step {
-                collect_variable_uses_in_expr(step, uses);
             }
         }
         ExprKind::TypeAscription(expr, _) | ExprKind::TypeCoercion(expr, _) => {
@@ -1068,6 +1062,15 @@ fn collect_uses(body: &mir::Body, expr_id: mir::ExprId) -> HashSet<mir::LocalId>
             }
             uses.extend(collect_uses(body, *end));
         }
+        OwnedSlice { data, len } => {
+            uses.extend(collect_uses(body, *data));
+            uses.extend(collect_uses(body, *len));
+        }
+        BorrowedSlice { base, offset, len } => {
+            uses.extend(collect_uses(body, *base));
+            uses.extend(collect_uses(body, *offset));
+            uses.extend(collect_uses(body, *len));
+        }
     }
 
     uses
@@ -1149,6 +1152,18 @@ fn compute_uses_after(
                 }
                 aliases.insert(local, alias_set);
             }
+            // Track aliases for borrowed slices: let s = arr[i:j] -> s aliases arr
+            if let BorrowedSlice { base, .. } = body.get_expr(rhs) {
+                if let Local(source_local) = body.get_expr(*base) {
+                    let mut alias_set = HashSet::new();
+                    alias_set.insert(*source_local);
+                    // Transitively include aliases of source
+                    if let Some(source_aliases) = aliases.get(source_local) {
+                        alias_set.extend(source_aliases.iter().cloned());
+                    }
+                    aliases.insert(local, alias_set);
+                }
+            }
             // After rhs: uses in body + after (minus local since it's being bound)
             let mut body_uses = collect_uses(body, let_body);
             body_uses.remove(&local);
@@ -1223,6 +1238,22 @@ fn compute_uses_after(
                 current_after.extend(collect_uses(body, s));
             }
             result.extend(compute_uses_after(body, start, &current_after, aliases));
+        }
+        OwnedSlice { data, len } => {
+            let (data, len) = (*data, *len);
+            let mut current_after = after.clone();
+            result.extend(compute_uses_after(body, len, &current_after, aliases));
+            current_after.extend(collect_uses(body, len));
+            result.extend(compute_uses_after(body, data, &current_after, aliases));
+        }
+        BorrowedSlice { base, offset, len } => {
+            let (base, offset, len) = (*base, *offset, *len);
+            let mut current_after = after.clone();
+            result.extend(compute_uses_after(body, len, &current_after, aliases));
+            current_after.extend(collect_uses(body, len));
+            result.extend(compute_uses_after(body, offset, &current_after, aliases));
+            current_after.extend(collect_uses(body, offset));
+            result.extend(compute_uses_after(body, base, &current_after, aliases));
         }
     }
 
@@ -1393,6 +1424,17 @@ fn find_inplace_ops(
                 find_inplace_ops(body, s, uses_after, aliases, result);
             }
             find_inplace_ops(body, end, uses_after, aliases, result);
+        }
+        OwnedSlice { data, len } => {
+            let (data, len) = (*data, *len);
+            find_inplace_ops(body, data, uses_after, aliases, result);
+            find_inplace_ops(body, len, uses_after, aliases, result);
+        }
+        BorrowedSlice { base, offset, len } => {
+            let (base, offset, len) = (*base, *offset, *len);
+            find_inplace_ops(body, base, uses_after, aliases, result);
+            find_inplace_ops(body, offset, uses_after, aliases, result);
+            find_inplace_ops(body, len, uses_after, aliases, result);
         }
     }
 }

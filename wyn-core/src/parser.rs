@@ -1443,27 +1443,23 @@ impl<'a> Parser<'a> {
 
         // Check if this is a slice (colon present) or regular index
         if self.check(&Token::Colon) {
-            // This is a slice: a[start:end:step] or a[start:end] or a[:end] etc.
-            self.advance(); // consume first ':'
+            // This is a slice: a[start:end] or a[:end] etc.
+            // TODO: Step syntax (a[i:j:s]) not yet supported
+            self.advance(); // consume ':'
 
-            // Parse optional end expression (before optional second colon)
-            let end_expr = if self.check(&Token::Colon) || self.check(&Token::RightBracket) {
+            // Parse optional end expression
+            let end_expr = if self.check(&Token::RightBracket) {
                 None
             } else {
                 Some(Box::new(self.parse_range_expression()?))
             };
 
-            // Check for optional step
-            let step_expr = if self.check(&Token::Colon) {
-                self.advance(); // consume second ':'
-                if self.check(&Token::RightBracket) {
-                    None
-                } else {
-                    Some(Box::new(self.parse_range_expression()?))
-                }
-            } else {
-                None
-            };
+            // Check for unsupported step syntax
+            if self.check(&Token::Colon) {
+                return Err(crate::err_parse!(
+                    "Slice step syntax (arr[i:j:s]) is not yet supported"
+                ));
+            }
 
             self.expect(Token::RightBracket)?;
             let end_span = self.previous_span();
@@ -1474,7 +1470,6 @@ impl<'a> Parser<'a> {
                     array: Box::new(array),
                     start: start_expr,
                     end: end_expr,
-                    step: step_expr,
                 }),
                 span,
             ))

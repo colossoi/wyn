@@ -1885,24 +1885,10 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                                 use crate::impl_source::Intrinsic;
                                 match custom_impl {
                                     Intrinsic::Placeholder if func == "length" => {
-                                        // Array length: extract size from array type
                                         if args.len() != 1 {
                                             bail_spirv!("length expects exactly 1 argument");
                                         }
-                                        let arg0_ty = body.get_type(args[0]);
-                                        if let PolyType::Constructed(TypeName::Array, type_args) = arg0_ty {
-                                            match type_args.get(0) {
-                                                Some(PolyType::Constructed(TypeName::Size(n), _)) => {
-                                                    Ok(constructor.const_i32(*n as i32))
-                                                }
-                                                _ => bail_spirv!(
-                                                    "Cannot determine compile-time array size for length: {:?}",
-                                                    type_args.get(0)
-                                                ),
-                                            }
-                                        } else {
-                                            bail_spirv!("length called on non-array type: {:?}", arg0_ty)
-                                        }
+                                        lower_length_intrinsic(constructor, body, args[0], arg_ids[0])
                                     }
                                     Intrinsic::Placeholder => {
                                         // Other placeholder intrinsics should have been desugared
@@ -2062,30 +2048,7 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                     if args.len() != 2 {
                         bail_spirv!("index requires 2 args");
                     }
-                    // Array indexing with OpAccessChain + OpLoad
-                    let index_val = lower_expr(constructor, body, args[1])?;
-
-                    let arg0_ty = body.get_type(args[0]);
-                    let array_var = if types::is_pointer(arg0_ty) {
-                        // It's a pointer, use it directly
-                        lower_expr(constructor, body, args[0])?
-                    } else {
-                        // Need to store the value in a variable to get a pointer
-                        let array_val = lower_expr(constructor, body, args[0])?;
-                        let array_type = constructor.ast_type_to_spirv(arg0_ty);
-                        let array_var = constructor.declare_variable("_w_index_tmp", array_type)?;
-                        constructor.builder.store(array_var, array_val, None, [])?;
-                        array_var
-                    };
-
-                    // Use OpAccessChain to get pointer to element
-                    let elem_ptr_type =
-                        constructor.builder.type_pointer(None, StorageClass::Function, result_type);
-                    let elem_ptr =
-                        constructor.builder.access_chain(elem_ptr_type, None, array_var, [index_val])?;
-
-                    // Load the element
-                    Ok(constructor.builder.load(result_type, None, elem_ptr, None, [])?)
+                    lower_index_intrinsic(constructor, body, args[0], args[1], result_type)
                 }
                 "assert" => {
                     // Assertions are no-ops in release, return body
@@ -2246,6 +2209,141 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
             // Construct the matrix from row vectors
             Ok(constructor.builder.composite_construct(result_type, None, row_ids)?)
         }
+
+        // Slices - not yet implemented for SPIR-V
+        Expr::OwnedSlice { .. } | Expr::BorrowedSlice { .. } => {
+            Err(err_spirv!("Slice expressions not yet implemented in SPIR-V lowering"))
+        }
+    }
+}
+
+/// Lower the `length` intrinsic for arrays and slices.
+/// For static arrays, returns the compile-time size constant.
+/// For slices, extracts the dynamic length field.
+fn lower_length_intrinsic(
+    constructor: &mut Constructor,
+    body: &Body,
+    arg_expr_id: ExprId,
+    arg_lowered: spirv::Word,
+) -> Result<spirv::Word> {
+    let arg_ty = body.get_type(arg_expr_id);
+    match arg_ty {
+        PolyType::Constructed(TypeName::Array, type_args) => {
+            // Static array: extract size from type
+            match type_args.get(0) {
+                Some(PolyType::Constructed(TypeName::Size(n), _)) => {
+                    Ok(constructor.const_i32(*n as i32))
+                }
+                _ => bail_spirv!(
+                    "Cannot determine compile-time array size for length: {:?}",
+                    type_args.get(0)
+                ),
+            }
+        }
+        PolyType::Constructed(TypeName::Slice, _) => {
+            // Slice: extract len field from slice value
+            // OwnedSlice struct: {len: i32, data: [cap]elem} - len at index 0
+            // BorrowedSlice struct: {offset: i32, len: i32} - len at index 1
+            let slice_expr = body.get_expr(arg_expr_id);
+            let i32_type = constructor.i32_type;
+            match slice_expr {
+                Expr::OwnedSlice { len, .. } => {
+                    // For owned slices, extract the len directly
+                    lower_expr(constructor, body, *len)
+                }
+                Expr::BorrowedSlice { len, .. } => {
+                    // For borrowed slices, extract the len directly
+                    lower_expr(constructor, body, *len)
+                }
+                _ => {
+                    // Slice value from a variable - need to extract from struct
+                    // For now, use CompositeExtract assuming owned slice layout (len at index 0)
+                    Ok(constructor.builder.composite_extract(
+                        i32_type,
+                        None,
+                        arg_lowered,
+                        [0],
+                    )?)
+                }
+            }
+        }
+        _ => bail_spirv!("length called on non-array/non-slice type: {:?}", arg_ty),
+    }
+}
+
+/// Lower the `index` intrinsic for arrays and slices.
+/// For arrays, performs direct indexing.
+/// For slices, handles owned/borrowed slice semantics.
+fn lower_index_intrinsic(
+    constructor: &mut Constructor,
+    body: &Body,
+    array_expr_id: ExprId,
+    index_expr_id: ExprId,
+    result_type: spirv::Word,
+) -> Result<spirv::Word> {
+    let arg0_ty = body.get_type(array_expr_id);
+    let index_val = lower_expr(constructor, body, index_expr_id)?;
+
+    match arg0_ty {
+        PolyType::Constructed(TypeName::Array, _) | PolyType::Constructed(TypeName::Pointer, _) => {
+            // Regular array indexing
+            let array_var = if types::is_pointer(arg0_ty) {
+                lower_expr(constructor, body, array_expr_id)?
+            } else {
+                let array_val = lower_expr(constructor, body, array_expr_id)?;
+                let array_type = constructor.ast_type_to_spirv(arg0_ty);
+                let array_var = constructor.declare_variable("_w_index_tmp", array_type)?;
+                constructor.builder.store(array_var, array_val, None, [])?;
+                array_var
+            };
+
+            let elem_ptr_type =
+                constructor.builder.type_pointer(None, StorageClass::Function, result_type);
+            let elem_ptr =
+                constructor.builder.access_chain(elem_ptr_type, None, array_var, [index_val])?;
+            Ok(constructor.builder.load(result_type, None, elem_ptr, None, [])?)
+        }
+        PolyType::Constructed(TypeName::Slice, _) => {
+            // Slice indexing
+            let slice_expr = body.get_expr(array_expr_id);
+            match slice_expr {
+                Expr::OwnedSlice { data, .. } => {
+                    // OwnedSlice: index into data directly
+                    lower_index_intrinsic(constructor, body, *data, index_expr_id, result_type)
+                }
+                Expr::BorrowedSlice { base, offset, .. } => {
+                    // BorrowedSlice: compute base[offset + i]
+                    let offset_val = lower_expr(constructor, body, *offset)?;
+                    let i32_type = constructor.i32_type;
+                    let adjusted_index =
+                        constructor.builder.i_add(i32_type, None, offset_val, index_val)?;
+
+                    // Now index into base with adjusted index
+                    let base_ty = body.get_type(*base);
+                    let base_var = if types::is_pointer(base_ty) {
+                        lower_expr(constructor, body, *base)?
+                    } else {
+                        let base_val = lower_expr(constructor, body, *base)?;
+                        let base_type = constructor.ast_type_to_spirv(base_ty);
+                        let base_var = constructor.declare_variable("_w_slice_base_tmp", base_type)?;
+                        constructor.builder.store(base_var, base_val, None, [])?;
+                        base_var
+                    };
+
+                    let elem_ptr_type =
+                        constructor.builder.type_pointer(None, StorageClass::Function, result_type);
+                    let elem_ptr =
+                        constructor.builder.access_chain(elem_ptr_type, None, base_var, [adjusted_index])?;
+                    Ok(constructor.builder.load(result_type, None, elem_ptr, None, [])?)
+                }
+                _ => {
+                    // Slice value from a variable - assume owned slice layout
+                    // Extract data field (index 1) and index into it
+                    bail_spirv!("Slice indexing through variables not yet implemented")
+                }
+            }
+        }
+        _ => bail_spirv!("index called on non-array/non-slice type: {:?}", arg0_ty),
     }
 }
 

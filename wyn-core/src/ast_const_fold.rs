@@ -185,9 +185,6 @@ impl AstConstFolder {
                 if let Some(end) = &mut slice.end {
                     self.fold_expr(end);
                 }
-                if let Some(step) = &mut slice.step {
-                    self.fold_expr(step);
-                }
             }
 
             ExprKind::TypeAscription(inner, _) | ExprKind::TypeCoercion(inner, _) => {
@@ -429,7 +426,6 @@ mod tests {
         array: Expression,
         start: Option<Expression>,
         end: Option<Expression>,
-        step: Option<Expression>,
     ) -> Expression {
         Expression {
             h: test_header(),
@@ -437,7 +433,6 @@ mod tests {
                 array: Box::new(array),
                 start: start.map(Box::new),
                 end: end.map(Box::new),
-                step: step.map(Box::new),
             }),
         }
     }
@@ -447,7 +442,7 @@ mod tests {
         let mut folder = AstConstFolder::new();
         // arr[1+2:10] should fold to arr[3:10]
         let start = make_binop("+", make_int(1), make_int(2));
-        let mut expr = make_slice(make_array_ident("arr"), Some(start), Some(make_int(10)), None);
+        let mut expr = make_slice(make_array_ident("arr"), Some(start), Some(make_int(10)));
         folder.fold_expr(&mut expr);
 
         if let ExprKind::Slice(slice) = &expr.kind {
@@ -467,7 +462,7 @@ mod tests {
         let mut folder = AstConstFolder::new();
         // arr[0:5+5] should fold to arr[0:10]
         let end = make_binop("+", make_int(5), make_int(5));
-        let mut expr = make_slice(make_array_ident("arr"), Some(make_int(0)), Some(end), None);
+        let mut expr = make_slice(make_array_ident("arr"), Some(make_int(0)), Some(end));
         folder.fold_expr(&mut expr);
 
         if let ExprKind::Slice(slice) = &expr.kind {
@@ -483,47 +478,19 @@ mod tests {
     }
 
     #[test]
-    fn test_fold_slice_step_constant() {
+    fn test_fold_slice_both_components() {
         let mut folder = AstConstFolder::new();
-        // arr[0:10:1+1] should fold to arr[0:10:2]
-        let step = make_binop("+", make_int(1), make_int(1));
-        let mut expr = make_slice(
-            make_array_ident("arr"),
-            Some(make_int(0)),
-            Some(make_int(10)),
-            Some(step),
-        );
-        folder.fold_expr(&mut expr);
-
-        if let ExprKind::Slice(slice) = &expr.kind {
-            let step = slice.step.as_ref().expect("step should exist");
-            assert_eq!(
-                step.kind,
-                ExprKind::IntLiteral(2),
-                "Slice step should be folded to 2"
-            );
-        } else {
-            panic!("Expected Slice, got {:?}", expr.kind);
-        }
-    }
-
-    #[test]
-    fn test_fold_slice_all_components() {
-        let mut folder = AstConstFolder::new();
-        // arr[1+1:4*2:1+0] should fold to arr[2:8:1]
+        // arr[1+1:4*2] should fold to arr[2:8]
         let start = make_binop("+", make_int(1), make_int(1));
         let end = make_binop("*", make_int(4), make_int(2));
-        let step = make_binop("+", make_int(1), make_int(0));
-        let mut expr = make_slice(make_array_ident("arr"), Some(start), Some(end), Some(step));
+        let mut expr = make_slice(make_array_ident("arr"), Some(start), Some(end));
         folder.fold_expr(&mut expr);
 
         if let ExprKind::Slice(slice) = &expr.kind {
             let start = slice.start.as_ref().expect("start should exist");
             let end = slice.end.as_ref().expect("end should exist");
-            let step = slice.step.as_ref().expect("step should exist");
             assert_eq!(start.kind, ExprKind::IntLiteral(2), "start should fold to 2");
             assert_eq!(end.kind, ExprKind::IntLiteral(8), "end should fold to 8");
-            assert_eq!(step.kind, ExprKind::IntLiteral(1), "step should fold to 1");
         } else {
             panic!("Expected Slice, got {:?}", expr.kind);
         }
@@ -540,7 +507,6 @@ mod tests {
             make_array_ident("arr"),
             Some(make_ident("OFFSET")),
             Some(make_ident("SIZE")),
-            None,
         );
         folder.fold_expr(&mut expr);
 
@@ -562,7 +528,6 @@ mod tests {
             make_array_ident("arr"),
             Some(make_ident("n")),
             Some(make_int(10)),
-            None,
         );
         folder.fold_expr(&mut expr);
 

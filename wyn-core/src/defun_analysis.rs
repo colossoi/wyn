@@ -325,9 +325,6 @@ impl<'a> DefunAnalyzer<'a> {
                 if let Some(end) = &slice.end {
                     self.analyze_expr(end);
                 }
-                if let Some(step) = &slice.step {
-                    self.analyze_expr(step);
-                }
                 self.classifications.insert(expr.h.id, StaticValue::Dyn);
             }
         }
@@ -498,9 +495,6 @@ impl<'a> DefunAnalyzer<'a> {
                 }
                 if let Some(end) = &slice.end {
                     self.collect_free_vars(end, bound, free);
-                }
-                if let Some(step) = &slice.step {
-                    self.collect_free_vars(step, bound, free);
                 }
             }
         }

@@ -139,9 +139,6 @@ fn resolve_expr(expr: &mut Expression, module_manager: &ModuleManager) -> Result
             if let Some(ref mut end) = slice.end {
                 resolve_expr(end, module_manager)?;
             }
-            if let Some(ref mut step) = slice.step {
-                resolve_expr(step, module_manager)?;
-            }
         }
         // Base cases - no sub-expressions to resolve
         ExprKind::IntLiteral(_)

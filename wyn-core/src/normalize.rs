@@ -487,6 +487,57 @@ impl Normalizer {
                     node_id,
                 )
             }
+
+            // Slices - atomize subexpressions
+            Expr::OwnedSlice { data, len } => {
+                let new_data = self.expr_map[data];
+                let new_len = self.expr_map[len];
+
+                let (atom_data, data_binding) = self.atomize(body, new_data, node_id);
+                let (atom_len, len_binding) = self.atomize(body, new_len, node_id);
+
+                let slice_id = body.alloc_expr(
+                    Expr::OwnedSlice {
+                        data: atom_data,
+                        len: atom_len,
+                    },
+                    ty.clone(),
+                    span,
+                    node_id,
+                );
+
+                self.wrap_bindings(body, slice_id, ty, span, node_id, vec![len_binding, data_binding])
+            }
+
+            Expr::BorrowedSlice { base, offset, len } => {
+                let new_base = self.expr_map[base];
+                let new_offset = self.expr_map[offset];
+                let new_len = self.expr_map[len];
+
+                let (atom_base, base_binding) = self.atomize(body, new_base, node_id);
+                let (atom_offset, offset_binding) = self.atomize(body, new_offset, node_id);
+                let (atom_len, len_binding) = self.atomize(body, new_len, node_id);
+
+                let slice_id = body.alloc_expr(
+                    Expr::BorrowedSlice {
+                        base: atom_base,
+                        offset: atom_offset,
+                        len: atom_len,
+                    },
+                    ty.clone(),
+                    span,
+                    node_id,
+                );
+
+                self.wrap_bindings(
+                    body,
+                    slice_id,
+                    ty,
+                    span,
+                    node_id,
+                    vec![len_binding, offset_binding, base_binding],
+                )
+            }
         }
     }
 

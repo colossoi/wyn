@@ -451,6 +451,17 @@ impl Monomorphizer {
             Expr::Bool(b) => Ok(Expr::Bool(*b)),
             Expr::String(s) => Ok(Expr::String(s.clone())),
             Expr::Unit => Ok(Expr::Unit),
+
+            // Slices - map subexpressions
+            Expr::OwnedSlice { data, len } => Ok(Expr::OwnedSlice {
+                data: expr_map[data],
+                len: expr_map[len],
+            }),
+            Expr::BorrowedSlice { base, offset, len } => Ok(Expr::BorrowedSlice {
+                base: expr_map[base],
+                offset: expr_map[offset],
+                len: expr_map[len],
+            }),
         }
     }
 

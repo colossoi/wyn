@@ -2028,6 +2028,7 @@ impl<'a> TypeChecker<'a> {
                                     TypeName::Sum(_) => "sum".to_string(),
                                     TypeName::Existential(_, _) => "existential".to_string(),
                                     TypeName::Pointer => "pointer".to_string(),
+                                    TypeName::Slice => "slice".to_string(),
                                 };
 
                                 // Look up field in builtin registry (for vector types)
@@ -2269,9 +2270,9 @@ impl<'a> TypeChecker<'a> {
             }
 
             ExprKind::Slice(slice) => {
-                // Slice expression: array[start:end:step]
+                // Slice expression: array[start:end]
                 // - array must be [n]T
-                // - start/end/step (if present) must be integers
+                // - start/end (if present) must be integers
                 // - result is [?m]T (existential size)
 
                 let array_type = self.infer_expression(&slice.array)?;
@@ -2309,17 +2310,6 @@ impl<'a> TypeChecker<'a> {
                             end.h.span,
                             "Slice end must be an integer, got {}",
                             self.format_type(&end_type.apply(&self.context))
-                        )
-                    })?;
-                }
-
-                if let Some(step) = &slice.step {
-                    let step_type = self.infer_expression(step)?;
-                    self.context.unify(&step_type, &i32()).map_err(|_| {
-                        err_type_at!(
-                            step.h.span,
-                            "Slice step must be an integer, got {}",
-                            self.format_type(&step_type.apply(&self.context))
                         )
                     })?;
                 }

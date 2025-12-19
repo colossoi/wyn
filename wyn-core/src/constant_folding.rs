@@ -374,6 +374,37 @@ impl ConstantFolder {
                     node_id,
                 ))
             }
+
+            // Slices - map subexpressions
+            Expr::OwnedSlice { data, len } => {
+                let new_data = self.expr_map[data];
+                let new_len = self.expr_map[len];
+                Ok(body.alloc_expr(
+                    Expr::OwnedSlice {
+                        data: new_data,
+                        len: new_len,
+                    },
+                    ty.clone(),
+                    span,
+                    node_id,
+                ))
+            }
+
+            Expr::BorrowedSlice { base, offset, len } => {
+                let new_base = self.expr_map[base];
+                let new_offset = self.expr_map[offset];
+                let new_len = self.expr_map[len];
+                Ok(body.alloc_expr(
+                    Expr::BorrowedSlice {
+                        base: new_base,
+                        offset: new_offset,
+                        len: new_len,
+                    },
+                    ty.clone(),
+                    span,
+                    node_id,
+                ))
+            }
         }
     }
 

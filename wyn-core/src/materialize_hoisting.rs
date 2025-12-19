@@ -219,6 +219,15 @@ fn collect_materializations_rec(
         Expr::Attributed { expr, .. } => {
             collect_materializations_rec(body, *expr, result, visited);
         }
+        Expr::OwnedSlice { data, len } => {
+            collect_materializations_rec(body, *data, result, visited);
+            collect_materializations_rec(body, *len, result, visited);
+        }
+        Expr::BorrowedSlice { base, offset, len } => {
+            collect_materializations_rec(body, *base, result, visited);
+            collect_materializations_rec(body, *offset, result, visited);
+            collect_materializations_rec(body, *len, result, visited);
+        }
         // Atoms have no children
         Expr::Local(_)
         | Expr::Global(_)

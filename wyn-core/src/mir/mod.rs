@@ -205,6 +205,29 @@ pub enum Expr {
         attributes: Vec<Attribute>,
         expr: ExprId,
     },
+
+    // --- Slices ---
+    /// Owned slice with capacity-sized buffer and dynamic length.
+    /// Produced by filter, array literals with dynamic content.
+    /// Type: Slice(cap, elem) where cap is the buffer capacity.
+    OwnedSlice {
+        /// The backing buffer: [cap]elem
+        data: ExprId,
+        /// Dynamic length: i32 (0 <= len <= cap)
+        len: ExprId,
+    },
+
+    /// Borrowed slice referencing part of another array (zero-copy view).
+    /// Produced by arr[i:j], take, drop.
+    /// Type: Slice(cap, elem) where cap is the source array size.
+    BorrowedSlice {
+        /// The source array being sliced
+        base: ExprId,
+        /// Start offset: i32
+        offset: ExprId,
+        /// Dynamic length: i32
+        len: ExprId,
+    },
 }
 
 // =============================================================================

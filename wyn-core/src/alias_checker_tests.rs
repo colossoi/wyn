@@ -601,11 +601,13 @@ def main() -> i32 =
 // =============================================================================
 // Slice and Range Alias Tests
 // =============================================================================
+// Note: Borrowed slices (arr[i:j]) alias their source array.
+// This is the new semantics - slices are zero-copy views.
 
 #[test]
-fn test_slice_creates_fresh_backing_store() {
-    // Slicing an array creates a fresh backing store (desugared to map/iota)
-    // Consuming the slice should NOT affect the original array
+fn test_borrowed_slice_consuming_invalidates_source() {
+    // Borrowed slices alias the source array.
+    // Consuming the slice invalidates the original array.
     let source = r#"
 def consume(arr: *[3]i32) -> i32 = arr[0]
 
@@ -615,16 +617,17 @@ def main(arr: [10]i32) -> i32 =
     arr[0]
 "#;
     let result = check_alias(source);
-    // Should be OK: sliced has its own backing store, consuming it doesn't affect arr
+    // Should ERROR: sliced aliases arr, consuming sliced invalidates arr
     assert!(
-        !result.has_errors(),
-        "Slice should create fresh backing store; consuming slice should not invalidate original"
+        result.has_errors(),
+        "Borrowed slice aliases source; consuming slice should invalidate original"
     );
 }
 
 #[test]
-fn test_slice_independent_of_original_array() {
-    // Multiple slices of the same array should be independent
+fn test_multiple_borrowed_slices_alias_same_source() {
+    // Multiple slices of the same array all alias the original.
+    // Consuming one invalidates the others (they share the same backing store).
     let source = r#"
 def consume(arr: *[3]i32) -> i32 = arr[0]
 
@@ -635,16 +638,16 @@ def main(arr: [10]i32) -> i32 =
     consume(s2)
 "#;
     let result = check_alias(source);
-    // Should be OK: s1 and s2 are independent fresh arrays
+    // Should ERROR: s1 and s2 both alias arr, consuming s1 invalidates s2
     assert!(
-        !result.has_errors(),
-        "Multiple slices should be independent backing stores"
+        result.has_errors(),
+        "Multiple borrowed slices alias same source; consuming one invalidates others"
     );
 }
 
 #[test]
-fn test_original_array_consumed_slice_still_valid() {
-    // If we consume the original array, slices (being fresh copies) are still valid
+fn test_consuming_source_invalidates_borrowed_slice() {
+    // If we consume the original array, borrowed slices are invalidated.
     let source = r#"
 def consume(arr: *[10]i32) -> i32 = arr[0]
 
@@ -654,16 +657,16 @@ def main(arr: [10]i32) -> i32 =
     sliced[0]
 "#;
     let result = check_alias(source);
-    // Should be OK: sliced is a fresh copy, not affected by consuming arr
+    // Should ERROR: sliced borrows from arr, consuming arr invalidates sliced
     assert!(
-        !result.has_errors(),
-        "Slice is a fresh copy; consuming original should not invalidate slice"
+        result.has_errors(),
+        "Borrowed slice is invalidated when source is consumed"
     );
 }
 
 #[test]
-fn test_slice_assigned_to_alias_tracks_correctly() {
-    // Slice bound to variable, then aliased - consuming alias should not affect original
+fn test_borrowed_slice_alias_chain() {
+    // Slice bound to variable, then aliased - consuming alias invalidates original
     let source = r#"
 def consume(arr: *[3]i32) -> i32 = arr[0]
 
@@ -674,10 +677,10 @@ def main(arr: [10]i32) -> i32 =
     arr[0]
 "#;
     let result = check_alias(source);
-    // Should be OK: alias is aliasing the fresh slice, not the original arr
+    // Should ERROR: alias -> sliced -> arr, consuming alias invalidates arr
     assert!(
-        !result.has_errors(),
-        "Slice alias consumed should not affect original array"
+        result.has_errors(),
+        "Borrowed slice alias chain: consuming alias invalidates original"
     );
 }
 
@@ -715,21 +718,41 @@ def main() -> i32 =
 }
 
 #[test]
-fn test_slice_with_step_creates_fresh_store() {
-    // Slice with step also creates fresh backing store
+fn test_borrowed_slice_aliases_base_array() {
+    // Borrowed slices alias their base array
+    // Consuming the slice should prevent using the original
     let source = r#"
 def consume(arr: *[3]i32) -> i32 = arr[0]
 
 def main(arr: [9]i32) -> i32 =
-    let sliced = arr[0:9:3] in
+    let sliced = arr[1:4] in
     let _ = consume(sliced) in
     arr[0]
 "#;
     let result = check_alias(source);
-    // Should be OK: slice with step is also a fresh copy
+    // Should ERROR: sliced borrows from arr, consuming sliced invalidates arr
+    assert!(
+        result.has_errors(),
+        "Borrowed slice should alias base array - using original after consuming slice is invalid"
+    );
+}
+
+#[test]
+fn test_borrowed_slice_non_consuming_ok() {
+    // Using a borrowed slice without consuming allows original to still be used
+    let source = r#"
+def borrow(arr: [3]i32) -> i32 = arr[0]
+
+def main(arr: [9]i32) -> i32 =
+    let sliced = arr[1:4] in
+    let _ = borrow(sliced) in
+    arr[0]
+"#;
+    let result = check_alias(source);
+    // Should be OK: borrow doesn't consume, so arr is still usable
     assert!(
         !result.has_errors(),
-        "Slice with step should create fresh backing store"
+        "Non-consuming use of borrowed slice should allow original array to be used"
     );
 }
 

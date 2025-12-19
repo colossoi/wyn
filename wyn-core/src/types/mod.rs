@@ -137,6 +137,10 @@ pub enum TypeName {
     /// Pointer type (MIR only) - result of Materialize, used for indexing/access.
     /// The pointee type is stored in Type::Constructed args.
     Pointer,
+    /// Slice type with dynamic length (MIR only).
+    /// Type args: [cap_type, elem_type] where cap is the backing buffer capacity.
+    /// Runtime representation includes a dynamic length field.
+    Slice,
 }
 
 impl std::fmt::Display for TypeName {
@@ -184,6 +188,7 @@ impl std::fmt::Display for TypeName {
                 write!(f, "?{}.{}", vars.join(" "), ty)
             }
             TypeName::Pointer => write!(f, "Ptr"),
+            TypeName::Slice => write!(f, "Slice"),
         }
     }
 }
@@ -234,6 +239,7 @@ impl polytype::Name for TypeName {
             }
             TypeName::Existential(vars, ty) => format!("?{}. {}", vars.join(" "), ty),
             TypeName::Pointer => "Ptr".to_string(),
+            TypeName::Slice => "Slice".to_string(),
         }
     }
 }
@@ -539,6 +545,33 @@ pub fn is_pointer(ty: &Type) -> bool {
 pub fn pointee(ty: &Type) -> Option<&Type> {
     match ty {
         Type::Constructed(TypeName::Pointer, args) if !args.is_empty() => Some(&args[0]),
+        _ => None,
+    }
+}
+
+/// Create a slice type (MIR only): Slice(cap, elem)
+/// cap is the capacity type (Size(n) or SizeVar), elem is the element type.
+pub fn slice(cap: Type, elem: Type) -> Type {
+    Type::Constructed(TypeName::Slice, vec![cap, elem])
+}
+
+/// Check if a type is a slice type
+pub fn is_slice(ty: &Type) -> bool {
+    matches!(ty, Type::Constructed(TypeName::Slice, _))
+}
+
+/// Get the element type from a slice type, or None if not a slice
+pub fn slice_elem(ty: &Type) -> Option<&Type> {
+    match ty {
+        Type::Constructed(TypeName::Slice, args) if args.len() >= 2 => Some(&args[1]),
+        _ => None,
+    }
+}
+
+/// Get the capacity type from a slice type, or None if not a slice
+pub fn slice_cap(ty: &Type) -> Option<&Type> {
+    match ty {
+        Type::Constructed(TypeName::Slice, args) if !args.is_empty() => Some(&args[0]),
         _ => None,
     }
 }

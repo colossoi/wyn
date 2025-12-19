@@ -811,6 +811,11 @@ impl<'a> LowerCtx<'a> {
             Expr::Materialize(inner) => self.lower_expr(body, *inner, output),
 
             Expr::Attributed { expr: inner, .. } => self.lower_expr(body, *inner, output),
+
+            // --- Slices ---
+            Expr::OwnedSlice { .. } | Expr::BorrowedSlice { .. } => {
+                bail_glsl!("Slice expressions not yet implemented in GLSL lowering")
+            }
         }
     }
 
@@ -935,8 +940,50 @@ impl<'a> LowerCtx<'a> {
                     Ok(format!("{}.{}", args[0], args[1]))
                 }
             }
-            "index" => Ok(format!("{}[{}]", args[0], args[1])),
-            "length" => Ok(format!("{}.length()", args[0])),
+            "index" => {
+                // Check if argument is an array or slice
+                let arg_ty = body.get_type(arg_ids[0]);
+                match arg_ty {
+                    PolyType::Constructed(TypeName::Array, _) => {
+                        // Regular array indexing
+                        Ok(format!("{}[{}]", args[0], args[1]))
+                    }
+                    PolyType::Constructed(TypeName::Slice, _) => {
+                        // Slice indexing - check if owned or borrowed
+                        match body.get_expr(arg_ids[0]) {
+                            Expr::OwnedSlice { .. } => {
+                                // OwnedSlice: index into data field
+                                Ok(format!("{}.data[{}]", args[0], args[1]))
+                            }
+                            Expr::BorrowedSlice { .. } => {
+                                // BorrowedSlice: offset + index
+                                Ok(format!("{}.base[{}.offset + {}]", args[0], args[0], args[1]))
+                            }
+                            _ => {
+                                // Slice through variable - assume owned layout
+                                Ok(format!("{}.data[{}]", args[0], args[1]))
+                            }
+                        }
+                    }
+                    _ => Ok(format!("{}[{}]", args[0], args[1])),
+                }
+            }
+            "length" => {
+                // Check if argument is an array or slice
+                let arg_ty = body.get_type(arg_ids[0]);
+                match arg_ty {
+                    PolyType::Constructed(TypeName::Array, _) => {
+                        // Static array: use GLSL .length() method
+                        Ok(format!("{}.length()", args[0]))
+                    }
+                    PolyType::Constructed(TypeName::Slice, _) => {
+                        // Slice: access the len field
+                        // OwnedSlice struct has len field, BorrowedSlice also has len
+                        Ok(format!("{}.len", args[0]))
+                    }
+                    _ => bail_glsl!("length called on non-array/non-slice type: {:?}", arg_ty),
+                }
+            }
             _ => bail_glsl!("Unknown intrinsic: {}", name),
         }
     }

@@ -145,6 +145,16 @@ fn format_constructed_type(name: &TypeName, args: &[PolyType<TypeName>]) -> Stri
             // Ptr<T>
             if args.len() == 1 { format!("Ptr<{}>", format_type(&args[0])) } else { "Ptr<?>".to_string() }
         }
+        TypeName::Slice => {
+            // Slice<cap, elem> - slice with dynamic length
+            if args.len() == 2 {
+                let cap = format_type(&args[0]);
+                let elem = format_type(&args[1]);
+                format!("Slice<{}, {}>", cap, elem)
+            } else {
+                "Slice<?>".to_string()
+            }
+        }
     }
 }
 
@@ -507,12 +517,7 @@ impl AstFormatter {
                 let arr = self.format_simple_expr(&slice.array);
                 let start = slice.start.as_ref().map(|e| self.format_simple_expr(e)).unwrap_or_default();
                 let end = slice.end.as_ref().map(|e| self.format_simple_expr(e)).unwrap_or_default();
-                if let Some(step) = &slice.step {
-                    let step_str = self.format_simple_expr(step);
-                    self.write_line(&format!("{}[{}:{}:{}]", arr, start, end, step_str));
-                } else {
-                    self.write_line(&format!("{}[{}:{}]", arr, start, end));
-                }
+                self.write_line(&format!("{}[{}:{}]", arr, start, end));
             }
             ExprKind::TypeAscription(inner, ty) => {
                 let inner_str = self.format_simple_expr(inner);
@@ -995,6 +1000,12 @@ impl Display for mir::Expr {
                     write!(f, "{} ", attr)?;
                 }
                 write!(f, "e{}", expr.0)
+            }
+            mir::Expr::OwnedSlice { data, len } => {
+                write!(f, "@owned_slice(data=e{}, len=e{})", data.0, len.0)
+            }
+            mir::Expr::BorrowedSlice { base, offset, len } => {
+                write!(f, "@borrowed_slice(base=e{}, offset=e{}, len=e{})", base.0, offset.0, len.0)
             }
         }
     }

@@ -511,9 +511,6 @@ pub fn walk_expr_slice<V: Visitor>(v: &mut V, slice: &SliceExpr) -> ControlFlow<
     if let Some(end) = &slice.end {
         v.visit_expression(end)?;
     }
-    if let Some(step) = &slice.step {
-        v.visit_expression(step)?;
-    }
     ControlFlow::Continue(())
 }
 

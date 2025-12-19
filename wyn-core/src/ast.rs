@@ -570,14 +570,14 @@ pub enum RangeKind {
     ExclusiveGt, // ..>
 }
 
-/// Array slice expression: a[start:end:step]
-/// All components are optional: a[:], a[i:], a[:j], a[::s], a[i:j:s]
+/// Array slice expression: a[start:end]
+/// Both start and end are optional: a[:], a[i:], a[:j], a[i:j]
+/// TODO: Step support (arr[i:j:s]) deferred to future work
 #[derive(Debug, Clone, PartialEq)]
 pub struct SliceExpr {
     pub array: Box<Expression>,
-    pub start: Option<Box<Expression>>, // None = 0 (or len-1 if step < 0)
-    pub end: Option<Box<Expression>>,   // None = len (or -1 if step < 0)
-    pub step: Option<Box<Expression>>,  // None = 1
+    pub start: Option<Box<Expression>>, // None = 0
+    pub end: Option<Box<Expression>>,   // None = len
 }
 
 // Pattern types for match expressions and let bindings

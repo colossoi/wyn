@@ -363,9 +363,6 @@ fn find_in_expr(expr: &ast::Expression, line: usize, col: usize, best: &mut Opti
             if let Some(end) = &slice_expr.end {
                 find_in_expr(end, line, col, best);
             }
-            if let Some(step) = &slice_expr.step {
-                find_in_expr(step, line, col, best);
-            }
         }
     }
 }

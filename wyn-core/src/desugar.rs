@@ -134,32 +134,24 @@ impl<'a> Desugarer<'a> {
             ExprKind::Range(_) | ExprKind::Slice(_) => {}
         }
 
-        // Now handle Slice transformations (Range stays as-is)
-        let span = expr.h.span;
-        if let ExprKind::Slice(slice) = &expr.kind {
-            let new_expr = self.desugar_slice(slice, span)?;
-            *expr = new_expr;
-        }
+        // Slice expressions are now handled in flattening as BorrowedSlice
+        // Range stays as-is in the AST
 
         Ok(())
     }
 
-    /// Desugar a slice expression into map over a range.
-    ///
-    /// Transformations:
-    /// - `a[i:j]` → `map (|idx| a[i + idx]) (0..<(j - i))`
-    /// - `a[i:j:s]` → `map (|idx| a[i + idx * s]) (0..<((j - i) / s))`
-    /// - `a[:]` → `a` (identity)
+    // NOTE: desugar_slice is no longer used - slices are now handled in flattening
+    // as BorrowedSlice. This code is kept for reference but should be deleted.
+    #[allow(dead_code)]
     fn desugar_slice(&mut self, slice: &SliceExpr, span: Span) -> Result<Expression> {
         let array = &slice.array;
 
         // Handle a[:] - full array copy (identity)
-        if slice.start.is_none() && slice.end.is_none() && slice.step.is_none() {
+        if slice.start.is_none() && slice.end.is_none() {
             return Ok((**array).clone());
         }
 
         // For now, require explicit start and end for slices
-        // (handling open-ended slices requires knowing the array length at desugar time)
         let start = slice.start.as_ref().ok_or_else(|| {
             err_flatten_at!(
                 span,
@@ -174,31 +166,19 @@ impl<'a> Desugarer<'a> {
             )
         })?;
 
-        // Calculate step (default 1)
-        let step_val = slice.step.as_ref().map(|s| (**s).clone()).unwrap_or_else(|| self.mk_int(1, span));
-
-        // Calculate count = (end - start) / step
+        // Calculate count = end - start
         let diff = self.mk_binop("-", (**end).clone(), (**start).clone(), span);
-        let count = self.mk_binop("/", diff, step_val.clone(), span);
 
-        // Build lambda: |idx| array[start + idx * step]
+        // Build lambda: |idx| array[start + idx]
         let idx_param = self.mk_pattern_name("__idx", span);
         let idx_var = self.mk_ident("__idx", span);
-
-        let index_expr = if slice.step.is_some() {
-            // start + idx * step
-            let idx_times_step = self.mk_binop("*", idx_var, step_val, span);
-            self.mk_binop("+", (**start).clone(), idx_times_step, span)
-        } else {
-            // start + idx
-            self.mk_binop("+", (**start).clone(), idx_var, span)
-        };
+        let index_expr = self.mk_binop("+", (**start).clone(), idx_var, span);
 
         let array_access = self.mk_array_index((**array).clone(), index_expr, span);
         let lambda = self.mk_lambda(vec![idx_param], array_access, span);
 
         // Create range 0..<count
-        let range_expr = self.mk_range(count, span);
+        let range_expr = self.mk_range(diff, span);
 
         Ok(self.mk_call("map", vec![lambda, range_expr], span))
     }

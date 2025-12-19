@@ -960,8 +960,63 @@ impl Flattener {
                     StaticValue::Dyn,
                 )
             }
-            ExprKind::Slice(_) => {
-                bail_flatten!("Slice expressions should be desugared before flattening");
+            ExprKind::Slice(slice) => {
+                // Slice creates a BorrowedSlice - a zero-copy view into an array
+                let (base_id, _) = self.flatten_expr(&slice.array)?;
+                let base_ty = self.current_body.get_type(base_id).clone();
+
+                // Get array capacity and element type from base array type
+                let (cap_ty, elem_ty) = match &base_ty {
+                    Type::Constructed(TypeName::Array, args) if args.len() == 2 => {
+                        (args[0].clone(), args[1].clone())
+                    }
+                    _ => {
+                        bail_flatten!("Slice requires an array type, got {:?}", base_ty);
+                    }
+                };
+
+                // Flatten start (default to 0)
+                let offset_id = if let Some(start) = &slice.start {
+                    let (id, _) = self.flatten_expr(start)?;
+                    id
+                } else {
+                    self.alloc_expr(mir::Expr::Int("0".to_string()), types::i32(), span)
+                };
+
+                // Flatten end - required for now
+                let end_id = if let Some(end) = &slice.end {
+                    let (id, _) = self.flatten_expr(end)?;
+                    id
+                } else {
+                    bail_flatten!("Slice without explicit end not yet supported");
+                };
+
+                // Compute length = end - offset
+                let len_id = self.alloc_expr(
+                    mir::Expr::BinOp {
+                        op: "-".to_string(),
+                        lhs: end_id,
+                        rhs: offset_id,
+                    },
+                    types::i32(),
+                    span,
+                );
+
+                // Create slice type: Slice(cap, elem)
+                let slice_ty = types::slice(cap_ty, elem_ty);
+
+                // Create BorrowedSlice expression with the slice type
+                let slice_id = self.alloc_expr(
+                    mir::Expr::BorrowedSlice {
+                        base: base_id,
+                        offset: offset_id,
+                        len: len_id,
+                    },
+                    slice_ty,
+                    span,
+                );
+
+                return Ok((slice_id, StaticValue::Dyn));
             }
         };
 
