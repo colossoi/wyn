@@ -125,6 +125,9 @@ pub struct PreElaboratedPrelude {
     pub prelude_functions: HashMap<String, Decl>,
     /// Type table for prelude function bodies (from type-checking during prelude creation)
     pub prelude_type_table: HashMap<NodeId, TypeScheme<TypeName>>,
+    /// Type schemes for prelude functions (name -> scheme)
+    /// Used by monomorphization for consistent type variable IDs across params/return
+    pub prelude_schemes: HashMap<String, TypeScheme<TypeName>>,
 }
 
 /// Manages lazy loading of module files
@@ -141,6 +144,9 @@ pub struct ModuleManager {
     prelude_functions: HashMap<String, Decl>,
     /// Type table for prelude function bodies
     prelude_type_table: HashMap<NodeId, TypeScheme<TypeName>>,
+    /// Type schemes for prelude functions (name -> scheme)
+    /// Used by monomorphization for consistent type variable IDs across params/return
+    prelude_schemes: HashMap<String, TypeScheme<TypeName>>,
 }
 
 impl ModuleManager {
@@ -182,6 +188,7 @@ impl ModuleManager {
             type_aliases: HashMap::new(),
             prelude_functions: HashMap::new(),
             prelude_type_table: HashMap::new(),
+            prelude_schemes: HashMap::new(),
         }
     }
 
@@ -205,6 +212,9 @@ impl ModuleManager {
         let mut checker = TypeChecker::new(&manager);
         checker.load_builtins()?;
         checker.check_prelude_functions()?;
+
+        // Extract function schemes before consuming the type checker
+        let prelude_schemes = checker.get_function_schemes();
         let prelude_type_table = checker.into_type_table();
 
         Ok(PreElaboratedPrelude {
@@ -214,6 +224,7 @@ impl ModuleManager {
             type_aliases: manager.type_aliases,
             prelude_functions: manager.prelude_functions,
             prelude_type_table,
+            prelude_schemes,
         })
     }
 
@@ -227,7 +238,13 @@ impl ModuleManager {
             type_aliases: prelude.type_aliases.clone(),
             prelude_functions: prelude.prelude_functions.clone(),
             prelude_type_table: prelude.prelude_type_table.clone(),
+            prelude_schemes: prelude.prelude_schemes.clone(),
         }
+    }
+
+    /// Get the type scheme for a prelude function (used by monomorphization)
+    pub fn get_prelude_scheme(&self, name: &str) -> Option<&TypeScheme<TypeName>> {
+        self.prelude_schemes.get(name)
     }
 
     /// Check if a name is a known module
@@ -736,6 +753,11 @@ impl ModuleManager {
     /// Get the type table for prelude function bodies
     pub fn get_prelude_type_table(&self) -> &HashMap<NodeId, TypeScheme<TypeName>> {
         &self.prelude_type_table
+    }
+
+    /// Get the type schemes for prelude functions (for monomorphization)
+    pub fn get_prelude_schemes(&self) -> &HashMap<String, TypeScheme<TypeName>> {
+        &self.prelude_schemes
     }
 
     /// Check if a name is a qualified module reference (e.g., "f32.sum")

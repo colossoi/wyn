@@ -1091,6 +1091,17 @@ impl<'a> TypeChecker<'a> {
         self.type_table
     }
 
+    /// Get all function type schemes from the scope stack.
+    /// Used to extract canonical schemes for prelude functions during prelude creation.
+    /// This ensures monomorphization has consistent type variable IDs across params/return.
+    pub fn get_function_schemes(&self) -> std::collections::HashMap<String, TypeScheme> {
+        let mut schemes = std::collections::HashMap::new();
+        self.scope_stack.for_each_binding(|name, scheme| {
+            schemes.insert(name.to_string(), scheme.clone());
+        });
+        schemes
+    }
+
     /// Resolve type aliases in a declaration within a module context
     fn resolve_decl_type_aliases(&self, decl: &crate::ast::Decl, module_name: &str) -> crate::ast::Decl {
         // Resolve type aliases in the return type

@@ -468,8 +468,16 @@ impl AliasChecked {
         );
 
         let builtins = impl_source::ImplSource::default().all_names();
-        let defun_analysis = defun_analysis::analyze_program(&self.ast, &type_table, &builtins);
-        let mut flattener = flattening::Flattener::new(type_table, builtins, defun_analysis);
+        // Collect prelude function declarations for defun analysis
+        let prelude_decls: Vec<_> = module_manager.get_prelude_function_declarations();
+        let defun_analysis = defun_analysis::analyze_program_with_decls(
+            &self.ast,
+            &prelude_decls,
+            &type_table,
+            &builtins,
+        );
+        let prelude_schemes = module_manager.get_prelude_schemes().clone();
+        let mut flattener = flattening::Flattener::new(type_table, builtins, defun_analysis, prelude_schemes);
         let mut mir = flattener.flatten_program(&self.ast)?;
 
         // Flatten module function declarations so they're available in SPIR-V

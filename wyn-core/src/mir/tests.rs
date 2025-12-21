@@ -61,6 +61,7 @@ fn test_simple_function() {
         name: "add".to_string(),
         params: vec![x_local, y_local],
         ret_type: i32_type(),
+        scheme: None,
         attributes: vec![],
         body,
         span,

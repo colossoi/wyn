@@ -50,6 +50,8 @@ pub struct Flattener {
     current_body: Body,
     /// Mapping from variable names to LocalIds in the current scope
     name_to_local: ScopeStack<LocalId>,
+    /// Type schemes for prelude functions (for monomorphization consistency)
+    prelude_schemes: HashMap<String, TypeScheme<TypeName>>,
 }
 
 impl Flattener {
@@ -57,6 +59,7 @@ impl Flattener {
         type_table: HashMap<NodeId, TypeScheme<TypeName>>,
         builtins: HashSet<String>,
         defun_analysis: DefunAnalysis,
+        prelude_schemes: HashMap<String, TypeScheme<TypeName>>,
     ) -> Self {
         Flattener {
             next_id: 0,
@@ -70,6 +73,7 @@ impl Flattener {
             needs_backing_store: HashSet::new(),
             current_body: Body::new(),
             name_to_local: ScopeStack::new(),
+            prelude_schemes,
         }
     }
 
@@ -127,6 +131,111 @@ impl Flattener {
         match &pattern.kind {
             PatternKind::Typed(inner, _) => Self::unwrap_typed_pattern(inner),
             _ => pattern,
+        }
+    }
+
+    /// Recursively destructure a pattern into MIR let bindings that wrap a body.
+    ///
+    /// Given a pattern like `(a, (b, c))` and a value_id for the tuple,
+    /// generates nested lets with tuple_access intrinsics to extract elements.
+    fn destructure_pattern(
+        &mut self,
+        pattern: &ast::Pattern,
+        value_id: ExprId,
+        value_ty: &Type,
+        body_id: ExprId,
+        span: Span,
+    ) -> Result<ExprId> {
+        let pattern = Self::unwrap_typed_pattern(pattern);
+
+        match &pattern.kind {
+            PatternKind::Name(name) => {
+                // Simple binding: let name = value in body
+                let local_id = self.alloc_local(name.clone(), value_ty.clone(), LocalKind::Let, span);
+                let body_ty = self.current_body.get_type(body_id).clone();
+                Ok(self.alloc_expr(
+                    mir::Expr::Let {
+                        local: local_id,
+                        rhs: value_id,
+                        body: body_id,
+                    },
+                    body_ty,
+                    span,
+                ))
+            }
+            PatternKind::Wildcard => {
+                // Wildcard: evaluate value for side effects but don't bind
+                let ignored_name = self.fresh_name("ignored");
+                let local_id = self.alloc_local(ignored_name, value_ty.clone(), LocalKind::Let, span);
+                let body_ty = self.current_body.get_type(body_id).clone();
+                Ok(self.alloc_expr(
+                    mir::Expr::Let {
+                        local: local_id,
+                        rhs: value_id,
+                        body: body_id,
+                    },
+                    body_ty,
+                    span,
+                ))
+            }
+            PatternKind::Tuple(patterns) => {
+                // Tuple pattern: bind the tuple, then recursively destructure each element
+                let tuple_name = self.fresh_name("tup");
+                let tuple_local_id = self.alloc_local(tuple_name, value_ty.clone(), LocalKind::Let, span);
+
+                // Get element types from the tuple type
+                let elem_types: Vec<Type> = match value_ty {
+                    Type::Constructed(TypeName::Tuple(_), args) => args.clone(),
+                    _ => {
+                        // Fallback: use types from pattern
+                        patterns.iter().map(|p| self.get_pattern_type(p)).collect()
+                    }
+                };
+
+                let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
+
+                // Process elements in reverse order to build nested lets from inside out
+                let mut current_body = body_id;
+                for (i, pat) in patterns.iter().enumerate().rev() {
+                    let elem_ty = elem_types.get(i).cloned().unwrap_or_else(|| {
+                        self.get_pattern_type(pat)
+                    });
+
+                    // Create tuple_access expression
+                    let tuple_ref = self.alloc_expr(mir::Expr::Local(tuple_local_id), value_ty.clone(), span);
+                    let idx_expr = self.alloc_expr(mir::Expr::Int(i.to_string()), i32_type.clone(), span);
+                    let extract_id = self.alloc_expr(
+                        mir::Expr::Intrinsic {
+                            name: "tuple_access".to_string(),
+                            args: vec![tuple_ref, idx_expr],
+                        },
+                        elem_ty.clone(),
+                        span,
+                    );
+
+                    // Recursively destructure this element
+                    current_body = self.destructure_pattern(pat, extract_id, &elem_ty, current_body, span)?;
+                }
+
+                // Wrap with the outer tuple binding
+                let body_ty = self.current_body.get_type(current_body).clone();
+                Ok(self.alloc_expr(
+                    mir::Expr::Let {
+                        local: tuple_local_id,
+                        rhs: value_id,
+                        body: current_body,
+                    },
+                    body_ty,
+                    span,
+                ))
+            }
+            PatternKind::Typed(_, _) => {
+                unreachable!("Typed patterns should be stripped before reaching here")
+            }
+            _ => Err(err_flatten!(
+                "Pattern kind {:?} not yet supported in destructuring",
+                pattern.kind
+            )),
         }
     }
 
@@ -421,6 +530,7 @@ impl Flattener {
                 name: d.name.clone(),
                 params: param_local_ids,
                 ret_type,
+                scheme: None, // User functions - scheme lookup happens via ModuleManager
                 attributes: self.convert_attributes(&d.attributes),
                 body,
                 span,
@@ -480,12 +590,28 @@ impl Flattener {
             self.name_to_local.pop_scope();
             let body = self.end_body(old_body);
 
-            let ret_type = self.get_expr_type(&d.body);
+            // Use the return type from the MIR body's root expression.
+            // This ensures parameter type variables match return type variables,
+            // since flattening propagates types consistently. The type_table
+            // may have inconsistent variable IDs due to separate inference passes.
+            let ret_type = body.get_type(body.root).clone();
+
+            // DEBUG: Verify consistency
+            let type_table_ret = self.get_expr_type(&d.body);
+            if ret_type != type_table_ret {
+                eprintln!("WARN: {} ret_type mismatch: body={:?} table={:?}",
+                         qualified_name, ret_type, type_table_ret);
+            }
+
+            // Look up the canonical scheme for this function (for monomorphization)
+            let scheme = self.prelude_schemes.get(qualified_name).cloned();
+
             mir::Def::Function {
                 id: self.next_node_id(),
                 name: qualified_name.to_string(),
                 params: param_local_ids,
                 ret_type,
+                scheme,
                 attributes: self.convert_attributes(&d.attributes),
                 body,
                 span,
@@ -775,7 +901,7 @@ impl Flattener {
             }
 
             ExprKind::LetIn(let_in) => return self.flatten_let_in(let_in, span, &ty),
-            ExprKind::Lambda(lambda) => return self.flatten_lambda(lambda, expr.h.id, span),
+            ExprKind::Lambda(lambda) => return self.flatten_lambda(lambda, expr.h.id, span, &ty),
             ExprKind::Application(func, args) => return self.flatten_application(func, args, &ty, span),
 
             ExprKind::Tuple(elems) => {
@@ -1211,6 +1337,7 @@ impl Flattener {
         lambda: &ast::LambdaExpr,
         node_id: NodeId,
         span: Span,
+        func_type: &Type,
     ) -> Result<(ExprId, StaticValue)> {
         // Look up pre-computed analysis for this lambda
         let analysis = self.defun_analysis.get_or_panic(node_id);
@@ -1256,15 +1383,34 @@ impl Flattener {
         );
         let mut param_local_ids = vec![closure_local];
 
-        // Allocate lambda params as locals
-        for param in &lambda.params {
-            let name = param
-                .simple_name()
-                .ok_or_else(|| err_flatten!("Complex lambda parameter patterns not supported"))?
-                .to_string();
+        // Allocate lambda params as locals - handle both simple names and patterns
+        // For tuple patterns, we allocate a single param with a synthetic name,
+        // then destructure it at the start of the body
+        let mut pattern_params: Vec<(&ast::Pattern, LocalId, Type)> = vec![];
+        for (i, param) in lambda.params.iter().enumerate() {
             let ty = self.get_pattern_type(param);
-            let local_id = self.alloc_local(name, ty, LocalKind::Param, span);
-            param_local_ids.push(local_id);
+            let pattern = Self::unwrap_typed_pattern(param);
+
+            match &pattern.kind {
+                PatternKind::Name(name) => {
+                    // Simple name: allocate directly
+                    let local_id = self.alloc_local(name.clone(), ty, LocalKind::Param, span);
+                    param_local_ids.push(local_id);
+                }
+                PatternKind::Tuple(_) => {
+                    // Tuple pattern: allocate param with synthetic name, destructure later
+                    let synth_name = format!("_w_param_{}", i);
+                    let local_id = self.alloc_local(synth_name, ty.clone(), LocalKind::Param, span);
+                    param_local_ids.push(local_id);
+                    pattern_params.push((param, local_id, ty));
+                }
+                _ => {
+                    return Err(err_flatten!(
+                        "Lambda parameter pattern {:?} not yet supported",
+                        pattern.kind
+                    ));
+                }
+            }
         }
 
         // Allocate locals for captured variables BEFORE flattening body
@@ -1305,6 +1451,12 @@ impl Flattener {
             );
         }
 
+        // Wrap body with pattern destructuring for tuple params (in reverse order)
+        for (pattern, param_local_id, param_ty) in pattern_params.into_iter().rev() {
+            let param_ref = self.alloc_expr(mir::Expr::Local(param_local_id), param_ty.clone(), span);
+            body_root = self.destructure_pattern(pattern, param_ref, &param_ty, body_root, span)?;
+        }
+
         self.current_body.set_root(body_root);
         self.name_to_local.pop_scope();
         let func_body = self.end_body(outer_body);
@@ -1317,6 +1469,7 @@ impl Flattener {
             name: func_name.clone(),
             params: param_local_ids,
             ret_type,
+            scheme: None, // Generated lambdas are monomorphic at call site
             attributes: vec![],
             body: func_body,
             span,
@@ -1338,8 +1491,8 @@ impl Flattener {
             lambda_name: func_name,
             captures: closure_tuple_id,
         };
-        let closure_result_type = closure_type; // Closure is represented as its captures tuple
-        let id = self.alloc_expr(closure_expr, closure_result_type, span);
+        // The closure expression should have the function type for monomorphization to work correctly
+        let id = self.alloc_expr(closure_expr, func_type.clone(), span);
         Ok((id, sv))
     }
 

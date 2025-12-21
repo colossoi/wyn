@@ -16,6 +16,7 @@ use crate::ast::TypeName;
 use crate::error::Result;
 use crate::mir::{Body, Def, Expr, ExprId, LocalDecl, Program};
 use crate::mir::{LambdaId, LambdaInfo};
+use crate::types::TypeScheme;
 use polytype::Type;
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -139,6 +140,38 @@ impl TypeKey {
     }
 }
 
+// =============================================================================
+// Scheme Instantiation Helpers
+// =============================================================================
+
+/// Unwrap a TypeScheme to get the inner monotype.
+/// The scheme's bound variables are already unique within the scheme,
+/// so we can use them directly for unification and substitution.
+fn unwrap_scheme(scheme: &TypeScheme) -> &Type<TypeName> {
+    match scheme {
+        TypeScheme::Monotype(ty) => ty,
+        TypeScheme::Polytype { body, .. } => unwrap_scheme(body),
+    }
+}
+
+/// Split a function type into (param_types, return_type).
+/// Handles curried function types: (A -> B -> C) becomes ([A, B], C)
+fn split_function_type(ty: &Type<TypeName>) -> (Vec<Type<TypeName>>, Type<TypeName>) {
+    let mut params = Vec::new();
+    let mut current = ty.clone();
+
+    while let Type::Constructed(TypeName::Arrow, ref args) = current {
+        if args.len() == 2 {
+            params.push(args[0].clone());
+            current = args[1].clone();
+        } else {
+            break;
+        }
+    }
+
+    (params, current)
+}
+
 impl Monomorphizer {
     fn new(program: Program) -> Self {
         // Build map of polymorphic functions
@@ -217,6 +250,7 @@ impl Monomorphizer {
                 name,
                 params,
                 ret_type,
+                scheme,
                 attributes,
                 body,
                 span,
@@ -227,6 +261,7 @@ impl Monomorphizer {
                     name,
                     params,
                     ret_type,
+                    scheme,
                     attributes,
                     body,
                     span,
@@ -466,22 +501,39 @@ impl Monomorphizer {
         }
     }
 
-    /// Infer the substitution needed for a polymorphic function call
+    /// Infer the substitution needed for a polymorphic function call.
+    /// If the function has a stored scheme, use it to ensure consistent type variable IDs
+    /// across parameter types and return type.
     fn infer_substitution(&self, poly_def: &Def, arg_types: &[Type<TypeName>]) -> Result<Substitution> {
         let mut subst = Substitution::new();
 
-        // Get parameter types from the definition
-        let param_types: Vec<_> = match poly_def {
-            Def::Function { params, body, .. } => params.iter().map(|&p| &body.get_local(p).ty).collect(),
-            Def::EntryPoint { inputs, .. } => inputs.iter().map(|i| &i.ty).collect(),
-            Def::Constant { .. } => return Ok(subst), // No parameters
-            Def::Uniform { .. } => return Ok(subst),  // No parameters
-            Def::Storage { .. } => return Ok(subst),  // No parameters
-        };
+        match poly_def {
+            Def::Function { scheme, params, body, .. } => {
+                // If there's a scheme, unify against scheme params to get return type variables
+                if let Some(scheme) = scheme {
+                    let func_type = unwrap_scheme(scheme);
+                    let (scheme_param_types, _ret_type) = split_function_type(func_type);
 
-        // Match argument types against parameter types
-        for (param_ty, arg_ty) in param_types.iter().zip(arg_types.iter()) {
-            self.unify_for_subst(param_ty, arg_ty, &mut subst)?;
+                    for (param_ty, arg_ty) in scheme_param_types.iter().zip(arg_types.iter()) {
+                        self.unify_for_subst(param_ty, arg_ty, &mut subst)?;
+                    }
+                }
+
+                // ALSO unify against body param types to cover body variables
+                let body_param_types: Vec<_> = params.iter().map(|&p| &body.get_local(p).ty).collect();
+                for (param_ty, arg_ty) in body_param_types.iter().zip(arg_types.iter()) {
+                    self.unify_for_subst(param_ty, arg_ty, &mut subst)?;
+                }
+            }
+            Def::EntryPoint { inputs, .. } => {
+                let param_types: Vec<_> = inputs.iter().map(|i| &i.ty).collect();
+                for (param_ty, arg_ty) in param_types.iter().zip(arg_types.iter()) {
+                    self.unify_for_subst(param_ty, arg_ty, &mut subst)?;
+                }
+            }
+            Def::Constant { .. } | Def::Uniform { .. } | Def::Storage { .. } => {
+                // No parameters
+            }
         }
 
         Ok(subst)
@@ -494,23 +546,31 @@ impl Monomorphizer {
         actual: &Type<TypeName>,
         subst: &mut Substitution,
     ) -> Result<()> {
+        eprintln!("  unify: expected={:?} actual={:?}", expected, actual);
         match (expected, actual) {
             (Type::Variable(id), concrete) => {
                 // This is a type variable in the polymorphic function
                 // Map it to the concrete type from the call site
                 if !contains_variables(concrete) {
+                    eprintln!("    -> subst[{}] = {:?}", id, concrete);
                     subst.insert(*id, concrete.clone());
+                } else {
+                    eprintln!("    -> skipped (concrete contains variables)");
                 }
             }
             (Type::Constructed(name1, args1), Type::Constructed(name2, args2)) => {
                 // Recurse into constructed types
-                if std::mem::discriminant(name1) == std::mem::discriminant(name2) {
+                let match_ = std::mem::discriminant(name1) == std::mem::discriminant(name2);
+                eprintln!("    -> Constructed match={} name1={:?} name2={:?}", match_, name1, name2);
+                if match_ {
                     for (a1, a2) in args1.iter().zip(args2.iter()) {
                         self.unify_for_subst(a1, a2, subst)?;
                     }
                 }
             }
-            _ => {}
+            _ => {
+                eprintln!("    -> no match");
+            }
         }
         Ok(())
     }
@@ -600,21 +660,34 @@ fn specialize_def(def: Def, subst: &Substitution, new_name: &str) -> Result<Def>
             id,
             params,
             ret_type,
+            scheme,
             attributes,
             body,
             span,
             ..
         } => {
-            // params is Vec<LocalId> - indices into body.locals
+            // If the function has a scheme, use it for consistent return type
+            let ret_type = if let Some(ref scheme) = scheme {
+                // Unwrap the scheme to get the inner function type
+                // Use the same bound variable IDs as infer_substitution
+                let func_type = unwrap_scheme(scheme);
+                let (_, scheme_ret_type) = split_function_type(func_type);
+                apply_subst(&scheme_ret_type, subst)
+            } else {
+                // Fallback: use the original ret_type
+                let ret_context = format!("{}::ret_type", new_name);
+                apply_subst_with_context(&ret_type, subst, &ret_context)
+            };
+
             // apply_subst_body handles substituting types in the locals
-            let ret_type = apply_subst(&ret_type, subst);
-            let body = apply_subst_body(body, subst);
+            let body = apply_subst_body_with_context(body, subst, new_name);
 
             Ok(Def::Function {
                 id,
                 name: new_name.to_string(),
                 params,
                 ret_type,
+                scheme: None, // Specialized functions are monomorphic
                 attributes,
                 body,
                 span,
@@ -631,21 +704,28 @@ fn specialize_def(def: Def, subst: &Substitution, new_name: &str) -> Result<Def>
         } => {
             let inputs = inputs
                 .into_iter()
-                .map(|i| EntryInput {
-                    local: i.local,
-                    name: i.name,
-                    ty: apply_subst(&i.ty, subst),
-                    decoration: i.decoration,
+                .map(|i| {
+                    let ctx = format!("{}::input({})", new_name, i.name);
+                    EntryInput {
+                        local: i.local,
+                        name: i.name,
+                        ty: apply_subst_with_context(&i.ty, subst, &ctx),
+                        decoration: i.decoration,
+                    }
                 })
                 .collect();
             let outputs = outputs
                 .into_iter()
-                .map(|o| EntryOutput {
-                    ty: apply_subst(&o.ty, subst),
-                    decoration: o.decoration,
+                .enumerate()
+                .map(|(idx, o)| {
+                    let ctx = format!("{}::output({})", new_name, idx);
+                    EntryOutput {
+                        ty: apply_subst_with_context(&o.ty, subst, &ctx),
+                        decoration: o.decoration,
+                    }
                 })
                 .collect();
-            let body = apply_subst_body(body, subst);
+            let body = apply_subst_body_with_context(body, subst, new_name);
 
             Ok(Def::EntryPoint {
                 id,
@@ -703,19 +783,25 @@ fn specialize_def(def: Def, subst: &Substitution, new_name: &str) -> Result<Def>
 
 /// Apply a substitution to a type
 fn apply_subst(ty: &Type<TypeName>, subst: &Substitution) -> Type<TypeName> {
+    apply_subst_with_context(ty, subst, "unknown")
+}
+
+/// Apply a substitution to a type with context for debugging
+fn apply_subst_with_context(ty: &Type<TypeName>, subst: &Substitution, context: &str) -> Type<TypeName> {
     match ty {
         Type::Variable(id) => subst.get(id).cloned().unwrap_or_else(|| {
             panic!(
                 "BUG: Unresolved type variable Variable({}) during monomorphization. \
                  The substitution is incomplete - this variable should have been resolved during type checking \
                  or added to the substitution during monomorphization.\n\
+                 Context: {}\n\
                  Substitution contains: {:?}",
-                id, subst
+                id, context, subst
             )
         }),
         Type::Constructed(name, args) => {
             // Recursively apply substitution to type arguments
-            let new_args = args.iter().map(|arg| apply_subst(arg, subst)).collect();
+            let new_args = args.iter().map(|arg| apply_subst_with_context(arg, subst, context)).collect();
 
             // Also apply substitution to types nested inside TypeName
             let new_name = match name {
@@ -726,7 +812,7 @@ fn apply_subst(ty: &Type<TypeName>, subst: &Substitution) -> Type<TypeName> {
                         .map(|(name, types)| {
                             (
                                 name.clone(),
-                                types.iter().map(|t| apply_subst(t, subst)).collect(),
+                                types.iter().map(|t| apply_subst_with_context(t, subst, context)).collect(),
                             )
                         })
                         .collect();
@@ -746,14 +832,20 @@ fn apply_subst(ty: &Type<TypeName>, subst: &Substitution) -> Type<TypeName> {
 
 /// Apply a substitution to a body
 fn apply_subst_body(old_body: Body, subst: &Substitution) -> Body {
+    apply_subst_body_with_context(old_body, subst, "body")
+}
+
+/// Apply a substitution to a body with context for debugging
+fn apply_subst_body_with_context(old_body: Body, subst: &Substitution, func_name: &str) -> Body {
     let mut new_body = Body::new();
 
     // Apply substitution to locals
     for local in &old_body.locals {
+        let context = format!("{}::local({})", func_name, local.name);
         new_body.alloc_local(LocalDecl {
             name: local.name.clone(),
             span: local.span,
-            ty: apply_subst(&local.ty, subst),
+            ty: apply_subst_with_context(&local.ty, subst, &context),
             kind: local.kind,
         });
     }
@@ -761,7 +853,8 @@ fn apply_subst_body(old_body: Body, subst: &Substitution) -> Body {
     // Copy expressions with substituted types
     for (idx, expr) in old_body.exprs.iter().enumerate() {
         let old_id = ExprId(idx as u32);
-        let ty = apply_subst(old_body.get_type(old_id), subst);
+        let context = format!("{}::expr({}, {:?})", func_name, idx, expr);
+        let ty = apply_subst_with_context(old_body.get_type(old_id), subst, &context);
         let span = old_body.get_span(old_id);
         let node_id = old_body.get_node_id(old_id);
         new_body.alloc_expr(expr.clone(), ty, span, node_id);

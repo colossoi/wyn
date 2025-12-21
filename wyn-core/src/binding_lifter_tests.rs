@@ -123,6 +123,7 @@ fn make_test_program(body: Body) -> Program {
             name: "test_fn".to_string(),
             params: vec![],
             ret_type: i32_type(),
+            scheme: None,
             attributes: vec![],
             body,
             span: test_span(),

@@ -14,6 +14,7 @@
 
 use crate::IdArena;
 use crate::ast::{NodeId, Span, TypeName};
+use crate::types::TypeScheme;
 use polytype::Type;
 
 #[cfg(test)]
@@ -458,6 +459,9 @@ pub enum Def {
         params: Vec<LocalId>,
         /// Return type.
         ret_type: Type<TypeName>,
+        /// Original polymorphic type scheme (for monomorphization).
+        /// This ensures parameter and return type variables are consistent.
+        scheme: Option<TypeScheme>,
         /// Attributes.
         attributes: Vec<Attribute>,
         /// Function body.
