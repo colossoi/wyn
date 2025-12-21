@@ -258,6 +258,33 @@ impl Flattener {
         }
     }
 
+    /// Unwrap a TypeScheme to get the inner monotype (for flattening)
+    /// This gives us the canonical variable IDs that will be shared across params/return
+    fn unwrap_scheme_for_flattening(scheme: &TypeScheme<TypeName>) -> &Type {
+        match scheme {
+            TypeScheme::Monotype(ty) => ty,
+            TypeScheme::Polytype { body, .. } => Self::unwrap_scheme_for_flattening(body),
+        }
+    }
+
+    /// Split a function type into (param_types, return_type).
+    /// Handles curried function types: (A -> B -> C) becomes ([A, B], C)
+    fn split_function_type(ty: &Type) -> (Vec<Type>, Type) {
+        let mut params = Vec::new();
+        let mut current = ty.clone();
+
+        while let Type::Constructed(TypeName::Arrow, ref args) = current {
+            if args.len() == 2 {
+                params.push(args[0].clone());
+                current = args[1].clone();
+            } else {
+                break;
+            }
+        }
+
+        (params, current)
+    }
+
     /// Get the type of an AST expression from the type table
     fn get_expr_type(&self, expr: &Expression) -> Type {
         self.type_table
@@ -575,11 +602,26 @@ impl Flattener {
             let old_body = self.begin_body();
             self.name_to_local.push_scope();
 
-            // Allocate params as locals
+            // Look up the canonical scheme FIRST - we'll use it for param types
+            let scheme = self.prelude_schemes.get(qualified_name).cloned();
+
+            // Extract param types from scheme if available (for consistent variable IDs)
+            let scheme_param_types: Option<Vec<Type>> = scheme.as_ref().map(|s| {
+                let func_type = Self::unwrap_scheme_for_flattening(s);
+                let (params, _) = Self::split_function_type(func_type);
+                params
+            });
+
+            // Allocate params as locals using scheme types when available
             let mut param_local_ids = Vec::new();
-            for param in &d.params {
+            for (i, param) in d.params.iter().enumerate() {
                 let name = self.extract_param_name(param)?;
-                let ty = self.get_pattern_type(param);
+                // Use scheme param type if available, otherwise fall back to type_table
+                let ty = if let Some(ref scheme_params) = scheme_param_types {
+                    scheme_params.get(i).cloned().unwrap_or_else(|| self.get_pattern_type(param))
+                } else {
+                    self.get_pattern_type(param)
+                };
                 let local_id = self.alloc_local(name, ty, LocalKind::Param, span);
                 param_local_ids.push(local_id);
             }
@@ -590,21 +632,15 @@ impl Flattener {
             self.name_to_local.pop_scope();
             let body = self.end_body(old_body);
 
-            // Use the return type from the MIR body's root expression.
-            // This ensures parameter type variables match return type variables,
-            // since flattening propagates types consistently. The type_table
-            // may have inconsistent variable IDs due to separate inference passes.
-            let ret_type = body.get_type(body.root).clone();
-
-            // DEBUG: Verify consistency
-            let type_table_ret = self.get_expr_type(&d.body);
-            if ret_type != type_table_ret {
-                eprintln!("WARN: {} ret_type mismatch: body={:?} table={:?}",
-                         qualified_name, ret_type, type_table_ret);
-            }
-
-            // Look up the canonical scheme for this function (for monomorphization)
-            let scheme = self.prelude_schemes.get(qualified_name).cloned();
+            // Use return type from scheme if available (canonical variable IDs),
+            // otherwise fall back to body root type
+            let ret_type = if let Some(ref s) = scheme {
+                let func_type = Self::unwrap_scheme_for_flattening(s);
+                let (_, ret) = Self::split_function_type(func_type);
+                ret
+            } else {
+                body.get_type(body.root).clone()
+            };
 
             mir::Def::Function {
                 id: self.next_node_id(),

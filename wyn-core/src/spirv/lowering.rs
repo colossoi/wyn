@@ -338,6 +338,13 @@ impl Constructor {
                         let inner = &args[0];
                         self.ast_type_to_spirv(inner)
                     }
+                    TypeName::Arrow => {
+                        // Arrow types (function types) come from closures that have been defunctionalized.
+                        // Since closures are represented as (captures_tuple, lambda_name), the actual
+                        // runtime value is just the captures. The Arrow type is a phantom type used
+                        // for type checking only. Map to unit type since it has no runtime representation.
+                        self.void_type
+                    }
                     _ => {
                         panic!(
                             "BUG: Unknown type reached lowering: {:?}. This should have been caught during type checking.",
@@ -1118,6 +1125,10 @@ fn lower_const_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId)
             "Global constants must be literals (found unary operation '{}')",
             op
         )),
+        Expr::Attributed { expr, .. } => {
+            // Attributes are metadata, just lower the inner expression
+            lower_const_expr(constructor, body, *expr)
+        }
         _ => Err(err_spirv!(
             "Global constants must be literals or compile-time foldable expressions"
         )),
@@ -3022,19 +3033,16 @@ def sum_scan(arr: [4]i32) -> [4]i32 = scan((|a, b| a + b), 0, arr)
     #[test]
     fn test_map_variants() {
         // Test all map variants: map (desugars to map1), map2, map3, map4, map5
+        // map2-map5 take functions with tuple arguments: (A, B) -> C, etc.
         let spirv = compile_to_spirv(
             r#"
 def double(x: i32) -> i32 = x * 2
-def add(x: i32, y: i32) -> i32 = x + y
-def add3(x: i32, y: i32, z: i32) -> i32 = x + y + z
-def add4(a: i32, b: i32, c: i32, d: i32) -> i32 = a + b + c + d
-def add5(a: i32, b: i32, c: i32, d: i32, e: i32) -> i32 = a + b + c + d + e
 
 def test_map(arr: [3]i32) -> [3]i32 = map(double, arr)
-def test_map2(xs: [3]i32, ys: [3]i32) -> [3]i32 = map2(add, xs, ys)
-def test_map3(xs: [3]i32, ys: [3]i32, zs: [3]i32) -> [3]i32 = map3(add3, xs, ys, zs)
-def test_map4(a: [3]i32, b: [3]i32, c: [3]i32, d: [3]i32) -> [3]i32 = map4(add4, a, b, c, d)
-def test_map5(a: [3]i32, b: [3]i32, c: [3]i32, d: [3]i32, e: [3]i32) -> [3]i32 = map5(add5, a, b, c, d, e)
+def test_map2(xs: [3]i32, ys: [3]i32) -> [3]i32 = map2(|(x, y)| x + y, xs, ys)
+def test_map3(xs: [3]i32, ys: [3]i32, zs: [3]i32) -> [3]i32 = map3(|(x, y, z)| x + y + z, xs, ys, zs)
+def test_map4(a: [3]i32, b: [3]i32, c: [3]i32, d: [3]i32) -> [3]i32 = map4(|(a, b, c, d)| a + b + c + d, a, b, c, d)
+def test_map5(a: [3]i32, b: [3]i32, c: [3]i32, d: [3]i32, e: [3]i32) -> [3]i32 = map5(|(a, b, c, d, e)| a + b + c + d + e, a, b, c, d, e)
 "#,
         )
         .unwrap();
