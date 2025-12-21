@@ -306,7 +306,21 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Create a new TypeChecker with a reference to a ModuleManager
+    /// Inherits the prelude type table from the module manager
     pub fn new(module_manager: &'a crate::module_manager::ModuleManager) -> Self {
+        Self::with_type_table(module_manager, module_manager.get_prelude_type_table().clone())
+    }
+
+    /// Create a TypeChecker with an empty type table (for building prelude)
+    pub fn new_empty(module_manager: &'a crate::module_manager::ModuleManager) -> Self {
+        Self::with_type_table(module_manager, HashMap::new())
+    }
+
+    /// Create a TypeChecker with a given initial type table
+    fn with_type_table(
+        module_manager: &'a crate::module_manager::ModuleManager,
+        type_table: HashMap<NodeId, TypeScheme>,
+    ) -> Self {
         let mut context = Context::default();
         let impl_source = crate::impl_source::ImplSource::new();
         let poly_builtins = crate::intrinsics::IntrinsicSource::new(&mut context);
@@ -318,7 +332,7 @@ impl<'a> TypeChecker<'a> {
             impl_source,
             intrinsics: poly_builtins,
             module_manager,
-            type_table: HashMap::new(),
+            type_table,
             warnings: Vec::new(),
             type_holes: Vec::new(),
             arity_map: HashMap::new(),
@@ -1069,12 +1083,8 @@ impl<'a> TypeChecker<'a> {
     /// Called during prelude creation to populate the type table for prelude function bodies.
     pub fn check_prelude_functions(&mut self) -> Result<()> {
         // Collect all prelude function declarations to avoid borrowing issues
-        let prelude_functions: Vec<crate::ast::Decl> = self
-            .module_manager
-            .get_prelude_function_declarations()
-            .into_iter()
-            .cloned()
-            .collect();
+        let prelude_functions: Vec<crate::ast::Decl> =
+            self.module_manager.get_prelude_function_declarations().into_iter().cloned().collect();
 
         // Type-check each prelude function
         for decl in prelude_functions {

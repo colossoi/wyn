@@ -393,7 +393,11 @@ impl IntrinsicSource {
         let k_var = Type::Constructed(TypeName::SizeVar(k.clone()), vec![]);
         let result_array = Type::Constructed(TypeName::Array, vec![k_var, a.clone()]);
         let existential_result = Type::Constructed(TypeName::Existential(vec![k]), vec![result_array]);
-        self.register_poly("_w_intrinsic_filter", vec![pred_type, array_a], existential_result);
+        self.register_poly(
+            "_w_intrinsic_filter",
+            vec![pred_type, array_a],
+            existential_result,
+        );
 
         // scan : ∀a n. (a -> a -> a) -> a -> [n]a -> [n]a
         // Inclusive scan (prefix sum): scan op ne [a,b,c] = [a, op(a,b), op(op(a,b),c)]
@@ -454,7 +458,6 @@ impl IntrinsicSource {
             Type::Constructed(TypeName::UInt(32), vec![]),
         );
     }
-
 }
 
 impl Default for IntrinsicSource {

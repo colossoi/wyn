@@ -45,40 +45,40 @@ def zip<[n], A, B>(xs: [n]A, ys: [n]B) -> [n](A, B) =
 
 -- Split an array of pairs into two arrays
 def unzip<[n], A, B>(xys: [n](A, B)) -> ([n]A, [n]B) =
-  (map((|xy: (A, B)| let (a, _) = xy in a), xys),
-   map((|xy: (A, B)| let (_, b) = xy in b), xys))
+  (map(|(a, _): (A, B)| a, xys),
+   map(|(_, b): (A, B)| b, xys))
 
--- 3-way zip (produces nested pairs: ((A, B), C))
-def zip3<[n], A, B, C>(xs: [n]A, ys: [n]B, zs: [n]C) -> [n]((A, B), C) =
-  zip(zip(xs, ys), zs)
+-- 3-way zip (produces flat tuples)
+def zip3<[n], A, B, C>(xs: [n]A, ys: [n]B, zs: [n]C) -> [n](A, B, C) =
+  map(|((a, b), c): ((A, B), C)| (a, b, c), zip(zip(xs, ys), zs))
 
--- 4-way zip (produces nested pairs)
-def zip4<[n], A, B, C, D>(as: [n]A, bs: [n]B, cs: [n]C, ds: [n]D) -> [n](((A, B), C), D) =
-  zip(zip3(as, bs, cs), ds)
+-- 4-way zip (produces flat tuples)
+def zip4<[n], A, B, C, D>(as: [n]A, bs: [n]B, cs: [n]C, ds: [n]D) -> [n](A, B, C, D) =
+  map(|(((a, b), c), d): (((A, B), C), D)| (a, b, c, d), zip(zip(zip(as, bs), cs), ds))
 
--- 5-way zip (produces nested pairs)
-def zip5<[n], A, B, C, D, E>(as: [n]A, bs: [n]B, cs: [n]C, ds: [n]D, es: [n]E) -> [n]((((A, B), C), D), E) =
-  zip(zip4(as, bs, cs, ds), es)
+-- 5-way zip (produces flat tuples)
+def zip5<[n], A, B, C, D, E>(as: [n]A, bs: [n]B, cs: [n]C, ds: [n]D, es: [n]E) -> [n](A, B, C, D, E) =
+  map(|((((a, b), c), d), e): ((((A, B), C), D), E)| (a, b, c, d, e), zip(zip(zip(zip(as, bs), cs), ds), es))
 
 ------------------------------------------------------------
 -- Multi-argument map functions (built from map + zip)
 ------------------------------------------------------------
 
 -- Map over two arrays in parallel
-def map2<[n], A, B, C>(f: A -> B -> C, xs: [n]A, ys: [n]B) -> [n]C =
-  map((|p: (A, B)| let (x, y) = p in f(x)(y)), zip(xs, ys))
+def map2<[n], A, B, C>(f: (A, B) -> C, xs: [n]A, ys: [n]B) -> [n]C =
+  map(f, zip(xs, ys))
 
 -- Map over three arrays in parallel
-def map3<[n], A, B, C, D>(f: A -> B -> C -> D, xs: [n]A, ys: [n]B, zs: [n]C) -> [n]D =
-  map((|p: ((A, B), C)| let ((x, y), z) = p in f(x)(y)(z)), zip3(xs, ys, zs))
+def map3<[n], A, B, C, D>(f: (A, B, C) -> D, xs: [n]A, ys: [n]B, zs: [n]C) -> [n]D =
+  map(f, zip3(xs, ys, zs))
 
 -- Map over four arrays in parallel
-def map4<[n], A, B, C, D, E>(f: A -> B -> C -> D -> E, as: [n]A, bs: [n]B, cs: [n]C, ds: [n]D) -> [n]E =
-  map((|p: (((A, B), C), D)| let (((a, b), c), d) = p in f(a)(b)(c)(d)), zip4(as, bs, cs, ds))
+def map4<[n], A, B, C, D, E>(f: (A, B, C, D) -> E, as: [n]A, bs: [n]B, cs: [n]C, ds: [n]D) -> [n]E =
+  map(f, zip4(as, bs, cs, ds))
 
 -- Map over five arrays in parallel
-def map5<[n], A, B, C, D, E, F>(f: A -> B -> C -> D -> E -> F, as: [n]A, bs: [n]B, cs: [n]C, ds: [n]D, es: [n]E) -> [n]F =
-  map((|p: ((((A, B), C), D), E)| let ((((a, b), c), d), e) = p in f(a)(b)(c)(d)(e)), zip5(as, bs, cs, ds, es))
+def map5<[n], A, B, C, D, E, F>(f: (A, B, C, D, E) -> F, as: [n]A, bs: [n]B, cs: [n]C, ds: [n]D, es: [n]E) -> [n]F =
+  map(f, zip5(as, bs, cs, ds, es))
 
 ------------------------------------------------------------
 -- Boolean aggregation
@@ -86,11 +86,11 @@ def map5<[n], A, B, C, D, E, F>(f: A -> B -> C -> D -> E -> F, as: [n]A, bs: [n]
 
 -- Test if predicate holds for all elements
 def all<[n], A>(p: A -> bool, xs: [n]A) -> bool =
-  reduce((|a: bool, b: bool| a && b), true, map(p, xs))
+  reduce(|a, b| a && b, true, map(p, xs))
 
 -- Test if predicate holds for any element
 def any<[n], A>(p: A -> bool, xs: [n]A) -> bool =
-  reduce((|a: bool, b: bool| a || b), false, map(p, xs))
+  reduce(|a, b| a || b, false, map(p, xs))
 
 ------------------------------------------------------------
 -- Array generation
@@ -107,11 +107,11 @@ def tabulate<[n], A>(size: i32, f: i32 -> A) -> [n]A =
 
 -- Reverse an array
 def reverse<[n], A>(arr: [n]A) -> [n]A =
-  map((|i: i32| arr[length(arr) - 1 - i]), 0..<length(arr))
+  map(|i| arr[length(arr) - 1 - i], 0..<length(arr))
 
 -- Rotate array left by k positions
 def rotate<[n], A>(k: i32, arr: [n]A) -> [n]A =
-  map((|i: i32| arr[(i + k) % length(arr)]), 0..<length(arr))
+  map(|i| arr[(i + k) % length(arr)], 0..<length(arr))
 
 ------------------------------------------------------------
 -- Reduce variants

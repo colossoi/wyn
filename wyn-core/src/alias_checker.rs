@@ -940,17 +940,59 @@ pub struct InPlaceInfo {
     pub can_reuse_input: HashSet<NodeId>,
 }
 
+/// Check if a function name looks like a prelude function
+fn is_prelude_function(name: &str) -> bool {
+    // Module-qualified names (e.g., "rand.init")
+    if name.contains('.') {
+        return true;
+    }
+    // Generated lambdas from prelude
+    if name.starts_with("_w_lam_") {
+        return true;
+    }
+    // Known prelude SOAC wrapper functions
+    const PRELUDE_SOACS: &[&str] = &[
+        "map",
+        "map2",
+        "map3",
+        "map4",
+        "map5",
+        "reduce",
+        "scan",
+        "zip",
+        "zip3",
+        "zip4",
+        "zip5",
+        "unzip",
+        "scatter",
+        "any",
+        "all",
+        "replicate",
+        "reverse",
+        "rotate",
+        "tabulate",
+        "length",
+        "filter",
+    ];
+    PRELUDE_SOACS.contains(&name)
+}
+
 /// Analyze MIR to find array operations that can reuse their input array.
 pub fn analyze_inplace(mir: &mir::Program) -> InPlaceInfo {
     let mut result = InPlaceInfo::default();
 
     for def in &mir.defs {
-        let body = match def {
-            mir::Def::Function { body, .. } => body,
-            mir::Def::Constant { body, .. } => body,
-            mir::Def::EntryPoint { body, .. } => body,
+        let (body, name) = match def {
+            mir::Def::Function { body, name, .. } => (body, name.as_str()),
+            mir::Def::Constant { body, name, .. } => (body, name.as_str()),
+            mir::Def::EntryPoint { body, .. } => (body, "<entry>"),
             mir::Def::Uniform { .. } | mir::Def::Storage { .. } => continue,
         };
+
+        // Skip prelude functions - their in-place opportunities are not meaningful
+        if is_prelude_function(name) {
+            continue;
+        }
 
         // Compute uses after each expression
         let mut aliases: HashMap<mir::LocalId, HashSet<mir::LocalId>> = HashMap::new();

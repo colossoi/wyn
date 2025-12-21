@@ -358,7 +358,8 @@ impl Monomorphizer {
                     if let Some((inner_func, _inner_args)) = get_trivial_wrapper_target(&poly_def) {
                         // Look up the inner function
                         if let Some(inner_def) = self.poly_functions.get(&inner_func).cloned() {
-                            let arg_types: Vec<_> = args.iter().map(|a| body.get_type(*a).clone()).collect();
+                            let arg_types: Vec<_> =
+                                args.iter().map(|a| body.get_type(*a).clone()).collect();
                             let subst = self.infer_substitution(&inner_def, &arg_types)?;
 
                             if !subst.is_empty() {
@@ -542,7 +543,9 @@ impl Monomorphizer {
         let mut subst = Substitution::new();
 
         match poly_def {
-            Def::Function { scheme: Some(scheme), .. } => {
+            Def::Function {
+                scheme: Some(scheme), ..
+            } => {
                 // Use canonical scheme variable IDs (consistent with specialize_def)
                 let func_type = unwrap_scheme(scheme);
                 let (param_types, _ret_type) = split_function_type(func_type);
@@ -552,7 +555,12 @@ impl Monomorphizer {
                     self.unify_for_subst(param_ty, arg_ty, &mut subst)?;
                 }
             }
-            Def::Function { scheme: None, params, body, .. } => {
+            Def::Function {
+                scheme: None,
+                params,
+                body,
+                ..
+            } => {
                 // Fallback for functions without schemes (user functions, lambdas)
                 let body_param_types: Vec<_> = params.iter().map(|&p| &body.get_local(p).ty).collect();
                 for (param_ty, arg_ty) in body_param_types.iter().zip(arg_types.iter()) {

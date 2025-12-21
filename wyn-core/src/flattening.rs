@@ -197,12 +197,11 @@ impl Flattener {
                 // Process elements in reverse order to build nested lets from inside out
                 let mut current_body = body_id;
                 for (i, pat) in patterns.iter().enumerate().rev() {
-                    let elem_ty = elem_types.get(i).cloned().unwrap_or_else(|| {
-                        self.get_pattern_type(pat)
-                    });
+                    let elem_ty = elem_types.get(i).cloned().unwrap_or_else(|| self.get_pattern_type(pat));
 
                     // Create tuple_access expression
-                    let tuple_ref = self.alloc_expr(mir::Expr::Local(tuple_local_id), value_ty.clone(), span);
+                    let tuple_ref =
+                        self.alloc_expr(mir::Expr::Local(tuple_local_id), value_ty.clone(), span);
                     let idx_expr = self.alloc_expr(mir::Expr::Int(i.to_string()), i32_type.clone(), span);
                     let extract_id = self.alloc_expr(
                         mir::Expr::Intrinsic {
@@ -214,7 +213,8 @@ impl Flattener {
                     );
 
                     // Recursively destructure this element
-                    current_body = self.destructure_pattern(pat, extract_id, &elem_ty, current_body, span)?;
+                    current_body =
+                        self.destructure_pattern(pat, extract_id, &elem_ty, current_body, span)?;
                 }
 
                 // Wrap with the outer tuple binding

@@ -2488,7 +2488,10 @@ fn lower_map(
     result_type: spirv::Word,
 ) -> Result<spirv::Word> {
     if args.len() != 2 {
-        bail_spirv!("_w_intrinsic_map requires 2 args (function, array), got {}", args.len());
+        bail_spirv!(
+            "_w_intrinsic_map requires 2 args (function, array), got {}",
+            args.len()
+        );
     }
 
     let (func_name, closure_val, is_empty_closure) = extract_closure_info(constructor, body, args[0])?;
@@ -2579,11 +2582,7 @@ fn lower_zip(
 }
 
 /// Lower `_w_intrinsic_length`: length [a,b,c] = 3
-fn lower_length(
-    constructor: &mut Constructor,
-    body: &Body,
-    args: &[ExprId],
-) -> Result<spirv::Word> {
+fn lower_length(constructor: &mut Constructor, body: &Body, args: &[ExprId]) -> Result<spirv::Word> {
     if args.len() != 1 {
         bail_spirv!("_w_intrinsic_length requires 1 arg, got {}", args.len());
     }
@@ -2604,17 +2603,18 @@ fn lower_replicate(
     result_type: spirv::Word,
 ) -> Result<spirv::Word> {
     if args.len() != 2 {
-        bail_spirv!("_w_intrinsic_replicate requires 2 args (size, value), got {}", args.len());
+        bail_spirv!(
+            "_w_intrinsic_replicate requires 2 args (size, value), got {}",
+            args.len()
+        );
     }
 
     // Get size from the result array type
     let size = match expr_ty {
-        PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 2 => {
-            match &type_args[0] {
-                PolyType::Constructed(TypeName::Size(n), _) => *n as u32,
-                _ => bail_spirv!("replicate size must be a literal, got {:?}", type_args[0]),
-            }
-        }
+        PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 2 => match &type_args[0] {
+            PolyType::Constructed(TypeName::Size(n), _) => *n as u32,
+            _ => bail_spirv!("replicate size must be a literal, got {:?}", type_args[0]),
+        },
         _ => bail_spirv!("replicate result must be array type, got {:?}", expr_ty),
     };
 

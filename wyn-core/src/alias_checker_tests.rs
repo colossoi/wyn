@@ -256,6 +256,7 @@ def main(t: ([4]i32, [4]i32, [4]i32)) -> i32 =
 // =============================================================================
 
 /// Helper to analyze in-place opportunities in a source file
+/// Runs through the full pipeline up to lifting (matching the real compilation flow)
 fn analyze_inplace_ops(source: &str) -> InPlaceInfo {
     let (module_manager, mut node_counter) = crate::cached_module_manager();
     let parsed = Compiler::parse(source, &mut node_counter).expect("parse failed");
@@ -266,6 +267,8 @@ fn analyze_inplace_ops(source: &str) -> InPlaceInfo {
     let alias_checked = type_checked.alias_check().expect("alias check failed");
     let (flattened, _backend) = alias_checked.flatten(&module_manager).expect("flatten failed");
 
+    // For tests without entry points, analyze after flattening (before monomorphization)
+    // since filter_reachable would remove all defs without an entry point
     analyze_inplace(&flattened.mir)
 }
 

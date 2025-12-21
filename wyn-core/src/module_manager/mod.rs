@@ -150,13 +150,15 @@ pub struct ModuleManager {
 }
 
 impl ModuleManager {
-    /// Create a new module manager and load prelude files using the provided counter
+    /// Create a new module manager with fully type-checked prelude
     pub fn new(node_counter: &mut NodeCounter) -> Self {
-        let mut manager = Self::new_empty();
-        if let Err(e) = manager.load_prelude_files(node_counter) {
-            eprintln!("ERROR loading prelude files: {:?}", e);
+        match Self::create_prelude(node_counter) {
+            Ok(prelude) => Self::from_prelude(&prelude),
+            Err(e) => {
+                eprintln!("ERROR creating prelude: {:?}", e);
+                Self::new_empty()
+            }
         }
-        manager
     }
 
     /// Create an empty module manager without loading prelude (internal helper)
@@ -209,7 +211,8 @@ impl ModuleManager {
         manager.load_prelude_files(node_counter)?;
 
         // Type-check prelude functions to populate the type table
-        let mut checker = TypeChecker::new(&manager);
+        // Use new_empty since we're building the prelude from scratch
+        let mut checker = TypeChecker::new_empty(&manager);
         checker.load_builtins()?;
         checker.check_prelude_functions()?;
 
@@ -771,7 +774,6 @@ impl ModuleManager {
         let parts: Vec<&str> = name.splitn(2, '.').collect();
         if parts.len() == 2 { Some((parts[0], parts[1])) } else { None }
     }
-
 
     /// Check if a name is a top-level prelude function (auto-imported)
     pub fn is_prelude_function(&self, name: &str) -> bool {

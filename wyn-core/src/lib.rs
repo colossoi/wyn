@@ -458,26 +458,16 @@ impl AliasChecked {
     /// Flatten AST to MIR (with defunctionalization and desugaring).
     /// Returns the flattened MIR and a BackEnd for subsequent passes.
     pub fn flatten(self, module_manager: &module_manager::ModuleManager) -> Result<(Flattened, BackEnd)> {
-        // Merge prelude type table into user's type table
-        let mut type_table = self.type_table;
-        type_table.extend(
-            module_manager
-                .get_prelude_type_table()
-                .iter()
-                .map(|(k, v)| (*k, v.clone())),
-        );
+        let type_table = self.type_table;
 
         let builtins = impl_source::ImplSource::default().all_names();
         // Collect prelude function declarations for defun analysis
         let prelude_decls: Vec<_> = module_manager.get_prelude_function_declarations();
-        let defun_analysis = defun_analysis::analyze_program_with_decls(
-            &self.ast,
-            &prelude_decls,
-            &type_table,
-            &builtins,
-        );
+        let defun_analysis =
+            defun_analysis::analyze_program_with_decls(&self.ast, &prelude_decls, &type_table, &builtins);
         let prelude_schemes = module_manager.get_prelude_schemes().clone();
-        let mut flattener = flattening::Flattener::new(type_table, builtins, defun_analysis, prelude_schemes);
+        let mut flattener =
+            flattening::Flattener::new(type_table, builtins, defun_analysis, prelude_schemes);
         let mut mir = flattener.flatten_program(&self.ast)?;
 
         // Flatten module function declarations so they're available in SPIR-V

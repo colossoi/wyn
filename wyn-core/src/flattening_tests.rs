@@ -137,6 +137,48 @@ fn test_tuple_pattern() {
 }
 
 #[test]
+fn test_lambda_tuple_pattern_param() {
+    // Test lambda with tuple pattern parameter: |(x, y)| x + y
+    let mir = flatten_program("def f() = let add = |(x, y)| x + y in add((1, 2))");
+
+    // Check that lambda registry has the lambda
+    assert!(
+        !mir.lambda_registry.is_empty(),
+        "Lambda registry should contain the generated lambda"
+    );
+
+    // Find the generated lambda function and verify it destructures the tuple param
+    let add_fn = mir.defs.iter().find(|d| {
+        if let mir::Def::Function { name, .. } = d { name.contains("_w_lam_f_") } else { false }
+    });
+    assert!(add_fn.is_some(), "Generated lambda function should exist");
+
+    if let Some(mir::Def::Function { body, .. }) = add_fn {
+        // The body should contain tuple_access intrinsics for destructuring the param
+        let has_tuple_access = body
+            .exprs
+            .iter()
+            .any(|expr| matches!(expr, mir::Expr::Intrinsic { name, .. } if name == "tuple_access"));
+        assert!(
+            has_tuple_access,
+            "Lambda with tuple param should have tuple_access for destructuring"
+        );
+    }
+}
+
+#[test]
+fn test_lambda_nested_tuple_pattern_param() {
+    // Test lambda with nested tuple pattern: |((a, b), c)| a + b + c
+    let mir = flatten_program("def f() = let add = |((a, b), c)| a + b + c in add(((1, 2), 3))");
+
+    // Should compile successfully with tuple destructuring
+    assert!(
+        !mir.lambda_registry.is_empty(),
+        "Lambda registry should contain the generated lambda"
+    );
+}
+
+#[test]
 fn test_lambda_defunctionalization() {
     let mir = flatten_program("def f() = |x| x + 1");
 

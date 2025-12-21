@@ -112,20 +112,25 @@ impl<'a> DefunAnalyzer<'a> {
         }
     }
 
+    /// Analyze a single Decl (function/constant declaration)
+    fn analyze_decl(&mut self, d: &ast::Decl) {
+        self.enclosing_decl_stack.push(d.name.clone());
+        // Register params in scope as Dyn
+        self.scope.push_scope();
+        for param in &d.params {
+            if let Some(name) = param.simple_name() {
+                self.scope.insert(name.to_string(), StaticValue::Dyn);
+            }
+        }
+        self.analyze_expr(&d.body);
+        self.scope.pop_scope();
+        self.enclosing_decl_stack.pop();
+    }
+
     fn analyze_declaration(&mut self, decl: &ast::Declaration) {
         match decl {
             ast::Declaration::Decl(d) => {
-                self.enclosing_decl_stack.push(d.name.clone());
-                // Register params in scope as Dyn
-                self.scope.push_scope();
-                for param in &d.params {
-                    if let Some(name) = param.simple_name() {
-                        self.scope.insert(name.to_string(), StaticValue::Dyn);
-                    }
-                }
-                self.analyze_expr(&d.body);
-                self.scope.pop_scope();
-                self.enclosing_decl_stack.pop();
+                self.analyze_decl(d);
             }
             ast::Declaration::Entry(entry) => {
                 self.enclosing_decl_stack.push(entry.name.clone());
@@ -596,5 +601,23 @@ pub fn analyze_program(
 ) -> DefunAnalysis {
     let mut analyzer = DefunAnalyzer::new(type_table, builtins);
     analyzer.analyze_program(program);
+    analyzer.into_analysis()
+}
+
+/// Analyze a program and additional declarations (e.g., prelude functions).
+/// This is used when there are declarations that aren't part of the main AST
+/// but still need defunctionalization analysis.
+pub fn analyze_program_with_decls(
+    program: &ast::Program,
+    extra_decls: &[&ast::Decl],
+    type_table: &HashMap<NodeId, TypeScheme<TypeName>>,
+    builtins: &HashSet<String>,
+) -> DefunAnalysis {
+    let mut analyzer = DefunAnalyzer::new(type_table, builtins);
+    analyzer.analyze_program(program);
+    // Analyze additional declarations
+    for decl in extra_decls {
+        analyzer.analyze_decl(decl);
+    }
     analyzer.into_analysis()
 }

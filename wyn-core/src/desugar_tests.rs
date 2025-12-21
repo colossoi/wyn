@@ -230,6 +230,90 @@ def vertex_main() -> #[builtin(position)] vec4f32 =
     );
 }
 
+// Test simple map without range to isolate issues
+#[test]
+fn test_map_simple_array() {
+    let source = r#"
+def double(x: i32) -> i32 = x * 2
+
+def test(arr: [4]i32) -> [4]i32 = map(double, arr)
+"#;
+    match compile_through_lowering(source) {
+        Ok(_) => {}
+        Err(e) => panic!("Simple map with array should compile: {e:?}"),
+    }
+}
+
+#[test]
+fn test_range_simple() {
+    // Test just the range, no map
+    let source = r#"
+def test() -> [4]i32 = 0..<4
+"#;
+    match compile_through_lowering(source) {
+        Ok(_) => {}
+        Err(e) => panic!("Simple range should compile: {e:?}"),
+    }
+}
+
+#[test]
+fn test_map_range_simple() {
+    // Test map over range with inline lambda
+    let source = r#"
+def test() -> [4]i32 = map(|x| x * 2, 0..<4)
+"#;
+    match compile_through_lowering(source) {
+        Ok(_) => {}
+        Err(e) => panic!("Map over range with lambda should compile: {e:?}"),
+    }
+}
+
+#[test]
+fn test_map_range_with_entry_point() {
+    // Test map over range inside entry point
+    let source = r#"
+#[vertex]
+def vertex_main() -> #[builtin(position)] vec4f32 =
+    let doubled = map(|x| x * 2, 0..<4) in
+    @[1.0f32, 2.0f32, 3.0f32, 1.0f32]
+"#;
+    match compile_through_lowering(source) {
+        Ok(_) => {}
+        Err(e) => panic!("Map over range in entry point should compile: {e:?}"),
+    }
+}
+
+#[test]
+fn test_map_range_with_index() {
+    // Test indexing into map result
+    let source = r#"
+def test() -> i32 =
+    let doubled = map(|x| x * 2, 0..<4) in
+    doubled[0]
+"#;
+    match compile_through_lowering(source) {
+        Ok(_) => {}
+        Err(e) => panic!("Indexing map result should compile: {e:?}"),
+    }
+}
+
+#[test]
+fn test_map_range_indirect_entry_point() {
+    // Test map over range used in entry point (using result)
+    // TODO: Non-trivial constant expressions like `map(...)` require inlining at use sites
+    // For now, test with map directly in the entry point
+    let source = r#"
+#[vertex]
+def vertex_main() -> #[builtin(position)] vec4f32 =
+    let doubled = map(|x| x * 2, 0..<4) in
+    @[f32.i32(doubled[0]), f32.i32(doubled[1]), f32.i32(doubled[2]), 1.0f32]
+"#;
+    match compile_through_lowering(source) {
+        Ok(_) => {}
+        Err(e) => panic!("Map over range via helper should compile: {e:?}"),
+    }
+}
+
 #[test]
 fn test_map_with_named_function() {
     let source = r#"
