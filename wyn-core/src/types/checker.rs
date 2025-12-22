@@ -140,14 +140,6 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    /// Structural equality on types after applying current substitution.
-    /// Two types are equal if they resolve to the same structure.
-    fn types_equal(&self, left: &Type, right: &Type) -> bool {
-        let l = left.apply(&self.context);
-        let r = right.apply(&self.context);
-        Self::types_equal_structural(&l, &r)
-    }
-
     /// Pure structural equality without applying substitution.
     /// Used internally after types have already been resolved.
     fn types_equal_structural(left: &Type, right: &Type) -> bool {
@@ -254,25 +246,46 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    /// Resolve type aliases in a type (e.g., "rand.state" -> "f32")
-    /// This expands qualified type names like "module.typename" to their underlying types.
-    fn resolve_type_aliases(&self, ty: &Type) -> Type {
+    /// Resolve type aliases in a type with optional module context.
+    /// - Qualified names (containing '.') are looked up as-is
+    /// - Unqualified names are qualified with current_module if provided
+    /// - Recursively resolves nested aliases
+    fn resolve_type_aliases_scoped(&self, ty: &Type, current_module: Option<&str>) -> Type {
         match ty {
-            Type::Constructed(TypeName::Named(name), args) if name.contains('.') => {
-                // Qualified type name - check if it's a type alias
-                if let Some(underlying) = self.module_manager.resolve_type_alias(name) {
-                    // Recursively resolve in case of nested aliases
-                    self.resolve_type_aliases(underlying)
-                } else {
-                    // Not a known alias, keep as-is but resolve args
-                    let resolved_args: Vec<Type> =
-                        args.iter().map(|a| self.resolve_type_aliases(a)).collect();
-                    Type::Constructed(TypeName::Named(name.clone()), resolved_args)
+            Type::Constructed(TypeName::Named(name), args) => {
+                // First resolve args recursively
+                let resolved_args: Vec<Type> = args
+                    .iter()
+                    .map(|a| self.resolve_type_aliases_scoped(a, current_module))
+                    .collect();
+
+                // Build lookup keys based on qualification
+                let mut keys = Vec::new();
+                if name.contains('.') {
+                    // Already qualified - try as-is
+                    keys.push(name.clone());
+                } else if let Some(m) = current_module {
+                    // Unqualified in module context - try qualified
+                    keys.push(format!("{}.{}", m, name));
                 }
+                // No prelude fallback - unqualified without context stays unresolved
+
+                for key in keys {
+                    if let Some(underlying) = self.module_manager.resolve_type_alias(&key) {
+                        // Recursively resolve in same module context
+                        return self.resolve_type_aliases_scoped(underlying, current_module);
+                    }
+                }
+
+                // Not an alias - keep as-is with resolved args
+                Type::Constructed(TypeName::Named(name.clone()), resolved_args)
             }
             Type::Constructed(name, args) => {
-                // Resolve aliases in type arguments
-                let resolved_args: Vec<Type> = args.iter().map(|a| self.resolve_type_aliases(a)).collect();
+                // Non-Named constructor - just resolve args
+                let resolved_args: Vec<Type> = args
+                    .iter()
+                    .map(|a| self.resolve_type_aliases_scoped(a, current_module))
+                    .collect();
                 Type::Constructed(name.clone(), resolved_args)
             }
             Type::Variable(id) => Type::Variable(*id),
@@ -426,7 +439,8 @@ impl<'a> TypeChecker<'a> {
             }
             PatternKind::Typed(_, annotated_type) => {
                 // Pattern has explicit type, resolve any module type aliases
-                self.resolve_type_aliases(annotated_type)
+                // Note: No module context here (used for lambdas); qualified names still resolve
+                self.resolve_type_aliases_scoped(annotated_type, None)
             }
             PatternKind::Attributed(_, inner_pattern) => {
                 // Ignore attributes, recurse on inner pattern
@@ -502,7 +516,8 @@ impl<'a> TypeChecker<'a> {
             }
             PatternKind::Typed(inner_pattern, annotated_type) => {
                 // Resolve module type aliases in the annotation (e.g., rand.state -> f32)
-                let resolved_annotation = self.resolve_type_aliases(annotated_type);
+                // Note: No module context here; qualified names still resolve
+                let resolved_annotation = self.resolve_type_aliases_scoped(annotated_type, None);
                 // Substitute any UserVar/SizeVar from enclosing function's type parameters
                 let substituted_annotation = self.substitute_from_type_param_scope(&resolved_annotation);
                 // Pattern has a type annotation - unify with expected type
@@ -963,6 +978,7 @@ impl<'a> TypeChecker<'a> {
         params: &[Pattern],
         body: &Expression,
         type_param_bindings: &HashMap<String, Type>,
+        module_name: Option<&str>,
     ) -> Result<(Vec<Type>, Type)> {
         // Create type variables or use explicit types for parameters
         let param_types: Vec<Type> = params
@@ -970,7 +986,7 @@ impl<'a> TypeChecker<'a> {
             .map(|p| {
                 let ty = p.pattern_type().cloned().unwrap_or_else(|| self.context.new_variable());
                 // Resolve module type aliases (e.g., rand.state -> f32)
-                let resolved = self.resolve_type_aliases(&ty);
+                let resolved = self.resolve_type_aliases_scoped(&ty, module_name);
                 // Substitute UserVars with bound type variables
                 Self::substitute_type_params_static(&resolved, type_param_bindings)
             })
@@ -1040,16 +1056,13 @@ impl<'a> TypeChecker<'a> {
             .map(|(module_name, decl)| (module_name.to_string(), decl.clone()))
             .collect();
 
-        // Type-check each module function
+        // Type-check each module function with module context for alias resolution
         for (module_name, decl) in module_functions {
             let qualified_name = format!("{}.{}", module_name, decl.name);
             debug!("Type-checking module function: {}", qualified_name);
 
-            // Resolve type aliases in the declaration (e.g., "state" -> "f32" within rand module)
-            let resolved_decl = self.resolve_decl_type_aliases(&decl, &module_name);
-
-            // Type-check the declaration body, inserting under the qualified name
-            self.check_decl_as(&resolved_decl, &qualified_name)?;
+            // Type-check the declaration with module context for alias resolution
+            self.check_decl_as_in_module(&decl, &qualified_name, Some(&module_name))?;
         }
 
         Ok(())
@@ -1156,7 +1169,7 @@ impl<'a> TypeChecker<'a> {
         for param in &decl.params {
             if let Some(param_ty) = self.extract_type_from_pattern(param) {
                 // Resolve type aliases (e.g., "state" -> "f32" within the rand module)
-                let resolved_ty = self.resolve_type_aliases_in_module(&param_ty, module_name);
+                let resolved_ty = self.resolve_type_aliases_scoped(&param_ty, Some(module_name));
                 param_types.push(resolved_ty);
             } else {
                 bail_module!("Function parameter in '{}' lacks type annotation", decl.name);
@@ -1165,7 +1178,7 @@ impl<'a> TypeChecker<'a> {
 
         // Get return type (default to unit if not specified) and resolve aliases
         let return_type = decl.ty.clone().unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![]));
-        let return_type = self.resolve_type_aliases_in_module(&return_type, module_name);
+        let return_type = self.resolve_type_aliases_scoped(&return_type, Some(module_name));
 
         // Build function type by folding right-to-left
         // f32 -> f32 -> f32 is represented as f32 -> (f32 -> f32)
@@ -1312,80 +1325,6 @@ impl<'a> TypeChecker<'a> {
         (self.context, self.type_table, self.intrinsics, schemes)
     }
 
-    /// Resolve type aliases in a declaration within a module context
-    fn resolve_decl_type_aliases(&self, decl: &crate::ast::Decl, module_name: &str) -> crate::ast::Decl {
-        // Resolve type aliases in the return type
-        let resolved_ty = decl.ty.as_ref().map(|ty| self.resolve_type_aliases_in_module(ty, module_name));
-
-        // Resolve type aliases in parameter patterns
-        let resolved_params: Vec<_> =
-            decl.params.iter().map(|p| self.resolve_pattern_type_aliases(p, module_name)).collect();
-
-        crate::ast::Decl {
-            keyword: decl.keyword,
-            attributes: decl.attributes.clone(),
-            name: decl.name.clone(),
-            size_params: decl.size_params.clone(),
-            type_params: decl.type_params.clone(),
-            params: resolved_params,
-            ty: resolved_ty,
-            body: decl.body.clone(),
-        }
-    }
-
-    /// Resolve type aliases in a pattern within a module context
-    fn resolve_pattern_type_aliases(&self, pattern: &Pattern, module_name: &str) -> Pattern {
-        use crate::ast::PatternKind;
-
-        let resolved_kind = match &pattern.kind {
-            PatternKind::Typed(inner, ty) => {
-                let resolved_ty = self.resolve_type_aliases_in_module(ty, module_name);
-                PatternKind::Typed(inner.clone(), resolved_ty)
-            }
-            PatternKind::Tuple(pats) => {
-                let resolved_pats: Vec<_> =
-                    pats.iter().map(|p| self.resolve_pattern_type_aliases(p, module_name)).collect();
-                PatternKind::Tuple(resolved_pats)
-            }
-            other => other.clone(),
-        };
-
-        Pattern {
-            kind: resolved_kind,
-            h: pattern.h.clone(),
-        }
-    }
-
-    /// Resolve type aliases in a type within a module context (unqualified names like "state")
-    fn resolve_type_aliases_in_module(&self, ty: &Type, module_name: &str) -> Type {
-        match ty {
-            Type::Constructed(TypeName::Named(name), args) => {
-                // Try to resolve as a module-local type alias
-                let qualified_name = if name.contains('.') {
-                    name.clone() // Already qualified
-                } else {
-                    format!("{}.{}", module_name, name) // Make qualified
-                };
-
-                if let Some(underlying) = self.module_manager.resolve_type_alias(&qualified_name) {
-                    // Recursively resolve in case of nested aliases
-                    self.resolve_type_aliases_in_module(underlying, module_name)
-                } else {
-                    // Not a known alias, keep as-is but resolve args
-                    let resolved_args: Vec<Type> =
-                        args.iter().map(|a| self.resolve_type_aliases_in_module(a, module_name)).collect();
-                    Type::Constructed(TypeName::Named(name.clone()), resolved_args)
-                }
-            }
-            Type::Constructed(name, args) => {
-                let resolved_args: Vec<Type> =
-                    args.iter().map(|a| self.resolve_type_aliases_in_module(a, module_name)).collect();
-                Type::Constructed(name.clone(), resolved_args)
-            }
-            Type::Variable(v) => Type::Variable(*v),
-        }
-    }
-
     fn check_declaration(&mut self, decl: &Declaration) -> Result<()> {
         match decl {
             Declaration::Decl(decl_node) => {
@@ -1395,7 +1334,7 @@ impl<'a> TypeChecker<'a> {
             Declaration::Entry(entry) => {
                 debug!("Checking entry point: {}", entry.name);
                 let (_param_types, body_type) =
-                    self.check_function_with_params(&entry.params, &entry.body, &HashMap::new())?;
+                    self.check_function_with_params(&entry.params, &entry.body, &HashMap::new(), None)?;
                 debug!("Entry point '{}' body type: {:?}", entry.name, body_type);
 
                 // Build expected return type from declared outputs
@@ -1479,10 +1418,15 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn check_decl(&mut self, decl: &Decl) -> Result<()> {
-        self.check_decl_as(decl, &decl.name)
+        self.check_decl_as_in_module(decl, &decl.name, None)
     }
 
-    fn check_decl_as(&mut self, decl: &Decl, scope_name: &str) -> Result<()> {
+    fn check_decl_as_in_module(
+        &mut self,
+        decl: &Decl,
+        scope_name: &str,
+        module_name: Option<&str>,
+    ) -> Result<()> {
         // Push a new scope for type parameters
         self.type_param_scope.push_scope();
 
@@ -1508,7 +1452,11 @@ impl<'a> TypeChecker<'a> {
 
         if decl.params.is_empty() {
             // Variable or entry point declaration: let/def name: type = value or let/def name = value
-            let expr_type = if let Some(declared_type) = &decl.ty {
+            // Resolve type aliases in declared type (e.g., rand.state -> f32)
+            let resolved_declared_type = decl.ty.as_ref()
+                .map(|ty| self.resolve_type_aliases_scoped(ty, module_name));
+
+            let expr_type = if let Some(ref declared_type) = resolved_declared_type {
                 // Use bidirectional checking when type annotation is present
                 self.check_expression(&decl.body, declared_type)?
             } else {
@@ -1516,7 +1464,7 @@ impl<'a> TypeChecker<'a> {
                 self.infer_expression(&decl.body)?
             };
 
-            if let Some(declared_type) = &decl.ty {
+            if let Some(ref declared_type) = resolved_declared_type {
                 if !self.types_match(&expr_type, declared_type) {
                     bail_type_at!(
                         decl.body.h.span,
@@ -1528,7 +1476,7 @@ impl<'a> TypeChecker<'a> {
             }
 
             // Add to scope - use declared type if available, otherwise inferred type
-            let stored_type = decl.ty.as_ref().unwrap_or(&expr_type).clone();
+            let stored_type = resolved_declared_type.unwrap_or(expr_type.clone());
             // Generalize the type to enable polymorphism
             let type_scheme = self.generalize(&stored_type);
             debug!("Inserting variable '{}' into scope", scope_name);
@@ -1566,7 +1514,7 @@ impl<'a> TypeChecker<'a> {
             }
 
             let (param_types, body_type) =
-                self.check_function_with_params(&decl.params, &decl.body, &type_param_bindings)?;
+                self.check_function_with_params(&decl.params, &decl.body, &type_param_bindings, module_name)?;
             debug!(
                 "Successfully inferred body type for '{}': {:?}",
                 decl.name, body_type
@@ -1581,7 +1529,7 @@ impl<'a> TypeChecker<'a> {
             // Check against declared type if provided
             if let Some(declared_type) = &decl.ty {
                 // Resolve type aliases in the declared return type (e.g., rand.state -> f32)
-                let resolved_return_type = self.resolve_type_aliases(declared_type);
+                let resolved_return_type = self.resolve_type_aliases_scoped(declared_type, module_name);
                 // Substitute UserVars in the declared return type
                 let substituted_return_type =
                     Self::substitute_type_params_static(&resolved_return_type, &type_param_bindings);

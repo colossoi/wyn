@@ -1462,3 +1462,51 @@ def test: [5]i32 =
         "#,
     );
 }
+
+// =========================================================================
+// Type alias resolution tests
+// =========================================================================
+
+#[test]
+fn test_qualified_type_alias_resolves() {
+    // rand.state is a type alias for f32 - qualified names should resolve
+    typecheck_program(
+        r#"
+def test: rand.state = 0.5f32
+        "#,
+    );
+}
+
+#[test]
+fn test_qualified_type_alias_in_function_param() {
+    // rand.state in parameter position should resolve to f32
+    typecheck_program(
+        r#"
+def use_state(s: rand.state) -> f32 = s + 1.0f32
+def test: f32 = use_state(0.5f32)
+        "#,
+    );
+}
+
+#[test]
+fn test_module_function_uses_internal_alias() {
+    // Module functions like rand.init use 'state' internally - this should type check
+    // because the module context provides alias resolution
+    typecheck_program(
+        r#"
+def test: rand.state = rand.init(0.123f32)
+        "#,
+    );
+}
+
+#[test]
+fn test_module_function_returns_resolved_alias() {
+    // rand.next returns (state, f32) which should resolve to (f32, f32)
+    typecheck_program(
+        r#"
+def test: (f32, f32) =
+    let s = rand.init(0.5f32) in
+    rand.next(s)
+        "#,
+    );
+}
