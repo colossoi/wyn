@@ -2,7 +2,7 @@ use super::{Type, TypeExt, TypeName, TypeScheme};
 use crate::ast::*;
 use crate::error::Result;
 use crate::scope::ScopeStack;
-use crate::{bail_type_at, err_module, err_type_at, err_undef_at};
+use crate::{bail_module, bail_type_at, err_module, err_type_at, err_undef_at};
 use log::debug;
 use polytype::Context;
 use std::collections::{BTreeSet, HashMap};
@@ -1097,6 +1097,250 @@ impl<'a> TypeChecker<'a> {
         Ok(())
     }
 
+    // =========================================================================
+    // Module/prelude function type lookup (moved from ModuleManager)
+    // =========================================================================
+
+    /// Get the TypeScheme for a module function.
+    /// This replaces ModuleManager::get_module_function_type, keeping polytype logic in TypeChecker.
+    pub fn get_module_function_type_scheme(
+        &mut self,
+        module_name: &str,
+        function_name: &str,
+    ) -> Result<TypeScheme> {
+        use crate::module_manager::ElaboratedItem;
+
+        // Look up the elaborated module
+        let elaborated = self
+            .module_manager
+            .get_elaborated_module(module_name)
+            .ok_or_else(|| err_module!("Module '{}' not found", module_name))?;
+
+        // Search for the function in the elaborated items
+        for item in &elaborated.items {
+            match item {
+                ElaboratedItem::Spec(spec) => match spec {
+                    Spec::Sig(name, type_params, ty) if name == function_name => {
+                        // Convert to TypeScheme if there are type/size parameters
+                        return Ok(self.convert_to_polytype(ty, type_params));
+                    }
+                    Spec::SigOp(op, ty) if op == function_name => {
+                        // Operators currently don't have type parameters, return as Monotype
+                        return Ok(TypeScheme::Monotype(ty.clone()));
+                    }
+                    _ => {}
+                },
+                ElaboratedItem::Decl(decl) if decl.name == function_name => {
+                    // Build the full function type from parameters and return type
+                    return self.build_function_type_from_decl(decl, module_name);
+                }
+                _ => {}
+            }
+        }
+
+        Err(err_module!(
+            "Function '{}' not found in module '{}'",
+            function_name,
+            module_name
+        ))
+    }
+
+    /// Get the TypeScheme for a top-level prelude function.
+    /// This replaces ModuleManager::get_prelude_function_type.
+    pub fn get_prelude_function_type_scheme(&mut self, name: &str) -> Option<TypeScheme> {
+        let decl = self.module_manager.get_prelude_function(name)?.clone();
+
+        // Build the full function type from parameters and return type
+        let mut param_types = Vec::new();
+        for param in &decl.params {
+            if let Some(param_ty) = self.extract_type_from_pattern(param) {
+                param_types.push(param_ty);
+            } else {
+                // Parameter lacks type annotation, can't determine type
+                return None;
+            }
+        }
+
+        // Get return type (default to unit if not specified)
+        let return_type = decl
+            .ty
+            .clone()
+            .unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![]));
+
+        // Build function type by folding right-to-left
+        let mut result_type = return_type;
+        for param_ty in param_types.into_iter().rev() {
+            result_type = Type::Constructed(TypeName::Arrow, vec![param_ty, result_type]);
+        }
+
+        // Convert to TypeScheme if there are type/size parameters
+        let type_params = self.extract_type_params_from_type(&result_type);
+        Some(self.convert_to_polytype(&result_type, &type_params))
+    }
+
+    /// Build the full function type from a declaration's parameters and return type.
+    fn build_function_type_from_decl(&mut self, decl: &Decl, module_name: &str) -> Result<TypeScheme> {
+        // Extract parameter types and resolve any type aliases within the module
+        let mut param_types = Vec::new();
+        for param in &decl.params {
+            if let Some(param_ty) = self.extract_type_from_pattern(param) {
+                // Resolve type aliases (e.g., "state" -> "f32" within the rand module)
+                let resolved_ty = self.resolve_type_aliases_in_module(&param_ty, module_name);
+                param_types.push(resolved_ty);
+            } else {
+                bail_module!("Function parameter in '{}' lacks type annotation", decl.name);
+            }
+        }
+
+        // Get return type (default to unit if not specified) and resolve aliases
+        let return_type = decl
+            .ty
+            .clone()
+            .unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![]));
+        let return_type = self.resolve_type_aliases_in_module(&return_type, module_name);
+
+        // Build function type by folding right-to-left
+        // f32 -> f32 -> f32 is represented as f32 -> (f32 -> f32)
+        let mut result_type = return_type;
+        for param_ty in param_types.into_iter().rev() {
+            result_type = Type::Constructed(TypeName::Arrow, vec![param_ty, result_type]);
+        }
+
+        // Convert to TypeScheme if there are type/size parameters
+        let type_params = self.extract_type_params_from_type(&result_type);
+        Ok(self.convert_to_polytype(&result_type, &type_params))
+    }
+
+    /// Convert a type with type parameters to a polymorphic TypeScheme.
+    /// Converts SizeVar("n") and UserVar("t") to fresh Type::Variables
+    /// and wraps the result in nested TypeScheme::Polytype layers.
+    fn convert_to_polytype(&mut self, ty: &Type, type_params: &[TypeParam]) -> TypeScheme {
+        if type_params.is_empty() {
+            return TypeScheme::Monotype(ty.clone());
+        }
+
+        // Create fresh variables for each parameter and build substitution map
+        let mut substitutions: HashMap<String, polytype::Variable> = HashMap::new();
+        let mut var_ids = Vec::new();
+
+        for param in type_params {
+            let var = self.context.new_variable();
+            if let Type::Variable(id) = var {
+                var_ids.push(id);
+                match param {
+                    TypeParam::Size(name) => {
+                        substitutions.insert(name.clone(), id);
+                    }
+                    TypeParam::Type(name) => {
+                        substitutions.insert(name.clone(), id);
+                    }
+                    _ => {} // Ignore other param types for now
+                }
+            }
+        }
+
+        // Substitute SizeVar/UserVar with Variable in the type
+        let substituted_ty = self.substitute_type_params(ty, &substitutions);
+
+        // Wrap in nested Polytype layers
+        let mut result = TypeScheme::Monotype(substituted_ty);
+        for &var_id in var_ids.iter().rev() {
+            result = TypeScheme::Polytype {
+                variable: var_id,
+                body: Box::new(result),
+            };
+        }
+
+        result
+    }
+
+    /// Recursively substitute SizeVar and UserVar with Variable.
+    fn substitute_type_params(
+        &self,
+        ty: &Type,
+        substitutions: &HashMap<String, polytype::Variable>,
+    ) -> Type {
+        match ty {
+            Type::Constructed(TypeName::SizeVar(name), args) => {
+                if let Some(&var_id) = substitutions.get(name) {
+                    Type::Variable(var_id)
+                } else {
+                    // Not in our substitution map, keep as-is
+                    Type::Constructed(
+                        TypeName::SizeVar(name.clone()),
+                        args.iter()
+                            .map(|a| self.substitute_type_params(a, substitutions))
+                            .collect(),
+                    )
+                }
+            }
+            Type::Constructed(TypeName::UserVar(name), args) => {
+                if let Some(&var_id) = substitutions.get(name) {
+                    Type::Variable(var_id)
+                } else {
+                    Type::Constructed(
+                        TypeName::UserVar(name.clone()),
+                        args.iter()
+                            .map(|a| self.substitute_type_params(a, substitutions))
+                            .collect(),
+                    )
+                }
+            }
+            Type::Constructed(name, args) => Type::Constructed(
+                name.clone(),
+                args.iter()
+                    .map(|a| self.substitute_type_params(a, substitutions))
+                    .collect(),
+            ),
+            Type::Variable(_) => ty.clone(),
+        }
+    }
+
+    /// Extract type parameters from a type by finding all UserVar and SizeVar.
+    fn extract_type_params_from_type(&self, ty: &Type) -> Vec<TypeParam> {
+        let mut params = std::collections::HashSet::new();
+        self.collect_type_params(ty, &mut params);
+        params.into_iter().collect()
+    }
+
+    /// Recursively collect type parameters from a type.
+    fn collect_type_params(&self, ty: &Type, params: &mut std::collections::HashSet<TypeParam>) {
+        match ty {
+            Type::Constructed(TypeName::UserVar(name), args) => {
+                params.insert(TypeParam::Type(name.clone()));
+                for arg in args {
+                    self.collect_type_params(arg, params);
+                }
+            }
+            Type::Constructed(TypeName::SizeVar(name), args) => {
+                params.insert(TypeParam::Size(name.clone()));
+                for arg in args {
+                    self.collect_type_params(arg, params);
+                }
+            }
+            Type::Constructed(_, args) => {
+                for arg in args {
+                    self.collect_type_params(arg, params);
+                }
+            }
+            Type::Variable(_) => {}
+        }
+    }
+
+    /// Extract type annotation from a pattern.
+    fn extract_type_from_pattern(&self, pattern: &Pattern) -> Option<Type> {
+        match &pattern.kind {
+            PatternKind::Typed(_, ty) => Some(ty.clone()),
+            PatternKind::Tuple(pats) => {
+                // For tuple patterns, extract types from each element
+                let elem_types: Option<Vec<Type>> =
+                    pats.iter().map(|p| self.extract_type_from_pattern(p)).collect();
+                elem_types.map(|types| Type::Constructed(TypeName::Tuple(types.len()), types))
+            }
+            _ => None,
+        }
+    }
+
     /// Consume the type checker and return the type table.
     /// Used to extract the prelude type table after type-checking prelude functions.
     pub fn into_type_table(self) -> std::collections::HashMap<crate::ast::NodeId, TypeScheme> {
@@ -1491,7 +1735,7 @@ impl<'a> TypeChecker<'a> {
 
                     // Try to query from elaborated modules
                     let module_name = &quals[0];
-                    if let Ok(type_scheme) = self.module_manager.get_module_function_type(module_name, name, &mut self.context) {
+                    if let Ok(type_scheme) = self.get_module_function_type_scheme(module_name, name) {
                         debug!("Found '{}' in elaborated module '{}' with type: {:?}", name, module_name, type_scheme);
                         let ty = type_scheme.instantiate(&mut self.context);
                         self.type_table.insert(expr.h.id, type_scheme);
@@ -1514,7 +1758,7 @@ impl<'a> TypeChecker<'a> {
                     };
                     debug!("Built function type for intrinsic '{}': {:?}", full_name, func_type);
                     Ok(func_type)
-                } else if let Some(type_scheme) = self.module_manager.get_prelude_function_type(&full_name, &mut self.context) {
+                } else if let Some(type_scheme) = self.get_prelude_function_type_scheme(&full_name) {
                     // Check top-level prelude functions (auto-imported)
                     debug!("'{}' is a prelude function with type: {:?}", full_name, type_scheme);
                     let ty = type_scheme.instantiate(&mut self.context);
@@ -1869,7 +2113,7 @@ impl<'a> TypeChecker<'a> {
                             } else if !quals.is_empty() {
                                 // Check module functions (e.g., f32.min)
                                 let module_name = &quals[0];
-                                if let Ok(type_scheme) = self.module_manager.get_module_function_type(module_name, name, &mut self.context) {
+                                if let Ok(type_scheme) = self.get_module_function_type_scheme(module_name, name) {
                                     let ty = type_scheme.instantiate(&mut self.context);
                                     Some(count_arrows(&ty))
                                 } else {
@@ -1979,7 +2223,7 @@ impl<'a> TypeChecker<'a> {
 
                     // Try to look up in elaborated modules (e.g., f32.i32 for type conversion)
                     let module_name = &qual_name.qualifiers[0];
-                    if let Ok(type_scheme) = self.module_manager.get_module_function_type(module_name, &qual_name.name, &mut self.context) {
+                    if let Ok(type_scheme) = self.get_module_function_type_scheme(module_name, &qual_name.name) {
                         let ty = type_scheme.instantiate(&mut self.context);
                         self.type_table.insert(expr.h.id, type_scheme);
                         return Ok(ty);
