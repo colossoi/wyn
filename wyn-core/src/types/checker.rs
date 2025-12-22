@@ -64,6 +64,10 @@ pub struct TypeChecker<'a> {
     warnings: Vec<TypeWarning>,          // Collected warnings
     type_holes: Vec<(NodeId, Span)>,     // Track type hole locations for warning emission
     arity_map: HashMap<String, usize>,   // function name -> required arity (number of params)
+    /// Scope stack for type parameter bindings (e.g., A -> var_1, B -> var_2).
+    /// Used to substitute UserVar/SizeVar in nested lambda type annotations.
+    /// Follows same scoping rules as value bindings - inner defs can shadow outer type params.
+    type_param_scope: ScopeStack<Type>,
 }
 
 /// Compute free type variables in a Type
@@ -335,6 +339,7 @@ impl<'a> TypeChecker<'a> {
             warnings: Vec::new(),
             type_holes: Vec::new(),
             arity_map: HashMap::new(),
+            type_param_scope: ScopeStack::new(),
         }
     }
 
@@ -433,19 +438,21 @@ impl<'a> TypeChecker<'a> {
             PatternKind::Typed(inner_pattern, annotated_type) => {
                 // Resolve module type aliases in the annotation (e.g., rand.state -> f32)
                 let resolved_annotation = self.resolve_type_aliases(annotated_type);
+                // Substitute any UserVar/SizeVar from enclosing function's type parameters
+                let substituted_annotation = self.substitute_from_type_param_scope(&resolved_annotation);
                 // Pattern has a type annotation - unify with expected type
-                self.context.unify(&resolved_annotation, expected_type).map_err(|_| {
+                self.context.unify(&substituted_annotation, expected_type).map_err(|_| {
                     err_type_at!(
                         pattern.h.span,
                         "Pattern type annotation {} doesn't match expected type {}",
-                        self.format_type(&resolved_annotation),
+                        self.format_type(&substituted_annotation),
                         self.format_type(expected_type)
                     )
                 })?;
-                // Bind the inner pattern with the resolved type
-                let result = self.bind_pattern(inner_pattern, &resolved_annotation, generalize)?;
+                // Bind the inner pattern with the substituted type
+                let result = self.bind_pattern(inner_pattern, &substituted_annotation, generalize)?;
                 // Also store type for the outer Typed pattern
-                let resolved = resolved_annotation.apply(&self.context);
+                let resolved = substituted_annotation.apply(&self.context);
                 self.type_table.insert(pattern.h.id, TypeScheme::Monotype(resolved));
                 Ok(result)
             }
@@ -593,10 +600,11 @@ impl<'a> TypeChecker<'a> {
 
                 let mut param_types = Vec::new();
                 for (param, expected_param_type) in lambda.params.iter().zip(expected_param_types.iter()) {
-                    // If parameter has a type annotation, trust it
+                    // If parameter has a type annotation, trust it (after substitution)
                     // Otherwise use the expected type from bidirectional checking
                     let param_type = if let Some(annotated_type) = param.pattern_type() {
-                        annotated_type.clone()
+                        // Substitute any UserVar/SizeVar from enclosing function's type parameters
+                        self.substitute_from_type_param_scope(annotated_type)
                     } else {
                         // Use the expected type for the parameter
                         expected_param_type.clone()
@@ -614,15 +622,17 @@ impl<'a> TypeChecker<'a> {
 
                 // If return type annotation exists, unify it with the body type
                 let return_type = if let Some(annotated_return_type) = &lambda.return_type {
-                    self.context.unify(&body_type, annotated_return_type).map_err(|_| {
+                    // Substitute any UserVar/SizeVar from enclosing function's type parameters
+                    let substituted_return_type = self.substitute_from_type_param_scope(annotated_return_type);
+                    self.context.unify(&body_type, &substituted_return_type).map_err(|_| {
                         err_type_at!(
                             lambda.body.h.span,
                             "Lambda body type {} does not match return type annotation {}",
                             self.format_type(&body_type),
-                            self.format_type(annotated_return_type)
+                            self.format_type(&substituted_return_type)
                         )
                     })?;
-                    annotated_return_type.clone()
+                    substituted_return_type
                 } else {
                     body_type
                 };
@@ -666,6 +676,27 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Substitute UserVars and SizeVars with bound type variables (recursive helper)
+    /// Substitute UserVar/SizeVar using the current type parameter scope stack.
+    /// Looks up each type variable name in the scope stack to find its binding.
+    fn substitute_from_type_param_scope(&self, ty: &Type) -> Type {
+        match ty {
+            Type::Constructed(TypeName::UserVar(name), _) => {
+                // Look up in scope stack
+                self.type_param_scope.lookup(name).cloned().unwrap_or_else(|| ty.clone())
+            }
+            Type::Constructed(TypeName::SizeVar(name), _) => {
+                // Look up in scope stack
+                self.type_param_scope.lookup(name).cloned().unwrap_or_else(|| ty.clone())
+            }
+            Type::Constructed(name, args) => {
+                let new_args: Vec<Type> =
+                    args.iter().map(|arg| self.substitute_from_type_param_scope(arg)).collect();
+                Type::Constructed(name.clone(), new_args)
+            }
+            Type::Variable(_) => ty.clone(),
+        }
+    }
+
     fn substitute_type_params_static(ty: &Type, bindings: &HashMap<String, Type>) -> Type {
         match ty {
             Type::Constructed(TypeName::UserVar(name), _) => {
@@ -1543,12 +1574,16 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn check_decl(&mut self, decl: &Decl) -> Result<()> {
+        // Push a new scope for type parameters
+        self.type_param_scope.push_scope();
+
         // Bind type parameters to fresh type variables
         // This ensures all occurrences of 'a in the function signature refer to the same variable
         let mut type_param_bindings: HashMap<String, Type> = HashMap::new();
         for type_param in &decl.type_params {
             let fresh_var = self.context.new_variable();
-            type_param_bindings.insert(type_param.clone(), fresh_var);
+            type_param_bindings.insert(type_param.clone(), fresh_var.clone());
+            self.type_param_scope.insert(type_param.clone(), fresh_var);
         }
 
         // Bind size parameters to fresh type variables
@@ -1556,7 +1591,8 @@ impl<'a> TypeChecker<'a> {
         // that can unify with concrete sizes (Size(8)) or other size variables
         for size_param in &decl.size_params {
             let fresh_var = self.context.new_variable();
-            type_param_bindings.insert(size_param.clone(), fresh_var);
+            type_param_bindings.insert(size_param.clone(), fresh_var.clone());
+            self.type_param_scope.insert(size_param.clone(), fresh_var);
         }
 
         // Note: substitution function defined as static method below
@@ -1680,6 +1716,9 @@ impl<'a> TypeChecker<'a> {
 
             debug!("Inferred type for {}: {}", decl.name, func_type);
         }
+
+        // Pop type parameter scope
+        self.type_param_scope.pop_scope();
 
         Ok(())
     }
@@ -2009,10 +2048,12 @@ impl<'a> TypeChecker<'a> {
                 // Save the parameter types so we can reuse them when building the function type
                 let mut param_types = Vec::new();
                 for param in &lambda.params {
-                    let param_type = param.pattern_type().cloned().unwrap_or_else(|| {
+                    let raw_param_type = param.pattern_type().cloned().unwrap_or_else(|| {
                         // No explicit type annotation - infer from pattern shape
                         self.fresh_type_for_pattern(param)
                     });
+                    // Substitute any UserVar/SizeVar from enclosing function's type parameters
+                    let param_type = self.substitute_from_type_param_scope(&raw_param_type);
                     param_types.push(param_type.clone());
 
                     // Bind the pattern (handles tuples, wildcards, etc.)
@@ -2025,15 +2066,17 @@ impl<'a> TypeChecker<'a> {
 
                 // If return type annotation exists, unify it with the body type
                 let return_type = if let Some(annotated_return_type) = &lambda.return_type {
-                    self.context.unify(&body_type, annotated_return_type).map_err(|_| {
+                    // Substitute any UserVar/SizeVar from enclosing function's type parameters
+                    let substituted_return_type = self.substitute_from_type_param_scope(annotated_return_type);
+                    self.context.unify(&body_type, &substituted_return_type).map_err(|_| {
                         err_type_at!(
                             lambda.body.h.span,
                             "Lambda body type {} does not match return type annotation {}",
                             self.format_type(&body_type),
-                            self.format_type(annotated_return_type)
+                            self.format_type(&substituted_return_type)
                         )
                     })?;
-                    annotated_return_type.clone()
+                    substituted_return_type
                 } else {
                     body_type
                 };

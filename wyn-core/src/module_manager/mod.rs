@@ -9,6 +9,7 @@ use crate::lexer;
 use crate::parser::Parser;
 use crate::scope::ScopeStack;
 use crate::{bail_module, err_module, err_parse};
+use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet};
 
 /// Name resolver for tracking opened modules and resolving unqualified names
@@ -120,7 +121,8 @@ pub struct PreElaboratedPrelude {
     /// Type aliases from modules: "module.typename" -> underlying Type
     pub type_aliases: HashMap<String, Type>,
     /// Top-level prelude function declarations (auto-imported)
-    pub prelude_functions: HashMap<String, Decl>,
+    /// Uses IndexMap to preserve insertion order (file order) for proper type-checking
+    pub prelude_functions: IndexMap<String, Decl>,
 }
 
 /// Manages lazy loading of module files
@@ -134,7 +136,8 @@ pub struct ModuleManager {
     /// Type aliases from modules: "module.typename" -> underlying Type
     type_aliases: HashMap<String, Type>,
     /// Top-level prelude function declarations (auto-imported)
-    prelude_functions: HashMap<String, Decl>,
+    /// Uses IndexMap to preserve insertion order (file order) for proper type-checking
+    prelude_functions: IndexMap<String, Decl>,
 }
 
 impl ModuleManager {
@@ -176,7 +179,7 @@ impl ModuleManager {
             elaborated_modules: HashMap::new(),
             known_modules,
             type_aliases: HashMap::new(),
-            prelude_functions: HashMap::new(),
+            prelude_functions: IndexMap::new(),
         }
     }
 
