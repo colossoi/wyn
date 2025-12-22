@@ -1151,13 +1151,8 @@ impl<'a> TypeChecker<'a> {
             // Resolve type aliases in the declaration (e.g., "state" -> "f32" within rand module)
             let resolved_decl = self.resolve_decl_type_aliases(&decl, &module_name);
 
-            // Type-check the declaration body
-            self.check_decl(&resolved_decl)?;
-
-            // Register with qualified name so it can be found during flattening
-            if let Some(type_scheme) = self.scope_stack.lookup(&decl.name) {
-                self.scope_stack.insert(qualified_name.clone(), type_scheme.clone());
-            }
+            // Type-check the declaration body, inserting under the qualified name
+            self.check_decl_as(&resolved_decl, &qualified_name)?;
         }
 
         Ok(())
@@ -1613,6 +1608,10 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn check_decl(&mut self, decl: &Decl) -> Result<()> {
+        self.check_decl_as(decl, &decl.name)
+    }
+
+    fn check_decl_as(&mut self, decl: &Decl, scope_name: &str) -> Result<()> {
         // Push a new scope for type parameters
         self.type_param_scope.push_scope();
 
@@ -1661,9 +1660,9 @@ impl<'a> TypeChecker<'a> {
             let stored_type = decl.ty.as_ref().unwrap_or(&expr_type).clone();
             // Generalize the type to enable polymorphism
             let type_scheme = self.generalize(&stored_type);
-            debug!("Inserting variable '{}' into scope", decl.name);
-            self.scope_stack.insert(decl.name.clone(), type_scheme);
-            debug!("Inferred type for {}: {}", decl.name, stored_type);
+            debug!("Inserting variable '{}' into scope", scope_name);
+            self.scope_stack.insert(scope_name.to_string(), type_scheme);
+            debug!("Inferred type for {}: {}", scope_name, stored_type);
         } else {
             // Function declaration: let/def name param1 param2 = body
 
@@ -1686,10 +1685,10 @@ impl<'a> TypeChecker<'a> {
 
                 // Register the dispatcher with its polymorphic type
                 let type_scheme = self.generalize(&func_type);
-                self.scope_stack.insert(decl.name.clone(), type_scheme);
+                self.scope_stack.insert(scope_name.to_string(), type_scheme);
                 debug!(
                     "Registered _w_apply dispatcher '{}' with polymorphic type",
-                    decl.name
+                    scope_name
                 );
                 self.type_param_scope.pop_scope();
                 return Ok(());
@@ -1749,12 +1748,12 @@ impl<'a> TypeChecker<'a> {
 
             // Update scope with inferred type using generalization
             let type_scheme = self.generalize(&func_type);
-            self.scope_stack.insert(decl.name.clone(), type_scheme);
+            self.scope_stack.insert(scope_name.to_string(), type_scheme);
 
             // Track arity for partial application checking
-            self.arity_map.insert(decl.name.clone(), decl.params.len());
+            self.arity_map.insert(scope_name.to_string(), decl.params.len());
 
-            debug!("Inferred type for {}: {}", decl.name, func_type);
+            debug!("Inferred type for {}: {}", scope_name, func_type);
         }
 
         // Pop type parameter scope
