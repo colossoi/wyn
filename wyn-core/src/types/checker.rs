@@ -9,7 +9,7 @@ use std::collections::{BTreeSet, HashMap};
 
 // Import type helper functions from parent module
 use super::{
-    as_arrow, bool_type, count_arrows, f32, function, i32, mat, record, sized_array, string, strip_unique,
+    as_arrow, bool_type, f32, function, i32, mat, record, sized_array, string, strip_unique,
     tuple, unit, vec,
 };
 
@@ -113,6 +113,21 @@ fn quantify(mut body: TypeScheme, vars: &BTreeSet<usize>) -> TypeScheme {
         };
     }
     body
+}
+
+/// Represents candidate function types for a callee expression.
+/// For overloaded intrinsics, there may be multiple candidates.
+struct CalleeCandidates {
+    candidates: Vec<Candidate>,
+    display_name: String,
+}
+
+/// A single candidate function type.
+struct Candidate {
+    /// Fresh instantiated monotype to unify against
+    ty: Type,
+    /// Original scheme (for storing in type_table)
+    scheme: Option<TypeScheme>,
 }
 
 impl<'a> TypeChecker<'a> {
@@ -1998,76 +2013,74 @@ impl<'a> TypeChecker<'a> {
                 Ok(body_type)
             }
             ExprKind::Application(func, args) => {
-                // Check if the function is an overloaded builtin identifier
-                // If so, perform overload resolution based on argument types
-                if let ExprKind::Identifier(quals, name) = &func.kind {
-                    let full_name = if quals.is_empty() {
-                        name.clone()
+                // Resolve callee to candidate function types
+                let callee = self.resolve_callee_candidates(func)?;
+
+                // For single candidate, use apply_two_pass (handles lambdas correctly)
+                // For multiple candidates (overloads), use inference-first approach
+                if callee.candidates.len() == 1 {
+                    let cand = callee.candidates.into_iter().next().unwrap();
+
+                    // Use two-pass for bidirectional lambda checking
+                    let result_ty = self.apply_two_pass(cand.ty.clone(), args)?;
+
+                    // Check for partial application AFTER application (when types are resolved)
+                    self.ensure_not_partial(&result_ty, &expr.h.span)?;
+
+                    // Store types in type table
+                    if let Some(s) = cand.scheme {
+                        self.type_table.insert(func.h.id, s);
                     } else {
-                        format!("{}.{}", quals.join("."), name)
-                    };
-                    use crate::intrinsics::IntrinsicLookup;
-                    // Clone entries to release the borrow on self.poly_builtins
-                    let overload_entries = match self.intrinsics.get(&full_name) {
-                        Some(IntrinsicLookup::Overloaded(overload_set)) => {
-                            Some(overload_set.entries().to_vec())
-                        }
-                        _ => None,
-                    };
-
-                    if let Some(entries) = overload_entries {
-                        // Infer argument types first
-                        let mut arg_types = Vec::new();
-                        for arg in args {
-                            arg_types.push(self.infer_expression(arg)?);
-                        }
-
-                        // Try each overload with backtracking
-                        for entry in &entries {
-                            let saved_context = self.context.clone();
-                            let func_type = entry.scheme.instantiate(&mut self.context);
-
-                            if let Some(return_type) = Self::try_unify_overload(&func_type, &arg_types, &mut self.context) {
-                                // Store the types in the type table
-                                let resolved_func_type = func_type.apply(&self.context);
-                                self.type_table.insert(func.h.id, TypeScheme::Monotype(resolved_func_type));
-                                self.type_table.insert(expr.h.id, TypeScheme::Monotype(return_type.clone()));
-                                return Ok(return_type);
-                            }
-
-                            self.context = saved_context;
-                        }
-
-                        bail_type_at!(
-                            expr.h.span,
-                            "No matching overload for '{}' with argument types: {}",
-                            name,
-                            arg_types.iter().map(|t| self.format_type(t)).collect::<Vec<_>>().join(", ")
-                        );
+                        let resolved = cand.ty.apply(&self.context);
+                        self.type_table
+                            .insert(func.h.id, TypeScheme::Monotype(resolved));
                     }
-                }
+                    self.type_table
+                        .insert(expr.h.id, TypeScheme::Monotype(result_ty.clone()));
+                    Ok(result_ty)
+                } else {
+                    // Multiple candidates: infer argument types first, then try overloads
+                    let mut arg_types = Vec::new();
+                    for arg in args {
+                        arg_types.push(self.infer_expression(arg)?);
+                    }
 
-                // Not an overloaded builtin, use standard application
-                let func_type = self.infer_expression(func)?;
+                    // Try each overload with backtracking
+                    for cand in callee.candidates {
+                        let saved_context = self.context.clone();
 
-                // Check arity for partial application prevention
-                // This is done on the inferred type to catch all cases (let bindings,
-                // conditionals, record fields, etc.) rather than pattern-matching on syntax
-                let resolved_func_type = func_type.apply(&self.context);
-                let arity = count_arrows(&resolved_func_type);
-                if arity > 0 && args.len() < arity {
+                        if let Some(result_ty) =
+                            Self::try_unify_overload(&cand.ty, &arg_types, &mut self.context)
+                        {
+                            // Check for partial application
+                            if self.ensure_not_partial(&result_ty, &expr.h.span).is_ok() {
+                                let resolved_func_ty = cand.ty.apply(&self.context);
+                                if let Some(s) = cand.scheme {
+                                    self.type_table.insert(func.h.id, s);
+                                } else {
+                                    self.type_table
+                                        .insert(func.h.id, TypeScheme::Monotype(resolved_func_ty));
+                                }
+                                self.type_table
+                                    .insert(expr.h.id, TypeScheme::Monotype(result_ty.clone()));
+                                return Ok(result_ty);
+                            }
+                        }
+
+                        self.context = saved_context;
+                    }
+
                     bail_type_at!(
                         expr.h.span,
-                        "Partial application not allowed: function requires {} argument(s), but {} provided",
-                        arity,
-                        args.len()
+                        "No matching overload for '{}' with argument types: {}",
+                        callee.display_name,
+                        arg_types
+                            .iter()
+                            .map(|t| self.format_type(t))
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     );
                 }
-
-                // Use two-pass application for better lambda inference
-                // This enables proper inference for expressions like (map (\x -> ...) arr)
-                // or (|>) operators with lambdas
-                self.apply_two_pass(func_type, args)
             }
             ExprKind::FieldAccess(inner_expr, field) => {
                 // Try to extract a qualified name (e.g., f32.cos, M.N.x)
@@ -2614,6 +2627,121 @@ impl<'a> TypeChecker<'a> {
     }
 
     // Removed: fresh_var - now using polytype's context.new_variable()
+
+    /// Resolve a callee expression to a set of candidate function types.
+    /// For overloaded intrinsics, returns multiple candidates.
+    /// For normal functions, returns a single candidate.
+    fn resolve_callee_candidates(&mut self, func: &Expression) -> Result<CalleeCandidates> {
+        use crate::intrinsics::IntrinsicLookup;
+
+        match &func.kind {
+            ExprKind::Identifier(quals, name) => {
+                let full_name = if quals.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{}.{}", quals.join("."), name)
+                };
+
+                // 1) Lexical scope first (local variables shadow intrinsics)
+                if let Some(scheme) = self.scope_stack.lookup(&full_name).cloned() {
+                    let ty = scheme.instantiate(&mut self.context);
+                    return Ok(CalleeCandidates {
+                        candidates: vec![Candidate {
+                            ty,
+                            scheme: Some(scheme),
+                        }],
+                        display_name: full_name,
+                    });
+                }
+
+                // 2) Overloaded intrinsic? => multiple candidates
+                if let Some(lookup) = self.intrinsics.get(&full_name) {
+                    match lookup {
+                        IntrinsicLookup::Overloaded(set) => {
+                            let mut candidates = Vec::new();
+                            for entry in set.entries() {
+                                let ty = entry.scheme.instantiate(&mut self.context);
+                                candidates.push(Candidate {
+                                    ty,
+                                    scheme: Some(entry.scheme.clone()),
+                                });
+                            }
+                            return Ok(CalleeCandidates {
+                                candidates,
+                                display_name: full_name,
+                            });
+                        }
+                        IntrinsicLookup::Single(entry) => {
+                            let scheme = entry.scheme.clone();
+                            let ty = scheme.instantiate(&mut self.context);
+                            return Ok(CalleeCandidates {
+                                candidates: vec![Candidate {
+                                    ty,
+                                    scheme: Some(scheme),
+                                }],
+                                display_name: full_name,
+                            });
+                        }
+                    }
+                }
+
+                // 3) Module function?
+                if !quals.is_empty() {
+                    let module_name = &quals[0];
+                    if let Ok(scheme) = self.get_module_function_type_scheme(module_name, name) {
+                        let ty = scheme.instantiate(&mut self.context);
+                        return Ok(CalleeCandidates {
+                            candidates: vec![Candidate {
+                                ty,
+                                scheme: Some(scheme),
+                            }],
+                            display_name: full_name,
+                        });
+                    }
+                }
+
+                // 4) Prelude?
+                if let Some(scheme) = self.get_prelude_function_type_scheme(&full_name) {
+                    let ty = scheme.instantiate(&mut self.context);
+                    return Ok(CalleeCandidates {
+                        candidates: vec![Candidate {
+                            ty,
+                            scheme: Some(scheme),
+                        }],
+                        display_name: full_name,
+                    });
+                }
+
+                Err(err_undef_at!(func.h.span, "{}", full_name))
+            }
+
+            // Any non-identifier callee: infer its type as single candidate
+            _ => {
+                let ty = self.infer_expression(func)?;
+                Ok(CalleeCandidates {
+                    candidates: vec![Candidate { ty, scheme: None }],
+                    display_name: "<expr>".to_string(),
+                })
+            }
+        }
+    }
+
+    /// Ensure the result type is not a function (no partial application).
+    /// Note: () -> T is allowed (unit functions are not considered partial application).
+    fn ensure_not_partial(&self, result_ty: &Type, call_span: &Span) -> Result<()> {
+        let r = result_ty.apply(&self.context);
+        if let Some((param, _)) = as_arrow(&r) {
+            // Unit parameter doesn't count as partial application
+            if !matches!(param, Type::Constructed(TypeName::Unit, _)) {
+                bail_type_at!(
+                    call_span.clone(),
+                    "Partial application not allowed: result is function type {}",
+                    self.format_type(&r)
+                );
+            }
+        }
+        Ok(())
+    }
 
     /// Two-pass function application for better lambda inference
     ///
