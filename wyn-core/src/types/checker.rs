@@ -2766,19 +2766,29 @@ impl<'a> TypeChecker<'a> {
 
         // First pass: process arguments to constrain type variables
         for (i, arg) in args.iter().enumerate() {
-            if matches!(&arg.kind, ExprKind::Lambda(_)) {
-                // For lambdas: peel the head with a fresh arrow (α -> β) and unify
-                let param_type_var = self.context.new_variable();
+            if let ExprKind::Lambda(lambda) = &arg.kind {
+                // For lambdas with k params: build k arrows for the expected lambda type
+                // This ensures check_expression can extract all k parameter types
+                let num_params = lambda.params.len();
+                let final_result = self.context.new_variable();
+
+                // Build expected lambda type: α1 -> α2 -> ... -> αk -> β
+                let mut expected_lambda_type = final_result;
+                for _ in 0..num_params {
+                    let param_var = self.context.new_variable();
+                    expected_lambda_type = Type::arrow(param_var, expected_lambda_type);
+                }
+
+                // Peel one arrow from func_type: (expected_lambda_type -> result)
                 let result_type = self.context.new_variable();
-                let expected_func_type = Type::arrow(param_type_var.clone(), result_type.clone());
+                let expected_func_type = Type::arrow(expected_lambda_type.clone(), result_type.clone());
 
                 self.context
                     .unify(&func_type, &expected_func_type)
                     .map_err(|e| err_type_at!(arg.h.span, "Function application type error: {:?}", e))?;
 
-                // Extract the parameter type by applying context
-                let param_type = param_type_var.apply(&self.context);
-                lambda_expected_types[i] = Some(param_type);
+                // Store the whole expected lambda type (not just first param)
+                lambda_expected_types[i] = Some(expected_lambda_type);
 
                 func_type = result_type;
             } else {
