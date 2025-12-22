@@ -56,7 +56,7 @@ use indexmap::IndexMap;
 
 use ast::{NodeCounter, NodeId};
 use error::Result;
-use polytype::TypeScheme;
+use polytype::{Context, TypeScheme};
 
 // =============================================================================
 // Generic ID allocation
@@ -196,6 +196,7 @@ impl<'a, Id: From<u32> + Copy + Eq + Hash, T> IntoIterator for &'a mut IdArena<I
 
 // Re-export key types for the public API
 pub use ast::TypeName;
+pub use polytype::Context as PolytypeContext;
 pub type TypeTable = HashMap<NodeId, TypeScheme<TypeName>>;
 pub type SpanTable = HashMap<NodeId, ast::Span>;
 
@@ -268,6 +269,16 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 pub struct FrontEnd {
     pub node_counter: NodeCounter,
     pub module_manager: module_manager::ModuleManager,
+    /// Type variable allocator for polymorphic types
+    pub context: Context<TypeName>,
+    /// Maps AST nodes to their inferred type schemes
+    pub type_table: TypeTable,
+    /// Polymorphic intrinsic function types
+    pub intrinsics: intrinsics::IntrinsicSource,
+    /// Top-level function type schemes (includes prelude and user-defined functions)
+    pub schemes: HashMap<String, TypeScheme<TypeName>>,
+    /// Per-module function type schemes cache (populated on first use)
+    pub module_schemes: HashMap<String, HashMap<String, TypeScheme<TypeName>>>,
 }
 
 impl FrontEnd {
@@ -277,9 +288,19 @@ impl FrontEnd {
     pub fn new() -> Self {
         let mut node_counter = NodeCounter::new();
         let module_manager = module_manager::ModuleManager::new(&mut node_counter);
+
+        // Type-related state is populated during type_check()
+        let context = Context::default();
+        let intrinsics = intrinsics::IntrinsicSource::new(&mut Context::default());
+
         FrontEnd {
             node_counter,
             module_manager,
+            context,
+            type_table: HashMap::new(),
+            intrinsics,
+            schemes: HashMap::new(),
+            module_schemes: HashMap::new(),
         }
     }
 }
@@ -367,10 +388,16 @@ pub struct AstConstFoldedEarly {
 
 impl AstConstFoldedEarly {
     /// Type check the program
-    pub fn type_check(self, module_manager: &module_manager::ModuleManager) -> Result<TypeChecked> {
+    pub fn type_check(
+        self,
+        module_manager: &module_manager::ModuleManager,
+        schemes: &mut HashMap<String, TypeScheme<TypeName>>,
+    ) -> Result<TypeChecked> {
         let mut checker = type_checker::TypeChecker::new(module_manager);
         checker.load_builtins()?;
         let type_table = checker.check_program(&self.ast)?;
+        // Populate schemes with function type schemes from type checking
+        *schemes = checker.get_function_schemes();
         let warnings: Vec<_> = checker.warnings().to_vec();
         let span_table = build_span_table(&self.ast);
 
@@ -457,7 +484,11 @@ impl AliasChecked {
 
     /// Flatten AST to MIR (with defunctionalization and desugaring).
     /// Returns the flattened MIR and a BackEnd for subsequent passes.
-    pub fn flatten(self, module_manager: &module_manager::ModuleManager) -> Result<(Flattened, BackEnd)> {
+    pub fn flatten(
+        self,
+        module_manager: &module_manager::ModuleManager,
+        schemes: &HashMap<String, TypeScheme<TypeName>>,
+    ) -> Result<(Flattened, BackEnd)> {
         let type_table = self.type_table;
 
         let builtins = impl_source::ImplSource::default().all_names();
@@ -465,9 +496,8 @@ impl AliasChecked {
         let prelude_decls: Vec<_> = module_manager.get_prelude_function_declarations();
         let defun_analysis =
             defun_analysis::analyze_program_with_decls(&self.ast, &prelude_decls, &type_table, &builtins);
-        let prelude_schemes = module_manager.get_prelude_schemes().clone();
         let mut flattener =
-            flattening::Flattener::new(type_table, builtins, defun_analysis, prelude_schemes);
+            flattening::Flattener::new(type_table, builtins, defun_analysis, schemes.clone());
         let mut mir = flattener.flatten_program(&self.ast)?;
 
         // Flatten module function declarations so they're available in SPIR-V
@@ -648,4 +678,23 @@ fn get_prelude_cache() -> (&'static module_manager::PreElaboratedPrelude, NodeCo
 pub fn cached_module_manager() -> (module_manager::ModuleManager, NodeCounter) {
     let (prelude, node_counter) = get_prelude_cache();
     (module_manager::ModuleManager::from_prelude(prelude), node_counter)
+}
+
+/// Create a FrontEnd using the cached prelude (test-only)
+#[cfg(test)]
+pub fn cached_frontend() -> FrontEnd {
+    let (prelude, node_counter) = get_prelude_cache();
+    let module_manager = module_manager::ModuleManager::from_prelude(prelude);
+    let context = Context::default();
+    let intrinsics = intrinsics::IntrinsicSource::new(&mut Context::default());
+
+    FrontEnd {
+        node_counter,
+        module_manager,
+        context,
+        type_table: HashMap::new(),
+        intrinsics,
+        schemes: HashMap::new(),
+        module_schemes: HashMap::new(),
+    }
 }

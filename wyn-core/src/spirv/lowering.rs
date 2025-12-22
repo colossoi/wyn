@@ -2850,19 +2850,19 @@ mod tests {
 
     fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
         // Use the typestate API to ensure proper compilation pipeline
-        let (module_manager, mut node_counter) = crate::cached_module_manager();
-        let parsed = crate::Compiler::parse(source, &mut node_counter).expect("Parsing failed");
+        let mut frontend = crate::cached_frontend();
+        let parsed = crate::Compiler::parse(source, &mut frontend.node_counter).expect("Parsing failed");
         let (flattened, _backend) = parsed
-            .desugar(&mut node_counter)
+            .desugar(&mut frontend.node_counter)
             .expect("Desugaring failed")
-            .resolve(&module_manager)
+            .resolve(&frontend.module_manager)
             .expect("Name resolution failed")
             .fold_ast_constants()
-            .type_check(&module_manager)
+            .type_check(&frontend.module_manager, &mut frontend.schemes)
             .expect("Type checking failed")
             .alias_check()
             .expect("Alias checking failed")
-            .flatten(&module_manager)
+            .flatten(&frontend.module_manager, &frontend.schemes)
             .expect("Flattening failed");
 
         let inplace_info = crate::alias_checker::analyze_inplace(&flattened.mir);

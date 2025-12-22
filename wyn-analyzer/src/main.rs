@@ -8,6 +8,7 @@ use wyn_core::TypeTable;
 use wyn_core::ast::{self, NodeCounter, NodeId, Span};
 use wyn_core::module_manager::{ModuleManager, PreElaboratedPrelude};
 use wyn_core::types::format_scheme;
+use wyn_core::FrontEnd;
 
 /// Cached prelude data AND the node counter state after parsing it
 static PRELUDE_CACHE: OnceLock<(PreElaboratedPrelude, NodeCounter)> = OnceLock::new();
@@ -19,6 +20,20 @@ fn get_prelude() -> (&'static PreElaboratedPrelude, NodeCounter) {
         (prelude, nc)
     });
     (prelude, counter.clone())
+}
+
+fn get_frontend() -> FrontEnd {
+    let (prelude, node_counter) = get_prelude();
+    let module_manager = ModuleManager::from_prelude(prelude);
+    FrontEnd {
+        node_counter,
+        module_manager,
+        context: wyn_core::PolytypeContext::default(),
+        type_table: HashMap::new(),
+        intrinsics: wyn_core::intrinsics::IntrinsicSource::new(&mut wyn_core::PolytypeContext::default()),
+        schemes: HashMap::new(),
+        module_schemes: HashMap::new(),
+    }
 }
 
 /// Cached document state after successful type checking
@@ -172,14 +187,13 @@ impl Backend {
         let mut diagnostics = Vec::new();
 
         // Try to parse and type-check the document
-        let (prelude, mut node_counter) = get_prelude();
-        let result = wyn_core::Compiler::parse(text, &mut node_counter).and_then(|parsed| {
-            let module_manager = ModuleManager::from_prelude(prelude);
+        let mut frontend = get_frontend();
+        let result = wyn_core::Compiler::parse(text, &mut frontend.node_counter).and_then(|parsed| {
             parsed
-                .desugar(&mut node_counter)?
-                .resolve(&module_manager)?
+                .desugar(&mut frontend.node_counter)?
+                .resolve(&frontend.module_manager)?
                 .fold_ast_constants()
-                .type_check(&module_manager)
+                .type_check(&frontend.module_manager, &mut frontend.schemes)
         });
 
         match result {

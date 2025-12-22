@@ -2,12 +2,12 @@ use crate::Compiler;
 use crate::alias_checker::{AliasCheckResult, AliasChecker, InPlaceInfo, analyze_inplace};
 
 fn check_alias(source: &str) -> AliasCheckResult {
-    let (module_manager, mut node_counter) = crate::cached_module_manager();
-    let parsed = Compiler::parse(source, &mut node_counter).expect("parse failed");
-    let desugared = parsed.desugar(&mut node_counter).expect("desugar failed");
-    let resolved = desugared.resolve(&module_manager).expect("resolve failed");
+    let mut frontend = crate::cached_frontend();
+    let parsed = Compiler::parse(source, &mut frontend.node_counter).expect("parse failed");
+    let desugared = parsed.desugar(&mut frontend.node_counter).expect("desugar failed");
+    let resolved = desugared.resolve(&frontend.module_manager).expect("resolve failed");
     let folded = resolved.fold_ast_constants();
-    let type_checked = folded.type_check(&module_manager).expect("type_check failed");
+    let type_checked = folded.type_check(&frontend.module_manager, &mut frontend.schemes).expect("type_check failed");
 
     let checker = AliasChecker::new(&type_checked.type_table, &type_checked.span_table);
     checker.check_program(&type_checked.ast).expect("alias check failed")
@@ -15,15 +15,15 @@ fn check_alias(source: &str) -> AliasCheckResult {
 
 /// Helper to run through the pipeline up to alias checking (returns the AliasChecked stage)
 fn alias_check_pipeline(source: &str) -> crate::AliasChecked {
-    let (module_manager, mut node_counter) = crate::cached_module_manager();
-    let parsed = Compiler::parse(source, &mut node_counter).expect("parse failed");
+    let mut frontend = crate::cached_frontend();
+    let parsed = Compiler::parse(source, &mut frontend.node_counter).expect("parse failed");
     parsed
-        .desugar(&mut node_counter)
+        .desugar(&mut frontend.node_counter)
         .expect("desugar failed")
-        .resolve(&module_manager)
+        .resolve(&frontend.module_manager)
         .expect("resolve failed")
         .fold_ast_constants()
-        .type_check(&module_manager)
+        .type_check(&frontend.module_manager, &mut frontend.schemes)
         .expect("type_check failed")
         .alias_check()
         .expect("alias_check failed")
@@ -258,14 +258,14 @@ def main(t: ([4]i32, [4]i32, [4]i32)) -> i32 =
 /// Helper to analyze in-place opportunities in a source file
 /// Runs through the full pipeline up to lifting (matching the real compilation flow)
 fn analyze_inplace_ops(source: &str) -> InPlaceInfo {
-    let (module_manager, mut node_counter) = crate::cached_module_manager();
-    let parsed = Compiler::parse(source, &mut node_counter).expect("parse failed");
-    let desugared = parsed.desugar(&mut node_counter).expect("desugar failed");
-    let resolved = desugared.resolve(&module_manager).expect("resolve failed");
+    let mut frontend = crate::cached_frontend();
+    let parsed = Compiler::parse(source, &mut frontend.node_counter).expect("parse failed");
+    let desugared = parsed.desugar(&mut frontend.node_counter).expect("desugar failed");
+    let resolved = desugared.resolve(&frontend.module_manager).expect("resolve failed");
     let folded = resolved.fold_ast_constants();
-    let type_checked = folded.type_check(&module_manager).expect("type_check failed");
+    let type_checked = folded.type_check(&frontend.module_manager, &mut frontend.schemes).expect("type_check failed");
     let alias_checked = type_checked.alias_check().expect("alias check failed");
-    let (flattened, _backend) = alias_checked.flatten(&module_manager).expect("flatten failed");
+    let (flattened, _backend) = alias_checked.flatten(&frontend.module_manager, &frontend.schemes).expect("flatten failed");
 
     // For tests without entry points, analyze after flattening (before monomorphization)
     // since filter_reachable would remove all defs without an entry point

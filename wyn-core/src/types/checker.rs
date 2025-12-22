@@ -306,9 +306,8 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Create a new TypeChecker with a reference to a ModuleManager
-    /// Inherits the prelude type table from the module manager
     pub fn new(module_manager: &'a crate::module_manager::ModuleManager) -> Self {
-        Self::with_type_table(module_manager, module_manager.get_prelude_type_table().clone())
+        Self::with_type_table(module_manager, HashMap::new())
     }
 
     /// Create a TypeChecker with an empty type table (for building prelude)
@@ -910,6 +909,9 @@ impl<'a> TypeChecker<'a> {
     }
 
     pub fn check_program(&mut self, program: &Program) -> Result<HashMap<crate::ast::NodeId, TypeScheme>> {
+        // Type-check prelude functions first (needed so they're in scope for user code)
+        self.check_prelude_functions()?;
+
         // Type-check module function bodies (e.g., rand.init, rand.int)
         // This ensures module functions have type table entries for flattening
         self.check_module_functions()?;
@@ -1110,6 +1112,24 @@ impl<'a> TypeChecker<'a> {
             schemes.insert(name.to_string(), scheme.clone());
         });
         schemes
+    }
+
+    /// Consume the type checker and return all parts needed by FrontEnd.
+    /// Returns (context, type_table, intrinsics, schemes).
+    pub fn into_parts(
+        self,
+    ) -> (
+        Context<TypeName>,
+        std::collections::HashMap<crate::ast::NodeId, TypeScheme>,
+        crate::intrinsics::IntrinsicSource,
+        std::collections::HashMap<String, TypeScheme>,
+    ) {
+        // Extract schemes from scope_stack before consuming self
+        let mut schemes = std::collections::HashMap::new();
+        self.scope_stack.for_each_binding(|name, scheme| {
+            schemes.insert(name.to_string(), scheme.clone());
+        });
+        (self.context, self.type_table, self.intrinsics, schemes)
     }
 
     /// Resolve type aliases in a declaration within a module context

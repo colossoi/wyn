@@ -165,7 +165,7 @@ fn compile_file(
     let resolved = time("resolve", verbose, || desugared.resolve(&frontend.module_manager))?;
     let ast_folded = time("fold_ast_constants", verbose, || resolved.fold_ast_constants());
     let type_checked = time("type_check", verbose, || {
-        ast_folded.type_check(&frontend.module_manager)
+        ast_folded.type_check(&frontend.module_manager, &mut frontend.schemes)
     })?;
 
     type_checked.print_warnings();
@@ -177,7 +177,7 @@ fn compile_file(
     }
 
     let (flattened, _backend) = time("flatten", verbose, || {
-        alias_checked.flatten(&frontend.module_manager)
+        alias_checked.flatten(&frontend.module_manager, &frontend.schemes)
     })?;
 
     // Write initial MIR if requested (right after flattening)
@@ -286,7 +286,7 @@ fn check_file(input: PathBuf, output_annotated: Option<PathBuf>, verbose: bool) 
     let parsed = Compiler::parse(&source, &mut frontend.node_counter)?;
     let desugared = parsed.desugar(&mut frontend.node_counter)?;
     let resolved = desugared.resolve(&frontend.module_manager)?;
-    let type_checked = resolved.fold_ast_constants().type_check(&frontend.module_manager)?;
+    let type_checked = resolved.fold_ast_constants().type_check(&frontend.module_manager, &mut frontend.schemes)?;
 
     type_checked.print_warnings();
 
