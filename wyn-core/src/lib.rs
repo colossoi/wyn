@@ -43,6 +43,8 @@ mod binding_lifter_tests;
 mod constant_folding_tests;
 #[cfg(test)]
 mod flattening_tests;
+#[cfg(test)]
+mod scope_tests;
 // #[cfg(test)]
 // mod monomorphization_tests;
 // #[cfg(test)]
