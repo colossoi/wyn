@@ -125,12 +125,22 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
+    /// Structural equality on types after applying current substitution.
+    /// Two types are equal if they resolve to the same structure.
     fn types_equal(&self, left: &Type, right: &Type) -> bool {
+        let l = left.apply(&self.context);
+        let r = right.apply(&self.context);
+        Self::types_equal_structural(&l, &r)
+    }
+
+    /// Pure structural equality without applying substitution.
+    /// Used internally after types have already been resolved.
+    fn types_equal_structural(left: &Type, right: &Type) -> bool {
         match (left, right) {
             (Type::Constructed(l_name, l_args), Type::Constructed(r_name, r_args)) => {
                 l_name == r_name
                     && l_args.len() == r_args.len()
-                    && l_args.iter().zip(r_args.iter()).all(|(l, r)| self.types_equal(l, r))
+                    && l_args.iter().zip(r_args.iter()).all(|(l, r)| Self::types_equal_structural(l, r))
             }
             (Type::Variable(l_id), Type::Variable(r_id)) => l_id == r_id,
             _ => false,
@@ -2913,10 +2923,10 @@ impl<'a> TypeChecker<'a> {
                 Type::Constructed(TypeName::Tuple(_), types2),
             ) => {
                 types1.len() == types2.len()
-                    && types1.iter().zip(types2.iter()).all(|(t1, t2)| self.types_equal(t1, t2))
+                    && types1.iter().zip(types2.iter()).all(|(t1, t2)| Self::types_equal_structural(t1, t2))
             }
-            // Regular case - use structural equality after applying substitution
-            _ => self.types_equal(&a, &b),
+            // Regular case - use structural equality (already applied above)
+            _ => Self::types_equal_structural(&a, &b),
         }
     }
 }
