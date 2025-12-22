@@ -2729,32 +2729,10 @@ impl<'a> TypeChecker<'a> {
         Ok(func_type.apply(&self.context))
     }
 
-    /// Check if two types match, treating tuple and attributed_tuple as compatible.
-    ///
-    /// This allows attributed_tuple (used in entry point return types) to match
-    /// plain tuple types. The attributes are metadata for code generation and don't
-    /// affect type compatibility.
+    /// Check if two types match structurally after applying substitutions.
     fn types_match(&self, t1: &Type, t2: &Type) -> bool {
-        // Apply current substitution without mutating context
         let a = t1.apply(&self.context);
         let b = t2.apply(&self.context);
-
-        // Handle attributed_tuple vs tuple matching (symmetric)
-        match (&a, &b) {
-            // tuple matches attributed_tuple if component types match
-            (
-                Type::Constructed(TypeName::Tuple(_), types1),
-                Type::Constructed(TypeName::Str("attributed_tuple"), types2),
-            )
-            | (
-                Type::Constructed(TypeName::Str("attributed_tuple"), types1),
-                Type::Constructed(TypeName::Tuple(_), types2),
-            ) => {
-                types1.len() == types2.len()
-                    && types1.iter().zip(types2.iter()).all(|(t1, t2)| Self::types_equal_structural(t1, t2))
-            }
-            // Regular case - use structural equality (already applied above)
-            _ => Self::types_equal_structural(&a, &b),
-        }
+        Self::types_equal_structural(&a, &b)
     }
 }
