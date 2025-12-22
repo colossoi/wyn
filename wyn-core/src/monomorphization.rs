@@ -17,7 +17,7 @@ use crate::error::Result;
 use crate::mir::{Body, Def, Expr, ExprId, LocalDecl, LocalId, Program};
 use crate::mir::{LambdaId, LambdaInfo};
 use crate::types::TypeScheme;
-use polytype::{Context, Type};
+use polytype::Type;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// A substitution mapping type variables to concrete types
@@ -42,8 +42,6 @@ struct Monomorphizer {
     processed: HashSet<String>,
     /// Lambda registry from original program
     lambda_registry: IdArena<LambdaId, LambdaInfo>,
-    /// Context for generating fresh type variables during scheme instantiation
-    instantiation_ctx: Context<TypeName>,
 }
 
 struct WorkItem {
@@ -210,7 +208,6 @@ impl Monomorphizer {
             worklist,
             processed: HashSet::new(),
             lambda_registry: program.lambda_registry,
-            instantiation_ctx: Context::default(),
         }
     }
 

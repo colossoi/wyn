@@ -123,6 +123,7 @@ impl<'a> OverloadSet<'a> {
 }
 
 /// Registry for polymorphic intrinsic types
+#[derive(Clone)]
 pub struct IntrinsicSource {
     /// Maps function name to entry or entries (for overloads)
     intrinsics: HashMap<String, Vec<IntrinsicEntry>>,
