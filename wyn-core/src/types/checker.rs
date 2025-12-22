@@ -1691,6 +1691,7 @@ impl<'a> TypeChecker<'a> {
                     "Registered _w_apply dispatcher '{}' with polymorphic type",
                     decl.name
                 );
+                self.type_param_scope.pop_scope();
                 return Ok(());
             }
 
