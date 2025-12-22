@@ -626,90 +626,7 @@ impl<'a> TypeChecker<'a> {
                     }
                 }
             }
-            ExprKind::Lambda(lambda) => {
-                // Special handling for lambdas in check mode
-                // Extract parameter types from the expected function type
-                let original_expected_type = expected_type.clone();
-                let mut expected_type = expected_type.clone();
-                let mut expected_param_types = Vec::new();
-
-                // Unwrap nested function types to get parameter types
-                for _ in 0..lambda.params.len() {
-                    let applied = expected_type.apply(&self.context);
-                    if let Some((param_type, result_type)) = as_arrow(&applied) {
-                        expected_param_types.push(param_type.clone());
-                        expected_type = result_type.clone();
-                    } else {
-                        // Expected type doesn't match lambda structure, fall back to inference
-                        return self.infer_expression(expr);
-                    }
-                }
-
-                // Now check the lambda with known parameter types
-                self.scope_stack.push_scope();
-
-                let mut param_types = Vec::new();
-                for (param, expected_param_type) in lambda.params.iter().zip(expected_param_types.iter()) {
-                    // If parameter has a type annotation, trust it (after substitution)
-                    // Otherwise use the expected type from bidirectional checking
-                    let param_type = if let Some(annotated_type) = param.pattern_type() {
-                        // Substitute any UserVar/SizeVar from enclosing function's type parameters
-                        self.substitute_from_type_param_scope(annotated_type)
-                    } else {
-                        // Use the expected type for the parameter
-                        expected_param_type.clone()
-                    };
-
-                    param_types.push(param_type.clone());
-
-                    // Bind the pattern (handles tuples, wildcards, etc.)
-                    // Lambda parameters are not generalized
-                    self.bind_pattern(param, &param_type, false)?;
-                }
-
-                // Check the body
-                let body_type = self.infer_expression(&lambda.body)?;
-
-                // If return type annotation exists, unify it with the body type
-                let return_type = if let Some(annotated_return_type) = &lambda.return_type {
-                    // Substitute any UserVar/SizeVar from enclosing function's type parameters
-                    let substituted_return_type =
-                        self.substitute_from_type_param_scope(annotated_return_type);
-                    self.context.unify(&body_type, &substituted_return_type).map_err(|_| {
-                        err_type_at!(
-                            lambda.body.h.span,
-                            "Lambda body type {} does not match return type annotation {}",
-                            self.format_type(&body_type),
-                            self.format_type(&substituted_return_type)
-                        )
-                    })?;
-                    substituted_return_type
-                } else {
-                    body_type
-                };
-
-                self.scope_stack.pop_scope();
-
-                // Build the function type
-                let mut func_type = return_type;
-                for param_type in param_types.iter().rev() {
-                    func_type = function(param_type.clone(), func_type);
-                }
-
-                // Unify the built function type with the original expected type
-                self.context.unify(&func_type, &original_expected_type).map_err(|_| {
-                    err_type_at!(
-                        expr.h.span,
-                        "Lambda type {} doesn't match expected type {}",
-                        self.format_type(&func_type),
-                        self.format_type(&original_expected_type)
-                    )
-                })?;
-
-                // Store the checked type in the type table
-                self.type_table.insert(expr.h.id, TypeScheme::Monotype(func_type.clone()));
-                Ok(func_type)
-            }
+            ExprKind::Lambda(lambda) => self.type_lambda(lambda, Some(expected_type), expr),
             _ => {
                 // For non-lambdas, infer and unify with expected
                 let actual_type = self.infer_expression(expr)?;
@@ -797,6 +714,90 @@ impl<'a> TypeChecker<'a> {
     /// Build a Vec type: Vec(n, elem)
     fn vec_ty(n: polytype::Variable, elem: Type) -> Type {
         Type::Constructed(TypeName::Vec, vec![Self::var(n), elem])
+    }
+
+    /// Type a lambda expression, optionally with an expected type for bidirectional checking.
+    fn type_lambda(
+        &mut self,
+        lambda: &crate::ast::LambdaExpr,
+        expected: Option<&Type>,
+        expr: &crate::ast::Expression,
+    ) -> Result<Type> {
+        // Extract expected parameter types if we have an expected function type
+        let expected_param_types: Option<Vec<Type>> = expected.and_then(|exp| {
+            let mut result = Vec::new();
+            let mut ty = exp.clone();
+            for _ in 0..lambda.params.len() {
+                let applied = ty.apply(&self.context);
+                if let Some((param_type, result_type)) = as_arrow(&applied) {
+                    result.push(param_type.clone());
+                    ty = result_type.clone();
+                } else {
+                    return None; // Expected type doesn't match lambda structure
+                }
+            }
+            Some(result)
+        });
+
+        self.scope_stack.push_scope();
+
+        // Determine parameter types and bind them
+        let mut param_types = Vec::new();
+        for (i, param) in lambda.params.iter().enumerate() {
+            let param_type = if let Some(annotated_type) = param.pattern_type() {
+                // Explicit annotation takes precedence
+                self.substitute_from_type_param_scope(annotated_type)
+            } else if let Some(ref expected_params) = expected_param_types {
+                // Use expected type from bidirectional checking
+                expected_params[i].clone()
+            } else {
+                // No annotation and no expected type - create fresh type variable
+                self.fresh_type_for_pattern(param)
+            };
+
+            param_types.push(param_type.clone());
+            self.bind_pattern(param, &param_type, false)?;
+        }
+
+        // Type check the body
+        let body_type = self.infer_expression(&lambda.body)?;
+
+        // Handle return type annotation
+        let return_type = if let Some(annotated_return_type) = &lambda.return_type {
+            let substituted = self.substitute_from_type_param_scope(annotated_return_type);
+            self.context.unify(&body_type, &substituted).map_err(|_| {
+                err_type_at!(
+                    lambda.body.h.span,
+                    "Lambda body type {} does not match return type annotation {}",
+                    self.format_type(&body_type),
+                    self.format_type(&substituted)
+                )
+            })?;
+            substituted
+        } else {
+            body_type
+        };
+
+        self.scope_stack.pop_scope();
+
+        // Build the function type
+        let func_type = Self::arrow_chain(&param_types, return_type);
+
+        // If we had an expected type, unify with it
+        if let Some(exp) = expected {
+            self.context.unify(&func_type, exp).map_err(|_| {
+                err_type_at!(
+                    expr.h.span,
+                    "Lambda type {} doesn't match expected type {}",
+                    self.format_type(&func_type),
+                    self.format_type(exp)
+                )
+            })?;
+            // Store in type table when checking against expected type
+            self.type_table.insert(expr.h.id, TypeScheme::Monotype(func_type.clone()));
+        }
+
+        Ok(func_type)
     }
 
     pub fn load_builtins(&mut self) -> Result<()> {
@@ -1960,59 +1961,7 @@ impl<'a> TypeChecker<'a> {
 
                 Ok(tuple(elem_types?))
             }
-            ExprKind::Lambda(lambda) => {
-                // Push new scope for lambda parameters
-                self.scope_stack.push_scope();
-
-                // Add parameters to scope with their types (or fresh type variables)
-                // Save the parameter types so we can reuse them when building the function type
-                let mut param_types = Vec::new();
-                for param in &lambda.params {
-                    let raw_param_type = param.pattern_type().cloned().unwrap_or_else(|| {
-                        // No explicit type annotation - infer from pattern shape
-                        self.fresh_type_for_pattern(param)
-                    });
-                    // Substitute any UserVar/SizeVar from enclosing function's type parameters
-                    let param_type = self.substitute_from_type_param_scope(&raw_param_type);
-                    param_types.push(param_type.clone());
-
-                    // Bind the pattern (handles tuples, wildcards, etc.)
-                    // Lambda parameters are not generalized
-                    self.bind_pattern(param, &param_type, false)?;
-                }
-
-                // Type check the lambda body with parameters in scope
-                let body_type = self.infer_expression(&lambda.body)?;
-
-                // If return type annotation exists, unify it with the body type
-                let return_type = if let Some(annotated_return_type) = &lambda.return_type {
-                    // Substitute any UserVar/SizeVar from enclosing function's type parameters
-                    let substituted_return_type = self.substitute_from_type_param_scope(annotated_return_type);
-                    self.context.unify(&body_type, &substituted_return_type).map_err(|_| {
-                        err_type_at!(
-                            lambda.body.h.span,
-                            "Lambda body type {} does not match return type annotation {}",
-                            self.format_type(&body_type),
-                            self.format_type(&substituted_return_type)
-                        )
-                    })?;
-                    substituted_return_type
-                } else {
-                    body_type
-                };
-
-                // Pop parameter scope
-                self.scope_stack.pop_scope();
-
-                // For multiple parameters, create nested function types using the SAME type variables
-                // we used when adding parameters to scope
-                let mut func_type = return_type;
-                for param_type in param_types.iter().rev() {
-                    func_type = function(param_type.clone(), func_type);
-                }
-
-                Ok(func_type)
-            }
+            ExprKind::Lambda(lambda) => self.type_lambda(lambda, None, expr),
             ExprKind::LetIn(let_in) => {
                 // Infer type of the value expression
                 let value_type = self.infer_expression(&let_in.value)?;
