@@ -1,4 +1,4 @@
-use super::{Type, TypeExt, TypeName, TypeScheme};
+use super::{SkolemId, Type, TypeExt, TypeName, TypeScheme};
 use crate::ast::*;
 use crate::error::Result;
 use crate::scope::ScopeStack;
@@ -68,6 +68,8 @@ pub struct TypeChecker<'a> {
     /// Used to substitute UserVar/SizeVar in nested lambda type annotations.
     /// Follows same scoping rules as value bindings - inner defs can shadow outer type params.
     type_param_scope: ScopeStack<Type>,
+    /// ID source for generating unique skolem constants when opening existential types.
+    skolem_ids: crate::IdSource<SkolemId>,
 }
 
 /// Compute free type variables in a Type
@@ -183,16 +185,18 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    /// Open an existential type: ?k. T becomes T[k'/k] where k' is a fresh variable.
+    /// Open an existential type: ?k. T becomes T[#n/k] where #n is a fresh skolem.
     /// This is called when binding an existential value to a variable.
+    /// Skolems are rigid constants that only unify with themselves, enforcing opacity.
     fn open_existential(&mut self, ty: Type) -> Type {
         match ty {
             Type::Constructed(TypeName::Existential(vars), args) if !args.is_empty() => {
                 let mut inner = args.into_iter().next().unwrap();
-                // Substitute each bound size variable with a fresh type variable
+                // Substitute each bound size variable with a fresh skolem constant
                 for var_name in vars {
-                    let fresh_var = self.context.new_variable();
-                    inner = Self::substitute_size_var(&inner, &var_name, &fresh_var);
+                    let skolem_id = self.skolem_ids.next();
+                    let skolem = Type::Constructed(TypeName::Skolem(skolem_id), vec![]);
+                    inner = Self::substitute_size_var(&inner, &var_name, &skolem);
                 }
                 inner
             }
@@ -363,6 +367,7 @@ impl<'a> TypeChecker<'a> {
             type_holes: Vec::new(),
             arity_map: HashMap::new(),
             type_param_scope: ScopeStack::new(),
+            skolem_ids: crate::IdSource::new(),
         }
     }
 
@@ -2411,6 +2416,7 @@ impl<'a> TypeChecker<'a> {
                                     TypeName::Existential(_) => "existential".to_string(),
                                     TypeName::Pointer => "pointer".to_string(),
                                     TypeName::Slice => "slice".to_string(),
+                                    TypeName::Skolem(id) => format!("{}", id),
                                 };
 
                                 // Look up field in builtin registry (for vector types)

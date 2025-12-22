@@ -80,6 +80,23 @@ impl PartialEq for RecordFields {
 
 impl Eq for RecordFields {}
 
+/// Unique identifier for skolem constants.
+/// Skolems are created when opening existential types and are rigid (only unify with themselves).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SkolemId(pub u32);
+
+impl From<u32> for SkolemId {
+    fn from(id: u32) -> Self {
+        SkolemId(id)
+    }
+}
+
+impl std::fmt::Display for SkolemId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "#{}", self.0)
+    }
+}
+
 /// Type name constructors for the Wyn type system.
 ///
 /// Note on type name variants:
@@ -142,6 +159,10 @@ pub enum TypeName {
     /// Type args: [cap_type, elem_type] where cap is the backing buffer capacity.
     /// Runtime representation includes a dynamic length field.
     Slice,
+    /// Rigid skolem constant for existential sizes.
+    /// Created when opening existential types (?k. T). Unlike unification variables,
+    /// skolems only unify with themselves (same ID), enforcing opacity.
+    Skolem(SkolemId),
 }
 
 impl std::fmt::Display for TypeName {
@@ -191,6 +212,7 @@ impl std::fmt::Display for TypeName {
             }
             TypeName::Pointer => write!(f, "Ptr"),
             TypeName::Slice => write!(f, "Slice"),
+            TypeName::Skolem(id) => write!(f, "{}", id),
         }
     }
 }
@@ -242,6 +264,7 @@ impl polytype::Name for TypeName {
             TypeName::Existential(vars) => format!("?{}.", vars.join(" ")),
             TypeName::Pointer => "Ptr".to_string(),
             TypeName::Slice => "Slice".to_string(),
+            TypeName::Skolem(id) => format!("{}", id),
         }
     }
 }

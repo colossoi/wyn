@@ -157,6 +157,7 @@ fn format_constructed_type(name: &TypeName, args: &[PolyType<TypeName>]) -> Stri
                 "Slice<?>".to_string()
             }
         }
+        TypeName::Skolem(id) => format!("{}", id),
     }
 }
 
