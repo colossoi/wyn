@@ -1,11 +1,11 @@
 use super::{SkolemId, Type, TypeExt, TypeName, TypeScheme};
 use crate::ast::*;
-use crate::error::Result;
+use crate::error::{CompilerError, Result};
 use crate::scope::ScopeStack;
 use crate::{bail_module, bail_type_at, err_module, err_type_at, err_undef_at};
 use log::debug;
 use polytype::Context;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 // Import type helper functions from parent module
 use super::{
@@ -254,13 +254,30 @@ impl<'a> TypeChecker<'a> {
     /// - Unqualified names are qualified with current_module if provided
     /// - Recursively resolves nested aliases
     fn resolve_type_aliases_scoped(&self, ty: &Type, current_module: Option<&str>) -> Type {
+        let mut visited = Vec::new();
+        self.resolve_type_aliases_impl(ty, current_module, &mut visited)
+            .unwrap_or_else(|cycle_err| {
+                // Return the original type on cycle - error will be caught elsewhere
+                // or we could log it. For now, just return unresolved.
+                log::error!("{}", cycle_err);
+                ty.clone()
+            })
+    }
+
+    fn resolve_type_aliases_impl(
+        &self,
+        ty: &Type,
+        current_module: Option<&str>,
+        visited: &mut Vec<String>,
+    ) -> Result<Type> {
         match ty {
             Type::Constructed(TypeName::Named(name), args) => {
                 // First resolve args recursively
-                let resolved_args: Vec<Type> = args
+                let resolved_args: Result<Vec<Type>> = args
                     .iter()
-                    .map(|a| self.resolve_type_aliases_scoped(a, current_module))
+                    .map(|a| self.resolve_type_aliases_impl(a, current_module, visited))
                     .collect();
+                let resolved_args = resolved_args?;
 
                 // Build lookup keys based on qualification
                 let mut keys = Vec::new();
@@ -274,24 +291,49 @@ impl<'a> TypeChecker<'a> {
                 // No prelude fallback - unqualified without context stays unresolved
 
                 for key in keys {
+                    // Check for cycles before resolving
+                    if let Some(cycle_err) = Self::check_alias_cycle(visited, &key) {
+                        return Err(cycle_err);
+                    }
+
                     if let Some(underlying) = self.module_manager.resolve_type_alias(&key) {
+                        // Track this alias as visited
+                        visited.push(key);
                         // Recursively resolve in same module context
-                        return self.resolve_type_aliases_scoped(underlying, current_module);
+                        let result = self.resolve_type_aliases_impl(underlying, current_module, visited);
+                        visited.pop();
+                        return result;
                     }
                 }
 
                 // Not an alias - keep as-is with resolved args
-                Type::Constructed(TypeName::Named(name.clone()), resolved_args)
+                Ok(Type::Constructed(TypeName::Named(name.clone()), resolved_args))
             }
             Type::Constructed(name, args) => {
                 // Non-Named constructor - just resolve args
-                let resolved_args: Vec<Type> = args
+                let resolved_args: Result<Vec<Type>> = args
                     .iter()
-                    .map(|a| self.resolve_type_aliases_scoped(a, current_module))
+                    .map(|a| self.resolve_type_aliases_impl(a, current_module, visited))
                     .collect();
-                Type::Constructed(name.clone(), resolved_args)
+                Ok(Type::Constructed(name.clone(), resolved_args?))
             }
-            Type::Variable(id) => Type::Variable(*id),
+            Type::Variable(id) => Ok(Type::Variable(*id)),
+        }
+    }
+
+    /// Check if adding `key` to visited would create a cycle.
+    /// Returns an error if a cycle is detected.
+    fn check_alias_cycle(visited: &[String], key: &str) -> Option<CompilerError> {
+        if visited.contains(&key.to_string()) {
+            let mut cycle_path = visited.to_vec();
+            cycle_path.push(key.to_string());
+            Some(err_type_at!(
+                Span::new(0, 0, 0, 0),
+                "type alias cycle detected: {}",
+                cycle_path.join(" -> ")
+            ))
+        } else {
+            None
         }
     }
 
