@@ -1862,7 +1862,8 @@ impl<'a> TypeChecker<'a> {
                     let first_type = self.infer_expression(&elements[0])?;
 
                     // Futhark restriction: arrays of functions are not permitted
-                    let resolved_first = first_type.apply(&self.context);
+                    // Strip uniqueness to catch Unique(Arrow(...)) as well
+                    let resolved_first = strip_unique(&first_type.apply(&self.context));
                     if as_arrow(&resolved_first).is_some() {
                         bail_type_at!(
                             expr.h.span,
