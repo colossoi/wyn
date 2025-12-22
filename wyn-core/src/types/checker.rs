@@ -1972,8 +1972,8 @@ impl<'a> TypeChecker<'a> {
                         err_type_at!(
                             let_in.value.h.span,
                             "Type mismatch in let binding: expected {}, got {}",
-                            declared_type,
-                            value_type
+                            self.format_type(declared_type),
+                            self.format_type(&value_type)
                         )
                     })?;
                 }
@@ -2383,8 +2383,12 @@ impl<'a> TypeChecker<'a> {
                     LoopForm::While(cond) => {
                         // Condition must be bool
                         let cond_type = self.infer_expression(cond)?;
-                        self.context.unify(&cond_type, &bool_type()).map_err(|e| {
-                            err_type_at!(cond.h.span, "While condition must be bool: {:?}", e)
+                        self.context.unify(&cond_type, &bool_type()).map_err(|_| {
+                            err_type_at!(
+                                cond.h.span,
+                                "While condition must be bool, got {}",
+                                self.format_type(&cond_type)
+                            )
                         })?;
                     }
                     LoopForm::For(var_name, bound) => {
@@ -2394,8 +2398,12 @@ impl<'a> TypeChecker<'a> {
 
                         // Bound must be integer
                         let bound_type = self.infer_expression(bound)?;
-                        self.context.unify(&bound_type, &i32()).map_err(|e| {
-                            err_type_at!(bound.h.span, "Loop bound must be i32: {:?}", e)
+                        self.context.unify(&bound_type, &i32()).map_err(|_| {
+                            err_type_at!(
+                                bound.h.span,
+                                "Loop bound must be i32, got {}",
+                                self.format_type(&bound_type)
+                            )
                         })?;
                     }
                     LoopForm::ForIn(pat, arr) => {
@@ -2405,8 +2413,12 @@ impl<'a> TypeChecker<'a> {
                         let size_type = self.context.new_variable();
                         let expected_arr = Type::Constructed(TypeName::Array, vec![size_type, elem_type.clone()]);
 
-                        self.context.unify(&arr_type, &expected_arr).map_err(|e| {
-                            err_type_at!(arr.h.span, "for-in requires an array: {:?}", e)
+                        self.context.unify(&arr_type, &expected_arr).map_err(|_| {
+                            err_type_at!(
+                                arr.h.span,
+                                "for-in requires an array, got {}",
+                                self.format_type(&arr_type)
+                            )
                         })?;
 
                         // Bind pattern to element type
@@ -2635,7 +2647,13 @@ impl<'a> TypeChecker<'a> {
 
                 self.context
                     .unify(&func_type, &expected_func_type)
-                    .map_err(|e| err_type_at!(arg.h.span, "Function application type error: {:?}", e))?;
+                    .map_err(|_| {
+                        err_type_at!(
+                            arg.h.span,
+                            "Cannot apply {} as a function",
+                            self.format_type(&func_type)
+                        )
+                    })?;
 
                 // Store the whole expected lambda type (not just first param)
                 lambda_expected_types[i] = Some(expected_lambda_type);
@@ -2653,7 +2671,13 @@ impl<'a> TypeChecker<'a> {
 
                 self.context
                     .unify(&func_type, &expected_func_type)
-                    .map_err(|e| err_type_at!(arg.h.span, "Function application type error: {:?}", e))?;
+                    .map_err(|_| {
+                        err_type_at!(
+                            arg.h.span,
+                            "Cannot apply {} as a function",
+                            self.format_type(&func_type)
+                        )
+                    })?;
 
                 // Extract the expected parameter type
                 let expected_param_type = param_type_var.apply(&self.context);
