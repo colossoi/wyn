@@ -3267,3 +3267,10 @@ fn test_parse_existential_type_in_parameter_rejected() {
     // Existential types are only valid in return position, not parameter position
     expect_parse_error("def len(arr: ?k. [k]i32) -> i32 = ???", |_| Ok(()));
 }
+
+#[test]
+fn test_numeric_field_access_rejected() {
+    // Numeric field access like x.0 should be rejected
+    // (tuple indexing is not supported)
+    expect_parse_error("def x(t: (i32, i32)) -> i32 = t.0", |_| Ok(()));
+}
