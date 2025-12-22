@@ -763,202 +763,87 @@ impl<'a> TypeChecker<'a> {
         })
     }
 
+    /// Allocate a fresh type variable and return its ID.
+    fn fresh_var(&mut self) -> polytype::Variable {
+        match self.context.new_variable() {
+            Type::Variable(id) => id,
+            _ => unreachable!(),
+        }
+    }
+
+    /// Convert a variable ID to a Type.
+    fn var(id: polytype::Variable) -> Type {
+        Type::Variable(id)
+    }
+
+    /// Build a chain of arrows: p1 -> p2 -> ... -> ret
+    fn arrow_chain(params: &[Type], ret: Type) -> Type {
+        params.iter().rev().fold(ret, |acc, param| Type::arrow(param.clone(), acc))
+    }
+
+    /// Wrap a type in nested ∀ quantifiers.
+    fn forall(ids: &[polytype::Variable], body: Type) -> TypeScheme {
+        ids.iter().rev().fold(TypeScheme::Monotype(body), |acc, &id| TypeScheme::Polytype {
+            variable: id,
+            body: Box::new(acc),
+        })
+    }
+
+    /// Build an array type: [n]elem
+    fn array_ty(n: polytype::Variable, elem: Type) -> Type {
+        Type::Constructed(TypeName::Array, vec![Self::var(n), elem])
+    }
+
+    /// Build a Vec type: Vec(n, elem)
+    fn vec_ty(n: polytype::Variable, elem: Type) -> Type {
+        Type::Constructed(TypeName::Vec, vec![Self::var(n), elem])
+    }
+
     pub fn load_builtins(&mut self) -> Result<()> {
-        // Add builtin function types directly using manual construction
-
-        // length: ∀a n. [n]a -> i32
-        let var_n = self.context.new_variable();
-        let var_a = self.context.new_variable();
-
-        let var_n_id = if let Type::Variable(id) = var_n { id } else { panic!("Expected Type::Variable") };
-        let var_a_id = if let Type::Variable(id) = var_a { id } else { panic!("Expected Type::Variable") };
-
-        let array_type = Type::Constructed(
-            TypeName::Array,
-            vec![Type::Variable(var_n_id), Type::Variable(var_a_id)],
-        );
-        let length_body = Type::arrow(array_type, i32());
-
-        // Create Polytype ∀n a. [n]a -> i32
-        let length_scheme = TypeScheme::Polytype {
-            variable: var_n_id,
-            body: Box::new(TypeScheme::Polytype {
-                variable: var_a_id,
-                body: Box::new(TypeScheme::Monotype(length_body)),
-            }),
-        };
-        self.scope_stack.insert("length".to_string(), length_scheme);
+        // length: ∀n a. [n]a -> i32
+        let (n, a) = (self.fresh_var(), self.fresh_var());
+        let body = Self::arrow_chain(&[Self::array_ty(n, Self::var(a))], i32());
+        self.scope_stack.insert("length".to_string(), Self::forall(&[n, a], body));
 
         // map: ∀a b n. (a -> b) -> [n]a -> [n]b
-        // The input array is borrowed (read-only), output is fresh
-        // Build the type using fresh type variables for proper polymorphism
-        let var_a = self.context.new_variable();
-        let var_b = self.context.new_variable();
-        let var_n = self.context.new_variable();
-
-        // Extract the variable IDs for the TypeScheme
-        let var_a_id = if let Type::Variable(id) = var_a { id } else { panic!("Expected Type::Variable") };
-        let var_b_id = if let Type::Variable(id) = var_b { id } else { panic!("Expected Type::Variable") };
-        let var_n_id = if let Type::Variable(id) = var_n { id } else { panic!("Expected Type::Variable") };
-
-        let func_type = Type::arrow(Type::Variable(var_a_id), Type::Variable(var_b_id));
-        let input_array_type = Type::Constructed(
-            TypeName::Array,
-            vec![Type::Variable(var_n_id), Type::Variable(var_a_id)],
+        let (a, b, n) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
+        let body = Self::arrow_chain(
+            &[
+                Type::arrow(Self::var(a), Self::var(b)),
+                Self::array_ty(n, Self::var(a)),
+            ],
+            Self::array_ty(n, Self::var(b)),
         );
-        let output_array_type = Type::Constructed(
-            TypeName::Array,
-            vec![Type::Variable(var_n_id), Type::Variable(var_b_id)],
+        self.scope_stack.insert("map".to_string(), Self::forall(&[a, b, n], body));
+
+        // zip: ∀n a b. [n]a -> [n]b -> [n](a, b)
+        let (n, a, b) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
+        let body = Self::arrow_chain(
+            &[Self::array_ty(n, Self::var(a)), Self::array_ty(n, Self::var(b))],
+            Self::array_ty(n, tuple(vec![Self::var(a), Self::var(b)])),
         );
-        let map_arrow1 = Type::arrow(input_array_type, output_array_type);
-        let map_body = Type::arrow(func_type, map_arrow1);
-        // Create nested Polytype for ∀a b n
-        let map_scheme = TypeScheme::Polytype {
-            variable: var_a_id,
-            body: Box::new(TypeScheme::Polytype {
-                variable: var_b_id,
-                body: Box::new(TypeScheme::Polytype {
-                    variable: var_n_id,
-                    body: Box::new(TypeScheme::Monotype(map_body)),
-                }),
-            }),
-        };
-        self.scope_stack.insert("map".to_string(), map_scheme);
+        self.scope_stack.insert("zip".to_string(), Self::forall(&[n, a, b], body));
 
-        // zip: ∀a b n. [n]a -> [n]b -> [n](a, b)
-        let var_n = self.context.new_variable();
-        let var_a = self.context.new_variable();
-        let var_b = self.context.new_variable();
-
-        let var_n_id = if let Type::Variable(id) = var_n { id } else { panic!("Expected Type::Variable") };
-        let var_a_id = if let Type::Variable(id) = var_a { id } else { panic!("Expected Type::Variable") };
-        let var_b_id = if let Type::Variable(id) = var_b { id } else { panic!("Expected Type::Variable") };
-
-        let array_a_type = Type::Constructed(
-            TypeName::Array,
-            vec![Type::Variable(var_n_id), Type::Variable(var_a_id)],
-        );
-        let array_b_type = Type::Constructed(
-            TypeName::Array,
-            vec![Type::Variable(var_n_id), Type::Variable(var_b_id)],
-        );
-        let tuple_type = tuple(vec![Type::Variable(var_a_id), Type::Variable(var_b_id)]);
-        let result_array_type =
-            Type::Constructed(TypeName::Array, vec![Type::Variable(var_n_id), tuple_type]);
-        let zip_arrow1 = Type::arrow(array_b_type, result_array_type);
-        let zip_body = Type::arrow(array_a_type, zip_arrow1);
-
-        let zip_scheme = TypeScheme::Polytype {
-            variable: var_n_id,
-            body: Box::new(TypeScheme::Polytype {
-                variable: var_a_id,
-                body: Box::new(TypeScheme::Polytype {
-                    variable: var_b_id,
-                    body: Box::new(TypeScheme::Monotype(zip_body)),
-                }),
-            }),
-        };
-        self.scope_stack.insert("zip".to_string(), zip_scheme);
-
-        // Array to vector conversion: to_vec
         // to_vec: ∀n a. [n]a -> Vec(n, a)
-        let var_n = self.context.new_variable();
-        let var_a = self.context.new_variable();
-
-        let var_n_id = if let Type::Variable(id) = var_n { id } else { panic!("Expected Type::Variable") };
-        let var_a_id = if let Type::Variable(id) = var_a { id } else { panic!("Expected Type::Variable") };
-
-        let array_input = Type::Constructed(
-            TypeName::Array,
-            vec![Type::Variable(var_n_id), Type::Variable(var_a_id)],
-        );
-        let vec_output = Type::Constructed(
-            TypeName::Vec,
-            vec![Type::Variable(var_n_id), Type::Variable(var_a_id)],
-        );
-        let to_vec_body = Type::arrow(array_input, vec_output);
-
-        let to_vec_scheme = TypeScheme::Polytype {
-            variable: var_n_id,
-            body: Box::new(TypeScheme::Polytype {
-                variable: var_a_id,
-                body: Box::new(TypeScheme::Monotype(to_vec_body)),
-            }),
-        };
-        self.scope_stack.insert("to_vec".to_string(), to_vec_scheme);
+        let (n, a) = (self.fresh_var(), self.fresh_var());
+        let body = Self::arrow_chain(&[Self::array_ty(n, Self::var(a))], Self::vec_ty(n, Self::var(a)));
+        self.scope_stack.insert("to_vec".to_string(), Self::forall(&[n, a], body));
 
         // replicate: ∀size a. i32 -> a -> [size]a
-        // Creates an array of length n filled with the given value
-        // Note: The size is determined by type inference from context
-        let var_a = self.context.new_variable();
-        let var_size = self.context.new_variable(); // Size will be inferred
-
-        let var_a_id = if let Type::Variable(id) = var_a { id } else { panic!("Expected Type::Variable") };
-        let var_size_id =
-            if let Type::Variable(id) = var_size { id } else { panic!("Expected Type::Variable") };
-
-        let output_array = Type::Constructed(
-            TypeName::Array,
-            vec![Type::Variable(var_size_id), Type::Variable(var_a_id)],
-        );
-        let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
-        let replicate_body = Type::arrow(i32_type, Type::arrow(Type::Variable(var_a_id), output_array));
-
-        let replicate_scheme = TypeScheme::Polytype {
-            variable: var_size_id,
-            body: Box::new(TypeScheme::Polytype {
-                variable: var_a_id,
-                body: Box::new(TypeScheme::Monotype(replicate_body)),
-            }),
-        };
-        self.scope_stack.insert("replicate".to_string(), replicate_scheme);
+        let (size, a) = (self.fresh_var(), self.fresh_var());
+        let body = Self::arrow_chain(&[i32(), Self::var(a)], Self::array_ty(size, Self::var(a)));
+        self.scope_stack.insert("replicate".to_string(), Self::forall(&[size, a], body));
 
         // _w_alloc_array: ∀n t. i32 -> [n]t
-        // Allocates an uninitialized array of the given size
-        // Used by map desugaring; size n and element type t are inferred from usage
-        let var_n = self.context.new_variable();
-        let var_t = self.context.new_variable();
-        let var_n_id = if let Type::Variable(id) = var_n { id } else { panic!("Expected Type::Variable") };
-        let var_t_id = if let Type::Variable(id) = var_t { id } else { panic!("Expected Type::Variable") };
+        let (n, t) = (self.fresh_var(), self.fresh_var());
+        let body = Self::arrow_chain(&[i32()], Self::array_ty(n, Self::var(t)));
+        self.scope_stack.insert("_w_alloc_array".to_string(), Self::forall(&[n, t], body));
 
-        let array_type = Type::Constructed(
-            TypeName::Array,
-            vec![Type::Variable(var_n_id), Type::Variable(var_t_id)],
-        );
-        let alloc_array_body = Type::arrow(i32(), array_type);
-
-        let alloc_array_scheme = TypeScheme::Polytype {
-            variable: var_n_id,
-            body: Box::new(TypeScheme::Polytype {
-                variable: var_t_id,
-                body: Box::new(TypeScheme::Monotype(alloc_array_body)),
-            }),
-        };
-        self.scope_stack.insert("_w_alloc_array".to_string(), alloc_array_scheme);
-
-        // Vector operations
         // dot: ∀n t. Vec(n, t) -> Vec(n, t) -> t
-        // Takes two vectors of the same size and element type, returns the element type
-        let var_n = self.context.new_variable();
-        let var_t = self.context.new_variable();
-
-        let var_n_id = if let Type::Variable(id) = var_n { id } else { panic!("Expected Type::Variable") };
-        let var_t_id = if let Type::Variable(id) = var_t { id } else { panic!("Expected Type::Variable") };
-
-        let vec_type = Type::Constructed(
-            TypeName::Vec,
-            vec![Type::Variable(var_n_id), Type::Variable(var_t_id)],
-        );
-        let dot_body = Type::arrow(vec_type.clone(), Type::arrow(vec_type, Type::Variable(var_t_id)));
-
-        let dot_scheme = TypeScheme::Polytype {
-            variable: var_n_id,
-            body: Box::new(TypeScheme::Polytype {
-                variable: var_t_id,
-                body: Box::new(TypeScheme::Monotype(dot_body)),
-            }),
-        };
-        self.scope_stack.insert("dot".to_string(), dot_scheme);
+        let (n, t) = (self.fresh_var(), self.fresh_var());
+        let vec = Self::vec_ty(n, Self::var(t));
+        let body = Self::arrow_chain(&[vec.clone(), vec], Self::var(t));
+        self.scope_stack.insert("dot".to_string(), Self::forall(&[n, t], body));
 
         // Trigonometric functions: f32 -> f32
         let trig_type = Type::arrow(f32(), f32());
