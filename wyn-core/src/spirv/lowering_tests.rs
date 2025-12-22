@@ -24,7 +24,7 @@ fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
 
 #[test]
 fn test_simple_constant() {
-    let spirv = compile_to_spirv("def x() = 42").unwrap();
+    let spirv = compile_to_spirv("def x = 42").unwrap();
     assert!(!spirv.is_empty());
     // SPIR-V magic number
     assert_eq!(spirv[0], 0x07230203);
@@ -39,7 +39,7 @@ fn test_simple_function() {
 
 #[test]
 fn test_let_binding() {
-    let spirv = compile_to_spirv("def f() = let x = 1 in x + 2").unwrap();
+    let spirv = compile_to_spirv("def f = let x = 1 in x + 2").unwrap();
     assert!(!spirv.is_empty());
     assert_eq!(spirv[0], 0x07230203);
 }
@@ -53,7 +53,7 @@ fn test_arithmetic() {
 
 #[test]
 fn test_nested_let() {
-    let spirv = compile_to_spirv("def f() = let a = 1 in let b = 2 in a + b").unwrap();
+    let spirv = compile_to_spirv("def f = let a = 1 in let b = 2 in a + b").unwrap();
     assert!(!spirv.is_empty());
     assert_eq!(spirv[0], 0x07230203);
 }
@@ -74,14 +74,14 @@ fn test_comparisons() {
 
 #[test]
 fn test_tuple_literal() {
-    let spirv = compile_to_spirv("def f() = (1, 2, 3)").unwrap();
+    let spirv = compile_to_spirv("def f = (1, 2, 3)").unwrap();
     assert!(!spirv.is_empty());
     assert_eq!(spirv[0], 0x07230203);
 }
 
 #[test]
 fn test_array_literal() {
-    let spirv = compile_to_spirv("def f() = [1, 2, 3]").unwrap();
+    let spirv = compile_to_spirv("def f = [1, 2, 3]").unwrap();
     assert!(!spirv.is_empty());
     assert_eq!(spirv[0], 0x07230203);
 }

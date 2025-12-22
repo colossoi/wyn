@@ -235,7 +235,7 @@ fn test_operator_precedence_and_associativity() {
     // According to spec, * and / have higher precedence than + and -
     // All are left-associative
     // Should parse as: ((a + (b * c)) - (d / e)) + f
-    let decl = single_decl("def result() -> i32 = a + b * c - d / e + f");
+    let decl = single_decl("def result: i32 = a + b * c - d / e + f");
 
     // Outermost: ((a + (b * c)) - (d / e)) + f
     assert!(matches!(
@@ -332,7 +332,7 @@ fn test_parse_tuple_attributed_return_type() {
 
 #[test]
 fn test_parse_unattributed_return_type() {
-    let decl = single_decl("def helper() -> vec4 = vec4(1.0f32, 0.0f32, 0.0f32, 1.0f32)");
+    let decl = single_decl("def helper: vec4 = vec4(1.0f32, 0.0f32, 0.0f32, 1.0f32)");
 
     // Regular decl no longer has attributed_return_type field
 
@@ -434,7 +434,7 @@ fn test_parse_simple_lambda() {
 fn test_operator_precedence_equivalence() {
     // Helper to parse just the expression from a declaration
     fn parse_expr(input: &str) -> Expression {
-        let full_input = format!("def result() -> i32 = {}", input);
+        let full_input = format!("def result: i32 = {}", input);
         let tokens = tokenize(&full_input).expect("Failed to tokenize");
         let mut nc = NodeCounter::new();
         let mut parser = Parser::new(tokens, &mut nc);
@@ -579,7 +579,7 @@ fn test_parse_lambda_with_typed_parameter() {
 #[test]
 fn test_parse_lambda_return_type_simple() {
     // Test lambda with return type annotation: |x| -> i32 body
-    let decl = single_decl(r#"def f() = |x| -> i32 x"#);
+    let decl = single_decl(r#"def f = |x| -> i32 x"#);
 
     if let ExprKind::Lambda(lambda) = &decl.body.kind {
         assert_eq!(lambda.params.len(), 1);
@@ -593,7 +593,7 @@ fn test_parse_lambda_return_type_simple() {
 #[test]
 fn test_parse_lambda_in_parens() {
     // Test lambda in parentheses with return type
-    let decl = single_decl(r#"def f() = (|x| -> i32 x)"#);
+    let decl = single_decl(r#"def f = (|x| -> i32 x)"#);
 
     if let ExprKind::Lambda(lambda) = &decl.body.kind {
         assert_eq!(lambda.params.len(), 1);
@@ -606,7 +606,7 @@ fn test_parse_lambda_in_parens() {
 #[test]
 fn test_parse_lambda_application_with_literal() {
     // Test function application: (lambda) arg with literal
-    let decl = single_decl(r#"def apply() = (|x| x + 1i32)(5i32)"#);
+    let decl = single_decl(r#"def apply = (|x| x + 1i32)(5i32)"#);
 
     // Should be a function application (eitherApplication)
     match &decl.body.kind {
@@ -620,7 +620,7 @@ fn test_parse_lambda_application_with_literal() {
 #[test]
 fn test_parse_lambda_application_with_type_hole() {
     // Test function application: (lambda) arg
-    let decl = single_decl(r#"def apply() = (|x| x + 1i32)(???)"#);
+    let decl = single_decl(r#"def apply = (|x| x + 1i32)(???)"#);
 
     // Should be a function application (either Application)
     match &decl.body.kind {
@@ -657,19 +657,19 @@ fn test_parse_let_in_with_lambda() {
 fn test_parse_multiple_top_level_lets_with_entry() {
     // Test multiple let declarations with entry points
     let input = r#"
-def verts() -> [3][4]f32 =
+def verts: [3][4]f32 =
   [[-1.0f32, -1.0f32, 0.0f32, 1.0f32],
    [ 3.0f32, -1.0f32, 0.0f32, 1.0f32],
    [-1.0f32,  3.0f32, 0.0f32, 1.0f32]]
 
 #[vertex]
-def vertex_main(vertex_id: i32) -> [4]f32 = verts()[vertex_id]
+def vertex_main(vertex_id: i32) -> [4]f32 = verts[vertex_id]
 
-def SKY_RGBA() -> [4]f32 =
+def SKY_RGBA: [4]f32 =
   [135.0f32/255.0f32, 206.0f32/255.0f32, 235.0f32/255.0f32, 1.0f32]
 
 #[fragment]
-def fragment_main() -> [4]f32 = SKY_RGBA()
+def fragment_main() -> [4]f32 = SKY_RGBA
 "#;
 
     let program = parse_ok(input);
@@ -698,7 +698,7 @@ def fragment_main() -> [4]f32 = SKY_RGBA()
 
 #[test]
 fn test_field_access_parsing() {
-    let decl = single_decl("def x() -> f32 = v.x");
+    let decl = single_decl("def x: f32 = v.x");
 
     assert_eq!(decl.name, "x");
     assert!(matches!(
@@ -710,7 +710,7 @@ fn test_field_access_parsing() {
 
 #[test]
 fn test_simple_identifier_parsing() {
-    let decl = single_decl("def x() -> f32 = y");
+    let decl = single_decl("def x: f32 = y");
 
     assert_eq!(decl.name, "x");
     assert!(matches!(&decl.body.kind, ExprKind::Identifier(_, name) if name == "y"));
@@ -718,7 +718,7 @@ fn test_simple_identifier_parsing() {
 
 #[test]
 fn test_vector_field_access_file() {
-    let program = parse_ok("def v() -> vec3 = vec3(1.0f32, 2.0f32, 3.0f32)\ndef x() -> f32 = v.x");
+    let program = parse_ok("def v: vec3 = vec3(1.0f32, 2.0f32, 3.0f32)\ndef x: f32 = v.x");
     assert_eq!(program.declarations.len(), 2);
 
     // Check first declaration: def v() -> vec3 = vec3(1.0f32, 2.0f32, 3.0f32)
@@ -746,7 +746,7 @@ fn test_vector_field_access_file() {
 fn test_parse_vector_arithmetic() {
     let decl = single_decl(
         r#"
-            def test_vector_arithmetic() -> f32 =
+            def test_vector_arithmetic: f32 =
               let v1: vec3 = vec3(1.0f32, 2.0f32, 3.0f32) in
               let v2: vec3 = vec3(4.0f32, 5.0f32, 6.0f32) in
               let sum: vec3 = v1 + v2 in
@@ -885,7 +885,7 @@ fn test_parse_complete_shader_example() {
 
 #[test]
 fn test_if_then_else_parsing() {
-    let decl = single_decl("def test() -> i32 = if x == 0 then 1 else 2");
+    let decl = single_decl("def test: i32 = if x == 0 then 1 else 2");
 
     assert_eq!(decl.name, "test");
 
@@ -1003,7 +1003,7 @@ fn test_parse_nested_unique() {
 #[test]
 fn test_parse_function_application_with_array_literal() {
     let _ = env_logger::builder().is_test(true).try_init();
-    let decl = single_decl("def test() -> vec4 = to_vec4([1.0f32, 2.0f32, 3.0f32, 4.0f32])");
+    let decl = single_decl("def test: vec4 = to_vec4([1.0f32, 2.0f32, 3.0f32, 4.0f32])");
 
     assert_eq!(decl.name, "test");
     assert!(matches!(
@@ -1458,7 +1458,7 @@ fn test_parse_import() {
 
 #[test]
 fn test_parse_module_bind_simple() {
-    let program = parse_ok("module M = { def x() -> i32 = 42 }");
+    let program = parse_ok("module M = { def x: i32 = 42 }");
     assert_eq!(program.declarations.len(), 1);
 
     let bind = match &program.declarations[0] {
@@ -1473,7 +1473,7 @@ fn test_parse_module_bind_simple() {
 
 #[test]
 fn test_parse_module_with_signature() {
-    let program = parse_ok("module M : { sig x: i32 } = { def x() -> i32 = 42 }");
+    let program = parse_ok("module M : { sig x: i32 } = { def x: i32 = 42 }");
     assert_eq!(program.declarations.len(), 1);
 
     let bind = match &program.declarations[0] {
@@ -1551,7 +1551,7 @@ fn test_parse_empty_module() {
 
 #[test]
 fn test_parse_module_multiple_declarations() {
-    let program = parse_ok("module M = { type t = i32 def x() -> t = 42 def y() -> t = 99 }");
+    let program = parse_ok("module M = { type t = i32 def x: t = 42 def y: t = 99 }");
     assert_eq!(program.declarations.len(), 1);
 
     let bind = match &program.declarations[0] {
@@ -1564,7 +1564,7 @@ fn test_parse_module_multiple_declarations() {
 #[test]
 fn test_parse_simple_field_access() {
     // First test that basic field access works
-    let decl = single_decl("def x() -> f32 = f32.cos");
+    let decl = single_decl("def x: f32 = f32.cos");
 
     match &decl.body.kind {
         ExprKind::FieldAccess(base, field) => {
@@ -1579,7 +1579,7 @@ fn test_parse_simple_field_access() {
 fn test_parse_qualified_name() {
     // At parse time, f32.cos is parsed as field access
     // The type checker will resolve it to a module member
-    let decl = single_decl("def x() -> f32 = f32.cos(0.5f32)");
+    let decl = single_decl("def x: f32 = f32.cos(0.5f32)");
 
     match &decl.body.kind {
         ExprKind::Application(func, args) => {
@@ -1599,7 +1599,7 @@ fn test_parse_qualified_name() {
 #[test]
 fn test_parse_nested_qualified_name() {
     // At parse time, M.N.foo is parsed as nested field access
-    let decl = single_decl("def x() -> i32 = M.N.foo(42)");
+    let decl = single_decl("def x: i32 = M.N.foo(42)");
 
     match &decl.body.kind {
         ExprKind::Application(func, args) => {
@@ -1692,7 +1692,7 @@ fn test_parse_sum_type_multiple_args() {
 #[test]
 fn test_ambiguity_field_access_parses_as_field() {
     // x.y should parse as field access on record x
-    let decl = single_decl("def test() -> i32 = x.y");
+    let decl = single_decl("def test: i32 = x.y");
 
     assert!(matches!(&decl.body.kind, ExprKind::FieldAccess(base, field)
         if matches!(&base.kind, ExprKind::Identifier(_, name) if name == "x") && field == "y"));
@@ -1701,7 +1701,7 @@ fn test_ambiguity_field_access_parses_as_field() {
 #[test]
 fn test_function_call_with_array_argument() {
     // f([x]) with parens should parse as function call with array argument
-    let decl = single_decl("def test() -> i32 = f([1, 2, 3])");
+    let decl = single_decl("def test: i32 = f([1, 2, 3])");
 
     assert!(matches!(&decl.body.kind, ExprKind::Application(func, args)
         if matches!(&func.kind, ExprKind::Identifier(_, name) if name == "f") && args.len() == 1 && matches!(&args[0].kind, ExprKind::ArrayLiteral(_))));
@@ -1710,7 +1710,7 @@ fn test_function_call_with_array_argument() {
 #[test]
 fn test_ambiguity_array_index_without_space_is_indexing() {
     // f[x] without space should parse as array indexing
-    let decl = single_decl("def test() -> i32 = f[0]");
+    let decl = single_decl("def test: i32 = f[0]");
 
     assert!(matches!(&decl.body.kind, ExprKind::ArrayIndex(array, _)
         if matches!(&array.kind, ExprKind::Identifier(_, name) if name == "f")));
@@ -1719,7 +1719,7 @@ fn test_ambiguity_array_index_without_space_is_indexing() {
 #[test]
 fn test_ambiguity_negative_in_parens() {
     // (-x) should parse as negation of x in parentheses
-    let decl = single_decl("def test() -> i32 = (-x)");
+    let decl = single_decl("def test: i32 = (-x)");
 
     assert!(matches!(&decl.body.kind, ExprKind::UnaryOp(op, operand)
         if op.op == "-" && matches!(&operand.kind, ExprKind::Identifier(_, name) if name == "x")));
@@ -1728,7 +1728,7 @@ fn test_ambiguity_negative_in_parens() {
 #[test]
 fn test_ambiguity_prefix_binds_tighter_than_infix() {
     // !x + y should parse as (!x) + y, not !(x + y)
-    let decl = single_decl("def test() -> i32 = !x + y");
+    let decl = single_decl("def test: i32 = !x + y");
 
     assert!(matches!(&decl.body.kind, ExprKind::BinaryOp(op, left, _)
         if op.op == "+" && matches!(&left.kind, ExprKind::UnaryOp(unary_op, _) if unary_op.op == "!")));
@@ -1737,7 +1737,7 @@ fn test_ambiguity_prefix_binds_tighter_than_infix() {
 #[test]
 fn test_function_call_precedence_in_expression() {
     // f(x) + y should parse as (f(x)) + y
-    let decl = single_decl("def test() -> i32 = f(x) + y");
+    let decl = single_decl("def test: i32 = f(x) + y");
 
     assert!(matches!(&decl.body.kind, ExprKind::BinaryOp(op, left, _)
         if op.op == "+" && matches!(&left.kind, ExprKind::Application(_, args) if args.len() == 1)));
@@ -1746,7 +1746,7 @@ fn test_function_call_precedence_in_expression() {
 #[test]
 fn test_ambiguity_let_extends_right() {
     // let x = 1 in x + y should parse with (x + y) as the body
-    let decl = single_decl("def test() -> i32 = let x = 1 in x + y");
+    let decl = single_decl("def test: i32 = let x = 1 in x + y");
 
     assert!(matches!(&decl.body.kind, ExprKind::LetIn(let_in)
         if matches!(&let_in.body.kind, ExprKind::BinaryOp(op, _, _) if op.op == "+")));
@@ -1755,7 +1755,7 @@ fn test_ambiguity_let_extends_right() {
 #[test]
 fn test_ambiguity_if_extends_right() {
     // if cond then x else y + z should parse with (y + z) as else branch
-    let decl = single_decl("def test() -> i32 = if true then 1 else 2 + 3");
+    let decl = single_decl("def test: i32 = if true then 1 else 2 + 3");
 
     assert!(matches!(&decl.body.kind, ExprKind::If(if_expr)
         if matches!(&if_expr.else_branch.kind, ExprKind::BinaryOp(op, _, _) if op.op == "+")));
@@ -1764,7 +1764,7 @@ fn test_ambiguity_if_extends_right() {
 #[test]
 fn test_ambiguity_type_ascription() {
     // x : i32 should parse as type ascription
-    let decl = single_decl("def test() -> i32 = x : i32");
+    let decl = single_decl("def test: i32 = x : i32");
 
     assert!(matches!(&decl.body.kind, ExprKind::TypeAscription(inner, ty)
         if matches!(&inner.kind, ExprKind::Identifier(_, name) if name == "x")
@@ -1774,7 +1774,7 @@ fn test_ambiguity_type_ascription() {
 #[test]
 fn test_ambiguity_pipe_operator() {
     // x |> f should desugar to f(x) at parse time
-    let decl = single_decl("def test() -> i32 = x |> f");
+    let decl = single_decl("def test: i32 = x |> f");
 
     // Pipe is desugared: x |> f => f(x) = Application(f, [x])
     assert!(matches!(&decl.body.kind, ExprKind::Application(func, args)
@@ -1786,7 +1786,7 @@ fn test_ambiguity_pipe_operator() {
 #[test]
 fn test_function_call_tuple_syntax() {
     // Test that "vec3(1.0, 0.5, 0.25)" parses as an Application with 3 arguments
-    let input = "def test() = vec3(1.0f32, 0.5f32, 0.25f32)";
+    let input = "def test = vec3(1.0f32, 0.5f32, 0.25f32)";
 
     let tokens = tokenize(input).unwrap();
     let mut nc = NodeCounter::new();
@@ -1812,12 +1812,12 @@ fn test_function_call_tuple_syntax() {
 #[test]
 fn test_span_tracking() {
     // Test that spans are correctly tracked for a multi-line program
-    let source = r#"def sum() -> i32 =
+    let source = r#"def sum: i32 =
   let x = 10 + 20
   in x * 2
 
-def main() -> i32 =
-  sum()"#;
+def main: i32 =
+  sum"#;
 
     let tokens = tokenize(source).expect("Failed to tokenize");
     let mut nc = NodeCounter::new();
@@ -1860,24 +1860,19 @@ def main() -> i32 =
         panic!("Expected Decl, got {:?}", program.declarations[0]);
     }
 
-    // Check second declaration (main function) - should be on line 5-6
+    // Check second declaration (main constant) - should be on line 5-6
     if let Declaration::Decl(main_decl) = &program.declarations[1] {
         assert_eq!(main_decl.name, "main");
 
-        // The function call should be on line 6
-        if let ExprKind::Application(func, args) = &main_decl.body.kind {
-            if let ExprKind::Identifier(_, name) = &func.kind {
-                assert_eq!(name, "sum");
-            } else {
-                panic!("Expected Identifier in Application, got {:?}", func.kind);
-            }
-            assert!(args.is_empty(), "sum() should have no arguments");
+        // The reference to sum should be on line 6 (now just an identifier, not a call)
+        if let ExprKind::Identifier(_, name) = &main_decl.body.kind {
+            assert_eq!(name, "sum");
             assert_eq!(
                 main_decl.body.h.span.start_line, 6,
-                "function call should be on line 6"
+                "identifier should be on line 6"
             );
         } else {
-            panic!("Expected Application, got {:?}", main_decl.body.kind);
+            panic!("Expected Identifier, got {:?}", main_decl.body.kind);
         }
     } else {
         panic!("Expected Decl, got {:?}", program.declarations[1]);
@@ -1920,7 +1915,7 @@ fn test_parse_pattern_y_i32() {
 
 #[test]
 fn test_parse_lambda_with_tuple_pattern() {
-    let source = r#"def test() -> i32 = let f = |(x, y)| x in f((1, 2))"#;
+    let source = r#"def test: i32 = let f = |(x, y)| x in f((1, 2))"#;
     let tokens = tokenize(source).expect("Failed to tokenize");
     println!("Tokens: {:#?}", tokens);
     let mut nc = NodeCounter::new();
@@ -1940,7 +1935,7 @@ fn test_parse_lambda_with_tuple_pattern() {
 
 #[test]
 fn test_parse_lambda_with_wildcard_in_tuple() {
-    let source = r#"def test() -> i32 = let f = |(_, acc)| acc in f((1, 2))"#;
+    let source = r#"def test: i32 = let f = |(_, acc)| acc in f((1, 2))"#;
     let tokens = tokenize(source).expect("Failed to tokenize");
     println!("Tokens: {:#?}", tokens);
     let mut nc = NodeCounter::new();
@@ -1960,7 +1955,7 @@ fn test_parse_lambda_with_wildcard_in_tuple() {
 
 #[test]
 fn test_parse_nested_let_in() {
-    let source = r#"def test() -> i32 =
+    let source = r#"def test: i32 =
   let x = 1 in
   let y = 2 in
   let z = 3 in
@@ -1971,7 +1966,7 @@ fn test_parse_nested_let_in() {
 
 #[test]
 fn test_parse_loop_with_nested_lets() {
-    let source = r#"def test() -> (i32, i32) =
+    let source = r#"def test: (i32, i32) =
   loop (idx, acc) = (0, 0) while idx < 10 do
     let x = idx * 2 in
     let y = x + 1 in
@@ -2003,7 +1998,7 @@ fn test_parse_function_call_with_paren_expr() {
     // Test parsing: myfunc(a, b, (x + y))
     // This should parse as a function call with 3 arguments: a, b, and (x + y)
     let input = r#"
-def test() -> f32 = myfunc(arg1, arg2, (x + y))
+def test: f32 = myfunc(arg1, arg2, (x + y))
 "#;
 
     let decl = single_decl(input);
@@ -2066,7 +2061,7 @@ def test(t: f32) -> vec3f32 = mix3v(a, b, (t*2.0f32 - 1.0f32))
 fn test_parse_map_with_lambda_and_array_index() {
     // Test parsing of: map((|e| e[0]), edges)
     let input = r#"
-def test() -> [12]i32 =
+def test: [12]i32 =
   let edges : [12][2]i32 = [[0,1]] in
   map((|e| e[0]), edges)
 "#;
@@ -2133,7 +2128,7 @@ fn test_parse_loop_with_tuple_pattern_and_pipe() {
     // Per SPECIFICATION.md line 559, loop body extends "as far to the right as possible",
     // so the pipe IS part of the loop body, not outside it. This test verifies correct parsing.
     let input = r#"
-def test() -> i32 =
+def test: i32 =
   loop (idx, acc) = (0, 10) while idx < 5 do
     (idx + 1, acc + idx)
   |> (|(_, result)| result)
@@ -2201,7 +2196,7 @@ def test() -> i32 =
 
 #[test]
 fn test_let_tuple_pattern() {
-    let input = "def test() = let (x, y) = (1, 2) in x + y";
+    let input = "def test = let (x, y) = (1, 2) in x + y";
     let decl = single_decl(input);
 
     // Check that we have a LetIn expression with a tuple pattern
@@ -2229,7 +2224,7 @@ fn test_let_tuple_pattern() {
 
 #[test]
 fn test_parse_record_literal_empty() {
-    let input = "def test() = {}";
+    let input = "def test = {}";
     let _program = parse_ok(input);
     let decl = single_decl(input);
 
@@ -2243,7 +2238,7 @@ fn test_parse_record_literal_empty() {
 
 #[test]
 fn test_parse_record_literal_single_field() {
-    let input = "def test() = {x: 42}";
+    let input = "def test = {x: 42}";
     let decl = single_decl(input);
 
     match &decl.body.kind {
@@ -2261,7 +2256,7 @@ fn test_parse_record_literal_single_field() {
 
 #[test]
 fn test_parse_record_literal_multiple_fields() {
-    let input = "def test() = {x: 0, v3s: v3s}";
+    let input = "def test = {x: 0, v3s: v3s}";
     let decl = single_decl(input);
 
     match &decl.body.kind {
@@ -2324,7 +2319,7 @@ fn test_parse_mul_mat_vec_application() {
 
 #[test]
 fn test_operator_section_in_expression() {
-    let input = "def test() = map((+), [1, 2, 3])";
+    let input = "def test = map((+), [1, 2, 3])";
     let decl = single_decl(input);
 
     // Should parse successfully - map applied to desugared operator section (lambda) and array
@@ -2436,7 +2431,7 @@ fn test_negation_of_array_index() {
 fn test_ambiguity_loop_body_extends_right() {
     // The body of loop extends as far right as possible
     // loop x = 0 while x < 10 do x + 1 + 2 should have (x + 1 + 2) as body
-    let decl = single_decl("def test() -> i32 = loop x = 0 while x < 10 do x + 1 + 2");
+    let decl = single_decl("def test: i32 = loop x = 0 while x < 10 do x + 1 + 2");
 
     match &decl.body.kind {
         ExprKind::Loop(loop_expr) => {
@@ -2511,7 +2506,7 @@ fn test_ambiguity_negation_prefix_binds_tighter_than_multiply() {
 #[test]
 fn test_ambiguity_chained_field_access() {
     // a.b.c should parse as (a.b).c - left associative field access
-    let decl = single_decl("def test() -> i32 = a.b.c");
+    let decl = single_decl("def test: i32 = a.b.c");
 
     match &decl.body.kind {
         ExprKind::FieldAccess(inner, field_c) => {
@@ -2627,13 +2622,13 @@ fn test_parse_matrix_literal_2x3() {
 
 #[test]
 fn test_parse_vector_literal_in_function() {
-    let decl = single_decl("def test() -> vec3f32 = @[1.0f32, 2.0f32, 3.0f32]");
+    let decl = single_decl("def test: vec3f32 = @[1.0f32, 2.0f32, 3.0f32]");
     assert!(matches!(&decl.body.kind, ExprKind::VecMatLiteral(_)));
 }
 
 #[test]
 fn test_parse_matrix_literal_in_let() {
-    let decl = single_decl("def test() -> mat2x2f32 = let m = @[[1.0f32, 0.0f32], [0.0f32, 1.0f32]] in m");
+    let decl = single_decl("def test: mat2x2f32 = let m = @[[1.0f32, 0.0f32], [0.0f32, 1.0f32]] in m");
     match &decl.body.kind {
         ExprKind::LetIn(let_in) => {
             assert!(matches!(&let_in.value.kind, ExprKind::VecMatLiteral(_)));
@@ -2822,21 +2817,21 @@ fn test_parse_rust_style_function_with_mixed_params() {
 #[test]
 fn test_parse_rust_style_lambda_single_param() {
     // New syntax: |x| body
-    let decl = single_decl("def f() = |x| x + 1");
+    let decl = single_decl("def f = |x| x + 1");
     assert!(matches!(&decl.body.kind, ExprKind::Lambda(lambda) if lambda.params.len() == 1));
 }
 
 #[test]
 fn test_parse_rust_style_lambda_multiple_params() {
     // New syntax: |x, y| body
-    let decl = single_decl("def f() = |x, y| x + y");
+    let decl = single_decl("def f = |x, y| x + y");
     assert!(matches!(&decl.body.kind, ExprKind::Lambda(lambda) if lambda.params.len() == 2));
 }
 
 #[test]
 fn test_parse_rust_style_lambda_typed_params() {
     // New syntax: |x: i32, y: i32| body
-    let decl = single_decl("def f() = |x: i32, y: i32| x + y");
+    let decl = single_decl("def f = |x: i32, y: i32| x + y");
     match &decl.body.kind {
         ExprKind::Lambda(lambda) => {
             assert_eq!(lambda.params.len(), 2);
@@ -2850,7 +2845,7 @@ fn test_parse_rust_style_lambda_typed_params() {
 #[test]
 fn test_parse_rust_style_lambda_empty_params() {
     // New syntax: || body - zero-argument lambda
-    let decl = single_decl("def f() = || 42");
+    let decl = single_decl("def f = || 42");
     assert!(matches!(&decl.body.kind, ExprKind::Lambda(lambda) if lambda.params.is_empty()));
 }
 
@@ -2952,7 +2947,7 @@ fn test_parse_lambda_then_bitwise_or() {
 fn test_parse_function_returning_function_type() {
     // Test that a function can have a return type that is itself a function type
     // This requires parentheses around the return type to disambiguate
-    let decl = single_decl("def inc() -> (i32 -> i32) = |x| x + 1");
+    let decl = single_decl("def inc: (i32 -> i32) = |x| x + 1");
     assert_eq!(decl.name, "inc");
     // Return type should be a function type i32 -> i32
     if let Some(ty) = &decl.ty {
@@ -2969,7 +2964,7 @@ fn test_parse_function_returning_function_type() {
 #[test]
 fn test_parse_function_returning_unit_to_int() {
     // Test function returning () -> i32
-    let decl = single_decl("def get_five() -> (() -> i32) = |()| 5");
+    let decl = single_decl("def get_five: (() -> i32) = |()| 5");
     assert_eq!(decl.name, "get_five");
     if let Some(ty) = &decl.ty {
         assert!(
@@ -2985,7 +2980,7 @@ fn test_parse_function_returning_unit_to_int() {
 #[test]
 fn test_parse_function_returning_tuple_to_int() {
     // Test function returning (i32, i32) -> i32
-    let decl = single_decl("def sum_pair() -> ((i32, i32) -> i32) = |(a, b)| a + b");
+    let decl = single_decl("def sum_pair: ((i32, i32) -> i32) = |(a, b)| a + b");
     assert_eq!(decl.name, "sum_pair");
     if let Some(ty) = &decl.ty {
         assert!(
@@ -3024,10 +3019,7 @@ fn test_parse_def_constant_vs_function() {
     let const_decl = single_decl("def WIDTH: i32 = 800");
     assert_eq!(const_decl.params.len(), 0);
 
-    let func_decl = single_decl("def get_width() -> i32 = 800");
-    assert_eq!(func_decl.params.len(), 0); // Also empty params, but parsed as function
-
-    // Both should parse successfully
+    // zero-arg functions like def get_width() are now rejected - use constant syntax instead
 }
 
 // ============================================================
@@ -3037,7 +3029,7 @@ fn test_parse_def_constant_vs_function() {
 #[test]
 fn test_curry_single_placeholder() {
     // $f(_) should desugar to |_0_| f(_0_)
-    let decl = single_decl("def x() = $f(_)");
+    let decl = single_decl("def x = $f(_)");
     match &decl.body.kind {
         ExprKind::Lambda(lambda) => {
             assert_eq!(lambda.params.len(), 1);
@@ -3067,7 +3059,7 @@ fn test_curry_single_placeholder() {
 #[test]
 fn test_curry_with_fixed_first_arg() {
     // $f(1, _) should desugar to |_0_| f(1, _0_)
-    let decl = single_decl("def x() = $f(1, _)");
+    let decl = single_decl("def x = $f(1, _)");
     match &decl.body.kind {
         ExprKind::Lambda(lambda) => {
             assert_eq!(lambda.params.len(), 1);
@@ -3095,7 +3087,7 @@ fn test_curry_with_fixed_first_arg() {
 #[test]
 fn test_curry_multiple_placeholders() {
     // $f(_, _, 3) should desugar to |_0_, _1_| f(_0_, _1_, 3)
-    let decl = single_decl("def x() = $f(_, _, 3)");
+    let decl = single_decl("def x = $f(_, _, 3)");
     match &decl.body.kind {
         ExprKind::Lambda(lambda) => {
             assert_eq!(lambda.params.len(), 2);
@@ -3126,7 +3118,7 @@ fn test_curry_multiple_placeholders() {
 #[test]
 fn test_curry_no_placeholder_is_normal_call() {
     // $f(1, 2) with no placeholders should just be f(1, 2)
-    let decl = single_decl("def x() = $f(1, 2)");
+    let decl = single_decl("def x = $f(1, 2)");
     match &decl.body.kind {
         ExprKind::Application(func, args) => {
             assert_eq!(args.len(), 2);
@@ -3142,7 +3134,7 @@ fn test_curry_no_placeholder_is_normal_call() {
 #[test]
 fn test_curry_with_field_access() {
     // $foo.bar(_, 1) should work with field access
-    let decl = single_decl("def x() = $foo.bar(_, 1)");
+    let decl = single_decl("def x = $foo.bar(_, 1)");
     match &decl.body.kind {
         ExprKind::Lambda(lambda) => {
             assert_eq!(lambda.params.len(), 1);
@@ -3242,7 +3234,7 @@ fn test_array_index_still_works() {
 #[test]
 fn test_parse_existential_type_simple() {
     // ?k. [k]i32 - existential array type with single size variable
-    let decl = single_decl("def f() -> ?k. [k]i32 = ???");
+    let decl = single_decl("def f(x: i32) -> ?k. [k]i32 = ???");
     assert_eq!(decl.name, "f");
     let ty = decl.ty.as_ref().expect("Expected return type");
     match ty {
@@ -3257,7 +3249,7 @@ fn test_parse_existential_type_simple() {
 #[test]
 fn test_parse_existential_type_multiple_vars() {
     // ?j k. [j][k]i32 - existential with multiple size variables
-    let decl = single_decl("def f() -> ?j k. [j][k]i32 = ???");
+    let decl = single_decl("def f(x: i32) -> ?j k. [j][k]i32 = ???");
     assert_eq!(decl.name, "f");
     let ty = decl.ty.as_ref().expect("Expected return type");
     match ty {

@@ -63,7 +63,7 @@ fn should_fail_type_check(input: &str) -> bool {
 
 #[test]
 fn test_simple_constant() {
-    let mir = flatten_program("def x() = 42");
+    let mir = flatten_program("def x = 42");
     // Nullary function becomes a Constant def in MIR
     let x_def = find_def(&mir, "x");
     let body = get_body(x_def);
@@ -120,7 +120,7 @@ fn test_let_binding() {
 
 #[test]
 fn test_tuple_pattern() {
-    let mir = flatten_program("def f() = let (a, b) = (1, 2) in a + b");
+    let mir = flatten_program("def f = let (a, b) = (1, 2) in a + b");
     // Tuple pattern desugars to multiple lets with intrinsic tuple access
     let f_def = find_def(&mir, "f");
     let body = get_body(f_def);
@@ -139,7 +139,7 @@ fn test_tuple_pattern() {
 #[test]
 fn test_lambda_tuple_pattern_param() {
     // Test lambda with tuple pattern parameter: |(x, y)| x + y
-    let mir = flatten_program("def f() = let add = |(x, y)| x + y in add((1, 2))");
+    let mir = flatten_program("def f = let add = |(x, y)| x + y in add((1, 2))");
 
     // Check that lambda registry has the lambda
     assert!(
@@ -169,7 +169,7 @@ fn test_lambda_tuple_pattern_param() {
 #[test]
 fn test_lambda_nested_tuple_pattern_param() {
     // Test lambda with nested tuple pattern: |((a, b), c)| a + b + c
-    let mir = flatten_program("def f() = let add = |((a, b), c)| a + b + c in add(((1, 2), 3))");
+    let mir = flatten_program("def f = let add = |((a, b), c)| a + b + c in add(((1, 2), 3))");
 
     // Should compile successfully with tuple destructuring
     assert!(
@@ -180,7 +180,7 @@ fn test_lambda_nested_tuple_pattern_param() {
 
 #[test]
 fn test_lambda_defunctionalization() {
-    let mir = flatten_program("def f() = |x| x + 1");
+    let mir = flatten_program("def f = |x| x + 1");
 
     // Check that lambda registry has the lambda
     assert!(
@@ -282,7 +282,7 @@ fn test_function_call() {
 
 #[test]
 fn test_array_literal() {
-    let mir = flatten_program("def arr() = [1, 2, 3]");
+    let mir = flatten_program("def arr = [1, 2, 3]");
     let arr_def = find_def(&mir, "arr");
     let body = get_body(arr_def);
     match body.get_expr(body.root) {
@@ -296,7 +296,7 @@ fn test_array_literal() {
 #[test]
 fn test_record_literal() {
     // Records are now represented as tuples in MIR, with fields in source order
-    let mir = flatten_program("def r() = {x: 1, y: 2}");
+    let mir = flatten_program("def r = {x: 1, y: 2}");
     let r_def = find_def(&mir, "r");
     let body = get_body(r_def);
     match body.get_expr(body.root) {
@@ -309,7 +309,7 @@ fn test_record_literal() {
 
 #[test]
 fn test_while_loop() {
-    let mir = flatten_program("def f() = loop x = 0 while x < 10 do x + 1");
+    let mir = flatten_program("def f = loop x = 0 while x < 10 do x + 1");
     let f_def = find_def(&mir, "f");
     let body = get_body(f_def);
     match body.get_expr(body.root) {
@@ -323,7 +323,7 @@ fn test_while_loop() {
 
 #[test]
 fn test_for_range_loop() {
-    let mir = flatten_program("def f() = loop acc = 0 for i < 10 do acc + i");
+    let mir = flatten_program("def f = loop acc = 0 for i < 10 do acc + i");
     let f_def = find_def(&mir, "f");
     let body = get_body(f_def);
     match body.get_expr(body.root) {
@@ -381,7 +381,7 @@ fn test_array_index() {
 fn test_multiple_lambdas() {
     let mir = flatten_program(
         r#"
-def f() =
+def f =
     let a = |x| x + 1 in
     let b = |y| y * 2 in
     (a, b)
@@ -396,7 +396,7 @@ fn test_map_with_lambda() {
     // Test map with inline lambda - just verify it compiles and produces a def
     let mir = flatten_program(
         r#"
-def test() -> [4]i32 =
+def test: [4]i32 =
     map((|x: i32| x + 1), [0, 1, 2, 3])
 "#,
     );
@@ -561,7 +561,7 @@ fn test_error_array_of_functions() {
     assert!(
         should_fail_type_check(
             r#"
-def test() -> [2](i32 -> i32) =
+def test: [2](i32 -> i32) =
     [|x: i32| x + 1, |x: i32| x * 2]
 "#
         ),
@@ -589,7 +589,7 @@ fn test_error_loop_parameter_function() {
     assert!(
         should_fail_type_check(
             r#"
-def test() -> (i32 -> i32) =
+def test: (i32 -> i32) =
     loop f = |x: i32| x while false do f
 "#
         ),
@@ -633,7 +633,7 @@ def mysum<[n]>(arr: [n]f32) -> f32 =
     (acc + arr[i], i + 1)
   in result
 
-def test() -> f32 =
+def test: f32 =
   let arr = [1.0f32, 2.0f32, 3.0f32] in
   mysum(arr)
 "#,
@@ -647,7 +647,7 @@ def test() -> f32 =
 fn test_f32_sum_simple() {
     // Test that f32.sum from prelude works through full compilation
     let source = r#"
-def test() -> f32 =
+def test: f32 =
   let arr = [1.0f32, 2.0f32, 3.0f32] in
   f32.sum(arr)
 "#;
@@ -940,7 +940,7 @@ fn test_curried_function_definition() {
     let mir = flatten_program(
         r#"
 def add(x: f32, y: f32) -> f32 = x + y
-def test() -> f32 = add(1.0f32, 2.0f32)
+def test: f32 = add(1.0f32, 2.0f32)
 "#,
     );
     let mir_str = format!("{}", mir);
@@ -955,7 +955,7 @@ fn test_curried_function_application() {
     let mir = flatten_program(
         r#"
 def add(x: f32, y: f32) -> f32 = x + y
-def test() -> f32 =
+def test: f32 =
     let a = 1.0f32 in
     let b = 2.0f32 in
     add(a, b)
@@ -973,7 +973,7 @@ fn test_higher_order_function_parameter() {
         r#"
 def apply(f: f32 -> f32, x: f32) -> f32 = f(x)
 def double(x: f32) -> f32 = x + x
-def test() -> f32 = apply(double, 3.0f32)
+def test: f32 = apply(double, 3.0f32)
 "#,
     );
     let mir_str = format!("{}", mir);
@@ -989,7 +989,7 @@ fn test_binary_function_parameter() {
         r#"
 def fold2(op: f32 -> f32 -> f32, x: f32, y: f32) -> f32 = op(x, y)
 def add(a: f32, b: f32) -> f32 = a + b
-def test() -> f32 = fold2(add, 1.0f32, 2.0f32)
+def test: f32 = fold2(add, 1.0f32, 2.0f32)
 "#,
     );
     let mir_str = format!("{}", mir);
@@ -1008,7 +1008,7 @@ def reduce_f32(op: f32 -> f32 -> f32, init: f32, arr: [4]f32) -> f32 =
     let x2 = op(x1, arr[2]) in
     op(x2, arr[3])
 
-def test() -> f32 =
+def test: f32 =
     let arr = [1.0f32, 2.0f32, 3.0f32, 4.0f32] in
     reduce_f32((|x, y| x + y), 0.0f32, arr)
 "#,
@@ -1096,7 +1096,7 @@ fn test_multiline_map_lambda() {
         r#"
 def arr: [4]f32 = [1.0, 2.0, 3.0, 4.0]
 
-def test_multiline() -> [4]f32 =
+def test_multiline: [4]f32 =
     map(|q:f32|
               let zinv = 1.0 / q in
               zinv,
@@ -1115,7 +1115,7 @@ fn test_loop_with_map() {
         r#"
 def cube: [4]f32 = [1.0, 2.0, 3.0, 4.0]
 
-def test_loop_map() -> f32 =
+def test_loop_map: f32 =
     let (_, acc) = loop (idx, acc) = (0i32, 0.0f32) while idx < 4 do
       let mat = 2.0f32 in
       let v4s = map(|v:f32| v * mat, cube) in

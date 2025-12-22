@@ -266,6 +266,15 @@ impl<'a> Parser<'a> {
                 if self.check(&Token::LeftParen) {
                     // Function: def foo(params) -> R = ...
                     let params = self.parse_comma_separated_params()?;
+
+                    // Reject zero-argument functions - use constant syntax instead
+                    if params.is_empty() {
+                        bail_parse!(
+                            "Zero-argument functions are not allowed. Use constant syntax instead: `def {} = ...`",
+                            name
+                        );
+                    }
+
                     // Rust-style return type: -> T (optional)
                     // Use parse_return_type to allow existential types like ?k. [k]T
                     let ty = if self.check(&Token::Arrow) {
@@ -276,10 +285,13 @@ impl<'a> Parser<'a> {
                     };
                     (params, ty)
                 } else if self.check(&Token::Colon) {
-                    // Constant binding: def foo: T = ...
+                    // Constant binding with type: def foo: T = ...
                     self.advance();
                     let ty = Some(self.parse_type()?);
                     (vec![], ty)
+                } else if self.check(&Token::Assign) {
+                    // Constant binding without type: def foo = ...
+                    (vec![], None)
                 } else {
                     bail_parse!("Expected '(' or ':' after def name");
                 }

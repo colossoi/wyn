@@ -187,7 +187,7 @@ fn test_return_aliases_non_consumed_params() {
     let base = r#"
 def id3(a: *[4]i32, b: [4]i32, c: [4]i32) -> [4]i32 = c
 def consume(arr: *[4]i32) -> i32 = arr[0]
-def main() -> i32 =
+def main: i32 =
     let x = [1, 2, 3, 4] in
     let y = [5, 6, 7, 8] in
     let z = [9, 10, 11, 12] in
@@ -470,7 +470,7 @@ fn test_liveness_simple_last_use() {
     let source = r#"
 def f(arr: [4]i32) -> i32 = arr[0]
 
-def main() -> i32 =
+def main: i32 =
     let x = [1, 2, 3, 4] in
     f(x)
 "#;
@@ -496,7 +496,7 @@ fn test_liveness_aliased_array() {
     let source = r#"
 def f(arr: [4]i32) -> i32 = arr[0]
 
-def main() -> i32 =
+def main: i32 =
     let x = [1, 2, 3, 4] in
     let y = x in
     f(x)
@@ -525,7 +525,7 @@ fn test_liveness_multiple_uses() {
     let source = r#"
 def f(arr: [4]i32) -> i32 = arr[0]
 
-def main() -> i32 =
+def main: i32 =
     let x = [1, 2, 3, 4] in
     f(x) + f(x)
 "#;
@@ -560,7 +560,7 @@ fn test_liveness_fresh_array_literal() {
     let source = r#"
 def f(arr: [4]i32) -> i32 = arr[0]
 
-def main() -> i32 =
+def main: i32 =
     f([1, 2, 3, 4])
 "#;
     let result = check_alias(source);
@@ -591,7 +591,7 @@ fn test_liveness_no_info_for_non_array() {
     let source = r#"
 def f(x: i32) -> i32 = x + 1
 
-def main() -> i32 =
+def main: i32 =
     f(42)
 "#;
     let result = check_alias(source);
@@ -696,7 +696,7 @@ fn test_range_creates_fresh_backing_store() {
     let source = r#"
 def consume(arr: *[5]i32) -> i32 = arr[0]
 
-def main() -> i32 =
+def main: i32 =
     let range = 0..<5 in
     consume(range)
 "#;
@@ -711,7 +711,7 @@ fn test_range_used_multiple_times() {
     let source = r#"
 def sum(arr: [5]i32) -> i32 = arr[0] + arr[1]
 
-def main() -> i32 =
+def main: i32 =
     let range = 0..<5 in
     sum(range) + sum(range)
 "#;

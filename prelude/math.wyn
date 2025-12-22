@@ -175,8 +175,8 @@ module f32	: 	(float with t = f32 with int_t = u32) = {
   sig abs : t -> t
   def sgn(x: t) -> t = if f32.isnan(x) then x else if x > 0.0f32 then 1.0f32 else if x < 0.0f32 then (0.0f32 - 1.0f32) else 0.0f32
 
-  def highest() -> t = 1.0f32 / 0.0f32
-  def lowest() -> t = (0.0f32 - 1.0f32) / 0.0f32
+  def highest: t = 1.0f32 / 0.0f32
+  def lowest: t = (0.0f32 - 1.0f32) / 0.0f32
 
   sig sum<[n]>: [n]t -> t
   sig product<[n]>: [n]t -> t
@@ -204,13 +204,13 @@ module f32	: 	(float with t = f32 with int_t = u32) = {
   sig acos : t -> t
   sig atan : t -> t
 
-  def pi() -> t = 3.14159265358979323846f32
-  def sinpi(x: t) -> t = f32.sin((pi() * x))
-  def cospi(x: t) -> t = f32.cos((pi() * x))
-  def tanpi(x: t) -> t = f32.tan((pi() * x))
-  def asinpi(x: t) -> t = f32.asin(x) / pi()
-  def acospi(x: t) -> t = f32.acos(x) / pi()
-  def atanpi(x: t) -> t = f32.atan(x) / pi()
+  def pi: t = 3.14159265358979323846f32
+  def sinpi(x: t) -> t = f32.sin((pi * x))
+  def cospi(x: t) -> t = f32.cos((pi * x))
+  def tanpi(x: t) -> t = f32.tan((pi * x))
+  def asinpi(x: t) -> t = f32.asin(x) / pi
+  def acospi(x: t) -> t = f32.acos(x) / pi
+  def atanpi(x: t) -> t = f32.atan(x) / pi
 
   sig sinh : t -> t
   sig cosh : t -> t
@@ -220,7 +220,7 @@ module f32	: 	(float with t = f32 with int_t = u32) = {
   sig atanh : t -> t
 
   sig atan2 : t -> t -> t
-  def atan2pi(x: t, y: t) -> t = f32.atan2(x, y) / pi()
+  def atan2pi(x: t, y: t) -> t = f32.atan2(x, y) / pi
   def hypot(x: t, y: t) -> t = f32.sqrt((x * x + y * y))
 
   def gamma(x: t) -> t = x
@@ -239,17 +239,17 @@ module f32	: 	(float with t = f32 with int_t = u32) = {
 
   sig isinf : t -> bool
   sig isnan : t -> bool
-  def inf() -> t = 1.0f32 / 0.0f32
-  def nan() -> t = 0.0f32 / 0.0f32
-  def e() -> t = 2.71828182845904523536f32
+  def inf: t = 1.0f32 / 0.0f32
+  def nan: t = 0.0f32 / 0.0f32
+  def e: t = 2.71828182845904523536f32
 
   def from_bits(x: int_t) -> t = __builtin_f32_from_bits(x)
   def to_bits(x: t) -> int_t = __builtin_f32_to_bits(x)
-  def num_bits() -> i32 = 32
+  def num_bits: i32 = 32
   def get_bit(bit: i32, x: t) -> i32 = i32(0)
   def set_bit(bit: i32, x: t, b: i32) -> t = x
 
-  def epsilon() -> t = 1.1920929e-7f32
+  def epsilon: t = 1.1920929e-7f32
   def nextafter(x: t, y: t) -> t = x
   def ldexp(x: t, n: i32) -> t = x
   def copysign(x: t, y: t) -> t = if y < 0.0f32 then (0.0f32 - f32.abs(x)) else f32.abs(x)

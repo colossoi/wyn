@@ -248,7 +248,7 @@ def test(arr: [4]i32) -> [4]i32 = map(double, arr)
 fn test_range_simple() {
     // Test just the range, no map
     let source = r#"
-def test() -> [4]i32 = 0..<4
+def test: [4]i32 = 0..<4
 "#;
     match compile_through_lowering(source) {
         Ok(_) => {}
@@ -260,7 +260,7 @@ def test() -> [4]i32 = 0..<4
 fn test_map_range_simple() {
     // Test map over range with inline lambda
     let source = r#"
-def test() -> [4]i32 = map(|x| x * 2, 0..<4)
+def test: [4]i32 = map(|x| x * 2, 0..<4)
 "#;
     match compile_through_lowering(source) {
         Ok(_) => {}
@@ -287,7 +287,7 @@ def vertex_main() -> #[builtin(position)] vec4f32 =
 fn test_map_range_with_index() {
     // Test indexing into map result
     let source = r#"
-def test() -> i32 =
+def test: i32 =
     let doubled = map(|x| x * 2, 0..<4) in
     doubled[0]
 "#;
@@ -353,7 +353,7 @@ def slice_test(arr: [10]i32) -> [5]i32 =
 #[test]
 fn test_simple_range_stays_as_range() {
     let source = r#"
-def range_test() -> [5]i32 =
+def range_test: [5]i32 =
     0..<5
 "#;
     // Verify range stays as primitive form by checking compilation succeeds
@@ -368,7 +368,7 @@ def range_test() -> [5]i32 =
 #[test]
 fn test_complex_range_stays_as_range() {
     let source = r#"
-def range_test() -> [5]i32 =
+def range_test: [5]i32 =
     1..<6
 "#;
     // Verify complex range compiles correctly
