@@ -1352,6 +1352,8 @@ impl<'a> TypeChecker<'a> {
                         entry.outputs.iter().map(|o| o.ty.clone()).collect(),
                     ),
                 };
+                // Resolve type aliases (e.g., rand.state -> f32)
+                let expected_type = self.resolve_type_aliases_scoped(&expected_type, None);
 
                 // Validate body type matches declared outputs
                 self.context.unify(&body_type, &expected_type).map_err(|_| {
@@ -1943,8 +1945,14 @@ impl<'a> TypeChecker<'a> {
                 // Infer type of the value expression
                 let value_type = self.infer_expression(&let_in.value)?;
 
+                // Resolve type annotation if present
+                let resolved_annotation = let_in.ty.as_ref().map(|ty| {
+                    let resolved = self.resolve_type_aliases_scoped(ty, self.current_module.as_deref());
+                    self.substitute_from_type_param_scope(&resolved)
+                });
+
                 // Check type annotation if present
-                if let Some(declared_type) = &let_in.ty {
+                if let Some(declared_type) = &resolved_annotation {
                     self.context.unify(&value_type, declared_type).map_err(|_| {
                         err_type_at!(
                             let_in.value.h.span,
@@ -1957,7 +1965,7 @@ impl<'a> TypeChecker<'a> {
 
                 // Push new scope and bind pattern
                 self.scope_stack.push_scope();
-                let bound_type = let_in.ty.as_ref().unwrap_or(&value_type).clone();
+                let bound_type = resolved_annotation.unwrap_or_else(|| value_type.clone());
 
                 // Open existential types: ?k. T becomes T[k'/k] where k' is fresh
                 let bound_type = self.open_existential(bound_type);
@@ -2569,8 +2577,10 @@ impl<'a> TypeChecker<'a> {
             ExprKind::TypeAscription(expr, ascribed_ty) => {
                 // Type ascription: check the inner expression against the ascribed type
                 // This allows integer literals to take on the ascribed type (e.g., 42u32)
-                self.check_expression(expr, ascribed_ty)?;
-                Ok(ascribed_ty.clone())
+                let resolved = self.resolve_type_aliases_scoped(ascribed_ty, self.current_module.as_deref());
+                let substituted = self.substitute_from_type_param_scope(&resolved);
+                self.check_expression(expr, &substituted)?;
+                Ok(substituted)
             }
 
             ExprKind::TypeCoercion(_, _) => {

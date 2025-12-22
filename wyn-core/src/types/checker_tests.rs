@@ -1523,3 +1523,42 @@ def test: f32 =
         "#,
     );
 }
+
+#[test]
+fn test_entry_output_with_qualified_alias() {
+    // Entry output types should resolve qualified type aliases
+    // rand.state -> f32, so returning 1.0f32 should be valid
+    typecheck_program(
+        r#"
+#[fragment]
+def test(x: f32) -> rand.state =
+    1.0f32
+        "#,
+    );
+}
+
+#[test]
+fn test_type_ascription_with_qualified_alias() {
+    // Type ascription should resolve qualified type aliases
+    // rand.state -> f32
+    typecheck_program(
+        r#"
+def test(x: f32) -> f32 =
+    let y = (1.0f32 : rand.state) in
+    y + x
+        "#,
+    );
+}
+
+#[test]
+fn test_let_annotation_with_qualified_alias() {
+    // Let binding type annotations should resolve qualified type aliases
+    // rand.state -> f32
+    typecheck_program(
+        r#"
+def test(x: f32) -> f32 =
+    let y: rand.state = 1.0f32 in
+    y + x
+        "#,
+    );
+}
