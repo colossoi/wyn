@@ -1776,11 +1776,18 @@ impl<'a> TypeChecker<'a> {
                 if !quals.is_empty() {
                     if let Some(lookup) = self.intrinsics.get(&full_name) {
                         use crate::intrinsics::IntrinsicLookup;
-                        let ty = match lookup {
-                            IntrinsicLookup::Single(entry) => entry.scheme.instantiate(&mut self.context),
-                            IntrinsicLookup::Overloaded(overloads) => overloads.fresh_type(&mut self.context),
+                        let (scheme, ty) = match lookup {
+                            IntrinsicLookup::Single(entry) => {
+                                let ty = entry.scheme.instantiate(&mut self.context);
+                                (entry.scheme.clone(), ty)
+                            }
+                            IntrinsicLookup::Overloaded(overloads) => {
+                                // Overloaded intrinsics get fresh type vars; store as monotype
+                                let ty = overloads.fresh_type(&mut self.context);
+                                (TypeScheme::Monotype(ty.clone()), ty)
+                            }
                         };
-                        self.type_table.insert(expr.h.id, polytype::TypeScheme::Monotype(ty.clone()));
+                        self.type_table.insert(expr.h.id, scheme);
                         return Ok(ty);
                     }
 
@@ -1797,29 +1804,38 @@ impl<'a> TypeChecker<'a> {
                 // Check scope stack for variables (use full_name for qualified lookups)
                 if let Some(type_scheme) = self.scope_stack.lookup(&full_name) {
                     debug!("Found '{}' in scope stack with type: {:?}", full_name, type_scheme);
-                    // Instantiate the type scheme to get a concrete type
-                    Ok(type_scheme.instantiate(&mut self.context))
+                    let ty = type_scheme.instantiate(&mut self.context);
+                    self.type_table.insert(expr.h.id, type_scheme.clone());
+                    return Ok(ty);
                 } else if let Some(lookup) = self.intrinsics.get(&full_name) {
                     // Check polymorphic intrinsics for polymorphic function types
                     use crate::intrinsics::IntrinsicLookup;
                     debug!("'{}' is a polymorphic intrinsic", full_name);
-                    let func_type = match lookup {
-                        IntrinsicLookup::Single(entry) => entry.scheme.instantiate(&mut self.context),
-                        IntrinsicLookup::Overloaded(overloads) => overloads.fresh_type(&mut self.context),
+                    let (scheme, func_type) = match lookup {
+                        IntrinsicLookup::Single(entry) => {
+                            let ty = entry.scheme.instantiate(&mut self.context);
+                            (entry.scheme.clone(), ty)
+                        }
+                        IntrinsicLookup::Overloaded(overloads) => {
+                            // Overloaded intrinsics get fresh type vars; store as monotype
+                            let ty = overloads.fresh_type(&mut self.context);
+                            (TypeScheme::Monotype(ty.clone()), ty)
+                        }
                     };
                     debug!("Built function type for intrinsic '{}': {:?}", full_name, func_type);
-                    Ok(func_type)
+                    self.type_table.insert(expr.h.id, scheme);
+                    return Ok(func_type);
                 } else if let Some(type_scheme) = self.get_prelude_function_type_scheme(&full_name) {
                     // Check top-level prelude functions (auto-imported)
                     debug!("'{}' is a prelude function with type: {:?}", full_name, type_scheme);
                     let ty = type_scheme.instantiate(&mut self.context);
                     self.type_table.insert(expr.h.id, type_scheme);
-                    Ok(ty)
+                    return Ok(ty);
                 } else {
                     // Not found anywhere
                     debug!("Variable lookup failed for '{}' - not in scope, intrinsics, or prelude", full_name);
                     debug!("Scope stack contents: {:?}", self.scope_stack);
-                    Err(err_undef_at!(expr.h.span, "{}", full_name))
+                    return Err(err_undef_at!(expr.h.span, "{}", full_name));
                 }
             }
             ExprKind::ArrayLiteral(elements) => {
