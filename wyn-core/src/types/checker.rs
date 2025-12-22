@@ -185,6 +185,18 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
+    /// Check if a type is numeric (Int, UInt, or Float).
+    /// Returns None if the type is a variable (not yet resolved).
+    fn is_numeric_type(ty: &Type) -> Option<bool> {
+        match ty {
+            Type::Constructed(TypeName::Int(_), _) => Some(true),
+            Type::Constructed(TypeName::UInt(_), _) => Some(true),
+            Type::Constructed(TypeName::Float(_), _) => Some(true),
+            Type::Variable(_) => None,
+            _ => Some(false),
+        }
+    }
+
     /// Open an existential type: ?k. T becomes T[#n/k] where #n is a fresh skolem.
     /// This is called when binding an existential value to a variable.
     /// Skolems are rigid constants that only unify with themselves, enforcing opacity.
@@ -2061,8 +2073,17 @@ impl<'a> TypeChecker<'a> {
                         Ok(bool_type)
                     }
                     "+" | "-" | "*" | "/" | "%" | "**" => {
-                        // Arithmetic operators return the same type as operands
-                        Ok(left_type.apply(&self.context))
+                        // Arithmetic operators require numeric operands
+                        let resolved = left_type.apply(&self.context);
+                        if let Some(false) = Self::is_numeric_type(&resolved) {
+                            return Err(err_type_at!(
+                                expr.h.span,
+                                "Arithmetic operator '{}' requires numeric operands, got {}",
+                                op.op,
+                                self.format_type(&resolved)
+                            ));
+                        }
+                        Ok(resolved)
                     }
                     _ => Err(err_type_at!(expr.h.span, "Unknown binary operator: {}", op.op)),
                 }
@@ -2492,8 +2513,16 @@ impl<'a> TypeChecker<'a> {
                 let bool_ty = Type::Constructed(TypeName::Str("bool"), vec![]);
                 match op.op.as_str() {
                     "-" => {
-                        // Numeric negation - operand must be numeric, returns same type
-                        Ok(operand_type)
+                        // Numeric negation - operand must be numeric
+                        let resolved = operand_type.apply(&self.context);
+                        if let Some(false) = Self::is_numeric_type(&resolved) {
+                            return Err(err_type_at!(
+                                operand.h.span,
+                                "Unary minus requires numeric operand, got {}",
+                                self.format_type(&resolved)
+                            ));
+                        }
+                        Ok(resolved)
                     }
                     "!" => {
                         // Logical not - operand must be bool, returns bool
