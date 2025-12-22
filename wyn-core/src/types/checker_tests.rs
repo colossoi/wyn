@@ -431,13 +431,27 @@ fn test_lambda_application() {
 }
 
 #[test]
-fn test_lambda_curried_application() {
-    // Curried lambda partially applied
-    typecheck_program(
-        r#"
+fn test_lambda_curried_application_rejected() {
+    // Curried lambda partially applied - should be rejected
+    assert!(
+        try_typecheck_program(
+            r#"
 def add = |x| |y| x + y
 def add5 = add(5)
 def result: i32 = add5(10)
+"#,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn test_lambda_multi_param() {
+    // Multi-parameter lambda (non-curried)
+    typecheck_program(
+        r#"
+def add = |x, y| x + y
+def result: i32 = add(5, 10)
 "#,
     );
 }
@@ -513,13 +527,28 @@ def result: i32 = apply((|x| x * 2), 5)
 }
 
 #[test]
-fn test_lambda_returned_from_function() {
-    // Function returning a lambda
-    typecheck_program(
-        r#"
+fn test_lambda_returned_from_function_rejected() {
+    // Function returning a lambda - rejected because it creates curried pattern
+    // Type i32 -> (i32 -> i32) requires 2 args under no-curry policy
+    assert!(
+        try_typecheck_program(
+            r#"
 def make_adder(n: i32) -> (i32 -> i32) = |x| x + n
 def add10 = make_adder(10)
 def result: i32 = add10(5)
+"#,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn test_higher_order_apply() {
+    // Higher-order function that takes and applies a function (not returning one)
+    typecheck_program(
+        r#"
+def apply_twice(f: i32 -> i32, x: i32) -> i32 = f(f(x))
+def result: i32 = apply_twice((|x| x * 2), 5)
 "#,
     );
 }
@@ -555,13 +584,28 @@ fn test_lambda_with_tuple_destructuring() {
 }
 
 #[test]
-fn test_lambda_chained_application() {
-    // Chained lambda applications
-    typecheck_program(
-        r#"
+fn test_lambda_chained_application_rejected() {
+    // Chained lambda applications - rejected under no-curry policy
+    assert!(
+        try_typecheck_program(
+            r#"
 def test: i32 =
     let f = |x| |y| |z| x + y + z in
     f(1)(2)(3)
+"#,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn test_lambda_multi_param_application() {
+    // Multi-parameter lambda called with all args at once
+    typecheck_program(
+        r#"
+def test: i32 =
+    let f = |x, y, z| x + y + z in
+    f(1, 2, 3)
 "#,
     );
 }
@@ -628,16 +672,34 @@ def test: bool = gt10(15)
 }
 
 #[test]
-fn test_lambda_compose() {
-    // Function composition with lambdas
-    typecheck_program(
-        r#"
+fn test_lambda_compose_rejected() {
+    // Function composition returning a lambda - rejected under no-curry policy
+    // Type (i32 -> i32) -> (i32 -> i32) -> (i32 -> i32) has 3 arrows, requires 3 args
+    assert!(
+        try_typecheck_program(
+            r#"
 def compose(f: i32 -> i32, g: i32 -> i32) -> (i32 -> i32) =
     |x| f(g(x))
 def double = |x| x * 2
 def inc = |x| x + 1
 def double_then_inc = compose(inc, double)
 def result: i32 = double_then_inc(5)
+"#,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn test_lambda_compose_inline() {
+    // Function composition applied inline (no function-returning-function)
+    typecheck_program(
+        r#"
+def compose_apply(f: i32 -> i32, g: i32 -> i32, x: i32) -> i32 =
+    f(g(x))
+def double = |x| x * 2
+def inc = |x| x + 1
+def result: i32 = compose_apply(inc, double, 5)
 "#,
     );
 }
@@ -835,25 +897,28 @@ def test(mat: mat4f32, verts: [3]vec3f32) -> [3]vec4f32 =
 
 #[test]
 fn test_higher_order_reduce() {
-    // Test reduce function with higher-order operations using explicit parentheses
+    // Test reduce function with 2-arg binary operator
+    // Type f32 -> f32 -> f32 has 2 arrows = requires 2 args
+    // Calling op(init, arr[0]) provides 2 args, so arity check passes
     typecheck_program(
         r#"
 def reduce_f32(op: f32 -> f32 -> f32, init: f32, arr: [4]f32) -> f32 =
-  let x0 = op(init)(arr[0]) in
-  let x1 = op(x0)(arr[1]) in
-  let x2 = op(x1)(arr[2]) in
-  op(x2)(arr[3])
+  let x0 = op(init, arr[0]) in
+  let x1 = op(x0, arr[1]) in
+  let x2 = op(x1, arr[2]) in
+  op(x2, arr[3])
 
-def test: f32 = reduce_f32((|x| |y| x + y), 0.0f32, [1.0f32, 2.0f32, 3.0f32, 4.0f32])
+def test: f32 = reduce_f32((|x, y| x + y), 0.0f32, [1.0f32, 2.0f32, 3.0f32, 4.0f32])
 "#,
     );
 }
 
 #[test]
-fn test_higher_order_reduce_no_parens() {
-    // Test reduce without parentheses - application is left-associative
-    typecheck_program(
-        r#"
+fn test_higher_order_reduce_curried_rejected() {
+    // Curried reduce pattern should be rejected
+    assert!(
+        try_typecheck_program(
+            r#"
 def reduce_f32(op: f32 -> f32 -> f32, init: f32, arr: [4]f32) -> f32 =
   let x0 = op(init)(arr[0]) in
   let x1 = op(x0)(arr[1]) in
@@ -862,27 +927,30 @@ def reduce_f32(op: f32 -> f32 -> f32, init: f32, arr: [4]f32) -> f32 =
 
 def test: f32 = reduce_f32((|x| |y| x + y), 0.0f32, [1.0f32, 2.0f32, 3.0f32, 4.0f32])
 "#,
+        )
+        .is_err()
     );
 }
 
 #[test]
 fn test_nested_map_with_reduce() {
     // Test the nested map pattern used in matrix multiplication
+    // Using curried types but calling with all args at once
     typecheck_program(
         r#"
 def reduce_f32(op: f32 -> f32 -> f32, init: f32, arr: [4]f32) -> f32 =
-  let x0 = op(init)(arr[0]) in
-  let x1 = op(x0)(arr[1]) in
-  let x2 = op(x1)(arr[2]) in
-  op(x2)(arr[3])
+  let x0 = op(init, arr[0]) in
+  let x1 = op(x0, arr[1]) in
+  let x2 = op(x1, arr[2]) in
+  op(x2, arr[3])
 
 def map2_f32(f: f32 -> f32 -> f32, xs: [4]f32, ys: [4]f32) -> [4]f32 =
-  [f(xs[0])(ys[0]), f(xs[1])(ys[1]), f(xs[2])(ys[2]), f(xs[3])(ys[3])]
+  [f(xs[0], ys[0]), f(xs[1], ys[1]), f(xs[2], ys[2]), f(xs[3], ys[3])]
 
 def test: f32 =
   let row = [1.0f32, 2.0f32, 3.0f32, 4.0f32] in
   let col = [5.0f32, 6.0f32, 7.0f32, 8.0f32] in
-  reduce_f32((|x| |y| x + y), 0.0f32, map2_f32((|x| |y| x * y), row, col))
+  reduce_f32((|x, y| x + y), 0.0f32, map2_f32((|x, y| x * y), row, col))
 "#,
     );
 }

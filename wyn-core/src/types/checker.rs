@@ -2157,59 +2157,6 @@ impl<'a> TypeChecker<'a> {
                 Ok(body_type)
             }
             ExprKind::Application(func, args) => {
-                // Check arity for partial application prevention
-                let required_arity: Option<usize> = match &func.kind {
-                    ExprKind::Identifier(quals, name) => {
-                        let full_name = if quals.is_empty() {
-                            name.clone()
-                        } else {
-                            format!("{}.{}", quals.join("."), name)
-                        };
-                        // First check user-defined functions
-                        if let Some(arity) = self.arity_map.get(&full_name).copied() {
-                            Some(arity)
-                        } else if self.scope_stack.lookup(&full_name).is_some() {
-                            // Name is bound locally - don't check builtins
-                            // (local variables shadow builtins, and we can't know their arity)
-                            None
-                        } else {
-                            // Check builtins - extract arity from type scheme
-                            use crate::intrinsics::IntrinsicLookup;
-                            if let Some(lookup) = self.intrinsics.get(&full_name) {
-                                let ty = match lookup {
-                                    IntrinsicLookup::Single(entry) => entry.scheme.instantiate(&mut self.context),
-                                    IntrinsicLookup::Overloaded(overloads) => overloads.fresh_type(&mut self.context),
-                                };
-                                Some(count_arrows(&ty))
-                            } else if !quals.is_empty() {
-                                // Check module functions (e.g., f32.min)
-                                let module_name = &quals[0];
-                                if let Ok(type_scheme) = self.get_module_function_type_scheme(module_name, name) {
-                                    let ty = type_scheme.instantiate(&mut self.context);
-                                    Some(count_arrows(&ty))
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        }
-                    }
-                    ExprKind::Lambda(lambda) => Some(lambda.params.len()),
-                    _ => None,
-                };
-
-                if let Some(arity) = required_arity {
-                    if args.len() < arity {
-                        bail_type_at!(
-                            expr.h.span,
-                            "Partial application not allowed: function requires {} argument(s), but {} provided",
-                            arity,
-                            args.len()
-                        );
-                    }
-                }
-
                 // Check if the function is an overloaded builtin identifier
                 // If so, perform overload resolution based on argument types
                 if let ExprKind::Identifier(quals, name) = &func.kind {
@@ -2261,6 +2208,20 @@ impl<'a> TypeChecker<'a> {
 
                 // Not an overloaded builtin, use standard application
                 let func_type = self.infer_expression(func)?;
+
+                // Check arity for partial application prevention
+                // This is done on the inferred type to catch all cases (let bindings,
+                // conditionals, record fields, etc.) rather than pattern-matching on syntax
+                let resolved_func_type = func_type.apply(&self.context);
+                let arity = count_arrows(&resolved_func_type);
+                if arity > 0 && args.len() < arity {
+                    bail_type_at!(
+                        expr.h.span,
+                        "Partial application not allowed: function requires {} argument(s), but {} provided",
+                        arity,
+                        args.len()
+                    );
+                }
 
                 // Use two-pass application for better lambda inference
                 // This enables proper inference for expressions like (map (\x -> ...) arr)

@@ -795,6 +795,51 @@ Further, type parameters are divided into non-lifted (bound with an apostrophe, 
 
 See also In-place updates for details on how consumption interacts with higher-order functions.
 
+### Function Arity and Partial Application
+
+Wyn functions are **not curried** by default. Every function has a fixed arity (number of arguments) and must be called with exactly that many arguments. Partial application is not allowed.
+
+```wyn
+def add(x: i32, y: i32) -> i32 = x + y
+
+-- Valid: fully applied
+def result = add(1, 2)
+
+-- INVALID: partial application
+def add_one = add(1)  -- Error: function requires 2 arguments
+```
+
+This restriction applies uniformly:
+- Top-level function definitions
+- Lambda expressions
+- Built-in functions
+- Functions passed as higher-order arguments
+
+The restriction exists to simplify compilation to GPU targets and ensure predictable performance.
+
+#### Explicit Currying with Placeholder Syntax
+
+When you need to create a partially applied function, use explicit placeholder syntax with `$`:
+
+```wyn
+def add(x: i32, y: i32) -> i32 = x + y
+
+-- Create a 2-arity function that calls add with middle arg fixed
+def add_with_5 = $add(_, 5, _)  -- Produces (i32, i32) -> i32
+
+-- Create a 1-arity function
+def add_one = $add(_, 1)  -- Produces i32 -> i32
+
+-- Usage
+def result = add_one(5)  -- Returns 6
+```
+
+The `$func(args...)` syntax:
+- `_` marks placeholder positions that become parameters of the new function
+- Non-placeholder arguments are captured at the definition site
+- The resulting function has arity equal to the number of `_` placeholders
+- The resulting function is itself non-curried (requires all placeholders filled at once)
+
 ---
 
 ## Type Inference
