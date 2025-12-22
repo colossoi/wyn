@@ -727,44 +727,40 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Substitute UserVars and SizeVars with bound type variables (recursive helper)
-    /// Substitute UserVar/SizeVar using the current type parameter scope stack.
-    /// Looks up each type variable name in the scope stack to find its binding.
-    fn substitute_from_type_param_scope(&self, ty: &Type) -> Type {
+    /// Generic substitution: walk the type tree and replace any TypeName for which `f` returns Some.
+    fn substitute_named_vars<F>(ty: &Type, f: &F) -> Type
+    where
+        F: Fn(&TypeName) -> Option<Type>,
+    {
         match ty {
-            Type::Constructed(TypeName::UserVar(name), _) => {
-                // Look up in scope stack
-                self.type_param_scope.lookup(name).cloned().unwrap_or_else(|| ty.clone())
-            }
-            Type::Constructed(TypeName::SizeVar(name), _) => {
-                // Look up in scope stack
-                self.type_param_scope.lookup(name).cloned().unwrap_or_else(|| ty.clone())
-            }
             Type::Constructed(name, args) => {
-                let new_args: Vec<Type> =
-                    args.iter().map(|arg| self.substitute_from_type_param_scope(arg)).collect();
-                Type::Constructed(name.clone(), new_args)
+                if let Some(replacement) = f(name) {
+                    replacement
+                } else {
+                    let new_args: Vec<Type> =
+                        args.iter().map(|arg| Self::substitute_named_vars(arg, f)).collect();
+                    Type::Constructed(name.clone(), new_args)
+                }
             }
             Type::Variable(_) => ty.clone(),
         }
     }
 
+    /// Substitute UserVar/SizeVar using the current type parameter scope stack.
+    fn substitute_from_type_param_scope(&self, ty: &Type) -> Type {
+        Self::substitute_named_vars(ty, &|tn| match tn {
+            TypeName::UserVar(name) | TypeName::SizeVar(name) => {
+                self.type_param_scope.lookup(name).cloned()
+            }
+            _ => None,
+        })
+    }
+
     fn substitute_type_params_static(ty: &Type, bindings: &HashMap<String, Type>) -> Type {
-        match ty {
-            Type::Constructed(TypeName::UserVar(name), _) => {
-                // Replace UserVar with the bound type variable
-                bindings.get(name).cloned().unwrap_or_else(|| ty.clone())
-            }
-            Type::Constructed(TypeName::SizeVar(name), _) => {
-                // Replace SizeVar with the bound size variable
-                bindings.get(name).cloned().unwrap_or_else(|| ty.clone())
-            }
-            Type::Constructed(name, args) => {
-                let new_args: Vec<Type> =
-                    args.iter().map(|arg| Self::substitute_type_params_static(arg, bindings)).collect();
-                Type::Constructed(name.clone(), new_args)
-            }
-            Type::Variable(_) => ty.clone(),
-        }
+        Self::substitute_named_vars(ty, &|tn| match tn {
+            TypeName::UserVar(name) | TypeName::SizeVar(name) => bindings.get(name).cloned(),
+            _ => None,
+        })
     }
 
     pub fn load_builtins(&mut self) -> Result<()> {
@@ -1311,7 +1307,7 @@ impl<'a> TypeChecker<'a> {
         }
 
         // Substitute SizeVar/UserVar with Variable in the type
-        let substituted_ty = self.substitute_type_params(ty, &substitutions);
+        let substituted_ty = Self::substitute_type_params(ty, &substitutions);
 
         // Wrap in nested Polytype layers
         let mut result = TypeScheme::Monotype(substituted_ty);
@@ -1326,39 +1322,13 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Recursively substitute SizeVar and UserVar with Variable.
-    fn substitute_type_params(
-        &self,
-        ty: &Type,
-        substitutions: &HashMap<String, polytype::Variable>,
-    ) -> Type {
-        match ty {
-            Type::Constructed(TypeName::SizeVar(name), args) => {
-                if let Some(&var_id) = substitutions.get(name) {
-                    Type::Variable(var_id)
-                } else {
-                    // Not in our substitution map, keep as-is
-                    Type::Constructed(
-                        TypeName::SizeVar(name.clone()),
-                        args.iter().map(|a| self.substitute_type_params(a, substitutions)).collect(),
-                    )
-                }
+    fn substitute_type_params(ty: &Type, substitutions: &HashMap<String, polytype::Variable>) -> Type {
+        Self::substitute_named_vars(ty, &|tn| match tn {
+            TypeName::UserVar(name) | TypeName::SizeVar(name) => {
+                substitutions.get(name).map(|&var_id| Type::Variable(var_id))
             }
-            Type::Constructed(TypeName::UserVar(name), args) => {
-                if let Some(&var_id) = substitutions.get(name) {
-                    Type::Variable(var_id)
-                } else {
-                    Type::Constructed(
-                        TypeName::UserVar(name.clone()),
-                        args.iter().map(|a| self.substitute_type_params(a, substitutions)).collect(),
-                    )
-                }
-            }
-            Type::Constructed(name, args) => Type::Constructed(
-                name.clone(),
-                args.iter().map(|a| self.substitute_type_params(a, substitutions)).collect(),
-            ),
-            Type::Variable(_) => ty.clone(),
-        }
+            _ => None,
+        })
     }
 
     /// Extract type parameters from a type by finding all UserVar and SizeVar.
