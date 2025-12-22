@@ -264,6 +264,14 @@ impl<'a> TypeChecker<'a> {
         // Always generalize the *solved* view
         let applied = ty.apply(&self.context);
 
+        // Assert no unsubstituted UserVar/SizeVar remain - these should have been
+        // substituted with type Variables before generalization
+        debug_assert!(
+            !Self::contains_user_or_size_var(&applied),
+            "Type contains unsubstituted UserVar/SizeVar before generalization: {:?}",
+            applied
+        );
+
         // Free vars in type
         let mut fv_ty = fv_type(&applied);
 
@@ -277,6 +285,21 @@ impl<'a> TypeChecker<'a> {
 
         // Wrap in nested Polytype quantifiers
         quantify(TypeScheme::Monotype(applied), &fv_ty)
+    }
+
+    /// Check if a type contains any unsubstituted UserVar or SizeVar.
+    /// These should be substituted with proper type Variables before generalization.
+    /// Skips checking inside Existential types, as those intentionally contain SizeVar
+    /// for existentially quantified sizes.
+    fn contains_user_or_size_var(ty: &Type) -> bool {
+        match ty {
+            Type::Constructed(TypeName::UserVar(_), _) => true,
+            Type::Constructed(TypeName::SizeVar(_), _) => true,
+            // Skip checking inside Existential - those intentionally use SizeVar
+            Type::Constructed(TypeName::Existential(_), _) => false,
+            Type::Constructed(_, args) => args.iter().any(Self::contains_user_or_size_var),
+            Type::Variable(_) => false,
+        }
     }
 
     /// Try to extract a qualified name from a FieldAccess expression chain
@@ -623,7 +646,8 @@ impl<'a> TypeChecker<'a> {
                 // If return type annotation exists, unify it with the body type
                 let return_type = if let Some(annotated_return_type) = &lambda.return_type {
                     // Substitute any UserVar/SizeVar from enclosing function's type parameters
-                    let substituted_return_type = self.substitute_from_type_param_scope(annotated_return_type);
+                    let substituted_return_type =
+                        self.substitute_from_type_param_scope(annotated_return_type);
                     self.context.unify(&body_type, &substituted_return_type).map_err(|_| {
                         err_type_at!(
                             lambda.body.h.span,
@@ -1193,10 +1217,7 @@ impl<'a> TypeChecker<'a> {
         }
 
         // Get return type (default to unit if not specified)
-        let return_type = decl
-            .ty
-            .clone()
-            .unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![]));
+        let return_type = decl.ty.clone().unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![]));
 
         // Build function type by folding right-to-left
         let mut result_type = return_type;
@@ -1224,10 +1245,7 @@ impl<'a> TypeChecker<'a> {
         }
 
         // Get return type (default to unit if not specified) and resolve aliases
-        let return_type = decl
-            .ty
-            .clone()
-            .unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![]));
+        let return_type = decl.ty.clone().unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![]));
         let return_type = self.resolve_type_aliases_in_module(&return_type, module_name);
 
         // Build function type by folding right-to-left
@@ -1299,9 +1317,7 @@ impl<'a> TypeChecker<'a> {
                     // Not in our substitution map, keep as-is
                     Type::Constructed(
                         TypeName::SizeVar(name.clone()),
-                        args.iter()
-                            .map(|a| self.substitute_type_params(a, substitutions))
-                            .collect(),
+                        args.iter().map(|a| self.substitute_type_params(a, substitutions)).collect(),
                     )
                 }
             }
@@ -1311,17 +1327,13 @@ impl<'a> TypeChecker<'a> {
                 } else {
                     Type::Constructed(
                         TypeName::UserVar(name.clone()),
-                        args.iter()
-                            .map(|a| self.substitute_type_params(a, substitutions))
-                            .collect(),
+                        args.iter().map(|a| self.substitute_type_params(a, substitutions)).collect(),
                     )
                 }
             }
             Type::Constructed(name, args) => Type::Constructed(
                 name.clone(),
-                args.iter()
-                    .map(|a| self.substitute_type_params(a, substitutions))
-                    .collect(),
+                args.iter().map(|a| self.substitute_type_params(a, substitutions)).collect(),
             ),
             Type::Variable(_) => ty.clone(),
         }

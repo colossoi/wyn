@@ -7,7 +7,8 @@ fn check_alias(source: &str) -> AliasCheckResult {
     let desugared = parsed.desugar(&mut frontend.node_counter).expect("desugar failed");
     let resolved = desugared.resolve(&frontend.module_manager).expect("resolve failed");
     let folded = resolved.fold_ast_constants();
-    let type_checked = folded.type_check(&frontend.module_manager, &mut frontend.schemes).expect("type_check failed");
+    let type_checked =
+        folded.type_check(&frontend.module_manager, &mut frontend.schemes).expect("type_check failed");
 
     let checker = AliasChecker::new(&type_checked.type_table, &type_checked.span_table);
     checker.check_program(&type_checked.ast).expect("alias check failed")
@@ -263,9 +264,11 @@ fn analyze_inplace_ops(source: &str) -> InPlaceInfo {
     let desugared = parsed.desugar(&mut frontend.node_counter).expect("desugar failed");
     let resolved = desugared.resolve(&frontend.module_manager).expect("resolve failed");
     let folded = resolved.fold_ast_constants();
-    let type_checked = folded.type_check(&frontend.module_manager, &mut frontend.schemes).expect("type_check failed");
+    let type_checked =
+        folded.type_check(&frontend.module_manager, &mut frontend.schemes).expect("type_check failed");
     let alias_checked = type_checked.alias_check().expect("alias check failed");
-    let (flattened, _backend) = alias_checked.flatten(&frontend.module_manager, &frontend.schemes).expect("flatten failed");
+    let (flattened, _backend) =
+        alias_checked.flatten(&frontend.module_manager, &frontend.schemes).expect("flatten failed");
 
     // For tests without entry points, analyze after flattening (before monomorphization)
     // since filter_reachable would remove all defs without an entry point

@@ -1,8 +1,8 @@
 //! Module manager for lazy loading and caching module definitions
 
 use crate::ast::{
-    Decl, Declaration, ModuleExpression, ModuleTypeExpression, Node, NodeCounter, Pattern,
-    PatternKind, Program, Spec, Type, TypeName,
+    Decl, Declaration, ModuleExpression, ModuleTypeExpression, Node, NodeCounter, Pattern, PatternKind,
+    Program, Spec, Type, TypeName,
 };
 use crate::error::Result;
 use crate::lexer;

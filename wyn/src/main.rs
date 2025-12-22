@@ -286,7 +286,8 @@ fn check_file(input: PathBuf, output_annotated: Option<PathBuf>, verbose: bool) 
     let parsed = Compiler::parse(&source, &mut frontend.node_counter)?;
     let desugared = parsed.desugar(&mut frontend.node_counter)?;
     let resolved = desugared.resolve(&frontend.module_manager)?;
-    let type_checked = resolved.fold_ast_constants().type_check(&frontend.module_manager, &mut frontend.schemes)?;
+    let type_checked =
+        resolved.fold_ast_constants().type_check(&frontend.module_manager, &mut frontend.schemes)?;
 
     type_checked.print_warnings();
 

@@ -4,11 +4,11 @@ use std::sync::{Arc, OnceLock, RwLock};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
+use wyn_core::FrontEnd;
 use wyn_core::TypeTable;
 use wyn_core::ast::{self, NodeCounter, NodeId, Span};
 use wyn_core::module_manager::{ModuleManager, PreElaboratedPrelude};
 use wyn_core::types::format_scheme;
-use wyn_core::FrontEnd;
 
 /// Cached prelude data AND the node counter state after parsing it
 static PRELUDE_CACHE: OnceLock<(PreElaboratedPrelude, NodeCounter)> = OnceLock::new();
