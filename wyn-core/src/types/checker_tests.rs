@@ -1510,3 +1510,16 @@ def test: (f32, f32) =
         "#,
     );
 }
+
+#[test]
+fn test_lambda_param_with_qualified_alias() {
+    // Lambda parameter annotations should resolve qualified type aliases
+    // This tests that |x: rand.state| resolves rand.state -> f32
+    typecheck_program(
+        r#"
+def test: f32 =
+    let f = |x: rand.state| x + 1.0f32 in
+    f(0.5f32)
+        "#,
+    );
+}

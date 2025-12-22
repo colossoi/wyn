@@ -70,6 +70,9 @@ pub struct TypeChecker<'a> {
     type_param_scope: ScopeStack<Type>,
     /// ID source for generating unique skolem constants when opening existential types.
     skolem_ids: crate::IdSource<SkolemId>,
+    /// Current module context for resolving unqualified type aliases in expressions.
+    /// Set during check_decl_as_in_module for module function checking.
+    current_module: Option<String>,
 }
 
 /// Compute free type variables in a Type
@@ -418,6 +421,7 @@ impl<'a> TypeChecker<'a> {
             arity_map: HashMap::new(),
             type_param_scope: ScopeStack::new(),
             skolem_ids: crate::IdSource::new(),
+            current_module: None,
         }
     }
 
@@ -439,8 +443,8 @@ impl<'a> TypeChecker<'a> {
             }
             PatternKind::Typed(_, annotated_type) => {
                 // Pattern has explicit type, resolve any module type aliases
-                // Note: No module context here (used for lambdas); qualified names still resolve
-                self.resolve_type_aliases_scoped(annotated_type, None)
+                // Uses current_module for context (e.g., lambda params inside module functions)
+                self.resolve_type_aliases_scoped(annotated_type, self.current_module.as_deref())
             }
             PatternKind::Attributed(_, inner_pattern) => {
                 // Ignore attributes, recurse on inner pattern
@@ -516,8 +520,8 @@ impl<'a> TypeChecker<'a> {
             }
             PatternKind::Typed(inner_pattern, annotated_type) => {
                 // Resolve module type aliases in the annotation (e.g., rand.state -> f32)
-                // Note: No module context here; qualified names still resolve
-                let resolved_annotation = self.resolve_type_aliases_scoped(annotated_type, None);
+                // Uses current_module for context (e.g., lambda params inside module functions)
+                let resolved_annotation = self.resolve_type_aliases_scoped(annotated_type, self.current_module.as_deref());
                 // Substitute any UserVar/SizeVar from enclosing function's type parameters
                 let substituted_annotation = self.substitute_from_type_param_scope(&resolved_annotation);
                 // Pattern has a type annotation - unify with expected type
@@ -776,7 +780,9 @@ impl<'a> TypeChecker<'a> {
         for (i, param) in lambda.params.iter().enumerate() {
             let param_type = if let Some(annotated_type) = param.pattern_type() {
                 // Explicit annotation takes precedence
-                self.substitute_from_type_param_scope(annotated_type)
+                // First resolve type aliases, then substitute type params
+                let resolved = self.resolve_type_aliases_scoped(annotated_type, self.current_module.as_deref());
+                self.substitute_from_type_param_scope(&resolved)
             } else if let Some(ref expected_params) = expected_param_types {
                 // Use expected type from bidirectional checking
                 expected_params[i].clone()
@@ -1427,6 +1433,10 @@ impl<'a> TypeChecker<'a> {
         scope_name: &str,
         module_name: Option<&str>,
     ) -> Result<()> {
+        // Set current module context for alias resolution in nested expressions
+        let saved_module = self.current_module.take();
+        self.current_module = module_name.map(|s| s.to_string());
+
         // Push a new scope for type parameters
         self.type_param_scope.push_scope();
 
@@ -1510,6 +1520,7 @@ impl<'a> TypeChecker<'a> {
                     scope_name
                 );
                 self.type_param_scope.pop_scope();
+                self.current_module = saved_module;
                 return Ok(());
             }
 
@@ -1577,6 +1588,9 @@ impl<'a> TypeChecker<'a> {
 
         // Pop type parameter scope
         self.type_param_scope.pop_scope();
+
+        // Restore previous module context
+        self.current_module = saved_module;
 
         Ok(())
     }
