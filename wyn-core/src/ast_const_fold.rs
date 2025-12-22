@@ -198,11 +198,6 @@ impl AstConstFolder {
             ExprKind::TypeAscription(inner, _) | ExprKind::TypeCoercion(inner, _) => {
                 self.fold_expr(inner);
             }
-
-            ExprKind::Assert(cond, body) => {
-                self.fold_expr(cond);
-                self.fold_expr(body);
-            }
         }
     }
 

@@ -269,7 +269,7 @@ fn test_question_and_at() {
 
 #[test]
 fn test_new_keywords() {
-    let input = "loop for while do match case assert";
+    let input = "loop for while do match case";
     let tokens = tokens_only(input);
     assert_eq!(
         tokens,
@@ -280,7 +280,6 @@ fn test_new_keywords() {
             Token::Do,
             Token::Match,
             Token::Case,
-            Token::Assert,
         ]
     );
 }

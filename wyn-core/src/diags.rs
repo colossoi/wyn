@@ -530,13 +530,6 @@ impl AstFormatter {
                 let inner_str = self.format_simple_expr(inner);
                 self.write_line(&format!("{} :> {}", inner_str, ty));
             }
-            ExprKind::Assert(cond, body) => {
-                let cond_str = self.format_simple_expr(cond);
-                self.write_line(&format!("assert {}", cond_str));
-                self.indent += 1;
-                self.write_expression(body);
-                self.indent -= 1;
-            }
             ExprKind::TypeHole => {
                 self.write_line("???");
             }

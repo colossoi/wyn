@@ -358,10 +358,6 @@ fn find_in_expr(expr: &ast::Expression, line: usize, col: usize, best: &mut Opti
         TypeCoercion(inner, _) | TypeAscription(inner, _) => {
             find_in_expr(inner, line, col, best);
         }
-        Assert(cond, body) => {
-            find_in_expr(cond, line, col, best);
-            find_in_expr(body, line, col, best);
-        }
         Range(range_expr) => {
             find_in_expr(&range_expr.start, line, col, best);
             if let Some(step) = &range_expr.step {

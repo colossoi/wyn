@@ -61,7 +61,6 @@ pub enum Token {
     Type,
     Include,
     With,
-    Assert,
 
     // Identifiers and literals
     Identifier(String),
@@ -141,7 +140,6 @@ fn parse_keyword(input: &str) -> IResult<&str, Token> {
             keyword("module", Token::Module),
             keyword("import", Token::Import),
             keyword("include", Token::Include),
-            keyword("assert", Token::Assert),
             keyword("match", Token::Match),
             keyword("case", Token::Case),
         )),

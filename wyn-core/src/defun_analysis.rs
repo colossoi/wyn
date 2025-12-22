@@ -300,12 +300,6 @@ impl<'a> DefunAnalyzer<'a> {
                 self.classifications.insert(expr.h.id, StaticValue::Dyn);
             }
 
-            ExprKind::Assert(cond, body) => {
-                self.analyze_expr(cond);
-                self.analyze_expr(body);
-                self.classifications.insert(expr.h.id, StaticValue::Dyn);
-            }
-
             ExprKind::Match(match_expr) => {
                 self.analyze_expr(&match_expr.scrutinee);
                 for case in &match_expr.cases {
@@ -472,10 +466,6 @@ impl<'a> DefunAnalyzer<'a> {
             ExprKind::TypeAscription(inner, _) | ExprKind::TypeCoercion(inner, _) => {
                 self.collect_free_vars(inner, bound, free);
             }
-            ExprKind::Assert(cond, body) => {
-                self.collect_free_vars(cond, bound, free);
-                self.collect_free_vars(body, bound, free);
-            }
             ExprKind::Match(match_expr) => {
                 self.collect_free_vars(&match_expr.scrutinee, bound, free);
                 for case in &match_expr.cases {
@@ -568,9 +558,6 @@ impl<'a> DefunAnalyzer<'a> {
             ExprKind::TypeAscription(inner, _) | ExprKind::TypeCoercion(inner, _) => {
                 self.find_var_type_in_expr(inner, var_name)
             }
-            ExprKind::Assert(cond, body) => self
-                .find_var_type_in_expr(cond, var_name)
-                .or_else(|| self.find_var_type_in_expr(body, var_name)),
             ExprKind::Match(match_expr) => {
                 if let Some(ty) = self.find_var_type_in_expr(&match_expr.scrutinee, var_name) {
                     return Some(ty);

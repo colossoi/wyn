@@ -233,21 +233,12 @@ pub fn walk_declaration<V: Visitor>(v: &mut V, d: &Declaration) -> ControlFlow<V
         Declaration::Uniform(uniform) => v.visit_uniform_decl(uniform),
         Declaration::Storage(storage) => v.visit_storage_decl(storage),
         Declaration::Sig(sig) => v.visit_sig_decl(sig),
-        Declaration::TypeBind(_) => {
-            unimplemented!("Type bindings are not yet supported in visitor")
-        }
-        Declaration::ModuleBind(_) => {
-            unimplemented!("Module bindings are not yet supported in visitor")
-        }
-        Declaration::ModuleTypeBind(_) => {
-            unimplemented!("Module type bindings are not yet supported in visitor")
-        }
-        Declaration::Open(_) => {
-            unimplemented!("Open declarations are not yet supported in visitor")
-        }
-        Declaration::Import(_) => {
-            unimplemented!("Import declarations are not yet supported in visitor")
-        }
+        // These declarations have no expressions to visit
+        Declaration::TypeBind(_)
+        | Declaration::ModuleBind(_)
+        | Declaration::ModuleTypeBind(_)
+        | Declaration::Open(_)
+        | Declaration::Import(_) => ControlFlow::Continue(()),
     }
 }
 
@@ -401,10 +392,6 @@ pub fn walk_expression<V: Visitor>(v: &mut V, e: &Expression) -> ControlFlow<V::
         ExprKind::Slice(slice_expr) => v.visit_expr_slice(id, slice_expr),
         ExprKind::TypeAscription(expr, _) => v.visit_expression(expr),
         ExprKind::TypeCoercion(expr, _) => v.visit_expression(expr),
-        ExprKind::Assert(cond, expr) => {
-            v.visit_expression(cond)?;
-            v.visit_expression(expr)
-        }
         ExprKind::VecMatLiteral(elements) => {
             for elem in elements {
                 v.visit_expression(elem)?;

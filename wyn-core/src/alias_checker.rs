@@ -839,10 +839,6 @@ fn collect_variable_uses_in_expr(expr: &Expression, uses: &mut HashMap<String, V
         ExprKind::TypeAscription(expr, _) | ExprKind::TypeCoercion(expr, _) => {
             collect_variable_uses_in_expr(expr, uses);
         }
-        ExprKind::Assert(cond, expr) => {
-            collect_variable_uses_in_expr(cond, uses);
-            collect_variable_uses_in_expr(expr, uses);
-        }
         ExprKind::VecMatLiteral(elems) => {
             for elem in elems {
                 collect_variable_uses_in_expr(elem, uses);

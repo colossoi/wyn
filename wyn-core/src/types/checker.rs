@@ -2469,7 +2469,10 @@ impl<'a> TypeChecker<'a> {
             }
 
             ExprKind::Match(_) => {
-                todo!("Match not yet implemented in type checker")
+                Err(err_type_at!(
+                    expr.h.span,
+                    "match expressions are not yet supported"
+                ))
             }
 
             ExprKind::Range(range) => {
@@ -2626,11 +2629,10 @@ impl<'a> TypeChecker<'a> {
             }
 
             ExprKind::TypeCoercion(_, _) => {
-                todo!("TypeCoercion not yet implemented in type checker")
-            }
-
-            ExprKind::Assert(_, _) => {
-                todo!("Assert not yet implemented in type checker")
+                Err(err_type_at!(
+                    expr.h.span,
+                    "type coercion (:>) is not yet supported"
+                ))
             }
         } // NEWCASESHERE - add new cases before this closing brace
         ?;

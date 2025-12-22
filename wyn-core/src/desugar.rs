@@ -119,10 +119,6 @@ impl<'a> Desugarer<'a> {
             ExprKind::TypeAscription(inner, _) | ExprKind::TypeCoercion(inner, _) => {
                 self.desugar_expr(inner)?;
             }
-            ExprKind::Assert(cond, body) => {
-                self.desugar_expr(cond)?;
-                self.desugar_expr(body)?;
-            }
             // Leaf expressions - nothing to desugar inside
             ExprKind::IntLiteral(_)
             | ExprKind::FloatLiteral(_)

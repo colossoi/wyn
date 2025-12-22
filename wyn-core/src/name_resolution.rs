@@ -120,10 +120,6 @@ fn resolve_expr(expr: &mut Expression, module_manager: &ModuleManager) -> Result
         ExprKind::TypeAscription(e, _) | ExprKind::TypeCoercion(e, _) => {
             resolve_expr(e, module_manager)?;
         }
-        ExprKind::Assert(cond, body) => {
-            resolve_expr(cond, module_manager)?;
-            resolve_expr(body, module_manager)?;
-        }
         ExprKind::Range(range) => {
             resolve_expr(&mut range.start, module_manager)?;
             resolve_expr(&mut range.end, module_manager)?;

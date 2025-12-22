@@ -491,7 +491,6 @@ pub enum ExprKind {
     Slice(SliceExpr),                         // array slicing: a[i:j:s]
     TypeAscription(Box<Expression>, Type),    // exp : type
     TypeCoercion(Box<Expression>, Type),      // exp :> type
-    Assert(Box<Expression>, Box<Expression>), // assert cond exp
     TypeHole,                                 // ??? - placeholder for any expression
 }
 

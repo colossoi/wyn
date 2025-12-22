@@ -818,11 +818,10 @@ impl<'a> Parser<'a> {
                         bail_parse!("Expected size in array type application");
                     }
                 }
-                // Regular type argument application
+                // Regular type argument application - not yet supported
                 Some(Token::Identifier(_)) | Some(Token::LeftParen) | Some(Token::LeftBrace) => {
-                    let _arg_type = self.parse_array_or_base_type()?;
-                    unimplemented!(
-                        "Type constructor application (e.g., 'F T') is not yet supported. This feature allows applying type arguments to type constructors."
+                    bail_parse!(
+                        "Type constructor application (e.g., 'F T') is not yet supported"
                     );
                 }
                 _ => break,
@@ -1670,7 +1669,6 @@ impl<'a> Parser<'a> {
             Some(Token::If) => self.parse_if_then_else(),
             Some(Token::Loop) => self.parse_loop(),
             Some(Token::Match) => self.parse_match(),
-            Some(Token::Assert) => self.parse_assert(),
             Some(Token::DollarSign) => self.parse_curry_expression(),
             _ => {
                 let span = self.current_span();
@@ -2142,18 +2140,6 @@ impl<'a> Parser<'a> {
 
         let span = start_span.merge(&last_span);
         Ok(self.node_counter.mk_node(ExprKind::Match(MatchExpr { scrutinee, cases }), span))
-    }
-
-    fn parse_assert(&mut self) -> Result<Expression> {
-        trace!("parse_assert: next token = {:?}", self.peek());
-        let start_span = self.current_span();
-        self.expect(Token::Assert)?;
-        // According to grammar: "assert" atom exp
-        // atom is a primary expression (condition)
-        let condition = Box::new(self.parse_primary_expression()?);
-        let body = Box::new(self.parse_expression()?);
-        let span = start_span.merge(&body.h.span);
-        Ok(self.node_counter.mk_node(ExprKind::Assert(condition, body), span))
     }
 
     // Helper methods

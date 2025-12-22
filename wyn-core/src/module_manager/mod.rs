@@ -884,10 +884,6 @@ impl ModuleManager {
             ExprKind::TypeAscription(inner, _) | ExprKind::TypeCoercion(inner, _) => {
                 self.resolve_names_in_expr(inner, module_name, module_functions, local_bindings);
             }
-            ExprKind::Assert(cond, body) => {
-                self.resolve_names_in_expr(cond, module_name, module_functions, local_bindings);
-                self.resolve_names_in_expr(body, module_name, module_functions, local_bindings);
-            }
             // Leaf expressions - nothing to resolve
             ExprKind::IntLiteral(_)
             | ExprKind::FloatLiteral(_)

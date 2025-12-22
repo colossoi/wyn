@@ -1079,17 +1079,6 @@ impl Flattener {
                 // Type annotations don't affect runtime, just flatten inner
                 return self.flatten_expr(inner);
             }
-            ExprKind::Assert(cond, body) => {
-                let (cond_id, _) = self.flatten_expr(cond)?;
-                let (body_id, _) = self.flatten_expr(body)?;
-                (
-                    mir::Expr::Intrinsic {
-                        name: "assert".to_string(),
-                        args: vec![cond_id, body_id],
-                    },
-                    StaticValue::Dyn,
-                )
-            }
             ExprKind::TypeHole => {
                 bail_flatten!("Type holes should be resolved before flattening");
             }
