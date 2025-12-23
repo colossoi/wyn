@@ -216,3 +216,31 @@ def scatter_test(dest: [5]i32, indices: [2]i32, values: [2]i32) -> [5]i32 =
     assert!(!spirv.is_empty());
     assert_eq!(spirv[0], 0x07230203);
 }
+
+#[test]
+fn test_reduce_by_index() {
+    // Histogram / reduce_by_index: accumulate values at indices using operator
+    let spirv = compile_to_spirv(
+        r#"
+def hist_test(dest: [3]i32, indices: [4]i32, values: [4]i32) -> [3]i32 =
+    reduce_by_index(dest, |a, b| a + b, 0, indices, values)
+"#,
+    )
+    .unwrap();
+    assert!(!spirv.is_empty());
+    assert_eq!(spirv[0], 0x07230203);
+}
+
+#[test]
+fn test_hist() {
+    // hist is an alias for reduce_by_index
+    let spirv = compile_to_spirv(
+        r#"
+def hist_alias_test(dest: [3]i32, indices: [4]i32, values: [4]i32) -> [3]i32 =
+    hist(dest, |a, b| a + b, 0, indices, values)
+"#,
+    )
+    .unwrap();
+    assert!(!spirv.is_empty());
+    assert_eq!(spirv[0], 0x07230203);
+}

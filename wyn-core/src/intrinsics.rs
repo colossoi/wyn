@@ -444,6 +444,23 @@ impl IntrinsicSource {
             result_array,
         );
 
+        // _w_intrinsic_hist_1d : [n]a -> (a -> a -> a) -> a -> [m]i32 -> [m]a -> [n]a
+        // hist_1d dest op ne indices values: for each i, dest[indices[i]] = op(dest[indices[i]], values[i])
+        let a = ctx.new_variable();
+        let n = ctx.new_variable();
+        let m = ctx.new_variable();
+        let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+        let op_type = Type::arrow(a.clone(), Type::arrow(a.clone(), a.clone())); // a -> a -> a
+        let dest_array = Type::Constructed(TypeName::Array, vec![n.clone(), a.clone()]);
+        let indices_array = Type::Constructed(TypeName::Array, vec![m.clone(), i32_ty]);
+        let values_array = Type::Constructed(TypeName::Array, vec![m, a.clone()]);
+        let result_array = Type::Constructed(TypeName::Array, vec![n, a.clone()]);
+        self.register_poly(
+            "_w_intrinsic_hist_1d",
+            vec![dest_array, op_type, a, indices_array, values_array],
+            result_array,
+        );
+
         // Misc utility intrinsics
         self.register_misc_intrinsics();
     }

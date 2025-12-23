@@ -1636,6 +1636,9 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                 "_w_intrinsic_scatter" => {
                     return lower_scatter(constructor, body, args, result_type);
                 }
+                "_w_intrinsic_hist_1d" => {
+                    return lower_hist_1d(constructor, body, args, result_type);
+                }
                 "_w_intrinsic_length" => {
                     return lower_length(constructor, body, args);
                 }
@@ -2839,6 +2842,78 @@ fn lower_scatter(
             result_elem = constructor.builder.select(elem_type, None, matches, value, result_elem)?;
         }
         result_elements.push(result_elem);
+    }
+
+    Ok(constructor.builder.composite_construct(result_type, None, result_elements)?)
+}
+
+/// Lower `hist_1d` SOAC: hist_1d dest op ne indices values
+/// For each destination index, accumulate values using op where indices match.
+fn lower_hist_1d(
+    constructor: &mut Constructor,
+    body: &Body,
+    args: &[ExprId],
+    result_type: spirv::Word,
+) -> Result<spirv::Word> {
+    if args.len() != 5 {
+        bail_spirv!(
+            "hist_1d requires 5 args (dest, op, ne, indices, values), got {}",
+            args.len()
+        );
+    }
+
+    let dest_val = lower_expr(constructor, body, args[0])?;
+    let (func_name, closure_val, is_empty_closure) = extract_closure_info(constructor, body, args[1])?;
+    let _neutral_val = lower_expr(constructor, body, args[2])?; // Used for initialization, but we use dest values
+    let indices_val = lower_expr(constructor, body, args[3])?;
+    let values_val = lower_expr(constructor, body, args[4])?;
+
+    let dest_ty = body.get_type(args[0]);
+    let indices_ty = body.get_type(args[3]);
+
+    let (dest_size, elem_type) = extract_array_info(constructor, dest_ty)?;
+    let (scatter_size, _) = extract_array_info(constructor, indices_ty)?;
+
+    let op_func_id = *constructor
+        .functions
+        .get(&func_name)
+        .ok_or_else(|| err_spirv!("Operator function not found: {}", func_name))?;
+
+    // For each destination index, accumulate matching values using the operator
+    let mut result_elements = Vec::with_capacity(dest_size as usize);
+
+    for dest_idx in 0..dest_size {
+        let dest_idx_const = constructor.const_i32(dest_idx as i32);
+        let orig_elem = constructor.builder.composite_extract(elem_type, None, dest_val, [dest_idx])?;
+
+        // Accumulate values where indices match this destination index
+        let mut acc = orig_elem;
+        for scatter_idx in 0..scatter_size {
+            let index = constructor.builder.composite_extract(
+                constructor.i32_type,
+                None,
+                indices_val,
+                [scatter_idx],
+            )?;
+            let value =
+                constructor.builder.composite_extract(elem_type, None, values_val, [scatter_idx])?;
+
+            // Check if this index matches the current destination
+            let matches =
+                constructor.builder.i_equal(constructor.bool_type, None, index, dest_idx_const)?;
+
+            // Apply operator: new_acc = op(acc, value)
+            let call_args = if is_empty_closure {
+                vec![acc, value]
+            } else {
+                vec![closure_val, acc, value]
+            };
+            let combined = constructor.builder.function_call(elem_type, None, op_func_id, call_args)?;
+
+            // Select: if matches then combined else acc
+            acc = constructor.builder.select(elem_type, None, matches, combined, acc)?;
+        }
+        result_elements.push(acc);
     }
 
     Ok(constructor.builder.composite_construct(result_type, None, result_elements)?)

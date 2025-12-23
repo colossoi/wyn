@@ -137,3 +137,17 @@ def partition<[n], A>(p: A -> bool, xs: [n]A) =
 -- Place values at indices in array filled with default value
 def spread<[n], [m], A>(size: i32, default: A, indices: [m]i32, values: [m]A) -> [n]A =
   scatter(replicate(size, default), indices, values)
+
+------------------------------------------------------------
+-- Histogram / Reduce by index
+------------------------------------------------------------
+
+-- Generalized histogram: reduce values into destination using operator
+-- For each i: dest[indices[i]] = op(dest[indices[i]], values[i])
+-- Multiple values at the same index are combined using the operator
+def reduce_by_index<[n], [m], A>(dest: [n]A, op: A -> A -> A, ne: A, indices: [m]i32, values: [m]A) -> [n]A =
+  _w_intrinsic_hist_1d(dest, op, ne, indices, values)
+
+-- Histogram (alias for reduce_by_index)
+def hist<[n], [m], A>(dest: [n]A, op: A -> A -> A, ne: A, indices: [m]i32, values: [m]A) -> [n]A =
+  reduce_by_index(dest, op, ne, indices, values)
