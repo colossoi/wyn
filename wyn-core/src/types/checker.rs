@@ -9,8 +9,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 // Import type helper functions from parent module
 use super::{
-    as_arrow, bool_type, f32, function, i32, mat, record, sized_array, string, strip_unique,
-    tuple, unit, vec,
+    as_arrow, bool_type, f32, function, i32, mat, record, sized_array, string, strip_unique, tuple, unit,
+    vec,
 };
 
 /// Trait for generating fresh type variables
@@ -255,13 +255,12 @@ impl<'a> TypeChecker<'a> {
     /// - Recursively resolves nested aliases
     fn resolve_type_aliases_scoped(&self, ty: &Type, current_module: Option<&str>) -> Type {
         let mut visited = Vec::new();
-        self.resolve_type_aliases_impl(ty, current_module, &mut visited)
-            .unwrap_or_else(|cycle_err| {
-                // Return the original type on cycle - error will be caught elsewhere
-                // or we could log it. For now, just return unresolved.
-                log::error!("{}", cycle_err);
-                ty.clone()
-            })
+        self.resolve_type_aliases_impl(ty, current_module, &mut visited).unwrap_or_else(|cycle_err| {
+            // Return the original type on cycle - error will be caught elsewhere
+            // or we could log it. For now, just return unresolved.
+            log::error!("{}", cycle_err);
+            ty.clone()
+        })
     }
 
     fn resolve_type_aliases_impl(
@@ -563,7 +562,8 @@ impl<'a> TypeChecker<'a> {
             PatternKind::Typed(inner_pattern, annotated_type) => {
                 // Resolve module type aliases in the annotation (e.g., rand.state -> f32)
                 // Uses current_module for context (e.g., lambda params inside module functions)
-                let resolved_annotation = self.resolve_type_aliases_scoped(annotated_type, self.current_module.as_deref());
+                let resolved_annotation =
+                    self.resolve_type_aliases_scoped(annotated_type, self.current_module.as_deref());
                 // Substitute any UserVar/SizeVar from enclosing function's type parameters
                 let substituted_annotation = self.substitute_from_type_param_scope(&resolved_annotation);
                 // Pattern has a type annotation - unify with expected type
@@ -823,7 +823,8 @@ impl<'a> TypeChecker<'a> {
             let param_type = if let Some(annotated_type) = param.pattern_type() {
                 // Explicit annotation takes precedence
                 // First resolve type aliases, then substitute type params
-                let resolved = self.resolve_type_aliases_scoped(annotated_type, self.current_module.as_deref());
+                let resolved =
+                    self.resolve_type_aliases_scoped(annotated_type, self.current_module.as_deref());
                 self.substitute_from_type_param_scope(&resolved)
             } else if let Some(ref expected_params) = expected_param_types {
                 // Use expected type from bidirectional checking
@@ -1507,8 +1508,8 @@ impl<'a> TypeChecker<'a> {
         if decl.params.is_empty() {
             // Variable or entry point declaration: let/def name: type = value or let/def name = value
             // Resolve type aliases in declared type (e.g., rand.state -> f32)
-            let resolved_declared_type = decl.ty.as_ref()
-                .map(|ty| self.resolve_type_aliases_scoped(ty, module_name));
+            let resolved_declared_type =
+                decl.ty.as_ref().map(|ty| self.resolve_type_aliases_scoped(ty, module_name));
 
             let expr_type = if let Some(ref declared_type) = resolved_declared_type {
                 // Use bidirectional checking when type annotation is present
@@ -1568,8 +1569,12 @@ impl<'a> TypeChecker<'a> {
                 return Ok(());
             }
 
-            let (param_types, body_type) =
-                self.check_function_with_params(&decl.params, &decl.body, &type_param_bindings, module_name)?;
+            let (param_types, body_type) = self.check_function_with_params(
+                &decl.params,
+                &decl.body,
+                &type_param_bindings,
+                module_name,
+            )?;
             debug!(
                 "Successfully inferred body type for '{}': {:?}",
                 decl.name, body_type
@@ -2652,11 +2657,8 @@ impl<'a> TypeChecker<'a> {
 
         match &func.kind {
             ExprKind::Identifier(quals, name) => {
-                let full_name = if quals.is_empty() {
-                    name.clone()
-                } else {
-                    format!("{}.{}", quals.join("."), name)
-                };
+                let full_name =
+                    if quals.is_empty() { name.clone() } else { format!("{}.{}", quals.join("."), name) };
 
                 // 1) Lexical scope first (local variables shadow intrinsics)
                 if let Some(scheme) = self.scope_stack.lookup(&full_name).cloned() {
@@ -2789,15 +2791,13 @@ impl<'a> TypeChecker<'a> {
                 let result_type = self.context.new_variable();
                 let expected_func_type = Type::arrow(expected_lambda_type.clone(), result_type.clone());
 
-                self.context
-                    .unify(&func_type, &expected_func_type)
-                    .map_err(|_| {
-                        err_type_at!(
-                            arg.h.span,
-                            "Cannot apply {} as a function",
-                            self.format_type(&func_type)
-                        )
-                    })?;
+                self.context.unify(&func_type, &expected_func_type).map_err(|_| {
+                    err_type_at!(
+                        arg.h.span,
+                        "Cannot apply {} as a function",
+                        self.format_type(&func_type)
+                    )
+                })?;
 
                 // Store the whole expected lambda type (not just first param)
                 lambda_expected_types[i] = Some(expected_lambda_type);
@@ -2813,15 +2813,13 @@ impl<'a> TypeChecker<'a> {
                 let result_type = self.context.new_variable();
                 let expected_func_type = Type::arrow(param_type_var.clone(), result_type.clone());
 
-                self.context
-                    .unify(&func_type, &expected_func_type)
-                    .map_err(|_| {
-                        err_type_at!(
-                            arg.h.span,
-                            "Cannot apply {} as a function",
-                            self.format_type(&func_type)
-                        )
-                    })?;
+                self.context.unify(&func_type, &expected_func_type).map_err(|_| {
+                    err_type_at!(
+                        arg.h.span,
+                        "Cannot apply {} as a function",
+                        self.format_type(&func_type)
+                    )
+                })?;
 
                 // Extract the expected parameter type
                 let expected_param_type = param_type_var.apply(&self.context);

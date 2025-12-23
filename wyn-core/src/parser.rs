@@ -820,9 +820,7 @@ impl<'a> Parser<'a> {
                 }
                 // Regular type argument application - not yet supported
                 Some(Token::Identifier(_)) | Some(Token::LeftParen) | Some(Token::LeftBrace) => {
-                    bail_parse!(
-                        "Type constructor application (e.g., 'F T') is not yet supported"
-                    );
+                    bail_parse!("Type constructor application (e.g., 'F T') is not yet supported");
                 }
                 _ => break,
             }

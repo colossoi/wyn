@@ -244,3 +244,27 @@ def hist_alias_test(dest: [3]i32, indices: [4]i32, values: [4]i32) -> [3]i32 =
     assert!(!spirv.is_empty());
     assert_eq!(spirv[0], 0x07230203);
 }
+
+#[test]
+fn test_algebraic_simplifications() {
+    // Test all algebraic identity simplifications compile correctly
+    let spirv = compile_to_spirv(
+        r#"
+def test(x: f32) -> f32 =
+    (0.0 - x) +     -- 0 - x → -x
+    (0.0 + x) +     -- 0 + x → x
+    (x + 0.0) +     -- x + 0 → x
+    (x - 0.0) +     -- x - 0 → x
+    (0.0 * x) +     -- 0 * x → 0
+    (x * 0.0) +     -- x * 0 → 0
+    (1.0 * x) +     -- 1 * x → x
+    (x * 1.0) +     -- x * 1 → x
+    (x / 1.0) +     -- x / 1 → x
+    (-1.0 * x) +    -- -1 * x → -x
+    (x * -1.0)      -- x * -1 → -x
+"#,
+    )
+    .unwrap();
+    assert!(!spirv.is_empty());
+    assert_eq!(spirv[0], 0x07230203);
+}

@@ -2903,11 +2903,7 @@ fn lower_hist_1d(
                 constructor.builder.i_equal(constructor.bool_type, None, index, dest_idx_const)?;
 
             // Apply operator: new_acc = op(acc, value)
-            let call_args = if is_empty_closure {
-                vec![acc, value]
-            } else {
-                vec![closure_val, acc, value]
-            };
+            let call_args = if is_empty_closure { vec![acc, value] } else { vec![closure_val, acc, value] };
             let combined = constructor.builder.function_call(elem_type, None, op_func_id, call_args)?;
 
             // Select: if matches then combined else acc

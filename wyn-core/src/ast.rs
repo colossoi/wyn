@@ -483,15 +483,15 @@ pub enum ExprKind {
     Lambda(LambdaExpr),
     Application(Box<Expression>, Vec<Expression>), // Function application
     LetIn(LetInExpr),
-    FieldAccess(Box<Expression>, String),     // e.g. v.x, v.y
-    If(IfExpr),                               // if-then-else expression
-    Loop(LoopExpr),                           // loop expression
-    Match(MatchExpr),                         // match expression
-    Range(RangeExpr),                         // range expressions: a..b, a..<b, a..>b, a...b
-    Slice(SliceExpr),                         // array slicing: a[i:j:s]
-    TypeAscription(Box<Expression>, Type),    // exp : type
-    TypeCoercion(Box<Expression>, Type),      // exp :> type
-    TypeHole,                                 // ??? - placeholder for any expression
+    FieldAccess(Box<Expression>, String),  // e.g. v.x, v.y
+    If(IfExpr),                            // if-then-else expression
+    Loop(LoopExpr),                        // loop expression
+    Match(MatchExpr),                      // match expression
+    Range(RangeExpr),                      // range expressions: a..b, a..<b, a..>b, a...b
+    Slice(SliceExpr),                      // array slicing: a[i:j:s]
+    TypeAscription(Box<Expression>, Type), // exp : type
+    TypeCoercion(Box<Expression>, Type),   // exp :> type
+    TypeHole,                              // ??? - placeholder for any expression
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -1,4 +1,4 @@
-use crate::ast::{BinaryOp, ExprKind, Expression, Header, NodeId, Span};
+use crate::ast::{BinaryOp, ExprKind, Expression, Header, NodeId, Span, UnaryOp};
 use crate::ast_const_fold::AstConstFolder;
 
 fn test_header() -> Header {
@@ -26,6 +26,13 @@ fn make_binop(op: &str, lhs: Expression, rhs: Expression) -> Expression {
     Expression {
         h: test_header(),
         kind: ExprKind::BinaryOp(BinaryOp { op: op.to_string() }, Box::new(lhs), Box::new(rhs)),
+    }
+}
+
+fn make_float(n: f32) -> Expression {
+    Expression {
+        h: test_header(),
+        kind: ExprKind::FloatLiteral(n),
     }
 }
 
@@ -209,4 +216,57 @@ fn test_fold_slice_no_fold_with_variable() {
     } else {
         panic!("Expected Slice, got {:?}", expr.kind);
     }
+}
+
+// =============================================================================
+// Zero Subtraction to Negation Optimization Tests
+// =============================================================================
+
+#[test]
+fn test_zero_minus_float_becomes_negation() {
+    let mut folder = AstConstFolder::new();
+    // 0.0 - x should become -x
+    let mut expr = make_binop("-", make_float(0.0), make_ident("x"));
+    folder.fold_expr(&mut expr);
+
+    if let ExprKind::UnaryOp(op, operand) = &expr.kind {
+        assert_eq!(op.op, "-", "Should be negation operator");
+        assert!(
+            matches!(operand.kind, ExprKind::Identifier(_, ref name) if name == "x"),
+            "Operand should be x"
+        );
+    } else {
+        panic!("Expected UnaryOp, got {:?}", expr.kind);
+    }
+}
+
+#[test]
+fn test_zero_minus_int_becomes_negation() {
+    let mut folder = AstConstFolder::new();
+    // 0 - y should become -y
+    let mut expr = make_binop("-", make_int(0), make_ident("y"));
+    folder.fold_expr(&mut expr);
+
+    if let ExprKind::UnaryOp(op, operand) = &expr.kind {
+        assert_eq!(op.op, "-", "Should be negation operator");
+        assert!(
+            matches!(operand.kind, ExprKind::Identifier(_, ref name) if name == "y"),
+            "Operand should be y"
+        );
+    } else {
+        panic!("Expected UnaryOp, got {:?}", expr.kind);
+    }
+}
+
+#[test]
+fn test_nonzero_minus_does_not_become_negation() {
+    let mut folder = AstConstFolder::new();
+    // 1.0 - x should NOT become negation
+    let mut expr = make_binop("-", make_float(1.0), make_ident("x"));
+    folder.fold_expr(&mut expr);
+
+    assert!(
+        matches!(expr.kind, ExprKind::BinaryOp(..)),
+        "Non-zero subtraction should remain BinaryOp"
+    );
 }

@@ -104,12 +104,15 @@ impl AstConstFolder {
                 }
             }
 
-            ExprKind::BinaryOp(op, lhs, rhs) => {
+            ExprKind::BinaryOp(ref op, ref mut lhs, ref mut rhs) => {
                 self.fold_expr(lhs);
                 self.fold_expr(rhs);
                 // Try to fold after children are folded
                 if let Some(val) = self.try_fold_binop(&op.op, lhs, rhs) {
                     expr.kind = ExprKind::IntLiteral(val as i32);
+                } else {
+                    // Try algebraic identity rewrites
+                    Self::try_algebraic_simplify(expr);
                 }
             }
 
@@ -313,6 +316,100 @@ impl AstConstFolder {
         match op {
             "-" => Some(-v),
             _ => None,
+        }
+    }
+
+    /// Check if an expression is a zero literal (int or float)
+    fn is_zero(expr: &Expression) -> bool {
+        match &expr.kind {
+            ExprKind::IntLiteral(0) => true,
+            ExprKind::FloatLiteral(v) => *v == 0.0,
+            _ => false,
+        }
+    }
+
+    /// Check if an expression is a one literal (int or float)
+    fn is_one(expr: &Expression) -> bool {
+        match &expr.kind {
+            ExprKind::IntLiteral(1) => true,
+            ExprKind::FloatLiteral(v) => *v == 1.0,
+            _ => false,
+        }
+    }
+
+    /// Check if an expression is a negative one literal (int or float)
+    fn is_neg_one(expr: &Expression) -> bool {
+        match &expr.kind {
+            ExprKind::IntLiteral(-1) => true,
+            ExprKind::FloatLiteral(v) => *v == -1.0,
+            _ => false,
+        }
+    }
+
+    /// Try to apply algebraic identity simplifications to a binary op expression.
+    /// Modifies expr in place if a simplification applies.
+    ///
+    /// Simplifications:
+    /// - 0 - x → -x
+    /// - 0 + x, x + 0 → x
+    /// - 0 * x, x * 0 → 0
+    /// - 1 * x, x * 1 → x
+    /// - -1 * x, x * -1 → -x
+    /// - x - 0, x / 1 → x
+    fn try_algebraic_simplify(expr: &mut Expression) {
+        // Check if any simplification applies
+        let dominated_by_zero = if let ExprKind::BinaryOp(ref op, ref lhs, ref rhs) = expr.kind {
+            match op.op.as_str() {
+                "-" if Self::is_zero(lhs) => Some(()),
+                "+" if Self::is_zero(lhs) || Self::is_zero(rhs) => Some(()),
+                "-" if Self::is_zero(rhs) => Some(()),
+                "*" if Self::is_zero(lhs) || Self::is_zero(rhs) => Some(()),
+                "*" if Self::is_one(lhs) || Self::is_one(rhs) => Some(()),
+                "*" if Self::is_neg_one(lhs) || Self::is_neg_one(rhs) => Some(()),
+                "/" if Self::is_one(rhs) => Some(()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        if dominated_by_zero.is_none() {
+            return;
+        }
+
+        // Take ownership and apply the rewrite
+        let old_kind = std::mem::replace(&mut expr.kind, ExprKind::Unit);
+        if let ExprKind::BinaryOp(binop, lhs, rhs) = old_kind {
+            expr.kind = match binop.op.as_str() {
+                // 0 - x → -x
+                "-" if Self::is_zero(&lhs) => {
+                    let unop = crate::ast::UnaryOp { op: binop.op };
+                    ExprKind::UnaryOp(unop, rhs)
+                }
+                // 0 + x → x
+                "+" if Self::is_zero(&lhs) => rhs.kind,
+                // x + 0, x - 0 → x
+                "+" | "-" if Self::is_zero(&rhs) => lhs.kind,
+                // 0 * x → 0, x * 0 → 0
+                "*" if Self::is_zero(&lhs) => lhs.kind,
+                "*" if Self::is_zero(&rhs) => rhs.kind,
+                // 1 * x → x
+                "*" if Self::is_one(&lhs) => rhs.kind,
+                // x * 1, x / 1 → x
+                "*" | "/" if Self::is_one(&rhs) => lhs.kind,
+                // -1 * x → -x
+                "*" if Self::is_neg_one(&lhs) => {
+                    let unop = crate::ast::UnaryOp { op: "-".to_string() };
+                    ExprKind::UnaryOp(unop, rhs)
+                }
+                // x * -1 → -x
+                "*" if Self::is_neg_one(&rhs) => {
+                    let unop = crate::ast::UnaryOp { op: "-".to_string() };
+                    ExprKind::UnaryOp(unop, lhs)
+                }
+                // Shouldn't reach here, but restore original if we do
+                _ => ExprKind::BinaryOp(binop, lhs, rhs),
+            };
         }
     }
 }
