@@ -120,3 +120,20 @@ def rotate<[n], A>(k: i32, arr: [n]A) -> [n]A =
 -- Commutative reduce (same as reduce, but documents commutativity)
 def reduce_comm<[n], A>(op: A -> A -> A, ne: A, arr: [n]A) -> A =
   reduce(op, ne, arr)
+
+------------------------------------------------------------
+-- Partitioning
+------------------------------------------------------------
+
+-- Split array into elements satisfying predicate and those that don't
+-- Returns (elements where p is true, elements where p is false)
+def partition<[n], A>(p: A -> bool, xs: [n]A) =
+  (filter(p, xs), filter(|x| !p(x), xs))
+
+------------------------------------------------------------
+-- Spread
+------------------------------------------------------------
+
+-- Place values at indices in array filled with default value
+def spread<[n], [m], A>(size: i32, default: A, indices: [m]i32, values: [m]A) -> [n]A =
+  scatter(replicate(size, default), indices, values)
