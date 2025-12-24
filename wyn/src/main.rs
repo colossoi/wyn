@@ -66,6 +66,10 @@ enum Commands {
         #[arg(long, value_name = "FILE")]
         output_annotated: Option<PathBuf>,
 
+        /// Enable partial evaluation (compile-time function inlining and loop unrolling)
+        #[arg(long)]
+        partial_eval: bool,
+
         /// Print verbose output
         #[arg(short, long)]
         verbose: bool,
@@ -108,6 +112,7 @@ fn main() -> Result<(), DriverError> {
             output_init_mir,
             output_final_mir,
             output_annotated,
+            partial_eval,
             verbose,
         } => {
             compile_file(
@@ -117,6 +122,7 @@ fn main() -> Result<(), DriverError> {
                 output_init_mir,
                 output_final_mir,
                 output_annotated,
+                partial_eval,
                 verbose,
             )?;
         }
@@ -139,6 +145,7 @@ fn compile_file(
     output_init_mir: Option<PathBuf>,
     output_final_mir: Option<PathBuf>,
     output_annotated: Option<PathBuf>,
+    partial_eval: bool,
     verbose: bool,
 ) -> Result<(), DriverError> {
     if verbose {
@@ -188,9 +195,13 @@ fn compile_file(
     });
     let normalized = time("normalize", verbose, || hoisted.normalize());
     let monomorphized = time("monomorphize", verbose, || normalized.monomorphize())?;
-    let reachable = time("filter_reachable", verbose, || monomorphized.filter_reachable());
-    let folded = time("fold_constants", verbose, || reachable.fold_constants())?;
-    let lifted = time("lift_bindings", verbose, || folded.lift_bindings());
+    let folded = if partial_eval {
+        time("partial_eval", verbose, || monomorphized.partial_eval())?
+    } else {
+        monomorphized.skip_folding()
+    };
+    let reachable = time("filter_reachable", verbose, || folded.filter_reachable());
+    let lifted = time("lift_bindings", verbose, || reachable.lift_bindings());
 
     // Write final MIR if requested (right before lowering)
     write_mir_if_requested(&lifted.mir, &output_final_mir, "final MIR", verbose)?;

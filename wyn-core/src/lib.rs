@@ -30,6 +30,7 @@ pub mod glsl;
 pub mod materialize_hoisting;
 pub mod monomorphization;
 pub mod normalize;
+pub mod partial_eval;
 pub mod spirv;
 
 #[cfg(test)]
@@ -261,8 +262,8 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 //     -> flattened.hoist_materializations()             -> MaterializationsHoisted
 //       -> .normalize()                                 -> Normalized
 //       -> .monomorphize()                              -> Monomorphized
+//       -> .fold_constants() or .partial_eval()         -> Folded
 //       -> .filter_reachable()                          -> Reachable
-//       -> .fold_constants()                            -> Folded
 //       -> .lift_bindings()                             -> Lifted
 //       -> .lower()                                     -> Lowered
 
@@ -579,6 +580,27 @@ pub struct Monomorphized {
 }
 
 impl Monomorphized {
+    /// Skip constant folding/partial evaluation entirely.
+    /// Just passes through to the next stage.
+    pub fn skip_folding(self) -> Folded {
+        Folded { mir: self.mir }
+    }
+
+    /// Partially evaluate the MIR using normalization-by-evaluation.
+    /// Evaluates function calls and loops when their arguments/bounds
+    /// are known at compile time.
+    pub fn partial_eval(self) -> Result<Folded> {
+        let mir = partial_eval::partial_eval(self.mir)?;
+        Ok(Folded { mir })
+    }
+}
+
+/// Constants have been folded (stub)
+pub struct Folded {
+    pub mir: mir::Program,
+}
+
+impl Folded {
     /// Filter out unreachable definitions and order them topologically.
     pub fn filter_reachable(self) -> Reachable {
         let mir = reachability::filter_reachable(self.mir);
@@ -592,19 +614,6 @@ pub struct Reachable {
 }
 
 impl Reachable {
-    /// Fold constant expressions in the MIR.
-    pub fn fold_constants(self) -> Result<Folded> {
-        let mir = constant_folding::fold_constants(self.mir)?;
-        Ok(Folded { mir })
-    }
-}
-
-/// Constants have been folded (stub)
-pub struct Folded {
-    pub mir: mir::Program,
-}
-
-impl Folded {
     /// Hoist loop-invariant bindings out of loops.
     pub fn lift_bindings(self) -> Lifted {
         let mir = binding_lifter::lift_bindings(self.mir);

@@ -23,8 +23,8 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .hoist_materializations()
         .normalize()
         .monomorphize()?
+        .skip_folding()
         .filter_reachable()
-        .fold_constants()?
         .lift_bindings()
         .lower()?;
     Ok(())

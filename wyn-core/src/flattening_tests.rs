@@ -663,9 +663,9 @@ def test: f32 =
         .and_then(|a| a.flatten(&frontend.module_manager, &frontend.schemes))
         .map(|(f, _backend)| f.hoist_materializations().normalize())
         .and_then(|n| n.monomorphize())
-        .map(|m| m.filter_reachable())
-        .and_then(|r| r.fold_constants())
-        .map(|f| f.lift_bindings())
+        .map(|m| m.skip_folding())
+        .map(|f| f.filter_reachable())
+        .map(|r| r.lift_bindings())
         .and_then(|l| l.lower());
     assert!(result.is_ok(), "Compilation failed: {:?}", result.err());
 }

@@ -839,14 +839,16 @@ impl Display for mir::Attribute {
 
 impl Display for mir::Body {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        // Simple display: just show the root expression ID and number of expressions
-        write!(
-            f,
-            "<Body: {} locals, {} exprs, root={}>",
-            self.locals.len(),
-            self.exprs.len(),
-            self.root.0
-        )
+        writeln!(f, "  locals:")?;
+        for (i, local) in self.locals.iter().enumerate() {
+            writeln!(f, "    {}: {} ({})", i, local.name, local.ty)?;
+        }
+        writeln!(f, "  exprs:")?;
+        for (i, expr) in self.exprs.iter().enumerate() {
+            let marker = if mir::ExprId(i as u32) == self.root { " <-- root" } else { "" };
+            writeln!(f, "    e{}: {}{}", i, expr, marker)?;
+        }
+        Ok(())
     }
 }
 
