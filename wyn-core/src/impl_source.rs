@@ -7,17 +7,11 @@ use std::collections::HashMap;
 
 /// Implementation strategy for a builtin function
 ///
-/// Builtins are organized into three semantic categories:
-/// 1. Library-level (CoreFn): Can be written in the language itself
-/// 2. Core primitives (PrimOp): Map fairly directly to backend operations
-/// 3. Genuine intrinsics (Intrinsic): Require backend-specific lowering
+/// Builtins are organized into two categories:
+/// 1. Core primitives (PrimOp): Map fairly directly to backend operations
+/// 2. Genuine intrinsics (Intrinsic): Require backend-specific lowering
 #[derive(Debug, Clone, PartialEq)]
 pub enum BuiltinImpl {
-    /// Library-level builtin: implemented as normal function in prelude/core IR
-    /// These can be written in the language itself (or lowered to core IR once)
-    /// Examples: f32.sum, replicate, filter
-    CoreFn(String), // Function name in the core IR
-
     /// Core primitive operation: maps fairly directly to SPIR-V/backend ops
     /// Examples: f32.add, i32.mul, dot, matrix multiply
     PrimOp(PrimOp),
@@ -172,12 +166,10 @@ impl ImplSource {
             let size = type_name.chars().nth(3)?.to_digit(10)? as usize;
 
             // Check if field is valid for this vector size
-            let valid_field = match (size, field_name) {
-                (2, "x" | "y") => true,
-                (3, "x" | "y" | "z") => true,
-                (4, "x" | "y" | "z" | "w") => true,
-                _ => false,
-            };
+            let valid_field = matches!(
+                (size, field_name),
+                (2, "x" | "y") | (3, "x" | "y" | "z") | (4, "x" | "y" | "z" | "w")
+            );
 
             if valid_field {
                 // Extract element type: vec2f32 -> f32, vec3i32 -> i32, vec4u32 -> u32

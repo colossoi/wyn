@@ -16,11 +16,11 @@ static VECTOR_TYPES: OnceLock<std::collections::HashMap<String, Type>> = OnceLoc
 static MATRIX_TYPES: OnceLock<std::collections::HashMap<String, Type>> = OnceLock::new();
 
 fn get_vector_types() -> &'static std::collections::HashMap<String, Type> {
-    VECTOR_TYPES.get_or_init(|| types::vector_type_constructors())
+    VECTOR_TYPES.get_or_init(types::vector_type_constructors)
 }
 
 fn get_matrix_types() -> &'static std::collections::HashMap<String, Type> {
-    MATRIX_TYPES.get_or_init(|| types::matrix_type_constructors())
+    MATRIX_TYPES.get_or_init(types::matrix_type_constructors)
 }
 
 /// Argument in a curry expression - either a placeholder (_) or a real expression
@@ -181,13 +181,13 @@ impl<'a> Parser<'a> {
             if keyword != "def" {
                 bail_parse!("Uniform declarations must use 'def', not 'let'");
             }
-            return self.parse_uniform_decl(set, binding);
+            self.parse_uniform_decl(set, binding)
         } else if let Some((set, binding, layout, access)) = storage_attr {
             // Storage buffer declaration - delegate to helper
             if keyword != "def" {
                 bail_parse!("Storage declarations must use 'def', not 'let'");
             }
-            return self.parse_storage_decl(set, binding, layout, access);
+            self.parse_storage_decl(set, binding, layout, access)
         } else if let Some(entry_attr) = entry_type {
             // Entry point: must be 'def', not 'let'
             if keyword != "def" {
@@ -221,7 +221,7 @@ impl<'a> Parser<'a> {
             // Combine into EntryOutput structs
             let outputs: Vec<EntryOutput> = return_types
                 .into_iter()
-                .zip(return_attributes.into_iter())
+                .zip(return_attributes)
                 .map(|(ty, attribute)| EntryOutput { ty, attribute })
                 .collect();
 
@@ -652,7 +652,7 @@ impl<'a> Parser<'a> {
                 } else if let Some(Token::Identifier(name)) = self.peek() {
                     // Type param: must be uppercase
                     let name = name.clone();
-                    if !name.chars().next().map_or(false, |c| c.is_uppercase()) {
+                    if !name.chars().next().is_some_and(|c| c.is_uppercase()) {
                         bail_parse!("Type parameters must be uppercase (got '{}')", name);
                     }
                     self.advance();
@@ -840,7 +840,7 @@ impl<'a> Parser<'a> {
                 // Grammar allows qualname which includes any lowercase identifier
                 // Uppercase = constructor/sum type
                 // Lowercase = base types (i32/f32), vector/matrix types, or user-defined type aliases
-                name.chars().next().map_or(false, |c| c.is_uppercase() || c.is_lowercase() || c == '\'')
+                name.chars().next().is_some_and(|c| c.is_uppercase() || c.is_lowercase() || c == '\'')
             }
             _ => false,
         }
@@ -1376,27 +1376,6 @@ impl<'a> Parser<'a> {
         Ok(args)
     }
 
-    // Helper to check if current token can start a primary expression
-    fn can_start_primary_expression(&self) -> bool {
-        matches!(
-            self.peek(),
-            Some(Token::IntLiteral(_)) |
-            Some(Token::SuffixedLiteral(_, _)) |
-            Some(Token::FloatLiteral(_)) |
-            Some(Token::StringLiteral(_)) |
-            Some(Token::True) |
-            Some(Token::False) |
-            Some(Token::Identifier(_)) |
-            Some(Token::LeftBracket) |  // array literal (no space) or array indexing context
-            Some(Token::LeftBracketSpaced) |  // array literal (with space)
-            Some(Token::AtBracket) |    // vector/matrix literal
-            Some(Token::LeftParen) |    // parenthesized expression
-            Some(Token::Pipe) |         // lambda |x| ...
-            Some(Token::Let) |          // let..in
-            Some(Token::TypeHole) // type hole
-        )
-    }
-
     fn parse_postfix_expression(&mut self) -> Result<Expression> {
         trace!("parse_postfix_expression: next token = {:?}", self.peek());
         let mut expr = self.parse_primary_expression()?;
@@ -1553,7 +1532,7 @@ impl<'a> Parser<'a> {
                     Token::FloatLiteral(f) => ExprKind::FloatLiteral(f),
                     _ => bail_parse!("Invalid suffixed literal"),
                 };
-                let inner_node = self.node_counter.mk_node(inner_expr, span.clone());
+                let inner_node = self.node_counter.mk_node(inner_expr, span);
                 // Convert suffix string to Type
                 let ty = suffix_to_type(&suffix);
                 Ok(self.node_counter.mk_node(ExprKind::TypeAscription(Box::new(inner_node), ty), span))
@@ -1800,7 +1779,7 @@ impl<'a> Parser<'a> {
         for arg in &args {
             if matches!(arg, CurryArg::Placeholder) {
                 let name = format!("_{}_", param_idx);
-                let param = self.node_counter.mk_node(PatternKind::Name(name), span.clone());
+                let param = self.node_counter.mk_node(PatternKind::Name(name), span);
                 params.push(param);
                 param_idx += 1;
             }
@@ -1814,15 +1793,14 @@ impl<'a> Parser<'a> {
                 CurryArg::Placeholder => {
                     let name = format!("_{}_", param_idx);
                     param_idx += 1;
-                    self.node_counter.mk_node(ExprKind::Identifier(vec![], name), span.clone())
+                    self.node_counter.mk_node(ExprKind::Identifier(vec![], name), span)
                 }
                 CurryArg::Expr(e) => e,
             })
             .collect();
 
         // Build the function call: func(args...)
-        let body =
-            self.node_counter.mk_node(ExprKind::Application(Box::new(func), call_args), span.clone());
+        let body = self.node_counter.mk_node(ExprKind::Application(Box::new(func), call_args), span);
 
         // Build the lambda: |_0_, _1_, ...| body
         let lambda = LambdaExpr {

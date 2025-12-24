@@ -234,10 +234,6 @@ impl<'a> Desugarer<'a> {
     fn mk_array_index(&mut self, array: Expression, index: Expression, span: Span) -> Expression {
         self.nc.mk_node(ExprKind::ArrayIndex(Box::new(array), Box::new(index)), span)
     }
-
-    fn is_zero(&self, expr: &Expression) -> bool {
-        matches!(expr.kind, ExprKind::IntLiteral(0))
-    }
 }
 
 /// Top-level function to desugar a program.

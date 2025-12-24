@@ -5,7 +5,7 @@ use crate::scope::ScopeStack;
 use crate::{bail_module, bail_type_at, err_module, err_type_at, err_undef_at};
 use log::debug;
 use polytype::Context;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 
 // Import type helper functions from parent module
 use super::{
@@ -226,7 +226,7 @@ impl<'a> TypeChecker<'a> {
                 let mut inner = args.into_iter().next().unwrap();
                 // Substitute each bound size variable with a fresh skolem constant
                 for var_name in vars {
-                    let skolem_id = self.skolem_ids.next();
+                    let skolem_id = self.skolem_ids.next_id();
                     let skolem = Type::Constructed(TypeName::Skolem(skolem_id), vec![]);
                     inner = Self::substitute_size_var(&inner, &var_name, &skolem);
                 }
@@ -1663,7 +1663,7 @@ impl<'a> TypeChecker<'a> {
             }
             ExprKind::TypeHole => {
                 // Record this hole for warning emission after type inference completes
-                self.type_holes.push((expr.h.id, expr.h.span.clone()));
+                self.type_holes.push((expr.h.id, expr.h.span));
                 Ok(self.context.new_variable())
             }
             ExprKind::IntLiteral(_) => Ok(i32()),
@@ -1843,7 +1843,7 @@ impl<'a> TypeChecker<'a> {
                 } else {
                     // Vector literal
                     let size = elements.len();
-                    if size < 2 || size > 4 {
+                    if !(2..=4).contains(&size) {
                         Err(err_type_at!(
                             expr.h.span,
                             "Vector size must be 2, 3, or 4, got {}",
@@ -2145,7 +2145,7 @@ impl<'a> TypeChecker<'a> {
                     if field == "_w_lambda_name" {
                         // The type checker can't verify this is actually a closure record,
                         // but the defunctionalizer guarantees it. Just return string type.
-                        let ty = Type::Constructed(TypeName::Str("string".into()), vec![]);
+                        let ty = Type::Constructed(TypeName::Str("string"), vec![]);
                         self.type_table.insert(expr.h.id, TypeScheme::Monotype(ty.clone()));
                         return Ok(ty);
                     }
@@ -2752,7 +2752,7 @@ impl<'a> TypeChecker<'a> {
             // Unit parameter doesn't count as partial application
             if !matches!(param, Type::Constructed(TypeName::Unit, _)) {
                 bail_type_at!(
-                    call_span.clone(),
+                    *call_span,
                     "Partial application not allowed: result is function type {}",
                     self.format_type(&r)
                 );

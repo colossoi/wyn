@@ -273,14 +273,14 @@ impl Body {
 
     /// Allocate a new local variable.
     pub fn alloc_local(&mut self, decl: LocalDecl) -> LocalId {
-        let id = self.local_ids.next();
+        let id = self.local_ids.next_id();
         self.locals.push(decl);
         id
     }
 
     /// Allocate a new expression with its metadata.
     pub fn alloc_expr(&mut self, expr: Expr, ty: Type<TypeName>, span: Span, node_id: NodeId) -> ExprId {
-        let id = self.expr_ids.next();
+        let id = self.expr_ids.next_id();
         self.exprs.push(expr);
         self.types.push(ty);
         self.spans.push(span);
@@ -365,7 +365,7 @@ impl Body {
         let span = self.get_span(expr_id);
 
         // Allocate local ID first so we can use it in the name
-        let local_id = self.local_ids.next();
+        let local_id = self.local_ids.next_id();
         let name = name.unwrap_or_else(|| format!("_w_hoist_{}", local_id.0));
 
         self.locals.push(LocalDecl {

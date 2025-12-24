@@ -40,8 +40,8 @@ fn test_simple_function() {
     });
 
     // Build expression: x + y
-    let x_ref = body.alloc_expr(Expr::Local(x_local), i32_type(), span, nc.next());
-    let y_ref = body.alloc_expr(Expr::Local(y_local), i32_type(), span, nc.next());
+    let x_ref = body.alloc_expr(Expr::Local(x_local), i32_type(), span, nc.next_id());
+    let y_ref = body.alloc_expr(Expr::Local(y_local), i32_type(), span, nc.next_id());
     let add_expr = body.alloc_expr(
         Expr::BinOp {
             op: "+".to_string(),
@@ -50,14 +50,14 @@ fn test_simple_function() {
         },
         i32_type(),
         span,
-        nc.next(),
+        nc.next_id(),
     );
     body.set_root(add_expr);
 
     // Represents: def add(x, y) = x + y
     // params are now LocalIds pointing to the locals table
     let add_fn = Def::Function {
-        id: nc.next(),
+        id: nc.next_id(),
         name: "add".to_string(),
         params: vec![x_local, y_local],
         ret_type: i32_type(),
@@ -100,12 +100,12 @@ fn test_constant() {
 
     // Build body for: 3.14159
     let mut body = Body::new();
-    let float_expr = body.alloc_expr(Expr::Float("3.14159".to_string()), f32_type(), span, nc.next());
+    let float_expr = body.alloc_expr(Expr::Float("3.14159".to_string()), f32_type(), span, nc.next_id());
     body.set_root(float_expr);
 
     // Represents: def pi = 3.14159
     let pi_const = Def::Constant {
-        id: nc.next(),
+        id: nc.next_id(),
         name: "pi".to_string(),
         ty: f32_type(),
         attributes: vec![],
@@ -142,9 +142,9 @@ fn test_let_binding() {
     });
 
     // Build expressions
-    let lit_42 = body.alloc_expr(Expr::Int("42".to_string()), i32_type(), span, nc.next());
-    let x_ref = body.alloc_expr(Expr::Local(x_local), i32_type(), span, nc.next());
-    let lit_1 = body.alloc_expr(Expr::Int("1".to_string()), i32_type(), span, nc.next());
+    let lit_42 = body.alloc_expr(Expr::Int("42".to_string()), i32_type(), span, nc.next_id());
+    let x_ref = body.alloc_expr(Expr::Local(x_local), i32_type(), span, nc.next_id());
+    let lit_1 = body.alloc_expr(Expr::Int("1".to_string()), i32_type(), span, nc.next_id());
     let add_expr = body.alloc_expr(
         Expr::BinOp {
             op: "+".to_string(),
@@ -153,7 +153,7 @@ fn test_let_binding() {
         },
         i32_type(),
         span,
-        nc.next(),
+        nc.next_id(),
     );
     let let_expr = body.alloc_expr(
         Expr::Let {
@@ -163,7 +163,7 @@ fn test_let_binding() {
         },
         i32_type(),
         span,
-        nc.next(),
+        nc.next_id(),
     );
     body.set_root(let_expr);
 
@@ -198,10 +198,10 @@ fn test_if_expression() {
     // Build body for: if true then 1 else 2
     let mut body = Body::new();
 
-    let cond = body.alloc_expr(Expr::Bool(true), bool_type.clone(), span, nc.next());
-    let then_ = body.alloc_expr(Expr::Int("1".to_string()), i32_type(), span, nc.next());
-    let else_ = body.alloc_expr(Expr::Int("2".to_string()), i32_type(), span, nc.next());
-    let if_expr = body.alloc_expr(Expr::If { cond, then_, else_ }, i32_type(), span, nc.next());
+    let cond = body.alloc_expr(Expr::Bool(true), bool_type.clone(), span, nc.next_id());
+    let then_ = body.alloc_expr(Expr::Int("1".to_string()), i32_type(), span, nc.next_id());
+    let else_ = body.alloc_expr(Expr::Int("2".to_string()), i32_type(), span, nc.next_id());
+    let if_expr = body.alloc_expr(Expr::If { cond, then_, else_ }, i32_type(), span, nc.next_id());
     body.set_root(if_expr);
 
     // Verify structure

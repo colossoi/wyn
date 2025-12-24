@@ -147,7 +147,7 @@ impl IntrinsicSource {
     /// Asserts that all overloads for the same name have the same arity.
     fn add_overload(&mut self, name: String, entry: IntrinsicEntry) {
         let new_arity = entry.arity();
-        let entries = self.intrinsics.entry(name.clone()).or_insert_with(Vec::new);
+        let entries = self.intrinsics.entry(name.clone()).or_default();
         if let Some(existing) = entries.first() {
             let existing_arity = existing.arity();
             assert_eq!(

@@ -2,7 +2,7 @@
 
 use crate::ast::{
     Decl, Declaration, ModuleExpression, ModuleTypeExpression, Node, NodeCounter, Pattern, PatternKind,
-    Program, Spec, Type, TypeName,
+    Program, Spec, Type,
 };
 use crate::error::Result;
 use crate::lexer;
@@ -231,37 +231,6 @@ impl ModuleManager {
         self.type_aliases.get(qualified_name)
     }
 
-    /// Resolve type aliases in a type, given the module context
-    /// For unqualified type names like "state", looks them up as "module_name.state"
-    fn resolve_type_aliases_in_module(&self, ty: &Type, module_name: &str) -> Type {
-        match ty {
-            Type::Constructed(TypeName::Named(name), args) => {
-                // Try to resolve as a module-local type alias
-                let qualified_name = if name.contains('.') {
-                    name.clone() // Already qualified
-                } else {
-                    format!("{}.{}", module_name, name) // Make qualified
-                };
-                if let Some(underlying) = self.type_aliases.get(&qualified_name) {
-                    // Recursively resolve in case of nested aliases
-                    self.resolve_type_aliases_in_module(underlying, module_name)
-                } else {
-                    // Not a known alias, keep as-is but resolve args
-                    let resolved_args: Vec<Type> =
-                        args.iter().map(|a| self.resolve_type_aliases_in_module(a, module_name)).collect();
-                    Type::Constructed(TypeName::Named(name.clone()), resolved_args)
-                }
-            }
-            Type::Constructed(name, args) => {
-                // Resolve aliases in type arguments
-                let resolved_args: Vec<Type> =
-                    args.iter().map(|a| self.resolve_type_aliases_in_module(a, module_name)).collect();
-                Type::Constructed(name.clone(), resolved_args)
-            }
-            Type::Variable(id) => Type::Variable(*id),
-        }
-    }
-
     /// Load and elaborate modules from a source string
     pub fn load_str(&mut self, source: &str, node_counter: &mut NodeCounter) -> Result<()> {
         // Parse the source
@@ -340,14 +309,9 @@ impl ModuleManager {
         let mut current = mte;
 
         // Walk through nested With expressions
-        loop {
-            match current {
-                ModuleTypeExpression::With(inner, type_name, _type_params, type_value) => {
-                    substitutions.insert(type_name.clone(), type_value.clone());
-                    current = inner;
-                }
-                _ => break,
-            }
+        while let ModuleTypeExpression::With(inner, type_name, _type_params, type_value) = current {
+            substitutions.insert(type_name.clone(), type_value.clone());
+            current = inner;
         }
 
         Ok(substitutions)

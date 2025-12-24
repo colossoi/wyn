@@ -8,7 +8,7 @@ use crate::bail_glsl;
 use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
 use crate::lowering_common::ShaderStage;
-use crate::mir::{Body, Def, EntryInput, ExecutionModel, Expr, ExprId, LocalId, LoopKind, Program};
+use crate::mir::{Body, Def, ExecutionModel, Expr, ExprId, LocalId, LoopKind, Program};
 use polytype::Type as PolyType;
 use rspirv::spirv;
 use std::collections::{HashMap, HashSet};
@@ -387,7 +387,7 @@ impl<'a> LowerCtx<'a> {
 
     fn collect_expr_deps(
         &self,
-        body: &Body,
+        _body: &Body,
         expr: &Expr,
         deps: &mut Vec<String>,
         visited: &mut HashSet<String>,
@@ -827,7 +827,6 @@ impl<'a> LowerCtx<'a> {
     ) -> Result<String> {
         match impl_ {
             BuiltinImpl::PrimOp(op) => self.lower_primop(op, args, ret_ty),
-            BuiltinImpl::CoreFn(name) => Ok(format!("{}({})", name, args.join(", "))),
             BuiltinImpl::Intrinsic(intr) => {
                 bail_glsl!("Intrinsic {:?} not supported in GLSL", intr)
             }

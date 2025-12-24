@@ -211,11 +211,7 @@ impl AstConstFolder {
         // Check if this introduces a constant
         // For simplicity, only handle simple name patterns
         let const_binding = if let crate::ast::PatternKind::Name(name) = &let_in.pattern.kind {
-            if let Some(val) = self.try_eval_const(&let_in.value) {
-                Some((name.clone(), val))
-            } else {
-                None
-            }
+            self.try_eval_const(&let_in.value).map(|val| (name.clone(), val))
         } else {
             None
         };

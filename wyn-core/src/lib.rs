@@ -85,7 +85,7 @@ impl<Id: From<u32>> IdSource<Id> {
         }
     }
 
-    pub fn next(&mut self) -> Id {
+    pub fn next_id(&mut self) -> Id {
         let id = Id::from(self.next_id);
         self.next_id += 1;
         id
@@ -118,7 +118,7 @@ impl<Id: From<u32> + Copy + Eq + Hash, T> IdArena<Id, T> {
 
     /// Allocate a new ID and store the item.
     pub fn alloc(&mut self, item: T) -> Id {
-        let id = self.source.next();
+        let id = self.source.next_id();
         self.items.insert(id, item);
         id
     }
@@ -126,7 +126,7 @@ impl<Id: From<u32> + Copy + Eq + Hash, T> IdArena<Id, T> {
     /// Allocate a new ID without storing anything yet.
     /// Use `insert` later to store the item.
     pub fn alloc_id(&mut self) -> Id {
-        self.source.next()
+        self.source.next_id()
     }
 
     /// Insert an item with a pre-allocated ID.
@@ -229,7 +229,7 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
     };
 
     for decl in &program.declarations {
-        visitor::walk_declaration(&mut collector, decl);
+        let _ = visitor::walk_declaration(&mut collector, decl);
     }
 
     collector.spans
@@ -285,6 +285,12 @@ pub struct FrontEnd {
     pub schemes: HashMap<String, TypeScheme<TypeName>>,
     /// Per-module function type schemes cache (populated on first use)
     pub module_schemes: HashMap<String, HashMap<String, TypeScheme<TypeName>>>,
+}
+
+impl Default for FrontEnd {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FrontEnd {

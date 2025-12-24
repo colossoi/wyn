@@ -79,7 +79,7 @@ impl Flattener {
 
     /// Start a new body for a function/entry-point. Returns the old body.
     fn begin_body(&mut self) -> Body {
-        std::mem::replace(&mut self.current_body, Body::new())
+        std::mem::take(&mut self.current_body)
     }
 
     /// Finish the current body, returning it and restoring the old body.
@@ -102,7 +102,7 @@ impl Flattener {
 
     /// Allocate a new expression in the current body.
     fn alloc_expr(&mut self, expr: mir::Expr, ty: Type, span: Span) -> ExprId {
-        let node_id = self.node_counter.next();
+        let node_id = self.node_counter.next_id();
         self.current_body.alloc_expr(expr, ty, span, node_id)
     }
 
@@ -118,7 +118,7 @@ impl Flattener {
 
     /// Get a fresh NodeId
     fn next_node_id(&mut self) -> NodeId {
-        self.node_counter.next()
+        self.node_counter.next_id()
     }
 
     /// Get the backing store variable name for a LocalId
@@ -412,11 +412,6 @@ impl Flattener {
             Type::Constructed(TypeName::Size(n), _) => Some(*n),
             _ => None,
         }
-    }
-
-    /// Check if an expression is the integer literal 0
-    fn is_zero(&self, expr: &ast::Expression) -> bool {
-        matches!(expr.kind, ast::ExprKind::IntLiteral(0))
     }
 
     /// Convert a primitive numeric type to a string for name mangling.
@@ -1647,7 +1642,7 @@ impl Flattener {
             }
             ast::LoopForm::For(var_name, bound) => {
                 let (bound_id, _) = self.flatten_expr(bound)?;
-                let bound_ty = self.current_body.get_type(bound_id).clone();
+                let _bound_ty = self.current_body.get_type(bound_id).clone();
                 // Get the element type for the loop variable (i32 for range bounds)
                 let var_ty = Type::Constructed(TypeName::Int(32), vec![]);
                 let var_local = self.alloc_local(var_name.clone(), var_ty, LocalKind::LoopVar, span);

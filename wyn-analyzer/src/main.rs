@@ -286,7 +286,7 @@ fn find_in_expr(expr: &ast::Expression, line: usize, col: usize, best: &mut Opti
     }
 
     // This expression contains the position - check if it's better than current best
-    let dominated = best.as_ref().map_or(true, |(_, best_span)| span.size() < best_span.size());
+    let dominated = best.as_ref().is_none_or(|(_, best_span)| span.size() < best_span.size());
     if dominated {
         *best = Some((expr.h.id, span));
     }

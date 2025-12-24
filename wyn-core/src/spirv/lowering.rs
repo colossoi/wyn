@@ -84,7 +84,6 @@ struct Constructor {
 
     // Type cache: avoid recreating same types
     vec_type_cache: HashMap<(spirv::Word, u32), spirv::Word>,
-    mat_type_cache: HashMap<(spirv::Word, u32, u32), spirv::Word>, // (elem_type, rows, cols)
     struct_type_cache: HashMap<Vec<spirv::Word>, spirv::Word>,
     ptr_type_cache: HashMap<(spirv::StorageClass, spirv::Word), spirv::Word>,
 
@@ -143,7 +142,6 @@ impl Constructor {
             functions: HashMap::new(),
             glsl_ext_inst_id,
             vec_type_cache: HashMap::new(),
-            mat_type_cache: HashMap::new(),
             struct_type_cache: HashMap::new(),
             ptr_type_cache: HashMap::new(),
             entry_point_interfaces: HashMap::new(),
@@ -366,21 +364,6 @@ impl Constructor {
         }
         let ty = self.builder.type_vector(elem_type, size);
         self.vec_type_cache.insert(key, ty);
-        ty
-    }
-
-    /// Get or create a matrix type
-    /// SPIR-V matrices are column-major: mat<rows x cols> has `cols` column vectors of size `rows`
-    fn get_or_create_mat_type(&mut self, elem_type: spirv::Word, rows: u32, cols: u32) -> spirv::Word {
-        let key = (elem_type, rows, cols);
-        if let Some(&ty) = self.mat_type_cache.get(&key) {
-            return ty;
-        }
-        // Matrix column type is a vector with `rows` elements
-        let col_type = self.get_or_create_vec_type(elem_type, rows);
-        // Matrix has `cols` columns
-        let ty = self.builder.type_matrix(col_type, cols);
-        self.mat_type_cache.insert(key, ty);
         ty
     }
 
@@ -1885,7 +1868,7 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                                         // Extract array size from result type
                                         if let PolyType::Constructed(TypeName::Array, type_args) = expr_ty {
                                             if let Some(PolyType::Constructed(TypeName::Size(n), _)) =
-                                                type_args.get(0)
+                                                type_args.first()
                                             {
                                                 // Build array by repeating the value
                                                 let val_id = arg_ids[1]; // second arg is the value
@@ -1957,21 +1940,6 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                                         bail_spirv!("BUG: filter intrinsic should be handled specially")
                                     }
                                 }
-                            }
-                            BuiltinImpl::CoreFn(core_fn_name) => {
-                                // Library-level builtins implemented as normal functions in prelude
-                                // Look up the function and call it
-                                let func_id = *constructor
-                                    .functions
-                                    .get(core_fn_name)
-                                    .ok_or_else(|| err_spirv!("CoreFn not found: {}", core_fn_name))?;
-
-                                Ok(constructor.builder.function_call(
-                                    result_type,
-                                    None,
-                                    func_id,
-                                    arg_ids,
-                                )?)
                             }
                         }
                     } else {
@@ -2299,11 +2267,11 @@ fn lower_length_intrinsic(
     match arg_ty {
         PolyType::Constructed(TypeName::Array, type_args) => {
             // Static array: extract size from type
-            match type_args.get(0) {
+            match type_args.first() {
                 Some(PolyType::Constructed(TypeName::Size(n), _)) => Ok(constructor.const_i32(*n as i32)),
                 _ => bail_spirv!(
                     "Cannot determine compile-time array size for length: {:?}",
-                    type_args.get(0)
+                    type_args.first()
                 ),
             }
         }

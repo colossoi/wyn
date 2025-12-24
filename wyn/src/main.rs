@@ -155,7 +155,7 @@ fn compile_file(
 
     // Compile through the pipeline
     // Create FrontEnd first - it owns the node counter and loads prelude
-    let mut frontend = time("frontend", verbose, || wyn_core::FrontEnd::new());
+    let mut frontend = time("frontend", verbose, wyn_core::FrontEnd::new);
     // Parse user code using the same counter (so IDs don't collide with prelude)
     let parsed = time("parse", verbose, || {
         Compiler::parse(&source, &mut frontend.node_counter)

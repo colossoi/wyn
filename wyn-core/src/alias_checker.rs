@@ -622,7 +622,7 @@ impl<'a> Visitor for AliasChecker<'a> {
                             format!("{}.{}", quals.join("."), name)
                         }
                     } else {
-                        format!("<expr>")
+                        "<expr>".to_string()
                     };
                     self.consume_stores(&arg_info.stores, arg.h.id, &var_name);
                 }

@@ -102,11 +102,11 @@ impl std::fmt::Display for SkolemId {
 /// Note on type name variants:
 /// - `Float/Int/SInt`: Numeric primitive types with bit widths (e.g., Float(32), SInt(32))
 /// - `Str`: Other primitive type names hardcoded in the compiler (e.g., "->", "bool")
-///          Uses static strings for efficiency
+///   Uses static strings for efficiency
 /// - `Tuple`: Tuple type constructor with arity (number of fields)
 /// - `Named`: Type names parsed from user source code (e.g., "vec3", "MyType")
-///            Could refer to built-in types, type aliases, or user-defined types
-///            Uses owned String since the name comes from parsed input
+///   Could refer to built-in types, type aliases, or user-defined types
+///   Uses owned String since the name comes from parsed input
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeName {
     /// Primitive type names hardcoded in compiler: "->", "bool", etc.
@@ -239,7 +239,7 @@ impl polytype::Name for TypeName {
             TypeName::Named(name) => name.clone(),
             TypeName::Unique => "*".to_string(),
             TypeName::Record(fields) => {
-                let field_strs: Vec<String> = fields.iter().map(|name| name.clone()).collect();
+                let field_strs: Vec<String> = fields.iter().cloned().collect();
                 format!("{{{}}}", field_strs.join(", "))
             }
             TypeName::Unit => "()".to_string(),
@@ -499,10 +499,7 @@ pub fn count_arrows(ty: &Type) -> usize {
 pub fn is_integer_type(ty: &Type) -> bool {
     match ty {
         Type::Constructed(TypeName::Str(name), args) if args.is_empty() => {
-            matches!(
-                name.as_ref(),
-                "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64"
-            )
+            matches!(*name, "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64")
         }
         _ => false,
     }

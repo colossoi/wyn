@@ -181,7 +181,7 @@ impl NodeCounterExt for NodeCounter {
     fn mk_node<T>(&mut self, kind: T, span: Span) -> Node<T> {
         Node {
             h: Header {
-                id: self.next(),
+                id: self.next_id(),
                 span,
             },
             kind,

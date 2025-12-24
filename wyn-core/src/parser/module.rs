@@ -60,7 +60,7 @@ impl Parser<'_> {
                 } else if let Some(Token::Identifier(name)) = self.peek() {
                     // Type param: must be uppercase
                     let name = name.clone();
-                    if !name.chars().next().map_or(false, |c| c.is_uppercase()) {
+                    if !name.chars().next().is_some_and(|c| c.is_uppercase()) {
                         bail_parse!("Type parameters must be uppercase (got '{}')", name);
                     }
                     self.advance();
