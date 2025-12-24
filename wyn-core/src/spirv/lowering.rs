@@ -100,6 +100,7 @@ struct Constructor {
     uniform_variables: HashMap<String, spirv::Word>,
     uniform_types: HashMap<String, spirv::Word>, // uniform name -> SPIR-V type ID
     uniform_load_cache: HashMap<String, spirv::Word>, // cached OpLoad results per function
+    extract_cache: HashMap<(spirv::Word, u32), spirv::Word>, // CSE for OpCompositeExtract
 
     /// Lambda registry: LambdaId -> LambdaInfo
     lambda_registry: IdArena<LambdaId, LambdaInfo>,
@@ -154,6 +155,7 @@ impl Constructor {
             uniform_variables: HashMap::new(),
             uniform_types: HashMap::new(),
             uniform_load_cache: HashMap::new(),
+            extract_cache: HashMap::new(),
             lambda_registry: IdArena::new(),
             impl_source: ImplSource::default(),
             inplace_nodes: HashSet::new(),
@@ -456,6 +458,7 @@ impl Constructor {
         self.first_code_block = None;
         self.env.clear();
         self.uniform_load_cache.clear();
+        self.extract_cache.clear();
 
         Ok(())
     }
@@ -528,10 +531,28 @@ impl Constructor {
         id
     }
 
+    /// CSE-cached composite extract - reuses result if same (source, index) was extracted before
+    fn composite_extract_cached(
+        &mut self,
+        result_type: spirv::Word,
+        composite: spirv::Word,
+        index: u32,
+    ) -> Result<spirv::Word> {
+        let key = (composite, index);
+        if let Some(&id) = self.extract_cache.get(&key) {
+            return Ok(id);
+        }
+        let id = self.builder.composite_extract(result_type, None, composite, [index])?;
+        self.extract_cache.insert(key, id);
+        Ok(id)
+    }
+
     /// Begin a block (must be called before emitting instructions into it)
     fn begin_block(&mut self, block_id: spirv::Word) -> Result<()> {
         self.builder.begin_block(Some(block_id))?;
         self.current_block = Some(block_id);
+        // Clear extract cache since values from previous blocks may not dominate this block
+        self.extract_cache.clear();
         Ok(())
     }
 
@@ -1997,7 +2018,7 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                         lower_expr(constructor, body, args[0])?
                     };
 
-                    Ok(constructor.builder.composite_extract(result_type, None, composite_id, [index])?)
+                    constructor.composite_extract_cached(result_type, composite_id, index)
                 }
                 "index" => {
                     if args.len() != 2 {
