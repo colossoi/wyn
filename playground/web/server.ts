@@ -38,7 +38,10 @@ async function handler(req: Request): Promise<Response> {
       },
     });
   } catch {
-    return new Response("Not Found", { status: 404 });
+    return new Response("Not Found", {
+      status: 404,
+      headers: { "Content-Type": "text/plain" },
+    });
   }
 }
 

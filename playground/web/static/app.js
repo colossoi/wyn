@@ -4,7 +4,7 @@ import init, {
 } from "./pkg/wyn_wasm.js";
 
 // DOM elements
-const editor = document.getElementById("editor");
+const editorContainer = document.getElementById("editor");
 const canvas = document.getElementById("canvas");
 const output = document.getElementById("output");
 const compileBtn = document.getElementById("compile-btn");
@@ -12,6 +12,13 @@ const statusDot = document.getElementById("status-dot");
 const statusText = document.getElementById("status-text");
 const fpsDisplay = document.getElementById("fps");
 const loadingOverlay = document.getElementById("loading");
+
+// CodeMirror editor instance
+let editor = null;
+
+// Error markers state
+let errorMarkers = [];
+let errorLineHandles = [];
 
 // WebGL state
 let gl = null;
@@ -27,6 +34,80 @@ in vec2 a_position;
 void main() {
     gl_Position = vec4(a_position, 0.0, 1.0);
 }`;
+
+// Initialize CodeMirror editor
+function initEditor() {
+  editor = CodeMirror(editorContainer, {
+    value: "",
+    mode: null, // Plain text, no syntax highlighting
+    theme: "material-darker",
+    lineNumbers: true,
+    tabSize: 2,
+    indentWithTabs: false,
+    lineWrapping: false,
+    autofocus: true,
+    gutters: ["CodeMirror-linenumbers", "error-gutter"],
+  });
+
+  // Ctrl/Cmd+Enter to compile
+  editor.setOption("extraKeys", {
+    "Ctrl-Enter": compileAndRun,
+    "Cmd-Enter": compileAndRun,
+  });
+}
+
+// Clear all error markers
+function clearErrors() {
+  // Clear text markers
+  for (const marker of errorMarkers) {
+    marker.clear();
+  }
+  errorMarkers = [];
+
+  // Clear line background highlights
+  for (const handle of errorLineHandles) {
+    editor.removeLineClass(handle, "background", "line-error");
+  }
+  errorLineHandles = [];
+
+  // Clear gutter markers
+  editor.clearGutter("error-gutter");
+}
+
+// Mark an error in the editor using structured location data
+function markError(location) {
+  if (!location) return;
+
+  const startLine = location.start_line - 1; // CodeMirror is 0-indexed
+  const startCol = location.start_col - 1;
+  const endLine = location.end_line - 1;
+  const endCol = location.end_col - 1;
+
+  // Add line background highlight
+  const lineHandle = editor.addLineClass(
+    startLine,
+    "background",
+    "line-error",
+  );
+  errorLineHandles.push(lineHandle);
+
+  // Add text marker for underline
+  const marker = editor.markText(
+    { line: startLine, ch: startCol },
+    { line: endLine, ch: endCol },
+    { className: "cm-error-underline" },
+  );
+  errorMarkers.push(marker);
+
+  // Add gutter marker
+  const gutterMarker = document.createElement("div");
+  gutterMarker.className = "error-marker";
+  gutterMarker.innerHTML = "●";
+  editor.setGutterMarker(startLine, "error-gutter", gutterMarker);
+
+  // Scroll to error line
+  editor.scrollIntoView({ line: startLine, ch: 0 }, 100);
+}
 
 // Initialize WebGL
 function initWebGL() {
@@ -127,7 +208,7 @@ function render(time) {
   // Update FPS
   frameCount++;
   if (time - lastFpsUpdate > 1000) {
-    const fps = Math.round(frameCount * 1000 / (time - lastFpsUpdate));
+    const fps = Math.round((frameCount * 1000) / (time - lastFpsUpdate));
     fpsDisplay.textContent = `${fps} FPS`;
     frameCount = 0;
     lastFpsUpdate = time;
@@ -159,6 +240,40 @@ function setOutput(message, isError = false) {
   output.className = isError ? "error" : "success";
 }
 
+// Show error as a clickable item using structured error data
+function showErrorItem(errorInfo) {
+  output.innerHTML = "";
+  output.className = "error";
+
+  const item = document.createElement("div");
+  item.className = "error-item";
+
+  const location = errorInfo.location;
+  if (location) {
+    const locationDiv = document.createElement("div");
+    locationDiv.className = "error-location";
+    locationDiv.textContent =
+      `Line ${location.start_line}, Column ${location.start_col}`;
+    item.appendChild(locationDiv);
+
+    // Click to jump to error
+    item.addEventListener("click", () => {
+      const line = location.start_line - 1;
+      const col = location.start_col - 1;
+      editor.setCursor({ line, ch: col });
+      editor.focus();
+      editor.scrollIntoView({ line, ch: col }, 100);
+    });
+  }
+
+  const messageDiv = document.createElement("div");
+  messageDiv.className = "error-message";
+  messageDiv.textContent = errorInfo.message;
+  item.appendChild(messageDiv);
+
+  output.appendChild(item);
+}
+
 // Set status
 function setStatus(status, text) {
   statusDot.className = `status-dot ${status}`;
@@ -187,8 +302,11 @@ void main() {
 }
 
 // Compile and run
-async function compileAndRun() {
-  const source = editor.value;
+function compileAndRun() {
+  const source = editor.getValue();
+
+  // Clear previous errors
+  clearErrors();
 
   setStatus("compiling", "Compiling...");
   compileBtn.disabled = true;
@@ -198,7 +316,16 @@ async function compileAndRun() {
     const result = compile_to_shadertoy(source);
 
     if (!result.success) {
-      throw new Error(result.error || "Unknown compilation error");
+      const errorInfo = result.error || {
+        message: "Unknown compilation error",
+        location: null,
+      };
+      markError(errorInfo.location);
+      showErrorItem(errorInfo);
+      setStatus("error", "Error");
+      stopRendering();
+      compileBtn.disabled = false;
+      return;
     }
 
     const shadertoyGlsl = result.glsl;
@@ -215,14 +342,21 @@ async function compileAndRun() {
     }
 
     // Create new program
-    program = createProgram(vertexShaderSource, glslSource);
+    try {
+      program = createProgram(vertexShaderSource, glslSource);
+    } catch (glError) {
+      showErrorItem({
+        message: `GLSL error: ${glError.message}`,
+        location: null,
+      });
+      setStatus("error", "GLSL Error");
+      stopRendering();
+      compileBtn.disabled = false;
+      return;
+    }
 
     setStatus("ready", "Running");
     startRendering();
-  } catch (error) {
-    setOutput(`Error: ${error.message}`, true);
-    setStatus("error", "Error");
-    stopRendering();
   } finally {
     compileBtn.disabled = false;
   }
@@ -234,24 +368,19 @@ async function main() {
     // Initialize WASM
     await init();
 
+    // Initialize CodeMirror editor
+    initEditor();
+
     // Initialize WebGL
     if (!initWebGL()) {
       throw new Error("Failed to initialize WebGL");
     }
 
     // Load example program
-    editor.value = get_example_program();
+    editor.setValue(get_example_program());
 
     // Set up event listeners
     compileBtn.addEventListener("click", compileAndRun);
-
-    // Keyboard shortcut: Ctrl/Cmd + Enter to compile
-    editor.addEventListener("keydown", (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
-        e.preventDefault();
-        compileAndRun();
-      }
-    });
 
     // Hide loading overlay
     loadingOverlay.classList.add("hidden");

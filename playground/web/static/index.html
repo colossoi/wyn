@@ -4,6 +4,14 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Wyn Playground</title>
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css"
+    >
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/material-darker.min.css"
+    >
     <style>
       :root {
         --bg-dark: #1a1a2e;
@@ -115,21 +123,41 @@
         overflow: hidden;
       }
 
-      #editor {
-        width: 100%;
+      /* CodeMirror customizations */
+      .CodeMirror {
         height: 100%;
-        background: var(--bg-editor);
-        color: var(--text-primary);
-        border: none;
-        padding: 16px;
         font-family:
           "JetBrains Mono", "Fira Code", "SF Mono", Monaco, "Consolas",
           monospace;
         font-size: 14px;
         line-height: 1.6;
-        resize: none;
-        outline: none;
-        tab-size: 2;
+        background: var(--bg-editor);
+      }
+
+      .CodeMirror-gutters {
+        background: var(--bg-darker);
+        border-right: 1px solid var(--border);
+      }
+
+      .CodeMirror-linenumber {
+        color: var(--text-secondary);
+      }
+
+      /* Error line highlighting */
+      .line-error {
+        background: rgba(248, 113, 113, 0.15) !important;
+      }
+
+      /* Error text marker - red wavy underline */
+      .cm-error-underline {
+        text-decoration: underline wavy var(--error);
+        text-decoration-skip-ink: none;
+      }
+
+      /* Error gutter marker */
+      .error-marker {
+        color: var(--error);
+        font-size: 12px;
       }
 
       .preview-panel {
@@ -173,6 +201,31 @@
 
       #output.success {
         color: var(--success);
+      }
+
+      /* Clickable error items */
+      .error-item {
+        padding: 8px 12px;
+        margin: 4px 0;
+        background: rgba(248, 113, 113, 0.1);
+        border-left: 3px solid var(--error);
+        border-radius: 0 4px 4px 0;
+        cursor: pointer;
+        transition: background 0.2s;
+      }
+
+      .error-item:hover {
+        background: rgba(248, 113, 113, 0.2);
+      }
+
+      .error-item .error-location {
+        font-weight: 600;
+        color: var(--error);
+        margin-bottom: 4px;
+      }
+
+      .error-item .error-message {
+        color: var(--text-primary);
       }
 
       .status {
@@ -280,7 +333,7 @@
           <span>Wyn Source</span>
         </div>
         <div class="editor-container">
-          <textarea id="editor" spellcheck="false"></textarea>
+          <div id="editor"></div>
         </div>
       </div>
 
@@ -301,6 +354,9 @@
       </div>
     </main>
 
+    <script
+      src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"
+    ></script>
     <script type="module" src="app.js"></script>
   </body>
 </html>

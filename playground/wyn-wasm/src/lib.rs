@@ -1,12 +1,79 @@
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
+use wyn_core::error::CompilerError;
+
+/// Source location for an error
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ErrorLocation {
+    pub start_line: usize,
+    pub start_col: usize,
+    pub end_line: usize,
+    pub end_col: usize,
+}
+
+/// Structured error information
+#[derive(Serialize, Deserialize)]
+pub struct ErrorInfo {
+    pub message: String,
+    pub location: Option<ErrorLocation>,
+}
 
 /// Result of compiling Wyn source to GLSL
 #[derive(Serialize, Deserialize)]
 pub struct CompileResult {
     pub success: bool,
     pub glsl: Option<String>,
-    pub error: Option<String>,
+    pub error: Option<ErrorInfo>,
+}
+
+impl CompileResult {
+    fn ok(glsl: String) -> Self {
+        CompileResult {
+            success: true,
+            glsl: Some(glsl),
+            error: None,
+        }
+    }
+
+    fn err(e: CompilerError) -> Self {
+        let location = e.span().map(|s| ErrorLocation {
+            start_line: s.start_line,
+            start_col: s.start_col,
+            end_line: s.end_line,
+            end_col: s.end_col,
+        });
+
+        // Get just the message without the span debug info
+        let message = match &e {
+            CompilerError::ParseError(msg, _) => format!("Parse error: {}", msg),
+            CompilerError::TypeError(msg, _) => format!("Type error: {}", msg),
+            CompilerError::UndefinedVariable(name, _) => format!("Undefined variable: '{}'", name),
+            CompilerError::AliasError(msg, _) => format!("Alias error: {}", msg),
+            CompilerError::SpirvError(msg, _) => format!("SPIR-V error: {}", msg),
+            CompilerError::GlslError(msg, _) => format!("GLSL error: {}", msg),
+            CompilerError::ModuleError(msg, _) => format!("Module error: {}", msg),
+            CompilerError::FlatteningError(msg, _) => format!("Flatten error: {}", msg),
+            CompilerError::IoError(err) => format!("IO error: {}", err),
+            CompilerError::SpirvBuilderError(msg) => format!("SPIR-V builder error: {}", msg),
+        };
+
+        CompileResult {
+            success: false,
+            glsl: None,
+            error: Some(ErrorInfo { message, location }),
+        }
+    }
+
+    fn err_msg(message: String) -> Self {
+        CompileResult {
+            success: false,
+            glsl: None,
+            error: Some(ErrorInfo {
+                message,
+                location: None,
+            }),
+        }
+    }
 }
 
 /// Compile Wyn source code to Shadertoy-compatible GLSL.
@@ -19,11 +86,7 @@ pub fn compile_to_shadertoy(source: &str) -> JsValue {
 
     let result = compile_impl(source);
     serde_wasm_bindgen::to_value(&result).unwrap_or_else(|e| {
-        let error_result = CompileResult {
-            success: false,
-            glsl: None,
-            error: Some(format!("Serialization error: {}", e)),
-        };
+        let error_result = CompileResult::err_msg(format!("Serialization error: {}", e));
         serde_wasm_bindgen::to_value(&error_result).unwrap()
     })
 }
@@ -35,37 +98,19 @@ fn compile_impl(source: &str) -> CompileResult {
     // Parse
     let parsed = match wyn_core::Compiler::parse(source, &mut frontend.node_counter) {
         Ok(p) => p,
-        Err(e) => {
-            return CompileResult {
-                success: false,
-                glsl: None,
-                error: Some(format!("Parse error: {}", e)),
-            };
-        }
+        Err(e) => return CompileResult::err(e),
     };
 
     // Desugar
     let desugared = match parsed.desugar(&mut frontend.node_counter) {
         Ok(d) => d,
-        Err(e) => {
-            return CompileResult {
-                success: false,
-                glsl: None,
-                error: Some(format!("Desugar error: {}", e)),
-            };
-        }
+        Err(e) => return CompileResult::err(e),
     };
 
     // Resolve names
     let resolved = match desugared.resolve(&frontend.module_manager) {
         Ok(r) => r,
-        Err(e) => {
-            return CompileResult {
-                success: false,
-                glsl: None,
-                error: Some(format!("Name resolution error: {}", e)),
-            };
-        }
+        Err(e) => return CompileResult::err(e),
     };
 
     // Fold AST constants
@@ -74,45 +119,23 @@ fn compile_impl(source: &str) -> CompileResult {
     // Type check
     let type_checked = match ast_folded.type_check(&frontend.module_manager, &mut frontend.schemes) {
         Ok(t) => t,
-        Err(e) => {
-            return CompileResult {
-                success: false,
-                glsl: None,
-                error: Some(format!("Type error: {}", e)),
-            };
-        }
+        Err(e) => return CompileResult::err(e),
     };
 
     // Alias check
     let alias_checked = match type_checked.alias_check() {
         Ok(a) => a,
-        Err(e) => {
-            return CompileResult {
-                success: false,
-                glsl: None,
-                error: Some(format!("Alias check error: {}", e)),
-            };
-        }
+        Err(e) => return CompileResult::err(e),
     };
 
     if alias_checked.has_alias_errors() {
-        return CompileResult {
-            success: false,
-            glsl: None,
-            error: Some("Alias checking failed".to_string()),
-        };
+        return CompileResult::err_msg("Alias checking failed".to_string());
     }
 
     // Flatten to MIR
     let (flattened, _backend) = match alias_checked.flatten(&frontend.module_manager, &frontend.schemes) {
         Ok(f) => f,
-        Err(e) => {
-            return CompileResult {
-                success: false,
-                glsl: None,
-                error: Some(format!("Flatten error: {}", e)),
-            };
-        }
+        Err(e) => return CompileResult::err(e),
     };
 
     // MIR passes
@@ -120,25 +143,13 @@ fn compile_impl(source: &str) -> CompileResult {
     let normalized = hoisted.normalize();
     let monomorphized = match normalized.monomorphize() {
         Ok(m) => m,
-        Err(e) => {
-            return CompileResult {
-                success: false,
-                glsl: None,
-                error: Some(format!("Monomorphization error: {}", e)),
-            };
-        }
+        Err(e) => return CompileResult::err(e),
     };
 
     // Use partial eval for better optimization
     let folded = match monomorphized.partial_eval() {
         Ok(f) => f,
-        Err(e) => {
-            return CompileResult {
-                success: false,
-                glsl: None,
-                error: Some(format!("Partial eval error: {}", e)),
-            };
-        }
+        Err(e) => return CompileResult::err(e),
     };
 
     let reachable = folded.filter_reachable();
@@ -146,16 +157,8 @@ fn compile_impl(source: &str) -> CompileResult {
 
     // Lower to Shadertoy GLSL
     match lifted.lower_shadertoy() {
-        Ok(glsl) => CompileResult {
-            success: true,
-            glsl: Some(glsl),
-            error: None,
-        },
-        Err(e) => CompileResult {
-            success: false,
-            glsl: None,
-            error: Some(format!("GLSL lowering error: {}", e)),
-        },
+        Ok(glsl) => CompileResult::ok(glsl),
+        Err(e) => CompileResult::err(e),
     }
 }
 
