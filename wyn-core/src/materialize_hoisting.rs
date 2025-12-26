@@ -126,9 +126,12 @@ fn hoist_in_if(body: &mut Body, if_id: ExprId) {
     // Find common materializations (by structural equality of inner expression)
     let common = find_common_materializations(body, &then_mats, &else_mats);
 
-    // Hoist each common materialization
-    for mat_id in common {
-        body.hoist_before(mat_id, if_id, None);
+    // Hoist each common materialization and replace its counterpart
+    for (then_mat, else_mat) in common {
+        // Hoist the then-branch materialization before the if
+        let local_id = body.hoist_before(then_mat, if_id, None);
+        // Replace the else-branch equivalent with a reference to the hoisted local
+        *body.get_expr_mut(else_mat) = Expr::Local(local_id);
     }
 }
 
@@ -242,7 +245,12 @@ fn collect_materializations_rec(
 }
 
 /// Find materializations that appear in both lists with structurally equal inner expressions.
-fn find_common_materializations(body: &Body, then_mats: &[ExprId], else_mats: &[ExprId]) -> Vec<ExprId> {
+/// Returns pairs of (then_mat, else_mat) so both can be handled during hoisting.
+fn find_common_materializations(
+    body: &Body,
+    then_mats: &[ExprId],
+    else_mats: &[ExprId],
+) -> Vec<(ExprId, ExprId)> {
     let mut common = Vec::new();
 
     for &then_mat in then_mats {
@@ -262,8 +270,8 @@ fn find_common_materializations(body: &Body, then_mats: &[ExprId], else_mats: &[
             // Check structural equality
             if exprs_equal(body, then_inner, else_inner) {
                 // Check we haven't already added an equivalent one
-                let already_added = common.iter().any(|&existing| {
-                    let existing_inner = match body.get_expr(existing) {
+                let already_added = common.iter().any(|(existing, _)| {
+                    let existing_inner = match body.get_expr(*existing) {
                         Expr::Materialize(inner) => *inner,
                         _ => return false,
                     };
@@ -271,7 +279,8 @@ fn find_common_materializations(body: &Body, then_mats: &[ExprId], else_mats: &[
                 });
 
                 if !already_added {
-                    common.push(then_mat);
+                    common.push((then_mat, else_mat));
+                    break; // Found match for this then_mat, move to next
                 }
             }
         }
