@@ -1019,7 +1019,7 @@ impl<'a> Parser<'a> {
             }
             _ => {
                 let span = self.current_span();
-                Err(err_parse!("Expected type at {}", span))
+                Err(err_parse_at!(span, "Expected type"))
             }
         }
     }
@@ -2156,7 +2156,7 @@ impl<'a> Parser<'a> {
             Ok(())
         } else {
             let span = self.current_span();
-            Err(err_parse!("Expected '{}', got {:?} at {}", op, self.peek(), span))
+            Err(err_parse_at!(span, "Expected '{}', got {:?}", op, self.peek()))
         }
     }
 
@@ -2166,12 +2166,7 @@ impl<'a> Parser<'a> {
             Ok(())
         } else {
             let span = self.current_span();
-            Err(err_parse!(
-                "Expected {:?}, got {:?} at {}",
-                token,
-                self.peek(),
-                span
-            ))
+            Err(err_parse_at!(span, "Expected {:?}, got {:?}", token, self.peek()))
         }
     }
 
@@ -2234,7 +2229,7 @@ impl<'a> Parser<'a> {
         let span = self.current_span();
         match self.advance() {
             Some(Token::Identifier(name)) => Ok(name.clone()),
-            _ => Err(err_parse!("Expected identifier at {}", span)),
+            _ => Err(err_parse_at!(span, "Expected identifier")),
         }
     }
 
@@ -2242,7 +2237,7 @@ impl<'a> Parser<'a> {
         let span = self.current_span();
         match self.advance() {
             Some(Token::IntLiteral(n)) => Ok(*n),
-            _ => Err(err_parse!("Expected integer at {}", span)),
+            _ => Err(err_parse_at!(span, "Expected integer")),
         }
     }
 

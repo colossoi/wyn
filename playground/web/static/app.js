@@ -40,7 +40,7 @@ function initEditor() {
   editor = CodeMirror(editorContainer, {
     value: "",
     mode: null, // Plain text, no syntax highlighting
-    theme: "material-darker",
+    theme: "monokai",
     lineNumbers: true,
     tabSize: 2,
     indentWithTabs: false,
