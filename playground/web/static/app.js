@@ -46,7 +46,7 @@ function initEditor() {
     indentWithTabs: false,
     lineWrapping: false,
     autofocus: true,
-    gutters: ["CodeMirror-linenumbers", "error-gutter"],
+    gutters: ["CodeMirror-linenumbers"],
   });
 
   // Ctrl/Cmd+Enter to compile
@@ -69,9 +69,6 @@ function clearErrors() {
     editor.removeLineClass(handle, "background", "line-error");
   }
   errorLineHandles = [];
-
-  // Clear gutter markers
-  editor.clearGutter("error-gutter");
 }
 
 // Mark an error in the editor using structured location data
@@ -98,12 +95,6 @@ function markError(location) {
     { className: "cm-error-underline" },
   );
   errorMarkers.push(marker);
-
-  // Add gutter marker
-  const gutterMarker = document.createElement("div");
-  gutterMarker.className = "error-marker";
-  gutterMarker.innerHTML = "●";
-  editor.setGutterMarker(startLine, "error-gutter", gutterMarker);
 
   // Scroll to error line
   editor.scrollIntoView({ line: startLine, ch: 0 }, 100);
