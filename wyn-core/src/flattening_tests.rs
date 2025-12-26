@@ -1340,3 +1340,111 @@ def sum_positive(arr: [5]i32) -> i32 =
     let sum_def = find_def(&mir, "sum_positive");
     assert!(matches!(sum_def, mir::Def::Function { .. }));
 }
+
+// =============================================================================
+// GLSL output tests - verify types are preserved through the full pipeline
+// =============================================================================
+
+/// Compile source to Shadertoy GLSL through the full pipeline
+fn compile_to_glsl(input: &str) -> String {
+    let mut frontend = crate::cached_frontend();
+    let parsed = crate::Compiler::parse(input, &mut frontend.node_counter).expect("Parsing failed");
+    let glsl = parsed
+        .desugar(&mut frontend.node_counter)
+        .expect("Desugaring failed")
+        .resolve(&frontend.module_manager)
+        .expect("Name resolution failed")
+        .fold_ast_constants()
+        .type_check(&frontend.module_manager, &mut frontend.schemes)
+        .expect("Type checking failed")
+        .alias_check()
+        .expect("Alias checking failed")
+        .flatten(&frontend.module_manager, &frontend.schemes)
+        .expect("Flattening failed")
+        .0
+        .hoist_materializations()
+        .normalize()
+        .monomorphize()
+        .expect("Monomorphization failed")
+        .partial_eval()
+        .expect("Partial eval failed")
+        .filter_reachable()
+        .lift_bindings()
+        .lower_shadertoy()
+        .expect("GLSL lowering failed");
+    glsl
+}
+
+#[test]
+fn test_glsl_vector_constructor_types() {
+    // Verify that vector literals use vec2/vec3/vec4 constructors, not float()
+    let glsl = compile_to_glsl(
+        r#"
+#[uniform(set=0, binding=0)] def iResolution: vec2f32
+#[uniform(set=0, binding=1)] def iTime: f32
+
+#[fragment]
+def fragment_main(#[builtin(position)] pos: vec4f32) -> #[location(0)] vec4f32 =
+    let v2 = @[pos.x, pos.y] in
+    let v3 = @[pos.x, pos.y, pos.z] in
+    @[v2.x, v2.y, v3.z, 1.0]
+"#,
+    );
+
+    // Should use vec2() not float() for 2-element vectors
+    assert!(glsl.contains("vec2("), "Expected vec2() constructor in GLSL");
+    assert!(!glsl.contains("float("), "Should not have float() constructor for vectors");
+
+    // Should use vec4() for output
+    assert!(glsl.contains("vec4("), "Expected vec4() constructor in GLSL");
+}
+
+#[test]
+fn test_glsl_let_bindings_preserved() {
+    // Verify that let bindings are preserved (not inlined everywhere)
+    let glsl = compile_to_glsl(
+        r#"
+#[uniform(set=0, binding=0)] def iResolution: vec2f32
+#[uniform(set=0, binding=1)] def iTime: f32
+
+#[fragment]
+def fragment_main(#[builtin(position)] pos: vec4f32) -> #[location(0)] vec4f32 =
+    let coord = @[pos.x, pos.y] in
+    let uv = @[coord.x / iResolution.x, coord.y / iResolution.y] in
+    @[uv.x, uv.y, 0.0, 1.0]
+"#,
+    );
+
+    // Let bindings should create local variables
+    assert!(glsl.contains("vec2 coord"), "Expected 'coord' local variable");
+    assert!(glsl.contains("vec2 uv"), "Expected 'uv' local variable");
+
+    // coord should only appear a few times (declaration + uses), not duplicated everywhere
+    let coord_count = glsl.matches("coord").count();
+    assert!(
+        coord_count <= 6,
+        "Expected coord to appear <= 6 times (not duplicated), found {} times",
+        coord_count
+    );
+}
+
+#[test]
+fn test_glsl_normalization_variables() {
+    // Verify that normalization creates _w_norm_ intermediate variables
+    let glsl = compile_to_glsl(
+        r#"
+#[uniform(set=0, binding=0)] def iTime: f32
+
+#[fragment]
+def fragment_main(#[builtin(position)] pos: vec4f32) -> #[location(0)] vec4f32 =
+    let x = pos.x + pos.y * iTime in
+    @[x, x, x, 1.0]
+"#,
+    );
+
+    // Normalization should create _w_norm_ variables for subexpressions
+    assert!(
+        glsl.contains("_w_norm_"),
+        "Expected _w_norm_ normalization variables in GLSL"
+    );
+}

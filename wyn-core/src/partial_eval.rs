@@ -249,18 +249,37 @@ impl PartialEvaluator {
         }
     }
 
-    /// Get the element type at a given index for a tuple/array type
-    fn get_element_type(&self, ty: &Type<TypeName>, _index: usize) -> Type<TypeName> {
-        // For simplicity, just clone the overall type
-        // In practice, we'd extract the element type from tuple/array types
-        ty.clone()
+    /// Get the element type at a given index for a tuple/array/vector type
+    fn get_element_type(&self, ty: &Type<TypeName>, index: usize) -> Type<TypeName> {
+        match ty {
+            Type::Constructed(TypeName::Tuple(_), args) => {
+                // Tuple: args are the element types in order
+                args.get(index).cloned().unwrap_or_else(|| ty.clone())
+            }
+            Type::Constructed(TypeName::Array, args) if args.len() >= 2 => {
+                // Array: args[0] = Size(n), args[1] = element type
+                args[1].clone()
+            }
+            Type::Constructed(TypeName::Vec, args) if args.len() >= 2 => {
+                // Vec: args[0] = Size(n), args[1] = element type
+                args[1].clone()
+            }
+            Type::Constructed(TypeName::Record(_fields), args) => {
+                // Record: args are the field types in source order
+                args.get(index).cloned().unwrap_or_else(|| ty.clone())
+            }
+            _ => ty.clone(),
+        }
     }
 
-    /// Get the captures type from a closure type
+    /// Get the captures type from a closure type (Record type)
     fn get_captures_type(&self, ty: &Type<TypeName>) -> Type<TypeName> {
-        // For simplicity, just return unit type
-        // In practice, we'd extract the captures type from the closure type
-        ty.clone()
+        // Closure types are represented as Record types containing captured variables
+        // The captures are stored as the closure's type directly
+        match ty {
+            Type::Constructed(TypeName::Record(_), _) => ty.clone(),
+            _ => Type::Constructed(TypeName::Unit, vec![]),
+        }
     }
 
     /// Evaluate an expression, returning a Value
@@ -316,22 +335,43 @@ impl PartialEvaluator {
             } => {
                 let rhs_val = self.eval(body, rhs, env)?;
 
-                // Always map the local for residualization purposes
-                let _new_local = self.map_local(body, local);
+                // Map the local for residualization purposes
+                let new_local = self.map_local(body, local);
 
                 if rhs_val.is_known() {
-                    // Bind the known value in the environment
+                    // Bind the known value in the environment (will be inlined)
                     env.extend(local, rhs_val);
+                    // Evaluate body without emitting a let
+                    self.eval(body, let_body, env)
                 } else {
                     // Emit a let binding for the unknown value
                     if let Value::Unknown(rhs_id) = &rhs_val {
-                        // The rhs_id is already in the output body
-                        // We need to bind it properly
-                        env.extend(local, Value::Unknown(*rhs_id));
+                        // Bind the local to a reference, not the rhs directly
+                        let local_ref_id =
+                            self.emit(Expr::Local(new_local), ty.clone(), span, node_id);
+                        env.extend(local, Value::Unknown(local_ref_id));
+
+                        // Evaluate the body
+                        let body_val = self.eval(body, let_body, env)?;
+
+                        // Emit the let expression wrapping the body
+                        let body_id = self.reify(&body_val, ty, span, node_id);
+                        let let_id = self.emit(
+                            Expr::Let {
+                                local: new_local,
+                                rhs: *rhs_id,
+                                body: body_id,
+                            },
+                            self.output.get_type(body_id).clone(),
+                            span,
+                            node_id,
+                        );
+                        Ok(Value::Unknown(let_id))
+                    } else {
+                        // Shouldn't happen, but fallback to old behavior
+                        self.eval(body, let_body, env)
                     }
                 }
-
-                self.eval(body, let_body, env)
             }
 
             // Binary operation
@@ -625,20 +665,47 @@ impl PartialEvaluator {
         new_id
     }
 
-    fn get_tuple_element_type(&self, ty: &Type<TypeName>, _index: usize) -> Type<TypeName> {
-        ty.clone()
+    /// Extract element type from Tuple at given index
+    fn get_tuple_element_type(&self, ty: &Type<TypeName>, index: usize) -> Type<TypeName> {
+        match ty {
+            Type::Constructed(TypeName::Tuple(_), args) => {
+                args.get(index).cloned().unwrap_or_else(|| ty.clone())
+            }
+            _ => ty.clone(),
+        }
     }
 
+    /// Extract element type from Array<Size(n), ElemType>
     fn get_array_element_type(&self, ty: &Type<TypeName>) -> Type<TypeName> {
-        ty.clone()
+        match ty {
+            Type::Constructed(TypeName::Array, args) if args.len() >= 2 => {
+                // args[0] = Size(n), args[1] = element type
+                args[1].clone()
+            }
+            _ => ty.clone(),
+        }
     }
 
+    /// Extract element type from Vec<Size(n), ElemType>
     fn get_vector_element_type(&self, ty: &Type<TypeName>) -> Type<TypeName> {
-        ty.clone()
+        match ty {
+            Type::Constructed(TypeName::Vec, args) if args.len() >= 2 => {
+                // args[0] = Size(n), args[1] = element type
+                args[1].clone()
+            }
+            _ => ty.clone(),
+        }
     }
 
+    /// Extract element type from Mat<Size(cols), Size(rows), ElemType>
     fn get_matrix_element_type(&self, ty: &Type<TypeName>) -> Type<TypeName> {
-        ty.clone()
+        match ty {
+            Type::Constructed(TypeName::Mat, args) if args.len() >= 3 => {
+                // args[0] = Size(cols), args[1] = Size(rows), args[2] = element type
+                args[2].clone()
+            }
+            _ => ty.clone(),
+        }
     }
 
     /// Evaluate a binary operation
