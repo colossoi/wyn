@@ -1,4 +1,5 @@
-import init, {
+import wasmInit, {
+  init_compiler,
   compile_to_shadertoy,
   get_example_program,
 } from "./pkg/wyn_wasm.js";
@@ -321,6 +322,7 @@ function compileAndRun() {
 
     const shadertoyGlsl = result.glsl;
     const glslSource = wrapForWebGL2(shadertoyGlsl);
+    console.log("=== Generated GLSL (wrapped for WebGL2) ===\n" + glslSource);
     setOutput(
       "Compilation successful!\n\n--- Generated GLSL ---\n" + shadertoyGlsl,
       false,
@@ -356,8 +358,13 @@ function compileAndRun() {
 // Initialize
 async function main() {
   try {
-    // Initialize WASM
-    await init();
+    // Initialize WASM with cache-busting nonce
+    await wasmInit(`./pkg/wyn_wasm_bg.wasm?v=${Date.now()}`);
+
+    // Pre-initialize the compiler cache (parses prelude files)
+    if (!init_compiler()) {
+      throw new Error("Failed to initialize compiler");
+    }
 
     // Initialize CodeMirror editor
     initEditor();

@@ -1,6 +1,73 @@
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
+use wyn_core::ast::NodeCounter;
 use wyn_core::error::CompilerError;
+use wyn_core::module_manager::{ModuleManager, PreElaboratedPrelude};
+use wyn_core::{intrinsics, FrontEnd, PolytypeContext};
+
+/// Cached prelude and starting node counter
+/// Creating the prelude parses all prelude files, which is expensive.
+/// We cache this and create fresh FrontEnds from it for each compilation.
+struct PreludeCache {
+    prelude: PreElaboratedPrelude,
+    start_node_counter: NodeCounter,
+}
+
+thread_local! {
+    static PRELUDE_CACHE: RefCell<Option<PreludeCache>> = RefCell::new(None);
+}
+
+/// Initialize the compiler cache. Call this once at startup.
+/// Returns true on success.
+#[wasm_bindgen]
+pub fn init_compiler() -> bool {
+    console_error_panic_hook::set_once();
+
+    PRELUDE_CACHE.with(|cache| {
+        if cache.borrow().is_some() {
+            return true; // Already initialized
+        }
+
+        let mut node_counter = NodeCounter::new();
+        match ModuleManager::create_prelude(&mut node_counter) {
+            Ok(prelude) => {
+                *cache.borrow_mut() = Some(PreludeCache {
+                    prelude,
+                    start_node_counter: node_counter,
+                });
+                true
+            }
+            Err(e) => {
+                web_sys::console::error_1(&format!("Failed to initialize prelude: {:?}", e).into());
+                false
+            }
+        }
+    })
+}
+
+/// Create a fresh FrontEnd using the cached prelude
+fn create_frontend() -> Option<FrontEnd> {
+    PRELUDE_CACHE.with(|cache| {
+        let cache_ref = cache.borrow();
+        let cached = cache_ref.as_ref()?;
+
+        let module_manager = ModuleManager::from_prelude(&cached.prelude);
+        let context = PolytypeContext::default();
+        let intrinsics = intrinsics::IntrinsicSource::new(&mut PolytypeContext::default());
+
+        Some(FrontEnd {
+            node_counter: cached.start_node_counter.clone(),
+            module_manager,
+            context,
+            type_table: HashMap::new(),
+            intrinsics,
+            schemes: HashMap::new(),
+            module_schemes: HashMap::new(),
+        })
+    })
+}
 
 /// Source location for an error
 #[derive(Serialize, Deserialize, Clone)]
@@ -79,10 +146,14 @@ impl CompileResult {
 /// Compile Wyn source code to Shadertoy-compatible GLSL.
 ///
 /// Returns a JSON-serialized CompileResult.
+/// Note: init_compiler() should be called first, but this will auto-initialize if needed.
 #[wasm_bindgen]
 pub fn compile_to_shadertoy(source: &str) -> JsValue {
     // Set up panic hook for better error messages
     console_error_panic_hook::set_once();
+
+    // Auto-initialize if not already done
+    init_compiler();
 
     let result = compile_impl(source);
     serde_wasm_bindgen::to_value(&result).unwrap_or_else(|e| {
@@ -92,8 +163,11 @@ pub fn compile_to_shadertoy(source: &str) -> JsValue {
 }
 
 fn compile_impl(source: &str) -> CompileResult {
-    // Create frontend (loads prelude, sets up module manager)
-    let mut frontend = wyn_core::FrontEnd::new();
+    // Create frontend from cached prelude
+    let mut frontend = match create_frontend() {
+        Some(f) => f,
+        None => return CompileResult::err_msg("Compiler not initialized".to_string()),
+    };
 
     // Parse
     let parsed = match wyn_core::Compiler::parse(source, &mut frontend.node_counter) {
