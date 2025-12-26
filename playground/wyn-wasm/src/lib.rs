@@ -21,7 +21,7 @@ thread_local! {
 /// Get the compiler version string
 #[wasm_bindgen]
 pub fn version() -> String {
-    "001".to_string()
+    "003".to_string()
 }
 
 /// Initialize the compiler cache. Call this once at startup.

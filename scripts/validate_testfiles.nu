@@ -11,7 +11,7 @@ def main [] {
 
         print -n $"Compiling ($f.name)... "
 
-        let compile_result = do { ./target/release/wyn compile $f.name -o $spv_path } | complete
+        let compile_result = do { ./target/release/wyn compile $f.name --partial-eval -o $spv_path } | complete
 
         if $compile_result.exit_code != 0 {
             print "COMPILE FAILED"

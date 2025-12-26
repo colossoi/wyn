@@ -268,3 +268,73 @@ def test(x: f32) -> f32 =
     assert!(!spirv.is_empty());
     assert_eq!(spirv[0], 0x07230203);
 }
+
+/// Compile source to SPIR-V through the full pipeline including partial_eval
+fn compile_to_spirv_with_partial_eval(source: &str) -> Result<Vec<u32>> {
+    let mut frontend = crate::cached_frontend();
+    let parsed = crate::Compiler::parse(source, &mut frontend.node_counter).expect("Parsing failed");
+    let flattened = parsed
+        .desugar(&mut frontend.node_counter)
+        .expect("Desugaring failed")
+        .resolve(&frontend.module_manager)
+        .expect("Name resolution failed")
+        .fold_ast_constants()
+        .type_check(&frontend.module_manager, &mut frontend.schemes)
+        .expect("Type checking failed")
+        .alias_check()
+        .expect("Alias checking failed")
+        .flatten(&frontend.module_manager, &frontend.schemes)
+        .expect("Flattening failed")
+        .0
+        .hoist_materializations()
+        .normalize()
+        .monomorphize()
+        .expect("Monomorphization failed")
+        .partial_eval()
+        .expect("Partial eval failed")
+        .filter_reachable()
+        .lift_bindings();
+
+    let inplace_info = crate::alias_checker::analyze_inplace(&flattened.mir);
+    lower(&flattened.mir, &inplace_info)
+}
+
+#[test]
+fn test_partial_eval_inlined_function_local_id_collision() {
+    // This test reproduces a bug where partial_eval inlining causes LocalId collision.
+    //
+    // The bug: When partial_eval inlines a function with all known args, it evaluates
+    // the inlined function's body. If that body has a let binding with an Unknown RHS
+    // (e.g., uses a uniform), it calls map_local() to allocate a LocalId. But local_map
+    // still contains mappings from the OUTER function, causing LocalId collisions.
+    //
+    // Setup:
+    // - helper() has a let binding that uses a uniform (Unknown)
+    // - fragment_main has multiple locals before calling helper() with known args
+    // - The helper's local collides with fragment_main's locals in local_map
+    let spirv = compile_to_spirv_with_partial_eval(
+        r#"
+#[uniform(set=0, binding=0)] def iTime: f32
+
+-- Helper function that will be inlined when called with known args.
+-- The let binding 'weight' uses iTime which is unknown, so it gets residualized.
+def helper(x: f32) -> f32 =
+    let weight = x * iTime in
+    weight
+
+#[fragment]
+def fragment_main(#[builtin(position)] pos: vec4f32) -> #[location(0)] vec4f32 =
+    -- Create multiple locals to ensure LocalId collision
+    let a = pos.x in
+    let b = pos.y in
+    let c = pos.z in
+    -- Call helper with known arg - this gets inlined.
+    -- helper's 'weight' local may collide with our locals.
+    let d = helper(3.0) in
+    @[d, a, b, c]
+"#,
+    )
+    .unwrap();
+    assert!(!spirv.is_empty());
+    assert_eq!(spirv[0], 0x07230203);
+}
