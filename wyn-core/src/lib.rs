@@ -316,6 +316,27 @@ impl FrontEnd {
             module_schemes: HashMap::new(),
         }
     }
+
+    /// Create a FrontEnd from a pre-elaborated prelude.
+    /// This is faster than `new()` as it reuses an already-parsed prelude.
+    pub fn new_from_prelude(
+        prelude: &module_manager::PreElaboratedPrelude,
+        node_counter: NodeCounter,
+    ) -> Self {
+        let module_manager = module_manager::ModuleManager::from_prelude(prelude);
+        let context = Context::default();
+        let intrinsics = intrinsics::IntrinsicSource::new(&mut Context::default());
+
+        FrontEnd {
+            node_counter,
+            module_manager,
+            context,
+            type_table: HashMap::new(),
+            intrinsics,
+            schemes: HashMap::new(),
+            module_schemes: HashMap::new(),
+        }
+    }
 }
 
 /// Shared state for BackEnd (MIR) passes.
@@ -705,17 +726,5 @@ pub fn cached_module_manager() -> (module_manager::ModuleManager, NodeCounter) {
 #[cfg(test)]
 pub fn cached_frontend() -> FrontEnd {
     let (prelude, node_counter) = get_prelude_cache();
-    let module_manager = module_manager::ModuleManager::from_prelude(prelude);
-    let context = Context::default();
-    let intrinsics = intrinsics::IntrinsicSource::new(&mut Context::default());
-
-    FrontEnd {
-        node_counter,
-        module_manager,
-        context,
-        type_table: HashMap::new(),
-        intrinsics,
-        schemes: HashMap::new(),
-        module_schemes: HashMap::new(),
-    }
+    FrontEnd::new_from_prelude(prelude, node_counter)
 }

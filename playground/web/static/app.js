@@ -1,4 +1,5 @@
 import wasmInit, {
+  version,
   init_compiler,
   compile_to_shadertoy,
   get_example_program,
@@ -360,6 +361,9 @@ async function main() {
   try {
     // Initialize WASM with cache-busting nonce
     await wasmInit(`./pkg/wyn_wasm_bg.wasm?v=${Date.now()}`);
+
+    // Log compiler version
+    console.log("Wyn compiler version:", version());
 
     // Pre-initialize the compiler cache (parses prelude files)
     if (!init_compiler()) {

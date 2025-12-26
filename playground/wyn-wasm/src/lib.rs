@@ -1,11 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
-use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
+use wyn_core::FrontEnd;
 use wyn_core::ast::NodeCounter;
 use wyn_core::error::CompilerError;
 use wyn_core::module_manager::{ModuleManager, PreElaboratedPrelude};
-use wyn_core::{intrinsics, FrontEnd, PolytypeContext};
 
 /// Cached prelude and starting node counter
 /// Creating the prelude parses all prelude files, which is expensive.
@@ -17,6 +16,12 @@ struct PreludeCache {
 
 thread_local! {
     static PRELUDE_CACHE: RefCell<Option<PreludeCache>> = RefCell::new(None);
+}
+
+/// Get the compiler version string
+#[wasm_bindgen]
+pub fn version() -> String {
+    "001".to_string()
 }
 
 /// Initialize the compiler cache. Call this once at startup.
@@ -52,20 +57,10 @@ fn create_frontend() -> Option<FrontEnd> {
     PRELUDE_CACHE.with(|cache| {
         let cache_ref = cache.borrow();
         let cached = cache_ref.as_ref()?;
-
-        let module_manager = ModuleManager::from_prelude(&cached.prelude);
-        let context = PolytypeContext::default();
-        let intrinsics = intrinsics::IntrinsicSource::new(&mut PolytypeContext::default());
-
-        Some(FrontEnd {
-            node_counter: cached.start_node_counter.clone(),
-            module_manager,
-            context,
-            type_table: HashMap::new(),
-            intrinsics,
-            schemes: HashMap::new(),
-            module_schemes: HashMap::new(),
-        })
+        Some(FrontEnd::new_from_prelude(
+            &cached.prelude,
+            cached.start_node_counter.clone(),
+        ))
     })
 }
 

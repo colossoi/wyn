@@ -24,16 +24,7 @@ fn get_prelude() -> (&'static PreElaboratedPrelude, NodeCounter) {
 
 fn get_frontend() -> FrontEnd {
     let (prelude, node_counter) = get_prelude();
-    let module_manager = ModuleManager::from_prelude(prelude);
-    FrontEnd {
-        node_counter,
-        module_manager,
-        context: wyn_core::PolytypeContext::default(),
-        type_table: HashMap::new(),
-        intrinsics: wyn_core::intrinsics::IntrinsicSource::new(&mut wyn_core::PolytypeContext::default()),
-        schemes: HashMap::new(),
-        module_schemes: HashMap::new(),
-    }
+    FrontEnd::new_from_prelude(prelude, node_counter)
 }
 
 /// Cached document state after successful type checking
