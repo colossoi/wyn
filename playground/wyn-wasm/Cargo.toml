@@ -1,0 +1,19 @@
+[package]
+name = "wyn-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "WebAssembly bindings for the Wyn compiler"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wyn-core = { path = "../../wyn-core" }
+wasm-bindgen = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+console_error_panic_hook = "0.1"
+
+[profile.release]
+opt-level = "s"
+lto = true

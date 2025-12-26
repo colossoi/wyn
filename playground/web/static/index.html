@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wyn Playground</title>
+    <style>
+      :root {
+        --bg-dark: #1a1a2e;
+        --bg-darker: #16162a;
+        --bg-editor: #0f0f1a;
+        --text-primary: #e0e0e0;
+        --text-secondary: #888;
+        --accent: #6366f1;
+        --accent-hover: #818cf8;
+        --error: #f87171;
+        --success: #4ade80;
+        --border: #2a2a4a;
+      }
+
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      body {
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+        background: var(--bg-dark);
+        color: var(--text-primary);
+        height: 100vh;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+
+      header {
+        background: var(--bg-darker);
+        padding: 12px 24px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .logo {
+        font-size: 1.5rem;
+        font-weight: 700;
+        background: linear-gradient(135deg, var(--accent), #a855f7);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+      }
+
+      .toolbar {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+      }
+
+      button {
+        background: var(--accent);
+        color: white;
+        border: none;
+        padding: 10px 20px;
+        border-radius: 6px;
+        font-size: 0.9rem;
+        font-weight: 500;
+        cursor: pointer;
+        transition: background 0.2s, transform 0.1s;
+      }
+
+      button:hover {
+        background: var(--accent-hover);
+      }
+
+      button:active {
+        transform: scale(0.98);
+      }
+
+      button:disabled {
+        background: var(--border);
+        cursor: not-allowed;
+      }
+
+      .main-content {
+        flex: 1;
+        display: flex;
+        overflow: hidden;
+      }
+
+      .editor-panel {
+        width: 50%;
+        display: flex;
+        flex-direction: column;
+        border-right: 1px solid var(--border);
+      }
+
+      .panel-header {
+        background: var(--bg-darker);
+        padding: 8px 16px;
+        font-size: 0.85rem;
+        color: var(--text-secondary);
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+
+      .editor-container {
+        flex: 1;
+        position: relative;
+        overflow: hidden;
+      }
+
+      #editor {
+        width: 100%;
+        height: 100%;
+        background: var(--bg-editor);
+        color: var(--text-primary);
+        border: none;
+        padding: 16px;
+        font-family:
+          "JetBrains Mono", "Fira Code", "SF Mono", Monaco, "Consolas",
+          monospace;
+        font-size: 14px;
+        line-height: 1.6;
+        resize: none;
+        outline: none;
+        tab-size: 2;
+      }
+
+      .preview-panel {
+        width: 50%;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .canvas-container {
+        flex: 1;
+        background: #000;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        position: relative;
+      }
+
+      #canvas {
+        max-width: 100%;
+        max-height: 100%;
+      }
+
+      .output-panel {
+        height: 150px;
+        background: var(--bg-darker);
+        border-top: 1px solid var(--border);
+        overflow: auto;
+      }
+
+      #output {
+        padding: 12px 16px;
+        font-family: "JetBrains Mono", "Fira Code", monospace;
+        font-size: 12px;
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+
+      #output.error {
+        color: var(--error);
+      }
+
+      #output.success {
+        color: var(--success);
+      }
+
+      .status {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .status-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--text-secondary);
+      }
+
+      .status-dot.ready {
+        background: var(--success);
+      }
+
+      .status-dot.error {
+        background: var(--error);
+      }
+
+      .status-dot.compiling {
+        background: var(--accent);
+        animation: pulse 1s infinite;
+      }
+
+      @keyframes pulse {
+        0%, 100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.5;
+        }
+      }
+
+      .fps {
+        font-size: 0.75rem;
+        color: var(--text-secondary);
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        background: rgba(0, 0, 0, 0.5);
+        padding: 4px 8px;
+        border-radius: 4px;
+      }
+
+      /* Loading overlay */
+      .loading-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: var(--bg-dark);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+        gap: 16px;
+        z-index: 1000;
+      }
+
+      .loading-overlay.hidden {
+        display: none;
+      }
+
+      .spinner {
+        width: 40px;
+        height: 40px;
+        border: 3px solid var(--border);
+        border-top-color: var(--accent);
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+      }
+
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="loading" class="loading-overlay">
+      <div class="spinner"></div>
+      <div>Loading Wyn compiler...</div>
+    </div>
+
+    <header>
+      <div class="logo">Wyn Playground</div>
+      <div class="toolbar">
+        <div class="status">
+          <div id="status-dot" class="status-dot"></div>
+          <span id="status-text">Loading...</span>
+        </div>
+        <button id="compile-btn" disabled>Compile & Run</button>
+      </div>
+    </header>
+
+    <main class="main-content">
+      <div class="editor-panel">
+        <div class="panel-header">
+          <span>Wyn Source</span>
+        </div>
+        <div class="editor-container">
+          <textarea id="editor" spellcheck="false"></textarea>
+        </div>
+      </div>
+
+      <div class="preview-panel">
+        <div class="panel-header">
+          <span>Preview</span>
+        </div>
+        <div class="canvas-container">
+          <canvas id="canvas" width="640" height="360"></canvas>
+          <div id="fps" class="fps">-- FPS</div>
+        </div>
+        <div class="output-panel">
+          <div class="panel-header">
+            <span>Output</span>
+          </div>
+          <div id="output"></div>
+        </div>
+      </div>
+    </main>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
