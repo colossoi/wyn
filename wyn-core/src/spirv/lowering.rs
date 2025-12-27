@@ -1169,7 +1169,13 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
             if let Some(&id) = constructor.env.get(name) {
                 return Ok(id);
             }
-            Err(err_spirv!("Undefined local variable: {}", name))
+            let env_keys: Vec<_> = constructor.env.keys().collect();
+            Err(err_spirv!(
+                "Undefined local variable: {} (local_id={:?}, env has: {:?})",
+                name,
+                local_id,
+                env_keys
+            ))
         }
 
         Expr::Global(name) => {

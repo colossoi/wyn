@@ -12,6 +12,61 @@ use polytype::Type;
 use std::collections::HashMap;
 
 // =============================================================================
+// Scoped local mapping
+// =============================================================================
+
+/// Maps LocalIds from input bodies to LocalIds in the output body.
+///
+/// This needs scoping because when we inline a function or evaluate a constant,
+/// we switch to evaluating a different input body. Each input body has its own
+/// LocalId namespace, so we need separate mappings for each.
+///
+/// Example: If outer function has LocalId(0) = "x" and inlined function has
+/// LocalId(0) = "y", these need different output LocalIds.
+#[derive(Debug, Default)]
+struct ScopedLocalMap {
+    /// Stack of local mappings, one per input body being evaluated.
+    /// The top of the stack is the current scope.
+    frames: Vec<HashMap<LocalId, LocalId>>,
+}
+
+impl ScopedLocalMap {
+    fn new() -> Self {
+        ScopedLocalMap {
+            frames: vec![HashMap::new()],
+        }
+    }
+
+    /// Enter a new scope (when starting to evaluate a different body)
+    fn push_scope(&mut self) {
+        self.frames.push(HashMap::new());
+    }
+
+    /// Leave the current scope (when done evaluating a body)
+    fn pop_scope(&mut self) {
+        self.frames.pop();
+    }
+
+    /// Look up a LocalId in the current scope only
+    fn get(&self, id: LocalId) -> Option<LocalId> {
+        self.frames.last()?.get(&id).copied()
+    }
+
+    /// Insert a mapping in the current scope
+    fn insert(&mut self, old: LocalId, new: LocalId) {
+        if let Some(frame) = self.frames.last_mut() {
+            frame.insert(old, new);
+        }
+    }
+
+    /// Clear all scopes and start fresh (for a new top-level definition)
+    fn reset(&mut self) {
+        self.frames.clear();
+        self.frames.push(HashMap::new());
+    }
+}
+
+// =============================================================================
 // Value representation
 // =============================================================================
 
@@ -155,8 +210,9 @@ struct PartialEvaluator {
     /// Cost budget
     cost_budget: CostBudget,
 
-    /// Mapping from old LocalId to new LocalId (for the current body)
-    local_map: HashMap<LocalId, LocalId>,
+    /// Scoped mapping from old LocalId to new LocalId.
+    /// Supports nested scopes for inlined functions and constant evaluation.
+    local_map: ScopedLocalMap,
 }
 
 impl PartialEvaluator {
@@ -189,7 +245,7 @@ impl PartialEvaluator {
             const_cache,
             output: Body::new(),
             cost_budget: CostBudget::default(),
-            local_map: HashMap::new(),
+            local_map: ScopedLocalMap::new(),
         }
     }
 
@@ -319,8 +375,12 @@ impl PartialEvaluator {
             Expr::Global(name) => {
                 // Check if it's a constant we can evaluate
                 if let Some(const_body) = self.const_cache.get(&name).cloned() {
+                    // Push a new scope for the constant's body (different LocalId namespace)
+                    self.local_map.push_scope();
                     let mut const_env = Env::new();
-                    return self.eval(&const_body, const_body.root, &mut const_env);
+                    let result = self.eval(&const_body, const_body.root, &mut const_env);
+                    self.local_map.pop_scope();
+                    return result;
                 }
                 // Otherwise, residualize
                 let new_id = self.emit(Expr::Global(name), ty, span, node_id);
@@ -346,9 +406,11 @@ impl PartialEvaluator {
                 } else {
                     // Emit a let binding for the unknown value
                     if let Value::Unknown(rhs_id) = &rhs_val {
+                        // Get the RHS type - the local has the type of its RHS, not the let body
+                        let rhs_ty = self.output.get_type(*rhs_id).clone();
+
                         // Bind the local to a reference, not the rhs directly
-                        let local_ref_id =
-                            self.emit(Expr::Local(new_local), ty.clone(), span, node_id);
+                        let local_ref_id = self.emit(Expr::Local(new_local), rhs_ty, span, node_id);
                         env.extend(local, Value::Unknown(local_ref_id));
 
                         // Evaluate the body
@@ -582,7 +644,12 @@ impl PartialEvaluator {
             // Materialize
             Expr::Materialize(inner) => {
                 let inner_val = self.eval(body, inner, env)?;
-                let inner_id = self.reify(&inner_val, ty.clone(), span, node_id);
+                // ty is Ptr(inner_type), unwrap to get the actual inner type for reification
+                let inner_ty = match &ty {
+                    Type::Constructed(TypeName::Pointer, args) if !args.is_empty() => args[0].clone(),
+                    _ => ty.clone(), // Fallback if not a pointer (shouldn't happen)
+                };
+                let inner_id = self.reify(&inner_val, inner_ty, span, node_id);
                 let new_id = self.emit(Expr::Materialize(inner_id), ty, span, node_id);
                 Ok(Value::Unknown(new_id))
             }
@@ -654,9 +721,9 @@ impl PartialEvaluator {
         }
     }
 
-    /// Map a local from the input body to the output body
+    /// Map a local from the input body to the output body (in current scope)
     fn map_local(&mut self, body: &Body, local_id: LocalId) -> LocalId {
-        if let Some(&new_id) = self.local_map.get(&local_id) {
+        if let Some(new_id) = self.local_map.get(local_id) {
             return new_id;
         }
         let decl = body.locals[local_id.index()].clone();
@@ -959,6 +1026,9 @@ impl PartialEvaluator {
             if let Some(func_info) = self.func_cache.get(func).cloned() {
                 self.cost_budget.inline_depth += 1;
 
+                // Push a new scope for the inlined function's body (different LocalId namespace)
+                self.local_map.push_scope();
+
                 // Build environment with argument bindings
                 let mut call_env = Env::new();
                 for (param_id, arg_val) in func_info.params.iter().zip(args.iter()) {
@@ -968,6 +1038,7 @@ impl PartialEvaluator {
                 // Evaluate the function body
                 let result = self.eval(&func_info.body, func_info.body.root, &mut call_env);
 
+                self.local_map.pop_scope();
                 self.cost_budget.inline_depth -= 1;
 
                 return result;
@@ -1377,7 +1448,7 @@ impl PartialEvaluator {
     /// Evaluate a function body, returning the new body
     fn eval_body(&mut self, old_body: Body) -> Result<Body> {
         self.output = Body::new();
-        self.local_map.clear();
+        self.local_map.reset();
 
         // Copy locals (parameters and let-bindings)
         for local in &old_body.locals {

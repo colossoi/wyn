@@ -1393,7 +1393,10 @@ def fragment_main(#[builtin(position)] pos: vec4f32) -> #[location(0)] vec4f32 =
 
     // Should use vec2() not float() for 2-element vectors
     assert!(glsl.contains("vec2("), "Expected vec2() constructor in GLSL");
-    assert!(!glsl.contains("float("), "Should not have float() constructor for vectors");
+    assert!(
+        !glsl.contains("float("),
+        "Should not have float() constructor for vectors"
+    );
 
     // Should use vec4() for output
     assert!(glsl.contains("vec4("), "Expected vec4() constructor in GLSL");

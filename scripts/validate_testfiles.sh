@@ -13,7 +13,7 @@ for f in testfiles/*.wyn; do
 
     printf "Compiling %s... " "$f"
 
-    if ! compile_err=$(./target/release/wyn compile "$f" -o "$spv_path" 2>&1); then
+    if ! compile_err=$(./target/release/wyn compile "$f" --partial-eval -o "$spv_path" 2>&1); then
         echo "COMPILE FAILED"
         echo "$compile_err"
         continue
