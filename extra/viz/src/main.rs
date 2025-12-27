@@ -11,9 +11,10 @@ use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
     BindingResource, BindingType, BufferBindingType, BufferDescriptor, BufferUsages, Color,
     ColorTargetState, CommandEncoderDescriptor, DeviceDescriptor, FragmentState, Instance,
-    InstanceDescriptor, LoadOp, MultisampleState, Operations, PipelineLayoutDescriptor, PowerPreference,
-    PresentMode, PrimitiveState, RenderPipeline, RequestAdapterOptions, ShaderModuleDescriptorPassthrough,
-    ShaderStages, StoreOp, SurfaceConfiguration, TextureUsages, Trace, VertexState,
+    InstanceDescriptor, InstanceFlags, LoadOp, MultisampleState, Operations, PipelineLayoutDescriptor,
+    PowerPreference, PresentMode, PrimitiveState, RenderPipeline, RequestAdapterOptions,
+    ShaderModuleDescriptorPassthrough, ShaderStages, StoreOp, SurfaceConfiguration, TextureUsages,
+    Trace, VertexState,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
@@ -56,6 +57,9 @@ enum Command {
         /// Print frame timing statistics
         #[arg(short, long)]
         verbose: bool,
+        /// Enable GPU validation layers for debugging
+        #[arg(long)]
+        validation: bool,
     },
     /// Run a compute shader (headless)
     #[command(name = "compute")]
@@ -98,6 +102,7 @@ enum PipelineSpec {
         shadertoy: bool,
         max_frames: Option<u32>,
         verbose: bool,
+        validation: bool,
     },
 }
 
@@ -673,7 +678,23 @@ impl State {
 
 impl State {
     async fn new(window: Arc<Window>, spec: &PipelineSpec) -> Result<Self> {
-        let instance = Instance::new(&InstanceDescriptor::default());
+        // Extract validation flag from spec
+        let validation = match spec {
+            PipelineSpec::VertexFragment { validation, .. } => *validation,
+        };
+
+        // Create instance with optional validation layers
+        let instance_flags = if validation {
+            eprintln!("[viz] Validation layers ENABLED");
+            InstanceFlags::VALIDATION | InstanceFlags::DEBUG
+        } else {
+            InstanceFlags::empty()
+        };
+
+        let instance = Instance::new(&InstanceDescriptor {
+            flags: instance_flags,
+            ..Default::default()
+        });
 
         let surface = instance.create_surface(window.clone()).context("failed to create wgpu surface")?;
 
@@ -687,15 +708,30 @@ impl State {
             .await
             .context("request_adapter failed")?;
 
+        // Extract verbose flag from spec
+        let verbose = match spec {
+            PipelineSpec::VertexFragment { verbose, .. } => *verbose,
+        };
+
+        // Print adapter info when verbose
+        if verbose {
+            let info = adapter.get_info();
+            eprintln!("[viz] Adapter: {} ({:?})", info.name, info.backend);
+            eprintln!("[viz] Driver: {}", info.driver);
+            eprintln!("[viz] Driver info: {}", info.driver_info);
+        }
+
         // Check if SPIRV_SHADER_PASSTHROUGH is supported
         let adapter_features = adapter.features();
         let spirv_passthrough_supported =
             adapter_features.contains(wgpu::Features::SPIRV_SHADER_PASSTHROUGH);
 
-        println!(
-            "SPIRV_SHADER_PASSTHROUGH supported: {}",
-            spirv_passthrough_supported
-        );
+        if verbose {
+            eprintln!(
+                "[viz] SPIRV_SHADER_PASSTHROUGH supported: {}",
+                spirv_passthrough_supported
+            );
+        }
 
         // Build required features
         let mut required_features = wgpu::Features::empty();
@@ -714,6 +750,11 @@ impl State {
             })
             .await
             .context("failed to create logical device")?;
+
+        // Set up uncaptured error handler to catch GPU errors at runtime
+        device.on_uncaptured_error(Box::new(|error| {
+            eprintln!("[viz] GPU ERROR: {:?}", error);
+        }));
 
         let caps = surface.get_capabilities(&adapter);
         let format =
@@ -1249,6 +1290,7 @@ fn main() -> Result<()> {
             shadertoy,
             max_frames,
             verbose,
+            validation,
         } => {
             // Resolve entry points: use provided names or auto-detect
             let (vertex_name, fragment_name) = resolve_entry_points(&path, vertex, fragment)?;
@@ -1260,6 +1302,7 @@ fn main() -> Result<()> {
                 shadertoy,
                 max_frames,
                 verbose,
+                validation,
             };
 
             let event_loop = EventLoop::new().context("failed to create event loop")?;
