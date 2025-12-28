@@ -377,6 +377,26 @@ impl Constructor {
         ty
     }
 
+    /// Create a Block-decorated struct type for a uniform buffer.
+    /// Returns the struct type ID. Each uniform gets its own unique struct
+    /// (not cached) since Block structs shouldn't be shared.
+    fn create_uniform_block_type(&mut self, value_type: spirv::Word) -> spirv::Word {
+        let block_struct = self.builder.type_struct(vec![value_type]);
+
+        // Decorate as Block (required for UBO in Vulkan)
+        self.builder.decorate(block_struct, spirv::Decoration::Block, []);
+
+        // Decorate member 0 with Offset 0
+        self.builder.member_decorate(
+            block_struct,
+            0,
+            spirv::Decoration::Offset,
+            [Operand::LiteralBit32(0)],
+        );
+
+        block_struct
+    }
+
     /// Begin a new function
     fn begin_function(
         &mut self,
@@ -690,10 +710,13 @@ impl<'a> LowerCtx<'a> {
                 binding,
                 ..
             } => {
-                // Create a SPIR-V uniform variable
-                let uniform_type = self.constructor.ast_type_to_spirv(ty);
-                let ptr_type =
-                    self.constructor.get_or_create_ptr_type(spirv::StorageClass::Uniform, uniform_type);
+                // Create a SPIR-V uniform variable wrapped in a Block-decorated struct
+                // (required for Vulkan uniform buffer compatibility)
+                let value_type = self.constructor.ast_type_to_spirv(ty);
+                let block_type = self.constructor.create_uniform_block_type(value_type);
+                let ptr_type = self
+                    .constructor
+                    .get_or_create_ptr_type(spirv::StorageClass::Uniform, block_type);
                 let var_id =
                     self.constructor.builder.variable(ptr_type, None, spirv::StorageClass::Uniform, None);
 
@@ -709,9 +732,9 @@ impl<'a> LowerCtx<'a> {
                     [Operand::LiteralBit32(*binding)],
                 );
 
-                // Store uniform variable ID and type for lookup
+                // Store uniform variable ID and the inner value type for lookup
                 self.constructor.uniform_variables.insert(name.clone(), var_id);
-                self.constructor.uniform_types.insert(name.clone(), uniform_type);
+                self.constructor.uniform_types.insert(name.clone(), value_type);
             }
             Def::Storage {
                 name,
@@ -1189,13 +1212,25 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                 if let Some(&cached_id) = constructor.uniform_load_cache.get(name) {
                     return Ok(cached_id);
                 }
-                // Load from the uniform variable and cache the result
+                // Uniform is wrapped in a Block struct - need OpAccessChain to get member 0
                 let value_type_id = constructor
                     .uniform_types
                     .get(name)
                     .copied()
                     .ok_or_else(|| err_spirv!("Could not find type for uniform variable: {}", name))?;
-                let load_id = constructor.builder.load(value_type_id, None, var_id, None, [])?;
+
+                // Create pointer type for the member access
+                let member_ptr_type = constructor
+                    .builder
+                    .type_pointer(None, spirv::StorageClass::Uniform, value_type_id);
+
+                // Access member 0 of the Block struct
+                let zero = constructor.const_i32(0);
+                let member_ptr =
+                    constructor.builder.access_chain(member_ptr_type, None, var_id, [zero])?;
+
+                // Load the value
+                let load_id = constructor.builder.load(value_type_id, None, member_ptr, None, [])?;
                 constructor.uniform_load_cache.insert(name.to_string(), load_id);
                 return Ok(load_id);
             }
