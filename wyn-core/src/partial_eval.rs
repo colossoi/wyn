@@ -569,14 +569,16 @@ impl PartialEvaluator {
             Expr::Call { func, args } => {
                 let arg_vals: Vec<Value> =
                     args.iter().map(|a| self.eval(body, *a, env)).collect::<Result<_>>()?;
-                self.eval_call(&func, arg_vals, body, ty, span, node_id)
+                // Pass original arg ExprIds so we can get their types when reifying
+                self.eval_call(&func, arg_vals, &args, body, ty, span, node_id)
             }
 
             // Intrinsic call
             Expr::Intrinsic { name, args } => {
                 let arg_vals: Vec<Value> =
                     args.iter().map(|a| self.eval(body, *a, env)).collect::<Result<_>>()?;
-                self.eval_intrinsic(&name, arg_vals, body, ty, span, node_id)
+                // Pass original arg ExprIds so we can get their types when reifying
+                self.eval_intrinsic(&name, arg_vals, &args, body, ty, span, node_id)
             }
 
             // Closure
@@ -1014,7 +1016,8 @@ impl PartialEvaluator {
         &mut self,
         func: &str,
         args: Vec<Value>,
-        _body: &Body,
+        arg_expr_ids: &[ExprId],
+        body: &Body,
         ty: Type<TypeName>,
         span: Span,
         node_id: NodeId,
@@ -1045,8 +1048,15 @@ impl PartialEvaluator {
             }
         }
 
-        // Can't inline - residualize
-        let arg_ids: Vec<ExprId> = args.iter().map(|v| self.reify(v, ty.clone(), span, node_id)).collect();
+        // Can't inline - residualize using each argument's original type
+        let arg_ids: Vec<ExprId> = args
+            .iter()
+            .zip(arg_expr_ids.iter())
+            .map(|(v, &orig_id)| {
+                let arg_ty = body.get_type(orig_id).clone();
+                self.reify(v, arg_ty, span, node_id)
+            })
+            .collect();
 
         let call_id = self.emit(
             Expr::Call {
@@ -1066,7 +1076,8 @@ impl PartialEvaluator {
         &mut self,
         name: &str,
         args: Vec<Value>,
-        _body: &Body,
+        arg_expr_ids: &[ExprId],
+        body: &Body,
         ty: Type<TypeName>,
         span: Span,
         node_id: NodeId,
@@ -1182,8 +1193,15 @@ impl PartialEvaluator {
             }
         }
 
-        // Residualize
-        let arg_ids: Vec<ExprId> = args.iter().map(|v| self.reify(v, ty.clone(), span, node_id)).collect();
+        // Residualize - use each argument's original type, not the result type
+        let arg_ids: Vec<ExprId> = args
+            .iter()
+            .zip(arg_expr_ids.iter())
+            .map(|(v, &orig_id)| {
+                let arg_ty = body.get_type(orig_id).clone();
+                self.reify(v, arg_ty, span, node_id)
+            })
+            .collect();
 
         let intrinsic_id = self.emit(
             Expr::Intrinsic {

@@ -338,3 +338,38 @@ def fragment_main(#[builtin(position)] pos: vec4f32) -> #[location(0)] vec4f32 =
     assert!(!spirv.is_empty());
     assert_eq!(spirv[0], 0x07230203);
 }
+
+#[test]
+fn test_partial_eval_intrinsic_arg_types() {
+    // This test reproduces a bug where partial_eval reifies intrinsic arguments
+    // using the result type instead of the argument types.
+    //
+    // The bug: When residualizing an intrinsic like dot(vec3, vec3) -> f32,
+    // the code was reifying the vector arguments with type f32 (the result type)
+    // instead of vec3f32 (the argument type). This causes OpCompositeConstruct
+    // to use a scalar type with multiple values.
+    //
+    // Setup:
+    // - dot() takes two vec3 arguments and returns f32
+    // - When the vec3 arguments are known vectors, they get reified with wrong type
+    let spirv = compile_to_spirv_with_partial_eval(
+        r#"
+def verts: [3]vec4f32 =
+  [@[-1.0, -1.0, 0.0, 1.0],
+   @[3.0, -1.0, 0.0, 1.0],
+   @[-1.0, 3.0, 0.0, 1.0]]
+
+#[vertex]
+def vertex_main(#[builtin(vertex_index)] vertex_id:i32) -> #[builtin(position)] vec4f32 = verts[vertex_id]
+
+#[fragment]
+def fragment_main() -> #[location(0)] vec4f32 =
+  let g = @[1.0, 2.0, 3.0] in
+  let h = dot(g, @[127.1, 311.7, 74.7]) in
+  @[h, h, h, 1.0]
+"#,
+    )
+    .unwrap();
+    assert!(!spirv.is_empty());
+    assert_eq!(spirv[0], 0x07230203);
+}
