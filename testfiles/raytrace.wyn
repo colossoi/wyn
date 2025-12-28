@@ -1,0 +1,394 @@
+-- Classic Raytracing Scene
+-- A simple scene with reflective spheres on a checkerboard ground plane
+-- Uses PBR-inspired lighting with configurable reflection bounces
+
+------------------------------------------------------------
+-- Uniforms
+------------------------------------------------------------
+#[uniform(set=0, binding=0)] def iResolution: vec2f32
+#[uniform(set=0, binding=1)] def iTime: f32
+#[uniform(set=0, binding=2)] def difficulty: i32
+#[uniform(set=0, binding=5)] def iMouse: vec4f32
+
+------------------------------------------------------------
+-- Constants
+------------------------------------------------------------
+def PI: f32 = 3.141592653589793
+def EPSILON: f32 = 0.001
+def MAX_DIST: f32 = 100.0
+
+-- Sphere definitions: (center_x, center_y, center_z, radius)
+-- Original 3 spheres in front
+def SPHERE1_CENTER: vec3f32 = @[-1.5, 0.5, 0.0]
+def SPHERE1_RADIUS: f32 = 0.5
+
+def SPHERE2_CENTER: vec3f32 = @[0.0, 0.75, 0.0]
+def SPHERE2_RADIUS: f32 = 0.75
+
+def SPHERE3_CENTER: vec3f32 = @[1.5, 0.5, 0.0]
+def SPHERE3_RADIUS: f32 = 0.5
+
+-- 5 additional spheres scattered around
+def SPHERE4_CENTER: vec3f32 = @[-2.5, 0.35, -1.8]
+def SPHERE4_RADIUS: f32 = 0.35
+
+def SPHERE5_CENTER: vec3f32 = @[2.2, 0.45, -2.0]
+def SPHERE5_RADIUS: f32 = 0.45
+
+def SPHERE6_CENTER: vec3f32 = @[-0.8, 0.3, -2.5]
+def SPHERE6_RADIUS: f32 = 0.3
+
+def SPHERE7_CENTER: vec3f32 = @[1.0, 0.6, -1.5]
+def SPHERE7_RADIUS: f32 = 0.6
+
+def SPHERE8_CENTER: vec3f32 = @[-1.0, 0.25, 1.5]
+def SPHERE8_RADIUS: f32 = 0.25
+
+def GROUND_Y: f32 = 0.0
+
+-- Light direction (normalized)
+def LIGHT_DIR: vec3f32 = @[0.5773502691896258, 0.5773502691896258, -0.5773502691896258]
+
+------------------------------------------------------------
+-- Vertex shader: full-screen triangle
+------------------------------------------------------------
+def verts: [3]vec4f32 =
+  [@[-1.0, -1.0, 0.0, 1.0],
+   @[3.0, -1.0, 0.0, 1.0],
+   @[-1.0, 3.0, 0.0, 1.0]]
+
+#[vertex]
+def vertex_main(#[builtin(vertex_index)] vertex_id: i32) -> #[builtin(position)] vec4f32 = verts[vertex_id]
+
+------------------------------------------------------------
+-- PBR Functions
+------------------------------------------------------------
+
+-- Fresnel-Schlick approximation
+def pbrFresnelSchlick(cosTheta: f32, f0: vec3f32) -> vec3f32 =
+  let oneMinusCos = 1.0 - cosTheta in
+  let pow5 = oneMinusCos * oneMinusCos * oneMinusCos * oneMinusCos * oneMinusCos in
+  @[f0.x + (1.0 - f0.x) * pow5,
+    f0.y + (1.0 - f0.y) * pow5,
+    f0.z + (1.0 - f0.z) * pow5]
+
+-- GGX/Trowbridge-Reitz normal distribution
+def pbrDistributionGGX(nDotH: f32, roughness: f32) -> f32 =
+  let a = roughness * roughness in
+  let a2 = a * a in
+  let nDotH2 = nDotH * nDotH in
+  let denom = nDotH2 * (a2 - 1.0) + 1.0 in
+  a2 / (PI * denom * denom + EPSILON)
+
+-- Schlick-GGX geometry function
+def pbrGeometrySchlickGGX(nDotV: f32, roughness: f32) -> f32 =
+  let r = roughness + 1.0 in
+  let k = r * r / 8.0 in
+  nDotV / (nDotV * (1.0 - k) + k + EPSILON)
+
+-- Smith's geometry function
+def pbrGeometrySmith(nDotV: f32, nDotL: f32, roughness: f32) -> f32 =
+  let ggx1 = pbrGeometrySchlickGGX(nDotV, roughness) in
+  let ggx2 = pbrGeometrySchlickGGX(nDotL, roughness) in
+  ggx1 * ggx2
+
+-- Cook-Torrance BRDF
+def pbrBrdf(n: vec3f32, v: vec3f32, l: vec3f32, albedo: vec3f32, metallic: f32, roughness: f32) -> vec3f32 =
+  let h = normalize(@[v.x + l.x, v.y + l.y, v.z + l.z]) in
+  let nDotV = f32.max(dot(n, v), 0.0) in
+  let nDotL = f32.max(dot(n, l), 0.0) in
+  let nDotH = f32.max(dot(n, h), 0.0) in
+  let hDotV = f32.max(dot(h, v), 0.0) in
+
+  -- f0 for dielectrics is 0.04, for metals it's the albedo
+  let f0 = @[mix(0.04, albedo.x, metallic),
+             mix(0.04, albedo.y, metallic),
+             mix(0.04, albedo.z, metallic)] in
+
+  let d = pbrDistributionGGX(nDotH, roughness) in
+  let g = pbrGeometrySmith(nDotV, nDotL, roughness) in
+  let fr = pbrFresnelSchlick(hDotV, f0) in
+
+  -- Specular component
+  let specDenom = 4.0 * nDotV * nDotL + EPSILON in
+  let specular = @[d * g * fr.x / specDenom,
+                   d * g * fr.y / specDenom,
+                   d * g * fr.z / specDenom] in
+
+  -- Diffuse component (Lambert)
+  let kD = @[(1.0 - fr.x) * (1.0 - metallic),
+             (1.0 - fr.y) * (1.0 - metallic),
+             (1.0 - fr.z) * (1.0 - metallic)] in
+  let diffuse = @[kD.x * albedo.x / PI,
+                  kD.y * albedo.y / PI,
+                  kD.z * albedo.z / PI] in
+
+  -- Combined BRDF * nDotL
+  @[(diffuse.x + specular.x) * nDotL,
+    (diffuse.y + specular.y) * nDotL,
+    (diffuse.z + specular.z) * nDotL]
+
+------------------------------------------------------------
+-- Ray Intersection Functions
+------------------------------------------------------------
+
+-- Ray-sphere intersection, returns distance or -1.0 if no hit
+def intersectSphere(ro: vec3f32, rd: vec3f32, center: vec3f32, radius: f32) -> f32 =
+  let oc = @[ro.x - center.x, ro.y - center.y, ro.z - center.z] in
+  let b = dot(oc, rd) in
+  let c = dot(oc, oc) - radius * radius in
+  let discriminant = b * b - c in
+  if discriminant < 0.0 then 0.0 - 1.0
+  else
+    let sqrtD = f32.sqrt(discriminant) in
+    let t1 = 0.0 - b - sqrtD in
+    let t2 = 0.0 - b + sqrtD in
+    if t1 > EPSILON then t1
+    else if t2 > EPSILON then t2
+    else 0.0 - 1.0
+
+-- Ray-plane intersection (horizontal plane at y = planeY)
+def intersectPlane(ro: vec3f32, rd: vec3f32, planeY: f32) -> f32 =
+  if f32.abs(rd.y) < EPSILON then 0.0 - 1.0
+  else
+    let t = (planeY - ro.y) / rd.y in
+    if t > EPSILON then t else 0.0 - 1.0
+
+------------------------------------------------------------
+-- Scene Intersection
+------------------------------------------------------------
+
+-- Material IDs: 0 = miss, 1 = ground, 2-9 = spheres 1-8
+
+-- Helper to check a single sphere and update closest hit
+def checkSphere(ro: vec3f32, rd: vec3f32, center: vec3f32, radius: f32, matId: i32,
+                curT: f32, curMat: i32, curN: vec3f32) -> (f32, i32, vec3f32) =
+  let t = intersectSphere(ro, rd, center, radius) in
+  if t > 0.0 then
+    if t < curT then
+      let hitP = @[ro.x + rd.x * t, ro.y + rd.y * t, ro.z + rd.z * t] in
+      let n = normalize(@[hitP.x - center.x, hitP.y - center.y, hitP.z - center.z]) in
+      (t, matId, n)
+    else (curT, curMat, curN)
+  else (curT, curMat, curN)
+
+def intersectScene(ro: vec3f32, rd: vec3f32) -> (f32, i32, vec3f32) =
+  -- Start with no hit
+  let tMin = MAX_DIST in
+  let matId = 0 in
+  let normal = @[0.0, 1.0, 0.0] in
+
+  -- Check ground plane
+  let tPlane = intersectPlane(ro, rd, GROUND_Y) in
+  let (t1, m1, n1) =
+    if tPlane > 0.0 then
+      if tPlane < tMin then (tPlane, 1, @[0.0, 1.0, 0.0])
+      else (tMin, matId, normal)
+    else (tMin, matId, normal)
+  in
+
+  -- Check all 8 spheres
+  let (t2, m2, n2) = checkSphere(ro, rd, SPHERE1_CENTER, SPHERE1_RADIUS, 2, t1, m1, n1) in
+  let (t3, m3, n3) = checkSphere(ro, rd, SPHERE2_CENTER, SPHERE2_RADIUS, 3, t2, m2, n2) in
+  let (t4, m4, n4) = checkSphere(ro, rd, SPHERE3_CENTER, SPHERE3_RADIUS, 4, t3, m3, n3) in
+  let (t5, m5, n5) = checkSphere(ro, rd, SPHERE4_CENTER, SPHERE4_RADIUS, 5, t4, m4, n4) in
+  let (t6, m6, n6) = checkSphere(ro, rd, SPHERE5_CENTER, SPHERE5_RADIUS, 6, t5, m5, n5) in
+  let (t7, m7, n7) = checkSphere(ro, rd, SPHERE6_CENTER, SPHERE6_RADIUS, 7, t6, m6, n6) in
+  let (t8, m8, n8) = checkSphere(ro, rd, SPHERE7_CENTER, SPHERE7_RADIUS, 8, t7, m7, n7) in
+  let (t9, m9, n9) = checkSphere(ro, rd, SPHERE8_CENTER, SPHERE8_RADIUS, 9, t8, m8, n8) in
+
+  (t9, m9, n9)
+
+------------------------------------------------------------
+-- Materials
+------------------------------------------------------------
+
+-- Returns (albedo, metallic, roughness, reflectivity)
+def getMaterial(matId: i32, hitPoint: vec3f32) -> (vec3f32, f32, f32, f32) =
+  if matId == 1 then
+    -- Ground: checkerboard pattern
+    let checker = f32.floor(hitPoint.x) + f32.floor(hitPoint.z) in
+    let isWhite = fract(checker * 0.5) > 0.25 in
+    let albedo = if isWhite then @[0.9, 0.9, 0.9] else @[0.1, 0.1, 0.1] in
+    (albedo, 0.0, 0.5, 0.3)
+  else if matId == 2 then
+    -- Sphere 1: Red metallic
+    (@[0.9, 0.2, 0.2], 0.8, 0.2, 0.8)
+  else if matId == 3 then
+    -- Sphere 2: Green metallic
+    (@[0.2, 0.9, 0.3], 0.6, 0.3, 0.6)
+  else if matId == 4 then
+    -- Sphere 3: Blue shiny
+    (@[0.2, 0.3, 0.9], 0.9, 0.1, 0.9)
+  else if matId == 5 then
+    -- Sphere 4: Gold
+    (@[1.0, 0.84, 0.0], 1.0, 0.15, 0.9)
+  else if matId == 6 then
+    -- Sphere 5: Cyan/teal
+    (@[0.0, 0.8, 0.8], 0.7, 0.25, 0.75)
+  else if matId == 7 then
+    -- Sphere 6: Magenta/pink
+    (@[0.9, 0.2, 0.7], 0.5, 0.35, 0.65)
+  else if matId == 8 then
+    -- Sphere 7: Orange
+    (@[1.0, 0.5, 0.0], 0.75, 0.2, 0.8)
+  else if matId == 9 then
+    -- Sphere 8: Purple
+    (@[0.6, 0.2, 0.9], 0.85, 0.15, 0.85)
+  else
+    -- Miss: sky color (won't be used for material)
+    (@[0.0, 0.0, 0.0], 0.0, 1.0, 0.0)
+
+------------------------------------------------------------
+-- Sky
+------------------------------------------------------------
+
+def getSkyColor(rd: vec3f32) -> vec3f32 =
+  let t = 0.5 * (rd.y + 1.0) in
+  let sky1 = @[1.0, 1.0, 1.0] in
+  let sky2 = @[0.5, 0.7, 1.0] in
+  @[mix(sky1.x, sky2.x, t), mix(sky1.y, sky2.y, t), mix(sky1.z, sky2.z, t)]
+
+------------------------------------------------------------
+-- Shadow Check
+------------------------------------------------------------
+
+def inShadow(hitPoint: vec3f32, lightDir: vec3f32) -> f32 =
+  let shadowRo = @[hitPoint.x + lightDir.x * EPSILON * 10.0,
+                   hitPoint.y + lightDir.y * EPSILON * 10.0,
+                   hitPoint.z + lightDir.z * EPSILON * 10.0] in
+  let (t, matId, _) = intersectScene(shadowRo, lightDir) in
+  if matId > 0 then 0.3 else 1.0
+
+------------------------------------------------------------
+-- Shading
+------------------------------------------------------------
+
+def shade(hitPoint: vec3f32, normal: vec3f32, viewDir: vec3f32, matId: i32) -> vec3f32 =
+  let (albedo, metallic, roughness, _) = getMaterial(matId, hitPoint) in
+
+  -- Light contribution using PBR BRDF
+  let brdfResult = pbrBrdf(normal, viewDir, LIGHT_DIR, albedo, metallic, roughness) in
+
+  -- Shadow factor
+  let shadow = inShadow(hitPoint, LIGHT_DIR) in
+
+  -- Light color (warm white)
+  let lightColor = @[2.0, 1.9, 1.8] in
+
+  -- Ambient
+  let ambient = @[albedo.x * 0.1, albedo.y * 0.1, albedo.z * 0.1] in
+
+  -- Final color
+  @[ambient.x + brdfResult.x * lightColor.x * shadow,
+    ambient.y + brdfResult.y * lightColor.y * shadow,
+    ambient.z + brdfResult.z * lightColor.z * shadow]
+
+------------------------------------------------------------
+-- Main Trace Function with Reflections
+------------------------------------------------------------
+
+def trace(ro: vec3f32, rd: vec3f32, maxBounces: i32) -> vec3f32 =
+  -- Track accumulated color tint from reflections (starts white)
+  let (finalColor, _, _, _, _) =
+    loop (color, rayO, rayD, tint, bounce) = (@[0.0, 0.0, 0.0], ro, rd, @[1.0, 1.0, 1.0], 0) while bounce <= maxBounces do
+      let (t, matId, normal) = intersectScene(rayO, rayD) in
+      if matId == 0 then
+        -- Hit sky, add sky color tinted by accumulated color
+        let skyCol = getSkyColor(rayD) in
+        let tintedSky = @[skyCol.x * tint.x, skyCol.y * tint.y, skyCol.z * tint.z] in
+        let newColor = @[color.x + tintedSky.x,
+                         color.y + tintedSky.y,
+                         color.z + tintedSky.z] in
+        (newColor, rayO, rayD, tint, maxBounces + 1)  -- Exit loop
+      else
+        -- Hit something
+        let hitPoint = @[rayO.x + rayD.x * t, rayO.y + rayD.y * t, rayO.z + rayD.z * t] in
+        let viewDir = @[0.0 - rayD.x, 0.0 - rayD.y, 0.0 - rayD.z] in
+
+        -- Get surface color and material properties
+        let surfaceColor = shade(hitPoint, normal, viewDir, matId) in
+        let (albedo, _, _, reflectivity) = getMaterial(matId, hitPoint) in
+
+        -- Add direct lighting contribution, tinted by accumulated tint
+        let contribution = 1.0 - reflectivity in
+        let tintedSurface = @[surfaceColor.x * tint.x * contribution,
+                              surfaceColor.y * tint.y * contribution,
+                              surfaceColor.z * tint.z * contribution] in
+        let newColor = @[color.x + tintedSurface.x,
+                         color.y + tintedSurface.y,
+                         color.z + tintedSurface.z] in
+
+        -- Update tint for next bounce: multiply by albedo and reflectivity
+        let newTint = @[tint.x * albedo.x * reflectivity,
+                        tint.y * albedo.y * reflectivity,
+                        tint.z * albedo.z * reflectivity] in
+
+        -- Prepare for reflection
+        let reflDir = reflect(rayD, normal) in
+        let newRayO = @[hitPoint.x + normal.x * EPSILON * 10.0,
+                        hitPoint.y + normal.y * EPSILON * 10.0,
+                        hitPoint.z + normal.z * EPSILON * 10.0] in
+
+        (newColor, newRayO, reflDir, newTint, bounce + 1)
+  in finalColor
+
+------------------------------------------------------------
+-- Camera Setup
+------------------------------------------------------------
+
+def getCamera(time: f32, mouse: vec4f32, resolution: vec2f32) -> (vec3f32, vec3f32, vec3f32, vec3f32) =
+  -- Mouse controls camera angle (Shadertoy style: drag to rotate)
+  -- iMouse.xy = current position, iMouse.zw = click position
+  let mouseAngleX = if mouse.z > 0.0 then (mouse.x / resolution.x - 0.5) * PI * 2.0 else 0.0 in
+  let mouseAngleY = if mouse.z > 0.0 then (mouse.y / resolution.y - 0.5) * PI * 0.5 else 0.0 in
+
+  -- Camera position orbiting around origin
+  let baseAngle = time * 0.3 in
+  let angle = baseAngle + mouseAngleX in
+  let camDist = 5.0 in
+  let camHeight = 2.0 + mouseAngleY * 2.0 in
+  let camPos = @[f32.sin(angle) * camDist, camHeight, f32.cos(angle) * camDist] in
+
+  -- Look at center of scene
+  let target = @[0.0, 0.5, 0.0] in
+
+  -- Camera basis vectors
+  let forward = normalize(@[target.x - camPos.x, target.y - camPos.y, target.z - camPos.z]) in
+  let worldUp = @[0.0, 1.0, 0.0] in
+  let right = normalize(cross(forward, worldUp)) in
+  let up = cross(right, forward) in
+
+  (camPos, forward, right, up)
+
+------------------------------------------------------------
+-- Fragment Shader
+------------------------------------------------------------
+
+#[fragment]
+def fragment_main(#[builtin(position)] fragCoord: vec4f32) -> #[location(0)] vec4f32 =
+  -- Flip Y for Vulkan
+  let coord = @[fragCoord.x, iResolution.y - fragCoord.y] in
+
+  -- Normalized coordinates (-1 to 1)
+  let uv = @[(coord.x / iResolution.x) * 2.0 - 1.0,
+             (coord.y / iResolution.y) * 2.0 - 1.0] in
+  let aspect = iResolution.x / iResolution.y in
+  let uv2 = @[uv.x * aspect, uv.y] in
+
+  -- Get camera
+  let (camPos, forward, right, up) = getCamera(iTime, iMouse, iResolution) in
+
+  -- Ray direction
+  let fov = 1.5 in  -- ~67 degrees
+  let rd = normalize(@[forward.x + uv2.x * right.x / fov + uv2.y * up.x / fov,
+                       forward.y + uv2.x * right.y / fov + uv2.y * up.y / fov,
+                       forward.z + uv2.x * right.z / fov + uv2.y * up.z / fov]) in
+
+  -- Trace with reflections based on difficulty uniform
+  let maxBounces = difficulty in
+  let color = trace(camPos, rd, maxBounces) in
+
+  -- Gamma correction
+  let gamma = 1.0 / 2.2 in
+  @[color.x ** gamma, color.y ** gamma, color.z ** gamma, 1.0]

@@ -81,6 +81,9 @@ enum Command {
         /// Present mode: fifo (vsync), mailbox (triple-buffer), immediate (no sync)
         #[arg(long, value_enum, default_value = "fifo")]
         present_mode: PresentModeArg,
+        /// Difficulty level for shaders that use it (binding 2)
+        #[arg(long, default_value = "3")]
+        difficulty: i32,
     },
     /// Run a compute shader (headless)
     #[command(name = "compute")]
@@ -181,6 +184,7 @@ enum PipelineSpec {
         verbose: bool,
         validate: bool,
         present_mode: PresentMode,
+        difficulty: i32,
     },
     TestPattern {
         max_frames: Option<u32>,
@@ -730,6 +734,14 @@ struct MouseUniform {
     mouse: [f32; 4],
 }
 
+// difficulty: i32 (binding 2)
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct DifficultyUniform {
+    difficulty: i32,
+    _pad: [i32; 3], // Pad to 16 bytes for alignment
+}
+
 struct State {
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
@@ -737,12 +749,17 @@ struct State {
     queue: wgpu::Queue,
     config: SurfaceConfiguration,
     pipeline: RenderPipeline,
-    // Uniform support - separate buffers for iResolution, iTime, iMouse (optional, enabled with --shadertoy)
+    // Uniform support - separate buffers for iResolution, iTime, iMouse, difficulty (optional, enabled with --shadertoy)
     resolution_buffer: Option<wgpu::Buffer>,
     time_buffer: Option<wgpu::Buffer>,
     mouse_buffer: Option<wgpu::Buffer>,
+    difficulty_buffer: Option<wgpu::Buffer>,
     uniform_bind_group: Option<BindGroup>,
     start_time: std::time::Instant,
+    // Mouse tracking
+    mouse_pos: [f32; 2],
+    mouse_click_pos: [f32; 2],
+    mouse_pressed: bool,
     // Frame limiting (optional, for debugging)
     frame_count: u32,
     max_frames: Option<u32>,
@@ -908,9 +925,10 @@ impl State {
         // Shadertoy canonical uniform ordering:
         //   binding 0: iResolution (vec3, we use vec2)
         //   binding 1: iTime (f32)
+        //   binding 2: difficulty (i32)
         //   binding 5: iMouse (vec4)
-        let (resolution_buffer, time_buffer, mouse_buffer, uniform_bind_group, uniform_bind_group_layout) =
-            if let PipelineSpec::VertexFragment { shadertoy: true, .. } = spec {
+        let (resolution_buffer, time_buffer, mouse_buffer, difficulty_buffer, uniform_bind_group, uniform_bind_group_layout) =
+            if let PipelineSpec::VertexFragment { shadertoy: true, difficulty, .. } = spec {
                 // Binding 0: iResolution ([2]f32)
                 let resolution_buffer = device.create_buffer(&BufferDescriptor {
                     label: Some("resolution_buffer"),
@@ -933,6 +951,19 @@ impl State {
                 });
                 let initial_time = TimeUniform { time: 0.0 };
                 queue.write_buffer(&time_buffer, 0, bytemuck::cast_slice(&[initial_time]));
+
+                // Binding 2: difficulty (i32)
+                let difficulty_buffer = device.create_buffer(&BufferDescriptor {
+                    label: Some("difficulty_buffer"),
+                    size: std::mem::size_of::<DifficultyUniform>() as u64,
+                    usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let initial_difficulty = DifficultyUniform {
+                    difficulty: *difficulty,
+                    _pad: [0, 0, 0],
+                };
+                queue.write_buffer(&difficulty_buffer, 0, bytemuck::cast_slice(&[initial_difficulty]));
 
                 // Binding 5: iMouse (vec4f32)
                 let mouse_buffer = device.create_buffer(&BufferDescriptor {
@@ -962,6 +993,16 @@ impl State {
                             },
                             BindGroupLayoutEntry {
                                 binding: 1,
+                                visibility: ShaderStages::VERTEX_FRAGMENT,
+                                ty: BindingType::Buffer {
+                                    ty: BufferBindingType::Uniform,
+                                    has_dynamic_offset: false,
+                                    min_binding_size: None,
+                                },
+                                count: None,
+                            },
+                            BindGroupLayoutEntry {
+                                binding: 2,
                                 visibility: ShaderStages::VERTEX_FRAGMENT,
                                 ty: BindingType::Buffer {
                                     ty: BufferBindingType::Uniform,
@@ -1004,6 +1045,14 @@ impl State {
                             }),
                         },
                         BindGroupEntry {
+                            binding: 2,
+                            resource: BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: &difficulty_buffer,
+                                offset: 0,
+                                size: None,
+                            }),
+                        },
+                        BindGroupEntry {
                             binding: 5,
                             resource: BindingResource::Buffer(wgpu::BufferBinding {
                                 buffer: &mouse_buffer,
@@ -1018,11 +1067,12 @@ impl State {
                     Some(resolution_buffer),
                     Some(time_buffer),
                     Some(mouse_buffer),
+                    Some(difficulty_buffer),
                     Some(uniform_bind_group),
                     Some(uniform_bind_group_layout),
                 )
             } else {
-                (None, None, None, None, None)
+                (None, None, None, None, None, None)
             };
 
         // Make these mutable so TestPattern can set them
@@ -1189,8 +1239,12 @@ impl State {
             resolution_buffer,
             time_buffer,
             mouse_buffer,
+            difficulty_buffer,
             uniform_bind_group,
             start_time: now,
+            mouse_pos: [0.0, 0.0],
+            mouse_click_pos: [0.0, 0.0],
+            mouse_pressed: false,
             frame_count: 0,
             max_frames,
             frame_times: [0.0; 60],
@@ -1230,6 +1284,20 @@ impl State {
             // Update iTime
             let time = TimeUniform { time: elapsed };
             self.queue.write_buffer(time_buffer, 0, bytemuck::cast_slice(&[time]));
+
+            // Update iMouse
+            if let Some(mouse_buffer) = &self.mouse_buffer {
+                // Shadertoy convention: (x, y, click_x, click_y)
+                // click_x/click_y are negative when not pressed
+                let mouse = MouseUniform {
+                    mouse: if self.mouse_pressed {
+                        [self.mouse_pos[0], self.mouse_pos[1], self.mouse_click_pos[0], self.mouse_click_pos[1]]
+                    } else {
+                        [self.mouse_pos[0], self.mouse_pos[1], -1.0, -1.0]
+                    },
+                };
+                self.queue.write_buffer(mouse_buffer, 0, bytemuck::cast_slice(&[mouse]));
+            }
         }
 
         match self.surface.get_current_texture() {
@@ -1467,6 +1535,23 @@ impl ApplicationHandler for App {
                         // Request a size; a `Resized` will follow.
                         let _ = inner_size_writer.request_inner_size(state.window.inner_size());
                     }
+                    WindowEvent::CursorMoved { position, .. } => {
+                        state.mouse_pos = [position.x as f32, position.y as f32];
+                    }
+                    WindowEvent::MouseInput { state: button_state, button, .. } => {
+                        use winit::event::{ElementState, MouseButton};
+                        if button == MouseButton::Left {
+                            match button_state {
+                                ElementState::Pressed => {
+                                    state.mouse_pressed = true;
+                                    state.mouse_click_pos = state.mouse_pos;
+                                }
+                                ElementState::Released => {
+                                    state.mouse_pressed = false;
+                                }
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -1544,6 +1629,7 @@ fn main() -> Result<()> {
             verbose,
             no_validate,
             present_mode,
+            difficulty,
         } => {
             // Resolve entry points: use provided names or auto-detect
             let (vertex_name, fragment_name) = resolve_entry_points(&path, vertex, fragment)?;
@@ -1557,6 +1643,7 @@ fn main() -> Result<()> {
                 verbose,
                 validate: !no_validate, // validation is ON by default
                 present_mode: present_mode.into(),
+                difficulty,
             };
 
             let event_loop = EventLoop::new().context("failed to create event loop")?;
