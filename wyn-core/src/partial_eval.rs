@@ -279,8 +279,22 @@ impl PartialEvaluator {
                     AggregateKind::Array => self.emit(Expr::Array(elem_ids), ty, span, node_id),
                     AggregateKind::Vector => self.emit(Expr::Vector(elem_ids), ty, span, node_id),
                     AggregateKind::Matrix => {
-                        // For now, treat matrix as a flat vector
-                        self.emit(Expr::Vector(elem_ids), ty, span, node_id)
+                        // Reconstruct the matrix structure from flat elements
+                        // Matrix type is Mat(Size(cols), Size(rows), ElemType)
+                        // The lowering expects Expr::Matrix(rows) where each row is
+                        // a Vec of scalar ExprIds - it creates the row vectors itself
+                        let (cols, rows) = self.get_matrix_dimensions(&ty);
+
+                        // Group flat scalar elements into rows
+                        let matrix_rows: Vec<Vec<ExprId>> = (0..rows)
+                            .map(|row_idx| {
+                                let row_start = row_idx * cols;
+                                let row_end = row_start + cols;
+                                elem_ids[row_start..row_end].to_vec()
+                            })
+                            .collect();
+
+                        self.emit(Expr::Matrix(matrix_rows), ty, span, node_id)
                     }
                 }
             }
@@ -305,7 +319,7 @@ impl PartialEvaluator {
         }
     }
 
-    /// Get the element type at a given index for a tuple/array/vector type
+    /// Get the element type at a given index for a tuple/array/vector/matrix type
     fn get_element_type(&self, ty: &Type<TypeName>, index: usize) -> Type<TypeName> {
         match ty {
             Type::Constructed(TypeName::Tuple(_), args) => {
@@ -319,6 +333,11 @@ impl PartialEvaluator {
             Type::Constructed(TypeName::Vec, args) if args.len() >= 2 => {
                 // Vec: args[0] = Size(n), args[1] = element type
                 args[1].clone()
+            }
+            Type::Constructed(TypeName::Mat, args) if args.len() >= 3 => {
+                // Mat: args[0] = Size(cols), args[1] = Size(rows), args[2] = element type
+                // For flattened matrix values, each element is the scalar element type
+                args[2].clone()
             }
             Type::Constructed(TypeName::Record(_fields), args) => {
                 // Record: args are the field types in source order
@@ -774,6 +793,24 @@ impl PartialEvaluator {
                 args[2].clone()
             }
             _ => ty.clone(),
+        }
+    }
+
+    /// Extract matrix dimensions (cols, rows) from Mat<Size(cols), Size(rows), ElemType>
+    fn get_matrix_dimensions(&self, ty: &Type<TypeName>) -> (usize, usize) {
+        match ty {
+            Type::Constructed(TypeName::Mat, args) if args.len() >= 2 => {
+                let cols = match &args[0] {
+                    Type::Constructed(TypeName::Size(n), _) => *n,
+                    _ => 1,
+                };
+                let rows = match &args[1] {
+                    Type::Constructed(TypeName::Size(n), _) => *n,
+                    _ => 1,
+                };
+                (cols, rows)
+            }
+            _ => (1, 1),
         }
     }
 
