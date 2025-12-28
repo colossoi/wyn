@@ -90,7 +90,63 @@ enum Command {
     /// Show device and driver information
     #[command(name = "info")]
     Info,
+    /// Render a built-in test pattern (no shader file needed, always validates)
+    #[command(name = "testpattern")]
+    TestPattern {
+        /// Maximum number of frames to render before exiting
+        #[arg(long)]
+        max_frames: Option<u32>,
+        /// Print frame timing statistics
+        #[arg(short, long)]
+        verbose: bool,
+    },
 }
+
+// --- Test pattern shaders (embedded WGSL) ------------------------------------
+
+const TEST_PATTERN_SHADER: &str = r#"
+// Resolution uniform (16-byte aligned)
+struct Globals {
+    resolution: vec2<f32>,
+    _pad: vec2<f32>,
+};
+
+@group(0) @binding(0)
+var<uniform> globals: Globals;
+
+// Vertex shader - fullscreen big triangle
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<f32> {
+    var pos = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 3.0, -1.0),
+        vec2<f32>(-1.0,  3.0)
+    );
+    return vec4<f32>(pos[vertex_index], 0.0, 1.0);
+}
+
+// Fragment shader - colored test pattern
+@fragment
+fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let res = globals.resolution;
+    let fragCoord = pos.xy;
+    let uv = fragCoord / res;
+
+    // Checkerboard using integer math (fragCoord >= 0, so truncation == floor)
+    let grid_size = 64.0;
+    let gx = i32(fragCoord.x / grid_size);
+    let gy = i32(fragCoord.y / grid_size);
+    let checker = f32((gx + gy) & 1);
+
+    // Color gradient + diagonal stripes
+    let r = uv.x;
+    let g = uv.y;
+    let b = checker * 0.5 + 0.5;
+    let stripe = sin((uv.x + uv.y) * 20.0) * 0.5 + 0.5;
+
+    return vec4<f32>(r * stripe, g, b * (1.0 - stripe * 0.3), 1.0);
+}
+"#;
 
 // --- Pipeline spec passed to the app -----------------------------------------
 
@@ -103,6 +159,10 @@ enum PipelineSpec {
         max_frames: Option<u32>,
         verbose: bool,
         validate: bool,
+    },
+    TestPattern {
+        max_frames: Option<u32>,
+        verbose: bool,
     },
 }
 
@@ -610,11 +670,12 @@ async fn run_compute_shader(
 // --- App state ---------------------------------------------------------------
 
 // Uniform buffers - one per shader uniform
-// iResolution: [2]f32
+// iResolution: [2]f32 + [2]f32 padding for 16-byte alignment
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct ResolutionUniform {
     resolution: [f32; 2],
+    _pad: [f32; 2],
 }
 
 // iTime: f32
@@ -681,6 +742,7 @@ impl State {
         // Extract validation flag from spec (validation is ON by default)
         let validate = match spec {
             PipelineSpec::VertexFragment { validate, .. } => *validate,
+            PipelineSpec::TestPattern { .. } => true, // always validate for test pattern
         };
 
         // Create instance with validation layers (enabled by default)
@@ -712,6 +774,7 @@ impl State {
         // Extract verbose flag from spec
         let verbose = match spec {
             PipelineSpec::VertexFragment { verbose, .. } => *verbose,
+            PipelineSpec::TestPattern { verbose, .. } => *verbose,
         };
 
         // Print adapter info when verbose
@@ -809,6 +872,7 @@ impl State {
                 });
                 let initial_resolution = ResolutionUniform {
                     resolution: [800.0, 600.0],
+                    _pad: [0.0, 0.0],
                 };
                 queue.write_buffer(&resolution_buffer, 0, bytemuck::cast_slice(&[initial_resolution]));
 
@@ -913,9 +977,16 @@ impl State {
                 (None, None, None, None, None)
             };
 
+        // Make these mutable so TestPattern can set them
+        let mut resolution_buffer = resolution_buffer;
+        let mut uniform_bind_group = uniform_bind_group;
+
         // Extract max_frames and verbose from spec
         let (max_frames, verbose) = match spec {
             PipelineSpec::VertexFragment {
+                max_frames, verbose, ..
+            } => (*max_frames, *verbose),
+            PipelineSpec::TestPattern {
                 max_frames, verbose, ..
             } => (*max_frames, *verbose),
         };
@@ -958,6 +1029,90 @@ impl State {
                     fragment: Some(FragmentState {
                         module: &module,
                         entry_point: Some(fragment.as_str()),
+                        targets: &[Some(ColorTargetState {
+                            format: config.format,
+                            blend: Some(wgpu::BlendState::REPLACE),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: Default::default(),
+                    }),
+                    primitive: PrimitiveState::default(),
+                    depth_stencil: None,
+                    multisample: MultisampleState::default(),
+                    multiview: None,
+                    cache: None,
+                })
+            }
+            PipelineSpec::TestPattern { .. } => {
+                eprintln!("[viz] Loading built-in test pattern shader (WGSL)");
+
+                // Create resolution uniform buffer for test pattern
+                let res_buffer = device.create_buffer(&BufferDescriptor {
+                    label: Some("test_pattern_resolution"),
+                    size: std::mem::size_of::<ResolutionUniform>() as u64,
+                    usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let initial_res = ResolutionUniform {
+                    resolution: [config.width as f32, config.height as f32],
+                    _pad: [0.0, 0.0],
+                };
+                queue.write_buffer(&res_buffer, 0, bytemuck::cast_slice(&[initial_res]));
+
+                let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                    label: Some("test_pattern_bind_group_layout"),
+                    entries: &[BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: ShaderStages::FRAGMENT,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    }],
+                });
+
+                let bind_group = device.create_bind_group(&BindGroupDescriptor {
+                    label: Some("test_pattern_bind_group"),
+                    layout: &bind_group_layout,
+                    entries: &[BindGroupEntry {
+                        binding: 0,
+                        resource: BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &res_buffer,
+                            offset: 0,
+                            size: None,
+                        }),
+                    }],
+                });
+
+                // Store these for later use - reuse the existing fields
+                resolution_buffer = Some(res_buffer);
+                uniform_bind_group = Some(bind_group);
+
+                let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("test_pattern_shader"),
+                    source: wgpu::ShaderSource::Wgsl(TEST_PATTERN_SHADER.into()),
+                });
+
+                let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+                    label: Some("test_pattern_layout"),
+                    bind_group_layouts: &[&bind_group_layout],
+                    push_constant_ranges: &[],
+                });
+
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("test_pattern_pipeline"),
+                    layout: Some(&layout),
+                    vertex: VertexState {
+                        module: &module,
+                        entry_point: Some("vs_main"),
+                        buffers: &[],
+                        compilation_options: Default::default(),
+                    },
+                    fragment: Some(FragmentState {
+                        module: &module,
+                        entry_point: Some("fs_main"),
                         targets: &[Some(ColorTargetState {
                             format: config.format,
                             blend: Some(wgpu::BlendState::REPLACE),
@@ -1020,6 +1175,7 @@ impl State {
             // Update iResolution
             let resolution = ResolutionUniform {
                 resolution: [self.config.width as f32, self.config.height as f32],
+                _pad: [0.0, 0.0],
             };
             self.queue.write_buffer(resolution_buffer, 0, bytemuck::cast_slice(&[resolution]));
 
@@ -1386,6 +1542,21 @@ fn main() -> Result<()> {
                 storage_specs,
                 verbose,
             ))?;
+        }
+        Command::TestPattern {
+            max_frames,
+            verbose,
+        } => {
+            eprintln!("[viz] Test pattern mode - built-in WGSL shader");
+
+            let spec = PipelineSpec::TestPattern { max_frames, verbose };
+
+            let event_loop = EventLoop::new().context("failed to create event loop")?;
+            let mut app = App { state: None, spec };
+
+            if let Err(e) = event_loop.run_app(&mut app) {
+                return Err(anyhow!(e)).context("winit event loop errored");
+            }
         }
     }
 
