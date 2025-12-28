@@ -57,9 +57,9 @@ enum Command {
         /// Print frame timing statistics
         #[arg(short, long)]
         verbose: bool,
-        /// Enable GPU validation layers for debugging
+        /// Disable GPU validation layers (validation is ON by default)
         #[arg(long)]
-        validation: bool,
+        no_validate: bool,
     },
     /// Run a compute shader (headless)
     #[command(name = "compute")]
@@ -102,7 +102,7 @@ enum PipelineSpec {
         shadertoy: bool,
         max_frames: Option<u32>,
         verbose: bool,
-        validation: bool,
+        validate: bool,
     },
 }
 
@@ -678,16 +678,17 @@ impl State {
 
 impl State {
     async fn new(window: Arc<Window>, spec: &PipelineSpec) -> Result<Self> {
-        // Extract validation flag from spec
-        let validation = match spec {
-            PipelineSpec::VertexFragment { validation, .. } => *validation,
+        // Extract validation flag from spec (validation is ON by default)
+        let validate = match spec {
+            PipelineSpec::VertexFragment { validate, .. } => *validate,
         };
 
-        // Create instance with optional validation layers
-        let instance_flags = if validation {
+        // Create instance with validation layers (enabled by default)
+        let instance_flags = if validate {
             eprintln!("[viz] Validation layers ENABLED");
             InstanceFlags::VALIDATION | InstanceFlags::DEBUG
         } else {
+            eprintln!("[viz] Validation layers DISABLED");
             InstanceFlags::empty()
         };
 
@@ -753,8 +754,23 @@ impl State {
 
         // Set up uncaptured error handler to catch GPU errors at runtime
         device.on_uncaptured_error(Box::new(|error| {
-            eprintln!("[viz] GPU ERROR: {:?}", error);
+            eprintln!("\n╔══════════════════════════════════════════════════════════════╗");
+            eprintln!("║                     GPU VALIDATION ERROR                     ║");
+            eprintln!("╚══════════════════════════════════════════════════════════════╝");
+            eprintln!("{:?}", error);
+            eprintln!();
         }));
+
+        // Set up device lost handler
+        device.set_device_lost_callback(|reason, message| {
+            eprintln!("\n╔══════════════════════════════════════════════════════════════╗");
+            eprintln!("║                      GPU DEVICE LOST                         ║");
+            eprintln!("╚══════════════════════════════════════════════════════════════╝");
+            eprintln!("Reason: {:?}", reason);
+            eprintln!("Message: {}", message);
+            eprintln!();
+            std::process::exit(1);
+        });
 
         let caps = surface.get_capabilities(&adapter);
         let format =
@@ -1109,6 +1125,23 @@ impl State {
 fn load_spirv_module(device: &wgpu::Device, path: &Path) -> Result<wgpu::ShaderModule> {
     let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
 
+    // Basic SPIR-V validation
+    if bytes.len() < 20 {
+        return Err(anyhow!("SPIR-V file too small ({} bytes)", bytes.len()));
+    }
+    if bytes.len() % 4 != 0 {
+        return Err(anyhow!("SPIR-V file size {} is not aligned to 4-byte words", bytes.len()));
+    }
+
+    // Check magic number
+    let magic = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    if magic != 0x07230203 {
+        return Err(anyhow!(
+            "Invalid SPIR-V magic number: 0x{:08x} (expected 0x07230203)",
+            magic
+        ));
+    }
+
     // Check if SPIRV_SHADER_PASSTHROUGH is supported
     if device.features().contains(wgpu::Features::SPIRV_SHADER_PASSTHROUGH) {
         // Convert bytes to u32 words for SPIR-V passthrough
@@ -1134,6 +1167,12 @@ fn load_spirv_module(device: &wgpu::Device, path: &Path) -> Result<wgpu::ShaderM
         // Check for validation errors even with passthrough
         let error_option = pollster::block_on(device.pop_error_scope());
         if let Some(error) = error_option {
+            eprintln!("\n╔══════════════════════════════════════════════════════════════╗");
+            eprintln!("║                  SHADER COMPILATION ERROR                    ║");
+            eprintln!("╚══════════════════════════════════════════════════════════════╝");
+            eprintln!("File: {}", path.display());
+            eprintln!("Mode: SPIR-V passthrough");
+            eprintln!();
             return Err(anyhow::Error::msg(format!(
                 "Shader validation failed (passthrough): {}",
                 error
@@ -1156,6 +1195,12 @@ fn load_spirv_module(device: &wgpu::Device, path: &Path) -> Result<wgpu::ShaderM
         // Check for validation errors
         let error_option = pollster::block_on(device.pop_error_scope());
         if let Some(error) = error_option {
+            eprintln!("\n╔══════════════════════════════════════════════════════════════╗");
+            eprintln!("║                  SHADER COMPILATION ERROR                    ║");
+            eprintln!("╚══════════════════════════════════════════════════════════════╝");
+            eprintln!("File: {}", path.display());
+            eprintln!("Mode: naga validation");
+            eprintln!();
             return Err(anyhow::Error::msg(format!("Shader validation failed: {}", error)));
         }
 
@@ -1290,7 +1335,7 @@ fn main() -> Result<()> {
             shadertoy,
             max_frames,
             verbose,
-            validation,
+            no_validate,
         } => {
             // Resolve entry points: use provided names or auto-detect
             let (vertex_name, fragment_name) = resolve_entry_points(&path, vertex, fragment)?;
@@ -1302,7 +1347,7 @@ fn main() -> Result<()> {
                 shadertoy,
                 max_frames,
                 verbose,
-                validation,
+                validate: !no_validate, // validation is ON by default
             };
 
             let event_loop = EventLoop::new().context("failed to create event loop")?;
