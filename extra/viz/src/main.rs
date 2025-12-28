@@ -13,8 +13,8 @@ use wgpu::{
     ColorTargetState, CommandEncoderDescriptor, DeviceDescriptor, FragmentState, Instance,
     InstanceDescriptor, InstanceFlags, LoadOp, MultisampleState, Operations, PipelineLayoutDescriptor,
     PowerPreference, PresentMode, PrimitiveState, RenderPipeline, RequestAdapterOptions,
-    ShaderModuleDescriptorPassthrough, ShaderStages, StoreOp, SurfaceConfiguration, TextureUsages,
-    Trace, VertexState,
+    ShaderModuleDescriptorPassthrough, ShaderStages, StoreOp, SurfaceConfiguration, TextureUsages, Trace,
+    VertexState,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
@@ -33,6 +33,24 @@ use rspirv::spirv::ExecutionModel;
 struct Cli {
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default)]
+enum PresentModeArg {
+    #[default]
+    Fifo,
+    Mailbox,
+    Immediate,
+}
+
+impl From<PresentModeArg> for PresentMode {
+    fn from(arg: PresentModeArg) -> Self {
+        match arg {
+            PresentModeArg::Fifo => PresentMode::Fifo,
+            PresentModeArg::Mailbox => PresentMode::Mailbox,
+            PresentModeArg::Immediate => PresentMode::Immediate,
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -60,6 +78,9 @@ enum Command {
         /// Disable GPU validation layers (validation is ON by default)
         #[arg(long)]
         no_validate: bool,
+        /// Present mode: fifo (vsync), mailbox (triple-buffer), immediate (no sync)
+        #[arg(long, value_enum, default_value = "fifo")]
+        present_mode: PresentModeArg,
     },
     /// Run a compute shader (headless)
     #[command(name = "compute")]
@@ -159,6 +180,7 @@ enum PipelineSpec {
         max_frames: Option<u32>,
         verbose: bool,
         validate: bool,
+        present_mode: PresentMode,
     },
     TestPattern {
         max_frames: Option<u32>,
@@ -342,11 +364,13 @@ async fn create_headless_device(verbose: bool) -> Result<(wgpu::Device, wgpu::Qu
         .context("request_adapter failed")?;
 
     let adapter_features = adapter.features();
-    let spirv_passthrough_supported =
-        adapter_features.contains(wgpu::Features::SPIRV_SHADER_PASSTHROUGH);
+    let spirv_passthrough_supported = adapter_features.contains(wgpu::Features::SPIRV_SHADER_PASSTHROUGH);
 
     if verbose {
-        println!("SPIRV_SHADER_PASSTHROUGH supported: {}", spirv_passthrough_supported);
+        println!(
+            "SPIRV_SHADER_PASSTHROUGH supported: {}",
+            spirv_passthrough_supported
+        );
     }
 
     let mut required_features = wgpu::Features::empty();
@@ -397,24 +421,22 @@ impl StorageBufferSpec {
             ));
         }
 
-        let binding = parts[0]
-            .parse::<u32>()
-            .map_err(|_| anyhow!("Invalid binding number: {}", parts[0]))?;
-        let size_elements = parts[1]
-            .parse::<u32>()
-            .map_err(|_| anyhow!("Invalid size: {}", parts[1]))?;
+        let binding =
+            parts[0].parse::<u32>().map_err(|_| anyhow!("Invalid binding number: {}", parts[0]))?;
+        let size_elements = parts[1].parse::<u32>().map_err(|_| anyhow!("Invalid size: {}", parts[1]))?;
         let element_type = match parts[2].to_lowercase().as_str() {
             "i32" => StorageElementType::I32,
             "u32" => StorageElementType::U32,
             "f32" => StorageElementType::F32,
-            other => return Err(anyhow!("Unknown element type: {}. Expected i32, u32, or f32", other)),
+            other => {
+                return Err(anyhow!(
+                    "Unknown element type: {}. Expected i32, u32, or f32",
+                    other
+                ));
+            }
         };
 
-        let input_file = if parts.len() == 4 {
-            Some(PathBuf::from(parts[3]))
-        } else {
-            None
-        };
+        let input_file = if parts.len() == 4 { Some(PathBuf::from(parts[3])) } else { None };
 
         Ok(Self {
             binding,
@@ -437,8 +459,7 @@ impl StorageBufferSpec {
                 let json: serde_json::Value = serde_json::from_str(&content)
                     .with_context(|| format!("Failed to parse JSON from: {}", path.display()))?;
 
-                let array = json.as_array()
-                    .ok_or_else(|| anyhow!("JSON input must be an array"))?;
+                let array = json.as_array().ok_or_else(|| anyhow!("JSON input must be an array"))?;
 
                 if array.len() != self.size_elements as usize {
                     return Err(anyhow!(
@@ -452,15 +473,16 @@ impl StorageBufferSpec {
                 match self.element_type {
                     StorageElementType::I32 => {
                         for (i, val) in array.iter().enumerate() {
-                            let n = val.as_i64()
-                                .ok_or_else(|| anyhow!("Element {} is not an integer", i))?
-                                as i32;
+                            let n =
+                                val.as_i64().ok_or_else(|| anyhow!("Element {} is not an integer", i))?
+                                    as i32;
                             bytes.extend_from_slice(&n.to_le_bytes());
                         }
                     }
                     StorageElementType::U32 => {
                         for (i, val) in array.iter().enumerate() {
-                            let n = val.as_u64()
+                            let n = val
+                                .as_u64()
                                 .ok_or_else(|| anyhow!("Element {} is not a positive integer", i))?
                                 as u32;
                             bytes.extend_from_slice(&n.to_le_bytes());
@@ -468,8 +490,7 @@ impl StorageBufferSpec {
                     }
                     StorageElementType::F32 => {
                         for (i, val) in array.iter().enumerate() {
-                            let n = val.as_f64()
-                                .ok_or_else(|| anyhow!("Element {} is not a number", i))?
+                            let n = val.as_f64().ok_or_else(|| anyhow!("Element {} is not a number", i))?
                                 as f32;
                             bytes.extend_from_slice(&n.to_le_bytes());
                         }
@@ -484,7 +505,10 @@ impl StorageBufferSpec {
 
 /// Print storage buffer contents
 fn print_storage_buffer(spec: &StorageBufferSpec, data: &[u8]) {
-    println!("\n=== Storage Buffer (binding {}, {} elements) ===", spec.binding, spec.size_elements);
+    println!(
+        "\n=== Storage Buffer (binding {}, {} elements) ===",
+        spec.binding, spec.size_elements
+    );
 
     let u32_data: &[u32] = bytemuck::cast_slice(data);
     let elements_to_show = (spec.size_elements as usize).min(64); // Show at most 64 elements
@@ -522,7 +546,10 @@ fn print_storage_buffer(spec: &StorageBufferSpec, data: &[u8]) {
     }
 
     if spec.size_elements as usize > elements_to_show {
-        println!("  ... ({} more elements)", spec.size_elements as usize - elements_to_show);
+        println!(
+            "  ... ({} more elements)",
+            spec.size_elements as usize - elements_to_show
+        );
     }
     println!();
 }
@@ -550,7 +577,12 @@ async fn run_compute_shader(
         // Initialize from JSON file or zeros
         let init_data = spec.load_initial_data()?;
         if verbose && spec.input_file.is_some() {
-            println!("Loaded {} bytes for binding {} from {:?}", init_data.len(), spec.binding, spec.input_file);
+            println!(
+                "Loaded {} bytes for binding {} from {:?}",
+                init_data.len(),
+                spec.binding,
+                spec.input_file
+            );
         }
         queue.write_buffer(&buffer, 0, &init_data);
 
@@ -621,8 +653,14 @@ async fn run_compute_shader(
     });
 
     if verbose {
-        println!("Dispatching {} x {} x {} workgroups...", workgroups.0, workgroups.1, workgroups.2);
-        println!("Storage buffers: {:?}", storage_specs.iter().map(|s| s.binding).collect::<Vec<_>>());
+        println!(
+            "Dispatching {} x {} x {} workgroups...",
+            workgroups.0, workgroups.1, workgroups.2
+        );
+        println!(
+            "Storage buffers: {:?}",
+            storage_specs.iter().map(|s| s.binding).collect::<Vec<_>>()
+        );
     }
 
     let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
@@ -840,12 +878,22 @@ impl State {
             caps.formats.get(0).copied().ok_or_else(|| anyhow!("surface reports no supported formats"))?;
         let size = window.inner_size();
 
+        // Extract present mode from spec (default to Fifo for TestPattern)
+        let present_mode = match spec {
+            PipelineSpec::VertexFragment { present_mode, .. } => *present_mode,
+            PipelineSpec::TestPattern { .. } => PresentMode::Fifo,
+        };
+
+        if verbose {
+            eprintln!("[viz] Present mode: {:?}", present_mode);
+        }
+
         let config = SurfaceConfiguration {
             usage: TextureUsages::RENDER_ATTACHMENT,
             format,
             width: size.width.max(1),
             height: size.height.max(1),
-            present_mode: PresentMode::Fifo,
+            present_mode,
             alpha_mode: caps
                 .alpha_modes
                 .get(0)
@@ -1286,7 +1334,10 @@ fn load_spirv_module(device: &wgpu::Device, path: &Path) -> Result<wgpu::ShaderM
         return Err(anyhow!("SPIR-V file too small ({} bytes)", bytes.len()));
     }
     if bytes.len() % 4 != 0 {
-        return Err(anyhow!("SPIR-V file size {} is not aligned to 4-byte words", bytes.len()));
+        return Err(anyhow!(
+            "SPIR-V file size {} is not aligned to 4-byte words",
+            bytes.len()
+        ));
     }
 
     // Check magic number
@@ -1492,6 +1543,7 @@ fn main() -> Result<()> {
             max_frames,
             verbose,
             no_validate,
+            present_mode,
         } => {
             // Resolve entry points: use provided names or auto-detect
             let (vertex_name, fragment_name) = resolve_entry_points(&path, vertex, fragment)?;
@@ -1504,6 +1556,7 @@ fn main() -> Result<()> {
                 max_frames,
                 verbose,
                 validate: !no_validate, // validation is ON by default
+                present_mode: present_mode.into(),
             };
 
             let event_loop = EventLoop::new().context("failed to create event loop")?;
@@ -1530,10 +1583,8 @@ fn main() -> Result<()> {
             });
 
             // Parse storage buffer specs
-            let storage_specs: Vec<StorageBufferSpec> = storage_buffers
-                .iter()
-                .map(|s| StorageBufferSpec::parse(s))
-                .collect::<Result<Vec<_>>>()?;
+            let storage_specs: Vec<StorageBufferSpec> =
+                storage_buffers.iter().map(|s| StorageBufferSpec::parse(s)).collect::<Result<Vec<_>>>()?;
 
             pollster::block_on(run_compute_shader(
                 path,
@@ -1543,10 +1594,7 @@ fn main() -> Result<()> {
                 verbose,
             ))?;
         }
-        Command::TestPattern {
-            max_frames,
-            verbose,
-        } => {
+        Command::TestPattern { max_frames, verbose } => {
             eprintln!("[viz] Test pattern mode - built-in WGSL shader");
 
             let spec = PipelineSpec::TestPattern { max_frames, verbose };
