@@ -169,25 +169,7 @@ impl ModuleManager {
 
     /// Create an empty module manager without loading prelude (internal helper)
     fn new_empty() -> Self {
-        let known_modules = [
-            "f32",
-            "f64",
-            "f16",
-            "i8",
-            "i16",
-            "i32",
-            "i64",
-            "u8",
-            "u16",
-            "u32",
-            "u64",
-            "bool",
-            "graphics32",
-            "graphics64",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+        let known_modules = Self::BUILTIN_MODULES.iter().map(|s| s.to_string()).collect();
 
         ModuleManager {
             module_type_registry: HashMap::new(),
