@@ -488,7 +488,7 @@ impl ModuleManager {
     }
 
     /// Builtin/intrinsic modules that shouldn't be type-checked
-    /// (their implementations use internal __builtin_* functions)
+    /// (their implementations use internal _w_intrinsic_* functions)
     const BUILTIN_MODULES: &'static [&'static str] = &[
         "f32",
         "f64",
@@ -531,14 +531,14 @@ impl ModuleManager {
     }
 
     /// Get all module declarations for flattening (includes builtin module constants like f32.pi)
-    /// Excludes intrinsic functions (those using __builtin_* in their body)
+    /// Excludes intrinsic functions (those using _w_intrinsic_* in their body)
     pub fn get_all_module_declarations(&self) -> Vec<(&str, &Decl)> {
         self.elaborated_modules
             .iter()
             .flat_map(|(module_name, elaborated)| {
                 elaborated.items.iter().filter_map(move |item| {
                     if let ElaboratedItem::Decl(decl) = item {
-                        // Skip intrinsics (functions that use __builtin_* calls)
+                        // Skip intrinsics (functions that use _w_intrinsic_* calls)
                         if Self::is_intrinsic_decl(decl) {
                             None
                         } else {
@@ -552,34 +552,34 @@ impl ModuleManager {
             .collect()
     }
 
-    /// Check if a declaration is an intrinsic (uses __builtin_* in its body)
+    /// Check if a declaration is an intrinsic (uses _w_intrinsic_* in its body)
     fn is_intrinsic_decl(decl: &Decl) -> bool {
-        Self::expr_uses_builtin(&decl.body)
+        Self::expr_uses_intrinsic(&decl.body)
     }
 
-    /// Recursively check if an expression uses __builtin_* functions
-    fn expr_uses_builtin(expr: &crate::ast::Expression) -> bool {
+    /// Recursively check if an expression uses _w_intrinsic_* functions
+    fn expr_uses_intrinsic(expr: &crate::ast::Expression) -> bool {
         use crate::ast::ExprKind;
         match &expr.kind {
             ExprKind::Identifier(quals, name) => {
-                name.starts_with("__builtin_") || (quals.is_empty() && name.starts_with("__builtin_"))
+                name.starts_with("_w_intrinsic_") || (quals.is_empty() && name.starts_with("_w_intrinsic_"))
             }
             ExprKind::Application(func, args) => {
-                Self::expr_uses_builtin(func) || args.iter().any(Self::expr_uses_builtin)
+                Self::expr_uses_intrinsic(func) || args.iter().any(Self::expr_uses_intrinsic)
             }
-            ExprKind::Lambda(lambda) => Self::expr_uses_builtin(&lambda.body),
+            ExprKind::Lambda(lambda) => Self::expr_uses_intrinsic(&lambda.body),
             ExprKind::LetIn(let_in) => {
-                Self::expr_uses_builtin(&let_in.value) || Self::expr_uses_builtin(&let_in.body)
+                Self::expr_uses_intrinsic(&let_in.value) || Self::expr_uses_intrinsic(&let_in.body)
             }
             ExprKind::If(if_expr) => {
-                Self::expr_uses_builtin(&if_expr.condition)
-                    || Self::expr_uses_builtin(&if_expr.then_branch)
-                    || Self::expr_uses_builtin(&if_expr.else_branch)
+                Self::expr_uses_intrinsic(&if_expr.condition)
+                    || Self::expr_uses_intrinsic(&if_expr.then_branch)
+                    || Self::expr_uses_intrinsic(&if_expr.else_branch)
             }
-            ExprKind::BinaryOp(_, lhs, rhs) => Self::expr_uses_builtin(lhs) || Self::expr_uses_builtin(rhs),
-            ExprKind::UnaryOp(_, operand) => Self::expr_uses_builtin(operand),
+            ExprKind::BinaryOp(_, lhs, rhs) => Self::expr_uses_intrinsic(lhs) || Self::expr_uses_intrinsic(rhs),
+            ExprKind::UnaryOp(_, operand) => Self::expr_uses_intrinsic(operand),
             ExprKind::Tuple(exprs) | ExprKind::ArrayLiteral(exprs) | ExprKind::VecMatLiteral(exprs) => {
-                exprs.iter().any(Self::expr_uses_builtin)
+                exprs.iter().any(Self::expr_uses_intrinsic)
             }
             _ => false,
         }
