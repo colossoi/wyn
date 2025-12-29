@@ -1094,13 +1094,13 @@ impl<'a> TypeChecker<'a> {
         Ok((param_types, body_type))
     }
 
-    /// Type-check function bodies from modules (e.g., rand.init, rand.int)
+    /// Type-check function bodies from modules (e.g., rand.init, rand.int, f32.pi)
     /// This populates the type table so these functions can be flattened to MIR.
     fn check_module_functions(&mut self) -> Result<()> {
-        // Collect all module function declarations to avoid borrowing issues
+        // Collect all module declarations that need flattening (includes constants like f32.pi)
         let module_functions: Vec<(String, crate::ast::Decl)> = self
             .module_manager
-            .get_module_function_declarations()
+            .get_all_module_declarations()
             .into_iter()
             .map(|(module_name, decl)| (module_name.to_string(), decl.clone()))
             .collect();

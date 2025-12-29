@@ -247,7 +247,67 @@ impl ModuleManager {
         Ok(())
     }
 
-    /// Elaborate all module bindings and top-level declarations from a parsed program
+    /// Elaborate a single module binding
+    fn elaborate_module_bind(&mut self, mb: &crate::ast::ModuleBind) -> Result<()> {
+        if self.elaborated_modules.contains_key(&mb.name) {
+            bail_module!("Module '{}' is already defined", mb.name);
+        }
+
+        // Extract type substitutions from the signature
+        let substitutions = if let Some(signature) = &mb.signature {
+            self.extract_substitutions(signature)?
+        } else {
+            HashMap::new()
+        };
+
+        let mut items = Vec::new();
+
+        // Elaborate the module signature if it exists
+        if let Some(signature) = &mb.signature {
+            let specs = self.elaborate_module_type(signature, &HashMap::new())?;
+            // Wrap specs in ElaboratedItem::Spec
+            items.extend(specs.into_iter().map(ElaboratedItem::Spec));
+        }
+
+        // Elaborate the module body
+        let body_items = self.elaborate_module_body(&mb.body, &mb.name, &substitutions)?;
+        items.extend(body_items);
+
+        let elaborated = ElaboratedModule {
+            name: mb.name.clone(),
+            items,
+        };
+
+        // Register type aliases from this module
+        for item in &elaborated.items {
+            if let ElaboratedItem::TypeAlias(type_name, underlying_type) = item {
+                let qualified_name = format!("{}.{}", mb.name, type_name);
+                self.type_aliases.insert(qualified_name, underlying_type.clone());
+            }
+        }
+
+        self.elaborated_modules.insert(mb.name.clone(), elaborated);
+        // Also register as a known module for name resolution
+        self.known_modules.insert(mb.name.clone());
+        Ok(())
+    }
+
+    /// Elaborate all module bindings from a parsed program
+    /// This is the public entry point for elaborating modules from any source
+    pub fn elaborate_modules(&mut self, program: &Program) -> Result<()> {
+        // Register module types first
+        self.register_module_types(program)?;
+
+        // Elaborate each module binding
+        for decl in &program.declarations {
+            if let Declaration::ModuleBind(mb) = decl {
+                self.elaborate_module_bind(mb)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Elaborate all module bindings and collect top-level declarations (for prelude files)
     fn elaborate_all_modules(&mut self, program: &Program) -> Result<()> {
         for decl in &program.declarations {
             // Collect top-level function declarations for prelude
@@ -257,46 +317,7 @@ impl ModuleManager {
             }
 
             if let Declaration::ModuleBind(mb) = decl {
-                if self.elaborated_modules.contains_key(&mb.name) {
-                    bail_module!("Module '{}' is already defined", mb.name);
-                }
-
-                // Extract type substitutions from the signature
-                let substitutions = if let Some(signature) = &mb.signature {
-                    self.extract_substitutions(signature)?
-                } else {
-                    HashMap::new()
-                };
-
-                let mut items = Vec::new();
-
-                // Elaborate the module signature if it exists
-                if let Some(signature) = &mb.signature {
-                    let specs = self.elaborate_module_type(signature, &HashMap::new())?;
-                    // Wrap specs in ElaboratedItem::Spec
-                    items.extend(specs.into_iter().map(ElaboratedItem::Spec));
-                }
-
-                // Elaborate the module body
-                let body_items = self.elaborate_module_body(&mb.body, &mb.name, &substitutions)?;
-                items.extend(body_items);
-
-                let elaborated = ElaboratedModule {
-                    name: mb.name.clone(),
-                    items,
-                };
-
-                // Register type aliases from this module
-                for item in &elaborated.items {
-                    if let ElaboratedItem::TypeAlias(type_name, underlying_type) = item {
-                        let qualified_name = format!("{}.{}", mb.name, type_name);
-                        self.type_aliases.insert(qualified_name, underlying_type.clone());
-                    }
-                }
-
-                self.elaborated_modules.insert(mb.name.clone(), elaborated);
-                // Also register as a known module for name resolution
-                self.known_modules.insert(mb.name.clone());
+                self.elaborate_module_bind(mb)?;
             }
         }
         Ok(())
@@ -473,6 +494,63 @@ impl ModuleManager {
                 })
             })
             .collect()
+    }
+
+    /// Get all module declarations for flattening (includes builtin module constants like f32.pi)
+    /// Excludes intrinsic functions (those using __builtin_* in their body)
+    pub fn get_all_module_declarations(&self) -> Vec<(&str, &Decl)> {
+        self.elaborated_modules
+            .iter()
+            .flat_map(|(module_name, elaborated)| {
+                elaborated.items.iter().filter_map(move |item| {
+                    if let ElaboratedItem::Decl(decl) = item {
+                        // Skip intrinsics (functions that use __builtin_* calls)
+                        if Self::is_intrinsic_decl(decl) {
+                            None
+                        } else {
+                            Some((module_name.as_str(), decl))
+                        }
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// Check if a declaration is an intrinsic (uses __builtin_* in its body)
+    fn is_intrinsic_decl(decl: &Decl) -> bool {
+        Self::expr_uses_builtin(&decl.body)
+    }
+
+    /// Recursively check if an expression uses __builtin_* functions
+    fn expr_uses_builtin(expr: &crate::ast::Expression) -> bool {
+        use crate::ast::ExprKind;
+        match &expr.kind {
+            ExprKind::Identifier(quals, name) => {
+                name.starts_with("__builtin_") || (quals.is_empty() && name.starts_with("__builtin_"))
+            }
+            ExprKind::Application(func, args) => {
+                Self::expr_uses_builtin(func) || args.iter().any(Self::expr_uses_builtin)
+            }
+            ExprKind::Lambda(lambda) => Self::expr_uses_builtin(&lambda.body),
+            ExprKind::LetIn(let_in) => {
+                Self::expr_uses_builtin(&let_in.value) || Self::expr_uses_builtin(&let_in.body)
+            }
+            ExprKind::If(if_expr) => {
+                Self::expr_uses_builtin(&if_expr.condition)
+                    || Self::expr_uses_builtin(&if_expr.then_branch)
+                    || Self::expr_uses_builtin(&if_expr.else_branch)
+            }
+            ExprKind::BinaryOp(_, lhs, rhs) => {
+                Self::expr_uses_builtin(lhs) || Self::expr_uses_builtin(rhs)
+            }
+            ExprKind::UnaryOp(_, operand) => Self::expr_uses_builtin(operand),
+            ExprKind::Tuple(exprs) | ExprKind::ArrayLiteral(exprs) | ExprKind::VecMatLiteral(exprs) => {
+                exprs.iter().any(Self::expr_uses_builtin)
+            }
+            _ => false,
+        }
     }
 
     /// Get all top-level prelude function declarations for flattening

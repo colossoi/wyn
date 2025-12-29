@@ -21,7 +21,6 @@ sig (*)	: 	t -> t -> t
 sig (/)	: 	t -> t -> t
 sig (%)	: 	t -> t -> t
 sig (**)	: 	t -> t -> t
-sig to_i64	: 	t -> i64
 sig (==)	: 	t -> t -> bool
 sig (<)	: 	t -> t -> bool
 sig (>)	: 	t -> t -> bool
@@ -64,8 +63,6 @@ module type real = {
 include numeric
 sig recip	: 	t -> t
 sig from_fraction	: 	i64 -> i64 -> t
-sig to_i64	: 	t -> i64
-sig to_f64	: 	t -> f64
 sig sqrt	: 	t -> t
 sig rsqrt	: 	t -> t
 sig cbrt	: 	t -> t
@@ -119,8 +116,6 @@ type int_t
 sig from_bits	: 	int_t -> t
 sig to_bits	: 	t -> int_t
 sig num_bits	: 	i32
-sig get_bit	: 	i32 -> t -> i32
-sig set_bit	: 	i32 -> t -> i32 -> t
 sig epsilon	: 	t
 sig nextafter	: 	(x: t) -> (y: t) -> t
 sig ldexp	: 	t -> i32 -> t
@@ -167,8 +162,6 @@ module f32	: 	(float with t = f32 with int_t = u32) = {
   sig (<=) : t -> t -> bool
   sig (>=) : t -> t -> bool
 
-  def to_i64(x: t) -> i64 = __builtin_f32_to_i64(x)
-
   def neg(x: t) -> t = 0.0f32 - x
   sig max : t -> t -> t
   sig min : t -> t -> t
@@ -185,11 +178,10 @@ module f32	: 	(float with t = f32 with int_t = u32) = {
 
   def recip(x: t) -> t = 1.0f32 / x
   def from_fraction(x: i64, y: i64) -> t = __builtin_f32_from_i64(x) / __builtin_f32_from_i64(y)
-  def to_f64(x: t) -> f64 = x
 
   sig sqrt : t -> t
   sig rsqrt : t -> t
-  def cbrt(x: t) -> t = f32.pow(x, (1.0f32 / 3.0f32))
+  def cbrt(x: t) -> t = x ** (1.0f32 / 3.0f32)
 
   sig exp : t -> t
   sig log : t -> t
@@ -246,7 +238,7 @@ module f32	: 	(float with t = f32 with int_t = u32) = {
   def from_bits(x: int_t) -> t = __builtin_f32_from_bits(x)
   def to_bits(x: t) -> int_t = __builtin_f32_to_bits(x)
   def num_bits: i32 = 32
-  def get_bit(bit: i32, x: t) -> i32 = i32(0)
+  def get_bit(bit: i32, x: t) -> i32 = 0i32
   def set_bit(bit: i32, x: t, b: i32) -> t = x
 
   def epsilon: t = 1.1920929e-7f32

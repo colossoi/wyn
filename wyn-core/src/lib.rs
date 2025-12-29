@@ -380,6 +380,19 @@ pub struct Parsed {
 }
 
 impl Parsed {
+    /// Elaborate inline module bindings from the parsed program.
+    /// This registers modules with the module_manager so they're available during resolution,
+    /// then removes the ModuleBind declarations from the AST (they've been copied to module_manager).
+    /// Should be called before desugar() if the program contains module definitions.
+    pub fn elaborate_modules(mut self, module_manager: &mut module_manager::ModuleManager) -> Result<Self> {
+        module_manager.elaborate_modules(&self.ast)?;
+        // Remove ModuleBind and ModuleTypeBind declarations - they've been elaborated
+        self.ast.declarations.retain(|decl| {
+            !matches!(decl, ast::Declaration::ModuleBind(_) | ast::Declaration::ModuleTypeBind(_))
+        });
+        Ok(self)
+    }
+
     /// Desugar range and slice expressions into map/iota constructs.
     /// Should be called before resolve() to ensure the generated identifiers
     /// (iota, map) get properly resolved.
@@ -560,8 +573,8 @@ impl AliasChecked {
             flattening::Flattener::new(type_table, builtins, defun_analysis, schemes.clone());
         let mut mir = flattener.flatten_program(&self.ast)?;
 
-        // Flatten module function declarations so they're available in SPIR-V
-        for (module_name, decl) in module_manager.get_module_function_declarations() {
+        // Flatten module declarations (includes constants like f32.pi, excludes intrinsics)
+        for (module_name, decl) in module_manager.get_all_module_declarations() {
             let qualified_name = format!("{}.{}", module_name, decl.name);
             let defs = flattener.flatten_module_decl(decl, &qualified_name)?;
             mir.defs.extend(defs);

@@ -13,13 +13,12 @@
 ------------------------------------------------------------
 -- Constants
 ------------------------------------------------------------
-def PI: f32 = 3.141592653589793
-def EPSILON: f32 = 0.001
-def MAX_DIST: f32 = 100.0
-def NUM_SPHERES: i32 = 12
+def epsilon: f32 = 0.001
+def maxDist: f32 = 100.0
+def numSpheres: i32 = 12
 
 -- Light direction (normalized)
-def LIGHT_DIR: vec3f32 = @[0.5773502691896258, 0.5773502691896258, -0.5773502691896258]
+def lightDir: vec3f32 = @[0.5773502691896258, 0.5773502691896258, -0.5773502691896258]
 
 ------------------------------------------------------------
 -- Sphere Data (Structure of Arrays)
@@ -87,8 +86,11 @@ def verts: [3]vec4f32 =
 def vertex_main(#[builtin(vertex_index)] vertex_id: i32) -> #[builtin(position)] vec4f32 = verts[vertex_id]
 
 ------------------------------------------------------------
--- PBR Functions
+-- Materials Module (PBR + Glass functions)
 ------------------------------------------------------------
+module materials = {
+
+def epsilon: f32 = 0.001
 
 def pbrFresnelSchlick(cosTheta: f32, f0: vec3f32) -> vec3f32 =
   let oneMinusCos = 1.0 - cosTheta in
@@ -102,17 +104,17 @@ def pbrDistributionGGX(nDotH: f32, roughness: f32) -> f32 =
   let a2 = a * a in
   let nDotH2 = nDotH * nDotH in
   let denom = nDotH2 * (a2 - 1.0) + 1.0 in
-  a2 / (PI * denom * denom + EPSILON)
+  a2 / (f32.pi * denom * denom + epsilon)
 
 def pbrGeometrySchlickGGX(nDotV: f32, roughness: f32) -> f32 =
   let r = roughness + 1.0 in
   let k = r * r / 8.0 in
-  nDotV / (nDotV * (1.0 - k) + k + EPSILON)
+  nDotV / (nDotV * (1.0 - k) + k + epsilon)
 
 def pbrGeometrySmith(nDotV: f32, nDotL: f32, roughness: f32) -> f32 =
   pbrGeometrySchlickGGX(nDotV, roughness) * pbrGeometrySchlickGGX(nDotL, roughness)
 
-def pbrBrdf(n: vec3f32, v: vec3f32, l: vec3f32, albedo: vec3f32, metallic: f32, roughness: f32) -> vec3f32 =
+def brdf(n: vec3f32, v: vec3f32, l: vec3f32, albedo: vec3f32, metallic: f32, roughness: f32) -> vec3f32 =
   let h = normalize(@[v.x + l.x, v.y + l.y, v.z + l.z]) in
   let nDotV = f32.max(dot(n, v), 0.0) in
   let nDotL = f32.max(dot(n, l), 0.0) in
@@ -127,7 +129,7 @@ def pbrBrdf(n: vec3f32, v: vec3f32, l: vec3f32, albedo: vec3f32, metallic: f32, 
   let g = pbrGeometrySmith(nDotV, nDotL, roughness) in
   let fr = pbrFresnelSchlick(hDotV, f0) in
 
-  let specDenom = 4.0 * nDotV * nDotL + EPSILON in
+  let specDenom = 4.0 * nDotV * nDotL + epsilon in
   let specular = @[d * g * fr.x / specDenom,
                    d * g * fr.y / specDenom,
                    d * g * fr.z / specDenom] in
@@ -135,9 +137,9 @@ def pbrBrdf(n: vec3f32, v: vec3f32, l: vec3f32, albedo: vec3f32, metallic: f32, 
   let kD = @[(1.0 - fr.x) * (1.0 - metallic),
              (1.0 - fr.y) * (1.0 - metallic),
              (1.0 - fr.z) * (1.0 - metallic)] in
-  let diffuse = @[kD.x * albedo.x / PI,
-                  kD.y * albedo.y / PI,
-                  kD.z * albedo.z / PI] in
+  let diffuse = @[kD.x * albedo.x / f32.pi,
+                  kD.y * albedo.y / f32.pi,
+                  kD.z * albedo.z / f32.pi] in
 
   @[(diffuse.x + specular.x) * nDotL,
     (diffuse.y + specular.y) * nDotL,
@@ -172,6 +174,8 @@ def refractRay(incident: vec3f32, normal: vec3f32, eta: f32) -> vec3f32 =
       eta * incident.y + (eta * cosI - cosT) * normal.y,
       eta * incident.z + (eta * cosI - cosT) * normal.z]
 
+} -- end module materials
+
 -- Vector addition helper for reduce
 def vecAdd(a: vec3f32, b: vec3f32) -> vec3f32 =
   @[a.x + b.x, a.y + b.y, a.z + b.z]
@@ -191,16 +195,16 @@ def intersectSphere(ro: vec3f32, rd: vec3f32, center: vec3f32, radius: f32) -> f
     let sqrtD = f32.sqrt(discriminant) in
     let t1 = 0.0 - b - sqrtD in
     let t2 = 0.0 - b + sqrtD in
-    if t1 > EPSILON then t1
-    else if t2 > EPSILON then t2
+    if t1 > epsilon then t1
+    else if t2 > epsilon then t2
     else 0.0 - 1.0
 
 -- Ray-plane intersection (horizontal plane at y = 0)
 def intersectPlane(ro: vec3f32, rd: vec3f32) -> f32 =
-  if f32.abs(rd.y) < EPSILON then 0.0 - 1.0
+  if f32.abs(rd.y) < epsilon then 0.0 - 1.0
   else
     let t = (0.0 - ro.y) / rd.y in
-    if t > EPSILON then t else 0.0 - 1.0
+    if t > epsilon then t else 0.0 - 1.0
 
 ------------------------------------------------------------
 -- Scene Intersection using SOACs
@@ -218,21 +222,21 @@ def intersectAllSpheres(ro: vec3f32, rd: vec3f32) -> [12](f32, i32, vec3f32) =
           let n = normalize(@[hitP.x - center.x, hitP.y - center.y, hitP.z - center.z]) in
           (t, idx + 2, n)  -- Material IDs start at 2 for spheres
         else
-          (MAX_DIST, 0, @[0.0, 1.0, 0.0]),
+          (maxDist, 0, @[0.0, 1.0, 0.0]),
       zip3(sphereCenters, sphereRadii, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]))
 
 -- Find closest hit using reduce
 def findClosestHit(hits: [12](f32, i32, vec3f32)) -> (f32, i32, vec3f32) =
   reduce(|(t1, m1, n1): (f32, i32, vec3f32), (t2, m2, n2): (f32, i32, vec3f32)|
            if t1 < t2 then (t1, m1, n1) else (t2, m2, n2),
-         (MAX_DIST, 0, @[0.0, 1.0, 0.0]),
+         (maxDist, 0, @[0.0, 1.0, 0.0]),
          hits)
 
 def intersectScene(ro: vec3f32, rd: vec3f32) -> (f32, i32, vec3f32) =
   -- Check ground plane first
   let tPlane = intersectPlane(ro, rd) in
   let groundHit = if tPlane > 0.0 then (tPlane, 1, @[0.0, 1.0, 0.0])
-                  else (MAX_DIST, 0, @[0.0, 1.0, 0.0]) in
+                  else (maxDist, 0, @[0.0, 1.0, 0.0]) in
 
   -- Check all spheres in parallel
   let sphereHits = intersectAllSpheres(ro, rd) in
@@ -277,9 +281,9 @@ def getSkyColor(rd: vec3f32) -> vec3f32 =
 ------------------------------------------------------------
 
 def inShadow(hitPoint: vec3f32, lightDir: vec3f32) -> f32 =
-  let shadowRo = @[hitPoint.x + lightDir.x * EPSILON * 10.0,
-                   hitPoint.y + lightDir.y * EPSILON * 10.0,
-                   hitPoint.z + lightDir.z * EPSILON * 10.0] in
+  let shadowRo = @[hitPoint.x + lightDir.x * epsilon * 10.0,
+                   hitPoint.y + lightDir.y * epsilon * 10.0,
+                   hitPoint.z + lightDir.z * epsilon * 10.0] in
   let (t, matId, unusedN) = intersectScene(shadowRo, lightDir) in
   if matId > 0 then 0.3 else 1.0
 
@@ -289,8 +293,8 @@ def inShadow(hitPoint: vec3f32, lightDir: vec3f32) -> f32 =
 
 def shade(hitPoint: vec3f32, normal: vec3f32, viewDir: vec3f32, matId: i32) -> vec3f32 =
   let (albedo, metallic, roughness, _, _, _) = getMaterial(matId, hitPoint) in
-  let brdfResult = pbrBrdf(normal, viewDir, LIGHT_DIR, albedo, metallic, roughness) in
-  let shadow = inShadow(hitPoint, LIGHT_DIR) in
+  let brdfResult = materials.brdf(normal, viewDir, lightDir, albedo, metallic, roughness) in
+  let shadow = inShadow(hitPoint, lightDir) in
   let lightColor = @[2.0, 1.9, 1.8] in
   let ambient = @[albedo.x * 0.1, albedo.y * 0.1, albedo.z * 0.1] in
   @[ambient.x + brdfResult.x * lightColor.x * shadow,
@@ -323,25 +327,25 @@ def trace(ro: vec3f32, rd: vec3f32, maxBounces: i32) -> vec3f32 =
           let eta = if entering then 1.0 / ior else ior in
 
           let cosTheta = f32.abs(dot(rayD, n)) in
-          let fresnel = fresnelGlass(cosTheta, ior) in
+          let fresnel = materials.fresnelGlass(cosTheta, ior) in
 
           -- Use hash for random decision based on hit position and bounce
           let bouncef = f32.i32(bounce) in
-          let rand = hash(@[hitPoint.x + bouncef * 7.13,
+          let rand = materials.hash(@[hitPoint.x + bouncef * 7.13,
                             hitPoint.y + bouncef * 11.27,
                             hitPoint.z + bouncef * 13.37]) in
 
           let newDir = if rand < fresnel then
                          reflect(rayD, n)  -- Reflect
                        else
-                         refractRay(rayD, n, eta)  -- Refract
+                         materials.refractRay(rayD, n, eta)  -- Refract
           in
 
           -- Offset origin based on direction (into or out of surface)
           let offsetSign = if dot(newDir, normal) > 0.0 then 1.0 else 0.0 - 1.0 in
-          let newRayO = @[hitPoint.x + normal.x * EPSILON * 10.0 * offsetSign,
-                          hitPoint.y + normal.y * EPSILON * 10.0 * offsetSign,
-                          hitPoint.z + normal.z * EPSILON * 10.0 * offsetSign] in
+          let newRayO = @[hitPoint.x + normal.x * epsilon * 10.0 * offsetSign,
+                          hitPoint.y + normal.y * epsilon * 10.0 * offsetSign,
+                          hitPoint.z + normal.z * epsilon * 10.0 * offsetSign] in
 
           -- Glass is mostly transparent, slight tint from albedo
           let glassTint = @[mix(1.0, albedo.x, 0.1),
@@ -367,9 +371,9 @@ def trace(ro: vec3f32, rd: vec3f32, maxBounces: i32) -> vec3f32 =
                           tint.z * albedo.z * reflectivity] in
 
           let reflDir = reflect(rayD, normal) in
-          let newRayO = @[hitPoint.x + normal.x * EPSILON * 10.0,
-                          hitPoint.y + normal.y * EPSILON * 10.0,
-                          hitPoint.z + normal.z * EPSILON * 10.0] in
+          let newRayO = @[hitPoint.x + normal.x * epsilon * 10.0,
+                          hitPoint.y + normal.y * epsilon * 10.0,
+                          hitPoint.z + normal.z * epsilon * 10.0] in
 
           (newColor, newRayO, reflDir, newTint, bounce + 1)
   in finalColor
@@ -401,21 +405,21 @@ def processOneRay(idx: i32, ro: vec3f32, rd: vec3f32, weight: vec3f32, active: i
         let n = if entering then normal else @[0.0 - normal.x, 0.0 - normal.y, 0.0 - normal.z] in
         let eta = if entering then 1.0 / ior else ior in
         let cosTheta = f32.abs(dot(rd, n)) in
-        let fresnel = fresnelGlass(cosTheta, ior) in
+        let fresnel = materials.fresnelGlass(cosTheta, ior) in
 
         let reflDir = reflect(rd, n) in
-        let refrDir = refractRay(rd, n, eta) in
+        let refrDir = materials.refractRay(rd, n, eta) in
 
         let reflWeight = @[weight.x * fresnel, weight.y * fresnel, weight.z * fresnel] in
         let refrWeight = @[weight.x * (1.0 - fresnel), weight.y * (1.0 - fresnel), weight.z * (1.0 - fresnel)] in
 
         let offsetSign = if dot(reflDir, normal) > 0.0 then 1.0 else 0.0 - 1.0 in
-        let reflOrigin = @[hitPoint.x + normal.x * EPSILON * 10.0 * offsetSign,
-                           hitPoint.y + normal.y * EPSILON * 10.0 * offsetSign,
-                           hitPoint.z + normal.z * EPSILON * 10.0 * offsetSign] in
-        let refrOrigin = @[hitPoint.x - normal.x * EPSILON * 10.0 * offsetSign,
-                           hitPoint.y - normal.y * EPSILON * 10.0 * offsetSign,
-                           hitPoint.z - normal.z * EPSILON * 10.0 * offsetSign] in
+        let reflOrigin = @[hitPoint.x + normal.x * epsilon * 10.0 * offsetSign,
+                           hitPoint.y + normal.y * epsilon * 10.0 * offsetSign,
+                           hitPoint.z + normal.z * epsilon * 10.0 * offsetSign] in
+        let refrOrigin = @[hitPoint.x - normal.x * epsilon * 10.0 * offsetSign,
+                           hitPoint.y - normal.y * epsilon * 10.0 * offsetSign,
+                           hitPoint.z - normal.z * epsilon * 10.0 * offsetSign] in
 
         -- Only spawn refract if slot < 4 (has a partner slot at idx+4)
         -- If can't split (slots 4-7), follow refraction (transmission) path only
@@ -436,9 +440,9 @@ def processOneRay(idx: i32, ro: vec3f32, rd: vec3f32, weight: vec3f32, active: i
                           weight.y * albedo.y * reflectivity,
                           weight.z * albedo.z * reflectivity] in
         let reflDir = reflect(rd, normal) in
-        let reflOrigin = @[hitPoint.x + normal.x * EPSILON * 10.0,
-                           hitPoint.y + normal.y * EPSILON * 10.0,
-                           hitPoint.z + normal.z * EPSILON * 10.0] in
+        let reflOrigin = @[hitPoint.x + normal.x * epsilon * 10.0,
+                           hitPoint.y + normal.y * epsilon * 10.0,
+                           hitPoint.z + normal.z * epsilon * 10.0] in
         (reflOrigin, reflDir, newWeight, contrib, zero, zero, zero, 1, 0)
 
 -- Process one bounce for all 8 ray slots in parallel
@@ -525,8 +529,8 @@ def traceWithSplitting(ro: vec3f32, rd: vec3f32, maxBounces: i32) -> vec3f32 =
 ------------------------------------------------------------
 
 def getCamera(time: f32, mouse: vec4f32, resolution: vec2f32) -> (vec3f32, vec3f32, vec3f32, vec3f32) =
-  let mouseAngleX = if mouse.z > 0.0 then (mouse.x / resolution.x - 0.5) * PI * 2.0 else 0.0 in
-  let mouseAngleY = if mouse.z > 0.0 then (mouse.y / resolution.y - 0.5) * PI * 0.5 else 0.0 in
+  let mouseAngleX = if mouse.z > 0.0 then (mouse.x / resolution.x - 0.5) * f32.pi * 2.0 else 0.0 in
+  let mouseAngleY = if mouse.z > 0.0 then (mouse.y / resolution.y - 0.5) * f32.pi * 0.5 else 0.0 in
 
   let baseAngle = time * 0.3 in
   let angle = baseAngle + mouseAngleX in

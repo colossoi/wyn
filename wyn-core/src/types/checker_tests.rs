@@ -18,6 +18,7 @@ fn try_typecheck_program(input: &str) -> Result<(), CompilerError> {
     let mut frontend = crate::cached_frontend();
     let parsed = crate::Compiler::parse(input, &mut frontend.node_counter)?;
     let _type_checked = parsed
+        .elaborate_modules(&mut frontend.module_manager)?
         .desugar(&mut frontend.node_counter)?
         .resolve(&frontend.module_manager)?
         .fold_ast_constants()
@@ -1559,6 +1560,19 @@ fn test_let_annotation_with_qualified_alias() {
 def test(x: f32) -> f32 =
     let y: rand.state = 1.0f32 in
     y + x
+        "#,
+    );
+}
+
+#[test]
+#[ignore] // TODO: Implement vector arithmetic (v1 + v2, v1 - v2, etc.)
+fn test_vector_arithmetic() {
+    // Vector addition/subtraction should work element-wise
+    typecheck_program(
+        r#"
+def vec_add(a: vec3f32, b: vec3f32) -> vec3f32 = a + b
+def vec_sub(a: vec3f32, b: vec3f32) -> vec3f32 = a - b
+def vec_scale(a: vec3f32, s: f32) -> vec3f32 = a * s
         "#,
     );
 }
