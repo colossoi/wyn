@@ -849,7 +849,7 @@ impl Flattener {
                 }
                 ast::Declaration::Sig(_)
                 | ast::Declaration::TypeBind(_)
-                | ast::Declaration::ModuleBind(_)
+                | ast::Declaration::Module(_)
                 | ast::Declaration::ModuleTypeBind(_)
                 | ast::Declaration::Open(_)
                 | ast::Declaration::Import(_) => {

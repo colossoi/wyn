@@ -248,8 +248,12 @@ impl AstFormatter {
             Declaration::TypeBind(tb) => {
                 self.write_line(&format!("type {} = {}", tb.name, tb.definition));
             }
-            Declaration::ModuleBind(mb) => {
-                self.write_line(&format!("module {} = ...", mb.name));
+            Declaration::Module(md) => {
+                let name = match md {
+                    ModuleDecl::Module { name, .. } => name,
+                    ModuleDecl::Functor { name, .. } => name,
+                };
+                self.write_line(&format!("module {} = ...", name));
             }
             Declaration::ModuleTypeBind(mtb) => {
                 self.write_line(&format!("module type {} = ...", mtb.name));

@@ -238,7 +238,7 @@ pub enum Declaration {
     Storage(StorageDecl), // Storage buffer declarations
     Sig(SigDecl),
     TypeBind(TypeBind),             // Type declarations
-    ModuleBind(ModuleBind),         // Module declarations
+    Module(ModuleDecl),             // Module and functor declarations
     ModuleTypeBind(ModuleTypeBind), // Module type declarations
     Open(ModuleExpression),         // open mod_exp
     Import(String),                 // import "path"
@@ -406,11 +406,17 @@ pub enum TypeParam {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ModuleBind {
-    pub name: String,
-    pub params: Vec<ModuleParam>,
-    pub signature: Option<ModuleTypeExpression>,
-    pub body: ModuleExpression,
+pub enum ModuleDecl {
+    Module {
+        name: String,
+        signature: Option<ModuleTypeExpression>,
+        body: ModuleExpression,
+    },
+    Functor {
+        name: String,
+        params: Vec<ModuleParam>,
+        body: ModuleExpression,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

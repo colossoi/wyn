@@ -1429,11 +1429,11 @@ impl<'a> TypeChecker<'a> {
                 // For now, just skip them in type checking
                 Ok(())
             }
-            Declaration::ModuleBind(_) => {
-                // Module bindings should be elaborated away before type checking
+            Declaration::Module(_) => {
+                // Module/functor declarations should be elaborated away before type checking
                 // If we encounter one here, it means elaboration wasn't run or failed
                 Err(err_module!(
-                    "Module bindings should be elaborated before type checking"
+                    "Module declarations should be elaborated before type checking"
                 ))
             }
             Declaration::ModuleTypeBind(_) => {

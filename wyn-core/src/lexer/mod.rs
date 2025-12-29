@@ -56,6 +56,7 @@ pub enum Token {
     Match,
     Case,
     Module,
+    Functor,
     Open,
     Import,
     Type,
@@ -138,6 +139,7 @@ fn parse_keyword(input: &str) -> IResult<&str, Token> {
     alt((
         alt((
             keyword("module", Token::Module),
+            keyword("functor", Token::Functor),
             keyword("import", Token::Import),
             keyword("include", Token::Include),
             keyword("match", Token::Match),

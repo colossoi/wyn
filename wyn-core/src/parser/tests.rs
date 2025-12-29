@@ -1462,14 +1462,14 @@ fn test_parse_module_bind_simple() {
     let program = parse_ok("module M = { def x: i32 = 42 }");
     assert_eq!(program.declarations.len(), 1);
 
-    let bind = match &program.declarations[0] {
-        Declaration::ModuleBind(b) => b,
-        _ => panic!("Expected ModuleBind declaration"),
+    match &program.declarations[0] {
+        Declaration::Module(ast::ModuleDecl::Module { name, signature, body }) => {
+            assert_eq!(name, "M");
+            assert!(signature.is_none());
+            assert!(matches!(body, ModuleExpression::Struct(decls) if decls.len() == 1));
+        }
+        _ => panic!("Expected Module declaration"),
     };
-    assert_eq!(bind.name, "M");
-    assert_eq!(bind.params.len(), 0);
-    assert!(bind.signature.is_none());
-    assert!(matches!(&bind.body, ModuleExpression::Struct(decls) if decls.len() == 1));
 }
 
 #[test]
@@ -3274,4 +3274,16 @@ fn test_numeric_field_access_rejected() {
     // Numeric field access like x.0 should be rejected
     // (tuple indexing is not supported)
     expect_parse_error("def x(t: (i32, i32)) -> i32 = t.0", |_| Ok(()));
+}
+
+#[test]
+fn test_functor_param_module_function_call() {
+    // Calling a function from a functor parameter module: R.f64(x)
+    // This should parse as Application(Identifier(["R"], "f64"), [x])
+    let src = r#"
+module mk_erf(R: real) = {
+  def erf(x: R.t) -> R.t = R.f64(0.5)
+}
+"#;
+    let _program = parse_ok(src);
 }

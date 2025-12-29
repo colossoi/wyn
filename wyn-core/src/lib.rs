@@ -380,17 +380,17 @@ pub struct Parsed {
 }
 
 impl Parsed {
-    /// Elaborate inline module bindings from the parsed program.
+    /// Elaborate inline module declarations from the parsed program.
     /// This registers modules with the module_manager so they're available during resolution,
-    /// then removes the ModuleBind declarations from the AST (they've been copied to module_manager).
+    /// then removes the Module declarations from the AST (they've been copied to module_manager).
     /// Should be called before desugar() if the program contains module definitions.
     pub fn elaborate_modules(mut self, module_manager: &mut module_manager::ModuleManager) -> Result<Self> {
         module_manager.elaborate_modules(&self.ast)?;
-        // Remove ModuleBind and ModuleTypeBind declarations - they've been elaborated
+        // Remove Module and ModuleTypeBind declarations - they've been elaborated
         self.ast.declarations.retain(|decl| {
             !matches!(
                 decl,
-                ast::Declaration::ModuleBind(_) | ast::Declaration::ModuleTypeBind(_)
+                ast::Declaration::Module(_) | ast::Declaration::ModuleTypeBind(_)
             )
         });
         Ok(self)

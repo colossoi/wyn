@@ -248,82 +248,85 @@ impl ModuleManager {
         Ok(())
     }
 
-    /// Elaborate a single module binding
-    fn elaborate_module_bind(&mut self, mb: &crate::ast::ModuleBind) -> Result<()> {
-        if self.elaborated_modules.contains_key(&mb.name) {
-            bail_module!("Module '{}' is already defined", mb.name);
-        }
-        if self.functor_modules.contains_key(&mb.name) {
-            bail_module!("Module '{}' is already defined as a functor", mb.name);
-        }
+    /// Elaborate a single module or functor declaration
+    fn elaborate_module_decl(&mut self, md: &crate::ast::ModuleDecl) -> Result<()> {
+        match md {
+            crate::ast::ModuleDecl::Functor { name, params, body } => {
+                if self.elaborated_modules.contains_key(name) {
+                    bail_module!("Module '{}' is already defined", name);
+                }
+                if self.functor_modules.contains_key(name) {
+                    bail_module!("Functor '{}' is already defined", name);
+                }
 
-        // If this module has parameters, store it as a functor (unevaluated)
-        if !mb.params.is_empty() {
-            let functor = FunctorModule {
-                name: mb.name.clone(),
-                params: mb.params.clone(),
-                signature: mb.signature.clone(),
-                body: mb.body.clone(),
-            };
-            self.functor_modules.insert(mb.name.clone(), functor);
-            // Register as a known module for name resolution
-            self.known_modules.insert(mb.name.clone());
-            return Ok(());
-        }
+                let functor = FunctorModule {
+                    name: name.clone(),
+                    params: params.clone(),
+                    signature: None,
+                    body: body.clone(),
+                };
+                self.functor_modules.insert(name.clone(), functor);
+                self.known_modules.insert(name.clone());
+                Ok(())
+            }
+            crate::ast::ModuleDecl::Module { name, signature, body } => {
+                if self.elaborated_modules.contains_key(name) {
+                    bail_module!("Module '{}' is already defined", name);
+                }
+                if self.functor_modules.contains_key(name) {
+                    bail_module!("Module '{}' is already defined as a functor", name);
+                }
 
-        // Extract type substitutions from the signature
-        let substitutions = if let Some(signature) = &mb.signature {
-            self.extract_substitutions(signature)?
-        } else {
-            HashMap::new()
-        };
+                // Extract type substitutions from the signature
+                let substitutions = if let Some(sig) = signature {
+                    self.extract_substitutions(sig)?
+                } else {
+                    HashMap::new()
+                };
 
-        let mut items = Vec::new();
+                let mut items = Vec::new();
 
-        // Elaborate the module signature if it exists
-        if let Some(signature) = &mb.signature {
-            let specs = self.elaborate_module_type(signature, &HashMap::new())?;
-            // Wrap specs in ElaboratedItem::Spec
-            items.extend(specs.into_iter().map(ElaboratedItem::Spec));
-        }
+                // Elaborate the module signature if it exists
+                if let Some(sig) = signature {
+                    let specs = self.elaborate_module_type(sig, &HashMap::new())?;
+                    items.extend(specs.into_iter().map(ElaboratedItem::Spec));
+                }
 
-        // Elaborate the module body
-        let body_items = self.elaborate_module_body(&mb.body, &mb.name, &substitutions, &HashMap::new())?;
-        items.extend(body_items);
+                // Elaborate the module body
+                let body_items = self.elaborate_module_body(body, name, &substitutions, &HashMap::new())?;
+                items.extend(body_items);
 
-        // Add type aliases from `with` substitutions in the signature
-        // This ensures that types like `t` from `(my_numeric with t = f32)` are available
-        // when the module is used as a functor argument
-        for (type_name, underlying_type) in &substitutions {
-            // Only add if not already present from the body
-            let already_present = items
-                .iter()
-                .any(|item| matches!(item, ElaboratedItem::TypeAlias(name, _) if name == type_name));
-            if !already_present {
-                items.push(ElaboratedItem::TypeAlias(
-                    type_name.clone(),
-                    underlying_type.clone(),
-                ));
+                // Add type aliases from `with` substitutions in the signature
+                for (type_name, underlying_type) in &substitutions {
+                    let already_present = items
+                        .iter()
+                        .any(|item| matches!(item, ElaboratedItem::TypeAlias(n, _) if n == type_name));
+                    if !already_present {
+                        items.push(ElaboratedItem::TypeAlias(
+                            type_name.clone(),
+                            underlying_type.clone(),
+                        ));
+                    }
+                }
+
+                let elaborated = ElaboratedModule {
+                    name: name.clone(),
+                    items,
+                };
+
+                // Register type aliases from this module
+                for item in &elaborated.items {
+                    if let ElaboratedItem::TypeAlias(type_name, underlying_type) = item {
+                        let qualified_name = format!("{}.{}", name, type_name);
+                        self.type_aliases.insert(qualified_name, underlying_type.clone());
+                    }
+                }
+
+                self.elaborated_modules.insert(name.clone(), elaborated);
+                self.known_modules.insert(name.clone());
+                Ok(())
             }
         }
-
-        let elaborated = ElaboratedModule {
-            name: mb.name.clone(),
-            items,
-        };
-
-        // Register type aliases from this module
-        for item in &elaborated.items {
-            if let ElaboratedItem::TypeAlias(type_name, underlying_type) = item {
-                let qualified_name = format!("{}.{}", mb.name, type_name);
-                self.type_aliases.insert(qualified_name, underlying_type.clone());
-            }
-        }
-
-        self.elaborated_modules.insert(mb.name.clone(), elaborated);
-        // Also register as a known module for name resolution
-        self.known_modules.insert(mb.name.clone());
-        Ok(())
     }
 
     /// Elaborate all module bindings from a parsed program
@@ -332,10 +335,10 @@ impl ModuleManager {
         // Register module types first
         self.register_module_types(program)?;
 
-        // Elaborate each module binding
+        // Elaborate each module declaration
         for decl in &program.declarations {
-            if let Declaration::ModuleBind(mb) = decl {
-                self.elaborate_module_bind(mb)?;
+            if let Declaration::Module(md) = decl {
+                self.elaborate_module_decl(md)?;
             }
         }
         Ok(())
@@ -350,8 +353,8 @@ impl ModuleManager {
                 continue;
             }
 
-            if let Declaration::ModuleBind(mb) = decl {
-                self.elaborate_module_bind(mb)?;
+            if let Declaration::Module(md) = decl {
+                self.elaborate_module_decl(md)?;
             }
         }
         Ok(())

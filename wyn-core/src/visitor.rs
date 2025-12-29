@@ -235,7 +235,7 @@ pub fn walk_declaration<V: Visitor>(v: &mut V, d: &Declaration) -> ControlFlow<V
         Declaration::Sig(sig) => v.visit_sig_decl(sig),
         // These declarations have no expressions to visit
         Declaration::TypeBind(_)
-        | Declaration::ModuleBind(_)
+        | Declaration::Module(_)
         | Declaration::ModuleTypeBind(_)
         | Declaration::Open(_)
         | Declaration::Import(_) => ControlFlow::Continue(()),

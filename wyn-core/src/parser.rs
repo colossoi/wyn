@@ -116,9 +116,11 @@ impl<'a> Parser<'a> {
                 } else {
                     // module declaration
                     self.current = saved_pos;
-                    let mod_bind = self.parse_module_bind()?;
-                    Ok(Declaration::ModuleBind(mod_bind))
+                    Ok(Declaration::Module(self.parse_module_decl()?))
                 }
+            }
+            Some(Token::Functor) => {
+                Ok(Declaration::Module(self.parse_functor_decl()?))
             }
             Some(Token::Open) => {
                 self.advance();
@@ -1002,18 +1004,23 @@ impl<'a> Parser<'a> {
             }
             Some(Token::Identifier(name)) if name.chars().next().unwrap().is_uppercase() => {
                 let name = name.clone();
-                // Distinguish between type variable (A, B, T) and sum type (Some, None)
-                // Type variables are single uppercase letters or all-uppercase identifiers
-                // Sum types have CamelCase names (first letter upper, rest mixed)
-                let is_type_var =
-                    name.len() == 1 || (name.chars().all(|c| c.is_uppercase() || c.is_ascii_digit()));
+                self.advance();
 
-                if is_type_var {
-                    // Type variable like T, A, B, UV
+                // Check for qualified type (e.g., R.t for functor param module member)
+                if self.check(&Token::Dot) {
                     self.advance();
+                    let member = self.expect_identifier()?;
+                    let qualified = format!("{}.{}", name, member);
+                    return Ok(Type::Constructed(TypeName::Named(qualified), vec![]));
+                }
+
+                // All-caps: type variable (T, UV, R1). CamelCase: sum type (Some, None)
+                let is_type_var = name.chars().all(|c| c.is_uppercase() || c.is_ascii_digit());
+                if is_type_var {
                     Ok(Type::Constructed(TypeName::UserVar(name), vec![]))
                 } else {
-                    // Sum type: Constructor type* | Constructor type*
+                    // Back up for parse_sum_type which expects to see the identifier
+                    self.current -= 1;
                     self.parse_sum_type()
                 }
             }

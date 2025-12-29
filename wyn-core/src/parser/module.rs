@@ -80,25 +80,18 @@ impl Parser<'_> {
         Ok(params)
     }
 
-    /// Parse a module binding:
+    /// Parse module declaration:
     /// ```text
-    /// mod_bind ::= "module" name mod_param* [":" mod_type_exp] ["=" mod_exp]
+    /// module_decl ::= "module" name [":" mod_type_exp] ["=" mod_exp]
     /// ```
     /// Note: If no body is provided but a signature is present, this is a signature-only
     /// module instantiation (e.g., `module i32 : (integral with t = i32)`)
-    pub fn parse_module_bind(&mut self) -> Result<ModuleBind> {
-        trace!("parse_module_bind: next token = {:?}", self.peek());
+    pub fn parse_module_decl(&mut self) -> Result<ModuleDecl> {
+        trace!("parse_module_decl: next token = {:?}", self.peek());
 
         self.expect(Token::Module)?;
         let name = self.expect_identifier()?;
 
-        // Parse module parameters
-        let mut params = Vec::new();
-        while self.check(&Token::LeftParen) {
-            params.push(self.parse_module_param()?);
-        }
-
-        // Parse optional signature
         let signature = if self.check(&Token::Colon) {
             self.advance();
             Some(self.parse_module_type_expression()?)
@@ -106,25 +99,41 @@ impl Parser<'_> {
             None
         };
 
-        // Parse optional body
-        // If there's a signature but no body, this is a signature-only instantiation
         let body = if self.check(&Token::Assign) {
             self.advance();
             self.parse_module_expression()?
         } else if signature.is_some() {
             // Signature-only module: create a synthetic empty body
-            // The elaborator will recognize this and generate declarations from the signature
             ModuleExpression::Struct(vec![])
         } else {
             bail_parse!("Module binding must have either a body (= mod_exp) or a signature (: mod_type)");
         };
 
-        Ok(ModuleBind {
-            name,
-            params,
-            signature,
-            body,
-        })
+        Ok(ModuleDecl::Module { name, signature, body })
+    }
+
+    /// Parse functor declaration:
+    /// ```text
+    /// functor_decl ::= "functor" name mod_param+ "=" mod_exp
+    /// ```
+    pub fn parse_functor_decl(&mut self) -> Result<ModuleDecl> {
+        trace!("parse_functor_decl: next token = {:?}", self.peek());
+
+        self.expect(Token::Functor)?;
+        let name = self.expect_identifier()?;
+
+        let mut params = Vec::new();
+        if !self.check(&Token::LeftParen) {
+            bail_parse!("Functor must have at least one parameter");
+        }
+        while self.check(&Token::LeftParen) {
+            params.push(self.parse_module_param()?);
+        }
+
+        self.expect(Token::Assign)?;
+        let body = self.parse_module_expression()?;
+
+        Ok(ModuleDecl::Functor { name, params, body })
     }
 
     /// Parse a module parameter:
