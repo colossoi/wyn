@@ -503,56 +503,6 @@ impl ModuleManager {
         }
     }
 
-    /// Like substitute_in_type but also handles parameter type references (e.g., n.t)
-    fn substitute_in_type_with_params(
-        &self,
-        ty: &Type,
-        substitutions: &HashMap<String, Type>,
-        param_bindings: &HashMap<String, ElaboratedModule>,
-    ) -> Type {
-        use crate::ast::TypeName;
-
-        match ty {
-            Type::Constructed(name, args) => {
-                if let TypeName::Named(type_name) = name {
-                    if args.is_empty() {
-                        // Check direct substitutions first
-                        if let Some(replacement) = substitutions.get(type_name) {
-                            return replacement.clone();
-                        }
-
-                        // Check for param.type pattern (e.g., "n.t")
-                        if let Some((param_name, field_name)) = type_name.split_once('.') {
-                            if let Some(param_module) = param_bindings.get(param_name) {
-                                // Look for a type alias in the parameter module
-                                for item in &param_module.items {
-                                    if let ElaboratedItem::TypeAlias(alias_name, underlying) = item {
-                                        if alias_name == field_name {
-                                            return underlying.clone();
-                                        }
-                                    }
-                                }
-                                // Also check the global type_aliases for the bound module
-                                let qualified = format!("{}.{}", param_module.name, field_name);
-                                if let Some(underlying) = self.type_aliases.get(&qualified) {
-                                    return underlying.clone();
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Recursively substitute in type arguments
-                let new_args: Vec<Type> = args
-                    .iter()
-                    .map(|arg| self.substitute_in_type_with_params(arg, substitutions, param_bindings))
-                    .collect();
-                Type::Constructed(name.clone(), new_args)
-            }
-            Type::Variable(_) => ty.clone(),
-        }
-    }
-
     /// Builtin/intrinsic modules that shouldn't be type-checked
     /// (their implementations use internal __builtin_* functions)
     const BUILTIN_MODULES: &'static [&'static str] = &[
@@ -749,11 +699,8 @@ impl ModuleManager {
                         Declaration::TypeBind(type_bind) => {
                             // Handle type aliases, including those referencing parameters
                             // e.g., `type t = n.t` where n is a parameter
-                            let substituted_ty = self.substitute_in_type_with_params(
-                                &type_bind.definition,
-                                substitutions,
-                                param_bindings,
-                            );
+                            let substituted_ty =
+                                self.substitute_in_type(&type_bind.definition, substitutions);
                             items.push(ElaboratedItem::TypeAlias(type_bind.name.clone(), substituted_ty));
                         }
                         _ => {
@@ -814,35 +761,22 @@ impl ModuleManager {
                 let mut new_param_bindings = param_bindings.clone();
                 new_param_bindings.insert(param_name.clone(), arg_module.clone());
 
-                // Extract type substitutions from the argument module
-                // Find type aliases in the arg module to use as substitutions
+                // Build type substitutions: map param.field to concrete types
+                // e.g., for add_stuff(my_f32_num) with param n, map "n.t" -> f32
                 let mut new_substitutions = substitutions.clone();
+
+                // From TypeAlias items in the argument module
                 for item in &arg_module.items {
                     if let ElaboratedItem::TypeAlias(type_name, underlying_type) = item {
-                        // Map param.type_name to the underlying type
                         let param_qualified = format!("{}.{}", param_name, type_name);
                         new_substitutions.insert(param_qualified, underlying_type.clone());
                     }
                 }
 
-                // Also look up type from the argument module's signature
-                // For `my_f32_num : (my_numeric with t = f32)`, we need to know t = f32
-                // This info is already in the arg_module's type aliases via `with` extraction
-                // But we also need to handle direct type references like `n.t`
-                // For now, add the arg module's type aliases with param prefix
-                if let Some(arg_elaborated) = self.elaborated_modules.get(arg_name) {
-                    for item in &arg_elaborated.items {
-                        if let ElaboratedItem::TypeAlias(type_name, underlying_type) = item {
-                            let param_qualified = format!("{}.{}", param_name, type_name);
-                            new_substitutions.insert(param_qualified, underlying_type.clone());
-                        }
-                    }
-                }
-
-                // Look up type substitutions from the type_aliases map for the arg module
+                // From global type_aliases (for types registered at module level)
+                let arg_prefix = format!("{}.", arg_name);
                 for (qualified_name, underlying_type) in &self.type_aliases {
-                    if qualified_name.starts_with(&format!("{}.", arg_name)) {
-                        let type_name = qualified_name.strip_prefix(&format!("{}.", arg_name)).unwrap();
+                    if let Some(type_name) = qualified_name.strip_prefix(&arg_prefix) {
                         let param_qualified = format!("{}.{}", param_name, type_name);
                         new_substitutions.insert(param_qualified, underlying_type.clone());
                     }
@@ -863,8 +797,9 @@ impl ModuleManager {
         }
     }
 
-    /// Elaborate a declaration's signature with type substitutions and parameter bindings
-    /// This handles functor parameter references in types and expressions
+    /// Elaborate a declaration with type substitutions and parameter bindings
+    /// Type substitutions handle param.field types (pre-resolved in substitutions map)
+    /// Parameter bindings handle param.func expressions (e.g., n.add -> my_f32_num.add)
     fn elaborate_decl_signature(
         &self,
         decl: &Decl,
@@ -873,18 +808,12 @@ impl ModuleManager {
         substitutions: &HashMap<String, Type>,
         param_bindings: &HashMap<String, ElaboratedModule>,
     ) -> Decl {
-        // Apply type substitutions to params (including param.type references)
-        let new_params: Vec<Pattern> = decl
-            .params
-            .iter()
-            .map(|p| self.substitute_in_pattern(p, substitutions, param_bindings))
-            .collect();
+        // Apply type substitutions to params
+        let new_params: Vec<Pattern> =
+            decl.params.iter().map(|p| self.substitute_in_pattern(p, substitutions)).collect();
 
         // Apply type substitutions to return type
-        let new_ty = decl
-            .ty
-            .as_ref()
-            .map(|ty| self.substitute_in_type_with_params(ty, substitutions, param_bindings));
+        let new_ty = decl.ty.as_ref().map(|ty| self.substitute_in_type(ty, substitutions));
 
         // Collect parameter names to avoid qualifying them as module functions
         let param_names: HashSet<String> =
@@ -945,24 +874,17 @@ impl ModuleManager {
         names
     }
 
-    /// Apply type substitutions to a pattern, including param.type references
-    fn substitute_in_pattern(
-        &self,
-        pattern: &Pattern,
-        substitutions: &HashMap<String, Type>,
-        param_bindings: &HashMap<String, ElaboratedModule>,
-    ) -> Pattern {
+    /// Apply type substitutions to a pattern
+    fn substitute_in_pattern(&self, pattern: &Pattern, substitutions: &HashMap<String, Type>) -> Pattern {
         let new_kind = match &pattern.kind {
             PatternKind::Typed(inner, ty) => {
-                let new_inner = Box::new(self.substitute_in_pattern(inner, substitutions, param_bindings));
-                let new_ty = self.substitute_in_type_with_params(ty, substitutions, param_bindings);
+                let new_inner = Box::new(self.substitute_in_pattern(inner, substitutions));
+                let new_ty = self.substitute_in_type(ty, substitutions);
                 PatternKind::Typed(new_inner, new_ty)
             }
             PatternKind::Tuple(pats) => {
-                let new_pats: Vec<Pattern> = pats
-                    .iter()
-                    .map(|p| self.substitute_in_pattern(p, substitutions, param_bindings))
-                    .collect();
+                let new_pats: Vec<Pattern> =
+                    pats.iter().map(|p| self.substitute_in_pattern(p, substitutions)).collect();
                 PatternKind::Tuple(new_pats)
             }
             PatternKind::Record(fields) => {
@@ -973,20 +895,18 @@ impl ModuleManager {
                         pattern: field
                             .pattern
                             .as_ref()
-                            .map(|p| self.substitute_in_pattern(p, substitutions, param_bindings)),
+                            .map(|p| self.substitute_in_pattern(p, substitutions)),
                     })
                     .collect();
                 PatternKind::Record(new_fields)
             }
             PatternKind::Constructor(name, pats) => {
-                let new_pats: Vec<Pattern> = pats
-                    .iter()
-                    .map(|p| self.substitute_in_pattern(p, substitutions, param_bindings))
-                    .collect();
+                let new_pats: Vec<Pattern> =
+                    pats.iter().map(|p| self.substitute_in_pattern(p, substitutions)).collect();
                 PatternKind::Constructor(name.clone(), new_pats)
             }
             PatternKind::Attributed(attrs, inner) => {
-                let new_inner = self.substitute_in_pattern(inner, substitutions, param_bindings);
+                let new_inner = self.substitute_in_pattern(inner, substitutions);
                 PatternKind::Attributed(attrs.clone(), Box::new(new_inner))
             }
             // Name, Wildcard, Literal, Unit don't contain types
