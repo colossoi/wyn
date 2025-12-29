@@ -1576,3 +1576,37 @@ def vec_scale(a: vec3f32, s: f32) -> vec3f32 = a * s
         "#,
     );
 }
+
+#[test]
+fn test_parameterized_module() {
+    // Functors should allow generic module implementations
+    typecheck_program(
+        r#"
+module type my_numeric = {
+  type t
+  sig add : t -> t -> t
+}
+
+module my_f32_num : (my_numeric with t = f32) = {
+  def add(x: t, y: t) -> t = x + y
+}
+
+module my_f64_num : (my_numeric with t = f64) = {
+  def add(x: t, y: t) -> t = x + y
+}
+
+module add_stuff(n: my_numeric) = {
+  type t = n.t
+
+  def add3(x: t, y: t, z: t) -> t =
+    n.add(n.add(x, y), z)
+}
+
+module add_f32 = add_stuff(my_f32_num)
+module add_f64 = add_stuff(my_f64_num)
+
+def add3_f32(a: f32, b: f32, c: f32) -> f32 = add_f32.add3(a, b, c)
+def add3_f64(a: f64, b: f64, c: f64) -> f64 = add_f64.add3(a, b, c)
+        "#,
+    );
+}

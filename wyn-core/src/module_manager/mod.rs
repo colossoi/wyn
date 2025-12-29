@@ -109,6 +109,19 @@ pub struct ElaboratedModule {
     pub items: Vec<ElaboratedItem>,
 }
 
+/// Represents a parameterized module (functor) that hasn't been applied yet
+#[derive(Debug, Clone)]
+pub struct FunctorModule {
+    /// The functor's name
+    pub name: String,
+    /// Parameters this functor takes
+    pub params: Vec<crate::ast::ModuleParam>,
+    /// The module signature (if any)
+    pub signature: Option<ModuleTypeExpression>,
+    /// The unevaluated body
+    pub body: ModuleExpression,
+}
+
 /// Pre-elaborated prelude data that can be shared across compilations (for test performance)
 #[derive(Clone)]
 pub struct PreElaboratedPrelude {
@@ -131,6 +144,8 @@ pub struct ModuleManager {
     module_type_registry: HashMap<String, ModuleTypeExpression>,
     /// Elaborated modules: module_name -> ElaboratedModule
     pub(crate) elaborated_modules: HashMap<String, ElaboratedModule>,
+    /// Functor modules: functor_name -> FunctorModule (unevaluated parameterized modules)
+    functor_modules: HashMap<String, FunctorModule>,
     /// Set of known module names (for name resolution)
     known_modules: HashSet<String>,
     /// Type aliases from modules: "module.typename" -> underlying Type
@@ -177,6 +192,7 @@ impl ModuleManager {
         ModuleManager {
             module_type_registry: HashMap::new(),
             elaborated_modules: HashMap::new(),
+            functor_modules: HashMap::new(),
             known_modules,
             type_aliases: HashMap::new(),
             prelude_functions: IndexMap::new(),
@@ -215,6 +231,7 @@ impl ModuleManager {
         ModuleManager {
             module_type_registry: prelude.module_type_registry.clone(),
             elaborated_modules: prelude.elaborated_modules.clone(),
+            functor_modules: HashMap::new(), // Prelude doesn't have functors
             known_modules: prelude.known_modules.clone(),
             type_aliases: prelude.type_aliases.clone(),
             prelude_functions: prelude.prelude_functions.clone(),
@@ -252,6 +269,23 @@ impl ModuleManager {
         if self.elaborated_modules.contains_key(&mb.name) {
             bail_module!("Module '{}' is already defined", mb.name);
         }
+        if self.functor_modules.contains_key(&mb.name) {
+            bail_module!("Module '{}' is already defined as a functor", mb.name);
+        }
+
+        // If this module has parameters, store it as a functor (unevaluated)
+        if !mb.params.is_empty() {
+            let functor = FunctorModule {
+                name: mb.name.clone(),
+                params: mb.params.clone(),
+                signature: mb.signature.clone(),
+                body: mb.body.clone(),
+            };
+            self.functor_modules.insert(mb.name.clone(), functor);
+            // Register as a known module for name resolution
+            self.known_modules.insert(mb.name.clone());
+            return Ok(());
+        }
 
         // Extract type substitutions from the signature
         let substitutions = if let Some(signature) = &mb.signature {
@@ -270,8 +304,24 @@ impl ModuleManager {
         }
 
         // Elaborate the module body
-        let body_items = self.elaborate_module_body(&mb.body, &mb.name, &substitutions)?;
+        let body_items = self.elaborate_module_body(&mb.body, &mb.name, &substitutions, &HashMap::new())?;
         items.extend(body_items);
+
+        // Add type aliases from `with` substitutions in the signature
+        // This ensures that types like `t` from `(my_numeric with t = f32)` are available
+        // when the module is used as a functor argument
+        for (type_name, underlying_type) in &substitutions {
+            // Only add if not already present from the body
+            let already_present = items
+                .iter()
+                .any(|item| matches!(item, ElaboratedItem::TypeAlias(name, _) if name == type_name));
+            if !already_present {
+                items.push(ElaboratedItem::TypeAlias(
+                    type_name.clone(),
+                    underlying_type.clone(),
+                ));
+            }
+        }
 
         let elaborated = ElaboratedModule {
             name: mb.name.clone(),
@@ -453,6 +503,56 @@ impl ModuleManager {
         }
     }
 
+    /// Like substitute_in_type but also handles parameter type references (e.g., n.t)
+    fn substitute_in_type_with_params(
+        &self,
+        ty: &Type,
+        substitutions: &HashMap<String, Type>,
+        param_bindings: &HashMap<String, ElaboratedModule>,
+    ) -> Type {
+        use crate::ast::TypeName;
+
+        match ty {
+            Type::Constructed(name, args) => {
+                if let TypeName::Named(type_name) = name {
+                    if args.is_empty() {
+                        // Check direct substitutions first
+                        if let Some(replacement) = substitutions.get(type_name) {
+                            return replacement.clone();
+                        }
+
+                        // Check for param.type pattern (e.g., "n.t")
+                        if let Some((param_name, field_name)) = type_name.split_once('.') {
+                            if let Some(param_module) = param_bindings.get(param_name) {
+                                // Look for a type alias in the parameter module
+                                for item in &param_module.items {
+                                    if let ElaboratedItem::TypeAlias(alias_name, underlying) = item {
+                                        if alias_name == field_name {
+                                            return underlying.clone();
+                                        }
+                                    }
+                                }
+                                // Also check the global type_aliases for the bound module
+                                let qualified = format!("{}.{}", param_module.name, field_name);
+                                if let Some(underlying) = self.type_aliases.get(&qualified) {
+                                    return underlying.clone();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Recursively substitute in type arguments
+                let new_args: Vec<Type> = args
+                    .iter()
+                    .map(|arg| self.substitute_in_type_with_params(arg, substitutions, param_bindings))
+                    .collect();
+                Type::Constructed(name.clone(), new_args)
+            }
+            Type::Variable(_) => ty.clone(),
+        }
+    }
+
     /// Builtin/intrinsic modules that shouldn't be type-checked
     /// (their implementations use internal __builtin_* functions)
     const BUILTIN_MODULES: &'static [&'static str] = &[
@@ -586,11 +686,13 @@ impl ModuleManager {
 
     /// Elaborate a module body expression into a list of elaborated items
     /// Applies type substitutions to declaration signatures
+    /// `param_bindings` maps parameter names to their resolved module's elaborated items
     fn elaborate_module_body(
         &self,
         module_expr: &ModuleExpression,
         module_name: &str,
         substitutions: &HashMap<String, Type>,
+        param_bindings: &HashMap<String, ElaboratedModule>,
     ) -> Result<Vec<ElaboratedItem>> {
         match module_expr {
             ModuleExpression::Struct(declarations) => {
@@ -615,11 +717,12 @@ impl ModuleManager {
                     match decl {
                         Declaration::Decl(d) => {
                             // Apply type substitutions and resolve names
-                            let elaborated_decl = self.elaborate_decl_signature(
+                            let elaborated_decl = self.elaborate_decl_signature_with_params(
                                 d,
                                 module_name,
                                 &module_functions,
                                 substitutions,
+                                param_bindings,
                             );
                             items.push(ElaboratedItem::Decl(elaborated_decl));
                         }
@@ -644,9 +747,13 @@ impl ModuleManager {
                             // TODO: Handle open declarations for name resolution
                         }
                         Declaration::TypeBind(type_bind) => {
-                            // Record type aliases (e.g., `type state = f32`)
-                            let substituted_ty =
-                                self.substitute_in_type(&type_bind.definition, substitutions);
+                            // Handle type aliases, including those referencing parameters
+                            // e.g., `type t = n.t` where n is a parameter
+                            let substituted_ty = self.substitute_in_type_with_params(
+                                &type_bind.definition,
+                                substitutions,
+                                param_bindings,
+                            );
                             items.push(ElaboratedItem::TypeAlias(type_bind.name.clone(), substituted_ty));
                         }
                         _ => {
@@ -657,9 +764,101 @@ impl ModuleManager {
 
                 Ok(items)
             }
+            ModuleExpression::Name(name) => {
+                // Look up an existing elaborated module by name
+                if let Some(param_module) = param_bindings.get(name) {
+                    // It's a parameter reference - return its items
+                    Ok(param_module.items.clone())
+                } else if let Some(elaborated) = self.elaborated_modules.get(name) {
+                    // It's a known elaborated module
+                    Ok(elaborated.items.clone())
+                } else {
+                    Err(err_module!("Unknown module: '{}'", name))
+                }
+            }
+            ModuleExpression::Application(functor_expr, arg_expr) => {
+                // Apply a functor to an argument
+                // 1. The functor must be a Name referencing a FunctorModule
+                // 2. The argument must be a Name referencing an elaborated module
+                let functor_name = match functor_expr.as_ref() {
+                    ModuleExpression::Name(name) => name,
+                    _ => return Err(err_module!("Functor must be a module name")),
+                };
+
+                let arg_name = match arg_expr.as_ref() {
+                    ModuleExpression::Name(name) => name,
+                    _ => return Err(err_module!("Functor argument must be a module name")),
+                };
+
+                // Look up the functor
+                let functor = self.functor_modules.get(functor_name).ok_or_else(|| {
+                    err_module!("'{}' is not a parameterized module (functor)", functor_name)
+                })?;
+
+                // Look up the argument module
+                let arg_module = self
+                    .elaborated_modules
+                    .get(arg_name)
+                    .ok_or_else(|| err_module!("Unknown module argument: '{}'", arg_name))?;
+
+                // Create parameter binding: param_name -> arg_module
+                if functor.params.len() != 1 {
+                    return Err(err_module!(
+                        "Functor '{}' expects {} parameters, got 1",
+                        functor_name,
+                        functor.params.len()
+                    ));
+                }
+
+                let param_name = &functor.params[0].name;
+                let mut new_param_bindings = param_bindings.clone();
+                new_param_bindings.insert(param_name.clone(), arg_module.clone());
+
+                // Extract type substitutions from the argument module
+                // Find type aliases in the arg module to use as substitutions
+                let mut new_substitutions = substitutions.clone();
+                for item in &arg_module.items {
+                    if let ElaboratedItem::TypeAlias(type_name, underlying_type) = item {
+                        // Map param.type_name to the underlying type
+                        let param_qualified = format!("{}.{}", param_name, type_name);
+                        new_substitutions.insert(param_qualified, underlying_type.clone());
+                    }
+                }
+
+                // Also look up type from the argument module's signature
+                // For `my_f32_num : (my_numeric with t = f32)`, we need to know t = f32
+                // This info is already in the arg_module's type aliases via `with` extraction
+                // But we also need to handle direct type references like `n.t`
+                // For now, add the arg module's type aliases with param prefix
+                if let Some(arg_elaborated) = self.elaborated_modules.get(arg_name) {
+                    for item in &arg_elaborated.items {
+                        if let ElaboratedItem::TypeAlias(type_name, underlying_type) = item {
+                            let param_qualified = format!("{}.{}", param_name, type_name);
+                            new_substitutions.insert(param_qualified, underlying_type.clone());
+                        }
+                    }
+                }
+
+                // Look up type substitutions from the type_aliases map for the arg module
+                for (qualified_name, underlying_type) in &self.type_aliases {
+                    if qualified_name.starts_with(&format!("{}.", arg_name)) {
+                        let type_name = qualified_name.strip_prefix(&format!("{}.", arg_name)).unwrap();
+                        let param_qualified = format!("{}.{}", param_name, type_name);
+                        new_substitutions.insert(param_qualified, underlying_type.clone());
+                    }
+                }
+
+                // Elaborate the functor body with the parameter binding
+                self.elaborate_module_body(
+                    &functor.body,
+                    module_name,
+                    &new_substitutions,
+                    &new_param_bindings,
+                )
+            }
             _ => {
-                // For now, only handle struct module expressions
-                Err(err_module!("Only struct module expressions are supported"))
+                // For now, only handle struct, name, and application module expressions
+                Err(err_module!("Unsupported module expression type"))
             }
         }
     }
@@ -686,6 +885,56 @@ impl ModuleManager {
         // Resolve names in body (convert FieldAccess to QualifiedName, qualify intra-module refs)
         let mut new_body = decl.body.clone();
         self.resolve_names_in_expr(&mut new_body, module_name, module_functions, &param_names);
+
+        Decl {
+            keyword: decl.keyword,
+            attributes: decl.attributes.clone(),
+            name: decl.name.clone(),
+            size_params: decl.size_params.clone(),
+            type_params: decl.type_params.clone(),
+            params: new_params,
+            ty: new_ty,
+            body: new_body,
+        }
+    }
+
+    /// Elaborate a declaration's signature with type substitutions and parameter bindings
+    /// This handles functor parameter references in types and expressions
+    fn elaborate_decl_signature_with_params(
+        &self,
+        decl: &Decl,
+        module_name: &str,
+        module_functions: &HashSet<String>,
+        substitutions: &HashMap<String, Type>,
+        param_bindings: &HashMap<String, ElaboratedModule>,
+    ) -> Decl {
+        // Apply type substitutions to params (including param.type references)
+        let new_params: Vec<Pattern> = decl
+            .params
+            .iter()
+            .map(|p| self.substitute_in_pattern_with_params(p, substitutions, param_bindings))
+            .collect();
+
+        // Apply type substitutions to return type
+        let new_ty = decl
+            .ty
+            .as_ref()
+            .map(|ty| self.substitute_in_type_with_params(ty, substitutions, param_bindings));
+
+        // Collect parameter names to avoid qualifying them as module functions
+        let param_names: HashSet<String> =
+            decl.params.iter().flat_map(|p| self.collect_pattern_names(p)).collect();
+
+        // Resolve names in body (convert FieldAccess to QualifiedName, qualify intra-module refs)
+        // Also handle parameter module references (e.g., n.add -> my_f32_num.add)
+        let mut new_body = decl.body.clone();
+        self.resolve_names_in_expr_with_params(
+            &mut new_body,
+            module_name,
+            module_functions,
+            &param_names,
+            param_bindings,
+        );
 
         Decl {
             keyword: decl.keyword,
@@ -975,6 +1224,298 @@ impl ModuleManager {
         Node {
             h: pattern.h.clone(),
             kind: new_kind,
+        }
+    }
+
+    /// Like substitute_in_pattern but handles param.type references
+    fn substitute_in_pattern_with_params(
+        &self,
+        pattern: &Pattern,
+        substitutions: &HashMap<String, Type>,
+        param_bindings: &HashMap<String, ElaboratedModule>,
+    ) -> Pattern {
+        let new_kind = match &pattern.kind {
+            PatternKind::Typed(inner, ty) => {
+                let new_ty = self.substitute_in_type_with_params(ty, substitutions, param_bindings);
+                PatternKind::Typed(inner.clone(), new_ty)
+            }
+            PatternKind::Tuple(pats) => {
+                let new_pats: Vec<Pattern> = pats
+                    .iter()
+                    .map(|p| self.substitute_in_pattern_with_params(p, substitutions, param_bindings))
+                    .collect();
+                PatternKind::Tuple(new_pats)
+            }
+            PatternKind::Record(fields) => {
+                let new_fields = fields
+                    .iter()
+                    .map(|field| crate::ast::RecordPatternField {
+                        field: field.field.clone(),
+                        pattern: field.pattern.as_ref().map(|p| {
+                            self.substitute_in_pattern_with_params(p, substitutions, param_bindings)
+                        }),
+                    })
+                    .collect();
+                PatternKind::Record(new_fields)
+            }
+            PatternKind::Constructor(name, pats) => {
+                let new_pats: Vec<Pattern> = pats
+                    .iter()
+                    .map(|p| self.substitute_in_pattern_with_params(p, substitutions, param_bindings))
+                    .collect();
+                PatternKind::Constructor(name.clone(), new_pats)
+            }
+            PatternKind::Attributed(attrs, inner) => {
+                let new_inner =
+                    self.substitute_in_pattern_with_params(inner, substitutions, param_bindings);
+                PatternKind::Attributed(attrs.clone(), Box::new(new_inner))
+            }
+            // Name, Wildcard, Literal, Unit don't contain types
+            _ => pattern.kind.clone(),
+        };
+
+        Node {
+            h: pattern.h.clone(),
+            kind: new_kind,
+        }
+    }
+
+    /// Like resolve_names_in_expr but also handles parameter module references
+    /// E.g., n.add -> my_f32_num.add when n is bound to my_f32_num
+    fn resolve_names_in_expr_with_params(
+        &self,
+        expr: &mut crate::ast::Expression,
+        module_name: &str,
+        module_functions: &HashSet<String>,
+        local_bindings: &HashSet<String>,
+        param_bindings: &HashMap<String, ElaboratedModule>,
+    ) {
+        use crate::ast::ExprKind;
+
+        match &mut expr.kind {
+            ExprKind::Identifier(quals, name) => {
+                // Check if this is an intra-module function reference (not shadowed by local binding)
+                if quals.is_empty() && !local_bindings.contains(name) && module_functions.contains(name) {
+                    // Convert to qualified identifier: next -> rand.next
+                    *quals = vec![module_name.to_string()];
+                }
+            }
+            ExprKind::FieldAccess(obj, field) => {
+                // Check if this is param.name pattern (parameter module reference)
+                if let ExprKind::Identifier(quals, name) = &obj.kind {
+                    if quals.is_empty() {
+                        // Check if it's a parameter reference
+                        if let Some(param_module) = param_bindings.get(name) {
+                            // Convert n.add to my_f32_num.add
+                            expr.kind =
+                                ExprKind::Identifier(vec![param_module.name.clone()], field.clone());
+                            return;
+                        }
+                        // Check if it's a known module
+                        if self.known_modules.contains(name) {
+                            // Convert to qualified Identifier
+                            expr.kind = ExprKind::Identifier(vec![name.clone()], field.clone());
+                            return;
+                        }
+                    }
+                }
+                // Otherwise recurse into object
+                self.resolve_names_in_expr_with_params(
+                    obj,
+                    module_name,
+                    module_functions,
+                    local_bindings,
+                    param_bindings,
+                );
+            }
+            ExprKind::Application(func, args) => {
+                self.resolve_names_in_expr_with_params(
+                    func,
+                    module_name,
+                    module_functions,
+                    local_bindings,
+                    param_bindings,
+                );
+                for arg in args {
+                    self.resolve_names_in_expr_with_params(
+                        arg,
+                        module_name,
+                        module_functions,
+                        local_bindings,
+                        param_bindings,
+                    );
+                }
+            }
+            ExprKind::Lambda(lambda) => {
+                // Collect lambda parameter names
+                let mut inner_bindings = local_bindings.clone();
+                for p in &lambda.params {
+                    inner_bindings.extend(self.collect_pattern_names(p));
+                }
+                self.resolve_names_in_expr_with_params(
+                    &mut lambda.body,
+                    module_name,
+                    module_functions,
+                    &inner_bindings,
+                    param_bindings,
+                );
+            }
+            ExprKind::LetIn(let_in) => {
+                self.resolve_names_in_expr_with_params(
+                    &mut let_in.value,
+                    module_name,
+                    module_functions,
+                    local_bindings,
+                    param_bindings,
+                );
+                // Collect let binding names
+                let mut inner_bindings = local_bindings.clone();
+                inner_bindings.extend(self.collect_pattern_names(&let_in.pattern));
+                self.resolve_names_in_expr_with_params(
+                    &mut let_in.body,
+                    module_name,
+                    module_functions,
+                    &inner_bindings,
+                    param_bindings,
+                );
+            }
+            ExprKind::If(if_expr) => {
+                self.resolve_names_in_expr_with_params(
+                    &mut if_expr.condition,
+                    module_name,
+                    module_functions,
+                    local_bindings,
+                    param_bindings,
+                );
+                self.resolve_names_in_expr_with_params(
+                    &mut if_expr.then_branch,
+                    module_name,
+                    module_functions,
+                    local_bindings,
+                    param_bindings,
+                );
+                self.resolve_names_in_expr_with_params(
+                    &mut if_expr.else_branch,
+                    module_name,
+                    module_functions,
+                    local_bindings,
+                    param_bindings,
+                );
+            }
+            ExprKind::BinaryOp(_, lhs, rhs) => {
+                self.resolve_names_in_expr_with_params(
+                    lhs,
+                    module_name,
+                    module_functions,
+                    local_bindings,
+                    param_bindings,
+                );
+                self.resolve_names_in_expr_with_params(
+                    rhs,
+                    module_name,
+                    module_functions,
+                    local_bindings,
+                    param_bindings,
+                );
+            }
+            ExprKind::UnaryOp(_, operand) => {
+                self.resolve_names_in_expr_with_params(
+                    operand,
+                    module_name,
+                    module_functions,
+                    local_bindings,
+                    param_bindings,
+                );
+            }
+            ExprKind::Tuple(exprs) | ExprKind::ArrayLiteral(exprs) | ExprKind::VecMatLiteral(exprs) => {
+                for e in exprs {
+                    self.resolve_names_in_expr_with_params(
+                        e,
+                        module_name,
+                        module_functions,
+                        local_bindings,
+                        param_bindings,
+                    );
+                }
+            }
+            ExprKind::ArrayIndex(arr, idx) => {
+                self.resolve_names_in_expr_with_params(
+                    arr,
+                    module_name,
+                    module_functions,
+                    local_bindings,
+                    param_bindings,
+                );
+                self.resolve_names_in_expr_with_params(
+                    idx,
+                    module_name,
+                    module_functions,
+                    local_bindings,
+                    param_bindings,
+                );
+            }
+            ExprKind::ArrayWith { array, index, value } => {
+                self.resolve_names_in_expr_with_params(
+                    array,
+                    module_name,
+                    module_functions,
+                    local_bindings,
+                    param_bindings,
+                );
+                self.resolve_names_in_expr_with_params(
+                    index,
+                    module_name,
+                    module_functions,
+                    local_bindings,
+                    param_bindings,
+                );
+                self.resolve_names_in_expr_with_params(
+                    value,
+                    module_name,
+                    module_functions,
+                    local_bindings,
+                    param_bindings,
+                );
+            }
+            ExprKind::RecordLiteral(fields) => {
+                for (_, e) in fields {
+                    self.resolve_names_in_expr_with_params(
+                        e,
+                        module_name,
+                        module_functions,
+                        local_bindings,
+                        param_bindings,
+                    );
+                }
+            }
+            ExprKind::Match(match_expr) => {
+                self.resolve_names_in_expr_with_params(
+                    &mut match_expr.scrutinee,
+                    module_name,
+                    module_functions,
+                    local_bindings,
+                    param_bindings,
+                );
+                for case in &mut match_expr.cases {
+                    let mut inner_bindings = local_bindings.clone();
+                    inner_bindings.extend(self.collect_pattern_names(&case.pattern));
+                    self.resolve_names_in_expr_with_params(
+                        &mut case.body,
+                        module_name,
+                        module_functions,
+                        &inner_bindings,
+                        param_bindings,
+                    );
+                }
+            }
+            // Literals and unit don't contain references
+            ExprKind::IntLiteral(_)
+            | ExprKind::FloatLiteral(_)
+            | ExprKind::BoolLiteral(_)
+            | ExprKind::StringLiteral(_)
+            | ExprKind::Unit => {}
+            // Other cases that might need handling
+            _ => {}
         }
     }
 }
