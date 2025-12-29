@@ -147,53 +147,16 @@ module f32	: 	(float with t = f32 with int_t = u32) = {
   def f64(x: f64) -> t = __builtin_f32_from_f64(x)
   def bool(x: bool) -> t = if x then 1.0f32 else 0.0f32
 
-  -- Operators (registered in impl_source.rs)
-  sig (+) : t -> t -> t
-  sig (-) : t -> t -> t
-  sig (*) : t -> t -> t
-  sig (/) : t -> t -> t
-  sig (%) : t -> t -> t
-  sig (**) : t -> t -> t
-  sig (==) : t -> t -> bool
-  sig (!=) : t -> t -> bool
-  sig (<) : t -> t -> bool
-  sig (>) : t -> t -> bool
-  sig (<=) : t -> t -> bool
-  sig (>=) : t -> t -> bool
-
   def neg(x: t) -> t = 0.0f32 - x
-  sig max : t -> t -> t
-  sig min : t -> t -> t
-  sig abs : t -> t
-  def sgn(x: t) -> t = if f32.isnan(x) then x else if x > 0.0f32 then 1.0f32 else if x < 0.0f32 then (0.0f32 - 1.0f32) else 0.0f32
-
   def highest: t = 1.0f32 / 0.0f32
   def lowest: t = (0.0f32 - 1.0f32) / 0.0f32
-
-  sig sum<[n]>: [n]t -> t
-  sig product<[n]>: [n]t -> t
-  sig maximum<[n]>: [n]t -> t
-  sig minimum<[n]>: [n]t -> t
 
   def recip(x: t) -> t = 1.0f32 / x
   def from_fraction(x: i64, y: i64) -> t = __builtin_f32_from_i64(x) / __builtin_f32_from_i64(y)
 
-  sig sqrt : t -> t
-  sig rsqrt : t -> t
   def cbrt(x: t) -> t = x ** (1.0f32 / 3.0f32)
-
-  sig exp : t -> t
-  sig log : t -> t
-  sig log2 : t -> t
   def log10(x: t) -> t = f32.log(x) / f32.log(10.0f32)
   def log1p(x: t) -> t = f32.log((1.0f32 + x))
-
-  sig sin : t -> t
-  sig cos : t -> t
-  sig tan : t -> t
-  sig asin : t -> t
-  sig acos : t -> t
-  sig atan : t -> t
 
   def pi: t = 3.14159265358979323846f32
   def sinpi(x: t) -> t = f32.sin((pi * x))
@@ -203,14 +166,6 @@ module f32	: 	(float with t = f32 with int_t = u32) = {
   def acospi(x: t) -> t = f32.acos(x) / pi
   def atanpi(x: t) -> t = f32.atan(x) / pi
 
-  sig sinh : t -> t
-  sig cosh : t -> t
-  sig tanh : t -> t
-  sig asinh : t -> t
-  sig acosh : t -> t
-  sig atanh : t -> t
-
-  sig atan2 : t -> t -> t
   def atan2pi(x: t, y: t) -> t = f32.atan2(x, y) / pi
   def hypot(x: t, y: t) -> t = f32.sqrt((x * x + y * y))
 
@@ -234,17 +189,8 @@ module f32	: 	(float with t = f32 with int_t = u32) = {
     sign * y
   def erfc(x: t) -> t = 1.0f32 - f32.erf(x)
 
-  sig lerp : t -> t -> t -> t
   def mad(a: t, b: t, c: t) -> t = a * b + c
-  sig fma : t -> t -> t -> t
 
-  sig ceil : t -> t
-  sig floor : t -> t
-  sig trunc : t -> t
-  sig round : t -> t
-
-  sig isinf : t -> bool
-  sig isnan : t -> bool
   def inf: t = 1.0f32 / 0.0f32
   def nan: t = 0.0f32 / 0.0f32
   def e: t = 2.71828182845904523536f32
@@ -254,7 +200,6 @@ module f32	: 	(float with t = f32 with int_t = u32) = {
   def num_bits: i32 = 32
 
   def epsilon: t = 1.1920929e-7f32
-  def ldexp(x: t, n: i32) -> t = x * (2.0f32 ** f32.i32(n))
   def copysign(x: t, y: t) -> t = if y < 0.0f32 then (0.0f32 - f32.abs(x)) else f32.abs(x)
 }
 module f16	: 	(float with t = f16 with int_t = u16)

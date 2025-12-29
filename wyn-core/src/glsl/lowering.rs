@@ -1356,8 +1356,12 @@ fn glsl_ext_to_name(id: u32) -> &'static str {
         46 => "mix",         // FMix
         48 => "step",        // Step
         49 => "smoothstep",  // SmoothStep
-        66 => "length",      // Length
-        67 => "distance",    // Distance
+        50 => "fma",         // Fma
+        53 => "ldexp",       // Ldexp
+        // TODO: isnan/isinf use opcodes 66/67 in impl_source.rs but those are Length/Distance
+        // IsNan should be 149, IsInf should be 148 - need to fix impl_source.rs and add mappings here
+        66 => "length",      // Length (also incorrectly used for isnan)
+        67 => "distance",    // Distance (also incorrectly used for isinf)
         68 => "cross",       // Cross
         69 => "normalize",   // Normalize
         70 => "faceforward", // FaceForward

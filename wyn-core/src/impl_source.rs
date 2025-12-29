@@ -361,7 +361,7 @@ impl ImplSource {
             self.register_binop(ty_name, "min", BuiltinImpl::PrimOp(PrimOp::GlslExt(37))); // FMin
             self.register_binop(ty_name, "max", BuiltinImpl::PrimOp(PrimOp::GlslExt(40))); // FMax
             self.register_unop(ty_name, "abs", BuiltinImpl::PrimOp(PrimOp::GlslExt(4))); // FAbs
-            self.register_unop(ty_name, "sign", BuiltinImpl::PrimOp(PrimOp::GlslExt(6))); // FSign
+            self.register_unop(ty_name, "sgn", BuiltinImpl::PrimOp(PrimOp::GlslExt(6))); // FSign
             self.register_ternop(ty_name, "clamp", BuiltinImpl::PrimOp(PrimOp::GlslExt(43))); // FClamp
         } else {
             self.register_binop(
@@ -393,7 +393,7 @@ impl ImplSource {
             );
             if is_signed {
                 self.register_unop(ty_name, "abs", BuiltinImpl::PrimOp(PrimOp::GlslExt(5))); // SAbs
-                self.register_unop(ty_name, "sign", BuiltinImpl::PrimOp(PrimOp::GlslExt(7))); // SSign
+                self.register_unop(ty_name, "sgn", BuiltinImpl::PrimOp(PrimOp::GlslExt(7))); // SSign
             }
             // Note: abs and sign don't make sense for unsigned types
         }
@@ -554,8 +554,13 @@ impl ImplSource {
         self.register_ternop(ty_name, "fma", BuiltinImpl::PrimOp(PrimOp::GlslExt(50))); // Fused multiply-add
 
         // isnan, isinf
+        // TODO: Check these opcodes - 66/67 are Length/Distance in GLSL.std.450, not IsNan/IsInf
+        // IsNan should be 149, IsInf should be 148
         self.register_bool_unop(ty_name, "isnan", BuiltinImpl::PrimOp(PrimOp::GlslExt(66)));
         self.register_bool_unop(ty_name, "isinf", BuiltinImpl::PrimOp(PrimOp::GlslExt(67)));
+
+        // ldexp: builds float from significand and exponent
+        self.register_binop(ty_name, "ldexp", BuiltinImpl::PrimOp(PrimOp::GlslExt(53)));
     }
 
     /// Register float-specific module functions
