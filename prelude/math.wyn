@@ -1,136 +1,136 @@
 module type from_prim = {
-type t
-sig i8	: 	i8 -> t
-sig i16	: 	i16 -> t
-sig i32	: 	i32 -> t
-sig i64	: 	i64 -> t
-sig u8	: 	u8 -> t
-sig u16	: 	u16 -> t
-sig u32	: 	u32 -> t
-sig u64	: 	u64 -> t
-sig f16	: 	f16 -> t
-sig f32	: 	f32 -> t
-sig f64	: 	f64 -> t
-sig bool	: 	bool -> t
+  type t
+  sig i8 : i8 -> t
+  sig i16 : i16 -> t
+  sig i32 : i32 -> t
+  sig i64 : i64 -> t
+  sig u8 : u8 -> t
+  sig u16 : u16 -> t
+  sig u32 : u32 -> t
+  sig u64 : u64 -> t
+  sig f16 : f16 -> t
+  sig f32 : f32 -> t
+  sig f64 : f64 -> t
+  sig bool : bool -> t
 }
 module type numeric = {
-include from_prim
-sig (+)	: 	t -> t -> t
-sig (-)	: 	t -> t -> t
-sig (*)	: 	t -> t -> t
-sig (/)	: 	t -> t -> t
-sig (%)	: 	t -> t -> t
-sig (**)	: 	t -> t -> t
-sig (==)	: 	t -> t -> bool
-sig (<)	: 	t -> t -> bool
-sig (>)	: 	t -> t -> bool
-sig (<=)	: 	t -> t -> bool
-sig (>=)	: 	t -> t -> bool
-sig (!=)	: 	t -> t -> bool
-sig neg	: 	t -> t
-sig max	: 	t -> t -> t
-sig min	: 	t -> t -> t
-sig abs	: 	t -> t
-sig sgn	: 	t -> t
-sig highest	: 	t
-sig lowest	: 	t
-sig sum<[n]>: 	[n]t -> t
-sig product<[n]>: 	[n]t -> t
-sig maximum<[n]>: 	[n]t -> t
-sig minimum<[n]>: 	[n]t -> t
+  include from_prim
+  sig (+) : t -> t -> t
+  sig (-) : t -> t -> t
+  sig (*) : t -> t -> t
+  sig (/) : t -> t -> t
+  sig (%) : t -> t -> t
+  sig (**) : t -> t -> t
+  sig (==) : t -> t -> bool
+  sig (<) : t -> t -> bool
+  sig (>) : t -> t -> bool
+  sig (<=) : t -> t -> bool
+  sig (>=) : t -> t -> bool
+  sig (!=) : t -> t -> bool
+  sig neg : t -> t
+  sig max : t -> t -> t
+  sig min : t -> t -> t
+  sig abs : t -> t
+  sig sgn : t -> t
+  sig highest : t
+  sig lowest : t
+  sig sum<[n]> : [n]t -> t
+  sig product<[n]> : [n]t -> t
+  sig maximum<[n]> : [n]t -> t
+  sig minimum<[n]> : [n]t -> t
 }
 module type integral = {
-include numeric
-sig (//)	: 	t -> t -> t
-sig (%%)	: 	t -> t -> t
-sig (&)	: 	t -> t -> t
-sig (|)	: 	t -> t -> t
-sig (^)	: 	t -> t -> t
-sig not	: 	t -> t
-sig (<<)	: 	t -> t -> t
-sig (>>)	: 	t -> t -> t
-sig (>>>)	: 	t -> t -> t
-sig num_bits	: 	i32
-sig get_bit	: 	i32 -> t -> i32
-sig set_bit	: 	i32 -> t -> i32 -> t
-sig popc	: 	t -> i32
-sig mul_hi	: 	(x: t) -> (y: t) -> t
-sig mad_hi	: 	(a: t) -> (b: t) -> (c: t) -> t
-sig clz	: 	t -> i32
-sig ctz	: 	t -> i32
+  include numeric
+  sig (//) : t -> t -> t
+  sig (%%) : t -> t -> t
+  sig (&) : t -> t -> t
+  sig (|) : t -> t -> t
+  sig (^) : t -> t -> t
+  sig not : t -> t
+  sig (<<) : t -> t -> t
+  sig (>>) : t -> t -> t
+  sig (>>>) : t -> t -> t
+  sig num_bits : i32
+  sig get_bit : i32 -> t -> i32
+  sig set_bit : i32 -> t -> i32 -> t
+  sig popc : t -> i32
+  sig mul_hi : (x: t) -> (y: t) -> t
+  sig mad_hi : (a: t) -> (b: t) -> (c: t) -> t
+  sig clz : t -> i32
+  sig ctz : t -> i32
 }
 module type real = {
-include numeric
-sig recip	: 	t -> t
-sig from_fraction	: 	i64 -> i64 -> t
-sig sqrt	: 	t -> t
-sig rsqrt	: 	t -> t
-sig cbrt	: 	t -> t
-sig exp	: 	t -> t
-sig sin	: 	t -> t
-sig cos	: 	t -> t
-sig tan	: 	t -> t
-sig sinpi	: 	t -> t
-sig cospi	: 	t -> t
-sig tanpi	: 	t -> t
-sig asin	: 	t -> t
-sig acos	: 	t -> t
-sig atan	: 	t -> t
-sig asinpi	: 	t -> t
-sig acospi	: 	t -> t
-sig atanpi	: 	t -> t
-sig sinh	: 	t -> t
-sig cosh	: 	t -> t
-sig tanh	: 	t -> t
-sig asinh	: 	t -> t
-sig acosh	: 	t -> t
-sig atanh	: 	t -> t
-sig atan2	: 	t -> t -> t
-sig atan2pi	: 	t -> t -> t
-sig hypot	: 	t -> t -> t
-sig gamma	: 	t -> t
-sig lgamma	: 	t -> t
-sig erf	: 	t -> t
-sig erfc	: 	t -> t
-sig lerp	: 	t -> t -> t -> t
-sig log	: 	t -> t
-sig log2	: 	t -> t
-sig log10	: 	t -> t
-sig log1p	: 	t -> t
-sig ceil	: 	t -> t
-sig floor	: 	t -> t
-sig trunc	: 	t -> t
-sig round	: 	t -> t
-sig mad	: 	(a: t) -> (b: t) -> (c: t) -> t
-sig fma	: 	(a: t) -> (b: t) -> (c: t) -> t
-sig isinf	: 	t -> bool
-sig isnan	: 	t -> bool
-sig inf	: 	t
-sig nan	: 	t
-sig pi	: 	t
-sig e	: 	t
+  include numeric
+  sig recip : t -> t
+  sig from_fraction : i64 -> i64 -> t
+  sig sqrt : t -> t
+  sig rsqrt : t -> t
+  sig cbrt : t -> t
+  sig exp : t -> t
+  sig sin : t -> t
+  sig cos : t -> t
+  sig tan : t -> t
+  sig sinpi : t -> t
+  sig cospi : t -> t
+  sig tanpi : t -> t
+  sig asin : t -> t
+  sig acos : t -> t
+  sig atan : t -> t
+  sig asinpi : t -> t
+  sig acospi : t -> t
+  sig atanpi : t -> t
+  sig sinh : t -> t
+  sig cosh : t -> t
+  sig tanh : t -> t
+  sig asinh : t -> t
+  sig acosh : t -> t
+  sig atanh : t -> t
+  sig atan2 : t -> t -> t
+  sig atan2pi : t -> t -> t
+  sig hypot : t -> t -> t
+  sig gamma : t -> t
+  sig lgamma : t -> t
+  sig erf : t -> t
+  sig erfc : t -> t
+  sig lerp : t -> t -> t -> t
+  sig log : t -> t
+  sig log2 : t -> t
+  sig log10 : t -> t
+  sig log1p : t -> t
+  sig ceil : t -> t
+  sig floor : t -> t
+  sig trunc : t -> t
+  sig round : t -> t
+  sig mad : (a: t) -> (b: t) -> (c: t) -> t
+  sig fma : (a: t) -> (b: t) -> (c: t) -> t
+  sig isinf : t -> bool
+  sig isnan : t -> bool
+  sig inf : t
+  sig nan : t
+  sig pi : t
+  sig e : t
 }
 module type float = {
-include real
-type int_t
-sig from_bits	: 	int_t -> t
-sig to_bits	: 	t -> int_t
-sig num_bits	: 	i32
-sig epsilon	: 	t
-sig ldexp	: 	t -> i32 -> t
-sig copysign	: 	(x: t) -> (y: t) -> t
+  include real
+  type int_t
+  sig from_bits : int_t -> t
+  sig to_bits : t -> int_t
+  sig num_bits : i32
+  sig epsilon : t
+  sig ldexp : t -> i32 -> t
+  sig copysign : (x: t) -> (y: t) -> t
 }
-module bool	: 	from_prim with t = bool
-module i8	: 	(integral with t = i8)
-module i16	: 	(integral with t = i16)
-module i32	: 	(integral with t = i32)
-module i64	: 	(integral with t = i64)
-module u8	: 	(integral with t = u8)
-module u16	: 	(integral with t = u16)
-module u32	: 	(integral with t = u32)
-module u64	: 	(integral with t = u64)
-module f64	: 	(float with t = f64 with int_t = u64)
-module f32	: 	(float with t = f32 with int_t = u32) = {
+module bool : from_prim with t = bool
+module i8 : (integral with t = i8)
+module i16 : (integral with t = i16)
+module i32 : (integral with t = i32)
+module i64 : (integral with t = i64)
+module u8 : (integral with t = u8)
+module u16 : (integral with t = u16)
+module u32 : (integral with t = u32)
+module u64 : (integral with t = u64)
+module f64 : (float with t = f64 with int_t = u64)
+module f32 : (float with t = f32 with int_t = u32) = {
   type t = f32
   type int_t = u32
 
@@ -202,4 +202,4 @@ module f32	: 	(float with t = f32 with int_t = u32) = {
   def epsilon: t = 1.1920929e-7f32
   def copysign(x: t, y: t) -> t = if y < 0.0f32 then (0.0f32 - f32.abs(x)) else f32.abs(x)
 }
-module f16	: 	(float with t = f16 with int_t = u16)
+module f16 : (float with t = f16 with int_t = u16)
