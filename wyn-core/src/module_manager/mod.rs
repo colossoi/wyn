@@ -954,8 +954,9 @@ impl ModuleManager {
     ) -> Pattern {
         let new_kind = match &pattern.kind {
             PatternKind::Typed(inner, ty) => {
+                let new_inner = Box::new(self.substitute_in_pattern(inner, substitutions, param_bindings));
                 let new_ty = self.substitute_in_type_with_params(ty, substitutions, param_bindings);
-                PatternKind::Typed(inner.clone(), new_ty)
+                PatternKind::Typed(new_inner, new_ty)
             }
             PatternKind::Tuple(pats) => {
                 let new_pats: Vec<Pattern> = pats
