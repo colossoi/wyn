@@ -1,6 +1,7 @@
--- Graphics modules: 3D transformation matrices for f32 and f64
+-- Graphics module: 3D transformation matrices for f32
+-- (f64 removed - GPU shaders use f32)
 
-module graphics32 = {
+module graphics = {
   -- Create a 4x4 translation (position) matrix from a 3D vector
   -- Moves objects by (x, y, z) in world space
   def translation(p: vec3f32) -> mat4f32 =
@@ -22,30 +23,5 @@ module graphics32 = {
       [s[0]*s[1]*c[2]-c[0]*s[2], s[0]*s[1]*s[2]+c[0]*c[2], s[0]*c[1], 0.0f32],
       [c[0]*s[1]*c[2]+s[0]*s[2], c[0]*s[1]*s[2]-s[0]*c[2], c[0]*c[1], 0.0f32],
       [0.0f32, 0.0f32, 0.0f32, 1.0f32]
-    ]
-}
-
-module graphics64 = {
-  -- Create a 4x4 translation (position) matrix from a 3D vector
-  -- Moves objects by (x, y, z) in world space
-  def translation(p: vec3f64) -> mat4f64 =
-    @[
-      [1.0, 0.0, 0.0, p.x],
-      [0.0, 1.0, 0.0, p.y],
-      [0.0, 0.0, 1.0, p.z],
-      [0.0, 0.0, 0.0, 1.0]
-    ]
-
-  -- Create a 4x4 rotation matrix from Euler angles (in radians)
-  -- Uses XYZ intrinsic Euler angles (rotate around X, then Y, then Z)
-  -- Input: vec3f64 where x=pitch, y=yaw, z=roll (in radians)
-  def rotation_euler(a: vec3f64) -> mat4f64 =
-    let s = [ f64.sin(a.x), f64.sin(a.y), f64.sin(a.z) ] in
-    let c = [ f64.cos(a.x), f64.cos(a.y), f64.cos(a.z) ] in
-    @[
-      [c[1]*c[2], c[1]*s[2], -s[1], 0.0],
-      [s[0]*s[1]*c[2]-c[0]*s[2], s[0]*s[1]*s[2]+c[0]*c[2], s[0]*c[1], 0.0],
-      [c[0]*s[1]*c[2]+s[0]*s[2], c[0]*s[1]*s[2]-s[0]*c[2], c[0]*c[1], 0.0],
-      [0.0, 0.0, 0.0, 1.0]
     ]
 }

@@ -117,7 +117,6 @@ sig from_bits	: 	int_t -> t
 sig to_bits	: 	t -> int_t
 sig num_bits	: 	i32
 sig epsilon	: 	t
-sig nextafter	: 	(x: t) -> (y: t) -> t
 sig ldexp	: 	t -> i32 -> t
 sig copysign	: 	(x: t) -> (y: t) -> t
 }
@@ -215,10 +214,25 @@ module f32	: 	(float with t = f32 with int_t = u32) = {
   def atan2pi(x: t, y: t) -> t = f32.atan2(x, y) / pi
   def hypot(x: t, y: t) -> t = f32.sqrt((x * x + y * y))
 
-  def gamma(x: t) -> t = x
-  def lgamma(x: t) -> t = x
-  def erf(x: t) -> t = x
-  def erfc(x: t) -> t = x
+  -- Log-gamma using Stirling's approximation (good for x > 0)
+  def lgamma(x: t) -> t =
+    let log2pi = 1.8378770664093453f32 in
+    (x - 0.5f32) * f32.log(x) - x + 0.5f32 * log2pi + 1.0f32 / (12.0f32 * x)
+  def gamma(x: t) -> t = f32.exp(f32.lgamma(x))
+  -- Error function using Abramowitz and Stegun approximation
+  def erf(x: t) -> t =
+    let a1 = 0.254829592f32 in
+    let a2 = 0.0f32 - 0.284496736f32 in
+    let a3 = 1.421413741f32 in
+    let a4 = 0.0f32 - 1.453152027f32 in
+    let a5 = 1.061405429f32 in
+    let p  = 0.3275911f32 in
+    let sign = if x < 0.0f32 then 0.0f32 - 1.0f32 else 1.0f32 in
+    let ax = f32.abs(x) in
+    let t = 1.0f32 / (1.0f32 + p * ax) in
+    let y = 1.0f32 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * f32.exp(0.0f32 - ax * ax) in
+    sign * y
+  def erfc(x: t) -> t = 1.0f32 - f32.erf(x)
 
   sig lerp : t -> t -> t -> t
   def mad(a: t, b: t, c: t) -> t = a * b + c
@@ -238,12 +252,9 @@ module f32	: 	(float with t = f32 with int_t = u32) = {
   def from_bits(x: int_t) -> t = __builtin_f32_from_bits(x)
   def to_bits(x: t) -> int_t = __builtin_f32_to_bits(x)
   def num_bits: i32 = 32
-  def get_bit(bit: i32, x: t) -> i32 = 0i32
-  def set_bit(bit: i32, x: t, b: i32) -> t = x
 
   def epsilon: t = 1.1920929e-7f32
-  def nextafter(x: t, y: t) -> t = x
-  def ldexp(x: t, n: i32) -> t = x
+  def ldexp(x: t, n: i32) -> t = x * (2.0f32 ** f32.i32(n))
   def copysign(x: t, y: t) -> t = if y < 0.0f32 then (0.0f32 - f32.abs(x)) else f32.abs(x)
 }
 module f16	: 	(float with t = f16 with int_t = u16)

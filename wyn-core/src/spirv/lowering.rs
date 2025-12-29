@@ -714,9 +714,8 @@ impl<'a> LowerCtx<'a> {
                 // (required for Vulkan uniform buffer compatibility)
                 let value_type = self.constructor.ast_type_to_spirv(ty);
                 let block_type = self.constructor.create_uniform_block_type(value_type);
-                let ptr_type = self
-                    .constructor
-                    .get_or_create_ptr_type(spirv::StorageClass::Uniform, block_type);
+                let ptr_type =
+                    self.constructor.get_or_create_ptr_type(spirv::StorageClass::Uniform, block_type);
                 let var_id =
                     self.constructor.builder.variable(ptr_type, None, spirv::StorageClass::Uniform, None);
 
@@ -1220,14 +1219,12 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                     .ok_or_else(|| err_spirv!("Could not find type for uniform variable: {}", name))?;
 
                 // Create pointer type for the member access
-                let member_ptr_type = constructor
-                    .builder
-                    .type_pointer(None, spirv::StorageClass::Uniform, value_type_id);
+                let member_ptr_type =
+                    constructor.builder.type_pointer(None, spirv::StorageClass::Uniform, value_type_id);
 
                 // Access member 0 of the Block struct
                 let zero = constructor.const_i32(0);
-                let member_ptr =
-                    constructor.builder.access_chain(member_ptr_type, None, var_id, [zero])?;
+                let member_ptr = constructor.builder.access_chain(member_ptr_type, None, var_id, [zero])?;
 
                 // Load the value
                 let load_id = constructor.builder.load(value_type_id, None, member_ptr, None, [])?;

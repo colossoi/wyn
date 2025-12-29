@@ -388,7 +388,10 @@ impl Parsed {
         module_manager.elaborate_modules(&self.ast)?;
         // Remove ModuleBind and ModuleTypeBind declarations - they've been elaborated
         self.ast.declarations.retain(|decl| {
-            !matches!(decl, ast::Declaration::ModuleBind(_) | ast::Declaration::ModuleTypeBind(_))
+            !matches!(
+                decl,
+                ast::Declaration::ModuleBind(_) | ast::Declaration::ModuleTypeBind(_)
+            )
         });
         Ok(self)
     }

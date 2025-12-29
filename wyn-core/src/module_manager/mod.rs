@@ -542,9 +542,7 @@ impl ModuleManager {
                     || Self::expr_uses_builtin(&if_expr.then_branch)
                     || Self::expr_uses_builtin(&if_expr.else_branch)
             }
-            ExprKind::BinaryOp(_, lhs, rhs) => {
-                Self::expr_uses_builtin(lhs) || Self::expr_uses_builtin(rhs)
-            }
+            ExprKind::BinaryOp(_, lhs, rhs) => Self::expr_uses_builtin(lhs) || Self::expr_uses_builtin(rhs),
             ExprKind::UnaryOp(_, operand) => Self::expr_uses_builtin(operand),
             ExprKind::Tuple(exprs) | ExprKind::ArrayLiteral(exprs) | ExprKind::VecMatLiteral(exprs) => {
                 exprs.iter().any(Self::expr_uses_builtin)

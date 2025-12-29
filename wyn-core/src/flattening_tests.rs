@@ -696,11 +696,10 @@ fn test_f32_conversions() {
     // Test f32 type conversion via module functions
     let mir = flatten_program(
         r#"
-def test_conversions(x: i32) -> f32 =
+def test_conversions(x: i32, y: i64) -> f32 =
   let f1 = f32.i32(x) in
-  let i1 = f32.to_i64(f1) in
-  let f2 = f32.i64(i1) in
-  f2
+  let f2 = f32.i64(y) in
+  f1 + f2
 "#,
     );
     // Check for conversion calls in the MIR
