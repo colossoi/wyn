@@ -717,7 +717,7 @@ impl ModuleManager {
                     match decl {
                         Declaration::Decl(d) => {
                             // Apply type substitutions and resolve names
-                            let elaborated_decl = self.elaborate_decl_signature_with_params(
+                            let elaborated_decl = self.elaborate_decl_signature(
                                 d,
                                 module_name,
                                 &module_functions,
@@ -863,44 +863,9 @@ impl ModuleManager {
         }
     }
 
-    /// Elaborate a declaration's signature (params and return type) with type substitutions
-    fn elaborate_decl_signature(
-        &self,
-        decl: &Decl,
-        module_name: &str,
-        module_functions: &HashSet<String>,
-        substitutions: &HashMap<String, Type>,
-    ) -> Decl {
-        // Apply type substitutions to params
-        let new_params: Vec<Pattern> =
-            decl.params.iter().map(|p| self.substitute_in_pattern(p, substitutions)).collect();
-
-        // Apply type substitutions to return type
-        let new_ty = decl.ty.as_ref().map(|ty| self.substitute_in_type(ty, substitutions));
-
-        // Collect parameter names to avoid qualifying them as module functions
-        let param_names: HashSet<String> =
-            decl.params.iter().flat_map(|p| self.collect_pattern_names(p)).collect();
-
-        // Resolve names in body (convert FieldAccess to QualifiedName, qualify intra-module refs)
-        let mut new_body = decl.body.clone();
-        self.resolve_names_in_expr(&mut new_body, module_name, module_functions, &param_names);
-
-        Decl {
-            keyword: decl.keyword,
-            attributes: decl.attributes.clone(),
-            name: decl.name.clone(),
-            size_params: decl.size_params.clone(),
-            type_params: decl.type_params.clone(),
-            params: new_params,
-            ty: new_ty,
-            body: new_body,
-        }
-    }
-
     /// Elaborate a declaration's signature with type substitutions and parameter bindings
     /// This handles functor parameter references in types and expressions
-    fn elaborate_decl_signature_with_params(
+    fn elaborate_decl_signature(
         &self,
         decl: &Decl,
         module_name: &str,
@@ -912,7 +877,7 @@ impl ModuleManager {
         let new_params: Vec<Pattern> = decl
             .params
             .iter()
-            .map(|p| self.substitute_in_pattern_with_params(p, substitutions, param_bindings))
+            .map(|p| self.substitute_in_pattern(p, substitutions, param_bindings))
             .collect();
 
         // Apply type substitutions to return type
@@ -928,7 +893,7 @@ impl ModuleManager {
         // Resolve names in body (convert FieldAccess to QualifiedName, qualify intra-module refs)
         // Also handle parameter module references (e.g., n.add -> my_f32_num.add)
         let mut new_body = decl.body.clone();
-        self.resolve_names_in_expr_with_params(
+        self.resolve_names_in_expr(
             &mut new_body,
             module_name,
             module_functions,
@@ -980,255 +945,8 @@ impl ModuleManager {
         names
     }
 
-    /// Resolve names in an expression within a module context
-    /// - Converts FieldAccess to QualifiedName for external module references
-    /// - Qualifies intra-module function references
-    fn resolve_names_in_expr(
-        &self,
-        expr: &mut crate::ast::Expression,
-        module_name: &str,
-        module_functions: &HashSet<String>,
-        local_bindings: &HashSet<String>,
-    ) {
-        use crate::ast::ExprKind;
-
-        match &mut expr.kind {
-            ExprKind::Identifier(quals, name) => {
-                // Check if this is an intra-module function reference (not shadowed by local binding)
-                if quals.is_empty() && !local_bindings.contains(name) && module_functions.contains(name) {
-                    // Convert to qualified identifier: next -> rand.next
-                    *quals = vec![module_name.to_string()];
-                }
-            }
-            ExprKind::FieldAccess(obj, field) => {
-                // Check if this is module.name pattern
-                if let ExprKind::Identifier(quals, name) = &obj.kind {
-                    if quals.is_empty() && self.known_modules.contains(name) {
-                        // Convert to qualified Identifier
-                        expr.kind = ExprKind::Identifier(vec![name.clone()], field.clone());
-                        return;
-                    }
-                }
-                // Otherwise recurse into object
-                self.resolve_names_in_expr(obj, module_name, module_functions, local_bindings);
-            }
-            ExprKind::Application(func, args) => {
-                self.resolve_names_in_expr(func, module_name, module_functions, local_bindings);
-                for arg in args {
-                    self.resolve_names_in_expr(arg, module_name, module_functions, local_bindings);
-                }
-            }
-            ExprKind::Lambda(lambda) => {
-                // Collect lambda parameter names
-                let mut inner_bindings = local_bindings.clone();
-                for p in &lambda.params {
-                    inner_bindings.extend(self.collect_pattern_names(p));
-                }
-                self.resolve_names_in_expr(
-                    &mut lambda.body,
-                    module_name,
-                    module_functions,
-                    &inner_bindings,
-                );
-            }
-            ExprKind::LetIn(let_in) => {
-                self.resolve_names_in_expr(
-                    &mut let_in.value,
-                    module_name,
-                    module_functions,
-                    local_bindings,
-                );
-                // Collect let binding names
-                let mut inner_bindings = local_bindings.clone();
-                inner_bindings.extend(self.collect_pattern_names(&let_in.pattern));
-                self.resolve_names_in_expr(
-                    &mut let_in.body,
-                    module_name,
-                    module_functions,
-                    &inner_bindings,
-                );
-            }
-            ExprKind::If(if_expr) => {
-                self.resolve_names_in_expr(
-                    &mut if_expr.condition,
-                    module_name,
-                    module_functions,
-                    local_bindings,
-                );
-                self.resolve_names_in_expr(
-                    &mut if_expr.then_branch,
-                    module_name,
-                    module_functions,
-                    local_bindings,
-                );
-                self.resolve_names_in_expr(
-                    &mut if_expr.else_branch,
-                    module_name,
-                    module_functions,
-                    local_bindings,
-                );
-            }
-            ExprKind::BinaryOp(_, lhs, rhs) => {
-                self.resolve_names_in_expr(lhs, module_name, module_functions, local_bindings);
-                self.resolve_names_in_expr(rhs, module_name, module_functions, local_bindings);
-            }
-            ExprKind::UnaryOp(_, operand) => {
-                self.resolve_names_in_expr(operand, module_name, module_functions, local_bindings);
-            }
-            ExprKind::Tuple(exprs) | ExprKind::ArrayLiteral(exprs) | ExprKind::VecMatLiteral(exprs) => {
-                for e in exprs {
-                    self.resolve_names_in_expr(e, module_name, module_functions, local_bindings);
-                }
-            }
-            ExprKind::ArrayIndex(arr, idx) => {
-                self.resolve_names_in_expr(arr, module_name, module_functions, local_bindings);
-                self.resolve_names_in_expr(idx, module_name, module_functions, local_bindings);
-            }
-            ExprKind::ArrayWith { array, index, value } => {
-                self.resolve_names_in_expr(array, module_name, module_functions, local_bindings);
-                self.resolve_names_in_expr(index, module_name, module_functions, local_bindings);
-                self.resolve_names_in_expr(value, module_name, module_functions, local_bindings);
-            }
-            ExprKind::RecordLiteral(fields) => {
-                for (_, e) in fields {
-                    self.resolve_names_in_expr(e, module_name, module_functions, local_bindings);
-                }
-            }
-            ExprKind::Loop(loop_expr) => {
-                if let Some(ref mut init) = loop_expr.init {
-                    self.resolve_names_in_expr(init, module_name, module_functions, local_bindings);
-                }
-                // Collect loop variable binding
-                let mut inner_bindings = local_bindings.clone();
-                inner_bindings.extend(self.collect_pattern_names(&loop_expr.pattern));
-                match &mut loop_expr.form {
-                    crate::ast::LoopForm::While(cond) => {
-                        self.resolve_names_in_expr(cond, module_name, module_functions, &inner_bindings);
-                    }
-                    crate::ast::LoopForm::For(var, bound) => {
-                        inner_bindings.insert(var.clone());
-                        self.resolve_names_in_expr(bound, module_name, module_functions, local_bindings);
-                    }
-                    crate::ast::LoopForm::ForIn(var_pat, iter) => {
-                        inner_bindings.extend(self.collect_pattern_names(var_pat));
-                        self.resolve_names_in_expr(iter, module_name, module_functions, local_bindings);
-                    }
-                }
-                self.resolve_names_in_expr(
-                    &mut loop_expr.body,
-                    module_name,
-                    module_functions,
-                    &inner_bindings,
-                );
-            }
-            ExprKind::Match(match_expr) => {
-                self.resolve_names_in_expr(
-                    &mut match_expr.scrutinee,
-                    module_name,
-                    module_functions,
-                    local_bindings,
-                );
-                for case in &mut match_expr.cases {
-                    let mut inner_bindings = local_bindings.clone();
-                    inner_bindings.extend(self.collect_pattern_names(&case.pattern));
-                    self.resolve_names_in_expr(
-                        &mut case.body,
-                        module_name,
-                        module_functions,
-                        &inner_bindings,
-                    );
-                }
-            }
-            ExprKind::Range(range_expr) => {
-                self.resolve_names_in_expr(
-                    &mut range_expr.start,
-                    module_name,
-                    module_functions,
-                    local_bindings,
-                );
-                self.resolve_names_in_expr(
-                    &mut range_expr.end,
-                    module_name,
-                    module_functions,
-                    local_bindings,
-                );
-                if let Some(step) = &mut range_expr.step {
-                    self.resolve_names_in_expr(step, module_name, module_functions, local_bindings);
-                }
-            }
-            ExprKind::Slice(slice_expr) => {
-                self.resolve_names_in_expr(
-                    &mut slice_expr.array,
-                    module_name,
-                    module_functions,
-                    local_bindings,
-                );
-                if let Some(start) = &mut slice_expr.start {
-                    self.resolve_names_in_expr(start, module_name, module_functions, local_bindings);
-                }
-                if let Some(end) = &mut slice_expr.end {
-                    self.resolve_names_in_expr(end, module_name, module_functions, local_bindings);
-                }
-            }
-            ExprKind::TypeAscription(inner, _) | ExprKind::TypeCoercion(inner, _) => {
-                self.resolve_names_in_expr(inner, module_name, module_functions, local_bindings);
-            }
-            // Leaf expressions - nothing to resolve
-            ExprKind::IntLiteral(_)
-            | ExprKind::FloatLiteral(_)
-            | ExprKind::BoolLiteral(_)
-            | ExprKind::StringLiteral(_)
-            | ExprKind::Unit
-            | ExprKind::TypeHole => {}
-        }
-    }
-
-    /// Apply type substitutions to a pattern
-    fn substitute_in_pattern(&self, pattern: &Pattern, substitutions: &HashMap<String, Type>) -> Pattern {
-        let new_kind = match &pattern.kind {
-            PatternKind::Typed(inner, ty) => {
-                let new_ty = self.substitute_in_type(ty, substitutions);
-                PatternKind::Typed(inner.clone(), new_ty)
-            }
-            PatternKind::Tuple(pats) => {
-                let new_pats: Vec<Pattern> =
-                    pats.iter().map(|p| self.substitute_in_pattern(p, substitutions)).collect();
-                PatternKind::Tuple(new_pats)
-            }
-            PatternKind::Record(fields) => {
-                let new_fields = fields
-                    .iter()
-                    .map(|field| crate::ast::RecordPatternField {
-                        field: field.field.clone(),
-                        pattern: field
-                            .pattern
-                            .as_ref()
-                            .map(|p| self.substitute_in_pattern(p, substitutions)),
-                    })
-                    .collect();
-                PatternKind::Record(new_fields)
-            }
-            PatternKind::Constructor(name, pats) => {
-                let new_pats: Vec<Pattern> =
-                    pats.iter().map(|p| self.substitute_in_pattern(p, substitutions)).collect();
-                PatternKind::Constructor(name.clone(), new_pats)
-            }
-            PatternKind::Attributed(attrs, inner) => {
-                let new_inner = self.substitute_in_pattern(inner, substitutions);
-                PatternKind::Attributed(attrs.clone(), Box::new(new_inner))
-            }
-            // Name, Wildcard, Literal, Unit don't contain types
-            _ => pattern.kind.clone(),
-        };
-
-        Node {
-            h: pattern.h.clone(),
-            kind: new_kind,
-        }
-    }
-
-    /// Like substitute_in_pattern but handles param.type references
-    fn substitute_in_pattern_with_params(
+    /// Apply type substitutions to a pattern, including param.type references
+    fn substitute_in_pattern(
         &self,
         pattern: &Pattern,
         substitutions: &HashMap<String, Type>,
@@ -1242,7 +960,7 @@ impl ModuleManager {
             PatternKind::Tuple(pats) => {
                 let new_pats: Vec<Pattern> = pats
                     .iter()
-                    .map(|p| self.substitute_in_pattern_with_params(p, substitutions, param_bindings))
+                    .map(|p| self.substitute_in_pattern(p, substitutions, param_bindings))
                     .collect();
                 PatternKind::Tuple(new_pats)
             }
@@ -1251,9 +969,10 @@ impl ModuleManager {
                     .iter()
                     .map(|field| crate::ast::RecordPatternField {
                         field: field.field.clone(),
-                        pattern: field.pattern.as_ref().map(|p| {
-                            self.substitute_in_pattern_with_params(p, substitutions, param_bindings)
-                        }),
+                        pattern: field
+                            .pattern
+                            .as_ref()
+                            .map(|p| self.substitute_in_pattern(p, substitutions, param_bindings)),
                     })
                     .collect();
                 PatternKind::Record(new_fields)
@@ -1261,13 +980,12 @@ impl ModuleManager {
             PatternKind::Constructor(name, pats) => {
                 let new_pats: Vec<Pattern> = pats
                     .iter()
-                    .map(|p| self.substitute_in_pattern_with_params(p, substitutions, param_bindings))
+                    .map(|p| self.substitute_in_pattern(p, substitutions, param_bindings))
                     .collect();
                 PatternKind::Constructor(name.clone(), new_pats)
             }
             PatternKind::Attributed(attrs, inner) => {
-                let new_inner =
-                    self.substitute_in_pattern_with_params(inner, substitutions, param_bindings);
+                let new_inner = self.substitute_in_pattern(inner, substitutions, param_bindings);
                 PatternKind::Attributed(attrs.clone(), Box::new(new_inner))
             }
             // Name, Wildcard, Literal, Unit don't contain types
@@ -1280,9 +998,9 @@ impl ModuleManager {
         }
     }
 
-    /// Like resolve_names_in_expr but also handles parameter module references
+    /// Resolve names in an expression, including parameter module references
     /// E.g., n.add -> my_f32_num.add when n is bound to my_f32_num
-    fn resolve_names_in_expr_with_params(
+    fn resolve_names_in_expr(
         &self,
         expr: &mut crate::ast::Expression,
         module_name: &str,
@@ -1320,7 +1038,7 @@ impl ModuleManager {
                     }
                 }
                 // Otherwise recurse into object
-                self.resolve_names_in_expr_with_params(
+                self.resolve_names_in_expr(
                     obj,
                     module_name,
                     module_functions,
@@ -1329,7 +1047,7 @@ impl ModuleManager {
                 );
             }
             ExprKind::Application(func, args) => {
-                self.resolve_names_in_expr_with_params(
+                self.resolve_names_in_expr(
                     func,
                     module_name,
                     module_functions,
@@ -1337,7 +1055,7 @@ impl ModuleManager {
                     param_bindings,
                 );
                 for arg in args {
-                    self.resolve_names_in_expr_with_params(
+                    self.resolve_names_in_expr(
                         arg,
                         module_name,
                         module_functions,
@@ -1352,7 +1070,7 @@ impl ModuleManager {
                 for p in &lambda.params {
                     inner_bindings.extend(self.collect_pattern_names(p));
                 }
-                self.resolve_names_in_expr_with_params(
+                self.resolve_names_in_expr(
                     &mut lambda.body,
                     module_name,
                     module_functions,
@@ -1361,7 +1079,7 @@ impl ModuleManager {
                 );
             }
             ExprKind::LetIn(let_in) => {
-                self.resolve_names_in_expr_with_params(
+                self.resolve_names_in_expr(
                     &mut let_in.value,
                     module_name,
                     module_functions,
@@ -1371,7 +1089,7 @@ impl ModuleManager {
                 // Collect let binding names
                 let mut inner_bindings = local_bindings.clone();
                 inner_bindings.extend(self.collect_pattern_names(&let_in.pattern));
-                self.resolve_names_in_expr_with_params(
+                self.resolve_names_in_expr(
                     &mut let_in.body,
                     module_name,
                     module_functions,
@@ -1380,21 +1098,21 @@ impl ModuleManager {
                 );
             }
             ExprKind::If(if_expr) => {
-                self.resolve_names_in_expr_with_params(
+                self.resolve_names_in_expr(
                     &mut if_expr.condition,
                     module_name,
                     module_functions,
                     local_bindings,
                     param_bindings,
                 );
-                self.resolve_names_in_expr_with_params(
+                self.resolve_names_in_expr(
                     &mut if_expr.then_branch,
                     module_name,
                     module_functions,
                     local_bindings,
                     param_bindings,
                 );
-                self.resolve_names_in_expr_with_params(
+                self.resolve_names_in_expr(
                     &mut if_expr.else_branch,
                     module_name,
                     module_functions,
@@ -1403,14 +1121,14 @@ impl ModuleManager {
                 );
             }
             ExprKind::BinaryOp(_, lhs, rhs) => {
-                self.resolve_names_in_expr_with_params(
+                self.resolve_names_in_expr(
                     lhs,
                     module_name,
                     module_functions,
                     local_bindings,
                     param_bindings,
                 );
-                self.resolve_names_in_expr_with_params(
+                self.resolve_names_in_expr(
                     rhs,
                     module_name,
                     module_functions,
@@ -1419,7 +1137,7 @@ impl ModuleManager {
                 );
             }
             ExprKind::UnaryOp(_, operand) => {
-                self.resolve_names_in_expr_with_params(
+                self.resolve_names_in_expr(
                     operand,
                     module_name,
                     module_functions,
@@ -1429,7 +1147,7 @@ impl ModuleManager {
             }
             ExprKind::Tuple(exprs) | ExprKind::ArrayLiteral(exprs) | ExprKind::VecMatLiteral(exprs) => {
                 for e in exprs {
-                    self.resolve_names_in_expr_with_params(
+                    self.resolve_names_in_expr(
                         e,
                         module_name,
                         module_functions,
@@ -1439,14 +1157,14 @@ impl ModuleManager {
                 }
             }
             ExprKind::ArrayIndex(arr, idx) => {
-                self.resolve_names_in_expr_with_params(
+                self.resolve_names_in_expr(
                     arr,
                     module_name,
                     module_functions,
                     local_bindings,
                     param_bindings,
                 );
-                self.resolve_names_in_expr_with_params(
+                self.resolve_names_in_expr(
                     idx,
                     module_name,
                     module_functions,
@@ -1455,21 +1173,21 @@ impl ModuleManager {
                 );
             }
             ExprKind::ArrayWith { array, index, value } => {
-                self.resolve_names_in_expr_with_params(
+                self.resolve_names_in_expr(
                     array,
                     module_name,
                     module_functions,
                     local_bindings,
                     param_bindings,
                 );
-                self.resolve_names_in_expr_with_params(
+                self.resolve_names_in_expr(
                     index,
                     module_name,
                     module_functions,
                     local_bindings,
                     param_bindings,
                 );
-                self.resolve_names_in_expr_with_params(
+                self.resolve_names_in_expr(
                     value,
                     module_name,
                     module_functions,
@@ -1479,7 +1197,7 @@ impl ModuleManager {
             }
             ExprKind::RecordLiteral(fields) => {
                 for (_, e) in fields {
-                    self.resolve_names_in_expr_with_params(
+                    self.resolve_names_in_expr(
                         e,
                         module_name,
                         module_functions,
@@ -1489,7 +1207,7 @@ impl ModuleManager {
                 }
             }
             ExprKind::Match(match_expr) => {
-                self.resolve_names_in_expr_with_params(
+                self.resolve_names_in_expr(
                     &mut match_expr.scrutinee,
                     module_name,
                     module_functions,
@@ -1499,7 +1217,7 @@ impl ModuleManager {
                 for case in &mut match_expr.cases {
                     let mut inner_bindings = local_bindings.clone();
                     inner_bindings.extend(self.collect_pattern_names(&case.pattern));
-                    self.resolve_names_in_expr_with_params(
+                    self.resolve_names_in_expr(
                         &mut case.body,
                         module_name,
                         module_functions,
