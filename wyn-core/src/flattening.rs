@@ -150,8 +150,13 @@ impl Flattener {
 
         match &pattern.kind {
             PatternKind::Name(name) => {
-                // Simple binding: let name = value in body
-                let local_id = self.alloc_local(name.clone(), value_ty.clone(), LocalKind::Let, span);
+                // Check if this name was pre-registered (e.g., for lambda tuple patterns)
+                // If so, reuse the existing local instead of creating a new one
+                let local_id = if let Some(existing_id) = self.lookup_local(name) {
+                    existing_id
+                } else {
+                    self.alloc_local(name.clone(), value_ty.clone(), LocalKind::Let, span)
+                };
                 let body_ty = self.current_body.get_type(body_id).clone();
                 Ok(self.alloc_expr(
                     mir::Expr::Let {
@@ -237,6 +242,61 @@ impl Flattener {
                 pattern.kind
             )),
         }
+    }
+
+    /// Pre-register all pattern-bound names in scope before flattening a body.
+    /// This is needed for lambda patterns where the body must be flattened before
+    /// destructuring can be applied. Returns the locals that were created.
+    fn pre_register_pattern_bindings(
+        &mut self,
+        pattern: &ast::Pattern,
+        value_ty: &Type,
+        span: Span,
+    ) -> Vec<(String, LocalId)> {
+        let pattern = Self::unwrap_typed_pattern(pattern);
+        self.collect_pattern_bindings(pattern, value_ty, span)
+    }
+
+    /// Recursively collect all name bindings from a pattern, allocating locals for them.
+    fn collect_pattern_bindings(
+        &mut self,
+        pattern: &ast::Pattern,
+        value_ty: &Type,
+        span: Span,
+    ) -> Vec<(String, LocalId)> {
+        let mut bindings = vec![];
+
+        match &pattern.kind {
+            PatternKind::Name(name) => {
+                let local_id = self.alloc_local(name.clone(), value_ty.clone(), LocalKind::Let, span);
+                bindings.push((name.clone(), local_id));
+            }
+            PatternKind::Wildcard => {
+                // Wildcards don't create bindings
+            }
+            PatternKind::Tuple(patterns) => {
+                // Get element types from the tuple type
+                let elem_types: Vec<Type> = match value_ty {
+                    Type::Constructed(TypeName::Tuple(_), args) => args.clone(),
+                    _ => {
+                        // Fallback: use types from pattern
+                        patterns.iter().map(|p| self.get_pattern_type(p)).collect()
+                    }
+                };
+
+                for (i, pat) in patterns.iter().enumerate() {
+                    let elem_ty = elem_types.get(i).cloned().unwrap_or_else(|| self.get_pattern_type(pat));
+                    let inner = Self::unwrap_typed_pattern(pat);
+                    bindings.extend(self.collect_pattern_bindings(inner, &elem_ty, span));
+                }
+            }
+            PatternKind::Typed(inner, _) => {
+                bindings.extend(self.collect_pattern_bindings(inner, value_ty, span));
+            }
+            _ => {}
+        }
+
+        bindings
     }
 
     /// Register a lambda function and return its ID.
@@ -1442,7 +1502,14 @@ impl Flattener {
             capture_locals.push(capture_local);
         }
 
-        // Now flatten the lambda body - captured vars will resolve to our new locals
+        // Pre-register pattern-bound names BEFORE flattening body
+        // This is critical for tuple patterns like ((a, b), c) - the body (a, b, c)
+        // needs these names in scope to resolve them as Local, not Global
+        for (pattern, _param_local_id, param_ty) in &pattern_params {
+            self.pre_register_pattern_bindings(pattern, param_ty, span);
+        }
+
+        // Now flatten the lambda body - captured vars and pattern bindings will resolve correctly
         let (mut body_root, _) = self.flatten_expr(&lambda.body)?;
 
         // Wrap body with let bindings for captured vars (in reverse order)
@@ -1491,9 +1558,10 @@ impl Flattener {
             ret_type,
             scheme: None, // Generated lambdas are monomorphic at call site
             attributes: vec![],
-            body: func_body,
+            body: func_body.clone(),
             span,
         };
+
         self.generated_functions.push(func);
 
         // Return the closure

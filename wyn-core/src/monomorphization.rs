@@ -328,7 +328,7 @@ impl Monomorphizer {
             let span = old_body.get_span(old_id);
             let node_id = old_body.get_node_id(old_id);
 
-            let new_expr = self.process_expr(&old_body, old_expr, &expr_map)?;
+            let new_expr = self.process_expr(&old_body, old_expr, &expr_map, &ty)?;
             let new_id = new_body.alloc_expr(new_expr, ty, span, node_id);
             expr_map.insert(old_id, new_id);
         }
@@ -342,6 +342,7 @@ impl Monomorphizer {
         body: &Body,
         expr: &Expr,
         expr_map: &HashMap<ExprId, ExprId>,
+        expr_type: &Type<TypeName>,
     ) -> Result<Expr> {
         match expr {
             Expr::Call { func, args } => {
@@ -484,11 +485,48 @@ impl Monomorphizer {
                 lambda_name,
                 captures,
             } => {
-                // Ensure lambda function is in worklist
-                if let Some(def) = self.poly_functions.get(lambda_name).cloned() {
-                    self.ensure_in_worklist(lambda_name, def);
-                }
                 let new_captures = expr_map[captures];
+
+                // Try to specialize the lambda based on the closure's concrete type
+                if let Some(def) = self.poly_functions.get(lambda_name).cloned() {
+                    // expr_type is the function type of this closure (Arrow type)
+                    // Extract concrete param and return types from it
+                    let (concrete_params, concrete_ret) = split_function_type(expr_type);
+
+                    // Build substitution by unifying lambda params AND return type
+                    // against concrete types. This is necessary because lambdas may have
+                    // different variable IDs for params vs return type (e.g., zip3's lambda
+                    // has ((A,B),C) -> (A,B,C) where param uses different vars than return)
+                    let subst = self.infer_lambda_substitution(&def, &concrete_params, &concrete_ret)?;
+
+                    if !subst.is_empty() {
+                        // Specialize the lambda with concrete types
+                        let specialized_name =
+                            self.get_or_create_specialization(lambda_name, &subst, &def)?;
+                        return Ok(Expr::Closure {
+                            lambda_name: specialized_name,
+                            captures: new_captures,
+                        });
+                    } else {
+                        // Check if lambda body has unresolved variables even with empty subst
+                        // This can happen for prelude lambdas whose param types are concrete
+                        // but whose internal expressions have stale type variables
+                        if let Def::Function { body, .. } = &def {
+                            if body_has_unresolved_variables(body) {
+                                // Force specialization even with empty subst to trigger
+                                // the variable resolution in specialize_def
+                                let specialized_name =
+                                    self.get_or_create_specialization(lambda_name, &subst, &def)?;
+                                return Ok(Expr::Closure {
+                                    lambda_name: specialized_name,
+                                    captures: new_captures,
+                                });
+                            }
+                        }
+                        self.ensure_in_worklist(lambda_name, def);
+                    }
+                }
+
                 Ok(Expr::Closure {
                     lambda_name: lambda_name.clone(),
                     captures: new_captures,
@@ -539,6 +577,11 @@ impl Monomorphizer {
     fn infer_substitution(&self, poly_def: &Def, arg_types: &[Type<TypeName>]) -> Result<Substitution> {
         let mut subst = Substitution::new();
 
+        let _func_name = match poly_def {
+            Def::Function { name, .. } => name.as_str(),
+            _ => "<unknown>",
+        };
+
         match poly_def {
             Def::Function {
                 scheme: Some(scheme), ..
@@ -573,6 +616,30 @@ impl Monomorphizer {
             Def::Constant { .. } | Def::Uniform { .. } | Def::Storage { .. } => {
                 // No parameters
             }
+        }
+
+        Ok(subst)
+    }
+
+    /// Infer substitution for a lambda using both param types and return type from the closure's concrete type
+    fn infer_lambda_substitution(
+        &self,
+        lambda_def: &Def,
+        concrete_params: &[Type<TypeName>],
+        concrete_ret: &Type<TypeName>,
+    ) -> Result<Substitution> {
+        let mut subst = Substitution::new();
+
+        if let Def::Function { params, body, .. } = lambda_def {
+            // Unify lambda's body param types against concrete param types
+            let body_param_types: Vec<_> = params.iter().map(|&p| &body.get_local(p).ty).collect();
+            for (param_ty, arg_ty) in body_param_types.iter().zip(concrete_params.iter()) {
+                self.unify_for_subst(param_ty, arg_ty, &mut subst)?;
+            }
+
+            // Also unify lambda's return type against concrete return type
+            let body_ret = body.get_type(body.root);
+            self.unify_for_subst(body_ret, concrete_ret, &mut subst)?;
         }
 
         Ok(subst)
@@ -682,6 +749,24 @@ fn contains_variables(ty: &Type<TypeName>) -> bool {
     }
 }
 
+/// Check if a function body contains any unresolved type variables
+fn body_has_unresolved_variables(body: &Body) -> bool {
+    // Check all expression types
+    for idx in 0..body.exprs.len() {
+        let ty = body.get_type(ExprId(idx as u32));
+        if contains_variables(ty) {
+            return true;
+        }
+    }
+    // Check all local declarations
+    for local in &body.locals {
+        if contains_variables(&local.ty) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Check if a function is a trivial wrapper (body just forwards all params to another call).
 /// Returns the target function name if so.
 fn get_trivial_wrapper_target(def: &Def) -> Option<(String, Vec<LocalId>)> {
@@ -762,11 +847,23 @@ fn specialize_def(def: Def, subst: &Substitution, new_name: &str) -> Result<Def>
                 let concrete_params: Vec<_> = scheme_params.iter().map(|t| apply_subst(t, subst)).collect();
                 let concrete_ret = apply_subst(&scheme_ret, subst);
 
-                // Collect all expression types that reference param locals
-                // and map their variables to concrete types
+                // Collect variable mappings from params and all body expressions
+                //
+                // The key insight: param LOCAL DECLARATIONS use scheme variable IDs
+                // (from flattening with prelude_schemes), while body expressions may use
+                // different variable IDs from type_table. We collect from:
+                // 1. Local declarations (canonical scheme vars)
+                // 2. Local reference expressions (may have same or different vars)
+                // 3. All other expressions (to catch nested lambdas etc.)
+
                 for (i, &param_id) in params.iter().enumerate() {
                     if let Some(concrete_ty) = concrete_params.get(i) {
-                        // Find all expressions that are Local(param_id) and map their type vars
+                        // Collect from local declaration (canonical type with scheme vars)
+                        if let Some(local) = body.locals.get(param_id.0 as usize) {
+                            collect_body_var_mappings(&local.ty, concrete_ty, &mut extended);
+                        }
+
+                        // Also collect from expressions that reference this local
                         for (expr_idx, expr) in body.exprs.iter().enumerate() {
                             if matches!(expr, Expr::Local(id) if *id == param_id) {
                                 let expr_ty = body.get_type(ExprId(expr_idx as u32));
@@ -780,9 +877,67 @@ fn specialize_def(def: Def, subst: &Substitution, new_name: &str) -> Result<Def>
                 let body_ret = body.get_type(body.root);
                 collect_body_var_mappings(body_ret, &concrete_ret, &mut extended);
 
+                // Now walk ALL expressions to propagate mappings transitively.
+                // This catches nested lambda types that use the same variables as params.
+                // We iterate until no new mappings are found (fixed point).
+                let mut changed = true;
+                while changed {
+                    changed = false;
+                    for (expr_idx, _) in body.exprs.iter().enumerate() {
+                        let expr_ty = body.get_type(ExprId(expr_idx as u32));
+                        // Try to resolve this expression's type using current mappings
+                        let resolved = apply_subst_partial(expr_ty, &extended);
+                        // If we got a fully concrete type, map any remaining vars
+                        if !contains_variables(&resolved) && contains_variables(expr_ty) {
+                            let before = extended.len();
+                            collect_body_var_mappings(expr_ty, &resolved, &mut extended);
+                            if extended.len() > before {
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+
                 extended
             } else {
-                subst.clone()
+                // For functions without schemes (lambdas), build substitution from params
+                let mut extended = subst.clone();
+                // Collect variable mappings from param local declarations
+                for &param_id in params.iter() {
+                    if let Some(local) = body.locals.get(param_id.0 as usize) {
+                        // Try to resolve the param type using current substitution
+                        let resolved = apply_subst_partial(&local.ty, &extended);
+                        if !contains_variables(&resolved) && contains_variables(&local.ty) {
+                            collect_body_var_mappings(&local.ty, &resolved, &mut extended);
+                        }
+                    }
+                }
+
+                // Collect from return type
+                let body_ret = body.get_type(body.root);
+                let resolved_ret = apply_subst_partial(body_ret, &extended);
+                if !contains_variables(&resolved_ret) && contains_variables(body_ret) {
+                    collect_body_var_mappings(body_ret, &resolved_ret, &mut extended);
+                }
+
+                // Propagate mappings through all expressions
+                let mut changed = true;
+                while changed {
+                    changed = false;
+                    for (expr_idx, _) in body.exprs.iter().enumerate() {
+                        let expr_ty = body.get_type(ExprId(expr_idx as u32));
+                        let resolved = apply_subst_partial(expr_ty, &extended);
+                        if !contains_variables(&resolved) && contains_variables(expr_ty) {
+                            let before = extended.len();
+                            collect_body_var_mappings(expr_ty, &resolved, &mut extended);
+                            if extended.len() > before {
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+
+                extended
             };
 
             // If the function has a scheme, use it for consistent return type
@@ -905,10 +1060,27 @@ fn apply_subst(ty: &Type<TypeName>, subst: &Substitution) -> Type<TypeName> {
     apply_subst_with_context(ty, subst, "unknown")
 }
 
+/// Apply a substitution to a type, keeping unresolved variables as-is.
+/// This is used for collecting variable mappings where we may not have all mappings yet.
+fn apply_subst_partial(ty: &Type<TypeName>, subst: &Substitution) -> Type<TypeName> {
+    match ty {
+        Type::Variable(id) => subst.get(id).cloned().unwrap_or_else(|| ty.clone()),
+        Type::Constructed(name, args) => {
+            let new_args = args.iter().map(|arg| apply_subst_partial(arg, subst)).collect();
+            Type::Constructed(name.clone(), new_args)
+        }
+    }
+}
+
 /// Apply a substitution to a type with context for debugging
 fn apply_subst_with_context(ty: &Type<TypeName>, subst: &Substitution, context: &str) -> Type<TypeName> {
     match ty {
         Type::Variable(id) => subst.get(id).cloned().unwrap_or_else(|| {
+            eprintln!(
+                "DEBUG: Unresolved type variable Variable({}) in context: {}\n\
+                 Substitution contains {} mappings: {:?}",
+                id, context, subst.len(), subst
+            );
             panic!(
                 "BUG: Unresolved type variable Variable({}) during monomorphization. \
                  The substitution is incomplete - this variable should have been resolved during type checking \

@@ -525,9 +525,35 @@ impl AliasChecked {
     ) -> Result<(Flattened, BackEnd)> {
         let type_table = self.type_table;
 
-        let builtins = impl_source::ImplSource::default().all_names();
+        let mut builtins = impl_source::ImplSource::default().all_names();
+
+        // Add top-level function names from user program - these should not be captured as free vars
+        for decl in &self.ast.declarations {
+            match decl {
+                ast::Declaration::Decl(d) => {
+                    builtins.insert(d.name.clone());
+                }
+                ast::Declaration::Entry(e) => {
+                    builtins.insert(e.name.clone());
+                }
+                ast::Declaration::Uniform(u) => {
+                    builtins.insert(u.name.clone());
+                }
+                ast::Declaration::Storage(s) => {
+                    builtins.insert(s.name.clone());
+                }
+                _ => {}
+            }
+        }
+
         // Collect prelude function declarations for defun analysis
         let prelude_decls: Vec<_> = module_manager.get_prelude_function_declarations();
+
+        // Add prelude function names to builtins - they should not be captured either
+        for decl in &prelude_decls {
+            builtins.insert(decl.name.clone());
+        }
+
         let defun_analysis =
             defun_analysis::analyze_program_with_decls(&self.ast, &prelude_decls, &type_table, &builtins);
         let mut flattener =

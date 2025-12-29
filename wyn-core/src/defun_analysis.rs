@@ -172,8 +172,9 @@ impl<'a> DefunAnalyzer<'a> {
                 // Register lambda params in scope as Dyn, then analyze body
                 self.scope.push_scope();
                 for param in &lambda.params {
-                    if let Some(name) = param.simple_name() {
-                        self.scope.insert(name.to_string(), StaticValue::Dyn);
+                    // Use bound_names() to handle tuple patterns like ((a, b), c)
+                    for name in param.bound_names() {
+                        self.scope.insert(name, StaticValue::Dyn);
                     }
                 }
                 self.analyze_expr(&lambda.body);
@@ -335,11 +336,11 @@ impl<'a> DefunAnalyzer<'a> {
         lambda: &ast::LambdaExpr,
         _lambda_expr: &Expression,
     ) -> Vec<(String, Type)> {
-        // Collect bound parameters
+        // Collect bound parameters (use bound_names() for tuple patterns)
         let mut bound = HashSet::new();
         for param in &lambda.params {
-            if let Some(name) = param.simple_name() {
-                bound.insert(name.to_string());
+            for name in param.bound_names() {
+                bound.insert(name);
             }
         }
 
@@ -404,8 +405,9 @@ impl<'a> DefunAnalyzer<'a> {
             ExprKind::Lambda(lambda) => {
                 let mut extended = bound.clone();
                 for param in &lambda.params {
-                    if let Some(name) = param.simple_name() {
-                        extended.insert(name.to_string());
+                    // Use bound_names() to handle tuple patterns like ((a, b), c)
+                    for name in param.bound_names() {
+                        extended.insert(name);
                     }
                 }
                 self.collect_free_vars(&lambda.body, &extended, free);

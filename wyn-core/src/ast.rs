@@ -610,6 +610,42 @@ impl Pattern {
         }
     }
 
+    /// Collect all names bound by this pattern (recursively for tuple patterns)
+    pub fn bound_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        self.collect_bound_names(&mut names);
+        names
+    }
+
+    fn collect_bound_names(&self, names: &mut Vec<String>) {
+        match &self.kind {
+            PatternKind::Name(name) => names.push(name.clone()),
+            PatternKind::Typed(inner, _) => inner.collect_bound_names(names),
+            PatternKind::Attributed(_, inner) => inner.collect_bound_names(names),
+            PatternKind::Tuple(patterns) => {
+                for pat in patterns {
+                    pat.collect_bound_names(names);
+                }
+            }
+            PatternKind::Wildcard | PatternKind::Literal(_) | PatternKind::Unit => {}
+            PatternKind::Constructor(_, patterns) => {
+                for pat in patterns {
+                    pat.collect_bound_names(names);
+                }
+            }
+            PatternKind::Record(fields) => {
+                for field in fields {
+                    if let Some(pat) = &field.pattern {
+                        pat.collect_bound_names(names);
+                    } else {
+                        // Shorthand: field name is the bound name
+                        names.push(field.field.clone());
+                    }
+                }
+            }
+        }
+    }
+
     /// Extract the type from a typed pattern
     pub fn pattern_type(&self) -> Option<&Type> {
         match &self.kind {
