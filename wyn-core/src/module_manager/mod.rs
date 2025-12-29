@@ -167,8 +167,9 @@ impl ModuleManager {
         }
     }
 
-    /// Create an empty module manager without loading prelude (internal helper)
-    fn new_empty() -> Self {
+    /// Create an empty module manager without loading prelude
+    /// Public for testing; production code should use `new()` or `from_prelude()`
+    pub fn new_empty() -> Self {
         let known_modules = Self::BUILTIN_MODULES.iter().map(|s| s.to_string()).collect();
 
         ModuleManager {
