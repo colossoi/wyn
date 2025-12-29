@@ -4,6 +4,7 @@ use crate::error::CompilerError;
 use crate::lexer::tokenize;
 
 /// Parse tokens with a fresh node counter (for parser tests that don't need prelude)
+#[allow(dead_code)]
 fn parse_tokens(tokens: Vec<LocatedToken>) -> crate::error::Result<Program> {
     let mut nc = NodeCounter::new();
     Parser::new(tokens, &mut nc).parse()

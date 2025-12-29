@@ -12,7 +12,7 @@ use crate::error::CompilerError;
 fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
     let mut frontend = crate::cached_frontend();
     let parsed = crate::Compiler::parse(input, &mut frontend.node_counter)?;
-    let (flattened, mut backend) = parsed
+    let (flattened, _backend) = parsed
         .desugar(&mut frontend.node_counter)?
         .resolve(&frontend.module_manager)?
         .fold_ast_constants()

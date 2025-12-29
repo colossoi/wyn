@@ -1,4 +1,4 @@
-use crate::ast::{BinaryOp, ExprKind, Expression, Header, NodeId, Span, UnaryOp};
+use crate::ast::{BinaryOp, ExprKind, Expression, Header, NodeId, Span};
 use crate::ast_const_fold::AstConstFolder;
 
 fn test_header() -> Header {

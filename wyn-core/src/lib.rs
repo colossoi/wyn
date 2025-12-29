@@ -320,7 +320,7 @@ impl FrontEnd {
     /// Create a FrontEnd from a pre-elaborated prelude.
     /// This is faster than `new()` as it reuses an already-parsed prelude.
     pub fn new_from_prelude(
-        prelude: &module_manager::PreElaboratedPrelude,
+        prelude: module_manager::PreElaboratedPrelude,
         node_counter: NodeCounter,
     ) -> Self {
         let module_manager = module_manager::ModuleManager::from_prelude(prelude);
@@ -761,12 +761,12 @@ fn get_prelude_cache() -> (&'static module_manager::PreElaboratedPrelude, NodeCo
 #[cfg(test)]
 pub fn cached_module_manager() -> (module_manager::ModuleManager, NodeCounter) {
     let (prelude, node_counter) = get_prelude_cache();
-    (module_manager::ModuleManager::from_prelude(prelude), node_counter)
+    (module_manager::ModuleManager::from_prelude(prelude.clone()), node_counter)
 }
 
 /// Create a FrontEnd using the cached prelude (test-only)
 #[cfg(test)]
 pub fn cached_frontend() -> FrontEnd {
     let (prelude, node_counter) = get_prelude_cache();
-    FrontEnd::new_from_prelude(prelude, node_counter)
+    FrontEnd::new_from_prelude(prelude.clone(), node_counter)
 }

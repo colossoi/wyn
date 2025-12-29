@@ -25,6 +25,7 @@ fn flatten_program(input: &str) -> mir::Program {
     flattened.hoist_materializations().mir
 }
 
+#[allow(dead_code)]
 fn flatten_to_string(input: &str) -> String {
     format!("{}", flatten_program(input))
 }

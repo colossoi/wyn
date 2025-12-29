@@ -24,7 +24,7 @@ fn get_prelude() -> (&'static PreElaboratedPrelude, NodeCounter) {
 
 fn get_frontend() -> FrontEnd {
     let (prelude, node_counter) = get_prelude();
-    FrontEnd::new_from_prelude(prelude, node_counter)
+    FrontEnd::new_from_prelude(prelude.clone(), node_counter)
 }
 
 /// Cached document state after successful type checking

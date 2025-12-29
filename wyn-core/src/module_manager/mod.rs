@@ -159,7 +159,7 @@ impl ModuleManager {
     /// Create a new module manager with fully type-checked prelude
     pub fn new(node_counter: &mut NodeCounter) -> Self {
         match Self::create_prelude(node_counter) {
-            Ok(prelude) => Self::from_prelude(&prelude),
+            Ok(prelude) => Self::from_prelude(prelude),
             Err(e) => {
                 eprintln!("ERROR creating prelude: {:?}", e);
                 Self::new_empty()
@@ -226,15 +226,16 @@ impl ModuleManager {
     }
 
     /// Create a ModuleManager using a pre-elaborated prelude (avoids re-parsing)
-    /// Advances the node_counter to start after all prelude NodeIds
-    pub fn from_prelude(prelude: &PreElaboratedPrelude) -> Self {
+    /// Note: Caller must use a NodeCounter that was advanced during prelude creation
+    /// (see get_prelude_cache in lib.rs which caches both prelude and node_counter)
+    pub fn from_prelude(prelude: PreElaboratedPrelude) -> Self {
         ModuleManager {
-            module_type_registry: prelude.module_type_registry.clone(),
-            elaborated_modules: prelude.elaborated_modules.clone(),
+            module_type_registry: prelude.module_type_registry,
+            elaborated_modules: prelude.elaborated_modules,
             functor_modules: HashMap::new(), // Prelude doesn't have functors
-            known_modules: prelude.known_modules.clone(),
-            type_aliases: prelude.type_aliases.clone(),
-            prelude_functions: prelude.prelude_functions.clone(),
+            known_modules: prelude.known_modules,
+            type_aliases: prelude.type_aliases,
+            prelude_functions: prelude.prelude_functions,
         }
     }
 
