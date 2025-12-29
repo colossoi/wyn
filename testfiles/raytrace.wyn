@@ -16,7 +16,7 @@
 def PI: f32 = 3.141592653589793
 def EPSILON: f32 = 0.001
 def MAX_DIST: f32 = 100.0
-def NUM_SPHERES: i32 = 8
+def NUM_SPHERES: i32 = 12
 
 -- Light direction (normalized)
 def LIGHT_DIR: vec3f32 = @[0.5773502691896258, 0.5773502691896258, -0.5773502691896258]
@@ -26,7 +26,7 @@ def LIGHT_DIR: vec3f32 = @[0.5773502691896258, 0.5773502691896258, -0.5773502691
 ------------------------------------------------------------
 
 -- Sphere centers
-def sphereCenters: [8]vec3f32 = [
+def sphereCenters: [12]vec3f32 = [
   @[-1.5, 0.5, 0.0],    -- Red
   @[0.0, 0.75, 0.0],    -- Green
   @[1.5, 0.5, 0.0],     -- Blue
@@ -34,14 +34,18 @@ def sphereCenters: [8]vec3f32 = [
   @[2.2, 0.45, -2.0],   -- Cyan
   @[-0.8, 0.3, -2.5],   -- Magenta
   @[1.0, 0.6, -1.5],    -- Orange
-  @[-1.0, 0.25, 1.5]    -- Purple
+  @[-1.0, 0.25, 1.5],   -- Purple
+  @[0.5, 0.4, 2.0],     -- Teal (solid)
+  @[-2.0, 0.5, 1.0],    -- Pink (glass)
+  @[2.5, 0.3, 0.5],     -- Lime (solid)
+  @[0.0, 0.35, -1.0]    -- White (glass)
 ]
 
 -- Sphere radii
-def sphereRadii: [8]f32 = [0.5, 0.75, 0.5, 0.35, 0.45, 0.3, 0.6, 0.25]
+def sphereRadii: [12]f32 = [0.5, 0.75, 0.5, 0.35, 0.45, 0.3, 0.6, 0.25, 0.4, 0.5, 0.3, 0.35]
 
 -- Material albedos (RGB color)
-def sphereAlbedos: [8]vec3f32 = [
+def sphereAlbedos: [12]vec3f32 = [
   @[0.9, 0.2, 0.2],   -- Red
   @[0.2, 0.9, 0.3],   -- Green
   @[0.2, 0.3, 0.9],   -- Blue
@@ -49,17 +53,27 @@ def sphereAlbedos: [8]vec3f32 = [
   @[0.0, 0.8, 0.8],   -- Cyan
   @[0.9, 0.2, 0.7],   -- Magenta
   @[1.0, 0.5, 0.0],   -- Orange
-  @[0.6, 0.2, 0.9]    -- Purple
+  @[0.6, 0.2, 0.9],   -- Purple
+  @[0.0, 0.7, 0.7],   -- Teal
+  @[1.0, 0.4, 0.7],   -- Pink
+  @[0.5, 0.9, 0.2],   -- Lime
+  @[0.95, 0.95, 0.95] -- White
 ]
 
 -- Material metallic values
-def sphereMetallic: [8]f32 = [0.8, 0.6, 0.9, 1.0, 0.7, 0.5, 0.75, 0.85]
+def sphereMetallic: [12]f32 = [0.8, 0.6, 0.9, 1.0, 0.7, 0.5, 0.75, 0.85, 0.7, 0.6, 0.8, 0.5]
 
 -- Material roughness values
-def sphereRoughness: [8]f32 = [0.2, 0.3, 0.1, 0.15, 0.25, 0.35, 0.2, 0.15]
+def sphereRoughness: [12]f32 = [0.2, 0.3, 0.1, 0.15, 0.25, 0.35, 0.2, 0.15, 0.25, 0.2, 0.15, 0.1]
 
 -- Material reflectivity values
-def sphereReflectivity: [8]f32 = [0.8, 0.6, 0.9, 0.9, 0.75, 0.65, 0.8, 0.85]
+def sphereReflectivity: [12]f32 = [0.8, 0.6, 0.9, 0.9, 0.75, 0.65, 0.8, 0.85, 0.7, 0.6, 0.75, 0.8]
+
+-- Glass material: 0 = opaque, 1 = glass
+def sphereIsGlass: [12]i32 = [0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1]
+
+-- Index of refraction for glass spheres (1.0 for opaque, ~1.5 for glass)
+def sphereIOR: [12]f32 = [1.0, 1.5, 1.0, 1.52, 1.0, 1.45, 1.0, 1.5, 1.0, 1.48, 1.0, 1.5]
 
 ------------------------------------------------------------
 -- Vertex shader: full-screen triangle
@@ -130,6 +144,39 @@ def pbrBrdf(n: vec3f32, v: vec3f32, l: vec3f32, albedo: vec3f32, metallic: f32, 
     (diffuse.z + specular.z) * nDotL]
 
 ------------------------------------------------------------
+-- Glass Helper Functions
+------------------------------------------------------------
+
+-- Pseudo-random hash for stochastic decisions
+def hash(p: vec3f32) -> f32 =
+  fract(f32.sin(dot(p, @[127.1, 311.7, 74.7])) * 43758.5453)
+
+-- Fresnel reflectance for dielectrics (glass)
+def fresnelGlass(cosTheta: f32, ior: f32) -> f32 =
+  let r0 = (1.0 - ior) / (1.0 + ior) in
+  let r0sq = r0 * r0 in
+  let x = 1.0 - cosTheta in
+  r0sq + (1.0 - r0sq) * x * x * x * x * x
+
+-- Refraction using Snell's law, returns refracted direction
+-- eta = n1/n2 (ratio of refractive indices)
+def refractRay(incident: vec3f32, normal: vec3f32, eta: f32) -> vec3f32 =
+  let cosI = 0.0 - dot(incident, normal) in
+  let sinT2 = eta * eta * (1.0 - cosI * cosI) in
+  if sinT2 > 1.0 then
+    -- Total internal reflection
+    reflect(incident, normal)
+  else
+    let cosT = f32.sqrt(1.0 - sinT2) in
+    @[eta * incident.x + (eta * cosI - cosT) * normal.x,
+      eta * incident.y + (eta * cosI - cosT) * normal.y,
+      eta * incident.z + (eta * cosI - cosT) * normal.z]
+
+-- Vector addition helper for reduce
+def vecAdd(a: vec3f32, b: vec3f32) -> vec3f32 =
+  @[a.x + b.x, a.y + b.y, a.z + b.z]
+
+------------------------------------------------------------
 -- Ray Intersection Functions
 ------------------------------------------------------------
 
@@ -163,7 +210,7 @@ def intersectPlane(ro: vec3f32, rd: vec3f32) -> f32 =
 -- material_id: 0 = miss, 1 = ground, 2+ = spheres
 
 -- Compute all sphere intersections in parallel using map
-def intersectAllSpheres(ro: vec3f32, rd: vec3f32) -> [8](f32, i32, vec3f32) =
+def intersectAllSpheres(ro: vec3f32, rd: vec3f32) -> [12](f32, i32, vec3f32) =
   map(|(center, radius, idx): (vec3f32, f32, i32)|
         let t = intersectSphere(ro, rd, center, radius) in
         if t > 0.0 then
@@ -172,10 +219,10 @@ def intersectAllSpheres(ro: vec3f32, rd: vec3f32) -> [8](f32, i32, vec3f32) =
           (t, idx + 2, n)  -- Material IDs start at 2 for spheres
         else
           (MAX_DIST, 0, @[0.0, 1.0, 0.0]),
-      zip3(sphereCenters, sphereRadii, [0, 1, 2, 3, 4, 5, 6, 7]))
+      zip3(sphereCenters, sphereRadii, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]))
 
 -- Find closest hit using reduce
-def findClosestHit(hits: [8](f32, i32, vec3f32)) -> (f32, i32, vec3f32) =
+def findClosestHit(hits: [12](f32, i32, vec3f32)) -> (f32, i32, vec3f32) =
   reduce(|(t1, m1, n1): (f32, i32, vec3f32), (t2, m2, n2): (f32, i32, vec3f32)|
            if t1 < t2 then (t1, m1, n1) else (t2, m2, n2),
          (MAX_DIST, 0, @[0.0, 1.0, 0.0]),
@@ -200,20 +247,22 @@ def intersectScene(ro: vec3f32, rd: vec3f32) -> (f32, i32, vec3f32) =
 -- Materials (using array lookups)
 ------------------------------------------------------------
 
-def getMaterial(matId: i32, hitPoint: vec3f32) -> (vec3f32, f32, f32, f32) =
+-- Returns: (albedo, metallic, roughness, reflectivity, isGlass, ior)
+def getMaterial(matId: i32, hitPoint: vec3f32) -> (vec3f32, f32, f32, f32, i32, f32) =
   if matId == 1 then
-    -- Ground: checkerboard pattern
+    -- Ground: reflective checkerboard pattern
     let checker = f32.floor(hitPoint.x) + f32.floor(hitPoint.z) in
     let isWhite = fract(checker * 0.5) > 0.25 in
     let albedo = if isWhite then @[0.9, 0.9, 0.9] else @[0.1, 0.1, 0.1] in
-    (albedo, 0.0, 0.5, 0.3)
+    (albedo, 0.0, 0.3, 0.85, 0, 1.0)  -- Boosted reflectivity from 0.3 to 0.85
   else if matId >= 2 then
     -- Sphere materials - index into arrays
     let idx = matId - 2 in
-    (sphereAlbedos[idx], sphereMetallic[idx], sphereRoughness[idx], sphereReflectivity[idx])
+    (sphereAlbedos[idx], sphereMetallic[idx], sphereRoughness[idx],
+     sphereReflectivity[idx], sphereIsGlass[idx], sphereIOR[idx])
   else
     -- Miss
-    (@[0.0, 0.0, 0.0], 0.0, 1.0, 0.0)
+    (@[0.0, 0.0, 0.0], 0.0, 1.0, 0.0, 0, 1.0)
 
 ------------------------------------------------------------
 -- Sky
@@ -239,7 +288,7 @@ def inShadow(hitPoint: vec3f32, lightDir: vec3f32) -> f32 =
 ------------------------------------------------------------
 
 def shade(hitPoint: vec3f32, normal: vec3f32, viewDir: vec3f32, matId: i32) -> vec3f32 =
-  let (albedo, metallic, roughness, unusedRefl) = getMaterial(matId, hitPoint) in
+  let (albedo, metallic, roughness, _, _, _) = getMaterial(matId, hitPoint) in
   let brdfResult = pbrBrdf(normal, viewDir, LIGHT_DIR, albedo, metallic, roughness) in
   let shadow = inShadow(hitPoint, LIGHT_DIR) in
   let lightColor = @[2.0, 1.9, 1.8] in
@@ -253,10 +302,11 @@ def shade(hitPoint: vec3f32, normal: vec3f32, viewDir: vec3f32, matId: i32) -> v
 ------------------------------------------------------------
 
 def trace(ro: vec3f32, rd: vec3f32, maxBounces: i32) -> vec3f32 =
-  let (finalColor, unusedRo, unusedRd, unusedTint, unusedBounce) =
+  let (finalColor, _, _, _, _) =
     loop (color, rayO, rayD, tint, bounce) = (@[0.0, 0.0, 0.0], ro, rd, @[1.0, 1.0, 1.0], 0) while bounce <= maxBounces do
       let (t, matId, normal) = intersectScene(rayO, rayD) in
       if matId == 0 then
+        -- Miss: accumulate sky color
         let skyCol = getSkyColor(rayD) in
         let tintedSky = @[skyCol.x * tint.x, skyCol.y * tint.y, skyCol.z * tint.z] in
         let newColor = @[color.x + tintedSky.x, color.y + tintedSky.y, color.z + tintedSky.z] in
@@ -264,28 +314,210 @@ def trace(ro: vec3f32, rd: vec3f32, maxBounces: i32) -> vec3f32 =
       else
         let hitPoint = @[rayO.x + rayD.x * t, rayO.y + rayD.y * t, rayO.z + rayD.z * t] in
         let viewDir = @[0.0 - rayD.x, 0.0 - rayD.y, 0.0 - rayD.z] in
+        let (albedo, _, _, reflectivity, isGlass, ior) = getMaterial(matId, hitPoint) in
 
+        if isGlass == 1 then
+          -- Glass material: probabilistically choose reflect or refract
+          let entering = dot(rayD, normal) < 0.0 in
+          let n = if entering then normal else @[0.0 - normal.x, 0.0 - normal.y, 0.0 - normal.z] in
+          let eta = if entering then 1.0 / ior else ior in
+
+          let cosTheta = f32.abs(dot(rayD, n)) in
+          let fresnel = fresnelGlass(cosTheta, ior) in
+
+          -- Use hash for random decision based on hit position and bounce
+          let bouncef = f32.i32(bounce) in
+          let rand = hash(@[hitPoint.x + bouncef * 7.13,
+                            hitPoint.y + bouncef * 11.27,
+                            hitPoint.z + bouncef * 13.37]) in
+
+          let newDir = if rand < fresnel then
+                         reflect(rayD, n)  -- Reflect
+                       else
+                         refractRay(rayD, n, eta)  -- Refract
+          in
+
+          -- Offset origin based on direction (into or out of surface)
+          let offsetSign = if dot(newDir, normal) > 0.0 then 1.0 else 0.0 - 1.0 in
+          let newRayO = @[hitPoint.x + normal.x * EPSILON * 10.0 * offsetSign,
+                          hitPoint.y + normal.y * EPSILON * 10.0 * offsetSign,
+                          hitPoint.z + normal.z * EPSILON * 10.0 * offsetSign] in
+
+          -- Glass is mostly transparent, slight tint from albedo
+          let glassTint = @[mix(1.0, albedo.x, 0.1),
+                            mix(1.0, albedo.y, 0.1),
+                            mix(1.0, albedo.z, 0.1)] in
+          let newTint = @[tint.x * glassTint.x, tint.y * glassTint.y, tint.z * glassTint.z] in
+
+          (color, newRayO, newDir, newTint, bounce + 1)
+        else
+          -- Opaque material: existing PBR shading + reflection
+          let surfaceColor = shade(hitPoint, normal, viewDir, matId) in
+
+          let contribution = 1.0 - reflectivity in
+          let tintedSurface = @[surfaceColor.x * tint.x * contribution,
+                                surfaceColor.y * tint.y * contribution,
+                                surfaceColor.z * tint.z * contribution] in
+          let newColor = @[color.x + tintedSurface.x,
+                           color.y + tintedSurface.y,
+                           color.z + tintedSurface.z] in
+
+          let newTint = @[tint.x * albedo.x * reflectivity,
+                          tint.y * albedo.y * reflectivity,
+                          tint.z * albedo.z * reflectivity] in
+
+          let reflDir = reflect(rayD, normal) in
+          let newRayO = @[hitPoint.x + normal.x * EPSILON * 10.0,
+                          hitPoint.y + normal.y * EPSILON * 10.0,
+                          hitPoint.z + normal.z * EPSILON * 10.0] in
+
+          (newColor, newRayO, reflDir, newTint, bounce + 1)
+  in finalColor
+
+------------------------------------------------------------
+-- Full Ray Splitting Trace (Deterministic Glass)
+------------------------------------------------------------
+
+-- Process a single ray slot, returning:
+-- (newOrigin, newDir, newWeight, colorContrib, refrOrigin, refrDir, refrWeight, stillActive, hasRefract)
+def processOneRay(idx: i32, ro: vec3f32, rd: vec3f32, weight: vec3f32, active: i32)
+    -> (vec3f32, vec3f32, vec3f32, vec3f32, vec3f32, vec3f32, vec3f32, i32, i32) =
+  let zero = @[0.0, 0.0, 0.0] in
+  if active == 0 then
+    (ro, rd, zero, zero, zero, zero, zero, 0, 0)
+  else
+    let (t, matId, normal) = intersectScene(ro, rd) in
+    if matId == 0 then
+      -- Miss: accumulate sky, deactivate
+      let sky = getSkyColor(rd) in
+      let contrib = @[sky.x * weight.x, sky.y * weight.y, sky.z * weight.z] in
+      (ro, rd, zero, contrib, zero, zero, zero, 0, 0)
+    else
+      let hitPoint = @[ro.x + rd.x * t, ro.y + rd.y * t, ro.z + rd.z * t] in
+      let (albedo, _, _, reflectivity, isGlass, ior) = getMaterial(matId, hitPoint) in
+      if isGlass == 1 then
+        -- Glass: split into reflect + refract
+        let entering = dot(rd, normal) < 0.0 in
+        let n = if entering then normal else @[0.0 - normal.x, 0.0 - normal.y, 0.0 - normal.z] in
+        let eta = if entering then 1.0 / ior else ior in
+        let cosTheta = f32.abs(dot(rd, n)) in
+        let fresnel = fresnelGlass(cosTheta, ior) in
+
+        let reflDir = reflect(rd, n) in
+        let refrDir = refractRay(rd, n, eta) in
+
+        let reflWeight = @[weight.x * fresnel, weight.y * fresnel, weight.z * fresnel] in
+        let refrWeight = @[weight.x * (1.0 - fresnel), weight.y * (1.0 - fresnel), weight.z * (1.0 - fresnel)] in
+
+        let offsetSign = if dot(reflDir, normal) > 0.0 then 1.0 else 0.0 - 1.0 in
+        let reflOrigin = @[hitPoint.x + normal.x * EPSILON * 10.0 * offsetSign,
+                           hitPoint.y + normal.y * EPSILON * 10.0 * offsetSign,
+                           hitPoint.z + normal.z * EPSILON * 10.0 * offsetSign] in
+        let refrOrigin = @[hitPoint.x - normal.x * EPSILON * 10.0 * offsetSign,
+                           hitPoint.y - normal.y * EPSILON * 10.0 * offsetSign,
+                           hitPoint.z - normal.z * EPSILON * 10.0 * offsetSign] in
+
+        -- Only spawn refract if slot < 4 (has a partner slot at idx+4)
+        -- If can't split (slots 4-7), follow refraction (transmission) path only
+        let canSplit = if idx < 4 then 1 else 0 in
+        if canSplit == 1 then
+          (reflOrigin, reflDir, reflWeight, zero, refrOrigin, refrDir, refrWeight, 1, 1)
+        else
+          -- Can't split: follow refraction with full weight (transmission through glass)
+          (refrOrigin, refrDir, weight, zero, zero, zero, zero, 1, 0)
+      else
+        -- Opaque: shade, continue with reflection
+        let viewDir = @[0.0 - rd.x, 0.0 - rd.y, 0.0 - rd.z] in
         let surfaceColor = shade(hitPoint, normal, viewDir, matId) in
-        let (albedo, unusedM, unusedR, reflectivity) = getMaterial(matId, hitPoint) in
+        let contrib = @[surfaceColor.x * weight.x * (1.0 - reflectivity),
+                        surfaceColor.y * weight.y * (1.0 - reflectivity),
+                        surfaceColor.z * weight.z * (1.0 - reflectivity)] in
+        let newWeight = @[weight.x * albedo.x * reflectivity,
+                          weight.y * albedo.y * reflectivity,
+                          weight.z * albedo.z * reflectivity] in
+        let reflDir = reflect(rd, normal) in
+        let reflOrigin = @[hitPoint.x + normal.x * EPSILON * 10.0,
+                           hitPoint.y + normal.y * EPSILON * 10.0,
+                           hitPoint.z + normal.z * EPSILON * 10.0] in
+        (reflOrigin, reflDir, newWeight, contrib, zero, zero, zero, 1, 0)
 
-        let contribution = 1.0 - reflectivity in
-        let tintedSurface = @[surfaceColor.x * tint.x * contribution,
-                              surfaceColor.y * tint.y * contribution,
-                              surfaceColor.z * tint.z * contribution] in
-        let newColor = @[color.x + tintedSurface.x,
-                         color.y + tintedSurface.y,
-                         color.z + tintedSurface.z] in
+-- Process one bounce for all 8 ray slots in parallel
+def processBounce(
+    origins: [8]vec3f32, dirs: [8]vec3f32, weights: [8]vec3f32, active: [8]i32,
+    accumColor: vec3f32
+) -> ([8]vec3f32, [8]vec3f32, [8]vec3f32, [8]i32, vec3f32) =
+  let indices = [0, 1, 2, 3, 4, 5, 6, 7] in
 
-        let newTint = @[tint.x * albedo.x * reflectivity,
-                        tint.y * albedo.y * reflectivity,
-                        tint.z * albedo.z * reflectivity] in
+  -- Process all rays in parallel
+  let results = map(|(i, ro, rd, w, a): (i32, vec3f32, vec3f32, vec3f32, i32)|
+      processOneRay(i, ro, rd, w, a),
+    zip5(indices, origins, dirs, weights, active)) in
 
-        let reflDir = reflect(rayD, normal) in
-        let newRayO = @[hitPoint.x + normal.x * EPSILON * 10.0,
-                        hitPoint.y + normal.y * EPSILON * 10.0,
-                        hitPoint.z + normal.z * EPSILON * 10.0] in
+  -- Extract updated ray states using destructuring
+  let newOrigins = map(|r| let (o, _, _, _, _, _, _, _, _) = r in o, results) in
+  let newDirs = map(|r| let (_, d, _, _, _, _, _, _, _) = r in d, results) in
+  let newWeights = map(|r| let (_, _, w, _, _, _, _, _, _) = r in w, results) in
+  let newActive = map(|r| let (_, _, _, _, _, _, _, a, _) = r in a, results) in
 
-        (newColor, newRayO, reflDir, newTint, bounce + 1)
+  -- Accumulate color contributions
+  let contribs = map(|r| let (_, _, _, c, _, _, _, _, _) = r in c, results) in
+  let totalContrib = reduce(vecAdd, @[0.0, 0.0, 0.0], contribs) in
+  let newAccum = vecAdd(accumColor, totalContrib) in
+
+  -- Extract refracted ray data from slots 0-3
+  let refrOrigins = map(|r| let (_, _, _, _, ro, _, _, _, _) = r in ro, results) in
+  let refrDirs = map(|r| let (_, _, _, _, _, rd, _, _, _) = r in rd, results) in
+  let refrWeights = map(|r| let (_, _, _, _, _, _, rw, _, _) = r in rw, results) in
+  let hasRefract = map(|r| let (_, _, _, _, _, _, _, _, h) = r in h, results) in
+
+  -- Conditionally update slots 4-7 only when a new refract ray spawns
+  -- (otherwise keep existing ray in that slot)
+  let finalOrigins = [
+    newOrigins[0], newOrigins[1], newOrigins[2], newOrigins[3],
+    if hasRefract[0] == 1 then refrOrigins[0] else newOrigins[4],
+    if hasRefract[1] == 1 then refrOrigins[1] else newOrigins[5],
+    if hasRefract[2] == 1 then refrOrigins[2] else newOrigins[6],
+    if hasRefract[3] == 1 then refrOrigins[3] else newOrigins[7]
+  ] in
+  let finalDirs = [
+    newDirs[0], newDirs[1], newDirs[2], newDirs[3],
+    if hasRefract[0] == 1 then refrDirs[0] else newDirs[4],
+    if hasRefract[1] == 1 then refrDirs[1] else newDirs[5],
+    if hasRefract[2] == 1 then refrDirs[2] else newDirs[6],
+    if hasRefract[3] == 1 then refrDirs[3] else newDirs[7]
+  ] in
+  let finalWeights = [
+    newWeights[0], newWeights[1], newWeights[2], newWeights[3],
+    if hasRefract[0] == 1 then refrWeights[0] else newWeights[4],
+    if hasRefract[1] == 1 then refrWeights[1] else newWeights[5],
+    if hasRefract[2] == 1 then refrWeights[2] else newWeights[6],
+    if hasRefract[3] == 1 then refrWeights[3] else newWeights[7]
+  ] in
+  let finalActive = [
+    newActive[0], newActive[1], newActive[2], newActive[3],
+    if hasRefract[0] == 1 then 1 else newActive[4],
+    if hasRefract[1] == 1 then 1 else newActive[5],
+    if hasRefract[2] == 1 then 1 else newActive[6],
+    if hasRefract[3] == 1 then 1 else newActive[7]
+  ] in
+
+  (finalOrigins, finalDirs, finalWeights, finalActive, newAccum)
+
+-- Main trace function with full ray splitting for glass
+def traceWithSplitting(ro: vec3f32, rd: vec3f32, maxBounces: i32) -> vec3f32 =
+  let zero = @[0.0, 0.0, 0.0] in
+  let origins: [8]vec3f32 = [ro, zero, zero, zero, zero, zero, zero, zero] in
+  let dirs: [8]vec3f32 = [rd, zero, zero, zero, zero, zero, zero, zero] in
+  let one = @[1.0, 1.0, 1.0] in
+  let weights: [8]vec3f32 = [one, zero, zero, zero, zero, zero, zero, zero] in
+  let active: [8]i32 = [1, 0, 0, 0, 0, 0, 0, 0] in
+
+  -- Bounce loop
+  let (_, _, _, _, _, finalColor) =
+    loop (o, d, w, a, bounce, c) = (origins, dirs, weights, active, 0, zero)
+    while bounce <= maxBounces do
+      let (o2, d2, w2, a2, c2) = processBounce(o, d, w, a, c) in
+      (o2, d2, w2, a2, bounce + 1, c2)
   in finalColor
 
 ------------------------------------------------------------
@@ -314,9 +546,9 @@ def getCamera(time: f32, mouse: vec4f32, resolution: vec2f32) -> (vec3f32, vec3f
 -- Fragment Shader
 ------------------------------------------------------------
 
-#[fragment]
-def fragment_main(#[builtin(position)] fragCoord: vec4f32) -> #[location(0)] vec4f32 =
-  let coord = @[fragCoord.x, iResolution.y - fragCoord.y] in
+-- Trace a single sample at given sub-pixel offset
+def traceSample(fragCoord: vec4f32, offsetX: f32, offsetY: f32) -> vec3f32 =
+  let coord = @[fragCoord.x + offsetX, iResolution.y - fragCoord.y + offsetY] in
 
   let uv = @[(coord.x / iResolution.x) * 2.0 - 1.0,
              (coord.y / iResolution.y) * 2.0 - 1.0] in
@@ -331,7 +563,10 @@ def fragment_main(#[builtin(position)] fragCoord: vec4f32) -> #[location(0)] vec
                        forward.z + uv2.x * right.z / fov + uv2.y * up.z / fov]) in
 
   let maxBounces = difficulty in
-  let color = trace(camPos, rd, maxBounces) in
+  traceWithSplitting(camPos, rd, maxBounces)
 
+#[fragment]
+def fragment_main(#[builtin(position)] fragCoord: vec4f32) -> #[location(0)] vec4f32 =
+  let color = traceSample(fragCoord, 0.0, 0.0) in
   let gamma = 1.0 / 2.2 in
   @[color.x ** gamma, color.y ** gamma, color.z ** gamma, 1.0]
