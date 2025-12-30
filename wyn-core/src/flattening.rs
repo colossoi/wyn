@@ -883,6 +883,7 @@ impl Flattener {
             ast::Attribute::Uniform { .. } => mir::Attribute::Uniform,
             // The binding is stored in Def::Storage, not the Attribute
             ast::Attribute::Storage { .. } => mir::Attribute::Storage,
+            ast::Attribute::SizeHint(hint) => mir::Attribute::SizeHint(*hint),
         }
     }
 

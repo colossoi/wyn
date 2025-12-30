@@ -271,7 +271,11 @@ impl ModuleManager {
                 self.known_modules.insert(name.clone());
                 Ok(())
             }
-            crate::ast::ModuleDecl::Module { name, signature, body } => {
+            crate::ast::ModuleDecl::Module {
+                name,
+                signature,
+                body,
+            } => {
                 if self.elaborated_modules.contains_key(name) {
                     bail_module!("Module '{}' is already defined", name);
                 }
@@ -581,7 +585,9 @@ impl ModuleManager {
                     || Self::expr_uses_intrinsic(&if_expr.then_branch)
                     || Self::expr_uses_intrinsic(&if_expr.else_branch)
             }
-            ExprKind::BinaryOp(_, lhs, rhs) => Self::expr_uses_intrinsic(lhs) || Self::expr_uses_intrinsic(rhs),
+            ExprKind::BinaryOp(_, lhs, rhs) => {
+                Self::expr_uses_intrinsic(lhs) || Self::expr_uses_intrinsic(rhs)
+            }
             ExprKind::UnaryOp(_, operand) => Self::expr_uses_intrinsic(operand),
             ExprKind::Tuple(exprs) | ExprKind::ArrayLiteral(exprs) | ExprKind::VecMatLiteral(exprs) => {
                 exprs.iter().any(Self::expr_uses_intrinsic)

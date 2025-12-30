@@ -383,6 +383,33 @@ fn test_parse_parameter_with_location_attribute() {
 }
 
 #[test]
+fn test_parse_parameter_with_size_hint_attribute() {
+    let program = parse_ok("def foo<[n], A>(#[size_hint(1024)] arr: [n]A) -> A = arr[0]");
+    assert_eq!(program.declarations.len(), 1);
+
+    let decl = match &program.declarations[0] {
+        Declaration::Decl(d) => d,
+        _ => panic!("Expected Decl declaration"),
+    };
+    assert_eq!(decl.name, "foo");
+    assert_eq!(decl.params.len(), 1);
+
+    // Pattern structure is Typed(Attributed(attrs, Name), type)
+    let param = &decl.params[0];
+    if let PatternKind::Typed(inner, _ty) = &param.kind {
+        if let PatternKind::Attributed(attrs, name_pat) = &inner.kind {
+            assert_eq!(attrs.len(), 1);
+            assert_eq!(attrs[0], Attribute::SizeHint(1024));
+            assert!(matches!(&name_pat.kind, PatternKind::Name(_)));
+        } else {
+            panic!("Expected Attributed pattern inside Typed, got {:?}", inner);
+        }
+    } else {
+        panic!("Expected Typed pattern, got {:?}", param);
+    }
+}
+
+#[test]
 fn test_parse_multiple_builtin_types() {
     let entry = single_entry(
         "#[vertex] def main(#[builtin(vertex_index)] vid: i32, #[builtin(instance_index)] iid: i32) -> #[builtin(position)] [4]f32 = result",
@@ -1463,7 +1490,11 @@ fn test_parse_module_bind_simple() {
     assert_eq!(program.declarations.len(), 1);
 
     match &program.declarations[0] {
-        Declaration::Module(ModuleDecl::Module { name, signature, body }) => {
+        Declaration::Module(ModuleDecl::Module {
+            name,
+            signature,
+            body,
+        }) => {
             assert_eq!(name, "M");
             assert!(signature.is_none());
             assert!(matches!(body, ModuleExpression::Struct(decls) if decls.len() == 1));
@@ -1478,7 +1509,11 @@ fn test_parse_module_with_signature() {
     assert_eq!(program.declarations.len(), 1);
 
     match &program.declarations[0] {
-        Declaration::Module(ModuleDecl::Module { name, signature, body: _ }) => {
+        Declaration::Module(ModuleDecl::Module {
+            name,
+            signature,
+            body: _,
+        }) => {
             assert_eq!(name, "M");
             assert!(signature.is_some());
             assert!(matches!(signature, Some(ModuleTypeExpression::Signature(specs)) if specs.len() == 1));
@@ -1544,7 +1579,11 @@ fn test_parse_empty_module() {
     assert_eq!(program.declarations.len(), 1);
 
     match &program.declarations[0] {
-        Declaration::Module(ModuleDecl::Module { name, signature: _, body }) => {
+        Declaration::Module(ModuleDecl::Module {
+            name,
+            signature: _,
+            body,
+        }) => {
             assert_eq!(name, "M");
             assert!(matches!(body, ModuleExpression::Struct(decls) if decls.is_empty()));
         }
@@ -1558,7 +1597,11 @@ fn test_parse_module_multiple_declarations() {
     assert_eq!(program.declarations.len(), 1);
 
     match &program.declarations[0] {
-        Declaration::Module(ModuleDecl::Module { name: _, signature: _, body }) => {
+        Declaration::Module(ModuleDecl::Module {
+            name: _,
+            signature: _,
+            body,
+        }) => {
             assert!(matches!(body, ModuleExpression::Struct(decls) if decls.len() == 3));
         }
         _ => panic!("Expected Module declaration"),
@@ -2756,7 +2799,11 @@ module f32 : (numeric with t = f32) = {
 
     // Check that we parsed a Module
     match &program.declarations[0] {
-        Declaration::Module(ModuleDecl::Module { name: _, signature: _, body }) => {
+        Declaration::Module(ModuleDecl::Module {
+            name: _,
+            signature: _,
+            body,
+        }) => {
             // Check the module body contains sig declarations
             match body {
                 ModuleExpression::Struct(decls) => {

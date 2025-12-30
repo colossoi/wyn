@@ -126,15 +126,13 @@ module f32_num : (numeric with t = f32) = {
     let m = mm.get_elaborated_module("f32_num").expect("f32_num should exist");
 
     // Should have TypeAlias for t -> f32
-    let has_type_alias = m.items.iter().any(|item| {
-        matches!(item, ElaboratedItem::TypeAlias(name, _) if name == "t")
-    });
+    let has_type_alias =
+        m.items.iter().any(|item| matches!(item, ElaboratedItem::TypeAlias(name, _) if name == "t"));
     assert!(has_type_alias, "f32_num should have type alias for t");
 
     // Should have Decl for add
-    let has_add_decl = m.items.iter().any(|item| {
-        matches!(item, ElaboratedItem::Decl(d) if d.name == "add")
-    });
+    let has_add_decl =
+        m.items.iter().any(|item| matches!(item, ElaboratedItem::Decl(d) if d.name == "add"));
     assert!(has_add_decl, "f32_num should have add declaration");
 
     // type_aliases should contain f32_num.t -> f32
@@ -167,20 +165,16 @@ module add_f32 = add_stuff(my_f32_num)
     let m = mm.get_elaborated_module("add_f32").expect("add_f32 should exist");
 
     // Should have TypeAlias for t (resolved from n.t -> f32)
-    let type_alias = m.items.iter().find_map(|item| {
-        match item {
-            ElaboratedItem::TypeAlias(name, ty) if name == "t" => Some(ty),
-            _ => None,
-        }
+    let type_alias = m.items.iter().find_map(|item| match item {
+        ElaboratedItem::TypeAlias(name, ty) if name == "t" => Some(ty),
+        _ => None,
     });
     assert!(type_alias.is_some(), "add_f32 should have type alias for t");
 
     // Should have Decl for add3
-    let add3_decl = m.items.iter().find_map(|item| {
-        match item {
-            ElaboratedItem::Decl(d) if d.name == "add3" => Some(d),
-            _ => None,
-        }
+    let add3_decl = m.items.iter().find_map(|item| match item {
+        ElaboratedItem::Decl(d) if d.name == "add3" => Some(d),
+        _ => None,
     });
     assert!(add3_decl.is_some(), "add_f32 should have add3 declaration");
 }
@@ -199,11 +193,9 @@ module foo = {
     let m = mm.get_elaborated_module("foo").expect("foo should exist");
 
     // Find the main decl
-    let main_decl = m.items.iter().find_map(|item| {
-        match item {
-            ElaboratedItem::Decl(d) if d.name == "main" => Some(d),
-            _ => None,
-        }
+    let main_decl = m.items.iter().find_map(|item| match item {
+        ElaboratedItem::Decl(d) if d.name == "main" => Some(d),
+        _ => None,
     });
     assert!(main_decl.is_some(), "foo should have main declaration");
 
@@ -234,11 +226,9 @@ module foo = {
     let m = mm.get_elaborated_module("foo").expect("foo should exist");
 
     // Find the test decl
-    let test_decl = m.items.iter().find_map(|item| {
-        match item {
-            ElaboratedItem::Decl(d) if d.name == "test" => Some(d),
-            _ => None,
-        }
+    let test_decl = m.items.iter().find_map(|item| match item {
+        ElaboratedItem::Decl(d) if d.name == "test" => Some(d),
+        _ => None,
     });
     assert!(test_decl.is_some(), "foo should have test declaration");
 
@@ -282,11 +272,9 @@ module i32_sum = sum_module(my_i32)
     let m = mm.get_elaborated_module("i32_sum").expect("i32_sum should exist");
 
     // Find sum3 decl
-    let sum3_decl = m.items.iter().find_map(|item| {
-        match item {
-            ElaboratedItem::Decl(d) if d.name == "sum3" => Some(d),
-            _ => None,
-        }
+    let sum3_decl = m.items.iter().find_map(|item| match item {
+        ElaboratedItem::Decl(d) if d.name == "sum3" => Some(d),
+        _ => None,
     });
     assert!(sum3_decl.is_some(), "i32_sum should have sum3 declaration");
 

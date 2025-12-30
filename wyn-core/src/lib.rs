@@ -761,7 +761,10 @@ fn get_prelude_cache() -> (&'static module_manager::PreElaboratedPrelude, NodeCo
 #[cfg(test)]
 pub fn cached_module_manager() -> (module_manager::ModuleManager, NodeCounter) {
     let (prelude, node_counter) = get_prelude_cache();
-    (module_manager::ModuleManager::from_prelude(prelude.clone()), node_counter)
+    (
+        module_manager::ModuleManager::from_prelude(prelude.clone()),
+        node_counter,
+    )
 }
 
 /// Create a FrontEnd using the cached prelude (test-only)

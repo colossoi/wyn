@@ -835,6 +835,7 @@ impl Display for mir::Attribute {
             }
             mir::Attribute::Uniform => write!(f, "#[uniform]"),
             mir::Attribute::Storage => write!(f, "#[storage]"),
+            mir::Attribute::SizeHint(hint) => write!(f, "#[size_hint({})]", hint),
         }
     }
 }

@@ -17,6 +17,8 @@ use crate::ast::{NodeId, Span, TypeName};
 use crate::types::TypeScheme;
 use polytype::Type;
 
+pub mod parallelism;
+
 #[cfg(test)]
 mod tests;
 
@@ -560,6 +562,8 @@ pub enum Attribute {
     },
     Uniform,
     Storage,
+    /// Hint for expected size of a dynamic array (in elements).
+    SizeHint(u32),
 }
 
 /// Execution model for a shader entry point.

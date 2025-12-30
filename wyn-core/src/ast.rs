@@ -253,6 +253,9 @@ pub enum Attribute {
         layout: StorageLayout,
         access: StorageAccess,
     },
+    /// Hint for the expected size of a dynamic array (in elements).
+    /// Used for parallelization decisions. Ignored on non-arrays or statically sized arrays.
+    SizeHint(u32),
 }
 
 impl Attribute {

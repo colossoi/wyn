@@ -119,9 +119,7 @@ impl<'a> Parser<'a> {
                     Ok(Declaration::Module(self.parse_module_decl()?))
                 }
             }
-            Some(Token::Functor) => {
-                Ok(Declaration::Module(self.parse_functor_decl()?))
-            }
+            Some(Token::Functor) => Ok(Declaration::Module(self.parse_functor_decl()?)),
             Some(Token::Open) => {
                 self.advance();
                 let mod_exp = self.parse_module_expression()?;
@@ -618,6 +616,14 @@ impl<'a> Parser<'a> {
                     layout,
                     access,
                 })
+            }
+            "size_hint" => {
+                // Parse size hint for dynamic arrays: #[size_hint(N)]
+                self.expect(Token::LeftParen)?;
+                let hint = self.expect_integer()? as u32;
+                self.expect(Token::RightParen)?;
+                self.expect(Token::RightBracket)?;
+                Ok(Attribute::SizeHint(hint))
             }
             _ => Err(err_parse!("Unknown attribute: {}", attr_name)),
         }

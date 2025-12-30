@@ -109,7 +109,11 @@ impl Parser<'_> {
             bail_parse!("Module binding must have either a body (= mod_exp) or a signature (: mod_type)");
         };
 
-        Ok(ModuleDecl::Module { name, signature, body })
+        Ok(ModuleDecl::Module {
+            name,
+            signature,
+            body,
+        })
     }
 
     /// Parse functor declaration:
