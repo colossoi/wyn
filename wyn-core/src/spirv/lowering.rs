@@ -9,7 +9,10 @@ use crate::ast::{NodeId, TypeName};
 use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
 use crate::lowering_common::is_empty_closure_type;
-use crate::mir::{self, Body, Def, Expr, ExprId, LambdaId, LambdaInfo, LocalId, LoopKind, Program};
+use crate::mir::parallelism::{SimpleComputeMap, detect_simple_compute_map};
+use crate::mir::{
+    self, Body, Def, ExecutionModel, Expr, ExprId, LambdaId, LambdaInfo, LocalId, LoopKind, Program,
+};
 use crate::types;
 use crate::{IdArena, bail_spirv, err_spirv};
 use polytype::Type as PolyType;
@@ -25,6 +28,22 @@ enum LowerState {
     NotStarted,
     InProgress,
     Done,
+}
+
+/// Information about a StorageSlice parameter for compute shader lowering.
+#[derive(Clone)]
+struct StorageSliceInfo {
+    /// Binding number for the storage buffer
+    #[allow(dead_code)]
+    binding: u32,
+    /// SPIR-V variable ID for the storage buffer
+    buffer_var: spirv::Word,
+    /// Element type ID
+    elem_type_id: spirv::Word,
+    /// Offset into the buffer (SPIR-V value ID)
+    offset: spirv::Word,
+    /// Length of the slice (SPIR-V value ID)
+    len: spirv::Word,
 }
 
 /// Entry point information for SPIR-V emission
@@ -107,8 +126,15 @@ struct Constructor {
     // Builtin function registry
     impl_source: ImplSource,
 
-    //// In-place optimization: NodeIds of operations where input array can be reused
+    /// In-place optimization: NodeIds of operations where input array can be reused
     inplace_nodes: HashSet<crate::ast::NodeId>,
+
+    /// Storage buffers for compute shaders: binding -> (buffer_var, elem_type_id)
+    storage_buffers: HashMap<u32, (spirv::Word, spirv::Word)>,
+
+    /// StorageSlice parameters: param_name -> StorageSliceInfo
+    /// Used during compute shader lowering to generate direct buffer access
+    storage_slice_params: HashMap<String, StorageSliceInfo>,
 }
 
 impl Constructor {
@@ -157,6 +183,8 @@ impl Constructor {
             lambda_registry: IdArena::new(),
             impl_source: ImplSource::default(),
             inplace_nodes: HashSet::new(),
+            storage_buffers: HashMap::new(),
+            storage_slice_params: HashMap::new(),
         }
     }
 
@@ -682,11 +710,42 @@ impl<'a> LowerCtx<'a> {
             }
             Def::EntryPoint {
                 name,
+                execution_model: ExecutionModel::Compute { local_size },
+                body,
+                inputs,
+                ..
+            } => {
+                // Validate compute shaders - must be "simple" pattern for now
+                let Some(compute_info) = detect_simple_compute_map(def) else {
+                    bail_spirv!(
+                        "Compute shader '{}' is not supported: must have single slice input and single map call at top level",
+                        name
+                    );
+                };
+
+                // Ensure dependencies (including map closure's lambda) are lowered
+                self.ensure_deps_lowered(body)?;
+
+                // Lower the compute shader with thunk architecture:
+                // 1. Helper function: the original body (map over slice)
+                // 2. Thunk: entry point that computes chunk and calls helper
+                lower_compute_entry_point(
+                    &mut self.constructor,
+                    name,
+                    *local_size,
+                    &compute_info,
+                    body,
+                    inputs,
+                )?;
+            }
+            Def::EntryPoint {
+                name,
                 inputs,
                 outputs,
                 body,
                 ..
             } => {
+                // Vertex/Fragment entry points
                 // First, ensure all dependencies are lowered
                 self.ensure_deps_lowered(body)?;
 
@@ -1065,6 +1124,170 @@ fn lower_entry_point_from_def(
     constructor.variables_block = None;
     constructor.first_code_block = None;
     constructor.env.clear();
+
+    Ok(())
+}
+
+/// Lower a compute shader entry point using the thunk architecture.
+///
+/// This generates a compute shader entry point that:
+/// - Gets global_invocation_id.x as thread index
+/// - Computes chunk boundaries based on size_hint / workgroup_size
+/// - Sets up a StorageSlice referencing the thread's chunk
+/// - Inlines the body (which operates on the StorageSlice in-place)
+fn lower_compute_entry_point(
+    constructor: &mut Constructor,
+    name: &str,
+    local_size: (u32, u32, u32),
+    compute_info: &SimpleComputeMap,
+    body: &Body,
+    inputs: &[mir::EntryInput],
+) -> Result<()> {
+    // Get element type from the input slice
+    let elem_type_id = constructor.ast_type_to_spirv(&compute_info.input.element_type);
+
+    // Compute chunk size from size_hint / workgroup_size.x
+    // Default size_hint to workgroup_size.x if not provided (1 element per thread)
+    let size_hint = compute_info.input.size_hint.unwrap_or(local_size.0);
+    let chunk_size = size_hint / local_size.0;
+    let chunk_size = if chunk_size == 0 { 1 } else { chunk_size };
+
+    // Set up the compute entry point
+    constructor.current_is_entry_point = true;
+    constructor.current_output_vars.clear();
+    constructor.current_input_vars.clear();
+
+    let mut interface_vars = Vec::new();
+
+    // Create storage buffer for the array (descriptor set 0, binding 0)
+    let runtime_array_type = constructor.builder.type_runtime_array(elem_type_id);
+    constructor.builder.decorate(
+        runtime_array_type,
+        spirv::Decoration::ArrayStride,
+        [Operand::LiteralBit32(4)], // TODO: compute proper stride from element type
+    );
+
+    // Wrap in a struct for Block decoration (required for storage buffers)
+    let buffer_struct_type = constructor.builder.type_struct([runtime_array_type]);
+    constructor.builder.decorate(buffer_struct_type, spirv::Decoration::Block, []);
+    constructor.builder.member_decorate(
+        buffer_struct_type,
+        0,
+        spirv::Decoration::Offset,
+        [Operand::LiteralBit32(0)],
+    );
+
+    let buffer_ptr_type =
+        constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, buffer_struct_type);
+    let buffer_var =
+        constructor.builder.variable(buffer_ptr_type, None, spirv::StorageClass::StorageBuffer, None);
+    constructor.builder.decorate(
+        buffer_var,
+        spirv::Decoration::DescriptorSet,
+        [Operand::LiteralBit32(0)],
+    );
+    constructor.builder.decorate(buffer_var, spirv::Decoration::Binding, [Operand::LiteralBit32(0)]);
+    interface_vars.push(buffer_var);
+
+    // Store the storage buffer info for use when lowering StorageSlice accesses
+    constructor.storage_buffers.insert(0, (buffer_var, elem_type_id));
+
+    // Create GlobalInvocationId input variable
+    let uvec3_type = constructor.get_or_create_vec_type(constructor.u32_type, 3);
+    let gid_ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::Input, uvec3_type);
+    let global_id_var = constructor.builder.variable(gid_ptr_type, None, spirv::StorageClass::Input, None);
+    constructor.builder.decorate(
+        global_id_var,
+        spirv::Decoration::BuiltIn,
+        [Operand::BuiltIn(spirv::BuiltIn::GlobalInvocationId)],
+    );
+    interface_vars.push(global_id_var);
+
+    // Store interface variables for entry point declaration
+    constructor.entry_point_interfaces.insert(name.to_string(), interface_vars);
+
+    // Create void(void) function for entry point
+    let func_type = constructor.builder.type_function(constructor.void_type, vec![]);
+    let func_id = constructor.builder.begin_function(
+        constructor.void_type,
+        None,
+        spirv::FunctionControl::NONE,
+        func_type,
+    )?;
+    constructor.functions.insert(name.to_string(), func_id);
+
+    // Create blocks
+    let vars_block_id = constructor.builder.id();
+    let code_block_id = constructor.builder.id();
+    constructor.variables_block = Some(vars_block_id);
+    constructor.first_code_block = Some(code_block_id);
+
+    constructor.builder.begin_block(Some(vars_block_id))?;
+    constructor.builder.select_block(None)?;
+    constructor.builder.begin_block(Some(code_block_id))?;
+    constructor.current_block = Some(code_block_id);
+
+    // Load global_invocation_id and extract x component
+    let gid = constructor.builder.load(uvec3_type, None, global_id_var, None, [])?;
+    let thread_id = constructor.builder.composite_extract(constructor.u32_type, None, gid, [0])?;
+
+    // Compute chunk start offset: start = thread_id * chunk_size
+    let chunk_size_const = constructor.const_u32(chunk_size);
+    let start_offset =
+        constructor.builder.i_mul(constructor.u32_type, None, thread_id, chunk_size_const)?;
+
+    // Set up the input parameter as a StorageSlice in the environment
+    // The body will access this when it references the input parameter
+    let input_param = &inputs[0];
+    let chunk_len = constructor.const_u32(chunk_size);
+
+    // Store StorageSlice info: (buffer_binding, offset_value, len_value)
+    // The lowering of map/indexing will check for this and generate direct buffer access
+    constructor.storage_slice_params.insert(
+        input_param.name.clone(),
+        StorageSliceInfo {
+            binding: 0,
+            buffer_var,
+            elem_type_id,
+            offset: start_offset,
+            len: chunk_len,
+        },
+    );
+
+    // Lower the body - map operations on the input will use StorageSlice access
+    let _result = lower_expr(constructor, body, body.root)?;
+
+    // The map operation writes results in-place, so no explicit store needed here
+
+    // Return
+    constructor.builder.ret()?;
+
+    // Terminate variables block
+    if let (Some(vars_block), Some(code_block)) =
+        (constructor.variables_block, constructor.first_code_block)
+    {
+        let func = constructor.builder.module_ref().functions.last().expect("No function");
+        let vars_idx = func
+            .blocks
+            .iter()
+            .position(|b| b.label.as_ref().map(|l| l.result_id) == Some(Some(vars_block)));
+
+        if let Some(idx) = vars_idx {
+            constructor.builder.select_block(Some(idx))?;
+            constructor.builder.branch(code_block)?;
+        }
+    }
+
+    constructor.builder.end_function()?;
+
+    // Clean up
+    constructor.current_is_entry_point = false;
+    constructor.current_used_globals.clear();
+    constructor.variables_block = None;
+    constructor.first_code_block = None;
+    constructor.env.clear();
+    constructor.storage_slice_params.clear();
+    constructor.storage_buffers.clear();
 
     Ok(())
 }
@@ -2524,6 +2747,11 @@ fn lower_map(
         );
     }
 
+    // Check if array argument is a StorageSlice (for compute shaders)
+    if let Some(storage_info) = get_storage_slice_for_expr(constructor, body, args[1]) {
+        return lower_map_storage_slice(constructor, body, args, storage_info);
+    }
+
     let (func_name, closure_val, is_empty_closure) = extract_closure_info(constructor, body, args[0])?;
 
     // Lower the input array
@@ -2570,6 +2798,141 @@ fn lower_map(
         }
         Ok(constructor.builder.composite_construct(result_type, None, result_elements)?)
     }
+}
+
+/// Check if an expression refers to a StorageSlice parameter.
+/// Returns the StorageSliceInfo if so.
+fn get_storage_slice_for_expr(
+    constructor: &Constructor,
+    body: &Body,
+    expr_id: ExprId,
+) -> Option<StorageSliceInfo> {
+    // Check if this is a Local reference to a storage slice parameter
+    if let Expr::Local(local_id) = body.get_expr(expr_id) {
+        let local_name = &body.get_local(*local_id).name;
+        return constructor.storage_slice_params.get(local_name).cloned();
+    }
+    None
+}
+
+/// Lower a map operation over a StorageSlice (for compute shaders).
+/// This generates in-place buffer access: for each element, load from buffer,
+/// apply function, store result back to buffer.
+fn lower_map_storage_slice(
+    constructor: &mut Constructor,
+    body: &Body,
+    args: &[ExprId],
+    storage_info: StorageSliceInfo,
+) -> Result<spirv::Word> {
+    let (func_name, closure_val, is_empty_closure) = extract_closure_info(constructor, body, args[0])?;
+
+    let map_func_id = *constructor
+        .functions
+        .get(&func_name)
+        .ok_or_else(|| err_spirv!("Map function not found: {}", func_name))?;
+
+    // Get the element pointer type for the storage buffer
+    let elem_ptr_type =
+        constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, storage_info.elem_type_id);
+
+    let zero = constructor.const_u32(0);
+
+    // Generate a loop over the chunk
+    // For now, use a simple unrolled approach with dynamic indexing
+    // TODO: Use actual SPIR-V loop constructs for larger chunks
+
+    // We need to loop from 0 to len, accessing buffer[offset + i]
+    // For the initial implementation, we'll use a loop variable
+
+    // Create loop variable
+    let i32_type = constructor.i32_type;
+    let u32_type = constructor.u32_type;
+
+    // Convert len to i32 for loop comparison
+    let len_i32 = constructor.builder.bitcast(i32_type, None, storage_info.len)?;
+
+    // Create loop blocks
+    let loop_header = constructor.builder.id();
+    let loop_body = constructor.builder.id();
+    let loop_continue = constructor.builder.id();
+    let loop_merge = constructor.builder.id();
+
+    // Branch to loop header
+    constructor.builder.branch(loop_header)?;
+
+    // Pre-allocate ID for the incremented loop index (used in phi forward reference)
+    let next_idx_id = constructor.builder.id();
+
+    // Get current block (the one we're branching from to enter the loop)
+    let pre_loop_block = constructor.current_block.unwrap();
+
+    // Loop header - phi node for loop variable
+    constructor.builder.begin_block(Some(loop_header))?;
+    constructor.current_block = Some(loop_header);
+
+    // Phi for loop index with both edges:
+    // - Initial value (0) from the block before the loop
+    // - Incremented value from the continue block (forward reference)
+    let zero_i32 = constructor.const_i32(0);
+    let loop_idx = constructor.builder.phi(
+        i32_type,
+        None,
+        [(zero_i32, pre_loop_block), (next_idx_id, loop_continue)],
+    )?;
+
+    // Loop condition: idx < len
+    let cond = constructor.builder.s_less_than(constructor.bool_type, None, loop_idx, len_i32)?;
+
+    // Loop control
+    constructor.builder.loop_merge(loop_merge, loop_continue, spirv::LoopControl::NONE, [])?;
+    constructor.builder.branch_conditional(cond, loop_body, loop_merge, [])?;
+
+    // Loop body
+    constructor.builder.begin_block(Some(loop_body))?;
+    constructor.current_block = Some(loop_body);
+
+    // Compute buffer index: offset + idx
+    let idx_u32 = constructor.builder.bitcast(u32_type, None, loop_idx)?;
+    let buffer_idx = constructor.builder.i_add(u32_type, None, storage_info.offset, idx_u32)?;
+
+    // Access buffer[buffer_idx]
+    let elem_ptr = constructor.builder.access_chain(
+        elem_ptr_type,
+        None,
+        storage_info.buffer_var,
+        [zero, buffer_idx],
+    )?;
+
+    // Load element
+    let input_elem = constructor.builder.load(storage_info.elem_type_id, None, elem_ptr, None, [])?;
+
+    // Call the map function
+    let call_args = if is_empty_closure { vec![input_elem] } else { vec![closure_val, input_elem] };
+    let result_elem =
+        constructor.builder.function_call(storage_info.elem_type_id, None, map_func_id, call_args)?;
+
+    // Store result back to the same location (in-place)
+    constructor.builder.store(elem_ptr, result_elem, None, [])?;
+
+    // Branch to continue block
+    constructor.builder.branch(loop_continue)?;
+
+    // Continue block - increment loop variable with the pre-allocated ID
+    constructor.builder.begin_block(Some(loop_continue))?;
+    constructor.current_block = Some(loop_continue);
+
+    let one = constructor.const_i32(1);
+    // Use the pre-allocated ID for next_idx so the phi forward reference works
+    constructor.builder.i_add(i32_type, Some(next_idx_id), loop_idx, one)?;
+
+    constructor.builder.branch(loop_header)?;
+
+    // Merge block
+    constructor.builder.begin_block(Some(loop_merge))?;
+    constructor.current_block = Some(loop_merge);
+
+    // Return unit value (the result is written in-place)
+    Ok(constructor.const_i32(0))
 }
 
 /// Lower `_w_intrinsic_zip`: zip [a,b,c] [x,y,z] = [(a,x), (b,y), (c,z)]

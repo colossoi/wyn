@@ -1,9 +1,12 @@
 //! Parallelism analysis for SOAC (Second-Order Array Combinator) operations.
 //!
 //! This module analyzes MIR to identify SOAC intrinsics and classify them
-//! based on their parallelization characteristics.
+//! based on their parallelization characteristics. It also provides detection
+//! for simple compute shader patterns that can be parallelized.
 
-use super::{Body, Expr, ExprId};
+use super::{Body, Def, EntryInput, ExecutionModel, Expr, ExprId, LocalId};
+use crate::types::TypeName;
+use polytype::Type;
 
 /// Classification of a SOAC's parallelization characteristics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +70,153 @@ impl ParallelismAnalysis {
         (independent, dependent)
     }
 }
+
+// =============================================================================
+// Simple Compute Map Detection
+// =============================================================================
+
+/// Information about a detected simple compute map pattern.
+///
+/// This pattern is:
+/// - A `#[compute]` entry point
+/// - With a single input slice parameter
+/// - Whose body is sequential setup (Let bindings) followed by a single `map` call
+#[derive(Debug, Clone)]
+pub struct SimpleComputeMap {
+    /// The workgroup size from the `#[compute(x,y,z)]` attribute.
+    pub local_size: (u32, u32, u32),
+    /// The input parameter (a slice).
+    pub input: InputSliceInfo,
+    /// The ExprId of the map call.
+    pub map_expr: ExprId,
+    /// The closure/lambda being mapped.
+    pub map_closure: ExprId,
+    /// The array argument to map.
+    pub map_array: ExprId,
+}
+
+/// Information about an input slice parameter.
+#[derive(Debug, Clone)]
+pub struct InputSliceInfo {
+    /// LocalId of the input parameter.
+    pub local: LocalId,
+    /// Name of the parameter.
+    pub name: String,
+    /// Element type of the slice.
+    pub element_type: Type<TypeName>,
+    /// Size hint if provided (from `#[size_hint(N)]`).
+    pub size_hint: Option<u32>,
+}
+
+/// Detect if a definition is a simple compute shader with a single map.
+///
+/// Returns `Some(SimpleComputeMap)` if the definition matches the pattern:
+/// - `#[compute(x,y,z)]` entry point
+/// - Single input slice parameter
+/// - Body is Let bindings followed by a single `_w_intrinsic_map` call
+pub fn detect_simple_compute_map(def: &Def) -> Option<SimpleComputeMap> {
+    // Must be an EntryPoint with Compute execution model
+    let (execution_model, inputs, body) = match def {
+        Def::EntryPoint {
+            execution_model,
+            inputs,
+            body,
+            ..
+        } => (execution_model, inputs, body),
+        _ => return None,
+    };
+
+    let local_size = match execution_model {
+        ExecutionModel::Compute { local_size } => *local_size,
+        _ => return None,
+    };
+
+    // Must have exactly one input that is a slice
+    if inputs.len() != 1 {
+        return None;
+    }
+    let input = &inputs[0];
+    let input_info = analyze_input_slice(input)?;
+
+    // Analyze body structure: should be sequential Let bindings + single map
+    let (map_expr, map_closure, map_array) = find_single_map_at_root(body)?;
+
+    Some(SimpleComputeMap {
+        local_size,
+        input: input_info,
+        map_expr,
+        map_closure,
+        map_array,
+    })
+}
+
+/// Check if an input is a slice/array type suitable for compute shaders and extract its info.
+fn analyze_input_slice(input: &EntryInput) -> Option<InputSliceInfo> {
+    // Accept both:
+    // 1. Array(Unsized, elem) - unsized array like []f32
+    // 2. Slice(cap, elem) - actual slice type
+    let element_type = match &input.ty {
+        Type::Constructed(TypeName::Array, args) if args.len() == 2 => {
+            // Array(size, elem) - check if size is Unsized
+            match &args[0] {
+                Type::Constructed(TypeName::Unsized, _) => args[1].clone(),
+                _ => return None, // Fixed-size arrays not supported for compute
+            }
+        }
+        Type::Constructed(TypeName::Slice, args) if args.len() == 2 => {
+            // Slice(cap, elem) - we want the element type (second arg)
+            args[1].clone()
+        }
+        _ => return None,
+    };
+
+    // TODO: Extract size_hint from attributes if present
+    // For now, we don't have attribute info on EntryInput
+
+    Some(InputSliceInfo {
+        local: input.local,
+        name: input.name.clone(),
+        element_type,
+        size_hint: None,
+    })
+}
+
+/// Walk the body from root to find a single map call at the "end" of setup.
+///
+/// The allowed pattern is:
+/// ```text
+/// let a = ... in
+/// let b = ... in
+/// ...
+/// _w_intrinsic_map(closure, array)
+/// ```
+///
+/// Returns (map_expr_id, closure_arg, array_arg) if found.
+fn find_single_map_at_root(body: &Body) -> Option<(ExprId, ExprId, ExprId)> {
+    let mut current = body.root;
+
+    // Walk through Let bindings
+    loop {
+        match body.get_expr(current) {
+            Expr::Let { body: inner, .. } => {
+                current = *inner;
+            }
+            Expr::Call { func, args } if func == "_w_intrinsic_map" => {
+                // Found the map! Should have 2 args: closure, array
+                if args.len() == 2 {
+                    return Some((current, args[0], args[1]));
+                }
+                return None;
+            }
+            // Any other expression at root level means this isn't a simple pattern
+            _ => return None,
+        }
+    }
+}
+
+// =============================================================================
+// SOAC Classification
+// =============================================================================
 
 /// Classify a function name as a SOAC intrinsic and determine its parallelism kind.
 /// Returns None if the function is not a SOAC intrinsic.

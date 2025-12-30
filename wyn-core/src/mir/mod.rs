@@ -231,6 +231,21 @@ pub enum Expr {
         /// Dynamic length: i32
         len: ExprId,
     },
+    // TODO: StorageSlice for compute shaders - commented out until needed in MIR
+    // /// Storage buffer slice for compute shaders.
+    // /// References a region of a storage buffer by binding + offset + length.
+    // /// Used by thunks to pass chunks of storage buffer to helper functions.
+    // /// Type: Slice(cap, elem) where cap is the chunk size.
+    // StorageSlice {
+    //     /// Descriptor set for the storage buffer
+    //     set: u32,
+    //     /// Binding number for the storage buffer
+    //     binding: u32,
+    //     /// Start offset into the buffer: u32
+    //     offset: ExprId,
+    //     /// Number of elements in this slice: u32
+    //     len: ExprId,
+    // },
 }
 
 // =============================================================================

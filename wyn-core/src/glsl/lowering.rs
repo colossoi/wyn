@@ -121,7 +121,7 @@ impl<'a> LowerCtx<'a> {
                         fragment_shader = Some(self.lower_shader(name, ShaderStage::Fragment)?);
                     }
                     ExecutionModel::Compute { .. } => {
-                        // Compute shaders not supported in this output format
+                        bail_glsl!("Compute shaders are not supported in GLSL output format");
                     }
                 }
             }
