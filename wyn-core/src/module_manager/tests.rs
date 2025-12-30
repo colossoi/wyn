@@ -155,7 +155,7 @@ module my_f32_num : (numeric with t = f32) = {
     def add(x: t, y: t) -> t = x + y
 }
 
-module add_stuff(n: numeric) = {
+functor add_stuff(n: numeric) = {
     type t = n.t
     def add3(x: t, y: t, z: t) -> t = n.add(n.add(x, y), z)
 }
@@ -271,7 +271,7 @@ module my_i32 : (numeric with t = i32) = {
     def add(x: t, y: t) -> t = x + y
 }
 
-module sum_module(n: numeric) = {
+functor sum_module(n: numeric) = {
     def sum3(a: n.t, b: n.t, c: n.t) -> n.t = n.add(n.add(a, b), c)
 }
 

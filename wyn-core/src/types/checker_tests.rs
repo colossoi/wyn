@@ -1595,7 +1595,7 @@ module my_f64_num : (my_numeric with t = f64) = {
   def add(x: t, y: t) -> t = x + y
 }
 
-module add_stuff(n: my_numeric) = {
+functor add_stuff(n: my_numeric) = {
   type t = n.t
 
   def add3(x: t, y: t, z: t) -> t =

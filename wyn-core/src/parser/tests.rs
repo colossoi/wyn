@@ -1463,7 +1463,7 @@ fn test_parse_module_bind_simple() {
     assert_eq!(program.declarations.len(), 1);
 
     match &program.declarations[0] {
-        Declaration::Module(ast::ModuleDecl::Module { name, signature, body }) => {
+        Declaration::Module(ModuleDecl::Module { name, signature, body }) => {
             assert_eq!(name, "M");
             assert!(signature.is_none());
             assert!(matches!(body, ModuleExpression::Struct(decls) if decls.len() == 1));
@@ -1477,13 +1477,14 @@ fn test_parse_module_with_signature() {
     let program = parse_ok("module M : { sig x: i32 } = { def x: i32 = 42 }");
     assert_eq!(program.declarations.len(), 1);
 
-    let bind = match &program.declarations[0] {
-        Declaration::ModuleBind(b) => b,
-        _ => panic!("Expected ModuleBind declaration"),
+    match &program.declarations[0] {
+        Declaration::Module(ModuleDecl::Module { name, signature, body: _ }) => {
+            assert_eq!(name, "M");
+            assert!(signature.is_some());
+            assert!(matches!(signature, Some(ModuleTypeExpression::Signature(specs)) if specs.len() == 1));
+        }
+        _ => panic!("Expected Module declaration"),
     };
-    assert_eq!(bind.name, "M");
-    assert!(bind.signature.is_some());
-    assert!(matches!(&bind.signature, Some(ModuleTypeExpression::Signature(specs)) if specs.len() == 1));
 }
 
 #[test]
@@ -1542,12 +1543,13 @@ fn test_parse_empty_module() {
     let program = parse_ok("module M = {}");
     assert_eq!(program.declarations.len(), 1);
 
-    let bind = match &program.declarations[0] {
-        Declaration::ModuleBind(b) => b,
-        _ => panic!("Expected ModuleBind declaration"),
+    match &program.declarations[0] {
+        Declaration::Module(ModuleDecl::Module { name, signature: _, body }) => {
+            assert_eq!(name, "M");
+            assert!(matches!(body, ModuleExpression::Struct(decls) if decls.is_empty()));
+        }
+        _ => panic!("Expected Module declaration"),
     };
-    assert_eq!(bind.name, "M");
-    assert!(matches!(&bind.body, ModuleExpression::Struct(decls) if decls.is_empty()));
 }
 
 #[test]
@@ -1555,11 +1557,12 @@ fn test_parse_module_multiple_declarations() {
     let program = parse_ok("module M = { type t = i32 def x: t = 42 def y: t = 99 }");
     assert_eq!(program.declarations.len(), 1);
 
-    let bind = match &program.declarations[0] {
-        Declaration::ModuleBind(b) => b,
-        _ => panic!("Expected ModuleBind declaration"),
+    match &program.declarations[0] {
+        Declaration::Module(ModuleDecl::Module { name: _, signature: _, body }) => {
+            assert!(matches!(body, ModuleExpression::Struct(decls) if decls.len() == 3));
+        }
+        _ => panic!("Expected Module declaration"),
     };
-    assert!(matches!(&bind.body, ModuleExpression::Struct(decls) if decls.len() == 3));
 }
 
 #[test]
@@ -2751,11 +2754,11 @@ module f32 : (numeric with t = f32) = {
     );
     assert_eq!(program.declarations.len(), 1);
 
-    // Check that we parsed a ModuleBind
+    // Check that we parsed a Module
     match &program.declarations[0] {
-        Declaration::ModuleBind(mb) => {
+        Declaration::Module(ModuleDecl::Module { name: _, signature: _, body }) => {
             // Check the module body contains sig declarations
-            match &mb.body {
+            match body {
                 ModuleExpression::Struct(decls) => {
                     assert!(
                         decls.len() >= 3,
@@ -2768,7 +2771,7 @@ module f32 : (numeric with t = f32) = {
                 _ => panic!("Expected ModuleExpression::Struct"),
             }
         }
-        _ => panic!("Expected ModuleBind"),
+        _ => panic!("Expected Module"),
     }
 }
 
@@ -3281,7 +3284,7 @@ fn test_functor_param_module_function_call() {
     // Calling a function from a functor parameter module: R.f64(x)
     // This should parse as Application(Identifier(["R"], "f64"), [x])
     let src = r#"
-module mk_erf(R: real) = {
+functor mk_erf(R: real) = {
   def erf(x: R.t) -> R.t = R.f64(0.5)
 }
 "#;
