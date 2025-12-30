@@ -70,15 +70,9 @@ module type real = {
   sig sin : t -> t
   sig cos : t -> t
   sig tan : t -> t
-  sig sinpi : t -> t
-  sig cospi : t -> t
-  sig tanpi : t -> t
   sig asin : t -> t
   sig acos : t -> t
   sig atan : t -> t
-  sig asinpi : t -> t
-  sig acospi : t -> t
-  sig atanpi : t -> t
   sig sinh : t -> t
   sig cosh : t -> t
   sig tanh : t -> t
@@ -86,8 +80,6 @@ module type real = {
   sig acosh : t -> t
   sig atanh : t -> t
   sig atan2 : t -> t -> t
-  sig atan2pi : t -> t -> t
-  sig hypot : t -> t -> t
   sig lerp : t -> t -> t -> t
   sig log : t -> t
   sig log2 : t -> t
@@ -155,15 +147,6 @@ module f32 : (float with t = f32 with int_t = u32) = {
   def log1p(x: t) -> t = f32.log((1.0f32 + x))
 
   def pi: t = 3.14159265358979323846f32
-  def sinpi(x: t) -> t = f32.sin((pi * x))
-  def cospi(x: t) -> t = f32.cos((pi * x))
-  def tanpi(x: t) -> t = f32.tan((pi * x))
-  def asinpi(x: t) -> t = f32.asin(x) / pi
-  def acospi(x: t) -> t = f32.acos(x) / pi
-  def atanpi(x: t) -> t = f32.atan(x) / pi
-
-  def atan2pi(x: t, y: t) -> t = f32.atan2(x, y) / pi
-  def hypot(x: t, y: t) -> t = f32.sqrt((x * x + y * y))
 
   def mad(a: t, b: t, c: t) -> t = a * b + c
 

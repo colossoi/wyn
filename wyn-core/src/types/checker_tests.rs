@@ -1623,3 +1623,20 @@ def test_lgamma(x: f32) -> f32 = stats32.lgamma(x)
         "#,
     );
 }
+
+#[test]
+fn test_trig32() {
+    // Test using the trig32 module from the ftrig functor
+    typecheck_program(
+        r#"
+def test_sinpi(x: f32) -> f32 = trig32.sinpi(x)
+def test_cospi(x: f32) -> f32 = trig32.cospi(x)
+def test_tanpi(x: f32) -> f32 = trig32.tanpi(x)
+def test_asinpi(x: f32) -> f32 = trig32.asinpi(x)
+def test_acospi(x: f32) -> f32 = trig32.acospi(x)
+def test_atanpi(x: f32) -> f32 = trig32.atanpi(x)
+def test_atan2pi(x: f32, y: f32) -> f32 = trig32.atan2pi(x, y)
+def test_hypot(x: f32, y: f32) -> f32 = trig32.hypot(x, y)
+        "#,
+    );
+}

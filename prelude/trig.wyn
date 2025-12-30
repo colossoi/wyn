@@ -1,0 +1,23 @@
+-- Derived trigonometric functions functor
+-- Provides sinpi, cospi, tanpi, asinpi, acospi, atanpi, atan2pi, hypot
+
+functor ftrig(R: real) = {
+  type t = R.t
+
+  -- Trig functions with pi multiplier: sin(pi * x), etc.
+  def sinpi(x: t) -> t = R.sin(R.pi * x)
+  def cospi(x: t) -> t = R.cos(R.pi * x)
+  def tanpi(x: t) -> t = R.tan(R.pi * x)
+
+  -- Inverse trig functions returning result in units of pi
+  def asinpi(x: t) -> t = R.asin(x) / R.pi
+  def acospi(x: t) -> t = R.acos(x) / R.pi
+  def atanpi(x: t) -> t = R.atan(x) / R.pi
+  def atan2pi(x: t, y: t) -> t = R.atan2(x, y) / R.pi
+
+  -- Euclidean distance
+  def hypot(x: t, y: t) -> t = R.sqrt(x * x + y * y)
+}
+
+module trig32 = ftrig(f32)
+module trig64 = ftrig(f64)
