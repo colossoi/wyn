@@ -186,6 +186,7 @@ impl ModuleManager {
     fn load_prelude_files(&mut self, node_counter: &mut NodeCounter) -> Result<()> {
         // Load all prelude files using include_str!
         self.load_str(include_str!("../../../prelude/math.wyn"), node_counter)?;
+        self.load_str(include_str!("../../../prelude/stats.wyn"), node_counter)?;
         self.load_str(include_str!("../../../prelude/graphics.wyn"), node_counter)?;
         self.load_str(include_str!("../../../prelude/rand.wyn"), node_counter)?;
         self.load_str(include_str!("../../../prelude/soacs.wyn"), node_counter)?;

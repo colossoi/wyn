@@ -1,0 +1,38 @@
+-- Statistical functions functor
+-- Provides erf, erfc, gamma, lgamma for any real number type
+
+functor fstats(R: real) = {
+  type t = R.t
+
+  -- Log-gamma using Stirling's approximation (good for x > 0)
+  def lgamma(x: t) -> t =
+    let half = R.f64(0.5f64) in
+    let one = R.f64(1.0f64) in
+    let twelve = R.f64(12.0f64) in
+    let log2pi = R.f64(1.8378770664093453f64) in
+    (x - half) * R.log(x) - x + half * log2pi + one / (twelve * x)
+
+  def gamma(x: t) -> t = R.exp(lgamma(x))
+
+  -- Error function using Abramowitz and Stegun approximation
+  def erf(x: t) -> t =
+    let zero = R.f64(0.0f64) in
+    let one = R.f64(1.0f64) in
+    let neg_one = zero - one in
+    let a1 = R.f64(0.254829592f64) in
+    let a2 = R.f64(0.0f64) - R.f64(0.284496736f64) in
+    let a3 = R.f64(1.421413741f64) in
+    let a4 = R.f64(0.0f64) - R.f64(1.453152027f64) in
+    let a5 = R.f64(1.061405429f64) in
+    let p  = R.f64(0.3275911f64) in
+    let sign = if x < zero then neg_one else one in
+    let ax = R.abs(x) in
+    let t = one / (one + p * ax) in
+    let y = one - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * R.exp(zero - ax * ax) in
+    sign * y
+
+  def erfc(x: t) -> t = R.f64(1.0f64) - erf(x)
+}
+
+module stats32 = fstats(f32)
+module stats64 = fstats(f64)

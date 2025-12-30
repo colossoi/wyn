@@ -1610,3 +1610,16 @@ def add3_f64(a: f64, b: f64, c: f64) -> f64 = add_f64.add3(a, b, c)
         "#,
     );
 }
+
+#[test]
+fn test_stats32_erf() {
+    // Test using the stats32 module from the fstats functor
+    typecheck_program(
+        r#"
+def test_erf(x: f32) -> f32 = stats32.erf(x)
+def test_erfc(x: f32) -> f32 = stats32.erfc(x)
+def test_gamma(x: f32) -> f32 = stats32.gamma(x)
+def test_lgamma(x: f32) -> f32 = stats32.lgamma(x)
+        "#,
+    );
+}
