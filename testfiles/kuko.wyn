@@ -1,0 +1,311 @@
+-- "KuKo Day 232" - Holofoil Dice by Jaenam
+-- Wyn port of the Shadertoy shader
+-- License: Creative Commons (CC BY-NC-SA 4.0)
+-- Original: https://x.com/Jaenam97/status/1997653539078693351
+
+------------------------------------------------------------
+-- Uniforms
+------------------------------------------------------------
+#[uniform(set=0, binding=0)] def iResolution: vec2f32
+#[uniform(set=0, binding=1)] def iTime: f32
+#[uniform(set=0, binding=5)] def iMouse: vec4f32
+
+def FAR: f32 = 55.0
+
+------------------------------------------------------------
+-- Vertex shader: full-screen triangle
+------------------------------------------------------------
+def verts: [3]vec4f32 =
+  [@[-1.0, -1.0, 0.0, 1.0],
+   @[3.0, -1.0, 0.0, 1.0],
+   @[-1.0, 3.0, 0.0, 1.0]]
+
+#[vertex]
+def vertex_main(#[builtin(vertex_index)] vertex_id: i32) -> #[builtin(position)] vec4f32 = verts[vertex_id]
+
+------------------------------------------------------------
+-- Two by two rotation matrix constructor
+------------------------------------------------------------
+def rot2D(a: f32) -> mat2f32 =
+  let c = f32.cos(a) in
+  let s = f32.sin(a) in
+  @[[c, s], [0.0 - s, c]]
+
+------------------------------------------------------------
+-- Hash functions for random sparkle generation
+------------------------------------------------------------
+def hash(p: vec3f32) -> f32 =
+  fract(f32.sin(dot(p, @[127.1, 311.7, 74.7])) * 43758.5)
+
+def hash2(p: vec3f32) -> f32 =
+  fract(f32.sin(dot(p, @[43.7, 78.2, 123.4])) * 127.1)
+
+------------------------------------------------------------
+-- Camera path to move around
+------------------------------------------------------------
+def camPath(t: f32) -> vec2f32 =
+  let s = f32.sin(t * 0.312) in
+  let c = f32.cos(t * 0.124) in
+  @[c * 1.4 - s * 1.4, c * 1.7 + s * 2.5]
+
+------------------------------------------------------------
+-- Foil gyroid distance function
+------------------------------------------------------------
+def foilGyroid(p: vec3f32, t: f32) -> f32 =
+  let ps = @[p.x * 0.6, p.y * 0.6, p.z * 0.6] in
+  let sinp = @[f32.sin(ps.x + t), f32.sin(ps.y + t), f32.sin(ps.z + t)] in
+  let cosp = @[f32.cos(ps.y + t), f32.cos(ps.z + t), f32.cos(ps.x + t)] in
+  let gyroid = dot(sinp, cosp) in
+  f32.abs(gyroid) * 1.0
+
+------------------------------------------------------------
+-- Main raymarching function with chromatic offset
+------------------------------------------------------------
+def raymarch(fragCoord: vec2f32, res: vec2f32, rotX: mat2f32, rotY: mat2f32, chromatic: f32, use_mouse: f32) -> f32 =
+  let (_, _, colorAccum) = loop (i, dt, acc) = (0.0, 0.0, 0.0) while i < FAR do
+    -- Ray origin with camera path
+    let ro_z = iTime * 0.5 in
+    let cam = camPath(ro_z) in
+    let ro = @[cam.x, cam.y, ro_z] in
+
+    -- Calculate ray direction from screen coordinates
+    let rd_xy = @[(fragCoord.x + fragCoord.x - res.x) / res.y, (fragCoord.y + fragCoord.y - res.y) / res.y] in
+    let rd_raw = @[rd_xy.x, rd_xy.y, 1.0] in
+    let rd_len = magnitude(rd_raw) in
+    let rd = @[rd_raw.x / rd_len, rd_raw.y / rd_len, rd_raw.z / rd_len] in
+
+    -- Apply rotation to ray direction based on mouse
+    let rd2 = if use_mouse > 0.5 then
+      let yz = mul(@[rd.y, rd.z], rotY) in
+      @[rd.x, yz.x, yz.y]
+    else
+      let xy = mul(@[rd.x, rd.y], rotX) in
+      @[xy.x, xy.y, rd.z]
+    in
+
+    -- Ray position
+    let p = @[ro.x + rd2.x * dt, ro.y + rd2.y * dt, ro.z + rd2.z * dt] in
+
+    if f32.abs(p.x) > 9.0 then (FAR, dt, acc)
+    else
+      -- Voxel grid for sparkles
+      let gridPos = @[f32.floor(p.x * 4.0), f32.floor(p.y * 4.0), f32.floor(p.z * 4.0)] in
+      let localPos = @[fract(p.x * 4.0) - 0.5, fract(p.y * 4.0) - 0.5, fract(p.z * 4.0) - 0.5] in
+
+      -- Sparkle detection
+      let localLen = magnitude(localPos) in
+      let sparkThresh = hash(gridPos) * 0.23 + 0.01 in
+      let sparkPlus = if localLen < sparkThresh then 1.0 else 0.0 in
+      let sparkHash = hash2(gridPos) * 6.28 in
+
+      -- Calculate distances
+      let foilDist = foilGyroid(p, iTime * 0.01) in
+      let cubeDist = foilGyroid(p, iTime * 0.04) in
+      let sineDist = magnitude(@[f32.sin(cubeDist), 0.0, 0.0]) - 0.13 in
+
+      let combinedDist = f32.max(f32.max(cubeDist, foilDist - 0.1), sineDist)
+                         + chromatic * 0.001 - i / 130.0 in
+
+      let stepSize = 0.01 + 0.2 * f32.abs(combinedDist) in
+      let dt2 = dt + stepSize in
+
+      -- Sparkle glow
+      let sparkGlow = sparkPlus * f32.sin(sparkHash + i * 0.04 + chromatic * 20.0) in
+      let sparkGlowClamped = f32.max(0.0, sparkGlow) in
+
+      -- Volumetric glow contributions
+      let shapeGlow = 3.5 / stepSize in
+      let sparkBright = 15.0 / stepSize in
+
+      -- Accumulate color
+      let contrib = shapeGlow * (0.3 + 0.23 * f32.sin(i * 0.33 + chromatic * 5.0)) +
+                    sparkBright * sparkGlowClamped in
+
+      (i + 1.0, dt2, acc + contrib)
+  in colorAccum
+
+------------------------------------------------------------
+-- Fragment shader
+------------------------------------------------------------
+#[fragment]
+def fragment_main(#[builtin(position)] frag: vec4f32) -> #[location(0)] vec4f32 =
+  let res = iResolution in
+  let uv = @[frag.x, res.y - frag.y] in
+
+  -- Mouse control for rotation, or auto-rotate based on time
+  let use_mouse = if iMouse.z > 0.0 then 1.0 else 0.0 in
+  let ma = if use_mouse > 0.5 then
+    @[(iMouse.x / res.x - 0.5) * 6.28, (iMouse.y / res.y - 0.5) * 6.28]
+  else
+    @[iTime / 12.0, iTime / 12.0]
+  in
+
+  -- Rotation matrices for 3D camera orientation
+  let rotX = rot2D(ma.x) in
+  let rotY = rot2D(ma.y) in
+
+  -- Raymarch three times with chromatic offset for RGB channels
+  let r_val = raymarch(uv, res, rotX, rotY, 0.0 - 1.0, use_mouse) in
+  let g_val = raymarch(uv, res, rotX, rotY, 0.0, use_mouse) in
+  let b_val = raymarch(uv, res, rotX, rotY, 1.0, use_mouse) in
+
+  -- Tone mapping: tanh(O * O / 1e7)
+  let scale = 1.0 / 10000000.0 in
+  let r_out = f32.tanh(r_val * r_val * scale) in
+  let g_out = f32.tanh(g_val * g_val * scale) in
+  let b_out = f32.tanh(b_val * b_val * scale) in
+
+  @[r_out, g_out, b_out, 1.0]
+
+------------------------------------------------------------
+-- Original GLSL code
+------------------------------------------------------------
+
+-- /*
+--     ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+--
+--     ▓              🌟  KuKo Day 232  🌟
+--
+--     ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+-- */
+--
+-- /*================================
+-- =         Holofoil Dice          =
+-- =         Author: Jaenam         =
+-- ================================*/
+-- // Date:    2025-12-07
+-- // License: Creative Commons (CC BY-NC-SA 4.0)
+-- // Twigl version: https://x.com/Jaenam97/status/1997653539078693351?s=20
+--
+-- #define FAR 55.0
+--
+-- // Two by two rotation matrix constructor.
+-- mat2 rot2D(float a) {
+--     return mat2(cos(a), sin(a), -sin(a), cos(a));
+-- }
+--
+-- // Hash function for random sparkle generation.
+-- // Takes a 3D grid position and returns a pseudo-random value.
+-- float hash(vec3 p) {
+--     return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5);
+-- }
+--
+-- // Second hash for sparkle animation phase.
+-- float hash2(vec3 p) {
+--     return fract(sin(dot(p, vec3(43.7, 78.2, 123.4))) * 127.1);
+-- }
+--
+-- // camera path to move around
+-- vec2 camPath(float t)
+-- {
+--     float s = sin(t * 0.312);
+--     float c = cos(t * 0.124);
+--     return vec2(c*1.4 - s*1.4, c*1.7 + s*2.5);
+-- }
+--
+-- float foilGyroid(vec3 p, float t)
+-- {
+--     p *= 0.6;
+--
+--     // Animated gyroid + time to phase-shift the surface
+--     float gyroid = dot(sin(p+t), cos(p.yzx));
+--
+--     // Return absolute value to get distance-like field
+--     return abs(gyroid) * 1.0;
+-- }
+--
+-- // Main raymarching function with chromatic offset.
+-- float raymarch(vec2 I, vec2 R, mat2 rotX, mat2 rotY, float chromatic)
+-- {
+--     float colorAccum = 0.0;
+--     float dt = 0.0;
+--
+--     // Calculate ray direction from screen coordinates
+--     vec3 rd = normalize(vec3((I + I - R) / R.y, 1.0));
+--
+--     // Apply rotation to ray direction
+--     if (iMouse.z > 0.0) {
+--         rd.yz *= rotY;
+--     } else {
+--         rd.xy *= rotX;
+--     }
+--
+--     for(float i = 0.0; i < FAR; i++)
+--     {
+--         // Ray origin with camera path
+--         vec3 ro = vec3(0, 0, iTime * 0.5);
+--         ro.xy += camPath(ro.z);
+--
+--         // Ray position
+--         vec3 p = ro + rd * dt;
+--
+--         if (abs(p.x) > 9.0) break;
+--
+--         // Voxel grid for sparkles
+--         vec3 gridPos = floor(p * 4.0);
+--         vec3 localPos = fract(p * 4.0) - 0.5;
+--
+--         // Sparkle detection
+--         float sparkPLus = step(length(localPos), hash(gridPos) * 0.23 + 0.01);
+--         float sparkHash = hash2(gridPos) * 6.28;
+--
+--         // Calculate distances
+--         float foilDist = foilGyroid(p, iTime * 0.01);
+--         float cubeDist = foilGyroid(p, iTime * 0.04);
+--         float sineDist = length(sin(cubeDist)) - .13;
+--
+--         float combinedDist = max(max(cubeDist, foilDist - 0.1), sineDist)
+--                              + chromatic * 0.001 - i / 130.0;
+--
+--         float stepSize = 0.01 + 0.2 * abs(combinedDist);
+--         dt += stepSize;
+--
+--         // sparkPLus determines if this voxel contains a sparkle (0 or 1)
+--         // The sine wave animates the sparkle brightness over time
+--         // i*0.04 varies animation phase per ray step
+--         // chromatic*20 creates color separation between R/G/B channels for rainbow shimmer
+--         float sparkGlow = sparkPLus * sin(sparkHash + i * 0.04 + chromatic * 20.);
+--
+--         // Clamp to positive values only - we only want bright sparkles, not dark ones
+--         sparkGlow = max(0.0, sparkGlow);
+--
+--         // Volumetric glow contribution from the gyroid shape itself
+--         // Dividing by stepSize creates brighter glow near surfaces (smaller steps = more samples)
+--         float shapeGlow = 3.5 / stepSize;
+--
+--         // Same principle for sparkles - concentrated brightness near sparkle centers
+--         float sparkBright = 15.0 / stepSize;
+--
+--         // Accumulate color contributions:
+--         // Shape gets subtle animated glow with sine modulation
+--         // Sparkles get their own bright, animated contribution
+--         // Higher sparkBright value makes sparkles dominate the scene
+--         colorAccum += shapeGlow * (.3 + .23 * sin(i * 0.33 + chromatic * 5.0)) +
+--                       sparkBright * sparkGlow;
+--     }
+--
+--     return colorAccum;
+-- }
+-- void mainImage(out vec4 O, in vec2 I)
+-- {
+--     vec3 R = iResolution;
+--
+--     // Mouse control for rotation, or auto-rotate based on time.
+--     vec2 Ma = iMouse.z > 0.0 ?
+--                       (iMouse.xy / R.xy - 0.5) * 6.28 :
+--                       vec2(iTime / 12.0);
+--
+--     // Rotation matrices for 3D camera orientation.
+--     mat2 rotX = rot2D(Ma.x);
+--     mat2 rotY = rot2D(Ma.y);
+--
+--     // Raymarch three times with chromatic offset for RGB channels.
+--     // -1.0 = red shifted backward, 0.0 = green centered, 1.0 = blue shifted forward.
+--     O.r = raymarch(I, R.xy, rotX, rotY, -1.0);
+--     O.g = raymarch(I, R.xy, rotX, rotY,  0.0);
+--     O.b = raymarch(I, R.xy, rotX, rotY,  1.0);
+--     O.a = 1.0;
+--
+--     // Tone mapping to compress the high dynamic range glow.
+--     O = tanh(O * O / 1e7);
+-- }

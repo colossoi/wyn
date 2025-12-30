@@ -26,16 +26,6 @@ impl QualName {
         }
     }
 
-    /// Mangle into the format used by module elaboration
-    /// E.g., M.N.x -> "M_$_N_x", f32.cos -> "f32_cos"
-    pub fn mangle(&self) -> String {
-        if self.qualifiers.is_empty() {
-            self.name.clone()
-        } else {
-            format!("{}_{}", self.qualifiers.join("_$_"), self.name)
-        }
-    }
-
     /// Get the dotted notation (for display/debugging)
     /// E.g., "M.N.x"
     pub fn to_dotted(&self) -> String {

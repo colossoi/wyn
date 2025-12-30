@@ -2103,10 +2103,9 @@ impl<'a> TypeChecker<'a> {
                 // Try to extract a qualified name (e.g., f32.cos, M.N.x)
                 if let Some(qual_name) = Self::try_extract_qual_name(inner_expr, field) {
                     let dotted = qual_name.to_dotted();
-                    let mangled = qual_name.mangle();
 
-                    // Check if this is a module-qualified name (mangled name exists in scope)
-                    if let Some(scheme) = self.scope_stack.lookup(&mangled) {
+                    // Check if this is a module-qualified name (dotted name exists in scope)
+                    if let Some(scheme) = self.scope_stack.lookup(&dotted) {
                         // Instantiate the type scheme
                         let ty = scheme.instantiate(&mut self.context);
                         self.type_table.insert(expr.h.id, TypeScheme::Monotype(ty.clone()));
@@ -2137,7 +2136,6 @@ impl<'a> TypeChecker<'a> {
 
                 // Not a qualified name (or wasn't found), treat as normal field access
                 {
-                    // Not a qualified name, proceed with normal field access
                     let expr_type = self.infer_expression(inner_expr)?;
 
                     // Check if this is a _w_lambda_name field access (closure lambda name for direct dispatch)
