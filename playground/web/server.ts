@@ -1,4 +1,5 @@
 const PORT = 8080;
+const LISTEN_IF = Deno.env.get("LISTEN_IF") || "localhost";
 
 const MIME_TYPES: Record<string, string> = {
   ".html": "text/html",
@@ -45,5 +46,5 @@ async function handler(req: Request): Promise<Response> {
   }
 }
 
-console.log(`Wyn Playground running at http://localhost:${PORT}/`);
-Deno.serve({ port: PORT }, handler);
+console.log(`Wyn Playground running at http://${LISTEN_IF}:${PORT}/`);
+Deno.serve({ port: PORT, hostname: LISTEN_IF }, handler);

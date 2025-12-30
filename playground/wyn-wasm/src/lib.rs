@@ -58,7 +58,7 @@ fn create_frontend() -> Option<FrontEnd> {
         let cache_ref = cache.borrow();
         let cached = cache_ref.as_ref()?;
         Some(FrontEnd::new_from_prelude(
-            &cached.prelude,
+            cached.prelude.clone(),
             cached.start_node_counter.clone(),
         ))
     })
