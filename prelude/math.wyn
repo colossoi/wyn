@@ -31,7 +31,7 @@ module type numeric = {
   sig max : t -> t -> t
   sig min : t -> t -> t
   sig abs : t -> t
-  sig sgn : t -> t
+  sig sign : t -> t
   sig highest : t
   sig lowest : t
   sig sum<[n]> : [n]t -> t
