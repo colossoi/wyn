@@ -94,6 +94,7 @@ impl Flattener {
             span,
             ty,
             kind,
+            mem: None,
         };
         let local_id = self.current_body.alloc_local(decl);
         self.name_to_local.insert(name, local_id);

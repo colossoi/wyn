@@ -47,6 +47,7 @@ impl TestBodyBuilder {
             span: test_span(),
             ty,
             kind,
+            mem: None,
         })
     }
 

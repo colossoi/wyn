@@ -31,12 +31,14 @@ fn test_simple_function() {
         ty: i32_type(),
         kind: LocalKind::Param,
         span,
+        mem: None,
     });
     let y_local = body.alloc_local(LocalDecl {
         name: "y".to_string(),
         ty: i32_type(),
         kind: LocalKind::Param,
         span,
+        mem: None,
     });
 
     // Build expression: x + y
@@ -139,6 +141,7 @@ fn test_let_binding() {
         ty: i32_type(),
         kind: LocalKind::Let,
         span,
+        mem: None,
     });
 
     // Build expressions

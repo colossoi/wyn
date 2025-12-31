@@ -11,7 +11,8 @@ use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
 use crate::lowering_common::is_empty_closure_type;
 use crate::mir::parallelism::{SimpleComputeMap, detect_simple_compute_map};
 use crate::mir::{
-    self, Body, Def, ExecutionModel, Expr, ExprId, LambdaId, LambdaInfo, LocalId, LoopKind, Program,
+    self, Body, Def, ExecutionModel, Expr, ExprId, LambdaId, LambdaInfo, LocalId, LoopKind, MemBinding,
+    Program,
 };
 use crate::types;
 use crate::{IdArena, bail_spirv, err_spirv};
@@ -29,23 +30,6 @@ enum LowerState {
     InProgress,
     Done,
 }
-
-/// Information about a StorageSlice parameter for compute shader lowering.
-#[derive(Clone)]
-struct StorageSliceInfo {
-    /// Binding number for the storage buffer
-    #[allow(dead_code)]
-    binding: u32,
-    /// SPIR-V variable ID for the storage buffer
-    buffer_var: spirv::Word,
-    /// Element type ID
-    elem_type_id: spirv::Word,
-    /// Offset into the buffer (SPIR-V value ID)
-    offset: spirv::Word,
-    /// Length of the slice (SPIR-V value ID)
-    len: spirv::Word,
-}
-
 /// Entry point information for SPIR-V emission
 struct EntryPointInfo {
     name: String,
@@ -129,12 +113,8 @@ struct Constructor {
     /// In-place optimization: NodeIds of operations where input array can be reused
     inplace_nodes: HashSet<crate::ast::NodeId>,
 
-    /// Storage buffers for compute shaders: binding -> (buffer_var, elem_type_id)
-    storage_buffers: HashMap<u32, (spirv::Word, spirv::Word)>,
-
-    /// StorageSlice parameters: param_name -> StorageSliceInfo
-    /// Used during compute shader lowering to generate direct buffer access
-    storage_slice_params: HashMap<String, StorageSliceInfo>,
+    /// Storage buffers for compute shaders: (set, binding) -> (buffer_var, elem_type_id)
+    storage_buffers: HashMap<(u32, u32), (spirv::Word, spirv::Word)>,
 }
 
 impl Constructor {
@@ -184,7 +164,6 @@ impl Constructor {
             impl_source: ImplSource::default(),
             inplace_nodes: HashSet::new(),
             storage_buffers: HashMap::new(),
-            storage_slice_params: HashMap::new(),
         }
     }
 
@@ -1190,7 +1169,7 @@ fn lower_compute_entry_point(
     interface_vars.push(buffer_var);
 
     // Store the storage buffer info for use when lowering StorageSlice accesses
-    constructor.storage_buffers.insert(0, (buffer_var, elem_type_id));
+    constructor.storage_buffers.insert((0, 0), (buffer_var, elem_type_id));
 
     // Create GlobalInvocationId input variable
     let uvec3_type = constructor.get_or_create_vec_type(constructor.u32_type, 3);
@@ -1236,25 +1215,12 @@ fn lower_compute_entry_point(
     let start_offset =
         constructor.builder.i_mul(constructor.u32_type, None, thread_id, chunk_size_const)?;
 
-    // Set up the input parameter as a StorageSlice in the environment
-    // The body will access this when it references the input parameter
-    let input_param = &inputs[0];
-    let chunk_len = constructor.const_u32(chunk_size);
+    // TODO: Set LocalDecl.mem for the input parameter to enable storage-backed lowering
+    // For now, storage buffer support is not fully implemented
+    let _input_param = &inputs[0];
+    let _start_offset = start_offset;
 
-    // Store StorageSlice info: (buffer_binding, offset_value, len_value)
-    // The lowering of map/indexing will check for this and generate direct buffer access
-    constructor.storage_slice_params.insert(
-        input_param.name.clone(),
-        StorageSliceInfo {
-            binding: 0,
-            buffer_var,
-            elem_type_id,
-            offset: start_offset,
-            len: chunk_len,
-        },
-    );
-
-    // Lower the body - map operations on the input will use StorageSlice access
+    // Lower the body
     let _result = lower_expr(constructor, body, body.root)?;
 
     // The map operation writes results in-place, so no explicit store needed here
@@ -1286,7 +1252,6 @@ fn lower_compute_entry_point(
     constructor.variables_block = None;
     constructor.first_code_block = None;
     constructor.env.clear();
-    constructor.storage_slice_params.clear();
     constructor.storage_buffers.clear();
 
     Ok(())
@@ -2731,8 +2696,74 @@ fn extract_array_info(
     }
 }
 
+/// Read an element from an array, handling both value arrays and storage-backed arrays.
+///
+/// For value arrays (`mem: None`): uses OpCompositeExtract
+/// For storage arrays (`mem: Some(Storage{..})`): uses OpAccessChain + OpLoad
+fn read_array_element(
+    constructor: &mut Constructor,
+    mem: Option<MemBinding>,
+    array_val: spirv::Word,
+    index: u32,
+    elem_type: spirv::Word,
+) -> Result<spirv::Word> {
+    match mem {
+        Some(MemBinding::Storage { set, binding }) => {
+            let (buffer_var, _) = constructor.storage_buffers.get(&(set, binding)).ok_or_else(|| {
+                err_spirv!("Storage buffer not found for set={}, binding={}", set, binding)
+            })?;
+            let buffer_var = *buffer_var;
+
+            let elem_ptr_type =
+                constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_type);
+            let zero = constructor.const_u32(0);
+            let idx = constructor.const_u32(index);
+            let elem_ptr =
+                constructor.builder.access_chain(elem_ptr_type, None, buffer_var, [zero, idx])?;
+            Ok(constructor.builder.load(elem_type, None, elem_ptr, None, [])?)
+        }
+        None => Ok(constructor.builder.composite_extract(elem_type, None, array_val, [index])?),
+    }
+}
+
+/// Write an element to an array, handling both value arrays and storage-backed arrays.
+///
+/// For value arrays (`mem: None`): uses OpCompositeInsert, returns new array value
+/// For storage arrays (`mem: Some(Storage{..})`): uses OpAccessChain + OpStore, returns original array_val
+fn write_array_element(
+    constructor: &mut Constructor,
+    mem: Option<MemBinding>,
+    array_val: spirv::Word,
+    index: u32,
+    value: spirv::Word,
+    elem_type: spirv::Word,
+    result_type: spirv::Word,
+) -> Result<spirv::Word> {
+    match mem {
+        Some(MemBinding::Storage { set, binding }) => {
+            let (buffer_var, _) = constructor.storage_buffers.get(&(set, binding)).ok_or_else(|| {
+                err_spirv!("Storage buffer not found for set={}, binding={}", set, binding)
+            })?;
+            let buffer_var = *buffer_var;
+
+            let elem_ptr_type =
+                constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_type);
+            let zero = constructor.const_u32(0);
+            let idx = constructor.const_u32(index);
+            let elem_ptr =
+                constructor.builder.access_chain(elem_ptr_type, None, buffer_var, [zero, idx])?;
+            constructor.builder.store(elem_ptr, value, None, [])?;
+            Ok(array_val) // Storage writes are side-effects, return original value
+        }
+        None => Ok(constructor.builder.composite_insert(result_type, None, value, array_val, [index])?),
+    }
+}
+
 /// Lower `_w_intrinsic_map`: map f [a,b,c] = [f(a), f(b), f(c)]
-/// This version builds a new result array. For in-place updates, see `lower_inplace_map`.
+///
+/// Handles both value arrays and storage-backed arrays:
+/// - Value arrays: builds new array via composite_construct (efficient)
+/// - Storage arrays: reads/writes in-place via access_chain + load/store
 fn lower_map(
     constructor: &mut Constructor,
     body: &Body,
@@ -2748,11 +2779,12 @@ fn lower_map(
         );
     }
 
-    // Check if array argument is a StorageSlice (for compute shaders)
-    // Storage slices are always handled in-place since we can't create new storage buffers
-    if let Some(storage_info) = get_storage_slice_for_expr(constructor, body, args[1]) {
-        return lower_map_storage_slice(constructor, body, args, storage_info);
-    }
+    // Extract mem binding from array argument's LocalDecl
+    let mem = if let Expr::Local(local_id) = body.get_expr(args[1]) {
+        body.get_local(*local_id).mem
+    } else {
+        None
+    };
 
     let (func_name, closure_val, is_empty_closure) = extract_closure_info(constructor, body, args[0])?;
 
@@ -2774,151 +2806,42 @@ fn lower_map(
         .get(&func_name)
         .ok_or_else(|| err_spirv!("Map function not found: {}", func_name))?;
 
-    // Build a new result array by extracting elements, applying function, and constructing
-    let mut result_elements = Vec::with_capacity(array_size as usize);
-    for i in 0..array_size {
-        let input_elem = constructor.builder.composite_extract(elem_type, None, arr_val, [i])?;
-        let call_args = if is_empty_closure { vec![input_elem] } else { vec![closure_val, input_elem] };
-        let result_elem =
-            constructor.builder.function_call(output_elem_type, None, map_func_id, call_args)?;
-        result_elements.push(result_elem);
+    match mem {
+        Some(_) => {
+            // Storage-backed array: read and write in-place
+            for i in 0..array_size {
+                let input_elem = read_array_element(constructor, mem, arr_val, i, elem_type)?;
+                let call_args =
+                    if is_empty_closure { vec![input_elem] } else { vec![closure_val, input_elem] };
+                let result_elem =
+                    constructor.builder.function_call(output_elem_type, None, map_func_id, call_args)?;
+                write_array_element(
+                    constructor,
+                    mem,
+                    arr_val,
+                    i,
+                    result_elem,
+                    output_elem_type,
+                    result_type,
+                )?;
+            }
+            // Return unit for storage ops (side-effect only)
+            Ok(constructor.const_i32(0))
+        }
+        None => {
+            // Value array: build new array with composite_construct (more efficient than chain of inserts)
+            let mut result_elements = Vec::with_capacity(array_size as usize);
+            for i in 0..array_size {
+                let input_elem = constructor.builder.composite_extract(elem_type, None, arr_val, [i])?;
+                let call_args =
+                    if is_empty_closure { vec![input_elem] } else { vec![closure_val, input_elem] };
+                let result_elem =
+                    constructor.builder.function_call(output_elem_type, None, map_func_id, call_args)?;
+                result_elements.push(result_elem);
+            }
+            Ok(constructor.builder.composite_construct(result_type, None, result_elements)?)
+        }
     }
-    Ok(constructor.builder.composite_construct(result_type, None, result_elements)?)
-}
-
-/// Check if an expression refers to a StorageSlice parameter.
-/// Returns the StorageSliceInfo if so.
-fn get_storage_slice_for_expr(
-    constructor: &Constructor,
-    body: &Body,
-    expr_id: ExprId,
-) -> Option<StorageSliceInfo> {
-    // Check if this is a Local reference to a storage slice parameter
-    if let Expr::Local(local_id) = body.get_expr(expr_id) {
-        let local_name = &body.get_local(*local_id).name;
-        return constructor.storage_slice_params.get(local_name).cloned();
-    }
-    None
-}
-
-/// Lower a map operation over a StorageSlice (for compute shaders).
-/// This generates in-place buffer access: for each element, load from buffer,
-/// apply function, store result back to buffer.
-fn lower_map_storage_slice(
-    constructor: &mut Constructor,
-    body: &Body,
-    args: &[ExprId],
-    storage_info: StorageSliceInfo,
-) -> Result<spirv::Word> {
-    let (func_name, closure_val, is_empty_closure) = extract_closure_info(constructor, body, args[0])?;
-
-    let map_func_id = *constructor
-        .functions
-        .get(&func_name)
-        .ok_or_else(|| err_spirv!("Map function not found: {}", func_name))?;
-
-    // Get the element pointer type for the storage buffer
-    let elem_ptr_type =
-        constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, storage_info.elem_type_id);
-
-    let zero = constructor.const_u32(0);
-
-    // Generate a loop over the chunk
-    // For now, use a simple unrolled approach with dynamic indexing
-    // TODO: Use actual SPIR-V loop constructs for larger chunks
-
-    // We need to loop from 0 to len, accessing buffer[offset + i]
-    // For the initial implementation, we'll use a loop variable
-
-    // Create loop variable
-    let i32_type = constructor.i32_type;
-    let u32_type = constructor.u32_type;
-
-    // Convert len to i32 for loop comparison
-    let len_i32 = constructor.builder.bitcast(i32_type, None, storage_info.len)?;
-
-    // Create loop blocks
-    let loop_header = constructor.builder.id();
-    let loop_body = constructor.builder.id();
-    let loop_continue = constructor.builder.id();
-    let loop_merge = constructor.builder.id();
-
-    // Branch to loop header
-    constructor.builder.branch(loop_header)?;
-
-    // Pre-allocate ID for the incremented loop index (used in phi forward reference)
-    let next_idx_id = constructor.builder.id();
-
-    // Get current block (the one we're branching from to enter the loop)
-    let pre_loop_block = constructor.current_block.unwrap();
-
-    // Loop header - phi node for loop variable
-    constructor.builder.begin_block(Some(loop_header))?;
-    constructor.current_block = Some(loop_header);
-
-    // Phi for loop index with both edges:
-    // - Initial value (0) from the block before the loop
-    // - Incremented value from the continue block (forward reference)
-    let zero_i32 = constructor.const_i32(0);
-    let loop_idx = constructor.builder.phi(
-        i32_type,
-        None,
-        [(zero_i32, pre_loop_block), (next_idx_id, loop_continue)],
-    )?;
-
-    // Loop condition: idx < len
-    let cond = constructor.builder.s_less_than(constructor.bool_type, None, loop_idx, len_i32)?;
-
-    // Loop control
-    constructor.builder.loop_merge(loop_merge, loop_continue, spirv::LoopControl::NONE, [])?;
-    constructor.builder.branch_conditional(cond, loop_body, loop_merge, [])?;
-
-    // Loop body
-    constructor.builder.begin_block(Some(loop_body))?;
-    constructor.current_block = Some(loop_body);
-
-    // Compute buffer index: offset + idx
-    let idx_u32 = constructor.builder.bitcast(u32_type, None, loop_idx)?;
-    let buffer_idx = constructor.builder.i_add(u32_type, None, storage_info.offset, idx_u32)?;
-
-    // Access buffer[buffer_idx]
-    let elem_ptr = constructor.builder.access_chain(
-        elem_ptr_type,
-        None,
-        storage_info.buffer_var,
-        [zero, buffer_idx],
-    )?;
-
-    // Load element
-    let input_elem = constructor.builder.load(storage_info.elem_type_id, None, elem_ptr, None, [])?;
-
-    // Call the map function
-    let call_args = if is_empty_closure { vec![input_elem] } else { vec![closure_val, input_elem] };
-    let result_elem =
-        constructor.builder.function_call(storage_info.elem_type_id, None, map_func_id, call_args)?;
-
-    // Store result back to the same location (in-place)
-    constructor.builder.store(elem_ptr, result_elem, None, [])?;
-
-    // Branch to continue block
-    constructor.builder.branch(loop_continue)?;
-
-    // Continue block - increment loop variable with the pre-allocated ID
-    constructor.builder.begin_block(Some(loop_continue))?;
-    constructor.current_block = Some(loop_continue);
-
-    let one = constructor.const_i32(1);
-    // Use the pre-allocated ID for next_idx so the phi forward reference works
-    constructor.builder.i_add(i32_type, Some(next_idx_id), loop_idx, one)?;
-
-    constructor.builder.branch(loop_header)?;
-
-    // Merge block
-    constructor.builder.begin_block(Some(loop_merge))?;
-    constructor.current_block = Some(loop_merge);
-
-    // Return unit value (the result is written in-place)
-    Ok(constructor.const_i32(0))
 }
 
 /// Lower `_w_intrinsic_zip`: zip [a,b,c] [x,y,z] = [(a,x), (b,y), (c,z)]

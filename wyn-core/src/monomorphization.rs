@@ -1138,6 +1138,7 @@ fn apply_subst_body_with_context(old_body: Body, subst: &Substitution, func_name
             span: local.span,
             ty: apply_subst_with_context(&local.ty, subst, &context),
             kind: local.kind,
+            mem: local.mem,
         });
     }
 

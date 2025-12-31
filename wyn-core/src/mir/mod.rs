@@ -83,6 +83,22 @@ pub enum LocalKind {
     LoopVar,
 }
 
+/// Memory binding for variables that live in non-value memory spaces.
+///
+/// This is used to track which variables are backed by storage buffers
+/// or other memory spaces, allowing the lowering pass to generate
+/// appropriate access patterns (e.g., OpAccessChain + OpLoad for storage
+/// vs OpCompositeExtract for value arrays).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemBinding {
+    /// GPU storage buffer at a specific descriptor set and binding.
+    Storage {
+        set: u32,
+        binding: u32,
+    },
+    // Future: Shared { size: u32 }, Private, etc.
+}
+
 /// Declaration of a local variable.
 #[derive(Debug, Clone)]
 pub struct LocalDecl {
@@ -94,6 +110,9 @@ pub struct LocalDecl {
     pub ty: Type<TypeName>,
     /// What kind of local this is.
     pub kind: LocalKind,
+    /// Optional memory binding for storage-backed variables.
+    /// `None` means this is a value/SSA variable (the default).
+    pub mem: Option<MemBinding>,
 }
 
 // =============================================================================
@@ -390,6 +409,7 @@ impl Body {
             span,
             ty,
             kind: LocalKind::Let,
+            mem: None,
         });
 
         let original = std::mem::replace(self.get_expr_mut(expr_id), Expr::Local(local_id));

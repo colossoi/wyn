@@ -606,6 +606,7 @@ impl Normalizer {
                 span,
                 ty: ty.clone(),
                 kind: LocalKind::Let,
+                mem: None,
             });
 
             // Create reference to local
