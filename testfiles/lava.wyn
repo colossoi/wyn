@@ -17,24 +17,24 @@ def verts: [3]vec4f32 =
    @[-1.0, 3.0, 0.0, 1.0]]
 
 #[vertex]
-def vertex_main(#[builtin(vertex_index)] vertex_id: i32) -> #[builtin(position)] vec4f32 = verts[vertex_id]
+entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 = verts[vertex_id]
 
 ------------------------------------------------------------
 -- SDF helpers
 ------------------------------------------------------------
 
-def opSmoothUnion(d1: f32, d2: f32, k: f32) -> f32 =
+def opSmoothUnion(d1: f32, d2: f32, k: f32) f32 =
   let h = clamp((0.5 + 0.5 * (d2 - d1) / k), 0.0, 1.0) in
   mix(d2, d1, h) - k * h * (1.0 - h)
 
-def sdSphere(p: vec3f32, s: f32) -> f32 =
+def sdSphere(p: vec3f32, s: f32) f32 =
   magnitude(p) - s
 
 ------------------------------------------------------------
 -- Scene mapping
 ------------------------------------------------------------
 
-def sdfScene(p: vec3f32) -> f32 =
+def sdfScene(p: vec3f32) f32 =
   let (_, d) = loop (i, d) = (0, 2.0) while i < 16 do
     let fi = f32.i32(i) in
     let time = iTime * (fract((fi * 412.531 + 0.513)) - 0.5) * 2.0 in
@@ -51,7 +51,7 @@ def sdfScene(p: vec3f32) -> f32 =
 -- Normal calculation (tetrahedron technique)
 ------------------------------------------------------------
 
-def calcNormal(p: vec3f32) -> vec3f32 =
+def calcNormal(p: vec3f32) vec3f32 =
   let h = 1e-5 in
   let k = @[1.0, -1.0] in
   -- k.xyy, k.yyx, k.yxy, k.xxx
@@ -67,7 +67,7 @@ def calcNormal(p: vec3f32) -> vec3f32 =
 -- Ray marching
 ------------------------------------------------------------
 
-def raymarch(rayOri: vec3f32, rayDir: vec3f32) -> (f32, vec3f32) =
+def raymarch(rayOri: vec3f32, rayDir: vec3f32) (f32, vec3f32) =
   let (_, depth, p) = loop (i, depth, p) = (0, 0.0, rayOri) while i < 64 do
     let p2 = @[rayOri.x + rayDir.x * depth, rayOri.y + rayDir.y * depth, rayOri.z + rayDir.z * depth] in
     let dist = sdfScene(p2) in
@@ -80,7 +80,7 @@ def raymarch(rayOri: vec3f32, rayDir: vec3f32) -> (f32, vec3f32) =
 ------------------------------------------------------------
 
 #[fragment]
-def fragment_main(#[builtin(position)] fragCoord: vec4f32) -> #[location(0)] vec4f32 =
+entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
   -- Flip Y for Vulkan
   let coord = @[fragCoord.x, iResolution.y - fragCoord.y] in
   let uv = @[coord.x / iResolution.x, coord.y / iResolution.y] in

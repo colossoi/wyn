@@ -2,7 +2,7 @@ use crate::ast::*;
 use crate::error::Result;
 use crate::lexer::{LocatedToken, Token};
 use crate::types;
-use crate::{bail_parse, err_parse, err_parse_at};
+use crate::{bail_parse, bail_parse_at, err_parse, err_parse_at};
 use log::trace;
 use std::sync::OnceLock;
 
@@ -95,6 +95,7 @@ impl<'a> Parser<'a> {
         match self.peek() {
             Some(Token::Let) => self.parse_decl("let", attributes),
             Some(Token::Def) => self.parse_decl("def", attributes),
+            Some(Token::Entry) => self.parse_entry_decl(attributes),
             Some(Token::Sig) => {
                 let mut decl = self.parse_sig_decl()?;
                 decl.attributes = attributes;
@@ -153,7 +154,7 @@ impl<'a> Parser<'a> {
         trace!("parse_decl({}): next token = {:?}", keyword, self.peek());
 
         // Check for special attributes that require specific declaration types
-        let entry_type = attributes.iter().find(|attr| {
+        let has_entry_attr = attributes.iter().any(|attr| {
             matches!(
                 attr,
                 Attribute::Vertex | Attribute::Fragment | Attribute::Compute { .. }
@@ -176,6 +177,14 @@ impl<'a> Parser<'a> {
             }
         });
 
+        // Entry attributes require the 'entry' keyword, not 'def' or 'let'
+        if has_entry_attr {
+            bail_parse!(
+                "Entry point attributes (#[vertex], #[fragment], #[compute]) require 'entry' keyword, not '{}'",
+                keyword
+            );
+        }
+
         if let Some((set, binding)) = uniform_attr {
             // Uniform declaration - delegate to helper
             if keyword != "def" {
@@ -188,53 +197,6 @@ impl<'a> Parser<'a> {
                 bail_parse!("Storage declarations must use 'def', not 'let'");
             }
             self.parse_storage_decl(set, binding, layout, access)
-        } else if let Some(entry_attr) = entry_type {
-            // Entry point: must be 'def', not 'let'
-            if keyword != "def" {
-                bail_parse!("Entry point declarations must use 'def', not 'let'");
-            }
-            self.expect(Token::Def)?;
-
-            let name = self.expect_identifier()?;
-
-            // Parse parameters in Rust-style: (x: type, y: type)
-            let params = self.parse_comma_separated_params()?;
-
-            // Entry points must have an explicit return type with ->
-            if !self.check(&Token::Arrow) {
-                bail_parse!("Entry point declarations must have an explicit return type (use ->)");
-            }
-
-            self.advance(); // consume '->'
-
-            // Parse return type (which may have optional attributes)
-            let (return_types, return_attributes) =
-                if self.check(&Token::AttributeStart) || self.check(&Token::LeftParen) {
-                    // Attributed return type(s)
-                    self.parse_return_type()?
-                } else {
-                    // Simple unattributed return type
-                    let ty = self.parse_type()?;
-                    (vec![ty], vec![None])
-                };
-
-            // Combine into EntryOutput structs
-            let outputs: Vec<EntryOutput> = return_types
-                .into_iter()
-                .zip(return_attributes)
-                .map(|(ty, attribute)| EntryOutput { ty, attribute })
-                .collect();
-
-            self.expect(Token::Assign)?;
-            let body = self.parse_expression()?;
-
-            Ok(Declaration::Entry(EntryDecl {
-                entry_type: entry_attr.clone(),
-                name,
-                params,
-                outputs,
-                body,
-            }))
         } else {
             // Regular declaration (let or def)
             match keyword {
@@ -259,12 +221,12 @@ impl<'a> Parser<'a> {
             };
 
             // For def: either function syntax or constant binding
-            //   - def foo(x: T, y: U) -> R = ...  (function with params)
-            //   - def foo: T = ...                 (constant binding)
+            //   - def foo(x: T, y: U) R = ...  (function with params)
+            //   - def foo: T = ...              (constant binding)
             // For let: type annotation with colon: let x: type = expr - no params
             let (params, ty) = if keyword == "def" {
                 if self.check(&Token::LeftParen) {
-                    // Function: def foo(params) -> R = ...
+                    // Function: def foo(params) R = ...
                     let params = self.parse_comma_separated_params()?;
 
                     // Reject zero-argument functions - use constant syntax instead
@@ -275,10 +237,8 @@ impl<'a> Parser<'a> {
                         );
                     }
 
-                    // Rust-style return type: -> T (optional)
-                    // Use parse_return_type to allow existential types like ?k. [k]T
-                    let ty = if self.check(&Token::Arrow) {
-                        self.advance();
+                    // Return type directly after params (no arrow): def foo(x: T) R = ...
+                    let ty = if !self.check(&Token::Assign) {
                         Some(self.parse_return_type_simple()?)
                     } else {
                         None
@@ -347,6 +307,119 @@ impl<'a> Parser<'a> {
             type_params,
             ty,
         })
+    }
+
+    /// Parse an entry point declaration.
+    /// Entry points have restrictive syntax: only `id: type` parameters, not general patterns.
+    /// Syntax: `#[vertex|fragment|compute(x,y,z)] entry name(id: type, ...) return_type = body`
+    fn parse_entry_decl(&mut self, attributes: Vec<Attribute>) -> Result<Declaration> {
+        trace!("parse_entry_decl: next token = {:?}", self.peek());
+
+        // Find the entry type attribute
+        let entry_type = attributes
+            .iter()
+            .find(|attr| {
+                matches!(
+                    attr,
+                    Attribute::Vertex | Attribute::Fragment | Attribute::Compute { .. }
+                )
+            })
+            .ok_or_else(|| {
+                err_parse!(
+                    "Entry declarations require #[vertex], #[fragment], or #[compute(...)] attribute"
+                )
+            })?
+            .clone();
+
+        self.expect(Token::Entry)?;
+        let name = self.expect_identifier()?;
+
+        // Parse restrictive parameters: (id: type, id: type, ...)
+        // Only typed identifiers allowed, not general patterns
+        let params = self.parse_entry_params()?;
+
+        // Parse return type (which may have optional attributes) - no arrow required
+        let (return_types, return_attributes) =
+            if self.check(&Token::AttributeStart) || self.check(&Token::LeftParen) {
+                // Attributed return type(s)
+                self.parse_return_type()?
+            } else if !self.check(&Token::Assign) {
+                // Simple unattributed return type
+                let ty = self.parse_type()?;
+                (vec![ty], vec![None])
+            } else {
+                bail_parse!("Entry point declarations must have an explicit return type");
+            };
+
+        // Combine into EntryOutput structs
+        let outputs: Vec<EntryOutput> = return_types
+            .into_iter()
+            .zip(return_attributes)
+            .map(|(ty, attribute)| EntryOutput { ty, attribute })
+            .collect();
+
+        self.expect(Token::Assign)?;
+        let body = self.parse_expression()?;
+
+        Ok(Declaration::Entry(EntryDecl {
+            entry_type,
+            name,
+            params,
+            outputs,
+            body,
+        }))
+    }
+
+    /// Parse entry point parameters with restrictive syntax.
+    /// Only allows `id: type` or `#[attr] id: type`, not general patterns.
+    fn parse_entry_params(&mut self) -> Result<Vec<Pattern>> {
+        trace!("parse_entry_params: next token = {:?}", self.peek());
+        let start_span = self.current_span();
+        self.expect(Token::LeftParen)?;
+        let mut params = Vec::new();
+
+        if !self.check(&Token::RightParen) {
+            loop {
+                let param_start = self.current_span();
+
+                // Parse optional attributes (can be multiple)
+                let attrs =
+                    if self.check(&Token::AttributeStart) { self.parse_attributes()? } else { vec![] };
+
+                // Must be an identifier
+                let name = self.expect_identifier()?;
+                let name_span = self.previous_span();
+
+                // Must have : type
+                self.expect(Token::Colon)?;
+                let ty = self.parse_type()?;
+
+                // Build pattern: if attrs present, Typed(Attributed(attrs, Name), ty)
+                // otherwise just Typed(Name, ty)
+                let name_pat = self.node_counter.mk_node(PatternKind::Name(name), name_span);
+
+                let inner_pat = if !attrs.is_empty() {
+                    let span = param_start.merge(&name_span);
+                    self.node_counter.mk_node(PatternKind::Attributed(attrs, Box::new(name_pat)), span)
+                } else {
+                    name_pat
+                };
+
+                let span = param_start.merge(&self.previous_span());
+                let typed_pat =
+                    self.node_counter.mk_node(PatternKind::Typed(Box::new(inner_pat), ty), span);
+
+                params.push(typed_pat);
+
+                if !self.check(&Token::Comma) {
+                    break;
+                }
+                self.advance(); // consume comma
+            }
+        }
+
+        self.expect(Token::RightParen)?;
+        Ok(params)
     }
 
     /// Parse return type with optional attributes, returning parallel arrays
@@ -828,7 +901,10 @@ impl<'a> Parser<'a> {
                 }
                 // Regular type argument application - not yet supported
                 Some(Token::Identifier(_)) | Some(Token::LeftParen) | Some(Token::LeftBrace) => {
-                    bail_parse!("Type constructor application (e.g., 'F T') is not yet supported");
+                    bail_parse_at!(
+                        self.current_span(),
+                        "Type constructor application (e.g., 'F T') is not yet supported"
+                    );
                 }
                 _ => break,
             }

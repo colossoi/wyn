@@ -44,6 +44,7 @@ pub enum Token {
     // Keywords
     Let,
     Def,
+    Entry,
     Sig,
     In,
     If,
@@ -146,6 +147,7 @@ fn parse_keyword(input: &str) -> IResult<&str, Token> {
             keyword("case", Token::Case),
         )),
         alt((
+            keyword("entry", Token::Entry),
             keyword("let", Token::Let),
             keyword("loop", Token::Loop),
             keyword("while", Token::While),

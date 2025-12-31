@@ -21,12 +21,12 @@ def verts: [3]vec4f32 =
    @[-1.0, 3.0, 0.0, 1.0]]
 
 #[vertex]
-def vertex_main(#[builtin(vertex_index)] vertex_id: i32) -> #[builtin(position)] vec4f32 = verts[vertex_id]
+entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 = verts[vertex_id]
 
 ------------------------------------------------------------
 -- Two by two rotation matrix constructor
 ------------------------------------------------------------
-def rot2D(a: f32) -> mat2f32 =
+def rot2D(a: f32) mat2f32 =
   let c = f32.cos(a) in
   let s = f32.sin(a) in
   @[[c, s], [0.0 - s, c]]
@@ -34,16 +34,16 @@ def rot2D(a: f32) -> mat2f32 =
 ------------------------------------------------------------
 -- Hash functions for random sparkle generation
 ------------------------------------------------------------
-def hash(p: vec3f32) -> f32 =
+def hash(p: vec3f32) f32 =
   fract(f32.sin(dot(p, @[127.1, 311.7, 74.7])) * 43758.5)
 
-def hash2(p: vec3f32) -> f32 =
+def hash2(p: vec3f32) f32 =
   fract(f32.sin(dot(p, @[43.7, 78.2, 123.4])) * 127.1)
 
 ------------------------------------------------------------
 -- Camera path to move around
 ------------------------------------------------------------
-def camPath(t: f32) -> vec2f32 =
+def camPath(t: f32) vec2f32 =
   let s = f32.sin(t * 0.312) in
   let c = f32.cos(t * 0.124) in
   @[c * 1.4 - s * 1.4, c * 1.7 + s * 2.5]
@@ -51,7 +51,7 @@ def camPath(t: f32) -> vec2f32 =
 ------------------------------------------------------------
 -- Foil gyroid distance function
 ------------------------------------------------------------
-def foilGyroid(p: vec3f32, t: f32) -> f32 =
+def foilGyroid(p: vec3f32, t: f32) f32 =
   let ps = @[p.x * 0.6, p.y * 0.6, p.z * 0.6] in
   let sinp = @[f32.sin(ps.x + t), f32.sin(ps.y + t), f32.sin(ps.z + t)] in
   let cosp = @[f32.cos(ps.y + t), f32.cos(ps.z + t), f32.cos(ps.x + t)] in
@@ -61,7 +61,7 @@ def foilGyroid(p: vec3f32, t: f32) -> f32 =
 ------------------------------------------------------------
 -- Main raymarching function with chromatic offset
 ------------------------------------------------------------
-def raymarch(fragCoord: vec2f32, res: vec2f32, rotX: mat2f32, rotY: mat2f32, chromatic: f32, use_mouse: f32) -> f32 =
+def raymarch(fragCoord: vec2f32, res: vec2f32, rotX: mat2f32, rotY: mat2f32, chromatic: f32, use_mouse: f32) f32 =
   let (_, _, colorAccum) = loop (i, dt, acc) = (0.0, 0.0, 0.0) while i < FAR do
     -- Ray origin with camera path
     let ro_z = iTime * 0.5 in
@@ -128,7 +128,7 @@ def raymarch(fragCoord: vec2f32, res: vec2f32, rotX: mat2f32, rotY: mat2f32, chr
 -- Fragment shader
 ------------------------------------------------------------
 #[fragment]
-def fragment_main(#[builtin(position)] frag: vec4f32) -> #[location(0)] vec4f32 =
+entry fragment_main(#[builtin(position)] frag: vec4f32) #[location(0)] vec4f32 =
   let res = iResolution in
   let uv = @[frag.x, res.y - frag.y] in
 

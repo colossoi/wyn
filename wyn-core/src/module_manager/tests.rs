@@ -118,7 +118,7 @@ module type numeric = {
 }
 
 module f32_num : (numeric with t = f32) = {
-    def add(x: t, y: t) -> t = x + y
+    def add(x: t, y: t) t = x + y
 }
         "#,
     );
@@ -150,12 +150,12 @@ module type numeric = {
 }
 
 module my_f32_num : (numeric with t = f32) = {
-    def add(x: t, y: t) -> t = x + y
+    def add(x: t, y: t) t = x + y
 }
 
 functor add_stuff(n: numeric) = {
     type t = n.t
-    def add3(x: t, y: t, z: t) -> t = n.add(n.add(x, y), z)
+    def add3(x: t, y: t, z: t) t = n.add(n.add(x, y), z)
 }
 
 module add_f32 = add_stuff(my_f32_num)
@@ -184,8 +184,8 @@ fn resolve_names_qualifies_intra_module_functions() {
     let mm = module_manager_with(
         r#"
 module foo = {
-    def helper(x: i32) -> i32 = x + 1
-    def main(x: i32) -> i32 = helper(x)
+    def helper(x: i32) i32 = x + 1
+    def main(x: i32) i32 = helper(x)
 }
         "#,
     );
@@ -215,8 +215,8 @@ fn resolve_names_respects_local_shadowing() {
     let mm = module_manager_with(
         r#"
 module foo = {
-    def bar(x: i32) -> i32 = x
-    def test(x: i32) -> i32 =
+    def bar(x: i32) i32 = x
+    def test(x: i32) i32 =
         let bar = x + 1 in
         bar
 }
@@ -258,11 +258,11 @@ module type numeric = {
 
 module my_i32 : (numeric with t = i32) = {
     def zero: t = 0
-    def add(x: t, y: t) -> t = x + y
+    def add(x: t, y: t) t = x + y
 }
 
 functor sum_module(n: numeric) = {
-    def sum3(a: n.t, b: n.t, c: n.t) -> n.t = n.add(n.add(a, b), c)
+    def sum3(a: n.t, b: n.t, c: n.t) n.t = n.add(n.add(a, b), c)
 }
 
 module i32_sum = sum_module(my_i32)

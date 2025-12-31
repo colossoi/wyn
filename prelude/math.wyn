@@ -122,43 +122,43 @@ module f32 : (float with t = f32 with int_t = u32) = {
   type t = f32
   type int_t = u32
 
-  def i8(x: i8) -> t = _w_intrinsic_f32_from_i8(x)
-  def i16(x: i16) -> t = _w_intrinsic_f32_from_i16(x)
-  def i32(x: i32) -> t = _w_intrinsic_f32_from_i32(x)
-  def i64(x: i64) -> t = _w_intrinsic_f32_from_i64(x)
-  def u8(x: u8) -> t = _w_intrinsic_f32_from_u8(x)
-  def u16(x: u16) -> t = _w_intrinsic_f32_from_u16(x)
-  def u32(x: u32) -> t = _w_intrinsic_f32_from_u32(x)
-  def u64(x: u64) -> t = _w_intrinsic_f32_from_u64(x)
-  def f16(x: f16) -> t = _w_intrinsic_f32_from_f16(x)
-  def f32(x: f32) -> t = x
-  def f64(x: f64) -> t = _w_intrinsic_f32_from_f64(x)
-  def bool(x: bool) -> t = if x then 1.0f32 else 0.0f32
+  def i8(x: i8) t = _w_intrinsic_f32_from_i8(x)
+  def i16(x: i16) t = _w_intrinsic_f32_from_i16(x)
+  def i32(x: i32) t = _w_intrinsic_f32_from_i32(x)
+  def i64(x: i64) t = _w_intrinsic_f32_from_i64(x)
+  def u8(x: u8) t = _w_intrinsic_f32_from_u8(x)
+  def u16(x: u16) t = _w_intrinsic_f32_from_u16(x)
+  def u32(x: u32) t = _w_intrinsic_f32_from_u32(x)
+  def u64(x: u64) t = _w_intrinsic_f32_from_u64(x)
+  def f16(x: f16) t = _w_intrinsic_f32_from_f16(x)
+  def f32(x: f32) t = x
+  def f64(x: f64) t = _w_intrinsic_f32_from_f64(x)
+  def bool(x: bool) t = if x then 1.0f32 else 0.0f32
 
-  def neg(x: t) -> t = 0.0f32 - x
+  def neg(x: t) t = 0.0f32 - x
   def highest: t = 1.0f32 / 0.0f32
   def lowest: t = (0.0f32 - 1.0f32) / 0.0f32
 
-  def recip(x: t) -> t = 1.0f32 / x
-  def from_fraction(x: i64, y: i64) -> t = _w_intrinsic_f32_from_i64(x) / _w_intrinsic_f32_from_i64(y)
+  def recip(x: t) t = 1.0f32 / x
+  def from_fraction(x: i64, y: i64) t = _w_intrinsic_f32_from_i64(x) / _w_intrinsic_f32_from_i64(y)
 
-  def cbrt(x: t) -> t = x ** (1.0f32 / 3.0f32)
-  def log10(x: t) -> t = f32.log(x) / f32.log(10.0f32)
-  def log1p(x: t) -> t = f32.log((1.0f32 + x))
+  def cbrt(x: t) t = x ** (1.0f32 / 3.0f32)
+  def log10(x: t) t = f32.log(x) / f32.log(10.0f32)
+  def log1p(x: t) t = f32.log((1.0f32 + x))
 
   def pi: t = 3.14159265358979323846f32
 
-  def mad(a: t, b: t, c: t) -> t = a * b + c
+  def mad(a: t, b: t, c: t) t = a * b + c
 
   def inf: t = 1.0f32 / 0.0f32
   def nan: t = 0.0f32 / 0.0f32
   def e: t = 2.71828182845904523536f32
 
-  def from_bits(x: int_t) -> t = _w_intrinsic_f32_from_bits(x)
-  def to_bits(x: t) -> int_t = _w_intrinsic_f32_to_bits(x)
+  def from_bits(x: int_t) t = _w_intrinsic_f32_from_bits(x)
+  def to_bits(x: t) int_t = _w_intrinsic_f32_to_bits(x)
   def num_bits: i32 = 32
 
   def epsilon: t = 1.1920929e-7f32
-  def copysign(x: t, y: t) -> t = if y < 0.0f32 then (0.0f32 - f32.abs(x)) else f32.abs(x)
+  def copysign(x: t, y: t) t = if y < 0.0f32 then (0.0f32 - f32.abs(x)) else f32.abs(x)
 }
 module f16 : (float with t = f16 with int_t = u16)

@@ -1,6 +1,6 @@
 -- Simple red triangle test
 
-#[vertex] def vertex_main(#[builtin(vertex_index)] vertex_index: i32) -> (#[builtin(position)] vec4f32, #[location(0)] vec3f32) =
+#[vertex] entry vertex_main(#[builtin(vertex_index)] vertex_index: i32) (#[builtin(position)] vec4f32, #[location(0)] vec3f32) =
   let position: vec4f32 = if vertex_index == 0 then
       @[-0.5, -0.5, 0.0, 1.0]
     else if vertex_index == 1 then
@@ -10,5 +10,5 @@
   let color: vec3f32 = @[1.0, 0.0, 0.0] in
   (position, color)
 
-#[fragment] def fragment_main(#[location(0)] color: vec3f32) -> #[location(0)] vec4f32 =
+#[fragment] entry fragment_main(#[location(0)] color: vec3f32) #[location(0)] vec4f32 =
   @[color.x, color.y, color.z, 1.0]

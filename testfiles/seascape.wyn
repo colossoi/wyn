@@ -26,7 +26,7 @@ def SEA_FREQ: f32 = 0.16
 def SEA_BASE: vec3f32 = @[0.0, 0.09, 0.18]
 def SEA_WATER_COLOR: vec3f32 = @[0.48, 0.54, 0.36]  -- vec3(0.8,0.9,0.6)*0.6
 
-def sea_time(t: f32) -> f32 = 1.0 + t * SEA_SPEED
+def sea_time(t: f32) f32 = 1.0 + t * SEA_SPEED
 
 -- octave_m = mat2(1.6, 1.2, -1.2, 1.6) - used for rotating UV in octaves
 def octave_m: mat2f32 = @[[1.6, -1.2], [1.2, 1.6]]
@@ -40,19 +40,19 @@ def verts: [3]vec4f32 =
    @[-1.0, 3.0, 0.0, 1.0]]
 
 #[vertex]
-def vertex_main(#[builtin(vertex_index)] vertex_id: i32) -> #[builtin(position)] vec4f32 = verts[vertex_id]
+entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 = verts[vertex_id]
 
 ------------------------------------------------------------
 -- Math helpers
 ------------------------------------------------------------
 
 -- Hash function for noise
-def hash(p: vec2f32) -> f32 =
+def hash(p: vec2f32) f32 =
   let h = dot(p, @[127.1, 311.7]) in
   fract(f32.sin(h) * 43758.5453123)
 
 -- 2D noise
-def noise(p: vec2f32) -> f32 =
+def noise(p: vec2f32) f32 =
   let i = floor(p) in
   let f = fract(p) in
   let u = @[f.x * f.x * (3.0 - 2.0 * f.x), f.y * f.y * (3.0 - 2.0 * f.y)] in
@@ -65,7 +65,7 @@ def noise(p: vec2f32) -> f32 =
   -1.0 + 2.0 * mix(mix_x0, mix_x1, u.y)
 
 -- Euler angles to rotation matrix
-def fromEuler(ang: vec3f32) -> mat3f32 =
+def fromEuler(ang: vec3f32) mat3f32 =
   let a1 = @[f32.sin(ang.x), f32.cos(ang.x)] in
   let a2 = @[f32.sin(ang.y), f32.cos(ang.y)] in
   let a3 = @[f32.sin(ang.z), f32.cos(ang.z)] in
@@ -78,10 +78,10 @@ def fromEuler(ang: vec3f32) -> mat3f32 =
 -- Lighting
 ------------------------------------------------------------
 
-def diffuse(n: vec3f32, l: vec3f32, p: f32) -> f32 =
+def diffuse(n: vec3f32, l: vec3f32, p: f32) f32 =
   (dot(n, l) * 0.4 + 0.6) ** p
 
-def specular(n: vec3f32, l: vec3f32, e: vec3f32, s: f32) -> f32 =
+def specular(n: vec3f32, l: vec3f32, e: vec3f32, s: f32) f32 =
   let nrm = (s + 8.0) / (PI * 8.0) in
   let refl = reflect(e, n) in
   (f32.max(dot(refl, l), 0.0)) ** s * nrm
@@ -90,7 +90,7 @@ def specular(n: vec3f32, l: vec3f32, e: vec3f32, s: f32) -> f32 =
 -- Sky
 ------------------------------------------------------------
 
-def getSkyColor(e: vec3f32) -> vec3f32 =
+def getSkyColor(e: vec3f32) vec3f32 =
   let ey = (f32.max(e.y, 0.0) * 0.8 + 0.2) * 0.8 in
   let r = (1.0 - ey) ** 2.0 in
   let g = 1.0 - ey in
@@ -101,7 +101,7 @@ def getSkyColor(e: vec3f32) -> vec3f32 =
 -- Sea
 ------------------------------------------------------------
 
-def sea_octave(uv: vec2f32, choppy: f32) -> f32 =
+def sea_octave(uv: vec2f32, choppy: f32) f32 =
   let uv2 = @[uv.x + noise(uv), uv.y + noise(uv)] in
   let wv = @[1.0 - f32.abs(f32.sin(uv2.x)), 1.0 - f32.abs(f32.sin(uv2.y))] in
   let swv = @[f32.abs(f32.cos(uv2.x)), f32.abs(f32.cos(uv2.y))] in
@@ -109,7 +109,7 @@ def sea_octave(uv: vec2f32, choppy: f32) -> f32 =
   (1.0 - (wv2.x * wv2.y) ** 0.65) ** choppy
 
 -- Height map function for geometry (fewer iterations)
-def heightMap(p: vec3f32, time: f32) -> f32 =
+def heightMap(p: vec3f32, time: f32) f32 =
   let sea_t = sea_time(time) in
   let uv_init = @[p.x * 0.75, p.z] in
   let (_, _, h, _, _, _) = loop (i, uv, h, freq, amp, choppy) = (0, uv_init, 0.0, SEA_FREQ, SEA_HEIGHT, SEA_CHOPPY) while i < ITER_GEOMETRY do
@@ -121,7 +121,7 @@ def heightMap(p: vec3f32, time: f32) -> f32 =
   in p.y - h
 
 -- Map function for detailed normals (more iterations)
-def map_detailed(p: vec3f32, time: f32) -> f32 =
+def map_detailed(p: vec3f32, time: f32) f32 =
   let sea_t = sea_time(time) in
   let uv_init = @[p.x * 0.75, p.z] in
   let (_, _, h, _, _, _) = loop (i, uv, h, freq, amp, choppy) = (0, uv_init, 0.0, SEA_FREQ, SEA_HEIGHT, SEA_CHOPPY) while i < ITER_FRAGMENT do
@@ -132,7 +132,7 @@ def map_detailed(p: vec3f32, time: f32) -> f32 =
     (i + 1, uv2, h2, freq * 1.9, amp * 0.22, mix(choppy, 1.0, 0.2))
   in p.y - h
 
-def getSeaColor(p: vec3f32, n: vec3f32, l: vec3f32, eye: vec3f32, dist: vec3f32) -> vec3f32 =
+def getSeaColor(p: vec3f32, n: vec3f32, l: vec3f32, eye: vec3f32, dist: vec3f32) vec3f32 =
   let fresnel_raw = clamp(1.0 - dot(n, @[0.0 - eye.x, 0.0 - eye.y, 0.0 - eye.z]), 0.0, 1.0) in
   let fresnel = f32.min(fresnel_raw * fresnel_raw * fresnel_raw, 0.5) in
 
@@ -158,14 +158,14 @@ def getSeaColor(p: vec3f32, n: vec3f32, l: vec3f32, eye: vec3f32, dist: vec3f32)
 -- Tracing
 ------------------------------------------------------------
 
-def getNormal(p: vec3f32, eps: f32, time: f32) -> vec3f32 =
+def getNormal(p: vec3f32, eps: f32, time: f32) vec3f32 =
   let ny = map_detailed(p, time) in
   let nx = map_detailed(@[p.x + eps, p.y, p.z], time) - ny in
   let nz = map_detailed(@[p.x, p.y, p.z + eps], time) - ny in
   normalize(@[nx, eps, nz])
 
 -- Height map tracing - returns (t, p)
-def heightMapTracing(ori: vec3f32, dir: vec3f32, time: f32) -> (f32, vec3f32) =
+def heightMapTracing(ori: vec3f32, dir: vec3f32, time: f32) (f32, vec3f32) =
   let tx = 1000.0 in
   let p_far = @[ori.x + dir.x * tx, ori.y + dir.y * tx, ori.z + dir.z * tx] in
   let hx = heightMap(p_far, time) in
@@ -189,7 +189,7 @@ def heightMapTracing(ori: vec3f32, dir: vec3f32, time: f32) -> (f32, vec3f32) =
 -- Main rendering
 ------------------------------------------------------------
 
-def getPixel(coord: vec2f32, time: f32) -> vec3f32 =
+def getPixel(coord: vec2f32, time: f32) vec3f32 =
   let uv = @[coord.x / iResolution.x, coord.y / iResolution.y] in
   let uv2 = @[uv.x * 2.0 - 1.0, uv.y * 2.0 - 1.0] in
   let uv3 = @[uv2.x * iResolution.x / iResolution.y, uv2.y] in
@@ -221,7 +221,7 @@ def getPixel(coord: vec2f32, time: f32) -> vec3f32 =
 ------------------------------------------------------------
 
 #[fragment]
-def fragment_main(#[builtin(position)] fragCoord: vec4f32) -> #[location(0)] vec4f32 =
+entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
   -- Flip Y coordinate for Vulkan
   let coord = @[fragCoord.x, iResolution.y - fragCoord.y] in
   let time = iTime * 0.3 + iMouse.x * 0.01 in

@@ -177,7 +177,7 @@ fn test_parse_array_type() {
 
 #[test]
 fn test_parse_entry_point_decl() {
-    let entry = single_entry("#[vertex] def main(x: i32, y: f32) -> [4]f32 = result");
+    let entry = single_entry("#[vertex] entry main(x: i32, y: f32) [4]f32 = result");
 
     assert_eq!(entry.name, "main");
     assert_eq!(entry.entry_type, Attribute::Vertex);
@@ -218,14 +218,14 @@ fn test_parse_division() {
 
 #[test]
 fn test_parse_vertex_attribute() {
-    let entry = single_entry("#[vertex] def main() -> [4]f32 = result");
+    let entry = single_entry("#[vertex] entry main() [4]f32 = result");
     assert_eq!(entry.entry_type, Attribute::Vertex);
     assert_eq!(entry.name, "main");
 }
 
 #[test]
 fn test_parse_fragment_attribute() {
-    let entry = single_entry("#[fragment] def frag() -> [4]f32 = result");
+    let entry = single_entry("#[fragment] entry frag() [4]f32 = result");
     assert_eq!(entry.entry_type, Attribute::Fragment);
     assert_eq!(entry.name, "frag");
 }
@@ -278,7 +278,7 @@ fn test_operator_precedence_and_associativity() {
 
 #[test]
 fn test_parse_builtin_attribute_on_return_type() {
-    let entry = single_entry("#[vertex] def main() -> #[builtin(position)] [4]f32 = result");
+    let entry = single_entry("#[vertex] entry main() #[builtin(position)] [4]f32 = result");
 
     assert_eq!(entry.entry_type, Attribute::Vertex);
     assert_eq!(entry.outputs.len(), 1);
@@ -296,7 +296,7 @@ fn test_parse_builtin_attribute_on_return_type() {
 #[test]
 fn test_parse_single_attributed_return_type() {
     let entry = single_entry(
-        "#[vertex] def vertex_main() -> #[builtin(position)] vec4 = vec4(0.0f32, 0.0f32, 0.0f32, 1.0f32)",
+        "#[vertex] entry vertex_main() #[builtin(position)] vec4 = vec4(0.0f32, 0.0f32, 0.0f32, 1.0f32)",
     );
 
     assert_eq!(entry.entry_type, Attribute::Vertex);
@@ -315,7 +315,7 @@ fn test_parse_single_attributed_return_type() {
 #[test]
 fn test_parse_tuple_attributed_return_type() {
     let entry = single_entry(
-        "#[vertex] def vertex_main() -> (#[builtin(position)] vec4, #[location(0)] vec3) = result",
+        "#[vertex] entry vertex_main() (#[builtin(position)] vec4, #[location(0)] vec3) = result",
     );
 
     assert_eq!(entry.outputs.len(), 2);
@@ -344,7 +344,7 @@ fn test_parse_unattributed_return_type() {
 
 #[test]
 fn test_parse_location_attribute_on_return_type() {
-    let entry = single_entry("#[fragment] def frag() -> #[location(0)] [4]f32 = result");
+    let entry = single_entry("#[fragment] entry frag() #[location(0)] [4]f32 = result");
 
     assert_eq!(entry.entry_type, Attribute::Fragment);
     assert_eq!(entry.outputs.len(), 1);
@@ -358,7 +358,7 @@ fn test_parse_location_attribute_on_return_type() {
 
 #[test]
 fn test_parse_parameter_with_builtin_attribute() {
-    let entry = single_entry("#[vertex] def main(#[builtin(vertex_index)] vid: i32) -> [4]f32 = result");
+    let entry = single_entry("#[vertex] entry main(#[builtin(vertex_index)] vid: i32) [4]f32 = result");
 
     assert_eq!(entry.params.len(), 1);
     assert_typed_param_with_attrs!(
@@ -371,7 +371,7 @@ fn test_parse_parameter_with_builtin_attribute() {
 
 #[test]
 fn test_parse_parameter_with_location_attribute() {
-    let entry = single_entry("#[fragment] def frag(#[location(1)] color: [3]f32) -> [4]f32 = result");
+    let entry = single_entry("#[fragment] entry frag(#[location(1)] color: [3]f32) [4]f32 = result");
 
     assert_eq!(entry.params.len(), 1);
     assert_typed_param_with_attrs!(
@@ -384,7 +384,7 @@ fn test_parse_parameter_with_location_attribute() {
 
 #[test]
 fn test_parse_parameter_with_size_hint_attribute() {
-    let program = parse_ok("def foo<[n], A>(#[size_hint(1024)] arr: [n]A) -> A = arr[0]");
+    let program = parse_ok("def foo<[n], A>(#[size_hint(1024)] arr: [n]A) A = arr[0]");
     assert_eq!(program.declarations.len(), 1);
 
     let decl = match &program.declarations[0] {
@@ -412,7 +412,7 @@ fn test_parse_parameter_with_size_hint_attribute() {
 #[test]
 fn test_parse_multiple_builtin_types() {
     let entry = single_entry(
-        "#[vertex] def main(#[builtin(vertex_index)] vid: i32, #[builtin(instance_index)] iid: i32) -> #[builtin(position)] [4]f32 = result",
+        "#[vertex] entry main(#[builtin(vertex_index)] vid: i32, #[builtin(instance_index)] iid: i32) #[builtin(position)] [4]f32 = result",
     );
 
     assert_eq!(entry.params.len(), 2);
@@ -662,7 +662,7 @@ fn test_parse_lambda_application_with_type_hole() {
 #[test]
 fn test_parse_simple_let_in() {
     // Just verify it parses successfully - the structure is complex to validate in detail
-    let _entry = single_entry("#[vertex] def main (x:i32) -> i32 = let y = 5 in y + x");
+    let _entry = single_entry("#[vertex] entry main (x:i32) i32 = let y = 5 in y + x");
 }
 
 #[test]
@@ -678,7 +678,7 @@ fn test_parse_let_in_expression_only() {
 #[test]
 fn test_parse_let_in_with_lambda() {
     // Just verify it parses successfully - the lambda let..in structure is complex
-    let _entry = single_entry(r#"#[vertex] def main (x:i32) -> i32 = let f = |y| y + x in f(10)"#);
+    let _entry = single_entry(r#"#[vertex] entry main (x:i32) i32 = let f = |y| y + x in f(10)"#);
 }
 
 #[test]
@@ -691,13 +691,13 @@ def verts: [3][4]f32 =
    [-1.0f32,  3.0f32, 0.0f32, 1.0f32]]
 
 #[vertex]
-def vertex_main(vertex_id: i32) -> [4]f32 = verts[vertex_id]
+entry vertex_main(vertex_id: i32) [4]f32 = verts[vertex_id]
 
 def SKY_RGBA: [4]f32 =
   [135.0f32/255.0f32, 206.0f32/255.0f32, 235.0f32/255.0f32, 1.0f32]
 
 #[fragment]
-def fragment_main() -> [4]f32 = SKY_RGBA
+entry fragment_main() [4]f32 = SKY_RGBA
 "#;
 
     let program = parse_ok(input);
@@ -749,7 +749,7 @@ fn test_vector_field_access_file() {
     let program = parse_ok("def v: vec3 = vec3(1.0f32, 2.0f32, 3.0f32)\ndef x: f32 = v.x");
     assert_eq!(program.declarations.len(), 2);
 
-    // Check first declaration: def v() -> vec3 = vec3(1.0f32, 2.0f32, 3.0f32)
+    // Check first declaration: def v() vec3 = vec3(1.0f32, 2.0f32, 3.0f32)
     let decl1 = match &program.declarations[0] {
         Declaration::Decl(d) => d,
         _ => panic!("Expected first declaration to be Decl"),
@@ -759,7 +759,7 @@ fn test_vector_field_access_file() {
         matches!(&decl1.body.kind, ExprKind::Application(func, args) if matches!(&func.kind, ExprKind::Identifier(_, name) if name == "vec3") && args.len() == 3)
     );
 
-    // Check second declaration: def x() -> f32 = v.x
+    // Check second declaration: def x() f32 = v.x
     let decl2 = match &program.declarations[1] {
         Declaration::Decl(d) => d,
         _ => panic!("Expected second declaration to be Decl"),
@@ -851,7 +851,7 @@ fn test_uniform_with_initializer_error() {
 fn test_parse_multiple_shader_outputs() {
     let entry = single_entry(
         r#"
-            #[fragment] def fragment_main() -> (#[location(0)] vec4, #[location(1)] vec3) =
+            #[fragment] entry fragment_main() (#[location(0)] vec4, #[location(1)] vec3) =
               let color = vec4(1.0f32, 0.5f32, 0.2f32, 1.0f32) in
               let normal = vec3(0.0f32, 1.0f32, 0.0f32) in
               (color, normal)
@@ -879,7 +879,7 @@ fn test_parse_complete_shader_example() {
             #[uniform(binding=0)] def material_color: vec3
             #[uniform(binding=1)] def time: f32
 
-            #[vertex] def vertex_main() -> (#[builtin(position)] vec4, #[location(0)] vec3) =
+            #[vertex] entry vertex_main() (#[builtin(position)] vec4, #[location(0)] vec3) =
               let angle: f32 = time in
               let x: f32 = sin(angle) in
               let y: f32 = cos(angle) in
@@ -887,7 +887,7 @@ fn test_parse_complete_shader_example() {
               let color: vec3 = material_color in
               (position, color)
 
-            #[fragment] def fragment_main() -> (#[location(0)] vec4, #[location(1)] vec3) =
+            #[fragment] entry fragment_main() (#[location(0)] vec4, #[location(1)] vec3) =
               let final_color: vec4 = vec4(1.0f32, 0.5f32, 0.2f32, 1.0f32) in
               let normal: vec3 = vec3(0.0f32, 1.0f32, 0.0f32) in
               (final_color, normal)
@@ -933,7 +933,7 @@ fn test_if_then_else_parsing() {
 #[test]
 fn test_parse_unit_pattern_simple() {
     // Test parsing () as a unit pattern parameter - need explicit (()) in new syntax
-    let decl = single_decl("def test(()) -> i32 = 42");
+    let decl = single_decl("def test(()) i32 = 42");
     println!("params: {:?}", decl.params);
     assert_eq!(decl.params.len(), 1);
     println!("param[0] kind: {:?}", decl.params[0].kind);
@@ -945,7 +945,7 @@ fn test_parse_attributed_return_simple() {
     let _ = env_logger::builder().is_test(true).try_init();
     // Test parsing a single attributed return type - must be an entry point
     let entry = single_entry(
-        "#[vertex] def test() -> #[builtin(position)] vec4 = vec4(0.0f32, 0.0f32, 0.0f32, 1.0f32)",
+        "#[vertex] entry test() #[builtin(position)] vec4 = vec4(0.0f32, 0.0f32, 0.0f32, 1.0f32)",
     );
     println!("entry: {:?}", entry);
     // In new syntax, empty () means 0 params, not a unit pattern
@@ -958,7 +958,7 @@ fn test_parse_attributed_return_simple() {
 fn test_array_literal() {
     // Just verify it parses successfully
     let _entry = single_entry(
-        "#[vertex] def test() -> #[builtin(position)] [4]f32 = [0.0f32, 0.5f32, 0.0f32, 1.0f32]",
+        "#[vertex] entry test() #[builtin(position)] [4]f32 = [0.0f32, 0.5f32, 0.0f32, 1.0f32]",
     );
 }
 
@@ -983,7 +983,7 @@ fn test_parse_array_literal() {
 fn test_parse_attributed_return_type() {
     let entry = single_entry(
         r#"#[vertex]
-def test_vertex() -> #[builtin(position)] vec4 =
+entry test_vertex() #[builtin(position)] vec4 =
   let angle = 1.0f32 in
   let s = f32.sin(angle) in
   vec4(s, s, 0.0f32, 1.0f32)"#,
@@ -996,7 +996,7 @@ def test_vertex() -> #[builtin(position)] vec4 =
 
 #[test]
 fn test_parse_unique_type() {
-    let decl = single_decl("def foo (x:*i32) -> i32 = x");
+    let decl = single_decl("def foo (x:*i32) i32 = x");
 
     assert_eq!(decl.params.len(), 1);
     let param_ty = decl.params[0].pattern_type().expect("Expected typed parameter");
@@ -1006,7 +1006,7 @@ fn test_parse_unique_type() {
 
 #[test]
 fn test_parse_unique_array_type() {
-    let decl = single_decl("def bar (arr:*[3]f32) -> f32 = arr[0]");
+    let decl = single_decl("def bar (arr:*[3]f32) f32 = arr[0]");
 
     assert_eq!(decl.params.len(), 1);
     let param_ty = decl.params[0].pattern_type().expect("Expected typed parameter");
@@ -1017,7 +1017,7 @@ fn test_parse_unique_array_type() {
 #[test]
 fn test_parse_nested_unique() {
     // Nested arrays with unique at different levels
-    let decl = single_decl("def baz (x:*[2][3]i32) -> i32 = x[0][0]");
+    let decl = single_decl("def baz (x:*[2][3]i32) i32 = x[0][0]");
 
     assert_eq!(decl.params.len(), 1);
     let param_ty = decl.params[0].pattern_type().expect("Expected typed parameter");
@@ -2024,7 +2024,7 @@ fn test_parse_loop_with_nested_lets() {
 
 #[test]
 fn test_parse_function_with_typed_patterns() {
-    let decl = single_decl("def add(x: i32, y: i32) -> i32 = x + y");
+    let decl = single_decl("def add(x: i32, y: i32) i32 = x + y");
     assert_eq!(decl.name, "add");
     assert_eq!(decl.params.len(), 2);
 
@@ -2073,9 +2073,9 @@ def test: f32 = myfunc(arg1, arg2, (x + y))
 fn test_parse_vec3_call_with_paren_expr() {
     // Test the actual failing case from de_rasterizer
     let input = r#"
-def mix3v(a: vec3f32, b: vec3f32, t: f32) -> vec3f32 = a
+def mix3v(a: vec3f32, b: vec3f32, t: f32) vec3f32 = a
 
-def test(t: f32) -> vec3f32 = mix3v(a, b, (t*2.0f32 - 1.0f32))
+def test(t: f32) vec3f32 = mix3v(a, b, (t*2.0f32 - 1.0f32))
 "#;
 
     let program = parse_ok(input);
@@ -2319,7 +2319,7 @@ fn test_parse_record_literal_multiple_fields() {
 #[test]
 fn test_parse_mul_mat_vec_application() {
     // Test that `mul(mat, vec4(...))` parses as a two-argument application
-    let input = r#"def test (mat:mat4f32) -> vec4f32 = mul(mat, vec4(1.0f32, 2.0f32, 3.0f32, 4.0f32))"#;
+    let input = r#"def test (mat:mat4f32) vec4f32 = mul(mat, vec4(1.0f32, 2.0f32, 3.0f32, 4.0f32))"#;
     let decl = single_decl(input);
 
     // The body should be an Application of mul to two args
@@ -2431,7 +2431,7 @@ fn test_operator_section_direct_application() {
 #[test]
 fn test_operator_definition() {
     // def (+) should parse as a function definition with name "(+)"
-    let input = "def (+)(x: i32, y: i32) -> i32 = x + y";
+    let input = "def (+)(x: i32, y: i32) i32 = x + y";
     let decl = single_decl(input);
 
     assert_eq!(decl.name, "(+)");
@@ -2442,7 +2442,7 @@ fn test_operator_definition() {
 fn test_negation_of_array_index() {
     // -s[1] should parse as -(s[1]), not (-s)[1]
     // This is important for expressions like: vec4 (c[1]*c[2]) (-s[1]) 0
-    let decl = single_decl("def test(s: [3]f32) -> f32 = -s[1]");
+    let decl = single_decl("def test(s: [3]f32) f32 = -s[1]");
 
     // Should be UnaryOp("-", ArrayIndex(s, 1))
     match &decl.body.kind {
@@ -2498,7 +2498,7 @@ fn test_ambiguity_type_ascription_not_in_array_index() {
     // Type ascription (exp : type) cannot appear as an array index without parens
     // because it conflicts with slice syntax. arr[x : i32] would be ambiguous.
     // This should parse arr[x] with type ascription on the whole expression.
-    let decl = single_decl("def test (arr: [10]i32) -> i32 = arr[0] : i32");
+    let decl = single_decl("def test (arr: [10]i32) i32 = arr[0] : i32");
 
     match &decl.body.kind {
         ExprKind::TypeAscription(inner, _ty) => {
@@ -2517,7 +2517,7 @@ fn test_ambiguity_field_access_vs_qualified_name() {
     // x.y could be field access on record x, or qualified name in module x.
     // At parse time, this is represented as FieldAccess; name resolution
     // later determines if it's a module reference.
-    let decl = single_decl("def test (r: {x: i32}) -> i32 = r.x");
+    let decl = single_decl("def test (r: {x: i32}) i32 = r.x");
 
     match &decl.body.kind {
         ExprKind::FieldAccess(base, field) => {
@@ -2535,7 +2535,7 @@ fn test_ambiguity_field_access_vs_qualified_name() {
 #[test]
 fn test_ambiguity_negation_prefix_binds_tighter_than_multiply() {
     // -x * y should parse as (-x) * y, not -(x * y)
-    let decl = single_decl("def test(x: i32, y: i32) -> i32 = -x * y");
+    let decl = single_decl("def test(x: i32, y: i32) i32 = -x * y");
 
     match &decl.body.kind {
         ExprKind::BinaryOp(op, left, _right) => {
@@ -2745,7 +2745,7 @@ module type integral = {
 
 #[test]
 fn test_parse_def_with_builtin_operator_name() {
-    let decl = single_decl("def (+)(x: f32, y: f32) -> f32 = x + y");
+    let decl = single_decl("def (+)(x: f32, y: f32) f32 = x + y");
     assert_eq!(decl.name, "(+)");
 }
 
@@ -2762,8 +2762,8 @@ fn test_parse_def_with_custom_operator_name() {
 fn test_parse_two_operator_defs() {
     let program = parse_ok(
         r#"
-def (+)(x: f32, y: f32) -> f32 = x + y
-def (%)(x: f32, y: f32) -> f32 = x % y
+def (+)(x: f32, y: f32) f32 = x + y
+def (%)(x: f32, y: f32) f32 = x % y
 "#,
     );
     assert_eq!(program.declarations.len(), 2);
@@ -2775,8 +2775,8 @@ fn test_parse_module_with_operator_defs() {
         r#"
 module f32 : (numeric with t = f32) = {
   type t = f32
-  def (+)(x: t, y: t) -> t = x + y
-  def (%)(x: t, y: t) -> t = x % y
+  def (+)(x: t, y: t) t = x + y
+  def (%)(x: t, y: t) t = x % y
 }
 "#,
     );
@@ -2828,8 +2828,8 @@ module f32 : (numeric with t = f32) = {
 
 #[test]
 fn test_parse_rust_style_function_simple() {
-    // New syntax: def name(params) -> ReturnType = body
-    let decl = single_decl("def add(x: i32, y: i32) -> i32 = x + y");
+    // New syntax: def name(params) ReturnType = body
+    let decl = single_decl("def add(x: i32, y: i32) i32 = x + y");
     assert_eq!(decl.name, "add");
     assert_eq!(decl.params.len(), 2);
     assert_typed_param!(&decl.params[0], "x", crate::types::i32());
@@ -2839,8 +2839,8 @@ fn test_parse_rust_style_function_simple() {
 
 #[test]
 fn test_parse_rust_style_function_with_type_params() {
-    // New syntax: def name<T>(x: T) -> T = body
-    let decl = single_decl("def identity<T>(x: T) -> T = x");
+    // New syntax: def name<T>(x: T) T = body
+    let decl = single_decl("def identity<T>(x: T) T = x");
     assert_eq!(decl.name, "identity");
     assert_eq!(decl.type_params, vec!["T"]);
     assert_eq!(decl.params.len(), 1);
@@ -2848,8 +2848,8 @@ fn test_parse_rust_style_function_with_type_params() {
 
 #[test]
 fn test_parse_rust_style_function_with_size_params() {
-    // New syntax: def name<[n]>(arr: [n]i32) -> [n]i32 = body
-    let decl = single_decl("def sized<[n]>(arr: [n]i32) -> [n]i32 = arr");
+    // New syntax: def name<[n]>(arr: [n]i32) [n]i32 = body
+    let decl = single_decl("def sized<[n]>(arr: [n]i32) [n]i32 = arr");
     assert_eq!(decl.name, "sized");
     assert_eq!(decl.size_params, vec!["n"]);
     assert_eq!(decl.params.len(), 1);
@@ -2858,7 +2858,7 @@ fn test_parse_rust_style_function_with_size_params() {
 #[test]
 fn test_parse_rust_style_function_with_mixed_params() {
     // New syntax: def name<[n], [m], A, B>(x: [n]A, y: [m]B) -> A
-    let decl = single_decl("def mixed<[n], [m], A, B>(x: [n]A, y: [m]B) -> A = x[0]");
+    let decl = single_decl("def mixed<[n], [m], A, B>(x: [n]A, y: [m]B) A = x[0]");
     assert_eq!(decl.name, "mixed");
     assert_eq!(decl.size_params, vec!["n", "m"]);
     assert_eq!(decl.type_params, vec!["A", "B"]);
@@ -2932,14 +2932,14 @@ fn test_parse_rust_style_sig_with_size_params() {
 #[test]
 fn test_parse_uppercase_type_variable() {
     // Uppercase single letters should be type variables
-    let decl = single_decl("def f<A>(x: A) -> A = x");
+    let decl = single_decl("def f<A>(x: A) A = x");
     assert_eq!(decl.type_params, vec!["A"]);
 }
 
 #[test]
 fn test_parse_type_variable_in_type_position() {
     // Type variables used in type annotations
-    let decl = single_decl("def swap<A, B>(x: A, y: B) -> (B, A) = (y, x)");
+    let decl = single_decl("def swap<A, B>(x: A, y: B) (B, A) = (y, x)");
     assert_eq!(decl.name, "swap");
     assert_eq!(decl.type_params, vec!["A", "B"]);
 }
@@ -3285,7 +3285,7 @@ fn test_array_index_still_works() {
 #[test]
 fn test_parse_existential_type_simple() {
     // ?k. [k]i32 - existential array type with single size variable
-    let decl = single_decl("def f(x: i32) -> ?k. [k]i32 = ???");
+    let decl = single_decl("def f(x: i32) ?k. [k]i32 = ???");
     assert_eq!(decl.name, "f");
     let ty = decl.ty.as_ref().expect("Expected return type");
     match ty {
@@ -3300,7 +3300,7 @@ fn test_parse_existential_type_simple() {
 #[test]
 fn test_parse_existential_type_multiple_vars() {
     // ?j k. [j][k]i32 - existential with multiple size variables
-    let decl = single_decl("def f(x: i32) -> ?j k. [j][k]i32 = ???");
+    let decl = single_decl("def f(x: i32) ?j k. [j][k]i32 = ???");
     assert_eq!(decl.name, "f");
     let ty = decl.ty.as_ref().expect("Expected return type");
     match ty {
@@ -3316,14 +3316,14 @@ fn test_parse_existential_type_multiple_vars() {
 #[test]
 fn test_parse_existential_type_in_parameter_rejected() {
     // Existential types are only valid in return position, not parameter position
-    expect_parse_error("def len(arr: ?k. [k]i32) -> i32 = ???", |_| Ok(()));
+    expect_parse_error("def len(arr: ?k. [k]i32) i32 = ???", |_| Ok(()));
 }
 
 #[test]
 fn test_numeric_field_access_rejected() {
     // Numeric field access like x.0 should be rejected
     // (tuple indexing is not supported)
-    expect_parse_error("def x(t: (i32, i32)) -> i32 = t.0", |_| Ok(()));
+    expect_parse_error("def x(t: (i32, i32)) i32 = t.0", |_| Ok(()));
 }
 
 #[test]
@@ -3332,7 +3332,7 @@ fn test_functor_param_module_function_call() {
     // This should parse as Application(Identifier(["R"], "f64"), [x])
     let src = r#"
 functor mk_erf(R: real) = {
-  def erf(x: R.t) -> R.t = R.f64(0.5)
+  def erf(x: R.t) R.t = R.f64(0.5)
 }
 "#;
     let _program = parse_ok(src);

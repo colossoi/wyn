@@ -81,15 +81,19 @@ param_type    ::= type | "(" name ":" type ")"
 existential_size ::= "?" ("[" name "]")+ "." type
 
 
-dec ::= val_bind | type_bind | mod_bind | mod_type_bind
+dec ::= val_bind | entry_bind | type_bind | mod_bind | mod_type_bind
         | "open" mod_exp
         | "import" stringlit
         | "local" dec
         | "#[" attr "]" dec
 
 
-val_bind ::= ("def" | "let") (name | "(" symbol ")") type_param* pat* [":" type] "=" exp
-             | ("def" | "let") pat symbol pat [":" type] "=" exp
+val_bind ::= ("def" | "let") (name | "(" symbol ")") type_param* pat* [type] "=" exp
+             | ("def" | "let") pat symbol pat [type] "=" exp
+
+entry_bind   ::= "entry" name entry_params ["#[" attr "]"] [type] "=" exp
+entry_params ::= "(" ")" | "(" entry_param ("," entry_param)* [","] ")"
+entry_param  ::= ["#[" attr "]"] name ":" type
 
 type_bind  ::= ("type" | "type^" | "type~") name type_param* "=" type
 type_param ::= "[" name "]" | "'" name | "'~" name | "'^" name

@@ -287,7 +287,7 @@ fn test_if_expression() {
 
 #[test]
 fn test_function_call() {
-    let mir = flatten_program("def g(y: i32) -> i32 = y + 1\ndef f(x) = g(x)");
+    let mir = flatten_program("def g(y: i32) i32 = y + 1\ndef f(x) = g(x)");
     assert!(mir.defs.len() >= 2, "Expected at least 2 functions");
 
     let names: Vec<_> = mir
@@ -438,7 +438,7 @@ fn test_lambda_captures_typed_variable() {
     // to resolve 'mat' as a field access on the closure.
     let mir = flatten_program(
         r#"
-def test_capture(arr: [4]i32) -> i32 =
+def test_capture(arr: [4]i32) i32 =
     let result = map((|i: i32| arr[i]), [0, 1, 2, 3]) in
     result[0]
 "#,
@@ -468,7 +468,7 @@ fn test_qualified_name_f32_sqrt() {
     // the type_table because it's a type name, not a variable.
     let mir = flatten_program(
         r#"
-def length2(v: vec2f32) -> f32 =
+def length2(v: vec2f32) f32 =
     f32.sqrt((v.x * v.x + v.y * v.y))
 "#,
     );
@@ -495,7 +495,7 @@ fn test_map_with_closure_application() {
     // and registers the lambda in the registry for dispatch.
     let mir = flatten_program(
         r#"
-def test_map(arr: [4]i32) -> [4]i32 =
+def test_map(arr: [4]i32) [4]i32 =
     map((|x: i32| x + 1), arr)
 "#,
     );
@@ -539,7 +539,7 @@ fn test_direct_closure_call() {
     // This test checks that directly calling a closure generates a direct lambda call
     let mir = flatten_program(
         r#"
-def test_apply(x: i32) -> i32 =
+def test_apply(x: i32) i32 =
     let f = |y: i32| y + x in
     f(10)
 "#,
@@ -597,7 +597,7 @@ fn test_error_function_from_if() {
     assert!(
         should_fail_type_check(
             r#"
-def choose(b: bool) -> (i32 -> i32) =
+def choose(b: bool) (i32 -> i32) =
     if b then |x: i32| x + 1 else |x: i32| x * 2
 "#
         ),
@@ -624,7 +624,7 @@ fn test_lambda_with_vector_literal() {
     // Test that vector literals work inside lambdas
     let mir = flatten_program(
         r#"
-def test(v: vec3f32) -> vec4f32 =
+def test(v: vec3f32) vec4f32 =
     let f = |x: vec3f32| @[x.x, x.y, x.z, 1.0f32] in
     f(v)
 "#,
@@ -650,7 +650,7 @@ fn test_f32_sum_inline_definition() {
     // Test sum with inline definition (simpler than using prelude)
     let mir = flatten_program(
         r#"
-def mysum<[n]>(arr: [n]f32) -> f32 =
+def mysum<[n]>(arr: [n]f32) f32 =
   let (result, _) = loop (acc, i) = (0.0f32, 0) while i < length(arr) do
     (acc + arr[i], i + 1)
   in result
@@ -697,7 +697,7 @@ fn test_f32_conversions() {
     // Test f32 type conversion via module functions
     let mir = flatten_program(
         r#"
-def test_conversions(x: i32, y: i64) -> f32 =
+def test_conversions(x: i32, y: i64) f32 =
   let f1 = f32.i32(x) in
   let f2 = f32.i64(y) in
   f1 + f2
@@ -717,7 +717,7 @@ fn test_f32_math_operations() {
     // Test f32 math operations including GLSL extended ops
     let mir = flatten_program(
         r#"
-def test_math(x: f32) -> f32 =
+def test_math(x: f32) f32 =
   let a = f32.sin(x) in
   let b = f32.cos(x) in
   let c = f32.sqrt(a) in
@@ -769,7 +769,7 @@ fn test_operator_section_direct_application() {
     // Test operator section applied directly to arguments
     let mir = flatten_program(
         r#"
-def test_add(x: i32, y: i32) -> i32 = (+)(x, y)
+def test_add(x: i32, y: i32) i32 = (+)(x, y)
 "#,
     );
     let mir_str = format!("{}", mir);
@@ -783,7 +783,7 @@ fn test_operator_section_with_map() {
     // Test operator section passed to map (special higher-order function)
     let mir = flatten_program(
         r#"
-def test_map(arr: [3]i32) -> [3]i32 = map((|x: i32| (+)(x, 1)), arr)
+def test_map(arr: [3]i32) [3]i32 = map((|x: i32| (+)(x, 1)), arr)
 "#,
     );
     let mir_str = format!("{}", mir);
@@ -801,7 +801,7 @@ fn test_mul_overloads() {
     // Note: Square matrices use mat4f32 syntax (not mat4x4f32)
     let mir = flatten_program(
         r#"
-def test_mul_overloads(m1: mat4f32, m2: mat4f32, v: vec4f32) -> vec4f32 =
+def test_mul_overloads(m1: mat4f32, m2: mat4f32, v: vec4f32) vec4f32 =
     let mat_result = mul(m1, m2) in          -- mul_mat_mat
     let vec_result1 = mul(mat_result, v) in  -- mul_mat_vec
     let vec_result2 = mul(v, m1) in          -- mul_vec_mat
@@ -843,7 +843,7 @@ fn test_no_redundant_materializations_simple_var() {
     // deduplicates materializations that appear in BOTH branches of an if.
     let mir = flatten_program(
         r#"
-def test(arr: [3]i32, i: i32) -> i32 =
+def test(arr: [3]i32, i: i32) i32 =
   let x = arr[i] in
   if true then arr[i] else x
 "#,
@@ -869,8 +869,8 @@ fn test_no_redundant_materializations_complex_expr() {
     // The materialize_hoisting pass should hoist the common materialization.
     let mir = flatten_program(
         r#"
-def identity(arr: [3]i32) -> [3]i32 = arr
-def test(arr: [3]i32, i: i32) -> i32 =
+def identity(arr: [3]i32) [3]i32 = arr
+def test(arr: [3]i32, i: i32) i32 =
   if true then (identity(arr))[i] else (identity(arr))[i]
 "#,
     );
@@ -894,7 +894,7 @@ fn test_no_materialize_for_loop_tuple_destructuring() {
     // Loop tuple destructuring should use tuple_access directly, not materialize
     let mir = flatten_program(
         r#"
-def test(arr: [10]i32) -> i32 =
+def test(arr: [10]i32) i32 =
   let (sum, _) = loop (acc, i) = (0, 0) while i < 10 do
     (acc + arr[i], i + 1)
   in sum
@@ -921,7 +921,7 @@ fn test_no_materialize_for_let_tuple_destructuring() {
     // Let tuple destructuring should use tuple_access directly, not materialize
     let mir = flatten_program(
         r#"
-def test(x: i32) -> i32 =
+def test(x: i32) i32 =
   let pair = (x, x + 1) in
   let (a, b) = pair in
   a + b
@@ -950,7 +950,7 @@ fn test_curried_function_definition() {
     // Curried function with parenthesized typed parameters
     let mir = flatten_program(
         r#"
-def add(x: f32, y: f32) -> f32 = x + y
+def add(x: f32, y: f32) f32 = x + y
 def test: f32 = add(1.0f32, 2.0f32)
 "#,
     );
@@ -965,7 +965,7 @@ fn test_curried_function_application() {
     // Curried function application with multiple arguments
     let mir = flatten_program(
         r#"
-def add(x: f32, y: f32) -> f32 = x + y
+def add(x: f32, y: f32) f32 = x + y
 def test: f32 =
     let a = 1.0f32 in
     let b = 2.0f32 in
@@ -982,8 +982,8 @@ fn test_higher_order_function_parameter() {
     // Function parameter with arrow type
     let mir = flatten_program(
         r#"
-def apply(f: f32 -> f32, x: f32) -> f32 = f(x)
-def double(x: f32) -> f32 = x + x
+def apply(f: f32 -> f32, x: f32) f32 = f(x)
+def double(x: f32) f32 = x + x
 def test: f32 = apply(double, 3.0f32)
 "#,
     );
@@ -998,8 +998,8 @@ fn test_binary_function_parameter() {
     // Binary function parameter (f32 -> f32 -> f32)
     let mir = flatten_program(
         r#"
-def fold2(op: f32 -> f32 -> f32, x: f32, y: f32) -> f32 = op(x, y)
-def add(a: f32, b: f32) -> f32 = a + b
+def fold2(op: f32 -> f32 -> f32, x: f32, y: f32) f32 = op(x, y)
+def add(a: f32, b: f32) f32 = a + b
 def test: f32 = fold2(add, 1.0f32, 2.0f32)
 "#,
     );
@@ -1013,7 +1013,7 @@ fn test_reduce_pattern() {
     // The reduce pattern with curried binary operator
     let mir = flatten_program(
         r#"
-def reduce_f32(op: f32 -> f32 -> f32, init: f32, arr: [4]f32) -> f32 =
+def reduce_f32(op: f32 -> f32 -> f32, init: f32, arr: [4]f32) f32 =
     let x0 = op(init, arr[0]) in
     let x1 = op(x0, arr[1]) in
     let x2 = op(x1, arr[2]) in
@@ -1036,7 +1036,7 @@ fn test_map_lambda_without_extra_parens() {
     // vs the working pattern: map((|v:vec3f32| ...), arr)
     let mir = flatten_program(
         r#"
-def test_map_no_parens(arr: [4]i32) -> [4]i32 =
+def test_map_no_parens(arr: [4]i32) [4]i32 =
     map(|x: i32| x + 1, arr)
 "#,
     );
@@ -1051,7 +1051,7 @@ fn test_map_lambda_with_capture() {
     // Pattern: map(|v:type| func(v, captured_var), arr)
     let mir = flatten_program(
         r#"
-def test_map_capture(arr: [4]i32, offset: i32) -> [4]i32 =
+def test_map_capture(arr: [4]i32, offset: i32) [4]i32 =
     map(|x: i32| x + offset, arr)
 "#,
     );
@@ -1065,9 +1065,9 @@ fn test_generic_function_dot2() {
     // Reproduce issue from primitives.wyn: generic function dot2<E, T>
     let mir = flatten_program(
         r#"
-def dot2<E, T>(v: T) -> E = dot(v, v)
+def dot2<E, T>(v: T) E = dot(v, v)
 
-def test_dot2(p: vec3f32) -> f32 =
+def test_dot2(p: vec3f32) f32 =
     dot2(p)
 "#,
     );
@@ -1091,7 +1091,7 @@ def cube_corners: [8]vec3f32 =
       @[1.0, 1.0, -1.0],
       @[1.0, -1.0, -1.0] ]
 
-def test_map_mul(mat: mat4f32) -> [8]vec4f32 =
+def test_map_mul(mat: mat4f32) [8]vec4f32 =
     map(|v:vec3f32| mul(@[v.x, v.y, v.z, 1.0], mat), cube_corners)
 "#,
     );
@@ -1153,9 +1153,9 @@ def verts: [3]vec4f32 =
    @[-1.0, 3.0, 0.0, 1.0]]
 
 #[vertex]
-def vertex_main(#[builtin(vertex_index)] vertex_id:i32) -> #[builtin(position)] vec4f32 = verts[vertex_id]
+entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 = verts[vertex_id]
 
-def translation(p: vec3f32) -> mat4f32 =
+def translation(p: vec3f32) mat4f32 =
   @[
     [1.0f32, 0.0f32, 0.0f32, p.x],
     [0.0f32, 1.0f32, 0.0f32, p.y],
@@ -1163,7 +1163,7 @@ def translation(p: vec3f32) -> mat4f32 =
     [0.0f32, 0.0f32, 0.0f32, 1.0f32]
   ]
 
-def rotation_euler(a: vec3f32) -> mat4f32 =
+def rotation_euler(a: vec3f32) mat4f32 =
   let s = [f32.sin(a.x), f32.sin(a.y), f32.sin(a.z)] in
   let c = [f32.cos(a.x), f32.cos(a.y), f32.cos(a.z)] in
   @[
@@ -1183,7 +1183,7 @@ def cube_corners: [8]vec3f32 =
       @[1.0, 1.0, -1.0],
       @[1.0, -1.0, -1.0] ]
 
-def main_image(iResolution:vec2f32, iTime:f32, fragCoord:vec2f32) -> vec4f32 =
+def main_image(iResolution:vec2f32, iTime:f32, fragCoord:vec2f32) vec4f32 =
   let cam = translation(@[0.0, 0.0, 10.0]) in
   let rot = rotation_euler(@[iTime, iTime*0.86, iTime*0.473]) in
   let rot_cam : mat4f32 = mul(rot, cam) in
@@ -1192,7 +1192,7 @@ def main_image(iResolution:vec2f32, iTime:f32, fragCoord:vec2f32) -> vec4f32 =
   v4s[0]
 
 #[fragment]
-def fragment_main(#[builtin(frag_coord)] pos:vec4f32) -> #[location(0)] vec4f32 =
+entry fragment_main(#[builtin(frag_coord)] pos: vec4f32) #[location(0)] vec4f32 =
   main_image(@[iResolution.x, iResolution.y], iTime, @[pos.x, pos.y])
 "#,
     );
@@ -1206,7 +1206,7 @@ fn test_reduce_with_lambda() {
     // Test that reduce with a lambda generates correct MIR
     let mir = flatten_program(
         r#"
-def sum_array(arr: [4]f32) -> f32 =
+def sum_array(arr: [4]f32) f32 =
     reduce((|acc: f32, x: f32| acc + x), 0.0, arr)
 "#,
     );
@@ -1246,7 +1246,7 @@ fn test_reduce_product() {
     // Test reduce for computing product
     let mir = flatten_program(
         r#"
-def product_array(arr: [4]f32) -> f32 =
+def product_array(arr: [4]f32) f32 =
     reduce((|acc: f32, x: f32| acc * x), 1.0, arr)
 "#,
     );
@@ -1261,9 +1261,9 @@ fn test_filter_basic() {
     // Test basic filter with a predicate
     let mir = flatten_program(
         r#"
-def is_positive(x: i32) -> bool = x > 0
+def is_positive(x: i32) bool = x > 0
 
-def filter_positive(arr: [5]i32) -> ?k. [k]i32 =
+def filter_positive(arr: [5]i32) ?k. [k]i32 =
     filter(is_positive, arr)
 "#,
     );
@@ -1279,7 +1279,7 @@ fn test_filter_with_lambda() {
     // Test filter with an inline lambda predicate
     let mir = flatten_program(
         r#"
-def filter_evens(arr: [4]i32) -> ?k. [k]i32 =
+def filter_evens(arr: [4]i32) ?k. [k]i32 =
     filter((|x: i32| x % 2 == 0), arr)
 "#,
     );
@@ -1298,9 +1298,9 @@ fn test_filter_length() {
     // Test that length() can be called on filter result
     let mir = flatten_program(
         r#"
-def is_positive(x: i32) -> bool = x > 0
+def is_positive(x: i32) bool = x > 0
 
-def count_positive(arr: [5]i32) -> i32 =
+def count_positive(arr: [5]i32) i32 =
     let filtered = filter(is_positive, arr) in
     length(filtered)
 "#,
@@ -1315,7 +1315,7 @@ fn test_for_in_loop_array() {
     // Test for-in loop over a static array
     let mir = flatten_program(
         r#"
-def sum_arr(arr: [5]i32) -> i32 =
+def sum_arr(arr: [5]i32) i32 =
     loop acc = 0 for x in arr do acc + x
 "#,
     );
@@ -1329,9 +1329,9 @@ fn test_for_in_loop_with_filter() {
     // Test for-in loop over a filter result (slice)
     let mir = flatten_program(
         r#"
-def is_positive(x: i32) -> bool = x > 0
+def is_positive(x: i32) bool = x > 0
 
-def sum_positive(arr: [5]i32) -> i32 =
+def sum_positive(arr: [5]i32) i32 =
     let filtered = filter(is_positive, arr) in
     loop acc = 0 for x in filtered do acc + x
 "#,
@@ -1384,7 +1384,7 @@ fn test_glsl_vector_constructor_types() {
 #[uniform(set=0, binding=1)] def iTime: f32
 
 #[fragment]
-def fragment_main(#[builtin(position)] pos: vec4f32) -> #[location(0)] vec4f32 =
+entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     let v2 = @[pos.x, pos.y] in
     let v3 = @[pos.x, pos.y, pos.z] in
     @[v2.x, v2.y, v3.z, 1.0]
@@ -1411,7 +1411,7 @@ fn test_glsl_let_bindings_preserved() {
 #[uniform(set=0, binding=1)] def iTime: f32
 
 #[fragment]
-def fragment_main(#[builtin(position)] pos: vec4f32) -> #[location(0)] vec4f32 =
+entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     let coord = @[pos.x, pos.y] in
     let uv = @[coord.x / iResolution.x, coord.y / iResolution.y] in
     @[uv.x, uv.y, 0.0, 1.0]
@@ -1439,7 +1439,7 @@ fn test_glsl_normalization_variables() {
 #[uniform(set=0, binding=0)] def iTime: f32
 
 #[fragment]
-def fragment_main(#[builtin(position)] pos: vec4f32) -> #[location(0)] vec4f32 =
+entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     let x = pos.x + pos.y * iTime in
     @[x, x, x, 1.0]
 "#,

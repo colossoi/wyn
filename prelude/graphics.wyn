@@ -4,7 +4,7 @@
 module graphics = {
   -- Create a 4x4 translation (position) matrix from a 3D vector
   -- Moves objects by (x, y, z) in world space
-  def translation(p: vec3f32) -> mat4f32 =
+  def translation(p: vec3f32) mat4f32 =
     @[
       [1.0f32, 0.0f32, 0.0f32, p.x],
       [0.0f32, 1.0f32, 0.0f32, p.y],
@@ -15,7 +15,7 @@ module graphics = {
   -- Create a 4x4 rotation matrix from Euler angles (in radians)
   -- Uses XYZ intrinsic Euler angles (rotate around X, then Y, then Z)
   -- Input: vec3f32 where x=pitch, y=yaw, z=roll (in radians)
-  def rotation_euler(a: vec3f32) -> mat4f32 =
+  def rotation_euler(a: vec3f32) mat4f32 =
     let s = [ f32.sin(a.x), f32.sin(a.y), f32.sin(a.z) ] in
     let c = [ f32.cos(a.x), f32.cos(a.y), f32.cos(a.z) ] in
     @[

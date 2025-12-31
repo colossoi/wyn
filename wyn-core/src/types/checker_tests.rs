@@ -86,7 +86,7 @@ fn test_mul_concrete_matrix_types() {
     // This test verifies that polymorphic mul works with concrete matrix types
     typecheck_program(
         r#"
-def test_mul(mat1: mat4f32, mat2: mat4f32) -> mat4f32 =
+def test_mul(mat1: mat4f32, mat2: mat4f32) mat4f32 =
     mul(mat1, mat2)
         "#,
     );
@@ -162,7 +162,7 @@ fn test_bidirectional_with_concrete_type() {
     // This demonstrates where bidirectional checking actually helps
     typecheck_program(
         r#"
-            def apply_to_vec(f: vec3f32 -> f32) -> f32 =
+            def apply_to_vec(f: vec3f32 -> f32) f32 =
               f(@[1.0f32, 2.0f32, 3.0f32])
 
             def test: f32 = apply_to_vec((|v| v.x))
@@ -332,7 +332,7 @@ fn test_size_parameter_binding() {
     // Test that size parameters are properly bound and substituted
     typecheck_program(
         r#"
-def identity<[n]>(xs: [n]i32) -> [n]i32 = xs
+def identity<[n]>(xs: [n]i32) [n]i32 = xs
 
 def test: [5]i32 =
   let arr = [1, 2, 3, 4, 5] in
@@ -521,7 +521,7 @@ fn test_lambda_as_argument() {
     // Lambda passed as argument to higher-order function
     typecheck_program(
         r#"
-def apply(f: i32 -> i32, x: i32) -> i32 = f(x)
+def apply(f: i32 -> i32, x: i32) i32 = f(x)
 def result: i32 = apply((|x| x * 2), 5)
 "#,
     );
@@ -534,7 +534,7 @@ fn test_lambda_returned_from_function_rejected() {
     assert!(
         try_typecheck_program(
             r#"
-def make_adder(n: i32) -> (i32 -> i32) = |x| x + n
+def make_adder(n: i32) (i32 -> i32) = |x| x + n
 def add10 = make_adder(10)
 def result: i32 = add10(5)
 "#,
@@ -548,7 +548,7 @@ fn test_higher_order_apply() {
     // Higher-order function that takes and applies a function (not returning one)
     typecheck_program(
         r#"
-def apply_twice(f: i32 -> i32, x: i32) -> i32 = f(f(x))
+def apply_twice(f: i32 -> i32, x: i32) i32 = f(f(x))
 def result: i32 = apply_twice((|x| x * 2), 5)
 "#,
     );
@@ -564,12 +564,6 @@ def test: i32 =
     double(21)
 "#,
     );
-}
-
-#[test]
-fn test_lambda_with_unit_param() {
-    // Lambda with unit parameter
-    typecheck_program("def get_five: (() -> i32) = |()| 5");
 }
 
 #[test]
@@ -696,7 +690,7 @@ fn test_lambda_compose_inline() {
     // Function composition applied inline (no function-returning-function)
     typecheck_program(
         r#"
-def compose_apply(f: i32 -> i32, g: i32 -> i32, x: i32) -> i32 =
+def compose_apply(f: i32 -> i32, g: i32 -> i32, x: i32) i32 =
     f(g(x))
 def double = |x| x * 2
 def inc = |x| x + 1
@@ -867,7 +861,7 @@ fn test_qualified_builtin_f32_sqrt() {
     // Test that qualified builtins like f32.sqrt work correctly
     typecheck_program(
         r#"
-def length2(v: vec2f32) -> f32 =
+def length2(v: vec2f32) f32 =
     f32.sqrt(v.x * v.x + v.y * v.y)
 "#,
     );
@@ -879,7 +873,7 @@ fn test_mul_mat_vec_application() {
     // mul : mat<n,m,a> -> vec<m,a> -> vec<n,a>
     typecheck_program(
         r#"
-def test(mat: mat4f32) -> vec4f32 =
+def test(mat: mat4f32) vec4f32 =
     mul(mat, @[1.0f32, 2.0f32, 3.0f32, 4.0f32])
 "#,
     );
@@ -890,7 +884,7 @@ fn test_mul_mat_vec_in_lambda() {
     // Test mul mat vec inside a lambda with captured matrix
     typecheck_program(
         r#"
-def test(mat: mat4f32, verts: [3]vec3f32) -> [3]vec4f32 =
+def test(mat: mat4f32, verts: [3]vec3f32) [3]vec4f32 =
     map((|v| mul(mat, @[v.x, v.y, v.z, 1.0f32])), verts)
 "#,
     );
@@ -903,7 +897,7 @@ fn test_higher_order_reduce() {
     // Calling op(init, arr[0]) provides 2 args, so arity check passes
     typecheck_program(
         r#"
-def reduce_f32(op: f32 -> f32 -> f32, init: f32, arr: [4]f32) -> f32 =
+def reduce_f32(op: f32 -> f32 -> f32, init: f32, arr: [4]f32) f32 =
   let x0 = op(init, arr[0]) in
   let x1 = op(x0, arr[1]) in
   let x2 = op(x1, arr[2]) in
@@ -920,7 +914,7 @@ fn test_higher_order_reduce_curried_rejected() {
     assert!(
         try_typecheck_program(
             r#"
-def reduce_f32(op: f32 -> f32 -> f32, init: f32, arr: [4]f32) -> f32 =
+def reduce_f32(op: f32 -> f32 -> f32, init: f32, arr: [4]f32) f32 =
   let x0 = op(init)(arr[0]) in
   let x1 = op(x0)(arr[1]) in
   let x2 = op(x1)(arr[2]) in
@@ -939,13 +933,13 @@ fn test_nested_map_with_reduce() {
     // Using curried types but calling with all args at once
     typecheck_program(
         r#"
-def reduce_f32(op: f32 -> f32 -> f32, init: f32, arr: [4]f32) -> f32 =
+def reduce_f32(op: f32 -> f32 -> f32, init: f32, arr: [4]f32) f32 =
   let x0 = op(init, arr[0]) in
   let x1 = op(x0, arr[1]) in
   let x2 = op(x1, arr[2]) in
   op(x2, arr[3])
 
-def map2_f32(f: f32 -> f32 -> f32, xs: [4]f32, ys: [4]f32) -> [4]f32 =
+def map2_f32(f: f32 -> f32 -> f32, xs: [4]f32, ys: [4]f32) [4]f32 =
   [f(xs[0], ys[0]), f(xs[1], ys[1]), f(xs[2], ys[2]), f(xs[3], ys[3])]
 
 def test: f32 =
@@ -964,7 +958,7 @@ fn test_size_param_instantiation() {
     // Simple test: size-polymorphic function called with concrete array
     typecheck_program(
         r#"
-def sum<[n]>(arr:[n]f32) -> f32 =
+def sum<[n]>(arr:[n]f32) f32 =
   let (result, _) = loop (acc, i) = (0.0f32, 0) while i < length(arr) do
     (acc + arr[i], i + 1)
   in result
@@ -979,12 +973,12 @@ def test: f32 = sum([1.0f32, 2.0f32, 3.0f32])
 fn test_size_param_through_calls() {
     typecheck_program(
         r#"
-def sum<[n]>(arr:[n]f32) -> f32 =
+def sum<[n]>(arr:[n]f32) f32 =
   let (result, _) = loop (acc, i) = (0.0f32, 0) while i < length(arr) do
     (acc + arr[i], i + 1)
   in result
 
-def double_sum<[m]>(arr:[m]f32) -> f32 = sum(arr) + sum(arr)
+def double_sum<[m]>(arr:[m]f32) f32 = sum(arr) + sum(arr)
 
 def test: f32 = double_sum([1.0f32, 2.0f32])
 "#,
@@ -995,7 +989,7 @@ def test: f32 = double_sum([1.0f32, 2.0f32])
 fn test_unique_return_from_non_unique_param() {
     // Returning *[4]f32 from a function that takes [4]f32 should be an error
     // because we're claiming to return a unique/owned value but we only borrowed it
-    let result = try_typecheck_program("def id(a: [4]f32) -> *[4]f32 = a");
+    let result = try_typecheck_program("def id(a: [4]f32) *[4]f32 = a");
     assert!(
         result.is_err(),
         "Should error: cannot return unique type from non-unique parameter"
@@ -1054,7 +1048,7 @@ fn test_vector_literal_mixed_element_types() {
 fn test_vector_literal_in_expression() {
     typecheck_program(
         r#"
-        def add_vectors(a: vec3f32, b: vec3f32) -> vec3f32 =
+        def add_vectors(a: vec3f32, b: vec3f32) vec3f32 =
             @[(a.x + b.x), (a.y + b.y), (a.z + b.z)]
 
         def test: vec3f32 = add_vectors(@[1.0f32, 0.0f32, 0.0f32], @[0.0f32, 1.0f32, 0.0f32])
@@ -1209,9 +1203,9 @@ fn test_polymorphic_builtin_magnitude_different_sizes() {
     // Bug: Type gets fixed on first use due to Monotype instead of Polytype
     typecheck_program(
         r#"
-def test1(v:vec3f32) -> f32 = magnitude(v)
-def test2(v:vec2f32) -> f32 = magnitude(v)
-def test3(v:vec4f32) -> f32 = magnitude(v)
+def test1(v:vec3f32) f32 = magnitude(v)
+def test2(v:vec2f32) f32 = magnitude(v)
+def test3(v:vec4f32) f32 = magnitude(v)
         "#,
     );
 }
@@ -1220,8 +1214,8 @@ def test3(v:vec4f32) -> f32 = magnitude(v)
 fn test_polymorphic_builtin_normalize_different_sizes() {
     typecheck_program(
         r#"
-def test1(v:vec3f32) -> vec3f32 = normalize(v)
-def test2(v:vec2f32) -> vec2f32 = normalize(v)
+def test1(v:vec3f32) vec3f32 = normalize(v)
+def test2(v:vec2f32) vec2f32 = normalize(v)
         "#,
     );
 }
@@ -1230,8 +1224,8 @@ def test2(v:vec2f32) -> vec2f32 = normalize(v)
 fn test_polymorphic_builtin_dot_different_sizes() {
     typecheck_program(
         r#"
-def test1(a:vec3f32, b:vec3f32) -> f32 = dot(a, b)
-def test2(a:vec2f32, b:vec2f32) -> f32 = dot(a, b)
+def test1(a:vec3f32, b:vec3f32) f32 = dot(a, b)
+def test2(a:vec2f32, b:vec2f32) f32 = dot(a, b)
         "#,
     );
 }
@@ -1242,11 +1236,11 @@ def test2(a:vec2f32, b:vec2f32) -> f32 = dot(a, b)
 fn test_builtin_abs_scalar_and_vector() {
     typecheck_program(
         r#"
-def test1(x:f32) -> f32 = abs(x)
-def test2(v:vec3f32) -> vec3f32 = abs(v)
-def test3(v:vec2f32) -> vec2f32 = abs(v)
-def test4(x:i32) -> i32 = abs(x)
-def test5(v:vec3i32) -> vec3i32 = abs(v)
+def test1(x:f32) f32 = abs(x)
+def test2(v:vec3f32) vec3f32 = abs(v)
+def test3(v:vec2f32) vec2f32 = abs(v)
+def test4(x:i32) i32 = abs(x)
+def test5(v:vec3i32) vec3i32 = abs(v)
         "#,
     );
 }
@@ -1255,9 +1249,9 @@ def test5(v:vec3i32) -> vec3i32 = abs(v)
 fn test_builtin_sign_scalar_and_vector() {
     typecheck_program(
         r#"
-def test1(x:f32) -> f32 = sign(x)
-def test2(v:vec3f32) -> vec3f32 = sign(v)
-def test3(x:i32) -> i32 = sign(x)
+def test1(x:f32) f32 = sign(x)
+def test2(v:vec3f32) vec3f32 = sign(v)
+def test3(x:i32) i32 = sign(x)
         "#,
     );
 }
@@ -1266,12 +1260,12 @@ def test3(x:i32) -> i32 = sign(x)
 fn test_builtin_floor_ceil_fract() {
     typecheck_program(
         r#"
-def test1(x:f32) -> f32 = floor(x)
-def test2(x:f32) -> f32 = ceil(x)
-def test3(x:f32) -> f32 = fract(x)
-def test4(v:vec3f32) -> vec3f32 = floor(v)
-def test5(v:vec3f32) -> vec3f32 = ceil(v)
-def test6(v:vec3f32) -> vec3f32 = fract(v)
+def test1(x:f32) f32 = floor(x)
+def test2(x:f32) f32 = ceil(x)
+def test3(x:f32) f32 = fract(x)
+def test4(v:vec3f32) vec3f32 = floor(v)
+def test5(v:vec3f32) vec3f32 = ceil(v)
+def test6(v:vec3f32) vec3f32 = fract(v)
         "#,
     );
 }
@@ -1280,12 +1274,12 @@ def test6(v:vec3f32) -> vec3f32 = fract(v)
 fn test_builtin_min_max_overloaded() {
     typecheck_program(
         r#"
-def test1(a:f32, b:f32) -> f32 = min(a, b)
-def test2(a:vec3f32, b:vec3f32) -> vec3f32 = min(a, b)
-def test3(a:f32, b:f32) -> f32 = max(a, b)
-def test4(a:i32, b:i32) -> i32 = min(a, b)
-def test5(a:u32, b:u32) -> u32 = max(a, b)
-def test6(a:vec2i32, b:vec2i32) -> vec2i32 = min(a, b)
+def test1(a:f32, b:f32) f32 = min(a, b)
+def test2(a:vec3f32, b:vec3f32) vec3f32 = min(a, b)
+def test3(a:f32, b:f32) f32 = max(a, b)
+def test4(a:i32, b:i32) i32 = min(a, b)
+def test5(a:u32, b:u32) u32 = max(a, b)
+def test6(a:vec2i32, b:vec2i32) vec2i32 = min(a, b)
         "#,
     );
 }
@@ -1294,10 +1288,10 @@ def test6(a:vec2i32, b:vec2i32) -> vec2i32 = min(a, b)
 fn test_builtin_clamp_curried() {
     typecheck_program(
         r#"
-def test1(x:f32) -> f32 = clamp(0.0, 1.0, x)
-def test2(v:vec3f32) -> vec3f32 = clamp(0.0, 1.0, v)
-def test3(x:i32) -> i32 = clamp(0i32, 100i32, x)
-def test4(lo:u32, hi:u32, x:u32) -> u32 = clamp(lo, hi, x)
+def test1(x:f32) f32 = clamp(0.0, 1.0, x)
+def test2(v:vec3f32) vec3f32 = clamp(0.0, 1.0, v)
+def test3(x:i32) i32 = clamp(0i32, 100i32, x)
+def test4(lo:u32, hi:u32, x:u32) u32 = clamp(lo, hi, x)
         "#,
     );
 }
@@ -1308,9 +1302,9 @@ fn test_builtin_mix_smoothstep() {
     // because GLSL FMix requires all operands to be the same type
     typecheck_program(
         r#"
-def test1(a:f32, b:f32, t:f32) -> f32 = mix(a, b, t)
-def test3(x:f32) -> f32 = smoothstep(0.0, 1.0, x)
-def test4(v:vec3f32) -> vec3f32 = smoothstep(0.0, 1.0, v)
+def test1(a:f32, b:f32, t:f32) f32 = mix(a, b, t)
+def test3(x:f32) f32 = smoothstep(0.0, 1.0, x)
+def test4(v:vec3f32) vec3f32 = smoothstep(0.0, 1.0, v)
         "#,
     );
 }
@@ -1342,7 +1336,7 @@ fn test_array_with_variable_index() {
     // Array with using a variable as index
     typecheck_program(
         r#"
-def test(i: i32) -> [4]f32 =
+def test(i: i32) [4]f32 =
     let arr = [1.0f32, 2.0f32, 3.0f32, 4.0f32] in
     arr with [i] = 0.0f32
         "#,
@@ -1442,7 +1436,7 @@ fn test_array_with_in_function() {
     // Array with as function parameter and return
     typecheck_program(
         r#"
-def update_at(arr: [4]i32, i: i32, v: i32) -> [4]i32 =
+def update_at(arr: [4]i32, i: i32, v: i32) [4]i32 =
     arr with [i] = v
 
 def test: [4]i32 =
@@ -1483,7 +1477,7 @@ fn test_qualified_type_alias_in_function_param() {
     // rand.state in parameter position should resolve to f32
     typecheck_program(
         r#"
-def use_state(s: rand.state) -> f32 = s + 1.0f32
+def use_state(s: rand.state) f32 = s + 1.0f32
 def test: f32 = use_state(0.5f32)
         "#,
     );
@@ -1532,7 +1526,7 @@ fn test_entry_output_with_qualified_alias() {
     typecheck_program(
         r#"
 #[fragment]
-def test(x: f32) -> rand.state =
+entry test(x: f32) rand.state =
     1.0f32
         "#,
     );
@@ -1544,7 +1538,7 @@ fn test_type_ascription_with_qualified_alias() {
     // rand.state -> f32
     typecheck_program(
         r#"
-def test(x: f32) -> f32 =
+def test(x: f32) f32 =
     let y = (1.0f32 : rand.state) in
     y + x
         "#,
@@ -1557,7 +1551,7 @@ fn test_let_annotation_with_qualified_alias() {
     // rand.state -> f32
     typecheck_program(
         r#"
-def test(x: f32) -> f32 =
+def test(x: f32) f32 =
     let y: rand.state = 1.0f32 in
     y + x
         "#,
@@ -1570,9 +1564,9 @@ fn test_vector_arithmetic() {
     // Vector addition/subtraction should work element-wise
     typecheck_program(
         r#"
-def vec_add(a: vec3f32, b: vec3f32) -> vec3f32 = a + b
-def vec_sub(a: vec3f32, b: vec3f32) -> vec3f32 = a - b
-def vec_scale(a: vec3f32, s: f32) -> vec3f32 = a * s
+def vec_add(a: vec3f32, b: vec3f32) vec3f32 = a + b
+def vec_sub(a: vec3f32, b: vec3f32) vec3f32 = a - b
+def vec_scale(a: vec3f32, s: f32) vec3f32 = a * s
         "#,
     );
 }
@@ -1588,25 +1582,25 @@ module type my_numeric = {
 }
 
 module my_f32_num : (my_numeric with t = f32) = {
-  def add(x: t, y: t) -> t = x + y
+  def add(x: t, y: t) t = x + y
 }
 
 module my_f64_num : (my_numeric with t = f64) = {
-  def add(x: t, y: t) -> t = x + y
+  def add(x: t, y: t) t = x + y
 }
 
 functor add_stuff(n: my_numeric) = {
   type t = n.t
 
-  def add3(x: t, y: t, z: t) -> t =
+  def add3(x: t, y: t, z: t) t =
     n.add(n.add(x, y), z)
 }
 
 module add_f32 = add_stuff(my_f32_num)
 module add_f64 = add_stuff(my_f64_num)
 
-def add3_f32(a: f32, b: f32, c: f32) -> f32 = add_f32.add3(a, b, c)
-def add3_f64(a: f64, b: f64, c: f64) -> f64 = add_f64.add3(a, b, c)
+def add3_f32(a: f32, b: f32, c: f32) f32 = add_f32.add3(a, b, c)
+def add3_f64(a: f64, b: f64, c: f64) f64 = add_f64.add3(a, b, c)
         "#,
     );
 }
@@ -1616,10 +1610,10 @@ fn test_stats32_erf() {
     // Test using the stats32 module from the fstats functor
     typecheck_program(
         r#"
-def test_erf(x: f32) -> f32 = stats32.erf(x)
-def test_erfc(x: f32) -> f32 = stats32.erfc(x)
-def test_gamma(x: f32) -> f32 = stats32.gamma(x)
-def test_lgamma(x: f32) -> f32 = stats32.lgamma(x)
+def test_erf(x: f32) f32 = stats32.erf(x)
+def test_erfc(x: f32) f32 = stats32.erfc(x)
+def test_gamma(x: f32) f32 = stats32.gamma(x)
+def test_lgamma(x: f32) f32 = stats32.lgamma(x)
         "#,
     );
 }
@@ -1629,14 +1623,14 @@ fn test_trig32() {
     // Test using the trig32 module from the ftrig functor
     typecheck_program(
         r#"
-def test_sinpi(x: f32) -> f32 = trig32.sinpi(x)
-def test_cospi(x: f32) -> f32 = trig32.cospi(x)
-def test_tanpi(x: f32) -> f32 = trig32.tanpi(x)
-def test_asinpi(x: f32) -> f32 = trig32.asinpi(x)
-def test_acospi(x: f32) -> f32 = trig32.acospi(x)
-def test_atanpi(x: f32) -> f32 = trig32.atanpi(x)
-def test_atan2pi(x: f32, y: f32) -> f32 = trig32.atan2pi(x, y)
-def test_hypot(x: f32, y: f32) -> f32 = trig32.hypot(x, y)
+def test_sinpi(x: f32) f32 = trig32.sinpi(x)
+def test_cospi(x: f32) f32 = trig32.cospi(x)
+def test_tanpi(x: f32) f32 = trig32.tanpi(x)
+def test_asinpi(x: f32) f32 = trig32.asinpi(x)
+def test_acospi(x: f32) f32 = trig32.acospi(x)
+def test_atanpi(x: f32) f32 = trig32.atanpi(x)
+def test_atan2pi(x: f32, y: f32) f32 = trig32.atan2pi(x, y)
+def test_hypot(x: f32, y: f32) f32 = trig32.hypot(x, y)
         "#,
     );
 }

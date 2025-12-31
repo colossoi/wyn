@@ -27,7 +27,7 @@ Wyn is a minimal functional programming language designed for GPU shader program
 Wyn programs consist of:
 - **Global declarations**: Constants and arrays defined with `let` or `def`
 - **Built-in function signatures**: Polymorphic functions defined with `val`
-- **Shader entry points**: Functions annotated with `#[vertex]` or `#[fragment]` attributes
+- **Shader entry points**: `entry` declarations with `#[vertex]`, `#[fragment]`, or `#[compute]` attributes
 
 The language uses Futhark-style syntax for types and function calls, with array-first semantics optimized for GPU programming patterns.
 
@@ -307,17 +307,20 @@ To simplify the handling of in-place updates (see In-place Updates), the value r
 
 #### Shader Entry Points
 
-Shader entry points are defined by annotating top-level `def` declarations with either `#[vertex]` or `#[fragment]` attributes:
+Shader entry points are defined using the `entry` keyword with a `#[vertex]`, `#[fragment]`, or `#[compute(...)]` attribute:
 
 ```wyn
 #[vertex]
-def vertex_main(): [4]f32 = ...
+entry vertex_main() [4]f32 = ...
 
-#[fragment] 
-def fragment_main(): [4]f32 = ...
+#[fragment]
+entry fragment_main() [4]f32 = ...
+
+#[compute(64, 1, 1)]
+entry double(arr: []f32) []f32 = map(|x| x * 2.0, arr)
 ```
 
-When the Wyn program is compiled, any top-level function with a `#[vertex]` or `#[fragment]` attribute in the single file passed directly to the Wyn compiler will be exposed as a shader entry point. Functions with these attributes in files accessed via `import` are not considered entry points, but can still be called as normal functions.
+When the Wyn program is compiled, any `entry` declaration in the single file passed directly to the Wyn compiler will be exposed as a shader entry point. Entry points in files accessed via `import` are not considered entry points, but can still be called as normal functions.
 
 **Entry Point Naming Restrictions:**
 The name of an entry point must not contain an apostrophe (`'`), even though that is normally permitted in Wyn identifiers.
@@ -800,7 +803,7 @@ See also In-place updates for details on how consumption interacts with higher-o
 Wyn functions are **not curried** by default. Every function has a fixed arity (number of arguments) and must be called with exactly that many arguments. Partial application is not allowed.
 
 ```wyn
-def add(x: i32, y: i32) -> i32 = x + y
+def add(x: i32, y: i32) i32 = x + y
 
 -- Valid: fully applied
 def result = add(1, 2)
@@ -822,7 +825,7 @@ The restriction exists to simplify compilation to GPU targets and ensure predict
 When you need to create a partially applied function, use explicit placeholder syntax with `$`:
 
 ```wyn
-def add(x: i32, y: i32) -> i32 = x + y
+def add(x: i32, y: i32) i32 = x + y
 
 -- Create a 2-arity function that calls add with middle arg fixed
 def add_with_5 = $add(_, 5, _)  -- Produces (i32, i32) -> i32
@@ -1272,16 +1275,16 @@ Wyn uses attributes to define the interface between vertex and fragment shaders,
 
 #### Shader Identification
 
-**`#[vertex]`** - Marks a top-level `def` as a vertex shader entry point
+**`#[vertex]`** - Marks an `entry` declaration as a vertex shader entry point
 ```wyn
-#[vertex] 
-def vs_main(): #[builtin(position)] [4]f32 = result
+#[vertex]
+entry vs_main() #[builtin(position)] [4]f32 = result
 ```
 
-**`#[fragment]`** - Marks a top-level `def` as a fragment shader entry point
+**`#[fragment]`** - Marks an `entry` declaration as a fragment shader entry point
 ```wyn
-#[fragment] 
-def fs_main(): #[location(0)] [4]f32 = result
+#[fragment]
+entry fs_main() #[location(0)] [4]f32 = result
 ```
 
 #### Built-in Variables
@@ -1302,40 +1305,40 @@ def fs_main(): #[location(0)] [4]f32 = result
 **`#[location(n)]`** - Maps parameters and return values to location-based interface variables for communication between shader stages.
 
 ```wyn
-#[vertex] 
-def vs(
+#[vertex]
+entry vs(
     #[builtin(vertex_index)] vid: i32,
     #[location(0)] pos: [3]f32
-): #[location(1)] [3]f32 = result
+) #[location(1)] [3]f32 = result
 
-#[fragment] 
-def fs(
-    #[location(1)] color: [3]f32  
-): #[location(0)] [4]f32 = result
+#[fragment]
+entry fs(
+    #[location(1)] color: [3]f32
+) #[location(0)] [4]f32 = result
 ```
 
 ### Attribute Examples
 
 #### Complete Vertex Shader Interface
 ```wyn
-#[vertex] 
-def vertex_main(
+#[vertex]
+entry vertex_main(
     #[builtin(vertex_index)] vertex_id: i32,
     #[builtin(instance_index)] instance_id: i32,
     #[location(0)] position: [3]f32,
     #[location(1)] normal: [3]f32
-): #[builtin(position)] [4]f32 = 
+) #[builtin(position)] [4]f32 =
     transform_position(position, vertex_id)
 ```
 
-#### Complete Fragment Shader Interface  
+#### Complete Fragment Shader Interface
 ```wyn
-#[fragment] 
-def fragment_main(
+#[fragment]
+entry fragment_main(
     #[location(0)] world_pos: [3]f32,
     #[location(1)] normal: [3]f32,
     #[builtin(front_facing)] is_front: bool
-): #[location(0)] [4]f32 =
+) #[location(0)] [4]f32 =
     compute_color(world_pos, normal, is_front)
 ```
 
@@ -1368,7 +1371,7 @@ let color: vec4f32 = vec4 1.0f32 0.0f32 0.0f32 1.0f32
 
 -- Built-in variables often require vector types
 #[vertex]
-def vertex_main(): #[builtin(position)] vec4f32 =
+entry vertex_main() #[builtin(position)] vec4f32 =
   vec4 0.0f32 0.0f32 0.0f32 1.0f32
 ```
 

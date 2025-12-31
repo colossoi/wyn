@@ -5,17 +5,17 @@ functor fstats(R: real) = {
   type t = R.t
 
   -- Log-gamma using Stirling's approximation (good for x > 0)
-  def lgamma(x: t) -> t =
+  def lgamma(x: t) t =
     let half = R.f64(0.5f64) in
     let one = R.f64(1.0f64) in
     let twelve = R.f64(12.0f64) in
     let log2pi = R.f64(1.8378770664093453f64) in
     (x - half) * R.log(x) - x + half * log2pi + one / (twelve * x)
 
-  def gamma(x: t) -> t = R.exp(lgamma(x))
+  def gamma(x: t) t = R.exp(lgamma(x))
 
   -- Error function using Abramowitz and Stegun approximation
-  def erf(x: t) -> t =
+  def erf(x: t) t =
     let zero = R.f64(0.0f64) in
     let one = R.f64(1.0f64) in
     let neg_one = zero - one in
@@ -31,7 +31,7 @@ functor fstats(R: real) = {
     let y = one - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * R.exp(zero - ax * ax) in
     sign * y
 
-  def erfc(x: t) -> t = R.f64(1.0f64) - erf(x)
+  def erfc(x: t) t = R.f64(1.0f64) - erf(x)
 }
 
 module stats32 = fstats(f32)

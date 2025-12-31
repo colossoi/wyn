@@ -25,27 +25,27 @@ def verts: [3]vec4f32 =
    @[-1.0, 3.0, 0.0, 1.0]]
 
 #[vertex]
-def vertex_main(#[builtin(vertex_index)] vertex_id: i32) -> #[builtin(position)] vec4f32 = verts[vertex_id]
+entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 = verts[vertex_id]
 
 ------------------------------------------------------------
 -- Rotation matrices
 ------------------------------------------------------------
 
-def xrot(t: f32) -> mat3f32 =
+def xrot(t: f32) mat3f32 =
   let c = f32.cos(t) in
   let s = f32.sin(t) in
   @[[1.0, 0.0, 0.0],
     [0.0, c, 0.0 - s],
     [0.0, s, c]]
 
-def yrot(t: f32) -> mat3f32 =
+def yrot(t: f32) mat3f32 =
   let c = f32.cos(t) in
   let s = f32.sin(t) in
   @[[c, 0.0, 0.0 - s],
     [0.0, 1.0, 0.0],
     [s, 0.0, c]]
 
-def zrot(t: f32) -> mat3f32 =
+def zrot(t: f32) mat3f32 =
   let c = f32.cos(t) in
   let s = f32.sin(t) in
   @[[c, 0.0 - s, 0.0],
@@ -56,7 +56,7 @@ def zrot(t: f32) -> mat3f32 =
 -- SDF Map function
 ------------------------------------------------------------
 
-def sdfMap(p_in: vec3f32) -> vec2f32 =
+def sdfMap(p_in: vec3f32) vec2f32 =
   -- p.x += sin(p.z)
   let p1 = @[p_in.x + f32.sin(p_in.z), p_in.y, p_in.z] in
   -- p *= zrot(p.z)
@@ -83,7 +83,7 @@ def sdfMap(p_in: vec3f32) -> vec2f32 =
 -- Normal calculation
 ------------------------------------------------------------
 
-def calcNormal(p: vec3f32) -> vec3f32 =
+def calcNormal(p: vec3f32) vec3f32 =
   let e = 0.1 in
   let dx = (sdfMap(@[p.x + e, p.y, p.z])).x - (sdfMap(@[p.x - e, p.y, p.z])).x in
   let dy = (sdfMap(@[p.x, p.y + e, p.z])).x - (sdfMap(@[p.x, p.y - e, p.z])).x in
@@ -94,7 +94,7 @@ def calcNormal(p: vec3f32) -> vec3f32 =
 -- Ray tracing
 ------------------------------------------------------------
 
-def trace(o: vec3f32, r: vec3f32) -> f32 =
+def trace(o: vec3f32, r: vec3f32) f32 =
   let (_, t_final) = loop (i, t) = (0, 0.0) while i < 64 do
     let p = @[o.x + r.x * t, o.y + r.y * t, o.z + r.z * t] in
     let d = (sdfMap(p)).x in
@@ -108,7 +108,7 @@ def trace(o: vec3f32, r: vec3f32) -> f32 =
 
 -- Triplanar texture lookup from iChannel0
 -- TODO: Replace with actual texture sampling: texture(iChannel0, uv)
-def sampleChannel0(p: vec3f32) -> vec3f32 =
+def sampleChannel0(p: vec3f32) vec3f32 =
   -- Placeholder: procedural pattern
   let ta = @[0.5 + 0.5 * f32.sin(p.y * 10.0),
              0.5 + 0.5 * f32.sin(p.z * 10.0),
@@ -125,7 +125,7 @@ def sampleChannel0(p: vec3f32) -> vec3f32 =
 
 -- Cubemap reflection lookup from iChannel1
 -- TODO: Replace with actual texture sampling: texture(iChannel1, ref)
-def sampleChannel1(ref: vec3f32) -> vec3f32 =
+def sampleChannel1(ref: vec3f32) vec3f32 =
   -- Placeholder: sky-like gradient based on reflection direction
   let t = 0.5 + 0.5 * ref.y in
   @[0.5 + 0.3 * t, 0.6 + 0.2 * t, 0.8 + 0.2 * t]
@@ -135,7 +135,7 @@ def sampleChannel1(ref: vec3f32) -> vec3f32 =
 ------------------------------------------------------------
 
 #[fragment]
-def fragment_main(#[builtin(position)] fragCoord: vec4f32) -> #[location(0)] vec4f32 =
+entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
   -- Flip Y for Vulkan
   let coord = @[fragCoord.x, iResolution.y - fragCoord.y] in
   let uv = @[coord.x / iResolution.x, coord.y / iResolution.y] in

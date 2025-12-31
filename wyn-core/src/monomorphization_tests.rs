@@ -47,13 +47,13 @@ fn test_monomorphization_asserts_on_unresolved_size_params() {
     // resolved during type checking but weren't.
 
     let source = r#"
-def sum<[n]>(arr:[n]f32) -> f32 =
+def sum<[n]>(arr:[n]f32) f32 =
   let (result, _) = loop (acc, i) = (0.0f32, 0) while i < length(arr) do
     (acc + arr[i], i + 1)
   in result
 
 #[vertex]
-def vertex_main(vertex_id:i32) -> #[builtin(position)] vec4f32 =
+entry vertex_main(vertex_id: i32) #[builtin(position)] vec4f32 =
   let result = sum([1.0f32, 1.0f32, 1.0f32]) in
   @[result, result, 0.0f32, 1.0f32]
 "#;
@@ -73,13 +73,13 @@ fn test_monomorphization_with_map_and_size_params() {
     // where sum has a size parameter [n]
 
     let source = r#"
-def sum<[n]>(arr:[n]f32) -> f32 =
+def sum<[n]>(arr:[n]f32) f32 =
   let (result, _) = loop (acc, i) = (0.0f32, 0) while i < length(arr) do
     (acc + arr[i], i + 1)
   in result
 
 #[vertex]
-def vertex_main(vertex_id:i32) -> #[builtin(position)] vec4f32 =
+entry vertex_main(vertex_id: i32) #[builtin(position)] vec4f32 =
   let edges : [3][2]i32 = [[0,1], [1,2], [2,0]] in
   let result = sum(map((|e:[2]i32| 1.0f32), edges)) in
   @[result, result, 0.0f32, 1.0f32]

@@ -6,28 +6,28 @@ module rand = {
   type state = f32
 
   -- Initialize RNG from a seed (should be in (0, 1) for best results)
-  def init(seed: f32) -> state = fract((seed * 43758.5453f32))
+  def init(seed: f32) state = fract((seed * 43758.5453f32))
 
   -- Generate next state and random value in [0, 1)
-  def next(s: state) -> (state, f32) =
+  def next(s: state) (state, f32) =
     let x = s * 43758.5453f32 in
     let new_state = fract(x) in
     (new_state, new_state)
 
   -- Generate random integer in [0, n)
-  def int(s: state, n: i32) -> (state, i32) =
+  def int(s: state, n: i32) (state, i32) =
     let (s2, r) = next(s) in
     let idx = i32.f32((r * f32.i32(n))) in
     let clamped = if idx < 0 then 0 else if idx >= n then n - 1 else idx in
     (s2, clamped)
 
   -- Generate random float in [lo, hi)
-  def range(s: state, lo: f32, hi: f32) -> (state, f32) =
+  def range(s: state, lo: f32, hi: f32) (state, f32) =
     let (s2, r) = next(s) in
     (s2, lo + r * (hi - lo))
 
   -- Generate random bool with given probability of true
-  def bool(s: state, prob: f32) -> (state, bool) =
+  def bool(s: state, prob: f32) (state, bool) =
     let (s2, r) = next(s) in
     (s2, r < prob)
 }

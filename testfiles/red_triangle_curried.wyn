@@ -1,14 +1,14 @@
 -- Simple red triangle test (alternate version)
 
-def select_position(idx: i32) -> vec4f32 =
+def select_position(idx: i32) vec4f32 =
   if idx == 0 then @[-0.5, -0.5, 0.0, 1.0]
   else if idx == 1 then @[0.5, -0.5, 0.0, 1.0]
   else @[0.0, 0.5, 0.0, 1.0]
 
-#[vertex] def vertex_main(#[builtin(vertex_index)] vertex_index: i32) -> (#[builtin(position)] vec4f32, #[location(0)] vec3f32) =
+#[vertex] entry vertex_main(#[builtin(vertex_index)] vertex_index: i32) (#[builtin(position)] vec4f32, #[location(0)] vec3f32) =
   let position = select_position(vertex_index) in
   let color: vec3f32 = @[1.0, 0.0, 0.0] in
   (position, color)
 
-#[fragment] def fragment_main(#[location(0)] color: vec3f32) -> #[location(0)] vec4f32 =
+#[fragment] entry fragment_main(#[location(0)] color: vec3f32) #[location(0)] vec4f32 =
   @[color.x, color.y, color.z, 1.0]

@@ -8,31 +8,31 @@
 ------------------------------------------------------------
 
 -- Apply function to each element of an array
-def map<[n], A, B>(f: A -> B, xs: [n]A) -> [n]B =
+def map<[n], A, B>(f: A -> B, xs: [n]A) [n]B =
   _w_intrinsic_map(f, xs)
 
 -- Reduce array using associative operator and neutral element
-def reduce<[n], A>(op: A -> A -> A, ne: A, xs: [n]A) -> A =
+def reduce<[n], A>(op: A -> A -> A, ne: A, xs: [n]A) A =
   _w_intrinsic_reduce(op, ne, xs)
 
 -- Inclusive scan (prefix sum) with associative operator
-def scan<[n], A>(op: A -> A -> A, ne: A, xs: [n]A) -> [n]A =
+def scan<[n], A>(op: A -> A -> A, ne: A, xs: [n]A) [n]A =
   _w_intrinsic_scan(op, ne, xs)
 
 -- Filter elements that satisfy predicate
-def filter<[n], A>(p: A -> bool, xs: [n]A) -> ?k. [k]A =
+def filter<[n], A>(p: A -> bool, xs: [n]A) ?k. [k]A =
   _w_intrinsic_filter(p, xs)
 
 -- Scatter values into destination array at specified indices
-def scatter<[n], [m], A>(dest: [n]A, indices: [m]i32, values: [m]A) -> [n]A =
+def scatter<[n], [m], A>(dest: [n]A, indices: [m]i32, values: [m]A) [n]A =
   _w_intrinsic_scatter(dest, indices, values)
 
 -- Get the length of an array
-def length<[n], A>(xs: [n]A) -> i32 =
+def length<[n], A>(xs: [n]A) i32 =
   _w_intrinsic_length(xs)
 
 -- Create array with n copies of value
-def replicate<[n], A>(n: i32, x: A) -> [n]A =
+def replicate<[n], A>(n: i32, x: A) [n]A =
   _w_intrinsic_replicate(n, x)
 
 ------------------------------------------------------------
@@ -40,24 +40,24 @@ def replicate<[n], A>(n: i32, x: A) -> [n]A =
 ------------------------------------------------------------
 
 -- Combine two arrays into an array of pairs
-def zip<[n], A, B>(xs: [n]A, ys: [n]B) -> [n](A, B) =
+def zip<[n], A, B>(xs: [n]A, ys: [n]B) [n](A, B) =
   _w_intrinsic_zip(xs, ys)
 
 -- Split an array of pairs into two arrays
-def unzip<[n], A, B>(xys: [n](A, B)) -> ([n]A, [n]B) =
+def unzip<[n], A, B>(xys: [n](A, B)) ([n]A, [n]B) =
   (map(|(a, _): (A, B)| a, xys),
    map(|(_, b): (A, B)| b, xys))
 
 -- 3-way zip (produces flat tuples)
-def zip3<[n], A, B, C>(xs: [n]A, ys: [n]B, zs: [n]C) -> [n](A, B, C) =
+def zip3<[n], A, B, C>(xs: [n]A, ys: [n]B, zs: [n]C) [n](A, B, C) =
   map(|((a, b), c): ((A, B), C)| (a, b, c), zip(zip(xs, ys), zs))
 
 -- 4-way zip (produces flat tuples)
-def zip4<[n], A, B, C, D>(as: [n]A, bs: [n]B, cs: [n]C, ds: [n]D) -> [n](A, B, C, D) =
+def zip4<[n], A, B, C, D>(as: [n]A, bs: [n]B, cs: [n]C, ds: [n]D) [n](A, B, C, D) =
   map(|(((a, b), c), d): (((A, B), C), D)| (a, b, c, d), zip(zip(zip(as, bs), cs), ds))
 
 -- 5-way zip (produces flat tuples)
-def zip5<[n], A, B, C, D, E>(as: [n]A, bs: [n]B, cs: [n]C, ds: [n]D, es: [n]E) -> [n](A, B, C, D, E) =
+def zip5<[n], A, B, C, D, E>(as: [n]A, bs: [n]B, cs: [n]C, ds: [n]D, es: [n]E) [n](A, B, C, D, E) =
   map(|((((a, b), c), d), e): ((((A, B), C), D), E)| (a, b, c, d, e), zip(zip(zip(zip(as, bs), cs), ds), es))
 
 ------------------------------------------------------------
@@ -65,19 +65,19 @@ def zip5<[n], A, B, C, D, E>(as: [n]A, bs: [n]B, cs: [n]C, ds: [n]D, es: [n]E) -
 ------------------------------------------------------------
 
 -- Map over two arrays in parallel
-def map2<[n], A, B, C>(f: (A, B) -> C, xs: [n]A, ys: [n]B) -> [n]C =
+def map2<[n], A, B, C>(f: (A, B) -> C, xs: [n]A, ys: [n]B) [n]C =
   map(f, zip(xs, ys))
 
 -- Map over three arrays in parallel
-def map3<[n], A, B, C, D>(f: (A, B, C) -> D, xs: [n]A, ys: [n]B, zs: [n]C) -> [n]D =
+def map3<[n], A, B, C, D>(f: (A, B, C) -> D, xs: [n]A, ys: [n]B, zs: [n]C) [n]D =
   map(f, zip3(xs, ys, zs))
 
 -- Map over four arrays in parallel
-def map4<[n], A, B, C, D, E>(f: (A, B, C, D) -> E, as: [n]A, bs: [n]B, cs: [n]C, ds: [n]D) -> [n]E =
+def map4<[n], A, B, C, D, E>(f: (A, B, C, D) -> E, as: [n]A, bs: [n]B, cs: [n]C, ds: [n]D) [n]E =
   map(f, zip4(as, bs, cs, ds))
 
 -- Map over five arrays in parallel
-def map5<[n], A, B, C, D, E, F>(f: (A, B, C, D, E) -> F, as: [n]A, bs: [n]B, cs: [n]C, ds: [n]D, es: [n]E) -> [n]F =
+def map5<[n], A, B, C, D, E, F>(f: (A, B, C, D, E) -> F, as: [n]A, bs: [n]B, cs: [n]C, ds: [n]D, es: [n]E) [n]F =
   map(f, zip5(as, bs, cs, ds, es))
 
 ------------------------------------------------------------
@@ -85,11 +85,11 @@ def map5<[n], A, B, C, D, E, F>(f: (A, B, C, D, E) -> F, as: [n]A, bs: [n]B, cs:
 ------------------------------------------------------------
 
 -- Test if predicate holds for all elements
-def all<[n], A>(p: A -> bool, xs: [n]A) -> bool =
+def all<[n], A>(p: A -> bool, xs: [n]A) bool =
   reduce(|a, b| a && b, true, map(p, xs))
 
 -- Test if predicate holds for any element
-def any<[n], A>(p: A -> bool, xs: [n]A) -> bool =
+def any<[n], A>(p: A -> bool, xs: [n]A) bool =
   reduce(|a, b| a || b, false, map(p, xs))
 
 ------------------------------------------------------------
@@ -98,7 +98,7 @@ def any<[n], A>(p: A -> bool, xs: [n]A) -> bool =
 
 -- Generate array by applying function to each index
 -- tabulate size f = [f 0, f 1, ..., f (size-1)]
-def tabulate<[n], A>(size: i32, f: i32 -> A) -> [n]A =
+def tabulate<[n], A>(size: i32, f: i32 -> A) [n]A =
   map(f, 0..<size)
 
 ------------------------------------------------------------
@@ -106,11 +106,11 @@ def tabulate<[n], A>(size: i32, f: i32 -> A) -> [n]A =
 ------------------------------------------------------------
 
 -- Reverse an array
-def reverse<[n], A>(arr: [n]A) -> [n]A =
+def reverse<[n], A>(arr: [n]A) [n]A =
   map(|i| arr[length(arr) - 1 - i], 0..<length(arr))
 
 -- Rotate array left by k positions
-def rotate<[n], A>(k: i32, arr: [n]A) -> [n]A =
+def rotate<[n], A>(k: i32, arr: [n]A) [n]A =
   map(|i| arr[(i + k) % length(arr)], 0..<length(arr))
 
 ------------------------------------------------------------
@@ -118,7 +118,7 @@ def rotate<[n], A>(k: i32, arr: [n]A) -> [n]A =
 ------------------------------------------------------------
 
 -- Commutative reduce (same as reduce, but documents commutativity)
-def reduce_comm<[n], A>(op: A -> A -> A, ne: A, arr: [n]A) -> A =
+def reduce_comm<[n], A>(op: A -> A -> A, ne: A, arr: [n]A) A =
   reduce(op, ne, arr)
 
 ------------------------------------------------------------
@@ -135,7 +135,7 @@ def partition<[n], A>(p: A -> bool, xs: [n]A) =
 ------------------------------------------------------------
 
 -- Place values at indices in array filled with default value
-def spread<[n], [m], A>(size: i32, default: A, indices: [m]i32, values: [m]A) -> [n]A =
+def spread<[n], [m], A>(size: i32, default: A, indices: [m]i32, values: [m]A) [n]A =
   scatter(replicate(size, default), indices, values)
 
 ------------------------------------------------------------
@@ -145,9 +145,9 @@ def spread<[n], [m], A>(size: i32, default: A, indices: [m]i32, values: [m]A) ->
 -- Generalized histogram: reduce values into destination using operator
 -- For each i: dest[indices[i]] = op(dest[indices[i]], values[i])
 -- Multiple values at the same index are combined using the operator
-def reduce_by_index<[n], [m], A>(dest: [n]A, op: A -> A -> A, ne: A, indices: [m]i32, values: [m]A) -> [n]A =
+def reduce_by_index<[n], [m], A>(dest: [n]A, op: A -> A -> A, ne: A, indices: [m]i32, values: [m]A) [n]A =
   _w_intrinsic_hist_1d(dest, op, ne, indices, values)
 
 -- Histogram (alias for reduce_by_index)
-def hist<[n], [m], A>(dest: [n]A, op: A -> A -> A, ne: A, indices: [m]i32, values: [m]A) -> [n]A =
+def hist<[n], [m], A>(dest: [n]A, op: A -> A -> A, ne: A, indices: [m]i32, values: [m]A) [n]A =
   reduce_by_index(dest, op, ne, indices, values)

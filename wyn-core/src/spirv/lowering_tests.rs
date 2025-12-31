@@ -97,7 +97,7 @@ fn test_unary_negation() {
 fn test_record_field_access() {
     let spirv = compile_to_spirv(
         r#"
-def get_x(r:{x:i32, y:i32}) -> i32 = r.x
+def get_x(r:{x:i32, y:i32}) i32 = r.x
 "#,
     )
     .unwrap();
@@ -110,7 +110,7 @@ fn test_closure_capture_access() {
     // This test uses tuple_access intrinsic for closure field access
     let spirv = compile_to_spirv(
         r#"
-def test(x:i32) -> i32 =
+def test(x:i32) i32 =
     let f = |y:i32| x + y in
     f(10)
 "#,
@@ -126,9 +126,9 @@ fn test_polymorphic_dot2() {
     // This reproduces the primitives.wyn issue where Vec type has unresolved size variable
     let spirv = compile_to_spirv(
         r#"
-def dot2<E, T>(v: T) -> E = dot(v, v)
+def dot2<E, T>(v: T) E = dot(v, v)
 
-def test_dot2_vec3(v: vec3f32) -> f32 = dot2(v)
+def test_dot2_vec3(v: vec3f32) f32 = dot2(v)
 "#,
     )
     .unwrap();
@@ -142,9 +142,9 @@ fn test_polymorphic_dot2_in_expression() {
     // sdCappedTorus: f32.sqrt(dot2(p) + ra*ra - 2.0*ra*k) - rb
     let spirv = compile_to_spirv(
         r#"
-def dot2<E, T>(v: T) -> E = dot(v, v)
+def dot2<E, T>(v: T) E = dot(v, v)
 
-def sdCappedTorus(p: vec3f32, ra: f32, rb: f32, k: f32) -> f32 =
+def sdCappedTorus(p: vec3f32, ra: f32, rb: f32, k: f32) f32 =
   f32.sqrt(dot2(p) + ra*ra - 2.0*ra*k) - rb
 "#,
     )
@@ -158,11 +158,11 @@ fn test_polymorphic_dot2_vec2_and_vec3() {
     // Test dot2 with both vec2 and vec3 in same program (like primitives.wyn)
     let spirv = compile_to_spirv(
         r#"
-def dot2<E, T>(v: T) -> E = dot(v, v)
+def dot2<E, T>(v: T) E = dot(v, v)
 
-def test_vec3(v: vec3f32) -> f32 = dot2(v)
-def test_vec2(v: vec2f32) -> f32 = dot2(v)
-def test_both(v3: vec3f32, v2: vec2f32) -> f32 = dot2(v3) + dot2(v2)
+def test_vec3(v: vec3f32) f32 = dot2(v)
+def test_vec2(v: vec2f32) f32 = dot2(v)
+def test_both(v3: vec3f32, v2: vec2f32) f32 = dot2(v3) + dot2(v2)
 "#,
     )
     .unwrap();
@@ -175,7 +175,7 @@ fn test_scan_inclusive() {
     // Inclusive scan (prefix sum): scan (+) 0 [1,2,3] = [1, 3, 6]
     let spirv = compile_to_spirv(
         r#"
-def sum_scan(arr: [4]i32) -> [4]i32 = scan((|a, b| a + b), 0, arr)
+def sum_scan(arr: [4]i32) [4]i32 = scan((|a, b| a + b), 0, arr)
 "#,
     )
     .unwrap();
@@ -189,13 +189,13 @@ fn test_map_variants() {
     // map2-map5 take functions with tuple arguments: (A, B) -> C, etc.
     let spirv = compile_to_spirv(
         r#"
-def double(x: i32) -> i32 = x * 2
+def double(x: i32) i32 = x * 2
 
-def test_map(arr: [3]i32) -> [3]i32 = map(double, arr)
-def test_map2(xs: [3]i32, ys: [3]i32) -> [3]i32 = map2(|(x, y)| x + y, xs, ys)
-def test_map3(xs: [3]i32, ys: [3]i32, zs: [3]i32) -> [3]i32 = map3(|(x, y, z)| x + y + z, xs, ys, zs)
-def test_map4(a: [3]i32, b: [3]i32, c: [3]i32, d: [3]i32) -> [3]i32 = map4(|(a, b, c, d)| a + b + c + d, a, b, c, d)
-def test_map5(a: [3]i32, b: [3]i32, c: [3]i32, d: [3]i32, e: [3]i32) -> [3]i32 = map5(|(a, b, c, d, e)| a + b + c + d + e, a, b, c, d, e)
+def test_map(arr: [3]i32) [3]i32 = map(double, arr)
+def test_map2(xs: [3]i32, ys: [3]i32) [3]i32 = map2(|(x, y)| x + y, xs, ys)
+def test_map3(xs: [3]i32, ys: [3]i32, zs: [3]i32) [3]i32 = map3(|(x, y, z)| x + y + z, xs, ys, zs)
+def test_map4(a: [3]i32, b: [3]i32, c: [3]i32, d: [3]i32) [3]i32 = map4(|(a, b, c, d)| a + b + c + d, a, b, c, d)
+def test_map5(a: [3]i32, b: [3]i32, c: [3]i32, d: [3]i32, e: [3]i32) [3]i32 = map5(|(a, b, c, d, e)| a + b + c + d + e, a, b, c, d, e)
 "#,
     )
     .unwrap();
@@ -208,7 +208,7 @@ fn test_scatter_update() {
     // Scatter: write values to array at given indices
     let spirv = compile_to_spirv(
         r#"
-def scatter_test(dest: [5]i32, indices: [2]i32, values: [2]i32) -> [5]i32 =
+def scatter_test(dest: [5]i32, indices: [2]i32, values: [2]i32) [5]i32 =
     scatter(dest, indices, values)
 "#,
     )
@@ -222,7 +222,7 @@ fn test_reduce_by_index() {
     // Histogram / reduce_by_index: accumulate values at indices using operator
     let spirv = compile_to_spirv(
         r#"
-def hist_test(dest: [3]i32, indices: [4]i32, values: [4]i32) -> [3]i32 =
+def hist_test(dest: [3]i32, indices: [4]i32, values: [4]i32) [3]i32 =
     reduce_by_index(dest, |a, b| a + b, 0, indices, values)
 "#,
     )
@@ -236,7 +236,7 @@ fn test_hist() {
     // hist is an alias for reduce_by_index
     let spirv = compile_to_spirv(
         r#"
-def hist_alias_test(dest: [3]i32, indices: [4]i32, values: [4]i32) -> [3]i32 =
+def hist_alias_test(dest: [3]i32, indices: [4]i32, values: [4]i32) [3]i32 =
     hist(dest, |a, b| a + b, 0, indices, values)
 "#,
     )
@@ -250,7 +250,7 @@ fn test_algebraic_simplifications() {
     // Test all algebraic identity simplifications compile correctly
     let spirv = compile_to_spirv(
         r#"
-def test(x: f32) -> f32 =
+def test(x: f32) f32 =
     (0.0 - x) +     -- 0 - x → -x
     (0.0 + x) +     -- 0 + x → x
     (x + 0.0) +     -- x + 0 → x
@@ -318,12 +318,12 @@ fn test_partial_eval_inlined_function_local_id_collision() {
 
 -- Helper function that will be inlined when called with known args.
 -- The let binding 'weight' uses iTime which is unknown, so it gets residualized.
-def helper(x: f32) -> f32 =
+def helper(x: f32) f32 =
     let weight = x * iTime in
     weight
 
 #[fragment]
-def fragment_main(#[builtin(position)] pos: vec4f32) -> #[location(0)] vec4f32 =
+entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     -- Create multiple locals to ensure LocalId collision
     let a = pos.x in
     let b = pos.y in
@@ -360,10 +360,10 @@ def verts: [3]vec4f32 =
    @[-1.0, 3.0, 0.0, 1.0]]
 
 #[vertex]
-def vertex_main(#[builtin(vertex_index)] vertex_id:i32) -> #[builtin(position)] vec4f32 = verts[vertex_id]
+entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 = verts[vertex_id]
 
 #[fragment]
-def fragment_main() -> #[location(0)] vec4f32 =
+entry fragment_main() #[location(0)] vec4f32 =
   let g = @[1.0, 2.0, 3.0] in
   let h = dot(g, @[127.1, 311.7, 74.7]) in
   @[h, h, h, 1.0]
