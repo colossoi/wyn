@@ -1,0 +1,10 @@
+[package]
+name = "tephra"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal ash-based compute shader runner for Wyn"
+
+[dependencies]
+ash = { version = "0.38", features = ["loaded"] }
+anyhow = "1.0"
+clap = { version = "4", features = ["derive"] }
