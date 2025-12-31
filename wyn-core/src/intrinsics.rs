@@ -418,6 +418,15 @@ impl IntrinsicSource {
         let result_array = Type::Constructed(TypeName::Array, vec![n, b]);
         self.register_poly("_w_intrinsic_map", vec![f_type, input_array], result_array);
 
+        // _w_intrinsic_inplace_map : (a -> a) -> [n]a -> [n]a
+        // In-place variant: requires f: a -> a (same element type) and input array is
+        // dead after use. Compiler pass rewrites map -> inplace_map when safe.
+        let a = ctx.new_variable();
+        let n = ctx.new_variable();
+        let f_type = Type::arrow(a.clone(), a.clone());
+        let array_a = Type::Constructed(TypeName::Array, vec![n, a]);
+        self.register_poly("_w_intrinsic_inplace_map", vec![f_type, array_a.clone()], array_a);
+
         // _w_intrinsic_zip : [n]a -> [n]b -> [n](a, b)
         let a = ctx.new_variable();
         let b = ctx.new_variable();

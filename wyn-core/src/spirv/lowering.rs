@@ -2732,12 +2732,13 @@ fn extract_array_info(
 }
 
 /// Lower `_w_intrinsic_map`: map f [a,b,c] = [f(a), f(b), f(c)]
+/// This version builds a new result array. For in-place updates, see `lower_inplace_map`.
 fn lower_map(
     constructor: &mut Constructor,
     body: &Body,
     args: &[ExprId],
     expr_ty: &PolyType<TypeName>,
-    expr_node_id: NodeId,
+    _expr_node_id: NodeId,
     result_type: spirv::Word,
 ) -> Result<spirv::Word> {
     if args.len() != 2 {
@@ -2748,6 +2749,7 @@ fn lower_map(
     }
 
     // Check if array argument is a StorageSlice (for compute shaders)
+    // Storage slices are always handled in-place since we can't create new storage buffers
     if let Some(storage_info) = get_storage_slice_for_expr(constructor, body, args[1]) {
         return lower_map_storage_slice(constructor, body, args, storage_info);
     }
@@ -2772,32 +2774,16 @@ fn lower_map(
         .get(&func_name)
         .ok_or_else(|| err_spirv!("Map function not found: {}", func_name))?;
 
-    // In-place optimization when array is dead after this use
-    let can_inplace = constructor.inplace_nodes.contains(&expr_node_id) && elem_type == output_elem_type;
-
-    if can_inplace {
-        // In-place optimization: use OpCompositeInsert to update array in place
-        let mut result = arr_val;
-        for i in 0..array_size {
-            let input_elem = constructor.builder.composite_extract(elem_type, None, arr_val, [i])?;
-            let call_args = if is_empty_closure { vec![input_elem] } else { vec![closure_val, input_elem] };
-            let result_elem =
-                constructor.builder.function_call(output_elem_type, None, map_func_id, call_args)?;
-            result = constructor.builder.composite_insert(result_type, None, result_elem, result, [i])?;
-        }
-        Ok(result)
-    } else {
-        // General case: extract elements, call function, build result array
-        let mut result_elements = Vec::with_capacity(array_size as usize);
-        for i in 0..array_size {
-            let input_elem = constructor.builder.composite_extract(elem_type, None, arr_val, [i])?;
-            let call_args = if is_empty_closure { vec![input_elem] } else { vec![closure_val, input_elem] };
-            let result_elem =
-                constructor.builder.function_call(output_elem_type, None, map_func_id, call_args)?;
-            result_elements.push(result_elem);
-        }
-        Ok(constructor.builder.composite_construct(result_type, None, result_elements)?)
+    // Build a new result array by extracting elements, applying function, and constructing
+    let mut result_elements = Vec::with_capacity(array_size as usize);
+    for i in 0..array_size {
+        let input_elem = constructor.builder.composite_extract(elem_type, None, arr_val, [i])?;
+        let call_args = if is_empty_closure { vec![input_elem] } else { vec![closure_val, input_elem] };
+        let result_elem =
+            constructor.builder.function_call(output_elem_type, None, map_func_id, call_args)?;
+        result_elements.push(result_elem);
     }
+    Ok(constructor.builder.composite_construct(result_type, None, result_elements)?)
 }
 
 /// Check if an expression refers to a StorageSlice parameter.

@@ -27,6 +27,7 @@ pub mod lowering_common;
 pub mod binding_lifter;
 pub mod constant_folding;
 pub mod glsl;
+pub mod inplace_rewriter;
 pub mod materialize_hoisting;
 pub mod monomorphization;
 pub mod normalize;
@@ -692,9 +693,13 @@ pub struct Lifted {
 impl Lifted {
     /// Lower MIR to SPIR-V
     pub fn lower(self) -> Result<Lowered> {
+        // Analyze which operations can be done in-place
         let inplace_info = alias_checker::analyze_inplace(&self.mir);
-        let spirv = spirv::lowering::lower(&self.mir, &inplace_info)?;
-        Ok(Lowered { mir: self.mir, spirv })
+        // Rewrite eligible map operations to inplace_map
+        let mir = inplace_rewriter::rewrite_inplace(self.mir, &inplace_info);
+        // Lower to SPIR-V
+        let spirv = spirv::lowering::lower(&mir, &inplace_info)?;
+        Ok(Lowered { mir, spirv })
     }
 
     /// Lower MIR to GLSL
