@@ -68,7 +68,9 @@ struct Constructor {
 
     // Constant caching
     int_const_cache: HashMap<i32, spirv::Word>,
-    float_const_cache: HashMap<u32, spirv::Word>, // bits as u32
+    uint_const_cache: HashMap<u32, spirv::Word>,
+    uint_const_reverse: HashMap<spirv::Word, u32>, // reverse lookup: ID -> value
+    float_const_cache: HashMap<u32, spirv::Word>,  // bits as u32
     bool_const_cache: HashMap<bool, spirv::Word>,
 
     // Current function state
@@ -139,6 +141,8 @@ impl Constructor {
             u32_type,
             f32_type,
             int_const_cache: HashMap::new(),
+            uint_const_cache: HashMap::new(),
+            uint_const_reverse: HashMap::new(),
             float_const_cache: HashMap::new(),
             bool_const_cache: HashMap::new(),
             current_block: None,
@@ -511,9 +515,19 @@ impl Constructor {
     }
 
     /// Get or create a u32 constant
-    #[allow(dead_code)]
     fn const_u32(&mut self, value: u32) -> spirv::Word {
-        self.builder.constant_bit32(self.u32_type, value)
+        if let Some(&id) = self.uint_const_cache.get(&value) {
+            return id;
+        }
+        let id = self.builder.constant_bit32(self.u32_type, value);
+        self.uint_const_cache.insert(value, id);
+        self.uint_const_reverse.insert(id, value);
+        id
+    }
+
+    /// Get the literal u32 value from a constant ID (reverse lookup)
+    fn get_const_u32_value(&self, id: spirv::Word) -> Option<u32> {
+        self.uint_const_reverse.get(&id).copied()
     }
 
     /// Get or create an f32 constant
@@ -2733,9 +2747,11 @@ fn read_array_element(
             Ok(constructor.builder.load(elem_type, None, elem_ptr, None, [])?)
         }
         None => {
-            // For value arrays, we need a constant index for OpCompositeExtract
-            // The caller should ensure index is a constant when mem is None
-            Ok(constructor.builder.composite_extract(elem_type, None, array_val, [index])?)
+            // For value arrays, we need a literal u32 index for OpCompositeExtract
+            let literal_idx = constructor
+                .get_const_u32_value(index)
+                .ok_or_else(|| err_spirv!("Value array access requires constant index"))?;
+            Ok(constructor.builder.composite_extract(elem_type, None, array_val, [literal_idx])?)
         }
     }
 }
@@ -2768,7 +2784,13 @@ fn write_array_element(
             constructor.builder.store(elem_ptr, value, None, [])?;
             Ok(array_val) // Storage writes are side-effects, return original value
         }
-        None => Ok(constructor.builder.composite_insert(result_type, None, value, array_val, [index])?),
+        None => {
+            // For value arrays, we need a literal u32 index for OpCompositeInsert
+            let literal_idx = constructor
+                .get_const_u32_value(index)
+                .ok_or_else(|| err_spirv!("Value array write requires constant index"))?;
+            Ok(constructor.builder.composite_insert(result_type, None, value, array_val, [literal_idx])?)
+        }
     }
 }
 
