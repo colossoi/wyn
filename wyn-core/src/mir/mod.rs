@@ -89,7 +89,7 @@ pub enum LocalKind {
 /// or other memory spaces, allowing the lowering pass to generate
 /// appropriate access patterns (e.g., OpAccessChain + OpLoad for storage
 /// vs OpCompositeExtract for value arrays).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MemBinding {
     /// GPU storage buffer at a specific descriptor set and binding.
     Storage {

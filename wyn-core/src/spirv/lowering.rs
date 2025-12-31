@@ -5,7 +5,7 @@
 //! Dependencies are lowered on-demand using ensure_lowered pattern.
 
 use crate::alias_checker::InPlaceInfo;
-use crate::ast::{NodeId, TypeName};
+use crate::ast::TypeName;
 use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
 use crate::lowering_common::is_empty_closure_type;
@@ -1117,19 +1117,13 @@ fn lower_entry_point_from_def(
 fn lower_compute_entry_point(
     constructor: &mut Constructor,
     name: &str,
-    local_size: (u32, u32, u32),
+    _local_size: (u32, u32, u32),
     compute_info: &SimpleComputeMap,
     body: &Body,
-    inputs: &[mir::EntryInput],
+    _inputs: &[mir::EntryInput],
 ) -> Result<()> {
     // Get element type from the input slice
     let elem_type_id = constructor.ast_type_to_spirv(&compute_info.input.element_type);
-
-    // Compute chunk size from size_hint / workgroup_size.x
-    // Default size_hint to workgroup_size.x if not provided (1 element per thread)
-    let size_hint = compute_info.input.size_hint.unwrap_or(local_size.0);
-    let chunk_size = size_hint / local_size.0;
-    let chunk_size = if chunk_size == 0 { 1 } else { chunk_size };
 
     // Set up the compute entry point
     constructor.current_is_entry_point = true;
@@ -1206,24 +1200,33 @@ fn lower_compute_entry_point(
     constructor.builder.begin_block(Some(code_block_id))?;
     constructor.current_block = Some(code_block_id);
 
-    // Load global_invocation_id and extract x component
+    // Load global_invocation_id and extract x component (thread index)
     let gid = constructor.builder.load(uvec3_type, None, global_id_var, None, [])?;
     let thread_id = constructor.builder.composite_extract(constructor.u32_type, None, gid, [0])?;
 
-    // Compute chunk start offset: start = thread_id * chunk_size
-    let chunk_size_const = constructor.const_u32(chunk_size);
-    let start_offset =
-        constructor.builder.i_mul(constructor.u32_type, None, thread_id, chunk_size_const)?;
+    // Extract closure info from the map expression
+    let (func_name, closure_val, is_empty_closure) =
+        extract_closure_info(constructor, body, compute_info.map_closure)?;
 
-    // TODO: Set LocalDecl.mem for the input parameter to enable storage-backed lowering
-    // For now, storage buffer support is not fully implemented
-    let _input_param = &inputs[0];
-    let _start_offset = start_offset;
+    let map_func_id = *constructor
+        .functions
+        .get(&func_name)
+        .ok_or_else(|| err_spirv!("Map function not found: {}", func_name))?;
 
-    // Lower the body
-    let _result = lower_expr(constructor, body, body.root)?;
-
-    // The map operation writes results in-place, so no explicit store needed here
+    // Delegate to lower_inplace_map_core with single-element index list
+    // Each thread handles one element at index = global_invocation_id.x
+    let mem = mir::MemBinding::Storage { set: 0, binding: 0 };
+    let closure_arg = if is_empty_closure { None } else { Some(closure_val) };
+    lower_inplace_map_core(
+        constructor,
+        mem,
+        buffer_var,
+        elem_type_id,
+        map_func_id,
+        closure_arg,
+        elem_type_id,
+        &[thread_id], // single element at runtime index
+    )?;
 
     // Return
     constructor.builder.ret()?;
@@ -1849,7 +1852,15 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
             // SOAC (Second-Order Array Combinator) intrinsic dispatch
             match func.as_str() {
                 "_w_intrinsic_map" => {
-                    return lower_map(constructor, body, args, expr_ty, expr_node_id, result_type);
+                    // Non-mutating map: always produces a new value array
+                    // For storage inputs: loads elements, transforms, builds value array
+                    return lower_map(constructor, body, args, expr_ty, result_type);
+                }
+                "_w_intrinsic_inplace_map" => {
+                    // In-place map: may mutate storage arrays
+                    // For storage inputs: reads/writes in-place to same buffer
+                    // For value inputs: builds new array (same as map)
+                    return lower_inplace_map(constructor, body, args, expr_ty, result_type);
                 }
                 "_w_intrinsic_zip" => {
                     return lower_zip(constructor, body, args, result_type);
@@ -2698,13 +2709,13 @@ fn extract_array_info(
 
 /// Read an element from an array, handling both value arrays and storage-backed arrays.
 ///
-/// For value arrays (`mem: None`): uses OpCompositeExtract
-/// For storage arrays (`mem: Some(Storage{..})`): uses OpAccessChain + OpLoad
+/// For value arrays (`mem: None`): uses OpCompositeExtract with constant index
+/// For storage arrays (`mem: Some(Storage{..})`): uses OpAccessChain + OpLoad with runtime index
 fn read_array_element(
     constructor: &mut Constructor,
     mem: Option<MemBinding>,
     array_val: spirv::Word,
-    index: u32,
+    index: spirv::Word, // SPIR-V ID of the index (constant or runtime)
     elem_type: spirv::Word,
 ) -> Result<spirv::Word> {
     match mem {
@@ -2717,12 +2728,15 @@ fn read_array_element(
             let elem_ptr_type =
                 constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_type);
             let zero = constructor.const_u32(0);
-            let idx = constructor.const_u32(index);
             let elem_ptr =
-                constructor.builder.access_chain(elem_ptr_type, None, buffer_var, [zero, idx])?;
+                constructor.builder.access_chain(elem_ptr_type, None, buffer_var, [zero, index])?;
             Ok(constructor.builder.load(elem_type, None, elem_ptr, None, [])?)
         }
-        None => Ok(constructor.builder.composite_extract(elem_type, None, array_val, [index])?),
+        None => {
+            // For value arrays, we need a constant index for OpCompositeExtract
+            // The caller should ensure index is a constant when mem is None
+            Ok(constructor.builder.composite_extract(elem_type, None, array_val, [index])?)
+        }
     }
 }
 
@@ -2734,7 +2748,7 @@ fn write_array_element(
     constructor: &mut Constructor,
     mem: Option<MemBinding>,
     array_val: spirv::Word,
-    index: u32,
+    index: spirv::Word, // SPIR-V ID of the index (constant or runtime)
     value: spirv::Word,
     elem_type: spirv::Word,
     result_type: spirv::Word,
@@ -2749,9 +2763,8 @@ fn write_array_element(
             let elem_ptr_type =
                 constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_type);
             let zero = constructor.const_u32(0);
-            let idx = constructor.const_u32(index);
             let elem_ptr =
-                constructor.builder.access_chain(elem_ptr_type, None, buffer_var, [zero, idx])?;
+                constructor.builder.access_chain(elem_ptr_type, None, buffer_var, [zero, index])?;
             constructor.builder.store(elem_ptr, value, None, [])?;
             Ok(array_val) // Storage writes are side-effects, return original value
         }
@@ -2759,17 +2772,59 @@ fn write_array_element(
     }
 }
 
+/// Core in-place map over storage array elements.
+///
+/// This is the general-purpose lowering for in-place map, used by both:
+/// - `lower_inplace_map` (passes constant indices 0..array_size)
+/// - `lower_compute_entry_point` (passes single runtime thread_id)
+///
+/// The caller provides the indices to iterate over, allowing the same
+/// lowering logic to handle both compile-time and runtime iteration.
+fn lower_inplace_map_core(
+    constructor: &mut Constructor,
+    mem: MemBinding,
+    array_val: spirv::Word,
+    elem_type: spirv::Word,
+    map_func_id: spirv::Word,
+    closure_val: Option<spirv::Word>,
+    output_elem_type: spirv::Word,
+    indices: &[spirv::Word],
+) -> Result<()> {
+    for &index in indices {
+        // Read element
+        let input_elem = read_array_element(constructor, Some(mem), array_val, index, elem_type)?;
+
+        // Apply function
+        let call_args = match closure_val {
+            Some(cv) => vec![cv, input_elem],
+            None => vec![input_elem],
+        };
+        let result_elem =
+            constructor.builder.function_call(output_elem_type, None, map_func_id, call_args)?;
+
+        // Write result back
+        write_array_element(
+            constructor,
+            Some(mem),
+            array_val,
+            index,
+            result_elem,
+            output_elem_type,
+            constructor.void_type,
+        )?;
+    }
+    Ok(())
+}
+
 /// Lower `_w_intrinsic_map`: map f [a,b,c] = [f(a), f(b), f(c)]
 ///
-/// Handles both value arrays and storage-backed arrays:
-/// - Value arrays: builds new array via composite_construct (efficient)
-/// - Storage arrays: reads/writes in-place via access_chain + load/store
+/// Always produces a new value array. For storage-backed inputs, loads elements
+/// from storage first. This is the non-mutating variant.
 fn lower_map(
     constructor: &mut Constructor,
     body: &Body,
     args: &[ExprId],
     expr_ty: &PolyType<TypeName>,
-    _expr_node_id: NodeId,
     result_type: spirv::Word,
 ) -> Result<spirv::Word> {
     if args.len() != 2 {
@@ -2806,30 +2861,85 @@ fn lower_map(
         .get(&func_name)
         .ok_or_else(|| err_spirv!("Map function not found: {}", func_name))?;
 
+    // Always build a new value array (non-mutating semantics)
+    let mut result_elements = Vec::with_capacity(array_size as usize);
+    for i in 0..array_size {
+        // Use read_array_element which handles both value and storage arrays
+        let idx = constructor.const_u32(i);
+        let input_elem = read_array_element(constructor, mem, arr_val, idx, elem_type)?;
+        let call_args = if is_empty_closure { vec![input_elem] } else { vec![closure_val, input_elem] };
+        let result_elem =
+            constructor.builder.function_call(output_elem_type, None, map_func_id, call_args)?;
+        result_elements.push(result_elem);
+    }
+    Ok(constructor.builder.composite_construct(result_type, None, result_elements)?)
+}
+
+/// Lower `_w_intrinsic_inplace_map`: in-place variant of map
+///
+/// For storage-backed arrays: reads/writes in-place to same buffer (side-effect)
+/// For value arrays: builds new array (same as regular map)
+fn lower_inplace_map(
+    constructor: &mut Constructor,
+    body: &Body,
+    args: &[ExprId],
+    expr_ty: &PolyType<TypeName>,
+    result_type: spirv::Word,
+) -> Result<spirv::Word> {
+    if args.len() != 2 {
+        bail_spirv!(
+            "_w_intrinsic_inplace_map requires 2 args (function, array), got {}",
+            args.len()
+        );
+    }
+
+    // Extract mem binding from array argument's LocalDecl
+    let mem = if let Expr::Local(local_id) = body.get_expr(args[1]) {
+        body.get_local(*local_id).mem
+    } else {
+        None
+    };
+
+    let (func_name, closure_val, is_empty_closure) = extract_closure_info(constructor, body, args[0])?;
+
+    // Lower the input array
+    let arr_val = lower_expr(constructor, body, args[1])?;
+    let arr_ty = body.get_type(args[1]);
+    let (array_size, elem_type) = extract_array_info(constructor, arr_ty)?;
+
+    // Get result element type from the expression type
+    let output_elem_type = match expr_ty {
+        PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 2 => {
+            constructor.ast_type_to_spirv(&type_args[1])
+        }
+        _ => bail_spirv!("inplace_map result must be array type, got {:?}", expr_ty),
+    };
+
+    let map_func_id = *constructor
+        .functions
+        .get(&func_name)
+        .ok_or_else(|| err_spirv!("Map function not found: {}", func_name))?;
+
     match mem {
-        Some(_) => {
-            // Storage-backed array: read and write in-place
-            for i in 0..array_size {
-                let input_elem = read_array_element(constructor, mem, arr_val, i, elem_type)?;
-                let call_args =
-                    if is_empty_closure { vec![input_elem] } else { vec![closure_val, input_elem] };
-                let result_elem =
-                    constructor.builder.function_call(output_elem_type, None, map_func_id, call_args)?;
-                write_array_element(
-                    constructor,
-                    mem,
-                    arr_val,
-                    i,
-                    result_elem,
-                    output_elem_type,
-                    result_type,
-                )?;
-            }
+        Some(mem_binding) => {
+            // Storage-backed array: build index list and delegate to core
+            let closure_arg = if is_empty_closure { None } else { Some(closure_val) };
+            let indices: Vec<_> = (0..array_size).map(|i| constructor.const_u32(i)).collect();
+            lower_inplace_map_core(
+                constructor,
+                mem_binding,
+                arr_val,
+                elem_type,
+                map_func_id,
+                closure_arg,
+                output_elem_type,
+                &indices,
+            )?;
             // Return unit for storage ops (side-effect only)
             Ok(constructor.const_i32(0))
         }
         None => {
-            // Value array: build new array with composite_construct (more efficient than chain of inserts)
+            // Value array: build new array (same as regular map)
             let mut result_elements = Vec::with_capacity(array_size as usize);
             for i in 0..array_size {
                 let input_elem = constructor.builder.composite_extract(elem_type, None, arr_val, [i])?;

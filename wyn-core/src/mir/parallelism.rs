@@ -201,7 +201,9 @@ fn find_single_map_at_root(body: &Body) -> Option<(ExprId, ExprId, ExprId)> {
             Expr::Let { body: inner, .. } => {
                 current = *inner;
             }
-            Expr::Call { func, args } if func == "_w_intrinsic_map" => {
+            Expr::Call { func, args }
+                if func == "_w_intrinsic_map" || func == "_w_intrinsic_inplace_map" =>
+            {
                 // Found the map! Should have 2 args: closure, array
                 if args.len() == 2 {
                     return Some((current, args[0], args[1]));
@@ -225,7 +227,7 @@ fn classify_soac(name: &str) -> Option<ParallelismKind> {
 
     match name {
         // Independent: each output element can be computed without knowledge of others
-        "_w_intrinsic_map" => Some(Independent),
+        "_w_intrinsic_map" | "_w_intrinsic_inplace_map" => Some(Independent),
         "_w_intrinsic_zip" => Some(Independent),
 
         // Dependent: output elements depend on other elements or require coordination

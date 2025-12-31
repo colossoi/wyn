@@ -14,7 +14,7 @@
 use crate::IdArena;
 use crate::ast::TypeName;
 use crate::error::Result;
-use crate::mir::{Body, Def, Expr, ExprId, LocalDecl, LocalId, Program};
+use crate::mir::{Body, Def, Expr, ExprId, LocalDecl, LocalId, MemBinding, Program};
 use crate::mir::{LambdaId, LambdaInfo};
 use crate::types::TypeScheme;
 use polytype::Type;
@@ -34,8 +34,8 @@ struct Monomorphizer {
     poly_functions: HashMap<String, Def>,
     /// Generated monomorphic functions
     mono_functions: Vec<Def>,
-    /// Map from (function_name, substitution) to specialized name
-    specializations: HashMap<(String, SubstKey), String>,
+    /// Map from (function_name, spec_key) to specialized name
+    specializations: HashMap<(String, SpecKey), String>,
     /// Worklist of functions to process
     worklist: VecDeque<WorkItem>,
     /// Functions already processed
@@ -56,6 +56,16 @@ struct WorkItem {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct SubstKey(Vec<(usize, TypeKey)>);
 
+/// Combined specialization key: type substitution + memory bindings.
+/// A function may need specialization due to type variables, memory bindings, or both.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SpecKey {
+    /// Type substitution (may be empty for mem-only specialization)
+    type_subst: SubstKey,
+    /// Memory binding for each parameter (None = value/SSA)
+    mem_bindings: Vec<Option<MemBinding>>,
+}
+
 /// A simplified representation of types for use as hash keys
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum TypeKey {
@@ -72,6 +82,29 @@ impl SubstKey {
         let mut items: Vec<_> = subst.iter().map(|(k, v)| (*k, TypeKey::from_type(v))).collect();
         items.sort();
         SubstKey(items)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Convert back to a Substitution for use in specialize_def
+    fn to_subst(&self) -> Substitution {
+        self.0.iter().map(|(k, v)| (*k, v.to_type())).collect()
+    }
+}
+
+impl SpecKey {
+    fn new(subst: &Substitution, mem_bindings: Vec<Option<MemBinding>>) -> Self {
+        SpecKey {
+            type_subst: SubstKey::from_subst(subst),
+            mem_bindings,
+        }
+    }
+
+    /// Returns true if this represents a non-trivial specialization
+    fn needs_specialization(&self) -> bool {
+        !self.type_subst.is_empty() || self.mem_bindings.iter().any(|m| m.is_some())
     }
 }
 
@@ -138,6 +171,61 @@ impl TypeKey {
             }
         }
     }
+
+    /// Convert back to a Type. Used for reconstructing substitutions.
+    fn to_type(&self) -> Type<TypeName> {
+        match self {
+            TypeKey::Var(id) => Type::Variable(*id),
+            TypeKey::Size(n) => Type::Constructed(TypeName::Size(*n), vec![]),
+            TypeKey::Record(fields) => {
+                let field_names: Vec<_> = fields.iter().map(|(k, _)| k.clone()).collect();
+                let field_types: Vec<_> = fields.iter().map(|(_, v)| v.to_type()).collect();
+                Type::Constructed(TypeName::Record(field_names.into()), field_types)
+            }
+            TypeKey::Sum(variants) => {
+                let variant_types: Vec<_> = variants
+                    .iter()
+                    .map(|(name, types)| (name.clone(), types.iter().map(|t| t.to_type()).collect()))
+                    .collect();
+                Type::Constructed(TypeName::Sum(variant_types), vec![])
+            }
+            TypeKey::Existential(vars, inner) => {
+                Type::Constructed(TypeName::Existential(vars.clone()), vec![inner.to_type()])
+            }
+            TypeKey::Constructed(name, args) => {
+                let type_args: Vec<_> = args.iter().map(|a| a.to_type()).collect();
+                let type_name = match name.as_str() {
+                    "f16" => TypeName::Float(16),
+                    "f32" => TypeName::Float(32),
+                    "f64" => TypeName::Float(64),
+                    "u8" => TypeName::UInt(8),
+                    "u16" => TypeName::UInt(16),
+                    "u32" => TypeName::UInt(32),
+                    "u64" => TypeName::UInt(64),
+                    "i8" => TypeName::Int(8),
+                    "i16" => TypeName::Int(16),
+                    "i32" => TypeName::Int(32),
+                    "i64" => TypeName::Int(64),
+                    "array" => TypeName::Array,
+                    "vec" => TypeName::Vec,
+                    "mat" => TypeName::Mat,
+                    "unsized" => TypeName::Unsized,
+                    "arrow" => TypeName::Arrow,
+                    "unit" => TypeName::Unit,
+                    "ptr" => TypeName::Pointer,
+                    "unique" => TypeName::Unique,
+                    s if s.starts_with("tuple") => {
+                        let n: usize = s[5..].parse().unwrap_or(0);
+                        TypeName::Tuple(n)
+                    }
+                    s if s.starts_with("sizevar_") => TypeName::SizeVar(s[8..].to_string()),
+                    s if s.starts_with("uservar_") => TypeName::UserVar(s[8..].to_string()),
+                    s => TypeName::Named(s.to_string()),
+                };
+                Type::Constructed(type_name, type_args)
+            }
+        }
+    }
 }
 
 // =============================================================================
@@ -174,11 +262,23 @@ fn split_function_type(ty: &Type<TypeName>) -> (Vec<Type<TypeName>>, Type<TypeNa
 
 impl Monomorphizer {
     fn new(program: Program) -> Self {
-        // Build map of polymorphic functions
+        // First pass: collect storage buffer declarations
+        let storage_buffers: HashMap<String, (u32, u32)> = program
+            .defs
+            .iter()
+            .filter_map(|def| match def {
+                Def::Storage {
+                    name, set, binding, ..
+                } => Some((name.clone(), (*set, *binding))),
+                _ => None,
+            })
+            .collect();
+
+        // Second pass: build function map and collect entry points with mem bindings
         let mut poly_functions = HashMap::new();
         let mut entry_points = Vec::new();
 
-        for def in program.defs {
+        for mut def in program.defs {
             let name = match &def {
                 Def::Function { name, .. } => name.clone(),
                 Def::Constant { name, .. } => name.clone(),
@@ -187,8 +287,13 @@ impl Monomorphizer {
                 Def::EntryPoint { name, .. } => name.clone(),
             };
 
-            // Check if this is an entry point
-            if let Def::EntryPoint { .. } = &def {
+            // For entry points, set mem bindings on storage-backed parameters
+            if let Def::EntryPoint { inputs, body, .. } = &mut def {
+                for input in inputs {
+                    if let Some(&(set, binding)) = storage_buffers.get(&input.name) {
+                        body.get_local_mut(input.local).mem = Some(MemBinding::Storage { set, binding });
+                    }
+                }
                 entry_points.push(WorkItem {
                     name: name.clone(),
                     def: def.clone(),
@@ -349,6 +454,18 @@ impl Monomorphizer {
                 // Map arguments
                 let new_args: Vec<_> = args.iter().map(|a| expr_map[a]).collect();
 
+                // Extract mem bindings from arguments
+                let mem_bindings: Vec<Option<MemBinding>> = args
+                    .iter()
+                    .map(|&arg_id| {
+                        if let Expr::Local(local_id) = body.get_expr(arg_id) {
+                            body.get_local(*local_id).mem
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
                 // Check if this is a call to a user-defined function
                 if let Some(poly_def) = self.poly_functions.get(func).cloned() {
                     // Check if this is a trivial wrapper (body just forwards to another call)
@@ -359,11 +476,12 @@ impl Monomorphizer {
                             let arg_types: Vec<_> =
                                 args.iter().map(|a| body.get_type(*a).clone()).collect();
                             let subst = self.infer_substitution(&inner_def, &arg_types)?;
+                            let spec_key = SpecKey::new(&subst, mem_bindings.clone());
 
-                            if !subst.is_empty() {
+                            if spec_key.needs_specialization() {
                                 // Specialize the inner function directly
                                 let specialized_name =
-                                    self.get_or_create_specialization(&inner_func, &subst, &inner_def)?;
+                                    self.get_or_create_specialization(&inner_func, &spec_key, &inner_def)?;
                                 return Ok(Expr::Call {
                                     func: specialized_name,
                                     args: new_args,
@@ -387,17 +505,18 @@ impl Monomorphizer {
                     // Get argument types to infer substitution
                     let arg_types: Vec<_> = args.iter().map(|a| body.get_type(*a).clone()).collect();
                     let subst = self.infer_substitution(&poly_def, &arg_types)?;
+                    let spec_key = SpecKey::new(&subst, mem_bindings);
 
-                    if !subst.is_empty() {
-                        // This is a polymorphic call - specialize it
+                    if spec_key.needs_specialization() {
+                        // This call needs specialization (type vars and/or mem bindings)
                         let specialized_name =
-                            self.get_or_create_specialization(func, &subst, &poly_def)?;
+                            self.get_or_create_specialization(func, &spec_key, &poly_def)?;
                         return Ok(Expr::Call {
                             func: specialized_name,
                             args: new_args,
                         });
                     } else {
-                        // Monomorphic call - ensure the callee is in the worklist
+                        // Monomorphic call with no mem bindings - ensure the callee is in the worklist
                         self.ensure_in_worklist(func, poly_def);
                     }
                 }
@@ -499,10 +618,14 @@ impl Monomorphizer {
                     // has ((A,B),C) -> (A,B,C) where param uses different vars than return)
                     let subst = self.infer_lambda_substitution(&def, &concrete_params, &concrete_ret)?;
 
+                    // Lambdas don't receive storage-backed arrays directly, so no mem bindings
+                    let lambda_mem_bindings = vec![None; concrete_params.len()];
+                    let spec_key = SpecKey::new(&subst, lambda_mem_bindings);
+
                     if !subst.is_empty() {
                         // Specialize the lambda with concrete types
                         let specialized_name =
-                            self.get_or_create_specialization(lambda_name, &subst, &def)?;
+                            self.get_or_create_specialization(lambda_name, &spec_key, &def)?;
                         return Ok(Expr::Closure {
                             lambda_name: specialized_name,
                             captures: new_captures,
@@ -516,7 +639,7 @@ impl Monomorphizer {
                                 // Force specialization even with empty subst to trigger
                                 // the variable resolution in specialize_def
                                 let specialized_name =
-                                    self.get_or_create_specialization(lambda_name, &subst, &def)?;
+                                    self.get_or_create_specialization(lambda_name, &spec_key, &def)?;
                                 return Ok(Expr::Closure {
                                     lambda_name: specialized_name,
                                     captures: new_captures,
@@ -677,20 +800,38 @@ impl Monomorphizer {
     fn get_or_create_specialization(
         &mut self,
         func_name: &str,
-        subst: &Substitution,
+        spec_key: &SpecKey,
         poly_def: &Def,
     ) -> Result<String> {
-        let key = (func_name.to_string(), SubstKey::from_subst(subst));
+        let cache_key = (func_name.to_string(), spec_key.clone());
 
-        if let Some(specialized_name) = self.specializations.get(&key) {
+        if let Some(specialized_name) = self.specializations.get(&cache_key) {
             return Ok(specialized_name.clone());
         }
 
-        // Create new specialized name
-        let specialized_name = format!("{}${}", func_name, format_subst(subst));
+        // Build substitution from type_subst
+        let subst = spec_key.type_subst.to_subst();
 
-        // Clone and specialize the function
-        let specialized_def = specialize_def(poly_def.clone(), subst, &specialized_name)?;
+        // Create new specialized name including both type and mem info
+        let type_suffix = format_subst(&subst);
+        let mem_suffix = format_mem_bindings(&spec_key.mem_bindings);
+        let specialized_name = if type_suffix.is_empty() && mem_suffix.is_empty() {
+            func_name.to_string()
+        } else if type_suffix.is_empty() {
+            format!("{}${}", func_name, mem_suffix)
+        } else if mem_suffix.is_empty() {
+            format!("{}${}", func_name, type_suffix)
+        } else {
+            format!("{}${}${}", func_name, type_suffix, mem_suffix)
+        };
+
+        // Clone and specialize the function with both type subst and mem bindings
+        let specialized_def = specialize_def(
+            poly_def.clone(),
+            &subst,
+            &spec_key.mem_bindings,
+            &specialized_name,
+        )?;
 
         // Add to worklist to process its body
         self.worklist.push_back(WorkItem {
@@ -698,7 +839,7 @@ impl Monomorphizer {
             def: specialized_def,
         });
 
-        self.specializations.insert(key, specialized_name.clone());
+        self.specializations.insert(cache_key, specialized_name.clone());
         Ok(specialized_name)
     }
 }
@@ -820,8 +961,13 @@ fn collect_body_var_mappings(
     }
 }
 
-/// Create a specialized version of a function by applying substitution
-fn specialize_def(def: Def, subst: &Substitution, new_name: &str) -> Result<Def> {
+/// Create a specialized version of a function by applying substitution and mem bindings
+fn specialize_def(
+    def: Def,
+    subst: &Substitution,
+    mem_bindings: &[Option<MemBinding>],
+    new_name: &str,
+) -> Result<Def> {
     use crate::mir::{EntryInput, EntryOutput};
 
     match def {
@@ -954,7 +1100,14 @@ fn specialize_def(def: Def, subst: &Substitution, new_name: &str) -> Result<Def>
             };
 
             // Apply the extended substitution to the body
-            let body = apply_subst_body_with_context(body, &full_subst, new_name);
+            let mut body = apply_subst_body_with_context(body, &full_subst, new_name);
+
+            // Apply mem bindings to parameters
+            for (i, &param_id) in params.iter().enumerate() {
+                if let Some(mem) = mem_bindings.get(i).copied().flatten() {
+                    body.get_local_mut(param_id).mem = Some(mem);
+                }
+            }
 
             Ok(Def::Function {
                 id,
@@ -1178,4 +1331,22 @@ fn format_type_compact(ty: &Type<TypeName>) -> String {
         }
         _ => "ty".to_string(),
     }
+}
+
+/// Format mem bindings for use in specialized function names
+fn format_mem_bindings(bindings: &[Option<MemBinding>]) -> String {
+    // If all bindings are None, no suffix needed
+    if bindings.iter().all(|m| m.is_none()) {
+        return String::new();
+    }
+
+    let parts: Vec<_> = bindings
+        .iter()
+        .map(|m| match m {
+            Some(MemBinding::Storage { set, binding }) => format!("s{}b{}", set, binding),
+            None => "_".to_string(),
+        })
+        .collect();
+
+    format!("mem_{}", parts.join("_"))
 }
