@@ -49,6 +49,7 @@ function initEditor() {
     lineWrapping: false,
     autofocus: true,
     gutters: ["CodeMirror-linenumbers"],
+    scrollbarStyle: "native",
   });
 
   // Ctrl/Cmd+Enter to compile
