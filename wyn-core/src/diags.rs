@@ -422,8 +422,7 @@ impl AstFormatter {
             }
             ExprKind::Lambda(lambda) => {
                 let params: Vec<String> = lambda.params.iter().map(|p| self.format_pattern(p)).collect();
-                let ret = lambda.return_type.as_ref().map(|t| format!(" -> {}", t)).unwrap_or_default();
-                self.write_line(&format!("|{}|{}", params.join(", "), ret));
+                self.write_line(&format!("|{}|", params.join(", ")));
                 self.indent += 1;
                 self.write_expression(&lambda.body);
                 self.indent -= 1;

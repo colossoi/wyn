@@ -1515,39 +1515,31 @@ impl<'a> Parser<'a> {
         Ok(expr)
     }
 
-    /// Parse either array indexing `a[i]` or array slicing `a[i:j:s]`
+    /// Parse either array indexing `a[i]` or array slicing `a[start..end]`
     /// Called after consuming the `[` token
     fn parse_index_or_slice(&mut self, array: Expression, start_span: Span) -> Result<Expression> {
-        // Check if we have a colon immediately ([:...])
-        let start_expr = if self.check(&Token::Colon) {
+        // Check if we have a DotDot immediately ([..end])
+        let start_expr = if self.check(&Token::DotDot) {
             None
         } else if self.check(&Token::RightBracket) {
             // Empty brackets a[] - this is an error
             bail_parse!("Expected index or slice expression");
         } else {
-            // Parse the first expression (use range_expression to avoid type ascription conflict)
-            Some(Box::new(self.parse_range_expression()?))
+            // Parse the first expression
+            Some(Box::new(self.parse_binary_expression()?))
         };
 
-        // Check if this is a slice (colon present) or regular index
-        if self.check(&Token::Colon) {
-            // This is a slice: a[start:end] or a[:end] etc.
-            // TODO: Step syntax (a[i:j:s]) not yet supported
-            self.advance(); // consume ':'
+        // Check if this is a slice (DotDot present) or regular index
+        if self.check(&Token::DotDot) {
+            // This is a slice: a[start..end] or a[..end] etc.
+            self.advance(); // consume '..'
 
             // Parse optional end expression
             let end_expr = if self.check(&Token::RightBracket) {
                 None
             } else {
-                Some(Box::new(self.parse_range_expression()?))
+                Some(Box::new(self.parse_binary_expression()?))
             };
-
-            // Check for unsupported step syntax
-            if self.check(&Token::Colon) {
-                return Err(crate::err_parse!(
-                    "Slice step syntax (arr[i:j:s]) is not yet supported"
-                ));
-            }
 
             self.expect(Token::RightBracket)?;
             let end_span = self.previous_span();
@@ -1567,7 +1559,7 @@ impl<'a> Parser<'a> {
             let end_span = self.previous_span();
             let span = start_span.merge(&end_span);
 
-            // start_expr must be Some here since we didn't see a colon
+            // start_expr must be Some here since we didn't see DotDot
             let index = start_expr.expect("index expression should exist for array indexing");
             Ok(self.node_counter.mk_node(ExprKind::ArrayIndex(Box::new(array), index), span))
         }
@@ -1700,10 +1692,9 @@ impl<'a> Parser<'a> {
                         span,
                     );
 
-                    // Create lambda: \x y -> x op y
+                    // Create lambda: |x, y| x op y
                     let lambda = LambdaExpr {
                         params: vec![x_pattern, y_pattern],
-                        return_type: None,
                         body: Box::new(body),
                     };
 
@@ -1900,7 +1891,6 @@ impl<'a> Parser<'a> {
         // Build the lambda: |_0_, _1_, ...| body
         let lambda = LambdaExpr {
             params,
-            return_type: None,
             body: Box::new(body),
         };
 
@@ -2043,25 +2033,12 @@ impl<'a> Parser<'a> {
             params
         };
 
-        // Parse optional return type: -> type
-        // Use parse_array_or_base_type to avoid consuming the body expression as a type arg
-        let return_type = if self.check(&Token::Arrow) {
-            self.advance();
-            Some(self.parse_array_or_base_type()?)
-        } else {
-            None
-        };
-
         // Parse body expression
         let body = Box::new(self.parse_expression()?);
         let span = start_span.merge(&body.h.span);
 
         Ok(self.node_counter.mk_node(
-            ExprKind::Lambda(LambdaExpr {
-                params,
-                return_type,
-                body,
-            }),
+            ExprKind::Lambda(LambdaExpr { params, body }),
             span,
         ))
     }

@@ -446,11 +446,6 @@ pub fn walk_expr_lambda<V: Visitor>(v: &mut V, lambda: &LambdaExpr) -> ControlFl
         v.visit_pattern(param)?;
     }
 
-    // Visit return type
-    if let Some(ty) = &lambda.return_type {
-        v.visit_type(ty)?;
-    }
-
     // Visit body
     v.visit_expression(&lambda.body)
 }

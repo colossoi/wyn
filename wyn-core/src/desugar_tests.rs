@@ -52,7 +52,7 @@ fn compile_through_flatten(input: &str) -> Result<crate::Flattened, CompilerErro
 fn test_simple_slice() {
     let source = r#"
 def slice_array(arr: [10]i32) [5]i32 =
-    arr[0:5]
+    arr[0..5]
 
 #[vertex]
 entry vertex_main() #[builtin(position)] vec4f32 =
@@ -68,7 +68,7 @@ entry vertex_main() #[builtin(position)] vec4f32 =
 fn test_slice_with_computed_indices() {
     let source = r#"
 def slice_computed(arr: [10]i32) [3]i32 =
-    arr[1+1:2+3]
+    arr[1+1..2+3]
 
 #[vertex]
 entry vertex_main() #[builtin(position)] vec4f32 =
@@ -82,7 +82,7 @@ entry vertex_main() #[builtin(position)] vec4f32 =
     );
 }
 
-// Note: Slice step syntax (arr[i:j:s]) is not yet supported - deferred to future work
+// Note: Slice step syntax (arr[i..j..s]) is not yet supported - deferred to future work
 
 // =============================================================================
 // Range Tests
@@ -133,7 +133,7 @@ entry vertex_main() #[builtin(position)] vec4f32 =
 // =============================================================================
 // Slice with Aliasing Tests
 // =============================================================================
-// Note: Borrowed slices (arr[i:j]) alias their source array.
+// Note: Borrowed slices (arr[i..j]) alias their source array.
 // Consuming a borrowed slice invalidates the source.
 
 #[test]
@@ -143,7 +143,7 @@ fn test_slice_borrowed_from_original() {
 def borrow(arr: [5]i32) i32 = arr[0]
 
 def use_slice(arr: [10]i32) i32 =
-    let sliced = arr[0:5] in
+    let sliced = arr[0..5] in
     let _ = borrow(sliced) in
     arr[0]
 
@@ -165,8 +165,8 @@ fn test_multiple_slices_borrow_from_same() {
 def borrow(arr: [3]i32) i32 = arr[0]
 
 def use_slices(arr: [10]i32) i32 =
-    let s1 = arr[0:3] in
-    let s2 = arr[3:6] in
+    let s1 = arr[0..3] in
+    let s2 = arr[3..6] in
     let _ = borrow(s1) in
     s2[0]
 
@@ -192,7 +192,7 @@ def SIZE: i32 = 5
 def OFFSET: i32 = 2
 
 def slice_with_constants(arr: [10]i32) [5]i32 =
-    arr[OFFSET:OFFSET+SIZE]
+    arr[OFFSET..OFFSET+SIZE]
 
 #[vertex]
 entry vertex_main() #[builtin(position)] vec4f32 =
@@ -328,7 +328,7 @@ entry vertex_main() #[builtin(position)] vec4f32 =
 fn test_slice_desugars_to_map_range() {
     let source = r#"
 def slice_test(arr: [10]i32) [5]i32 =
-    arr[0:5]
+    arr[0..5]
 "#;
     // Verify slice desugars correctly by checking compilation succeeds
     // The actual desugaring to map over range is tested by compile_through_flatten

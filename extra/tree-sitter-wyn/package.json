@@ -1,0 +1,62 @@
+{
+  "name": "tree-sitter-wyn",
+  "version": "0.1.0",
+  "description": "Tree-sitter grammar for the Wyn shader language",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gmiller/wyn"
+  },
+  "license": "MIT",
+  "main": "bindings/node",
+  "types": "bindings/node",
+  "keywords": [
+    "tree-sitter",
+    "parser",
+    "wyn",
+    "shader",
+    "spirv"
+  ],
+  "files": [
+    "grammar.js",
+    "binding.gyp",
+    "prebuilds/**",
+    "bindings/node/*",
+    "queries/*",
+    "src/**"
+  ],
+  "dependencies": {
+    "node-addon-api": "^8.0.0",
+    "node-gyp-build": "^4.8.0"
+  },
+  "peerDependencies": {
+    "tree-sitter": "^0.21.0"
+  },
+  "peerDependenciesMeta": {
+    "tree-sitter": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "tree-sitter-cli": "^0.22.0",
+    "prebuildify": "^6.0.0"
+  },
+  "scripts": {
+    "build": "tree-sitter generate && node-gyp build",
+    "parse": "tree-sitter parse",
+    "test": "tree-sitter test",
+    "generate": "tree-sitter generate",
+    "install": "node-gyp-build",
+    "prebuildify": "prebuildify --napi --strip"
+  },
+  "tree-sitter": [
+    {
+      "scope": "source.wyn",
+      "file-types": [
+        "wyn"
+      ],
+      "injection-regex": "wyn",
+      "highlights": "queries/highlights.scm",
+      "locals": "queries/locals.scm"
+    }
+  ]
+}

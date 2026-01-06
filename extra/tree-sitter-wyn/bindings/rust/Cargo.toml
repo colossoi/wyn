@@ -1,0 +1,29 @@
+[package]
+name = "tree-sitter-wyn"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Tree-sitter grammar for the Wyn shader language"
+repository = "https://github.com/gmiller/wyn"
+keywords = ["tree-sitter", "parser", "wyn", "shader", "spirv"]
+categories = ["parsing", "text-editors"]
+
+build = "build.rs"
+include = [
+    "bindings/rust/*",
+    "grammar.js",
+    "queries/*",
+    "src/*",
+]
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+tree-sitter-language = "0.1"
+
+[dev-dependencies]
+tree-sitter = "0.22"
+
+[build-dependencies]
+cc = "1.0"

@@ -607,7 +607,7 @@ def main: i32 =
 // =============================================================================
 // Slice and Range Alias Tests
 // =============================================================================
-// Note: Borrowed slices (arr[i:j]) alias their source array.
+// Note: Borrowed slices (arr[i..j]) alias their source array.
 // This is the new semantics - slices are zero-copy views.
 
 #[test]
@@ -618,7 +618,7 @@ fn test_borrowed_slice_consuming_invalidates_source() {
 def consume(arr: *[3]i32) i32 = arr[0]
 
 def main(arr: [10]i32) i32 =
-    let sliced = arr[0:3] in
+    let sliced = arr[0..3] in
     let _ = consume(sliced) in
     arr[0]
 "#;
@@ -638,8 +638,8 @@ fn test_multiple_borrowed_slices_alias_same_source() {
 def consume(arr: *[3]i32) i32 = arr[0]
 
 def main(arr: [10]i32) i32 =
-    let s1 = arr[0:3] in
-    let s2 = arr[3:6] in
+    let s1 = arr[0..3] in
+    let s2 = arr[3..6] in
     let _ = consume(s1) in
     consume(s2)
 "#;
@@ -658,7 +658,7 @@ fn test_consuming_source_invalidates_borrowed_slice() {
 def consume(arr: *[10]i32) i32 = arr[0]
 
 def main(arr: [10]i32) i32 =
-    let sliced = arr[0:3] in
+    let sliced = arr[0..3] in
     let _ = consume(arr) in
     sliced[0]
 "#;
@@ -677,7 +677,7 @@ fn test_borrowed_slice_alias_chain() {
 def consume(arr: *[3]i32) i32 = arr[0]
 
 def main(arr: [10]i32) i32 =
-    let sliced = arr[0:3] in
+    let sliced = arr[0..3] in
     let alias = sliced in
     let _ = consume(alias) in
     arr[0]
@@ -731,7 +731,7 @@ fn test_borrowed_slice_aliases_base_array() {
 def consume(arr: *[3]i32) i32 = arr[0]
 
 def main(arr: [9]i32) i32 =
-    let sliced = arr[1:4] in
+    let sliced = arr[1..4] in
     let _ = consume(sliced) in
     arr[0]
 "#;
@@ -750,7 +750,7 @@ fn test_borrowed_slice_non_consuming_ok() {
 def borrow(arr: [3]i32) i32 = arr[0]
 
 def main(arr: [9]i32) i32 =
-    let sliced = arr[1:4] in
+    let sliced = arr[1..4] in
     let _ = borrow(sliced) in
     arr[0]
 "#;

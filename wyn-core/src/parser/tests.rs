@@ -453,7 +453,6 @@ fn test_parse_simple_lambda() {
             if lambda.params.len() == 1
             && lambda.params[0].simple_name() == Some("x")
             && lambda.params[0].pattern_type().is_none()
-            && lambda.return_type.is_none()
             && matches!(lambda.body.kind, ExprKind::Identifier(_, ref name) if name == "x")
     ));
 }
@@ -523,7 +522,6 @@ fn test_parse_lambda_with_type_annotation() {
             if lambda.params.len() == 1
             && lambda.params[0].simple_name() == Some("x")
             && lambda.params[0].pattern_type().is_none()
-            && lambda.return_type.is_none()
             && matches!(lambda.body.kind, ExprKind::Identifier(_, ref name) if name == "x")
     ));
 }
@@ -540,42 +538,13 @@ fn test_parse_lambda_with_multiple_params() {
             && lambda.params[0].pattern_type().is_none()
             && lambda.params[1].simple_name() == Some("y")
             && lambda.params[1].pattern_type().is_none()
-            && lambda.return_type.is_none()
             && matches!(lambda.body.kind, ExprKind::Identifier(_, ref name) if name == "x")
     ));
 }
 
 #[test]
-fn test_parse_lambda_with_return_type() {
-    // |x| -> i32 body means: untyped parameter x, return type i32
-    let decl = single_decl(r#"let f: i32 -> i32 = |x| -> i32 x + 7i32"#);
-
-    if let ExprKind::Lambda(lambda) = &decl.body.kind {
-        // Check parameter: should be untyped
-        assert_eq!(lambda.params.len(), 1);
-        assert_eq!(lambda.params[0].simple_name(), Some("x"));
-        assert!(
-            lambda.params[0].pattern_type().is_none(),
-            "Parameter should not have a type"
-        );
-
-        // Check return type: should be i32
-        assert!(lambda.return_type.is_some(), "Lambda should have a return type");
-
-        // Check body: should be x + 7i32
-        assert!(matches!(lambda.body.kind, ExprKind::BinaryOp(_, _, _)));
-        if let ExprKind::BinaryOp(_op, left, right) = &lambda.body.kind {
-            assert!(matches!(left.kind, ExprKind::Identifier(_, ref name) if name == "x"));
-            assert!(matches!(right.kind, ExprKind::IntLiteral(7)));
-        }
-    } else {
-        panic!("Expected lambda, got {:?}", decl.body.kind);
-    }
-}
-
-#[test]
 fn test_parse_lambda_with_typed_parameter() {
-    // |x: i32| body means: typed parameter x:i32, no return type
+    // |x: i32| body means: typed parameter x:i32
     let decl = single_decl(r#"let f: i32 -> i32 = |x: i32| x + 7i32"#);
 
     if let ExprKind::Lambda(lambda) = &decl.body.kind {
@@ -587,12 +556,6 @@ fn test_parse_lambda_with_typed_parameter() {
             "Parameter should have a type"
         );
 
-        // Check return type: should be None
-        assert!(
-            lambda.return_type.is_none(),
-            "Lambda should not have a return type"
-        );
-
         // Check body: should be x + 7i32
         assert!(matches!(lambda.body.kind, ExprKind::BinaryOp(_, _, _)));
         if let ExprKind::BinaryOp(_op, left, right) = &lambda.body.kind {
@@ -605,27 +568,13 @@ fn test_parse_lambda_with_typed_parameter() {
 }
 
 #[test]
-fn test_parse_lambda_return_type_simple() {
-    // Test lambda with return type annotation: |x| -> i32 body
-    let decl = single_decl(r#"def f = |x| -> i32 x"#);
+fn test_parse_lambda_in_parens() {
+    // Test lambda in parentheses
+    let decl = single_decl(r#"def f = (|x| x)"#);
 
     if let ExprKind::Lambda(lambda) = &decl.body.kind {
         assert_eq!(lambda.params.len(), 1);
         assert_eq!(lambda.params[0].simple_name(), Some("x"));
-        assert!(lambda.return_type.is_some(), "Lambda should have return type");
-    } else {
-        panic!("Expected lambda, got {:?}", decl.body.kind);
-    }
-}
-
-#[test]
-fn test_parse_lambda_in_parens() {
-    // Test lambda in parentheses with return type
-    let decl = single_decl(r#"def f = (|x| -> i32 x)"#);
-
-    if let ExprKind::Lambda(lambda) = &decl.body.kind {
-        assert_eq!(lambda.params.len(), 1);
-        assert!(lambda.return_type.is_some(), "Lambda should have return type");
     } else {
         panic!("Expected lambda, got {:?}", decl.body.kind);
     }
@@ -3214,12 +3163,12 @@ fn test_curry_with_field_access() {
 // Slice parsing tests
 // =============================================================================
 
-// Note: Step syntax (a[i:j:s]) is not yet supported - tests removed
+// Note: Step syntax (a[i..j..s]) is not yet supported - tests removed
 
 #[test]
 fn test_slice_basic() {
-    // a[i:j] - slice with start and end
-    let decl = single_decl("def x(a: [10]i32) = a[1:5]");
+    // a[i..j] - slice with start and end
+    let decl = single_decl("def x(a: [10]i32) = a[1..5]");
     match &decl.body.kind {
         ExprKind::Slice(slice) => {
             assert!(slice.start.is_some());
@@ -3231,8 +3180,8 @@ fn test_slice_basic() {
 
 #[test]
 fn test_slice_from_start() {
-    // a[:j] - slice from beginning to j
-    let decl = single_decl("def x(a: [10]i32) = a[:5]");
+    // a[..j] - slice from beginning to j
+    let decl = single_decl("def x(a: [10]i32) = a[..5]");
     match &decl.body.kind {
         ExprKind::Slice(slice) => {
             assert!(slice.start.is_none());
@@ -3244,8 +3193,8 @@ fn test_slice_from_start() {
 
 #[test]
 fn test_slice_to_end() {
-    // a[i:] - slice from i to end
-    let decl = single_decl("def x(a: [10]i32) = a[2:]");
+    // a[i..] - slice from i to end
+    let decl = single_decl("def x(a: [10]i32) = a[2..]");
     match &decl.body.kind {
         ExprKind::Slice(slice) => {
             assert!(slice.start.is_some());
@@ -3257,8 +3206,8 @@ fn test_slice_to_end() {
 
 #[test]
 fn test_slice_full_array() {
-    // a[:] - entire array
-    let decl = single_decl("def x(a: [10]i32) = a[:]");
+    // a[..] - entire array
+    let decl = single_decl("def x(a: [10]i32) = a[..]");
     match &decl.body.kind {
         ExprKind::Slice(slice) => {
             assert!(slice.start.is_none());

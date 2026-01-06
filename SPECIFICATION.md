@@ -320,6 +320,12 @@ entry fragment_main() [4]f32 = ...
 entry double(arr: []f32) []f32 = map(|x| x * 2.0, arr)
 ```
 
+**Entry Point Syntax:**
+- Parentheses are required, even for zero-argument entry points: `entry foo() ...`
+- Parameters must be simple identifiers with explicit type annotations: `name: type`
+- Pattern destructuring is not allowed in entry point parameters
+- Return type is required and comes after the parameter list (no arrow)
+
 When the Wyn program is compiled, any `entry` declaration in the single file passed directly to the Wyn compiler will be exposed as a shader entry point. Entry points in files accessed via `import` are not considered entry points, but can still be called as normal functions.
 
 **Entry Point Naming Restrictions:**
@@ -489,7 +495,7 @@ exp         ::= atom
                 | "let" size* pat "=" exp "in" exp
                 | "let" name slice "=" exp "in" exp
                 | "let" name type_param* pat+ [":" type] "=" exp "in" exp
-                | "(" "\" pat+ [":" type] "->" exp ")"
+                | "|" pat ("," pat)* "|" exp
                 | "loop" pat ["=" exp] loopform "do" exp
                 | "#[" attr "]" exp
                 | "unsafe" exp
@@ -766,23 +772,23 @@ Match the value produced by `x` to each of the patterns in turn, picking the fir
 
 ### Function Expressions
 
-#### \x y z: t -> e
-Produces an anonymous function taking parameters `x`, `y`, and `z`, returns type `t`, and whose body is `e`. Lambdas do not permit type parameters; use a named function if you want a polymorphic function.
+#### |x, y, z| e
+Produces an anonymous function taking parameters `x`, `y`, and `z`, whose body is `e`. Lambdas do not permit type parameters; use a named function if you want a polymorphic function.
 
 #### (binop)
-An operator section that is equivalent to `\x y -> x binop y`.
+An operator section that is equivalent to `|x, y| x binop y`.
 
 #### (x binop)
-An operator section that is equivalent to `\y -> x binop y`.
+An operator section that is equivalent to `|y| x binop y`.
 
 #### (binop y)
-An operator section that is equivalent to `\x -> x binop y`.
+An operator section that is equivalent to `|x| x binop y`.
 
 #### (.a.b.c)
-An operator section that is equivalent to `\x -> x.a.b.c`.
+An operator section that is equivalent to `|x| x.a.b.c`.
 
 #### (.[i,j])
-An operator section that is equivalent to `\x -> x[i,j]`.
+An operator section that is equivalent to `|x| x[i,j]`.
 
 ---
 
@@ -869,7 +875,7 @@ def f [n] (a: [n]i32) (b: [n]i32): [n]i32 =
 We use a size parameter, `[n]`, to explicitly quantify a size. The `[n]` parameter is not explicitly passed when calling `f`. Rather, its value is implicitly deduced from the arguments passed for the value parameters. An array type can contain anonymous sizes, e.g. `[]i32`, for which the type checker will invent fresh size parameters, which ensures that all arrays have a size. On the right-hand side of a function arrow ("return types"), this results in an existential size that is not known until the function is fully applied, e.g:
 
 ```wyn
-val filter [n] 'a : (p: a -> bool) -> (as: [n]a) -> ?[k].[k]a
+sig filter [n] 'a : (p: a -> bool) -> (as: [n]a) -> ?[k].[k]a
 ```
 
 Sizes can be any expression of type `i64` that does not consume any free variables. Size parameters can be used as ordinary variables of type `i64` within the scope of the parameters. The type checker verifies that the program obeys any constraints imposed by size annotations.
@@ -889,7 +895,7 @@ Whenever we write a type `[e]t`, `e` must be a well-typed expression of type `i6
 There are cases where the type checker cannot assign a precise size to the result of some operation. For example, the type of `filter` is:
 
 ```wyn
-val filter [n] 'a : (a -> bool) -> [n]t -> ?[m].[m]t
+sig filter [n] 'a : (a -> bool) -> [n]t -> ?[m].[m]t
 ```
 
 The function returns of an array of some existential size `m`, but it cannot be known in advance.
@@ -932,7 +938,7 @@ Whenever the result of a function application has an existential size, that size
 For example, `filter` has the following type:
 
 ```wyn
-val filter [n] 'a : (p: a -> bool) -> (as: [n]a) -> ?[k].[k]a
+sig filter [n] 'a : (p: a -> bool) -> (as: [n]a) -> ?[k].[k]a
 ```
 
 For an application `filter f xs`, the type checker invents a fresh unknown size `k'`, and the actual type for this specific application will be `[k']a`.
@@ -1033,13 +1039,13 @@ Then we can construct an array of values of type `m.t` without worrying about co
 When a higher-order function takes a functional argument whose return type is a non-lifted type parameter, any instantiation of that type parameter must have a non-existential size. If the return type is a lifted type parameter, then the instantiation may contain existential sizes. This is why the type of `map` guarantees regular arrays:
 
 ```wyn
-val map [n] 'a 'b : (a -> b) -> [n]a -> [n]b
+sig map [n] 'a 'b : (a -> b) -> [n]a -> [n]b
 ```
 
 The type parameter `b` can only be replaced with a type that has non-existential sizes, which means they must be the same for every application of the function. In contrast, this is the type of the pipeline operator:
 
 ```wyn
-val (|>) '^a -> '^b : a -> (a -> b) -> b
+sig (|>) '^a -> '^b : a -> (a -> b) -> b
 ```
 
 The provided function can return something with an existential size (such as `filter`).
@@ -1049,7 +1055,7 @@ The provided function can return something with an existential size (such as `fi
 If a function (named or anonymous) is inferred to have a return type that contains an unknown size variable created within the function body, that size variable will be replaced with an existential size. In most cases this is not important, but it means that an expression like the following is ill-typed:
 
 ```wyn
-map (\xs -> iota (length xs)) (xss : [n][m]i32)
+map(|xs| iota(length(xs)), xss : [n][m]i32)
 ```
 
 This is because the `(length xs)` expression gives rise to some fresh size `k`. The lambda is then assigned the type `[n]t -> [k]i32`, which is immediately turned into `[n]t -> ?[k].[k]i32` because `k` was generated inside its body. A function of this type cannot be passed to `map`, as explained before. The solution is to bind `length` to a name before the lambda.
@@ -1197,19 +1203,19 @@ A module type expression can be the name of another module type, or a sequence o
 In a value spec, sizes in types on the left-hand side of a function arrow must not be anonymous. For example, this is forbidden:
 
 ```wyn
-val sum: []t -> t
+sig sum: []t -> t
 ```
 
 Instead write:
 
 ```wyn
-val sum [n]: [n]t -> t
+sig sum [n]: [n]t -> t
 ```
 
 But this is allowed, because the empty size is not to the left of a function arrow:
 
 ```wyn
-val evens [n]: [n]i32 -> []i32
+sig evens [n]: [n]i32 -> []i32
 ```
 
 ### Referencing Other Files
@@ -1441,7 +1447,7 @@ The evaluation semantics are entirely sequential, with parallelism being solely 
 
 Functions have a fixed number of arguments and must be called with all of them (although functions are not fully first class; see Types below). Although the `assert` construct looks like a function, it is not.
 
-Lambda terms are written as `\x -> x + 2`, as in Haskell.
+Lambda terms are written as `|x| x + 2`.
 
 A Wyn program is read top-down, and all functions must be declared in the order they are used, like Standard ML. Unlike just about all functional languages, recursive functions are not supported. Most of the time, you will use bulk array operations instead, but there is also a dedicated `loop` language construct, which is essentially syntactic sugar for tail recursive functions.
 

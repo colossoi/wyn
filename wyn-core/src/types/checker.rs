@@ -841,26 +841,10 @@ impl<'a> TypeChecker<'a> {
         // Type check the body
         let body_type = self.infer_expression(&lambda.body)?;
 
-        // Handle return type annotation
-        let return_type = if let Some(annotated_return_type) = &lambda.return_type {
-            let substituted = self.substitute_from_type_param_scope(annotated_return_type);
-            self.context.unify(&body_type, &substituted).map_err(|_| {
-                err_type_at!(
-                    lambda.body.h.span,
-                    "Lambda body type {} does not match return type annotation {}",
-                    self.format_type(&body_type),
-                    self.format_type(&substituted)
-                )
-            })?;
-            substituted
-        } else {
-            body_type
-        };
-
         self.scope_stack.pop_scope();
 
         // Build the function type
-        let func_type = Self::arrow_chain(&param_types, return_type);
+        let func_type = Self::arrow_chain(&param_types, body_type);
 
         // If we had an expected type, unify with it
         if let Some(exp) = expected {

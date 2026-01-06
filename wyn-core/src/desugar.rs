@@ -220,7 +220,6 @@ impl<'a> Desugarer<'a> {
         self.nc.mk_node(
             ExprKind::Lambda(LambdaExpr {
                 params,
-                return_type: None,
                 body: Box::new(body),
             }),
             span,
