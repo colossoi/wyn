@@ -626,6 +626,9 @@ module.exports = grammar({
 
     identifier: $ => /[a-zA-Z_][a-zA-Z0-9_']*/,
 
+    // Constructor names start with uppercase
+    constructor: $ => /[A-Z][a-zA-Z0-9_']*/,
+
     qualified_name: $ => prec.left(1, seq(
       $.identifier,
       repeat1(seq('.', $.identifier)),

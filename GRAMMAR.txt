@@ -12,6 +12,7 @@ lowercase    ::= "a"..."z"
 uppercase    ::= "A"..."Z"
 letter       ::= lowercase | uppercase
 
+comment      ::= "--" <any characters until end of line>
 
 literal ::= intnumber | floatnumber | "true" | "false"
 
@@ -73,8 +74,7 @@ type_application ::= type type_arg | "*" type
 type_arg         ::= "[" [dim] "]" | type
 
 
-function_type ::= param_type "->" type
-param_type    ::= type | "(" name ":" type ")"
+function_type ::= type "->" type
 
 
 
@@ -88,8 +88,8 @@ dec ::= val_bind | entry_bind | type_bind | mod_bind | mod_type_bind
         | "#[" attr "]" dec
 
 
-val_bind ::= ("def" | "let") (name | "(" symbol ")") type_param* pat* [type] "=" exp
-             | ("def" | "let") pat symbol pat [type] "=" exp
+val_bind ::= "def" (name | "(" symbol ")") type_param* pat* [type] "=" exp
+             | "def" pat symbol pat [type] "=" exp
 
 entry_bind   ::= "entry" name entry_params ["#[" attr "]"] [type] "=" exp
 entry_params ::= "(" ")" | "(" entry_param ("," entry_param)* [","] ")"
@@ -114,6 +114,8 @@ atom        ::= literal
                 | "(" exp ")" slice
                 | quals "." "(" exp ")"
                 | "[" exp ("," exp)* [","] "]"
+                | "@[" exp ("," exp)* [","] "]"
+                | "$" exp "(" (exp | "_") ("," (exp | "_"))* [","] ")"
                 | "(" qualsymbol ")"
                 | "(" exp qualsymbol ")"
                 | "(" qualsymbol exp ")"
@@ -135,11 +137,9 @@ exp         ::= atom
                 | "let" size* pat "=" exp "in" exp
                 | "let" name slice "=" exp "in" exp
                 | "let" name type_param* pat+ [":" type] "=" exp "in" exp
-                | "(" "\" pat+ [":" type] "->" exp ")"
+                | "|" pat ("," pat)* [","] "|" exp
                 | "loop" pat ["=" exp] loopform "do" exp
                 | "#[" attr "]" exp
-                | "unsafe" exp
-                | "assert" atom exp
                 | exp "with" slice "=" exp
                 | exp "with" fieldid ("." fieldid)* "=" exp
                 | "match" exp ("case" pat "->" exp)+
@@ -166,9 +166,9 @@ pat_literal ::= [ "-" ] intnumber
 loopform    ::= "for" name "<" exp
                 | "for" pat "in" exp
                 | "while" exp
-index       ::= exp [":" [exp]] [":" [exp]]
-                | [exp] ":" exp [":" [exp]]
-                | [exp] [":" exp] ":" [exp]
+index       ::= exp [".." [exp]] [".." [exp]]
+                | [exp] ".." exp [".." [exp]]
+                | [exp] [".." exp] ".." [exp]
 
 
 mod_bind      ::= "module" name mod_param* "=" [":" mod_type_exp] "=" mod_exp
@@ -178,7 +178,7 @@ mod_type_bind ::= "module" "type" name "=" mod_type_exp
 
 mod_exp ::= qualname
             | mod_exp ":" mod_type_exp
-            | "\" "(" mod_param* ")" [":" mod_type_exp] "->" mod_exp
+            | "|" mod_param ("," mod_param)* [","] "|" mod_exp
             | mod_exp mod_exp
             | "(" mod_exp ")"
             | "{" dec* "}"
@@ -193,9 +193,9 @@ mod_type_exp ::= qualname
                  | mod_type_exp "->" mod_type_exp
 
 
-spec ::= "val" name type_param* ":" type
-         | "val" "(" symbol ")" ":" type
-         | "val" symbol type_param* ":" type
+spec ::= "sig" name type_param* ":" type
+         | "sig" "(" symbol ")" ":" type
+         | "sig" symbol type_param* ":" type
          | ("type" | "type^" | "type~") name type_param* "=" type
          | ("type" | "type^" | "type~") name type_param*
          | "module" name ":" mod_type_exp
