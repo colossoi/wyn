@@ -1456,6 +1456,8 @@ dependencies = [
  "nom",
  "polytype",
  "rspirv",
+ "serde",
+ "serde_json",
  "spirv",
  "thiserror",
 ]

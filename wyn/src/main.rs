@@ -66,6 +66,10 @@ enum Commands {
         #[arg(long, value_name = "FILE")]
         output_annotated: Option<PathBuf>,
 
+        /// Output shader interface as JSON (bindings, entry points, types)
+        #[arg(long, value_name = "FILE")]
+        output_interface: Option<PathBuf>,
+
         /// Enable partial evaluation (compile-time function inlining and loop unrolling)
         #[arg(long)]
         partial_eval: bool,
@@ -112,6 +116,7 @@ fn main() -> Result<(), DriverError> {
             output_init_mir,
             output_final_mir,
             output_annotated,
+            output_interface,
             partial_eval,
             verbose,
         } => {
@@ -122,6 +127,7 @@ fn main() -> Result<(), DriverError> {
                 output_init_mir,
                 output_final_mir,
                 output_annotated,
+                output_interface,
                 partial_eval,
                 verbose,
             )?;
@@ -145,6 +151,7 @@ fn compile_file(
     output_init_mir: Option<PathBuf>,
     output_final_mir: Option<PathBuf>,
     output_annotated: Option<PathBuf>,
+    output_interface: Option<PathBuf>,
     partial_eval: bool,
     verbose: bool,
 ) -> Result<(), DriverError> {
@@ -209,6 +216,17 @@ fn compile_file(
 
     // Write final MIR if requested (right before lowering)
     write_mir_if_requested(&lifted.mir, &output_final_mir, "final MIR", verbose)?;
+
+    // Write interface JSON if requested
+    if let Some(ref interface_path) = output_interface {
+        let interface = wyn_core::interface::extract_interface(&lifted.mir);
+        let json = wyn_core::interface::to_json(&interface)
+            .expect("Failed to serialize interface");
+        fs::write(interface_path, json)?;
+        if verbose {
+            info!("Wrote interface to {}", interface_path.display());
+        }
+    }
 
     match target {
         Target::Spirv => {

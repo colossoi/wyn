@@ -4,6 +4,7 @@ pub mod diags;
 pub mod error;
 pub mod flattening;
 pub mod impl_source;
+pub mod interface;
 pub mod intrinsics;
 pub mod lexer;
 pub mod mir;
