@@ -203,11 +203,11 @@ pub enum Expr {
 
     // --- Closures ---
     /// A closure value (defunctionalized lambda).
-    /// The captures field is a single ExprId pointing to a Tuple or Unit expression
-    /// containing all captured values.
+    /// Each captured variable is a separate ExprId in the captures vector.
+    /// The lambda function has one parameter per capture, followed by its regular params.
     Closure {
         lambda_name: String,
-        captures: ExprId,
+        captures: Vec<ExprId>,
     },
 
     // --- Ranges ---

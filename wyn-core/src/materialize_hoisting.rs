@@ -200,7 +200,9 @@ fn collect_materializations_rec(
             }
         }
         Expr::Closure { captures, .. } => {
-            collect_materializations_rec(body, *captures, result, visited);
+            for cap in captures {
+                collect_materializations_rec(body, *cap, result, visited);
+            }
         }
         Expr::Tuple(elems) | Expr::Array(elems) | Expr::Vector(elems) => {
             for elem in elems {

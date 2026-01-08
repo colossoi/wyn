@@ -1219,7 +1219,7 @@ fn lower_compute_entry_point(
     let thread_id = constructor.builder.composite_extract(constructor.u32_type, None, gid, [0])?;
 
     // Extract closure info from the map expression
-    let (func_name, closure_val, is_empty_closure) =
+    let (func_name, capture_vals) =
         extract_closure_info(constructor, body, compute_info.map_closure)?;
 
     let map_func_id = *constructor
@@ -1230,14 +1230,13 @@ fn lower_compute_entry_point(
     // Delegate to lower_inplace_map_core with single-element index list
     // Each thread handles one element at index = global_invocation_id.x
     let mem = mir::MemBinding::Storage { set: 0, binding: 0 };
-    let closure_arg = if is_empty_closure { None } else { Some(closure_val) };
     lower_inplace_map_core(
         constructor,
         mem,
         buffer_var,
         elem_type_id,
         map_func_id,
-        closure_arg,
+        &capture_vals,
         elem_type_id,
         &[thread_id], // single element at runtime index
     )?;
@@ -2282,10 +2281,27 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
         }
 
         Expr::Closure { captures, .. } => {
-            // The captures field points to a Tuple or Unit expression.
-            // Just lower it directly - Tuple handles struct construction with proper
-            // type caching, and Unit produces const_i32(0) for empty closures.
-            lower_expr(constructor, body, *captures)
+            // Lower each capture individually
+            if captures.is_empty() {
+                // Empty closure - return dummy value
+                Ok(constructor.const_i32(0))
+            } else if captures.len() == 1 {
+                // Single capture - return it directly
+                lower_expr(constructor, body, captures[0])
+            } else {
+                // Multiple captures - construct struct from capture types
+                let elem_ids: Vec<spirv::Word> = captures
+                    .iter()
+                    .map(|&c| lower_expr(constructor, body, c))
+                    .collect::<Result<Vec<_>>>()?;
+                // Build struct type from capture types (not the closure's function type)
+                let elem_types: Vec<spirv::Word> = captures
+                    .iter()
+                    .map(|&c| constructor.ast_type_to_spirv(body.get_type(c)))
+                    .collect();
+                let struct_type = constructor.builder.type_struct(elem_types);
+                Ok(constructor.builder.composite_construct(struct_type, None, elem_ids)?)
+            }
         }
 
         Expr::Range {
@@ -2674,28 +2690,27 @@ fn try_extract_const_int(body: &Body, expr_id: ExprId) -> Option<i32> {
 // =============================================================================
 
 /// Extract closure information from a SOAC operator argument.
-/// Returns (function_name, closure_value, is_empty_closure).
+/// Returns (function_name, capture_values) where capture_values is a Vec of individual captures.
 fn extract_closure_info(
     constructor: &mut Constructor,
     body: &Body,
     arg_expr_id: ExprId,
-) -> Result<(String, spirv::Word, bool)> {
+) -> Result<(String, Vec<spirv::Word>)> {
     match body.get_expr(arg_expr_id) {
         Expr::Closure {
             lambda_name,
             captures,
         } => {
-            let is_empty = is_empty_closure_type(body.get_type(*captures));
-            let closure_val = if is_empty {
-                constructor.const_i32(0)
-            } else {
-                lower_expr(constructor, body, arg_expr_id)?
-            };
-            Ok((lambda_name.clone(), closure_val, is_empty))
+            // Lower each capture individually
+            let capture_vals: Vec<spirv::Word> = captures
+                .iter()
+                .map(|&c| lower_expr(constructor, body, c))
+                .collect::<Result<Vec<_>>>()?;
+            Ok((lambda_name.clone(), capture_vals))
         }
         Expr::Global(name) => {
-            // Named function reference - treat like empty closure
-            Ok((name.clone(), constructor.const_i32(0), true))
+            // Named function reference - no captures
+            Ok((name.clone(), vec![]))
         }
         other => {
             bail_spirv!("Expected closure or function reference, got {:?}", other);
@@ -2808,7 +2823,7 @@ fn lower_inplace_map_core(
     array_val: spirv::Word,
     elem_type: spirv::Word,
     map_func_id: spirv::Word,
-    closure_val: Option<spirv::Word>,
+    capture_vals: &[spirv::Word],
     output_elem_type: spirv::Word,
     indices: &[spirv::Word],
 ) -> Result<()> {
@@ -2816,11 +2831,9 @@ fn lower_inplace_map_core(
         // Read element
         let input_elem = read_array_element(constructor, Some(mem), array_val, index, elem_type)?;
 
-        // Apply function
-        let call_args = match closure_val {
-            Some(cv) => vec![cv, input_elem],
-            None => vec![input_elem],
-        };
+        // Apply function: captures first, then input element
+        let mut call_args = capture_vals.to_vec();
+        call_args.push(input_elem);
         let result_elem =
             constructor.builder.function_call(output_elem_type, None, map_func_id, call_args)?;
 
@@ -2863,7 +2876,7 @@ fn lower_map(
         None
     };
 
-    let (func_name, closure_val, is_empty_closure) = extract_closure_info(constructor, body, args[0])?;
+    let (func_name, capture_vals) = extract_closure_info(constructor, body, args[0])?;
 
     // Lower the input array
     let arr_val = lower_expr(constructor, body, args[1])?;
@@ -2889,7 +2902,9 @@ fn lower_map(
         // Use read_array_element which handles both value and storage arrays
         let idx = constructor.const_u32(i);
         let input_elem = read_array_element(constructor, mem, arr_val, idx, elem_type)?;
-        let call_args = if is_empty_closure { vec![input_elem] } else { vec![closure_val, input_elem] };
+        // Build call args: captures first, then input element
+        let mut call_args = capture_vals.clone();
+        call_args.push(input_elem);
         let result_elem =
             constructor.builder.function_call(output_elem_type, None, map_func_id, call_args)?;
         result_elements.push(result_elem);
@@ -2922,7 +2937,7 @@ fn lower_inplace_map(
         None
     };
 
-    let (func_name, closure_val, is_empty_closure) = extract_closure_info(constructor, body, args[0])?;
+    let (func_name, capture_vals) = extract_closure_info(constructor, body, args[0])?;
 
     // Lower the input array
     let arr_val = lower_expr(constructor, body, args[1])?;
@@ -2945,7 +2960,6 @@ fn lower_inplace_map(
     match mem {
         Some(mem_binding) => {
             // Storage-backed array: build index list and delegate to core
-            let closure_arg = if is_empty_closure { None } else { Some(closure_val) };
             let indices: Vec<_> = (0..array_size).map(|i| constructor.const_u32(i)).collect();
             lower_inplace_map_core(
                 constructor,
@@ -2953,7 +2967,7 @@ fn lower_inplace_map(
                 arr_val,
                 elem_type,
                 map_func_id,
-                closure_arg,
+                &capture_vals,
                 output_elem_type,
                 &indices,
             )?;
@@ -2965,8 +2979,9 @@ fn lower_inplace_map(
             let mut result_elements = Vec::with_capacity(array_size as usize);
             for i in 0..array_size {
                 let input_elem = constructor.builder.composite_extract(elem_type, None, arr_val, [i])?;
-                let call_args =
-                    if is_empty_closure { vec![input_elem] } else { vec![closure_val, input_elem] };
+                // Build call args: captures first, then input element
+                let mut call_args = capture_vals.clone();
+                call_args.push(input_elem);
                 let result_elem =
                     constructor.builder.function_call(output_elem_type, None, map_func_id, call_args)?;
                 result_elements.push(result_elem);
@@ -3070,7 +3085,7 @@ fn lower_reduce(
         bail_spirv!("reduce requires 3 args (op, ne, array), got {}", args.len());
     }
 
-    let (func_name, closure_val, is_empty_closure) = extract_closure_info(constructor, body, args[0])?;
+    let (func_name, capture_vals) = extract_closure_info(constructor, body, args[0])?;
     let neutral_val = lower_expr(constructor, body, args[1])?;
     let array_val = lower_expr(constructor, body, args[2])?;
 
@@ -3086,7 +3101,10 @@ fn lower_reduce(
     let mut acc = neutral_val;
     for i in 0..array_size {
         let elem = constructor.builder.composite_extract(elem_type, None, array_val, [i])?;
-        let call_args = if is_empty_closure { vec![acc, elem] } else { vec![closure_val, acc, elem] };
+        // Build call args: captures first, then acc and elem
+        let mut call_args = capture_vals.clone();
+        call_args.push(acc);
+        call_args.push(elem);
         acc = constructor.builder.function_call(result_type, None, op_func_id, call_args)?;
     }
 
@@ -3104,7 +3122,7 @@ fn lower_scan(
         bail_spirv!("scan requires 3 args (op, ne, array), got {}", args.len());
     }
 
-    let (func_name, closure_val, is_empty_closure) = extract_closure_info(constructor, body, args[0])?;
+    let (func_name, capture_vals) = extract_closure_info(constructor, body, args[0])?;
     let _neutral_val = lower_expr(constructor, body, args[1])?; // Used for empty arrays
     let array_val = lower_expr(constructor, body, args[2])?;
 
@@ -3128,7 +3146,10 @@ fn lower_scan(
         let mut acc = first_elem;
         for i in 1..array_size {
             let elem = constructor.builder.composite_extract(elem_type, None, array_val, [i])?;
-            let call_args = if is_empty_closure { vec![acc, elem] } else { vec![closure_val, acc, elem] };
+            // Build call args: captures first, then acc and elem
+            let mut call_args = capture_vals.clone();
+            call_args.push(acc);
+            call_args.push(elem);
             acc = constructor.builder.function_call(elem_type, None, op_func_id, call_args)?;
             result_elements.push(acc);
         }
@@ -3148,7 +3169,7 @@ fn lower_filter(
         bail_spirv!("filter requires 2 args (pred, array), got {}", args.len());
     }
 
-    let (func_name, closure_val, is_empty_closure) = extract_closure_info(constructor, body, args[0])?;
+    let (func_name, capture_vals) = extract_closure_info(constructor, body, args[0])?;
     let array_val = lower_expr(constructor, body, args[1])?;
 
     let arg1_ty = body.get_type(args[1]);
@@ -3165,7 +3186,9 @@ fn lower_filter(
 
     for i in 0..array_size {
         let elem = constructor.builder.composite_extract(elem_type, None, array_val, [i])?;
-        let call_args = if is_empty_closure { vec![elem] } else { vec![closure_val, elem] };
+        // Build call args: captures first, then elem
+        let mut call_args = capture_vals.clone();
+        call_args.push(elem);
         let pred_result =
             constructor.builder.function_call(constructor.bool_type, None, pred_func_id, call_args)?;
 
@@ -3294,7 +3317,7 @@ fn lower_hist_1d(
     }
 
     let dest_val = lower_expr(constructor, body, args[0])?;
-    let (func_name, closure_val, is_empty_closure) = extract_closure_info(constructor, body, args[1])?;
+    let (func_name, capture_vals) = extract_closure_info(constructor, body, args[1])?;
     let _neutral_val = lower_expr(constructor, body, args[2])?; // Used for initialization, but we use dest values
     let indices_val = lower_expr(constructor, body, args[3])?;
     let values_val = lower_expr(constructor, body, args[4])?;
@@ -3334,7 +3357,10 @@ fn lower_hist_1d(
                 constructor.builder.i_equal(constructor.bool_type, None, index, dest_idx_const)?;
 
             // Apply operator: new_acc = op(acc, value)
-            let call_args = if is_empty_closure { vec![acc, value] } else { vec![closure_val, acc, value] };
+            // Build call args: captures first, then acc and value
+            let mut call_args = capture_vals.clone();
+            call_args.push(acc);
+            call_args.push(value);
             let combined = constructor.builder.function_call(elem_type, None, op_func_id, call_args)?;
 
             // Select: if matches then combined else acc

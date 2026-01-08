@@ -604,7 +604,21 @@ impl Monomorphizer {
                 lambda_name,
                 captures,
             } => {
-                let new_captures = expr_map[captures];
+                // Map each capture to the new body
+                let new_captures: Vec<_> = captures.iter().map(|c| expr_map[c]).collect();
+
+                // Extract mem bindings from captures for lambda specialization
+                // If a capture is a Local with storage backing, the lambda param should get it too
+                let capture_mem_bindings: Vec<Option<MemBinding>> = captures
+                    .iter()
+                    .map(|&cap_id| {
+                        if let Expr::Local(local_id) = body.get_expr(cap_id) {
+                            body.get_local(*local_id).mem
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
 
                 // Try to specialize the lambda based on the closure's concrete type
                 if let Some(def) = self.poly_functions.get(lambda_name).cloned() {
@@ -618,12 +632,14 @@ impl Monomorphizer {
                     // has ((A,B),C) -> (A,B,C) where param uses different vars than return)
                     let subst = self.infer_lambda_substitution(&def, &concrete_params, &concrete_ret)?;
 
-                    // Lambdas don't receive storage-backed arrays directly, so no mem bindings
-                    let lambda_mem_bindings = vec![None; concrete_params.len()];
+                    // Lambda params: capture params first, then regular params
+                    // capture_mem_bindings covers capture params, concrete_params covers regular params
+                    let mut lambda_mem_bindings = capture_mem_bindings.clone();
+                    lambda_mem_bindings.extend(vec![None; concrete_params.len()]);
                     let spec_key = SpecKey::new(&subst, lambda_mem_bindings);
 
-                    if !subst.is_empty() {
-                        // Specialize the lambda with concrete types
+                    if !subst.is_empty() || capture_mem_bindings.iter().any(|m| m.is_some()) {
+                        // Specialize the lambda with concrete types and/or mem bindings
                         let specialized_name =
                             self.get_or_create_specialization(lambda_name, &spec_key, &def)?;
                         return Ok(Expr::Closure {

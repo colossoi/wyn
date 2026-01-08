@@ -1438,7 +1438,6 @@ impl Flattener {
 
         // Build closure captures - look up each free var and get its ExprId
         let mut capture_ids = vec![];
-        let mut capture_types = vec![];
         for (var_name, var_type) in &free_vars {
             let capture_id = if let Some(local_id) = self.lookup_local(var_name) {
                 self.alloc_expr(mir::Expr::Local(local_id), var_type.clone(), span)
@@ -1446,24 +1445,21 @@ impl Flattener {
                 self.alloc_expr(mir::Expr::Global(var_name.clone()), var_type.clone(), span)
             };
             capture_ids.push(capture_id);
-            capture_types.push(var_type.clone());
         }
-
-        // The closure type is the captures tuple
-        let closure_type = types::tuple(capture_types.clone());
 
         // Create a new body for the generated function
         let outer_body = self.begin_body();
         self.name_to_local.push_scope();
 
-        // Allocate closure param as local
-        let closure_local = self.alloc_local(
-            "_w_closure".to_string(),
-            closure_type.clone(),
-            LocalKind::Param,
-            span,
-        );
-        let mut param_local_ids = vec![closure_local];
+        // Allocate individual params for each capture (instead of single tuple param)
+        let mut param_local_ids = Vec::new();
+        let mut capture_param_locals = Vec::new();
+        for (idx, (_var_name, var_type)) in free_vars.iter().enumerate() {
+            let param_name = format!("_w_cap_{}", idx);
+            let param_local = self.alloc_local(param_name, var_type.clone(), LocalKind::Param, span);
+            param_local_ids.push(param_local);
+            capture_param_locals.push(param_local);
+        }
 
         // Allocate lambda params as locals - handle both simple names and patterns
         // For tuple patterns, we allocate a single param with a synthetic name,
@@ -1496,8 +1492,7 @@ impl Flattener {
         }
 
         // Allocate locals for captured variables BEFORE flattening body
-        // This ensures body references resolve to the lambda's locals, not the parent's
-        let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
+        // These will be bound to the capture params via Let bindings
         let mut capture_locals = vec![];
         for (var_name, var_type) in &free_vars {
             let capture_local = self.alloc_local(var_name.clone(), var_type.clone(), LocalKind::Let, span);
@@ -1515,24 +1510,19 @@ impl Flattener {
         let (mut body_root, _) = self.flatten_expr(&lambda.body)?;
 
         // Wrap body with let bindings for captured vars (in reverse order)
-        for (idx, ((_var_name, var_type), capture_local)) in
-            free_vars.iter().zip(capture_locals.iter()).enumerate().rev()
+        // Each capture local is bound directly to its capture param (no tuple_access)
+        for (((_var_name, var_type), capture_local), capture_param) in free_vars
+            .iter()
+            .zip(capture_locals.iter())
+            .zip(capture_param_locals.iter())
+            .rev()
         {
-            let closure_ref = self.alloc_expr(mir::Expr::Local(closure_local), closure_type.clone(), span);
-            let idx_expr = self.alloc_expr(mir::Expr::Int(idx.to_string()), i32_type.clone(), span);
-            let extract = self.alloc_expr(
-                mir::Expr::Intrinsic {
-                    name: "tuple_access".to_string(),
-                    args: vec![closure_ref, idx_expr],
-                },
-                var_type.clone(),
-                span,
-            );
+            let param_ref = self.alloc_expr(mir::Expr::Local(*capture_param), var_type.clone(), span);
             let body_ty = self.current_body.get_type(body_root).clone();
             body_root = self.alloc_expr(
                 mir::Expr::Let {
                     local: *capture_local,
-                    rhs: extract,
+                    rhs: param_ref,
                     body: body_root,
                 },
                 body_ty,
@@ -1572,14 +1562,10 @@ impl Flattener {
             free_vars: free_vars.clone(),
         };
 
-        // Build closure tuple
-        let closure_tuple =
-            if capture_ids.is_empty() { mir::Expr::Unit } else { mir::Expr::Tuple(capture_ids.clone()) };
-        let closure_tuple_id = self.alloc_expr(closure_tuple, closure_type.clone(), span);
-
+        // Build closure with individual capture ExprIds (not a tuple)
         let closure_expr = mir::Expr::Closure {
             lambda_name: func_name,
-            captures: closure_tuple_id,
+            captures: capture_ids,
         };
         // The closure expression should have the function type for monomorphization to work correctly
         let id = self.alloc_expr(closure_expr, func_type.clone(), span);

@@ -86,7 +86,7 @@ pub enum Value {
     /// Known closure (lambda with captured values)
     Closure {
         lambda_name: String,
-        captures: Box<Value>,
+        captures: Vec<Value>,
     },
 
     /// Unit value
@@ -121,7 +121,7 @@ impl Value {
         match self {
             Value::Scalar(_) | Value::Unit => true,
             Value::Aggregate { elements, .. } => elements.iter().all(|e| e.is_known()),
-            Value::Closure { captures, .. } => captures.is_known(),
+            Value::Closure { captures, .. } => captures.iter().all(|c| c.is_known()),
             Value::Unknown(_) => false,
         }
     }
@@ -302,13 +302,20 @@ impl PartialEvaluator {
                 lambda_name,
                 captures,
             } => {
-                // Get the capture type from the closure type
-                let captures_ty = self.get_captures_type(&ty);
-                let captures_id = self.reify(captures, captures_ty, span, node_id);
+                // Reify each capture individually
+                // We don't have type info for each capture at this point, so we use Unit as placeholder
+                // (the actual capture type comes from the original expression in most cases)
+                let capture_ids: Vec<ExprId> = captures
+                    .iter()
+                    .map(|cap| {
+                        let cap_ty = Type::Constructed(TypeName::Unit, vec![]);
+                        self.reify(cap, cap_ty, span, node_id)
+                    })
+                    .collect();
                 self.emit(
                     Expr::Closure {
                         lambda_name: lambda_name.clone(),
-                        captures: captures_id,
+                        captures: capture_ids,
                     },
                     ty,
                     span,
@@ -344,16 +351,6 @@ impl PartialEvaluator {
                 args.get(index).cloned().unwrap_or_else(|| ty.clone())
             }
             _ => ty.clone(),
-        }
-    }
-
-    /// Get the captures type from a closure type (Record type)
-    fn get_captures_type(&self, ty: &Type<TypeName>) -> Type<TypeName> {
-        // Closure types are represented as Record types containing captured variables
-        // The captures are stored as the closure's type directly
-        match ty {
-            Type::Constructed(TypeName::Record(_), _) => ty.clone(),
-            _ => Type::Constructed(TypeName::Unit, vec![]),
         }
     }
 
@@ -605,10 +602,13 @@ impl PartialEvaluator {
                 lambda_name,
                 captures,
             } => {
-                let captures_val = self.eval(body, captures, env)?;
+                let captures_vals: Vec<Value> = captures
+                    .iter()
+                    .map(|c| self.eval(body, *c, env))
+                    .collect::<Result<_>>()?;
                 Ok(Value::Closure {
                     lambda_name,
-                    captures: Box::new(captures_val),
+                    captures: captures_vals,
                 })
             }
 

@@ -796,9 +796,27 @@ impl<'a> LowerCtx<'a> {
 
             // --- Closures ---
             Expr::Closure { captures, .. } => {
-                // Lower closure as its captures tuple directly
-                // The captures field points to a Tuple or Unit expression
-                self.lower_expr(body, *captures, output)
+                // Lower closure as its captures
+                if captures.is_empty() {
+                    output.push_str("0");
+                    Ok("int".to_string())
+                } else if captures.len() == 1 {
+                    self.lower_expr(body, captures[0], output)
+                } else {
+                    // Multiple captures - lower as tuple/struct
+                    let ty = body.get_type(expr_id);
+                    let type_str = self.type_to_glsl(ty);
+                    output.push_str(&type_str);
+                    output.push('(');
+                    for (i, &cap) in captures.iter().enumerate() {
+                        if i > 0 {
+                            output.push_str(", ");
+                        }
+                        self.lower_expr(body, cap, output)?;
+                    }
+                    output.push(')');
+                    Ok(type_str)
+                }
             }
 
             // --- Range ---

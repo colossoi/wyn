@@ -307,7 +307,7 @@ impl BindingLifter {
                 lambda_name,
                 captures,
             } => {
-                let new_captures = self.expr_map[captures];
+                let new_captures: Vec<_> = captures.iter().map(|c| self.expr_map[c]).collect();
                 new_body.alloc_expr(
                     Expr::Closure {
                         lambda_name: lambda_name.clone(),
@@ -679,7 +679,9 @@ fn collect_free_locals_inner(
         }
 
         Expr::Closure { captures, .. } => {
-            collect_free_locals_inner(body, *captures, bound, free);
+            for cap in captures {
+                collect_free_locals_inner(body, *cap, bound, free);
+            }
         }
 
         Expr::Range { start, step, end, .. } => {

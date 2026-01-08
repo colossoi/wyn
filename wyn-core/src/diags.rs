@@ -971,7 +971,11 @@ impl Display for mir::Expr {
                 lambda_name,
                 captures,
             } => {
-                write!(f, "@closure({}, e{})", lambda_name, captures.0)
+                write!(f, "@closure({}", lambda_name)?;
+                for cap in captures {
+                    write!(f, ", e{}", cap.0)?;
+                }
+                write!(f, ")")
             }
             mir::Expr::Range {
                 start,

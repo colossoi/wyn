@@ -1091,7 +1091,9 @@ fn collect_uses(body: &mir::Body, expr_id: mir::ExprId) -> HashSet<mir::LocalId>
             uses.extend(collect_uses(body, *inner));
         }
         Closure { captures, .. } => {
-            uses.extend(collect_uses(body, *captures));
+            for cap in captures {
+                uses.extend(collect_uses(body, *cap));
+            }
         }
         Range { start, step, end, .. } => {
             uses.extend(collect_uses(body, *start));
@@ -1263,7 +1265,9 @@ fn compute_uses_after(
             result.extend(compute_uses_after(body, inner, after, aliases));
         }
         Closure { captures, .. } => {
-            result.extend(compute_uses_after(body, *captures, after, aliases));
+            for cap in captures {
+                result.extend(compute_uses_after(body, *cap, after, aliases));
+            }
         }
         Range { start, step, end, .. } => {
             let (start, step, end) = (*start, *step, *end);
@@ -1453,7 +1457,9 @@ fn find_inplace_ops(
             find_inplace_ops(body, inner, uses_after, aliases, result);
         }
         Closure { captures, .. } => {
-            find_inplace_ops(body, *captures, uses_after, aliases, result);
+            for cap in captures {
+                find_inplace_ops(body, *cap, uses_after, aliases, result);
+            }
         }
         Range { start, step, end, .. } => {
             let (start, step, end) = (*start, *step, *end);

@@ -259,7 +259,7 @@ impl<'a> InPlaceRewriter<'a> {
                 captures,
             } => Expr::Closure {
                 lambda_name: lambda_name.clone(),
-                captures: self.remap(*captures),
+                captures: captures.iter().map(|c| self.remap(*c)).collect(),
             },
 
             // Ranges

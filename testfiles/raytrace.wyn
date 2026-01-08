@@ -385,7 +385,7 @@ def trace(ro: vec3f32, rd: vec3f32, maxBounces: i32) vec3f32 =
 -- Process a single ray slot, returning:
 -- (newOrigin, newDir, newWeight, colorContrib, refrOrigin, refrDir, refrWeight, stillActive, hasRefract)
 def processOneRay(idx: i32, ro: vec3f32, rd: vec3f32, weight: vec3f32, active: i32)
-    -> (vec3f32, vec3f32, vec3f32, vec3f32, vec3f32, vec3f32, vec3f32, i32, i32) =
+    (vec3f32, vec3f32, vec3f32, vec3f32, vec3f32, vec3f32, vec3f32, i32, i32) =
   let zero = @[0.0, 0.0, 0.0] in
   if active == 0 then
     (ro, rd, zero, zero, zero, zero, zero, 0, 0)
