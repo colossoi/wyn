@@ -763,8 +763,8 @@ impl Flattener {
                     let execution_model = match &e.entry_type {
                         ast::Attribute::Vertex => mir::ExecutionModel::Vertex,
                         ast::Attribute::Fragment => mir::ExecutionModel::Fragment,
-                        ast::Attribute::Compute { local_size } => mir::ExecutionModel::Compute {
-                            local_size: *local_size,
+                        ast::Attribute::Compute => mir::ExecutionModel::Compute {
+                            local_size: (64, 1, 1),
                         },
                         _ => panic!("Invalid entry type attribute: {:?}", e.entry_type),
                     };
@@ -877,9 +877,7 @@ impl Flattener {
             ast::Attribute::Location(loc) => mir::Attribute::Location(*loc),
             ast::Attribute::Vertex => mir::Attribute::Vertex,
             ast::Attribute::Fragment => mir::Attribute::Fragment,
-            ast::Attribute::Compute { local_size } => mir::Attribute::Compute {
-                local_size: *local_size,
-            },
+            ast::Attribute::Compute => mir::Attribute::Compute,
             // The binding is stored in Def::Uniform, not the Attribute
             ast::Attribute::Uniform { .. } => mir::Attribute::Uniform,
             // The binding is stored in Def::Storage, not the Attribute

@@ -17,6 +17,8 @@ use crate::ast::{NodeId, Span, TypeName};
 use crate::types::TypeScheme;
 use polytype::Type;
 
+pub mod binding_allocator;
+pub mod layout;
 pub mod parallelism;
 
 #[cfg(test)]
@@ -592,9 +594,7 @@ pub enum Attribute {
     Location(u32),
     Vertex,
     Fragment,
-    Compute {
-        local_size: (u32, u32, u32),
-    },
+    Compute,
     Uniform,
     Storage,
     /// Hint for expected size of a dynamic array (in elements).
@@ -675,4 +675,45 @@ pub enum LoopKind {
         /// Loop condition.
         cond: ExprId,
     },
+}
+
+// =============================================================================
+// Buffer Blocks
+// =============================================================================
+
+/// A field within a buffer block.
+#[derive(Debug, Clone)]
+pub struct BufferField {
+    /// Field name.
+    pub name: String,
+    /// Field type.
+    pub ty: Type<TypeName>,
+    /// Whether this is a runtime-sized array (only valid for last field).
+    pub is_runtime_sized: bool,
+}
+
+/// A buffer block with potentially multiple fields.
+/// Corresponds to GLSL/SPIR-V buffer blocks:
+/// ```glsl
+/// layout(std430, binding = 0) buffer MyBuffer {
+///     int count;
+///     float data[];
+/// } buf;
+/// ```
+#[derive(Debug, Clone)]
+pub struct BufferBlock {
+    /// Unique node identifier.
+    pub id: NodeId,
+    /// Block name.
+    pub name: String,
+    /// Memory layout (std430 or std140).
+    pub layout: crate::ast::StorageLayout,
+    /// Descriptor set number.
+    pub set: u32,
+    /// Binding number within the set.
+    pub binding: u32,
+    /// Access mode.
+    pub access: crate::ast::StorageAccess,
+    /// Fields in the buffer block.
+    pub fields: Vec<BufferField>,
 }

@@ -10,6 +10,7 @@ use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
 use crate::lowering_common::is_empty_closure_type;
 use crate::mir::parallelism::{SimpleComputeMap, detect_simple_compute_map};
+use crate::pipeline::{self, Pipeline};
 use crate::mir::{
     self, Body, Def, ExecutionModel, Expr, ExprId, LambdaId, LambdaInfo, LocalId, LoopKind, MemBinding,
     Program,
@@ -117,6 +118,9 @@ struct Constructor {
 
     /// Storage buffers for compute shaders: (set, binding) -> (buffer_var, elem_type_id)
     storage_buffers: HashMap<(u32, u32), (spirv::Word, spirv::Word)>,
+
+    /// Compute shader parameters: maps param name to (set, binding) for storage buffer lookup
+    compute_params: HashMap<String, (u32, u32)>,
 }
 
 impl Constructor {
@@ -168,6 +172,7 @@ impl Constructor {
             impl_source: ImplSource::default(),
             inplace_nodes: HashSet::new(),
             storage_buffers: HashMap::new(),
+            compute_params: HashMap::new(),
         }
     }
 
@@ -703,15 +708,22 @@ impl<'a> LowerCtx<'a> {
             }
             Def::EntryPoint {
                 name,
-                execution_model: ExecutionModel::Compute { local_size },
+                execution_model: ExecutionModel::Compute { .. },
                 body,
-                inputs,
                 ..
             } => {
-                // Validate compute shaders - must be "simple" pattern for now
+                // Build pipeline from compute entry point
+                let Some(pipeline) = pipeline::build_pipeline(def) else {
+                    bail_spirv!(
+                        "Compute shader '{}' could not be converted to pipeline",
+                        name
+                    );
+                };
+
+                // Validate - must still be "simple" pattern for now
                 let Some(compute_info) = detect_simple_compute_map(def) else {
                     bail_spirv!(
-                        "Compute shader '{}' is not supported: must have single slice input and single map call at top level",
+                        "Compute shader '{}' is not supported: must have slice inputs and single map call at top level",
                         name
                     );
                 };
@@ -719,16 +731,12 @@ impl<'a> LowerCtx<'a> {
                 // Ensure dependencies (including map closure's lambda) are lowered
                 self.ensure_deps_lowered(body)?;
 
-                // Lower the compute shader with thunk architecture:
-                // 1. Helper function: the original body (map over slice)
-                // 2. Thunk: entry point that computes chunk and calls helper
-                lower_compute_entry_point(
+                // Lower the compute shader using the pipeline's buffer bindings
+                lower_compute_pipeline(
                     &mut self.constructor,
-                    name,
-                    *local_size,
+                    &pipeline,
                     &compute_info,
                     body,
-                    inputs,
                 )?;
             }
             Def::EntryPoint {
@@ -1121,24 +1129,13 @@ fn lower_entry_point_from_def(
     Ok(())
 }
 
-/// Lower a compute shader entry point using the thunk architecture.
-///
-/// This generates a compute shader entry point that:
-/// - Gets global_invocation_id.x as thread index
-/// - Computes chunk boundaries based on size_hint / workgroup_size
-/// - Sets up a StorageSlice referencing the thread's chunk
-/// - Inlines the body (which operates on the StorageSlice in-place)
-fn lower_compute_entry_point(
+/// Lower a compute pipeline using the Pipeline's buffer bindings.
+fn lower_compute_pipeline(
     constructor: &mut Constructor,
-    name: &str,
-    _local_size: (u32, u32, u32),
+    pipeline: &Pipeline,
     compute_info: &SimpleComputeMap,
     body: &Body,
-    _inputs: &[mir::EntryInput],
 ) -> Result<()> {
-    // Get element type from the input slice
-    let elem_type_id = constructor.ast_type_to_spirv(&compute_info.input.element_type);
-
     // Set up the compute entry point
     constructor.current_is_entry_point = true;
     constructor.current_output_vars.clear();
@@ -1146,38 +1143,57 @@ fn lower_compute_entry_point(
 
     let mut interface_vars = Vec::new();
 
-    // Create storage buffer for the array (descriptor set 0, binding 0)
-    let runtime_array_type = constructor.builder.type_runtime_array(elem_type_id);
-    constructor.builder.decorate(
-        runtime_array_type,
-        spirv::Decoration::ArrayStride,
-        [Operand::LiteralBit32(4)], // TODO: compute proper stride from element type
-    );
+    // Create storage buffers from pipeline buffer blocks
+    for buffer in &pipeline.buffers {
+        let field = &buffer.fields[0]; // Single runtime-sized field for now
+        let elem_type_id = constructor.ast_type_to_spirv(&field.ty);
 
-    // Wrap in a struct for Block decoration (required for storage buffers)
-    let buffer_struct_type = constructor.builder.type_struct([runtime_array_type]);
-    constructor.builder.decorate(buffer_struct_type, spirv::Decoration::Block, []);
-    constructor.builder.member_decorate(
-        buffer_struct_type,
-        0,
-        spirv::Decoration::Offset,
-        [Operand::LiteralBit32(0)],
-    );
+        // Calculate proper array stride from element type
+        let stride = crate::mir::layout::type_byte_size(&field.ty).unwrap_or(4);
 
-    let buffer_ptr_type =
-        constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, buffer_struct_type);
-    let buffer_var =
-        constructor.builder.variable(buffer_ptr_type, None, spirv::StorageClass::StorageBuffer, None);
-    constructor.builder.decorate(
-        buffer_var,
-        spirv::Decoration::DescriptorSet,
-        [Operand::LiteralBit32(0)],
-    );
-    constructor.builder.decorate(buffer_var, spirv::Decoration::Binding, [Operand::LiteralBit32(0)]);
-    interface_vars.push(buffer_var);
+        let runtime_array_type = constructor.builder.type_runtime_array(elem_type_id);
+        constructor.builder.decorate(
+            runtime_array_type,
+            spirv::Decoration::ArrayStride,
+            [Operand::LiteralBit32(stride)],
+        );
 
-    // Store the storage buffer info for use when lowering StorageSlice accesses
-    constructor.storage_buffers.insert((0, 0), (buffer_var, elem_type_id));
+        // Wrap in a struct for Block decoration
+        let buffer_struct_type = constructor.builder.type_struct([runtime_array_type]);
+        constructor.builder.decorate(buffer_struct_type, spirv::Decoration::Block, []);
+        constructor.builder.member_decorate(
+            buffer_struct_type,
+            0,
+            spirv::Decoration::Offset,
+            [Operand::LiteralBit32(0)],
+        );
+
+        let buffer_ptr_type =
+            constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, buffer_struct_type);
+        let buffer_var =
+            constructor.builder.variable(buffer_ptr_type, None, spirv::StorageClass::StorageBuffer, None);
+        constructor.builder.decorate(
+            buffer_var,
+            spirv::Decoration::DescriptorSet,
+            [Operand::LiteralBit32(buffer.set)],
+        );
+        constructor.builder.decorate(
+            buffer_var,
+            spirv::Decoration::Binding,
+            [Operand::LiteralBit32(buffer.binding)],
+        );
+        interface_vars.push(buffer_var);
+
+        // Register buffer for use when lowering StorageSlice accesses
+        constructor.storage_buffers.insert((buffer.set, buffer.binding), (buffer_var, elem_type_id));
+
+        // Also register by name so captured variables can be resolved
+        constructor.uniform_variables.insert(buffer.name.clone(), buffer_var);
+        constructor.uniform_types.insert(buffer.name.clone(), runtime_array_type);
+
+        // Register as compute parameter for Local variable resolution
+        constructor.compute_params.insert(buffer.name.clone(), (buffer.set, buffer.binding));
+    }
 
     // Create GlobalInvocationId input variable
     let uvec3_type = constructor.get_or_create_vec_type(constructor.u32_type, 3);
@@ -1191,7 +1207,7 @@ fn lower_compute_entry_point(
     interface_vars.push(global_id_var);
 
     // Store interface variables for entry point declaration
-    constructor.entry_point_interfaces.insert(name.to_string(), interface_vars);
+    constructor.entry_point_interfaces.insert(pipeline.name.clone(), interface_vars);
 
     // Create void(void) function for entry point
     let func_type = constructor.builder.type_function(constructor.void_type, vec![]);
@@ -1201,7 +1217,7 @@ fn lower_compute_entry_point(
         spirv::FunctionControl::NONE,
         func_type,
     )?;
-    constructor.functions.insert(name.to_string(), func_id);
+    constructor.functions.insert(pipeline.name.clone(), func_id);
 
     // Create blocks
     let vars_block_id = constructor.builder.id();
@@ -1227,18 +1243,24 @@ fn lower_compute_entry_point(
         .get(&func_name)
         .ok_or_else(|| err_spirv!("Map function not found: {}", func_name))?;
 
+    // Get the primary input buffer (binding 0) for the map operation
+    let (primary_buffer_var, elem_type_id) = constructor.storage_buffers
+        .get(&(0, 0))
+        .ok_or_else(|| err_spirv!("No primary input buffer at binding 0"))?;
+    let primary_buffer_var = *primary_buffer_var;
+    let elem_type_id = *elem_type_id;
+
     // Delegate to lower_inplace_map_core with single-element index list
-    // Each thread handles one element at index = global_invocation_id.x
     let mem = mir::MemBinding::Storage { set: 0, binding: 0 };
     lower_inplace_map_core(
         constructor,
         mem,
-        buffer_var,
+        primary_buffer_var,
         elem_type_id,
         map_func_id,
         &capture_vals,
         elem_type_id,
-        &[thread_id], // single element at runtime index
+        &[thread_id],
     )?;
 
     // Return
@@ -1269,6 +1291,7 @@ fn lower_compute_entry_point(
     constructor.first_code_block = None;
     constructor.env.clear();
     constructor.storage_buffers.clear();
+    constructor.compute_params.clear();
 
     Ok(())
 }
@@ -1395,6 +1418,17 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
             if let Some(&id) = constructor.env.get(name) {
                 return Ok(id);
             }
+
+            // Check if this is a compute shader parameter (storage buffer)
+            if let Some(&(set, binding)) = constructor.compute_params.get(name) {
+                // This is a storage buffer parameter - return a StorageSlice-like reference
+                // The actual indexing will be handled by lower_index_intrinsic
+                if let Some(&(buffer_var, _elem_type_id)) = constructor.storage_buffers.get(&(set, binding)) {
+                    // Return the buffer variable - indexing operations will use storage_buffers to access it
+                    return Ok(buffer_var);
+                }
+            }
+
             let env_keys: Vec<_> = constructor.env.keys().collect();
             Err(err_spirv!(
                 "Undefined local variable: {} (local_id={:?}, env has: {:?})",

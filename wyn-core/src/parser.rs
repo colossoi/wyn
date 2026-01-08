@@ -157,7 +157,7 @@ impl<'a> Parser<'a> {
         let has_entry_attr = attributes.iter().any(|attr| {
             matches!(
                 attr,
-                Attribute::Vertex | Attribute::Fragment | Attribute::Compute { .. }
+                Attribute::Vertex | Attribute::Fragment | Attribute::Compute
             )
         });
         let uniform_attr = attributes.iter().find_map(|attr| {
@@ -321,7 +321,7 @@ impl<'a> Parser<'a> {
             .find(|attr| {
                 matches!(
                     attr,
-                    Attribute::Vertex | Attribute::Fragment | Attribute::Compute { .. }
+                    Attribute::Vertex | Attribute::Fragment | Attribute::Compute
                 )
             })
             .ok_or_else(|| {
@@ -337,6 +337,19 @@ impl<'a> Parser<'a> {
         // Parse restrictive parameters: (id: type, id: type, ...)
         // Only typed identifiers allowed, not general patterns
         let params = self.parse_entry_params()?;
+
+        // Compute entry params cannot have explicit bindings
+        if matches!(entry_type, Attribute::Compute) {
+            for param in &params {
+                if let PatternKind::Typed(inner, _) = &param.kind {
+                    if let PatternKind::Attributed(attrs, _) = &inner.kind {
+                        if attrs.iter().any(|a| matches!(a, Attribute::Storage { .. })) {
+                            bail_parse!("Compute entry parameters cannot have explicit bindings");
+                        }
+                    }
+                }
+            }
+        }
 
         // Parse return type (which may have optional attributes) - no arrow required
         let (return_types, return_attributes) =
@@ -541,18 +554,11 @@ impl<'a> Parser<'a> {
                 Ok(Attribute::Fragment)
             }
             "compute" => {
-                // Require (x, y, z) local size parameters
-                self.expect(Token::LeftParen)?;
-                let x = self.expect_integer()? as u32;
-                self.expect(Token::Comma)?;
-                let y = self.expect_integer()? as u32;
-                self.expect(Token::Comma)?;
-                let z = self.expect_integer()? as u32;
-                self.expect(Token::RightParen)?;
+                if self.check(&Token::LeftParen) {
+                    bail_parse!("#[compute] takes no parameters");
+                }
                 self.expect(Token::RightBracket)?;
-                Ok(Attribute::Compute {
-                    local_size: (x, y, z),
-                })
+                Ok(Attribute::Compute)
             }
             "uniform" => {
                 // Parse uniform attribute: #[uniform(binding=N)] or #[uniform(set=M, binding=N)]

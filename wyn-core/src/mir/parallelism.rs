@@ -79,14 +79,14 @@ impl ParallelismAnalysis {
 ///
 /// This pattern is:
 /// - A `#[compute]` entry point
-/// - With a single input slice parameter
+/// - With one or more slice input parameters
 /// - Whose body is sequential setup (Let bindings) followed by a single `map` call
 #[derive(Debug, Clone)]
 pub struct SimpleComputeMap {
-    /// The workgroup size from the `#[compute(x,y,z)]` attribute.
+    /// The workgroup size.
     pub local_size: (u32, u32, u32),
-    /// The input parameter (a slice).
-    pub input: InputSliceInfo,
+    /// All input parameters (slices). First one is the primary input for the map.
+    pub inputs: Vec<InputSliceInfo>,
     /// The ExprId of the map call.
     pub map_expr: ExprId,
     /// The closure/lambda being mapped.
@@ -108,11 +108,11 @@ pub struct InputSliceInfo {
     pub size_hint: Option<u32>,
 }
 
-/// Detect if a definition is a simple compute shader with a single map.
+/// Detect if a definition is a simple compute shader with a map.
 ///
 /// Returns `Some(SimpleComputeMap)` if the definition matches the pattern:
-/// - `#[compute(x,y,z)]` entry point
-/// - Single input slice parameter
+/// - `#[compute]` entry point
+/// - One or more slice input parameters
 /// - Body is Let bindings followed by a single `_w_intrinsic_map` call
 pub fn detect_simple_compute_map(def: &Def) -> Option<SimpleComputeMap> {
     // Must be an EntryPoint with Compute execution model
@@ -131,19 +131,30 @@ pub fn detect_simple_compute_map(def: &Def) -> Option<SimpleComputeMap> {
         _ => return None,
     };
 
-    // Must have exactly one input that is a slice
-    if inputs.len() != 1 {
+    // Must have at least one input that is a slice
+    if inputs.is_empty() {
         return None;
     }
-    let input = &inputs[0];
-    let input_info = analyze_input_slice(input)?;
+
+    // Collect all slice inputs
+    let mut input_infos = Vec::new();
+    for input in inputs {
+        if let Some(info) = analyze_input_slice(input) {
+            input_infos.push(info);
+        }
+    }
+
+    // Must have at least one slice input
+    if input_infos.is_empty() {
+        return None;
+    }
 
     // Analyze body structure: should be sequential Let bindings + single map
     let (map_expr, map_closure, map_array) = find_single_map_at_root(body)?;
 
     Some(SimpleComputeMap {
         local_size,
-        input: input_info,
+        inputs: input_infos,
         map_expr,
         map_closure,
         map_array,

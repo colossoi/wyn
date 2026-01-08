@@ -8,6 +8,7 @@ pub mod intrinsics;
 pub mod lexer;
 pub mod mir;
 pub mod module_manager;
+pub mod pipeline;
 pub mod name_resolution;
 pub mod parser;
 pub mod pattern;

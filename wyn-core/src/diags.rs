@@ -826,13 +826,7 @@ impl Display for mir::Attribute {
             mir::Attribute::Location(loc) => write!(f, "#[location({})]", loc),
             mir::Attribute::Vertex => write!(f, "#[vertex]"),
             mir::Attribute::Fragment => write!(f, "#[fragment]"),
-            mir::Attribute::Compute { local_size } => {
-                write!(
-                    f,
-                    "#[compute({}, {}, {})]",
-                    local_size.0, local_size.1, local_size.2
-                )
-            }
+            mir::Attribute::Compute => write!(f, "#[compute]"),
             mir::Attribute::Uniform => write!(f, "#[uniform]"),
             mir::Attribute::Storage => write!(f, "#[storage]"),
             mir::Attribute::SizeHint(hint) => write!(f, "#[size_hint({})]", hint),
