@@ -54,7 +54,7 @@ fn format_constructed_type(name: &TypeName, args: &[PolyType<TypeName>]) -> Stri
         TypeName::Size(n) => format!("{}", n),
         TypeName::SizeVar(s) => s.clone(),
         TypeName::Unsized => "?".to_string(),
-        TypeName::Array => {
+        TypeName::ValueArray => {
             // [size]elem_type
             if args.len() == 2 {
                 let size = format_type(&args[0]);

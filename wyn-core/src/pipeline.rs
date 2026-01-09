@@ -93,7 +93,7 @@ pub fn build_pipeline(def: &mir::Def) -> Option<Pipeline> {
 /// Check if a type is a slice (runtime-sized array).
 fn is_slice_type(ty: &Type<TypeName>) -> bool {
     match ty {
-        Type::Constructed(TypeName::Array, args) if args.len() >= 2 => {
+        Type::Constructed(TypeName::ValueArray, args) if args.len() >= 2 => {
             matches!(&args[0], Type::Constructed(TypeName::Unsized, _))
         }
         _ => false,
@@ -103,7 +103,7 @@ fn is_slice_type(ty: &Type<TypeName>) -> bool {
 /// Get the element type of a slice.
 fn get_slice_element_type(ty: &Type<TypeName>) -> Option<Type<TypeName>> {
     match ty {
-        Type::Constructed(TypeName::Array, args) if args.len() >= 2 => Some(args[1].clone()),
+        Type::Constructed(TypeName::ValueArray, args) if args.len() >= 2 => Some(args[1].clone()),
         _ => None,
     }
 }

@@ -120,7 +120,7 @@ pub enum TypeName {
     /// Signed integer types: i8, i16, i32, i64
     Int(usize),
     /// Array type constructor (takes size and element type)
-    Array,
+    ValueArray,
     /// Unsized/anonymous array size placeholder (for []t syntax where size is inferred)
     Unsized,
     /// Function arrow type constructor (T1 -> T2)
@@ -172,7 +172,7 @@ impl std::fmt::Display for TypeName {
             TypeName::Float(bits) => write!(f, "f{}", bits),
             TypeName::UInt(bits) => write!(f, "u{}", bits),
             TypeName::Int(bits) => write!(f, "i{}", bits),
-            TypeName::Array => write!(f, "Array"),
+            TypeName::ValueArray => write!(f, "Array"),
             TypeName::Unsized => write!(f, ""),
             TypeName::Arrow => write!(f, "->"),
             TypeName::Vec => write!(f, "Vec"),
@@ -228,7 +228,7 @@ impl polytype::Name for TypeName {
             TypeName::Float(bits) => format!("f{}", bits),
             TypeName::UInt(bits) => format!("u{}", bits),
             TypeName::Int(bits) => format!("i{}", bits),
-            TypeName::Array => "Array".to_string(),
+            TypeName::ValueArray => "Array".to_string(),
             TypeName::Unsized => "".to_string(),
             TypeName::Arrow => "->".to_string(),
             TypeName::Vec => "Vec".to_string(),
@@ -323,7 +323,7 @@ impl TypeExt for Type {
     }
 
     fn is_array(&self) -> bool {
-        matches!(self, Type::Constructed(TypeName::Array, _))
+        matches!(self, Type::Constructed(TypeName::ValueArray, _))
     }
 }
 
@@ -454,7 +454,7 @@ pub fn matrix_type_constructors() -> HashMap<String, Type> {
 
 pub fn sized_array(size: usize, elem_type: Type) -> Type {
     Type::Constructed(
-        TypeName::Array,
+        TypeName::ValueArray,
         vec![Type::Constructed(TypeName::Size(size), vec![]), elem_type],
     )
 }
@@ -608,7 +608,7 @@ pub fn format_type(ty: &Type) -> String {
             let arg_strs: Vec<String> = args.iter().map(format_type).collect();
             format!("({})", arg_strs.join(", "))
         }
-        Type::Constructed(TypeName::Array, args) if args.len() == 2 => {
+        Type::Constructed(TypeName::ValueArray, args) if args.len() == 2 => {
             format!("[{}]{}", format_type(&args[0]), format_type(&args[1]))
         }
         // Vec[Size(n), elem] -> vecNelem (e.g., vec3f32)

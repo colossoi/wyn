@@ -200,7 +200,7 @@ fn format_type(ty: &polytype::Type<crate::ast::TypeName>) -> String {
                 format!("{:?}", ty)
             }
         }
-        Type::Constructed(TypeName::Array, args) if args.len() >= 2 => {
+        Type::Constructed(TypeName::ValueArray, args) if args.len() >= 2 => {
             let elem = format_type(&args[1]);
             match &args[0] {
                 Type::Constructed(TypeName::Size(n), _) => format!("[{}]{}", n, elem),

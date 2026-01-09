@@ -961,7 +961,7 @@ impl<'a> LowerCtx<'a> {
                 // Check if argument is an array or slice
                 let arg_ty = body.get_type(arg_ids[0]);
                 match arg_ty {
-                    PolyType::Constructed(TypeName::Array, _) => {
+                    PolyType::Constructed(TypeName::ValueArray, _) => {
                         // Regular array indexing
                         Ok(format!("{}[{}]", args[0], args[1]))
                     }
@@ -989,7 +989,7 @@ impl<'a> LowerCtx<'a> {
                 // Check if argument is an array or slice
                 let arg_ty = body.get_type(arg_ids[0]);
                 match arg_ty {
-                    PolyType::Constructed(TypeName::Array, _) => {
+                    PolyType::Constructed(TypeName::ValueArray, _) => {
                         // Static array: use GLSL .length() method
                         Ok(format!("{}.length()", args[0]))
                     }
@@ -1160,7 +1160,7 @@ impl<'a> LowerCtx<'a> {
         // Get array size from type
         let arr_ty = body.get_type(args[2]);
         let array_size = match arr_ty {
-            PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 2 => {
+            PolyType::Constructed(TypeName::ValueArray, type_args) if type_args.len() == 2 => {
                 match &type_args[0] {
                     PolyType::Constructed(TypeName::Size(n), _) => *n,
                     _ => bail_glsl!("Invalid array size type for reduce"),
@@ -1298,7 +1298,7 @@ impl<'a> LowerCtx<'a> {
                     }
                 }
                 // Array: args[0] is Size(n), args[1] is element type
-                TypeName::Array if args.len() >= 2 => {
+                TypeName::ValueArray if args.len() >= 2 => {
                     format!("{}[]", self.type_to_glsl(&args[1]))
                 }
                 // Record types (closures) should be eliminated before GLSL lowering

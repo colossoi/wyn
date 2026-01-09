@@ -236,7 +236,7 @@ impl Constructor {
                             args.iter().map(|a| self.ast_type_to_spirv(a)).collect();
                         self.get_or_create_struct_type(field_types)
                     }
-                    TypeName::Array => {
+                    TypeName::ValueArray => {
                         // Array type: args[0] is size, args[1] is element type
                         if args.len() < 2 {
                             panic!(
@@ -1746,7 +1746,7 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                 // Index into the array: arr[idx]
                 let iter_ty = body.get_type(*iter);
                 let elem_ty = match iter_ty {
-                    PolyType::Constructed(TypeName::Array, args) if !args.is_empty() => &args[1],
+                    PolyType::Constructed(TypeName::ValueArray, args) if !args.is_empty() => &args[1],
                     PolyType::Constructed(TypeName::Slice, args) if !args.is_empty() => &args[1],
                     _ => bail_spirv!("For-in loop over non-array type: {:?}", iter_ty),
                 };
@@ -1761,7 +1761,7 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                         let cap = &args[0];
                         let elem = &args[1];
                         let array_ty =
-                            PolyType::Constructed(TypeName::Array, vec![cap.clone(), elem.clone()]);
+                            PolyType::Constructed(TypeName::ValueArray, vec![cap.clone(), elem.clone()]);
                         let array_spirv_ty = constructor.ast_type_to_spirv(&array_ty);
 
                         let data_array = constructor.builder.composite_extract(
@@ -2150,7 +2150,7 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                                             bail_spirv!("replicate expects exactly 2 arguments");
                                         }
                                         // Extract array size from result type
-                                        if let PolyType::Constructed(TypeName::Array, type_args) = expr_ty {
+                                        if let PolyType::Constructed(TypeName::ValueArray, type_args) = expr_ty {
                                             if let Some(PolyType::Constructed(TypeName::Size(n), _)) =
                                                 type_args.first()
                                             {
@@ -2465,7 +2465,7 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
             // The result type should be Array(Size(n), elem) from the type checker
             let result_ty = body.get_type(expr_id);
             match result_ty {
-                PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 2 => {
+                PolyType::Constructed(TypeName::ValueArray, type_args) if type_args.len() == 2 => {
                     match &type_args[0] {
                         PolyType::Constructed(TypeName::Size(size), _) => {
                             let size = *size;
@@ -2566,7 +2566,7 @@ fn lower_length_intrinsic(
 ) -> Result<spirv::Word> {
     let arg_ty = body.get_type(arg_expr_id);
     match arg_ty {
-        PolyType::Constructed(TypeName::Array, type_args) => {
+        PolyType::Constructed(TypeName::ValueArray, type_args) => {
             // Static array: extract size from type
             match type_args.first() {
                 Some(PolyType::Constructed(TypeName::Size(n), _)) => Ok(constructor.const_i32(*n as i32)),
@@ -2616,7 +2616,7 @@ fn lower_index_intrinsic(
     let index_val = lower_expr(constructor, body, index_expr_id)?;
 
     match arg0_ty {
-        PolyType::Constructed(TypeName::Array, _) | PolyType::Constructed(TypeName::Pointer, _) => {
+        PolyType::Constructed(TypeName::ValueArray, _) | PolyType::Constructed(TypeName::Pointer, _) => {
             // Regular array indexing
             let array_var = if types::is_pointer(arg0_ty) {
                 lower_expr(constructor, body, array_expr_id)?
@@ -2758,7 +2758,7 @@ fn extract_array_info(
     ty: &PolyType<TypeName>,
 ) -> Result<(u32, spirv::Word)> {
     match ty {
-        PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 2 => {
+        PolyType::Constructed(TypeName::ValueArray, type_args) if type_args.len() == 2 => {
             let size = match &type_args[0] {
                 PolyType::Constructed(TypeName::Size(n), _) => *n as u32,
                 _ => bail_spirv!("Invalid array size type"),
@@ -2919,7 +2919,7 @@ fn lower_map(
 
     // Get result element type from the expression type
     let output_elem_type = match expr_ty {
-        PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 2 => {
+        PolyType::Constructed(TypeName::ValueArray, type_args) if type_args.len() == 2 => {
             constructor.ast_type_to_spirv(&type_args[1])
         }
         _ => bail_spirv!("map result must be array type, got {:?}", expr_ty),
@@ -2980,7 +2980,7 @@ fn lower_inplace_map(
 
     // Get result element type from the expression type
     let output_elem_type = match expr_ty {
-        PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 2 => {
+        PolyType::Constructed(TypeName::ValueArray, type_args) if type_args.len() == 2 => {
             constructor.ast_type_to_spirv(&type_args[1])
         }
         _ => bail_spirv!("inplace_map result must be array type, got {:?}", expr_ty),
@@ -3094,7 +3094,7 @@ fn lower_replicate(
 
     // Get size from the result array type
     let size = match expr_ty {
-        PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 2 => match &type_args[0] {
+        PolyType::Constructed(TypeName::ValueArray, type_args) if type_args.len() == 2 => match &type_args[0] {
             PolyType::Constructed(TypeName::Size(n), _) => *n as u32,
             _ => bail_spirv!("replicate size must be a literal, got {:?}", type_args[0]),
         },

@@ -723,7 +723,7 @@ fn is_copy_type(ty: &polytype::Type<TypeName>) -> bool {
             TypeName::Float(_) => true,
             TypeName::Str("bool") => true,
             TypeName::Str("unit") => true,
-            TypeName::Array => false,
+            TypeName::ValueArray => false,
             TypeName::Vec => false,
             TypeName::Mat => false,
             TypeName::Tuple(_) => args.iter().all(is_copy_type),

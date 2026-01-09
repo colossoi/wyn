@@ -784,7 +784,7 @@ impl<'a> TypeChecker<'a> {
 
     /// Build an array type: [n]elem
     fn array_ty(n: polytype::Variable, elem: Type) -> Type {
-        Type::Constructed(TypeName::Array, vec![Self::var(n), elem])
+        Type::Constructed(TypeName::ValueArray, vec![Self::var(n), elem])
     }
 
     /// Build a Vec type: Vec(n, elem)
@@ -1797,7 +1797,7 @@ impl<'a> TypeChecker<'a> {
                 // Check if first element is an array (matrix) or scalar (vector)
                 let is_matrix = matches!(
                     first_type.apply(&self.context),
-                    Type::Constructed(TypeName::Array, _)
+                    Type::Constructed(TypeName::ValueArray, _)
                 );
 
                 // Unify all element types
@@ -1816,7 +1816,7 @@ impl<'a> TypeChecker<'a> {
                 if is_matrix {
                     // Matrix: extract row size and element type from the array type
                     let resolved = first_type.apply(&self.context);
-                    if let Type::Constructed(TypeName::Array, args) = resolved {
+                    if let Type::Constructed(TypeName::ValueArray, args) = resolved {
                         if args.len() == 2 {
                             if let Type::Constructed(TypeName::Size(cols), _) = &args[0] {
                                 let rows = elements.len();
@@ -1875,7 +1875,7 @@ impl<'a> TypeChecker<'a> {
                 let array_type_stripped = strip_unique(&array_type);
                 let size_var = self.context.new_variable();
                 let elem_var = self.context.new_variable();
-                let want_array = Type::Constructed(TypeName::Array, vec![size_var, elem_var.clone()]);
+                let want_array = Type::Constructed(TypeName::ValueArray, vec![size_var, elem_var.clone()]);
 
                 self.context.unify(&array_type_stripped, &want_array).map_err(|_| {
                     err_type_at!(
@@ -1908,7 +1908,7 @@ impl<'a> TypeChecker<'a> {
                 let array_type_stripped = strip_unique(&array_type);
                 let size_var = self.context.new_variable();
                 let elem_var = self.context.new_variable();
-                let want_array = Type::Constructed(TypeName::Array, vec![size_var.clone(), elem_var.clone()]);
+                let want_array = Type::Constructed(TypeName::ValueArray, vec![size_var.clone(), elem_var.clone()]);
 
                 self.context.unify(&array_type_stripped, &want_array).map_err(|_| {
                     err_type_at!(
@@ -2263,7 +2263,7 @@ impl<'a> TypeChecker<'a> {
                                     TypeName::Float(bits) => format!("f{}", bits),
                                     TypeName::UInt(bits) => format!("u{}", bits),
                                     TypeName::Int(bits) => format!("i{}", bits),
-                                    TypeName::Array => "array".to_string(),
+                                    TypeName::ValueArray => "array".to_string(),
                                     TypeName::Unsized => "unsized".to_string(),
                                     TypeName::Arrow => "function".to_string(),
                                     TypeName::Vec => "vec".to_string(),
@@ -2439,7 +2439,7 @@ impl<'a> TypeChecker<'a> {
                         let arr_type = self.infer_expression(arr)?;
                         let elem_type = self.context.new_variable();
                         let size_type = self.context.new_variable();
-                        let expected_arr = Type::Constructed(TypeName::Array, vec![size_type, elem_type.clone()]);
+                        let expected_arr = Type::Constructed(TypeName::ValueArray, vec![size_type, elem_type.clone()]);
 
                         self.context.unify(&arr_type, &expected_arr).map_err(|_| {
                             err_type_at!(
@@ -2541,7 +2541,7 @@ impl<'a> TypeChecker<'a> {
                 };
 
                 let elem_type = start_type.apply(&self.context);
-                Ok(Type::Constructed(TypeName::Array, vec![size_type, elem_type]))
+                Ok(Type::Constructed(TypeName::ValueArray, vec![size_type, elem_type]))
             }
 
             ExprKind::Slice(slice) => {
@@ -2556,7 +2556,7 @@ impl<'a> TypeChecker<'a> {
                 // Constrain array to be Array(n, elem)
                 let size_var = self.context.new_variable();
                 let elem_var = self.context.new_variable();
-                let want_array = Type::Constructed(TypeName::Array, vec![size_var, elem_var.clone()]);
+                let want_array = Type::Constructed(TypeName::ValueArray, vec![size_var, elem_var.clone()]);
 
                 self.context.unify(&array_type_stripped, &want_array).map_err(|_| {
                     err_type_at!(
@@ -2619,7 +2619,7 @@ impl<'a> TypeChecker<'a> {
                 };
 
                 let elem_type = elem_var.apply(&self.context);
-                Ok(Type::Constructed(TypeName::Array, vec![result_size, elem_type]))
+                Ok(Type::Constructed(TypeName::ValueArray, vec![result_size, elem_type]))
             }
 
             ExprKind::TypeAscription(expr, ascribed_ty) => {

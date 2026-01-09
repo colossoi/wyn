@@ -167,7 +167,7 @@ fn analyze_input_slice(input: &EntryInput) -> Option<InputSliceInfo> {
     // 1. Array(Unsized, elem) - unsized array like []f32
     // 2. Slice(cap, elem) - actual slice type
     let element_type = match &input.ty {
-        Type::Constructed(TypeName::Array, args) if args.len() == 2 => {
+        Type::Constructed(TypeName::ValueArray, args) if args.len() == 2 => {
             // Array(size, elem) - check if size is Unsized
             match &args[0] {
                 Type::Constructed(TypeName::Unsized, _) => args[1].clone(),

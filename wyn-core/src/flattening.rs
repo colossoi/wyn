@@ -407,7 +407,7 @@ impl Flattener {
         let arg_ty = self.get_expr_type(&args[0]);
 
         // Extract array size n, vector size m, and element type a from [n]vec<m,a>
-        if let Type::Constructed(TypeName::Array, array_args) = &arg_ty {
+        if let Type::Constructed(TypeName::ValueArray, array_args) = &arg_ty {
             if array_args.len() >= 2 {
                 if let Type::Constructed(TypeName::Vec, vec_args) = &array_args[1] {
                     if vec_args.len() >= 2 {
@@ -1172,7 +1172,7 @@ impl Flattener {
                 let base_ty = self.current_body.get_type(base_id).clone();
 
                 // Verify base is an array type
-                if !matches!(&base_ty, Type::Constructed(TypeName::Array, args) if args.len() == 2) {
+                if !matches!(&base_ty, Type::Constructed(TypeName::ValueArray, args) if args.len() == 2) {
                     bail_flatten!("Slice requires an array type, got {:?}", base_ty);
                 }
 
@@ -1509,11 +1509,8 @@ impl Flattener {
 
         // Wrap body with let bindings for captured vars (in reverse order)
         // Each capture local is bound directly to its capture param (no tuple_access)
-        for (((_var_name, var_type), capture_local), capture_param) in free_vars
-            .iter()
-            .zip(capture_locals.iter())
-            .zip(capture_param_locals.iter())
-            .rev()
+        for (((_var_name, var_type), capture_local), capture_param) in
+            free_vars.iter().zip(capture_locals.iter()).zip(capture_param_locals.iter()).rev()
         {
             let param_ref = self.alloc_expr(mir::Expr::Local(*capture_param), var_type.clone(), span);
             let body_ty = self.current_body.get_type(body_root).clone();
@@ -1716,7 +1713,7 @@ impl Flattener {
                 // Get element type from array type
                 let iter_ty = self.current_body.get_type(iter_id).clone();
                 let elem_ty = match &iter_ty {
-                    Type::Constructed(TypeName::Array, args) if !args.is_empty() => args[0].clone(),
+                    Type::Constructed(TypeName::ValueArray, args) if !args.is_empty() => args[0].clone(),
                     _ => iter_ty.clone(), // Fallback
                 };
                 let var_local = self.alloc_local(var_name, elem_ty, LocalKind::LoopVar, span);

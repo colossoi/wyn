@@ -883,7 +883,7 @@ impl<'a> Parser<'a> {
                         // Empty brackets []
                         self.advance();
                         base = Type::Constructed(
-                            TypeName::Array,
+                            TypeName::ValueArray,
                             vec![Type::Constructed(TypeName::Unsized, vec![]), base],
                         );
                     } else if let Some(Token::Identifier(name)) = self.peek() {
@@ -891,14 +891,14 @@ impl<'a> Parser<'a> {
                         let size_var = name.clone();
                         self.advance();
                         self.expect(Token::RightBracket)?;
-                        base = Type::Constructed(TypeName::Array, vec![types::size_var(size_var), base]);
+                        base = Type::Constructed(TypeName::ValueArray, vec![types::size_var(size_var), base]);
                     } else if let Some(Token::IntLiteral(n)) = self.peek() {
                         // Size literal [3]
                         let size = *n as usize;
                         self.advance();
                         self.expect(Token::RightBracket)?;
                         base = Type::Constructed(
-                            TypeName::Array,
+                            TypeName::ValueArray,
                             vec![Type::Constructed(TypeName::Size(size), vec![]), base],
                         );
                     } else {
@@ -970,7 +970,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 let elem_type = self.parse_array_or_base_type()?;
                 return Ok(Type::Constructed(
-                    TypeName::Array,
+                    TypeName::ValueArray,
                     vec![Type::Constructed(TypeName::Unsized, vec![]), elem_type],
                 ));
             }
@@ -989,7 +989,7 @@ impl<'a> Parser<'a> {
                 self.expect(Token::RightBracket)?;
                 let elem_type = self.parse_array_or_base_type()?;
                 Ok(Type::Constructed(
-                    TypeName::Array,
+                    TypeName::ValueArray,
                     vec![types::size_var(size_var), elem_type],
                 ))
             } else {

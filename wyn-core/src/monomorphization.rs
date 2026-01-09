@@ -148,7 +148,7 @@ impl TypeKey {
                     TypeName::Float(bits) => format!("f{}", bits),
                     TypeName::UInt(bits) => format!("u{}", bits),
                     TypeName::Int(bits) => format!("i{}", bits),
-                    TypeName::Array => "array".to_string(),
+                    TypeName::ValueArray => "array".to_string(),
                     TypeName::Vec => "vec".to_string(),
                     TypeName::Mat => "mat".to_string(),
                     TypeName::Unsized => "unsized".to_string(),
@@ -206,7 +206,7 @@ impl TypeKey {
                     "i16" => TypeName::Int(16),
                     "i32" => TypeName::Int(32),
                     "i64" => TypeName::Int(64),
-                    "array" => TypeName::Array,
+                    "array" => TypeName::ValueArray,
                     "vec" => TypeName::Vec,
                     "mat" => TypeName::Mat,
                     "unsized" => TypeName::Unsized,
@@ -1338,7 +1338,7 @@ fn format_type_compact(ty: &Type<TypeName>) -> String {
         Type::Variable(id) => format!("v{}", id),
         Type::Constructed(TypeName::Size(n), _) => format!("n{}", n),
         Type::Constructed(TypeName::Str(s), args) if args.is_empty() => s.to_string(),
-        Type::Constructed(TypeName::Array, args) if args.len() == 2 => {
+        Type::Constructed(TypeName::ValueArray, args) if args.len() == 2 => {
             format!(
                 "arr{}{}",
                 format_type_compact(&args[0]),

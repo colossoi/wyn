@@ -354,14 +354,14 @@ impl IntrinsicSource {
         // length : ∀a n. [n]a -> i32
         let a = ctx.new_variable();
         let n = ctx.new_variable();
-        let array_a = Type::Constructed(TypeName::Array, vec![n, a]);
+        let array_a = Type::Constructed(TypeName::ValueArray, vec![n, a]);
         let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
         self.register_poly("_w_intrinsic_length", vec![array_a], i32_ty);
 
         // replicate : ∀a n. n -> a -> [n]a
         let a = ctx.new_variable();
         let n = ctx.new_variable();
-        let array_a = Type::Constructed(TypeName::Array, vec![n.clone(), a.clone()]);
+        let array_a = Type::Constructed(TypeName::ValueArray, vec![n.clone(), a.clone()]);
         self.register_poly("_w_intrinsic_replicate", vec![n, a], array_a);
 
         // _w_uninit : ∀a. () -> a
@@ -372,7 +372,7 @@ impl IntrinsicSource {
         // _w_array_with : ∀a n. [n]a -> i32 -> a -> [n]a
         let a = ctx.new_variable();
         let n = ctx.new_variable();
-        let array_a = Type::Constructed(TypeName::Array, vec![n, a.clone()]);
+        let array_a = Type::Constructed(TypeName::ValueArray, vec![n, a.clone()]);
         let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
         self.register_poly("_w_array_with", vec![array_a.clone(), i32_ty, a], array_a);
 
@@ -380,7 +380,7 @@ impl IntrinsicSource {
         let a = ctx.new_variable();
         let n = ctx.new_variable();
         let op_type = Type::arrow(a.clone(), Type::arrow(a.clone(), a.clone())); // a -> a -> a
-        let array_a = Type::Constructed(TypeName::Array, vec![n, a.clone()]);
+        let array_a = Type::Constructed(TypeName::ValueArray, vec![n, a.clone()]);
         self.register_poly("_w_intrinsic_reduce", vec![op_type, a.clone(), array_a], a);
 
         // filter : ∀a n. (a -> bool) -> [n]a -> ?k. [k]a
@@ -388,11 +388,11 @@ impl IntrinsicSource {
         let n = ctx.new_variable();
         let bool_ty = Type::Constructed(TypeName::Str("bool"), vec![]);
         let pred_type = Type::arrow(a.clone(), bool_ty); // a -> bool
-        let array_a = Type::Constructed(TypeName::Array, vec![n, a.clone()]);
+        let array_a = Type::Constructed(TypeName::ValueArray, vec![n, a.clone()]);
         // Existential return type: ?k. [k]a
         let k = "k".to_string();
         let k_var = Type::Constructed(TypeName::SizeVar(k.clone()), vec![]);
-        let result_array = Type::Constructed(TypeName::Array, vec![k_var, a.clone()]);
+        let result_array = Type::Constructed(TypeName::ValueArray, vec![k_var, a.clone()]);
         let existential_result = Type::Constructed(TypeName::Existential(vec![k]), vec![result_array]);
         self.register_poly(
             "_w_intrinsic_filter",
@@ -405,8 +405,8 @@ impl IntrinsicSource {
         let a = ctx.new_variable();
         let n = ctx.new_variable();
         let op_type = Type::arrow(a.clone(), Type::arrow(a.clone(), a.clone())); // a -> a -> a
-        let array_a = Type::Constructed(TypeName::Array, vec![n.clone(), a.clone()]);
-        let result_array = Type::Constructed(TypeName::Array, vec![n, a.clone()]);
+        let array_a = Type::Constructed(TypeName::ValueArray, vec![n.clone(), a.clone()]);
+        let result_array = Type::Constructed(TypeName::ValueArray, vec![n, a.clone()]);
         self.register_poly("_w_intrinsic_scan", vec![op_type, a, array_a], result_array);
 
         // _w_intrinsic_map : (a -> b) -> [n]a -> [n]b
@@ -414,8 +414,8 @@ impl IntrinsicSource {
         let b = ctx.new_variable();
         let n = ctx.new_variable();
         let f_type = Type::arrow(a.clone(), b.clone());
-        let input_array = Type::Constructed(TypeName::Array, vec![n.clone(), a]);
-        let result_array = Type::Constructed(TypeName::Array, vec![n, b]);
+        let input_array = Type::Constructed(TypeName::ValueArray, vec![n.clone(), a]);
+        let result_array = Type::Constructed(TypeName::ValueArray, vec![n, b]);
         self.register_poly("_w_intrinsic_map", vec![f_type, input_array], result_array);
 
         // _w_intrinsic_inplace_map : (a -> a) -> [n]a -> [n]a
@@ -424,17 +424,17 @@ impl IntrinsicSource {
         let a = ctx.new_variable();
         let n = ctx.new_variable();
         let f_type = Type::arrow(a.clone(), a.clone());
-        let array_a = Type::Constructed(TypeName::Array, vec![n, a]);
+        let array_a = Type::Constructed(TypeName::ValueArray, vec![n, a]);
         self.register_poly("_w_intrinsic_inplace_map", vec![f_type, array_a.clone()], array_a);
 
         // _w_intrinsic_zip : [n]a -> [n]b -> [n](a, b)
         let a = ctx.new_variable();
         let b = ctx.new_variable();
         let n = ctx.new_variable();
-        let array_a = Type::Constructed(TypeName::Array, vec![n.clone(), a.clone()]);
-        let array_b = Type::Constructed(TypeName::Array, vec![n.clone(), b.clone()]);
+        let array_a = Type::Constructed(TypeName::ValueArray, vec![n.clone(), a.clone()]);
+        let array_b = Type::Constructed(TypeName::ValueArray, vec![n.clone(), b.clone()]);
         let pair_type = Type::Constructed(TypeName::Tuple(2), vec![a, b]);
-        let result_array = Type::Constructed(TypeName::Array, vec![n, pair_type]);
+        let result_array = Type::Constructed(TypeName::ValueArray, vec![n, pair_type]);
         self.register_poly("_w_intrinsic_zip", vec![array_a, array_b], result_array);
 
         // _w_intrinsic_scatter : [n]a -> [m]i32 -> [m]a -> [n]a
@@ -443,10 +443,10 @@ impl IntrinsicSource {
         let n = ctx.new_variable();
         let m = ctx.new_variable();
         let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
-        let dest_array = Type::Constructed(TypeName::Array, vec![n.clone(), a.clone()]);
-        let indices_array = Type::Constructed(TypeName::Array, vec![m.clone(), i32_ty]);
-        let values_array = Type::Constructed(TypeName::Array, vec![m, a.clone()]);
-        let result_array = Type::Constructed(TypeName::Array, vec![n, a]);
+        let dest_array = Type::Constructed(TypeName::ValueArray, vec![n.clone(), a.clone()]);
+        let indices_array = Type::Constructed(TypeName::ValueArray, vec![m.clone(), i32_ty]);
+        let values_array = Type::Constructed(TypeName::ValueArray, vec![m, a.clone()]);
+        let result_array = Type::Constructed(TypeName::ValueArray, vec![n, a]);
         self.register_poly(
             "_w_intrinsic_scatter",
             vec![dest_array, indices_array, values_array],
@@ -460,10 +460,10 @@ impl IntrinsicSource {
         let m = ctx.new_variable();
         let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
         let op_type = Type::arrow(a.clone(), Type::arrow(a.clone(), a.clone())); // a -> a -> a
-        let dest_array = Type::Constructed(TypeName::Array, vec![n.clone(), a.clone()]);
-        let indices_array = Type::Constructed(TypeName::Array, vec![m.clone(), i32_ty]);
-        let values_array = Type::Constructed(TypeName::Array, vec![m, a.clone()]);
-        let result_array = Type::Constructed(TypeName::Array, vec![n, a.clone()]);
+        let dest_array = Type::Constructed(TypeName::ValueArray, vec![n.clone(), a.clone()]);
+        let indices_array = Type::Constructed(TypeName::ValueArray, vec![m.clone(), i32_ty]);
+        let values_array = Type::Constructed(TypeName::ValueArray, vec![m, a.clone()]);
+        let result_array = Type::Constructed(TypeName::ValueArray, vec![n, a.clone()]);
         self.register_poly(
             "_w_intrinsic_hist_1d",
             vec![dest_array, op_type, a, indices_array, values_array],

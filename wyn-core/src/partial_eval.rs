@@ -333,7 +333,7 @@ impl PartialEvaluator {
                 // Tuple: args are the element types in order
                 args.get(index).cloned().unwrap_or_else(|| ty.clone())
             }
-            Type::Constructed(TypeName::Array, args) if args.len() >= 2 => {
+            Type::Constructed(TypeName::ValueArray, args) if args.len() >= 2 => {
                 // Array: args[0] = Size(n), args[1] = element type
                 args[1].clone()
             }
@@ -766,7 +766,7 @@ impl PartialEvaluator {
     /// Extract element type from Array<Size(n), ElemType>
     fn get_array_element_type(&self, ty: &Type<TypeName>) -> Type<TypeName> {
         match ty {
-            Type::Constructed(TypeName::Array, args) if args.len() >= 2 => {
+            Type::Constructed(TypeName::ValueArray, args) if args.len() >= 2 => {
                 // args[0] = Size(n), args[1] = element type
                 args[1].clone()
             }
