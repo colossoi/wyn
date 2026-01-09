@@ -54,9 +54,15 @@ fn format_constructed_type(name: &TypeName, args: &[PolyType<TypeName>]) -> Stri
         TypeName::Size(n) => format!("{}", n),
         TypeName::SizeVar(s) => s.clone(),
         TypeName::Unsized => "?".to_string(),
-        TypeName::ValueArray => {
-            // [size]elem_type
-            if args.len() == 2 {
+        TypeName::Array => {
+            // Array[elem, addrspace, size] - unified array type
+            if args.len() >= 3 {
+                let elem = format_type(&args[0]);
+                let size = format_type(&args[2]);
+                // Show size and elem, omit addrspace for brevity in common case
+                format!("[{}]{}", size, elem)
+            } else if args.len() == 2 {
+                // Legacy 2-arg format: [size]elem
                 let size = format_type(&args[0]);
                 let elem = format_type(&args[1]);
                 format!("[{}]{}", size, elem)
@@ -143,27 +149,9 @@ fn format_constructed_type(name: &TypeName, args: &[PolyType<TypeName>]) -> Stri
             // Ptr<T>
             if args.len() == 1 { format!("Ptr<{}>", format_type(&args[0])) } else { "Ptr<?>".to_string() }
         }
-        TypeName::Slice => {
-            // Slice<elem, addrspace> - slice with dynamic length
-            if args.len() == 2 {
-                let elem = format_type(&args[0]);
-                let addrspace = format_type(&args[1]);
-                format!("Slice<{}, {}>", elem, addrspace)
-            } else if args.len() == 1 {
-                format!("Slice<{}>", format_type(&args[0]))
-            } else {
-                "Slice<?>".to_string()
-            }
-        }
-        TypeName::RuntimeArray => {
-            if args.len() == 1 {
-                format!("RuntimeArray<{}>", format_type(&args[0]))
-            } else {
-                "RuntimeArray<?>".to_string()
-            }
-        }
         TypeName::Storage => "storage".to_string(),
         TypeName::Function => "function".to_string(),
+        TypeName::AddressUnknown => "?addrspace".to_string(),
         TypeName::Skolem(id) => format!("{}", id),
     }
 }
@@ -1012,11 +1000,18 @@ impl Display for mir::Expr {
             mir::Expr::OwnedSlice { data, len } => {
                 write!(f, "@owned_slice(data=e{}, len=e{})", data.0, len.0)
             }
-            mir::Expr::BorrowedSlice { base, offset, len } => {
+            mir::Expr::InlineSlice { base, offset, len } => {
                 write!(
                     f,
-                    "@borrowed_slice(base=e{}, offset=e{}, len=e{})",
+                    "@inline_slice(base=e{}, offset=e{}, len=e{})",
                     base.0, offset.0, len.0
+                )
+            }
+            mir::Expr::BoundSlice { name, offset, len } => {
+                write!(
+                    f,
+                    "@bound_slice(name={}, offset=e{}, len=e{})",
+                    name, offset.0, len.0
                 )
             }
             mir::Expr::Load { ptr } => {

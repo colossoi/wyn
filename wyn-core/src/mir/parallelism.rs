@@ -163,20 +163,21 @@ pub fn detect_simple_compute_map(def: &Def) -> Option<SimpleComputeMap> {
 
 /// Check if an input is a slice/array type suitable for compute shaders and extract its info.
 fn analyze_input_slice(input: &EntryInput) -> Option<InputSliceInfo> {
-    // Accept both:
-    // 1. Array(Unsized, elem) - unsized array like []f32
-    // 2. Slice(cap, elem) - actual slice type
+    // Array[elem, addrspace, size] - check if size is Unsized (unsized array)
     let element_type = match &input.ty {
-        Type::Constructed(TypeName::ValueArray, args) if args.len() == 2 => {
-            // Array(size, elem) - check if size is Unsized
-            match &args[0] {
-                Type::Constructed(TypeName::Unsized, _) => args[1].clone(),
+        Type::Constructed(TypeName::Array, args) if args.len() >= 3 => {
+            // Array[elem, addrspace, size] - check if size is Unsized
+            match &args[2] {
+                Type::Constructed(TypeName::Unsized, _) => args[0].clone(),
                 _ => return None, // Fixed-size arrays not supported for compute
             }
         }
-        Type::Constructed(TypeName::Slice, args) if args.len() == 2 => {
-            // Slice(cap, elem) - we want the element type (second arg)
-            args[1].clone()
+        // Legacy 2-arg format: Array[size, elem]
+        Type::Constructed(TypeName::Array, args) if args.len() == 2 => {
+            match &args[0] {
+                Type::Constructed(TypeName::Unsized, _) => args[1].clone(),
+                _ => return None,
+            }
         }
         _ => return None,
     };

@@ -90,20 +90,28 @@ pub fn build_pipeline(def: &mir::Def) -> Option<Pipeline> {
     })
 }
 
-/// Check if a type is a slice (runtime-sized array).
+/// Check if a type is a storage slice (unsized array in storage address space).
+/// Array[elem, addrspace, size] where addrspace is Storage and size is Unsized.
 fn is_slice_type(ty: &Type<TypeName>) -> bool {
     match ty {
-        Type::Constructed(TypeName::ValueArray, args) if args.len() >= 2 => {
-            matches!(&args[0], Type::Constructed(TypeName::Unsized, _))
+        Type::Constructed(TypeName::Array, args) => {
+            assert!(args.len() == 3);
+            let is_storage = matches!(&args[1], Type::Constructed(TypeName::Storage, _));
+            let is_unsized = matches!(&args[2], Type::Constructed(TypeName::Unsized, _));
+            is_storage && is_unsized
         }
         _ => false,
     }
 }
 
-/// Get the element type of a slice.
+/// Get the element type of an array.
+/// Array[elem, addrspace, size] - element is at args[0].
 fn get_slice_element_type(ty: &Type<TypeName>) -> Option<Type<TypeName>> {
     match ty {
-        Type::Constructed(TypeName::ValueArray, args) if args.len() >= 2 => Some(args[1].clone()),
+        Type::Constructed(TypeName::Array, args) => {
+            assert!(args.len() == 3);
+            Some(args[0].clone())
+        }
         _ => None,
     }
 }

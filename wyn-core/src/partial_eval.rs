@@ -333,9 +333,10 @@ impl PartialEvaluator {
                 // Tuple: args are the element types in order
                 args.get(index).cloned().unwrap_or_else(|| ty.clone())
             }
-            Type::Constructed(TypeName::ValueArray, args) if args.len() >= 2 => {
-                // Array: args[0] = Size(n), args[1] = element type
-                args[1].clone()
+            Type::Constructed(TypeName::Array, args) => {
+                assert!(args.len() == 3, "Array must have 3 args: [elem, addrspace, size]");
+                // Array[elem, addrspace, size]: element type is args[0]
+                args[0].clone()
             }
             Type::Constructed(TypeName::Vec, args) if args.len() >= 2 => {
                 // Vec: args[0] = Size(n), args[1] = element type
@@ -717,7 +718,7 @@ impl PartialEvaluator {
                 Ok(Value::Unknown(new_id))
             }
 
-            Expr::BorrowedSlice { base, offset, len } => {
+            Expr::InlineSlice { base, offset, len } => {
                 let base_val = self.eval(body, base, env)?;
                 let offset_val = self.eval(body, offset, env)?;
                 let len_val = self.eval(body, len, env)?;
@@ -728,8 +729,29 @@ impl PartialEvaluator {
                 let len_id = self.reify(&len_val, i32_ty, span, node_id);
 
                 let new_id = self.emit(
-                    Expr::BorrowedSlice {
+                    Expr::InlineSlice {
                         base: base_id,
+                        offset: offset_id,
+                        len: len_id,
+                    },
+                    ty,
+                    span,
+                    node_id,
+                );
+                Ok(Value::Unknown(new_id))
+            }
+
+            Expr::BoundSlice { name, offset, len } => {
+                let offset_val = self.eval(body, offset, env)?;
+                let len_val = self.eval(body, len, env)?;
+
+                let i32_ty = Type::Constructed(TypeName::Named("i32".to_string()), vec![]);
+                let offset_id = self.reify(&offset_val, i32_ty.clone(), span, node_id);
+                let len_id = self.reify(&len_val, i32_ty, span, node_id);
+
+                let new_id = self.emit(
+                    Expr::BoundSlice {
+                        name: name.clone(),
                         offset: offset_id,
                         len: len_id,
                     },
@@ -793,7 +815,8 @@ impl PartialEvaluator {
     /// Extract element type from Array<Size(n), ElemType>
     fn get_array_element_type(&self, ty: &Type<TypeName>) -> Type<TypeName> {
         match ty {
-            Type::Constructed(TypeName::ValueArray, args) if args.len() >= 2 => {
+            Type::Constructed(TypeName::Array, args) => {
+                assert!(args.len() == 3);
                 // args[0] = Size(n), args[1] = element type
                 args[1].clone()
             }

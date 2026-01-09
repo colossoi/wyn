@@ -380,13 +380,28 @@ impl BindingLifter {
                 )
             }
 
-            Expr::BorrowedSlice { base, offset, len } => {
+            Expr::InlineSlice { base, offset, len } => {
                 let new_base = self.expr_map[base];
                 let new_offset = self.expr_map[offset];
                 let new_len = self.expr_map[len];
                 new_body.alloc_expr(
-                    Expr::BorrowedSlice {
+                    Expr::InlineSlice {
                         base: new_base,
+                        offset: new_offset,
+                        len: new_len,
+                    },
+                    ty.clone(),
+                    span,
+                    node_id,
+                )
+            }
+
+            Expr::BoundSlice { name, offset, len } => {
+                let new_offset = self.expr_map[offset];
+                let new_len = self.expr_map[len];
+                new_body.alloc_expr(
+                    Expr::BoundSlice {
+                        name: name.clone(),
                         offset: new_offset,
                         len: new_len,
                     },
@@ -725,8 +740,14 @@ fn collect_free_locals_inner(
             collect_free_locals_inner(body, *len, bound, free);
         }
 
-        Expr::BorrowedSlice { base, offset, len } => {
+        Expr::InlineSlice { base, offset, len } => {
             collect_free_locals_inner(body, *base, bound, free);
+            collect_free_locals_inner(body, *offset, bound, free);
+            collect_free_locals_inner(body, *len, bound, free);
+        }
+
+        Expr::BoundSlice { offset, len, .. } => {
+            // name is a String, not an ExprId
             collect_free_locals_inner(body, *offset, bound, free);
             collect_free_locals_inner(body, *len, bound, free);
         }

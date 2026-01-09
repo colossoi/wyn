@@ -240,32 +240,32 @@ pub enum Expr {
         len: ExprId,
     },
 
-    /// Borrowed slice referencing part of another array (zero-copy view).
-    /// Produced by arr[i:j], take, drop.
-    /// Type: Slice(cap, elem) where cap is the source array size.
-    BorrowedSlice {
-        /// The source array being sliced
+    /// Inline slice referencing part of a local value (zero-copy view).
+    /// Produced by arr[i:j], take, drop on local arrays.
+    /// Base is an ExprId - the backing store is a value in the current scope.
+    /// Type: Slice[Size(cap), elem] where cap is the source array size.
+    InlineSlice {
+        // InlineSlice {
+        /// The source array being sliced (a local value)
         base: ExprId,
         /// Start offset: i32
         offset: ExprId,
         /// Dynamic length: i32
         len: ExprId,
     },
-    // TODO: StorageSlice for compute shaders - commented out until needed in MIR
-    // /// Storage buffer slice for compute shaders.
-    // /// References a region of a storage buffer by binding + offset + length.
-    // /// Used by thunks to pass chunks of storage buffer to helper functions.
-    // /// Type: Slice(cap, elem) where cap is the chunk size.
-    // StorageSlice {
-    //     /// Descriptor set for the storage buffer
-    //     set: u32,
-    //     /// Binding number for the storage buffer
-    //     binding: u32,
-    //     /// Start offset into the buffer: u32
-    //     offset: ExprId,
-    //     /// Number of elements in this slice: u32
-    //     len: ExprId,
-    // },
+
+    /// Bound slice referencing part of an external resource (storage buffer, uniform, etc).
+    /// The backing store is identified by name, not an ExprId.
+    /// Accessed via OpAccessChain into module-level variables in SPIR-V.
+    /// Type: Slice[elem, Storage] (address space in type).
+    BoundSlice {
+        /// Name of the bound resource (e.g., "factors", "data")
+        name: String,
+        /// Start offset into the buffer: i32
+        offset: ExprId,
+        /// Number of elements in this slice: i32
+        len: ExprId,
+    },
 }
 
 // =============================================================================

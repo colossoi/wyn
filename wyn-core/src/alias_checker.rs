@@ -723,7 +723,7 @@ fn is_copy_type(ty: &polytype::Type<TypeName>) -> bool {
             TypeName::Float(_) => true,
             TypeName::Str("bool") => true,
             TypeName::Str("unit") => true,
-            TypeName::ValueArray => false,
+            TypeName::Array => false,
             TypeName::Vec => false,
             TypeName::Mat => false,
             TypeName::Tuple(_) => args.iter().all(is_copy_type),
@@ -1106,8 +1106,13 @@ fn collect_uses(body: &mir::Body, expr_id: mir::ExprId) -> HashSet<mir::LocalId>
             uses.extend(collect_uses(body, *data));
             uses.extend(collect_uses(body, *len));
         }
-        BorrowedSlice { base, offset, len } => {
+        InlineSlice { base, offset, len } => {
             uses.extend(collect_uses(body, *base));
+            uses.extend(collect_uses(body, *offset));
+            uses.extend(collect_uses(body, *len));
+        }
+        BoundSlice { offset, len, .. } => {
+            // name is a String, not an ExprId - only offset and len are expressions
             uses.extend(collect_uses(body, *offset));
             uses.extend(collect_uses(body, *len));
         }
@@ -1200,7 +1205,7 @@ fn compute_uses_after(
                 aliases.insert(local, alias_set);
             }
             // Track aliases for borrowed slices: let s = arr[i:j] -> s aliases arr
-            if let BorrowedSlice { base, .. } = body.get_expr(rhs) {
+            if let InlineSlice { base, .. } = body.get_expr(rhs) {
                 if let Local(source_local) = body.get_expr(*base) {
                     let mut alias_set = HashSet::new();
                     alias_set.insert(*source_local);
@@ -1295,7 +1300,7 @@ fn compute_uses_after(
             current_after.extend(collect_uses(body, len));
             result.extend(compute_uses_after(body, data, &current_after, aliases));
         }
-        BorrowedSlice { base, offset, len } => {
+        InlineSlice { base, offset, len } => {
             let (base, offset, len) = (*base, *offset, *len);
             let mut current_after = after.clone();
             result.extend(compute_uses_after(body, len, &current_after, aliases));
@@ -1303,6 +1308,13 @@ fn compute_uses_after(
             result.extend(compute_uses_after(body, offset, &current_after, aliases));
             current_after.extend(collect_uses(body, offset));
             result.extend(compute_uses_after(body, base, &current_after, aliases));
+        }
+        BoundSlice { offset, len, .. } => {
+            let (offset, len) = (*offset, *len);
+            let mut current_after = after.clone();
+            result.extend(compute_uses_after(body, len, &current_after, aliases));
+            current_after.extend(collect_uses(body, len));
+            result.extend(compute_uses_after(body, offset, &current_after, aliases));
         }
         Load { ptr } => {
             let ptr = *ptr;
@@ -1492,9 +1504,14 @@ fn find_inplace_ops(
             find_inplace_ops(body, data, uses_after, aliases, result);
             find_inplace_ops(body, len, uses_after, aliases, result);
         }
-        BorrowedSlice { base, offset, len } => {
+        InlineSlice { base, offset, len } => {
             let (base, offset, len) = (*base, *offset, *len);
             find_inplace_ops(body, base, uses_after, aliases, result);
+            find_inplace_ops(body, offset, uses_after, aliases, result);
+            find_inplace_ops(body, len, uses_after, aliases, result);
+        }
+        BoundSlice { offset, len, .. } => {
+            let (offset, len) = (*offset, *len);
             find_inplace_ops(body, offset, uses_after, aliases, result);
             find_inplace_ops(body, len, uses_after, aliases, result);
         }

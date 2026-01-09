@@ -392,13 +392,28 @@ impl ConstantFolder {
                 ))
             }
 
-            Expr::BorrowedSlice { base, offset, len } => {
+            Expr::InlineSlice { base, offset, len } => {
                 let new_base = self.expr_map[base];
                 let new_offset = self.expr_map[offset];
                 let new_len = self.expr_map[len];
                 Ok(body.alloc_expr(
-                    Expr::BorrowedSlice {
+                    Expr::InlineSlice {
                         base: new_base,
+                        offset: new_offset,
+                        len: new_len,
+                    },
+                    ty.clone(),
+                    span,
+                    node_id,
+                ))
+            }
+
+            Expr::BoundSlice { name, offset, len } => {
+                let new_offset = self.expr_map[offset];
+                let new_len = self.expr_map[len];
+                Ok(body.alloc_expr(
+                    Expr::BoundSlice {
+                        name: name.clone(),
                         offset: new_offset,
                         len: new_len,
                     },

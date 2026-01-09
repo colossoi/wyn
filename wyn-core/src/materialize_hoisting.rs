@@ -230,8 +230,12 @@ fn collect_materializations_rec(
             collect_materializations_rec(body, *data, result, visited);
             collect_materializations_rec(body, *len, result, visited);
         }
-        Expr::BorrowedSlice { base, offset, len } => {
+        Expr::InlineSlice { base, offset, len } => {
             collect_materializations_rec(body, *base, result, visited);
+            collect_materializations_rec(body, *offset, result, visited);
+            collect_materializations_rec(body, *len, result, visited);
+        }
+        Expr::BoundSlice { offset, len, .. } => {
             collect_materializations_rec(body, *offset, result, visited);
             collect_materializations_rec(body, *len, result, visited);
         }

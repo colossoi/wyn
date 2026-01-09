@@ -3291,7 +3291,7 @@ fn test_parse_existential_type_simple() {
     match ty {
         Type::Constructed(TypeName::Existential(vars), args) => {
             assert_eq!(vars, &vec!["k".to_string()]);
-            assert!(matches!(&args[0], Type::Constructed(TypeName::ValueArray, _)));
+            assert!(matches!(&args[0], Type::Constructed(TypeName::Array, _)));
         }
         _ => panic!("Expected Existential type, got {:?}", ty),
     }
