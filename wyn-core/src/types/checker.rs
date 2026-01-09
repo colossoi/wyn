@@ -2280,6 +2280,9 @@ impl<'a> TypeChecker<'a> {
                                     TypeName::Existential(_) => "existential".to_string(),
                                     TypeName::Pointer => "pointer".to_string(),
                                     TypeName::Slice => "slice".to_string(),
+                                    TypeName::RuntimeArray => "runtime_array".to_string(),
+                                    TypeName::Storage => "storage".to_string(),
+                                    TypeName::Function => "function".to_string(),
                                     TypeName::Skolem(id) => format!("{}", id),
                                 };
 

@@ -152,13 +152,25 @@ pub enum TypeName {
     /// Existential size: ?[n][m]. type
     /// Inner type is stored in Type::Constructed args[0], not in the TypeName.
     Existential(Vec<String>),
-    /// Pointer type (MIR only) - result of Materialize, used for indexing/access.
-    /// The pointee type is stored in Type::Constructed args.
+    // --- Reference types (MIR only) ---
+    /// Pointer type - result of Materialize, used for indexing/access.
+    /// Type args: [pointee_type, addrspace]
     Pointer,
-    /// Slice type with dynamic length (MIR only).
-    /// Type args: [cap_type, elem_type] where cap is the backing buffer capacity.
-    /// Runtime representation includes a dynamic length field.
+    /// Slice type with dynamic length (pointer + length).
+    /// Type args: [elem_type, addrspace]
     Slice,
+    /// Runtime array type (unbounded).
+    /// Type args: [elem_type]
+    /// Only valid as pointee of Pointer[_, Storage]. Maps to SPIR-V OpTypeRuntimeArray.
+    RuntimeArray,
+
+    // --- Address spaces (MIR only) ---
+    /// Storage address space - data backed by SSBO (storage buffer).
+    Storage,
+    /// Function address space - function-local OpVariable.
+    Function,
+
+    // --- Type system internals ---
     /// Rigid skolem constant for existential sizes.
     /// Created when opening existential types (?k. T). Unlike unification variables,
     /// skolems only unify with themselves (same ID), enforcing opacity.
@@ -212,6 +224,9 @@ impl std::fmt::Display for TypeName {
             }
             TypeName::Pointer => write!(f, "Ptr"),
             TypeName::Slice => write!(f, "Slice"),
+            TypeName::RuntimeArray => write!(f, "RuntimeArray"),
+            TypeName::Storage => write!(f, "storage"),
+            TypeName::Function => write!(f, "function"),
             TypeName::Skolem(id) => write!(f, "{}", id),
         }
     }
@@ -264,6 +279,9 @@ impl polytype::Name for TypeName {
             TypeName::Existential(vars) => format!("?{}.", vars.join(" ")),
             TypeName::Pointer => "Ptr".to_string(),
             TypeName::Slice => "Slice".to_string(),
+            TypeName::RuntimeArray => "RuntimeArray".to_string(),
+            TypeName::Storage => "storage".to_string(),
+            TypeName::Function => "function".to_string(),
             TypeName::Skolem(id) => format!("{}", id),
         }
     }
@@ -553,9 +571,33 @@ pub fn strip_unique(ty: &Type) -> Type {
     }
 }
 
-/// Create a pointer type (MIR only): Ptr(inner)
-pub fn pointer(inner: Type) -> Type {
-    Type::Constructed(TypeName::Pointer, vec![inner])
+// --- Address space constructors ---
+
+/// Create a storage address space type
+pub fn storage_addrspace() -> Type {
+    Type::Constructed(TypeName::Storage, vec![])
+}
+
+/// Create a function (local) address space type
+pub fn function_addrspace() -> Type {
+    Type::Constructed(TypeName::Function, vec![])
+}
+
+/// Check if a type is the storage address space
+pub fn is_storage_addrspace(ty: &Type) -> bool {
+    matches!(ty, Type::Constructed(TypeName::Storage, _))
+}
+
+/// Check if a type is the function address space
+pub fn is_function_addrspace(ty: &Type) -> bool {
+    matches!(ty, Type::Constructed(TypeName::Function, _))
+}
+
+// --- Pointer type helpers ---
+
+/// Create a pointer type (MIR only): Ptr(pointee, addrspace)
+pub fn pointer(pointee: Type, addrspace: Type) -> Type {
+    Type::Constructed(TypeName::Pointer, vec![pointee, addrspace])
 }
 
 /// Check if a type is a pointer type
@@ -571,10 +613,19 @@ pub fn pointee(ty: &Type) -> Option<&Type> {
     }
 }
 
-/// Create a slice type (MIR only): Slice(cap, elem)
-/// cap is the capacity type (Size(n) or SizeVar), elem is the element type.
-pub fn slice(cap: Type, elem: Type) -> Type {
-    Type::Constructed(TypeName::Slice, vec![cap, elem])
+/// Get the address space from a pointer type, or None if not a pointer
+pub fn pointer_addrspace(ty: &Type) -> Option<&Type> {
+    match ty {
+        Type::Constructed(TypeName::Pointer, args) if args.len() >= 2 => Some(&args[1]),
+        _ => None,
+    }
+}
+
+// --- Slice type helpers ---
+
+/// Create a slice type (MIR only): Slice(elem, addrspace)
+pub fn slice(elem: Type, addrspace: Type) -> Type {
+    Type::Constructed(TypeName::Slice, vec![elem, addrspace])
 }
 
 /// Check if a type is a slice type
@@ -585,15 +636,36 @@ pub fn is_slice(ty: &Type) -> bool {
 /// Get the element type from a slice type, or None if not a slice
 pub fn slice_elem(ty: &Type) -> Option<&Type> {
     match ty {
+        Type::Constructed(TypeName::Slice, args) if !args.is_empty() => Some(&args[0]),
+        _ => None,
+    }
+}
+
+/// Get the address space from a slice type, or None if not a slice
+pub fn slice_addrspace(ty: &Type) -> Option<&Type> {
+    match ty {
         Type::Constructed(TypeName::Slice, args) if args.len() >= 2 => Some(&args[1]),
         _ => None,
     }
 }
 
-/// Get the capacity type from a slice type, or None if not a slice
-pub fn slice_cap(ty: &Type) -> Option<&Type> {
+// --- Runtime array type helpers ---
+
+/// Create a runtime array type (MIR only): RuntimeArray(elem)
+/// Only valid as pointee of Pointer[_, Storage]
+pub fn runtime_array(elem: Type) -> Type {
+    Type::Constructed(TypeName::RuntimeArray, vec![elem])
+}
+
+/// Check if a type is a runtime array type
+pub fn is_runtime_array(ty: &Type) -> bool {
+    matches!(ty, Type::Constructed(TypeName::RuntimeArray, _))
+}
+
+/// Get the element type from a runtime array, or None if not a runtime array
+pub fn runtime_array_elem(ty: &Type) -> Option<&Type> {
     match ty {
-        Type::Constructed(TypeName::Slice, args) if !args.is_empty() => Some(&args[0]),
+        Type::Constructed(TypeName::RuntimeArray, args) if !args.is_empty() => Some(&args[0]),
         _ => None,
     }
 }

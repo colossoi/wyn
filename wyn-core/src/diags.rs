@@ -144,15 +144,26 @@ fn format_constructed_type(name: &TypeName, args: &[PolyType<TypeName>]) -> Stri
             if args.len() == 1 { format!("Ptr<{}>", format_type(&args[0])) } else { "Ptr<?>".to_string() }
         }
         TypeName::Slice => {
-            // Slice<cap, elem> - slice with dynamic length
+            // Slice<elem, addrspace> - slice with dynamic length
             if args.len() == 2 {
-                let cap = format_type(&args[0]);
-                let elem = format_type(&args[1]);
-                format!("Slice<{}, {}>", cap, elem)
+                let elem = format_type(&args[0]);
+                let addrspace = format_type(&args[1]);
+                format!("Slice<{}, {}>", elem, addrspace)
+            } else if args.len() == 1 {
+                format!("Slice<{}>", format_type(&args[0]))
             } else {
                 "Slice<?>".to_string()
             }
         }
+        TypeName::RuntimeArray => {
+            if args.len() == 1 {
+                format!("RuntimeArray<{}>", format_type(&args[0]))
+            } else {
+                "RuntimeArray<?>".to_string()
+            }
+        }
+        TypeName::Storage => "storage".to_string(),
+        TypeName::Function => "function".to_string(),
         TypeName::Skolem(id) => format!("{}", id),
     }
 }

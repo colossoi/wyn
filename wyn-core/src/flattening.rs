@@ -1069,7 +1069,7 @@ impl Flattener {
                             args: vec![
                                 self.alloc_expr(
                                     mir::Expr::Local(ptr_local_id),
-                                    types::pointer(self.current_body.get_type(arr_id).clone()),
+                                    types::pointer(self.current_body.get_type(arr_id).clone(), types::function_addrspace()),
                                     span,
                                 ),
                                 idx_id,
@@ -1083,7 +1083,7 @@ impl Flattener {
                 // Fallback for dynamic index on complex expression: wrap in Materialize
                 let arr_ty = self.current_body.get_type(arr_id).clone();
                 let materialized = mir::Expr::Materialize(arr_id);
-                let materialized_id = self.alloc_expr(materialized, types::pointer(arr_ty), span);
+                let materialized_id = self.alloc_expr(materialized, types::pointer(arr_ty, types::function_addrspace()), span);
                 (
                     mir::Expr::Intrinsic {
                         name: "index".to_string(),
@@ -1259,11 +1259,11 @@ impl Flattener {
                     let var_id = self.alloc_expr(mir::Expr::Local(local_id), value_ty.clone(), span);
                     let materialize_id = self.alloc_expr(
                         mir::Expr::Materialize(var_id),
-                        types::pointer(value_ty.clone()),
+                        types::pointer(value_ty.clone(), types::function_addrspace()),
                         span,
                     );
                     let ptr_local_id =
-                        self.alloc_local(ptr_name, types::pointer(value_ty), LocalKind::Let, span);
+                        self.alloc_local(ptr_name, types::pointer(value_ty, types::function_addrspace()), LocalKind::Let, span);
                     let body_ty = self.current_body.get_type(body_id).clone();
                     self.alloc_expr(
                         mir::Expr::Let {
