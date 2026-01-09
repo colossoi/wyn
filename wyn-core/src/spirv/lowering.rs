@@ -12,9 +12,15 @@ use crate::lowering_common::is_empty_closure_type;
 use crate::mir::parallelism::{SimpleComputeMap, detect_simple_compute_map};
 use crate::pipeline::{self, Pipeline};
 use crate::mir::{
-    self, Body, Def, ExecutionModel, Expr, ExprId, LambdaId, LambdaInfo, LocalId, LoopKind, MemBinding,
-    Program,
+    self, Body, Def, ExecutionModel, Expr, ExprId, LambdaId, LambdaInfo, LocalId, LoopKind, Program,
 };
+
+// TODO(Phase 5): Remove this stub - address space is now tracked in types
+/// Temporary stub for MemBinding until Phase 5 migrates to address space in types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MemBinding {
+    Storage { set: u32, binding: u32 },
+}
 use crate::types;
 use crate::{IdArena, bail_spirv, err_spirv};
 use polytype::Type as PolyType;
@@ -1251,7 +1257,7 @@ fn lower_compute_pipeline(
     let elem_type_id = *elem_type_id;
 
     // Delegate to lower_inplace_map_core with single-element index list
-    let mem = mir::MemBinding::Storage { set: 0, binding: 0 };
+    let mem = MemBinding::Storage { set: 0, binding: 0 };
     lower_inplace_map_core(
         constructor,
         mem,
@@ -2552,6 +2558,12 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                 )),
             }
         }
+
+        // --- Memory operations ---
+        Expr::Load { .. } | Expr::Store { .. } => {
+            // TODO(Phase 5): Implement Load/Store lowering with address space support
+            Err(err_spirv!("Load/Store expressions not yet implemented in SPIR-V lowering"))
+        }
     }
 }
 
@@ -2903,12 +2915,9 @@ fn lower_map(
         );
     }
 
-    // Extract mem binding from array argument's LocalDecl
-    let mem = if let Expr::Local(local_id) = body.get_expr(args[1]) {
-        body.get_local(*local_id).mem
-    } else {
-        None
-    };
+    // TODO(Phase 5): Address space is now tracked in types (Slice[elem, Storage/Function])
+    // For now, use None for mem binding since we don't have LocalDecl.mem anymore
+    let mem: Option<MemBinding> = None;
 
     let (func_name, capture_vals) = extract_closure_info(constructor, body, args[0])?;
 
@@ -2964,12 +2973,9 @@ fn lower_inplace_map(
         );
     }
 
-    // Extract mem binding from array argument's LocalDecl
-    let mem = if let Expr::Local(local_id) = body.get_expr(args[1]) {
-        body.get_local(*local_id).mem
-    } else {
-        None
-    };
+    // TODO(Phase 5): Address space is now tracked in types (Slice[elem, Storage/Function])
+    // For now, use None for mem binding since we don't have LocalDecl.mem anymore
+    let mem: Option<MemBinding> = None;
 
     let (func_name, capture_vals) = extract_closure_info(constructor, body, args[0])?;
 

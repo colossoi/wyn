@@ -739,6 +739,33 @@ impl PartialEvaluator {
                 );
                 Ok(Value::Unknown(new_id))
             }
+
+            // Memory operations - residualize for now
+            Expr::Load { ptr } => {
+                let ptr_val = self.eval(body, ptr, env)?;
+                let ptr_id = self.reify(&ptr_val, ty.clone(), span, node_id);
+                let new_id = self.emit(Expr::Load { ptr: ptr_id }, ty, span, node_id);
+                Ok(Value::Unknown(new_id))
+            }
+
+            Expr::Store { ptr, value } => {
+                let ptr_val = self.eval(body, ptr, env)?;
+                let value_val = self.eval(body, value, env)?;
+
+                let ptr_id = self.reify(&ptr_val, ty.clone(), span, node_id);
+                let value_id = self.reify(&value_val, ty.clone(), span, node_id);
+
+                let new_id = self.emit(
+                    Expr::Store {
+                        ptr: ptr_id,
+                        value: value_id,
+                    },
+                    ty,
+                    span,
+                    node_id,
+                );
+                Ok(Value::Unknown(new_id))
+            }
         }
     }
 

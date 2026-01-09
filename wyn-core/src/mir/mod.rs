@@ -85,23 +85,10 @@ pub enum LocalKind {
     LoopVar,
 }
 
-/// Memory binding for variables that live in non-value memory spaces.
-///
-/// This is used to track which variables are backed by storage buffers
-/// or other memory spaces, allowing the lowering pass to generate
-/// appropriate access patterns (e.g., OpAccessChain + OpLoad for storage
-/// vs OpCompositeExtract for value arrays).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum MemBinding {
-    /// GPU storage buffer at a specific descriptor set and binding.
-    Storage {
-        set: u32,
-        binding: u32,
-    },
-    // Future: Shared { size: u32 }, Private, etc.
-}
-
 /// Declaration of a local variable.
+///
+/// Address space information is now encoded in the type itself (e.g., Slice[elem, Storage])
+/// rather than as a separate MemBinding field.
 #[derive(Debug, Clone)]
 pub struct LocalDecl {
     /// Variable name (for debugging/display).
@@ -112,9 +99,6 @@ pub struct LocalDecl {
     pub ty: Type<TypeName>,
     /// What kind of local this is.
     pub kind: LocalKind,
-    /// Optional memory binding for storage-backed variables.
-    /// `None` means this is a value/SSA variable (the default).
-    pub mem: Option<MemBinding>,
 }
 
 // =============================================================================
@@ -222,12 +206,27 @@ pub enum Expr {
     },
 
     // --- Special ---
-    /// Materialize a value into a variable for indexing.
+    /// Materialize a value into a pointer for indexing.
+    /// Creates a Pointer[T, Function] from a value of type T.
+    /// Allocates a function-local variable, stores the value, returns pointer.
     Materialize(ExprId),
     /// Expression with attributes attached.
     Attributed {
         attributes: Vec<Attribute>,
         expr: ExprId,
+    },
+
+    // --- Memory operations ---
+    /// Load a value from a pointer.
+    /// If ptr has type Pointer[T, _], result has type T.
+    Load {
+        ptr: ExprId,
+    },
+    /// Store a value to a pointer.
+    /// Result type is Unit.
+    Store {
+        ptr: ExprId,
+        value: ExprId,
     },
 
     // --- Slices ---
@@ -411,7 +410,6 @@ impl Body {
             span,
             ty,
             kind: LocalKind::Let,
-            mem: None,
         });
 
         let original = std::mem::replace(self.get_expr_mut(expr_id), Expr::Local(local_id));

@@ -395,6 +395,26 @@ impl BindingLifter {
                     node_id,
                 )
             }
+
+            // Memory operations - map subexpressions
+            Expr::Load { ptr } => {
+                let new_ptr = self.expr_map[ptr];
+                new_body.alloc_expr(Expr::Load { ptr: new_ptr }, ty.clone(), span, node_id)
+            }
+
+            Expr::Store { ptr, value } => {
+                let new_ptr = self.expr_map[ptr];
+                let new_value = self.expr_map[value];
+                new_body.alloc_expr(
+                    Expr::Store {
+                        ptr: new_ptr,
+                        value: new_value,
+                    },
+                    ty.clone(),
+                    span,
+                    node_id,
+                )
+            }
         }
     }
 
@@ -709,6 +729,15 @@ fn collect_free_locals_inner(
             collect_free_locals_inner(body, *base, bound, free);
             collect_free_locals_inner(body, *offset, bound, free);
             collect_free_locals_inner(body, *len, bound, free);
+        }
+
+        Expr::Load { ptr } => {
+            collect_free_locals_inner(body, *ptr, bound, free);
+        }
+
+        Expr::Store { ptr, value } => {
+            collect_free_locals_inner(body, *ptr, bound, free);
+            collect_free_locals_inner(body, *value, bound, free);
         }
 
         // Leaf nodes - no locals to collect

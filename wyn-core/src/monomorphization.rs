@@ -14,11 +14,19 @@
 use crate::IdArena;
 use crate::ast::TypeName;
 use crate::error::Result;
-use crate::mir::{Body, Def, Expr, ExprId, LocalDecl, LocalId, MemBinding, Program};
+use crate::mir::{Body, Def, Expr, ExprId, LocalDecl, LocalId, Program};
 use crate::mir::{LambdaId, LambdaInfo};
 use crate::types::TypeScheme;
 use polytype::Type;
 use std::collections::{HashMap, HashSet, VecDeque};
+
+// TODO(Phase 6): Remove this stub - address space is now tracked in types
+/// Temporary stub for MemBinding until Phase 6 removes all usages.
+/// Address space information is now in the type system (Slice[elem, Storage/Function]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MemBinding {
+    Storage { set: u32, binding: u32 },
+}
 
 /// A substitution mapping type variables to concrete types
 type Substitution = HashMap<usize, Type<TypeName>>;
@@ -262,23 +270,14 @@ fn split_function_type(ty: &Type<TypeName>) -> (Vec<Type<TypeName>>, Type<TypeNa
 
 impl Monomorphizer {
     fn new(program: Program) -> Self {
-        // First pass: collect storage buffer declarations
-        let storage_buffers: HashMap<String, (u32, u32)> = program
-            .defs
-            .iter()
-            .filter_map(|def| match def {
-                Def::Storage {
-                    name, set, binding, ..
-                } => Some((name.clone(), (*set, *binding))),
-                _ => None,
-            })
-            .collect();
+        // TODO(Phase 6): Storage buffer declarations are now tracked via types.
+        // The old mem binding approach is being phased out.
 
-        // Second pass: build function map and collect entry points with mem bindings
+        // Build function map and collect entry points
         let mut poly_functions = HashMap::new();
         let mut entry_points = Vec::new();
 
-        for mut def in program.defs {
+        for def in program.defs {
             let name = match &def {
                 Def::Function { name, .. } => name.clone(),
                 Def::Constant { name, .. } => name.clone(),
@@ -287,13 +286,10 @@ impl Monomorphizer {
                 Def::EntryPoint { name, .. } => name.clone(),
             };
 
-            // For entry points, set mem bindings on storage-backed parameters
-            if let Def::EntryPoint { inputs, body, .. } = &mut def {
-                for input in inputs {
-                    if let Some(&(set, binding)) = storage_buffers.get(&input.name) {
-                        body.get_local_mut(input.local).mem = Some(MemBinding::Storage { set, binding });
-                    }
-                }
+            // For entry points, add to worklist
+            // TODO(Phase 6): Address space is now tracked in types (Slice[elem, Storage/Function])
+            // rather than via mem bindings on LocalDecl
+            if let Def::EntryPoint { .. } = &def {
                 entry_points.push(WorkItem {
                     name: name.clone(),
                     def: def.clone(),
@@ -454,17 +450,9 @@ impl Monomorphizer {
                 // Map arguments
                 let new_args: Vec<_> = args.iter().map(|a| expr_map[a]).collect();
 
-                // Extract mem bindings from arguments
-                let mem_bindings: Vec<Option<MemBinding>> = args
-                    .iter()
-                    .map(|&arg_id| {
-                        if let Expr::Local(local_id) = body.get_expr(arg_id) {
-                            body.get_local(*local_id).mem
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
+                // TODO(Phase 6): Address space is now tracked in types.
+                // For now, create empty mem_bindings until this is fully migrated.
+                let mem_bindings: Vec<Option<MemBinding>> = args.iter().map(|_| None).collect();
 
                 // Check if this is a call to a user-defined function
                 if let Some(poly_def) = self.poly_functions.get(func).cloned() {
@@ -607,18 +595,10 @@ impl Monomorphizer {
                 // Map each capture to the new body
                 let new_captures: Vec<_> = captures.iter().map(|c| expr_map[c]).collect();
 
-                // Extract mem bindings from captures for lambda specialization
-                // If a capture is a Local with storage backing, the lambda param should get it too
-                let capture_mem_bindings: Vec<Option<MemBinding>> = captures
-                    .iter()
-                    .map(|&cap_id| {
-                        if let Expr::Local(local_id) = body.get_expr(cap_id) {
-                            body.get_local(*local_id).mem
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
+                // TODO(Phase 6): Address space is now tracked in types.
+                // For now, create empty capture_mem_bindings until this is fully migrated.
+                let capture_mem_bindings: Vec<Option<MemBinding>> =
+                    captures.iter().map(|_| None).collect();
 
                 // Try to specialize the lambda based on the closure's concrete type
                 if let Some(def) = self.poly_functions.get(lambda_name).cloned() {
@@ -707,6 +687,13 @@ impl Monomorphizer {
                 base: expr_map[base],
                 offset: expr_map[offset],
                 len: expr_map[len],
+            }),
+
+            // Memory operations - map subexpressions
+            Expr::Load { ptr } => Ok(Expr::Load { ptr: expr_map[ptr] }),
+            Expr::Store { ptr, value } => Ok(Expr::Store {
+                ptr: expr_map[ptr],
+                value: expr_map[value],
             }),
         }
     }
@@ -1116,14 +1103,11 @@ fn specialize_def(
             };
 
             // Apply the extended substitution to the body
-            let mut body = apply_subst_body_with_context(body, &full_subst, new_name);
+            let body = apply_subst_body_with_context(body, &full_subst, new_name);
 
-            // Apply mem bindings to parameters
-            for (i, &param_id) in params.iter().enumerate() {
-                if let Some(mem) = mem_bindings.get(i).copied().flatten() {
-                    body.get_local_mut(param_id).mem = Some(mem);
-                }
-            }
+            // TODO(Phase 6): Address space is now tracked in types.
+            // mem_bindings are no longer applied to LocalDecl.mem
+            let _ = mem_bindings; // Suppress unused warning
 
             Ok(Def::Function {
                 id,
@@ -1307,7 +1291,6 @@ fn apply_subst_body_with_context(old_body: Body, subst: &Substitution, func_name
             span: local.span,
             ty: apply_subst_with_context(&local.ty, subst, &context),
             kind: local.kind,
-            mem: local.mem,
         });
     }
 

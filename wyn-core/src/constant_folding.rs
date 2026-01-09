@@ -407,6 +407,26 @@ impl ConstantFolder {
                     node_id,
                 ))
             }
+
+            // Memory operations - map subexpressions
+            Expr::Load { ptr } => {
+                let new_ptr = self.expr_map[ptr];
+                Ok(body.alloc_expr(Expr::Load { ptr: new_ptr }, ty.clone(), span, node_id))
+            }
+
+            Expr::Store { ptr, value } => {
+                let new_ptr = self.expr_map[ptr];
+                let new_value = self.expr_map[value];
+                Ok(body.alloc_expr(
+                    Expr::Store {
+                        ptr: new_ptr,
+                        value: new_value,
+                    },
+                    ty.clone(),
+                    span,
+                    node_id,
+                ))
+            }
         }
     }
 

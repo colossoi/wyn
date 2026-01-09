@@ -292,6 +292,13 @@ impl<'a> InPlaceRewriter<'a> {
                 offset: self.remap(*offset),
                 len: self.remap(*len),
             },
+
+            // Memory operations
+            Expr::Load { ptr } => Expr::Load { ptr: self.remap(*ptr) },
+            Expr::Store { ptr, value } => Expr::Store {
+                ptr: self.remap(*ptr),
+                value: self.remap(*value),
+            },
         };
 
         new_body.alloc_expr(new_expr, ty.clone(), span, node_id)

@@ -1019,6 +1019,12 @@ impl Display for mir::Expr {
                     base.0, offset.0, len.0
                 )
             }
+            mir::Expr::Load { ptr } => {
+                write!(f, "@load(e{})", ptr.0)
+            }
+            mir::Expr::Store { ptr, value } => {
+                write!(f, "@store(e{}, e{})", ptr.0, value.0)
+            }
         }
     }
 }

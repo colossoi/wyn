@@ -834,6 +834,11 @@ impl<'a> LowerCtx<'a> {
             Expr::OwnedSlice { .. } | Expr::BorrowedSlice { .. } => {
                 bail_glsl!("Slice expressions not yet implemented in GLSL lowering")
             }
+
+            // --- Memory operations ---
+            Expr::Load { .. } | Expr::Store { .. } => {
+                bail_glsl!("Load/Store expressions not yet implemented in GLSL lowering")
+            }
         }
     }
 

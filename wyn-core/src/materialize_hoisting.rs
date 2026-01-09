@@ -235,6 +235,13 @@ fn collect_materializations_rec(
             collect_materializations_rec(body, *offset, result, visited);
             collect_materializations_rec(body, *len, result, visited);
         }
+        Expr::Load { ptr } => {
+            collect_materializations_rec(body, *ptr, result, visited);
+        }
+        Expr::Store { ptr, value } => {
+            collect_materializations_rec(body, *ptr, result, visited);
+            collect_materializations_rec(body, *value, result, visited);
+        }
         // Atoms have no children
         Expr::Local(_)
         | Expr::Global(_)
