@@ -500,6 +500,27 @@ impl Flattener {
             })
     }
 
+    /// Convert entry point param types for compute shaders.
+    /// Unbounded arrays (ValueArray[Unsized, elem]) become Slice[elem, Storage].
+    fn convert_compute_param_type(&self, ty: Type, is_compute: bool) -> Type {
+        if !is_compute {
+            return ty;
+        }
+
+        // Check for unbounded array: ValueArray[Unsized, elem]
+        if let Type::Constructed(TypeName::ValueArray, args) = &ty {
+            if args.len() == 2 {
+                if let Type::Constructed(TypeName::Unsized, _) = &args[0] {
+                    // Convert to Slice[elem, Storage]
+                    let elem_type = args[1].clone();
+                    return types::slice(elem_type, types::storage_addrspace());
+                }
+            }
+        }
+
+        ty
+    }
+
     /// Generate a unique ID
     fn fresh_id(&mut self) -> usize {
         let id = self.next_id;
@@ -737,11 +758,16 @@ impl Flattener {
                     let old_body = self.begin_body();
                     self.name_to_local.push_scope();
 
+                    // Check if this is a compute entry point
+                    let is_compute = matches!(e.entry_type, ast::Attribute::Compute);
+
                     // Allocate params as locals and build EntryInputs
                     let mut inputs = Vec::new();
                     for param in &e.params {
                         let name = self.extract_param_name(param).unwrap_or_default();
-                        let ty = self.get_pattern_type(param);
+                        let raw_ty = self.get_pattern_type(param);
+                        // Convert unbounded arrays to Slice[elem, Storage] for compute entry points
+                        let ty = self.convert_compute_param_type(raw_ty, is_compute);
                         let decoration = self.extract_io_decoration(param);
                         let local_id = self.alloc_local(name.clone(), ty.clone(), LocalKind::Param, span);
                         inputs.push(mir::EntryInput {
@@ -1166,14 +1192,24 @@ impl Flattener {
                 )
             }
             ExprKind::Slice(slice) => {
-                // Slice creates a BorrowedSlice - a zero-copy view into an array
+                // Slice creates a BorrowedSlice - a zero-copy view into an array/slice
                 let (base_id, _) = self.flatten_expr(&slice.array)?;
                 let base_ty = self.current_body.get_type(base_id).clone();
 
-                // Verify base is an array type
-                if !matches!(&base_ty, Type::Constructed(TypeName::ValueArray, args) if args.len() == 2) {
-                    bail_flatten!("Slice requires an array type, got {:?}", base_ty);
-                }
+                // Determine element type and address space from base type
+                let (elem_ty, addrspace) = match &base_ty {
+                    // Slicing a Slice preserves address space
+                    Type::Constructed(TypeName::Slice, args) if args.len() >= 2 => {
+                        (args[0].clone(), args[1].clone())
+                    }
+                    // Slicing a ValueArray creates a Function-local slice
+                    Type::Constructed(TypeName::ValueArray, args) if args.len() == 2 => {
+                        (args[1].clone(), types::function_addrspace())
+                    }
+                    _ => {
+                        bail_flatten!("Slice requires an array or slice type, got {:?}", base_ty);
+                    }
+                };
 
                 // Flatten start (default to 0)
                 let offset_id = if let Some(start) = &slice.start {
@@ -1202,9 +1238,8 @@ impl Flattener {
                     span,
                 );
 
-                // Get the type from the type table - the type checker computes concrete
-                // size when bounds are integer literals
-                let slice_ty = self.get_expr_type(expr);
+                // Create Slice type with address space
+                let slice_ty = types::slice(elem_ty, addrspace);
 
                 // Create BorrowedSlice expression
                 let slice_id = self.alloc_expr(
