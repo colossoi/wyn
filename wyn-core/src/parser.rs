@@ -2056,10 +2056,7 @@ impl<'a> Parser<'a> {
         let body = Box::new(self.parse_expression()?);
         let span = start_span.merge(&body.h.span);
 
-        Ok(self.node_counter.mk_node(
-            ExprKind::Lambda(LambdaExpr { params, body }),
-            span,
-        ))
+        Ok(self.node_counter.mk_node(ExprKind::Lambda(LambdaExpr { params, body }), span))
     }
 
     fn parse_let_in(&mut self) -> Result<Expression> {

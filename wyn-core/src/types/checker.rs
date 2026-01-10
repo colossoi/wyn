@@ -133,6 +133,19 @@ struct Candidate {
     scheme: Option<TypeScheme>,
 }
 
+/// Result of resolving a value name (identifier or qualified name).
+/// Centralizes name resolution to avoid precedence drift between different call sites.
+struct ResolvedValue {
+    /// Display name for error messages
+    display_name: String,
+    /// Type scheme to store in type_table at the identifier node
+    scheme_for_table: TypeScheme,
+    /// Instantiated monotype (with fresh type variables)
+    instantiated: Type,
+    /// For overloaded intrinsics: all available schemes (for callee resolution)
+    overloads: Option<Vec<TypeScheme>>,
+}
+
 impl<'a> TypeChecker<'a> {
     /// Try to extract a constant integer value from an expression.
     /// Returns None if the expression is not a constant.
@@ -473,6 +486,105 @@ impl<'a> TypeChecker<'a> {
                 }
             }
         }
+    }
+
+    /// Unified name resolution for identifiers and qualified names.
+    ///
+    /// Precedence (enforced consistently across all call sites):
+    /// - Unqualified names: scope > intrinsics > prelude (locals shadow builtins)
+    /// - Qualified names: intrinsics > modules (explicit qualification)
+    ///
+    /// Returns `None` if the name is not found (caller should produce error with span).
+    fn resolve_value_name(&mut self, full_name: &str, is_qualified: bool) -> Option<ResolvedValue> {
+        use crate::intrinsics::IntrinsicLookup;
+
+        // For qualified names, check intrinsics first (e.g., f32.cos, vec3.magnitude)
+        if is_qualified {
+            if let Some(lookup) = self.intrinsics.get(full_name) {
+                let (scheme, ty, overloads) = match lookup {
+                    IntrinsicLookup::Single(entry) => {
+                        let ty = entry.scheme.instantiate(&mut self.context);
+                        (entry.scheme.clone(), ty, None)
+                    }
+                    IntrinsicLookup::Overloaded(set) => {
+                        // For identifier use: return fresh type, store as monotype
+                        // For callee use: overloads vec is populated
+                        let ty = set.fresh_type(&mut self.context);
+                        let all_schemes: Vec<_> = set.entries().iter().map(|e| e.scheme.clone()).collect();
+                        (TypeScheme::Monotype(ty.clone()), ty, Some(all_schemes))
+                    }
+                };
+                return Some(ResolvedValue {
+                    display_name: full_name.to_string(),
+                    scheme_for_table: scheme,
+                    instantiated: ty,
+                    overloads,
+                });
+            }
+
+            // Try elaborated modules (e.g., Module.function)
+            // Split on first dot to get module name
+            if let Some(dot_pos) = full_name.find('.') {
+                let module_name = &full_name[..dot_pos];
+                let func_name = &full_name[dot_pos + 1..];
+                if let Ok(scheme) = self.get_module_function_type_scheme(module_name, func_name) {
+                    let ty = scheme.instantiate(&mut self.context);
+                    let prepared = self.prepare_array_type(&ty);
+                    return Some(ResolvedValue {
+                        display_name: full_name.to_string(),
+                        scheme_for_table: scheme,
+                        instantiated: prepared,
+                        overloads: None,
+                    });
+                }
+            }
+        }
+
+        // Check scope stack (locals shadow intrinsics for unqualified names)
+        if let Some(scheme) = self.scope_stack.lookup(full_name).cloned() {
+            let ty = scheme.instantiate(&mut self.context);
+            return Some(ResolvedValue {
+                display_name: full_name.to_string(),
+                scheme_for_table: scheme,
+                instantiated: ty,
+                overloads: None,
+            });
+        }
+
+        // Check intrinsics (for unqualified names, after scope)
+        if let Some(lookup) = self.intrinsics.get(full_name) {
+            let (scheme, ty, overloads) = match lookup {
+                IntrinsicLookup::Single(entry) => {
+                    let ty = entry.scheme.instantiate(&mut self.context);
+                    (entry.scheme.clone(), ty, None)
+                }
+                IntrinsicLookup::Overloaded(set) => {
+                    let ty = set.fresh_type(&mut self.context);
+                    let all_schemes: Vec<_> = set.entries().iter().map(|e| e.scheme.clone()).collect();
+                    (TypeScheme::Monotype(ty.clone()), ty, Some(all_schemes))
+                }
+            };
+            return Some(ResolvedValue {
+                display_name: full_name.to_string(),
+                scheme_for_table: scheme,
+                instantiated: ty,
+                overloads,
+            });
+        }
+
+        // Check prelude functions
+        if let Some(scheme) = self.get_prelude_function_type_scheme(full_name) {
+            let ty = scheme.instantiate(&mut self.context);
+            let prepared = self.prepare_array_type(&ty);
+            return Some(ResolvedValue {
+                display_name: full_name.to_string(),
+                scheme_for_table: scheme,
+                instantiated: prepared,
+                overloads: None,
+            });
+        }
+
+        None
     }
 
     /// Create a new TypeChecker with a reference to a ModuleManager
@@ -1753,77 +1865,17 @@ impl<'a> TypeChecker<'a> {
                 } else {
                     format!("{}.{}", quals.join("."), name)
                 };
+                let is_qualified = !quals.is_empty();
 
                 debug!("Looking up identifier '{}'", full_name);
-                debug!("Current scope depth: {}", self.scope_stack.depth());
 
-                // For qualified names, check builtins with full name first
-                if !quals.is_empty() {
-                    if let Some(lookup) = self.intrinsics.get(&full_name) {
-                        use crate::intrinsics::IntrinsicLookup;
-                        let (scheme, ty) = match lookup {
-                            IntrinsicLookup::Single(entry) => {
-                                let ty = entry.scheme.instantiate(&mut self.context);
-                                (entry.scheme.clone(), ty)
-                            }
-                            IntrinsicLookup::Overloaded(overloads) => {
-                                // Overloaded intrinsics get fresh type vars; store as monotype
-                                let ty = overloads.fresh_type(&mut self.context);
-                                (TypeScheme::Monotype(ty.clone()), ty)
-                            }
-                        };
-                        self.type_table.insert(expr.h.id, scheme);
-                        return Ok(ty);
-                    }
-
-                    // Try to query from elaborated modules
-                    let module_name = &quals[0];
-                    if let Ok(type_scheme) = self.get_module_function_type_scheme(module_name, name) {
-                        debug!("Found '{}' in elaborated module '{}' with type: {:?}", name, module_name, type_scheme);
-                        let ty = type_scheme.instantiate(&mut self.context);
-                        // Replace AddressUnknown markers with type variables
-                        let prepared_ty = self.prepare_array_type(&ty);
-                        self.type_table.insert(expr.h.id, type_scheme);
-                        return Ok(prepared_ty);
-                    }
+                if let Some(resolved) = self.resolve_value_name(&full_name, is_qualified) {
+                    self.type_table.insert(expr.h.id, resolved.scheme_for_table);
+                    return Ok(resolved.instantiated);
                 }
 
-                // Check scope stack for variables (use full_name for qualified lookups)
-                if let Some(type_scheme) = self.scope_stack.lookup(&full_name) {
-                    debug!("Found '{}' in scope stack with type: {:?}", full_name, type_scheme);
-                    let ty = type_scheme.instantiate(&mut self.context);
-                    self.type_table.insert(expr.h.id, type_scheme.clone());
-                    return Ok(ty);
-                } else if let Some(lookup) = self.intrinsics.get(&full_name) {
-                    // Check polymorphic intrinsics for polymorphic function types
-                    use crate::intrinsics::IntrinsicLookup;
-                    debug!("'{}' is a polymorphic intrinsic", full_name);
-                    let (scheme, func_type) = match lookup {
-                        IntrinsicLookup::Single(entry) => {
-                            let ty = entry.scheme.instantiate(&mut self.context);
-                            (entry.scheme.clone(), ty)
-                        }
-                        IntrinsicLookup::Overloaded(overloads) => {
-                            // Overloaded intrinsics get fresh type vars; store as monotype
-                            let ty = overloads.fresh_type(&mut self.context);
-                            (TypeScheme::Monotype(ty.clone()), ty)
-                        }
-                    };
-                    debug!("Built function type for intrinsic '{}': {:?}", full_name, func_type);
-                    self.type_table.insert(expr.h.id, scheme);
-                    return Ok(func_type);
-                } else if let Some(type_scheme) = self.get_prelude_function_type_scheme(&full_name) {
-                    // Check top-level prelude functions (auto-imported)
-                    debug!("'{}' is a prelude function with type: {:?}", full_name, type_scheme);
-                    let ty = type_scheme.instantiate(&mut self.context);
-                    self.type_table.insert(expr.h.id, type_scheme);
-                    return Ok(ty);
-                } else {
-                    // Not found anywhere
-                    debug!("Variable lookup failed for '{}' - not in scope, intrinsics, or prelude", full_name);
-                    debug!("Scope stack contents: {:?}", self.scope_stack);
-                    return Err(err_undef_at!(expr.h.span, "{}", full_name));
-                }
+                debug!("Variable lookup failed for '{}' - not in scope, intrinsics, or prelude", full_name);
+                return Err(err_undef_at!(expr.h.span, "{}", full_name));
             }
             ExprKind::ArrayLiteral(elements) => {
                 if elements.is_empty() {
@@ -2185,33 +2237,10 @@ impl<'a> TypeChecker<'a> {
                 if let Some(qual_name) = Self::try_extract_qual_name(inner_expr, field) {
                     let dotted = qual_name.to_dotted();
 
-                    // Check if this is a module-qualified name (dotted name exists in scope)
-                    if let Some(scheme) = self.scope_stack.lookup(&dotted) {
-                        // Instantiate the type scheme
-                        let ty = scheme.instantiate(&mut self.context);
-                        self.type_table.insert(expr.h.id, TypeScheme::Monotype(ty.clone()));
-                        return Ok(ty);
-                    }
-
-                    // Check if this is a polymorphic builtin (e.g., magnitude, normalize)
-                    if let Some(lookup) = self.intrinsics.get(&dotted) {
-                        use crate::intrinsics::IntrinsicLookup;
-                        let ty = match lookup {
-                            IntrinsicLookup::Single(entry) => entry.scheme.instantiate(&mut self.context),
-                            IntrinsicLookup::Overloaded(overloads) => overloads.fresh_type(&mut self.context),
-                        };
-                        self.type_table.insert(expr.h.id, TypeScheme::Monotype(ty.clone()));
-                        return Ok(ty);
-                    }
-
-                    // Try to look up in elaborated modules (e.g., f32.i32 for type conversion)
-                    let module_name = &qual_name.qualifiers[0];
-                    if let Ok(type_scheme) = self.get_module_function_type_scheme(module_name, &qual_name.name) {
-                        let ty = type_scheme.instantiate(&mut self.context);
-                        // Replace AddressUnknown markers with type variables
-                        let prepared_ty = self.prepare_array_type(&ty);
-                        self.type_table.insert(expr.h.id, type_scheme);
-                        return Ok(prepared_ty);
+                    // Use unified resolver (qualified names always have is_qualified=true)
+                    if let Some(resolved) = self.resolve_value_name(&dotted, true) {
+                        self.type_table.insert(expr.h.id, resolved.scheme_for_table);
+                        return Ok(resolved.instantiated);
                     }
 
                     // Qualified name not found - fall through to field access
@@ -2748,84 +2777,35 @@ impl<'a> TypeChecker<'a> {
     /// For overloaded intrinsics, returns multiple candidates.
     /// For normal functions, returns a single candidate.
     fn resolve_callee_candidates(&mut self, func: &Expression) -> Result<CalleeCandidates> {
-        use crate::intrinsics::IntrinsicLookup;
-
         match &func.kind {
             ExprKind::Identifier(quals, name) => {
                 let full_name =
                     if quals.is_empty() { name.clone() } else { format!("{}.{}", quals.join("."), name) };
+                let is_qualified = !quals.is_empty();
 
-                // 1) Lexical scope first (local variables shadow intrinsics)
-                if let Some(scheme) = self.scope_stack.lookup(&full_name).cloned() {
-                    let ty = scheme.instantiate(&mut self.context);
-                    return Ok(CalleeCandidates {
-                        candidates: vec![Candidate {
-                            ty,
-                            scheme: Some(scheme),
-                        }],
-                        display_name: full_name,
-                    });
-                }
-
-                // 2) Overloaded intrinsic? => multiple candidates
-                if let Some(lookup) = self.intrinsics.get(&full_name) {
-                    match lookup {
-                        IntrinsicLookup::Overloaded(set) => {
-                            let mut candidates = Vec::new();
-                            for entry in set.entries() {
-                                let ty = entry.scheme.instantiate(&mut self.context);
-                                candidates.push(Candidate {
-                                    ty,
-                                    scheme: Some(entry.scheme.clone()),
-                                });
-                            }
-                            return Ok(CalleeCandidates {
-                                candidates,
-                                display_name: full_name,
-                            });
-                        }
-                        IntrinsicLookup::Single(entry) => {
-                            let scheme = entry.scheme.clone();
-                            let ty = scheme.instantiate(&mut self.context);
-                            return Ok(CalleeCandidates {
-                                candidates: vec![Candidate {
+                if let Some(resolved) = self.resolve_value_name(&full_name, is_qualified) {
+                    // For overloaded intrinsics, expand into multiple candidates
+                    let candidates = if let Some(overloads) = resolved.overloads {
+                        overloads
+                            .into_iter()
+                            .map(|scheme| {
+                                let ty = scheme.instantiate(&mut self.context);
+                                Candidate {
                                     ty,
                                     scheme: Some(scheme),
-                                }],
-                                display_name: full_name,
-                            });
-                        }
-                    }
-                }
+                                }
+                            })
+                            .collect()
+                    } else {
+                        vec![Candidate {
+                            ty: resolved.instantiated,
+                            scheme: Some(resolved.scheme_for_table),
+                        }]
+                    };
 
-                // 3) Module function?
-                if !quals.is_empty() {
-                    let module_name = &quals[0];
-                    if let Ok(scheme) = self.get_module_function_type_scheme(module_name, name) {
-                        let ty = scheme.instantiate(&mut self.context);
-                        // Replace AddressUnknown markers with type variables
-                        let prepared_ty = self.prepare_array_type(&ty);
-                        return Ok(CalleeCandidates {
-                            candidates: vec![Candidate {
-                                ty: prepared_ty,
-                                scheme: Some(scheme),
-                            }],
-                            display_name: full_name,
-                        });
-                    }
-                }
-
-                // 4) Prelude?
-                if let Some(scheme) = self.get_prelude_function_type_scheme(&full_name) {
-                    let ty = scheme.instantiate(&mut self.context);
-                    // Replace AddressUnknown markers with type variables
-                    let prepared_ty = self.prepare_array_type(&ty);
                     return Ok(CalleeCandidates {
-                        candidates: vec![Candidate {
-                            ty: prepared_ty,
-                            scheme: Some(scheme),
-                        }],
-                        display_name: full_name,
+                        candidates,
+                        display_name: resolved.display_name,
                     });
                 }
 
