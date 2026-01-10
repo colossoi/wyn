@@ -2216,193 +2216,30 @@ impl<'a> TypeChecker<'a> {
                 if let Some(qual_name) = Self::try_extract_qual_name(inner_expr, field) {
                     let dotted = qual_name.to_dotted();
 
-                    // Use unified resolver (qualified names always have is_qualified=true)
                     if let Some(resolved) = self.resolve_value_name(&dotted, true) {
                         self.type_table.insert(expr.h.id, resolved.scheme_for_table);
                         return Ok(resolved.instantiated);
                     }
-
                     // Qualified name not found - fall through to field access
                 }
 
-                // Not a qualified name (or wasn't found), treat as normal field access
-                {
-                    let expr_type = self.infer_expression(inner_expr)?;
+                // Infer base expression type
+                let base_type = self.infer_expression(inner_expr)?;
 
-                    // Check if this is a _w_lambda_name field access (closure lambda name for direct dispatch)
-                    // Allow it on any type variable and return string type
-                    if field == "_w_lambda_name" {
-                        // The type checker can't verify this is actually a closure record,
-                        // but the defunctionalizer guarantees it. Just return string type.
-                        let ty = Type::Constructed(TypeName::Str("string"), vec![]);
-                        self.type_table.insert(expr.h.id, TypeScheme::Monotype(ty.clone()));
-                        return Ok(ty);
-                    }
-
-                    // Apply context to resolve any type variables that have been unified
-                    let expr_type = expr_type.apply(&self.context);
-
-                    // Strip uniqueness for field access - the inner type's fields are accessible
-                    let expr_type = expr_type.strip_unique().clone();
-
-                    // Extract the type name from the expression type
-                    // First check if it's a record with the requested field
-                    if let Type::Constructed(TypeName::Record(fields), field_types) = &expr_type {
-                        if let Some(field_index) = fields.get_index(field) {
-                            if field_index < field_types.len() {
-                                let field_type = &field_types[field_index];
-                                self.type_table.insert(expr.h.id, TypeScheme::Monotype(field_type.clone()));
-                                return Ok(field_type.clone());
-                            }
-                        }
-                    }
-
-                    // Check if this is a tuple numeric field access (0, 1, 2, etc.)
-                    if let Ok(index) = field.parse::<usize>() {
-                        // Tuple field access: t.0, t.1, etc.
-                        // The expr_type should be a tuple
-                        if let Type::Constructed(TypeName::Tuple(_), elem_types) = &expr_type {
-                            if index < elem_types.len() {
-                                let field_type = elem_types[index].clone();
-                                self.type_table.insert(expr.h.id, TypeScheme::Monotype(field_type.clone()));
-                                return Ok(field_type);
-                            } else {
-                                bail_type_at!(
-                                    expr.h.span,
-                                    "Tuple index {} out of bounds (tuple has {} elements)",
-                                    index,
-                                    elem_types.len()
-                                );
-                            }
-                        } else {
-                            bail_type_at!(
-                                expr.h.span,
-                                "Numeric field access '.{}' requires a tuple type, got {}",
-                                index,
-                                self.format_type(&expr_type)
-                            );
-                        }
-                    }
-
-                    // Check if this is a vector field access (x, y, z, w)
-                    // If so, constrain the type to be a Vec even if it's currently unknown
-                    if matches!(field.as_str(), "x" | "y" | "z" | "w") {
-                        // Create a Vec type with unknown size and element type
-                        let size_var = self.context.new_variable();
-                        let elem_var = self.context.new_variable();
-                        let want_vec = Type::Constructed(TypeName::Vec, vec![size_var, elem_var.clone()]);
-
-                        // Unify to constrain expr_type to be a Vec
-                        self.context.unify(&expr_type, &want_vec).map_err(|_| {
-                            err_type_at!(
-                                expr.h.span,
-                                "Field access '{}' requires a vector type, got {}",
-                                field,
-                                self.format_type(&expr_type.apply(&self.context))
-                            )
-                        })?;
-
-                        // Return the element type
-                        let result_ty = elem_var.apply(&self.context);
-                        self.type_table.insert(expr.h.id, TypeScheme::Monotype(result_ty.clone()));
-                        return Ok(result_ty);
-                    }
-
-                    // Extract the type name from the expression type
-                    match expr_type {
-                        Type::Constructed(type_name, ref args) => {
-                            // Handle Vec type specially for field access
-                            if matches!(type_name, TypeName::Vec) {
-                                // Vec(size, element_type) - must have exactly 2 args
-                                if args.len() != 2 {
-                                    bail_type_at!(
-                                        expr.h.span,
-                                        "Malformed Vec type - expected 2 arguments (size, element), got {}",
-                                        args.len()
-                                    );
-                                }
-
-                                // Fields x, y, z, w return the element type (args[1])
-                                let element_type = &args[1];
-
-                                // Check if field is valid (x, y, z, w)
-                                if matches!(field.as_str(), "x" | "y" | "z" | "w") {
-                                    Ok(element_type.clone())
-                                } else {
-                                    Err(err_type_at!(expr.h.span, "Vector type has no field '{}'", field))
-                                }
-                            } else if let TypeName::Record(fields) = &type_name {
-                                // Handle Record type specially - look up field in the record's field map
-                                if let Some(field_index) = fields.get_index(field) {
-                                    if field_index < args.len() {
-                                        let field_type = &args[field_index];
-                                        self.type_table.insert(expr.h.id, TypeScheme::Monotype(field_type.clone()));
-                                        return Ok(field_type.clone());
-                                    }
-                                }
-                                // Field not found in record
-                                bail_type_at!(
-                                    expr.h.span,
-                                    "Record type has no field '{}'. Available fields: {}",
-                                    field,
-                                    fields.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
-                                );
-                            } else {
-                                // Get the type name as a string for other types
-                                let type_name_str = match &type_name {
-                                    TypeName::Str(s) => s.to_string(),
-                                    TypeName::Float(bits) => format!("f{}", bits),
-                                    TypeName::UInt(bits) => format!("u{}", bits),
-                                    TypeName::Int(bits) => format!("i{}", bits),
-                                    TypeName::Array => "array".to_string(),
-                                    TypeName::Unsized => "unsized".to_string(),
-                                    TypeName::Arrow => "function".to_string(),
-                                    TypeName::Vec => "vec".to_string(),
-                                    TypeName::Mat => "mat".to_string(),
-                                    TypeName::Size(n) => n.to_string(),
-                                    TypeName::SizeVar(name) => name.clone(),
-                                    TypeName::UserVar(name) => format!("'{}", name),
-                                    TypeName::Named(name) => name.clone(),
-                                    TypeName::Unique => unreachable!("Uniqueness stripped above"),
-                                    TypeName::Record(_) => "record".to_string(),
-                                    TypeName::Unit => "unit".to_string(),
-                                    TypeName::Tuple(_) => "tuple".to_string(),
-                                    TypeName::Sum(_) => "sum".to_string(),
-                                    TypeName::Existential(_) => "existential".to_string(),
-                                    TypeName::Pointer => "pointer".to_string(),
-                                    TypeName::AddressStorage => "storage".to_string(),
-                                    TypeName::AddressFunction => "function".to_string(),
-                                    TypeName::AddressUnknown => "addrspace_unknown".to_string(),
-                                    TypeName::Skolem(id) => format!("{}", id),
-                                };
-
-                                // Look up field in builtin registry (for vector types)
-                                if let Some(field_type) =
-                                    self.impl_source.get_field_type(&type_name_str, field)
-                                {
-                                    Ok(field_type)
-                                } else if let Some(field_type) =
-                                    self.record_field_map.get(&(type_name_str.clone(), field.clone()))
-                                {
-                                    Ok(field_type.clone())
-                                } else {
-                                    Err(err_type_at!(
-                                        expr.h.span,
-                                        "Type '{}' has no field '{}'",
-                                        type_name_str,
-                                        field
-                                    ))
-                                }
-                            }
-                        }
-                        _ => Err(err_type_at!(
-                            expr.h.span,
-                            "Field access '{}' not supported on type {}",
-                            field,
-                            expr_type
-                        )),
-                    }
+                // Special case: _w_lambda_name for closure dispatch
+                if field == "_w_lambda_name" {
+                    let ty = Type::Constructed(TypeName::Str("string"), vec![]);
+                    self.type_table.insert(expr.h.id, TypeScheme::Monotype(ty.clone()));
+                    return Ok(ty);
                 }
+
+                // Apply context and strip uniqueness
+                let base_type = base_type.apply(&self.context).strip_unique().clone();
+
+                // Use unified field access helper
+                let field_type = self.infer_field_access(&base_type, field, &expr.h.span)?;
+                self.type_table.insert(expr.h.id, TypeScheme::Monotype(field_type.clone()));
+                Ok(field_type)
             }
             ExprKind::If(if_expr) => {
                 // Infer condition type - should be bool
@@ -2881,6 +2718,118 @@ impl<'a> TypeChecker<'a> {
         })?;
 
         Ok((elem_var, addrspace_var, size_var))
+    }
+
+    /// Infer the type of a field access on a base type.
+    ///
+    /// Precedence:
+    /// 1. Record fields (by TypeName::Record field map)
+    /// 2. Tuple numeric indices (.0, .1, etc.)
+    /// 3. Vec swizzle (x/y/z/w) - constrains to Vec if type is unknown
+    /// 4. Known type fields via impl_source / record_field_map
+    ///
+    /// The base_ty should already be applied and uniqueness-stripped.
+    fn infer_field_access(&mut self, base_ty: &Type, field: &str, span: &Span) -> Result<Type> {
+        // 1. Record field access
+        if let Type::Constructed(TypeName::Record(fields), field_types) = base_ty {
+            if let Some(field_index) = fields.get_index(field) {
+                if field_index < field_types.len() {
+                    return Ok(field_types[field_index].clone());
+                }
+            }
+            bail_type_at!(
+                *span,
+                "Record type has no field '{}'. Available: {}",
+                field,
+                fields.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+            );
+        }
+
+        // 2. Tuple numeric index (.0, .1, etc.)
+        if let Ok(index) = field.parse::<usize>() {
+            if let Type::Constructed(TypeName::Tuple(_), elem_types) = base_ty {
+                if index < elem_types.len() {
+                    return Ok(elem_types[index].clone());
+                }
+                bail_type_at!(
+                    *span,
+                    "Tuple index {} out of bounds (tuple has {} elements)",
+                    index,
+                    elem_types.len()
+                );
+            }
+            bail_type_at!(
+                *span,
+                "Numeric field access '.{}' requires a tuple type, got {}",
+                index,
+                self.format_type(base_ty)
+            );
+        }
+
+        // 3. Vec swizzle (x/y/z/w)
+        if matches!(field, "x" | "y" | "z" | "w") {
+            // If already a Vec, extract element type
+            if let Type::Constructed(TypeName::Vec, args) = base_ty {
+                if args.len() == 2 {
+                    return Ok(args[1].clone()); // element type
+                }
+            }
+
+            // Otherwise, constrain to Vec and return element type
+            let size_var = self.context.new_variable();
+            let elem_var = self.context.new_variable();
+            let want_vec = Type::Constructed(TypeName::Vec, vec![size_var, elem_var.clone()]);
+
+            self.context.unify(base_ty, &want_vec).map_err(|_| {
+                err_type_at!(
+                    *span,
+                    "Field '{}' requires a vector type, got {}",
+                    field,
+                    self.format_type(&base_ty.apply(&self.context))
+                )
+            })?;
+
+            return Ok(elem_var.apply(&self.context));
+        }
+
+        // 4. Known type fields via impl_source / record_field_map
+        if let Type::Constructed(type_name, _) = base_ty {
+            let type_name_str = match type_name {
+                TypeName::Str(s) => s.to_string(),
+                TypeName::Float(bits) => format!("f{}", bits),
+                TypeName::UInt(bits) => format!("u{}", bits),
+                TypeName::Int(bits) => format!("i{}", bits),
+                TypeName::Vec => "vec".to_string(),
+                TypeName::Mat => "mat".to_string(),
+                TypeName::Array => "array".to_string(),
+                TypeName::Named(name) => name.clone(),
+                _ => {
+                    bail_type_at!(
+                        *span,
+                        "Type {} has no field '{}'",
+                        self.format_type(base_ty),
+                        field
+                    );
+                }
+            };
+
+            if let Some(field_type) = self.impl_source.get_field_type(&type_name_str, field) {
+                return Ok(field_type);
+            }
+            if let Some(field_type) = self.record_field_map.get(&(type_name_str.clone(), field.to_string()))
+            {
+                return Ok(field_type.clone());
+            }
+
+            bail_type_at!(*span, "Type '{}' has no field '{}'", type_name_str, field);
+        }
+
+        bail_type_at!(
+            *span,
+            "Field access '{}' not supported on type {}",
+            field,
+            self.format_type(base_ty)
+        )
     }
 
     /// Two-pass function application for better lambda inference
