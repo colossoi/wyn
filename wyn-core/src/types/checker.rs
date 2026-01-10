@@ -640,9 +640,7 @@ impl<'a> TypeChecker<'a> {
                 tuple(elem_types)
             }
             PatternKind::Typed(_, annotated_type) => {
-                // Pattern has explicit type, resolve any module type aliases
-                // Uses current_module for context (e.g., lambda params inside module functions)
-                self.resolve_type_aliases_scoped(annotated_type, self.current_module.as_deref())
+                self.normalize_annotation_type(annotated_type, self.current_module.as_deref())
             }
             PatternKind::Attributed(_, inner_pattern) => {
                 // Ignore attributes, recurse on inner pattern
@@ -717,25 +715,20 @@ impl<'a> TypeChecker<'a> {
                 }
             }
             PatternKind::Typed(inner_pattern, annotated_type) => {
-                // Resolve module type aliases in the annotation (e.g., rand.state -> f32)
-                // Uses current_module for context (e.g., lambda params inside module functions)
-                let resolved_annotation =
-                    self.resolve_type_aliases_scoped(annotated_type, self.current_module.as_deref());
-                // Substitute any UserVar/SizeVar from enclosing function's type parameters
-                let substituted_annotation = self.substitute_from_type_param_scope(&resolved_annotation);
-                // Pattern has a type annotation - unify with expected type
-                self.context.unify(&substituted_annotation, expected_type).map_err(|_| {
+                let normalized =
+                    self.normalize_annotation_type(annotated_type, self.current_module.as_deref());
+                // Unify annotation with expected type
+                self.context.unify(&normalized, expected_type).map_err(|_| {
                     err_type_at!(
                         pattern.h.span,
                         "Pattern type annotation {} doesn't match expected type {}",
-                        self.format_type(&substituted_annotation),
+                        self.format_type(&normalized),
                         self.format_type(expected_type)
                     )
                 })?;
-                // Bind the inner pattern with the substituted type
-                let result = self.bind_pattern(inner_pattern, &substituted_annotation, generalize)?;
-                // Also store type for the outer Typed pattern
-                let resolved = substituted_annotation.apply(&self.context);
+                // Bind the inner pattern
+                let result = self.bind_pattern(inner_pattern, &normalized, generalize)?;
+                let resolved = normalized.apply(&self.context);
                 self.type_table.insert(pattern.h.id, TypeScheme::Monotype(resolved));
                 Ok(result)
             }
@@ -913,6 +906,30 @@ impl<'a> TypeChecker<'a> {
         })
     }
 
+    /// Resolve type aliases and substitute type parameters from the current scope.
+    ///
+    /// This is the canonical way to normalize a type annotation (e.g., in lambda params,
+    /// let bindings, type ascriptions). It combines alias resolution with type parameter
+    /// substitution from enclosing function scopes.
+    fn normalize_annotation_type(&self, ty: &Type, module: Option<&str>) -> Type {
+        let resolved = self.resolve_type_aliases_scoped(ty, module);
+        self.substitute_from_type_param_scope(&resolved)
+    }
+
+    /// Resolve type aliases and substitute type parameters from a static bindings map.
+    ///
+    /// Used when type parameter bindings are explicitly tracked (e.g., in check_function_with_params)
+    /// rather than stored in type_param_scope.
+    fn normalize_annotation_type_static(
+        &self,
+        ty: &Type,
+        module: Option<&str>,
+        bindings: &HashMap<String, Type>,
+    ) -> Type {
+        let resolved = self.resolve_type_aliases_scoped(ty, module);
+        Self::substitute_type_params_static(&resolved, bindings)
+    }
+
     /// Allocate a fresh type variable and return its ID.
     fn fresh_var(&mut self) -> polytype::Variable {
         match self.context.new_variable() {
@@ -979,10 +996,7 @@ impl<'a> TypeChecker<'a> {
         for (i, param) in lambda.params.iter().enumerate() {
             let param_type = if let Some(annotated_type) = param.pattern_type() {
                 // Explicit annotation takes precedence
-                // First resolve type aliases, then substitute type params
-                let resolved =
-                    self.resolve_type_aliases_scoped(annotated_type, self.current_module.as_deref());
-                self.substitute_from_type_param_scope(&resolved)
+                self.normalize_annotation_type(annotated_type, self.current_module.as_deref())
             } else if let Some(ref expected_params) = expected_param_types {
                 // Use expected type from bidirectional checking
                 expected_params[i].clone()
@@ -1210,12 +1224,9 @@ impl<'a> TypeChecker<'a> {
             .iter()
             .map(|p| {
                 let ty = p.pattern_type().cloned().unwrap_or_else(|| self.context.new_variable());
-                // Resolve module type aliases (e.g., rand.state -> f32)
-                let resolved = self.resolve_type_aliases_scoped(&ty, module_name);
-                // Substitute UserVars with bound type variables
-                let substituted = Self::substitute_type_params_static(&resolved, type_param_bindings);
-                // Replace AddressUnknown and Unsized markers with type variables
-                self.prepare_array_type(&substituted)
+                let normalized =
+                    self.normalize_annotation_type_static(&ty, module_name, type_param_bindings);
+                self.prepare_array_type(&normalized)
             })
             .collect();
 
@@ -1774,13 +1785,9 @@ impl<'a> TypeChecker<'a> {
 
             // Check against declared type if provided
             if let Some(declared_type) = &decl.ty {
-                // Resolve type aliases in the declared return type (e.g., rand.state -> f32)
-                let resolved_return_type = self.resolve_type_aliases_scoped(declared_type, module_name);
-                // Substitute UserVars in the declared return type
-                let substituted_return_type =
-                    Self::substitute_type_params_static(&resolved_return_type, &type_param_bindings);
-                // Replace AddressUnknown and Unsized markers with type variables
-                let prepared_return_type = self.prepare_array_type(&substituted_return_type);
+                let normalized_return_type =
+                    self.normalize_annotation_type_static(declared_type, module_name, &type_param_bindings);
+                let prepared_return_type = self.prepare_array_type(&normalized_return_type);
 
                 // When a function has parameters, decl.ty is just the return type annotation
                 // Unify the body type with the declared return type
@@ -1984,8 +1991,6 @@ impl<'a> TypeChecker<'a> {
                 let index_type = self.infer_expression(index_expr)?;
 
                 // Unify index type with i32
-                // Per spec: array index may be "any unsigned integer type"
-                // We use i32 for now for compatibility
                 self.context.unify(&index_type, &i32()).map_err(|_| {
                     err_type_at!(
                         index_expr.h.span,
@@ -1994,27 +1999,14 @@ impl<'a> TypeChecker<'a> {
                     )
                 })?;
 
-                // Constrain array type to be Array[elem, addrspace, size] (3-arg format)
-                // This allows indexing arrays whose type is a meta-variable
-                // Strip uniqueness marker - indexing a *[n]T should work like indexing [n]T
+                // Constrain array type - strip uniqueness (indexing *[n]T works like [n]T)
                 let array_type_stripped = strip_unique(&array_type);
-                let elem_var = self.context.new_variable();
-                let addrspace_var = self.context.new_variable();
-                let size_var = self.context.new_variable();
-                let want_array = Type::Constructed(
-                    TypeName::Array,
-                    vec![elem_var.clone(), addrspace_var, size_var],
-                );
+                let (elem_var, _, _) = self.constrain_array_type(
+                    &array_type_stripped,
+                    &array_expr.h.span,
+                    "Cannot index non-array type",
+                )?;
 
-                self.context.unify(&array_type_stripped, &want_array).map_err(|_| {
-                    err_type_at!(
-                        array_expr.h.span,
-                        "Cannot index non-array type: got {}",
-                        self.format_type(&array_type.apply(&self.context))
-                    )
-                })?;
-
-                // Return the element type, resolved through the context
                 Ok(elem_var.apply(&self.context))
             }
             ExprKind::ArrayWith { array, index, value } => {
@@ -2033,23 +2025,13 @@ impl<'a> TypeChecker<'a> {
                     )
                 })?;
 
-                // Constrain array type to be Array[elem, addrspace, size]
+                // Constrain array type - strip uniqueness
                 let array_type_stripped = strip_unique(&array_type);
-                let elem_var = self.context.new_variable();
-                let addrspace_var = self.context.new_variable();
-                let size_var = self.context.new_variable();
-                let want_array = Type::Constructed(
-                    TypeName::Array,
-                    vec![elem_var.clone(), addrspace_var, size_var],
-                );
-
-                self.context.unify(&array_type_stripped, &want_array).map_err(|_| {
-                    err_type_at!(
-                        array.h.span,
-                        "Cannot update non-array type: got {}",
-                        self.format_type(&array_type.apply(&self.context))
-                    )
-                })?;
+                let (elem_var, _, _) = self.constrain_array_type(
+                    &array_type_stripped,
+                    &array.h.span,
+                    "Cannot update non-array type",
+                )?;
 
                 // Unify value type with element type
                 self.context.unify(&value_type, &elem_var).map_err(|_| {
@@ -2125,13 +2107,10 @@ impl<'a> TypeChecker<'a> {
                 // Infer type of the value expression
                 let value_type = self.infer_expression(&let_in.value)?;
 
-                // Resolve type annotation if present
-                let resolved_annotation = let_in.ty.as_ref().map(|ty| {
-                    let resolved = self.resolve_type_aliases_scoped(ty, self.current_module.as_deref());
-                    self.substitute_from_type_param_scope(&resolved)
-                });
-
-                // Check type annotation if present
+                let resolved_annotation = let_in
+                    .ty
+                    .as_ref()
+                    .map(|ty| self.normalize_annotation_type(ty, self.current_module.as_deref()));
                 if let Some(declared_type) = &resolved_annotation {
                     self.context.unify(&value_type, declared_type).map_err(|_| {
                         err_type_at!(
@@ -2551,21 +2530,8 @@ impl<'a> TypeChecker<'a> {
                     LoopForm::ForIn(pat, arr) => {
                         // Array must be an array type: Array[elem, addrspace, size]
                         let arr_type = self.infer_expression(arr)?;
-                        let elem_type = self.context.new_variable();
-                        let addrspace_type = self.context.new_variable();
-                        let size_type = self.context.new_variable();
-                        let expected_arr = Type::Constructed(
-                            TypeName::Array,
-                            vec![elem_type.clone(), addrspace_type, size_type],
-                        );
-
-                        self.context.unify(&arr_type, &expected_arr).map_err(|_| {
-                            err_type_at!(
-                                arr.h.span,
-                                "for-in requires an array, got {}",
-                                self.format_type(&arr_type)
-                            )
-                        })?;
+                        let (elem_type, _, _) =
+                            self.constrain_array_type(&arr_type, &arr.h.span, "for-in requires an array")?;
 
                         // Bind pattern to element type
                         self.bind_pattern(pat, &elem_type, false)?;
@@ -2674,21 +2640,11 @@ impl<'a> TypeChecker<'a> {
                 let array_type_stripped = strip_unique(&array_type);
 
                 // Constrain array to be Array[elem, addrspace, size]
-                let elem_var = self.context.new_variable();
-                let addrspace_var = self.context.new_variable();
-                let size_var = self.context.new_variable();
-                let want_array = Type::Constructed(
-                    TypeName::Array,
-                    vec![elem_var.clone(), addrspace_var.clone(), size_var],
-                );
-
-                self.context.unify(&array_type_stripped, &want_array).map_err(|_| {
-                    err_type_at!(
-                        slice.array.h.span,
-                        "Cannot slice non-array type: got {}",
-                        self.format_type(&array_type.apply(&self.context))
-                    )
-                })?;
+                let (elem_var, addrspace_var, _) = self.constrain_array_type(
+                    &array_type_stripped,
+                    &slice.array.h.span,
+                    "Cannot slice non-array type",
+                )?;
 
                 // Extract integer literal value from start (default 0)
                 let start_val: Option<i32> = match &slice.start {
@@ -2751,10 +2707,10 @@ impl<'a> TypeChecker<'a> {
             ExprKind::TypeAscription(expr, ascribed_ty) => {
                 // Type ascription: check the inner expression against the ascribed type
                 // This allows integer literals to take on the ascribed type (e.g., 42u32)
-                let resolved = self.resolve_type_aliases_scoped(ascribed_ty, self.current_module.as_deref());
-                let substituted = self.substitute_from_type_param_scope(&resolved);
-                self.check_expression(expr, &substituted)?;
-                Ok(substituted)
+                let normalized =
+                    self.normalize_annotation_type(ascribed_ty, self.current_module.as_deref());
+                self.check_expression(expr, &normalized)?;
+                Ok(normalized)
             }
 
             ExprKind::TypeCoercion(_, _) => {
@@ -2892,6 +2848,39 @@ impl<'a> TypeChecker<'a> {
         })?;
 
         Ok(result_var)
+    }
+
+    /// Constrain a type to be an Array and return its components.
+    ///
+    /// Creates fresh type variables for elem, addrspace, and size, then unifies
+    /// the given type with Array[elem, addrspace, size]. Returns the three
+    /// component type variables.
+    ///
+    /// Caller should strip uniqueness before calling if needed.
+    fn constrain_array_type(
+        &mut self,
+        array_ty: &Type,
+        span: &Span,
+        error_context: &str,
+    ) -> Result<(Type, Type, Type)> {
+        let elem_var = self.context.new_variable();
+        let addrspace_var = self.context.new_variable();
+        let size_var = self.context.new_variable();
+        let want_array = Type::Constructed(
+            TypeName::Array,
+            vec![elem_var.clone(), addrspace_var.clone(), size_var.clone()],
+        );
+
+        self.context.unify(array_ty, &want_array).map_err(|_| {
+            err_type_at!(
+                *span,
+                "{}: got {}",
+                error_context,
+                self.format_type(&array_ty.apply(&self.context))
+            )
+        })?;
+
+        Ok((elem_var, addrspace_var, size_var))
     }
 
     /// Two-pass function application for better lambda inference
