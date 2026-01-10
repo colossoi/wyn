@@ -14,7 +14,7 @@
 
 use crate::IdArena;
 use crate::ast::{NodeId, Span, TypeName};
-use crate::types::TypeScheme;
+use crate::types::{self, TypeScheme};
 use polytype::Type;
 
 pub mod binding_allocator;
@@ -85,23 +85,10 @@ pub enum LocalKind {
     LoopVar,
 }
 
-/// Memory binding for variables that live in non-value memory spaces.
-///
-/// This is used to track which variables are backed by storage buffers
-/// or other memory spaces, allowing the lowering pass to generate
-/// appropriate access patterns (e.g., OpAccessChain + OpLoad for storage
-/// vs OpCompositeExtract for value arrays).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum MemBinding {
-    /// GPU storage buffer at a specific descriptor set and binding.
-    Storage {
-        set: u32,
-        binding: u32,
-    },
-    // Future: Shared { size: u32 }, Private, etc.
-}
-
 /// Declaration of a local variable.
+///
+/// Address space information is now encoded in the type itself (e.g., Slice[elem, Storage])
+/// rather than as a separate MemBinding field.
 #[derive(Debug, Clone)]
 pub struct LocalDecl {
     /// Variable name (for debugging/display).
@@ -112,9 +99,6 @@ pub struct LocalDecl {
     pub ty: Type<TypeName>,
     /// What kind of local this is.
     pub kind: LocalKind,
-    /// Optional memory binding for storage-backed variables.
-    /// `None` means this is a value/SSA variable (the default).
-    pub mem: Option<MemBinding>,
 }
 
 // =============================================================================
@@ -222,12 +206,27 @@ pub enum Expr {
     },
 
     // --- Special ---
-    /// Materialize a value into a variable for indexing.
+    /// Materialize a value into a pointer for indexing.
+    /// Creates a Pointer[T, Function] from a value of type T.
+    /// Allocates a function-local variable, stores the value, returns pointer.
     Materialize(ExprId),
     /// Expression with attributes attached.
     Attributed {
         attributes: Vec<Attribute>,
         expr: ExprId,
+    },
+
+    // --- Memory operations ---
+    /// Load a value from a pointer.
+    /// If ptr has type Pointer[T, _], result has type T.
+    Load {
+        ptr: ExprId,
+    },
+    /// Store a value to a pointer.
+    /// Result type is Unit.
+    Store {
+        ptr: ExprId,
+        value: ExprId,
     },
 
     // --- Slices ---
@@ -241,32 +240,32 @@ pub enum Expr {
         len: ExprId,
     },
 
-    /// Borrowed slice referencing part of another array (zero-copy view).
-    /// Produced by arr[i:j], take, drop.
-    /// Type: Slice(cap, elem) where cap is the source array size.
-    BorrowedSlice {
-        /// The source array being sliced
+    /// Inline slice referencing part of a local value (zero-copy view).
+    /// Produced by arr[i:j], take, drop on local arrays.
+    /// Base is an ExprId - the backing store is a value in the current scope.
+    /// Type: Slice[Size(cap), elem] where cap is the source array size.
+    InlineSlice {
+        // InlineSlice {
+        /// The source array being sliced (a local value)
         base: ExprId,
         /// Start offset: i32
         offset: ExprId,
         /// Dynamic length: i32
         len: ExprId,
     },
-    // TODO: StorageSlice for compute shaders - commented out until needed in MIR
-    // /// Storage buffer slice for compute shaders.
-    // /// References a region of a storage buffer by binding + offset + length.
-    // /// Used by thunks to pass chunks of storage buffer to helper functions.
-    // /// Type: Slice(cap, elem) where cap is the chunk size.
-    // StorageSlice {
-    //     /// Descriptor set for the storage buffer
-    //     set: u32,
-    //     /// Binding number for the storage buffer
-    //     binding: u32,
-    //     /// Start offset into the buffer: u32
-    //     offset: ExprId,
-    //     /// Number of elements in this slice: u32
-    //     len: ExprId,
-    // },
+
+    /// Bound slice referencing part of an external resource (storage buffer, uniform, etc).
+    /// The backing store is identified by name, not an ExprId.
+    /// Accessed via OpAccessChain into module-level variables in SPIR-V.
+    /// Type: Slice[elem, Storage] (address space in type).
+    BoundSlice {
+        /// Name of the bound resource (e.g., "factors", "data")
+        name: String,
+        /// Start offset into the buffer: i32
+        offset: ExprId,
+        /// Number of elements in this slice: i32
+        len: ExprId,
+    },
 }
 
 // =============================================================================
@@ -318,6 +317,9 @@ impl Body {
 
     /// Allocate a new expression with its metadata.
     pub fn alloc_expr(&mut self, expr: Expr, ty: Type<TypeName>, span: Span, node_id: NodeId) -> ExprId {
+        // Debug assertion: expression types should never be address space markers
+        types::debug_assert_top_level_type(&ty, "Body::alloc_expr");
+
         let id = self.expr_ids.next_id();
         self.exprs.push(expr);
         self.types.push(ty);
@@ -411,7 +413,6 @@ impl Body {
             span,
             ty,
             kind: LocalKind::Let,
-            mem: None,
         });
 
         let original = std::mem::replace(self.get_expr_mut(expr_id), Expr::Local(local_id));

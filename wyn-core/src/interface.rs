@@ -76,9 +76,10 @@ pub fn extract_interface(program: &Program) -> ShaderInterface {
                 let (model_str, workgroup_size) = match execution_model {
                     ExecutionModel::Vertex => ("vertex".to_string(), None),
                     ExecutionModel::Fragment => ("fragment".to_string(), None),
-                    ExecutionModel::Compute { local_size } => {
-                        ("compute".to_string(), Some([local_size.0, local_size.1, local_size.2]))
-                    }
+                    ExecutionModel::Compute { local_size } => (
+                        "compute".to_string(),
+                        Some([local_size.0, local_size.1, local_size.2]),
+                    ),
                 };
 
                 entry_points.push(EntryPointInfo {
@@ -191,8 +192,10 @@ fn format_type(ty: &polytype::Type<crate::ast::TypeName>) -> String {
             }
         }
         Type::Constructed(TypeName::Mat, args) if args.len() >= 3 => {
-            if let (Type::Constructed(TypeName::Size(cols), _), Type::Constructed(TypeName::Size(rows), _)) =
-                (&args[0], &args[1])
+            if let (
+                Type::Constructed(TypeName::Size(cols), _),
+                Type::Constructed(TypeName::Size(rows), _),
+            ) = (&args[0], &args[1])
             {
                 let elem = format_type(&args[2]);
                 format!("mat{}x{}{}", cols, rows, elem)
@@ -200,9 +203,10 @@ fn format_type(ty: &polytype::Type<crate::ast::TypeName>) -> String {
                 format!("{:?}", ty)
             }
         }
-        Type::Constructed(TypeName::Array, args) if args.len() >= 2 => {
-            let elem = format_type(&args[1]);
-            match &args[0] {
+        Type::Constructed(TypeName::Array, args) => {
+            assert!(args.len() == 3);
+            let elem = format_type(&args[0]);
+            match &args[2] {
                 Type::Constructed(TypeName::Size(n), _) => format!("[{}]{}", n, elem),
                 Type::Constructed(TypeName::Unsized, _) => format!("[]{}", elem),
                 _ => format!("[?]{}", elem),

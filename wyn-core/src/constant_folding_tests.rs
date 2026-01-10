@@ -55,7 +55,6 @@ impl TestBodyBuilder {
             span: test_span(),
             ty,
             kind: LocalKind::Let,
-            mem: None,
         })
     }
 

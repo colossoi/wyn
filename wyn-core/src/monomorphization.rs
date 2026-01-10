@@ -14,7 +14,7 @@
 use crate::IdArena;
 use crate::ast::TypeName;
 use crate::error::Result;
-use crate::mir::{Body, Def, Expr, ExprId, LocalDecl, LocalId, MemBinding, Program};
+use crate::mir::{Body, Def, Expr, ExprId, LocalDecl, LocalId, Program};
 use crate::mir::{LambdaId, LambdaInfo};
 use crate::types::TypeScheme;
 use polytype::Type;
@@ -60,10 +60,8 @@ struct SubstKey(Vec<(usize, TypeKey)>);
 /// A function may need specialization due to type variables, memory bindings, or both.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct SpecKey {
-    /// Type substitution (may be empty for mem-only specialization)
+    /// Type substitution for specialization
     type_subst: SubstKey,
-    /// Memory binding for each parameter (None = value/SSA)
-    mem_bindings: Vec<Option<MemBinding>>,
 }
 
 /// A simplified representation of types for use as hash keys
@@ -95,16 +93,15 @@ impl SubstKey {
 }
 
 impl SpecKey {
-    fn new(subst: &Substitution, mem_bindings: Vec<Option<MemBinding>>) -> Self {
+    fn new(subst: &Substitution) -> Self {
         SpecKey {
             type_subst: SubstKey::from_subst(subst),
-            mem_bindings,
         }
     }
 
     /// Returns true if this represents a non-trivial specialization
     fn needs_specialization(&self) -> bool {
-        !self.type_subst.is_empty() || self.mem_bindings.iter().any(|m| m.is_some())
+        !self.type_subst.is_empty()
     }
 }
 
@@ -165,6 +162,9 @@ impl TypeKey {
                     TypeName::Unit => "unit".to_string(),
                     TypeName::Tuple(n) => format!("tuple{}", n),
                     TypeName::Pointer => "ptr".to_string(),
+                    TypeName::AddressFunction => "function".to_string(),
+                    TypeName::AddressStorage => "storage".to_string(),
+                    TypeName::AddressUnknown => "address_unknown".to_string(),
                     _ => unreachable!("Should have been handled above: {:?}", name),
                 };
                 TypeKey::Constructed(name_str, args.iter().map(TypeKey::from_type).collect())
@@ -262,23 +262,14 @@ fn split_function_type(ty: &Type<TypeName>) -> (Vec<Type<TypeName>>, Type<TypeNa
 
 impl Monomorphizer {
     fn new(program: Program) -> Self {
-        // First pass: collect storage buffer declarations
-        let storage_buffers: HashMap<String, (u32, u32)> = program
-            .defs
-            .iter()
-            .filter_map(|def| match def {
-                Def::Storage {
-                    name, set, binding, ..
-                } => Some((name.clone(), (*set, *binding))),
-                _ => None,
-            })
-            .collect();
+        // TODO(Phase 6): Storage buffer declarations are now tracked via types.
+        // The old mem binding approach is being phased out.
 
-        // Second pass: build function map and collect entry points with mem bindings
+        // Build function map and collect entry points
         let mut poly_functions = HashMap::new();
         let mut entry_points = Vec::new();
 
-        for mut def in program.defs {
+        for def in program.defs {
             let name = match &def {
                 Def::Function { name, .. } => name.clone(),
                 Def::Constant { name, .. } => name.clone(),
@@ -287,13 +278,10 @@ impl Monomorphizer {
                 Def::EntryPoint { name, .. } => name.clone(),
             };
 
-            // For entry points, set mem bindings on storage-backed parameters
-            if let Def::EntryPoint { inputs, body, .. } = &mut def {
-                for input in inputs {
-                    if let Some(&(set, binding)) = storage_buffers.get(&input.name) {
-                        body.get_local_mut(input.local).mem = Some(MemBinding::Storage { set, binding });
-                    }
-                }
+            // For entry points, add to worklist
+            // TODO(Phase 6): Address space is now tracked in types (Slice[elem, Storage/Function])
+            // rather than via mem bindings on LocalDecl
+            if let Def::EntryPoint { .. } = &def {
                 entry_points.push(WorkItem {
                     name: name.clone(),
                     def: def.clone(),
@@ -454,18 +442,6 @@ impl Monomorphizer {
                 // Map arguments
                 let new_args: Vec<_> = args.iter().map(|a| expr_map[a]).collect();
 
-                // Extract mem bindings from arguments
-                let mem_bindings: Vec<Option<MemBinding>> = args
-                    .iter()
-                    .map(|&arg_id| {
-                        if let Expr::Local(local_id) = body.get_expr(arg_id) {
-                            body.get_local(*local_id).mem
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-
                 // Check if this is a call to a user-defined function
                 if let Some(poly_def) = self.poly_functions.get(func).cloned() {
                     // Check if this is a trivial wrapper (body just forwards to another call)
@@ -476,7 +452,7 @@ impl Monomorphizer {
                             let arg_types: Vec<_> =
                                 args.iter().map(|a| body.get_type(*a).clone()).collect();
                             let subst = self.infer_substitution(&inner_def, &arg_types)?;
-                            let spec_key = SpecKey::new(&subst, mem_bindings.clone());
+                            let spec_key = SpecKey::new(&subst);
 
                             if spec_key.needs_specialization() {
                                 // Specialize the inner function directly
@@ -505,7 +481,7 @@ impl Monomorphizer {
                     // Get argument types to infer substitution
                     let arg_types: Vec<_> = args.iter().map(|a| body.get_type(*a).clone()).collect();
                     let subst = self.infer_substitution(&poly_def, &arg_types)?;
-                    let spec_key = SpecKey::new(&subst, mem_bindings);
+                    let spec_key = SpecKey::new(&subst);
 
                     if spec_key.needs_specialization() {
                         // This call needs specialization (type vars and/or mem bindings)
@@ -607,19 +583,6 @@ impl Monomorphizer {
                 // Map each capture to the new body
                 let new_captures: Vec<_> = captures.iter().map(|c| expr_map[c]).collect();
 
-                // Extract mem bindings from captures for lambda specialization
-                // If a capture is a Local with storage backing, the lambda param should get it too
-                let capture_mem_bindings: Vec<Option<MemBinding>> = captures
-                    .iter()
-                    .map(|&cap_id| {
-                        if let Expr::Local(local_id) = body.get_expr(cap_id) {
-                            body.get_local(*local_id).mem
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-
                 // Try to specialize the lambda based on the closure's concrete type
                 if let Some(def) = self.poly_functions.get(lambda_name).cloned() {
                     // expr_type is the function type of this closure (Arrow type)
@@ -632,13 +595,9 @@ impl Monomorphizer {
                     // has ((A,B),C) -> (A,B,C) where param uses different vars than return)
                     let subst = self.infer_lambda_substitution(&def, &concrete_params, &concrete_ret)?;
 
-                    // Lambda params: capture params first, then regular params
-                    // capture_mem_bindings covers capture params, concrete_params covers regular params
-                    let mut lambda_mem_bindings = capture_mem_bindings.clone();
-                    lambda_mem_bindings.extend(vec![None; concrete_params.len()]);
-                    let spec_key = SpecKey::new(&subst, lambda_mem_bindings);
+                    let spec_key = SpecKey::new(&subst);
 
-                    if !subst.is_empty() || capture_mem_bindings.iter().any(|m| m.is_some()) {
+                    if !subst.is_empty() {
                         // Specialize the lambda with concrete types and/or mem bindings
                         let specialized_name =
                             self.get_or_create_specialization(lambda_name, &spec_key, &def)?;
@@ -703,10 +662,22 @@ impl Monomorphizer {
                 data: expr_map[data],
                 len: expr_map[len],
             }),
-            Expr::BorrowedSlice { base, offset, len } => Ok(Expr::BorrowedSlice {
+            Expr::InlineSlice { base, offset, len } => Ok(Expr::InlineSlice {
                 base: expr_map[base],
                 offset: expr_map[offset],
                 len: expr_map[len],
+            }),
+            Expr::BoundSlice { name, offset, len } => Ok(Expr::BoundSlice {
+                name: name.clone(),
+                offset: expr_map[offset],
+                len: expr_map[len],
+            }),
+
+            // Memory operations - map subexpressions
+            Expr::Load { ptr } => Ok(Expr::Load { ptr: expr_map[ptr] }),
+            Expr::Store { ptr, value } => Ok(Expr::Store {
+                ptr: expr_map[ptr],
+                value: expr_map[value],
             }),
         }
     }
@@ -828,26 +799,16 @@ impl Monomorphizer {
         // Build substitution from type_subst
         let subst = spec_key.type_subst.to_subst();
 
-        // Create new specialized name including both type and mem info
+        // Create new specialized name from type substitution
         let type_suffix = format_subst(&subst);
-        let mem_suffix = format_mem_bindings(&spec_key.mem_bindings);
-        let specialized_name = if type_suffix.is_empty() && mem_suffix.is_empty() {
+        let specialized_name = if type_suffix.is_empty() {
             func_name.to_string()
-        } else if type_suffix.is_empty() {
-            format!("{}${}", func_name, mem_suffix)
-        } else if mem_suffix.is_empty() {
-            format!("{}${}", func_name, type_suffix)
         } else {
-            format!("{}${}${}", func_name, type_suffix, mem_suffix)
+            format!("{}${}", func_name, type_suffix)
         };
 
-        // Clone and specialize the function with both type subst and mem bindings
-        let specialized_def = specialize_def(
-            poly_def.clone(),
-            &subst,
-            &spec_key.mem_bindings,
-            &specialized_name,
-        )?;
+        // Clone and specialize the function
+        let specialized_def = specialize_def(poly_def.clone(), &subst, &specialized_name)?;
 
         // Add to worklist to process its body
         self.worklist.push_back(WorkItem {
@@ -977,13 +938,8 @@ fn collect_body_var_mappings(
     }
 }
 
-/// Create a specialized version of a function by applying substitution and mem bindings
-fn specialize_def(
-    def: Def,
-    subst: &Substitution,
-    mem_bindings: &[Option<MemBinding>],
-    new_name: &str,
-) -> Result<Def> {
+/// Create a specialized version of a function by applying substitution
+fn specialize_def(def: Def, subst: &Substitution, new_name: &str) -> Result<Def> {
     use crate::mir::{EntryInput, EntryOutput};
 
     match def {
@@ -1116,14 +1072,7 @@ fn specialize_def(
             };
 
             // Apply the extended substitution to the body
-            let mut body = apply_subst_body_with_context(body, &full_subst, new_name);
-
-            // Apply mem bindings to parameters
-            for (i, &param_id) in params.iter().enumerate() {
-                if let Some(mem) = mem_bindings.get(i).copied().flatten() {
-                    body.get_local_mut(param_id).mem = Some(mem);
-                }
-            }
+            let body = apply_subst_body_with_context(body, &full_subst, new_name);
 
             Ok(Def::Function {
                 id,
@@ -1307,7 +1256,6 @@ fn apply_subst_body_with_context(old_body: Body, subst: &Substitution, func_name
             span: local.span,
             ty: apply_subst_with_context(&local.ty, subst, &context),
             kind: local.kind,
-            mem: local.mem,
         });
     }
 
@@ -1338,31 +1286,15 @@ fn format_type_compact(ty: &Type<TypeName>) -> String {
         Type::Variable(id) => format!("v{}", id),
         Type::Constructed(TypeName::Size(n), _) => format!("n{}", n),
         Type::Constructed(TypeName::Str(s), args) if args.is_empty() => s.to_string(),
-        Type::Constructed(TypeName::Array, args) if args.len() == 2 => {
+        Type::Constructed(TypeName::Array, args) => {
+            assert!(args.len() == 3);
             format!(
-                "arr{}{}",
+                "arr{}_{}{}",
                 format_type_compact(&args[0]),
-                format_type_compact(&args[1])
+                format_type_compact(&args[1]),
+                format_type_compact(&args[2])
             )
         }
         _ => "ty".to_string(),
     }
-}
-
-/// Format mem bindings for use in specialized function names
-fn format_mem_bindings(bindings: &[Option<MemBinding>]) -> String {
-    // If all bindings are None, no suffix needed
-    if bindings.iter().all(|m| m.is_none()) {
-        return String::new();
-    }
-
-    let parts: Vec<_> = bindings
-        .iter()
-        .map(|m| match m {
-            Some(MemBinding::Storage { set, binding }) => format!("s{}b{}", set, binding),
-            None => "_".to_string(),
-        })
-        .collect();
-
-    format!("mem_{}", parts.join("_"))
 }

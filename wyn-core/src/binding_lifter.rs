@@ -380,15 +380,50 @@ impl BindingLifter {
                 )
             }
 
-            Expr::BorrowedSlice { base, offset, len } => {
+            Expr::InlineSlice { base, offset, len } => {
                 let new_base = self.expr_map[base];
                 let new_offset = self.expr_map[offset];
                 let new_len = self.expr_map[len];
                 new_body.alloc_expr(
-                    Expr::BorrowedSlice {
+                    Expr::InlineSlice {
                         base: new_base,
                         offset: new_offset,
                         len: new_len,
+                    },
+                    ty.clone(),
+                    span,
+                    node_id,
+                )
+            }
+
+            Expr::BoundSlice { name, offset, len } => {
+                let new_offset = self.expr_map[offset];
+                let new_len = self.expr_map[len];
+                new_body.alloc_expr(
+                    Expr::BoundSlice {
+                        name: name.clone(),
+                        offset: new_offset,
+                        len: new_len,
+                    },
+                    ty.clone(),
+                    span,
+                    node_id,
+                )
+            }
+
+            // Memory operations - map subexpressions
+            Expr::Load { ptr } => {
+                let new_ptr = self.expr_map[ptr];
+                new_body.alloc_expr(Expr::Load { ptr: new_ptr }, ty.clone(), span, node_id)
+            }
+
+            Expr::Store { ptr, value } => {
+                let new_ptr = self.expr_map[ptr];
+                let new_value = self.expr_map[value];
+                new_body.alloc_expr(
+                    Expr::Store {
+                        ptr: new_ptr,
+                        value: new_value,
                     },
                     ty.clone(),
                     span,
@@ -705,10 +740,25 @@ fn collect_free_locals_inner(
             collect_free_locals_inner(body, *len, bound, free);
         }
 
-        Expr::BorrowedSlice { base, offset, len } => {
+        Expr::InlineSlice { base, offset, len } => {
             collect_free_locals_inner(body, *base, bound, free);
             collect_free_locals_inner(body, *offset, bound, free);
             collect_free_locals_inner(body, *len, bound, free);
+        }
+
+        Expr::BoundSlice { offset, len, .. } => {
+            // name is a String, not an ExprId
+            collect_free_locals_inner(body, *offset, bound, free);
+            collect_free_locals_inner(body, *len, bound, free);
+        }
+
+        Expr::Load { ptr } => {
+            collect_free_locals_inner(body, *ptr, bound, free);
+        }
+
+        Expr::Store { ptr, value } => {
+            collect_free_locals_inner(body, *ptr, bound, free);
+            collect_free_locals_inner(body, *value, bound, free);
         }
 
         // Leaf nodes - no locals to collect

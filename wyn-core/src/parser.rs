@@ -154,12 +154,9 @@ impl<'a> Parser<'a> {
         trace!("parse_decl({}): next token = {:?}", keyword, self.peek());
 
         // Check for special attributes that require specific declaration types
-        let has_entry_attr = attributes.iter().any(|attr| {
-            matches!(
-                attr,
-                Attribute::Vertex | Attribute::Fragment | Attribute::Compute
-            )
-        });
+        let has_entry_attr = attributes
+            .iter()
+            .any(|attr| matches!(attr, Attribute::Vertex | Attribute::Fragment | Attribute::Compute));
         let uniform_attr = attributes.iter().find_map(|attr| {
             if let Attribute::Uniform { set, binding } = attr { Some((*set, *binding)) } else { None }
         });
@@ -318,12 +315,7 @@ impl<'a> Parser<'a> {
         // Find the entry type attribute
         let entry_type = attributes
             .iter()
-            .find(|attr| {
-                matches!(
-                    attr,
-                    Attribute::Vertex | Attribute::Fragment | Attribute::Compute
-                )
-            })
+            .find(|attr| matches!(attr, Attribute::Vertex | Attribute::Fragment | Attribute::Compute))
             .ok_or_else(|| {
                 err_parse!(
                     "Entry declarations require #[vertex], #[fragment], or #[compute(...)] attribute"
@@ -387,7 +379,7 @@ impl<'a> Parser<'a> {
     /// Only allows `id: type` or `#[attr] id: type`, not general patterns.
     fn parse_entry_params(&mut self) -> Result<Vec<Pattern>> {
         trace!("parse_entry_params: next token = {:?}", self.peek());
-        let start_span = self.current_span();
+        let _start_span = self.current_span();
         self.expect(Token::LeftParen)?;
         let mut params = Vec::new();
 
@@ -880,26 +872,44 @@ impl<'a> Parser<'a> {
                     self.advance();
 
                     if self.check(&Token::RightBracket) {
-                        // Empty brackets []
+                        // Empty brackets [] - unsized array with unknown address space
+                        // Array[elem, AddressUnknown, Unsized]
                         self.advance();
                         base = Type::Constructed(
                             TypeName::Array,
-                            vec![Type::Constructed(TypeName::Unsized, vec![]), base],
+                            vec![
+                                base,
+                                Type::Constructed(TypeName::AddressUnknown, vec![]),
+                                Type::Constructed(TypeName::Unsized, vec![]),
+                            ],
                         );
                     } else if let Some(Token::Identifier(name)) = self.peek() {
                         // Size variable [n]
                         let size_var = name.clone();
                         self.advance();
                         self.expect(Token::RightBracket)?;
-                        base = Type::Constructed(TypeName::Array, vec![types::size_var(size_var), base]);
+                        // Array[elem, AddressUnknown, SizeVar(n)]
+                        base = Type::Constructed(
+                            TypeName::Array,
+                            vec![
+                                base,
+                                Type::Constructed(TypeName::AddressUnknown, vec![]),
+                                types::size_var(size_var),
+                            ],
+                        );
                     } else if let Some(Token::IntLiteral(n)) = self.peek() {
                         // Size literal [3]
                         let size = *n as usize;
                         self.advance();
                         self.expect(Token::RightBracket)?;
+                        // Array[elem, AddressUnknown, Size(n)]
                         base = Type::Constructed(
                             TypeName::Array,
-                            vec![Type::Constructed(TypeName::Size(size), vec![]), base],
+                            vec![
+                                base,
+                                Type::Constructed(TypeName::AddressUnknown, vec![]),
+                                Type::Constructed(TypeName::Size(size), vec![]),
+                            ],
                         );
                     } else {
                         bail_parse!("Expected size in array type application");
@@ -965,13 +975,17 @@ impl<'a> Parser<'a> {
         if self.check(&Token::LeftBracket) || self.check(&Token::LeftBracketSpaced) {
             self.advance(); // consume '['
 
-            // Check for empty brackets []
+            // Check for empty brackets [] - unsized array with unknown address space
             if self.check(&Token::RightBracket) {
                 self.advance();
                 let elem_type = self.parse_array_or_base_type()?;
                 return Ok(Type::Constructed(
                     TypeName::Array,
-                    vec![Type::Constructed(TypeName::Unsized, vec![]), elem_type],
+                    vec![
+                        elem_type,
+                        Type::Constructed(TypeName::AddressUnknown, vec![]),
+                        Type::Constructed(TypeName::Unsized, vec![]),
+                    ],
                 ));
             }
 
@@ -988,9 +1002,14 @@ impl<'a> Parser<'a> {
                 self.advance();
                 self.expect(Token::RightBracket)?;
                 let elem_type = self.parse_array_or_base_type()?;
+                // Array[elem, AddressUnknown, SizeVar(n)]
                 Ok(Type::Constructed(
                     TypeName::Array,
-                    vec![types::size_var(size_var), elem_type],
+                    vec![
+                        elem_type,
+                        Type::Constructed(TypeName::AddressUnknown, vec![]),
+                        types::size_var(size_var),
+                    ],
                 ))
             } else {
                 Err(err_parse!("Expected size literal or variable in array type"))

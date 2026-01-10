@@ -163,20 +163,19 @@ pub fn detect_simple_compute_map(def: &Def) -> Option<SimpleComputeMap> {
 
 /// Check if an input is a slice/array type suitable for compute shaders and extract its info.
 fn analyze_input_slice(input: &EntryInput) -> Option<InputSliceInfo> {
-    // Accept both:
-    // 1. Array(Unsized, elem) - unsized array like []f32
-    // 2. Slice(cap, elem) - actual slice type
+    // Array[elem, addrspace, size] - check if size is Unsized or a type variable
     let element_type = match &input.ty {
-        Type::Constructed(TypeName::Array, args) if args.len() == 2 => {
-            // Array(size, elem) - check if size is Unsized
-            match &args[0] {
-                Type::Constructed(TypeName::Unsized, _) => args[1].clone(),
-                _ => return None, // Fixed-size arrays not supported for compute
+        Type::Constructed(TypeName::Array, args) => {
+            assert!(args.len() == 3);
+            // Array[elem, addrspace, size] - check if size is dynamically determined
+            match &args[2] {
+                // Explicitly unsized
+                Type::Constructed(TypeName::Unsized, _) => args[0].clone(),
+                // Type variable means size is runtime-determined (polymorphic size)
+                Type::Variable(_) => args[0].clone(),
+                // Fixed-size arrays not supported for compute
+                _ => return None,
             }
-        }
-        Type::Constructed(TypeName::Slice, args) if args.len() == 2 => {
-            // Slice(cap, elem) - we want the element type (second arg)
-            args[1].clone()
         }
         _ => return None,
     };
@@ -213,7 +212,7 @@ fn find_single_map_at_root(body: &Body) -> Option<(ExprId, ExprId, ExprId)> {
                 current = *inner;
             }
             Expr::Call { func, args }
-                if func == "_w_intrinsic_map" || func == "_w_intrinsic_inplace_map" =>
+                if func == "_w_intrinsic_map" || func == "_w_intrinsic_inplace_map" || func == "map" =>
             {
                 // Found the map! Should have 2 args: closure, array
                 if args.len() == 2 {

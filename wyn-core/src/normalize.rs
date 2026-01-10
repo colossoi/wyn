@@ -511,7 +511,7 @@ impl Normalizer {
                 self.wrap_bindings(body, slice_id, ty, span, node_id, vec![len_binding, data_binding])
             }
 
-            Expr::BorrowedSlice { base, offset, len } => {
+            Expr::InlineSlice { base, offset, len } => {
                 let new_base = self.expr_map[base];
                 let new_offset = self.expr_map[offset];
                 let new_len = self.expr_map[len];
@@ -521,7 +521,7 @@ impl Normalizer {
                 let (atom_len, len_binding) = self.atomize(body, new_len, node_id);
 
                 let slice_id = body.alloc_expr(
-                    Expr::BorrowedSlice {
+                    Expr::InlineSlice {
                         base: atom_base,
                         offset: atom_offset,
                         len: atom_len,
@@ -538,6 +538,70 @@ impl Normalizer {
                     span,
                     node_id,
                     vec![len_binding, offset_binding, base_binding],
+                )
+            }
+
+            Expr::BoundSlice { name, offset, len } => {
+                let new_offset = self.expr_map[offset];
+                let new_len = self.expr_map[len];
+
+                let (atom_offset, offset_binding) = self.atomize(body, new_offset, node_id);
+                let (atom_len, len_binding) = self.atomize(body, new_len, node_id);
+
+                let slice_id = body.alloc_expr(
+                    Expr::BoundSlice {
+                        name: name.clone(),
+                        offset: atom_offset,
+                        len: atom_len,
+                    },
+                    ty.clone(),
+                    span,
+                    node_id,
+                );
+
+                self.wrap_bindings(
+                    body,
+                    slice_id,
+                    ty,
+                    span,
+                    node_id,
+                    vec![len_binding, offset_binding],
+                )
+            }
+
+            // Memory operations - atomize subexpressions
+            Expr::Load { ptr } => {
+                let new_ptr = self.expr_map[ptr];
+                let (atom_ptr, ptr_binding) = self.atomize(body, new_ptr, node_id);
+
+                let load_id = body.alloc_expr(Expr::Load { ptr: atom_ptr }, ty.clone(), span, node_id);
+                self.wrap_bindings(body, load_id, ty, span, node_id, vec![ptr_binding])
+            }
+
+            Expr::Store { ptr, value } => {
+                let new_ptr = self.expr_map[ptr];
+                let new_value = self.expr_map[value];
+
+                let (atom_ptr, ptr_binding) = self.atomize(body, new_ptr, node_id);
+                let (atom_value, value_binding) = self.atomize(body, new_value, node_id);
+
+                let store_id = body.alloc_expr(
+                    Expr::Store {
+                        ptr: atom_ptr,
+                        value: atom_value,
+                    },
+                    ty.clone(),
+                    span,
+                    node_id,
+                );
+
+                self.wrap_bindings(
+                    body,
+                    store_id,
+                    ty,
+                    span,
+                    node_id,
+                    vec![value_binding, ptr_binding],
                 )
             }
         }
@@ -606,7 +670,6 @@ impl Normalizer {
                 span,
                 ty: ty.clone(),
                 kind: LocalKind::Let,
-                mem: None,
             });
 
             // Create reference to local

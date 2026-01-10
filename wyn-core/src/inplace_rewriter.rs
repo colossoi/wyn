@@ -287,10 +287,24 @@ impl<'a> InPlaceRewriter<'a> {
                 data: self.remap(*data),
                 len: self.remap(*len),
             },
-            Expr::BorrowedSlice { base, offset, len } => Expr::BorrowedSlice {
+            Expr::InlineSlice { base, offset, len } => Expr::InlineSlice {
                 base: self.remap(*base),
                 offset: self.remap(*offset),
                 len: self.remap(*len),
+            },
+            Expr::BoundSlice { name, offset, len } => Expr::BoundSlice {
+                name: name.clone(),
+                offset: self.remap(*offset),
+                len: self.remap(*len),
+            },
+
+            // Memory operations
+            Expr::Load { ptr } => Expr::Load {
+                ptr: self.remap(*ptr),
+            },
+            Expr::Store { ptr, value } => Expr::Store {
+                ptr: self.remap(*ptr),
+                value: self.remap(*value),
             },
         };
 

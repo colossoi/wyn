@@ -831,8 +831,13 @@ impl<'a> LowerCtx<'a> {
             Expr::Attributed { expr: inner, .. } => self.lower_expr(body, *inner, output),
 
             // --- Slices ---
-            Expr::OwnedSlice { .. } | Expr::BorrowedSlice { .. } => {
+            Expr::OwnedSlice { .. } | Expr::InlineSlice { .. } | Expr::BoundSlice { .. } => {
                 bail_glsl!("Slice expressions not yet implemented in GLSL lowering")
+            }
+
+            // --- Memory operations ---
+            Expr::Load { .. } | Expr::Store { .. } => {
+                bail_glsl!("Load/Store expressions not yet implemented in GLSL lowering")
             }
         }
     }
@@ -958,47 +963,52 @@ impl<'a> LowerCtx<'a> {
                 }
             }
             "index" => {
-                // Check if argument is an array or slice
+                // Check if argument is an array (unified Array[elem, addrspace, size] type)
                 let arg_ty = body.get_type(arg_ids[0]);
                 match arg_ty {
-                    PolyType::Constructed(TypeName::Array, _) => {
-                        // Regular array indexing
-                        Ok(format!("{}[{}]", args[0], args[1]))
-                    }
-                    PolyType::Constructed(TypeName::Slice, _) => {
-                        // Slice indexing - check if owned or borrowed
-                        match body.get_expr(arg_ids[0]) {
-                            Expr::OwnedSlice { .. } => {
-                                // OwnedSlice: index into data field
-                                Ok(format!("{}.data[{}]", args[0], args[1]))
+                    PolyType::Constructed(TypeName::Array, type_args) => {
+                        assert!(type_args.len() == 3);
+                        // Check if unsized (slice-like) - size is at index 2
+                        let is_unsized =
+                            matches!(&type_args[2], PolyType::Constructed(TypeName::Unsized, _));
+                        if is_unsized {
+                            // Unsized array (slice) - check expression kind
+                            match body.get_expr(arg_ids[0]) {
+                                Expr::OwnedSlice { .. } => Ok(format!("{}.data[{}]", args[0], args[1])),
+                                Expr::InlineSlice { .. } => {
+                                    Ok(format!("{}.base[{}.offset + {}]", args[0], args[0], args[1]))
+                                }
+                                Expr::BoundSlice { name, .. } => {
+                                    Ok(format!("{}[{}.offset + {}]", name, args[0], args[1]))
+                                }
+                                _ => Ok(format!("{}.data[{}]", args[0], args[1])),
                             }
-                            Expr::BorrowedSlice { .. } => {
-                                // BorrowedSlice: offset + index
-                                Ok(format!("{}.base[{}.offset + {}]", args[0], args[0], args[1]))
-                            }
-                            _ => {
-                                // Slice through variable - assume owned layout
-                                Ok(format!("{}.data[{}]", args[0], args[1]))
-                            }
+                        } else {
+                            // Sized array - regular indexing
+                            Ok(format!("{}[{}]", args[0], args[1]))
                         }
                     }
                     _ => Ok(format!("{}[{}]", args[0], args[1])),
                 }
             }
             "length" => {
-                // Check if argument is an array or slice
+                // Check if argument is an array
                 let arg_ty = body.get_type(arg_ids[0]);
                 match arg_ty {
-                    PolyType::Constructed(TypeName::Array, _) => {
-                        // Static array: use GLSL .length() method
-                        Ok(format!("{}.length()", args[0]))
+                    PolyType::Constructed(TypeName::Array, type_args) => {
+                        assert!(type_args.len() == 3);
+                        // Check if unsized (slice-like)
+                        let is_unsized =
+                            matches!(&type_args[2], PolyType::Constructed(TypeName::Unsized, _));
+                        if is_unsized {
+                            // Unsized array: access len field
+                            Ok(format!("{}.len", args[0]))
+                        } else {
+                            // Sized array: use GLSL .length() method
+                            Ok(format!("{}.length()", args[0]))
+                        }
                     }
-                    PolyType::Constructed(TypeName::Slice, _) => {
-                        // Slice: access the len field
-                        // OwnedSlice struct has len field, BorrowedSlice also has len
-                        Ok(format!("{}.len", args[0]))
-                    }
-                    _ => bail_glsl!("length called on non-array/non-slice type: {:?}", arg_ty),
+                    _ => bail_glsl!("length called on non-array type: {:?}", arg_ty),
                 }
             }
             _ => bail_glsl!("Unknown intrinsic: {}", name),
@@ -1160,8 +1170,9 @@ impl<'a> LowerCtx<'a> {
         // Get array size from type
         let arr_ty = body.get_type(args[2]);
         let array_size = match arr_ty {
-            PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 2 => {
-                match &type_args[0] {
+            PolyType::Constructed(TypeName::Array, type_args) => {
+                assert!(type_args.len() == 3);
+                match &type_args[2] {
                     PolyType::Constructed(TypeName::Size(n), _) => *n,
                     _ => bail_glsl!("Invalid array size type for reduce"),
                 }
@@ -1297,9 +1308,10 @@ impl<'a> LowerCtx<'a> {
                         _ => format!("mat{}", rows),
                     }
                 }
-                // Array: args[0] is Size(n), args[1] is element type
-                TypeName::Array if args.len() >= 2 => {
-                    format!("{}[]", self.type_to_glsl(&args[1]))
+                // Array: args[0] is elem_type, args[1] is addrspace, args[2] is size
+                TypeName::Array => {
+                    assert!(args.len() == 3);
+                    format!("{}[]", self.type_to_glsl(&args[0]))
                 }
                 // Record types (closures) should be eliminated before GLSL lowering
                 TypeName::Record(fields) => {

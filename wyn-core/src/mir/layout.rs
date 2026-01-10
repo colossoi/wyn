@@ -32,13 +32,14 @@ pub fn type_byte_size(ty: &Type) -> Option<u32> {
             let elem_size = type_byte_size(&args[2])?;
             Some(cols * rows * elem_size)
         }
-        Type::Constructed(TypeName::Array, args) if args.len() >= 2 => {
-            // Array<size, elem_type>
-            let size = match &args[0] {
+        Type::Constructed(TypeName::Array, args) => {
+            assert!(args.len() == 3);
+            // Array<elem_type, address_space, size>
+            let elem_size = type_byte_size(&args[0])?;
+            let size = match &args[2] {
                 Type::Constructed(TypeName::Size(n), _) => *n as u32,
                 _ => return None,
             };
-            let elem_size = type_byte_size(&args[1])?;
             Some(size * elem_size)
         }
         Type::Constructed(TypeName::Tuple(arity), args) => {
@@ -79,9 +80,10 @@ pub fn std430_alignment(ty: &Type) -> Option<u32> {
             let elem_align = std430_alignment(&args[2])?;
             Some(if rows == 2 { 2 * elem_align } else { 4 * elem_align })
         }
-        Type::Constructed(TypeName::Array, args) if args.len() >= 2 => {
+        Type::Constructed(TypeName::Array, args) => {
+            assert!(args.len() == 3);
             // Array alignment = element alignment (std430 is tightly packed)
-            std430_alignment(&args[1])
+            std430_alignment(&args[0])
         }
         _ => None,
     }
@@ -109,9 +111,10 @@ pub fn std140_alignment(ty: &Type) -> Option<u32> {
             let elem_align = std140_alignment(&args[2])?;
             Some(4 * elem_align) // Always vec4 alignment in std140
         }
-        Type::Constructed(TypeName::Array, args) if args.len() >= 2 => {
+        Type::Constructed(TypeName::Array, args) => {
+            assert!(args.len() == 3);
             // In std140, arrays have alignment rounded up to vec4
-            let elem_align = std140_alignment(&args[1])?;
+            let elem_align = std140_alignment(&args[0])?;
             Some(((elem_align + 15) / 16) * 16)
         }
         _ => None,

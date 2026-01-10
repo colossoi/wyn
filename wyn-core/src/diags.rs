@@ -55,14 +55,12 @@ fn format_constructed_type(name: &TypeName, args: &[PolyType<TypeName>]) -> Stri
         TypeName::SizeVar(s) => s.clone(),
         TypeName::Unsized => "?".to_string(),
         TypeName::Array => {
-            // [size]elem_type
-            if args.len() == 2 {
-                let size = format_type(&args[0]);
-                let elem = format_type(&args[1]);
-                format!("[{}]{}", size, elem)
-            } else {
-                "[?]?".to_string()
-            }
+            // Array[elem, addrspace, size] - unified array type
+            assert!(args.len() == 3);
+            let elem = format_type(&args[0]);
+            let size = format_type(&args[2]);
+            // Show size and elem, omit addrspace for brevity in common case
+            format!("[{}]{}", size, elem)
         }
         TypeName::Vec => {
             // vec<size>elem_type
@@ -143,16 +141,9 @@ fn format_constructed_type(name: &TypeName, args: &[PolyType<TypeName>]) -> Stri
             // Ptr<T>
             if args.len() == 1 { format!("Ptr<{}>", format_type(&args[0])) } else { "Ptr<?>".to_string() }
         }
-        TypeName::Slice => {
-            // Slice<cap, elem> - slice with dynamic length
-            if args.len() == 2 {
-                let cap = format_type(&args[0]);
-                let elem = format_type(&args[1]);
-                format!("Slice<{}, {}>", cap, elem)
-            } else {
-                "Slice<?>".to_string()
-            }
-        }
+        TypeName::AddressStorage => "storage".to_string(),
+        TypeName::AddressFunction => "function".to_string(),
+        TypeName::AddressUnknown => "?addrspace".to_string(),
         TypeName::Skolem(id) => format!("{}", id),
     }
 }
@@ -1000,12 +991,25 @@ impl Display for mir::Expr {
             mir::Expr::OwnedSlice { data, len } => {
                 write!(f, "@owned_slice(data=e{}, len=e{})", data.0, len.0)
             }
-            mir::Expr::BorrowedSlice { base, offset, len } => {
+            mir::Expr::InlineSlice { base, offset, len } => {
                 write!(
                     f,
-                    "@borrowed_slice(base=e{}, offset=e{}, len=e{})",
+                    "@inline_slice(base=e{}, offset=e{}, len=e{})",
                     base.0, offset.0, len.0
                 )
+            }
+            mir::Expr::BoundSlice { name, offset, len } => {
+                write!(
+                    f,
+                    "@bound_slice(name={}, offset=e{}, len=e{})",
+                    name, offset.0, len.0
+                )
+            }
+            mir::Expr::Load { ptr } => {
+                write!(f, "@load(e{})", ptr.0)
+            }
+            mir::Expr::Store { ptr, value } => {
+                write!(f, "@store(e{}, e{})", ptr.0, value.0)
             }
         }
     }

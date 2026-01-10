@@ -2,7 +2,7 @@ use super::{SkolemId, Type, TypeExt, TypeName, TypeScheme};
 use crate::ast::*;
 use crate::error::{CompilerError, Result};
 use crate::scope::ScopeStack;
-use crate::{bail_module, bail_type_at, err_module, err_type_at, err_undef_at};
+use crate::{bail_module, bail_type_at, err_module, err_type, err_type_at, err_undef_at};
 use log::debug;
 use polytype::Context;
 use std::collections::{BTreeSet, HashMap};
@@ -154,6 +154,51 @@ impl<'a> TypeChecker<'a> {
             }
             (Type::Variable(l_id), Type::Variable(r_id)) => l_id == r_id,
             _ => false,
+        }
+    }
+
+    /// Prepare array types for type checking by replacing marker types with fresh variables.
+    /// - `AddressUnknown` → fresh type variable (to be constrained)
+    /// - `Unsized` → fresh type variable (to be inferred or validated)
+    /// Returns the transformed type.
+    fn prepare_array_type(&mut self, ty: &Type) -> Type {
+        match ty {
+            Type::Constructed(TypeName::Array, args) => {
+                assert!(args.len() == 3);
+                let elem = self.prepare_array_type(&args[0]);
+                let addrspace = match &args[1] {
+                    Type::Constructed(TypeName::AddressUnknown, _) => self.context.new_variable(),
+                    other => self.prepare_array_type(other),
+                };
+                let size = match &args[2] {
+                    Type::Constructed(TypeName::Unsized, _) => self.context.new_variable(),
+                    other => self.prepare_array_type(other),
+                };
+                Type::Constructed(TypeName::Array, vec![elem, addrspace, size])
+            }
+            Type::Constructed(name, args) => {
+                let new_args: Vec<Type> = args.iter().map(|a| self.prepare_array_type(a)).collect();
+                Type::Constructed(name.clone(), new_args)
+            }
+            Type::Variable(_) => ty.clone(),
+        }
+    }
+
+    /// Constrain the address space of an array type to Storage.
+    /// Used for entry point parameters where []f32 means storage buffer.
+    fn constrain_array_to_storage(&mut self, ty: &Type) -> Result<()> {
+        let resolved = ty.apply(&self.context);
+        match &resolved {
+            Type::Constructed(TypeName::Array, args) => {
+                assert!(args.len() == 3);
+                // Constrain address space (args[1]) to Storage
+                let storage = Type::Constructed(TypeName::AddressStorage, vec![]);
+                self.context.unify(&args[1], &storage).map_err(|_| {
+                    err_type!("Entry point array parameter must have Storage address space")
+                })?;
+                Ok(())
+            }
+            _ => Ok(()), // Not an array type, nothing to constrain
         }
     }
 
@@ -782,9 +827,9 @@ impl<'a> TypeChecker<'a> {
         })
     }
 
-    /// Build an array type: [n]elem
-    fn array_ty(n: polytype::Variable, elem: Type) -> Type {
-        Type::Constructed(TypeName::Array, vec![Self::var(n), elem])
+    /// Build an array type: Array[elem, addrspace, size]
+    fn array_ty(elem: Type, addrspace: polytype::Variable, size: polytype::Variable) -> Type {
+        Type::Constructed(TypeName::Array, vec![elem, Self::var(addrspace), Self::var(size)])
     }
 
     /// Build a Vec type: Vec(n, elem)
@@ -864,44 +909,60 @@ impl<'a> TypeChecker<'a> {
     }
 
     pub fn load_builtins(&mut self) -> Result<()> {
-        // length: ∀n a. [n]a -> i32
-        let (n, a) = (self.fresh_var(), self.fresh_var());
-        let body = Self::arrow_chain(&[Self::array_ty(n, Self::var(a))], i32());
-        self.scope_stack.insert("length".to_string(), Self::forall(&[n, a], body));
+        // length: ∀n a s. Array[a, s, n] -> i32
+        let (n, a, s) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
+        let body = Self::arrow_chain(&[Self::array_ty(Self::var(a), s, n)], i32());
+        self.scope_stack.insert("length".to_string(), Self::forall(&[n, a, s], body));
 
-        // map: ∀a b n. (a -> b) -> [n]a -> [n]b
-        let (a, b, n) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
+        // map: ∀a b n s. (a -> b) -> Array[a, s, n] -> Array[b, s, n]
+        let (a, b, n, s) = (
+            self.fresh_var(),
+            self.fresh_var(),
+            self.fresh_var(),
+            self.fresh_var(),
+        );
         let body = Self::arrow_chain(
             &[
                 Type::arrow(Self::var(a), Self::var(b)),
-                Self::array_ty(n, Self::var(a)),
+                Self::array_ty(Self::var(a), s, n),
             ],
-            Self::array_ty(n, Self::var(b)),
+            Self::array_ty(Self::var(b), s, n),
         );
-        self.scope_stack.insert("map".to_string(), Self::forall(&[a, b, n], body));
+        self.scope_stack.insert("map".to_string(), Self::forall(&[a, b, n, s], body));
 
-        // zip: ∀n a b. [n]a -> [n]b -> [n](a, b)
-        let (n, a, b) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
+        // zip: ∀n a b s. Array[a, s, n] -> Array[b, s, n] -> Array[(a, b), s, n]
+        let (n, a, b, s) = (
+            self.fresh_var(),
+            self.fresh_var(),
+            self.fresh_var(),
+            self.fresh_var(),
+        );
         let body = Self::arrow_chain(
-            &[Self::array_ty(n, Self::var(a)), Self::array_ty(n, Self::var(b))],
-            Self::array_ty(n, tuple(vec![Self::var(a), Self::var(b)])),
+            &[
+                Self::array_ty(Self::var(a), s, n),
+                Self::array_ty(Self::var(b), s, n),
+            ],
+            Self::array_ty(tuple(vec![Self::var(a), Self::var(b)]), s, n),
         );
-        self.scope_stack.insert("zip".to_string(), Self::forall(&[n, a, b], body));
+        self.scope_stack.insert("zip".to_string(), Self::forall(&[n, a, b, s], body));
 
-        // to_vec: ∀n a. [n]a -> Vec(n, a)
-        let (n, a) = (self.fresh_var(), self.fresh_var());
-        let body = Self::arrow_chain(&[Self::array_ty(n, Self::var(a))], Self::vec_ty(n, Self::var(a)));
-        self.scope_stack.insert("to_vec".to_string(), Self::forall(&[n, a], body));
+        // to_vec: ∀n a s. Array[a, s, n] -> Vec(n, a)
+        let (n, a, s) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
+        let body = Self::arrow_chain(
+            &[Self::array_ty(Self::var(a), s, n)],
+            Self::vec_ty(n, Self::var(a)),
+        );
+        self.scope_stack.insert("to_vec".to_string(), Self::forall(&[n, a, s], body));
 
-        // replicate: ∀size a. i32 -> a -> [size]a
-        let (size, a) = (self.fresh_var(), self.fresh_var());
-        let body = Self::arrow_chain(&[i32(), Self::var(a)], Self::array_ty(size, Self::var(a)));
-        self.scope_stack.insert("replicate".to_string(), Self::forall(&[size, a], body));
+        // replicate: ∀size a s. i32 -> a -> Array[a, s, size]
+        let (size, a, s) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
+        let body = Self::arrow_chain(&[i32(), Self::var(a)], Self::array_ty(Self::var(a), s, size));
+        self.scope_stack.insert("replicate".to_string(), Self::forall(&[size, a, s], body));
 
-        // _w_alloc_array: ∀n t. i32 -> [n]t
-        let (n, t) = (self.fresh_var(), self.fresh_var());
-        let body = Self::arrow_chain(&[i32()], Self::array_ty(n, Self::var(t)));
-        self.scope_stack.insert("_w_alloc_array".to_string(), Self::forall(&[n, t], body));
+        // _w_alloc_array: ∀n t s. i32 -> Array[t, s, n]
+        let (n, t, s) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
+        let body = Self::arrow_chain(&[i32()], Self::array_ty(Self::var(t), s, n));
+        self.scope_stack.insert("_w_alloc_array".to_string(), Self::forall(&[n, t, s], body));
 
         // dot: ∀n t. Vec(n, t) -> Vec(n, t) -> t
         let (n, t) = (self.fresh_var(), self.fresh_var());
@@ -1013,6 +1074,25 @@ impl<'a> TypeChecker<'a> {
         type_param_bindings: &HashMap<String, Type>,
         module_name: Option<&str>,
     ) -> Result<(Vec<Type>, Type)> {
+        self.check_function_with_params_inner(params, body, type_param_bindings, module_name, false)
+    }
+
+    fn check_entry_with_params(
+        &mut self,
+        params: &[Pattern],
+        body: &Expression,
+    ) -> Result<(Vec<Type>, Type)> {
+        self.check_function_with_params_inner(params, body, &HashMap::new(), None, true)
+    }
+
+    fn check_function_with_params_inner(
+        &mut self,
+        params: &[Pattern],
+        body: &Expression,
+        type_param_bindings: &HashMap<String, Type>,
+        module_name: Option<&str>,
+        is_entry: bool,
+    ) -> Result<(Vec<Type>, Type)> {
         // Create type variables or use explicit types for parameters
         let param_types: Vec<Type> = params
             .iter()
@@ -1021,9 +1101,18 @@ impl<'a> TypeChecker<'a> {
                 // Resolve module type aliases (e.g., rand.state -> f32)
                 let resolved = self.resolve_type_aliases_scoped(&ty, module_name);
                 // Substitute UserVars with bound type variables
-                Self::substitute_type_params_static(&resolved, type_param_bindings)
+                let substituted = Self::substitute_type_params_static(&resolved, type_param_bindings);
+                // Replace AddressUnknown and Unsized markers with type variables
+                self.prepare_array_type(&substituted)
             })
             .collect();
+
+        // For entry point parameters, constrain array address spaces to Storage
+        if is_entry {
+            for param_type in &param_types {
+                self.constrain_array_to_storage(param_type)?;
+            }
+        }
 
         // Validate that no parameter types contain existential quantifiers
         // Existential types are only valid in return types, not parameters
@@ -1366,8 +1455,7 @@ impl<'a> TypeChecker<'a> {
             }
             Declaration::Entry(entry) => {
                 debug!("Checking entry point: {}", entry.name);
-                let (_param_types, body_type) =
-                    self.check_function_with_params(&entry.params, &entry.body, &HashMap::new(), None)?;
+                let (_param_types, body_type) = self.check_entry_with_params(&entry.params, &entry.body)?;
                 debug!("Entry point '{}' body type: {:?}", entry.name, body_type);
 
                 // Build expected return type from declared outputs
@@ -1381,6 +1469,8 @@ impl<'a> TypeChecker<'a> {
                 };
                 // Resolve type aliases (e.g., rand.state -> f32)
                 let expected_type = self.resolve_type_aliases_scoped(&expected_type, None);
+                // Replace AddressUnknown and Unsized markers with type variables
+                let expected_type = self.prepare_array_type(&expected_type);
 
                 // Validate body type matches declared outputs
                 self.context.unify(&body_type, &expected_type).map_err(|_| {
@@ -1577,11 +1667,13 @@ impl<'a> TypeChecker<'a> {
                 // Substitute UserVars in the declared return type
                 let substituted_return_type =
                     Self::substitute_type_params_static(&resolved_return_type, &type_param_bindings);
+                // Replace AddressUnknown and Unsized markers with type variables
+                let prepared_return_type = self.prepare_array_type(&substituted_return_type);
 
                 // When a function has parameters, decl.ty is just the return type annotation
                 // Unify the body type with the declared return type
                 if !decl.params.is_empty() {
-                    self.context.unify(&body_type, &substituted_return_type).map_err(|e| {
+                    self.context.unify(&body_type, &prepared_return_type).map_err(|e| {
                         err_type_at!(
                             decl.body.h.span,
                             "Function return type mismatch for '{}': {}",
@@ -1594,7 +1686,7 @@ impl<'a> TypeChecker<'a> {
                     // But currently we're storing just the value type
                     // Since func_type for parameterless functions is just the body type,
                     // we can just check body_type against substituted declared_type
-                    self.context.unify(&body_type, &substituted_return_type).map_err(|_| {
+                    self.context.unify(&body_type, &prepared_return_type).map_err(|_| {
                         err_type_at!(
                             decl.body.h.span,
                             "Type mismatch for '{}': declared {}, inferred {}",
@@ -1689,8 +1781,10 @@ impl<'a> TypeChecker<'a> {
                     if let Ok(type_scheme) = self.get_module_function_type_scheme(module_name, name) {
                         debug!("Found '{}' in elaborated module '{}' with type: {:?}", name, module_name, type_scheme);
                         let ty = type_scheme.instantiate(&mut self.context);
+                        // Replace AddressUnknown markers with type variables
+                        let prepared_ty = self.prepare_array_type(&ty);
                         self.type_table.insert(expr.h.id, type_scheme);
-                        return Ok(ty);
+                        return Ok(prepared_ty);
                     }
                 }
 
@@ -1799,19 +1893,14 @@ impl<'a> TypeChecker<'a> {
 
                 if is_matrix {
                     // Matrix: extract row size and element type from the array type
+                    // Array[elem_type, addrspace, size] - elem_type at 0, size at 2
                     let resolved = first_type.apply(&self.context);
                     if let Type::Constructed(TypeName::Array, args) = resolved {
-                        if args.len() == 2 {
-                            if let Type::Constructed(TypeName::Size(cols), _) = &args[0] {
-                                let rows = elements.len();
-                                let elem_type = args[1].clone();
-                                Ok(mat(rows, *cols, elem_type))
-                            } else {
-                                Err(err_type_at!(
-                                    expr.h.span,
-                                    "Matrix rows must be fixed-size arrays"
-                                ))
-                            }
+                        assert!(args.len() == 3);
+                        if let Type::Constructed(TypeName::Size(cols), _) = &args[2] {
+                            let rows = elements.len();
+                            let elem_type = args[0].clone();
+                            Ok(mat(rows, *cols, elem_type))
                         } else {
                             Err(err_type_at!(
                                 expr.h.span,
@@ -1853,13 +1942,17 @@ impl<'a> TypeChecker<'a> {
                     )
                 })?;
 
-                // Constrain array type to be Array(n, a) even if it's currently unknown
+                // Constrain array type to be Array[elem, addrspace, size] (3-arg format)
                 // This allows indexing arrays whose type is a meta-variable
                 // Strip uniqueness marker - indexing a *[n]T should work like indexing [n]T
                 let array_type_stripped = strip_unique(&array_type);
-                let size_var = self.context.new_variable();
                 let elem_var = self.context.new_variable();
-                let want_array = Type::Constructed(TypeName::Array, vec![size_var, elem_var.clone()]);
+                let addrspace_var = self.context.new_variable();
+                let size_var = self.context.new_variable();
+                let want_array = Type::Constructed(
+                    TypeName::Array,
+                    vec![elem_var.clone(), addrspace_var, size_var],
+                );
 
                 self.context.unify(&array_type_stripped, &want_array).map_err(|_| {
                     err_type_at!(
@@ -1873,8 +1966,8 @@ impl<'a> TypeChecker<'a> {
                 Ok(elem_var.apply(&self.context))
             }
             ExprKind::ArrayWith { array, index, value } => {
-                // Type check: array must be [n]T, index must be i32, value must be T
-                // Result type is [n]T
+                // Type check: array must be Array[elem, addrspace, size], index must be i32, value must be elem
+                // Result type is Array[elem, addrspace, size]
                 let array_type = self.infer_expression(array)?;
                 let index_type = self.infer_expression(index)?;
                 let value_type = self.infer_expression(value)?;
@@ -1888,11 +1981,15 @@ impl<'a> TypeChecker<'a> {
                     )
                 })?;
 
-                // Constrain array type to be Array(n, a)
+                // Constrain array type to be Array[elem, addrspace, size]
                 let array_type_stripped = strip_unique(&array_type);
-                let size_var = self.context.new_variable();
                 let elem_var = self.context.new_variable();
-                let want_array = Type::Constructed(TypeName::Array, vec![size_var.clone(), elem_var.clone()]);
+                let addrspace_var = self.context.new_variable();
+                let size_var = self.context.new_variable();
+                let want_array = Type::Constructed(
+                    TypeName::Array,
+                    vec![elem_var.clone(), addrspace_var, size_var],
+                );
 
                 self.context.unify(&array_type_stripped, &want_array).map_err(|_| {
                     err_type_at!(
@@ -2111,8 +2208,10 @@ impl<'a> TypeChecker<'a> {
                     let module_name = &qual_name.qualifiers[0];
                     if let Ok(type_scheme) = self.get_module_function_type_scheme(module_name, &qual_name.name) {
                         let ty = type_scheme.instantiate(&mut self.context);
+                        // Replace AddressUnknown markers with type variables
+                        let prepared_ty = self.prepare_array_type(&ty);
                         self.type_table.insert(expr.h.id, type_scheme);
-                        return Ok(ty);
+                        return Ok(prepared_ty);
                     }
 
                     // Qualified name not found - fall through to field access
@@ -2263,7 +2362,9 @@ impl<'a> TypeChecker<'a> {
                                     TypeName::Sum(_) => "sum".to_string(),
                                     TypeName::Existential(_) => "existential".to_string(),
                                     TypeName::Pointer => "pointer".to_string(),
-                                    TypeName::Slice => "slice".to_string(),
+                                    TypeName::AddressStorage => "storage".to_string(),
+                                    TypeName::AddressFunction => "function".to_string(),
+                                    TypeName::AddressUnknown => "addrspace_unknown".to_string(),
                                     TypeName::Skolem(id) => format!("{}", id),
                                 };
 
@@ -2419,11 +2520,15 @@ impl<'a> TypeChecker<'a> {
                         })?;
                     }
                     LoopForm::ForIn(pat, arr) => {
-                        // Array must be an array type
+                        // Array must be an array type: Array[elem, addrspace, size]
                         let arr_type = self.infer_expression(arr)?;
                         let elem_type = self.context.new_variable();
+                        let addrspace_type = self.context.new_variable();
                         let size_type = self.context.new_variable();
-                        let expected_arr = Type::Constructed(TypeName::Array, vec![size_type, elem_type.clone()]);
+                        let expected_arr = Type::Constructed(
+                            TypeName::Array,
+                            vec![elem_type.clone(), addrspace_type, size_type],
+                        );
 
                         self.context.unify(&arr_type, &expected_arr).map_err(|_| {
                             err_type_at!(
@@ -2525,22 +2630,28 @@ impl<'a> TypeChecker<'a> {
                 };
 
                 let elem_type = start_type.apply(&self.context);
-                Ok(Type::Constructed(TypeName::Array, vec![size_type, elem_type]))
+                // Range literals produce function-local arrays
+                let addrspace = Type::Constructed(TypeName::AddressFunction, vec![]);
+                Ok(Type::Constructed(TypeName::Array, vec![elem_type, addrspace, size_type]))
             }
 
             ExprKind::Slice(slice) => {
                 // Slice expression: array[start:end]
-                // - array must be [n]T
+                // - array must be Array[elem, addrspace, size]
                 // - start/end (if present) must be integers
-                // - result is [m]T where m = end - start (concrete if bounds are literals)
+                // - result is Array[elem, addrspace, size'] where size' = end - start
 
                 let array_type = self.infer_expression(&slice.array)?;
                 let array_type_stripped = strip_unique(&array_type);
 
-                // Constrain array to be Array(n, elem)
-                let size_var = self.context.new_variable();
+                // Constrain array to be Array[elem, addrspace, size]
                 let elem_var = self.context.new_variable();
-                let want_array = Type::Constructed(TypeName::Array, vec![size_var, elem_var.clone()]);
+                let addrspace_var = self.context.new_variable();
+                let size_var = self.context.new_variable();
+                let want_array = Type::Constructed(
+                    TypeName::Array,
+                    vec![elem_var.clone(), addrspace_var.clone(), size_var],
+                );
 
                 self.context.unify(&array_type_stripped, &want_array).map_err(|_| {
                     err_type_at!(
@@ -2602,8 +2713,10 @@ impl<'a> TypeChecker<'a> {
                     }
                 };
 
+                // Slice result preserves element type and address space
                 let elem_type = elem_var.apply(&self.context);
-                Ok(Type::Constructed(TypeName::Array, vec![result_size, elem_type]))
+                let addrspace = addrspace_var.apply(&self.context);
+                Ok(Type::Constructed(TypeName::Array, vec![elem_type, addrspace, result_size]))
             }
 
             ExprKind::TypeAscription(expr, ascribed_ty) => {
@@ -2690,9 +2803,11 @@ impl<'a> TypeChecker<'a> {
                     let module_name = &quals[0];
                     if let Ok(scheme) = self.get_module_function_type_scheme(module_name, name) {
                         let ty = scheme.instantiate(&mut self.context);
+                        // Replace AddressUnknown markers with type variables
+                        let prepared_ty = self.prepare_array_type(&ty);
                         return Ok(CalleeCandidates {
                             candidates: vec![Candidate {
-                                ty,
+                                ty: prepared_ty,
                                 scheme: Some(scheme),
                             }],
                             display_name: full_name,
@@ -2703,9 +2818,11 @@ impl<'a> TypeChecker<'a> {
                 // 4) Prelude?
                 if let Some(scheme) = self.get_prelude_function_type_scheme(&full_name) {
                     let ty = scheme.instantiate(&mut self.context);
+                    // Replace AddressUnknown markers with type variables
+                    let prepared_ty = self.prepare_array_type(&ty);
                     return Ok(CalleeCandidates {
                         candidates: vec![Candidate {
-                            ty,
+                            ty: prepared_ty,
                             scheme: Some(scheme),
                         }],
                         display_name: full_name,

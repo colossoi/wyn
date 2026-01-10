@@ -119,7 +119,11 @@ pub enum TypeName {
     UInt(usize),
     /// Signed integer types: i8, i16, i32, i64
     Int(usize),
-    /// Array type constructor (takes size and element type)
+    /// Unified array type constructor.
+    /// Type args: [elem_type, address_space, size]
+    /// - elem_type: element type (f32, etc.)
+    /// - address_space: Storage, Function, AddressUnknown, or type variable
+    /// - size: Size(n), SizeVar("n"), Unsized, or type variable
     Array,
     /// Unsized/anonymous array size placeholder (for []t syntax where size is inferred)
     Unsized,
@@ -152,13 +156,21 @@ pub enum TypeName {
     /// Existential size: ?[n][m]. type
     /// Inner type is stored in Type::Constructed args[0], not in the TypeName.
     Existential(Vec<String>),
-    /// Pointer type (MIR only) - result of Materialize, used for indexing/access.
-    /// The pointee type is stored in Type::Constructed args.
+    // --- Reference types (MIR only) ---
+    /// Pointer type - result of Materialize, used for indexing/access.
+    /// Type args: [pointee_type, addrspace]
     Pointer,
-    /// Slice type with dynamic length (MIR only).
-    /// Type args: [cap_type, elem_type] where cap is the backing buffer capacity.
-    /// Runtime representation includes a dynamic length field.
-    Slice,
+
+    // --- Address spaces ---
+    /// Storage address space - data backed by SSBO (storage buffer).
+    AddressStorage,
+    /// Function address space - function-local OpVariable.
+    AddressFunction,
+    /// Unknown address space - placeholder before type checking resolves it.
+    /// Entry params get Storage, regular function params get a type variable.
+    AddressUnknown,
+
+    // --- Type system internals ---
     /// Rigid skolem constant for existential sizes.
     /// Created when opening existential types (?k. T). Unlike unification variables,
     /// skolems only unify with themselves (same ID), enforcing opacity.
@@ -211,7 +223,9 @@ impl std::fmt::Display for TypeName {
                 write!(f, "?{}.", vars.join(" "))
             }
             TypeName::Pointer => write!(f, "Ptr"),
-            TypeName::Slice => write!(f, "Slice"),
+            TypeName::AddressStorage => write!(f, "storage"),
+            TypeName::AddressFunction => write!(f, "function"),
+            TypeName::AddressUnknown => write!(f, "?addrspace"),
             TypeName::Skolem(id) => write!(f, "{}", id),
         }
     }
@@ -263,7 +277,9 @@ impl polytype::Name for TypeName {
             }
             TypeName::Existential(vars) => format!("?{}.", vars.join(" ")),
             TypeName::Pointer => "Ptr".to_string(),
-            TypeName::Slice => "Slice".to_string(),
+            TypeName::AddressStorage => "storage".to_string(),
+            TypeName::AddressFunction => "function".to_string(),
+            TypeName::AddressUnknown => "?addrspace".to_string(),
             TypeName::Skolem(id) => format!("{}", id),
         }
     }
@@ -452,10 +468,16 @@ pub fn matrix_type_constructors() -> HashMap<String, Type> {
         .collect()
 }
 
+/// Create a sized array: Array[elem, Function, Size(n)]
+/// Defaults to Function address space for local/value arrays.
 pub fn sized_array(size: usize, elem_type: Type) -> Type {
     Type::Constructed(
         TypeName::Array,
-        vec![Type::Constructed(TypeName::Size(size), vec![]), elem_type],
+        vec![
+            elem_type,
+            Type::Constructed(TypeName::AddressFunction, vec![]),
+            Type::Constructed(TypeName::Size(size), vec![]),
+        ],
     )
 }
 
@@ -553,9 +575,80 @@ pub fn strip_unique(ty: &Type) -> Type {
     }
 }
 
-/// Create a pointer type (MIR only): Ptr(inner)
-pub fn pointer(inner: Type) -> Type {
-    Type::Constructed(TypeName::Pointer, vec![inner])
+// --- Address space constructors ---
+
+/// Create a storage address space type
+pub fn storage_addrspace() -> Type {
+    Type::Constructed(TypeName::AddressStorage, vec![])
+}
+
+/// Create a function (local) address space type
+pub fn function_addrspace() -> Type {
+    Type::Constructed(TypeName::AddressFunction, vec![])
+}
+
+/// Check if a type is the storage address space
+pub fn is_storage_addrspace(ty: &Type) -> bool {
+    matches!(ty, Type::Constructed(TypeName::AddressStorage, _))
+}
+
+/// Check if a type is the function address space
+pub fn is_function_addrspace(ty: &Type) -> bool {
+    matches!(ty, Type::Constructed(TypeName::AddressFunction, _))
+}
+
+/// Check if a type is an address space marker (Storage, Function, or Unknown).
+/// These types should only appear as the second argument of Array types,
+/// never as standalone expression types.
+pub fn is_address_space(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::Constructed(
+            TypeName::AddressStorage | TypeName::AddressFunction | TypeName::AddressUnknown,
+            _
+        )
+    )
+}
+
+/// Debug assertion that a type is valid as a top-level expression/variable type.
+/// Panics if the type is a marker type that should only appear nested inside other types:
+/// - Address space markers (AddressStorage, AddressFunction, AddressUnknown)
+/// - Size markers (Size, Unsized, SizeVar)
+#[inline]
+pub fn debug_assert_top_level_type(ty: &Type, context: &str) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+
+    match ty {
+        Type::Constructed(name, _) => match name {
+            // Address space markers - only valid inside Array[elem, addrspace, size]
+            TypeName::AddressStorage | TypeName::AddressFunction | TypeName::AddressUnknown => {
+                panic!(
+                    "BUG: Address space type {:?} used as top-level type in {}. \
+                     Address space markers should only appear inside Array[elem, addrspace, size].",
+                    ty, context
+                );
+            }
+            // Size markers - only valid inside Array, Vec, Mat types
+            TypeName::Size(_) | TypeName::Unsized | TypeName::SizeVar(_) => {
+                panic!(
+                    "BUG: Size marker {:?} used as top-level type in {}. \
+                     Size markers should only appear inside Array, Vec, or Mat types.",
+                    ty, context
+                );
+            }
+            _ => {}
+        },
+        Type::Variable(_) => {}
+    }
+}
+
+// --- Pointer type helpers ---
+
+/// Create a pointer type (MIR only): Ptr(pointee, addrspace)
+pub fn pointer(pointee: Type, addrspace: Type) -> Type {
+    Type::Constructed(TypeName::Pointer, vec![pointee, addrspace])
 }
 
 /// Check if a type is a pointer type
@@ -571,30 +664,72 @@ pub fn pointee(ty: &Type) -> Option<&Type> {
     }
 }
 
-/// Create a slice type (MIR only): Slice(cap, elem)
-/// cap is the capacity type (Size(n) or SizeVar), elem is the element type.
-pub fn slice(cap: Type, elem: Type) -> Type {
-    Type::Constructed(TypeName::Slice, vec![cap, elem])
-}
-
-/// Check if a type is a slice type
-pub fn is_slice(ty: &Type) -> bool {
-    matches!(ty, Type::Constructed(TypeName::Slice, _))
-}
-
-/// Get the element type from a slice type, or None if not a slice
-pub fn slice_elem(ty: &Type) -> Option<&Type> {
+/// Get the address space from a pointer type, or None if not a pointer
+pub fn pointer_addrspace(ty: &Type) -> Option<&Type> {
     match ty {
-        Type::Constructed(TypeName::Slice, args) if args.len() >= 2 => Some(&args[1]),
+        Type::Constructed(TypeName::Pointer, args) if args.len() >= 2 => Some(&args[1]),
         _ => None,
     }
 }
 
-/// Get the capacity type from a slice type, or None if not a slice
-pub fn slice_cap(ty: &Type) -> Option<&Type> {
+// --- Array type helpers ---
+// Array[elem, addrspace, size] is the unified array type.
+
+/// Create an unsized array (slice): Array[elem, addrspace, Unsized]
+pub fn unsized_array(elem: Type, addrspace: Type) -> Type {
+    Type::Constructed(
+        TypeName::Array,
+        vec![elem, addrspace, Type::Constructed(TypeName::Unsized, vec![])],
+    )
+}
+
+/// Check if a type is an unsized array (has Unsized as size arg)
+pub fn is_unsized_array(ty: &Type) -> bool {
+    let Type::Constructed(TypeName::Array, args) = ty else {
+        return false;
+    };
+    assert!(args.len() == 3);
+    matches!(&args[2], Type::Constructed(TypeName::Unsized, _))
+}
+
+/// Get the element type from an Array, or None if not an Array
+pub fn array_elem(ty: &Type) -> Option<&Type> {
+    let Type::Constructed(TypeName::Array, args) = ty else {
+        return None;
+    };
+    assert!(args.len() == 3);
+    Some(&args[0])
+}
+
+/// Get the address space from an Array, or None if not an Array
+pub fn array_addrspace(ty: &Type) -> Option<&Type> {
+    let Type::Constructed(TypeName::Array, args) = ty else {
+        return None;
+    };
+    assert!(args.len() == 3);
+    Some(&args[1])
+}
+
+/// Get the size from an Array, or None if not an Array
+pub fn array_size(ty: &Type) -> Option<&Type> {
+    let Type::Constructed(TypeName::Array, args) = ty else {
+        return None;
+    };
+    assert!(args.len() == 3);
+    Some(&args[2])
+}
+
+/// Check if a type is a storage array that requires BoundSlice-style access.
+/// Storage arrays with unsized length need pointer-based indexing at runtime.
+pub fn is_bound_slice_access(ty: &Type) -> bool {
     match ty {
-        Type::Constructed(TypeName::Slice, args) if !args.is_empty() => Some(&args[0]),
-        _ => None,
+        Type::Constructed(TypeName::Array, args) if args.len() >= 3 => {
+            assert!(args.len() == 3);
+            let is_storage = matches!(&args[1], Type::Constructed(TypeName::AddressStorage, _));
+            let is_unsized = matches!(&args[2], Type::Constructed(TypeName::Unsized, _));
+            is_storage && is_unsized
+        }
+        _ => false,
     }
 }
 
@@ -608,8 +743,15 @@ pub fn format_type(ty: &Type) -> String {
             let arg_strs: Vec<String> = args.iter().map(format_type).collect();
             format!("({})", arg_strs.join(", "))
         }
-        Type::Constructed(TypeName::Array, args) if args.len() == 2 => {
-            format!("[{}]{}", format_type(&args[0]), format_type(&args[1]))
+        // Array[elem, addrspace, size] -> display based on size
+        Type::Constructed(TypeName::Array, args) if args.len() == 3 => {
+            let elem = format_type(&args[0]);
+            let size = &args[2];
+            match size {
+                Type::Constructed(TypeName::Size(n), _) => format!("[{}]{}", n, elem),
+                Type::Constructed(TypeName::Unsized, _) => format!("[]{}", elem),
+                _ => format!("[{}]{}", format_type(size), elem),
+            }
         }
         // Vec[Size(n), elem] -> vecNelem (e.g., vec3f32)
         Type::Constructed(TypeName::Vec, args) if args.len() == 2 => {

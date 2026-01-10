@@ -1106,10 +1106,22 @@ fn collect_uses(body: &mir::Body, expr_id: mir::ExprId) -> HashSet<mir::LocalId>
             uses.extend(collect_uses(body, *data));
             uses.extend(collect_uses(body, *len));
         }
-        BorrowedSlice { base, offset, len } => {
+        InlineSlice { base, offset, len } => {
             uses.extend(collect_uses(body, *base));
             uses.extend(collect_uses(body, *offset));
             uses.extend(collect_uses(body, *len));
+        }
+        BoundSlice { offset, len, .. } => {
+            // name is a String, not an ExprId - only offset and len are expressions
+            uses.extend(collect_uses(body, *offset));
+            uses.extend(collect_uses(body, *len));
+        }
+        Load { ptr } => {
+            uses.extend(collect_uses(body, *ptr));
+        }
+        Store { ptr, value } => {
+            uses.extend(collect_uses(body, *ptr));
+            uses.extend(collect_uses(body, *value));
         }
     }
 
@@ -1193,7 +1205,7 @@ fn compute_uses_after(
                 aliases.insert(local, alias_set);
             }
             // Track aliases for borrowed slices: let s = arr[i:j] -> s aliases arr
-            if let BorrowedSlice { base, .. } = body.get_expr(rhs) {
+            if let InlineSlice { base, .. } = body.get_expr(rhs) {
                 if let Local(source_local) = body.get_expr(*base) {
                     let mut alias_set = HashSet::new();
                     alias_set.insert(*source_local);
@@ -1288,7 +1300,7 @@ fn compute_uses_after(
             current_after.extend(collect_uses(body, len));
             result.extend(compute_uses_after(body, data, &current_after, aliases));
         }
-        BorrowedSlice { base, offset, len } => {
+        InlineSlice { base, offset, len } => {
             let (base, offset, len) = (*base, *offset, *len);
             let mut current_after = after.clone();
             result.extend(compute_uses_after(body, len, &current_after, aliases));
@@ -1296,6 +1308,24 @@ fn compute_uses_after(
             result.extend(compute_uses_after(body, offset, &current_after, aliases));
             current_after.extend(collect_uses(body, offset));
             result.extend(compute_uses_after(body, base, &current_after, aliases));
+        }
+        BoundSlice { offset, len, .. } => {
+            let (offset, len) = (*offset, *len);
+            let mut current_after = after.clone();
+            result.extend(compute_uses_after(body, len, &current_after, aliases));
+            current_after.extend(collect_uses(body, len));
+            result.extend(compute_uses_after(body, offset, &current_after, aliases));
+        }
+        Load { ptr } => {
+            let ptr = *ptr;
+            result.extend(compute_uses_after(body, ptr, after, aliases));
+        }
+        Store { ptr, value } => {
+            let (ptr, value) = (*ptr, *value);
+            let mut current_after = after.clone();
+            result.extend(compute_uses_after(body, value, &current_after, aliases));
+            current_after.extend(collect_uses(body, value));
+            result.extend(compute_uses_after(body, ptr, &current_after, aliases));
         }
     }
 
@@ -1474,11 +1504,23 @@ fn find_inplace_ops(
             find_inplace_ops(body, data, uses_after, aliases, result);
             find_inplace_ops(body, len, uses_after, aliases, result);
         }
-        BorrowedSlice { base, offset, len } => {
+        InlineSlice { base, offset, len } => {
             let (base, offset, len) = (*base, *offset, *len);
             find_inplace_ops(body, base, uses_after, aliases, result);
             find_inplace_ops(body, offset, uses_after, aliases, result);
             find_inplace_ops(body, len, uses_after, aliases, result);
+        }
+        BoundSlice { offset, len, .. } => {
+            let (offset, len) = (*offset, *len);
+            find_inplace_ops(body, offset, uses_after, aliases, result);
+            find_inplace_ops(body, len, uses_after, aliases, result);
+        }
+        Load { ptr } => {
+            find_inplace_ops(body, *ptr, uses_after, aliases, result);
+        }
+        Store { ptr, value } => {
+            find_inplace_ops(body, *ptr, uses_after, aliases, result);
+            find_inplace_ops(body, *value, uses_after, aliases, result);
         }
     }
 }

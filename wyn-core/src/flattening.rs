@@ -94,7 +94,6 @@ impl Flattener {
             span,
             ty,
             kind,
-            mem: None,
         };
         let local_id = self.current_body.alloc_local(decl);
         self.name_to_local.insert(name, local_id);
@@ -406,19 +405,18 @@ impl Flattener {
 
         let arg_ty = self.get_expr_type(&args[0]);
 
-        // Extract array size n, vector size m, and element type a from [n]vec<m,a>
+        // Extract array size n, vector size m, and element type a from Array[vec<m,a>, addrspace, n]
         if let Type::Constructed(TypeName::Array, array_args) = &arg_ty {
-            if array_args.len() >= 2 {
-                if let Type::Constructed(TypeName::Vec, vec_args) = &array_args[1] {
-                    if vec_args.len() >= 2 {
-                        if let (Some(n), Some(m)) = (
-                            Self::extract_size(&array_args[0]),
-                            Self::extract_size(&vec_args[0]),
-                        ) {
-                            // Extract element type
-                            let elem_type_str = Self::primitive_type_to_string(&vec_args[1])?;
-                            return Ok(format!("matav_{}_{}_{}", n, m, elem_type_str));
-                        }
+            assert!(array_args.len() == 3);
+            if let Type::Constructed(TypeName::Vec, vec_args) = &array_args[0] {
+                if vec_args.len() >= 2 {
+                    if let (Some(n), Some(m)) = (
+                        Self::extract_size(&array_args[2]),
+                        Self::extract_size(&vec_args[0]),
+                    ) {
+                        // Extract element type
+                        let elem_type_str = Self::primitive_type_to_string(&vec_args[1])?;
+                        return Ok(format!("matav_{}_{}_{}", n, m, elem_type_str));
                     }
                 }
             }
@@ -499,6 +497,30 @@ impl Flattener {
             .unwrap_or_else(|| {
                 panic!("BUG: Pattern (id={:?}) has no type in type table during flattening. Type checking should ensure all patterns have types.", pat.h.id)
             })
+    }
+
+    /// Convert entry point param types for compute shaders.
+    /// Resolves AddressUnknown to Storage for compute entry params.
+    fn convert_compute_param_type(&self, ty: Type, is_compute: bool) -> Type {
+        if !is_compute {
+            return ty;
+        }
+
+        // Check for Array with AddressUnknown - resolve to Storage
+        if let Type::Constructed(TypeName::Array, args) = &ty {
+            assert!(args.len() == 3);
+            if let Type::Constructed(TypeName::AddressUnknown, _) = &args[1] {
+                // Convert AddressUnknown to Storage
+                let elem_type = args[0].clone();
+                let size = args[2].clone();
+                return Type::Constructed(
+                    TypeName::Array,
+                    vec![elem_type, types::storage_addrspace(), size],
+                );
+            }
+        }
+
+        ty
     }
 
     /// Generate a unique ID
@@ -738,11 +760,16 @@ impl Flattener {
                     let old_body = self.begin_body();
                     self.name_to_local.push_scope();
 
+                    // Check if this is a compute entry point
+                    let is_compute = matches!(e.entry_type, ast::Attribute::Compute);
+
                     // Allocate params as locals and build EntryInputs
                     let mut inputs = Vec::new();
                     for param in &e.params {
                         let name = self.extract_param_name(param).unwrap_or_default();
-                        let ty = self.get_pattern_type(param);
+                        let raw_ty = self.get_pattern_type(param);
+                        // Convert unbounded arrays to Slice[elem, Storage] for compute entry points
+                        let ty = self.convert_compute_param_type(raw_ty, is_compute);
                         let decoration = self.extract_io_decoration(param);
                         let local_id = self.alloc_local(name.clone(), ty.clone(), LocalKind::Param, span);
                         inputs.push(mir::EntryInput {
@@ -1043,6 +1070,17 @@ impl Flattener {
                 let (arr_id, _) = self.flatten_expr(arr_expr)?;
                 let (idx_id, _) = self.flatten_expr(idx_expr)?;
 
+                // Storage slices use BoundSlice representation {ptr, len} and need index intrinsic
+                let arr_ty = self.current_body.get_type(arr_id);
+                if types::is_bound_slice_access(arr_ty) {
+                    let intrinsic = mir::Expr::Intrinsic {
+                        name: "index".to_string(),
+                        args: vec![arr_id, idx_id],
+                    };
+                    let id = self.alloc_expr(intrinsic, ty, span);
+                    return Ok((id, StaticValue::Dyn));
+                }
+
                 // Check if index is a constant - if so, use tuple_access (OpCompositeExtract)
                 // which doesn't need a backing store
                 if let mir::Expr::Int(_) = self.current_body.get_expr(idx_id) {
@@ -1069,7 +1107,10 @@ impl Flattener {
                             args: vec![
                                 self.alloc_expr(
                                     mir::Expr::Local(ptr_local_id),
-                                    types::pointer(self.current_body.get_type(arr_id).clone()),
+                                    types::pointer(
+                                        self.current_body.get_type(arr_id).clone(),
+                                        types::function_addrspace(),
+                                    ),
                                     span,
                                 ),
                                 idx_id,
@@ -1083,7 +1124,11 @@ impl Flattener {
                 // Fallback for dynamic index on complex expression: wrap in Materialize
                 let arr_ty = self.current_body.get_type(arr_id).clone();
                 let materialized = mir::Expr::Materialize(arr_id);
-                let materialized_id = self.alloc_expr(materialized, types::pointer(arr_ty), span);
+                let materialized_id = self.alloc_expr(
+                    materialized,
+                    types::pointer(arr_ty, types::function_addrspace()),
+                    span,
+                );
                 (
                     mir::Expr::Intrinsic {
                         name: "index".to_string(),
@@ -1167,14 +1212,23 @@ impl Flattener {
                 )
             }
             ExprKind::Slice(slice) => {
-                // Slice creates a BorrowedSlice - a zero-copy view into an array
+                // Slice creates a view or copy depending on address space:
+                // - Storage buffer slice: view (pointer + length)
+                // - Function-local array: copy (new fixed-size array)
+                // The type checker has already computed the correct result type,
+                // including the concrete size when bounds are known literals.
                 let (base_id, _) = self.flatten_expr(&slice.array)?;
                 let base_ty = self.current_body.get_type(base_id).clone();
 
-                // Verify base is an array type
-                if !matches!(&base_ty, Type::Constructed(TypeName::Array, args) if args.len() == 2) {
-                    bail_flatten!("Slice requires an array type, got {:?}", base_ty);
-                }
+                // Validate base is an array type
+                match &base_ty {
+                    Type::Constructed(TypeName::Array, args) => {
+                        assert!(args.len() == 3, "Array must have 3 args: [elem, addrspace, size]");
+                    }
+                    _ => {
+                        bail_flatten!("Slice requires an array type, got {:?}", base_ty);
+                    }
+                };
 
                 // Flatten start (default to 0)
                 let offset_id = if let Some(start) = &slice.start {
@@ -1203,13 +1257,13 @@ impl Flattener {
                     span,
                 );
 
-                // Get the type from the type table - the type checker computes concrete
-                // size when bounds are integer literals
-                let slice_ty = self.get_expr_type(expr);
+                // Use the type from type checking - it has the correct size
+                // (concrete Size(n) for literal bounds, Unsized for dynamic bounds)
+                let slice_ty = ty;
 
                 // Create BorrowedSlice expression
                 let slice_id = self.alloc_expr(
-                    mir::Expr::BorrowedSlice {
+                    mir::Expr::InlineSlice {
                         base: base_id,
                         offset: offset_id,
                         len: len_id,
@@ -1259,11 +1313,15 @@ impl Flattener {
                     let var_id = self.alloc_expr(mir::Expr::Local(local_id), value_ty.clone(), span);
                     let materialize_id = self.alloc_expr(
                         mir::Expr::Materialize(var_id),
-                        types::pointer(value_ty.clone()),
+                        types::pointer(value_ty.clone(), types::function_addrspace()),
                         span,
                     );
-                    let ptr_local_id =
-                        self.alloc_local(ptr_name, types::pointer(value_ty), LocalKind::Let, span);
+                    let ptr_local_id = self.alloc_local(
+                        ptr_name,
+                        types::pointer(value_ty, types::function_addrspace()),
+                        LocalKind::Let,
+                        span,
+                    );
                     let body_ty = self.current_body.get_type(body_id).clone();
                     self.alloc_expr(
                         mir::Expr::Let {
@@ -1435,14 +1493,26 @@ impl Flattener {
         self.add_lambda(func_name.clone(), arity);
 
         // Build closure captures - look up each free var and get its ExprId
+        // Use the ACTUAL type from the current scope, not the type from defun analysis,
+        // since entry point params may have been converted to Slice[elem, Storage].
         let mut capture_ids = vec![];
+        let mut actual_capture_types = vec![];
         for (var_name, var_type) in &free_vars {
-            let capture_id = if let Some(local_id) = self.lookup_local(var_name) {
-                self.alloc_expr(mir::Expr::Local(local_id), var_type.clone(), span)
+            let (capture_id, actual_type) = if let Some(local_id) = self.lookup_local(var_name) {
+                let actual_ty = self.current_body.get_local(local_id).ty.clone();
+                (
+                    self.alloc_expr(mir::Expr::Local(local_id), actual_ty.clone(), span),
+                    actual_ty,
+                )
             } else {
-                self.alloc_expr(mir::Expr::Global(var_name.clone()), var_type.clone(), span)
+                // For globals, use the type from defun analysis
+                (
+                    self.alloc_expr(mir::Expr::Global(var_name.clone()), var_type.clone(), span),
+                    var_type.clone(),
+                )
             };
             capture_ids.push(capture_id);
+            actual_capture_types.push(actual_type);
         }
 
         // Create a new body for the generated function
@@ -1450,11 +1520,12 @@ impl Flattener {
         self.name_to_local.push_scope();
 
         // Allocate individual params for each capture (instead of single tuple param)
+        // Use the actual types from the captures, which may have address space info.
         let mut param_local_ids = Vec::new();
         let mut capture_param_locals = Vec::new();
-        for (idx, (_var_name, var_type)) in free_vars.iter().enumerate() {
+        for (idx, actual_type) in actual_capture_types.iter().enumerate() {
             let param_name = format!("_w_cap_{}", idx);
-            let param_local = self.alloc_local(param_name, var_type.clone(), LocalKind::Param, span);
+            let param_local = self.alloc_local(param_name, actual_type.clone(), LocalKind::Param, span);
             param_local_ids.push(param_local);
             capture_param_locals.push(param_local);
         }
@@ -1491,9 +1562,11 @@ impl Flattener {
 
         // Allocate locals for captured variables BEFORE flattening body
         // These will be bound to the capture params via Let bindings
+        // Use actual_capture_types which has the correct address space info.
         let mut capture_locals = vec![];
-        for (var_name, var_type) in &free_vars {
-            let capture_local = self.alloc_local(var_name.clone(), var_type.clone(), LocalKind::Let, span);
+        for ((var_name, _), actual_type) in free_vars.iter().zip(actual_capture_types.iter()) {
+            let capture_local =
+                self.alloc_local(var_name.clone(), actual_type.clone(), LocalKind::Let, span);
             capture_locals.push(capture_local);
         }
 
@@ -1509,13 +1582,10 @@ impl Flattener {
 
         // Wrap body with let bindings for captured vars (in reverse order)
         // Each capture local is bound directly to its capture param (no tuple_access)
-        for (((_var_name, var_type), capture_local), capture_param) in free_vars
-            .iter()
-            .zip(capture_locals.iter())
-            .zip(capture_param_locals.iter())
-            .rev()
+        for ((actual_type, capture_local), capture_param) in
+            actual_capture_types.iter().zip(capture_locals.iter()).zip(capture_param_locals.iter()).rev()
         {
-            let param_ref = self.alloc_expr(mir::Expr::Local(*capture_param), var_type.clone(), span);
+            let param_ref = self.alloc_expr(mir::Expr::Local(*capture_param), actual_type.clone(), span);
             let body_ty = self.current_body.get_type(body_root).clone();
             body_root = self.alloc_expr(
                 mir::Expr::Let {
@@ -1716,7 +1786,10 @@ impl Flattener {
                 // Get element type from array type
                 let iter_ty = self.current_body.get_type(iter_id).clone();
                 let elem_ty = match &iter_ty {
-                    Type::Constructed(TypeName::Array, args) if !args.is_empty() => args[0].clone(),
+                    Type::Constructed(TypeName::Array, args) => {
+                        assert!(args.len() == 3);
+                        args[0].clone()
+                    }
                     _ => iter_ty.clone(), // Fallback
                 };
                 let var_local = self.alloc_local(var_name, elem_ty, LocalKind::LoopVar, span);

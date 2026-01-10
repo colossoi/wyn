@@ -220,8 +220,7 @@ fn compile_file(
     // Write interface JSON if requested
     if let Some(ref interface_path) = output_interface {
         let interface = wyn_core::interface::extract_interface(&lifted.mir);
-        let json = wyn_core::interface::to_json(&interface)
-            .expect("Failed to serialize interface");
+        let json = wyn_core::interface::to_json(&interface).expect("Failed to serialize interface");
         fs::write(interface_path, json)?;
         if verbose {
             info!("Wrote interface to {}", interface_path.display());
