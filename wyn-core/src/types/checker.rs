@@ -2,7 +2,7 @@ use super::{SkolemId, Type, TypeExt, TypeName, TypeScheme};
 use crate::ast::*;
 use crate::error::{CompilerError, Result};
 use crate::scope::ScopeStack;
-use crate::{bail_module, bail_type_at, err_module, err_type, err_type_at, err_undef_at};
+use crate::{bail_type_at, err_module, err_type, err_type_at, err_undef_at};
 use log::debug;
 use polytype::Context;
 use std::collections::{BTreeSet, HashMap};
@@ -73,6 +73,9 @@ pub struct TypeChecker<'a> {
     /// Current module context for resolving unqualified type aliases in expressions.
     /// Set during check_decl_as_in_module for module function checking.
     current_module: Option<String>,
+    /// Cached module function schemes (key: "module.function", e.g., "rand.init").
+    /// Populated during check_module_functions to avoid rebuilding schemes on each lookup.
+    module_schemes: HashMap<String, TypeScheme>,
 }
 
 /// Compute free type variables in a Type
@@ -144,6 +147,13 @@ struct ResolvedValue {
     instantiated: Type,
     /// For overloaded intrinsics: all available schemes (for callee resolution)
     overloads: Option<Vec<TypeScheme>>,
+}
+
+/// Unified scheme lookup result, matching the pattern from IntrinsicLookup.
+/// All scheme providers (scope, intrinsics, modules) feed into this.
+enum SchemeLookup {
+    Single(TypeScheme),
+    Overloaded(Vec<TypeScheme>),
 }
 
 impl<'a> TypeChecker<'a> {
@@ -491,100 +501,62 @@ impl<'a> TypeChecker<'a> {
     /// Unified name resolution for identifiers and qualified names.
     ///
     /// Precedence (enforced consistently across all call sites):
-    /// - Unqualified names: scope > intrinsics > prelude (locals shadow builtins)
+    /// - Unqualified names: scope > intrinsics (locals shadow builtins)
     /// - Qualified names: intrinsics > modules (explicit qualification)
     ///
     /// Returns `None` if the name is not found (caller should produce error with span).
     fn resolve_value_name(&mut self, full_name: &str, is_qualified: bool) -> Option<ResolvedValue> {
+        let lookup = if is_qualified {
+            // Qualified: intrinsics > modules (cache, then on-demand)
+            self.lookup_intrinsic(full_name).or_else(|| self.lookup_module_scheme(full_name))
+        } else {
+            // Unqualified: scope > intrinsics
+            self.scope_stack
+                .lookup(full_name)
+                .cloned()
+                .map(SchemeLookup::Single)
+                .or_else(|| self.lookup_intrinsic(full_name))
+        };
+
+        lookup.map(|scheme_lookup| self.resolve_scheme_lookup(full_name, scheme_lookup))
+    }
+
+    fn lookup_module_scheme(&self, qualified_name: &str) -> Option<SchemeLookup> {
+        self.module_schemes.get(qualified_name).cloned().map(SchemeLookup::Single)
+    }
+
+    fn lookup_intrinsic(&mut self, name: &str) -> Option<SchemeLookup> {
         use crate::intrinsics::IntrinsicLookup;
+        self.intrinsics.get(name).map(|lookup| match lookup {
+            IntrinsicLookup::Single(entry) => SchemeLookup::Single(entry.scheme.clone()),
+            IntrinsicLookup::Overloaded(set) => {
+                SchemeLookup::Overloaded(set.entries().iter().map(|e| e.scheme.clone()).collect())
+            }
+        })
+    }
 
-        // For qualified names, check intrinsics first (e.g., f32.cos, vec3.magnitude)
-        if is_qualified {
-            if let Some(lookup) = self.intrinsics.get(full_name) {
-                let (scheme, ty, overloads) = match lookup {
-                    IntrinsicLookup::Single(entry) => {
-                        let ty = entry.scheme.instantiate(&mut self.context);
-                        (entry.scheme.clone(), ty, None)
-                    }
-                    IntrinsicLookup::Overloaded(set) => {
-                        // For identifier use: return fresh type, store as monotype
-                        // For callee use: overloads vec is populated
-                        let ty = set.fresh_type(&mut self.context);
-                        let all_schemes: Vec<_> = set.entries().iter().map(|e| e.scheme.clone()).collect();
-                        (TypeScheme::Monotype(ty.clone()), ty, Some(all_schemes))
-                    }
-                };
-                return Some(ResolvedValue {
-                    display_name: full_name.to_string(),
+    fn resolve_scheme_lookup(&mut self, name: &str, lookup: SchemeLookup) -> ResolvedValue {
+        match lookup {
+            SchemeLookup::Single(scheme) => {
+                let ty = scheme.instantiate(&mut self.context);
+                let prepared = self.prepare_array_type(&ty);
+                ResolvedValue {
+                    display_name: name.to_string(),
                     scheme_for_table: scheme,
+                    instantiated: prepared,
+                    overloads: None,
+                }
+            }
+            SchemeLookup::Overloaded(schemes) => {
+                let ty = self.context.new_variable();
+                ResolvedValue {
+                    display_name: name.to_string(),
+                    scheme_for_table: TypeScheme::Monotype(ty.clone()),
                     instantiated: ty,
-                    overloads,
-                });
-            }
-
-            // Try elaborated modules (e.g., Module.function)
-            // Split on first dot to get module name
-            if let Some(dot_pos) = full_name.find('.') {
-                let module_name = &full_name[..dot_pos];
-                let func_name = &full_name[dot_pos + 1..];
-                if let Ok(scheme) = self.get_module_function_type_scheme(module_name, func_name) {
-                    let ty = scheme.instantiate(&mut self.context);
-                    let prepared = self.prepare_array_type(&ty);
-                    return Some(ResolvedValue {
-                        display_name: full_name.to_string(),
-                        scheme_for_table: scheme,
-                        instantiated: prepared,
-                        overloads: None,
-                    });
+                    overloads: Some(schemes),
                 }
             }
         }
-
-        // Check scope stack (locals shadow intrinsics for unqualified names)
-        if let Some(scheme) = self.scope_stack.lookup(full_name).cloned() {
-            let ty = scheme.instantiate(&mut self.context);
-            return Some(ResolvedValue {
-                display_name: full_name.to_string(),
-                scheme_for_table: scheme,
-                instantiated: ty,
-                overloads: None,
-            });
-        }
-
-        // Check intrinsics (for unqualified names, after scope)
-        if let Some(lookup) = self.intrinsics.get(full_name) {
-            let (scheme, ty, overloads) = match lookup {
-                IntrinsicLookup::Single(entry) => {
-                    let ty = entry.scheme.instantiate(&mut self.context);
-                    (entry.scheme.clone(), ty, None)
-                }
-                IntrinsicLookup::Overloaded(set) => {
-                    let ty = set.fresh_type(&mut self.context);
-                    let all_schemes: Vec<_> = set.entries().iter().map(|e| e.scheme.clone()).collect();
-                    (TypeScheme::Monotype(ty.clone()), ty, Some(all_schemes))
-                }
-            };
-            return Some(ResolvedValue {
-                display_name: full_name.to_string(),
-                scheme_for_table: scheme,
-                instantiated: ty,
-                overloads,
-            });
-        }
-
-        // Check prelude functions
-        if let Some(scheme) = self.get_prelude_function_type_scheme(full_name) {
-            let ty = scheme.instantiate(&mut self.context);
-            let prepared = self.prepare_array_type(&ty);
-            return Some(ResolvedValue {
-                display_name: full_name.to_string(),
-                scheme_for_table: scheme,
-                instantiated: prepared,
-                overloads: None,
-            });
-        }
-
-        None
     }
 
     /// Create a new TypeChecker with a reference to a ModuleManager
@@ -620,6 +592,7 @@ impl<'a> TypeChecker<'a> {
             type_param_scope: ScopeStack::new(),
             skolem_ids: crate::IdSource::new(),
             current_module: None,
+            module_schemes: HashMap::new(),
         }
     }
 
@@ -1123,12 +1096,12 @@ impl<'a> TypeChecker<'a> {
     }
 
     pub fn check_program(&mut self, program: &Program) -> Result<HashMap<crate::ast::NodeId, TypeScheme>> {
-        // Type-check prelude functions first (needed so they're in scope for user code)
-        self.check_prelude_functions()?;
-
-        // Type-check module function bodies (e.g., rand.init, rand.int)
-        // This ensures module functions have type table entries for flattening
+        // Type-check module functions first to populate the module_schemes cache.
+        // This must happen before prelude functions since they may reference module functions.
         self.check_module_functions()?;
+
+        // Type-check prelude functions (needed so they're in scope for user code)
+        self.check_prelude_functions()?;
 
         // Process user declarations
         for decl in &program.declarations {
@@ -1291,8 +1264,28 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Type-check function bodies from modules (e.g., rand.init, rand.int, f32.pi)
-    /// This populates the type table so these functions can be flattened to MIR.
-    fn check_module_functions(&mut self) -> Result<()> {
+    /// This populates the type table and module_schemes cache so these functions can be flattened to MIR.
+    pub fn check_module_functions(&mut self) -> Result<()> {
+        use crate::module_manager::ElaboratedItem;
+
+        // First, cache all module Specs (signatures like f32.sin, f32.cos).
+        // These don't need type-checking - their types are declared.
+        for (module_name, elaborated) in self.module_manager.elaborated_modules.iter() {
+            for item in &elaborated.items {
+                if let ElaboratedItem::Spec(spec) = item {
+                    let (name, scheme) = match spec {
+                        Spec::Sig(name, type_params, ty) => {
+                            (name.clone(), self.convert_to_polytype(ty, type_params))
+                        }
+                        Spec::SigOp(op, ty) => (op.clone(), TypeScheme::Monotype(ty.clone())),
+                        _ => continue,
+                    };
+                    let qualified_name = format!("{}.{}", module_name, name);
+                    self.module_schemes.insert(qualified_name, scheme);
+                }
+            }
+        }
+
         // Collect all module declarations that need flattening (includes constants like f32.pi)
         let module_functions: Vec<(String, crate::ast::Decl)> = self
             .module_manager
@@ -1308,6 +1301,11 @@ impl<'a> TypeChecker<'a> {
 
             // Type-check the declaration with module context for alias resolution
             self.check_decl_as_in_module(&decl, &qualified_name, Some(&module_name))?;
+
+            // Cache the scheme for fast lookup during name resolution
+            if let Some(scheme) = self.scope_stack.lookup(&qualified_name).cloned() {
+                self.module_schemes.insert(qualified_name, scheme);
+            }
         }
 
         Ok(())
@@ -1327,114 +1325,6 @@ impl<'a> TypeChecker<'a> {
         }
 
         Ok(())
-    }
-
-    // =========================================================================
-    // Module/prelude function type lookup (moved from ModuleManager)
-    // =========================================================================
-
-    /// Get the TypeScheme for a module function.
-    /// This replaces ModuleManager::get_module_function_type, keeping polytype logic in TypeChecker.
-    pub fn get_module_function_type_scheme(
-        &mut self,
-        module_name: &str,
-        function_name: &str,
-    ) -> Result<TypeScheme> {
-        use crate::module_manager::ElaboratedItem;
-
-        // Look up the elaborated module
-        let elaborated = self
-            .module_manager
-            .get_elaborated_module(module_name)
-            .ok_or_else(|| err_module!("Module '{}' not found", module_name))?;
-
-        // Search for the function in the elaborated items
-        for item in &elaborated.items {
-            match item {
-                ElaboratedItem::Spec(spec) => match spec {
-                    Spec::Sig(name, type_params, ty) if name == function_name => {
-                        // Convert to TypeScheme if there are type/size parameters
-                        return Ok(self.convert_to_polytype(ty, type_params));
-                    }
-                    Spec::SigOp(op, ty) if op == function_name => {
-                        // Operators currently don't have type parameters, return as Monotype
-                        return Ok(TypeScheme::Monotype(ty.clone()));
-                    }
-                    _ => {}
-                },
-                ElaboratedItem::Decl(decl) if decl.name == function_name => {
-                    // Build the full function type from parameters and return type
-                    return self.build_function_type_from_decl(decl, module_name);
-                }
-                _ => {}
-            }
-        }
-
-        Err(err_module!(
-            "Function '{}' not found in module '{}'",
-            function_name,
-            module_name
-        ))
-    }
-
-    /// Get the TypeScheme for a top-level prelude function.
-    /// This replaces ModuleManager::get_prelude_function_type.
-    pub fn get_prelude_function_type_scheme(&mut self, name: &str) -> Option<TypeScheme> {
-        let decl = self.module_manager.get_prelude_function(name)?.clone();
-
-        // Build the full function type from parameters and return type
-        let mut param_types = Vec::new();
-        for param in &decl.params {
-            if let Some(param_ty) = self.extract_type_from_pattern(param) {
-                param_types.push(param_ty);
-            } else {
-                // Parameter lacks type annotation, can't determine type
-                return None;
-            }
-        }
-
-        // Get return type (default to unit if not specified)
-        let return_type = decl.ty.clone().unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![]));
-
-        // Build function type by folding right-to-left
-        let mut result_type = return_type;
-        for param_ty in param_types.into_iter().rev() {
-            result_type = Type::Constructed(TypeName::Arrow, vec![param_ty, result_type]);
-        }
-
-        // Convert to TypeScheme if there are type/size parameters
-        let type_params = self.extract_type_params_from_type(&result_type);
-        Some(self.convert_to_polytype(&result_type, &type_params))
-    }
-
-    /// Build the full function type from a declaration's parameters and return type.
-    fn build_function_type_from_decl(&mut self, decl: &Decl, module_name: &str) -> Result<TypeScheme> {
-        // Extract parameter types and resolve any type aliases within the module
-        let mut param_types = Vec::new();
-        for param in &decl.params {
-            if let Some(param_ty) = self.extract_type_from_pattern(param) {
-                // Resolve type aliases (e.g., "state" -> "f32" within the rand module)
-                let resolved_ty = self.resolve_type_aliases_scoped(&param_ty, Some(module_name));
-                param_types.push(resolved_ty);
-            } else {
-                bail_module!("Function parameter in '{}' lacks type annotation", decl.name);
-            }
-        }
-
-        // Get return type (default to unit if not specified) and resolve aliases
-        let return_type = decl.ty.clone().unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![]));
-        let return_type = self.resolve_type_aliases_scoped(&return_type, Some(module_name));
-
-        // Build function type by folding right-to-left
-        // f32 -> f32 -> f32 is represented as f32 -> (f32 -> f32)
-        let mut result_type = return_type;
-        for param_ty in param_types.into_iter().rev() {
-            result_type = Type::Constructed(TypeName::Arrow, vec![param_ty, result_type]);
-        }
-
-        // Convert to TypeScheme if there are type/size parameters
-        let type_params = self.extract_type_params_from_type(&result_type);
-        Ok(self.convert_to_polytype(&result_type, &type_params))
     }
 
     /// Convert a type with type parameters to a polymorphic TypeScheme.
@@ -1490,51 +1380,6 @@ impl<'a> TypeChecker<'a> {
         })
     }
 
-    /// Extract type parameters from a type by finding all UserVar and SizeVar.
-    fn extract_type_params_from_type(&self, ty: &Type) -> Vec<TypeParam> {
-        let mut params = std::collections::HashSet::new();
-        self.collect_type_params(ty, &mut params);
-        params.into_iter().collect()
-    }
-
-    /// Recursively collect type parameters from a type.
-    fn collect_type_params(&self, ty: &Type, params: &mut std::collections::HashSet<TypeParam>) {
-        match ty {
-            Type::Constructed(TypeName::UserVar(name), args) => {
-                params.insert(TypeParam::Type(name.clone()));
-                for arg in args {
-                    self.collect_type_params(arg, params);
-                }
-            }
-            Type::Constructed(TypeName::SizeVar(name), args) => {
-                params.insert(TypeParam::Size(name.clone()));
-                for arg in args {
-                    self.collect_type_params(arg, params);
-                }
-            }
-            Type::Constructed(_, args) => {
-                for arg in args {
-                    self.collect_type_params(arg, params);
-                }
-            }
-            Type::Variable(_) => {}
-        }
-    }
-
-    /// Extract type annotation from a pattern.
-    fn extract_type_from_pattern(&self, pattern: &Pattern) -> Option<Type> {
-        match &pattern.kind {
-            PatternKind::Typed(_, ty) => Some(ty.clone()),
-            PatternKind::Tuple(pats) => {
-                // For tuple patterns, extract types from each element
-                let elem_types: Option<Vec<Type>> =
-                    pats.iter().map(|p| self.extract_type_from_pattern(p)).collect();
-                elem_types.map(|types| Type::Constructed(TypeName::Tuple(types.len()), types))
-            }
-            _ => None,
-        }
-    }
-
     /// Consume the type checker and return the type table.
     /// Used to extract the prelude type table after type-checking prelude functions.
     pub fn into_type_table(self) -> std::collections::HashMap<crate::ast::NodeId, TypeScheme> {
@@ -1550,6 +1395,12 @@ impl<'a> TypeChecker<'a> {
             schemes.insert(name.to_string(), scheme.clone());
         });
         schemes
+    }
+
+    /// Get a module function scheme from the cache.
+    /// Requires `check_module_functions()` to have been called first.
+    pub fn get_module_scheme(&self, qualified_name: &str) -> Option<&TypeScheme> {
+        self.module_schemes.get(qualified_name)
     }
 
     /// Consume the type checker and return all parts needed by FrontEnd.
