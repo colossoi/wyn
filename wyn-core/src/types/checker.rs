@@ -2840,6 +2840,60 @@ impl<'a> TypeChecker<'a> {
         Ok(())
     }
 
+    /// Peel one arrow from a function type and unify an argument with the expected param.
+    ///
+    /// Returns the result type after application.
+    fn unify_apply_arg(
+        &mut self,
+        func_ty: &Type,
+        arg_ty: &Type,
+        arg: &Expression,
+        arg_index: usize,
+    ) -> Result<Type> {
+        // Create fresh variables for param and result
+        let param_var = self.context.new_variable();
+        let result_var = self.context.new_variable();
+        let arrow_type = Type::arrow(param_var.clone(), result_var.clone());
+
+        // Unify function type with arrow
+        self.context.unify(func_ty, &arrow_type).map_err(|_| {
+            err_type_at!(
+                arg.h.span,
+                "Cannot apply {} as a function",
+                self.format_type(func_ty)
+            )
+        })?;
+
+        // Get expected param type after unification
+        let expected_param = param_var.apply(&self.context);
+
+        // Strip uniqueness for unification
+        let arg_stripped = strip_unique(arg_ty);
+        let param_stripped = strip_unique(&expected_param);
+
+        // Unify argument with expected param
+        self.context.unify(&arg_stripped, &param_stripped).map_err(|e| {
+            let error_msg = if arg.h.span.is_generated() {
+                format!(
+                    "Function argument type mismatch at argument {}: {:?}\n\
+                         Expected param type: {}\n\
+                         Actual arg type: {}\n\
+                         Generated expression: {:#?}",
+                    arg_index + 1,
+                    e,
+                    self.format_type(&param_stripped),
+                    self.format_type(&arg_stripped),
+                    arg
+                )
+            } else {
+                format!("Function argument type mismatch: {:?}", e)
+            };
+            err_type_at!(arg.h.span, "{}", error_msg)
+        })?;
+
+        Ok(result_var)
+    }
+
     /// Two-pass function application for better lambda inference
     ///
     /// Pass 1: Process non-lambda arguments to constrain type variables
@@ -2847,8 +2901,7 @@ impl<'a> TypeChecker<'a> {
     ///
     /// This allows map (\x -> ...) arr to infer properly regardless of argument order
     fn apply_two_pass(&mut self, mut func_type: Type, args: &[Expression]) -> Result<Type> {
-        // Collect argument types and expected types for lambdas
-        let mut arg_types: Vec<Option<Type>> = vec![None; args.len()];
+        // Track expected types for lambda arguments (for second pass)
         let mut lambda_expected_types: Vec<Option<Type>> = vec![None; args.len()];
 
         // First pass: process arguments to constrain type variables
@@ -2883,50 +2936,9 @@ impl<'a> TypeChecker<'a> {
 
                 func_type = result_type;
             } else {
-                // For non-lambda argument: infer type and unify
+                // For non-lambda argument: infer type and unify with expected param
                 let arg_type = self.infer_expression(arg)?;
-                arg_types[i] = Some(arg_type.clone());
-
-                // Peel the head with a fresh arrow
-                let param_type_var = self.context.new_variable();
-                let result_type = self.context.new_variable();
-                let expected_func_type = Type::arrow(param_type_var.clone(), result_type.clone());
-
-                self.context.unify(&func_type, &expected_func_type).map_err(|_| {
-                    err_type_at!(
-                        arg.h.span,
-                        "Cannot apply {} as a function",
-                        self.format_type(&func_type)
-                    )
-                })?;
-
-                // Extract the expected parameter type
-                let expected_param_type = param_type_var.apply(&self.context);
-
-                // Strip uniqueness for unification
-                let arg_type_for_unify = strip_unique(&arg_type);
-                let expected_param_for_unify = strip_unique(&expected_param_type);
-
-                self.context.unify(&arg_type_for_unify, &expected_param_for_unify).map_err(|e| {
-                    let error_msg = if arg.h.span.is_generated() {
-                        format!(
-                            "Function argument type mismatch at argument {}: {:?}\n\
-                             Expected param type: {}\n\
-                             Actual arg type: {}\n\
-                             Generated expression: {:#?}",
-                            i + 1,
-                            e,
-                            self.format_type(&expected_param_for_unify),
-                            self.format_type(&arg_type_for_unify),
-                            arg
-                        )
-                    } else {
-                        format!("Function argument type mismatch: {:?}", e)
-                    };
-                    err_type_at!(arg.h.span, "{}", error_msg)
-                })?;
-
-                func_type = result_type;
+                func_type = self.unify_apply_arg(&func_type, &arg_type, arg, i)?;
             }
         }
 
