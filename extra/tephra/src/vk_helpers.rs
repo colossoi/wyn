@@ -1,6 +1,6 @@
 //! Vulkan helper abstractions for compute shaders
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use ash::vk;
 use std::ffi::CStr;
 
@@ -29,12 +29,10 @@ impl ComputeContext {
 
             let create_info = vk::InstanceCreateInfo::default().application_info(&app_info);
 
-            let instance = entry
-                .create_instance(&create_info, None)
-                .context("Failed to create Vulkan instance")?;
+            let instance =
+                entry.create_instance(&create_info, None).context("Failed to create Vulkan instance")?;
 
-            let (physical_device, queue_family_index, device_name) =
-                select_compute_device(&instance)?;
+            let (physical_device, queue_family_index, device_name) = select_compute_device(&instance)?;
 
             let device = create_logical_device(&instance, physical_device, queue_family_index)?;
             let queue = device.get_device_queue(queue_family_index, 0);
@@ -56,7 +54,17 @@ impl ComputeContext {
     }
 
     pub fn create_compute_pipeline(&self, spirv: &[u32], entry_name: &str) -> Result<ComputePipeline<'_>> {
-        ComputePipeline::new(self, spirv, entry_name)
+        ComputePipeline::new(self, spirv, entry_name, 1, 0)
+    }
+
+    pub fn create_compute_pipeline_multi(
+        &self,
+        spirv: &[u32],
+        entry_name: &str,
+        binding_count: u32,
+        push_constant_size: u32,
+    ) -> Result<ComputePipeline<'_>> {
+        ComputePipeline::new(self, spirv, entry_name, binding_count, push_constant_size)
     }
 }
 
@@ -70,12 +78,9 @@ impl Drop for ComputeContext {
 }
 
 /// Find a physical device with compute capability
-unsafe fn select_compute_device(
-    instance: &ash::Instance,
-) -> Result<(vk::PhysicalDevice, u32, String)> {
-    let physical_devices = instance
-        .enumerate_physical_devices()
-        .context("Failed to enumerate physical devices")?;
+unsafe fn select_compute_device(instance: &ash::Instance) -> Result<(vk::PhysicalDevice, u32, String)> {
+    let physical_devices =
+        instance.enumerate_physical_devices().context("Failed to enumerate physical devices")?;
 
     for pd in physical_devices {
         let queue_families = instance.get_physical_device_queue_family_properties(pd);
@@ -86,9 +91,7 @@ unsafe fn select_compute_device(
             .find(|(_, props)| props.queue_flags.contains(vk::QueueFlags::COMPUTE))
         {
             let props = instance.get_physical_device_properties(pd);
-            let name = CStr::from_ptr(props.device_name.as_ptr())
-                .to_string_lossy()
-                .into_owned();
+            let name = CStr::from_ptr(props.device_name.as_ptr()).to_string_lossy().into_owned();
 
             return Ok((pd, idx as u32, name));
         }
@@ -135,10 +138,8 @@ impl<'a> StorageBuffer<'a> {
                 .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
                 .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
-            let buffer = ctx
-                .device
-                .create_buffer(&buffer_create_info, None)
-                .context("Failed to create buffer")?;
+            let buffer =
+                ctx.device.create_buffer(&buffer_create_info, None).context("Failed to create buffer")?;
 
             let mem_requirements = ctx.device.get_buffer_memory_requirements(buffer);
             let memory_type_index = find_memory_type(ctx, mem_requirements.memory_type_bits)?;
@@ -147,14 +148,10 @@ impl<'a> StorageBuffer<'a> {
                 .allocation_size(mem_requirements.size)
                 .memory_type_index(memory_type_index);
 
-            let memory = ctx
-                .device
-                .allocate_memory(&alloc_info, None)
-                .context("Failed to allocate memory")?;
+            let memory =
+                ctx.device.allocate_memory(&alloc_info, None).context("Failed to allocate memory")?;
 
-            ctx.device
-                .bind_buffer_memory(buffer, memory, 0)
-                .context("Failed to bind buffer memory")?;
+            ctx.device.bind_buffer_memory(buffer, memory, 0).context("Failed to bind buffer memory")?;
 
             Ok(Self {
                 ctx,
@@ -217,9 +214,7 @@ impl Drop for StorageBuffer<'_> {
 
 /// Find host-visible, coherent memory type
 unsafe fn find_memory_type(ctx: &ComputeContext, type_bits: u32) -> Result<u32> {
-    let memory_properties = ctx
-        .instance
-        .get_physical_device_memory_properties(ctx.physical_device);
+    let memory_properties = ctx.instance.get_physical_device_memory_properties(ctx.physical_device);
 
     (0..memory_properties.memory_type_count)
         .find(|&i| {
@@ -242,29 +237,53 @@ pub struct ComputePipeline<'a> {
     descriptor_pool: vk::DescriptorPool,
     shader_module: vk::ShaderModule,
     command_pool: vk::CommandPool,
+    binding_count: u32,
+    push_constant_size: u32,
 }
 
 impl<'a> ComputePipeline<'a> {
-    fn new(ctx: &'a ComputeContext, spirv: &[u32], entry_name: &str) -> Result<Self> {
+    fn new(
+        ctx: &'a ComputeContext,
+        spirv: &[u32],
+        entry_name: &str,
+        binding_count: u32,
+        push_constant_size: u32,
+    ) -> Result<Self> {
         unsafe {
-            // Descriptor set layout
-            let binding = vk::DescriptorSetLayoutBinding::default()
-                .binding(0)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE);
+            // Descriptor set layout with multiple bindings
+            let bindings: Vec<vk::DescriptorSetLayoutBinding> = (0..binding_count)
+                .map(|i| {
+                    vk::DescriptorSetLayoutBinding::default()
+                        .binding(i)
+                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                        .descriptor_count(1)
+                        .stage_flags(vk::ShaderStageFlags::COMPUTE)
+                })
+                .collect();
 
-            let layout_info =
-                vk::DescriptorSetLayoutCreateInfo::default().bindings(std::slice::from_ref(&binding));
+            let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
 
             let descriptor_set_layout = ctx
                 .device
                 .create_descriptor_set_layout(&layout_info, None)
                 .context("Failed to create descriptor set layout")?;
 
+            // Push constant range (if any)
+            let push_constant_ranges = if push_constant_size > 0 {
+                vec![
+                    vk::PushConstantRange::default()
+                        .stage_flags(vk::ShaderStageFlags::COMPUTE)
+                        .offset(0)
+                        .size(push_constant_size),
+                ]
+            } else {
+                vec![]
+            };
+
             // Pipeline layout
             let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
-                .set_layouts(std::slice::from_ref(&descriptor_set_layout));
+                .set_layouts(std::slice::from_ref(&descriptor_set_layout))
+                .push_constant_ranges(&push_constant_ranges);
 
             let pipeline_layout = ctx
                 .device
@@ -286,9 +305,8 @@ impl<'a> ComputePipeline<'a> {
                 .module(shader_module)
                 .name(&entry_cstr);
 
-            let pipeline_info = vk::ComputePipelineCreateInfo::default()
-                .stage(stage_info)
-                .layout(pipeline_layout);
+            let pipeline_info =
+                vk::ComputePipelineCreateInfo::default().stage(stage_info).layout(pipeline_layout);
 
             let pipelines = ctx
                 .device
@@ -301,7 +319,7 @@ impl<'a> ComputePipeline<'a> {
             // Descriptor pool
             let pool_size = vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(1);
+                .descriptor_count(binding_count);
 
             let pool_info = vk::DescriptorPoolCreateInfo::default()
                 .max_sets(1)
@@ -329,11 +347,49 @@ impl<'a> ComputePipeline<'a> {
                 descriptor_pool,
                 shader_module,
                 command_pool,
+                binding_count,
+                push_constant_size,
             })
         }
     }
 
+    /// Dispatch with a single buffer (legacy API).
     pub fn dispatch(&self, buffer: &StorageBuffer, num_workgroups: u32) -> Result<()> {
+        self.dispatch_multi(&[buffer], [num_workgroups, 1, 1], &[])
+    }
+
+    /// Dispatch with multiple buffers, 3D workgroup dimensions, and optional push constants.
+    pub fn dispatch_multi(
+        &self,
+        buffers: &[&StorageBuffer],
+        workgroups: [u32; 3],
+        push_constants: &[u8],
+    ) -> Result<()> {
+        if buffers.len() != self.binding_count as usize {
+            return Err(anyhow!(
+                "Expected {} buffers, got {}",
+                self.binding_count,
+                buffers.len()
+            ));
+        }
+
+        if !push_constants.is_empty() && push_constants.len() != self.push_constant_size as usize {
+            return Err(anyhow!(
+                "Expected {} bytes of push constants, got {}",
+                self.push_constant_size,
+                push_constants.len()
+            ));
+        }
+
+        self.dispatch_multi_internal(buffers, workgroups, push_constants)
+    }
+
+    fn dispatch_multi_internal(
+        &self,
+        buffers: &[&StorageBuffer],
+        workgroups: [u32; 3],
+        push_constants: &[u8],
+    ) -> Result<()> {
         unsafe {
             // Allocate descriptor set
             let alloc_info = vk::DescriptorSetAllocateInfo::default()
@@ -348,19 +404,26 @@ impl<'a> ComputePipeline<'a> {
 
             let descriptor_set = descriptor_sets[0];
 
-            // Update descriptor
-            let buffer_info = vk::DescriptorBufferInfo::default()
-                .buffer(buffer.buffer)
-                .offset(0)
-                .range(buffer.size);
+            // Update descriptors for all buffers
+            let buffer_infos: Vec<vk::DescriptorBufferInfo> = buffers
+                .iter()
+                .map(|buf| vk::DescriptorBufferInfo::default().buffer(buf.buffer).offset(0).range(buf.size))
+                .collect();
 
-            let write = vk::WriteDescriptorSet::default()
-                .dst_set(descriptor_set)
-                .dst_binding(0)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .buffer_info(std::slice::from_ref(&buffer_info));
+            // We need to keep buffer_info slices alive for the write descriptors
+            let writes: Vec<vk::WriteDescriptorSet> = buffer_infos
+                .iter()
+                .enumerate()
+                .map(|(i, info)| {
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(descriptor_set)
+                        .dst_binding(i as u32)
+                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                        .buffer_info(std::slice::from_ref(info))
+                })
+                .collect();
 
-            self.ctx.device.update_descriptor_sets(&[write], &[]);
+            self.ctx.device.update_descriptor_sets(&writes, &[]);
 
             // Allocate command buffer
             let cmd_alloc_info = vk::CommandBufferAllocateInfo::default()
@@ -377,14 +440,12 @@ impl<'a> ComputePipeline<'a> {
             let cmd = cmd_buffers[0];
 
             // Record commands
-            let begin_info = vk::CommandBufferBeginInfo::default()
-                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+            let begin_info =
+                vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
             self.ctx.device.begin_command_buffer(cmd, &begin_info)?;
 
-            self.ctx
-                .device
-                .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline);
+            self.ctx.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline);
 
             self.ctx.device.cmd_bind_descriptor_sets(
                 cmd,
@@ -395,18 +456,25 @@ impl<'a> ComputePipeline<'a> {
                 &[],
             );
 
-            self.ctx.device.cmd_dispatch(cmd, num_workgroups, 1, 1);
+            // Push constants if any
+            if !push_constants.is_empty() {
+                self.ctx.device.cmd_push_constants(
+                    cmd,
+                    self.pipeline_layout,
+                    vk::ShaderStageFlags::COMPUTE,
+                    0,
+                    push_constants,
+                );
+            }
+
+            self.ctx.device.cmd_dispatch(cmd, workgroups[0], workgroups[1], workgroups[2]);
 
             self.ctx.device.end_command_buffer(cmd)?;
 
             // Submit and wait
-            let submit_info =
-                vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
+            let submit_info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
 
-            let fence = self
-                .ctx
-                .device
-                .create_fence(&vk::FenceCreateInfo::default(), None)?;
+            let fence = self.ctx.device.create_fence(&vk::FenceCreateInfo::default(), None)?;
 
             self.ctx
                 .device
@@ -429,19 +497,11 @@ impl Drop for ComputePipeline<'_> {
     fn drop(&mut self) {
         unsafe {
             self.ctx.device.destroy_command_pool(self.command_pool, None);
-            self.ctx
-                .device
-                .destroy_descriptor_pool(self.descriptor_pool, None);
+            self.ctx.device.destroy_descriptor_pool(self.descriptor_pool, None);
             self.ctx.device.destroy_pipeline(self.pipeline, None);
-            self.ctx
-                .device
-                .destroy_shader_module(self.shader_module, None);
-            self.ctx
-                .device
-                .destroy_pipeline_layout(self.pipeline_layout, None);
-            self.ctx
-                .device
-                .destroy_descriptor_set_layout(self.descriptor_set_layout, None);
+            self.ctx.device.destroy_shader_module(self.shader_module, None);
+            self.ctx.device.destroy_pipeline_layout(self.pipeline_layout, None);
+            self.ctx.device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
         }
     }
 }
