@@ -1,0 +1,78 @@
+-- Cryptographic primitives
+-- SHA256 implementation for GPU compute shaders
+
+------------------------------------------------------------
+-- SHA256 Constants
+------------------------------------------------------------
+
+-- Initial hash values (first 32 bits of fractional parts of square roots of first 8 primes)
+def sha256_iv: [8]u32 =
+    [0x6a09e667u32, 0xbb67ae85u32, 0x3c6ef372u32, 0xa54ff53au32,
+     0x510e527fu32, 0x9b05688cu32, 0x1f83d9abu32, 0x5be0cd19u32]
+
+------------------------------------------------------------
+-- SHA256 Core Functions
+------------------------------------------------------------
+
+-- SHA256 compression of a single 512-bit (16 word) block with standard IV
+def sha256_block(block: [16]u32) [8]u32 =
+    _w_intrinsic_sha256_block(block)
+
+-- SHA256 compression with custom initial state (for multi-block hashing)
+def sha256_block_with_state(state: [8]u32, block: [16]u32) [8]u32 =
+    _w_intrinsic_sha256_block_with_state(state, block)
+
+------------------------------------------------------------
+-- SHA256 Padding Helpers
+------------------------------------------------------------
+
+-- Pad an 80-byte (20 word) message to 128 bytes (32 words = 2 blocks)
+-- Used for Bitcoin block header hashing
+-- Message format: [20 words of data] [padding to 32 words]
+-- Padding: 0x80000000, zeros, length in bits (80*8 = 640 = 0x280)
+def sha256_pad_80(msg: [20]u32) [32]u32 =
+    -- First block: 16 words of message
+    -- Second block: 4 words of message + 0x80000000 + 10 zeros + length
+    [msg[0], msg[1], msg[2], msg[3], msg[4], msg[5], msg[6], msg[7],
+     msg[8], msg[9], msg[10], msg[11], msg[12], msg[13], msg[14], msg[15],
+     msg[16], msg[17], msg[18], msg[19],
+     0x80000000u32,
+     0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32,
+     0x00000280u32]
+
+-- Hash an 80-byte message (Bitcoin block header)
+def sha256_80(msg: [20]u32) [8]u32 =
+    let padded = sha256_pad_80(msg) in
+    let block1: [16]u32 = [padded[0], padded[1], padded[2], padded[3],
+                           padded[4], padded[5], padded[6], padded[7],
+                           padded[8], padded[9], padded[10], padded[11],
+                           padded[12], padded[13], padded[14], padded[15]] in
+    let block2: [16]u32 = [padded[16], padded[17], padded[18], padded[19],
+                           padded[20], padded[21], padded[22], padded[23],
+                           padded[24], padded[25], padded[26], padded[27],
+                           padded[28], padded[29], padded[30], padded[31]] in
+    let h1 = sha256_block(block1) in
+    sha256_block_with_state(h1, block2)
+
+-- Pad a 32-byte (8 word) hash for double hashing
+-- Used for Bitcoin's double SHA256: SHA256(SHA256(header))
+-- Format: [8 words hash][0x80000000][6 zeros][0x00000100]
+def sha256_pad_32(hash: [8]u32) [16]u32 =
+    [hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7],
+     0x80000000u32,
+     0u32, 0u32, 0u32, 0u32, 0u32, 0u32,
+     0x00000100u32]
+
+-- Double SHA256 of an 80-byte message (Bitcoin mining)
+def sha256d_80(msg: [20]u32) [8]u32 =
+    let first_hash = sha256_80(msg) in
+    let padded = sha256_pad_32(first_hash) in
+    sha256_block(padded)
+
+------------------------------------------------------------
+-- Bit manipulation helpers
+------------------------------------------------------------
+
+-- Right rotate (for SHA256 internals)
+def rotr32(x: u32, n: u32) u32 =
+    _w_intrinsic_rotr32(x, n)

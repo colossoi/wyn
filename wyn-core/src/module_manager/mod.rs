@@ -191,6 +191,7 @@ impl ModuleManager {
         self.load_str(include_str!("../../../prelude/graphics.wyn"), node_counter)?;
         self.load_str(include_str!("../../../prelude/rand.wyn"), node_counter)?;
         self.load_str(include_str!("../../../prelude/soacs.wyn"), node_counter)?;
+        self.load_str(include_str!("../../../prelude/crypto.wyn"), node_counter)?;
         Ok(())
     }
 
