@@ -1944,6 +1944,15 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                 "_w_intrinsic_replicate" => {
                     return lower_replicate(constructor, body, args, expr_ty, result_type);
                 }
+                "_w_intrinsic_rotr32" => {
+                    return lower_rotr32(constructor, body, args);
+                }
+                "_w_intrinsic_sha256_block" => {
+                    return lower_sha256_block(constructor, body, args, result_type);
+                }
+                "_w_intrinsic_sha256_block_with_state" => {
+                    return lower_sha256_block_with_state(constructor, body, args, result_type);
+                }
                 _ => {} // Fall through to other special cases and regular calls
             }
 
@@ -3449,4 +3458,231 @@ fn lower_hist_1d(
     }
 
     Ok(constructor.builder.composite_construct(result_type, None, result_elements)?)
+}
+
+// ============================================================================
+// SHA256 intrinsics
+// ============================================================================
+
+/// SHA256 K constants (first 32 bits of fractional parts of cube roots of first 64 primes)
+const SHA256_K: [u32; 64] = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+];
+
+/// SHA256 initial hash values (first 32 bits of fractional parts of square roots of first 8 primes)
+const SHA256_IV: [u32; 8] = [
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+];
+
+/// Lower `_w_intrinsic_rotr32`: right rotate a u32 by n bits
+fn lower_rotr32(
+    constructor: &mut Constructor,
+    body: &Body,
+    args: &[ExprId],
+) -> Result<spirv::Word> {
+    if args.len() != 2 {
+        bail_spirv!("_w_intrinsic_rotr32 requires 2 args (x, n), got {}", args.len());
+    }
+
+    let x = lower_expr(constructor, body, args[0])?;
+    let n = lower_expr(constructor, body, args[1])?;
+
+    // rotr(x, n) = (x >> n) | (x << (32 - n))
+    let const_32 = constructor.builder.constant_bit32(constructor.u32_type, 32);
+    let complement = constructor.builder.i_sub(constructor.u32_type, None, const_32, n)?;
+    let right_shift = constructor.builder.shift_right_logical(constructor.u32_type, None, x, n)?;
+    let left_shift = constructor.builder.shift_left_logical(constructor.u32_type, None, x, complement)?;
+    Ok(constructor.builder.bitwise_or(constructor.u32_type, None, right_shift, left_shift)?)
+}
+
+/// Lower `_w_intrinsic_sha256_block`: SHA256 compression with standard IV
+fn lower_sha256_block(
+    constructor: &mut Constructor,
+    body: &Body,
+    args: &[ExprId],
+    result_type: spirv::Word,
+) -> Result<spirv::Word> {
+    if args.len() != 1 {
+        bail_spirv!("_w_intrinsic_sha256_block requires 1 arg (block), got {}", args.len());
+    }
+
+    let block = lower_expr(constructor, body, args[0])?;
+
+    // Build initial state from SHA256_IV constants
+    let mut state_words = Vec::with_capacity(8);
+    for &iv in &SHA256_IV {
+        state_words.push(constructor.builder.constant_bit32(constructor.u32_type, iv));
+    }
+    let array_8_u32 = result_type;
+    let state = constructor.builder.composite_construct(array_8_u32, None, state_words)?;
+
+    // Call the core compression function
+    lower_sha256_compress(constructor, state, block, result_type)
+}
+
+/// Lower `_w_intrinsic_sha256_block_with_state`: SHA256 compression with custom state
+fn lower_sha256_block_with_state(
+    constructor: &mut Constructor,
+    body: &Body,
+    args: &[ExprId],
+    result_type: spirv::Word,
+) -> Result<spirv::Word> {
+    if args.len() != 2 {
+        bail_spirv!("_w_intrinsic_sha256_block_with_state requires 2 args (state, block), got {}", args.len());
+    }
+
+    let state = lower_expr(constructor, body, args[0])?;
+    let block = lower_expr(constructor, body, args[1])?;
+
+    lower_sha256_compress(constructor, state, block, result_type)
+}
+
+/// Core SHA256 compression function
+/// Takes state [8]u32 and block [16]u32, returns new state [8]u32
+fn lower_sha256_compress(
+    constructor: &mut Constructor,
+    state: spirv::Word,
+    block: spirv::Word,
+    result_type: spirv::Word,
+) -> Result<spirv::Word> {
+    let u32_ty = constructor.u32_type;
+
+    // Helper closure for right rotation
+    let rotr = |c: &mut Constructor, x: spirv::Word, n: u32| -> Result<spirv::Word> {
+        let n_const = c.builder.constant_bit32(u32_ty, n);
+        let const_32 = c.builder.constant_bit32(u32_ty, 32);
+        let complement = c.builder.i_sub(u32_ty, None, const_32, n_const)?;
+        let right = c.builder.shift_right_logical(u32_ty, None, x, n_const)?;
+        let left = c.builder.shift_left_logical(u32_ty, None, x, complement)?;
+        Ok(c.builder.bitwise_or(u32_ty, None, right, left)?)
+    };
+
+    // Helper closure for right shift
+    let shr = |c: &mut Constructor, x: spirv::Word, n: u32| -> Result<spirv::Word> {
+        let n_const = c.builder.constant_bit32(u32_ty, n);
+        Ok(c.builder.shift_right_logical(u32_ty, None, x, n_const)?)
+    };
+
+    // Extract initial hash values (a, b, c, d, e, f, g, h)
+    let mut h = Vec::with_capacity(8);
+    for i in 0..8 {
+        h.push(constructor.builder.composite_extract(u32_ty, None, state, [i as u32])?);
+    }
+
+    // Extract message block words
+    let mut w = Vec::with_capacity(64);
+    for i in 0..16 {
+        w.push(constructor.builder.composite_extract(u32_ty, None, block, [i as u32])?);
+    }
+
+    // Expand message schedule (W[16..63])
+    for i in 16..64 {
+        // sigma0(x) = rotr(x,7) ^ rotr(x,18) ^ shr(x,3)
+        let w_i_15 = w[i - 15];
+        let s0_r7 = rotr(constructor, w_i_15, 7)?;
+        let s0_r18 = rotr(constructor, w_i_15, 18)?;
+        let s0_s3 = shr(constructor, w_i_15, 3)?;
+        let s0_tmp = constructor.builder.bitwise_xor(u32_ty, None, s0_r7, s0_r18)?;
+        let s0 = constructor.builder.bitwise_xor(u32_ty, None, s0_tmp, s0_s3)?;
+
+        // sigma1(x) = rotr(x,17) ^ rotr(x,19) ^ shr(x,10)
+        let w_i_2 = w[i - 2];
+        let s1_r17 = rotr(constructor, w_i_2, 17)?;
+        let s1_r19 = rotr(constructor, w_i_2, 19)?;
+        let s1_s10 = shr(constructor, w_i_2, 10)?;
+        let s1_tmp = constructor.builder.bitwise_xor(u32_ty, None, s1_r17, s1_r19)?;
+        let s1 = constructor.builder.bitwise_xor(u32_ty, None, s1_tmp, s1_s10)?;
+
+        // W[i] = W[i-16] + s0 + W[i-7] + s1
+        let w_i_16 = w[i - 16];
+        let w_i_7 = w[i - 7];
+        let tmp1 = constructor.builder.i_add(u32_ty, None, w_i_16, s0)?;
+        let tmp2 = constructor.builder.i_add(u32_ty, None, tmp1, w_i_7)?;
+        w.push(constructor.builder.i_add(u32_ty, None, tmp2, s1)?);
+    }
+
+    // Working variables
+    let mut a = h[0];
+    let mut b = h[1];
+    let mut c = h[2];
+    let mut d = h[3];
+    let mut e = h[4];
+    let mut f = h[5];
+    let mut g = h[6];
+    let mut hh = h[7];
+
+    // 64 rounds
+    for i in 0..64 {
+        // Sigma1(e) = rotr(e,6) ^ rotr(e,11) ^ rotr(e,25)
+        let sig1_r6 = rotr(constructor, e, 6)?;
+        let sig1_r11 = rotr(constructor, e, 11)?;
+        let sig1_r25 = rotr(constructor, e, 25)?;
+        let sig1_tmp = constructor.builder.bitwise_xor(u32_ty, None, sig1_r6, sig1_r11)?;
+        let sig1 = constructor.builder.bitwise_xor(u32_ty, None, sig1_tmp, sig1_r25)?;
+
+        // Ch(e,f,g) = (e & f) ^ (~e & g)
+        let e_and_f = constructor.builder.bitwise_and(u32_ty, None, e, f)?;
+        let not_e = constructor.builder.not(u32_ty, None, e)?;
+        let not_e_and_g = constructor.builder.bitwise_and(u32_ty, None, not_e, g)?;
+        let ch = constructor.builder.bitwise_xor(u32_ty, None, e_and_f, not_e_and_g)?;
+
+        // T1 = h + Sigma1(e) + Ch(e,f,g) + K[i] + W[i]
+        let k_i = constructor.builder.constant_bit32(u32_ty, SHA256_K[i]);
+        let t1_tmp1 = constructor.builder.i_add(u32_ty, None, hh, sig1)?;
+        let t1_tmp2 = constructor.builder.i_add(u32_ty, None, t1_tmp1, ch)?;
+        let t1_tmp3 = constructor.builder.i_add(u32_ty, None, t1_tmp2, k_i)?;
+        let t1 = constructor.builder.i_add(u32_ty, None, t1_tmp3, w[i])?;
+
+        // Sigma0(a) = rotr(a,2) ^ rotr(a,13) ^ rotr(a,22)
+        let sig0_r2 = rotr(constructor, a, 2)?;
+        let sig0_r13 = rotr(constructor, a, 13)?;
+        let sig0_r22 = rotr(constructor, a, 22)?;
+        let sig0_tmp = constructor.builder.bitwise_xor(u32_ty, None, sig0_r2, sig0_r13)?;
+        let sig0 = constructor.builder.bitwise_xor(u32_ty, None, sig0_tmp, sig0_r22)?;
+
+        // Maj(a,b,c) = (a & b) ^ (a & c) ^ (b & c)
+        let a_and_b = constructor.builder.bitwise_and(u32_ty, None, a, b)?;
+        let a_and_c = constructor.builder.bitwise_and(u32_ty, None, a, c)?;
+        let b_and_c = constructor.builder.bitwise_and(u32_ty, None, b, c)?;
+        let maj_tmp = constructor.builder.bitwise_xor(u32_ty, None, a_and_b, a_and_c)?;
+        let maj = constructor.builder.bitwise_xor(u32_ty, None, maj_tmp, b_and_c)?;
+
+        // T2 = Sigma0(a) + Maj(a,b,c)
+        let t2 = constructor.builder.i_add(u32_ty, None, sig0, maj)?;
+
+        // Update working variables
+        hh = g;
+        g = f;
+        f = e;
+        e = constructor.builder.i_add(u32_ty, None, d, t1)?;
+        d = c;
+        c = b;
+        b = a;
+        a = constructor.builder.i_add(u32_ty, None, t1, t2)?;
+    }
+
+    // Add working variables to original hash
+    let h0_new = constructor.builder.i_add(u32_ty, None, h[0], a)?;
+    let h1_new = constructor.builder.i_add(u32_ty, None, h[1], b)?;
+    let h2_new = constructor.builder.i_add(u32_ty, None, h[2], c)?;
+    let h3_new = constructor.builder.i_add(u32_ty, None, h[3], d)?;
+    let h4_new = constructor.builder.i_add(u32_ty, None, h[4], e)?;
+    let h5_new = constructor.builder.i_add(u32_ty, None, h[5], f)?;
+    let h6_new = constructor.builder.i_add(u32_ty, None, h[6], g)?;
+    let h7_new = constructor.builder.i_add(u32_ty, None, h[7], hh)?;
+
+    // Construct result array
+    Ok(constructor.builder.composite_construct(
+        result_type,
+        None,
+        vec![h0_new, h1_new, h2_new, h3_new, h4_new, h5_new, h6_new, h7_new],
+    )?)
 }
