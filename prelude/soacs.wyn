@@ -96,10 +96,14 @@ def any<[n], A>(p: A -> bool, xs: [n]A) bool =
 -- Array generation
 ------------------------------------------------------------
 
+-- Generate array of sequential integers [0, 1, 2, ..., n-1]
+-- Fundamental for distributing work across parallel threads.
+def iota<[n]>(size: i32) [n]i32 = 0..<size
+
 -- Generate array by applying function to each index
 -- tabulate size f = [f 0, f 1, ..., f (size-1)]
 def tabulate<[n], A>(size: i32, f: i32 -> A) [n]A =
-  map(f, 0..<size)
+  map(f, iota(size))
 
 ------------------------------------------------------------
 -- Array transformations
@@ -107,11 +111,13 @@ def tabulate<[n], A>(size: i32, f: i32 -> A) [n]A =
 
 -- Reverse an array
 def reverse<[n], A>(arr: [n]A) [n]A =
-  map(|i| arr[length(arr) - 1 - i], 0..<length(arr))
+  let len = length(arr)
+  in map(|i| arr[len - 1 - i], iota(len))
 
 -- Rotate array left by k positions
 def rotate<[n], A>(k: i32, arr: [n]A) [n]A =
-  map(|i| arr[(i + k) % length(arr)], 0..<length(arr))
+  let len = length(arr)
+  in map(|i| arr[(i + k) % len], iota(len))
 
 ------------------------------------------------------------
 -- Reduce variants
