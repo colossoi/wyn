@@ -1246,24 +1246,52 @@ fn lower_compute_pipeline(
         .ok_or_else(|| err_spirv!("Map function not found: {}", func_name))?;
 
     // Get the primary input buffer (binding 0) for the map operation
-    let (primary_buffer_var, elem_type_id) = constructor
+    let (primary_buffer_var, input_elem_type_id) = constructor
         .storage_buffers
         .get(&(0, 0))
         .ok_or_else(|| err_spirv!("No primary input buffer at binding 0"))?;
     let primary_buffer_var = *primary_buffer_var;
-    let elem_type_id = *elem_type_id;
+    let input_elem_type_id = *input_elem_type_id;
 
-    // Delegate to lower_inplace_map_core with single-element index list
-    let mem = MemBinding::Storage { set: 0, binding: 0 };
-    lower_inplace_map_core(
+    // Get the output element type from the map expression's return type
+    // For map(f, [][N]T) -> [][M]U, we need to extract [M]U from the output type
+    let output_elem_type_id = {
+        let map_expr_type = body.get_type(compute_info.map_expr);
+        match map_expr_type {
+            types::Type::Constructed(TypeName::Array, args) if args.len() == 3 => {
+                // Array[elem, addrspace, size] - extract elem
+                constructor.ast_type_to_spirv(&args[0])
+            }
+            _ => input_elem_type_id, // Fallback to input type for 1D arrays
+        }
+    };
+
+    // Check if we have a separate output buffer (for non-inplace maps)
+    // Output buffer is at binding = num_inputs (last buffer)
+    let num_input_buffers = compute_info.inputs.len() as u32;
+    let output_buffer_binding = num_input_buffers; // Output follows inputs
+
+    let (output_buffer_var, output_mem) = if let Some((out_var, _)) = constructor.storage_buffers.get(&(0, output_buffer_binding)) {
+        // Separate output buffer exists
+        (*out_var, MemBinding::Storage { set: 0, binding: output_buffer_binding })
+    } else {
+        // In-place: use input buffer for output
+        (primary_buffer_var, MemBinding::Storage { set: 0, binding: 0 })
+    };
+
+    // Read from input, write to output
+    let input_mem = MemBinding::Storage { set: 0, binding: 0 };
+    lower_compute_map_core(
         constructor,
-        mem,
+        input_mem,
         primary_buffer_var,
-        elem_type_id,
+        input_elem_type_id,
+        output_mem,
+        output_buffer_var,
+        output_elem_type_id,
         map_func_id,
         &capture_vals,
-        elem_type_id,
-        &[thread_id],
+        thread_id,
     )?;
 
     // Return
@@ -2937,6 +2965,45 @@ fn lower_inplace_map_core(
             constructor.void_type,
         )?;
     }
+    Ok(())
+}
+
+/// Compute shader map with separate input and output buffers.
+///
+/// Reads from input buffer, applies function, writes to output buffer.
+/// Used when input and output element types differ (e.g., map(sha256_block, [][16]u32) -> [][8]u32).
+fn lower_compute_map_core(
+    constructor: &mut Constructor,
+    input_mem: MemBinding,
+    input_buffer: spirv::Word,
+    input_elem_type: spirv::Word,
+    output_mem: MemBinding,
+    output_buffer: spirv::Word,
+    output_elem_type: spirv::Word,
+    map_func_id: spirv::Word,
+    capture_vals: &[spirv::Word],
+    index: spirv::Word,
+) -> Result<()> {
+    // Read element from input buffer
+    let input_elem = read_array_element(constructor, Some(input_mem), input_buffer, index, input_elem_type)?;
+
+    // Apply function: captures first, then input element
+    let mut call_args = capture_vals.to_vec();
+    call_args.push(input_elem);
+    let result_elem =
+        constructor.builder.function_call(output_elem_type, None, map_func_id, call_args)?;
+
+    // Write result to output buffer
+    write_array_element(
+        constructor,
+        Some(output_mem),
+        output_buffer,
+        index,
+        result_elem,
+        output_elem_type,
+        constructor.void_type,
+    )?;
+
     Ok(())
 }
 
