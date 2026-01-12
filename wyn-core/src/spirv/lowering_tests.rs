@@ -246,6 +246,21 @@ def hist_alias_test(dest: [3]i32, indices: [4]i32, values: [4]i32) [3]i32 =
 }
 
 #[test]
+fn test_reduce_u32() {
+    // Test reduce with u32 types - the initial value 0u32 must generate
+    // an unsigned constant, not a signed one
+    let spirv = compile_to_spirv(
+        r#"
+def sum_u32(arr: [4]u32) u32 =
+    reduce(|a, b| a + b, 0u32, arr)
+"#,
+    )
+    .unwrap();
+    assert!(!spirv.is_empty());
+    assert_eq!(spirv[0], 0x07230203);
+}
+
+#[test]
 fn test_algebraic_simplifications() {
     // Test all algebraic identity simplifications compile correctly
     let spirv = compile_to_spirv(

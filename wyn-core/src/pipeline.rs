@@ -63,7 +63,7 @@ pub fn build_pipeline(def: &mir::Def) -> Option<Pipeline> {
                 layout: StorageLayout::Std430,
                 set: 0,
                 binding: binding_num,
-                access: StorageAccess::ReadWrite,
+                access: StorageAccess::ReadOnly,
                 fields: vec![BufferField {
                     name: "data".to_string(),
                     ty: elem_type,
@@ -74,6 +74,26 @@ pub fn build_pipeline(def: &mir::Def) -> Option<Pipeline> {
             buffers.push(buffer);
             binding_num += 1;
         }
+    }
+
+    // Check if the return type is a slice - if so, add an output buffer
+    let return_type = body.get_type(body.root);
+    if is_output_slice_type(return_type) {
+        let output_elem_type = get_slice_element_type(return_type)?;
+        let output_buffer = BufferBlock {
+            id: crate::ast::NodeId(0),
+            name: "_output".to_string(),
+            layout: StorageLayout::Std430,
+            set: 0,
+            binding: binding_num,
+            access: StorageAccess::WriteOnly,
+            fields: vec![BufferField {
+                name: "data".to_string(),
+                ty: output_elem_type,
+                is_runtime_sized: true,
+            }],
+        };
+        buffers.push(output_buffer);
     }
 
     let stage = PipelineStage {
@@ -88,6 +108,23 @@ pub fn build_pipeline(def: &mir::Def) -> Option<Pipeline> {
         buffers,
         stages: vec![stage],
     })
+}
+
+/// Check if a type is an output slice (unsized array that can be in any address space).
+/// This is more permissive than is_slice_type since the return value doesn't need
+/// an explicit Storage address space annotation.
+fn is_output_slice_type(ty: &Type<TypeName>) -> bool {
+    match ty {
+        Type::Constructed(TypeName::Array, args) => {
+            assert!(args.len() == 3);
+            // Accept Unsized or type variable (polymorphic size = runtime determined)
+            matches!(
+                &args[2],
+                Type::Constructed(TypeName::Unsized, _) | Type::Variable(_)
+            )
+        }
+        _ => false,
+    }
 }
 
 /// Check if a type is a storage slice (unsized array in storage address space).

@@ -1315,6 +1315,17 @@ fn test_u32_literal() {
     typecheck_program("let x: u32 = 42u32");
 }
 
+#[test]
+fn test_reduce_with_u32() {
+    // Test that reduce with u32 initial value and u32 array works correctly
+    typecheck_program(
+        r#"
+def sum_u32(arr: [4]u32) u32 =
+    reduce(|a, b| a + b, 0u32, arr)
+        "#,
+    );
+}
+
 // ============================================================
 // ArrayWith (a with [i] = v) tests
 // ============================================================
