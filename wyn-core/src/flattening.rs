@@ -1032,11 +1032,7 @@ impl Flattener {
                     elems.iter().map(|e| self.flatten_expr(e).map(|(id, _)| id)).collect();
                 let elem_ids = elem_ids?;
                 let size_val = elem_ids.len() as i64;
-                let size_id = self.alloc_expr(
-                    mir::Expr::Int(size_val.to_string()),
-                    types::i32(),
-                    span,
-                );
+                let size_id = self.alloc_expr(mir::Expr::Int(size_val.to_string()), types::i32(), span);
                 (
                     mir::Expr::Array {
                         backing: mir::ArrayBacking::Literal(elem_ids),

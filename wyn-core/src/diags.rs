@@ -905,7 +905,7 @@ impl Display for mir::Expr {
                         name, offset.0, size.0
                     )
                 }
-            }
+            },
             mir::Expr::Vector(ids) => {
                 write!(f, "@[")?;
                 for (i, id) in ids.iter().enumerate() {

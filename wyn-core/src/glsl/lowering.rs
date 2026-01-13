@@ -987,9 +987,7 @@ impl<'a> LowerCtx<'a> {
                                 Expr::Array {
                                     backing: ArrayBacking::View { .. },
                                     ..
-                                } => {
-                                    Ok(format!("{}.base[{}.offset + {}]", args[0], args[0], args[1]))
-                                }
+                                } => Ok(format!("{}.base[{}.offset + {}]", args[0], args[0], args[1])),
                                 Expr::Array {
                                     backing: ArrayBacking::Storage { name, .. },
                                     ..

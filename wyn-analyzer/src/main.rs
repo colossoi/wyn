@@ -8,7 +8,7 @@ use wyn_core::FrontEnd;
 use wyn_core::TypeTable;
 use wyn_core::ast::{self, NodeCounter, NodeId, Span};
 use wyn_core::module_manager::{ModuleManager, PreElaboratedPrelude};
-use wyn_core::types::{format_scheme, Type, TypeName, TypeScheme};
+use wyn_core::types::{Type, TypeName, TypeScheme, format_scheme};
 
 /// Cached prelude data AND the node counter state after parsing it
 static PRELUDE_CACHE: OnceLock<(PreElaboratedPrelude, NodeCounter)> = OnceLock::new();
@@ -172,7 +172,8 @@ impl LanguageServer for Backend {
         let pos = params.text_document_position.position;
 
         // Check if triggered by '.'
-        let is_dot_trigger = params.context
+        let is_dot_trigger = params
+            .context
             .as_ref()
             .and_then(|ctx| ctx.trigger_character.as_ref())
             .map(|c| c == ".")
@@ -200,7 +201,8 @@ impl LanguageServer for Backend {
 
         // Default: prelude function completions
         let (prelude, _) = get_prelude();
-        let items: Vec<CompletionItem> = prelude.prelude_functions
+        let items: Vec<CompletionItem> = prelude
+            .prelude_functions
             .iter()
             .map(|(name, _decl)| CompletionItem {
                 label: name.clone(),
@@ -257,20 +259,15 @@ impl LanguageServer for Backend {
         let doc = docs.as_ref().and_then(|d| d.get(uri));
 
         if let Some(doc) = doc {
-            let symbols: Vec<DocumentSymbol> = doc.ast.declarations
-                .iter()
-                .filter_map(declaration_to_symbol)
-                .collect();
+            let symbols: Vec<DocumentSymbol> =
+                doc.ast.declarations.iter().filter_map(declaration_to_symbol).collect();
             return Ok(Some(DocumentSymbolResponse::Nested(symbols)));
         }
 
         Ok(None)
     }
 
-    async fn signature_help(
-        &self,
-        params: SignatureHelpParams,
-    ) -> Result<Option<SignatureHelp>> {
+    async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
 
@@ -364,8 +361,14 @@ impl Backend {
                     }
                 } else {
                     Range {
-                        start: Position { line: 0, character: 0 },
-                        end: Position { line: 0, character: 1 },
+                        start: Position {
+                            line: 0,
+                            character: 0,
+                        },
+                        end: Position {
+                            line: 0,
+                            character: 1,
+                        },
                     }
                 };
 
@@ -609,7 +612,9 @@ fn get_field_completions(scheme: &TypeScheme) -> Vec<CompletionItem> {
         }
     }
 
-    let Some(ty) = unwrap_scheme(scheme) else { return vec![] };
+    let Some(ty) = unwrap_scheme(scheme) else {
+        return vec![];
+    };
 
     let mut items = Vec::new();
 
@@ -689,7 +694,9 @@ fn find_definition(ast: &ast::Program, line: usize, col: usize) -> Option<Span> 
     for decl in &ast.declarations {
         match decl {
             ast::Declaration::Decl(def) => {
-                let param_bindings: Vec<_> = def.params.iter()
+                let param_bindings: Vec<_> = def
+                    .params
+                    .iter()
                     .flat_map(|p| p.collect_names().into_iter().map(|n| (n, p.h.span)))
                     .collect();
 
@@ -703,7 +710,9 @@ fn find_definition(ast: &ast::Program, line: usize, col: usize) -> Option<Span> 
                 }
             }
             ast::Declaration::Entry(entry) => {
-                let param_bindings: Vec<_> = entry.params.iter()
+                let param_bindings: Vec<_> = entry
+                    .params
+                    .iter()
                     .flat_map(|p| p.collect_names().into_iter().map(|n| (n, p.h.span)))
                     .collect();
 
@@ -780,15 +789,11 @@ fn find_definition_in_expr(
             }
             None
         }
-        If(if_expr) => {
-            find_definition_in_expr(&if_expr.condition, line, col, bindings)
-                .or_else(|| find_definition_in_expr(&if_expr.then_branch, line, col, bindings))
-                .or_else(|| find_definition_in_expr(&if_expr.else_branch, line, col, bindings))
-        }
-        BinaryOp(_, lhs, rhs) => {
-            find_definition_in_expr(lhs, line, col, bindings)
-                .or_else(|| find_definition_in_expr(rhs, line, col, bindings))
-        }
+        If(if_expr) => find_definition_in_expr(&if_expr.condition, line, col, bindings)
+            .or_else(|| find_definition_in_expr(&if_expr.then_branch, line, col, bindings))
+            .or_else(|| find_definition_in_expr(&if_expr.else_branch, line, col, bindings)),
+        BinaryOp(_, lhs, rhs) => find_definition_in_expr(lhs, line, col, bindings)
+            .or_else(|| find_definition_in_expr(rhs, line, col, bindings)),
         UnaryOp(_, operand) => find_definition_in_expr(operand, line, col, bindings),
         Tuple(elems) | ArrayLiteral(elems) | VecMatLiteral(elems) => {
             for elem in elems {
@@ -798,15 +803,11 @@ fn find_definition_in_expr(
             }
             None
         }
-        ArrayIndex(arr, idx) => {
-            find_definition_in_expr(arr, line, col, bindings)
-                .or_else(|| find_definition_in_expr(idx, line, col, bindings))
-        }
-        ArrayWith { array, index, value } => {
-            find_definition_in_expr(array, line, col, bindings)
-                .or_else(|| find_definition_in_expr(index, line, col, bindings))
-                .or_else(|| find_definition_in_expr(value, line, col, bindings))
-        }
+        ArrayIndex(arr, idx) => find_definition_in_expr(arr, line, col, bindings)
+            .or_else(|| find_definition_in_expr(idx, line, col, bindings)),
+        ArrayWith { array, index, value } => find_definition_in_expr(array, line, col, bindings)
+            .or_else(|| find_definition_in_expr(index, line, col, bindings))
+            .or_else(|| find_definition_in_expr(value, line, col, bindings)),
         FieldAccess(base, _) => find_definition_in_expr(base, line, col, bindings),
         Loop(loop_expr) => {
             let saved_len = bindings.len();
@@ -851,16 +852,18 @@ fn find_definition_in_expr(
         TypeCoercion(inner, _) | TypeAscription(inner, _) => {
             find_definition_in_expr(inner, line, col, bindings)
         }
-        Range(range_expr) => {
-            find_definition_in_expr(&range_expr.start, line, col, bindings)
-                .or_else(|| range_expr.step.as_ref().and_then(|s| find_definition_in_expr(s, line, col, bindings)))
-                .or_else(|| find_definition_in_expr(&range_expr.end, line, col, bindings))
-        }
-        Slice(slice_expr) => {
-            find_definition_in_expr(&slice_expr.array, line, col, bindings)
-                .or_else(|| slice_expr.start.as_ref().and_then(|s| find_definition_in_expr(s, line, col, bindings)))
-                .or_else(|| slice_expr.end.as_ref().and_then(|e| find_definition_in_expr(e, line, col, bindings)))
-        }
+        Range(range_expr) => find_definition_in_expr(&range_expr.start, line, col, bindings)
+            .or_else(|| {
+                range_expr.step.as_ref().and_then(|s| find_definition_in_expr(s, line, col, bindings))
+            })
+            .or_else(|| find_definition_in_expr(&range_expr.end, line, col, bindings)),
+        Slice(slice_expr) => find_definition_in_expr(&slice_expr.array, line, col, bindings)
+            .or_else(|| {
+                slice_expr.start.as_ref().and_then(|s| find_definition_in_expr(s, line, col, bindings))
+            })
+            .or_else(|| {
+                slice_expr.end.as_ref().and_then(|e| find_definition_in_expr(e, line, col, bindings))
+            }),
         _ => None,
     }
 }
@@ -920,7 +923,10 @@ fn declaration_to_symbol(decl: &ast::Declaration) -> Option<DocumentSymbol> {
             let range = Range::default();
             Some(DocumentSymbol {
                 name: uniform.name.clone(),
-                detail: Some(format!("uniform (set={}, binding={})", uniform.set, uniform.binding)),
+                detail: Some(format!(
+                    "uniform (set={}, binding={})",
+                    uniform.set, uniform.binding
+                )),
                 kind: SymbolKind::VARIABLE,
                 tags: None,
                 deprecated: None,
@@ -933,7 +939,10 @@ fn declaration_to_symbol(decl: &ast::Declaration) -> Option<DocumentSymbol> {
             let range = Range::default();
             Some(DocumentSymbol {
                 name: storage.name.clone(),
-                detail: Some(format!("storage (set={}, binding={})", storage.set, storage.binding)),
+                detail: Some(format!(
+                    "storage (set={}, binding={})",
+                    storage.set, storage.binding
+                )),
                 kind: SymbolKind::VARIABLE,
                 tags: None,
                 deprecated: None,

@@ -373,8 +373,7 @@ fn exprs_equal(body: &Body, a: ExprId, b: ExprId) -> bool {
             }
             match (ba, bb) {
                 (ArrayBacking::Literal(ea), ArrayBacking::Literal(eb)) => {
-                    ea.len() == eb.len()
-                        && ea.iter().zip(eb.iter()).all(|(x, y)| exprs_equal(body, *x, *y))
+                    ea.len() == eb.len() && ea.iter().zip(eb.iter()).all(|(x, y)| exprs_equal(body, *x, *y))
                 }
                 (
                     ArrayBacking::Range {

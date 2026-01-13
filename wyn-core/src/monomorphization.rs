@@ -581,9 +581,7 @@ impl Monomorphizer {
                         base: expr_map[base],
                         offset: expr_map[offset],
                     },
-                    ArrayBacking::Owned { data } => ArrayBacking::Owned {
-                        data: expr_map[data],
-                    },
+                    ArrayBacking::Owned { data } => ArrayBacking::Owned { data: expr_map[data] },
                     ArrayBacking::Storage { name, offset } => ArrayBacking::Storage {
                         name: name.clone(),
                         offset: expr_map[offset],

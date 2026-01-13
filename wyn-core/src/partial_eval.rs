@@ -279,12 +279,8 @@ impl PartialEvaluator {
                     AggregateKind::Tuple => self.emit(Expr::Tuple(elem_ids), ty, span, node_id),
                     AggregateKind::Array => {
                         let size_val = elem_ids.len() as i64;
-                        let size_id = self.emit(
-                            Expr::Int(size_val.to_string()),
-                            types::i32(),
-                            span,
-                            node_id,
-                        );
+                        let size_id =
+                            self.emit(Expr::Int(size_val.to_string()), types::i32(), span, node_id);
                         self.emit(
                             Expr::Array {
                                 backing: ArrayBacking::Literal(elem_ids),

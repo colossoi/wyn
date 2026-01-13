@@ -11,8 +11,8 @@ use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
 use crate::lowering_common::is_empty_closure_type;
 use crate::mir::parallelism::{SimpleComputeMap, detect_simple_compute_map};
 use crate::mir::{
-    self, ArrayBacking, Body, Def, ExecutionModel, Expr, ExprId, LambdaId, LambdaInfo, LocalId,
-    LoopKind, Program,
+    self, ArrayBacking, Body, Def, ExecutionModel, Expr, ExprId, LambdaId, LambdaInfo, LocalId, LoopKind,
+    Program,
 };
 use crate::pipeline::{self, Pipeline};
 
@@ -104,6 +104,8 @@ struct Constructor {
     vec_type_cache: HashMap<(spirv::Word, u32), spirv::Word>,
     struct_type_cache: HashMap<Vec<spirv::Word>, spirv::Word>,
     ptr_type_cache: HashMap<(spirv::StorageClass, spirv::Word), spirv::Word>,
+    runtime_array_cache: HashMap<(spirv::Word, u32), spirv::Word>, // (elem_type, stride) -> decorated type
+    buffer_block_cache: HashMap<spirv::Word, spirv::Word>, // runtime_array_type -> Block-decorated struct
 
     // Entry point interface tracking
     entry_point_interfaces: HashMap<String, Vec<spirv::Word>>,
@@ -170,6 +172,8 @@ impl Constructor {
             vec_type_cache: HashMap::new(),
             struct_type_cache: HashMap::new(),
             ptr_type_cache: HashMap::new(),
+            runtime_array_cache: HashMap::new(),
+            buffer_block_cache: HashMap::new(),
             entry_point_interfaces: HashMap::new(),
             current_is_entry_point: false,
             current_output_vars: Vec::new(),
@@ -402,6 +406,34 @@ impl Constructor {
         }
         let ty = self.builder.type_struct(field_types.clone());
         self.struct_type_cache.insert(field_types, ty);
+        ty
+    }
+
+    /// Get or create a runtime array type with ArrayStride decoration
+    fn get_or_create_runtime_array_type(&mut self, elem_type: spirv::Word, stride: u32) -> spirv::Word {
+        let key = (elem_type, stride);
+        if let Some(&ty) = self.runtime_array_cache.get(&key) {
+            return ty;
+        }
+        let ty = self.builder.type_runtime_array(elem_type);
+        self.builder.decorate(
+            ty,
+            spirv::Decoration::ArrayStride,
+            [Operand::LiteralBit32(stride)],
+        );
+        self.runtime_array_cache.insert(key, ty);
+        ty
+    }
+
+    /// Get or create a Block-decorated struct wrapping a runtime array (for storage buffers)
+    fn get_or_create_buffer_block_type(&mut self, runtime_array_type: spirv::Word) -> spirv::Word {
+        if let Some(&ty) = self.buffer_block_cache.get(&runtime_array_type) {
+            return ty;
+        }
+        let ty = self.builder.type_struct([runtime_array_type]);
+        self.builder.decorate(ty, spirv::Decoration::Block, []);
+        self.builder.member_decorate(ty, 0, spirv::Decoration::Offset, [Operand::LiteralBit32(0)]);
+        self.buffer_block_cache.insert(runtime_array_type, ty);
         ty
     }
 
@@ -1155,22 +1187,8 @@ fn lower_compute_pipeline(
         // Calculate proper array stride from element type
         let stride = crate::mir::layout::type_byte_size(&field.ty).unwrap_or(4);
 
-        let runtime_array_type = constructor.builder.type_runtime_array(elem_type_id);
-        constructor.builder.decorate(
-            runtime_array_type,
-            spirv::Decoration::ArrayStride,
-            [Operand::LiteralBit32(stride)],
-        );
-
-        // Wrap in a struct for Block decoration
-        let buffer_struct_type = constructor.builder.type_struct([runtime_array_type]);
-        constructor.builder.decorate(buffer_struct_type, spirv::Decoration::Block, []);
-        constructor.builder.member_decorate(
-            buffer_struct_type,
-            0,
-            spirv::Decoration::Offset,
-            [Operand::LiteralBit32(0)],
-        );
+        let runtime_array_type = constructor.get_or_create_runtime_array_type(elem_type_id, stride);
+        let buffer_struct_type = constructor.get_or_create_buffer_block_type(runtime_array_type);
 
         let buffer_ptr_type =
             constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, buffer_struct_type);
@@ -1277,12 +1295,29 @@ fn lower_compute_pipeline(
     // - Storage: loads from buffer[thread_id]
     // - IndexFn: calls the function with thread_id
     let input_elem = match map_array_expr {
-        Expr::Array { backing, .. } => {
-            read_elem(constructor, body, compute_info.map_array, backing, thread_id_i32, input_elem_type_id)?
-        }
+        Expr::Array { backing, .. } => read_elem(
+            constructor,
+            body,
+            compute_info.map_array,
+            backing,
+            thread_id_i32,
+            input_elem_type_id,
+        )?,
         _ => {
-            // Fallback for non-Array expressions (shouldn't happen for compute maps)
-            bail_spirv!("Compute map source must be an Array expression, got {:?}", map_array_expr)
+            // For Local references (storage buffer inputs), read from the first input buffer
+            let binding = (0u32, 0u32);
+            let (buffer_var, _) = constructor
+                .storage_buffers
+                .get(&binding)
+                .ok_or_else(|| err_spirv!("No input buffer at binding {:?}", binding))?;
+            let buffer_var = *buffer_var;
+
+            let elem_ptr_type =
+                constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, input_elem_type_id);
+            let zero = constructor.const_u32(0);
+            let elem_ptr =
+                constructor.builder.access_chain(elem_ptr_type, None, buffer_var, [zero, thread_id])?;
+            constructor.builder.load(input_elem_type_id, None, elem_ptr, None, [])?
         }
     };
 
@@ -1297,16 +1332,21 @@ fn lower_compute_pipeline(
     let output_buffer_binding = num_input_buffers;
 
     // Check if we have a dedicated output buffer
-    let (output_buffer_var, output_mem) = if let Some((out_var, _)) =
-        constructor.storage_buffers.get(&(0, output_buffer_binding))
-    {
-        (*out_var, MemBinding::Storage { set: 0, binding: output_buffer_binding })
-    } else if let Some((out_var, _)) = constructor.storage_buffers.get(&(0, 0)) {
-        // Fallback to first buffer for in-place operations
-        (*out_var, MemBinding::Storage { set: 0, binding: 0 })
-    } else {
-        bail_spirv!("No output buffer available for compute shader")
-    };
+    let (output_buffer_var, output_mem) =
+        if let Some((out_var, _)) = constructor.storage_buffers.get(&(0, output_buffer_binding)) {
+            (
+                *out_var,
+                MemBinding::Storage {
+                    set: 0,
+                    binding: output_buffer_binding,
+                },
+            )
+        } else if let Some((out_var, _)) = constructor.storage_buffers.get(&(0, 0)) {
+            // Fallback to first buffer for in-place operations
+            (*out_var, MemBinding::Storage { set: 0, binding: 0 })
+        } else {
+            bail_spirv!("No output buffer available for compute shader")
+        };
 
     write_array_element(
         constructor,
@@ -1366,7 +1406,7 @@ fn lower_const_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId)
                 let val: i32 = n.parse().map_err(|_| err_spirv!("Invalid integer literal: {}", n))?;
                 Ok(constructor.const_i32(val))
             }
-        }
+        },
         Expr::Float(f) => {
             let val: f32 = f.parse().map_err(|_| err_spirv!("Invalid float literal: {}", f))?;
             Ok(constructor.const_f32(val))
@@ -1489,7 +1529,7 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                 let val: i32 = s.parse().map_err(|_| err_spirv!("Invalid integer literal: {}", s))?;
                 Ok(constructor.const_i32(val))
             }
-        }
+        },
 
         Expr::Float(s) => {
             let val: f32 = s.parse().map_err(|_| err_spirv!("Invalid float literal: {}", s))?;
@@ -2445,9 +2485,7 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
             Ok(constructor.builder.composite_construct(result_type, None, elem_ids)?)
         }
 
-        Expr::Array { backing, size } => {
-            lower_array_expr(constructor, body, backing, *size, expr_ty)
-        }
+        Expr::Array { backing, size } => lower_array_expr(constructor, body, backing, *size, expr_ty),
 
         Expr::Vector(elems) => {
             // Lower all element expressions
@@ -2710,7 +2748,11 @@ fn read_elem(
                     // Lower the element expression at that index
                     lower_expr(constructor, body, elems[literal_idx as usize])
                 } else {
-                    bail_spirv!("Array index {} out of bounds for literal array of size {}", literal_idx, elems.len())
+                    bail_spirv!(
+                        "Array index {} out of bounds for literal array of size {}",
+                        literal_idx,
+                        elems.len()
+                    )
                 }
             } else {
                 // Dynamic index: must store array in variable and use access chain
@@ -2726,11 +2768,8 @@ fn read_elem(
                 let array_var = constructor.declare_variable("_w_lit_arr_tmp", array_type)?;
                 constructor.builder.store(array_var, array_val, None, [])?;
 
-                let elem_ptr_type = constructor.builder.type_pointer(
-                    None,
-                    spirv::StorageClass::Function,
-                    elem_type,
-                );
+                let elem_ptr_type =
+                    constructor.builder.type_pointer(None, spirv::StorageClass::Function, elem_type);
                 let elem_ptr = constructor.builder.access_chain(elem_ptr_type, None, array_var, [index])?;
                 Ok(constructor.builder.load(elem_type, None, elem_ptr, None, [])?)
             }
@@ -2776,9 +2815,10 @@ fn read_elem(
             // Get base array's backing and recurse
             let base_expr = body.get_expr(*base);
             match base_expr {
-                Expr::Array { backing: base_backing, .. } => {
-                    read_elem(constructor, body, *base, base_backing, adjusted_index, elem_type)
-                }
+                Expr::Array {
+                    backing: base_backing,
+                    ..
+                } => read_elem(constructor, body, *base, base_backing, adjusted_index, elem_type),
                 _ => {
                     // Base is a value expression, not an Array with backing
                     // Fall back to storing and indexing
@@ -2788,12 +2828,14 @@ fn read_elem(
                     let base_var = constructor.declare_variable("_w_view_base_tmp", base_type)?;
                     constructor.builder.store(base_var, base_val, None, [])?;
 
-                    let elem_ptr_type = constructor.builder.type_pointer(
+                    let elem_ptr_type =
+                        constructor.builder.type_pointer(None, spirv::StorageClass::Function, elem_type);
+                    let elem_ptr = constructor.builder.access_chain(
+                        elem_ptr_type,
                         None,
-                        spirv::StorageClass::Function,
-                        elem_type,
-                    );
-                    let elem_ptr = constructor.builder.access_chain(elem_ptr_type, None, base_var, [adjusted_index])?;
+                        base_var,
+                        [adjusted_index],
+                    )?;
                     Ok(constructor.builder.load(elem_type, None, elem_ptr, None, [])?)
                 }
             }
@@ -2807,11 +2849,8 @@ fn read_elem(
             let data_var = constructor.declare_variable("_w_owned_tmp", data_type)?;
             constructor.builder.store(data_var, data_val, None, [])?;
 
-            let elem_ptr_type = constructor.builder.type_pointer(
-                None,
-                spirv::StorageClass::Function,
-                elem_type,
-            );
+            let elem_ptr_type =
+                constructor.builder.type_pointer(None, spirv::StorageClass::Function, elem_type);
             let elem_ptr = constructor.builder.access_chain(elem_ptr_type, None, data_var, [index])?;
             Ok(constructor.builder.load(elem_type, None, elem_ptr, None, [])?)
         }
@@ -2834,9 +2873,15 @@ fn read_elem(
             let offset_val = lower_expr(constructor, body, *offset)?;
             let adjusted_index = constructor.builder.i_add(i32_type, None, offset_val, index)?;
 
-            let elem_ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_type);
+            let elem_ptr_type =
+                constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_type);
             let zero = constructor.const_u32(0);
-            let elem_ptr = constructor.builder.access_chain(elem_ptr_type, None, buffer_var, [zero, adjusted_index])?;
+            let elem_ptr = constructor.builder.access_chain(
+                elem_ptr_type,
+                None,
+                buffer_var,
+                [zero, adjusted_index],
+            )?;
             Ok(constructor.builder.load(elem_type, None, elem_ptr, None, [])?)
         }
     }
@@ -2953,10 +2998,10 @@ fn lower_index_intrinsic(
                             .ok_or_else(|| err_spirv!("Unknown storage buffer: {}", name))?;
                         let (set, binding) = (*set, *binding);
 
-                        let (buffer_var, _elem_type_id) = constructor
-                            .storage_buffers
-                            .get(&(set, binding))
-                            .ok_or_else(|| err_spirv!("Storage buffer not registered: {}:{}", set, binding))?;
+                        let (buffer_var, _elem_type_id) =
+                            constructor.storage_buffers.get(&(set, binding)).ok_or_else(|| {
+                                err_spirv!("Storage buffer not registered: {}:{}", set, binding)
+                            })?;
                         let buffer_var = *buffer_var;
 
                         let offset_val = lower_expr(constructor, body, *offset)?;
@@ -3198,8 +3243,8 @@ fn lower_inplace_map_core(
 
 /// Lower `_w_intrinsic_map`: map f [a,b,c] = [f(a), f(b), f(c)]
 ///
-/// Always produces a new value array. For storage-backed inputs, loads elements
-/// from storage first. This is the non-mutating variant.
+/// Always produces a new value array. Uses read_elem for virtual arrays
+/// (Range, IndexFn) to avoid unnecessary materialization.
 fn lower_map(
     constructor: &mut Constructor,
     body: &Body,
@@ -3214,15 +3259,10 @@ fn lower_map(
         );
     }
 
-    // TODO(Phase 5): Address space is now tracked in types (Slice[elem, Storage/Function])
-    // For now, use None for mem binding since we don't have LocalDecl.mem anymore
-    let mem: Option<MemBinding> = None;
-
     let (func_name, capture_vals) = extract_closure_info(constructor, body, args[0])?;
 
-    // Lower the input array
-    let arr_val = lower_expr(constructor, body, args[1])?;
-    let arr_ty = body.get_type(args[1]);
+    let arr_expr_id = args[1];
+    let arr_ty = body.get_type(arr_expr_id);
     let (array_size, elem_type) = extract_array_info(constructor, arr_ty)?;
 
     // Get result element type from the expression type
@@ -3239,19 +3279,51 @@ fn lower_map(
         .get(&func_name)
         .ok_or_else(|| err_spirv!("Map function not found: {}", func_name))?;
 
-    // Always build a new value array (non-mutating semantics)
+    // Check if input array has a virtual backing (Range, IndexFn)
+    // If so, use read_elem directly to avoid materialization
+    let arr_expr = body.get_expr(arr_expr_id);
+    let use_read_elem = matches!(
+        arr_expr,
+        Expr::Array {
+            backing: ArrayBacking::Range { .. } | ArrayBacking::IndexFn { .. },
+            ..
+        }
+    );
+
+    // Build output array elements
     let mut result_elements = Vec::with_capacity(array_size as usize);
-    for i in 0..array_size {
-        // Use read_array_element which handles both value and storage arrays
-        let idx = constructor.const_u32(i);
-        let input_elem = read_array_element(constructor, mem, arr_val, idx, elem_type)?;
-        // Build call args: captures first, then input element
-        let mut call_args = capture_vals.clone();
-        call_args.push(input_elem);
-        let result_elem =
-            constructor.builder.function_call(output_elem_type, None, map_func_id, call_args)?;
-        result_elements.push(result_elem);
+
+    if use_read_elem {
+        // Virtual array: use read_elem to compute elements on-the-fly
+        if let Expr::Array { backing, .. } = arr_expr {
+            for i in 0..array_size {
+                let idx = constructor.const_i32(i as i32);
+                let input_elem = read_elem(constructor, body, arr_expr_id, backing, idx, elem_type)?;
+
+                let mut call_args = capture_vals.clone();
+                call_args.push(input_elem);
+                let result_elem =
+                    constructor.builder.function_call(output_elem_type, None, map_func_id, call_args)?;
+                result_elements.push(result_elem);
+            }
+        }
+    } else {
+        // Materialized array: lower it first, then read elements
+        let arr_val = lower_expr(constructor, body, arr_expr_id)?;
+        let mem: Option<MemBinding> = None;
+
+        for i in 0..array_size {
+            let idx = constructor.const_u32(i);
+            let input_elem = read_array_element(constructor, mem, arr_val, idx, elem_type)?;
+
+            let mut call_args = capture_vals.clone();
+            call_args.push(input_elem);
+            let result_elem =
+                constructor.builder.function_call(output_elem_type, None, map_func_id, call_args)?;
+            result_elements.push(result_elem);
+        }
     }
+
     Ok(constructor.builder.composite_construct(result_type, None, result_elements)?)
 }
 
@@ -3734,16 +3806,11 @@ const SHA256_K: [u32; 64] = [
 
 /// SHA256 initial hash values (first 32 bits of fractional parts of square roots of first 8 primes)
 const SHA256_IV: [u32; 8] = [
-    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];
 
 /// Lower `_w_intrinsic_rotr32`: right rotate a u32 by n bits
-fn lower_rotr32(
-    constructor: &mut Constructor,
-    body: &Body,
-    args: &[ExprId],
-) -> Result<spirv::Word> {
+fn lower_rotr32(constructor: &mut Constructor, body: &Body, args: &[ExprId]) -> Result<spirv::Word> {
     if args.len() != 2 {
         bail_spirv!("_w_intrinsic_rotr32 requires 2 args (x, n), got {}", args.len());
     }
@@ -3767,7 +3834,10 @@ fn lower_sha256_block(
     result_type: spirv::Word,
 ) -> Result<spirv::Word> {
     if args.len() != 1 {
-        bail_spirv!("_w_intrinsic_sha256_block requires 1 arg (block), got {}", args.len());
+        bail_spirv!(
+            "_w_intrinsic_sha256_block requires 1 arg (block), got {}",
+            args.len()
+        );
     }
 
     let block = lower_expr(constructor, body, args[0])?;
@@ -3792,7 +3862,10 @@ fn lower_sha256_block_with_state(
     result_type: spirv::Word,
 ) -> Result<spirv::Word> {
     if args.len() != 2 {
-        bail_spirv!("_w_intrinsic_sha256_block_with_state requires 2 args (state, block), got {}", args.len());
+        bail_spirv!(
+            "_w_intrinsic_sha256_block_with_state requires 2 args (state, block), got {}",
+            args.len()
+        );
     }
 
     let state = lower_expr(constructor, body, args[0])?;
