@@ -1246,103 +1246,77 @@ fn lower_compute_pipeline(
         .get(&func_name)
         .ok_or_else(|| err_spirv!("Map function not found: {}", func_name))?;
 
-    // Handle different map sources based on the map_array expression
+    // Get the map array expression and its backing
     let map_array_expr = body.get_expr(compute_info.map_array);
-    let is_range_source = matches!(
-        map_array_expr,
-        Expr::Array {
-            backing: ArrayBacking::Range { .. },
-            ..
+
+    // Get input element type from the map array type
+    let map_array_ty = body.get_type(compute_info.map_array);
+    let input_elem_type_id = match map_array_ty {
+        types::Type::Constructed(TypeName::Array, args) if args.len() == 3 => {
+            constructor.ast_type_to_spirv(&args[0])
         }
-    );
+        _ => constructor.i32_type, // Default to i32 for Range arrays
+    };
 
-    if is_range_source {
-        // For map(f, 0..<n) pattern: pass thread_id directly to f
-        // The function receives the thread index as its argument
-
-        // Get the output element type from the map expression's return type
-        let output_elem_type_id = {
-            let map_expr_type = body.get_type(compute_info.map_expr);
-            match map_expr_type {
-                types::Type::Constructed(TypeName::Array, args) if args.len() == 3 => {
-                    constructor.ast_type_to_spirv(&args[0])
-                }
-                _ => constructor.i32_type, // Default to i32 for simple cases
+    // Get output element type from the map expression's return type
+    let output_elem_type_id = {
+        let map_expr_type = body.get_type(compute_info.map_expr);
+        match map_expr_type {
+            types::Type::Constructed(TypeName::Array, args) if args.len() == 3 => {
+                constructor.ast_type_to_spirv(&args[0])
             }
-        };
-
-        // Call function with thread_id as argument
-        // For iota pattern, the input is just the thread index (as i32)
-        let thread_id_i32 = constructor.builder.bitcast(constructor.i32_type, None, thread_id)?;
-
-        let mut call_args = capture_vals.clone();
-        call_args.push(thread_id_i32);
-        let result =
-            constructor.builder.function_call(output_elem_type_id, None, map_func_id, call_args)?;
-
-        // Write result to output buffer if there is one
-        if let Some((output_buffer_var, _)) = constructor.storage_buffers.get(&(0, 0)) {
-            let output_buffer_var = *output_buffer_var;
-            let output_mem = MemBinding::Storage { set: 0, binding: 0 };
-            write_array_element(
-                constructor,
-                Some(output_mem),
-                output_buffer_var,
-                thread_id,
-                result,
-                output_elem_type_id,
-                constructor.void_type,
-            )?;
+            _ => input_elem_type_id, // Fallback to input type
         }
+    };
+
+    // Convert thread_id to i32 for read_elem (which expects i32 indices)
+    let thread_id_i32 = constructor.builder.bitcast(constructor.i32_type, None, thread_id)?;
+
+    // Use read_elem to get the input value - works for all backing types:
+    // - Range: computes start + thread_id * stride (virtual, no memory)
+    // - Storage: loads from buffer[thread_id]
+    // - IndexFn: calls the function with thread_id
+    let input_elem = match map_array_expr {
+        Expr::Array { backing, .. } => {
+            read_elem(constructor, body, compute_info.map_array, backing, thread_id_i32, input_elem_type_id)?
+        }
+        _ => {
+            // Fallback for non-Array expressions (shouldn't happen for compute maps)
+            bail_spirv!("Compute map source must be an Array expression, got {:?}", map_array_expr)
+        }
+    };
+
+    // Apply the map function to the input element
+    let mut call_args = capture_vals.clone();
+    call_args.push(input_elem);
+    let result = constructor.builder.function_call(output_elem_type_id, None, map_func_id, call_args)?;
+
+    // Write result to output buffer
+    // Determine output buffer binding (after all input buffers)
+    let num_input_buffers = compute_info.inputs.len() as u32;
+    let output_buffer_binding = num_input_buffers;
+
+    // Check if we have a dedicated output buffer
+    let (output_buffer_var, output_mem) = if let Some((out_var, _)) =
+        constructor.storage_buffers.get(&(0, output_buffer_binding))
+    {
+        (*out_var, MemBinding::Storage { set: 0, binding: output_buffer_binding })
+    } else if let Some((out_var, _)) = constructor.storage_buffers.get(&(0, 0)) {
+        // Fallback to first buffer for in-place operations
+        (*out_var, MemBinding::Storage { set: 0, binding: 0 })
     } else {
-        // For map(f, buffer) pattern: read from buffer, apply f, write result
-        // Use the first input buffer as the primary input
-        let binding = (0u32, 0u32);
-        let (primary_buffer_var, input_elem_type_id) = constructor
-            .storage_buffers
-            .get(&binding)
-            .ok_or_else(|| err_spirv!("No input buffer at binding {:?}", binding))?;
-        let primary_buffer_var = *primary_buffer_var;
-        let input_elem_type_id = *input_elem_type_id;
+        bail_spirv!("No output buffer available for compute shader")
+    };
 
-        // Get the output element type from the map expression's return type
-        let output_elem_type_id = {
-            let map_expr_type = body.get_type(compute_info.map_expr);
-            match map_expr_type {
-                types::Type::Constructed(TypeName::Array, args) if args.len() == 3 => {
-                    constructor.ast_type_to_spirv(&args[0])
-                }
-                _ => input_elem_type_id, // Fallback to input type for 1D arrays
-            }
-        };
-
-        // Check if we have a separate output buffer (for non-inplace maps)
-        let num_input_buffers = compute_info.inputs.len() as u32;
-        let output_buffer_binding = num_input_buffers;
-
-        let (output_buffer_var, output_mem) = if let Some((out_var, _)) =
-            constructor.storage_buffers.get(&(0, output_buffer_binding))
-        {
-            (*out_var, MemBinding::Storage { set: 0, binding: output_buffer_binding })
-        } else {
-            (primary_buffer_var, MemBinding::Storage { set: 0, binding: binding.1 })
-        };
-
-        // Read from input, write to output
-        let input_mem = MemBinding::Storage { set: 0, binding: binding.1 };
-        lower_compute_map_core(
-            constructor,
-            input_mem,
-            primary_buffer_var,
-            input_elem_type_id,
-            output_mem,
-            output_buffer_var,
-            output_elem_type_id,
-            map_func_id,
-            &capture_vals,
-            thread_id,
-        )?;
-    }
+    write_array_element(
+        constructor,
+        Some(output_mem),
+        output_buffer_var,
+        thread_id,
+        result,
+        output_elem_type_id,
+        constructor.void_type,
+    )?;
 
     // Return
     constructor.builder.ret()?;
@@ -2711,6 +2685,163 @@ fn lower_array_expr(
     }
 }
 
+/// Read a single element from an array at a given index, dispatching on the backing type.
+///
+/// This is the core primitive for virtual array access:
+/// - For Range: computes `start + index * step` (virtual - no memory access)
+/// - For IndexFn: calls the function with the index
+/// - For Literal/Owned/View/Storage: performs actual memory access
+///
+/// Returns the SPIR-V ID of the loaded element value.
+fn read_elem(
+    constructor: &mut Constructor,
+    body: &Body,
+    array_expr_id: ExprId,
+    backing: &ArrayBacking,
+    index: spirv::Word,
+    elem_type: spirv::Word,
+) -> Result<spirv::Word> {
+    match backing {
+        ArrayBacking::Literal(elems) => {
+            // For literal arrays, we need to check if index is a constant
+            if let Some(literal_idx) = constructor.get_const_u32_value(index) {
+                // Constant index: use composite extract directly
+                if (literal_idx as usize) < elems.len() {
+                    // Lower the element expression at that index
+                    lower_expr(constructor, body, elems[literal_idx as usize])
+                } else {
+                    bail_spirv!("Array index {} out of bounds for literal array of size {}", literal_idx, elems.len())
+                }
+            } else {
+                // Dynamic index: must store array in variable and use access chain
+                let array_val = lower_array_expr(
+                    constructor,
+                    body,
+                    backing,
+                    // Need to get size expr - use a dummy since we already have the elements
+                    body.root, // This is a hack; we really should pass size through
+                    body.get_type(array_expr_id),
+                )?;
+                let array_type = constructor.ast_type_to_spirv(body.get_type(array_expr_id));
+                let array_var = constructor.declare_variable("_w_lit_arr_tmp", array_type)?;
+                constructor.builder.store(array_var, array_val, None, [])?;
+
+                let elem_ptr_type = constructor.builder.type_pointer(
+                    None,
+                    spirv::StorageClass::Function,
+                    elem_type,
+                );
+                let elem_ptr = constructor.builder.access_chain(elem_ptr_type, None, array_var, [index])?;
+                Ok(constructor.builder.load(elem_type, None, elem_ptr, None, [])?)
+            }
+        }
+
+        ArrayBacking::Range { start, step, .. } => {
+            // Virtual: compute start + index * step (no memory access!)
+            let i32_type = constructor.i32_type;
+            let start_val = lower_expr(constructor, body, *start)?;
+
+            if let Some(step_expr) = step {
+                // step is actually (start + stride), so stride = step - start
+                let step_val = lower_expr(constructor, body, *step_expr)?;
+                let stride = constructor.builder.i_sub(i32_type, None, step_val, start_val)?;
+                let offset = constructor.builder.i_mul(i32_type, None, index, stride)?;
+                Ok(constructor.builder.i_add(i32_type, None, start_val, offset)?)
+            } else {
+                // No step means stride of 1
+                Ok(constructor.builder.i_add(i32_type, None, start_val, index)?)
+            }
+        }
+
+        ArrayBacking::IndexFn { index_fn } => {
+            // Virtual: call the index function with the index
+            // The index function should be a closure: i32 -> T
+            let (func_name, capture_vals) = extract_closure_info(constructor, body, *index_fn)?;
+            let func_id = *constructor
+                .functions
+                .get(&func_name)
+                .ok_or_else(|| err_spirv!("IndexFn function not found: {}", func_name))?;
+
+            let mut call_args = capture_vals;
+            call_args.push(index);
+            Ok(constructor.builder.function_call(elem_type, None, func_id, call_args)?)
+        }
+
+        ArrayBacking::View { base, offset } => {
+            // View: adjust index by offset and read from base
+            let i32_type = constructor.i32_type;
+            let offset_val = lower_expr(constructor, body, *offset)?;
+            let adjusted_index = constructor.builder.i_add(i32_type, None, offset_val, index)?;
+
+            // Get base array's backing and recurse
+            let base_expr = body.get_expr(*base);
+            match base_expr {
+                Expr::Array { backing: base_backing, .. } => {
+                    read_elem(constructor, body, *base, base_backing, adjusted_index, elem_type)
+                }
+                _ => {
+                    // Base is a value expression, not an Array with backing
+                    // Fall back to storing and indexing
+                    let base_val = lower_expr(constructor, body, *base)?;
+                    let base_ty = body.get_type(*base);
+                    let base_type = constructor.ast_type_to_spirv(base_ty);
+                    let base_var = constructor.declare_variable("_w_view_base_tmp", base_type)?;
+                    constructor.builder.store(base_var, base_val, None, [])?;
+
+                    let elem_ptr_type = constructor.builder.type_pointer(
+                        None,
+                        spirv::StorageClass::Function,
+                        elem_type,
+                    );
+                    let elem_ptr = constructor.builder.access_chain(elem_ptr_type, None, base_var, [adjusted_index])?;
+                    Ok(constructor.builder.load(elem_type, None, elem_ptr, None, [])?)
+                }
+            }
+        }
+
+        ArrayBacking::Owned { data } => {
+            // Owned: the data is a complete array, index into it
+            let data_val = lower_expr(constructor, body, *data)?;
+            let data_ty = body.get_type(*data);
+            let data_type = constructor.ast_type_to_spirv(data_ty);
+            let data_var = constructor.declare_variable("_w_owned_tmp", data_type)?;
+            constructor.builder.store(data_var, data_val, None, [])?;
+
+            let elem_ptr_type = constructor.builder.type_pointer(
+                None,
+                spirv::StorageClass::Function,
+                elem_type,
+            );
+            let elem_ptr = constructor.builder.access_chain(elem_ptr_type, None, data_var, [index])?;
+            Ok(constructor.builder.load(elem_type, None, elem_ptr, None, [])?)
+        }
+
+        ArrayBacking::Storage { name, offset } => {
+            // Storage: load from external buffer at offset + index
+            let (set, binding) = constructor
+                .compute_params
+                .get(name)
+                .ok_or_else(|| err_spirv!("Unknown storage buffer: {}", name))?;
+            let (set, binding) = (*set, *binding);
+
+            let (buffer_var, _) = constructor
+                .storage_buffers
+                .get(&(set, binding))
+                .ok_or_else(|| err_spirv!("Storage buffer not registered: {}:{}", set, binding))?;
+            let buffer_var = *buffer_var;
+
+            let i32_type = constructor.i32_type;
+            let offset_val = lower_expr(constructor, body, *offset)?;
+            let adjusted_index = constructor.builder.i_add(i32_type, None, offset_val, index)?;
+
+            let elem_ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_type);
+            let zero = constructor.const_u32(0);
+            let elem_ptr = constructor.builder.access_chain(elem_ptr_type, None, buffer_var, [zero, adjusted_index])?;
+            Ok(constructor.builder.load(elem_type, None, elem_ptr, None, [])?)
+        }
+    }
+}
+
 /// Lower the `length` intrinsic for arrays and slices.
 /// For static arrays, returns the compile-time size constant.
 /// For unsized arrays, extracts the dynamic length field.
@@ -3062,45 +3193,6 @@ fn lower_inplace_map_core(
             constructor.void_type,
         )?;
     }
-    Ok(())
-}
-
-/// Compute shader map with separate input and output buffers.
-///
-/// Reads from input buffer, applies function, writes to output buffer.
-/// Used when input and output element types differ (e.g., map(sha256_block, [][16]u32) -> [][8]u32).
-fn lower_compute_map_core(
-    constructor: &mut Constructor,
-    input_mem: MemBinding,
-    input_buffer: spirv::Word,
-    input_elem_type: spirv::Word,
-    output_mem: MemBinding,
-    output_buffer: spirv::Word,
-    output_elem_type: spirv::Word,
-    map_func_id: spirv::Word,
-    capture_vals: &[spirv::Word],
-    index: spirv::Word,
-) -> Result<()> {
-    // Read element from input buffer
-    let input_elem = read_array_element(constructor, Some(input_mem), input_buffer, index, input_elem_type)?;
-
-    // Apply function: captures first, then input element
-    let mut call_args = capture_vals.to_vec();
-    call_args.push(input_elem);
-    let result_elem =
-        constructor.builder.function_call(output_elem_type, None, map_func_id, call_args)?;
-
-    // Write result to output buffer
-    write_array_element(
-        constructor,
-        Some(output_mem),
-        output_buffer,
-        index,
-        result_elem,
-        output_elem_type,
-        constructor.void_type,
-    )?;
-
     Ok(())
 }
 
