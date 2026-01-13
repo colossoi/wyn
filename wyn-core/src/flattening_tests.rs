@@ -308,10 +308,13 @@ fn test_array_literal() {
     let arr_def = find_def(&mir, "arr");
     let body = get_body(arr_def);
     match body.get_expr(body.root) {
-        mir::Expr::Array(elems) => {
+        mir::Expr::Array {
+            backing: mir::ArrayBacking::Literal(elems),
+            ..
+        } => {
             assert_eq!(elems.len(), 3, "Expected 3 elements");
         }
-        other => panic!("Expected Array, got {:?}", other),
+        other => panic!("Expected Array with Literal backing, got {:?}", other),
     }
 }
 

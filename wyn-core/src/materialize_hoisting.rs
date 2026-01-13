@@ -14,7 +14,7 @@
 //! if c then @index(__mat_0, i) else @index(__mat_0, i)
 //! ```
 
-use crate::mir::{Body, Def, Expr, ExprId, Program};
+use crate::mir::{ArrayBacking, Body, Def, Expr, ExprId, Program};
 use std::collections::HashSet;
 
 /// Hoist duplicate materializations in a program.
@@ -204,9 +204,38 @@ fn collect_materializations_rec(
                 collect_materializations_rec(body, *cap, result, visited);
             }
         }
-        Expr::Tuple(elems) | Expr::Array(elems) | Expr::Vector(elems) => {
+        Expr::Tuple(elems) | Expr::Vector(elems) => {
             for elem in elems {
                 collect_materializations_rec(body, *elem, result, visited);
+            }
+        }
+        Expr::Array { backing, size } => {
+            collect_materializations_rec(body, *size, result, visited);
+            match backing {
+                ArrayBacking::Literal(elems) => {
+                    for elem in elems {
+                        collect_materializations_rec(body, *elem, result, visited);
+                    }
+                }
+                ArrayBacking::Range { start, step, .. } => {
+                    collect_materializations_rec(body, *start, result, visited);
+                    if let Some(s) = step {
+                        collect_materializations_rec(body, *s, result, visited);
+                    }
+                }
+                ArrayBacking::IndexFn { index_fn } => {
+                    collect_materializations_rec(body, *index_fn, result, visited);
+                }
+                ArrayBacking::View { base, offset } => {
+                    collect_materializations_rec(body, *base, result, visited);
+                    collect_materializations_rec(body, *offset, result, visited);
+                }
+                ArrayBacking::Owned { data } => {
+                    collect_materializations_rec(body, *data, result, visited);
+                }
+                ArrayBacking::Storage { offset, .. } => {
+                    collect_materializations_rec(body, *offset, result, visited);
+                }
             }
         }
         Expr::Matrix(rows) => {
@@ -216,28 +245,8 @@ fn collect_materializations_rec(
                 }
             }
         }
-        Expr::Range { start, step, end, .. } => {
-            collect_materializations_rec(body, *start, result, visited);
-            if let Some(s) = step {
-                collect_materializations_rec(body, *s, result, visited);
-            }
-            collect_materializations_rec(body, *end, result, visited);
-        }
         Expr::Attributed { expr, .. } => {
             collect_materializations_rec(body, *expr, result, visited);
-        }
-        Expr::OwnedSlice { data, len } => {
-            collect_materializations_rec(body, *data, result, visited);
-            collect_materializations_rec(body, *len, result, visited);
-        }
-        Expr::InlineSlice { base, offset, len } => {
-            collect_materializations_rec(body, *base, result, visited);
-            collect_materializations_rec(body, *offset, result, visited);
-            collect_materializations_rec(body, *len, result, visited);
-        }
-        Expr::BoundSlice { offset, len, .. } => {
-            collect_materializations_rec(body, *offset, result, visited);
-            collect_materializations_rec(body, *len, result, visited);
         }
         Expr::Load { ptr } => {
             collect_materializations_rec(body, *ptr, result, visited);
@@ -345,10 +354,76 @@ fn exprs_equal(body: &Body, a: ExprId, b: ExprId) -> bool {
         }
         (Expr::Materialize(ia), Expr::Materialize(ib)) => exprs_equal(body, *ia, *ib),
 
-        (Expr::Tuple(ea), Expr::Tuple(eb))
-        | (Expr::Array(ea), Expr::Array(eb))
-        | (Expr::Vector(ea), Expr::Vector(eb)) => {
+        (Expr::Tuple(ea), Expr::Tuple(eb)) | (Expr::Vector(ea), Expr::Vector(eb)) => {
             ea.len() == eb.len() && ea.iter().zip(eb.iter()).all(|(x, y)| exprs_equal(body, *x, *y))
+        }
+
+        (
+            Expr::Array {
+                backing: ba,
+                size: sa,
+            },
+            Expr::Array {
+                backing: bb,
+                size: sb,
+            },
+        ) => {
+            if !exprs_equal(body, *sa, *sb) {
+                return false;
+            }
+            match (ba, bb) {
+                (ArrayBacking::Literal(ea), ArrayBacking::Literal(eb)) => {
+                    ea.len() == eb.len()
+                        && ea.iter().zip(eb.iter()).all(|(x, y)| exprs_equal(body, *x, *y))
+                }
+                (
+                    ArrayBacking::Range {
+                        start: sta,
+                        step: stepa,
+                        kind: ka,
+                    },
+                    ArrayBacking::Range {
+                        start: stb,
+                        step: stepb,
+                        kind: kb,
+                    },
+                ) => {
+                    ka == kb
+                        && exprs_equal(body, *sta, *stb)
+                        && match (stepa, stepb) {
+                            (Some(a), Some(b)) => exprs_equal(body, *a, *b),
+                            (None, None) => true,
+                            _ => false,
+                        }
+                }
+                (ArrayBacking::IndexFn { index_fn: fa }, ArrayBacking::IndexFn { index_fn: fb }) => {
+                    exprs_equal(body, *fa, *fb)
+                }
+                (
+                    ArrayBacking::View {
+                        base: basea,
+                        offset: offa,
+                    },
+                    ArrayBacking::View {
+                        base: baseb,
+                        offset: offb,
+                    },
+                ) => exprs_equal(body, *basea, *baseb) && exprs_equal(body, *offa, *offb),
+                (ArrayBacking::Owned { data: da }, ArrayBacking::Owned { data: db }) => {
+                    exprs_equal(body, *da, *db)
+                }
+                (
+                    ArrayBacking::Storage {
+                        name: na,
+                        offset: offa,
+                    },
+                    ArrayBacking::Storage {
+                        name: nb,
+                        offset: offb,
+                    },
+                ) => na == nb && exprs_equal(body, *offa, *offb),
+                _ => false,
+            }
         }
 
         (Expr::Matrix(ra), Expr::Matrix(rb)) => {

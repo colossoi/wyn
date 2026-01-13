@@ -14,7 +14,7 @@
 use crate::IdArena;
 use crate::ast::TypeName;
 use crate::error::Result;
-use crate::mir::{Body, Def, Expr, ExprId, LocalDecl, LocalId, Program};
+use crate::mir::{ArrayBacking, Body, Def, Expr, ExprId, LocalDecl, LocalId, Program};
 use crate::mir::{LambdaId, LambdaInfo};
 use crate::types::TypeScheme;
 use polytype::Type;
@@ -563,9 +563,36 @@ impl Monomorphizer {
                 let new_elems: Vec<_> = elems.iter().map(|e| expr_map[e]).collect();
                 Ok(Expr::Tuple(new_elems))
             }
-            Expr::Array(elems) => {
-                let new_elems: Vec<_> = elems.iter().map(|e| expr_map[e]).collect();
-                Ok(Expr::Array(new_elems))
+            Expr::Array { backing, size } => {
+                let new_size = expr_map[size];
+                let new_backing = match backing {
+                    ArrayBacking::Literal(elems) => {
+                        ArrayBacking::Literal(elems.iter().map(|e| expr_map[e]).collect())
+                    }
+                    ArrayBacking::Range { start, step, kind } => ArrayBacking::Range {
+                        start: expr_map[start],
+                        step: step.map(|s| expr_map[&s]),
+                        kind: *kind,
+                    },
+                    ArrayBacking::IndexFn { index_fn } => ArrayBacking::IndexFn {
+                        index_fn: expr_map[index_fn],
+                    },
+                    ArrayBacking::View { base, offset } => ArrayBacking::View {
+                        base: expr_map[base],
+                        offset: expr_map[offset],
+                    },
+                    ArrayBacking::Owned { data } => ArrayBacking::Owned {
+                        data: expr_map[data],
+                    },
+                    ArrayBacking::Storage { name, offset } => ArrayBacking::Storage {
+                        name: name.clone(),
+                        offset: expr_map[offset],
+                    },
+                };
+                Ok(Expr::Array {
+                    backing: new_backing,
+                    size: new_size,
+                })
             }
             Expr::Vector(elems) => {
                 let new_elems: Vec<_> = elems.iter().map(|e| expr_map[e]).collect();
@@ -630,17 +657,6 @@ impl Monomorphizer {
                     captures: new_captures,
                 })
             }
-            Expr::Range {
-                start,
-                step,
-                end,
-                kind,
-            } => Ok(Expr::Range {
-                start: expr_map[start],
-                step: step.map(|s| expr_map[&s]),
-                end: expr_map[end],
-                kind: *kind,
-            }),
             Expr::Global(name) => {
                 // Global reference might refer to a top-level constant
                 if let Some(def) = self.poly_functions.get(name).cloned() {
@@ -656,22 +672,6 @@ impl Monomorphizer {
             Expr::Bool(b) => Ok(Expr::Bool(*b)),
             Expr::String(s) => Ok(Expr::String(s.clone())),
             Expr::Unit => Ok(Expr::Unit),
-
-            // Slices - map subexpressions
-            Expr::OwnedSlice { data, len } => Ok(Expr::OwnedSlice {
-                data: expr_map[data],
-                len: expr_map[len],
-            }),
-            Expr::InlineSlice { base, offset, len } => Ok(Expr::InlineSlice {
-                base: expr_map[base],
-                offset: expr_map[offset],
-                len: expr_map[len],
-            }),
-            Expr::BoundSlice { name, offset, len } => Ok(Expr::BoundSlice {
-                name: name.clone(),
-                offset: expr_map[offset],
-                len: expr_map[len],
-            }),
 
             // Memory operations - map subexpressions
             Expr::Load { ptr } => Ok(Expr::Load { ptr: expr_map[ptr] }),

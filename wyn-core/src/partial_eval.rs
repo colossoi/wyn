@@ -6,7 +6,8 @@
 
 use crate::ast::{NodeId, Span, TypeName};
 use crate::error::Result;
-use crate::mir::{Body, Def, Expr, ExprId, LocalId, LocalKind, LoopKind, Program};
+use crate::mir::{ArrayBacking, Body, Def, Expr, ExprId, LocalId, LocalKind, LoopKind, Program};
+use crate::types;
 use crate::{bail_type_at, err_type_at};
 use polytype::Type;
 use std::collections::HashMap;
@@ -276,7 +277,24 @@ impl PartialEvaluator {
 
                 match kind {
                     AggregateKind::Tuple => self.emit(Expr::Tuple(elem_ids), ty, span, node_id),
-                    AggregateKind::Array => self.emit(Expr::Array(elem_ids), ty, span, node_id),
+                    AggregateKind::Array => {
+                        let size_val = elem_ids.len() as i64;
+                        let size_id = self.emit(
+                            Expr::Int(size_val.to_string()),
+                            types::i32(),
+                            span,
+                            node_id,
+                        );
+                        self.emit(
+                            Expr::Array {
+                                backing: ArrayBacking::Literal(elem_ids),
+                                size: size_id,
+                            },
+                            ty,
+                            span,
+                            node_id,
+                        )
+                    }
                     AggregateKind::Vector => self.emit(Expr::Vector(elem_ids), ty, span, node_id),
                     AggregateKind::Matrix => {
                         // Reconstruct the matrix structure from flat elements
@@ -497,27 +515,145 @@ impl PartialEvaluator {
                 }
             }
 
-            // Array
-            Expr::Array(elems) => {
-                let elem_vals: Vec<Value> =
-                    elems.iter().map(|e| self.eval(body, *e, env)).collect::<Result<_>>()?;
+            // Array - unified handling for all backing types
+            Expr::Array { backing, size } => {
+                match backing {
+                    ArrayBacking::Literal(elems) => {
+                        let elem_vals: Vec<Value> =
+                            elems.iter().map(|e| self.eval(body, *e, env)).collect::<Result<_>>()?;
 
-                if elem_vals.iter().all(|v| v.is_known()) {
-                    Ok(Value::Aggregate {
-                        kind: AggregateKind::Array,
-                        elements: elem_vals,
-                    })
-                } else {
-                    // Residualize
-                    let elem_ids: Vec<ExprId> = elem_vals
-                        .iter()
-                        .map(|v| {
-                            let elem_ty = self.get_array_element_type(&ty);
-                            self.reify(v, elem_ty, span, node_id)
-                        })
-                        .collect();
-                    let new_id = self.emit(Expr::Array(elem_ids), ty, span, node_id);
-                    Ok(Value::Unknown(new_id))
+                        if elem_vals.iter().all(|v| v.is_known()) {
+                            Ok(Value::Aggregate {
+                                kind: AggregateKind::Array,
+                                elements: elem_vals,
+                            })
+                        } else {
+                            // Residualize
+                            let elem_ids: Vec<ExprId> = elem_vals
+                                .iter()
+                                .map(|v| {
+                                    let elem_ty = self.get_array_element_type(&ty);
+                                    self.reify(v, elem_ty, span, node_id)
+                                })
+                                .collect();
+                            let new_size = self.emit(
+                                Expr::Int(elem_ids.len().to_string()),
+                                types::i32(),
+                                span,
+                                node_id,
+                            );
+                            let new_id = self.emit(
+                                Expr::Array {
+                                    backing: ArrayBacking::Literal(elem_ids),
+                                    size: new_size,
+                                },
+                                ty,
+                                span,
+                                node_id,
+                            );
+                            Ok(Value::Unknown(new_id))
+                        }
+                    }
+                    // For non-Literal backings, we just reconstruct the expression
+                    // with mapped sub-expressions (no compile-time evaluation)
+                    ArrayBacking::Range { start, step, kind } => {
+                        let new_start = self.eval(body, start, env)?;
+                        let start_id = self.reify(&new_start, types::i32(), span, node_id);
+                        let new_step = if let Some(s) = step {
+                            let step_val = self.eval(body, s, env)?;
+                            Some(self.reify(&step_val, types::i32(), span, node_id))
+                        } else {
+                            None
+                        };
+                        let new_size_val = self.eval(body, size, env)?;
+                        let size_id = self.reify(&new_size_val, types::i32(), span, node_id);
+                        let new_id = self.emit(
+                            Expr::Array {
+                                backing: ArrayBacking::Range {
+                                    start: start_id,
+                                    step: new_step,
+                                    kind,
+                                },
+                                size: size_id,
+                            },
+                            ty,
+                            span,
+                            node_id,
+                        );
+                        Ok(Value::Unknown(new_id))
+                    }
+                    ArrayBacking::IndexFn { index_fn } => {
+                        let new_fn = self.eval(body, index_fn, env)?;
+                        let fn_id = self.reify(&new_fn, body.get_type(index_fn).clone(), span, node_id);
+                        let new_size_val = self.eval(body, size, env)?;
+                        let size_id = self.reify(&new_size_val, types::i32(), span, node_id);
+                        let new_id = self.emit(
+                            Expr::Array {
+                                backing: ArrayBacking::IndexFn { index_fn: fn_id },
+                                size: size_id,
+                            },
+                            ty,
+                            span,
+                            node_id,
+                        );
+                        Ok(Value::Unknown(new_id))
+                    }
+                    ArrayBacking::View { base, offset } => {
+                        let new_base = self.eval(body, base, env)?;
+                        let base_id = self.reify(&new_base, body.get_type(base).clone(), span, node_id);
+                        let new_offset = self.eval(body, offset, env)?;
+                        let offset_id = self.reify(&new_offset, types::i32(), span, node_id);
+                        let new_size_val = self.eval(body, size, env)?;
+                        let size_id = self.reify(&new_size_val, types::i32(), span, node_id);
+                        let new_id = self.emit(
+                            Expr::Array {
+                                backing: ArrayBacking::View {
+                                    base: base_id,
+                                    offset: offset_id,
+                                },
+                                size: size_id,
+                            },
+                            ty,
+                            span,
+                            node_id,
+                        );
+                        Ok(Value::Unknown(new_id))
+                    }
+                    ArrayBacking::Owned { data } => {
+                        let new_data = self.eval(body, data, env)?;
+                        let data_id = self.reify(&new_data, body.get_type(data).clone(), span, node_id);
+                        let new_size_val = self.eval(body, size, env)?;
+                        let size_id = self.reify(&new_size_val, types::i32(), span, node_id);
+                        let new_id = self.emit(
+                            Expr::Array {
+                                backing: ArrayBacking::Owned { data: data_id },
+                                size: size_id,
+                            },
+                            ty,
+                            span,
+                            node_id,
+                        );
+                        Ok(Value::Unknown(new_id))
+                    }
+                    ArrayBacking::Storage { name, offset } => {
+                        let new_offset = self.eval(body, offset, env)?;
+                        let offset_id = self.reify(&new_offset, types::i32(), span, node_id);
+                        let new_size_val = self.eval(body, size, env)?;
+                        let size_id = self.reify(&new_size_val, types::i32(), span, node_id);
+                        let new_id = self.emit(
+                            Expr::Array {
+                                backing: ArrayBacking::Storage {
+                                    name,
+                                    offset: offset_id,
+                                },
+                                size: size_id,
+                            },
+                            ty,
+                            span,
+                            node_id,
+                        );
+                        Ok(Value::Unknown(new_id))
+                    }
                 }
             }
 
@@ -631,36 +767,6 @@ impl PartialEvaluator {
                 node_id,
             ),
 
-            // Range
-            Expr::Range {
-                start,
-                step,
-                end,
-                kind,
-            } => {
-                let start_val = self.eval(body, start, env)?;
-                let step_val = if let Some(s) = step { Some(self.eval(body, s, env)?) } else { None };
-                let end_val = self.eval(body, end, env)?;
-
-                // Residualize ranges for now
-                let start_id = self.reify(&start_val, ty.clone(), span, node_id);
-                let step_id = step_val.map(|v| self.reify(&v, ty.clone(), span, node_id));
-                let end_id = self.reify(&end_val, ty.clone(), span, node_id);
-
-                let new_id = self.emit(
-                    Expr::Range {
-                        start: start_id,
-                        step: step_id,
-                        end: end_id,
-                        kind,
-                    },
-                    ty,
-                    span,
-                    node_id,
-                );
-                Ok(Value::Unknown(new_id))
-            }
-
             // Materialize
             Expr::Materialize(inner) => {
                 let inner_val = self.eval(body, inner, env)?;
@@ -693,71 +799,6 @@ impl PartialEvaluator {
                     );
                     Ok(Value::Unknown(new_id))
                 }
-            }
-
-            // Slices - residualize for now
-            Expr::OwnedSlice { data, len } => {
-                let data_val = self.eval(body, data, env)?;
-                let len_val = self.eval(body, len, env)?;
-
-                let data_id = self.reify(&data_val, ty.clone(), span, node_id);
-                let len_ty = Type::Constructed(TypeName::Named("i32".to_string()), vec![]);
-                let len_id = self.reify(&len_val, len_ty, span, node_id);
-
-                let new_id = self.emit(
-                    Expr::OwnedSlice {
-                        data: data_id,
-                        len: len_id,
-                    },
-                    ty,
-                    span,
-                    node_id,
-                );
-                Ok(Value::Unknown(new_id))
-            }
-
-            Expr::InlineSlice { base, offset, len } => {
-                let base_val = self.eval(body, base, env)?;
-                let offset_val = self.eval(body, offset, env)?;
-                let len_val = self.eval(body, len, env)?;
-
-                let base_id = self.reify(&base_val, ty.clone(), span, node_id);
-                let i32_ty = Type::Constructed(TypeName::Named("i32".to_string()), vec![]);
-                let offset_id = self.reify(&offset_val, i32_ty.clone(), span, node_id);
-                let len_id = self.reify(&len_val, i32_ty, span, node_id);
-
-                let new_id = self.emit(
-                    Expr::InlineSlice {
-                        base: base_id,
-                        offset: offset_id,
-                        len: len_id,
-                    },
-                    ty,
-                    span,
-                    node_id,
-                );
-                Ok(Value::Unknown(new_id))
-            }
-
-            Expr::BoundSlice { name, offset, len } => {
-                let offset_val = self.eval(body, offset, env)?;
-                let len_val = self.eval(body, len, env)?;
-
-                let i32_ty = Type::Constructed(TypeName::Named("i32".to_string()), vec![]);
-                let offset_id = self.reify(&offset_val, i32_ty.clone(), span, node_id);
-                let len_id = self.reify(&len_val, i32_ty, span, node_id);
-
-                let new_id = self.emit(
-                    Expr::BoundSlice {
-                        name: name.clone(),
-                        offset: offset_id,
-                        len: len_id,
-                    },
-                    ty,
-                    span,
-                    node_id,
-                );
-                Ok(Value::Unknown(new_id))
             }
 
             // Memory operations - residualize for now

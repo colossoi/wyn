@@ -3,7 +3,7 @@
 use crate::IdArena;
 use crate::ast::{NodeId, Span, TypeName};
 use crate::constant_folding::fold_constants;
-use crate::mir::{Body, Def, Expr, ExprId, LocalDecl, LocalId, LocalKind, Program};
+use crate::mir::{ArrayBacking, Body, Def, Expr, ExprId, LocalDecl, LocalId, LocalKind, Program};
 use polytype::Type;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -114,7 +114,22 @@ impl TestBodyBuilder {
 
     /// Create an array literal expression.
     fn array(&mut self, elements: Vec<ExprId>, ty: Type<TypeName>) -> ExprId {
-        self.body.alloc_expr(Expr::Array(elements), ty, test_span(), next_id())
+        let len = elements.len();
+        let size = self.body.alloc_expr(
+            Expr::Int(len.to_string()),
+            Type::Constructed(TypeName::Int(32), vec![]),
+            test_span(),
+            next_id(),
+        );
+        self.body.alloc_expr(
+            Expr::Array {
+                backing: ArrayBacking::Literal(elements),
+                size,
+            },
+            ty,
+            test_span(),
+            next_id(),
+        )
     }
 
     /// Finalize the body with the given root expression.
@@ -266,7 +281,10 @@ fn test_fold_array_literal() {
 
     let result_body = get_body(&result);
     match get_root_expr(&result) {
-        Expr::Array(elements) => {
+        Expr::Array {
+            backing: ArrayBacking::Literal(elements),
+            ..
+        } => {
             assert_eq!(elements.len(), 2);
             match result_body.get_expr(elements[0]) {
                 Expr::Int(v) => assert_eq!(v, "3"),

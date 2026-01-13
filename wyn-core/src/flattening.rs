@@ -1030,7 +1030,20 @@ impl Flattener {
             ExprKind::ArrayLiteral(elems) => {
                 let elem_ids: Result<Vec<_>> =
                     elems.iter().map(|e| self.flatten_expr(e).map(|(id, _)| id)).collect();
-                (mir::Expr::Array(elem_ids?), StaticValue::Dyn)
+                let elem_ids = elem_ids?;
+                let size_val = elem_ids.len() as i64;
+                let size_id = self.alloc_expr(
+                    mir::Expr::Int(size_val.to_string()),
+                    types::i32(),
+                    span,
+                );
+                (
+                    mir::Expr::Array {
+                        backing: mir::ArrayBacking::Literal(elem_ids),
+                        size: size_id,
+                    },
+                    StaticValue::Dyn,
+                )
             }
             ExprKind::VecMatLiteral(elems) => {
                 // Check if first element is an array literal (matrix) or scalar (vector)
@@ -1201,12 +1214,16 @@ impl Flattener {
                     ast::RangeKind::ExclusiveLt => mir::RangeKind::ExclusiveLt,
                     ast::RangeKind::ExclusiveGt => mir::RangeKind::ExclusiveGt,
                 };
+                // Range expression becomes an Array with Range backing.
+                // The size is the end value (for 0..<n, n is the count).
                 (
-                    mir::Expr::Range {
-                        start: start_id,
-                        step: step_id,
-                        end: end_id,
-                        kind,
+                    mir::Expr::Array {
+                        backing: mir::ArrayBacking::Range {
+                            start: start_id,
+                            step: step_id,
+                            kind,
+                        },
+                        size: end_id,
                     },
                     StaticValue::Dyn,
                 )
@@ -1261,12 +1278,14 @@ impl Flattener {
                 // (concrete Size(n) for literal bounds, Unsized for dynamic bounds)
                 let slice_ty = ty;
 
-                // Create BorrowedSlice expression
+                // Create a View into the base array
                 let slice_id = self.alloc_expr(
-                    mir::Expr::InlineSlice {
-                        base: base_id,
-                        offset: offset_id,
-                        len: len_id,
+                    mir::Expr::Array {
+                        backing: mir::ArrayBacking::View {
+                            base: base_id,
+                            offset: offset_id,
+                        },
+                        size: len_id,
                     },
                     slice_ty,
                     span,

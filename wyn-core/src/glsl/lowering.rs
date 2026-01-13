@@ -8,7 +8,7 @@ use crate::bail_glsl;
 use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
 use crate::lowering_common::ShaderStage;
-use crate::mir::{Body, Def, ExecutionModel, Expr, ExprId, LocalId, LoopKind, Program};
+use crate::mir::{ArrayBacking, Body, Def, ExecutionModel, Expr, ExprId, LocalId, LoopKind, Program};
 use polytype::Type as PolyType;
 use rspirv::spirv;
 use std::collections::{HashMap, HashSet};
@@ -641,13 +641,30 @@ impl<'a> LowerCtx<'a> {
                 Ok(format!("{}({})", struct_name, parts.join(", ")))
             }
 
-            Expr::Array(elems) => {
-                let mut parts = Vec::new();
-                for &e in elems {
-                    parts.push(self.lower_expr(body, e, output)?);
+            Expr::Array { backing, size: _ } => match backing {
+                ArrayBacking::Literal(elems) => {
+                    let mut parts = Vec::new();
+                    for &e in elems {
+                        parts.push(self.lower_expr(body, e, output)?);
+                    }
+                    Ok(format!("{}[]({})", self.type_to_glsl(ty), parts.join(", ")))
                 }
-                Ok(format!("{}[]({})", self.type_to_glsl(ty), parts.join(", ")))
-            }
+                ArrayBacking::Range { .. } => {
+                    bail_glsl!("Range arrays not supported in GLSL lowering")
+                }
+                ArrayBacking::IndexFn { .. } => {
+                    bail_glsl!("Index function arrays not supported in GLSL lowering")
+                }
+                ArrayBacking::View { .. } => {
+                    bail_glsl!("View arrays not supported in GLSL lowering")
+                }
+                ArrayBacking::Owned { .. } => {
+                    bail_glsl!("Owned arrays not supported in GLSL lowering")
+                }
+                ArrayBacking::Storage { .. } => {
+                    bail_glsl!("Storage arrays not supported in GLSL lowering")
+                }
+            },
 
             Expr::Vector(elems) => {
                 let mut parts = Vec::new();
@@ -819,21 +836,10 @@ impl<'a> LowerCtx<'a> {
                 }
             }
 
-            // --- Range ---
-            Expr::Range { .. } => {
-                // Range expressions should be desugared before GLSL lowering
-                bail_glsl!("Range expressions are not supported in GLSL lowering")
-            }
-
             // --- Special ---
             Expr::Materialize(inner) => self.lower_expr(body, *inner, output),
 
             Expr::Attributed { expr: inner, .. } => self.lower_expr(body, *inner, output),
-
-            // --- Slices ---
-            Expr::OwnedSlice { .. } | Expr::InlineSlice { .. } | Expr::BoundSlice { .. } => {
-                bail_glsl!("Slice expressions not yet implemented in GLSL lowering")
-            }
 
             // --- Memory operations ---
             Expr::Load { .. } | Expr::Store { .. } => {
@@ -974,13 +980,20 @@ impl<'a> LowerCtx<'a> {
                         if is_unsized {
                             // Unsized array (slice) - check expression kind
                             match body.get_expr(arg_ids[0]) {
-                                Expr::OwnedSlice { .. } => Ok(format!("{}.data[{}]", args[0], args[1])),
-                                Expr::InlineSlice { .. } => {
+                                Expr::Array {
+                                    backing: ArrayBacking::Owned { .. },
+                                    ..
+                                } => Ok(format!("{}.data[{}]", args[0], args[1])),
+                                Expr::Array {
+                                    backing: ArrayBacking::View { .. },
+                                    ..
+                                } => {
                                     Ok(format!("{}.base[{}.offset + {}]", args[0], args[0], args[1]))
                                 }
-                                Expr::BoundSlice { name, .. } => {
-                                    Ok(format!("{}[{}.offset + {}]", name, args[0], args[1]))
-                                }
+                                Expr::Array {
+                                    backing: ArrayBacking::Storage { name, .. },
+                                    ..
+                                } => Ok(format!("{}[{}.offset + {}]", name, args[0], args[1])),
                                 _ => Ok(format!("{}.data[{}]", args[0], args[1])),
                             }
                         } else {

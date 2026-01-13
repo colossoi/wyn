@@ -9,7 +9,7 @@
 //! - If/Loop conditions are Local or scalar literal
 
 use crate::ast::{NodeId, Span, TypeName};
-use crate::mir::{Body, Def, Expr, ExprId, LocalDecl, LocalId, LocalKind, LoopKind, Program};
+use crate::mir::{ArrayBacking, Body, Def, Expr, ExprId, LocalDecl, LocalId, LocalKind, LoopKind, Program};
 use polytype::Type;
 use std::collections::HashMap;
 
@@ -207,21 +207,140 @@ impl Normalizer {
                 self.wrap_bindings(body, tuple_id, ty, span, node_id, bindings)
             }
 
-            // Array - atomize all elements
-            Expr::Array(elems) => {
-                let mut new_elems = Vec::new();
-                let mut bindings = Vec::new();
+            // Array - handle all backing types
+            Expr::Array { backing, size } => {
+                let new_size = self.expr_map[&size];
+                let (atom_size, size_binding) = self.atomize(body, new_size, node_id);
 
-                for elem in elems {
-                    let new_elem = self.expr_map[elem];
-                    let (atom_elem, binding) = self.atomize(body, new_elem, node_id);
-                    new_elems.push(atom_elem);
-                    bindings.push(binding);
+                match backing {
+                    ArrayBacking::Literal(elems) => {
+                        let mut new_elems = Vec::new();
+                        let mut bindings = Vec::new();
+
+                        for elem in elems {
+                            let new_elem = self.expr_map[&elem];
+                            let (atom_elem, binding) = self.atomize(body, new_elem, node_id);
+                            new_elems.push(atom_elem);
+                            bindings.push(binding);
+                        }
+
+                        bindings.push(size_binding);
+                        let array_id = body.alloc_expr(
+                            Expr::Array {
+                                backing: ArrayBacking::Literal(new_elems),
+                                size: atom_size,
+                            },
+                            ty.clone(),
+                            span,
+                            node_id,
+                        );
+                        bindings.reverse();
+                        self.wrap_bindings(body, array_id, ty, span, node_id, bindings)
+                    }
+                    ArrayBacking::Range { start, step, kind } => {
+                        let new_start = self.expr_map[&start];
+                        let (atom_start, start_binding) = self.atomize(body, new_start, node_id);
+
+                        let (atom_step, step_binding) = if let Some(step) = step {
+                            let new_step = self.expr_map[&step];
+                            let (atom, binding) = self.atomize(body, new_step, node_id);
+                            (Some(atom), binding)
+                        } else {
+                            (None, None)
+                        };
+
+                        let range_id = body.alloc_expr(
+                            Expr::Array {
+                                backing: ArrayBacking::Range {
+                                    start: atom_start,
+                                    step: atom_step,
+                                    kind: *kind,
+                                },
+                                size: atom_size,
+                            },
+                            ty.clone(),
+                            span,
+                            node_id,
+                        );
+
+                        let bindings = vec![size_binding, step_binding, start_binding];
+                        self.wrap_bindings(body, range_id, ty, span, node_id, bindings)
+                    }
+                    ArrayBacking::IndexFn { index_fn } => {
+                        let new_fn = self.expr_map[&index_fn];
+                        // Don't atomize the closure - keep it as-is
+                        let array_id = body.alloc_expr(
+                            Expr::Array {
+                                backing: ArrayBacking::IndexFn { index_fn: new_fn },
+                                size: atom_size,
+                            },
+                            ty.clone(),
+                            span,
+                            node_id,
+                        );
+                        let bindings = vec![size_binding];
+                        self.wrap_bindings(body, array_id, ty, span, node_id, bindings)
+                    }
+                    ArrayBacking::View { base, offset } => {
+                        let new_base = self.expr_map[&base];
+                        let (atom_base, base_binding) = self.atomize(body, new_base, node_id);
+                        let new_offset = self.expr_map[&offset];
+                        let (atom_offset, offset_binding) = self.atomize(body, new_offset, node_id);
+
+                        let view_id = body.alloc_expr(
+                            Expr::Array {
+                                backing: ArrayBacking::View {
+                                    base: atom_base,
+                                    offset: atom_offset,
+                                },
+                                size: atom_size,
+                            },
+                            ty.clone(),
+                            span,
+                            node_id,
+                        );
+
+                        let bindings = vec![size_binding, offset_binding, base_binding];
+                        self.wrap_bindings(body, view_id, ty, span, node_id, bindings)
+                    }
+                    ArrayBacking::Owned { data } => {
+                        let new_data = self.expr_map[&data];
+                        let (atom_data, data_binding) = self.atomize(body, new_data, node_id);
+
+                        let owned_id = body.alloc_expr(
+                            Expr::Array {
+                                backing: ArrayBacking::Owned { data: atom_data },
+                                size: atom_size,
+                            },
+                            ty.clone(),
+                            span,
+                            node_id,
+                        );
+
+                        let bindings = vec![size_binding, data_binding];
+                        self.wrap_bindings(body, owned_id, ty, span, node_id, bindings)
+                    }
+                    ArrayBacking::Storage { name, offset } => {
+                        let new_offset = self.expr_map[&offset];
+                        let (atom_offset, offset_binding) = self.atomize(body, new_offset, node_id);
+
+                        let storage_id = body.alloc_expr(
+                            Expr::Array {
+                                backing: ArrayBacking::Storage {
+                                    name: name.clone(),
+                                    offset: atom_offset,
+                                },
+                                size: atom_size,
+                            },
+                            ty.clone(),
+                            span,
+                            node_id,
+                        );
+
+                        let bindings = vec![size_binding, offset_binding];
+                        self.wrap_bindings(body, storage_id, ty, span, node_id, bindings)
+                    }
                 }
-
-                let array_id = body.alloc_expr(Expr::Array(new_elems), ty.clone(), span, node_id);
-                bindings.reverse();
-                self.wrap_bindings(body, array_id, ty, span, node_id, bindings)
             }
 
             // Vector - atomize all elements
@@ -421,49 +540,6 @@ impl Normalizer {
                 )
             }
 
-            // Range - atomize start, step, end
-            Expr::Range {
-                start,
-                step,
-                end,
-                kind,
-            } => {
-                let new_start = self.expr_map[start];
-                let new_end = self.expr_map[end];
-
-                let (atom_start, start_binding) = self.atomize(body, new_start, node_id);
-                let (atom_end, end_binding) = self.atomize(body, new_end, node_id);
-
-                let (new_step, step_binding) = if let Some(s) = step {
-                    let new_s = self.expr_map[s];
-                    let (atom_s, binding) = self.atomize(body, new_s, node_id);
-                    (Some(atom_s), binding)
-                } else {
-                    (None, None)
-                };
-
-                let range_id = body.alloc_expr(
-                    Expr::Range {
-                        start: atom_start,
-                        step: new_step,
-                        end: atom_end,
-                        kind: *kind,
-                    },
-                    ty.clone(),
-                    span,
-                    node_id,
-                );
-
-                self.wrap_bindings(
-                    body,
-                    range_id,
-                    ty,
-                    span,
-                    node_id,
-                    vec![end_binding, step_binding, start_binding],
-                )
-            }
-
             // Materialize - atomize inner
             Expr::Materialize(inner) => {
                 let new_inner = self.expr_map[inner];
@@ -487,85 +563,6 @@ impl Normalizer {
                     ty.clone(),
                     span,
                     node_id,
-                )
-            }
-
-            // Slices - atomize subexpressions
-            Expr::OwnedSlice { data, len } => {
-                let new_data = self.expr_map[data];
-                let new_len = self.expr_map[len];
-
-                let (atom_data, data_binding) = self.atomize(body, new_data, node_id);
-                let (atom_len, len_binding) = self.atomize(body, new_len, node_id);
-
-                let slice_id = body.alloc_expr(
-                    Expr::OwnedSlice {
-                        data: atom_data,
-                        len: atom_len,
-                    },
-                    ty.clone(),
-                    span,
-                    node_id,
-                );
-
-                self.wrap_bindings(body, slice_id, ty, span, node_id, vec![len_binding, data_binding])
-            }
-
-            Expr::InlineSlice { base, offset, len } => {
-                let new_base = self.expr_map[base];
-                let new_offset = self.expr_map[offset];
-                let new_len = self.expr_map[len];
-
-                let (atom_base, base_binding) = self.atomize(body, new_base, node_id);
-                let (atom_offset, offset_binding) = self.atomize(body, new_offset, node_id);
-                let (atom_len, len_binding) = self.atomize(body, new_len, node_id);
-
-                let slice_id = body.alloc_expr(
-                    Expr::InlineSlice {
-                        base: atom_base,
-                        offset: atom_offset,
-                        len: atom_len,
-                    },
-                    ty.clone(),
-                    span,
-                    node_id,
-                );
-
-                self.wrap_bindings(
-                    body,
-                    slice_id,
-                    ty,
-                    span,
-                    node_id,
-                    vec![len_binding, offset_binding, base_binding],
-                )
-            }
-
-            Expr::BoundSlice { name, offset, len } => {
-                let new_offset = self.expr_map[offset];
-                let new_len = self.expr_map[len];
-
-                let (atom_offset, offset_binding) = self.atomize(body, new_offset, node_id);
-                let (atom_len, len_binding) = self.atomize(body, new_len, node_id);
-
-                let slice_id = body.alloc_expr(
-                    Expr::BoundSlice {
-                        name: name.clone(),
-                        offset: atom_offset,
-                        len: atom_len,
-                    },
-                    ty.clone(),
-                    span,
-                    node_id,
-                );
-
-                self.wrap_bindings(
-                    body,
-                    slice_id,
-                    ty,
-                    span,
-                    node_id,
-                    vec![len_binding, offset_binding],
                 )
             }
 

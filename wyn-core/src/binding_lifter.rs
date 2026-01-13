@@ -23,7 +23,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::{NodeId, Span, TypeName};
-use crate::mir::{Body, Def, Expr, ExprId, LocalId, LoopKind, Program};
+use crate::mir::{ArrayBacking, Body, Def, Expr, ExprId, LocalId, LoopKind, Program};
 use polytype::Type;
 
 /// A single binding in linear form, extracted from nested Let chains.
@@ -283,10 +283,43 @@ impl BindingLifter {
                 new_body.alloc_expr(Expr::Tuple(new_elems), ty.clone(), span, node_id)
             }
 
-            // Array - map subexpressions
-            Expr::Array(elems) => {
-                let new_elems: Vec<_> = elems.iter().map(|e| self.expr_map[e]).collect();
-                new_body.alloc_expr(Expr::Array(new_elems), ty.clone(), span, node_id)
+            // Array - map subexpressions based on backing
+            Expr::Array { backing, size } => {
+                let new_size = self.expr_map[size];
+                let new_backing = match backing {
+                    ArrayBacking::Literal(elems) => {
+                        let new_elems: Vec<_> = elems.iter().map(|e| self.expr_map[e]).collect();
+                        ArrayBacking::Literal(new_elems)
+                    }
+                    ArrayBacking::Range { start, step, kind } => ArrayBacking::Range {
+                        start: self.expr_map[start],
+                        step: step.map(|s| self.expr_map[&s]),
+                        kind: *kind,
+                    },
+                    ArrayBacking::IndexFn { index_fn } => ArrayBacking::IndexFn {
+                        index_fn: self.expr_map[index_fn],
+                    },
+                    ArrayBacking::View { base, offset } => ArrayBacking::View {
+                        base: self.expr_map[base],
+                        offset: self.expr_map[offset],
+                    },
+                    ArrayBacking::Owned { data } => ArrayBacking::Owned {
+                        data: self.expr_map[data],
+                    },
+                    ArrayBacking::Storage { name, offset } => ArrayBacking::Storage {
+                        name: name.clone(),
+                        offset: self.expr_map[offset],
+                    },
+                };
+                new_body.alloc_expr(
+                    Expr::Array {
+                        backing: new_backing,
+                        size: new_size,
+                    },
+                    ty.clone(),
+                    span,
+                    node_id,
+                )
             }
 
             // Vector - map subexpressions
@@ -319,29 +352,6 @@ impl BindingLifter {
                 )
             }
 
-            // Range - map subexpressions
-            Expr::Range {
-                start,
-                step,
-                end,
-                kind,
-            } => {
-                let new_start = self.expr_map[start];
-                let new_step = step.map(|s| self.expr_map[&s]);
-                let new_end = self.expr_map[end];
-                new_body.alloc_expr(
-                    Expr::Range {
-                        start: new_start,
-                        step: new_step,
-                        end: new_end,
-                        kind: *kind,
-                    },
-                    ty.clone(),
-                    span,
-                    node_id,
-                )
-            }
-
             // Materialize - map inner
             Expr::Materialize(inner) => {
                 let new_inner = self.expr_map[inner];
@@ -358,52 +368,6 @@ impl BindingLifter {
                     Expr::Attributed {
                         attributes: attributes.clone(),
                         expr: new_inner,
-                    },
-                    ty.clone(),
-                    span,
-                    node_id,
-                )
-            }
-
-            // Slices - map subexpressions
-            Expr::OwnedSlice { data, len } => {
-                let new_data = self.expr_map[data];
-                let new_len = self.expr_map[len];
-                new_body.alloc_expr(
-                    Expr::OwnedSlice {
-                        data: new_data,
-                        len: new_len,
-                    },
-                    ty.clone(),
-                    span,
-                    node_id,
-                )
-            }
-
-            Expr::InlineSlice { base, offset, len } => {
-                let new_base = self.expr_map[base];
-                let new_offset = self.expr_map[offset];
-                let new_len = self.expr_map[len];
-                new_body.alloc_expr(
-                    Expr::InlineSlice {
-                        base: new_base,
-                        offset: new_offset,
-                        len: new_len,
-                    },
-                    ty.clone(),
-                    span,
-                    node_id,
-                )
-            }
-
-            Expr::BoundSlice { name, offset, len } => {
-                let new_offset = self.expr_map[offset];
-                let new_len = self.expr_map[len];
-                new_body.alloc_expr(
-                    Expr::BoundSlice {
-                        name: name.clone(),
-                        offset: new_offset,
-                        len: new_len,
                     },
                     ty.clone(),
                     span,
@@ -699,9 +663,39 @@ fn collect_free_locals_inner(
             }
         }
 
-        Expr::Tuple(elems) | Expr::Array(elems) | Expr::Vector(elems) => {
+        Expr::Tuple(elems) | Expr::Vector(elems) => {
             for elem in elems {
                 collect_free_locals_inner(body, *elem, bound, free);
+            }
+        }
+
+        Expr::Array { backing, size } => {
+            collect_free_locals_inner(body, *size, bound, free);
+            match backing {
+                ArrayBacking::Literal(elems) => {
+                    for elem in elems {
+                        collect_free_locals_inner(body, *elem, bound, free);
+                    }
+                }
+                ArrayBacking::Range { start, step, .. } => {
+                    collect_free_locals_inner(body, *start, bound, free);
+                    if let Some(s) = step {
+                        collect_free_locals_inner(body, *s, bound, free);
+                    }
+                }
+                ArrayBacking::IndexFn { index_fn } => {
+                    collect_free_locals_inner(body, *index_fn, bound, free);
+                }
+                ArrayBacking::View { base, offset } => {
+                    collect_free_locals_inner(body, *base, bound, free);
+                    collect_free_locals_inner(body, *offset, bound, free);
+                }
+                ArrayBacking::Owned { data } => {
+                    collect_free_locals_inner(body, *data, bound, free);
+                }
+                ArrayBacking::Storage { offset, .. } => {
+                    collect_free_locals_inner(body, *offset, bound, free);
+                }
             }
         }
 
@@ -719,37 +713,12 @@ fn collect_free_locals_inner(
             }
         }
 
-        Expr::Range { start, step, end, .. } => {
-            collect_free_locals_inner(body, *start, bound, free);
-            if let Some(s) = step {
-                collect_free_locals_inner(body, *s, bound, free);
-            }
-            collect_free_locals_inner(body, *end, bound, free);
-        }
-
         Expr::Materialize(inner) => {
             collect_free_locals_inner(body, *inner, bound, free);
         }
 
         Expr::Attributed { expr, .. } => {
             collect_free_locals_inner(body, *expr, bound, free);
-        }
-
-        Expr::OwnedSlice { data, len } => {
-            collect_free_locals_inner(body, *data, bound, free);
-            collect_free_locals_inner(body, *len, bound, free);
-        }
-
-        Expr::InlineSlice { base, offset, len } => {
-            collect_free_locals_inner(body, *base, bound, free);
-            collect_free_locals_inner(body, *offset, bound, free);
-            collect_free_locals_inner(body, *len, bound, free);
-        }
-
-        Expr::BoundSlice { offset, len, .. } => {
-            // name is a String, not an ExprId
-            collect_free_locals_inner(body, *offset, bound, free);
-            collect_free_locals_inner(body, *len, bound, free);
         }
 
         Expr::Load { ptr } => {

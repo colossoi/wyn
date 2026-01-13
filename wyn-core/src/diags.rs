@@ -861,15 +861,50 @@ impl Display for mir::Expr {
                 }
                 write!(f, ")")
             }
-            mir::Expr::Array(ids) => {
-                write!(f, "[")?;
-                for (i, id) in ids.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
+            mir::Expr::Array { backing, size } => match backing {
+                mir::ArrayBacking::Literal(ids) => {
+                    write!(f, "[")?;
+                    for (i, id) in ids.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "e{}", id.0)?;
                     }
-                    write!(f, "e{}", id.0)?;
+                    write!(f, "]")
                 }
-                write!(f, "]")
+                mir::ArrayBacking::Range { start, step, kind } => {
+                    let kind_str = match kind {
+                        mir::RangeKind::Inclusive => "...",
+                        mir::RangeKind::Exclusive => "..",
+                        mir::RangeKind::ExclusiveLt => "..<",
+                        mir::RangeKind::ExclusiveGt => "..>",
+                    };
+                    if let Some(step) = step {
+                        write!(f, "e{}..e{}{}e{}", start.0, step.0, kind_str, size.0)
+                    } else {
+                        write!(f, "e{}{}e{}", start.0, kind_str, size.0)
+                    }
+                }
+                mir::ArrayBacking::IndexFn { index_fn } => {
+                    write!(f, "@index_fn(e{}, size=e{})", index_fn.0, size.0)
+                }
+                mir::ArrayBacking::View { base, offset } => {
+                    write!(
+                        f,
+                        "@view(base=e{}, offset=e{}, len=e{})",
+                        base.0, offset.0, size.0
+                    )
+                }
+                mir::ArrayBacking::Owned { data } => {
+                    write!(f, "@owned(data=e{}, len=e{})", data.0, size.0)
+                }
+                mir::ArrayBacking::Storage { name, offset } => {
+                    write!(
+                        f,
+                        "@storage(name={}, offset=e{}, len=e{})",
+                        name, offset.0, size.0
+                    )
+                }
             }
             mir::Expr::Vector(ids) => {
                 write!(f, "@[")?;
@@ -961,24 +996,6 @@ impl Display for mir::Expr {
                 }
                 write!(f, ")")
             }
-            mir::Expr::Range {
-                start,
-                step,
-                end,
-                kind,
-            } => {
-                let kind_str = match kind {
-                    mir::RangeKind::Inclusive => "...",
-                    mir::RangeKind::Exclusive => "..",
-                    mir::RangeKind::ExclusiveLt => "..<",
-                    mir::RangeKind::ExclusiveGt => "..>",
-                };
-                if let Some(step) = step {
-                    write!(f, "e{}..e{}{}e{}", start.0, step.0, kind_str, end.0)
-                } else {
-                    write!(f, "e{}{}e{}", start.0, kind_str, end.0)
-                }
-            }
             mir::Expr::Materialize(inner) => {
                 write!(f, "@materialize(e{})", inner.0)
             }
@@ -987,23 +1004,6 @@ impl Display for mir::Expr {
                     write!(f, "{} ", attr)?;
                 }
                 write!(f, "e{}", expr.0)
-            }
-            mir::Expr::OwnedSlice { data, len } => {
-                write!(f, "@owned_slice(data=e{}, len=e{})", data.0, len.0)
-            }
-            mir::Expr::InlineSlice { base, offset, len } => {
-                write!(
-                    f,
-                    "@inline_slice(base=e{}, offset=e{}, len=e{})",
-                    base.0, offset.0, len.0
-                )
-            }
-            mir::Expr::BoundSlice { name, offset, len } => {
-                write!(
-                    f,
-                    "@bound_slice(name={}, offset=e{}, len=e{})",
-                    name, offset.0, len.0
-                )
             }
             mir::Expr::Load { ptr } => {
                 write!(f, "@load(e{})", ptr.0)

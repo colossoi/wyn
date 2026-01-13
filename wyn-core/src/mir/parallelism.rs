@@ -85,7 +85,7 @@ impl ParallelismAnalysis {
 pub struct SimpleComputeMap {
     /// The workgroup size.
     pub local_size: (u32, u32, u32),
-    /// All input parameters (slices). First one is the primary input for the map.
+    /// All input parameters (slices).
     pub inputs: Vec<InputSliceInfo>,
     /// The ExprId of the map call.
     pub map_expr: ExprId,
@@ -112,8 +112,8 @@ pub struct InputSliceInfo {
 ///
 /// Returns `Some(SimpleComputeMap)` if the definition matches the pattern:
 /// - `#[compute]` entry point
-/// - One or more slice input parameters
-/// - Body is Let bindings followed by a single `_w_intrinsic_map` call
+/// - At least one slice input parameter
+/// - Body is Let bindings followed by a single `map` call
 pub fn detect_simple_compute_map(def: &Def) -> Option<SimpleComputeMap> {
     // Must be an EntryPoint with Compute execution model
     let (execution_model, inputs, body) = match def {
@@ -130,11 +130,6 @@ pub fn detect_simple_compute_map(def: &Def) -> Option<SimpleComputeMap> {
         ExecutionModel::Compute { local_size } => *local_size,
         _ => return None,
     };
-
-    // Must have at least one input that is a slice
-    if inputs.is_empty() {
-        return None;
-    }
 
     // Collect all slice inputs
     let mut input_infos = Vec::new();

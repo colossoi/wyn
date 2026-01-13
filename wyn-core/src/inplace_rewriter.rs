@@ -14,7 +14,7 @@ use std::collections::HashMap;
 
 use crate::alias_checker::InPlaceInfo;
 use crate::ast::{NodeId, Span, TypeName};
-use crate::mir::{Body, Def, Expr, ExprId, LoopKind, Program};
+use crate::mir::{ArrayBacking, Body, Def, Expr, ExprId, LoopKind, Program};
 use polytype::Type;
 
 /// Rewrite eligible map operations to their in-place variants.
@@ -167,7 +167,37 @@ impl<'a> InPlaceRewriter<'a> {
 
             // Aggregates - remap children
             Expr::Tuple(elems) => Expr::Tuple(elems.iter().map(|e| self.remap(*e)).collect()),
-            Expr::Array(elems) => Expr::Array(elems.iter().map(|e| self.remap(*e)).collect()),
+            Expr::Array { backing, size } => {
+                let new_size = self.remap(*size);
+                let new_backing = match backing {
+                    ArrayBacking::Literal(elems) => {
+                        ArrayBacking::Literal(elems.iter().map(|e| self.remap(*e)).collect())
+                    }
+                    ArrayBacking::Range { start, step, kind } => ArrayBacking::Range {
+                        start: self.remap(*start),
+                        step: step.map(|s| self.remap(s)),
+                        kind: *kind,
+                    },
+                    ArrayBacking::IndexFn { index_fn } => ArrayBacking::IndexFn {
+                        index_fn: self.remap(*index_fn),
+                    },
+                    ArrayBacking::View { base, offset } => ArrayBacking::View {
+                        base: self.remap(*base),
+                        offset: self.remap(*offset),
+                    },
+                    ArrayBacking::Owned { data } => ArrayBacking::Owned {
+                        data: self.remap(*data),
+                    },
+                    ArrayBacking::Storage { name, offset } => ArrayBacking::Storage {
+                        name: name.clone(),
+                        offset: self.remap(*offset),
+                    },
+                };
+                Expr::Array {
+                    backing: new_backing,
+                    size: new_size,
+                }
+            }
             Expr::Vector(elems) => Expr::Vector(elems.iter().map(|e| self.remap(*e)).collect()),
             Expr::Matrix(rows) => {
                 Expr::Matrix(rows.iter().map(|row| row.iter().map(|e| self.remap(*e)).collect()).collect())
@@ -262,40 +292,11 @@ impl<'a> InPlaceRewriter<'a> {
                 captures: captures.iter().map(|c| self.remap(*c)).collect(),
             },
 
-            // Ranges
-            Expr::Range {
-                start,
-                step,
-                end,
-                kind,
-            } => Expr::Range {
-                start: self.remap(*start),
-                step: step.map(|s| self.remap(s)),
-                end: self.remap(*end),
-                kind: kind.clone(),
-            },
-
             // Special
             Expr::Materialize(inner) => Expr::Materialize(self.remap(*inner)),
             Expr::Attributed { attributes, expr } => Expr::Attributed {
                 attributes: attributes.clone(),
                 expr: self.remap(*expr),
-            },
-
-            // Slices
-            Expr::OwnedSlice { data, len } => Expr::OwnedSlice {
-                data: self.remap(*data),
-                len: self.remap(*len),
-            },
-            Expr::InlineSlice { base, offset, len } => Expr::InlineSlice {
-                base: self.remap(*base),
-                offset: self.remap(*offset),
-                len: self.remap(*len),
-            },
-            Expr::BoundSlice { name, offset, len } => Expr::BoundSlice {
-                name: name.clone(),
-                offset: self.remap(*offset),
-                len: self.remap(*len),
             },
 
             // Memory operations

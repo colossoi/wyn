@@ -1013,9 +1013,38 @@ fn collect_uses(body: &mir::Body, expr_id: mir::ExprId) -> HashSet<mir::LocalId>
             uses.insert(*local_id);
         }
         Global(_) | Int(_) | Float(_) | Bool(_) | String(_) | Unit => {}
-        Tuple(elems) | Array(elems) | Vector(elems) => {
+        Tuple(elems) | Vector(elems) => {
             for elem in elems {
                 uses.extend(collect_uses(body, *elem));
+            }
+        }
+        Array { backing, size } => {
+            uses.extend(collect_uses(body, *size));
+            match backing {
+                mir::ArrayBacking::Literal(elems) => {
+                    for elem in elems {
+                        uses.extend(collect_uses(body, *elem));
+                    }
+                }
+                mir::ArrayBacking::Range { start, step, .. } => {
+                    uses.extend(collect_uses(body, *start));
+                    if let Some(s) = step {
+                        uses.extend(collect_uses(body, *s));
+                    }
+                }
+                mir::ArrayBacking::IndexFn { index_fn } => {
+                    uses.extend(collect_uses(body, *index_fn));
+                }
+                mir::ArrayBacking::View { base, offset } => {
+                    uses.extend(collect_uses(body, *base));
+                    uses.extend(collect_uses(body, *offset));
+                }
+                mir::ArrayBacking::Owned { data } => {
+                    uses.extend(collect_uses(body, *data));
+                }
+                mir::ArrayBacking::Storage { offset, .. } => {
+                    uses.extend(collect_uses(body, *offset));
+                }
             }
         }
         Matrix(rows) => {
@@ -1095,27 +1124,6 @@ fn collect_uses(body: &mir::Body, expr_id: mir::ExprId) -> HashSet<mir::LocalId>
                 uses.extend(collect_uses(body, *cap));
             }
         }
-        Range { start, step, end, .. } => {
-            uses.extend(collect_uses(body, *start));
-            if let Some(s) = step {
-                uses.extend(collect_uses(body, *s));
-            }
-            uses.extend(collect_uses(body, *end));
-        }
-        OwnedSlice { data, len } => {
-            uses.extend(collect_uses(body, *data));
-            uses.extend(collect_uses(body, *len));
-        }
-        InlineSlice { base, offset, len } => {
-            uses.extend(collect_uses(body, *base));
-            uses.extend(collect_uses(body, *offset));
-            uses.extend(collect_uses(body, *len));
-        }
-        BoundSlice { offset, len, .. } => {
-            // name is a String, not an ExprId - only offset and len are expressions
-            uses.extend(collect_uses(body, *offset));
-            uses.extend(collect_uses(body, *len));
-        }
         Load { ptr } => {
             uses.extend(collect_uses(body, *ptr));
         }
@@ -1146,12 +1154,44 @@ fn compute_uses_after(
 
     match expr {
         Local(_) | Global(_) | Int(_) | Float(_) | Bool(_) | String(_) | Unit => {}
-        Tuple(elems) | Array(elems) | Vector(elems) => {
+        Tuple(elems) | Vector(elems) => {
             let elems = elems.clone();
             let mut current_after = after.clone();
             for elem in elems.iter().rev() {
                 result.extend(compute_uses_after(body, *elem, &current_after, aliases));
                 current_after.extend(collect_uses(body, *elem));
+            }
+        }
+        Array { backing, size } => {
+            let (backing, size) = (backing.clone(), *size);
+            result.extend(compute_uses_after(body, size, after, aliases));
+            match backing {
+                mir::ArrayBacking::Literal(elems) => {
+                    let mut current_after = after.clone();
+                    for elem in elems.iter().rev() {
+                        result.extend(compute_uses_after(body, *elem, &current_after, aliases));
+                        current_after.extend(collect_uses(body, *elem));
+                    }
+                }
+                mir::ArrayBacking::Range { start, step, .. } => {
+                    result.extend(compute_uses_after(body, start, after, aliases));
+                    if let Some(s) = step {
+                        result.extend(compute_uses_after(body, s, after, aliases));
+                    }
+                }
+                mir::ArrayBacking::IndexFn { index_fn } => {
+                    result.extend(compute_uses_after(body, index_fn, after, aliases));
+                }
+                mir::ArrayBacking::View { base, offset } => {
+                    result.extend(compute_uses_after(body, base, after, aliases));
+                    result.extend(compute_uses_after(body, offset, after, aliases));
+                }
+                mir::ArrayBacking::Owned { data } => {
+                    result.extend(compute_uses_after(body, data, after, aliases));
+                }
+                mir::ArrayBacking::Storage { offset, .. } => {
+                    result.extend(compute_uses_after(body, offset, after, aliases));
+                }
             }
         }
         Matrix(rows) => {
@@ -1204,8 +1244,12 @@ fn compute_uses_after(
                 }
                 aliases.insert(local, alias_set);
             }
-            // Track aliases for borrowed slices: let s = arr[i:j] -> s aliases arr
-            if let InlineSlice { base, .. } = body.get_expr(rhs) {
+            // Track aliases for borrowed slices (views): let s = arr[i:j] -> s aliases arr
+            if let Array {
+                backing: mir::ArrayBacking::View { base, .. },
+                ..
+            } = body.get_expr(rhs)
+            {
                 if let Local(source_local) = body.get_expr(*base) {
                     let mut alias_set = HashSet::new();
                     alias_set.insert(*source_local);
@@ -1280,41 +1324,6 @@ fn compute_uses_after(
             for cap in captures {
                 result.extend(compute_uses_after(body, *cap, after, aliases));
             }
-        }
-        Range { start, step, end, .. } => {
-            let (start, step, end) = (*start, *step, *end);
-            // Process end, step (if any), then start
-            let mut current_after = after.clone();
-            result.extend(compute_uses_after(body, end, &current_after, aliases));
-            current_after.extend(collect_uses(body, end));
-            if let Some(s) = step {
-                result.extend(compute_uses_after(body, s, &current_after, aliases));
-                current_after.extend(collect_uses(body, s));
-            }
-            result.extend(compute_uses_after(body, start, &current_after, aliases));
-        }
-        OwnedSlice { data, len } => {
-            let (data, len) = (*data, *len);
-            let mut current_after = after.clone();
-            result.extend(compute_uses_after(body, len, &current_after, aliases));
-            current_after.extend(collect_uses(body, len));
-            result.extend(compute_uses_after(body, data, &current_after, aliases));
-        }
-        InlineSlice { base, offset, len } => {
-            let (base, offset, len) = (*base, *offset, *len);
-            let mut current_after = after.clone();
-            result.extend(compute_uses_after(body, len, &current_after, aliases));
-            current_after.extend(collect_uses(body, len));
-            result.extend(compute_uses_after(body, offset, &current_after, aliases));
-            current_after.extend(collect_uses(body, offset));
-            result.extend(compute_uses_after(body, base, &current_after, aliases));
-        }
-        BoundSlice { offset, len, .. } => {
-            let (offset, len) = (*offset, *len);
-            let mut current_after = after.clone();
-            result.extend(compute_uses_after(body, len, &current_after, aliases));
-            current_after.extend(collect_uses(body, len));
-            result.extend(compute_uses_after(body, offset, &current_after, aliases));
         }
         Load { ptr } => {
             let ptr = *ptr;
@@ -1404,10 +1413,40 @@ fn find_inplace_ops(
         }
         // Recurse into all subexpressions
         Local(_) | Global(_) | Int(_) | Float(_) | Bool(_) | String(_) | Unit => {}
-        Tuple(elems) | Array(elems) | Vector(elems) => {
+        Tuple(elems) | Vector(elems) => {
             let elems = elems.clone();
             for elem in &elems {
                 find_inplace_ops(body, *elem, uses_after, aliases, result);
+            }
+        }
+        Array { backing, size } => {
+            let (backing, size) = (backing.clone(), *size);
+            find_inplace_ops(body, size, uses_after, aliases, result);
+            match backing {
+                mir::ArrayBacking::Literal(elems) => {
+                    for elem in &elems {
+                        find_inplace_ops(body, *elem, uses_after, aliases, result);
+                    }
+                }
+                mir::ArrayBacking::Range { start, step, .. } => {
+                    find_inplace_ops(body, start, uses_after, aliases, result);
+                    if let Some(s) = step {
+                        find_inplace_ops(body, s, uses_after, aliases, result);
+                    }
+                }
+                mir::ArrayBacking::IndexFn { index_fn } => {
+                    find_inplace_ops(body, index_fn, uses_after, aliases, result);
+                }
+                mir::ArrayBacking::View { base, offset } => {
+                    find_inplace_ops(body, base, uses_after, aliases, result);
+                    find_inplace_ops(body, offset, uses_after, aliases, result);
+                }
+                mir::ArrayBacking::Owned { data } => {
+                    find_inplace_ops(body, data, uses_after, aliases, result);
+                }
+                mir::ArrayBacking::Storage { offset, .. } => {
+                    find_inplace_ops(body, offset, uses_after, aliases, result);
+                }
             }
         }
         Matrix(rows) => {
@@ -1490,30 +1529,6 @@ fn find_inplace_ops(
             for cap in captures {
                 find_inplace_ops(body, *cap, uses_after, aliases, result);
             }
-        }
-        Range { start, step, end, .. } => {
-            let (start, step, end) = (*start, *step, *end);
-            find_inplace_ops(body, start, uses_after, aliases, result);
-            if let Some(s) = step {
-                find_inplace_ops(body, s, uses_after, aliases, result);
-            }
-            find_inplace_ops(body, end, uses_after, aliases, result);
-        }
-        OwnedSlice { data, len } => {
-            let (data, len) = (*data, *len);
-            find_inplace_ops(body, data, uses_after, aliases, result);
-            find_inplace_ops(body, len, uses_after, aliases, result);
-        }
-        InlineSlice { base, offset, len } => {
-            let (base, offset, len) = (*base, *offset, *len);
-            find_inplace_ops(body, base, uses_after, aliases, result);
-            find_inplace_ops(body, offset, uses_after, aliases, result);
-            find_inplace_ops(body, len, uses_after, aliases, result);
-        }
-        BoundSlice { offset, len, .. } => {
-            let (offset, len) = (*offset, *len);
-            find_inplace_ops(body, offset, uses_after, aliases, result);
-            find_inplace_ops(body, len, uses_after, aliases, result);
         }
         Load { ptr } => {
             find_inplace_ops(body, *ptr, uses_after, aliases, result);

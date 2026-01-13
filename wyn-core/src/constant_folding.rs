@@ -5,7 +5,7 @@
 
 use crate::ast::{NodeId, Span, TypeName};
 use crate::error::Result;
-use crate::mir::{Body, Def, Expr, ExprId, LoopKind, Program};
+use crate::mir::{ArrayBacking, Body, Def, Expr, ExprId, LoopKind, Program};
 use crate::{bail_type_at, err_type_at};
 use polytype::Type;
 use std::collections::HashMap;
@@ -159,9 +159,48 @@ impl ConstantFolder {
                 let new_elems: Vec<_> = elems.iter().map(|e| self.expr_map[e]).collect();
                 Ok(body.alloc_expr(Expr::Tuple(new_elems), ty.clone(), span, node_id))
             }
-            Expr::Array(elems) => {
-                let new_elems: Vec<_> = elems.iter().map(|e| self.expr_map[e]).collect();
-                Ok(body.alloc_expr(Expr::Array(new_elems), ty.clone(), span, node_id))
+            Expr::Array { backing, size } => {
+                let new_size = self.expr_map[size];
+                let new_backing = match backing {
+                    ArrayBacking::Literal(elems) => {
+                        let new_elems: Vec<_> = elems.iter().map(|e| self.expr_map[e]).collect();
+                        ArrayBacking::Literal(new_elems)
+                    }
+                    ArrayBacking::Range { start, step, kind } => {
+                        let new_start = self.expr_map[start];
+                        let new_step = step.map(|s| self.expr_map[&s]);
+                        ArrayBacking::Range {
+                            start: new_start,
+                            step: new_step,
+                            kind: *kind,
+                        }
+                    }
+                    ArrayBacking::IndexFn { index_fn } => {
+                        ArrayBacking::IndexFn {
+                            index_fn: self.expr_map[index_fn],
+                        }
+                    }
+                    ArrayBacking::View { base, offset } => ArrayBacking::View {
+                        base: self.expr_map[base],
+                        offset: self.expr_map[offset],
+                    },
+                    ArrayBacking::Owned { data } => ArrayBacking::Owned {
+                        data: self.expr_map[data],
+                    },
+                    ArrayBacking::Storage { name, offset } => ArrayBacking::Storage {
+                        name: name.clone(),
+                        offset: self.expr_map[offset],
+                    },
+                };
+                Ok(body.alloc_expr(
+                    Expr::Array {
+                        backing: new_backing,
+                        size: new_size,
+                    },
+                    ty.clone(),
+                    span,
+                    node_id,
+                ))
             }
             Expr::Vector(elems) => {
                 let new_elems: Vec<_> = elems.iter().map(|e| self.expr_map[e]).collect();
@@ -331,29 +370,6 @@ impl ConstantFolder {
                 ))
             }
 
-            // Range - map subexpressions
-            Expr::Range {
-                start,
-                step,
-                end,
-                kind,
-            } => {
-                let new_start = self.expr_map[start];
-                let new_step = step.map(|s| self.expr_map[&s]);
-                let new_end = self.expr_map[end];
-                Ok(body.alloc_expr(
-                    Expr::Range {
-                        start: new_start,
-                        step: new_step,
-                        end: new_end,
-                        kind: *kind,
-                    },
-                    ty.clone(),
-                    span,
-                    node_id,
-                ))
-            }
-
             // Materialize - map inner
             Expr::Materialize(inner) => {
                 let new_inner = self.expr_map[inner];
@@ -370,52 +386,6 @@ impl ConstantFolder {
                     Expr::Attributed {
                         attributes: attributes.clone(),
                         expr: new_inner,
-                    },
-                    ty.clone(),
-                    span,
-                    node_id,
-                ))
-            }
-
-            // Slices - map subexpressions
-            Expr::OwnedSlice { data, len } => {
-                let new_data = self.expr_map[data];
-                let new_len = self.expr_map[len];
-                Ok(body.alloc_expr(
-                    Expr::OwnedSlice {
-                        data: new_data,
-                        len: new_len,
-                    },
-                    ty.clone(),
-                    span,
-                    node_id,
-                ))
-            }
-
-            Expr::InlineSlice { base, offset, len } => {
-                let new_base = self.expr_map[base];
-                let new_offset = self.expr_map[offset];
-                let new_len = self.expr_map[len];
-                Ok(body.alloc_expr(
-                    Expr::InlineSlice {
-                        base: new_base,
-                        offset: new_offset,
-                        len: new_len,
-                    },
-                    ty.clone(),
-                    span,
-                    node_id,
-                ))
-            }
-
-            Expr::BoundSlice { name, offset, len } => {
-                let new_offset = self.expr_map[offset];
-                let new_len = self.expr_map[len];
-                Ok(body.alloc_expr(
-                    Expr::BoundSlice {
-                        name: name.clone(),
-                        offset: new_offset,
-                        len: new_len,
                     },
                     ty.clone(),
                     span,

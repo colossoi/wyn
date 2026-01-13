@@ -128,8 +128,14 @@ pub enum Expr {
     // --- Aggregates ---
     /// Tuple literal.
     Tuple(Vec<ExprId>),
-    /// Array literal.
-    Array(Vec<ExprId>),
+    /// Unified array representation.
+    /// All array/slice types use this variant with different backings.
+    Array {
+        /// How elements are computed/stored.
+        backing: ArrayBacking,
+        /// Array length (number of elements).
+        size: ExprId,
+    },
     /// Vector literal (@[1.0, 2.0, 3.0]).
     Vector(Vec<ExprId>),
     /// Matrix literal (@[[1,2], [3,4]]).
@@ -196,15 +202,6 @@ pub enum Expr {
         captures: Vec<ExprId>,
     },
 
-    // --- Ranges ---
-    /// Range expression: start..end or start..step..end.
-    Range {
-        start: ExprId,
-        step: Option<ExprId>,
-        end: ExprId,
-        kind: RangeKind,
-    },
-
     // --- Special ---
     /// Materialize a value into a pointer for indexing.
     /// Creates a Pointer[T, Function] from a value of type T.
@@ -229,43 +226,6 @@ pub enum Expr {
         value: ExprId,
     },
 
-    // --- Slices ---
-    /// Owned slice with capacity-sized buffer and dynamic length.
-    /// Produced by filter, array literals with dynamic content.
-    /// Type: Slice(cap, elem) where cap is the buffer capacity.
-    OwnedSlice {
-        /// The backing buffer: [cap]elem
-        data: ExprId,
-        /// Dynamic length: i32 (0 <= len <= cap)
-        len: ExprId,
-    },
-
-    /// Inline slice referencing part of a local value (zero-copy view).
-    /// Produced by arr[i:j], take, drop on local arrays.
-    /// Base is an ExprId - the backing store is a value in the current scope.
-    /// Type: Slice[Size(cap), elem] where cap is the source array size.
-    InlineSlice {
-        // InlineSlice {
-        /// The source array being sliced (a local value)
-        base: ExprId,
-        /// Start offset: i32
-        offset: ExprId,
-        /// Dynamic length: i32
-        len: ExprId,
-    },
-
-    /// Bound slice referencing part of an external resource (storage buffer, uniform, etc).
-    /// The backing store is identified by name, not an ExprId.
-    /// Accessed via OpAccessChain into module-level variables in SPIR-V.
-    /// Type: Slice[elem, Storage] (address space in type).
-    BoundSlice {
-        /// Name of the bound resource (e.g., "factors", "data")
-        name: String,
-        /// Start offset into the buffer: i32
-        offset: ExprId,
-        /// Number of elements in this slice: i32
-        len: ExprId,
-    },
 }
 
 // =============================================================================
@@ -652,6 +612,69 @@ pub enum RangeKind {
     ExclusiveLt,
     /// `..>` - exclusive on end, stepping downward
     ExclusiveGt,
+}
+
+// =============================================================================
+// Array Backing
+// =============================================================================
+
+/// The representation/backing of an array - how element values are computed.
+///
+/// This unifies all array representations under a single umbrella:
+/// - Virtual arrays (Range, IndexFn) compute elements on-demand without storage
+/// - Materialized arrays (Literal, Owned, View, Storage) have actual backing storage
+#[derive(Debug, Clone)]
+pub enum ArrayBacking {
+    /// Literal array: elements are ExprIds to concrete values.
+    /// Generates OpConstantComposite, accessed via OpCompositeExtract.
+    /// Distinct from Owned because we have direct access to element ExprIds.
+    Literal(Vec<ExprId>),
+
+    /// Range: value at i = start + i * step.
+    /// Virtual - elements computed on-the-fly, no memory allocation.
+    Range {
+        start: ExprId,
+        /// None means step = 1
+        step: Option<ExprId>,
+        kind: RangeKind,
+    },
+
+    /// Index function: value at i = f(i).
+    /// Virtual - elements computed by calling the closure.
+    IndexFn {
+        /// Closure that computes element: i32 -> T
+        index_fn: ExprId,
+    },
+
+    /// View into another array: value at i = base[offset + i].
+    /// Zero-copy, base must outlive this view.
+    /// (Replaces InlineSlice)
+    View {
+        /// The source array expression
+        base: ExprId,
+        /// Start offset into base
+        offset: ExprId,
+    },
+
+    /// Owned buffer with dynamic length (for filter results, etc.).
+    /// Has capacity >= length. The backing data is materialized.
+    /// Accessed via memory operations (store to variable, access chain).
+    /// Distinct from Literal: we have a reference to the buffer, not individual elements.
+    /// (Replaces OwnedSlice)
+    Owned {
+        /// The backing buffer: [capacity]elem
+        data: ExprId,
+    },
+
+    /// Reference to external storage buffer (SSBO, uniform, etc).
+    /// Identified by name, accessed via OpAccessChain into module-level variables.
+    /// (Replaces BoundSlice)
+    Storage {
+        /// Name of the bound resource (e.g., "factors", "data")
+        name: String,
+        /// Start offset into the buffer
+        offset: ExprId,
+    },
 }
 
 /// The kind of loop construct.
