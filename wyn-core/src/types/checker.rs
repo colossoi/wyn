@@ -161,7 +161,7 @@ impl<'a> TypeChecker<'a> {
     /// Returns None if the expression is not a constant.
     fn try_extract_const_int(expr: &Expression) -> Option<i32> {
         match &expr.kind {
-            ExprKind::IntLiteral(n) => Some(*n),
+            ExprKind::IntLiteral(n) => i32::try_from(n).ok(),
             _ => None,
         }
     }
@@ -2347,7 +2347,7 @@ impl<'a> TypeChecker<'a> {
                         })?;
                         // Try to extract literal value
                         match &start.kind {
-                            ExprKind::IntLiteral(n) => Some(*n),
+                            ExprKind::IntLiteral(n) => i32::try_from(n).ok(),
                             _ => None,
                         }
                     }
@@ -2367,7 +2367,7 @@ impl<'a> TypeChecker<'a> {
                         })?;
                         // Try to extract literal value
                         match &end.kind {
-                            ExprKind::IntLiteral(n) => Some(*n),
+                            ExprKind::IntLiteral(n) => i32::try_from(n).ok(),
                             _ => None,
                         }
                     }

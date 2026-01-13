@@ -47,7 +47,7 @@ fn test_tokenize_literals() {
         tokens,
         vec![
             Token::FloatLiteral(-1.0),
-            Token::IntLiteral(42),
+            Token::IntLiteral("42".into()),
             Token::FloatLiteral(3.14),
         ]
     );
@@ -63,7 +63,7 @@ fn test_all_literal_types() {
         vec![
             Token::True,
             Token::False,
-            Token::IntLiteral(123),
+            Token::IntLiteral("123".into()),
             Token::FloatLiteral(45.67),
         ]
     );
@@ -77,9 +77,9 @@ fn test_integer_literal_formats() {
     assert_eq!(
         tokens,
         vec![
-            Token::IntLiteral(42),
-            Token::IntLiteral(-10),
-            Token::IntLiteral(0),
+            Token::IntLiteral("42".into()),
+            Token::IntLiteral("-10".into()),
+            Token::IntLiteral("0".into()),
         ]
     );
 }
@@ -96,7 +96,7 @@ fn test_tokenize_with_comments() {
             Token::Let,
             Token::Identifier("x".to_string()),
             Token::Assign,
-            Token::IntLiteral(42),
+            Token::IntLiteral("42".into()),
         ]
     );
 }
@@ -109,10 +109,10 @@ fn test_tokenize_array_syntax() {
         tokens,
         vec![
             Token::LeftBracketSpaced, // At start of input, counts as having whitespace
-            Token::IntLiteral(3),
+            Token::IntLiteral("3".into()),
             Token::RightBracket,
             Token::LeftBracket, // No space before this one
-            Token::IntLiteral(4),
+            Token::IntLiteral("4".into()),
             Token::RightBracket,
             Token::Identifier("f32".to_string()),
         ]
@@ -370,7 +370,7 @@ fn test_mixed_identifiers_and_operators() {
             Token::RightParen,
             Token::Identifier("arr".to_string()),
             Token::LeftBracket,
-            Token::IntLiteral(0),
+            Token::IntLiteral("0".into()),
             Token::RightBracket,
         ]
     );

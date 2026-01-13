@@ -165,7 +165,7 @@ fn test_parse_let_decl() {
     let decl = single_decl("let x: i32 = 42");
     assert_eq!(decl.name, "x");
     assert_eq!(decl.ty, Some(crate::types::i32()));
-    assert!(matches!(decl.body.kind, ExprKind::IntLiteral(42)));
+    assert!(matches!(decl.body.kind, ExprKind::IntLiteral(ref n) if n.as_str() == "42"));
 }
 
 #[test]
@@ -200,7 +200,7 @@ fn test_parse_array_index() {
         &decl.body.kind,
         ExprKind::ArrayIndex(arr, idx)
             if matches!(arr.kind, ExprKind::Identifier(_, ref name) if name == "arr")
-            && matches!(idx.kind, ExprKind::IntLiteral(0))
+            && matches!(idx.kind, ExprKind::IntLiteral(ref n) if n.as_str() == "0")
     ));
 }
 
@@ -560,7 +560,7 @@ fn test_parse_lambda_with_typed_parameter() {
         assert!(matches!(lambda.body.kind, ExprKind::BinaryOp(_, _, _)));
         if let ExprKind::BinaryOp(_op, left, right) = &lambda.body.kind {
             assert!(matches!(left.kind, ExprKind::Identifier(_, ref name) if name == "x"));
-            assert!(matches!(right.kind, ExprKind::IntLiteral(7)));
+            assert!(matches!(right.kind, ExprKind::IntLiteral(ref n) if n.as_str() == "7"));
         }
     } else {
         panic!("Expected lambda, got {:?}", decl.body.kind);
@@ -873,10 +873,10 @@ fn test_if_then_else_parsing() {
             if matches!(&if_expr.condition.kind, ExprKind::BinaryOp(op, left, right)
                 if op.op == "=="
                 && matches!(left.kind, ExprKind::Identifier(_, ref name) if name == "x")
-                && matches!(right.kind, ExprKind::IntLiteral(0))
+                && matches!(right.kind, ExprKind::IntLiteral(ref n) if n.as_str() == "0")
             )
-            && matches!(if_expr.then_branch.kind, ExprKind::IntLiteral(1))
-            && matches!(if_expr.else_branch.kind, ExprKind::IntLiteral(2))
+            && matches!(if_expr.then_branch.kind, ExprKind::IntLiteral(ref n) if n.as_str() == "1")
+            && matches!(if_expr.else_branch.kind, ExprKind::IntLiteral(ref n) if n.as_str() == "2")
     ));
 }
 #[test]
@@ -1043,8 +1043,8 @@ fn test_parse_pattern_int_literal() {
     let pattern = parser.parse_pattern().expect("Failed to parse pattern");
 
     match pattern.kind {
-        PatternKind::Literal(PatternLiteral::Int(n)) => {
-            assert_eq!(n, 42, "Expected int literal 42");
+        PatternKind::Literal(PatternLiteral::Int(ref n)) => {
+            assert_eq!(n.as_str(), "42", "Expected int literal 42");
         }
         _ => panic!("Expected int literal pattern, got {:?}", pattern.kind),
     }
@@ -1059,7 +1059,7 @@ fn test_parse_pattern_negative_int_literal() {
 
     match pattern.kind {
         PatternKind::Literal(PatternLiteral::Int(n)) => {
-            assert_eq!(n, -42, "Expected int literal -42");
+            assert_eq!(n.as_str(), "-42", "Expected int literal -42");
         }
         _ => panic!("Expected int literal pattern, got {:?}", pattern.kind),
     }
@@ -2095,7 +2095,7 @@ def test: [12]i32 =
                                     }
                                     // idx should be int literal 0
                                     match &idx.kind {
-                                        ExprKind::IntLiteral(n) => assert_eq!(*n, 0),
+                                        ExprKind::IntLiteral(n) => assert_eq!(n.as_str(), "0"),
                                         other => panic!("Expected IntLiteral, got {:?}", other),
                                     }
                                 }
@@ -2242,7 +2242,7 @@ fn test_parse_record_literal_single_field() {
             assert_eq!(fields.len(), 1);
             assert_eq!(fields[0].0, "x");
             match &fields[0].1.kind {
-                ExprKind::IntLiteral(n) => assert_eq!(*n, 42),
+                ExprKind::IntLiteral(n) => assert_eq!(n.as_str(), "42"),
                 other => panic!("Expected IntLiteral, got {:?}", other),
             }
         }
@@ -2405,7 +2405,7 @@ fn test_negation_of_array_index() {
                         array.kind
                     );
                     assert!(
-                        matches!(&index.kind, ExprKind::IntLiteral(1)),
+                        matches!(&index.kind, ExprKind::IntLiteral(ref n) if n.as_str() == "1"),
                         "Expected index 1, got {:?}",
                         index.kind
                     );
@@ -3068,7 +3068,7 @@ fn test_curry_with_fixed_first_arg() {
                     assert_eq!(args.len(), 2);
                     // First arg should be literal 1
                     match &args[0].kind {
-                        ExprKind::IntLiteral(1) => {}
+                        ExprKind::IntLiteral(ref n) if n.as_str() == "1" => {}
                         other => panic!("Expected IntLiteral(1), got {:?}", other),
                     }
                     // Second arg should be _0_
@@ -3104,7 +3104,7 @@ fn test_curry_multiple_placeholders() {
                     assert_eq!(args.len(), 3);
                     // Third arg should be literal 3
                     match &args[2].kind {
-                        ExprKind::IntLiteral(3) => {}
+                        ExprKind::IntLiteral(ref n) if n.as_str() == "3" => {}
                         other => panic!("Expected IntLiteral(3), got {:?}", other),
                     }
                 }

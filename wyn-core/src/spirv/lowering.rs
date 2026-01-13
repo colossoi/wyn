@@ -1399,7 +1399,13 @@ fn lower_const_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId)
     match body.get_expr(expr_id) {
         Expr::Int(n) => match ty {
             types::Type::Constructed(TypeName::UInt(32), _) => {
-                let val: u32 = n.parse().map_err(|_| err_spirv!("Invalid u32 literal: {}", n))?;
+                // Parse as i32 first to handle wrapped negative values (e.g., 0x80000000u32
+                // is stored as -2147483648 in the AST because IntLiteral uses i32),
+                // then reinterpret the bits as u32
+                let val: u32 = n
+                    .parse::<u32>()
+                    .or_else(|_| n.parse::<i32>().map(|v| v as u32))
+                    .map_err(|_| err_spirv!("Invalid u32 literal: {}", n))?;
                 Ok(constructor.const_u32(val))
             }
             _ => {

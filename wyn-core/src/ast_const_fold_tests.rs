@@ -11,7 +11,7 @@ fn test_header() -> Header {
 fn make_int(n: i32) -> Expression {
     Expression {
         h: test_header(),
-        kind: ExprKind::IntLiteral(n),
+        kind: ExprKind::IntLiteral(n.to_string().into()),
     }
 }
 
@@ -41,7 +41,7 @@ fn test_fold_simple_addition() {
     let mut folder = AstConstFolder::new();
     let mut expr = make_binop("+", make_int(2), make_int(7));
     folder.fold_expr(&mut expr);
-    assert_eq!(expr.kind, ExprKind::IntLiteral(9));
+    assert_eq!(expr.kind, ExprKind::IntLiteral("9".into()));
 }
 
 #[test]
@@ -51,7 +51,7 @@ fn test_fold_nested_arithmetic() {
     let inner = make_binop("+", make_int(2), make_int(3));
     let mut expr = make_binop("*", inner, make_int(4));
     folder.fold_expr(&mut expr);
-    assert_eq!(expr.kind, ExprKind::IntLiteral(20));
+    assert_eq!(expr.kind, ExprKind::IntLiteral("20".into()));
 }
 
 #[test]
@@ -61,7 +61,7 @@ fn test_inline_constant() {
 
     let mut expr = make_ident("SIZE");
     folder.fold_expr(&mut expr);
-    assert_eq!(expr.kind, ExprKind::IntLiteral(16));
+    assert_eq!(expr.kind, ExprKind::IntLiteral("16".into()));
 }
 
 #[test]
@@ -72,7 +72,7 @@ fn test_fold_with_constant_reference() {
     // X + 3 = 8
     let mut expr = make_binop("+", make_ident("X"), make_int(3));
     folder.fold_expr(&mut expr);
-    assert_eq!(expr.kind, ExprKind::IntLiteral(8));
+    assert_eq!(expr.kind, ExprKind::IntLiteral("8".into()));
 }
 
 #[test]
@@ -128,7 +128,7 @@ fn test_fold_slice_start_constant() {
         let start = slice.start.as_ref().expect("start should exist");
         assert_eq!(
             start.kind,
-            ExprKind::IntLiteral(3),
+            ExprKind::IntLiteral("3".into()),
             "Slice start should be folded to 3"
         );
     } else {
@@ -148,7 +148,7 @@ fn test_fold_slice_end_constant() {
         let end = slice.end.as_ref().expect("end should exist");
         assert_eq!(
             end.kind,
-            ExprKind::IntLiteral(10),
+            ExprKind::IntLiteral("10".into()),
             "Slice end should be folded to 10"
         );
     } else {
@@ -168,8 +168,8 @@ fn test_fold_slice_both_components() {
     if let ExprKind::Slice(slice) = &expr.kind {
         let start = slice.start.as_ref().expect("start should exist");
         let end = slice.end.as_ref().expect("end should exist");
-        assert_eq!(start.kind, ExprKind::IntLiteral(2), "start should fold to 2");
-        assert_eq!(end.kind, ExprKind::IntLiteral(8), "end should fold to 8");
+        assert_eq!(start.kind, ExprKind::IntLiteral("2".into()), "start should fold to 2");
+        assert_eq!(end.kind, ExprKind::IntLiteral("8".into()), "end should fold to 8");
     } else {
         panic!("Expected Slice, got {:?}", expr.kind);
     }
@@ -192,8 +192,8 @@ fn test_fold_slice_with_constant_inlining() {
     if let ExprKind::Slice(slice) = &expr.kind {
         let start = slice.start.as_ref().expect("start should exist");
         let end = slice.end.as_ref().expect("end should exist");
-        assert_eq!(start.kind, ExprKind::IntLiteral(2), "start should inline to 2");
-        assert_eq!(end.kind, ExprKind::IntLiteral(10), "end should inline to 10");
+        assert_eq!(start.kind, ExprKind::IntLiteral("2".into()), "start should inline to 2");
+        assert_eq!(end.kind, ExprKind::IntLiteral("10".into()), "end should inline to 10");
     } else {
         panic!("Expected Slice, got {:?}", expr.kind);
     }

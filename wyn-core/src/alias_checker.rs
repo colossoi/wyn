@@ -428,7 +428,11 @@ impl<'a> AliasChecker<'a> {
 impl<'a> Visitor for AliasChecker<'a> {
     type Break = ();
 
-    fn visit_expr_int_literal(&mut self, id: NodeId, _n: i32) -> ControlFlow<Self::Break> {
+    fn visit_expr_int_literal(
+        &mut self,
+        id: NodeId,
+        _n: &crate::lexer::IntString,
+    ) -> ControlFlow<Self::Break> {
         self.set_result(id, AliasInfo::copy());
         ControlFlow::Continue(())
     }

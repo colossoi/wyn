@@ -565,10 +565,10 @@ impl<'a> Parser<'a> {
 
                     match param_name.as_str() {
                         "set" => {
-                            set = self.expect_integer()? as u32;
+                            set = self.expect_integer()?;
                         }
                         "binding" => {
-                            binding = Some(self.expect_integer()? as u32);
+                            binding = Some(self.expect_integer()?);
                         }
                         _ => bail_parse!("Unknown uniform parameter: {}", param_name),
                     }
@@ -618,7 +618,7 @@ impl<'a> Parser<'a> {
             "location" => {
                 self.expect(Token::LeftParen)?;
                 let location = if let Some(Token::IntLiteral(location)) = self.advance() {
-                    *location as u32
+                    u32::try_from(location).map_err(|_| err_parse!("Invalid location number"))?
                 } else {
                     bail_parse!("Expected location number");
                 };
@@ -642,10 +642,10 @@ impl<'a> Parser<'a> {
 
                     match param_name.as_str() {
                         "set" => {
-                            set = self.expect_integer()? as u32;
+                            set = self.expect_integer()?;
                         }
                         "binding" => {
-                            binding = Some(self.expect_integer()? as u32);
+                            binding = Some(self.expect_integer()?);
                         }
                         "layout" => {
                             let layout_name = self.expect_identifier()?;
@@ -691,7 +691,7 @@ impl<'a> Parser<'a> {
             "size_hint" => {
                 // Parse size hint for dynamic arrays: #[size_hint(N)]
                 self.expect(Token::LeftParen)?;
-                let hint = self.expect_integer()? as u32;
+                let hint = self.expect_integer()?;
                 self.expect(Token::RightParen)?;
                 self.expect(Token::RightBracket)?;
                 Ok(Attribute::SizeHint(hint))
@@ -899,7 +899,7 @@ impl<'a> Parser<'a> {
                         );
                     } else if let Some(Token::IntLiteral(n)) = self.peek() {
                         // Size literal [3]
-                        let size = *n as usize;
+                        let size = usize::try_from(n).map_err(|_| err_parse!("Invalid array size"))?;
                         self.advance();
                         self.expect(Token::RightBracket)?;
                         // Array[elem, AddressUnknown, Size(n)]
@@ -991,7 +991,7 @@ impl<'a> Parser<'a> {
 
             // Parse dimension - could be integer literal or identifier (size variable)
             if let Some(Token::IntLiteral(n)) = self.peek() {
-                let size = *n as usize;
+                let size = usize::try_from(n).map_err(|_| err_parse!("Invalid array size"))?;
                 self.advance();
                 self.expect(Token::RightBracket)?;
                 let elem_type = self.parse_array_or_base_type()?; // Allow nested arrays
@@ -1622,7 +1622,7 @@ impl<'a> Parser<'a> {
                 Ok(self.node_counter.mk_node(ExprKind::TypeHole, span))
             }
             Some(Token::IntLiteral(n)) => {
-                let n = *n;
+                let n = n.clone();
                 let span = self.current_span();
                 self.advance();
                 Ok(self.node_counter.mk_node(ExprKind::IntLiteral(n), span))
@@ -2321,10 +2321,12 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn expect_integer(&mut self) -> Result<i32> {
+    fn expect_integer(&mut self) -> Result<u32> {
         let span = self.current_span();
         match self.advance() {
-            Some(Token::IntLiteral(n)) => Ok(*n),
+            Some(Token::IntLiteral(n)) => {
+                u32::try_from(n).map_err(|_| err_parse_at!(span, "Invalid integer"))
+            }
             _ => Err(err_parse_at!(span, "Expected integer")),
         }
     }

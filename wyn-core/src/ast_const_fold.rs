@@ -99,7 +99,7 @@ impl AstConstFolder {
                 // Inline known constants (only for unqualified names)
                 if quals.is_empty() {
                     if let Some(&val) = self.constants.get(name) {
-                        expr.kind = ExprKind::IntLiteral(val as i32);
+                        expr.kind = ExprKind::IntLiteral(val.to_string().into());
                     }
                 }
             }
@@ -109,7 +109,7 @@ impl AstConstFolder {
                 self.fold_expr(rhs);
                 // Try to fold after children are folded
                 if let Some(val) = self.try_fold_binop(&op.op, lhs, rhs) {
-                    expr.kind = ExprKind::IntLiteral(val as i32);
+                    expr.kind = ExprKind::IntLiteral(val.to_string().into());
                 } else {
                     // Try algebraic identity rewrites
                     Self::try_algebraic_simplify(expr);
@@ -120,7 +120,7 @@ impl AstConstFolder {
                 self.fold_expr(operand);
                 // Try to fold after child is folded
                 if let Some(val) = self.try_fold_unaryop(&op.op, operand) {
-                    expr.kind = ExprKind::IntLiteral(val as i32);
+                    expr.kind = ExprKind::IntLiteral(val.to_string().into());
                 }
             }
 
@@ -270,7 +270,7 @@ impl AstConstFolder {
     /// Returns None if the expression is not a constant integer.
     fn try_eval_const(&self, expr: &Expression) -> Option<i64> {
         match &expr.kind {
-            ExprKind::IntLiteral(n) => Some(*n as i64),
+            ExprKind::IntLiteral(n) => i64::try_from(n).ok(),
             ExprKind::Identifier(quals, name) if quals.is_empty() => self.constants.get(name).copied(),
             ExprKind::BinaryOp(op, lhs, rhs) => {
                 let l = self.try_eval_const(lhs)?;
@@ -318,7 +318,7 @@ impl AstConstFolder {
     /// Check if an expression is a zero literal (int or float)
     fn is_zero(expr: &Expression) -> bool {
         match &expr.kind {
-            ExprKind::IntLiteral(0) => true,
+            ExprKind::IntLiteral(n) => n.as_str() == "0",
             ExprKind::FloatLiteral(v) => *v == 0.0,
             _ => false,
         }
@@ -327,7 +327,7 @@ impl AstConstFolder {
     /// Check if an expression is a one literal (int or float)
     fn is_one(expr: &Expression) -> bool {
         match &expr.kind {
-            ExprKind::IntLiteral(1) => true,
+            ExprKind::IntLiteral(n) => n.as_str() == "1",
             ExprKind::FloatLiteral(v) => *v == 1.0,
             _ => false,
         }
@@ -336,7 +336,7 @@ impl AstConstFolder {
     /// Check if an expression is a negative one literal (int or float)
     fn is_neg_one(expr: &Expression) -> bool {
         match &expr.kind {
-            ExprKind::IntLiteral(-1) => true,
+            ExprKind::IntLiteral(n) => n.as_str() == "-1",
             ExprKind::FloatLiteral(v) => *v == -1.0,
             _ => false,
         }

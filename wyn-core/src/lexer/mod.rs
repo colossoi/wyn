@@ -16,6 +16,83 @@ use nom::{
 };
 
 use literal::{parse_char_literal, parse_float_literal, parse_int_literal, parse_string_literal};
+use std::num::ParseIntError;
+
+/// A string representation of an integer literal that can be converted to numeric types.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IntString(pub String);
+
+impl IntString {
+    pub fn new(s: String) -> Self {
+        IntString(s)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Create a negated version of this integer string
+    pub fn negated(&self) -> Self {
+        if self.0.starts_with('-') {
+            IntString(self.0[1..].to_string())
+        } else {
+            IntString(format!("-{}", self.0))
+        }
+    }
+}
+
+impl std::fmt::Display for IntString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<String> for IntString {
+    fn from(s: String) -> Self {
+        IntString(s)
+    }
+}
+
+impl From<&str> for IntString {
+    fn from(s: &str) -> Self {
+        IntString(s.to_string())
+    }
+}
+
+impl TryFrom<&IntString> for i32 {
+    type Error = ParseIntError;
+    fn try_from(s: &IntString) -> Result<Self, Self::Error> {
+        s.0.parse()
+    }
+}
+
+impl TryFrom<&IntString> for u32 {
+    type Error = ParseIntError;
+    fn try_from(s: &IntString) -> Result<Self, Self::Error> {
+        s.0.parse()
+    }
+}
+
+impl TryFrom<&IntString> for i64 {
+    type Error = ParseIntError;
+    fn try_from(s: &IntString) -> Result<Self, Self::Error> {
+        s.0.parse()
+    }
+}
+
+impl TryFrom<&IntString> for u64 {
+    type Error = ParseIntError;
+    fn try_from(s: &IntString) -> Result<Self, Self::Error> {
+        s.0.parse()
+    }
+}
+
+impl TryFrom<&IntString> for usize {
+    type Error = ParseIntError;
+    fn try_from(s: &IntString) -> Result<Self, Self::Error> {
+        s.0.parse()
+    }
+}
 
 /// Token with source location information
 #[derive(Debug, Clone, PartialEq)]
@@ -66,7 +143,7 @@ pub enum Token {
 
     // Identifiers and literals
     Identifier(String),
-    IntLiteral(i32),
+    IntLiteral(IntString),
     SuffixedLiteral(Box<Token>, String), // literal token with type suffix (e.g., "u32", "i64", "f64")
     FloatLiteral(f32),
     CharLiteral(char),

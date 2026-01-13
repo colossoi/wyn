@@ -459,7 +459,7 @@ pub enum Spec {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprKind {
-    IntLiteral(i32),
+    IntLiteral(crate::lexer::IntString),
     FloatLiteral(f32),
     BoolLiteral(bool),
     StringLiteral(String),
@@ -678,7 +678,7 @@ impl Pattern {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PatternLiteral {
-    Int(i32),
+    Int(crate::lexer::IntString),
     Float(f32),
     Char(char),
     Bool(bool),

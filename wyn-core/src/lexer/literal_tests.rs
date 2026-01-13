@@ -3,33 +3,56 @@ use super::literal::*;
 
 #[test]
 fn test_hexadecimal_integers() {
-    assert_eq!(parse_int_literal("0x10"), Ok(("", Token::IntLiteral(16))));
-    assert_eq!(parse_int_literal("0xFF"), Ok(("", Token::IntLiteral(255))));
-    assert_eq!(parse_int_literal("0x1A_2B"), Ok(("", Token::IntLiteral(0x1A2B))));
-    assert_eq!(parse_int_literal("0X00FF"), Ok(("", Token::IntLiteral(255))));
+    assert_eq!(parse_int_literal("0x10"), Ok(("", Token::IntLiteral("16".into()))));
+    assert_eq!(parse_int_literal("0xFF"), Ok(("", Token::IntLiteral("255".into()))));
+    assert_eq!(parse_int_literal("0x1A_2B"), Ok(("", Token::IntLiteral("6699".into()))));
+    assert_eq!(parse_int_literal("0X00FF"), Ok(("", Token::IntLiteral("255".into()))));
+}
+
+#[test]
+fn test_u32_high_bit_literal() {
+    // 0x80000000 = 2147483648 which is > i32::MAX
+    // This value is used in SHA256 padding and must round-trip correctly
+    // Now stored as IntString which preserves the full u64 range
+    let result = parse_int_literal("0x80000000u32");
+    match result {
+        Ok(("", Token::SuffixedLiteral(inner, suffix))) => {
+            assert_eq!(suffix, "u32");
+            match *inner {
+                Token::IntLiteral(ref val) => {
+                    // The value should be stored as "2147483648" (decimal)
+                    assert_eq!(val.as_str(), "2147483648");
+                    // And should parse correctly to u32
+                    assert_eq!(u32::try_from(val).unwrap(), 0x80000000u32);
+                }
+                ref other => panic!("Expected IntLiteral inside, got {:?}", other),
+            }
+        }
+        other => panic!("Expected SuffixedLiteral(IntLiteral, u32), got {:?}", other),
+    }
 }
 
 #[test]
 fn test_binary_integers() {
-    assert_eq!(parse_int_literal("0b1010"), Ok(("", Token::IntLiteral(10))));
-    assert_eq!(parse_int_literal("0B1111"), Ok(("", Token::IntLiteral(15))));
-    assert_eq!(parse_int_literal("0b10_11"), Ok(("", Token::IntLiteral(11))));
+    assert_eq!(parse_int_literal("0b1010"), Ok(("", Token::IntLiteral("10".into()))));
+    assert_eq!(parse_int_literal("0B1111"), Ok(("", Token::IntLiteral("15".into()))));
+    assert_eq!(parse_int_literal("0b10_11"), Ok(("", Token::IntLiteral("11".into()))));
 }
 
 #[test]
 fn test_integers_with_underscores() {
     assert_eq!(
         parse_int_literal("1_000_000"),
-        Ok(("", Token::IntLiteral(1_000_000)))
+        Ok(("", Token::IntLiteral("1000000".into())))
     );
-    assert_eq!(parse_int_literal("42_42"), Ok(("", Token::IntLiteral(4242))));
-    assert_eq!(parse_int_literal("123_456"), Ok(("", Token::IntLiteral(123456))));
+    assert_eq!(parse_int_literal("42_42"), Ok(("", Token::IntLiteral("4242".into()))));
+    assert_eq!(parse_int_literal("123_456"), Ok(("", Token::IntLiteral("123456".into()))));
 }
 
 #[test]
 fn test_basic_decimals() {
-    assert_eq!(parse_int_literal("42"), Ok(("", Token::IntLiteral(42))));
-    assert_eq!(parse_int_literal("-17"), Ok(("", Token::IntLiteral(-17))));
+    assert_eq!(parse_int_literal("42"), Ok(("", Token::IntLiteral("42".into()))));
+    assert_eq!(parse_int_literal("-17"), Ok(("", Token::IntLiteral("-17".into()))));
 }
 
 #[test]

@@ -271,9 +271,9 @@ impl Parser<'_> {
 
         let literal = match self.peek() {
             Some(Token::IntLiteral(n)) => {
-                let value = *n;
+                let value = n.clone();
                 self.advance();
-                PatternLiteral::Int(if is_negative { -value } else { value })
+                PatternLiteral::Int(if is_negative { value.negated() } else { value })
             }
 
             Some(Token::FloatLiteral(f)) => {

@@ -197,7 +197,7 @@ impl<'a> Desugarer<'a> {
     // Helper methods to construct AST nodes
 
     fn mk_int(&mut self, n: i32, span: Span) -> Expression {
-        self.nc.mk_node(ExprKind::IntLiteral(n), span)
+        self.nc.mk_node(ExprKind::IntLiteral(n.to_string().into()), span)
     }
 
     fn mk_ident(&mut self, name: &str, span: Span) -> Expression {

@@ -7,6 +7,7 @@
 
 use crate::NodeId;
 use crate::ast::*;
+use crate::lexer::IntString;
 use std::ops::ControlFlow;
 
 /// Visitor trait for traversing the AST
@@ -54,7 +55,7 @@ pub trait Visitor: Sized {
         walk_expression(self, e)
     }
 
-    fn visit_expr_int_literal(&mut self, _id: NodeId, _n: i32) -> ControlFlow<Self::Break> {
+    fn visit_expr_int_literal(&mut self, _id: NodeId, _n: &IntString) -> ControlFlow<Self::Break> {
         ControlFlow::Continue(())
     }
 
@@ -344,7 +345,7 @@ pub fn walk_expression<V: Visitor>(v: &mut V, e: &Expression) -> ControlFlow<V::
             }
             ControlFlow::Continue(())
         }
-        ExprKind::IntLiteral(n) => v.visit_expr_int_literal(id, *n),
+        ExprKind::IntLiteral(n) => v.visit_expr_int_literal(id, n),
         ExprKind::FloatLiteral(f) => v.visit_expr_float_literal(id, *f),
         ExprKind::BoolLiteral(b) => v.visit_expr_bool_literal(id, *b),
         ExprKind::StringLiteral(_) => ControlFlow::Continue(()),
