@@ -621,12 +621,16 @@ pub struct SirFused {
 }
 
 impl SirFused {
-    /// Analyze SOACs and determine parallelization strategies.
+    /// Transform SIR for parallel execution and determine strategies.
+    ///
+    /// For compute shaders, this:
+    /// - Injects thread_id as a built-in input
+    /// - Rewrites map(f, arr) → f(arr[thread_id]) for storage arrays
     pub fn parallelize(self) -> SirParallelized {
         let mut parallelizer = sir::parallelize::Parallelizer::new();
-        let plan = parallelizer.analyze(&self.sir);
+        let (transformed_sir, plan) = parallelizer.transform(self.sir);
         SirParallelized {
-            sir: self.sir,
+            sir: transformed_sir,
             parallelization_plan: plan,
             node_counter: self.node_counter,
         }

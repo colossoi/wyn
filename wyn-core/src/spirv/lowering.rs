@@ -9,12 +9,10 @@ use crate::ast::TypeName;
 use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
 use crate::lowering_common::is_empty_closure_type;
-use crate::mir::parallelism::{SimpleComputeMap, detect_simple_compute_map};
 use crate::mir::{
-    self, ArrayBacking, Body, Def, ExecutionModel, Expr, ExprId, LambdaId, LambdaInfo, LocalId, LoopKind,
-    Program,
+    self, ArrayBacking, Body, Def, ExecutionModel, Expr, ExprId, LambdaId, LambdaInfo, LocalId,
+    LoopKind, Program,
 };
-use crate::pipeline::{self, Pipeline};
 
 /// Tracks SPIR-V descriptor set and binding numbers for storage buffers.
 /// This is an internal implementation detail for SPIR-V lowering.
@@ -111,7 +109,7 @@ struct Constructor {
     entry_point_interfaces: HashMap<String, Vec<spirv::Word>>,
     current_is_entry_point: bool,
     current_output_vars: Vec<spirv::Word>,
-    current_input_vars: Vec<(spirv::Word, String, spirv::Word)>, // (var_id, param_name, type_id)
+    current_input_vars: Vec<(spirv::Word, String, spirv::Word, StorageClass)>, // (var_id, param_name, type_id, storage_class)
     current_used_globals: Vec<spirv::Word>, // Global constants accessed in current entry point
 
     // Global constants: name -> constant_id (SPIR-V OpConstant)
@@ -135,6 +133,9 @@ struct Constructor {
 
     /// Compute shader parameters: maps param name to (set, binding) for storage buffer lookup
     compute_params: HashMap<String, (u32, u32)>,
+
+    /// Built-in variables cache: BuiltIn -> variable_id
+    builtin_vars: HashMap<spirv::BuiltIn, spirv::Word>,
 }
 
 impl Constructor {
@@ -189,6 +190,7 @@ impl Constructor {
             inplace_nodes: HashSet::new(),
             storage_buffers: HashMap::new(),
             compute_params: HashMap::new(),
+            builtin_vars: HashMap::new(),
         }
     }
 
@@ -437,6 +439,27 @@ impl Constructor {
         ty
     }
 
+    /// Get the size in bytes of a SPIR-V type (for array stride calculation).
+    /// This is a simplified implementation that handles common scalar and vector types.
+    fn type_size(&self, type_id: spirv::Word) -> u32 {
+        // Check common scalar types
+        if type_id == self.f32_type {
+            return 4;
+        }
+        if type_id == self.i32_type {
+            return 4;
+        }
+        if type_id == self.u32_type {
+            return 4;
+        }
+        if type_id == self.bool_type {
+            return 4; // SPIR-V bools are typically 32-bit in storage
+        }
+        // For other types, default to 4 (covers most cases)
+        // TODO: Handle vec2/vec3/vec4, matrices, and structs properly
+        4
+    }
+
     /// Create a Block-decorated struct type for a uniform buffer.
     /// Returns the struct type ID. Each uniform gets its own unique struct
     /// (not cached) since Block structs shouldn't be shared.
@@ -455,6 +478,30 @@ impl Constructor {
         );
 
         block_struct
+    }
+
+    /// Get or create a built-in variable (like GlobalInvocationId for compute shaders).
+    fn get_or_create_builtin_var(
+        &mut self,
+        builtin: spirv::BuiltIn,
+        value_type: spirv::Word,
+    ) -> spirv::Word {
+        if let Some(&var) = self.builtin_vars.get(&builtin) {
+            return var;
+        }
+
+        // Create an Input variable with the BuiltIn decoration
+        let ptr_type = self.get_or_create_ptr_type(StorageClass::Input, value_type);
+        let var = self.builder.variable(ptr_type, None, StorageClass::Input, None);
+
+        self.builder.decorate(
+            var,
+            spirv::Decoration::BuiltIn,
+            [Operand::BuiltIn(builtin)],
+        );
+
+        self.builtin_vars.insert(builtin, var);
+        var
     }
 
     /// Begin a new function
@@ -752,28 +799,17 @@ impl<'a> LowerCtx<'a> {
             }
             Def::EntryPoint {
                 name,
-                execution_model: ExecutionModel::Compute { .. },
+                inputs,
+                outputs,
                 body,
+                execution_model: ExecutionModel::Compute { .. },
                 ..
             } => {
-                // Build pipeline from compute entry point
-                let Some(pipeline) = pipeline::build_pipeline(def) else {
-                    bail_spirv!("Compute shader '{}' could not be converted to pipeline", name);
-                };
-
-                // Validate - must still be "simple" pattern for now
-                let Some(compute_info) = detect_simple_compute_map(def) else {
-                    bail_spirv!(
-                        "Compute shader '{}' is not supported: must have slice inputs and single map call at top level",
-                        name
-                    );
-                };
-
-                // Ensure dependencies (including map closure's lambda) are lowered
+                // Compute shaders: use the general entry point lowering
+                // The SIR parallelization pass has already transformed map operations
+                // into per-element operations with thread_id indexing
                 self.ensure_deps_lowered(body)?;
-
-                // Lower the compute shader using the pipeline's buffer bindings
-                lower_compute_pipeline(&mut self.constructor, &pipeline, &compute_info, body)?;
+                lower_entry_point_from_def(&mut self.constructor, name, inputs, outputs, body)?;
             }
             Def::EntryPoint {
                 name,
@@ -1002,6 +1038,20 @@ fn lower_regular_function(
     Ok(())
 }
 
+/// Check if a type is an unsized storage array (AddressStorage + Unsized)
+fn is_storage_buffer_array(ty: &PolyType<TypeName>) -> Option<&PolyType<TypeName>> {
+    if let PolyType::Constructed(TypeName::Array, args) = ty {
+        if args.len() == 3 {
+            let is_storage = matches!(&args[1], PolyType::Constructed(TypeName::AddressStorage, _));
+            let is_unsized = matches!(&args[2], PolyType::Constructed(TypeName::Unsized, _));
+            if is_storage && is_unsized {
+                return Some(&args[0]); // Return element type
+            }
+        }
+    }
+    None
+}
+
 /// Lower an entry point from Def::EntryPoint structure (new format with EntryInput/EntryOutput)
 fn lower_entry_point_from_def(
     constructor: &mut Constructor,
@@ -1015,35 +1065,65 @@ fn lower_entry_point_from_def(
     constructor.current_input_vars.clear();
 
     let mut interface_vars = Vec::new();
+    let mut next_binding: u32 = 0;
 
-    // Create Input variables for parameters
+    // Create variables for parameters
     for input in inputs.iter() {
-        let input_type_id = constructor.ast_type_to_spirv(&input.ty);
-        let ptr_type_id = constructor.get_or_create_ptr_type(StorageClass::Input, input_type_id);
-        let var_id = constructor.builder.variable(ptr_type_id, None, StorageClass::Input, None);
+        // Check if this is a storage buffer array
+        if let Some(elem_ty) = is_storage_buffer_array(&input.ty) {
+            // Storage buffer: create RuntimeArray in Block struct
+            let elem_type_id = constructor.ast_type_to_spirv(elem_ty);
+            let elem_size = constructor.type_size(elem_type_id);
+            let runtime_array_ty = constructor.get_or_create_runtime_array_type(elem_type_id, elem_size);
+            let block_ty = constructor.get_or_create_buffer_block_type(runtime_array_ty);
+            let ptr_type_id = constructor.get_or_create_ptr_type(StorageClass::StorageBuffer, block_ty);
+            let var_id = constructor.builder.variable(ptr_type_id, None, StorageClass::StorageBuffer, None);
 
-        // Add decorations from IoDecoration
-        if let Some(decoration) = &input.decoration {
-            match decoration {
-                mir::IoDecoration::Location(loc) => {
-                    constructor.builder.decorate(
-                        var_id,
-                        spirv::Decoration::Location,
-                        [rspirv::dr::Operand::LiteralBit32(*loc)],
-                    );
-                }
-                mir::IoDecoration::BuiltIn(builtin) => {
-                    constructor.builder.decorate(
-                        var_id,
-                        spirv::Decoration::BuiltIn,
-                        [rspirv::dr::Operand::BuiltIn(*builtin)],
-                    );
+            // Add descriptor set/binding decorations
+            constructor.builder.decorate(
+                var_id,
+                spirv::Decoration::DescriptorSet,
+                [rspirv::dr::Operand::LiteralBit32(0)],
+            );
+            constructor.builder.decorate(
+                var_id,
+                spirv::Decoration::Binding,
+                [rspirv::dr::Operand::LiteralBit32(next_binding)],
+            );
+            next_binding += 1;
+
+            interface_vars.push(var_id);
+            // Store the element type (not the block type) for indexing operations
+            constructor.current_input_vars.push((var_id, input.name.clone(), elem_type_id, StorageClass::StorageBuffer));
+        } else {
+            // Regular input variable
+            let input_type_id = constructor.ast_type_to_spirv(&input.ty);
+            let ptr_type_id = constructor.get_or_create_ptr_type(StorageClass::Input, input_type_id);
+            let var_id = constructor.builder.variable(ptr_type_id, None, StorageClass::Input, None);
+
+            // Add decorations from IoDecoration
+            if let Some(decoration) = &input.decoration {
+                match decoration {
+                    mir::IoDecoration::Location(loc) => {
+                        constructor.builder.decorate(
+                            var_id,
+                            spirv::Decoration::Location,
+                            [rspirv::dr::Operand::LiteralBit32(*loc)],
+                        );
+                    }
+                    mir::IoDecoration::BuiltIn(builtin) => {
+                        constructor.builder.decorate(
+                            var_id,
+                            spirv::Decoration::BuiltIn,
+                            [rspirv::dr::Operand::BuiltIn(*builtin)],
+                        );
+                    }
                 }
             }
-        }
 
-        interface_vars.push(var_id);
-        constructor.current_input_vars.push((var_id, input.name.clone(), input_type_id));
+            interface_vars.push(var_id);
+            constructor.current_input_vars.push((var_id, input.name.clone(), input_type_id, StorageClass::Input));
+        }
     }
 
     // Create Output variables for return values (skip Unit types - they have no output)
@@ -1053,32 +1133,60 @@ fn lower_entry_point_from_def(
             continue;
         }
 
-        let output_type_id = constructor.ast_type_to_spirv(&output.ty);
-        let ptr_type_id = constructor.get_or_create_ptr_type(StorageClass::Output, output_type_id);
-        let var_id = constructor.builder.variable(ptr_type_id, None, StorageClass::Output, None);
+        // Check if this is a storage buffer array
+        if let Some(elem_ty) = is_storage_buffer_array(&output.ty) {
+            // Storage buffer output: create RuntimeArray in Block struct
+            let elem_type_id = constructor.ast_type_to_spirv(elem_ty);
+            let elem_size = constructor.type_size(elem_type_id);
+            let runtime_array_ty = constructor.get_or_create_runtime_array_type(elem_type_id, elem_size);
+            let block_ty = constructor.get_or_create_buffer_block_type(runtime_array_ty);
+            let ptr_type_id = constructor.get_or_create_ptr_type(StorageClass::StorageBuffer, block_ty);
+            let var_id = constructor.builder.variable(ptr_type_id, None, StorageClass::StorageBuffer, None);
 
-        // Add decorations from IoDecoration
-        if let Some(decoration) = &output.decoration {
-            match decoration {
-                mir::IoDecoration::Location(loc) => {
-                    constructor.builder.decorate(
-                        var_id,
-                        spirv::Decoration::Location,
-                        [rspirv::dr::Operand::LiteralBit32(*loc)],
-                    );
-                }
-                mir::IoDecoration::BuiltIn(builtin) => {
-                    constructor.builder.decorate(
-                        var_id,
-                        spirv::Decoration::BuiltIn,
-                        [rspirv::dr::Operand::BuiltIn(*builtin)],
-                    );
+            // Add descriptor set/binding decorations
+            constructor.builder.decorate(
+                var_id,
+                spirv::Decoration::DescriptorSet,
+                [rspirv::dr::Operand::LiteralBit32(0)],
+            );
+            constructor.builder.decorate(
+                var_id,
+                spirv::Decoration::Binding,
+                [rspirv::dr::Operand::LiteralBit32(next_binding)],
+            );
+            next_binding += 1;
+
+            interface_vars.push(var_id);
+            constructor.current_output_vars.push(var_id);
+        } else {
+            // Regular output variable
+            let output_type_id = constructor.ast_type_to_spirv(&output.ty);
+            let ptr_type_id = constructor.get_or_create_ptr_type(StorageClass::Output, output_type_id);
+            let var_id = constructor.builder.variable(ptr_type_id, None, StorageClass::Output, None);
+
+            // Add decorations from IoDecoration
+            if let Some(decoration) = &output.decoration {
+                match decoration {
+                    mir::IoDecoration::Location(loc) => {
+                        constructor.builder.decorate(
+                            var_id,
+                            spirv::Decoration::Location,
+                            [rspirv::dr::Operand::LiteralBit32(*loc)],
+                        );
+                    }
+                    mir::IoDecoration::BuiltIn(builtin) => {
+                        constructor.builder.decorate(
+                            var_id,
+                            spirv::Decoration::BuiltIn,
+                            [rspirv::dr::Operand::BuiltIn(*builtin)],
+                        );
+                    }
                 }
             }
-        }
 
-        interface_vars.push(var_id);
-        constructor.current_output_vars.push(var_id);
+            interface_vars.push(var_id);
+            constructor.current_output_vars.push(var_id);
+        }
     }
 
     // Store interface variables for entry point declaration
@@ -1110,8 +1218,11 @@ fn lower_entry_point_from_def(
     constructor.builder.begin_block(Some(code_block_id))?;
     constructor.current_block = Some(code_block_id);
 
-    // Load input variables into environment
-    for (var_id, param_name, type_id) in constructor.current_input_vars.clone() {
+    // Load input variables into environment (skip storage buffers - they're accessed via slice)
+    for (var_id, param_name, type_id, storage_class) in constructor.current_input_vars.clone() {
+        if storage_class == StorageClass::StorageBuffer {
+            continue; // Storage buffers are accessed via _w_slice, not loaded directly
+        }
         let loaded = constructor.builder.load(type_id, None, var_id, None, [])?;
         constructor.env.insert(param_name, loaded);
     }
@@ -1161,232 +1272,6 @@ fn lower_entry_point_from_def(
     constructor.variables_block = None;
     constructor.first_code_block = None;
     constructor.env.clear();
-
-    Ok(())
-}
-
-/// Lower a compute pipeline using the Pipeline's buffer bindings.
-fn lower_compute_pipeline(
-    constructor: &mut Constructor,
-    pipeline: &Pipeline,
-    compute_info: &SimpleComputeMap,
-    body: &Body,
-) -> Result<()> {
-    // Set up the compute entry point
-    constructor.current_is_entry_point = true;
-    constructor.current_output_vars.clear();
-    constructor.current_input_vars.clear();
-
-    let mut interface_vars = Vec::new();
-
-    // Create storage buffers from pipeline buffer blocks
-    for buffer in &pipeline.buffers {
-        let field = &buffer.fields[0]; // Single runtime-sized field for now
-        let elem_type_id = constructor.ast_type_to_spirv(&field.ty);
-
-        // Calculate proper array stride from element type
-        let stride = crate::mir::layout::type_byte_size(&field.ty).unwrap_or(4);
-
-        let runtime_array_type = constructor.get_or_create_runtime_array_type(elem_type_id, stride);
-        let buffer_struct_type = constructor.get_or_create_buffer_block_type(runtime_array_type);
-
-        let buffer_ptr_type =
-            constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, buffer_struct_type);
-        let buffer_var =
-            constructor.builder.variable(buffer_ptr_type, None, spirv::StorageClass::StorageBuffer, None);
-        constructor.builder.decorate(
-            buffer_var,
-            spirv::Decoration::DescriptorSet,
-            [Operand::LiteralBit32(buffer.set)],
-        );
-        constructor.builder.decorate(
-            buffer_var,
-            spirv::Decoration::Binding,
-            [Operand::LiteralBit32(buffer.binding)],
-        );
-        interface_vars.push(buffer_var);
-
-        // Register buffer for use when lowering StorageSlice accesses
-        constructor.storage_buffers.insert((buffer.set, buffer.binding), (buffer_var, elem_type_id));
-
-        // Also register by name so captured variables can be resolved
-        constructor.uniform_variables.insert(buffer.name.clone(), buffer_var);
-        constructor.uniform_types.insert(buffer.name.clone(), runtime_array_type);
-
-        // Register as compute parameter for Local variable resolution
-        constructor.compute_params.insert(buffer.name.clone(), (buffer.set, buffer.binding));
-    }
-
-    // Create GlobalInvocationId input variable
-    let uvec3_type = constructor.get_or_create_vec_type(constructor.u32_type, 3);
-    let gid_ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::Input, uvec3_type);
-    let global_id_var = constructor.builder.variable(gid_ptr_type, None, spirv::StorageClass::Input, None);
-    constructor.builder.decorate(
-        global_id_var,
-        spirv::Decoration::BuiltIn,
-        [Operand::BuiltIn(spirv::BuiltIn::GlobalInvocationId)],
-    );
-    interface_vars.push(global_id_var);
-
-    // Store interface variables for entry point declaration
-    constructor.entry_point_interfaces.insert(pipeline.name.clone(), interface_vars);
-
-    // Create void(void) function for entry point
-    let func_type = constructor.builder.type_function(constructor.void_type, vec![]);
-    let func_id = constructor.builder.begin_function(
-        constructor.void_type,
-        None,
-        spirv::FunctionControl::NONE,
-        func_type,
-    )?;
-    constructor.functions.insert(pipeline.name.clone(), func_id);
-
-    // Create blocks
-    let vars_block_id = constructor.builder.id();
-    let code_block_id = constructor.builder.id();
-    constructor.variables_block = Some(vars_block_id);
-    constructor.first_code_block = Some(code_block_id);
-
-    constructor.builder.begin_block(Some(vars_block_id))?;
-    constructor.builder.select_block(None)?;
-    constructor.builder.begin_block(Some(code_block_id))?;
-    constructor.current_block = Some(code_block_id);
-
-    // Load global_invocation_id and extract x component (thread index)
-    let gid = constructor.builder.load(uvec3_type, None, global_id_var, None, [])?;
-    let thread_id = constructor.builder.composite_extract(constructor.u32_type, None, gid, [0])?;
-
-    // Extract closure info from the map expression
-    let (func_name, capture_vals) = extract_closure_info(constructor, body, compute_info.map_closure)?;
-
-    let map_func_id = *constructor
-        .functions
-        .get(&func_name)
-        .ok_or_else(|| err_spirv!("Map function not found: {}", func_name))?;
-
-    // Get the map array expression and its backing
-    let map_array_expr = body.get_expr(compute_info.map_array);
-
-    // Get input element type from the map array type
-    let map_array_ty = body.get_type(compute_info.map_array);
-    let input_elem_type_id = match map_array_ty {
-        types::Type::Constructed(TypeName::Array, args) if args.len() == 3 => {
-            constructor.ast_type_to_spirv(&args[0])
-        }
-        _ => constructor.i32_type, // Default to i32 for Range arrays
-    };
-
-    // Get output element type from the map expression's return type
-    let output_elem_type_id = {
-        let map_expr_type = body.get_type(compute_info.map_expr);
-        match map_expr_type {
-            types::Type::Constructed(TypeName::Array, args) if args.len() == 3 => {
-                constructor.ast_type_to_spirv(&args[0])
-            }
-            _ => input_elem_type_id, // Fallback to input type
-        }
-    };
-
-    // Convert thread_id to i32 for read_elem (which expects i32 indices)
-    let thread_id_i32 = constructor.builder.bitcast(constructor.i32_type, None, thread_id)?;
-
-    // Use read_elem to get the input value - works for all backing types:
-    // - Range: computes start + thread_id * stride (virtual, no memory)
-    // - Storage: loads from buffer[thread_id]
-    // - IndexFn: calls the function with thread_id
-    let input_elem = match map_array_expr {
-        Expr::Array { backing, .. } => read_elem(
-            constructor,
-            body,
-            compute_info.map_array,
-            backing,
-            thread_id_i32,
-            input_elem_type_id,
-        )?,
-        _ => {
-            // For Local references (storage buffer inputs), read from the first input buffer
-            let binding = (0u32, 0u32);
-            let (buffer_var, _) = constructor
-                .storage_buffers
-                .get(&binding)
-                .ok_or_else(|| err_spirv!("No input buffer at binding {:?}", binding))?;
-            let buffer_var = *buffer_var;
-
-            let elem_ptr_type =
-                constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, input_elem_type_id);
-            let zero = constructor.const_u32(0);
-            let elem_ptr =
-                constructor.builder.access_chain(elem_ptr_type, None, buffer_var, [zero, thread_id])?;
-            constructor.builder.load(input_elem_type_id, None, elem_ptr, None, [])?
-        }
-    };
-
-    // Apply the map function to the input element
-    let mut call_args = capture_vals.clone();
-    call_args.push(input_elem);
-    let result = constructor.builder.function_call(output_elem_type_id, None, map_func_id, call_args)?;
-
-    // Write result to output buffer
-    // Determine output buffer binding (after all input buffers)
-    let num_input_buffers = compute_info.inputs.len() as u32;
-    let output_buffer_binding = num_input_buffers;
-
-    // Check if we have a dedicated output buffer
-    let (output_buffer_var, output_mem) =
-        if let Some((out_var, _)) = constructor.storage_buffers.get(&(0, output_buffer_binding)) {
-            (
-                *out_var,
-                MemBinding::Storage {
-                    set: 0,
-                    binding: output_buffer_binding,
-                },
-            )
-        } else if let Some((out_var, _)) = constructor.storage_buffers.get(&(0, 0)) {
-            // Fallback to first buffer for in-place operations
-            (*out_var, MemBinding::Storage { set: 0, binding: 0 })
-        } else {
-            bail_spirv!("No output buffer available for compute shader")
-        };
-
-    write_array_element(
-        constructor,
-        Some(output_mem),
-        output_buffer_var,
-        thread_id,
-        result,
-        output_elem_type_id,
-        constructor.void_type,
-    )?;
-
-    // Return
-    constructor.builder.ret()?;
-
-    // Terminate variables block
-    if let (Some(vars_block), Some(code_block)) =
-        (constructor.variables_block, constructor.first_code_block)
-    {
-        let func = constructor.builder.module_ref().functions.last().expect("No function");
-        let vars_idx = func
-            .blocks
-            .iter()
-            .position(|b| b.label.as_ref().map(|l| l.result_id) == Some(Some(vars_block)));
-
-        if let Some(idx) = vars_idx {
-            constructor.builder.select_block(Some(idx))?;
-            constructor.builder.branch(code_block)?;
-        }
-    }
-
-    constructor.builder.end_function()?;
-
-    // Clean up
-    constructor.current_is_entry_point = false;
-    constructor.current_used_globals.clear();
-    constructor.variables_block = None;
-    constructor.first_code_block = None;
-    constructor.env.clear();
-    constructor.storage_buffers.clear();
-    constructor.compute_params.clear();
 
     Ok(())
 }
@@ -2479,6 +2364,55 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
 
                     // CompositeExtract
                     Ok(constructor.builder.composite_extract(elem_ty, None, base_id, [index])?)
+                }
+                "_w_global_invocation_id" => {
+                    // Load the GlobalInvocationId built-in for compute shaders
+                    // Returns uvec3
+                    let builtin_var = constructor.get_or_create_builtin_var(
+                        spirv::BuiltIn::GlobalInvocationId,
+                        result_type,
+                    );
+                    Ok(constructor.builder.load(result_type, None, builtin_var, None, [])?)
+                }
+                "_w_slice" => {
+                    // Slice a storage buffer at an index to get a single element
+                    // _w_slice(arr, idx) -> element (for size-1 slice, returns the element directly)
+                    if args.len() != 2 {
+                        bail_spirv!("_w_slice requires 2 args (array, index), got {}", args.len());
+                    }
+                    // For compute shader storage buffers, this is an index operation
+                    // The "slice" returns a single element at the given index
+                    let idx_id = lower_expr(constructor, body, args[1])?;
+
+                    // Get the storage buffer variable for this array
+                    // The first arg should be a reference to an entry input (storage buffer)
+                    let arr_expr_id = args[0];
+                    let arr_var_id = match body.get_expr(arr_expr_id) {
+                        Expr::Local(local_id) => {
+                            // Look up the local's name and find the storage buffer
+                            let local_name = &body.get_local(*local_id).name;
+                            constructor.current_input_vars.iter()
+                                .find(|(_, n, _, _)| n == local_name)
+                                .map(|(id, _, _, _)| *id)
+                                .ok_or_else(|| err_spirv!("Storage buffer not found: {}", local_name))?
+                        }
+                        _ => bail_spirv!("_w_slice first arg must be a local variable reference"),
+                    };
+
+                    // Access the element in the storage buffer
+                    // Storage buffer structure: Block { RuntimeArray[elem_type] }
+                    let zero = constructor.const_u32(0);
+                    let elem_ptr_type = constructor.get_or_create_ptr_type(
+                        StorageClass::StorageBuffer,
+                        result_type,
+                    );
+                    let elem_ptr = constructor.builder.access_chain(
+                        elem_ptr_type,
+                        None,
+                        arr_var_id,
+                        [zero, idx_id],  // [0] for struct member, [idx] for array element
+                    )?;
+                    Ok(constructor.builder.load(result_type, None, elem_ptr, None, [])?)
                 }
                 _ => Err(err_spirv!("Unknown intrinsic: {}", name)),
             }

@@ -1,0 +1,5 @@
+-- Multi-buffer compute shader: scale data by a factor from another buffer
+
+#[compute]
+entry scale(data: []f32, factors: []f32) []f32 =
+  map(|x| x * factors[0], data)

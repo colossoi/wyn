@@ -62,6 +62,10 @@ enum Commands {
         #[arg(long, value_name = "FILE")]
         output_final_mir: Option<PathBuf>,
 
+        /// Output SIR (after parallelization, before flattening)
+        #[arg(long, value_name = "FILE")]
+        output_sir: Option<PathBuf>,
+
         /// Output annotated source code with block IDs and locations
         #[arg(long, value_name = "FILE")]
         output_annotated: Option<PathBuf>,
@@ -115,6 +119,7 @@ fn main() -> Result<(), DriverError> {
             target,
             output_init_mir,
             output_final_mir,
+            output_sir,
             output_annotated,
             output_interface,
             partial_eval,
@@ -126,6 +131,7 @@ fn main() -> Result<(), DriverError> {
                 target,
                 output_init_mir,
                 output_final_mir,
+                output_sir,
                 output_annotated,
                 output_interface,
                 partial_eval,
@@ -150,6 +156,7 @@ fn compile_file(
     target: Target,
     output_init_mir: Option<PathBuf>,
     output_final_mir: Option<PathBuf>,
+    output_sir: Option<PathBuf>,
     output_annotated: Option<PathBuf>,
     output_interface: Option<PathBuf>,
     partial_eval: bool,
@@ -199,6 +206,15 @@ fn compile_file(
     })?;
     let sir_fused = time("sir_fuse", verbose, || sir_lowered.fuse());
     let sir_parallelized = time("sir_parallelize", verbose, || sir_fused.parallelize());
+
+    // Write SIR if requested (after parallelization, before flattening)
+    if let Some(ref sir_path) = output_sir {
+        fs::write(sir_path, format!("{}", sir_parallelized.sir))?;
+        if verbose {
+            info!("Wrote SIR to {}", sir_path.display());
+        }
+    }
+
     let (flattened, _backend) = time("sir_flatten", verbose, || sir_parallelized.flatten())?;
 
     // Write initial MIR if requested (right after flattening)

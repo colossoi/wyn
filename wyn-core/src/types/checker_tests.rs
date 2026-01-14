@@ -12,18 +12,18 @@ fn typecheck_program(input: &str) {
     result.expect("Type checking should succeed");
 }
 
-/// Helper to parse and type check source code, returning Result
-fn try_typecheck_program(input: &str) -> Result<(), CompilerError> {
+/// Helper to parse and type check source code, returning Result with TypeChecked
+fn try_typecheck_program(input: &str) -> Result<crate::TypeChecked, CompilerError> {
     // Use the typestate API to ensure proper pipeline setup
     let mut frontend = crate::cached_frontend();
     let parsed = crate::Compiler::parse(input, &mut frontend.node_counter)?;
-    let _type_checked = parsed
+    let type_checked = parsed
         .elaborate_modules(&mut frontend.module_manager)?
         .desugar(&mut frontend.node_counter)?
         .resolve(&frontend.module_manager)?
         .fold_ast_constants()
         .type_check(&frontend.module_manager, &mut frontend.schemes)?;
-    Ok(())
+    Ok(type_checked)
 }
 
 #[test]
@@ -1644,4 +1644,53 @@ def test_atan2pi(x: f32, y: f32) f32 = trig32.atan2pi(x, y)
 def test_hypot(x: f32, y: f32) f32 = trig32.hypot(x, y)
         "#,
     );
+}
+
+#[test]
+fn test_entry_array_param_has_unsized() {
+    // Entry point array parameters should have Unsized size and Storage address space
+    use polytype::TypeScheme;
+    let tc = try_typecheck_program("#[compute] entry double(arr: []f32) []f32 = map((|x| x * 2.0f32), arr)").unwrap();
+
+    if let crate::ast::Declaration::Entry(entry) = &tc.ast.declarations[0] {
+        // Check parameter type
+        let scheme = tc.type_table.get(&entry.params[0].h.id).expect("param should have type");
+        let param_ty = match scheme {
+            TypeScheme::Monotype(ty) => ty,
+            _ => panic!("Expected monotype"),
+        };
+        if let Type::Constructed(TypeName::Array, args) = param_ty {
+            assert!(
+                matches!(&args[1], Type::Constructed(TypeName::AddressStorage, _)),
+                "Entry array param address space should be Storage, got {:?}", args[1]
+            );
+            assert!(
+                matches!(&args[2], Type::Constructed(TypeName::Unsized, _)),
+                "Entry array param size should be Unsized, got {:?}", args[2]
+            );
+        } else {
+            panic!("Expected Array type, got {:?}", param_ty);
+        }
+
+        // Check body/return type
+        let body_scheme = tc.type_table.get(&entry.body.h.id).expect("body should have type");
+        let body_ty = match body_scheme {
+            TypeScheme::Monotype(ty) => ty,
+            _ => panic!("Expected monotype for body"),
+        };
+        if let Type::Constructed(TypeName::Array, args) = body_ty {
+            assert!(
+                matches!(&args[1], Type::Constructed(TypeName::AddressStorage, _)),
+                "Entry return type address space should be Storage, got {:?}", args[1]
+            );
+            assert!(
+                matches!(&args[2], Type::Constructed(TypeName::Unsized, _)),
+                "Entry return type size should be Unsized, got {:?}", args[2]
+            );
+        } else {
+            panic!("Expected Array type for body, got {:?}", body_ty);
+        }
+    } else {
+        panic!("Expected Entry declaration");
+    }
 }

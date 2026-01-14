@@ -162,20 +162,32 @@ impl AstToSir {
         // Lower body
         let body = self.lower_expr_to_body(&entry.body)?;
 
-        // Extract outputs
+        // Extract outputs - get types from the type table (body type was unified with outputs)
+        let body_type = self.type_table.get(&entry.body.h.id)
+            .map(|scheme| self.scheme_to_type(scheme))
+            .expect("Entry body should have type in type_table");
+
+        let output_types: Vec<SirType> = if entry.outputs.len() == 1 {
+            vec![body_type]
+        } else {
+            // Multiple outputs: body type is a tuple
+            match body_type {
+                Type::Constructed(TypeName::Tuple(_), args) => args,
+                _ => panic!("Multiple outputs but body type is not a tuple: {:?}", body_type),
+            }
+        };
+
         let outputs: Vec<_> = entry
             .outputs
             .iter()
-            .map(|o| {
+            .zip(output_types)
+            .map(|(o, ty)| {
                 let decoration = o.attribute.as_ref().and_then(|a| match a {
                     ast::Attribute::BuiltIn(b) => Some(IoDecoration::BuiltIn(*b)),
                     ast::Attribute::Location(l) => Some(IoDecoration::Location(*l)),
                     _ => None,
                 });
-                EntryOutput {
-                    ty: self.ast_type_to_sir(&o.ty),
-                    decoration,
-                }
+                EntryOutput { ty, decoration }
             })
             .collect();
 

@@ -1,0 +1,2 @@
+#[compute]
+entry double(arr: []f32) []f32 = map((|x| x * 2.0f32), arr)

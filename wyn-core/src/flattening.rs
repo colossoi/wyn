@@ -10,12 +10,13 @@ use std::collections::HashMap;
 
 use crate::ast::{NodeCounter, NodeId, Span, TypeName};
 use crate::error::Result;
-use crate::mir::{self, ArrayBacking, ExprId, LocalDecl, LocalId, LocalKind, RangeKind};
+use crate::mir::{self, ArrayBacking, ExprId, IoDecoration, LocalDecl, LocalId, LocalKind, RangeKind};
 use crate::scope::ScopeStack;
 use crate::sir::{self, Body, Def, Exp, Lambda, Prim, SirType, Soac, Statement, VarId};
 // TypeScheme used in original flattening but not needed here yet
 use crate::{IdArena, bail_flatten};
 use polytype::Type;
+use spirv;
 
 /// Flattens SIR to MIR with defunctionalization.
 pub struct SirFlattener<'nc> {
@@ -35,6 +36,8 @@ pub struct SirFlattener<'nc> {
     name_to_local: ScopeStack<LocalId>,
     /// SIR lambdas available for defunctionalization
     sir_lambdas: HashMap<sir::LambdaId, Lambda>,
+    /// Builtin inputs discovered during flattening (to be added to entry point)
+    pending_builtin_inputs: Vec<mir::EntryInput>,
 }
 
 impl SirFlattener<'_> {
@@ -48,6 +51,7 @@ impl SirFlattener<'_> {
             var_to_local: HashMap::new(),
             name_to_local: ScopeStack::new(),
             sir_lambdas: HashMap::new(),
+            pending_builtin_inputs: Vec::new(),
         }
     }
 
@@ -101,6 +105,72 @@ impl SirFlattener<'_> {
     fn alloc_expr(&mut self, expr: mir::Expr, ty: Type<TypeName>, span: Span) -> ExprId {
         let node_id = self.next_node_id();
         self.current_body.alloc_expr(expr, ty, span, node_id)
+    }
+
+    /// Require a builtin input variable, creating it if it doesn't exist.
+    /// Returns the LocalId for the builtin, and ensures it will be added to entry inputs.
+    fn require_builtin(&mut self, builtin: spirv::BuiltIn, span: Span) -> LocalId {
+        // Check if we already have this builtin
+        for input in &self.pending_builtin_inputs {
+            if let Some(IoDecoration::BuiltIn(b)) = &input.decoration {
+                if *b == builtin {
+                    return input.local;
+                }
+            }
+        }
+
+        // Create the builtin with appropriate type and name
+        let (name, ty) = match builtin {
+            spirv::BuiltIn::GlobalInvocationId => {
+                let uvec3 = Type::Constructed(
+                    TypeName::Vec,
+                    vec![
+                        Type::Constructed(TypeName::Size(3), vec![]),
+                        Type::Constructed(TypeName::UInt(32), vec![]),
+                    ],
+                );
+                ("gl_GlobalInvocationID".to_string(), uvec3)
+            }
+            _ => panic!("Unsupported builtin: {:?}", builtin),
+        };
+
+        // Allocate local for the builtin
+        let local_id = self.alloc_local(name.clone(), ty.clone(), LocalKind::Param, span);
+
+        // Add to pending builtin inputs
+        self.pending_builtin_inputs.push(mir::EntryInput {
+            local: local_id,
+            name,
+            ty,
+            decoration: Some(IoDecoration::BuiltIn(builtin)),
+        });
+
+        local_id
+    }
+
+    /// Build an entry point definition, including any builtins discovered during flattening.
+    fn build_entry_point(
+        &mut self,
+        id: NodeId,
+        name: String,
+        execution_model: mir::ExecutionModel,
+        mut inputs: Vec<mir::EntryInput>,
+        outputs: Vec<mir::EntryOutput>,
+        body: mir::Body,
+        span: Span,
+    ) -> mir::Def {
+        // Append any builtin inputs discovered during flattening
+        inputs.append(&mut self.pending_builtin_inputs);
+
+        mir::Def::EntryPoint {
+            id,
+            name,
+            execution_model,
+            inputs,
+            outputs,
+            body,
+            span,
+        }
     }
 
     /// Flatten a complete SIR program to MIR.
@@ -286,15 +356,7 @@ impl SirFlattener<'_> {
         self.name_to_local.pop_scope();
         let mir_body = self.end_body(old_body);
 
-        Ok(mir::Def::EntryPoint {
-            id,
-            name,
-            execution_model: mir_exec_model,
-            inputs: mir_inputs,
-            outputs: mir_outputs,
-            body: mir_body,
-            span,
-        })
+        Ok(self.build_entry_point(id, name, mir_exec_model, mir_inputs, mir_outputs, mir_body, span))
     }
 
     fn flatten_constant(
@@ -761,6 +823,13 @@ impl SirFlattener<'_> {
                         })
                         .collect();
                     return Ok(self.alloc_expr(mir::Expr::Vector(elem_ids), ty.clone(), span));
+                }
+
+                // _w_global_invocation_id() -> load from builtin input
+                if name == "_w_global_invocation_id" {
+                    let local_id = self.require_builtin(spirv::BuiltIn::GlobalInvocationId, span);
+                    let local_ty = self.current_body.get_local(local_id).ty.clone();
+                    return Ok(self.alloc_expr(mir::Expr::Local(local_id), local_ty, span));
                 }
 
                 // __lambda_N(captures...) -> defunctionalize and create Closure

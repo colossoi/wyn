@@ -2,7 +2,7 @@ use super::{SkolemId, Type, TypeExt, TypeName, TypeScheme};
 use crate::ast::*;
 use crate::error::{CompilerError, Result};
 use crate::scope::ScopeStack;
-use crate::{bail_type_at, err_module, err_type, err_type_at, err_undef_at};
+use crate::{bail_type_at, err_module, err_type_at, err_undef_at};
 use log::debug;
 use polytype::Context;
 use std::collections::{BTreeSet, HashMap};
@@ -207,21 +207,29 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    /// Constrain the address space of an array type to Storage.
-    /// Used for entry point parameters where []f32 means storage buffer.
-    fn constrain_array_to_storage(&mut self, ty: &Type) -> Result<()> {
-        let resolved = ty.apply(&self.context);
-        match &resolved {
+    /// Prepare array types for entry point parameters.
+    /// - `AddressUnknown` → Storage (entry arrays are storage buffers)
+    /// - `Unsized` → keep as Unsized (storage buffer sizes are runtime-determined)
+    fn prepare_entry_array_type(&self, ty: &Type) -> Type {
+        match ty {
             Type::Constructed(TypeName::Array, args) => {
                 assert!(args.len() == 3);
-                // Constrain address space (args[1]) to Storage
-                let storage = Type::Constructed(TypeName::AddressStorage, vec![]);
-                self.context.unify(&args[1], &storage).map_err(|_| {
-                    err_type!("Entry point array parameter must have Storage address space")
-                })?;
-                Ok(())
+                let elem = self.prepare_entry_array_type(&args[0]);
+                let addrspace = match &args[1] {
+                    Type::Constructed(TypeName::AddressUnknown, _) => {
+                        Type::Constructed(TypeName::AddressStorage, vec![])
+                    }
+                    other => self.prepare_entry_array_type(other),
+                };
+                // Keep Unsized as-is for entry points
+                let size = self.prepare_entry_array_type(&args[2]);
+                Type::Constructed(TypeName::Array, vec![elem, addrspace, size])
             }
-            _ => Ok(()), // Not an array type, nothing to constrain
+            Type::Constructed(name, args) => {
+                let new_args: Vec<Type> = args.iter().map(|a| self.prepare_entry_array_type(a)).collect();
+                Type::Constructed(name.clone(), new_args)
+            }
+            Type::Variable(_) => ty.clone(),
         }
     }
 
@@ -1193,22 +1201,22 @@ impl<'a> TypeChecker<'a> {
         is_entry: bool,
     ) -> Result<(Vec<Type>, Type)> {
         // Create type variables or use explicit types for parameters
+        // For entry points, use prepare_entry_array_type which:
+        // - Converts AddressUnknown to Storage (entry arrays are storage buffers)
+        // - Keeps Unsized as Unsized (storage buffer sizes are runtime-determined)
         let param_types: Vec<Type> = params
             .iter()
             .map(|p| {
                 let ty = p.pattern_type().cloned().unwrap_or_else(|| self.context.new_variable());
                 let normalized =
                     self.normalize_annotation_type_static(&ty, module_name, type_param_bindings);
-                self.prepare_array_type(&normalized)
+                if is_entry {
+                    self.prepare_entry_array_type(&normalized)
+                } else {
+                    self.prepare_array_type(&normalized)
+                }
             })
             .collect();
-
-        // For entry point parameters, constrain array address spaces to Storage
-        if is_entry {
-            for param_type in &param_types {
-                self.constrain_array_to_storage(param_type)?;
-            }
-        }
 
         // Validate that no parameter types contain existential quantifiers
         // Existential types are only valid in return types, not parameters
@@ -1443,8 +1451,8 @@ impl<'a> TypeChecker<'a> {
                 };
                 // Resolve type aliases (e.g., rand.state -> f32)
                 let expected_type = self.resolve_type_aliases_scoped(&expected_type, None);
-                // Replace AddressUnknown and Unsized markers with type variables
-                let expected_type = self.prepare_array_type(&expected_type);
+                // Entry point outputs: AddressUnknown -> Storage, keep Unsized
+                let expected_type = self.prepare_entry_array_type(&expected_type);
 
                 // Validate body type matches declared outputs
                 self.context.unify(&body_type, &expected_type).map_err(|_| {

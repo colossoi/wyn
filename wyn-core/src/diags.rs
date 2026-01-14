@@ -1033,3 +1033,303 @@ impl Display for mir::LoopKind {
         }
     }
 }
+
+// =============================================================================
+// SIR Display implementations
+// =============================================================================
+
+use crate::sir;
+
+impl Display for sir::Program {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        for (i, def) in self.defs.iter().enumerate() {
+            if i > 0 {
+                writeln!(f)?;
+            }
+            write!(f, "{}", def)?;
+        }
+        Ok(())
+    }
+}
+
+impl Display for sir::Def {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            sir::Def::Function {
+                name,
+                params,
+                ret_ty,
+                body,
+                ..
+            } => {
+                write!(f, "def {} (", name)?;
+                for (i, p) in params.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", p)?;
+                }
+                writeln!(f, "): {} =", format_type(ret_ty))?;
+                write!(f, "{}", SirBodyDisplay { body, indent: 2 })
+            }
+            sir::Def::EntryPoint {
+                name,
+                execution_model,
+                inputs,
+                outputs,
+                body,
+                ..
+            } => {
+                // Write execution model
+                match execution_model {
+                    sir::ExecutionModel::Vertex => writeln!(f, "#[vertex]")?,
+                    sir::ExecutionModel::Fragment => writeln!(f, "#[fragment]")?,
+                    sir::ExecutionModel::Compute { local_size } => {
+                        writeln!(f, "#[compute({}, {}, {})]", local_size.0, local_size.1, local_size.2)?;
+                    }
+                }
+                write!(f, "entry {} (", name)?;
+                for (i, inp) in inputs.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}: {}", inp.name, format_type(&inp.ty))?;
+                    if let Some(dec) = &inp.decoration {
+                        write!(f, " {:?}", dec)?;
+                    }
+                }
+                write!(f, ")")?;
+                if !outputs.is_empty() {
+                    write!(f, " -> (")?;
+                    for (i, out) in outputs.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{}", format_type(&out.ty))?;
+                    }
+                    write!(f, ")")?;
+                }
+                writeln!(f, " =")?;
+                write!(f, "{}", SirBodyDisplay { body, indent: 2 })
+            }
+            sir::Def::Constant { name, body, .. } => {
+                writeln!(f, "const {} =", name)?;
+                write!(f, "{}", SirBodyDisplay { body, indent: 2 })
+            }
+            sir::Def::Uniform {
+                name, ty, set, binding, ..
+            } => {
+                write!(f, "#[uniform(set={}, binding={})] {}: {}", set, binding, name, format_type(ty))
+            }
+            sir::Def::Storage {
+                name, ty, set, binding, ..
+            } => {
+                write!(f, "#[storage(set={}, binding={})] {}: {}", set, binding, name, format_type(ty))
+            }
+        }
+    }
+}
+
+impl Display for sir::Param {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "v{}: {}", self.var.0, format_type(&self.ty))
+    }
+}
+
+/// Helper for displaying SIR bodies with indentation
+struct SirBodyDisplay<'a> {
+    body: &'a sir::Body,
+    indent: usize,
+}
+
+impl Display for SirBodyDisplay<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let indent = " ".repeat(self.indent);
+        for stmt in &self.body.statements {
+            write!(f, "{}let ", indent)?;
+            // Write pattern
+            for (i, bind) in stmt.pat.binds.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "v{}", bind.var.0)?;
+            }
+            write!(f, " = ")?;
+            // Write expression
+            write!(f, "{}", SirExpDisplay { exp: &stmt.exp })?;
+            writeln!(f)?;
+        }
+        // Write result
+        write!(f, "{}in (", indent)?;
+        for (i, r) in self.body.result.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "v{}", r.0)?;
+        }
+        writeln!(f, ")")
+    }
+}
+
+/// Helper for displaying SIR expressions
+struct SirExpDisplay<'a> {
+    exp: &'a sir::Exp,
+}
+
+impl Display for SirExpDisplay<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self.exp {
+            sir::Exp::Var(v) => write!(f, "v{}", v.0),
+            sir::Exp::Prim(prim) => write!(f, "{}", SirPrimDisplay { prim }),
+            sir::Exp::Tuple(vars) => {
+                write!(f, "(")?;
+                for (i, v) in vars.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "v{}", v.0)?;
+                }
+                write!(f, ")")
+            }
+            sir::Exp::TupleProj { tuple, index } => {
+                write!(f, "v{}.{}", tuple.0, index)
+            }
+            sir::Exp::Apply { func, args } => {
+                write!(f, "{}(", func)?;
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "v{}", a.0)?;
+                }
+                write!(f, ")")
+            }
+            sir::Exp::If { cond, .. } => {
+                write!(f, "if v{} then ... else ...", cond.0)
+            }
+            sir::Exp::Loop { .. } => {
+                write!(f, "loop ...")
+            }
+            sir::Exp::Op(op) => write!(f, "{}", SirOpDisplay { op }),
+        }
+    }
+}
+
+/// Helper for displaying SIR primitives
+struct SirPrimDisplay<'a> {
+    prim: &'a sir::Prim,
+}
+
+impl Display for SirPrimDisplay<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self.prim {
+            sir::Prim::ConstBool(b) => write!(f, "{}", b),
+            sir::Prim::ConstI32(n) => write!(f, "{}i32", n),
+            sir::Prim::ConstI64(n) => write!(f, "{}i64", n),
+            sir::Prim::ConstU32(n) => write!(f, "{}u32", n),
+            sir::Prim::ConstU64(n) => write!(f, "{}u64", n),
+            sir::Prim::ConstF32(n) => write!(f, "{}f32", n),
+            sir::Prim::ConstF64(n) => write!(f, "{}f64", n),
+            sir::Prim::Add(a, b) => write!(f, "v{} + v{}", a.0, b.0),
+            sir::Prim::Sub(a, b) => write!(f, "v{} - v{}", a.0, b.0),
+            sir::Prim::Mul(a, b) => write!(f, "v{} * v{}", a.0, b.0),
+            sir::Prim::Div(a, b) => write!(f, "v{} / v{}", a.0, b.0),
+            sir::Prim::Mod(a, b) => write!(f, "v{} % v{}", a.0, b.0),
+            sir::Prim::Eq(a, b) => write!(f, "v{} == v{}", a.0, b.0),
+            sir::Prim::Ne(a, b) => write!(f, "v{} != v{}", a.0, b.0),
+            sir::Prim::Lt(a, b) => write!(f, "v{} < v{}", a.0, b.0),
+            sir::Prim::Le(a, b) => write!(f, "v{} <= v{}", a.0, b.0),
+            sir::Prim::Gt(a, b) => write!(f, "v{} > v{}", a.0, b.0),
+            sir::Prim::Ge(a, b) => write!(f, "v{} >= v{}", a.0, b.0),
+            sir::Prim::And(a, b) => write!(f, "v{} && v{}", a.0, b.0),
+            sir::Prim::Or(a, b) => write!(f, "v{} || v{}", a.0, b.0),
+            sir::Prim::Neg(v) => write!(f, "-v{}", v.0),
+            sir::Prim::Not(v) => write!(f, "!v{}", v.0),
+            sir::Prim::Index { arr, idx } => write!(f, "v{}[v{}]", arr.0, idx.0),
+            sir::Prim::Intrinsic { name, args } => {
+                write!(f, "@{}(", name)?;
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "v{}", a.0)?;
+                }
+                write!(f, ")")
+            }
+        }
+    }
+}
+
+/// Helper for displaying SIR operations
+struct SirOpDisplay<'a> {
+    op: &'a sir::Op,
+}
+
+impl Display for SirOpDisplay<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self.op {
+            sir::Op::Soac(soac) => write!(f, "{}", SirSoacDisplay { soac }),
+            sir::Op::Launch(launch) => {
+                write!(f, "launch({:?}, inputs=[", launch.kind)?;
+                for (i, v) in launch.inputs.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "v{}", v.0)?;
+                }
+                write!(f, "])")
+            }
+        }
+    }
+}
+
+/// Helper for displaying SIR SOACs
+struct SirSoacDisplay<'a> {
+    soac: &'a sir::Soac,
+}
+
+impl Display for SirSoacDisplay<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self.soac {
+            sir::Soac::Map(map) => {
+                write!(f, "map(|")?;
+                for (i, p) in map.f.params.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "v{}", p.var.0)?;
+                }
+                write!(f, "| ..., ")?;
+                for (i, a) in map.arrs.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "v{}", a.0)?;
+                }
+                write!(f, ")")
+            }
+            sir::Soac::Reduce(red) => {
+                write!(f, "reduce(|a,b| ..., v{}, v{})", red.neutral.0, red.arr.0)
+            }
+            sir::Soac::Scan(scan) => {
+                write!(f, "scan(|a,b| ..., v{}, v{})", scan.neutral.0, scan.arr.0)
+            }
+            sir::Soac::Iota { n, elem_ty } => write!(f, "iota({}, {:?})", n, elem_ty),
+            sir::Soac::Replicate { n, value } => {
+                write!(f, "replicate({}, v{})", n, value.0)
+            }
+            sir::Soac::Reshape { new_shape, arr } => {
+                write!(f, "reshape(v{}, {:?})", arr.0, new_shape)
+            }
+            sir::Soac::SegMap(seg) => {
+                write!(f, "seg_map(..., segs=v{})", seg.segs.0)
+            }
+            sir::Soac::SegReduce(seg) => {
+                write!(f, "seg_reduce(..., segs=v{})", seg.segs.0)
+            }
+            sir::Soac::SegScan(seg) => {
+                write!(f, "seg_scan(..., segs=v{})", seg.segs.0)
+            }
+        }
+    }
+}
