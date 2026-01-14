@@ -9,6 +9,12 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SizeVar(pub u32);
 
+impl From<u32> for SizeVar {
+    fn from(id: u32) -> Self {
+        SizeVar(id)
+    }
+}
+
 impl fmt::Display for SizeVar {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "n{}", self.0)

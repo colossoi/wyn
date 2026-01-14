@@ -30,6 +30,12 @@ pub use types::{AssocInfo, ScalarTy, Size, SizeVar};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VarId(pub u32);
 
+impl From<u32> for VarId {
+    fn from(id: u32) -> Self {
+        VarId(id)
+    }
+}
+
 impl std::fmt::Display for VarId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "v{}", self.0)
@@ -40,9 +46,21 @@ impl std::fmt::Display for VarId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StmId(pub u32);
 
+impl From<u32> for StmId {
+    fn from(id: u32) -> Self {
+        StmId(id)
+    }
+}
+
 /// Unique identifier for a lambda.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LambdaId(pub u32);
+
+impl From<u32> for LambdaId {
+    fn from(id: u32) -> Self {
+        LambdaId(id)
+    }
+}
 
 // =============================================================================
 // Type Alias

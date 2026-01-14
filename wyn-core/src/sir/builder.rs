@@ -4,6 +4,7 @@
 //! ID allocation and type tracking.
 
 use crate::ast::Span;
+use crate::IdSource;
 
 use super::{
     types::SizeVar, Body, Exp, Lambda, LambdaId, Map, Param, Pat, PatElem, Prim, Reduce, Scan,
@@ -13,10 +14,10 @@ use super::{
 /// Builder for constructing SIR programs.
 #[derive(Debug, Default)]
 pub struct SirBuilder {
-    next_var: u32,
-    next_stm: u32,
-    next_lam: u32,
-    next_size: u32,
+    vars: IdSource<VarId>,
+    stms: IdSource<StmId>,
+    lambdas: IdSource<LambdaId>,
+    sizes: IdSource<SizeVar>,
 }
 
 impl SirBuilder {
@@ -26,30 +27,22 @@ impl SirBuilder {
 
     /// Allocate a fresh variable ID.
     pub fn fresh_var(&mut self) -> VarId {
-        let v = VarId(self.next_var);
-        self.next_var += 1;
-        v
+        self.vars.next_id()
     }
 
     /// Allocate a fresh statement ID.
     pub fn fresh_stm(&mut self) -> StmId {
-        let s = StmId(self.next_stm);
-        self.next_stm += 1;
-        s
+        self.stms.next_id()
     }
 
     /// Allocate a fresh lambda ID.
     pub fn fresh_lambda(&mut self) -> LambdaId {
-        let l = LambdaId(self.next_lam);
-        self.next_lam += 1;
-        l
+        self.lambdas.next_id()
     }
 
     /// Allocate a fresh size variable.
     pub fn fresh_size_var(&mut self) -> SizeVar {
-        let s = SizeVar(self.next_size);
-        self.next_size += 1;
-        s
+        self.sizes.next_id()
     }
 
     /// Create a single-variable pattern.
