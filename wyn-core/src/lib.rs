@@ -91,6 +91,15 @@ impl<Id: From<u32>> IdSource<Id> {
         }
     }
 
+    /// Create an IdSource starting from a specific value.
+    /// Useful when continuing ID allocation after analyzing existing IDs.
+    pub fn starting_from(start: u32) -> Self {
+        IdSource {
+            next_id: start,
+            _phantom: PhantomData,
+        }
+    }
+
     pub fn next_id(&mut self) -> Id {
         let id = Id::from(self.next_id);
         self.next_id += 1;
@@ -479,13 +488,10 @@ pub struct TypeChecked {
 impl TypeChecked {
     /// Print warnings to stderr (convenience method)
     pub fn print_warnings(&self) {
-        let mut nc = NodeCounter::new();
-        let mm = module_manager::ModuleManager::new(&mut nc);
-        let checker = type_checker::TypeChecker::new(&mm);
         for warning in &self.warnings {
             eprintln!(
                 "Warning: {} at {:?}",
-                warning.message(&|t| checker.format_type(t)),
+                warning.message(&diags::format_type),
                 warning.span()
             );
         }
