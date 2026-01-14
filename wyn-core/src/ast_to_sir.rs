@@ -9,7 +9,6 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::{self, ExprKind, Expression, NodeId, PatternKind, Span, TypeName};
-use crate::defun_analysis::DefunAnalysis;
 use crate::error::Result;
 use crate::sir::builder::SirBuilder;
 use crate::sir::types::{AssocInfo, ScalarTy, Size};
@@ -18,7 +17,7 @@ use crate::sir::{
     Param, Pat, Prim, Reduce, Scan, SirType, Soac, Stm, VarId,
 };
 use crate::types::TypeScheme;
-use crate::bail_flatten;
+use crate::{bail_flatten, err_parse_at};
 use polytype::Type;
 
 /// Lowers typed AST to SIR.
@@ -40,11 +39,7 @@ pub struct AstToSir {
 }
 
 impl AstToSir {
-    pub fn new(
-        type_table: HashMap<NodeId, TypeScheme>,
-        builtins: HashSet<String>,
-        _defun_analysis: DefunAnalysis,
-    ) -> Self {
+    pub fn new(type_table: HashMap<NodeId, TypeScheme>, builtins: HashSet<String>) -> Self {
         AstToSir {
             builder: SirBuilder::new(),
             type_table,
@@ -101,8 +96,8 @@ impl AstToSir {
 
         self.pop_scope();
 
-        // Generate a NodeId for the def (we don't have one from AST)
-        let id = NodeId::new(0);
+        // Use the body's NodeId for source tracing
+        let id = decl.body.h.id;
         let span = decl.body.h.span;
 
         if params.is_empty() {
@@ -180,7 +175,8 @@ impl AstToSir {
 
         self.pop_scope();
 
-        let id = NodeId::new(0);
+        // Use the body's NodeId for source tracing
+        let id = entry.body.h.id;
         let span = entry.body.h.span;
 
         self.defs.push(Def::EntryPoint {
@@ -198,6 +194,8 @@ impl AstToSir {
 
     fn lower_uniform(&mut self, uniform: &ast::UniformDecl) -> Result<()> {
         let ty = self.ast_type_to_sir(&uniform.ty);
+        // Uniforms are declarations without expressions, so no meaningful NodeId exists.
+        // Use a placeholder - this is acceptable since uniforms don't generate executable code.
         let id = NodeId::new(0);
         self.defs.push(Def::Uniform {
             id,
@@ -211,6 +209,8 @@ impl AstToSir {
 
     fn lower_storage(&mut self, storage: &ast::StorageDecl) -> Result<()> {
         let ty = self.ast_type_to_sir(&storage.ty);
+        // Storage buffers are declarations without expressions, so no meaningful NodeId exists.
+        // Use a placeholder - this is acceptable since storage decls don't generate executable code.
         let id = NodeId::new(0);
         self.defs.push(Def::Storage {
             id,
@@ -264,7 +264,8 @@ impl AstToSir {
 
         match &expr.kind {
             ExprKind::IntLiteral(n) => {
-                let val: i64 = n.as_str().parse().unwrap_or(0);
+                let val: i64 = n.as_str().parse()
+                    .map_err(|_| err_parse_at!(span, "Invalid integer literal: {}", n.as_str()))?;
                 self.emit_stm(Exp::Prim(Prim::ConstI32(val as i32)), ty, span)
             }
 
@@ -1166,9 +1167,14 @@ impl AstToSir {
         }
     }
 
-    fn field_to_index(&self, _ty: &SirType, _field: &str) -> usize {
-        // TODO: implement field lookup
-        0
+    fn field_to_index(&self, ty: &SirType, field: &str) -> usize {
+        // This is only called for named field access on Tuple types.
+        // Currently, tuples in wyn are positional-only - named field access
+        // should be rejected by type checking. If we reach here, it's a compiler bug.
+        panic!(
+            "Named field access '{}' on tuple type {:?} - should have been rejected by type checker",
+            field, ty
+        )
     }
 
     fn infer_array_size(&mut self, _expr: &Expression) -> Size {
@@ -1179,7 +1185,8 @@ impl AstToSir {
     fn lower_expr_to_size(&mut self, expr: &Expression) -> Result<Size> {
         match &expr.kind {
             ExprKind::IntLiteral(n) => {
-                let val: u64 = n.as_str().parse().unwrap_or(0);
+                let val: u64 = n.as_str().parse()
+                    .map_err(|_| err_parse_at!(expr.h.span, "Invalid size literal: {}", n.as_str()))?;
                 Ok(Size::Const(val))
             }
             _ => {
@@ -1227,8 +1234,7 @@ pub fn lower_to_sir(
     program: &ast::Program,
     type_table: HashMap<NodeId, TypeScheme>,
     builtins: HashSet<String>,
-    defun_analysis: DefunAnalysis,
 ) -> Result<sir::Program> {
-    let lowerer = AstToSir::new(type_table, builtins, defun_analysis);
+    let lowerer = AstToSir::new(type_table, builtins);
     lowerer.lower_program(program)
 }

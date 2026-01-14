@@ -5,7 +5,7 @@ fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
     // Use the typestate API to ensure proper compilation pipeline
     let mut frontend = crate::cached_frontend();
     let parsed = crate::Compiler::parse(source, &mut frontend.node_counter).expect("Parsing failed");
-    let (flattened, _backend) = parsed
+    let alias_checked = parsed
         .desugar(&mut frontend.node_counter)
         .expect("Desugaring failed")
         .resolve(&frontend.module_manager)
@@ -14,8 +14,9 @@ fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
         .type_check(&frontend.module_manager, &mut frontend.schemes)
         .expect("Type checking failed")
         .alias_check()
-        .expect("Alias checking failed")
-        .lower_to_sir()
+        .expect("Alias checking failed");
+    let (flattened, _backend) = alias_checked
+        .lower_to_sir(frontend.node_counter)
         .expect("SIR lowering failed")
         .transform()
         .flatten()
@@ -291,7 +292,7 @@ def test(x: f32) f32 =
 fn compile_to_spirv_with_partial_eval(source: &str) -> Result<Vec<u32>> {
     let mut frontend = crate::cached_frontend();
     let parsed = crate::Compiler::parse(source, &mut frontend.node_counter).expect("Parsing failed");
-    let flattened = parsed
+    let alias_checked = parsed
         .desugar(&mut frontend.node_counter)
         .expect("Desugaring failed")
         .resolve(&frontend.module_manager)
@@ -300,8 +301,9 @@ fn compile_to_spirv_with_partial_eval(source: &str) -> Result<Vec<u32>> {
         .type_check(&frontend.module_manager, &mut frontend.schemes)
         .expect("Type checking failed")
         .alias_check()
-        .expect("Alias checking failed")
-        .lower_to_sir()
+        .expect("Alias checking failed");
+    let flattened = alias_checked
+        .lower_to_sir(frontend.node_counter)
         .expect("SIR lowering failed")
         .transform()
         .flatten()

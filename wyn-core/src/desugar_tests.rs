@@ -12,13 +12,14 @@ use crate::error::CompilerError;
 fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
     let mut frontend = crate::cached_frontend();
     let parsed = crate::Compiler::parse(input, &mut frontend.node_counter)?;
-    let (flattened, _backend) = parsed
+    let alias_checked = parsed
         .desugar(&mut frontend.node_counter)?
         .resolve(&frontend.module_manager)?
         .fold_ast_constants()
         .type_check(&frontend.module_manager, &mut frontend.schemes)?
-        .alias_check()?
-        .lower_to_sir()?
+        .alias_check()?;
+    let (flattened, _backend) = alias_checked
+        .lower_to_sir(frontend.node_counter)?
         .transform()
         .flatten()?;
     flattened
@@ -36,13 +37,14 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
 fn compile_through_flatten(input: &str) -> Result<crate::Flattened, CompilerError> {
     let mut frontend = crate::cached_frontend();
     let parsed = crate::Compiler::parse(input, &mut frontend.node_counter)?;
-    let (flattened, _backend) = parsed
+    let alias_checked = parsed
         .desugar(&mut frontend.node_counter)?
         .resolve(&frontend.module_manager)?
         .fold_ast_constants()
         .type_check(&frontend.module_manager, &mut frontend.schemes)?
-        .alias_check()?
-        .lower_to_sir()?
+        .alias_check()?;
+    let (flattened, _backend) = alias_checked
+        .lower_to_sir(frontend.node_counter)?
         .transform()
         .flatten()?;
     Ok(flattened)

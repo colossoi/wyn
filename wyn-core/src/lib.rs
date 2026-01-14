@@ -260,9 +260,9 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 //       -> .fold_ast_constants()                        -> AstConstFoldedEarly
 //       -> .type_check(&frontend.module_manager)        -> TypeChecked
 //       -> .alias_check()                               -> AliasChecked
-//       -> .lower_to_sir()                              -> SirLowered
+//       -> .lower_to_sir(node_counter)                  -> SirLowered (takes ownership of counter)
 //       -> .transform()                                 -> SirTransformed
-//       -> .flatten()                                   -> Flattened
+//       -> .flatten()                                   -> (Flattened, BackEnd) (counter in BackEnd)
 //
 // BackEnd Pipeline (MIR -> output):
 //   let mut backend = BackEnd::new(node_counter);
@@ -540,7 +540,8 @@ impl AliasChecked {
     }
 
     /// Lower AST to SIR (SOAC Intermediate Representation).
-    pub fn lower_to_sir(self) -> Result<SirLowered> {
+    /// Takes ownership of the NodeCounter to thread it through subsequent stages.
+    pub fn lower_to_sir(self, node_counter: NodeCounter) -> Result<SirLowered> {
         let type_table = self.type_table;
         let mut builtins = impl_source::ImplSource::default().all_names();
 
@@ -563,12 +564,10 @@ impl AliasChecked {
             }
         }
 
-        let defun_analysis =
-            defun_analysis::analyze_program_with_decls(&self.ast, &[], &type_table, &builtins);
-        let lowerer = ast_to_sir::AstToSir::new(type_table, builtins, defun_analysis);
+        let lowerer = ast_to_sir::AstToSir::new(type_table, builtins);
         let sir = lowerer.lower_program(&self.ast)?;
 
-        Ok(SirLowered { sir })
+        Ok(SirLowered { sir, node_counter })
     }
 }
 
@@ -579,6 +578,7 @@ impl AliasChecked {
 /// AST has been lowered to SIR
 pub struct SirLowered {
     pub sir: sir::Program,
+    node_counter: NodeCounter,
 }
 
 impl SirLowered {
@@ -586,23 +586,26 @@ impl SirLowered {
     /// For now this is identity - transformations will be added later.
     pub fn transform(self) -> SirTransformed {
         // TODO: Apply map-map fusion and other transforms
-        SirTransformed { sir: self.sir }
+        SirTransformed {
+            sir: self.sir,
+            node_counter: self.node_counter,
+        }
     }
 }
 
 /// SIR has been transformed (fusion, etc.)
 pub struct SirTransformed {
     pub sir: sir::Program,
+    node_counter: NodeCounter,
 }
 
 impl SirTransformed {
     /// Flatten SIR to MIR (with defunctionalization).
     /// Returns the flattened MIR and a BackEnd for subsequent passes.
     pub fn flatten(self) -> Result<(Flattened, BackEnd)> {
-        let builtins = impl_source::ImplSource::default().all_names();
-        let flattener = sir_flattening::SirFlattener::new(builtins);
+        let mut node_counter = self.node_counter;
+        let flattener = sir_flattening::SirFlattener::new(&mut node_counter);
         let mir = flattener.flatten_program(self.sir)?;
-        let node_counter = NodeCounter::new(); // TODO: carry through from earlier stages
         Ok((Flattened { mir }, BackEnd::new(node_counter)))
     }
 }

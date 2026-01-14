@@ -19,7 +19,7 @@ fn flatten_program(input: &str) -> mir::Program {
         .expect("Type checking failed")
         .alias_check()
         .expect("Borrow checking failed")
-        .lower_to_sir()
+        .lower_to_sir(frontend.node_counter)
         .expect("SIR lowering failed")
         .transform()
         .flatten()
@@ -678,13 +678,15 @@ def test: f32 =
 
     // This should compile successfully
     let mut frontend = crate::cached_frontend();
-    let result = crate::Compiler::parse(source, &mut frontend.node_counter)
+    let alias_checked = crate::Compiler::parse(source, &mut frontend.node_counter)
         .and_then(|p| p.desugar(&mut frontend.node_counter))
         .and_then(|d| d.resolve(&frontend.module_manager))
         .map(|r| r.fold_ast_constants())
         .and_then(|f| f.type_check(&frontend.module_manager, &mut frontend.schemes))
         .and_then(|t| t.alias_check())
-        .and_then(|a| a.lower_to_sir())
+        .expect("Frontend failed");
+    let result = alias_checked
+        .lower_to_sir(frontend.node_counter)
         .map(|s| s.transform())
         .and_then(|s| s.flatten())
         .map(|(f, _backend)| f.hoist_materializations().normalize())
@@ -1353,7 +1355,7 @@ def sum_positive(arr: [5]i32) i32 =
 fn compile_to_glsl(input: &str) -> String {
     let mut frontend = crate::cached_frontend();
     let parsed = crate::Compiler::parse(input, &mut frontend.node_counter).expect("Parsing failed");
-    let glsl = parsed
+    let alias_checked = parsed
         .desugar(&mut frontend.node_counter)
         .expect("Desugaring failed")
         .resolve(&frontend.module_manager)
@@ -1362,8 +1364,9 @@ fn compile_to_glsl(input: &str) -> String {
         .type_check(&frontend.module_manager, &mut frontend.schemes)
         .expect("Type checking failed")
         .alias_check()
-        .expect("Alias checking failed")
-        .lower_to_sir()
+        .expect("Alias checking failed");
+    let glsl = alias_checked
+        .lower_to_sir(frontend.node_counter)
         .expect("SIR lowering failed")
         .transform()
         .flatten()

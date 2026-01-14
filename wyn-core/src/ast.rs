@@ -159,16 +159,68 @@ impl From<u32> for NodeId {
     }
 }
 
-/// Counter for generating unique node IDs across compilation phases
-pub type NodeCounter = IdSource<NodeId>;
-
-/// Extension trait for NodeCounter to provide AST node creation helpers
-pub trait NodeCounterExt {
-    fn mk_node<T>(&mut self, kind: T, span: Span) -> Node<T>;
+/// Counter for generating unique node IDs across compilation phases.
+///
+/// This is a newtype wrapper around IdSource<NodeId> that enforces single-instance
+/// semantics in debug builds: panics if more than one NodeCounter is created in a process
+/// (except in tests, which use `new_for_test()`).
+#[derive(Debug, Clone)]
+pub struct NodeCounter {
+    inner: IdSource<NodeId>,
 }
 
-impl NodeCounterExt for NodeCounter {
-    fn mk_node<T>(&mut self, kind: T, span: Span) -> Node<T> {
+#[cfg(all(debug_assertions, not(test)))]
+static NODE_COUNTER_INSTANCES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+impl NodeCounter {
+    /// Create a new NodeCounter.
+    ///
+    /// In debug builds (but not tests), this will panic if another NodeCounter
+    /// already exists in the process. Use `new_for_test()` in tests.
+    pub fn new() -> Self {
+        // Claude Code LOVES to inappropriately create new NodeCounters instead of
+        // threading the existing one through the pipeline. This check ensures that
+        // doesn't happen again - NodeIds must be globally unique across compilation.
+        #[cfg(all(debug_assertions, not(test)))]
+        {
+            let prev = NODE_COUNTER_INSTANCES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if prev > 0 {
+                panic!(
+                    "NodeCounter::new() called {} times - only one NodeCounter should exist per compilation. \
+                     Thread the existing counter through the pipeline instead of creating a new one.",
+                    prev + 1
+                );
+            }
+        }
+        NodeCounter {
+            inner: IdSource::new(),
+        }
+    }
+
+    /// Create a NodeCounter for testing purposes.
+    /// This bypasses the single-instance check.
+    #[cfg(test)]
+    pub fn new_for_test() -> Self {
+        NodeCounter {
+            inner: IdSource::new(),
+        }
+    }
+
+    /// Get the next unique NodeId.
+    pub fn next_id(&mut self) -> NodeId {
+        self.inner.next_id()
+    }
+}
+
+impl Default for NodeCounter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl NodeCounter {
+    /// Create a node with the given kind and span.
+    pub fn mk_node<T>(&mut self, kind: T, span: Span) -> Node<T> {
         Node {
             h: Header {
                 id: self.next_id(),
@@ -177,17 +229,10 @@ impl NodeCounterExt for NodeCounter {
             kind,
         }
     }
-}
 
-#[cfg(test)]
-pub trait NodeCounterTestExt {
-    /// Create a node with a dummy span (for testing only)
-    fn mk_node_dummy<T>(&mut self, kind: T) -> Node<T>;
-}
-
-#[cfg(test)]
-impl NodeCounterTestExt for NodeCounter {
-    fn mk_node_dummy<T>(&mut self, kind: T) -> Node<T> {
+    /// Create a node with a dummy span (for testing only).
+    #[cfg(test)]
+    pub fn mk_node_dummy<T>(&mut self, kind: T) -> Node<T> {
         self.mk_node(kind, Span::dummy())
     }
 }

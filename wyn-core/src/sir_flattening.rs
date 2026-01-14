@@ -6,7 +6,7 @@
 //! - Statement sequencing: SIR Body (stm list + result) becomes nested MIR Let expressions
 //! - SOAC lowering: Map/Reduce/Scan become MIR calls or array constructs
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::ast::{NodeCounter, NodeId, Span, TypeName};
 use crate::error::Result;
@@ -18,17 +18,15 @@ use crate::{bail_flatten, IdArena};
 use polytype::Type;
 
 /// Flattens SIR to MIR with defunctionalization.
-pub struct SirFlattener {
+pub struct SirFlattener<'nc> {
     /// Counter for generating unique names
     next_id: usize,
-    /// Counter for generating unique MIR node IDs
-    node_counter: NodeCounter,
+    /// Counter for generating unique MIR node IDs (borrowed from pipeline)
+    node_counter: &'nc mut NodeCounter,
     /// Generated lambda functions (collected during flattening)
     generated_functions: Vec<mir::Def>,
     /// Lambda registry: all lambdas (source and synthesized)
     lambda_registry: IdArena<mir::LambdaId, mir::LambdaInfo>,
-    /// Set of builtin names to exclude from free variable capture
-    _builtins: HashSet<String>,
     /// Current MIR body being built
     current_body: mir::Body,
     /// Mapping from SIR VarId to MIR LocalId in current scope
@@ -39,14 +37,13 @@ pub struct SirFlattener {
     sir_lambdas: HashMap<sir::LambdaId, Lambda>,
 }
 
-impl SirFlattener {
-    pub fn new(builtins: HashSet<String>) -> Self {
+impl SirFlattener<'_> {
+    pub fn new(node_counter: &mut NodeCounter) -> SirFlattener<'_> {
         SirFlattener {
             next_id: 0,
-            node_counter: NodeCounter::new(),
+            node_counter,
             generated_functions: Vec::new(),
             lambda_registry: IdArena::new(),
-            _builtins: builtins,
             current_body: mir::Body::new(),
             var_to_local: HashMap::new(),
             name_to_local: ScopeStack::new(),
@@ -64,6 +61,15 @@ impl SirFlattener {
     /// Get a fresh NodeId.
     fn next_node_id(&mut self) -> NodeId {
         self.node_counter.next_id()
+    }
+
+    /// Lookup a SIR VarId in the current scope, returning the corresponding MIR LocalId.
+    /// Panics with a descriptive message if the variable is not found (compiler bug).
+    fn get_local(&self, var: &VarId) -> LocalId {
+        self.var_to_local
+            .get(var)
+            .copied()
+            .unwrap_or_else(|| panic!("SIR variable {} not found in var_to_local mapping - compiler bug", var))
     }
 
     /// Start a new body. Returns the old body.
@@ -540,7 +546,7 @@ impl SirFlattener {
                 let init_ids: Vec<_> = init
                     .iter()
                     .map(|v| {
-                        let local_id = self.var_to_local.get(v).copied().unwrap();
+                        let local_id = self.get_local(v);
                         let ty = self.current_body.get_local(local_id).ty.clone();
                         self.alloc_expr(mir::Expr::Local(local_id), ty, span)
                     })
@@ -570,7 +576,7 @@ impl SirFlattener {
                     let arg_ids: Vec<_> = args
                         .iter()
                         .map(|v| {
-                            let local_id = self.var_to_local.get(v).copied().unwrap();
+                            let local_id = self.get_local(v);
                             let ty = self.current_body.get_local(local_id).ty.clone();
                             self.alloc_expr(mir::Expr::Local(local_id), ty, span)
                         })
@@ -591,7 +597,7 @@ impl SirFlattener {
                 let elem_ids: Vec<_> = elems
                     .iter()
                     .map(|v| {
-                        let local_id = self.var_to_local.get(v).copied().unwrap();
+                        let local_id = self.get_local(v);
                         let ty = self.current_body.get_local(local_id).ty.clone();
                         self.alloc_expr(mir::Expr::Local(local_id), ty, span)
                     })
@@ -600,7 +606,7 @@ impl SirFlattener {
             }
 
             Exp::TupleProj { tuple, index } => {
-                let tuple_local = self.var_to_local.get(tuple).copied().unwrap();
+                let tuple_local = self.get_local(tuple);
                 let tuple_ty = self.current_body.get_local(tuple_local).ty.clone();
                 let tuple_id = self.alloc_expr(mir::Expr::Local(tuple_local), tuple_ty, span);
                 Ok(self.alloc_expr(
@@ -654,7 +660,7 @@ impl SirFlattener {
             Prim::Or(a, b) => self.flatten_binop("||", *a, *b, ty, span),
 
             Prim::Neg(a) => {
-                let local_id = self.var_to_local.get(a).copied().unwrap();
+                let local_id = self.get_local(a);
                 let operand_ty = self.current_body.get_local(local_id).ty.clone();
                 let operand_id = self.alloc_expr(mir::Expr::Local(local_id), operand_ty, span);
                 Ok(self.alloc_expr(
@@ -667,7 +673,7 @@ impl SirFlattener {
                 ))
             }
             Prim::Not(a) => {
-                let local_id = self.var_to_local.get(a).copied().unwrap();
+                let local_id = self.get_local(a);
                 let operand_ty = self.current_body.get_local(local_id).ty.clone();
                 let operand_id = self.alloc_expr(mir::Expr::Local(local_id), operand_ty, span);
                 Ok(self.alloc_expr(
@@ -681,11 +687,11 @@ impl SirFlattener {
             }
 
             Prim::Index { arr, idx } => {
-                let arr_local = self.var_to_local.get(arr).copied().unwrap();
+                let arr_local = self.get_local(arr);
                 let arr_ty = self.current_body.get_local(arr_local).ty.clone();
                 let arr_id = self.alloc_expr(mir::Expr::Local(arr_local), arr_ty, span);
 
-                let idx_local = self.var_to_local.get(idx).copied().unwrap();
+                let idx_local = self.get_local(idx);
                 let idx_ty = self.current_body.get_local(idx_local).ty.clone();
                 let idx_id = self.alloc_expr(mir::Expr::Local(idx_local), idx_ty, span);
 
@@ -706,7 +712,7 @@ impl SirFlattener {
                     let elem_ids: Vec<_> = args
                         .iter()
                         .map(|v| {
-                            let local_id = self.var_to_local.get(v).copied().unwrap();
+                            let local_id = self.get_local(v);
                             let ty = self.current_body.get_local(local_id).ty.clone();
                             self.alloc_expr(mir::Expr::Local(local_id), ty, span)
                         })
@@ -730,7 +736,7 @@ impl SirFlattener {
                     let elem_ids: Vec<_> = args
                         .iter()
                         .map(|v| {
-                            let local_id = self.var_to_local.get(v).copied().unwrap();
+                            let local_id = self.get_local(v);
                             let ty = self.current_body.get_local(local_id).ty.clone();
                             self.alloc_expr(mir::Expr::Local(local_id), ty, span)
                         })
@@ -755,7 +761,7 @@ impl SirFlattener {
                             let capture_ids: Vec<_> = args
                                 .iter()
                                 .map(|v| {
-                                    let local_id = self.var_to_local.get(v).copied().unwrap();
+                                    let local_id = self.get_local(v);
                                     let ty = self.current_body.get_local(local_id).ty.clone();
                                     self.alloc_expr(mir::Expr::Local(local_id), ty, span)
                                 })
@@ -776,11 +782,11 @@ impl SirFlattener {
 
                 if name == "__range" && args.len() == 2 {
                     // __range(start, end) -> Array with Range backing
-                    let start_local = self.var_to_local.get(&args[0]).copied().unwrap();
+                    let start_local = self.get_local(&args[0]);
                     let start_ty = self.current_body.get_local(start_local).ty.clone();
                     let start_id = self.alloc_expr(mir::Expr::Local(start_local), start_ty, span);
 
-                    let end_local = self.var_to_local.get(&args[1]).copied().unwrap();
+                    let end_local = self.get_local(&args[1]);
                     let end_ty = self.current_body.get_local(end_local).ty.clone();
                     let end_id = self.alloc_expr(mir::Expr::Local(end_local), end_ty, span);
 
@@ -800,11 +806,11 @@ impl SirFlattener {
 
                 if name == "__range_inclusive" && args.len() == 2 {
                     // __range_inclusive(start, end) -> Array with Range backing (inclusive)
-                    let start_local = self.var_to_local.get(&args[0]).copied().unwrap();
+                    let start_local = self.get_local(&args[0]);
                     let start_ty = self.current_body.get_local(start_local).ty.clone();
                     let start_id = self.alloc_expr(mir::Expr::Local(start_local), start_ty, span);
 
-                    let end_local = self.var_to_local.get(&args[1]).copied().unwrap();
+                    let end_local = self.get_local(&args[1]);
                     let end_ty = self.current_body.get_local(end_local).ty.clone();
                     let end_id = self.alloc_expr(mir::Expr::Local(end_local), end_ty, span);
 
@@ -825,15 +831,15 @@ impl SirFlattener {
                 // Slice intrinsics: __slice_range, __slice_from, __slice_to, __slice_full
                 if name == "__slice_range" && args.len() == 3 {
                     // arr[start..end]
-                    let base_local = self.var_to_local.get(&args[0]).copied().unwrap();
+                    let base_local = self.get_local(&args[0]);
                     let base_ty = self.current_body.get_local(base_local).ty.clone();
                     let base_id = self.alloc_expr(mir::Expr::Local(base_local), base_ty, span);
 
-                    let start_local = self.var_to_local.get(&args[1]).copied().unwrap();
+                    let start_local = self.get_local(&args[1]);
                     let start_ty = self.current_body.get_local(start_local).ty.clone();
                     let offset_id = self.alloc_expr(mir::Expr::Local(start_local), start_ty, span);
 
-                    let end_local = self.var_to_local.get(&args[2]).copied().unwrap();
+                    let end_local = self.get_local(&args[2]);
                     let end_ty = self.current_body.get_local(end_local).ty.clone();
                     let end_id = self.alloc_expr(mir::Expr::Local(end_local), end_ty, span);
 
@@ -868,7 +874,7 @@ impl SirFlattener {
                     let arg_ids: Vec<_> = args
                         .iter()
                         .map(|v| {
-                            let local_id = self.var_to_local.get(v).copied().unwrap();
+                            let local_id = self.get_local(v);
                             let ty = self.current_body.get_local(local_id).ty.clone();
                             self.alloc_expr(mir::Expr::Local(local_id), ty, span)
                         })
@@ -885,11 +891,11 @@ impl SirFlattener {
 
                 if name == "__slice_to" && args.len() == 2 {
                     // arr[..end] - from 0 to end
-                    let base_local = self.var_to_local.get(&args[0]).copied().unwrap();
+                    let base_local = self.get_local(&args[0]);
                     let base_ty = self.current_body.get_local(base_local).ty.clone();
                     let base_id = self.alloc_expr(mir::Expr::Local(base_local), base_ty, span);
 
-                    let end_local = self.var_to_local.get(&args[1]).copied().unwrap();
+                    let end_local = self.get_local(&args[1]);
                     let end_ty = self.current_body.get_local(end_local).ty.clone();
                     let end_id = self.alloc_expr(mir::Expr::Local(end_local), end_ty, span);
 
@@ -912,7 +918,7 @@ impl SirFlattener {
 
                 if name == "__slice_full" && args.len() == 1 {
                     // arr[..] - full slice (identity)
-                    let base_local = self.var_to_local.get(&args[0]).copied().unwrap();
+                    let base_local = self.get_local(&args[0]);
                     let base_ty = self.current_body.get_local(base_local).ty.clone();
                     return Ok(self.alloc_expr(mir::Expr::Local(base_local), base_ty, span));
                 }
@@ -922,7 +928,7 @@ impl SirFlattener {
                     let arg_ids: Vec<_> = args
                         .iter()
                         .map(|v| {
-                            let local_id = self.var_to_local.get(v).copied().unwrap();
+                            let local_id = self.get_local(v);
                             let ty = self.current_body.get_local(local_id).ty.clone();
                             self.alloc_expr(mir::Expr::Local(local_id), ty, span)
                         })
@@ -940,7 +946,7 @@ impl SirFlattener {
                 let arg_ids: Vec<_> = args
                     .iter()
                     .map(|v| {
-                        let local_id = self.var_to_local.get(v).copied().unwrap();
+                        let local_id = self.get_local(v);
                         let ty = self.current_body.get_local(local_id).ty.clone();
                         self.alloc_expr(mir::Expr::Local(local_id), ty, span)
                     })
@@ -959,11 +965,11 @@ impl SirFlattener {
     }
 
     fn flatten_binop(&mut self, op: &str, lhs: VarId, rhs: VarId, ty: &SirType, span: Span) -> Result<ExprId> {
-        let lhs_local = self.var_to_local.get(&lhs).copied().unwrap();
+        let lhs_local = self.get_local(&lhs);
         let lhs_ty = self.current_body.get_local(lhs_local).ty.clone();
         let lhs_id = self.alloc_expr(mir::Expr::Local(lhs_local), lhs_ty, span);
 
-        let rhs_local = self.var_to_local.get(&rhs).copied().unwrap();
+        let rhs_local = self.get_local(&rhs);
         let rhs_ty = self.current_body.get_local(rhs_local).ty.clone();
         let rhs_id = self.alloc_expr(mir::Expr::Local(rhs_local), rhs_ty, span);
 
@@ -1000,7 +1006,7 @@ impl SirFlattener {
                 let capture_ids: Vec<_> = map.f.captures
                     .iter()
                     .map(|v| {
-                        let local_id = self.var_to_local.get(v).copied().unwrap();
+                        let local_id = self.get_local(v);
                         let ty = self.current_body.get_local(local_id).ty.clone();
                         self.alloc_expr(mir::Expr::Local(local_id), ty, span)
                     })
@@ -1021,7 +1027,7 @@ impl SirFlattener {
                 let arr_ids: Vec<_> = map.arrs
                     .iter()
                     .map(|v| {
-                        let local_id = self.var_to_local.get(v).copied().unwrap();
+                        let local_id = self.get_local(v);
                         let ty = self.current_body.get_local(local_id).ty.clone();
                         self.alloc_expr(mir::Expr::Local(local_id), ty, span)
                     })
@@ -1046,7 +1052,7 @@ impl SirFlattener {
                 let capture_ids: Vec<_> = reduce.f.captures
                     .iter()
                     .map(|v| {
-                        let local_id = self.var_to_local.get(v).copied().unwrap();
+                        let local_id = self.get_local(v);
                         let ty = self.current_body.get_local(local_id).ty.clone();
                         self.alloc_expr(mir::Expr::Local(local_id), ty, span)
                     })
@@ -1063,11 +1069,11 @@ impl SirFlattener {
                     span,
                 );
 
-                let neutral_local = self.var_to_local.get(&reduce.neutral).copied().unwrap();
+                let neutral_local = self.get_local(&reduce.neutral);
                 let neutral_ty = self.current_body.get_local(neutral_local).ty.clone();
                 let neutral_id = self.alloc_expr(mir::Expr::Local(neutral_local), neutral_ty, span);
 
-                let arr_local = self.var_to_local.get(&reduce.arr).copied().unwrap();
+                let arr_local = self.get_local(&reduce.arr);
                 let arr_ty = self.current_body.get_local(arr_local).ty.clone();
                 let arr_id = self.alloc_expr(mir::Expr::Local(arr_local), arr_ty, span);
 
@@ -1087,7 +1093,7 @@ impl SirFlattener {
                 let capture_ids: Vec<_> = scan.f.captures
                     .iter()
                     .map(|v| {
-                        let local_id = self.var_to_local.get(v).copied().unwrap();
+                        let local_id = self.get_local(v);
                         let ty = self.current_body.get_local(local_id).ty.clone();
                         self.alloc_expr(mir::Expr::Local(local_id), ty, span)
                     })
@@ -1104,11 +1110,11 @@ impl SirFlattener {
                     span,
                 );
 
-                let neutral_local = self.var_to_local.get(&scan.neutral).copied().unwrap();
+                let neutral_local = self.get_local(&scan.neutral);
                 let neutral_ty = self.current_body.get_local(neutral_local).ty.clone();
                 let neutral_id = self.alloc_expr(mir::Expr::Local(neutral_local), neutral_ty, span);
 
-                let arr_local = self.var_to_local.get(&scan.arr).copied().unwrap();
+                let arr_local = self.get_local(&scan.arr);
                 let arr_ty = self.current_body.get_local(arr_local).ty.clone();
                 let arr_id = self.alloc_expr(mir::Expr::Local(arr_local), arr_ty, span);
 
@@ -1146,7 +1152,7 @@ impl SirFlattener {
                 // Lower replicate to Array with IndexFn (constant function)
                 let size_id = self.flatten_size(n, span)?;
 
-                let value_local = self.var_to_local.get(value).copied().unwrap();
+                let value_local = self.get_local(value);
                 let value_ty = self.current_body.get_local(value_local).ty.clone();
                 let value_id = self.alloc_expr(mir::Expr::Local(value_local), value_ty.clone(), span);
 
@@ -1175,7 +1181,7 @@ impl SirFlattener {
 
             Soac::Reshape { new_shape: _, arr } => {
                 // For now, reshape is identity (shape info is in type)
-                let arr_local = self.var_to_local.get(arr).copied().unwrap();
+                let arr_local = self.get_local(arr);
                 let arr_ty = self.current_body.get_local(arr_local).ty.clone();
                 Ok(self.alloc_expr(mir::Expr::Local(arr_local), arr_ty, span))
             }
@@ -1343,8 +1349,4 @@ impl SirFlattener {
         Ok(lambda_name)
     }
 
-    /// Get the NodeCounter for use after flattening.
-    pub fn into_node_counter(self) -> NodeCounter {
-        self.node_counter
-    }
 }

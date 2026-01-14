@@ -4,13 +4,14 @@ use crate::error::CompilerError;
 fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
     let (module_manager, mut node_counter) = crate::cached_module_manager();
     let parsed = crate::Compiler::parse(input, &mut node_counter)?;
-    let (flattened, mut backend) = parsed
+    let alias_checked = parsed
         .desugar(&mut node_counter)?
         .resolve(&module_manager)?
         .fold_ast_constants()
         .type_check(&module_manager)?
-        .alias_check()?
-        .lower_to_sir()?
+        .alias_check()?;
+    let (flattened, mut backend) = alias_checked
+        .lower_to_sir(node_counter)?
         .transform()
         .flatten()?;
     flattened
@@ -28,13 +29,14 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
 fn compile_through_monomorphization(input: &str) -> Result<(), CompilerError> {
     let (module_manager, mut node_counter) = crate::cached_module_manager();
     let parsed = crate::Compiler::parse(input, &mut node_counter)?;
-    let (flattened, _backend) = parsed
+    let alias_checked = parsed
         .desugar(&mut node_counter)?
         .resolve(&module_manager)?
         .fold_ast_constants()
         .type_check(&module_manager)?
-        .alias_check()?
-        .lower_to_sir()?
+        .alias_check()?;
+    let (flattened, _backend) = alias_checked
+        .lower_to_sir(node_counter)?
         .transform()
         .flatten()?;
     flattened.hoist_materializations().normalize().monomorphize()?;
