@@ -201,8 +201,15 @@ fn compile_impl(source: &str) -> CompileResult {
         return CompileResult::err_msg("Alias checking failed".to_string());
     }
 
-    // Flatten to MIR
-    let (flattened, _backend) = match alias_checked.flatten(&frontend.module_manager, &frontend.schemes) {
+    // Lower to SIR
+    let sir_lowered = match alias_checked.lower_to_sir() {
+        Ok(s) => s,
+        Err(e) => return CompileResult::err(e),
+    };
+    let sir_transformed = sir_lowered.transform();
+
+    // Flatten SIR to MIR
+    let (flattened, _backend) = match sir_transformed.flatten() {
         Ok(f) => f,
         Err(e) => return CompileResult::err(e),
     };

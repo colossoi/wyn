@@ -559,10 +559,6 @@ impl Monomorphizer {
                 expr: expr_map[inner],
             }),
             Expr::Materialize(inner) => Ok(Expr::Materialize(expr_map[inner])),
-            Expr::Tuple(elems) => {
-                let new_elems: Vec<_> = elems.iter().map(|e| expr_map[e]).collect();
-                Ok(Expr::Tuple(new_elems))
-            }
             Expr::Array { backing, size } => {
                 let new_size = expr_map[size];
                 let new_backing = match backing {
@@ -676,6 +672,16 @@ impl Monomorphizer {
             Expr::Store { ptr, value } => Ok(Expr::Store {
                 ptr: expr_map[ptr],
                 value: expr_map[value],
+            }),
+
+            // Tuples
+            Expr::Tuple(elems) => {
+                let new_elems: Vec<_> = elems.iter().map(|e| expr_map[e]).collect();
+                Ok(Expr::Tuple(new_elems))
+            }
+            Expr::TupleProj { tuple, index } => Ok(Expr::TupleProj {
+                tuple: expr_map[tuple],
+                index: *index,
             }),
         }
     }

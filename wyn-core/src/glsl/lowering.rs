@@ -622,25 +622,6 @@ impl<'a> LowerCtx<'a> {
             Expr::Global(name) => Ok(name.clone()),
 
             // --- Aggregates ---
-            Expr::Tuple(elems) => {
-                // Empty tuples should not reach lowering - they indicate a bug
-                // (Unit values and empty closures should be handled at call sites)
-                if elems.is_empty() {
-                    bail_glsl!(
-                        "BUG: Empty tuple reached GLSL lowering. Empty tuples/unit values should \
-                         be handled at call sites (let _ = ..., map with empty closures, etc.)"
-                    );
-                }
-
-                // Emit tuple as struct constructor
-                let mut parts = Vec::new();
-                for &e in elems {
-                    parts.push(self.lower_expr(body, e, output)?);
-                }
-                let struct_name = self.type_to_glsl(ty);
-                Ok(format!("{}({})", struct_name, parts.join(", ")))
-            }
-
             Expr::Array { backing, size: _ } => match backing {
                 ArrayBacking::Literal(elems) => {
                     let mut parts = Vec::new();
@@ -845,6 +826,23 @@ impl<'a> LowerCtx<'a> {
             Expr::Load { .. } | Expr::Store { .. } => {
                 bail_glsl!("Load/Store expressions not yet implemented in GLSL lowering")
             }
+
+            // --- Tuples ---
+            Expr::Tuple(elems) => {
+                // Lower as a constructor call for tuple type
+                let parts: Vec<_> = elems
+                    .iter()
+                    .map(|&e| self.lower_expr(body, e, output))
+                    .collect::<Result<_>>()?;
+                let type_str = self.type_to_glsl(ty);
+                Ok(format!("{}({})", type_str, parts.join(", ")))
+            }
+
+            Expr::TupleProj { tuple, index } => {
+                // Access tuple field
+                let tuple_str = self.lower_expr(body, *tuple, output)?;
+                Ok(format!("{}._{}", tuple_str, index))
+            }
         }
     }
 
@@ -1020,6 +1018,28 @@ impl<'a> LowerCtx<'a> {
                         }
                     }
                     _ => bail_glsl!("length called on non-array type: {:?}", arg_ty),
+                }
+            }
+            _ if name.starts_with("__field_") => {
+                // Field access: __field_x, __field_y, etc.
+                let field_name = &name[8..]; // strip "__field_"
+                Ok(format!("{}.{}", args[0], field_name))
+            }
+            _ if name.starts_with("__tuple_proj_") => {
+                // Tuple projection: __tuple_proj_0, __tuple_proj_1, etc.
+                let idx: usize = name[13..].parse().unwrap_or(0);
+                let arg_ty = body.get_type(arg_ids[0]);
+                if self.is_vector_type(arg_ty) {
+                    let swizzle = match idx {
+                        0 => "x",
+                        1 => "y",
+                        2 => "z",
+                        3 => "w",
+                        _ => return Err(crate::err_glsl!("Invalid vector index: {}", idx)),
+                    };
+                    Ok(format!("{}.{}", args[0], swizzle))
+                } else {
+                    Ok(format!("{}._{}", args[0], idx))
                 }
             }
             _ => bail_glsl!("Unknown intrinsic: {}", name),

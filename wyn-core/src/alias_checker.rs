@@ -1017,7 +1017,7 @@ fn collect_uses(body: &mir::Body, expr_id: mir::ExprId) -> HashSet<mir::LocalId>
             uses.insert(*local_id);
         }
         Global(_) | Int(_) | Float(_) | Bool(_) | String(_) | Unit => {}
-        Tuple(elems) | Vector(elems) => {
+        Vector(elems) => {
             for elem in elems {
                 uses.extend(collect_uses(body, *elem));
             }
@@ -1135,6 +1135,14 @@ fn collect_uses(body: &mir::Body, expr_id: mir::ExprId) -> HashSet<mir::LocalId>
             uses.extend(collect_uses(body, *ptr));
             uses.extend(collect_uses(body, *value));
         }
+        Tuple(elems) => {
+            for elem in elems {
+                uses.extend(collect_uses(body, *elem));
+            }
+        }
+        TupleProj { tuple, .. } => {
+            uses.extend(collect_uses(body, *tuple));
+        }
     }
 
     uses
@@ -1158,7 +1166,7 @@ fn compute_uses_after(
 
     match expr {
         Local(_) | Global(_) | Int(_) | Float(_) | Bool(_) | String(_) | Unit => {}
-        Tuple(elems) | Vector(elems) => {
+        Vector(elems) => {
             let elems = elems.clone();
             let mut current_after = after.clone();
             for elem in elems.iter().rev() {
@@ -1340,6 +1348,17 @@ fn compute_uses_after(
             current_after.extend(collect_uses(body, value));
             result.extend(compute_uses_after(body, ptr, &current_after, aliases));
         }
+        Tuple(elems) => {
+            let elems = elems.clone();
+            let mut current_after = after.clone();
+            for elem in elems.iter().rev() {
+                result.extend(compute_uses_after(body, *elem, &current_after, aliases));
+                current_after.extend(collect_uses(body, *elem));
+            }
+        }
+        TupleProj { tuple, .. } => {
+            result.extend(compute_uses_after(body, *tuple, after, aliases));
+        }
     }
 
     result
@@ -1417,7 +1436,7 @@ fn find_inplace_ops(
         }
         // Recurse into all subexpressions
         Local(_) | Global(_) | Int(_) | Float(_) | Bool(_) | String(_) | Unit => {}
-        Tuple(elems) | Vector(elems) => {
+        Vector(elems) => {
             let elems = elems.clone();
             for elem in &elems {
                 find_inplace_ops(body, *elem, uses_after, aliases, result);
@@ -1540,6 +1559,15 @@ fn find_inplace_ops(
         Store { ptr, value } => {
             find_inplace_ops(body, *ptr, uses_after, aliases, result);
             find_inplace_ops(body, *value, uses_after, aliases, result);
+        }
+        Tuple(elems) => {
+            let elems = elems.clone();
+            for elem in &elems {
+                find_inplace_ops(body, *elem, uses_after, aliases, result);
+            }
+        }
+        TupleProj { tuple, .. } => {
+            find_inplace_ops(body, *tuple, uses_after, aliases, result);
         }
     }
 }

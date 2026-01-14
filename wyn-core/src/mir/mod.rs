@@ -126,8 +126,6 @@ pub enum Expr {
     String(String),
 
     // --- Aggregates ---
-    /// Tuple literal.
-    Tuple(Vec<ExprId>),
     /// Unified array representation.
     /// All array/slice types use this variant with different backings.
     Array {
@@ -140,6 +138,10 @@ pub enum Expr {
     Vector(Vec<ExprId>),
     /// Matrix literal (@[[1,2], [3,4]]).
     Matrix(Vec<Vec<ExprId>>),
+    /// Tuple literal (a, b, c).
+    Tuple(Vec<ExprId>),
+    /// Tuple projection (t.0, t.1, etc).
+    TupleProj { tuple: ExprId, index: usize },
 
     // --- Operations ---
     /// Binary operation.

@@ -90,6 +90,9 @@ pub enum Value {
         captures: Vec<Value>,
     },
 
+    /// Known tuple value
+    Tuple(Vec<Value>),
+
     /// Unit value
     Unit,
 
@@ -110,7 +113,6 @@ pub enum ScalarValue {
 /// Kind of aggregate value
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AggregateKind {
-    Tuple,
     Array,
     Vector,
     Matrix,
@@ -122,6 +124,7 @@ impl Value {
         match self {
             Value::Scalar(_) | Value::Unit => true,
             Value::Aggregate { elements, .. } => elements.iter().all(|e| e.is_known()),
+            Value::Tuple(elements) => elements.iter().all(|e| e.is_known()),
             Value::Closure { captures, .. } => captures.iter().all(|c| c.is_known()),
             Value::Unknown(_) => false,
         }
@@ -276,7 +279,6 @@ impl PartialEvaluator {
                     .collect();
 
                 match kind {
-                    AggregateKind::Tuple => self.emit(Expr::Tuple(elem_ids), ty, span, node_id),
                     AggregateKind::Array => {
                         let size_val = elem_ids.len() as i64;
                         let size_id =
@@ -335,6 +337,17 @@ impl PartialEvaluator {
                     span,
                     node_id,
                 )
+            }
+            Value::Tuple(elements) => {
+                let elem_ids: Vec<ExprId> = elements
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        let elem_ty = self.get_element_type(&ty, i);
+                        self.reify(v, elem_ty, span, node_id)
+                    })
+                    .collect();
+                self.emit(Expr::Tuple(elem_ids), ty, span, node_id)
             }
             Value::Unknown(expr_id) => *expr_id,
         }
@@ -484,31 +497,6 @@ impl PartialEvaluator {
             Expr::If { cond, then_, else_ } => {
                 let cond_val = self.eval(body, cond, env)?;
                 self.eval_if(body, cond_val, then_, else_, env, ty, span, node_id)
-            }
-
-            // Tuple
-            Expr::Tuple(elems) => {
-                let elem_vals: Vec<Value> =
-                    elems.iter().map(|e| self.eval(body, *e, env)).collect::<Result<_>>()?;
-
-                if elem_vals.iter().all(|v| v.is_known()) {
-                    Ok(Value::Aggregate {
-                        kind: AggregateKind::Tuple,
-                        elements: elem_vals,
-                    })
-                } else {
-                    // Residualize
-                    let elem_ids: Vec<ExprId> = elem_vals
-                        .iter()
-                        .enumerate()
-                        .map(|(i, v)| {
-                            let elem_ty = self.get_tuple_element_type(&ty, i);
-                            self.reify(v, elem_ty, span, node_id)
-                        })
-                        .collect();
-                    let new_id = self.emit(Expr::Tuple(elem_ids), ty, span, node_id);
-                    Ok(Value::Unknown(new_id))
-                }
             }
 
             // Array - unified handling for all backing types
@@ -823,6 +811,51 @@ impl PartialEvaluator {
                 );
                 Ok(Value::Unknown(new_id))
             }
+
+            // Tuples - evaluate elements and build tuple value
+            Expr::Tuple(elems) => {
+                let elem_vals: Vec<Value> =
+                    elems.iter().map(|e| self.eval(body, *e, env)).collect::<Result<_>>()?;
+
+                // Check if all elements are known
+                if elem_vals.iter().all(|v| v.is_known()) {
+                    Ok(Value::Tuple(elem_vals))
+                } else {
+                    // Residualize
+                    let elem_ids: Vec<_> = elems
+                        .iter()
+                        .zip(elem_vals.iter())
+                        .map(|(e, v)| {
+                            let elem_ty = body.get_type(*e).clone();
+                            self.reify(v, elem_ty, span, node_id)
+                        })
+                        .collect();
+                    let new_id = self.emit(Expr::Tuple(elem_ids), ty, span, node_id);
+                    Ok(Value::Unknown(new_id))
+                }
+            }
+
+            Expr::TupleProj { tuple, index } => {
+                let tuple_val = self.eval(body, tuple, env)?;
+
+                // Try to project from a known tuple
+                if let Value::Tuple(ref elems) = tuple_val {
+                    if index < elems.len() {
+                        return Ok(elems[index].clone());
+                    }
+                }
+
+                // Residualize
+                let tuple_ty = body.get_type(tuple).clone();
+                let tuple_id = self.reify(&tuple_val, tuple_ty, span, node_id);
+                let new_id = self.emit(
+                    Expr::TupleProj { tuple: tuple_id, index },
+                    ty,
+                    span,
+                    node_id,
+                );
+                Ok(Value::Unknown(new_id))
+            }
         }
     }
 
@@ -835,16 +868,6 @@ impl PartialEvaluator {
         let new_id = self.output.alloc_local(decl);
         self.local_map.insert(local_id, new_id);
         new_id
-    }
-
-    /// Extract element type from Tuple at given index
-    fn get_tuple_element_type(&self, ty: &Type<TypeName>, index: usize) -> Type<TypeName> {
-        match ty {
-            Type::Constructed(TypeName::Tuple(_), args) => {
-                args.get(index).cloned().unwrap_or_else(|| ty.clone())
-            }
-            _ => ty.clone(),
-        }
     }
 
     /// Extract element type from Array[elem, addrspace, size]
@@ -1209,22 +1232,6 @@ impl PartialEvaluator {
         // Try to evaluate pure intrinsics on known arguments
         if all_known {
             match name {
-                // Tuple access
-                "tuple_access" if args.len() == 2 => {
-                    if let (
-                        Value::Aggregate {
-                            kind: AggregateKind::Tuple,
-                            elements,
-                        },
-                        Value::Scalar(ScalarValue::Int(idx)),
-                    ) = (&args[0], &args[1])
-                    {
-                        if let Some(elem) = elements.get(*idx as usize) {
-                            return Ok(elem.clone());
-                        }
-                    }
-                }
-
                 // Math intrinsics on floats
                 "sqrt" if args.len() == 1 => {
                     if let Value::Scalar(ScalarValue::Float(v)) = &args[0] {

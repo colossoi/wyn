@@ -18,7 +18,9 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .fold_ast_constants()
         .type_check(&frontend.module_manager, &mut frontend.schemes)?
         .alias_check()?
-        .flatten(&frontend.module_manager, &frontend.schemes)?;
+        .lower_to_sir()?
+        .transform()
+        .flatten()?;
     flattened
         .hoist_materializations()
         .normalize()
@@ -40,7 +42,9 @@ fn compile_through_flatten(input: &str) -> Result<crate::Flattened, CompilerErro
         .fold_ast_constants()
         .type_check(&frontend.module_manager, &mut frontend.schemes)?
         .alias_check()?
-        .flatten(&frontend.module_manager, &frontend.schemes)?;
+        .lower_to_sir()?
+        .transform()
+        .flatten()?;
     Ok(flattened)
 }
 

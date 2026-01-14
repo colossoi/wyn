@@ -190,23 +190,6 @@ impl Normalizer {
                 self.wrap_bindings(body, unop_id, ty, span, node_id, vec![binding])
             }
 
-            // Tuple - atomize all elements (tuples need all elements to be vars)
-            Expr::Tuple(elems) => {
-                let mut new_elems = Vec::new();
-                let mut bindings = Vec::new();
-
-                for elem in elems {
-                    let new_elem = self.expr_map[elem];
-                    let (atom_elem, binding) = self.atomize(body, new_elem, node_id);
-                    new_elems.push(atom_elem);
-                    bindings.push(binding);
-                }
-
-                let tuple_id = body.alloc_expr(Expr::Tuple(new_elems), ty.clone(), span, node_id);
-                bindings.reverse();
-                self.wrap_bindings(body, tuple_id, ty, span, node_id, bindings)
-            }
-
             // Array - handle all backing types
             Expr::Array { backing, size } => {
                 let new_size = self.expr_map[&size];
@@ -601,6 +584,36 @@ impl Normalizer {
                     vec![value_binding, ptr_binding],
                 )
             }
+
+            // Tuples - atomize elements
+            Expr::Tuple(elems) => {
+                let mut new_elems = Vec::new();
+                let mut bindings = Vec::new();
+
+                for elem in elems {
+                    let new_elem = self.expr_map[elem];
+                    let (atom_elem, binding) = self.atomize(body, new_elem, node_id);
+                    new_elems.push(atom_elem);
+                    bindings.push(binding);
+                }
+
+                let tuple_id = body.alloc_expr(Expr::Tuple(new_elems), ty.clone(), span, node_id);
+                bindings.reverse();
+                self.wrap_bindings(body, tuple_id, ty, span, node_id, bindings)
+            }
+
+            Expr::TupleProj { tuple, index } => {
+                let new_tuple = self.expr_map[tuple];
+                let (atom_tuple, binding) = self.atomize(body, new_tuple, node_id);
+
+                let proj_id = body.alloc_expr(
+                    Expr::TupleProj { tuple: atom_tuple, index: *index },
+                    ty.clone(),
+                    span,
+                    node_id,
+                );
+                self.wrap_bindings(body, proj_id, ty, span, node_id, vec![binding])
+            }
         }
     }
 
@@ -708,8 +721,7 @@ fn is_atomic(expr: &Expr) -> bool {
     match expr {
         Expr::Local(_) | Expr::Global(_) | Expr::Unit => true,
         Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::String(_) => true,
-        Expr::Closure { .. } => true,           // Closures are atomic values
-        Expr::Tuple(elems) => elems.is_empty(), // Empty tuple is atomic
+        Expr::Closure { .. } => true, // Closures are atomic values
         _ => false,
     }
 }

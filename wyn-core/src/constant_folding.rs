@@ -155,10 +155,6 @@ impl ConstantFolder {
             Expr::String(s) => Ok(body.alloc_expr(Expr::String(s.clone()), ty.clone(), span, node_id)),
 
             // Aggregates - map child expressions
-            Expr::Tuple(elems) => {
-                let new_elems: Vec<_> = elems.iter().map(|e| self.expr_map[e]).collect();
-                Ok(body.alloc_expr(Expr::Tuple(new_elems), ty.clone(), span, node_id))
-            }
             Expr::Array { backing, size } => {
                 let new_size = self.expr_map[size];
                 let new_backing = match backing {
@@ -405,6 +401,21 @@ impl ConstantFolder {
                         ptr: new_ptr,
                         value: new_value,
                     },
+                    ty.clone(),
+                    span,
+                    node_id,
+                ))
+            }
+
+            Expr::Tuple(elems) => {
+                let new_elems: Vec<_> = elems.iter().map(|e| self.expr_map[e]).collect();
+                Ok(body.alloc_expr(Expr::Tuple(new_elems), ty.clone(), span, node_id))
+            }
+
+            Expr::TupleProj { tuple, index } => {
+                let new_tuple = self.expr_map[tuple];
+                Ok(body.alloc_expr(
+                    Expr::TupleProj { tuple: new_tuple, index: *index },
                     ty.clone(),
                     span,
                     node_id,

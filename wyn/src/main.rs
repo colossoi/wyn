@@ -194,9 +194,9 @@ fn compile_file(
         return Err(wyn_core::err_alias!("alias checking failed").into());
     }
 
-    let (flattened, _backend) = time("flatten", verbose, || {
-        alias_checked.flatten(&frontend.module_manager, &frontend.schemes)
-    })?;
+    let sir_lowered = time("lower_to_sir", verbose, || alias_checked.lower_to_sir())?;
+    let sir_transformed = time("sir_transform", verbose, || sir_lowered.transform());
+    let (flattened, _backend) = time("sir_flatten", verbose, || sir_transformed.flatten())?;
 
     // Write initial MIR if requested (right after flattening)
     write_mir_if_requested(&flattened.mir, &output_init_mir, "initial MIR", verbose)?;

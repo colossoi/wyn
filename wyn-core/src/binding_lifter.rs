@@ -277,12 +277,6 @@ impl BindingLifter {
                 )
             }
 
-            // Tuple - map subexpressions
-            Expr::Tuple(elems) => {
-                let new_elems: Vec<_> = elems.iter().map(|e| self.expr_map[e]).collect();
-                new_body.alloc_expr(Expr::Tuple(new_elems), ty.clone(), span, node_id)
-            }
-
             // Array - map subexpressions based on backing
             Expr::Array { backing, size } => {
                 let new_size = self.expr_map[size];
@@ -389,6 +383,21 @@ impl BindingLifter {
                         ptr: new_ptr,
                         value: new_value,
                     },
+                    ty.clone(),
+                    span,
+                    node_id,
+                )
+            }
+
+            Expr::Tuple(elems) => {
+                let new_elems: Vec<_> = elems.iter().map(|e| self.expr_map[e]).collect();
+                new_body.alloc_expr(Expr::Tuple(new_elems), ty.clone(), span, node_id)
+            }
+
+            Expr::TupleProj { tuple, index } => {
+                let new_tuple = self.expr_map[tuple];
+                new_body.alloc_expr(
+                    Expr::TupleProj { tuple: new_tuple, index: *index },
                     ty.clone(),
                     span,
                     node_id,
@@ -663,7 +672,7 @@ fn collect_free_locals_inner(
             }
         }
 
-        Expr::Tuple(elems) | Expr::Vector(elems) => {
+        Expr::Vector(elems) => {
             for elem in elems {
                 collect_free_locals_inner(body, *elem, bound, free);
             }
@@ -728,6 +737,16 @@ fn collect_free_locals_inner(
         Expr::Store { ptr, value } => {
             collect_free_locals_inner(body, *ptr, bound, free);
             collect_free_locals_inner(body, *value, bound, free);
+        }
+
+        Expr::Tuple(elems) => {
+            for elem in elems {
+                collect_free_locals_inner(body, *elem, bound, free);
+            }
+        }
+
+        Expr::TupleProj { tuple, .. } => {
+            collect_free_locals_inner(body, *tuple, bound, free);
         }
 
         // Leaf nodes - no locals to collect

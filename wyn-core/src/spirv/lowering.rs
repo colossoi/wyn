@@ -1419,13 +1419,6 @@ fn lower_const_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId)
         }
         Expr::Bool(b) => Ok(constructor.const_bool(*b)),
         Expr::Unit => Ok(constructor.const_i32(0)),
-        Expr::Tuple(elems) => {
-            let elem_ids: Result<Vec<_>> =
-                elems.iter().map(|&id| lower_const_expr(constructor, body, id)).collect();
-            let elem_ids = elem_ids?;
-            let struct_type = constructor.ast_type_to_spirv(ty);
-            Ok(constructor.builder.constant_composite(struct_type, elem_ids))
-        }
         Expr::Array { backing, .. } => match backing {
             ArrayBacking::Literal(elems) => {
                 let elem_ids: Result<Vec<_>> =
@@ -2432,6 +2425,56 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                         ))
                     }
                 }
+                _ if name.starts_with("__field_") => {
+                    // Field access: __field_x, __field_y, etc.
+                    let field_name = &name[8..]; // strip "__field_"
+                    let base_id = lower_expr(constructor, body, args[0])?;
+                    let base_ty = body.get_type(args[0]);
+
+                    // Determine index from field name
+                    let index = match field_name {
+                        "x" | "r" => 0u32,
+                        "y" | "g" => 1,
+                        "z" | "b" => 2,
+                        "w" | "a" => 3,
+                        _ => return Err(err_spirv!("Unknown field: {}", field_name)),
+                    };
+
+                    // Get element type
+                    let elem_ty = match base_ty {
+                        PolyType::Constructed(TypeName::Vec, type_args) if type_args.len() == 2 => {
+                            constructor.ast_type_to_spirv(&type_args[1])
+                        }
+                        _ => return Err(err_spirv!("Cannot access field {} on non-vector type", field_name)),
+                    };
+
+                    // CompositeExtract
+                    Ok(constructor.builder.composite_extract(elem_ty, None, base_id, [index])?)
+                }
+                _ if name.starts_with("__tuple_proj_") => {
+                    // Tuple projection: __tuple_proj_0, __tuple_proj_1, etc.
+                    let index: u32 = name[13..].parse().unwrap_or(0);
+                    let base_id = lower_expr(constructor, body, args[0])?;
+                    let base_ty = body.get_type(args[0]);
+
+                    // Get element type from tuple
+                    let elem_ty = match base_ty {
+                        PolyType::Constructed(TypeName::Tuple(_), type_args) => {
+                            if (index as usize) < type_args.len() {
+                                constructor.ast_type_to_spirv(&type_args[index as usize])
+                            } else {
+                                return Err(err_spirv!("Tuple index {} out of range", index));
+                            }
+                        }
+                        PolyType::Constructed(TypeName::Vec, type_args) if type_args.len() == 2 => {
+                            constructor.ast_type_to_spirv(&type_args[1])
+                        }
+                        _ => return Err(err_spirv!("Cannot project from non-tuple/vector type")),
+                    };
+
+                    // CompositeExtract
+                    Ok(constructor.builder.composite_extract(elem_ty, None, base_id, [index])?)
+                }
                 _ => Err(err_spirv!("Unknown intrinsic: {}", name)),
             }
         }
@@ -2479,18 +2522,6 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
             }
         }
 
-        Expr::Tuple(elems) => {
-            // Lower all element expressions
-            let elem_ids: Vec<spirv::Word> =
-                elems.iter().map(|&e| lower_expr(constructor, body, e)).collect::<Result<Vec<_>>>()?;
-
-            // Get the tuple type
-            let result_type = constructor.ast_type_to_spirv(expr_ty);
-
-            // Construct the composite
-            Ok(constructor.builder.composite_construct(result_type, None, elem_ids)?)
-        }
-
         Expr::Array { backing, size } => lower_array_expr(constructor, body, backing, *size, expr_ty),
 
         Expr::Vector(elems) => {
@@ -2535,6 +2566,25 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
             Err(err_spirv!(
                 "Load/Store expressions not yet implemented in SPIR-V lowering"
             ))
+        }
+
+        // --- Tuples ---
+        Expr::Tuple(elems) => {
+            // Lower each element
+            let elem_ids: Vec<_> = elems
+                .iter()
+                .map(|&e| lower_expr(constructor, body, e))
+                .collect::<Result<_>>()?;
+
+            // Construct the tuple as a composite
+            let result_type = constructor.ast_type_to_spirv(expr_ty);
+            Ok(constructor.builder.composite_construct(result_type, None, elem_ids)?)
+        }
+
+        Expr::TupleProj { tuple, index } => {
+            let tuple_id = lower_expr(constructor, body, *tuple)?;
+            let result_type = constructor.ast_type_to_spirv(expr_ty);
+            Ok(constructor.builder.composite_extract(result_type, None, tuple_id, [*index as u32])?)
         }
     }
 }
@@ -3075,11 +3125,38 @@ fn lower_index_intrinsic(
 }
 
 /// Try to extract a compile-time constant integer from an expression.
+/// Follows Local references to find the underlying value.
 fn try_extract_const_int(body: &Body, expr_id: ExprId) -> Option<i32> {
     match body.get_expr(expr_id) {
         Expr::Int(s) => s.parse().ok(),
+        Expr::Local(local_id) => {
+            // Try to find the value this local was bound to
+            // Search through all let bindings in the body
+            find_local_value(body, *local_id)
+        }
         _ => None,
     }
+}
+
+/// Search the expression tree for a Let binding that defines the given local
+/// and try to extract its constant value.
+fn find_local_value(body: &Body, local_id: mir::LocalId) -> Option<i32> {
+    fn search_expr(body: &Body, expr_id: ExprId, target: mir::LocalId) -> Option<i32> {
+        match body.get_expr(expr_id) {
+            Expr::Let { local, rhs, body: inner } => {
+                if *local == target {
+                    // Found the binding, try to extract the value
+                    try_extract_const_int(body, *rhs)
+                } else {
+                    // Search in the inner expression
+                    search_expr(body, *inner, target)
+                }
+            }
+            Expr::Int(s) => s.parse().ok(),
+            _ => None,
+        }
+    }
+    search_expr(body, body.root, local_id)
 }
 
 // =============================================================================

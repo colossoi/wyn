@@ -15,7 +15,10 @@ fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
         .expect("Type checking failed")
         .alias_check()
         .expect("Alias checking failed")
-        .flatten(&frontend.module_manager, &frontend.schemes)
+        .lower_to_sir()
+        .expect("SIR lowering failed")
+        .transform()
+        .flatten()
         .expect("Flattening failed");
 
     let inplace_info = crate::alias_checker::analyze_inplace(&flattened.mir);
@@ -298,7 +301,10 @@ fn compile_to_spirv_with_partial_eval(source: &str) -> Result<Vec<u32>> {
         .expect("Type checking failed")
         .alias_check()
         .expect("Alias checking failed")
-        .flatten(&frontend.module_manager, &frontend.schemes)
+        .lower_to_sir()
+        .expect("SIR lowering failed")
+        .transform()
+        .flatten()
         .expect("Flattening failed")
         .0
         .hoist_materializations()

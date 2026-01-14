@@ -204,7 +204,7 @@ fn collect_materializations_rec(
                 collect_materializations_rec(body, *cap, result, visited);
             }
         }
-        Expr::Tuple(elems) | Expr::Vector(elems) => {
+        Expr::Vector(elems) => {
             for elem in elems {
                 collect_materializations_rec(body, *elem, result, visited);
             }
@@ -254,6 +254,14 @@ fn collect_materializations_rec(
         Expr::Store { ptr, value } => {
             collect_materializations_rec(body, *ptr, result, visited);
             collect_materializations_rec(body, *value, result, visited);
+        }
+        Expr::Tuple(elems) => {
+            for elem in elems {
+                collect_materializations_rec(body, *elem, result, visited);
+            }
+        }
+        Expr::TupleProj { tuple, .. } => {
+            collect_materializations_rec(body, *tuple, result, visited);
         }
         // Atoms have no children
         Expr::Local(_)
@@ -354,7 +362,7 @@ fn exprs_equal(body: &Body, a: ExprId, b: ExprId) -> bool {
         }
         (Expr::Materialize(ia), Expr::Materialize(ib)) => exprs_equal(body, *ia, *ib),
 
-        (Expr::Tuple(ea), Expr::Tuple(eb)) | (Expr::Vector(ea), Expr::Vector(eb)) => {
+        (Expr::Vector(ea), Expr::Vector(eb)) => {
             ea.len() == eb.len() && ea.iter().zip(eb.iter()).all(|(x, y)| exprs_equal(body, *x, *y))
         }
 

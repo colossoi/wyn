@@ -2,7 +2,6 @@ pub mod ast;
 pub mod defun_analysis;
 pub mod diags;
 pub mod error;
-pub mod flattening;
 pub mod impl_source;
 pub mod interface;
 pub mod intrinsics;
@@ -23,6 +22,8 @@ pub use types::checker as type_checker;
 
 pub mod alias_checker;
 pub mod ast_const_fold;
+pub mod ast_to_sir;
+pub mod sir_flattening;
 pub mod desugar;
 pub mod lowering_common;
 
@@ -34,6 +35,7 @@ pub mod materialize_hoisting;
 pub mod monomorphization;
 pub mod normalize;
 pub mod partial_eval;
+pub mod sir;
 pub mod spirv;
 
 #[cfg(test)]
@@ -250,7 +252,7 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 //   - FrontEnd: holds module_manager (used by resolve, type_check, flatten)
 //   - BackEnd: holds node_counter (used by normalize)
 //
-// FrontEnd Pipeline (AST -> MIR):
+// FrontEnd Pipeline (AST -> SIR -> MIR):
 //   let parsed = Compiler::parse(source)?;
 //   let mut frontend = FrontEnd::new(module_manager);
 //     -> parsed.desugar(&mut node_counter)              -> Desugared
@@ -258,7 +260,9 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 //       -> .fold_ast_constants()                        -> AstConstFoldedEarly
 //       -> .type_check(&frontend.module_manager)        -> TypeChecked
 //       -> .alias_check()                               -> AliasChecked
-//       -> .flatten(&frontend.module_manager)           -> Flattened
+//       -> .lower_to_sir()                              -> SirLowered
+//       -> .transform()                                 -> SirTransformed
+//       -> .flatten()                                   -> Flattened
 //
 // BackEnd Pipeline (MIR -> output):
 //   let mut backend = BackEnd::new(node_counter);
@@ -535,18 +539,12 @@ impl AliasChecked {
         self.alias_result.print_errors();
     }
 
-    /// Flatten AST to MIR (with defunctionalization and desugaring).
-    /// Returns the flattened MIR and a BackEnd for subsequent passes.
-    pub fn flatten(
-        self,
-        module_manager: &module_manager::ModuleManager,
-        schemes: &HashMap<String, TypeScheme<TypeName>>,
-    ) -> Result<(Flattened, BackEnd)> {
+    /// Lower AST to SIR (SOAC Intermediate Representation).
+    pub fn lower_to_sir(self) -> Result<SirLowered> {
         let type_table = self.type_table;
-
         let mut builtins = impl_source::ImplSource::default().all_names();
 
-        // Add top-level function names from user program - these should not be captured as free vars
+        // Add top-level function names from user program
         for decl in &self.ast.declarations {
             match decl {
                 ast::Declaration::Decl(d) => {
@@ -565,34 +563,46 @@ impl AliasChecked {
             }
         }
 
-        // Collect prelude function declarations for defun analysis
-        let prelude_decls: Vec<_> = module_manager.get_prelude_function_declarations();
-
-        // Add prelude function names to builtins - they should not be captured either
-        for decl in &prelude_decls {
-            builtins.insert(decl.name.clone());
-        }
-
         let defun_analysis =
-            defun_analysis::analyze_program_with_decls(&self.ast, &prelude_decls, &type_table, &builtins);
-        let mut flattener =
-            flattening::Flattener::new(type_table, builtins, defun_analysis, schemes.clone());
-        let mut mir = flattener.flatten_program(&self.ast)?;
+            defun_analysis::analyze_program_with_decls(&self.ast, &[], &type_table, &builtins);
+        let lowerer = ast_to_sir::AstToSir::new(type_table, builtins, defun_analysis);
+        let sir = lowerer.lower_program(&self.ast)?;
 
-        // Flatten module declarations (includes constants like f32.pi, excludes intrinsics)
-        for (module_name, decl) in module_manager.get_all_module_declarations() {
-            let qualified_name = format!("{}.{}", module_name, decl.name);
-            let defs = flattener.flatten_module_decl(decl, &qualified_name)?;
-            mir.defs.extend(defs);
-        }
+        Ok(SirLowered { sir })
+    }
+}
 
-        // Flatten prelude function declarations (top-level, auto-imported)
-        for decl in module_manager.get_prelude_function_declarations() {
-            let defs = flattener.flatten_module_decl(decl, &decl.name)?;
-            mir.defs.extend(defs);
-        }
+// =============================================================================
+// SIR stages
+// =============================================================================
 
-        let node_counter = flattener.into_node_counter();
+/// AST has been lowered to SIR
+pub struct SirLowered {
+    pub sir: sir::Program,
+}
+
+impl SirLowered {
+    /// Apply SIR-level transformations (fusion, etc.).
+    /// For now this is identity - transformations will be added later.
+    pub fn transform(self) -> SirTransformed {
+        // TODO: Apply map-map fusion and other transforms
+        SirTransformed { sir: self.sir }
+    }
+}
+
+/// SIR has been transformed (fusion, etc.)
+pub struct SirTransformed {
+    pub sir: sir::Program,
+}
+
+impl SirTransformed {
+    /// Flatten SIR to MIR (with defunctionalization).
+    /// Returns the flattened MIR and a BackEnd for subsequent passes.
+    pub fn flatten(self) -> Result<(Flattened, BackEnd)> {
+        let builtins = impl_source::ImplSource::default().all_names();
+        let flattener = sir_flattening::SirFlattener::new(builtins);
+        let mir = flattener.flatten_program(self.sir)?;
+        let node_counter = NodeCounter::new(); // TODO: carry through from earlier stages
         Ok((Flattened { mir }, BackEnd::new(node_counter)))
     }
 }

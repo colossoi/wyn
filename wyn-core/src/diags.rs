@@ -851,16 +851,6 @@ impl Display for mir::Expr {
             mir::Expr::Bool(b) => write!(f, "{}", b),
             mir::Expr::Unit => write!(f, "()"),
             mir::Expr::String(s) => write!(f, "\"{}\"", s.escape_default()),
-            mir::Expr::Tuple(ids) => {
-                write!(f, "(")?;
-                for (i, id) in ids.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "e{}", id.0)?;
-                }
-                write!(f, ")")
-            }
             mir::Expr::Array { backing, size } => match backing {
                 mir::ArrayBacking::Literal(ids) => {
                     write!(f, "[")?;
@@ -932,6 +922,19 @@ impl Display for mir::Expr {
                     write!(f, "]")?;
                 }
                 write!(f, "]")
+            }
+            mir::Expr::Tuple(elems) => {
+                write!(f, "(")?;
+                for (i, id) in elems.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "e{}", id.0)?;
+                }
+                write!(f, ")")
+            }
+            mir::Expr::TupleProj { tuple, index } => {
+                write!(f, "e{}.{}", tuple.0, index)
             }
             mir::Expr::BinOp { op, lhs, rhs } => {
                 write!(f, "(e{} {} e{})", lhs.0, op, rhs.0)

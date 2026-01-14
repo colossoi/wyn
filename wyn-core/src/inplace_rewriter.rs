@@ -166,7 +166,6 @@ impl<'a> InPlaceRewriter<'a> {
             Expr::String(s) => Expr::String(s.clone()),
 
             // Aggregates - remap children
-            Expr::Tuple(elems) => Expr::Tuple(elems.iter().map(|e| self.remap(*e)).collect()),
             Expr::Array { backing, size } => {
                 let new_size = self.remap(*size);
                 let new_backing = match backing {
@@ -306,6 +305,13 @@ impl<'a> InPlaceRewriter<'a> {
             Expr::Store { ptr, value } => Expr::Store {
                 ptr: self.remap(*ptr),
                 value: self.remap(*value),
+            },
+
+            // Tuples
+            Expr::Tuple(elems) => Expr::Tuple(elems.iter().map(|e| self.remap(*e)).collect()),
+            Expr::TupleProj { tuple, index } => Expr::TupleProj {
+                tuple: self.remap(*tuple),
+                index: *index,
             },
         };
 

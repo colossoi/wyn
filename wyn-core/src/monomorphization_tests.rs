@@ -10,7 +10,9 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .fold_ast_constants()
         .type_check(&module_manager)?
         .alias_check()?
-        .flatten(&module_manager)?;
+        .lower_to_sir()?
+        .transform()
+        .flatten()?;
     flattened
         .hoist_materializations()
         .normalize()
@@ -32,7 +34,9 @@ fn compile_through_monomorphization(input: &str) -> Result<(), CompilerError> {
         .fold_ast_constants()
         .type_check(&module_manager)?
         .alias_check()?
-        .flatten(&module_manager)?;
+        .lower_to_sir()?
+        .transform()
+        .flatten()?;
     flattened.hoist_materializations().normalize().monomorphize()?;
     Ok(())
 }

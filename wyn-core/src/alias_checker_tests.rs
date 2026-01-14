@@ -268,7 +268,9 @@ fn analyze_inplace_ops(source: &str) -> InPlaceInfo {
         folded.type_check(&frontend.module_manager, &mut frontend.schemes).expect("type_check failed");
     let alias_checked = type_checked.alias_check().expect("alias check failed");
     let (flattened, _backend) =
-        alias_checked.flatten(&frontend.module_manager, &frontend.schemes).expect("flatten failed");
+        alias_checked.lower_to_sir().expect("SIR lowering failed")
+            .transform()
+            .flatten().expect("flatten failed");
 
     // For tests without entry points, analyze after flattening (before monomorphization)
     // since filter_reachable would remove all defs without an entry point
