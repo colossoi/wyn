@@ -7,8 +7,8 @@
 //! Must run after type checking and before flattening.
 
 use crate::ast::{
-    BinaryOp, Decl, Declaration, EntryDecl, ExprKind, Expression, LambdaExpr, NodeCounter,
-    Pattern, PatternKind, Program, RangeExpr, RangeKind, SliceExpr, Span,
+    BinaryOp, Decl, Declaration, EntryDecl, ExprKind, Expression, LambdaExpr, NodeCounter, Pattern,
+    PatternKind, Program, RangeExpr, RangeKind, SliceExpr, Span,
 };
 use crate::err_flatten_at;
 use crate::error::Result;

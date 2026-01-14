@@ -607,7 +607,10 @@ impl Normalizer {
                 let (atom_tuple, binding) = self.atomize(body, new_tuple, node_id);
 
                 let proj_id = body.alloc_expr(
-                    Expr::TupleProj { tuple: atom_tuple, index: *index },
+                    Expr::TupleProj {
+                        tuple: atom_tuple,
+                        index: *index,
+                    },
                     ty.clone(),
                     span,
                     node_id,

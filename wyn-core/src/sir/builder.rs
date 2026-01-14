@@ -3,19 +3,19 @@
 //! Provides a fluent API for building SIR programs with automatic
 //! ID allocation and type tracking.
 
-use crate::ast::Span;
 use crate::IdSource;
+use crate::ast::Span;
 
 use super::{
-    types::SizeVar, Body, Exp, Lambda, LambdaId, Map, Param, Pat, PatElem, Prim, Reduce, Scan,
-    SirType, Size, Soac, Stm, StmId, VarId,
+    Body, Exp, Lambda, LambdaId, Map, Param, Pat, PatElem, Prim, Reduce, Scan, SirType, Size, Soac,
+    Statement, StatementId, VarId, types::SizeVar,
 };
 
 /// Builder for constructing SIR programs.
 #[derive(Debug, Default)]
 pub struct SirBuilder {
     vars: IdSource<VarId>,
-    stms: IdSource<StmId>,
+    stms: IdSource<StatementId>,
     lambdas: IdSource<LambdaId>,
     sizes: IdSource<SizeVar>,
 }
@@ -31,7 +31,7 @@ impl SirBuilder {
     }
 
     /// Allocate a fresh statement ID.
-    pub fn fresh_stm(&mut self) -> StmId {
+    pub fn fresh_stm(&mut self) -> StatementId {
         self.stms.next_id()
     }
 
@@ -83,8 +83,8 @@ impl SirBuilder {
     }
 
     /// Create a statement binding a single expression.
-    pub fn stm(&mut self, pat: Pat, exp: Exp, ty: SirType, span: Span) -> Stm {
-        Stm {
+    pub fn stm(&mut self, pat: Pat, exp: Exp, ty: SirType, span: Span) -> Statement {
+        Statement {
             id: self.fresh_stm(),
             pat,
             exp,
@@ -104,13 +104,7 @@ impl SirBuilder {
     }
 
     /// Create a parameter with a specific variable.
-    pub fn param_with_var(
-        &self,
-        var: VarId,
-        name: impl Into<String>,
-        ty: SirType,
-        span: Span,
-    ) -> Param {
+    pub fn param_with_var(&self, var: VarId, name: impl Into<String>, ty: SirType, span: Span) -> Param {
         Param {
             name_hint: name.into(),
             var,
@@ -147,10 +141,7 @@ impl SirBuilder {
         ret_tys: Vec<SirType>,
         span: Span,
     ) -> Lambda {
-        let params: Vec<_> = param_specs
-            .into_iter()
-            .map(|(name, ty)| self.param(name, ty, span))
-            .collect();
+        let params: Vec<_> = param_specs.into_iter().map(|(name, ty)| self.param(name, ty, span)).collect();
         let param_vars: Vec<_> = params.iter().map(|p| p.var).collect();
         let body = body_fn(&param_vars);
         Lambda {
@@ -296,8 +287,11 @@ impl SirBuilder {
     }
 
     /// Create a body with statements and results.
-    pub fn body(&self, stms: Vec<Stm>, result: Vec<VarId>) -> Body {
-        Body { stms, result }
+    pub fn body(&self, stms: Vec<Statement>, result: Vec<VarId>) -> Body {
+        Body {
+            statements: stms,
+            result,
+        }
     }
 }
 
@@ -356,7 +350,7 @@ mod tests {
 
         let body = b.body(vec![stm], vec![x_var]);
 
-        assert_eq!(body.stms.len(), 1);
+        assert_eq!(body.statements.len(), 1);
         assert_eq!(body.result.len(), 1);
         assert_eq!(body.result[0], x_var);
     }

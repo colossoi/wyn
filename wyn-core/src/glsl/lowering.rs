@@ -830,10 +830,8 @@ impl<'a> LowerCtx<'a> {
             // --- Tuples ---
             Expr::Tuple(elems) => {
                 // Lower as a constructor call for tuple type
-                let parts: Vec<_> = elems
-                    .iter()
-                    .map(|&e| self.lower_expr(body, e, output))
-                    .collect::<Result<_>>()?;
+                let parts: Vec<_> =
+                    elems.iter().map(|&e| self.lower_expr(body, e, output)).collect::<Result<_>>()?;
                 let type_str = self.type_to_glsl(ty);
                 Ok(format!("{}({})", type_str, parts.join(", ")))
             }

@@ -12,9 +12,9 @@ use crate::ast::{NodeCounter, NodeId, Span, TypeName};
 use crate::error::Result;
 use crate::mir::{self, ArrayBacking, ExprId, LocalDecl, LocalId, LocalKind, RangeKind};
 use crate::scope::ScopeStack;
-use crate::sir::{self, Body, Def, Exp, Lambda, Prim, SirType, Soac, Stm, VarId};
+use crate::sir::{self, Body, Def, Exp, Lambda, Prim, SirType, Soac, Statement, VarId};
 // TypeScheme used in original flattening but not needed here yet
-use crate::{bail_flatten, IdArena};
+use crate::{IdArena, bail_flatten};
 use polytype::Type;
 
 /// Flattens SIR to MIR with defunctionalization.
@@ -66,10 +66,12 @@ impl SirFlattener<'_> {
     /// Lookup a SIR VarId in the current scope, returning the corresponding MIR LocalId.
     /// Panics with a descriptive message if the variable is not found (compiler bug).
     fn get_local(&self, var: &VarId) -> LocalId {
-        self.var_to_local
-            .get(var)
-            .copied()
-            .unwrap_or_else(|| panic!("SIR variable {} not found in var_to_local mapping - compiler bug", var))
+        self.var_to_local.get(var).copied().unwrap_or_else(|| {
+            panic!(
+                "SIR variable {} not found in var_to_local mapping - compiler bug",
+                var
+            )
+        })
     }
 
     /// Start a new body. Returns the old body.
@@ -110,22 +112,62 @@ impl SirFlattener<'_> {
 
         for def in program.defs {
             match def {
-                Def::Function { id, name, params, ret_ty, body, span } => {
+                Def::Function {
+                    id,
+                    name,
+                    params,
+                    ret_ty,
+                    body,
+                    span,
+                } => {
                     let mir_def = self.flatten_function(id, name, params, ret_ty, body, span)?;
                     defs.push(mir_def);
                 }
-                Def::EntryPoint { id, name, execution_model, inputs, outputs, body, span } => {
-                    let mir_def = self.flatten_entry_point(id, name, execution_model, inputs, outputs, body, span)?;
+                Def::EntryPoint {
+                    id,
+                    name,
+                    execution_model,
+                    inputs,
+                    outputs,
+                    body,
+                    span,
+                } => {
+                    let mir_def =
+                        self.flatten_entry_point(id, name, execution_model, inputs, outputs, body, span)?;
                     defs.push(mir_def);
                 }
-                Def::Constant { id, name, ty, body, span } => {
+                Def::Constant {
+                    id,
+                    name,
+                    ty,
+                    body,
+                    span,
+                } => {
                     let mir_def = self.flatten_constant(id, name, ty, body, span)?;
                     defs.push(mir_def);
                 }
-                Def::Uniform { id, name, ty, set, binding } => {
-                    defs.push(mir::Def::Uniform { id, name, ty, set, binding });
+                Def::Uniform {
+                    id,
+                    name,
+                    ty,
+                    set,
+                    binding,
+                } => {
+                    defs.push(mir::Def::Uniform {
+                        id,
+                        name,
+                        ty,
+                        set,
+                        binding,
+                    });
                 }
-                Def::Storage { id, name, ty, set, binding } => {
+                Def::Storage {
+                    id,
+                    name,
+                    ty,
+                    set,
+                    binding,
+                } => {
                     // SIR Storage doesn't have layout/access, use defaults
                     defs.push(mir::Def::Storage {
                         id,
@@ -211,12 +253,7 @@ impl SirFlattener<'_> {
         // Allocate inputs as locals
         let mut mir_inputs = Vec::new();
         for input in &inputs {
-            let local_id = self.alloc_local(
-                input.name.clone(),
-                input.ty.clone(),
-                LocalKind::Param,
-                span,
-            );
+            let local_id = self.alloc_local(input.name.clone(), input.ty.clone(), LocalKind::Param, span);
             self.var_to_local.insert(input.var, local_id);
             mir_inputs.push(mir::EntryInput {
                 local: local_id,
@@ -302,12 +339,12 @@ impl SirFlattener<'_> {
     fn flatten_body(&mut self, body: &Body, span: Span) -> Result<ExprId> {
         // First pass: pre-allocate LocalIds for all pattern bindings
         // This ensures var_to_local is populated before we reference any VarIds
-        for stm in &body.stms {
+        for stm in &body.statements {
             self.pre_allocate_pattern_bindings(stm)?;
         }
 
         // If no statements, just return the result
-        if body.stms.is_empty() {
+        if body.statements.is_empty() {
             return self.flatten_result(&body.result, span);
         }
 
@@ -316,7 +353,7 @@ impl SirFlattener<'_> {
 
         // Process statements in reverse order to build nested lets
         let mut current = result_id;
-        for stm in body.stms.iter().rev() {
+        for stm in body.statements.iter().rev() {
             current = self.flatten_stm(stm, current)?;
         }
 
@@ -324,15 +361,11 @@ impl SirFlattener<'_> {
     }
 
     /// Pre-allocate LocalIds for all pattern bindings in a statement.
-    fn pre_allocate_pattern_bindings(&mut self, stm: &Stm) -> Result<()> {
+    fn pre_allocate_pattern_bindings(&mut self, stm: &Statement) -> Result<()> {
         for bind in &stm.pat.binds {
             if !self.var_to_local.contains_key(&bind.var) {
-                let local_id = self.alloc_local(
-                    bind.name_hint.clone(),
-                    bind.ty.clone(),
-                    LocalKind::Let,
-                    stm.span,
-                );
+                let local_id =
+                    self.alloc_local(bind.name_hint.clone(), bind.ty.clone(), LocalKind::Let, stm.span);
                 self.var_to_local.insert(bind.var, local_id);
             }
         }
@@ -348,7 +381,9 @@ impl SirFlattener<'_> {
             }
             1 => {
                 // Single result - just reference the local
-                let local_id = self.var_to_local.get(&result[0])
+                let local_id = self
+                    .var_to_local
+                    .get(&result[0])
                     .copied()
                     .ok_or_else(|| crate::err_flatten!("Unknown variable in result"))?;
                 let ty = self.current_body.get_local(local_id).ty.clone();
@@ -360,16 +395,18 @@ impl SirFlattener<'_> {
                 let elem_ids: Vec<_> = result
                     .iter()
                     .map(|v| {
-                        let local_id = self.var_to_local.get(v).copied()
+                        let local_id = self
+                            .var_to_local
+                            .get(v)
+                            .copied()
                             .ok_or_else(|| crate::err_flatten!("Unknown variable in result"))?;
                         let ty = self.current_body.get_local(local_id).ty.clone();
                         Ok(self.alloc_expr(mir::Expr::Local(local_id), ty, span))
                     })
                     .collect::<Result<Vec<_>>>()?;
 
-                let elem_tys: Vec<_> = elem_ids.iter()
-                    .map(|id| self.current_body.get_type(*id).clone())
-                    .collect();
+                let elem_tys: Vec<_> =
+                    elem_ids.iter().map(|id| self.current_body.get_type(*id).clone()).collect();
                 let tuple_ty = Type::Constructed(TypeName::Tuple(elem_tys.len()), elem_tys);
 
                 Ok(self.alloc_expr(
@@ -385,7 +422,7 @@ impl SirFlattener<'_> {
     }
 
     /// Flatten a single SIR statement, wrapping the body in a Let.
-    fn flatten_stm(&mut self, stm: &Stm, body_id: ExprId) -> Result<ExprId> {
+    fn flatten_stm(&mut self, stm: &Statement, body_id: ExprId) -> Result<ExprId> {
         let span = stm.span;
 
         // Flatten the expression
@@ -395,7 +432,9 @@ impl SirFlattener<'_> {
         if stm.pat.binds.len() == 1 {
             let bind = &stm.pat.binds[0];
             // Use the pre-allocated local from pre_allocate_pattern_bindings
-            let local_id = *self.var_to_local.get(&bind.var)
+            let local_id = *self
+                .var_to_local
+                .get(&bind.var)
                 .ok_or_else(|| crate::err_flatten!("Missing pre-allocated local for {:?}", bind.var))?;
 
             let body_ty = self.current_body.get_type(body_id).clone();
@@ -412,12 +451,7 @@ impl SirFlattener<'_> {
             // No bindings - just sequence the expressions
             // Create a dummy local for the rhs
             let dummy_name = self.fresh_name("_");
-            let local_id = self.alloc_local(
-                dummy_name,
-                stm.ty.clone(),
-                LocalKind::Let,
-                span,
-            );
+            let local_id = self.alloc_local(dummy_name, stm.ty.clone(), LocalKind::Let, span);
             let body_ty = self.current_body.get_type(body_id).clone();
             Ok(self.alloc_expr(
                 mir::Expr::Let {
@@ -437,19 +471,14 @@ impl SirFlattener<'_> {
     /// Flatten a tuple pattern into nested tuple_access + let bindings.
     fn flatten_tuple_pattern(
         &mut self,
-        stm: &Stm,
+        stm: &Statement,
         rhs_id: ExprId,
         body_id: ExprId,
         span: Span,
     ) -> Result<ExprId> {
         // First bind the tuple to a temp
         let tuple_name = self.fresh_name("tup");
-        let tuple_local = self.alloc_local(
-            tuple_name,
-            stm.ty.clone(),
-            LocalKind::Let,
-            span,
-        );
+        let tuple_local = self.alloc_local(tuple_name, stm.ty.clone(), LocalKind::Let, span);
 
         // Build from inside out
         let mut current = body_id;
@@ -457,21 +486,14 @@ impl SirFlattener<'_> {
         // For each binding, extract from tuple and bind
         for (i, bind) in stm.pat.binds.iter().enumerate().rev() {
             // Use the pre-allocated local
-            let local_id = *self.var_to_local.get(&bind.var)
-                .ok_or_else(|| crate::err_flatten!("Missing pre-allocated local for tuple bind {:?}", bind.var))?;
+            let local_id = *self.var_to_local.get(&bind.var).ok_or_else(|| {
+                crate::err_flatten!("Missing pre-allocated local for tuple bind {:?}", bind.var)
+            })?;
 
             // tuple_access(tuple, index)
-            let tuple_ref = self.alloc_expr(
-                mir::Expr::Local(tuple_local),
-                stm.ty.clone(),
-                span,
-            );
+            let tuple_ref = self.alloc_expr(mir::Expr::Local(tuple_local), stm.ty.clone(), span);
             let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
-            let index_expr = self.alloc_expr(
-                mir::Expr::Int(i.to_string()),
-                i32_ty,
-                span,
-            );
+            let index_expr = self.alloc_expr(mir::Expr::Int(i.to_string()), i32_ty, span);
             let access_expr = self.alloc_expr(
                 mir::Expr::Intrinsic {
                     name: "tuple_access".to_string(),
@@ -512,15 +534,23 @@ impl SirFlattener<'_> {
             Exp::Prim(prim) => self.flatten_prim(prim, ty, span),
 
             Exp::Var(var_id) => {
-                let local_id = self.var_to_local.get(var_id)
+                let local_id = self
+                    .var_to_local
+                    .get(var_id)
                     .copied()
                     .ok_or_else(|| crate::err_flatten!("Unknown variable {:?}", var_id))?;
                 let local_ty = self.current_body.get_local(local_id).ty.clone();
                 Ok(self.alloc_expr(mir::Expr::Local(local_id), local_ty, span))
             }
 
-            Exp::If { cond, then_body, else_body } => {
-                let cond_local = self.var_to_local.get(cond)
+            Exp::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
+                let cond_local = self
+                    .var_to_local
+                    .get(cond)
                     .copied()
                     .ok_or_else(|| crate::err_flatten!("Unknown condition variable"))?;
                 let cond_ty = self.current_body.get_local(cond_local).ty.clone();
@@ -540,7 +570,11 @@ impl SirFlattener<'_> {
                 ))
             }
 
-            Exp::Loop { params: _, init, body: _ } => {
+            Exp::Loop {
+                params: _,
+                init,
+                body: _,
+            } => {
                 // Convert to MIR Loop
                 // For now, emit as intrinsic - proper loop lowering is complex
                 let init_ids: Vec<_> = init
@@ -567,11 +601,7 @@ impl SirFlattener<'_> {
             Exp::Apply { func, args } => {
                 if args.is_empty() {
                     // No-args Apply is a global reference (uniform, storage, constant)
-                    Ok(self.alloc_expr(
-                        mir::Expr::Global(func.clone()),
-                        ty.clone(),
-                        span,
-                    ))
+                    Ok(self.alloc_expr(mir::Expr::Global(func.clone()), ty.clone(), span))
                 } else {
                     let arg_ids: Vec<_> = args
                         .iter()
@@ -610,7 +640,10 @@ impl SirFlattener<'_> {
                 let tuple_ty = self.current_body.get_local(tuple_local).ty.clone();
                 let tuple_id = self.alloc_expr(mir::Expr::Local(tuple_local), tuple_ty, span);
                 Ok(self.alloc_expr(
-                    mir::Expr::TupleProj { tuple: tuple_id, index: *index },
+                    mir::Expr::TupleProj {
+                        tuple: tuple_id,
+                        index: *index,
+                    },
                     ty.clone(),
                     span,
                 ))
@@ -621,27 +654,13 @@ impl SirFlattener<'_> {
     /// Flatten a primitive expression.
     fn flatten_prim(&mut self, prim: &Prim, ty: &SirType, span: Span) -> Result<ExprId> {
         match prim {
-            Prim::ConstBool(b) => {
-                Ok(self.alloc_expr(mir::Expr::Bool(*b), ty.clone(), span))
-            }
-            Prim::ConstI32(n) => {
-                Ok(self.alloc_expr(mir::Expr::Int(n.to_string()), ty.clone(), span))
-            }
-            Prim::ConstI64(n) => {
-                Ok(self.alloc_expr(mir::Expr::Int(n.to_string()), ty.clone(), span))
-            }
-            Prim::ConstU32(n) => {
-                Ok(self.alloc_expr(mir::Expr::Int(n.to_string()), ty.clone(), span))
-            }
-            Prim::ConstU64(n) => {
-                Ok(self.alloc_expr(mir::Expr::Int(n.to_string()), ty.clone(), span))
-            }
-            Prim::ConstF32(n) => {
-                Ok(self.alloc_expr(mir::Expr::Float(n.to_string()), ty.clone(), span))
-            }
-            Prim::ConstF64(n) => {
-                Ok(self.alloc_expr(mir::Expr::Float(n.to_string()), ty.clone(), span))
-            }
+            Prim::ConstBool(b) => Ok(self.alloc_expr(mir::Expr::Bool(*b), ty.clone(), span)),
+            Prim::ConstI32(n) => Ok(self.alloc_expr(mir::Expr::Int(n.to_string()), ty.clone(), span)),
+            Prim::ConstI64(n) => Ok(self.alloc_expr(mir::Expr::Int(n.to_string()), ty.clone(), span)),
+            Prim::ConstU32(n) => Ok(self.alloc_expr(mir::Expr::Int(n.to_string()), ty.clone(), span)),
+            Prim::ConstU64(n) => Ok(self.alloc_expr(mir::Expr::Int(n.to_string()), ty.clone(), span)),
+            Prim::ConstF32(n) => Ok(self.alloc_expr(mir::Expr::Float(n.to_string()), ty.clone(), span)),
+            Prim::ConstF64(n) => Ok(self.alloc_expr(mir::Expr::Float(n.to_string()), ty.clone(), span)),
 
             Prim::Add(a, b) => self.flatten_binop("+", *a, *b, ty, span),
             Prim::Sub(a, b) => self.flatten_binop("-", *a, *b, ty, span),
@@ -741,11 +760,7 @@ impl SirFlattener<'_> {
                             self.alloc_expr(mir::Expr::Local(local_id), ty, span)
                         })
                         .collect();
-                    return Ok(self.alloc_expr(
-                        mir::Expr::Vector(elem_ids),
-                        ty.clone(),
-                        span,
-                    ));
+                    return Ok(self.alloc_expr(mir::Expr::Vector(elem_ids), ty.clone(), span));
                 }
 
                 // __lambda_N(captures...) -> defunctionalize and create Closure
@@ -964,7 +979,14 @@ impl SirFlattener<'_> {
         }
     }
 
-    fn flatten_binop(&mut self, op: &str, lhs: VarId, rhs: VarId, ty: &SirType, span: Span) -> Result<ExprId> {
+    fn flatten_binop(
+        &mut self,
+        op: &str,
+        lhs: VarId,
+        rhs: VarId,
+        ty: &SirType,
+        span: Span,
+    ) -> Result<ExprId> {
         let lhs_local = self.get_local(&lhs);
         let lhs_ty = self.current_body.get_local(lhs_local).ty.clone();
         let lhs_id = self.alloc_expr(mir::Expr::Local(lhs_local), lhs_ty, span);
@@ -1003,7 +1025,9 @@ impl SirFlattener<'_> {
                 let lambda_name = self.defunctionalize_lambda(&map.f, span)?;
 
                 // Build closure for the lambda
-                let capture_ids: Vec<_> = map.f.captures
+                let capture_ids: Vec<_> = map
+                    .f
+                    .captures
                     .iter()
                     .map(|v| {
                         let local_id = self.get_local(v);
@@ -1024,7 +1048,8 @@ impl SirFlattener<'_> {
                 );
 
                 // Build array arguments
-                let arr_ids: Vec<_> = map.arrs
+                let arr_ids: Vec<_> = map
+                    .arrs
                     .iter()
                     .map(|v| {
                         let local_id = self.get_local(v);
@@ -1049,7 +1074,9 @@ impl SirFlattener<'_> {
             Soac::Reduce(reduce) => {
                 let lambda_name = self.defunctionalize_lambda(&reduce.f, span)?;
 
-                let capture_ids: Vec<_> = reduce.f.captures
+                let capture_ids: Vec<_> = reduce
+                    .f
+                    .captures
                     .iter()
                     .map(|v| {
                         let local_id = self.get_local(v);
@@ -1090,7 +1117,9 @@ impl SirFlattener<'_> {
             Soac::Scan(scan) => {
                 let lambda_name = self.defunctionalize_lambda(&scan.f, span)?;
 
-                let capture_ids: Vec<_> = scan.f.captures
+                let capture_ids: Vec<_> = scan
+                    .f
+                    .captures
                     .iter()
                     .map(|v| {
                         let local_id = self.get_local(v);
@@ -1187,16 +1216,14 @@ impl SirFlattener<'_> {
             }
 
             // Segmented operations - emit as intrinsics for now
-            Soac::SegMap(_) | Soac::SegReduce(_) | Soac::SegScan(_) => {
-                Ok(self.alloc_expr(
-                    mir::Expr::Intrinsic {
-                        name: "__segmented_op".to_string(),
-                        args: vec![],
-                    },
-                    ty.clone(),
-                    span,
-                ))
-            }
+            Soac::SegMap(_) | Soac::SegReduce(_) | Soac::SegScan(_) => Ok(self.alloc_expr(
+                mir::Expr::Intrinsic {
+                    name: "__segmented_op".to_string(),
+                    args: vec![],
+                },
+                ty.clone(),
+                span,
+            )),
         }
     }
 
@@ -1204,9 +1231,7 @@ impl SirFlattener<'_> {
     fn flatten_size(&mut self, size: &sir::Size, span: Span) -> Result<ExprId> {
         let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
         match size {
-            sir::Size::Const(n) => {
-                Ok(self.alloc_expr(mir::Expr::Int(n.to_string()), i32_ty, span))
-            }
+            sir::Size::Const(n) => Ok(self.alloc_expr(mir::Expr::Int(n.to_string()), i32_ty, span)),
             sir::Size::Sym(_var) => {
                 // Symbolic size - would need to look up the actual variable
                 // For now, emit a placeholder
@@ -1348,5 +1373,4 @@ impl SirFlattener<'_> {
 
         Ok(lambda_name)
     }
-
 }

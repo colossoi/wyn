@@ -849,7 +849,10 @@ impl PartialEvaluator {
                 let tuple_ty = body.get_type(tuple).clone();
                 let tuple_id = self.reify(&tuple_val, tuple_ty, span, node_id);
                 let new_id = self.emit(
-                    Expr::TupleProj { tuple: tuple_id, index },
+                    Expr::TupleProj {
+                        tuple: tuple_id,
+                        index,
+                    },
                     ty,
                     span,
                     node_id,

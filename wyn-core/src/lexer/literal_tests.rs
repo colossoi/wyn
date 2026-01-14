@@ -3,10 +3,22 @@ use super::literal::*;
 
 #[test]
 fn test_hexadecimal_integers() {
-    assert_eq!(parse_int_literal("0x10"), Ok(("", Token::IntLiteral("16".into()))));
-    assert_eq!(parse_int_literal("0xFF"), Ok(("", Token::IntLiteral("255".into()))));
-    assert_eq!(parse_int_literal("0x1A_2B"), Ok(("", Token::IntLiteral("6699".into()))));
-    assert_eq!(parse_int_literal("0X00FF"), Ok(("", Token::IntLiteral("255".into()))));
+    assert_eq!(
+        parse_int_literal("0x10"),
+        Ok(("", Token::IntLiteral("16".into())))
+    );
+    assert_eq!(
+        parse_int_literal("0xFF"),
+        Ok(("", Token::IntLiteral("255".into())))
+    );
+    assert_eq!(
+        parse_int_literal("0x1A_2B"),
+        Ok(("", Token::IntLiteral("6699".into())))
+    );
+    assert_eq!(
+        parse_int_literal("0X00FF"),
+        Ok(("", Token::IntLiteral("255".into())))
+    );
 }
 
 #[test]
@@ -34,9 +46,18 @@ fn test_u32_high_bit_literal() {
 
 #[test]
 fn test_binary_integers() {
-    assert_eq!(parse_int_literal("0b1010"), Ok(("", Token::IntLiteral("10".into()))));
-    assert_eq!(parse_int_literal("0B1111"), Ok(("", Token::IntLiteral("15".into()))));
-    assert_eq!(parse_int_literal("0b10_11"), Ok(("", Token::IntLiteral("11".into()))));
+    assert_eq!(
+        parse_int_literal("0b1010"),
+        Ok(("", Token::IntLiteral("10".into())))
+    );
+    assert_eq!(
+        parse_int_literal("0B1111"),
+        Ok(("", Token::IntLiteral("15".into())))
+    );
+    assert_eq!(
+        parse_int_literal("0b10_11"),
+        Ok(("", Token::IntLiteral("11".into())))
+    );
 }
 
 #[test]
@@ -45,14 +66,23 @@ fn test_integers_with_underscores() {
         parse_int_literal("1_000_000"),
         Ok(("", Token::IntLiteral("1000000".into())))
     );
-    assert_eq!(parse_int_literal("42_42"), Ok(("", Token::IntLiteral("4242".into()))));
-    assert_eq!(parse_int_literal("123_456"), Ok(("", Token::IntLiteral("123456".into()))));
+    assert_eq!(
+        parse_int_literal("42_42"),
+        Ok(("", Token::IntLiteral("4242".into())))
+    );
+    assert_eq!(
+        parse_int_literal("123_456"),
+        Ok(("", Token::IntLiteral("123456".into())))
+    );
 }
 
 #[test]
 fn test_basic_decimals() {
     assert_eq!(parse_int_literal("42"), Ok(("", Token::IntLiteral("42".into()))));
-    assert_eq!(parse_int_literal("-17"), Ok(("", Token::IntLiteral("-17".into()))));
+    assert_eq!(
+        parse_int_literal("-17"),
+        Ok(("", Token::IntLiteral("-17".into())))
+    );
 }
 
 #[test]

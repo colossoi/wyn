@@ -415,7 +415,10 @@ impl ConstantFolder {
             Expr::TupleProj { tuple, index } => {
                 let new_tuple = self.expr_map[tuple];
                 Ok(body.alloc_expr(
-                    Expr::TupleProj { tuple: new_tuple, index: *index },
+                    Expr::TupleProj {
+                        tuple: new_tuple,
+                        index: *index,
+                    },
                     ty.clone(),
                     span,
                     node_id,

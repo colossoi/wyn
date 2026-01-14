@@ -143,9 +143,7 @@ fn test_let_binding() {
     fn find_binop(body: &mir::Body, expr_id: mir::ExprId) -> bool {
         match body.get_expr(expr_id) {
             mir::Expr::BinOp { op, .. } => op == "+",
-            mir::Expr::Let { rhs, body: inner, .. } => {
-                find_binop(body, *rhs) || find_binop(body, *inner)
-            }
+            mir::Expr::Let { rhs, body: inner, .. } => find_binop(body, *rhs) || find_binop(body, *inner),
             _ => false,
         }
     }
@@ -236,9 +234,7 @@ fn test_nested_let() {
     fn find_binop(body: &mir::Body, expr_id: mir::ExprId) -> bool {
         match body.get_expr(expr_id) {
             mir::Expr::BinOp { op, .. } => op == "+",
-            mir::Expr::Let { rhs, body: inner, .. } => {
-                find_binop(body, *rhs) || find_binop(body, *inner)
-            }
+            mir::Expr::Let { rhs, body: inner, .. } => find_binop(body, *rhs) || find_binop(body, *inner),
             _ => false,
         }
     }
@@ -255,9 +251,7 @@ fn test_if_expression() {
     fn find_if(body: &mir::Body, expr_id: mir::ExprId) -> bool {
         match body.get_expr(expr_id) {
             mir::Expr::If { .. } => true,
-            mir::Expr::Let { rhs, body: inner, .. } => {
-                find_if(body, *rhs) || find_if(body, *inner)
-            }
+            mir::Expr::Let { rhs, body: inner, .. } => find_if(body, *rhs) || find_if(body, *inner),
             _ => false,
         }
     }
@@ -290,9 +284,10 @@ fn test_array_literal() {
 
     fn find_array_literal(body: &mir::Body, expr_id: mir::ExprId) -> Option<usize> {
         match body.get_expr(expr_id) {
-            mir::Expr::Array { backing: mir::ArrayBacking::Literal(elems), .. } => {
-                Some(elems.len())
-            }
+            mir::Expr::Array {
+                backing: mir::ArrayBacking::Literal(elems),
+                ..
+            } => Some(elems.len()),
             mir::Expr::Let { rhs, body: inner, .. } => {
                 find_array_literal(body, *rhs).or_else(|| find_array_literal(body, *inner))
             }
@@ -324,13 +319,14 @@ fn test_while_loop() {
         match body.get_expr(expr_id) {
             mir::Expr::Loop { .. } => true,
             mir::Expr::Intrinsic { name, .. } => name == "__loop",
-            mir::Expr::Let { rhs, body: inner, .. } => {
-                find_loop(body, *rhs) || find_loop(body, *inner)
-            }
+            mir::Expr::Let { rhs, body: inner, .. } => find_loop(body, *rhs) || find_loop(body, *inner),
             _ => false,
         }
     }
-    assert!(find_loop(body, body.root), "Should contain loop or __loop intrinsic");
+    assert!(
+        find_loop(body, body.root),
+        "Should contain loop or __loop intrinsic"
+    );
 }
 
 #[test]
@@ -344,13 +340,14 @@ fn test_for_range_loop() {
         match body.get_expr(expr_id) {
             mir::Expr::Loop { .. } => true,
             mir::Expr::Intrinsic { name, .. } => name == "__loop",
-            mir::Expr::Let { rhs, body: inner, .. } => {
-                find_loop(body, *rhs) || find_loop(body, *inner)
-            }
+            mir::Expr::Let { rhs, body: inner, .. } => find_loop(body, *rhs) || find_loop(body, *inner),
             _ => false,
         }
     }
-    assert!(find_loop(body, body.root), "Should contain loop or __loop intrinsic");
+    assert!(
+        find_loop(body, body.root),
+        "Should contain loop or __loop intrinsic"
+    );
 }
 
 #[test]
@@ -383,9 +380,7 @@ fn test_unary_op() {
     fn find_unary(body: &mir::Body, expr_id: mir::ExprId) -> bool {
         match body.get_expr(expr_id) {
             mir::Expr::UnaryOp { op, .. } => op == "-",
-            mir::Expr::Let { rhs, body: inner, .. } => {
-                find_unary(body, *rhs) || find_unary(body, *inner)
-            }
+            mir::Expr::Let { rhs, body: inner, .. } => find_unary(body, *rhs) || find_unary(body, *inner),
             _ => false,
         }
     }
@@ -532,10 +527,7 @@ def test_map(arr: [4]i32) [4]i32 =
             }
         }
     }
-    assert!(
-        has_closure,
-        "Expected closure expression with lambda prefix"
-    );
+    assert!(has_closure, "Expected closure expression with lambda prefix");
 }
 
 #[test]
@@ -1244,7 +1236,10 @@ def sum_array(arr: [4]f32) f32 =
             }
         }
     }
-    assert!(has_reduce_call, "Expected _w_intrinsic_reduce call with 3 arguments");
+    assert!(
+        has_reduce_call,
+        "Expected _w_intrinsic_reduce call with 3 arguments"
+    );
 }
 
 #[test]

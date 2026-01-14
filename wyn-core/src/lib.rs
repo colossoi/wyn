@@ -23,8 +23,8 @@ pub use types::checker as type_checker;
 pub mod alias_checker;
 pub mod ast_const_fold;
 pub mod ast_to_sir;
-pub mod sir_flattening;
 pub mod desugar;
+pub mod flattening;
 pub mod lowering_common;
 
 pub mod binding_lifter;
@@ -604,7 +604,7 @@ impl SirTransformed {
     /// Returns the flattened MIR and a BackEnd for subsequent passes.
     pub fn flatten(self) -> Result<(Flattened, BackEnd)> {
         let mut node_counter = self.node_counter;
-        let flattener = sir_flattening::SirFlattener::new(&mut node_counter);
+        let flattener = flattening::SirFlattener::new(&mut node_counter);
         let mir = flattener.flatten_program(self.sir)?;
         Ok((Flattened { mir }, BackEnd::new(node_counter)))
     }

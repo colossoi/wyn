@@ -141,7 +141,10 @@ pub enum Expr {
     /// Tuple literal (a, b, c).
     Tuple(Vec<ExprId>),
     /// Tuple projection (t.0, t.1, etc).
-    TupleProj { tuple: ExprId, index: usize },
+    TupleProj {
+        tuple: ExprId,
+        index: usize,
+    },
 
     // --- Operations ---
     /// Binary operation.

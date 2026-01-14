@@ -2445,7 +2445,12 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                         PolyType::Constructed(TypeName::Vec, type_args) if type_args.len() == 2 => {
                             constructor.ast_type_to_spirv(&type_args[1])
                         }
-                        _ => return Err(err_spirv!("Cannot access field {} on non-vector type", field_name)),
+                        _ => {
+                            return Err(err_spirv!(
+                                "Cannot access field {} on non-vector type",
+                                field_name
+                            ));
+                        }
                     };
 
                     // CompositeExtract
@@ -2571,10 +2576,8 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
         // --- Tuples ---
         Expr::Tuple(elems) => {
             // Lower each element
-            let elem_ids: Vec<_> = elems
-                .iter()
-                .map(|&e| lower_expr(constructor, body, e))
-                .collect::<Result<_>>()?;
+            let elem_ids: Vec<_> =
+                elems.iter().map(|&e| lower_expr(constructor, body, e)).collect::<Result<_>>()?;
 
             // Construct the tuple as a composite
             let result_type = constructor.ast_type_to_spirv(expr_ty);
@@ -3143,7 +3146,11 @@ fn try_extract_const_int(body: &Body, expr_id: ExprId) -> Option<i32> {
 fn find_local_value(body: &Body, local_id: mir::LocalId) -> Option<i32> {
     fn search_expr(body: &Body, expr_id: ExprId, target: mir::LocalId) -> Option<i32> {
         match body.get_expr(expr_id) {
-            Expr::Let { local, rhs, body: inner } => {
+            Expr::Let {
+                local,
+                rhs,
+                body: inner,
+            } => {
                 if *local == target {
                     // Found the binding, try to extract the value
                     try_extract_const_int(body, *rhs)

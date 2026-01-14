@@ -44,11 +44,11 @@ impl std::fmt::Display for VarId {
 
 /// Unique identifier for a statement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct StmId(pub u32);
+pub struct StatementId(pub u32);
 
-impl From<u32> for StmId {
+impl From<u32> for StatementId {
     fn from(id: u32) -> Self {
-        StmId(id)
+        StatementId(id)
     }
 }
 
@@ -135,7 +135,9 @@ pub enum Def {
 pub enum ExecutionModel {
     Vertex,
     Fragment,
-    Compute { local_size: (u32, u32, u32) },
+    Compute {
+        local_size: (u32, u32, u32),
+    },
 }
 
 /// An input to a shader entry point.
@@ -169,7 +171,7 @@ pub enum IoDecoration {
 #[derive(Debug, Clone)]
 pub struct Body {
     /// Statements in execution order.
-    pub stms: Vec<Stm>,
+    pub statements: Vec<Statement>,
     /// Result values (multiple for tuple returns).
     pub result: Vec<VarId>,
 }
@@ -178,7 +180,7 @@ impl Body {
     /// Create an empty body with no statements and no results.
     pub fn empty() -> Self {
         Body {
-            stms: Vec::new(),
+            statements: Vec::new(),
             result: Vec::new(),
         }
     }
@@ -186,7 +188,7 @@ impl Body {
     /// Create a body with a single result and no statements.
     pub fn just(var: VarId) -> Self {
         Body {
-            stms: Vec::new(),
+            statements: Vec::new(),
             result: vec![var],
         }
     }
@@ -194,9 +196,9 @@ impl Body {
 
 /// A statement: binds pattern to expression result.
 #[derive(Debug, Clone)]
-pub struct Stm {
+pub struct Statement {
     /// Unique statement identifier.
-    pub id: StmId,
+    pub id: StatementId,
     /// Pattern being bound (defines variables).
     pub pat: Pat,
     /// Expression being evaluated.
@@ -228,11 +230,7 @@ impl Pat {
 
     /// Get the single variable if this is a single-bind pattern.
     pub fn single_var(&self) -> Option<VarId> {
-        if self.binds.len() == 1 {
-            Some(self.binds[0].var)
-        } else {
-            None
-        }
+        if self.binds.len() == 1 { Some(self.binds[0].var) } else { None }
     }
 }
 
@@ -305,7 +303,10 @@ pub enum Exp {
     Tuple(Vec<VarId>),
 
     /// Tuple projection.
-    TupleProj { tuple: VarId, index: usize },
+    TupleProj {
+        tuple: VarId,
+        index: usize,
+    },
 }
 
 /// Primitive (scalar) operations.
@@ -344,10 +345,16 @@ pub enum Prim {
     Not(VarId),
 
     // Array indexing
-    Index { arr: VarId, idx: VarId },
+    Index {
+        arr: VarId,
+        idx: VarId,
+    },
 
     // Intrinsic call (for ops not worth special-casing)
-    Intrinsic { name: String, args: Vec<VarId> },
+    Intrinsic {
+        name: String,
+        args: Vec<VarId>,
+    },
 }
 
 // =============================================================================
@@ -380,11 +387,20 @@ pub enum Soac {
 
     // Array constructors that often fuse away
     /// Generate [0, 1, 2, ..., n-1].
-    Iota { n: Size, elem_ty: ScalarTy },
+    Iota {
+        n: Size,
+        elem_ty: ScalarTy,
+    },
     /// Generate [v, v, v, ...] of length n.
-    Replicate { n: Size, value: VarId },
+    Replicate {
+        n: Size,
+        value: VarId,
+    },
     /// Reshape array to new dimensions.
-    Reshape { new_shape: Vec<Size>, arr: VarId },
+    Reshape {
+        new_shape: Vec<Size>,
+        arr: VarId,
+    },
 }
 
 /// Parallel map operation.

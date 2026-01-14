@@ -13,8 +13,8 @@ use crate::error::Result;
 use crate::sir::builder::SirBuilder;
 use crate::sir::types::{AssocInfo, ScalarTy, Size};
 use crate::sir::{
-    self, Body, Def, EntryInput, EntryOutput, ExecutionModel, Exp, IoDecoration, Lambda, Map,
-    Param, Pat, Prim, Reduce, Scan, SirType, Soac, Stm, VarId,
+    self, Body, Def, EntryInput, EntryOutput, ExecutionModel, Exp, IoDecoration, Lambda, Map, Param, Pat,
+    Prim, Reduce, Scan, SirType, Soac, Statement, VarId,
 };
 use crate::types::TypeScheme;
 use crate::{bail_flatten, err_parse_at};
@@ -33,7 +33,7 @@ pub struct AstToSir {
     /// Generated definitions.
     defs: Vec<Def>,
     /// Current statement accumulator.
-    current_stms: Vec<Stm>,
+    current_stms: Vec<Statement>,
     /// Lambda registry: stores all lambdas for defunctionalization.
     lambdas: HashMap<sir::LambdaId, Lambda>,
 }
@@ -56,7 +56,10 @@ impl AstToSir {
         for decl in &program.declarations {
             self.lower_declaration(decl)?;
         }
-        Ok(sir::Program { defs: self.defs, lambdas: self.lambdas })
+        Ok(sir::Program {
+            defs: self.defs,
+            lambdas: self.lambdas,
+        })
     }
 
     fn lower_declaration(&mut self, decl: &ast::Declaration) -> Result<()> {
@@ -79,11 +82,8 @@ impl AstToSir {
         self.push_scope();
 
         // Create parameters from patterns
-        let params: Vec<_> = decl
-            .params
-            .iter()
-            .map(|p| self.lower_pattern_to_param(p))
-            .collect::<Result<_>>()?;
+        let params: Vec<_> =
+            decl.params.iter().map(|p| self.lower_pattern_to_param(p)).collect::<Result<_>>()?;
 
         // Add params to scope
         for param in &params {
@@ -231,7 +231,10 @@ impl AstToSir {
         let old_stms = std::mem::take(&mut self.current_stms);
         let result_var = self.lower_expr(expr)?;
         let stms = std::mem::replace(&mut self.current_stms, old_stms);
-        Ok(Body { stms, result: vec![result_var] })
+        Ok(Body {
+            statements: stms,
+            result: vec![result_var],
+        })
     }
 
     /// Lower a lambda body with tuple pattern destructuring.
@@ -253,7 +256,10 @@ impl AstToSir {
         // Lower the body expression
         let result_var = self.lower_expr(body_expr)?;
         let stms = std::mem::replace(&mut self.current_stms, old_stms);
-        Ok(Body { stms, result: vec![result_var] })
+        Ok(Body {
+            statements: stms,
+            result: vec![result_var],
+        })
     }
 
     /// Lower an expression, returning the VarId of the result.
@@ -264,14 +270,14 @@ impl AstToSir {
 
         match &expr.kind {
             ExprKind::IntLiteral(n) => {
-                let val: i64 = n.as_str().parse()
+                let val: i64 = n
+                    .as_str()
+                    .parse()
                     .map_err(|_| err_parse_at!(span, "Invalid integer literal: {}", n.as_str()))?;
                 self.emit_stm(Exp::Prim(Prim::ConstI32(val as i32)), ty, span)
             }
 
-            ExprKind::FloatLiteral(f) => {
-                self.emit_stm(Exp::Prim(Prim::ConstF32(*f)), ty, span)
-            }
+            ExprKind::FloatLiteral(f) => self.emit_stm(Exp::Prim(Prim::ConstF32(*f)), ty, span),
 
             ExprKind::BoolLiteral(b) => self.emit_stm(Exp::Prim(Prim::ConstBool(*b)), ty, span),
 
@@ -293,18 +299,22 @@ impl AstToSir {
             }
 
             ExprKind::Identifier(quals, name) => {
-                let full_name = if quals.is_empty() {
-                    name.clone()
-                } else {
-                    format!("{}.{}", quals.join("."), name)
-                };
+                let full_name =
+                    if quals.is_empty() { name.clone() } else { format!("{}.{}", quals.join("."), name) };
 
                 // Check if it's a local variable
                 if let Some(var) = self.lookup_var(&full_name) {
                     Ok(var)
                 } else {
                     // Global reference - emit as Apply with no args
-                    self.emit_stm(Exp::Apply { func: full_name, args: vec![] }, ty, span)
+                    self.emit_stm(
+                        Exp::Apply {
+                            func: full_name,
+                            args: vec![],
+                        },
+                        ty,
+                        span,
+                    )
                 }
             }
 
@@ -343,18 +353,12 @@ impl AstToSir {
             ExprKind::Application(func, args) => self.lower_application(func, args, ty, span),
 
             ExprKind::Tuple(elems) => {
-                let elem_vars: Vec<_> = elems
-                    .iter()
-                    .map(|e| self.lower_expr(e))
-                    .collect::<Result<_>>()?;
+                let elem_vars: Vec<_> = elems.iter().map(|e| self.lower_expr(e)).collect::<Result<_>>()?;
                 self.emit_stm(Exp::Tuple(elem_vars), ty, span)
             }
 
             ExprKind::ArrayLiteral(elems) => {
-                let elem_vars: Vec<_> = elems
-                    .iter()
-                    .map(|e| self.lower_expr(e))
-                    .collect::<Result<_>>()?;
+                let elem_vars: Vec<_> = elems.iter().map(|e| self.lower_expr(e)).collect::<Result<_>>()?;
                 self.emit_stm(
                     Exp::Prim(Prim::Intrinsic {
                         name: "array_literal".to_string(),
@@ -368,7 +372,14 @@ impl AstToSir {
             ExprKind::ArrayIndex(arr, idx) => {
                 let arr_var = self.lower_expr(arr)?;
                 let idx_var = self.lower_expr(idx)?;
-                self.emit_stm(Exp::Prim(Prim::Index { arr: arr_var, idx: idx_var }), ty, span)
+                self.emit_stm(
+                    Exp::Prim(Prim::Index {
+                        arr: arr_var,
+                        idx: idx_var,
+                    }),
+                    ty,
+                    span,
+                )
             }
 
             ExprKind::FieldAccess(base_expr, field) => {
@@ -376,11 +387,25 @@ impl AstToSir {
                 let base_ty = self.get_expr_type(base_expr);
                 // Check if it's a tuple field access (numeric index)
                 if let Ok(index) = field.parse::<usize>() {
-                    self.emit_stm(Exp::TupleProj { tuple: base_var, index }, ty, span)
+                    self.emit_stm(
+                        Exp::TupleProj {
+                            tuple: base_var,
+                            index,
+                        },
+                        ty,
+                        span,
+                    )
                 } else if matches!(base_ty, Type::Constructed(TypeName::Tuple(_), _)) {
                     // Tuple with named field - convert to index
                     let index = self.field_to_index(&base_ty, field);
-                    self.emit_stm(Exp::TupleProj { tuple: base_var, index }, ty, span)
+                    self.emit_stm(
+                        Exp::TupleProj {
+                            tuple: base_var,
+                            index,
+                        },
+                        ty,
+                        span,
+                    )
                 } else {
                     // Record/struct field access
                     self.emit_stm(
@@ -409,11 +434,8 @@ impl AstToSir {
 
             ExprKind::Loop(l) => {
                 // Lower loop - for now emit as intrinsic
-                let init_args = if let Some(init_expr) = &l.init {
-                    vec![self.lower_expr(init_expr)?]
-                } else {
-                    vec![]
-                };
+                let init_args =
+                    if let Some(init_expr) = &l.init { vec![self.lower_expr(init_expr)?] } else { vec![] };
                 self.emit_stm(
                     Exp::Prim(Prim::Intrinsic {
                         name: "__loop".to_string(),
@@ -425,10 +447,7 @@ impl AstToSir {
             }
 
             ExprKind::VecMatLiteral(elems) => {
-                let elem_vars: Vec<_> = elems
-                    .iter()
-                    .map(|e| self.lower_expr(e))
-                    .collect::<Result<_>>()?;
+                let elem_vars: Vec<_> = elems.iter().map(|e| self.lower_expr(e)).collect::<Result<_>>()?;
                 self.emit_stm(
                     Exp::Prim(Prim::Intrinsic {
                         name: "vec_literal".to_string(),
@@ -440,10 +459,8 @@ impl AstToSir {
             }
 
             ExprKind::RecordLiteral(fields) => {
-                let elem_vars: Vec<_> = fields
-                    .iter()
-                    .map(|(_, e)| self.lower_expr(e))
-                    .collect::<Result<_>>()?;
+                let elem_vars: Vec<_> =
+                    fields.iter().map(|(_, e)| self.lower_expr(e)).collect::<Result<_>>()?;
                 // Emit as intrinsic for now (could add Exp::Record later)
                 self.emit_stm(
                     Exp::Prim(Prim::Intrinsic {
@@ -522,12 +539,7 @@ impl AstToSir {
     }
 
     /// Lower a let-in expression.
-    fn lower_let_in(
-        &mut self,
-        let_in: &ast::LetInExpr,
-        _ty: SirType,
-        _span: Span,
-    ) -> Result<VarId> {
+    fn lower_let_in(&mut self, let_in: &ast::LetInExpr, _ty: SirType, _span: Span) -> Result<VarId> {
         // Lower the RHS
         let rhs_var = self.lower_expr(&let_in.value)?;
 
@@ -564,20 +576,12 @@ impl AstToSir {
     }
 
     /// Lower a lambda expression.
-    fn lower_lambda(
-        &mut self,
-        lambda: &ast::LambdaExpr,
-        ty: SirType,
-        span: Span,
-    ) -> Result<VarId> {
+    fn lower_lambda(&mut self, lambda: &ast::LambdaExpr, ty: SirType, span: Span) -> Result<VarId> {
         self.push_scope();
 
         // Create parameters from patterns
-        let params: Vec<_> = lambda
-            .params
-            .iter()
-            .map(|p| self.lower_pattern_to_param(p))
-            .collect::<Result<_>>()?;
+        let params: Vec<_> =
+            lambda.params.iter().map(|p| self.lower_pattern_to_param(p)).collect::<Result<_>>()?;
 
         // Bind parameter names (simple binding, no statements emitted yet)
         for param in &params {
@@ -634,10 +638,7 @@ impl AstToSir {
         }
 
         // Regular function call
-        let arg_vars: Vec<_> = args
-            .iter()
-            .map(|a| self.lower_expr(a))
-            .collect::<Result<_>>()?;
+        let arg_vars: Vec<_> = args.iter().map(|a| self.lower_expr(a)).collect::<Result<_>>()?;
 
         // Get function name
         let func_name = match &func.kind {
@@ -663,7 +664,14 @@ impl AstToSir {
             }
         };
 
-        self.emit_stm(Exp::Apply { func: func_name, args: arg_vars }, ty, span)
+        self.emit_stm(
+            Exp::Apply {
+                func: func_name,
+                args: arg_vars,
+            },
+            ty,
+            span,
+        )
     }
 
     /// Try to recognize and lower a SOAC call.
@@ -741,11 +749,8 @@ impl AstToSir {
             ExprKind::Lambda(lambda) => {
                 self.push_scope();
 
-                let params: Vec<_> = lambda
-                    .params
-                    .iter()
-                    .map(|p| self.lower_pattern_to_param(p))
-                    .collect::<Result<_>>()?;
+                let params: Vec<_> =
+                    lambda.params.iter().map(|p| self.lower_pattern_to_param(p)).collect::<Result<_>>()?;
 
                 for param in &params {
                     self.bind_var(&param.name_hint, param.var);
@@ -769,11 +774,8 @@ impl AstToSir {
 
             ExprKind::Identifier(quals, name) => {
                 // Function reference - create a lambda that calls it
-                let full_name = if quals.is_empty() {
-                    name.clone()
-                } else {
-                    format!("{}.{}", quals.join("."), name)
-                };
+                let full_name =
+                    if quals.is_empty() { name.clone() } else { format!("{}.{}", quals.join("."), name) };
 
                 // Infer param types from function type
                 let func_ty = self.get_expr_type(expr);
@@ -794,10 +796,13 @@ impl AstToSir {
 
                 // Create body: call the function with params
                 let call_var = self.builder.fresh_var();
-                let call_stm = Stm {
+                let call_stm = Statement {
                     id: self.builder.fresh_stm(),
                     pat: Pat::single(call_var, ret_ty.clone(), "_result".to_string()),
-                    exp: Exp::Apply { func: full_name, args: param_vars },
+                    exp: Exp::Apply {
+                        func: full_name,
+                        args: param_vars,
+                    },
                     ty: ret_ty.clone(),
                     span,
                 };
@@ -807,7 +812,7 @@ impl AstToSir {
                     params,
                     captures: vec![],
                     body: Body {
-                        stms: vec![call_stm],
+                        statements: vec![call_stm],
                         result: vec![call_var],
                     },
                     ret_tys: vec![ret_ty],
@@ -826,7 +831,7 @@ impl AstToSir {
     fn emit_stm(&mut self, exp: Exp, ty: SirType, span: Span) -> Result<VarId> {
         let var = self.builder.fresh_var();
         let pat = Pat::single(var, ty.clone(), format!("_w_{}", var.0));
-        let stm = Stm {
+        let stm = Statement {
             id: self.builder.fresh_stm(),
             pat,
             exp,
@@ -859,7 +864,6 @@ impl AstToSir {
         }
         None
     }
-
 
     /// Desugar overloaded function names based on argument types.
     fn desugar_function_name(&self, name: &str, args: &[Expression]) -> String {
@@ -895,11 +899,8 @@ impl AstToSir {
                 // Emit TupleProj for each element
                 for (i, pat) in patterns.iter().enumerate() {
                     let proj_ty = self.get_pattern_type(pat);
-                    let proj_var = self.emit_stm(
-                        Exp::TupleProj { tuple: var, index: i },
-                        proj_ty,
-                        pattern.h.span,
-                    )?;
+                    let proj_var =
+                        self.emit_stm(Exp::TupleProj { tuple: var, index: i }, proj_ty, pattern.h.span)?;
                     self.bind_pattern(pat, proj_var)?;
                 }
                 Ok(())
@@ -956,16 +957,13 @@ impl AstToSir {
     }
 
     fn get_pattern_type(&self, pattern: &ast::Pattern) -> SirType {
-        self.type_table
-            .get(&pattern.h.id)
-            .map(|scheme| self.scheme_to_type(scheme))
-            .unwrap_or_else(|| {
-                // For typed patterns, extract from the annotation
-                if let PatternKind::Typed(_, ty) = &pattern.kind {
-                    return ty.clone();
-                }
-                panic!("No type found for pattern {:?}", pattern.h.id)
-            })
+        self.type_table.get(&pattern.h.id).map(|scheme| self.scheme_to_type(scheme)).unwrap_or_else(|| {
+            // For typed patterns, extract from the annotation
+            if let PatternKind::Typed(_, ty) = &pattern.kind {
+                return ty.clone();
+            }
+            panic!("No type found for pattern {:?}", pattern.h.id)
+        })
     }
 
     fn ast_type_to_sir(&self, ty: &ast::Type) -> SirType {
@@ -998,15 +996,24 @@ impl AstToSir {
     }
 
     /// Recursively collect free variable names from an AST expression.
-    fn collect_free_vars(&self, expr: &Expression, bound: &mut HashSet<String>, free: &mut HashSet<String>) {
+    fn collect_free_vars(
+        &self,
+        expr: &Expression,
+        bound: &mut HashSet<String>,
+        free: &mut HashSet<String>,
+    ) {
         match &expr.kind {
             ExprKind::Identifier(_, name) => {
                 if !bound.contains(name) {
                     free.insert(name.clone());
                 }
             }
-            ExprKind::IntLiteral(_) | ExprKind::FloatLiteral(_) | ExprKind::BoolLiteral(_)
-            | ExprKind::StringLiteral(_) | ExprKind::Unit | ExprKind::TypeHole => {}
+            ExprKind::IntLiteral(_)
+            | ExprKind::FloatLiteral(_)
+            | ExprKind::BoolLiteral(_)
+            | ExprKind::StringLiteral(_)
+            | ExprKind::Unit
+            | ExprKind::TypeHole => {}
             ExprKind::ArrayLiteral(elems) | ExprKind::VecMatLiteral(elems) | ExprKind::Tuple(elems) => {
                 for e in elems {
                     self.collect_free_vars(e, bound, free);
@@ -1106,7 +1113,9 @@ impl AstToSir {
     /// Collect all bound names from a pattern into the set.
     fn collect_pattern_names_into(&self, pattern: &ast::Pattern, bound: &mut HashSet<String>) {
         match &pattern.kind {
-            PatternKind::Name(name) => { bound.insert(name.clone()); }
+            PatternKind::Name(name) => {
+                bound.insert(name.clone());
+            }
             PatternKind::Typed(inner, _) => self.collect_pattern_names_into(inner, bound),
             PatternKind::Wildcard | PatternKind::Literal(_) | PatternKind::Unit => {}
             PatternKind::Tuple(pats) => {
@@ -1185,7 +1194,9 @@ impl AstToSir {
     fn lower_expr_to_size(&mut self, expr: &Expression) -> Result<Size> {
         match &expr.kind {
             ExprKind::IntLiteral(n) => {
-                let val: u64 = n.as_str().parse()
+                let val: u64 = n
+                    .as_str()
+                    .parse()
                     .map_err(|_| err_parse_at!(expr.h.span, "Invalid size literal: {}", n.as_str()))?;
                 Ok(Size::Const(val))
             }
@@ -1198,9 +1209,7 @@ impl AstToSir {
 
     fn infer_iota_elem_type(&self, ty: &SirType) -> ScalarTy {
         match ty {
-            Type::Constructed(TypeName::Array, args) if !args.is_empty() => {
-                self.type_to_scalar(&args[0])
-            }
+            Type::Constructed(TypeName::Array, args) if !args.is_empty() => self.type_to_scalar(&args[0]),
             _ => ScalarTy::I32,
         }
     }
