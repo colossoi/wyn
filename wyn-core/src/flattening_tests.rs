@@ -21,7 +21,8 @@ fn flatten_program(input: &str) -> mir::Program {
         .expect("Borrow checking failed")
         .lower_to_sir(frontend.node_counter)
         .expect("SIR lowering failed")
-        .transform()
+        .skip_fusion()
+        .skip_parallelize()
         .flatten()
         .expect("Flattening failed");
     // Run hoisting pass to optimize materializations
@@ -679,7 +680,7 @@ def test: f32 =
         .expect("Frontend failed");
     let result = alias_checked
         .lower_to_sir(frontend.node_counter)
-        .map(|s| s.transform())
+        .map(|s| s.skip_fusion().skip_parallelize())
         .and_then(|s| s.flatten())
         .map(|(f, _backend)| f.hoist_materializations().normalize())
         .and_then(|n| n.monomorphize())
@@ -1363,7 +1364,8 @@ fn compile_to_glsl(input: &str) -> String {
     let glsl = alias_checked
         .lower_to_sir(frontend.node_counter)
         .expect("SIR lowering failed")
-        .transform()
+        .skip_fusion()
+        .skip_parallelize()
         .flatten()
         .expect("Flattening failed")
         .0

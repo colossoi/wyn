@@ -19,7 +19,7 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .alias_check()?;
     let (flattened, _backend) = alias_checked
         .lower_to_sir(node_counter)?
-        .transform()
+        .skip_fusion().skip_parallelize()
         .flatten()?;
     flattened
         .hoist_materializations()

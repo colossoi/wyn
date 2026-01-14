@@ -675,7 +675,7 @@ fn find_declaration_name_at(ast: &ast::Program, line: usize, col: usize) -> Opti
                     let kind = match &entry.entry_type {
                         ast::Attribute::Vertex => "vertex",
                         ast::Attribute::Fragment => "fragment",
-                        ast::Attribute::Compute => "compute",
+                        ast::Attribute::Compute(_) => "compute",
                         _ => "entry",
                     };
                     return Some((entry.name.clone(), kind));
@@ -905,7 +905,7 @@ fn declaration_to_symbol(decl: &ast::Declaration) -> Option<DocumentSymbol> {
             let kind_str = match &entry.entry_type {
                 ast::Attribute::Vertex => "vertex",
                 ast::Attribute::Fragment => "fragment",
-                ast::Attribute::Compute => "compute",
+                ast::Attribute::Compute(_) => "compute",
                 _ => "entry",
             };
             Some(DocumentSymbol {

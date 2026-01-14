@@ -285,8 +285,10 @@ pub enum Attribute {
     Location(u32),
     Vertex,
     Fragment,
-    /// Compute shader entry point. Workgroup size is determined by the compiler.
-    Compute,
+    /// Compute shader entry point with optional workgroup size.
+    /// - `None` means derive from context (size hints) or use default
+    /// - `Some((x, y, z))` specifies explicit workgroup dimensions
+    Compute(Option<(u32, u32, u32)>),
     Uniform {
         set: u32,
         binding: u32,
@@ -310,7 +312,7 @@ impl Attribute {
         matches!(self, Attribute::Fragment)
     }
     pub fn is_compute(&self) -> bool {
-        matches!(self, Attribute::Compute)
+        matches!(self, Attribute::Compute(_))
     }
 }
 

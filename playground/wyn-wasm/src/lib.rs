@@ -206,10 +206,11 @@ fn compile_impl(source: &str) -> CompileResult {
         Ok(s) => s,
         Err(e) => return CompileResult::err(e),
     };
-    let sir_transformed = sir_lowered.transform();
+    let sir_fused = sir_lowered.fuse();
+    let sir_parallelized = sir_fused.parallelize();
 
     // Flatten SIR to MIR
-    let (flattened, _backend) = match sir_transformed.flatten() {
+    let (flattened, _backend) = match sir_parallelized.flatten() {
         Ok(f) => f,
         Err(e) => return CompileResult::err(e),
     };

@@ -270,7 +270,8 @@ fn analyze_inplace_ops(source: &str) -> InPlaceInfo {
     let (flattened, _backend) = alias_checked
         .lower_to_sir(frontend.node_counter)
         .expect("SIR lowering failed")
-        .transform()
+        .skip_fusion()
+        .skip_parallelize()
         .flatten()
         .expect("flatten failed");
 

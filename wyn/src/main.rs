@@ -197,8 +197,9 @@ fn compile_file(
     let sir_lowered = time("lower_to_sir", verbose, || {
         alias_checked.lower_to_sir(frontend.node_counter)
     })?;
-    let sir_transformed = time("sir_transform", verbose, || sir_lowered.transform());
-    let (flattened, _backend) = time("sir_flatten", verbose, || sir_transformed.flatten())?;
+    let sir_fused = time("sir_fuse", verbose, || sir_lowered.fuse());
+    let sir_parallelized = time("sir_parallelize", verbose, || sir_fused.parallelize());
+    let (flattened, _backend) = time("sir_flatten", verbose, || sir_parallelized.flatten())?;
 
     // Write initial MIR if requested (right after flattening)
     write_mir_if_requested(&flattened.mir, &output_init_mir, "initial MIR", verbose)?;

@@ -154,9 +154,12 @@ impl<'a> Parser<'a> {
         trace!("parse_decl({}): next token = {:?}", keyword, self.peek());
 
         // Check for special attributes that require specific declaration types
-        let has_entry_attr = attributes
-            .iter()
-            .any(|attr| matches!(attr, Attribute::Vertex | Attribute::Fragment | Attribute::Compute));
+        let has_entry_attr = attributes.iter().any(|attr| {
+            matches!(
+                attr,
+                Attribute::Vertex | Attribute::Fragment | Attribute::Compute(_)
+            )
+        });
         let uniform_attr = attributes.iter().find_map(|attr| {
             if let Attribute::Uniform { set, binding } = attr { Some((*set, *binding)) } else { None }
         });
@@ -315,7 +318,12 @@ impl<'a> Parser<'a> {
         // Find the entry type attribute
         let entry_type = attributes
             .iter()
-            .find(|attr| matches!(attr, Attribute::Vertex | Attribute::Fragment | Attribute::Compute))
+            .find(|attr| {
+                matches!(
+                    attr,
+                    Attribute::Vertex | Attribute::Fragment | Attribute::Compute(_)
+                )
+            })
             .ok_or_else(|| {
                 err_parse!(
                     "Entry declarations require #[vertex], #[fragment], or #[compute(...)] attribute"
@@ -331,7 +339,7 @@ impl<'a> Parser<'a> {
         let params = self.parse_entry_params()?;
 
         // Compute entry params cannot have explicit bindings
-        if matches!(entry_type, Attribute::Compute) {
+        if matches!(entry_type, Attribute::Compute(_)) {
             for param in &params {
                 if let PatternKind::Typed(inner, _) = &param.kind {
                     if let PatternKind::Attributed(attrs, _) = &inner.kind {
@@ -546,11 +554,28 @@ impl<'a> Parser<'a> {
                 Ok(Attribute::Fragment)
             }
             "compute" => {
-                if self.check(&Token::LeftParen) {
-                    bail_parse!("#[compute] takes no parameters");
-                }
+                let local_size = if self.check(&Token::LeftParen) {
+                    self.advance(); // consume (
+                    let x = self.expect_integer()?;
+                    let y = if self.check(&Token::Comma) {
+                        self.advance();
+                        self.expect_integer()?
+                    } else {
+                        1
+                    };
+                    let z = if self.check(&Token::Comma) {
+                        self.advance();
+                        self.expect_integer()?
+                    } else {
+                        1
+                    };
+                    self.expect(Token::RightParen)?;
+                    Some((x, y, z))
+                } else {
+                    None // Derive from context or use default
+                };
                 self.expect(Token::RightBracket)?;
-                Ok(Attribute::Compute)
+                Ok(Attribute::Compute(local_size))
             }
             "uniform" => {
                 // Parse uniform attribute: #[uniform(binding=N)] or #[uniform(set=M, binding=N)]

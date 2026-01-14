@@ -18,7 +18,8 @@ fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
     let (flattened, _backend) = alias_checked
         .lower_to_sir(frontend.node_counter)
         .expect("SIR lowering failed")
-        .transform()
+        .skip_fusion()
+        .skip_parallelize()
         .flatten()
         .expect("Flattening failed");
 
@@ -305,7 +306,8 @@ fn compile_to_spirv_with_partial_eval(source: &str) -> Result<Vec<u32>> {
     let flattened = alias_checked
         .lower_to_sir(frontend.node_counter)
         .expect("SIR lowering failed")
-        .transform()
+        .skip_fusion()
+        .skip_parallelize()
         .flatten()
         .expect("Flattening failed")
         .0

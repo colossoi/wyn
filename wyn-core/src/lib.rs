@@ -261,7 +261,8 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 //       -> .type_check(&frontend.module_manager)        -> TypeChecked
 //       -> .alias_check()                               -> AliasChecked
 //       -> .lower_to_sir(node_counter)                  -> SirLowered (takes ownership of counter)
-//       -> .transform()                                 -> SirTransformed
+//       -> .fuse()                                      -> SirFused (map-map fusion, etc.)
+//       -> .parallelize()                               -> SirParallelized (SOAC strategy selection)
 //       -> .flatten()                                   -> (Flattened, BackEnd) (counter in BackEnd)
 //
 // BackEnd Pipeline (MIR -> output):
@@ -582,29 +583,75 @@ pub struct SirLowered {
 }
 
 impl SirLowered {
-    /// Apply SIR-level transformations (fusion, etc.).
-    /// For now this is identity - transformations will be added later.
-    pub fn transform(self) -> SirTransformed {
-        // TODO: Apply map-map fusion and other transforms
-        SirTransformed {
+    /// Apply SIR-level fusion transforms.
+    /// This includes map-map fusion and other optimizations.
+    pub fn fuse(self) -> SirFused {
+        let mut fusion = sir::fusion::SirFusion::new();
+        let (sir, fusion_stats) = fusion.fuse(self.sir);
+        SirFused {
+            sir,
+            fusion_stats,
+            node_counter: self.node_counter,
+        }
+    }
+
+    /// Skip fusion and go directly to parallelization.
+    /// Useful for debugging or when fusion is not desired.
+    pub fn skip_fusion(self) -> SirFused {
+        SirFused {
             sir: self.sir,
+            fusion_stats: sir::fusion::FusionStats::default(),
             node_counter: self.node_counter,
         }
     }
 }
 
-/// SIR has been transformed (fusion, etc.)
-pub struct SirTransformed {
+/// SIR has been fused (map-map fusion, etc.)
+pub struct SirFused {
     pub sir: sir::Program,
+    /// Statistics from the fusion pass.
+    pub fusion_stats: sir::fusion::FusionStats,
     node_counter: NodeCounter,
 }
 
-impl SirTransformed {
+impl SirFused {
+    /// Analyze SOACs and determine parallelization strategies.
+    pub fn parallelize(self) -> SirParallelized {
+        let mut parallelizer = sir::parallelize::Parallelizer::new();
+        let plan = parallelizer.analyze(&self.sir);
+        SirParallelized {
+            sir: self.sir,
+            parallelization_plan: plan,
+            node_counter: self.node_counter,
+        }
+    }
+
+    /// Skip parallelization analysis.
+    /// All SOACs will use default/sequential strategies.
+    pub fn skip_parallelize(self) -> SirParallelized {
+        SirParallelized {
+            sir: self.sir,
+            parallelization_plan: sir::parallelize::ParallelizationPlan::default(),
+            node_counter: self.node_counter,
+        }
+    }
+}
+
+/// SIR has been analyzed for parallelization.
+pub struct SirParallelized {
+    pub sir: sir::Program,
+    /// Parallelization plan with execution strategies for each SOAC.
+    pub parallelization_plan: sir::parallelize::ParallelizationPlan,
+    node_counter: NodeCounter,
+}
+
+impl SirParallelized {
     /// Flatten SIR to MIR (with defunctionalization).
     /// Returns the flattened MIR and a BackEnd for subsequent passes.
     pub fn flatten(self) -> Result<(Flattened, BackEnd)> {
         let mut node_counter = self.node_counter;
         let flattener = flattening::SirFlattener::new(&mut node_counter);
+        // TODO: Pass parallelization_plan to flattener for strategy-aware lowering
         let mir = flattener.flatten_program(self.sir)?;
         Ok((Flattened { mir }, BackEnd::new(node_counter)))
     }

@@ -12,6 +12,8 @@
 //! - Types reuse polytype::Type<TypeName> from the existing type system
 
 pub mod builder;
+pub mod fusion;
+pub mod parallelize;
 pub mod types;
 
 use std::collections::HashMap;
@@ -570,5 +572,73 @@ impl TypeEnv {
     /// Check if a variable has a type.
     pub fn has(&self, v: VarId) -> bool {
         self.var_tys.contains_key(&v)
+    }
+}
+
+// =============================================================================
+// Parallelization Configuration
+// =============================================================================
+
+/// Configuration for GPU parallelization strategies.
+///
+/// This struct controls how SOACs are lowered to GPU kernels,
+/// including workgroup sizing and algorithm selection.
+#[derive(Debug, Clone)]
+pub struct ParallelizationConfig {
+    /// Default workgroup size when not specified by user via `#[compute(x,y,z)]`.
+    /// Used for embarrassingly parallel operations like `map`.
+    pub default_workgroup_size: (u32, u32, u32),
+
+    /// Maximum elements to process in a single workgroup before switching
+    /// to multi-phase algorithms (e.g., two-phase reduce, three-phase scan).
+    pub single_workgroup_threshold: u32,
+
+    /// Enable SPIR-V subgroup operations for intra-warp efficiency.
+    /// When true, uses wave intrinsics for reduction steps.
+    pub use_subgroups: bool,
+}
+
+impl Default for ParallelizationConfig {
+    fn default() -> Self {
+        ParallelizationConfig {
+            default_workgroup_size: (64, 1, 1),
+            single_workgroup_threshold: 256,
+            use_subgroups: true,
+        }
+    }
+}
+
+impl ParallelizationConfig {
+    /// Create a new config with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Derive workgroup size from a size hint.
+    ///
+    /// Uses heuristics based on expected array size:
+    /// - Small (≤64): Fit in one workgroup
+    /// - Medium (65-256): Standard 64-wide workgroup
+    /// - Large (257-1024): 128-wide workgroup
+    /// - Very large (>1024): 256-wide for maximum occupancy
+    pub fn derive_workgroup_size(&self, size_hint: Option<u32>) -> (u32, u32, u32) {
+        match size_hint {
+            Some(n) if n <= 64 => {
+                // Small array: fit in single workgroup, round up to power of 2 >= 32
+                let size = n.next_power_of_two().max(32);
+                (size, 1, 1)
+            }
+            Some(n) if n <= 256 => (64, 1, 1),
+            Some(n) if n <= 1024 => (128, 1, 1),
+            _ => (256, 1, 1), // Default for large/unknown
+        }
+    }
+
+    /// Determine if an operation can be completed in a single workgroup.
+    pub fn fits_single_workgroup(&self, size_hint: Option<u32>) -> bool {
+        match size_hint {
+            Some(n) => n <= self.single_workgroup_threshold,
+            None => false, // Conservative: assume multi-phase needed
+        }
     }
 }

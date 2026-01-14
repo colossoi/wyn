@@ -13,8 +13,8 @@ use crate::error::Result;
 use crate::sir::builder::SirBuilder;
 use crate::sir::types::{AssocInfo, ScalarTy, Size};
 use crate::sir::{
-    self, Body, Def, EntryInput, EntryOutput, ExecutionModel, Exp, IoDecoration, Lambda, Map, Param, Pat,
-    Prim, Reduce, Scan, SirType, Soac, Statement, VarId,
+    self, Body, Def, EntryInput, EntryOutput, ExecutionModel, Exp, IoDecoration, Lambda, Map,
+    ParallelizationConfig, Param, Pat, Prim, Reduce, Scan, SirType, Soac, Statement, VarId,
 };
 use crate::types::TypeScheme;
 use crate::{bail_flatten, err_parse_at};
@@ -131,11 +131,17 @@ impl AstToSir {
         let execution_model = match &entry.entry_type {
             ast::Attribute::Vertex => ExecutionModel::Vertex,
             ast::Attribute::Fragment => ExecutionModel::Fragment,
-            ast::Attribute::Compute => {
-                // Default local size - would need to be specified elsewhere
-                ExecutionModel::Compute {
-                    local_size: (64, 1, 1),
-                }
+            ast::Attribute::Compute(explicit_size) => {
+                // Use explicit size if provided, otherwise derive from size hints
+                let local_size = match explicit_size {
+                    Some(size) => *size,
+                    None => {
+                        // Extract size hints from params and use the largest for derivation
+                        let size_hint = Self::extract_max_size_hint(&entry.params);
+                        ParallelizationConfig::default().derive_workgroup_size(size_hint)
+                    }
+                };
+                ExecutionModel::Compute { local_size }
             }
             _ => bail_flatten!("Invalid entry type attribute"),
         };
@@ -939,6 +945,37 @@ impl AstToSir {
             PatternKind::Typed(inner, _) => self.get_inner_pattern_kind(inner),
             PatternKind::Attributed(_, inner) => self.get_inner_pattern_kind(inner),
             other => other,
+        }
+    }
+
+    /// Extract size hints from patterns and return the maximum.
+    ///
+    /// Used to derive workgroup size for compute shaders when not explicitly specified.
+    fn extract_max_size_hint(params: &[ast::Pattern]) -> Option<u32> {
+        let mut max_hint = None;
+
+        for param in params {
+            if let Some(hint) = Self::extract_size_hint_from_pattern(param) {
+                max_hint = Some(max_hint.map_or(hint, |prev: u32| prev.max(hint)));
+            }
+        }
+
+        max_hint
+    }
+
+    /// Extract size hint from a single pattern, recursively checking wrappers.
+    fn extract_size_hint_from_pattern(pattern: &ast::Pattern) -> Option<u32> {
+        match &pattern.kind {
+            PatternKind::Typed(inner, _) => Self::extract_size_hint_from_pattern(inner),
+            PatternKind::Attributed(attrs, inner) => {
+                // Check for SizeHint in this pattern's attributes
+                let hint_here = attrs.iter().find_map(|attr| {
+                    if let ast::Attribute::SizeHint(n) = attr { Some(*n) } else { None }
+                });
+                // If not found here, check inner pattern
+                hint_here.or_else(|| Self::extract_size_hint_from_pattern(inner))
+            }
+            _ => None,
         }
     }
 
