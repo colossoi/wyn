@@ -596,6 +596,50 @@ impl AliasChecked {
         let node_counter = flattener.into_node_counter();
         Ok((Flattened { mir }, BackEnd::new(node_counter)))
     }
+
+    /// Transform AST to TLC (new pipeline path)
+    pub fn to_tlc(self) -> TlcTransformed {
+        let tlc_program = tlc::transform(&self.ast, &self.type_table);
+        TlcTransformed {
+            tlc: tlc_program,
+            type_table: self.type_table,
+        }
+    }
+}
+
+// =============================================================================
+// TLC-based pipeline stages
+// =============================================================================
+
+/// AST has been transformed to TLC
+pub struct TlcTransformed {
+    pub tlc: tlc::Program,
+    pub type_table: TypeTable,
+}
+
+impl TlcTransformed {
+    /// Lift all lambdas to top-level definitions
+    pub fn lift(self) -> TlcLifted {
+        let lifted = tlc::lift::LambdaLifter::lift(self.tlc);
+        TlcLifted {
+            tlc: lifted,
+            type_table: self.type_table,
+        }
+    }
+}
+
+/// TLC with all lambdas lifted to top-level
+pub struct TlcLifted {
+    pub tlc: tlc::Program,
+    pub type_table: TypeTable,
+}
+
+impl TlcLifted {
+    /// Transform TLC to MIR
+    pub fn to_mir(self) -> Flattened {
+        let mir = tlc::to_mir::TlcToMir::transform(&self.tlc);
+        Flattened { mir }
+    }
 }
 
 // =============================================================================

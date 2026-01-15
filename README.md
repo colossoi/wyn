@@ -19,11 +19,43 @@ A minimal compiler for a Futhark-like programming language that generates SPIR-V
 
 The project is organized as a Rust workspace:
 
-- **`wyn-core/`** - Compiler library (lexer, parser, type checker, code generator)
+- **`wyn-core/`** - Compiler library (lexer, parser, type checker, TLC, MIR, code generator)
 - **`wyn/`** - Command-line executable
 - **`spirv-validator/`** - SPIR-V validation tool using wgpu
 - **`viz/`** - Visualization tool for rendering SPIR-V shaders
 - **`prelude/`** - Standard library functions written in Wyn
+
+## Compiler Architecture
+
+The compiler uses a multi-stage pipeline with typestate-driven phases:
+
+### Frontend (AST)
+| Stage | Description |
+|-------|-------------|
+| **Parsed** | Tokenization and parsing into AST |
+| **Desugared** | Range/slice expressions desugared |
+| **Resolved** | Name resolution and module imports |
+| **AstConstFolded** | Compile-time constant folding |
+| **TypeChecked** | Hindley-Milner type inference and checking |
+| **AliasChecked** | Uniqueness/alias analysis for mutable references |
+
+### TLC (Typed Lambda Calculus)
+| Stage | Description |
+|-------|-------------|
+| **TlcTransformed** | AST converted to minimal typed lambda calculus |
+| **TlcLifted** | All lambdas lifted to top-level, captures explicit |
+
+### Backend (MIR)
+| Stage | Description |
+|-------|-------------|
+| **Flattened** | AST to MIR conversion with defunctionalization |
+| **MaterializationsHoisted** | Duplicate materializations hoisted from branches |
+| **Normalized** | A-normal form conversion |
+| **Monomorphized** | Polymorphic functions specialized to concrete types |
+| **Folded** | Partial evaluation and constant folding (optional) |
+| **Reachable** | Dead code elimination |
+| **Lifted** | Final binding lifting |
+| **Lowered** | SPIR-V code generation |
 
 ## Example Program
 
@@ -55,6 +87,11 @@ cargo run --bin wyn -- compile input.wyn -o output.spv
 # Type check without generating code
 cargo run --bin wyn -- check input.wyn
 
+# Output intermediate representations
+cargo run --bin wyn -- compile input.wyn --output-tlc out.tlc    # Typed Lambda Calculus
+cargo run --bin wyn -- compile input.wyn --output-init-mir out.mir  # Initial MIR
+cargo run --bin wyn -- compile input.wyn --output-final-mir out.mir # Final MIR
+
 # Visualize a SPIR-V shader
 cd viz && cargo run vf ../shader.spv --vertex vertex_main --fragment fragment_main
 ```
@@ -66,7 +103,7 @@ cargo build --release
 cargo test
 ```
 
-All 277 tests currently pass.
+All 546 tests currently pass.
 
 ## Language Overview
 

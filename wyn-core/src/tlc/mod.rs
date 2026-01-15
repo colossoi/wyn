@@ -3,6 +3,9 @@
 //! A minimal typed lambda calculus IR for SOAC fusion analysis.
 //! Lambdas remain as values (not yet defunctionalized).
 
+pub mod lift;
+pub mod to_mir;
+
 use crate::TypeTable;
 use crate::ast::{self, NodeId, Span, TypeName};
 use polytype::Type;
@@ -276,7 +279,14 @@ impl<'a> Transformer<'a> {
             ast::PatternKind::Record(fields) => {
                 let fresh = format!("_rec_{}", self.term_ids.next_id().0);
                 let field_types = self.extract_record_types(&param_ty);
-                let inner = self.flatten_record_pattern(&fresh, &param_ty, fields, &field_types, body, pattern.h.span);
+                let inner = self.flatten_record_pattern(
+                    &fresh,
+                    &param_ty,
+                    fields,
+                    &field_types,
+                    body,
+                    pattern.h.span,
+                );
 
                 let lam_ty = Type::Constructed(TypeName::Arrow, vec![param_ty.clone(), inner.ty.clone()]);
                 self.mk_term(
@@ -316,9 +326,7 @@ impl<'a> Transformer<'a> {
     /// Resolve a field name to its index in a record type
     fn resolve_field_index(&self, ty: &Type<TypeName>, field: &str) -> Option<usize> {
         match ty {
-            Type::Constructed(TypeName::Record(fields), _) => {
-                fields.iter().position(|f| f == field)
-            }
+            Type::Constructed(TypeName::Record(fields), _) => fields.iter().position(|f| f == field),
             _ => None,
         }
     }
@@ -382,11 +390,7 @@ impl<'a> Transformer<'a> {
             // Resolve field name to index, treat record as tuple
             let field_idx = self.resolve_field_index(record_ty, &field.field).unwrap_or(0);
 
-            let record_ref = self.mk_term(
-                record_ty.clone(),
-                span,
-                TermKind::Var(record_var.to_string()),
-            );
+            let record_ref = self.mk_term(record_ty.clone(), span, TermKind::Var(record_var.to_string()));
             let field_access = self.build_app1(
                 &format!("_w_proj_{}", field_idx),
                 record_ref,
@@ -570,11 +574,10 @@ impl<'a> Transformer<'a> {
                     fields.iter().map(|(name, expr)| (name.as_str(), expr)).collect();
 
                 let ordered_exprs: Vec<ast::Expression> = match &ty {
-                    Type::Constructed(TypeName::Record(type_fields), _) => {
-                        type_fields.iter()
-                            .filter_map(|f| field_map.get(f.as_str()).map(|e| (*e).clone()))
-                            .collect()
-                    }
+                    Type::Constructed(TypeName::Record(type_fields), _) => type_fields
+                        .iter()
+                        .filter_map(|f| field_map.get(f.as_str()).map(|e| (*e).clone()))
+                        .collect(),
                     _ => fields.iter().map(|(_, e)| e.clone()).collect(),
                 };
 
@@ -932,7 +935,8 @@ impl<'a> Transformer<'a> {
                 let field_types = self.extract_record_types(&scrutinee.ty);
 
                 let fresh = format!("_match_{}", self.term_ids.next_id().0);
-                let inner = self.flatten_record_pattern(&fresh, &scrutinee.ty, fields, &field_types, body, span);
+                let inner =
+                    self.flatten_record_pattern(&fresh, &scrutinee.ty, fields, &field_types, body, span);
 
                 self.mk_term(
                     ty,
