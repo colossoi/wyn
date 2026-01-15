@@ -43,16 +43,16 @@ The compiler uses a multi-stage pipeline with typestate-driven phases:
 | Stage | Description |
 |-------|-------------|
 | **TlcTransformed** | AST converted to minimal typed lambda calculus |
+| **TlcPartialEval** | Constant folding and algebraic simplifications (optional) |
 | **TlcLifted** | All lambdas lifted to top-level, captures explicit |
 
 ### Backend (MIR)
 | Stage | Description |
 |-------|-------------|
-| **Flattened** | AST to MIR conversion with defunctionalization |
+| **Flattened** | TLC to MIR conversion |
 | **MaterializationsHoisted** | Duplicate materializations hoisted from branches |
 | **Normalized** | A-normal form conversion |
 | **Monomorphized** | Polymorphic functions specialized to concrete types |
-| **Folded** | Partial evaluation and constant folding (optional) |
 | **Reachable** | Dead code elimination |
 | **Lifted** | Final binding lifting |
 | **Lowered** | SPIR-V code generation |
@@ -103,7 +103,7 @@ cargo build --release
 cargo test
 ```
 
-All 546 tests currently pass.
+All 555 tests currently pass.
 
 ## Language Overview
 

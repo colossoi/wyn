@@ -262,3 +262,116 @@ fn test_let_constant_propagation() {
         other => panic!("Expected IntLit(8), got {:?}", other),
     }
 }
+
+#[test]
+fn test_function_inlining() {
+    // def foo(a, b) = a + b
+    // def bar = foo(8, 9)
+    // bar should evaluate to 17
+    let mut ids = TermIdSource::new();
+    let int_ty = Type::Constructed(TypeName::Int(32), vec![]);
+
+    // Build foo: |a| |b| a + b
+    let a_var = Term {
+        id: ids.next_id(),
+        ty: int_ty.clone(),
+        span: make_span(),
+        kind: TermKind::Var("a".to_string()),
+    };
+    let b_var = Term {
+        id: ids.next_id(),
+        ty: int_ty.clone(),
+        span: make_span(),
+        kind: TermKind::Var("b".to_string()),
+    };
+    let a_plus_b = make_binop(&mut ids, "+", a_var, b_var);
+
+    let inner_lam = Term {
+        id: ids.next_id(),
+        ty: Type::Constructed(
+            TypeName::Arrow,
+            vec![int_ty.clone(), int_ty.clone()],
+        ),
+        span: make_span(),
+        kind: TermKind::Lam {
+            param: "b".to_string(),
+            param_ty: int_ty.clone(),
+            body: Box::new(a_plus_b),
+        },
+    };
+
+    let foo_body = Term {
+        id: ids.next_id(),
+        ty: Type::Constructed(
+            TypeName::Arrow,
+            vec![int_ty.clone(), inner_lam.ty.clone()],
+        ),
+        span: make_span(),
+        kind: TermKind::Lam {
+            param: "a".to_string(),
+            param_ty: int_ty.clone(),
+            body: Box::new(inner_lam),
+        },
+    };
+
+    // Build bar: foo 8 9
+    let eight = make_int(&mut ids, 8);
+    let nine = make_int(&mut ids, 9);
+
+    let foo_ref = Term {
+        id: ids.next_id(),
+        ty: foo_body.ty.clone(),
+        span: make_span(),
+        kind: TermKind::Var("foo".to_string()),
+    };
+
+    let foo_8 = Term {
+        id: ids.next_id(),
+        ty: Type::Constructed(TypeName::Arrow, vec![int_ty.clone(), int_ty.clone()]),
+        span: make_span(),
+        kind: TermKind::App {
+            func: Box::new(FunctionName::Term(Box::new(foo_ref))),
+            arg: Box::new(eight),
+        },
+    };
+
+    let bar_body = Term {
+        id: ids.next_id(),
+        ty: int_ty.clone(),
+        span: make_span(),
+        kind: TermKind::App {
+            func: Box::new(FunctionName::Term(Box::new(foo_8))),
+            arg: Box::new(nine),
+        },
+    };
+
+    let program = Program {
+        defs: vec![
+            Def {
+                name: "foo".to_string(),
+                ty: foo_body.ty.clone(),
+                body: foo_body,
+                meta: DefMeta::Function,
+                arity: 2,
+            },
+            Def {
+                name: "bar".to_string(),
+                ty: int_ty.clone(),
+                body: bar_body,
+                meta: DefMeta::Function,
+                arity: 0,
+            },
+        ],
+        uniforms: vec![],
+        storage: vec![],
+    };
+
+    let result = PartialEvaluator::partial_eval(program);
+
+    // bar should be inlined and folded to 17
+    let bar_def = result.defs.iter().find(|d| d.name == "bar").unwrap();
+    match &bar_def.body.kind {
+        TermKind::IntLit(s) => assert_eq!(s, "17"),
+        other => panic!("Expected IntLit(17), got {:?}", other),
+    }
+}
