@@ -276,7 +276,7 @@ impl<'a> Transformer<'a> {
             ast::PatternKind::Record(fields) => {
                 let fresh = format!("_rec_{}", self.term_ids.next_id().0);
                 let field_types = self.extract_record_types(&param_ty);
-                let inner = self.flatten_record_pattern(&fresh, fields, &field_types, body, pattern.h.span);
+                let inner = self.flatten_record_pattern(&fresh, &param_ty, fields, &field_types, body, pattern.h.span);
 
                 let lam_ty = Type::Constructed(TypeName::Arrow, vec![param_ty.clone(), inner.ty.clone()]);
                 self.mk_term(
@@ -310,6 +310,16 @@ impl<'a> Transformer<'a> {
             _ => (0..expected_len)
                 .map(|_| Type::Constructed(TypeName::Named("unknown".to_string()), vec![]))
                 .collect(),
+        }
+    }
+
+    /// Resolve a field name to its index in a record type
+    fn resolve_field_index(&self, ty: &Type<TypeName>, field: &str) -> Option<usize> {
+        match ty {
+            Type::Constructed(TypeName::Record(fields), _) => {
+                fields.iter().position(|f| f == field)
+            }
+            _ => None,
         }
     }
 
@@ -355,6 +365,7 @@ impl<'a> Transformer<'a> {
     fn flatten_record_pattern(
         &mut self,
         record_var: &str,
+        record_ty: &Type<TypeName>,
         fields: &[ast::RecordPatternField],
         field_types: &HashMap<String, Type<TypeName>>,
         body: Term,
@@ -368,14 +379,16 @@ impl<'a> Transformer<'a> {
                 .cloned()
                 .unwrap_or_else(|| Type::Constructed(TypeName::Named("unknown".to_string()), vec![]));
 
-            // field_access(record_var) as function application
+            // Resolve field name to index, treat record as tuple
+            let field_idx = self.resolve_field_index(record_ty, &field.field).unwrap_or(0);
+
             let record_ref = self.mk_term(
-                Type::Constructed(TypeName::Named("record".to_string()), vec![]),
+                record_ty.clone(),
                 span,
                 TermKind::Var(record_var.to_string()),
             );
             let field_access = self.build_app1(
-                &format!("_w_field_{}", field.field),
+                &format!("_w_proj_{}", field_idx),
                 record_ref,
                 field_ty.clone(),
                 span,
@@ -460,7 +473,7 @@ impl<'a> Transformer<'a> {
             ast::PatternKind::Record(fields) => {
                 let fresh = format!("_rec_{}", self.term_ids.next_id().0);
                 let field_types = self.extract_record_types(&pat_ty);
-                let inner = self.flatten_record_pattern(&fresh, fields, &field_types, body, span);
+                let inner = self.flatten_record_pattern(&fresh, &pat_ty, fields, &field_types, body, span);
 
                 self.mk_term(
                     inner.ty.clone(),
@@ -552,9 +565,20 @@ impl<'a> Transformer<'a> {
             ast::ExprKind::Tuple(elements) => self.build_intrinsic_call("_w_tuple", elements, ty, span),
 
             ast::ExprKind::RecordLiteral(fields) => {
-                // For now, treat as tuple of values
-                let exprs: Vec<_> = fields.iter().map(|(_, e)| e.clone()).collect();
-                self.build_intrinsic_call("_w_record", &exprs, ty, span)
+                // Records are tuples - reorder fields to match type's field order
+                let field_map: HashMap<&str, &ast::Expression> =
+                    fields.iter().map(|(name, expr)| (name.as_str(), expr)).collect();
+
+                let ordered_exprs: Vec<ast::Expression> = match &ty {
+                    Type::Constructed(TypeName::Record(type_fields), _) => {
+                        type_fields.iter()
+                            .filter_map(|f| field_map.get(f.as_str()).map(|e| (*e).clone()))
+                            .collect()
+                    }
+                    _ => fields.iter().map(|(_, e)| e.clone()).collect(),
+                };
+
+                self.build_intrinsic_call("_w_tuple", &ordered_exprs, ty, span)
             }
 
             ast::ExprKind::Lambda(lam) => self.transform_lambda(&lam.params, &lam.body, ty, span),
@@ -571,7 +595,9 @@ impl<'a> Transformer<'a> {
 
             ast::ExprKind::FieldAccess(record, field) => {
                 let rec = self.transform_expr(record);
-                self.build_app1(&format!("_w_field_{}", field), rec, ty, span)
+                // Resolve field name to index, treat record as tuple
+                let field_idx = self.resolve_field_index(&rec.ty, field).unwrap_or(0);
+                self.build_app1(&format!("_w_proj_{}", field_idx), rec, ty, span)
             }
 
             ast::ExprKind::If(if_expr) => {
@@ -906,7 +932,7 @@ impl<'a> Transformer<'a> {
                 let field_types = self.extract_record_types(&scrutinee.ty);
 
                 let fresh = format!("_match_{}", self.term_ids.next_id().0);
-                let inner = self.flatten_record_pattern(&fresh, fields, &field_types, body, span);
+                let inner = self.flatten_record_pattern(&fresh, &scrutinee.ty, fields, &field_types, body, span);
 
                 self.mk_term(
                     ty,
