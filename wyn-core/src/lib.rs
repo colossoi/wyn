@@ -25,6 +25,7 @@ pub mod alias_checker;
 pub mod ast_const_fold;
 pub mod desugar;
 pub mod lowering_common;
+pub mod tlc;
 
 pub mod binding_lifter;
 pub mod constant_folding;

@@ -66,6 +66,10 @@ enum Commands {
         #[arg(long, value_name = "FILE")]
         output_annotated: Option<PathBuf>,
 
+        /// Output typed lambda calculus representation
+        #[arg(long, value_name = "FILE")]
+        output_tlc: Option<PathBuf>,
+
         /// Output shader interface as JSON (bindings, entry points, types)
         #[arg(long, value_name = "FILE")]
         output_interface: Option<PathBuf>,
@@ -116,6 +120,7 @@ fn main() -> Result<(), DriverError> {
             output_init_mir,
             output_final_mir,
             output_annotated,
+            output_tlc,
             output_interface,
             partial_eval,
             verbose,
@@ -127,6 +132,7 @@ fn main() -> Result<(), DriverError> {
                 output_init_mir,
                 output_final_mir,
                 output_annotated,
+                output_tlc,
                 output_interface,
                 partial_eval,
                 verbose,
@@ -151,6 +157,7 @@ fn compile_file(
     output_init_mir: Option<PathBuf>,
     output_final_mir: Option<PathBuf>,
     output_annotated: Option<PathBuf>,
+    output_tlc: Option<PathBuf>,
     output_interface: Option<PathBuf>,
     partial_eval: bool,
     verbose: bool,
@@ -192,6 +199,17 @@ fn compile_file(
     if alias_checked.has_alias_errors() {
         alias_checked.print_alias_errors();
         return Err(wyn_core::err_alias!("alias checking failed").into());
+    }
+
+    // Output TLC if requested
+    if let Some(ref tlc_path) = output_tlc {
+        let tlc_program = time("tlc", verbose, || {
+            wyn_core::tlc::transform(&alias_checked.ast, &alias_checked.type_table)
+        });
+        fs::write(tlc_path, format!("{}", tlc_program))?;
+        if verbose {
+            info!("Wrote TLC to {}", tlc_path.display());
+        }
     }
 
     let (flattened, _backend) = time("flatten", verbose, || {

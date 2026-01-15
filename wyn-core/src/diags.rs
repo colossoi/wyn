@@ -1030,3 +1030,107 @@ impl Display for mir::LoopKind {
         }
     }
 }
+
+// =============================================================================
+// TLC Display implementations
+// =============================================================================
+
+use crate::tlc;
+
+impl Display for tlc::Program {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        for (i, def) in self.defs.iter().enumerate() {
+            if i > 0 {
+                writeln!(f)?;
+                writeln!(f)?;
+            }
+            write!(f, "{}", def)?;
+        }
+        Ok(())
+    }
+}
+
+impl Display for tlc::Def {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{} = {}", self.name, self.body)
+    }
+}
+
+impl Display for tlc::Term {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        self.fmt_prec(f, 0)
+    }
+}
+
+impl tlc::Term {
+    fn fmt_prec(&self, f: &mut Formatter<'_>, prec: usize) -> fmt::Result {
+        match &self.kind {
+            tlc::TermKind::Var(name) => write!(f, "{}", name),
+
+            tlc::TermKind::Lam { param, param_ty, body } => {
+                if prec > 0 {
+                    write!(f, "(")?;
+                }
+                write!(f, "λ({}: {}). ", param, format_type(param_ty))?;
+                body.fmt_prec(f, 0)?;
+                if prec > 0 {
+                    write!(f, ")")?;
+                }
+                Ok(())
+            }
+
+            tlc::TermKind::App { func, arg } => {
+                if prec > 1 {
+                    write!(f, "(")?;
+                }
+                match func.as_ref() {
+                    tlc::FunctionName::Var(name) => write!(f, "{}", name)?,
+                    tlc::FunctionName::BinOp(op) => write!(f, "({})", op.op)?,
+                    tlc::FunctionName::UnOp(op) => write!(f, "({})", op.op)?,
+                    tlc::FunctionName::Term(term) => term.fmt_prec(f, 1)?,
+                }
+                write!(f, " ")?;
+                arg.fmt_prec(f, 2)?;
+                if prec > 1 {
+                    write!(f, ")")?;
+                }
+                Ok(())
+            }
+
+            tlc::TermKind::Let { name, name_ty, rhs, body } => {
+                if prec > 0 {
+                    write!(f, "(")?;
+                }
+                write!(f, "let {}: {} = ", name, format_type(name_ty))?;
+                rhs.fmt_prec(f, 0)?;
+                write!(f, " in ")?;
+                body.fmt_prec(f, 0)?;
+                if prec > 0 {
+                    write!(f, ")")?;
+                }
+                Ok(())
+            }
+
+            tlc::TermKind::IntLit(n) => write!(f, "{}", n),
+            tlc::TermKind::FloatLit(n) => write!(f, "{}", n),
+            tlc::TermKind::BoolLit(b) => write!(f, "{}", b),
+            tlc::TermKind::StringLit(s) => write!(f, "\"{}\"", s),
+
+            tlc::TermKind::If { cond, then_branch, else_branch } => {
+                if prec > 0 {
+                    write!(f, "(")?;
+                }
+                write!(f, "if ")?;
+                cond.fmt_prec(f, 0)?;
+                write!(f, " then ")?;
+                then_branch.fmt_prec(f, 0)?;
+                write!(f, " else ")?;
+                else_branch.fmt_prec(f, 0)?;
+                if prec > 0 {
+                    write!(f, ")")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
