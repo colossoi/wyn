@@ -4,7 +4,7 @@
 //! get extra parameters for their captures, and the lambda occurrence
 //! becomes a partial application to the captured values.
 
-use super::{Def, FunctionName, Program, Term, TermIdSource, TermKind};
+use super::{Def, DefMeta, FunctionName, Program, Term, TermIdSource, TermKind};
 use crate::ast::{Span, TypeName};
 use polytype::Type;
 use std::collections::HashSet;
@@ -19,8 +19,8 @@ pub struct LambdaLifter {
     lambda_counter: u32,
     /// Counter for generating unique term IDs
     term_ids: TermIdSource,
-    /// Scope stack for bound variables
-    scope: Vec<String>,
+    /// Scope stack for bound variables with their types
+    scope: Vec<(String, Type<TypeName>)>,
 }
 
 impl LambdaLifter {
@@ -38,27 +38,58 @@ impl LambdaLifter {
             .defs
             .into_iter()
             .map(|def| {
-                let body = lifter.lift_term(def.body);
+                // For all defs (entry points and functions), preserve parameter lambdas
+                // but lift nested lambdas inside the function body
+                let body = lifter.lift_preserving_params(def.body);
                 Def { body, ..def }
             })
             .collect();
 
         Program {
-            defs: transformed_defs
-                .into_iter()
-                .chain(lifter.new_defs)
-                .collect(),
+            defs: transformed_defs.into_iter().chain(lifter.new_defs).collect(),
+            uniforms: program.uniforms,
+            storage: program.storage,
         }
     }
 
-    /// Check if a name is bound (in scope or top-level)
-    fn is_bound(&self, name: &str) -> bool {
-        self.scope.contains(&name.to_string()) || self.top_level.contains(name)
+    /// Lift lambdas but preserve the outermost parameter lambdas (for entry points).
+    fn lift_preserving_params(&mut self, term: Term) -> Term {
+        match term.kind {
+            TermKind::Lam {
+                param,
+                param_ty,
+                body,
+            } => {
+                // Keep this lambda, but recursively process its body
+                self.push_scope(&param, param_ty.clone());
+                let lifted_body = self.lift_preserving_params(*body);
+                self.pop_scope();
+                Term {
+                    id: self.term_ids.next_id(),
+                    ty: term.ty,
+                    span: term.span,
+                    kind: TermKind::Lam {
+                        param,
+                        param_ty,
+                        body: Box::new(lifted_body),
+                    },
+                }
+            }
+            // Once we hit a non-lambda, lift normally
+            _ => self.lift_term(term),
+        }
     }
 
-    /// Push a name onto the scope stack
-    fn push_scope(&mut self, name: &str) {
-        self.scope.push(name.to_string());
+    /// Check if a name is bound (in scope, top-level, or an intrinsic)
+    fn is_bound(&self, name: &str) -> bool {
+        self.scope.iter().any(|(n, _)| n == name)
+            || self.top_level.contains(name)
+            || name.starts_with("_w_") // Intrinsics are always bound
+    }
+
+    /// Push a name and type onto the scope stack
+    fn push_scope(&mut self, name: &str, ty: Type<TypeName>) {
+        self.scope.push((name.to_string(), ty));
     }
 
     /// Pop from the scope stack
@@ -77,13 +108,13 @@ impl LambdaLifter {
                 param_ty,
                 body,
             } => {
-                // Push param onto scope
-                self.push_scope(&param);
+                // Push param onto scope with its type
+                self.push_scope(&param, param_ty.clone());
                 let lifted_body = self.lift_term(*body);
                 self.pop_scope();
 
                 // Compute free vars of this lambda (need to temporarily add param to scope)
-                self.push_scope(&param);
+                self.push_scope(&param, param_ty.clone());
                 let free_vars = self.free_vars_of(&lifted_body);
                 self.pop_scope();
 
@@ -104,6 +135,8 @@ impl LambdaLifter {
                         name: name.clone(),
                         ty: ty.clone(),
                         body: new_lam,
+                        meta: DefMeta::Function,
+                        arity: 1, // Lifted lambda takes one arg
                     });
                     Term {
                         id: self.term_ids.next_id(),
@@ -114,14 +147,16 @@ impl LambdaLifter {
                 } else {
                     // Has captures: wrap with extra lambdas, apply to captures
                     let name = self.fresh_name();
-                    let wrapped =
-                        self.wrap_with_captures(param, param_ty, lifted_body, &free_vars, span);
+                    let wrapped = self.wrap_with_captures(param, param_ty, lifted_body, &free_vars, span);
+                    let lifted_ty = wrapped.ty.clone();
                     self.new_defs.push(Def {
                         name: name.clone(),
-                        ty: wrapped.ty.clone(),
+                        ty: lifted_ty.clone(),
                         body: wrapped,
+                        meta: DefMeta::Function,
+                        arity: free_vars.len() + 1, // Captures + original param
                     });
-                    self.apply_to_captures(&name, &free_vars, ty, span)
+                    self.apply_to_captures(&name, lifted_ty, &free_vars, ty, span)
                 }
             }
 
@@ -146,7 +181,7 @@ impl LambdaLifter {
                 body,
             } => {
                 let lifted_rhs = self.lift_term(*rhs);
-                self.push_scope(&name);
+                self.push_scope(&name, name_ty.clone());
                 let lifted_body = self.lift_term(*body);
                 self.pop_scope();
                 Term {
@@ -244,10 +279,8 @@ impl LambdaLifter {
                 self.collect_free_vars(else_branch, free, seen);
             }
             // Literals have no free vars
-            TermKind::IntLit(_)
-            | TermKind::FloatLit(_)
-            | TermKind::BoolLit(_)
-            | TermKind::StringLit(_) => {}
+            TermKind::IntLit(_) | TermKind::FloatLit(_) | TermKind::BoolLit(_) | TermKind::StringLit(_) => {
+            }
         }
     }
 
@@ -260,13 +293,15 @@ impl LambdaLifter {
         match func {
             FunctionName::Term(t) => self.collect_free_vars(t, free, seen),
             FunctionName::Var(name) => {
-                // Function name could be a free var if not bound
+                // FunctionName::Var is used for top-level functions and intrinsics,
+                // which should always be bound. Local variables in function position
+                // use FunctionName::Term(Term::Var(...)) instead.
                 if !self.is_bound(name) && !seen.contains(name) {
-                    seen.insert(name.clone());
-                    free.push((
-                        name.clone(),
-                        Type::Constructed(TypeName::Named("unknown".to_string()), vec![]),
-                    ));
+                    panic!(
+                        "BUG: Unexpected free FunctionName::Var '{}'. \
+                         Local function variables should use FunctionName::Term.",
+                        name
+                    );
                 }
             }
             // BinOp and UnOp don't introduce free vars
@@ -317,6 +352,7 @@ impl LambdaLifter {
     fn apply_to_captures(
         &mut self,
         name: &str,
+        lifted_ty: Type<TypeName>,
         captures: &[(String, Type<TypeName>)],
         result_ty: Type<TypeName>,
         span: Span,
@@ -324,35 +360,47 @@ impl LambdaLifter {
         // Start with reference to the lifted lambda
         let base = Term {
             id: self.term_ids.next_id(),
-            ty: Type::Constructed(TypeName::Named("unknown".to_string()), vec![]),
+            ty: lifted_ty.clone(),
             span,
             kind: TermKind::Var(name.to_string()),
         };
 
-        // Apply to each capture
-        let result = captures.iter().fold(base, |acc, (cap_name, cap_ty)| {
+        // Apply to each capture, threading the type through
+        let (result, _) = captures.iter().fold((base, lifted_ty), |(acc, func_ty), (cap_name, cap_ty)| {
             let arg = Term {
                 id: self.term_ids.next_id(),
                 ty: cap_ty.clone(),
                 span,
                 kind: TermKind::Var(cap_name.clone()),
             };
-            Term {
+            // func_ty should be Arrow(cap_ty, result_ty) - extract the result type
+            let app_result_ty = match &func_ty {
+                Type::Constructed(TypeName::Arrow, args) if args.len() == 2 => args[1].clone(),
+                _ => panic!(
+                    "BUG: Expected arrow type for capture application, got {:?}",
+                    func_ty
+                ),
+            };
+            let app = Term {
                 id: self.term_ids.next_id(),
-                ty: Type::Constructed(TypeName::Named("unknown".to_string()), vec![]),
+                ty: app_result_ty.clone(),
                 span,
                 kind: TermKind::App {
                     func: Box::new(FunctionName::Term(Box::new(acc))),
                     arg: Box::new(arg),
                 },
-            }
+            };
+            (app, app_result_ty)
         });
 
-        // Fix up the result type
-        Term {
-            ty: result_ty,
-            ..result
-        }
+        // The final type should match result_ty (the original lambda type)
+        debug_assert!(
+            result.ty == result_ty,
+            "BUG: Final type mismatch: {:?} vs {:?}",
+            result.ty,
+            result_ty
+        );
+        result
     }
 
     fn fresh_name(&mut self) -> String {
@@ -376,9 +424,9 @@ mod tests {
     }
 
     #[test]
-    fn test_lift_simple_lambda() {
+    fn test_lift_preserves_param_lambda() {
         // Test: def f = |x| x
-        // Should become: def f = _lambda_0, def _lambda_0 = |x| x
+        // Parameter lambdas are preserved, so f stays as |x| x (not lifted)
         let mut ids = TermIdSource::new();
 
         let lam = Term {
@@ -408,20 +456,23 @@ mod tests {
                 name: "f".to_string(),
                 ty: lam.ty.clone(),
                 body: lam,
+                meta: DefMeta::Function,
+                arity: 1,
             }],
+            uniforms: vec![],
+            storage: vec![],
         };
 
         let lifted = LambdaLifter::lift(program);
 
-        // Should have 2 defs: f and _lambda_0
-        assert_eq!(lifted.defs.len(), 2);
+        // Should have 1 def: f with the lambda preserved
+        assert_eq!(lifted.defs.len(), 1);
         assert_eq!(lifted.defs[0].name, "f");
-        assert_eq!(lifted.defs[1].name, "_lambda_0");
 
-        // f's body should be a Var reference to _lambda_0
+        // f's body should still be a Lam
         match &lifted.defs[0].body.kind {
-            TermKind::Var(name) => assert_eq!(name, "_lambda_0"),
-            _ => panic!("Expected Var"),
+            TermKind::Lam { param, .. } => assert_eq!(param, "x"),
+            _ => panic!("Expected Lam"),
         }
     }
 }

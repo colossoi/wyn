@@ -1067,7 +1067,11 @@ impl tlc::Term {
         match &self.kind {
             tlc::TermKind::Var(name) => write!(f, "{}", name),
 
-            tlc::TermKind::Lam { param, param_ty, body } => {
+            tlc::TermKind::Lam {
+                param,
+                param_ty,
+                body,
+            } => {
                 if prec > 0 {
                     write!(f, "(")?;
                 }
@@ -1097,7 +1101,12 @@ impl tlc::Term {
                 Ok(())
             }
 
-            tlc::TermKind::Let { name, name_ty, rhs, body } => {
+            tlc::TermKind::Let {
+                name,
+                name_ty,
+                rhs,
+                body,
+            } => {
                 if prec > 0 {
                     write!(f, "(")?;
                 }
@@ -1116,7 +1125,11 @@ impl tlc::Term {
             tlc::TermKind::BoolLit(b) => write!(f, "{}", b),
             tlc::TermKind::StringLit(s) => write!(f, "\"{}\"", s),
 
-            tlc::TermKind::If { cond, then_branch, else_branch } => {
+            tlc::TermKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
                 if prec > 0 {
                     write!(f, "(")?;
                 }

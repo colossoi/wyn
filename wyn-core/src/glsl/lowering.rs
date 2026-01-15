@@ -1022,6 +1022,61 @@ impl<'a> LowerCtx<'a> {
                     _ => bail_glsl!("length called on non-array type: {:?}", arg_ty),
                 }
             }
+            "_w_tuple_proj" => {
+                // Same as tuple_access - args[0] is the tuple/vector, args[1] is the index
+                if let Expr::Int(idx_str) = body.get_expr(arg_ids[1]) {
+                    let idx: usize = idx_str
+                        .parse()
+                        .map_err(|_| crate::err_glsl!("BUG: Invalid tuple index literal: {}", idx_str))?;
+                    let arg_ty = body.get_type(arg_ids[0]);
+                    if self.is_vector_type(arg_ty) {
+                        let swizzle = match idx {
+                            0 => "x",
+                            1 => "y",
+                            2 => "z",
+                            3 => "w",
+                            _ => bail_glsl!("Invalid vector component index: {}", idx),
+                        };
+                        Ok(format!("{}.{}", args[0], swizzle))
+                    } else {
+                        // Struct/tuple field access
+                        Ok(format!("{}._{}", args[0], idx))
+                    }
+                } else {
+                    bail_glsl!("_w_tuple_proj requires constant index")
+                }
+            }
+            "_w_index" => {
+                // Same as index - array indexing
+                let arg_ty = body.get_type(arg_ids[0]);
+                match arg_ty {
+                    PolyType::Constructed(TypeName::Array, type_args) => {
+                        assert!(type_args.len() == 3);
+                        let is_unsized =
+                            matches!(&type_args[2], PolyType::Constructed(TypeName::Unsized, _));
+                        if is_unsized {
+                            match body.get_expr(arg_ids[0]) {
+                                Expr::Array {
+                                    backing: ArrayBacking::Owned { .. },
+                                    ..
+                                } => Ok(format!("{}.data[{}]", args[0], args[1])),
+                                Expr::Array {
+                                    backing: ArrayBacking::View { .. },
+                                    ..
+                                } => Ok(format!("{}.base[{}.offset + {}]", args[0], args[0], args[1])),
+                                Expr::Array {
+                                    backing: ArrayBacking::Storage { name, .. },
+                                    ..
+                                } => Ok(format!("{}[{}.offset + {}]", name, args[0], args[1])),
+                                _ => Ok(format!("{}.data[{}]", args[0], args[1])),
+                            }
+                        } else {
+                            Ok(format!("{}[{}]", args[0], args[1]))
+                        }
+                    }
+                    _ => Ok(format!("{}[{}]", args[0], args[1])),
+                }
+            }
             _ => bail_glsl!("Unknown intrinsic: {}", name),
         }
     }

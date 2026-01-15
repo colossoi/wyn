@@ -1,0 +1,264 @@
+//! Tests for TLC partial evaluation.
+
+use super::partial_eval::PartialEvaluator;
+use super::{Def, DefMeta, FunctionName, Program, Term, TermIdSource, TermKind};
+use crate::ast::{BinaryOp, Span, TypeName};
+use polytype::Type;
+
+fn make_span() -> Span {
+    Span {
+        start_line: 1,
+        start_col: 1,
+        end_line: 1,
+        end_col: 1,
+    }
+}
+
+fn make_program(name: &str, body: Term) -> Program {
+    Program {
+        defs: vec![Def {
+            name: name.to_string(),
+            ty: body.ty.clone(),
+            body,
+            meta: DefMeta::Function,
+            arity: 0,
+        }],
+        uniforms: vec![],
+        storage: vec![],
+    }
+}
+
+fn make_int(ids: &mut TermIdSource, n: i64) -> Term {
+    Term {
+        id: ids.next_id(),
+        ty: Type::Constructed(TypeName::Int(32), vec![]),
+        span: make_span(),
+        kind: TermKind::IntLit(n.to_string()),
+    }
+}
+
+fn make_bool(ids: &mut TermIdSource, b: bool) -> Term {
+    Term {
+        id: ids.next_id(),
+        ty: Type::Constructed(TypeName::Str("bool"), vec![]),
+        span: make_span(),
+        kind: TermKind::BoolLit(b),
+    }
+}
+
+fn make_binop(ids: &mut TermIdSource, op: &str, lhs: Term, rhs: Term) -> Term {
+    let partial = Term {
+        id: ids.next_id(),
+        ty: lhs.ty.clone(),
+        span: make_span(),
+        kind: TermKind::App {
+            func: Box::new(FunctionName::BinOp(BinaryOp { op: op.to_string() })),
+            arg: Box::new(lhs),
+        },
+    };
+    Term {
+        id: ids.next_id(),
+        ty: partial.ty.clone(),
+        span: make_span(),
+        kind: TermKind::App {
+            func: Box::new(FunctionName::Term(Box::new(partial))),
+            arg: Box::new(rhs),
+        },
+    }
+}
+
+#[test]
+fn test_constant_folding_add() {
+    let mut ids = TermIdSource::new();
+    let lhs = make_int(&mut ids, 2);
+    let rhs = make_int(&mut ids, 3);
+    let term = make_binop(&mut ids, "+", lhs, rhs);
+
+    let program = make_program("test", term);
+
+    let result = PartialEvaluator::partial_eval(program);
+    assert_eq!(result.defs.len(), 1);
+
+    match &result.defs[0].body.kind {
+        TermKind::IntLit(s) => assert_eq!(s, "5"),
+        other => panic!("Expected IntLit(5), got {:?}", other),
+    }
+}
+
+#[test]
+fn test_constant_folding_mul() {
+    let mut ids = TermIdSource::new();
+    let lhs = make_int(&mut ids, 4);
+    let rhs = make_int(&mut ids, 7);
+    let term = make_binop(&mut ids, "*", lhs, rhs);
+
+    let program = make_program("test", term);
+
+    let result = PartialEvaluator::partial_eval(program);
+
+    match &result.defs[0].body.kind {
+        TermKind::IntLit(s) => assert_eq!(s, "28"),
+        other => panic!("Expected IntLit(28), got {:?}", other),
+    }
+}
+
+#[test]
+fn test_algebraic_add_zero() {
+    let mut ids = TermIdSource::new();
+    let x = Term {
+        id: ids.next_id(),
+        ty: Type::Constructed(TypeName::Int(32), vec![]),
+        span: make_span(),
+        kind: TermKind::Var("x".to_string()),
+    };
+    let zero = make_int(&mut ids, 0);
+    let term = make_binop(&mut ids, "+", x, zero);
+
+    let program = make_program("test", term);
+
+    let result = PartialEvaluator::partial_eval(program);
+
+    // x + 0 should simplify to just x
+    match &result.defs[0].body.kind {
+        TermKind::Var(name) => assert_eq!(name, "x"),
+        other => panic!("Expected Var(x), got {:?}", other),
+    }
+}
+
+#[test]
+fn test_algebraic_mul_one() {
+    let mut ids = TermIdSource::new();
+    let one = make_int(&mut ids, 1);
+    let x = Term {
+        id: ids.next_id(),
+        ty: Type::Constructed(TypeName::Int(32), vec![]),
+        span: make_span(),
+        kind: TermKind::Var("x".to_string()),
+    };
+    let term = make_binop(&mut ids, "*", one, x);
+
+    let program = make_program("test", term);
+
+    let result = PartialEvaluator::partial_eval(program);
+
+    // 1 * x should simplify to just x
+    match &result.defs[0].body.kind {
+        TermKind::Var(name) => assert_eq!(name, "x"),
+        other => panic!("Expected Var(x), got {:?}", other),
+    }
+}
+
+#[test]
+fn test_algebraic_mul_zero() {
+    let mut ids = TermIdSource::new();
+    let x = Term {
+        id: ids.next_id(),
+        ty: Type::Constructed(TypeName::Int(32), vec![]),
+        span: make_span(),
+        kind: TermKind::Var("x".to_string()),
+    };
+    let zero = make_int(&mut ids, 0);
+    let term = make_binop(&mut ids, "*", x, zero);
+
+    let program = make_program("test", term);
+
+    let result = PartialEvaluator::partial_eval(program);
+
+    // x * 0 should simplify to 0
+    match &result.defs[0].body.kind {
+        TermKind::IntLit(s) => assert_eq!(s, "0"),
+        other => panic!("Expected IntLit(0), got {:?}", other),
+    }
+}
+
+#[test]
+fn test_if_true_elimination() {
+    let mut ids = TermIdSource::new();
+    let cond = make_bool(&mut ids, true);
+    let then_branch = make_int(&mut ids, 1);
+    let else_branch = make_int(&mut ids, 2);
+    let term = Term {
+        id: ids.next_id(),
+        ty: Type::Constructed(TypeName::Int(32), vec![]),
+        span: make_span(),
+        kind: TermKind::If {
+            cond: Box::new(cond),
+            then_branch: Box::new(then_branch),
+            else_branch: Box::new(else_branch),
+        },
+    };
+
+    let program = make_program("test", term);
+
+    let result = PartialEvaluator::partial_eval(program);
+
+    // if true then 1 else 2 should simplify to 1
+    match &result.defs[0].body.kind {
+        TermKind::IntLit(s) => assert_eq!(s, "1"),
+        other => panic!("Expected IntLit(1), got {:?}", other),
+    }
+}
+
+#[test]
+fn test_if_false_elimination() {
+    let mut ids = TermIdSource::new();
+    let cond = make_bool(&mut ids, false);
+    let then_branch = make_int(&mut ids, 1);
+    let else_branch = make_int(&mut ids, 2);
+    let term = Term {
+        id: ids.next_id(),
+        ty: Type::Constructed(TypeName::Int(32), vec![]),
+        span: make_span(),
+        kind: TermKind::If {
+            cond: Box::new(cond),
+            then_branch: Box::new(then_branch),
+            else_branch: Box::new(else_branch),
+        },
+    };
+
+    let program = make_program("test", term);
+
+    let result = PartialEvaluator::partial_eval(program);
+
+    // if false then 1 else 2 should simplify to 2
+    match &result.defs[0].body.kind {
+        TermKind::IntLit(s) => assert_eq!(s, "2"),
+        other => panic!("Expected IntLit(2), got {:?}", other),
+    }
+}
+
+#[test]
+fn test_let_constant_propagation() {
+    let mut ids = TermIdSource::new();
+    // let x = 5 in x + 3
+    let rhs = make_int(&mut ids, 5);
+    let x_var = Term {
+        id: ids.next_id(),
+        ty: Type::Constructed(TypeName::Int(32), vec![]),
+        span: make_span(),
+        kind: TermKind::Var("x".to_string()),
+    };
+    let three = make_int(&mut ids, 3);
+    let body_expr = make_binop(&mut ids, "+", x_var, three);
+    let term = Term {
+        id: ids.next_id(),
+        ty: Type::Constructed(TypeName::Int(32), vec![]),
+        span: make_span(),
+        kind: TermKind::Let {
+            name: "x".to_string(),
+            name_ty: Type::Constructed(TypeName::Int(32), vec![]),
+            rhs: Box::new(rhs),
+            body: Box::new(body_expr),
+        },
+    };
+
+    let program = make_program("test", term);
+
+    let result = PartialEvaluator::partial_eval(program);
+
+    // let x = 5 in x + 3 should simplify to 8
+    match &result.defs[0].body.kind {
+        TermKind::IntLit(s) => assert_eq!(s, "8"),
+        other => panic!("Expected IntLit(8), got {:?}", other),
+    }
+}

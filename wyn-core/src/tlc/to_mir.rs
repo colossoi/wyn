@@ -2,8 +2,8 @@
 //!
 //! Transforms a lifted TLC program (where all lambdas are top-level) into MIR.
 
-use super::{Def as TlcDef, FunctionName, Program as TlcProgram, Term, TermKind};
-use crate::ast::{NodeId, Span, TypeName};
+use super::{Def as TlcDef, DefMeta, FunctionName, Program as TlcProgram, Term, TermKind};
+use crate::ast::{self, NodeId, PatternKind, Span, TypeName};
 use crate::mir::{self, Body, Def as MirDef, Expr, ExprId, LocalDecl, LocalId, LocalKind};
 use polytype::Type;
 use std::collections::HashMap;
@@ -20,22 +20,39 @@ impl TlcToMir {
     /// Transform a lifted TLC program to MIR.
     pub fn transform(program: &TlcProgram) -> mir::Program {
         // Collect top-level names
-        let top_level: HashMap<String, TlcDef> = program
-            .defs
-            .iter()
-            .map(|d| (d.name.clone(), d.clone()))
-            .collect();
+        let top_level: HashMap<String, TlcDef> =
+            program.defs.iter().map(|d| (d.name.clone(), d.clone())).collect();
 
         let mut transformer = Self {
             locals: HashMap::new(),
             top_level,
         };
 
-        let defs: Vec<MirDef> = program
-            .defs
-            .iter()
-            .map(|def| transformer.transform_def(def))
-            .collect();
+        let mut defs: Vec<MirDef> = program.defs.iter().map(|def| transformer.transform_def(def)).collect();
+
+        // Add uniform declarations
+        for uniform in &program.uniforms {
+            defs.push(MirDef::Uniform {
+                id: NodeId(0),
+                name: uniform.name.clone(),
+                ty: uniform.ty.clone(),
+                set: uniform.set,
+                binding: uniform.binding,
+            });
+        }
+
+        // Add storage declarations
+        for storage in &program.storage {
+            defs.push(MirDef::Storage {
+                id: NodeId(0),
+                name: storage.name.clone(),
+                ty: storage.ty.clone(),
+                set: storage.set,
+                binding: storage.binding,
+                layout: storage.layout,
+                access: storage.access,
+            });
+        }
 
         mir::Program {
             defs,
@@ -46,6 +63,13 @@ impl TlcToMir {
     fn transform_def(&mut self, def: &TlcDef) -> MirDef {
         self.locals.clear();
 
+        match &def.meta {
+            DefMeta::Function => self.transform_function_def(def),
+            DefMeta::EntryPoint(entry) => self.transform_entry_def(def, entry),
+        }
+    }
+
+    fn transform_function_def(&mut self, def: &TlcDef) -> MirDef {
         let mut body = Body::new();
 
         // Extract parameters from nested Lams
@@ -73,7 +97,7 @@ impl TlcToMir {
         if params.is_empty() {
             // Constant (no parameters)
             MirDef::Constant {
-                id: NodeId(0), // TLC doesn't track NodeIds, use placeholder
+                id: NodeId(0),
                 name: def.name.clone(),
                 ty: def.ty.clone(),
                 attributes: vec![],
@@ -92,6 +116,134 @@ impl TlcToMir {
                 body,
                 span: def.body.span,
             }
+        }
+    }
+
+    fn transform_entry_def(&mut self, def: &TlcDef, entry: &ast::EntryDecl) -> MirDef {
+        let mut body = Body::new();
+
+        // Extract parameters from nested Lams
+        let (params, inner_body) = self.extract_params(&def.body);
+
+        // Build inputs with decorations from AST
+        let mut inputs = Vec::new();
+        for (i, (name, ty, span)) in params.iter().enumerate() {
+            let local_id = body.alloc_local(LocalDecl {
+                name: name.clone(),
+                span: *span,
+                ty: ty.clone(),
+                kind: LocalKind::Param,
+            });
+            self.locals.insert(name.clone(), local_id);
+
+            // Get decoration from original AST pattern
+            let decoration = entry.params.get(i).and_then(|p| self.extract_io_decoration(p));
+
+            inputs.push(mir::EntryInput {
+                local: local_id,
+                name: name.clone(),
+                ty: ty.clone(),
+                decoration,
+            });
+        }
+
+        // Transform the body
+        let root = self.transform_term(inner_body, &mut body);
+        body.set_root(root);
+
+        // Convert entry type to ExecutionModel
+        let execution_model = match &entry.entry_type {
+            ast::Attribute::Vertex => mir::ExecutionModel::Vertex,
+            ast::Attribute::Fragment => mir::ExecutionModel::Fragment,
+            ast::Attribute::Compute => mir::ExecutionModel::Compute {
+                local_size: (64, 1, 1),
+            },
+            _ => panic!("Invalid entry type attribute: {:?}", entry.entry_type),
+        };
+
+        // Build outputs from AST
+        let ret_type = inner_body.ty.clone();
+        let outputs = self.build_entry_outputs(entry, &ret_type);
+
+        MirDef::EntryPoint {
+            id: NodeId(0),
+            name: def.name.clone(),
+            execution_model,
+            inputs,
+            outputs,
+            body,
+            span: def.body.span,
+        }
+    }
+
+    /// Extract I/O decoration from a pattern
+    fn extract_io_decoration(&self, pattern: &ast::Pattern) -> Option<mir::IoDecoration> {
+        match &pattern.kind {
+            PatternKind::Attributed(attrs, inner) => {
+                for attr in attrs {
+                    match attr {
+                        ast::Attribute::BuiltIn(builtin) => {
+                            return Some(mir::IoDecoration::BuiltIn(*builtin));
+                        }
+                        ast::Attribute::Location(loc) => {
+                            return Some(mir::IoDecoration::Location(*loc));
+                        }
+                        _ => {}
+                    }
+                }
+                self.extract_io_decoration(inner)
+            }
+            PatternKind::Typed(inner, _) => self.extract_io_decoration(inner),
+            _ => None,
+        }
+    }
+
+    /// Build entry outputs from AST entry declaration
+    fn build_entry_outputs(
+        &self,
+        entry: &ast::EntryDecl,
+        ret_type: &Type<TypeName>,
+    ) -> Vec<mir::EntryOutput> {
+        if entry.outputs.iter().all(|o| o.attribute.is_none()) && entry.outputs.len() == 1 {
+            // Single output without explicit decoration
+            if !matches!(ret_type, Type::Constructed(TypeName::Unit, _)) {
+                vec![mir::EntryOutput {
+                    ty: ret_type.clone(),
+                    decoration: None,
+                }]
+            } else {
+                vec![]
+            }
+        } else if let Type::Constructed(TypeName::Tuple(_), component_types) = ret_type {
+            // Multiple outputs with decorations (tuple return)
+            entry
+                .outputs
+                .iter()
+                .zip(component_types.iter())
+                .map(|(output, ty)| mir::EntryOutput {
+                    ty: ty.clone(),
+                    decoration: output.attribute.as_ref().and_then(|a| self.convert_to_io_decoration(a)),
+                })
+                .collect()
+        } else {
+            // Single output with decoration
+            vec![mir::EntryOutput {
+                ty: ret_type.clone(),
+                decoration: entry
+                    .outputs
+                    .first()
+                    .and_then(|o| o.attribute.as_ref())
+                    .and_then(|a| self.convert_to_io_decoration(a)),
+            }]
+        }
+    }
+
+    /// Convert AST attribute to MIR IoDecoration
+    fn convert_to_io_decoration(&self, attr: &ast::Attribute) -> Option<mir::IoDecoration> {
+        match attr {
+            ast::Attribute::BuiltIn(builtin) => Some(mir::IoDecoration::BuiltIn(*builtin)),
+            ast::Attribute::Location(loc) => Some(mir::IoDecoration::Location(*loc)),
+            _ => None,
         }
     }
 
@@ -278,12 +430,12 @@ impl TlcToMir {
                 // Check if inner_term is a binop partial application
                 if let TermKind::App {
                     func: inner_func,
-                    arg: lhs,
+                    arg: first_arg,
                 } = &inner_term.kind
                 {
                     if let FunctionName::BinOp(op) = inner_func.as_ref() {
                         // Complete binary operation: we have both lhs and rhs (arg)
-                        let lhs_id = self.transform_term(lhs, body);
+                        let lhs_id = self.transform_term(first_arg, body);
                         let rhs_id = self.transform_term(arg, body);
                         return body.alloc_expr(
                             Expr::BinOp {
@@ -296,6 +448,27 @@ impl TlcToMir {
                             node_id,
                         );
                     }
+
+                    // Check for two-arg intrinsics: _w_index, _w_tuple_proj
+                    if let FunctionName::Var(name) = inner_func.as_ref() {
+                        match name.as_str() {
+                            "_w_index" | "_w_tuple_proj" => {
+                                // Two-arg intrinsic: complete with both args
+                                let first_id = self.transform_term(first_arg, body);
+                                let second_id = self.transform_term(arg, body);
+                                return body.alloc_expr(
+                                    Expr::Intrinsic {
+                                        name: name.clone(),
+                                        args: vec![first_id, second_id],
+                                    },
+                                    ty,
+                                    span,
+                                    node_id,
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
                 }
 
                 // Generic higher-order application
@@ -306,24 +479,135 @@ impl TlcToMir {
                 // Check if it's a call to a known function
                 if let Expr::Global(func_name) = body.get_expr(func_id) {
                     let func_name = func_name.clone();
-                    // Collect all curried args
+                    // Check for literal intrinsics that should become MIR literals/intrinsics
+                    match func_name.as_str() {
+                        "_w_vec_lit" => body.alloc_expr(Expr::Vector(vec![arg_id]), ty, span, node_id),
+                        "_w_array_lit" => {
+                            // For arrays, we need the size expression
+                            let size = body.alloc_expr(
+                                Expr::Int("1".to_string()),
+                                Type::Constructed(TypeName::Int(32), vec![]),
+                                span,
+                                node_id,
+                            );
+                            body.alloc_expr(
+                                Expr::Array {
+                                    backing: mir::ArrayBacking::Literal(vec![arg_id]),
+                                    size,
+                                },
+                                ty,
+                                span,
+                                node_id,
+                            )
+                        }
+                        "_w_tuple" => body.alloc_expr(Expr::Tuple(vec![arg_id]), ty, span, node_id),
+                        // Intrinsics that need special handling
+                        name if name.starts_with("_w_") => body.alloc_expr(
+                            Expr::Intrinsic {
+                                name: func_name,
+                                args: vec![arg_id],
+                            },
+                            ty,
+                            span,
+                            node_id,
+                        ),
+                        _ => body.alloc_expr(
+                            Expr::Call {
+                                func: func_name,
+                                args: vec![arg_id],
+                            },
+                            ty,
+                            span,
+                            node_id,
+                        ),
+                    }
+                } else if let Expr::Call {
+                    func: func_name,
+                    args: existing_args,
+                } = body.get_expr(func_id).clone()
+                {
+                    // Extend the call with more arguments
+                    let mut args = existing_args;
+                    args.push(arg_id);
+
+                    // Check for literal intrinsics that should become MIR literals
+                    match func_name.as_str() {
+                        "_w_vec_lit" => body.alloc_expr(Expr::Vector(args), ty, span, node_id),
+                        "_w_array_lit" => {
+                            let len = args.len();
+                            let size = body.alloc_expr(
+                                Expr::Int(len.to_string()),
+                                Type::Constructed(TypeName::Int(32), vec![]),
+                                span,
+                                node_id,
+                            );
+                            body.alloc_expr(
+                                Expr::Array {
+                                    backing: mir::ArrayBacking::Literal(args),
+                                    size,
+                                },
+                                ty,
+                                span,
+                                node_id,
+                            )
+                        }
+                        "_w_tuple" => body.alloc_expr(Expr::Tuple(args), ty, span, node_id),
+                        _ => body.alloc_expr(
+                            Expr::Call {
+                                func: func_name,
+                                args,
+                            },
+                            ty,
+                            span,
+                            node_id,
+                        ),
+                    }
+                } else if let Expr::Intrinsic {
+                    name: intrinsic_name,
+                    args: existing_args,
+                } = body.get_expr(func_id).clone()
+                {
+                    // Extend an intrinsic with more arguments
+                    let mut args = existing_args;
+                    args.push(arg_id);
                     body.alloc_expr(
-                        Expr::Call {
-                            func: func_name,
-                            args: vec![arg_id],
+                        Expr::Intrinsic {
+                            name: intrinsic_name,
+                            args,
                         },
                         ty,
                         span,
                         node_id,
                     )
-                } else if let Expr::Call { func: func_name, args: existing_args } = body.get_expr(func_id).clone() {
-                    // Extend the call with more arguments
-                    let mut args = existing_args;
-                    args.push(arg_id);
+                } else if let Expr::Tuple(existing_elems) = body.get_expr(func_id).clone() {
+                    // Extend an existing tuple literal
+                    let mut elems = existing_elems;
+                    elems.push(arg_id);
+                    body.alloc_expr(Expr::Tuple(elems), ty, span, node_id)
+                } else if let Expr::Vector(existing_elems) = body.get_expr(func_id).clone() {
+                    // Extend an existing vector literal
+                    let mut elems = existing_elems;
+                    elems.push(arg_id);
+                    body.alloc_expr(Expr::Vector(elems), ty, span, node_id)
+                } else if let Expr::Array {
+                    backing: mir::ArrayBacking::Literal(existing_elems),
+                    ..
+                } = body.get_expr(func_id).clone()
+                {
+                    // Extend an existing array literal
+                    let mut elems = existing_elems;
+                    elems.push(arg_id);
+                    let len = elems.len();
+                    let size = body.alloc_expr(
+                        Expr::Int(len.to_string()),
+                        Type::Constructed(TypeName::Int(32), vec![]),
+                        span,
+                        node_id,
+                    );
                     body.alloc_expr(
-                        Expr::Call {
-                            func: func_name,
-                            args,
+                        Expr::Array {
+                            backing: mir::ArrayBacking::Literal(elems),
+                            size,
                         },
                         ty,
                         span,
@@ -402,9 +686,7 @@ mod tests {
             ),
             span,
             kind: TermKind::App {
-                func: Box::new(FunctionName::BinOp(BinaryOp {
-                    op: "+".to_string(),
-                })),
+                func: Box::new(FunctionName::BinOp(BinaryOp { op: "+".to_string() })),
                 arg: Box::new(x_var),
             },
         };
@@ -466,7 +748,11 @@ mod tests {
                 name: "add".to_string(),
                 ty: lam_x.ty.clone(),
                 body: lam_x,
+                meta: super::DefMeta::Function,
+                arity: 2,
             }],
+            uniforms: vec![],
+            storage: vec![],
         };
 
         let mir = TlcToMir::transform(&program);

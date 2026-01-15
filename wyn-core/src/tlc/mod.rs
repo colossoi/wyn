@@ -4,6 +4,9 @@
 //! Lambdas remain as values (not yet defunctionalized).
 
 pub mod lift;
+pub mod partial_eval;
+#[cfg(test)]
+mod partial_eval_tests;
 pub mod to_mir;
 
 use crate::TypeTable;
@@ -110,18 +113,34 @@ pub enum TermKind {
 // TLC Program
 // =============================================================================
 
+/// Metadata about how a definition should be lowered to MIR.
+#[derive(Debug, Clone)]
+pub enum DefMeta {
+    /// A regular function or constant.
+    Function,
+    /// A shader entry point - stores the original AST entry for metadata.
+    EntryPoint(Box<ast::EntryDecl>),
+}
+
 /// A top-level definition in TLC.
 #[derive(Debug, Clone)]
 pub struct Def {
     pub name: String,
     pub ty: Type<TypeName>,
     pub body: Term,
+    pub meta: DefMeta,
+    /// Number of arguments this function expects (for uncurrying).
+    pub arity: usize,
 }
 
 /// A TLC program (collection of definitions).
 #[derive(Debug, Clone)]
 pub struct Program {
     pub defs: Vec<Def>,
+    /// Uniform declarations (no bodies, just metadata).
+    pub uniforms: Vec<ast::UniformDecl>,
+    /// Storage buffer declarations (no bodies, just metadata).
+    pub storage: Vec<ast::StorageDecl>,
 }
 
 // =============================================================================
@@ -145,28 +164,40 @@ impl<'a> Transformer<'a> {
     /// Transform an AST program to TLC.
     pub fn transform_program(&mut self, program: &ast::Program) -> Program {
         let mut defs = Vec::new();
+        let mut uniforms = Vec::new();
+        let mut storage = Vec::new();
 
         for decl in &program.declarations {
-            if let Some(def) = self.transform_declaration(decl) {
-                defs.push(def);
+            match decl {
+                ast::Declaration::Decl(d) => {
+                    if let Some(def) = self.transform_decl(d) {
+                        defs.push(def);
+                    }
+                }
+                ast::Declaration::Entry(e) => {
+                    if let Some(def) = self.transform_entry(e) {
+                        defs.push(def);
+                    }
+                }
+                ast::Declaration::Uniform(u) => {
+                    uniforms.push(u.clone());
+                }
+                ast::Declaration::Storage(s) => {
+                    storage.push(s.clone());
+                }
+                ast::Declaration::Sig(_)
+                | ast::Declaration::TypeBind(_)
+                | ast::Declaration::Module(_)
+                | ast::Declaration::ModuleTypeBind(_)
+                | ast::Declaration::Open(_)
+                | ast::Declaration::Import(_) => {}
             }
         }
 
-        Program { defs }
-    }
-
-    fn transform_declaration(&mut self, decl: &ast::Declaration) -> Option<Def> {
-        match decl {
-            ast::Declaration::Decl(d) => self.transform_decl(d),
-            ast::Declaration::Entry(e) => self.transform_entry(e),
-            ast::Declaration::Uniform(_) => None,
-            ast::Declaration::Storage(_) => None,
-            ast::Declaration::Sig(_) => None,
-            ast::Declaration::TypeBind(_) => None,
-            ast::Declaration::Module(_) => None,
-            ast::Declaration::ModuleTypeBind(_) => None,
-            ast::Declaration::Open(_) => None,
-            ast::Declaration::Import(_) => None,
+        Program {
+            defs,
+            uniforms,
+            storage,
         }
     }
 
@@ -179,6 +210,8 @@ impl<'a> Transformer<'a> {
             name: decl.name.clone(),
             ty: full_ty,
             body,
+            meta: DefMeta::Function,
+            arity: decl.params.len(),
         })
     }
 
@@ -191,6 +224,8 @@ impl<'a> Transformer<'a> {
             name: entry.name.clone(),
             ty: full_ty,
             body,
+            meta: DefMeta::EntryPoint(Box::new(entry.clone())),
+            arity: entry.params.len(),
         })
     }
 
@@ -209,7 +244,7 @@ impl<'a> Transformer<'a> {
         match &pattern.kind {
             ast::PatternKind::Typed(_, ty) => ty.clone(),
             ast::PatternKind::Attributed(_, inner) => self.pattern_type(inner),
-            _ => Type::Constructed(TypeName::Named("unknown".to_string()), vec![]),
+            _ => self.lookup_type(pattern.h.id).expect("Pattern must have type in type table"),
         }
     }
 
@@ -314,12 +349,10 @@ impl<'a> Transformer<'a> {
         }
     }
 
-    fn extract_tuple_types(&self, ty: &Type<TypeName>, expected_len: usize) -> Vec<Type<TypeName>> {
+    fn extract_tuple_types(&self, ty: &Type<TypeName>, _expected_len: usize) -> Vec<Type<TypeName>> {
         match ty {
             Type::Constructed(TypeName::Tuple(_), args) => args.clone(),
-            _ => (0..expected_len)
-                .map(|_| Type::Constructed(TypeName::Named("unknown".to_string()), vec![]))
-                .collect(),
+            _ => panic!("BUG: Expected tuple type, got {:?}", ty),
         }
     }
 
@@ -354,7 +387,7 @@ impl<'a> Transformer<'a> {
             let comp_ty = component_types
                 .get(i)
                 .cloned()
-                .unwrap_or_else(|| Type::Constructed(TypeName::Named("unknown".to_string()), vec![]));
+                .expect("BUG: Tuple pattern has more elements than tuple type");
 
             // proj_i(tuple_var) as function application
             let tuple_ref = self.mk_term(
@@ -362,7 +395,12 @@ impl<'a> Transformer<'a> {
                 span,
                 TermKind::Var(tuple_var.to_string()),
             );
-            let proj = self.build_app1(&format!("_w_proj_{}", i), tuple_ref, comp_ty.clone(), span);
+            let index_lit = self.mk_term(
+                Type::Constructed(TypeName::Int(32), vec![]),
+                span,
+                TermKind::IntLit(i.to_string()),
+            );
+            let proj = self.build_app2("_w_tuple_proj", tuple_ref, index_lit, comp_ty.clone(), span);
 
             result = self.bind_pattern_to_expr(pattern, comp_ty, proj, result, span);
         }
@@ -385,18 +423,19 @@ impl<'a> Transformer<'a> {
             let field_ty = field_types
                 .get(&field.field)
                 .cloned()
-                .unwrap_or_else(|| Type::Constructed(TypeName::Named("unknown".to_string()), vec![]));
+                .unwrap_or_else(|| panic!("BUG: Record field '{}' not found in type", field.field));
 
             // Resolve field name to index, treat record as tuple
             let field_idx = self.resolve_field_index(record_ty, &field.field).unwrap_or(0);
 
             let record_ref = self.mk_term(record_ty.clone(), span, TermKind::Var(record_var.to_string()));
-            let field_access = self.build_app1(
-                &format!("_w_proj_{}", field_idx),
-                record_ref,
-                field_ty.clone(),
+            let index_lit = self.mk_term(
+                Type::Constructed(TypeName::Int(32), vec![]),
                 span,
+                TermKind::IntLit(field_idx.to_string()),
             );
+            let field_access =
+                self.build_app2("_w_tuple_proj", record_ref, index_lit, field_ty.clone(), span);
 
             if let Some(pat) = &field.pattern {
                 result = self.bind_pattern_to_expr(pat, field_ty, field_access, result, span);
@@ -506,9 +545,7 @@ impl<'a> Transformer<'a> {
     }
 
     fn transform_expr(&mut self, expr: &ast::Expression) -> Term {
-        let ty = self
-            .lookup_type(expr.h.id)
-            .unwrap_or_else(|| Type::Constructed(TypeName::Named("unknown".to_string()), vec![]));
+        let ty = self.lookup_type(expr.h.id).expect("BUG: Expression must have type in type table");
         let span = expr.h.span;
 
         match &expr.kind {
@@ -600,7 +637,12 @@ impl<'a> Transformer<'a> {
                 let rec = self.transform_expr(record);
                 // Resolve field name to index, treat record as tuple
                 let field_idx = self.resolve_field_index(&rec.ty, field).unwrap_or(0);
-                self.build_app1(&format!("_w_proj_{}", field_idx), rec, ty, span)
+                let index_lit = self.mk_term(
+                    Type::Constructed(TypeName::Int(32), vec![]),
+                    span,
+                    TermKind::IntLit(field_idx.to_string()),
+                );
+                self.build_app2("_w_tuple_proj", rec, index_lit, ty, span)
             }
 
             ast::ExprKind::If(if_expr) => {
@@ -664,7 +706,7 @@ impl<'a> Transformer<'a> {
     fn get_param_type(&self, ty: &Type<TypeName>) -> Type<TypeName> {
         match ty {
             Type::Constructed(TypeName::Arrow, args) if args.len() == 2 => args[0].clone(),
-            _ => Type::Constructed(TypeName::Named("unknown".to_string()), vec![]),
+            _ => panic!("BUG: Expected arrow type for function param, got {:?}", ty),
         }
     }
 
@@ -724,13 +766,16 @@ impl<'a> Transformer<'a> {
                 let body = self.transform_expr(&loop_expr.body);
 
                 let body_ty = body.ty.clone();
-                let inner_lam = self.pattern_to_lambda(&loop_expr.pattern, body_ty, body);
+                let inner_lam = self.pattern_to_lambda(&loop_expr.pattern, body_ty.clone(), body);
+                let index_ty = Type::Constructed(TypeName::Int(32), vec![]);
+                let outer_lam_ty =
+                    Type::Constructed(TypeName::Arrow, vec![index_ty.clone(), inner_lam.ty.clone()]);
                 let body_lam = self.mk_term(
-                    Type::Constructed(TypeName::Named("unknown".to_string()), vec![]),
+                    outer_lam_ty,
                     span,
                     TermKind::Lam {
                         param: var.clone(),
-                        param_ty: Type::Constructed(TypeName::Int(32), vec![]),
+                        param_ty: index_ty,
                         body: Box::new(inner_lam),
                     },
                 );
@@ -752,9 +797,11 @@ impl<'a> Transformer<'a> {
                 let elem_name = pattern.simple_name().unwrap_or("_elem").to_string();
 
                 let body_ty = body.ty.clone();
-                let inner_lam = self.pattern_to_lambda(&loop_expr.pattern, body_ty, body);
+                let inner_lam = self.pattern_to_lambda(&loop_expr.pattern, body_ty.clone(), body);
+                let outer_lam_ty =
+                    Type::Constructed(TypeName::Arrow, vec![elem_ty.clone(), inner_lam.ty.clone()]);
                 let body_lam = self.mk_term(
-                    Type::Constructed(TypeName::Named("unknown".to_string()), vec![]),
+                    outer_lam_ty,
                     span,
                     TermKind::Lam {
                         param: elem_name,
@@ -792,7 +839,7 @@ impl<'a> Transformer<'a> {
     fn get_array_element_type(&self, ty: &Type<TypeName>) -> Type<TypeName> {
         match ty {
             Type::Constructed(TypeName::Array, args) if !args.is_empty() => args[0].clone(),
-            _ => Type::Constructed(TypeName::Named("unknown".to_string()), vec![]),
+            _ => panic!("BUG: Expected array type, got {:?}", ty),
         }
     }
 
@@ -887,7 +934,8 @@ impl<'a> Transformer<'a> {
                 let body = self.transform_expr(&case.body);
                 let mut bound_body = body;
                 for (i, pat) in patterns.iter().enumerate().rev() {
-                    let field_ty = Type::Constructed(TypeName::Named("unknown".to_string()), vec![]);
+                    let field_ty =
+                        self.lookup_type(pat.h.id).expect("BUG: Constructor field pattern must have type");
                     let extract = self.build_app1(
                         &format!("_w_extract_{}_{}", ctor_name, i),
                         scrutinee.clone(),
@@ -1033,8 +1081,12 @@ impl<'a> Transformer<'a> {
         result_ty: Type<TypeName>,
         span: Span,
     ) -> Term {
+        // Type of app2: arg3.ty -> result_ty
+        let app2_ty = Type::Constructed(TypeName::Arrow, vec![arg3.ty.clone(), result_ty.clone()]);
+        // Type of app1: arg2.ty -> app2_ty
+        let app1_ty = Type::Constructed(TypeName::Arrow, vec![arg2.ty.clone(), app2_ty.clone()]);
         let app1 = self.mk_term(
-            Type::Constructed(TypeName::Named("unknown".to_string()), vec![]),
+            app1_ty,
             span,
             TermKind::App {
                 func: Box::new(FunctionName::Var(name.to_string())),
@@ -1042,7 +1094,7 @@ impl<'a> Transformer<'a> {
             },
         );
         let app2 = self.mk_term(
-            Type::Constructed(TypeName::Arrow, vec![arg3.ty.clone(), result_ty.clone()]),
+            app2_ty,
             span,
             TermKind::App {
                 func: Box::new(FunctionName::Term(Box::new(app1))),
@@ -1110,32 +1162,42 @@ impl<'a> Transformer<'a> {
             return self.mk_term(result_ty, span, TermKind::Var(name.to_string()));
         }
 
-        let first_arg = self.transform_expr(&args[0]);
+        // Transform all args first to get their types
+        let arg_terms: Vec<Term> = args.iter().map(|a| self.transform_expr(a)).collect();
+
+        // Compute intermediate types working backwards from result_ty
+        // For f(a, b, c) with result R: f(a) : B -> C -> R, f(a)(b) : C -> R, f(a)(b)(c) : R
+        let mut intermediate_types = vec![result_ty.clone()];
+        for arg in arg_terms.iter().rev().skip(1) {
+            let prev_ty = intermediate_types.last().unwrap().clone();
+            let cur_ty = Type::Constructed(TypeName::Arrow, vec![arg.ty.clone(), prev_ty]);
+            intermediate_types.push(cur_ty);
+        }
+        intermediate_types.reverse();
+
+        // Build curried applications
         let mut result = self.mk_term(
-            Type::Constructed(TypeName::Named("unknown".to_string()), vec![]),
+            intermediate_types[0].clone(),
             span,
             TermKind::App {
                 func: Box::new(FunctionName::Var(name.to_string())),
-                arg: Box::new(first_arg),
+                arg: Box::new(arg_terms[0].clone()),
             },
         );
 
-        for arg in &args[1..] {
-            let arg_term = self.transform_expr(arg);
+        for (i, arg_term) in arg_terms.iter().enumerate().skip(1) {
+            let app_ty = intermediate_types.get(i).cloned().unwrap_or_else(|| result_ty.clone());
             result = self.mk_term(
-                Type::Constructed(TypeName::Named("unknown".to_string()), vec![]),
+                app_ty,
                 span,
                 TermKind::App {
                     func: Box::new(FunctionName::Term(Box::new(result))),
-                    arg: Box::new(arg_term),
+                    arg: Box::new(arg_term.clone()),
                 },
             );
         }
 
-        Term {
-            ty: result_ty,
-            ..result
-        }
+        result
     }
 
     fn lookup_type(&self, node_id: NodeId) -> Option<Type<TypeName>> {

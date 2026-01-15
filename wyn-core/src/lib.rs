@@ -34,7 +34,6 @@ pub mod inplace_rewriter;
 pub mod materialize_hoisting;
 pub mod monomorphization;
 pub mod normalize;
-pub mod partial_eval;
 pub mod spirv;
 
 #[cfg(test)]
@@ -259,14 +258,18 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 //       -> .fold_ast_constants()                        -> AstConstFoldedEarly
 //       -> .type_check(&frontend.module_manager)        -> TypeChecked
 //       -> .alias_check()                               -> AliasChecked
-//       -> .flatten(&frontend.module_manager)           -> Flattened
+//
+// TLC Pipeline (AST -> MIR):
+//       -> .to_tlc()                                    -> TlcTransformed
+//       -> .partial_eval() or .skip_partial_eval()      -> TlcTransformed (optimized)
+//       -> .lift()                                      -> TlcLifted
+//       -> .to_mir()                                    -> Flattened
 //
 // BackEnd Pipeline (MIR -> output):
-//   let mut backend = BackEnd::new(node_counter);
 //     -> flattened.hoist_materializations()             -> MaterializationsHoisted
 //       -> .normalize()                                 -> Normalized
 //       -> .monomorphize()                              -> Monomorphized
-//       -> .fold_constants() or .partial_eval()         -> Folded
+//       -> .skip_folding()                              -> Folded
 //       -> .filter_reachable()                          -> Reachable
 //       -> .lift_bindings()                             -> Lifted
 //       -> .lower()                                     -> Lowered
@@ -618,6 +621,20 @@ pub struct TlcTransformed {
 }
 
 impl TlcTransformed {
+    /// Apply partial evaluation (constant folding, algebraic simplifications, etc.)
+    pub fn partial_eval(self) -> TlcTransformed {
+        let optimized = tlc::partial_eval::PartialEvaluator::partial_eval(self.tlc);
+        TlcTransformed {
+            tlc: optimized,
+            type_table: self.type_table,
+        }
+    }
+
+    /// Skip partial evaluation
+    pub fn skip_partial_eval(self) -> TlcTransformed {
+        self
+    }
+
     /// Lift all lambdas to top-level definitions
     pub fn lift(self) -> TlcLifted {
         let lifted = tlc::lift::LambdaLifter::lift(self.tlc);
@@ -692,17 +709,9 @@ pub struct Monomorphized {
 
 impl Monomorphized {
     /// Skip constant folding/partial evaluation entirely.
-    /// Just passes through to the next stage.
+    /// Partial evaluation now happens on TLC before MIR generation.
     pub fn skip_folding(self) -> Folded {
         Folded { mir: self.mir }
-    }
-
-    /// Partially evaluate the MIR using normalization-by-evaluation.
-    /// Evaluates function calls and loops when their arguments/bounds
-    /// are known at compile time.
-    pub fn partial_eval(self) -> Result<Folded> {
-        let mir = partial_eval::partial_eval(self.mir)?;
-        Ok(Folded { mir })
     }
 }
 

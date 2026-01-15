@@ -201,22 +201,31 @@ fn compile_file(
         return Err(wyn_core::err_alias!("alias checking failed").into());
     }
 
-    // Output TLC if requested
+    // Transform to TLC
+    let tlc_transformed = time("to_tlc", verbose, || alias_checked.to_tlc());
+
+    // Output TLC if requested (before optimization)
     if let Some(ref tlc_path) = output_tlc {
-        let tlc_program = time("tlc", verbose, || {
-            wyn_core::tlc::transform(&alias_checked.ast, &alias_checked.type_table)
-        });
-        fs::write(tlc_path, format!("{}", tlc_program))?;
+        fs::write(tlc_path, format!("{}", tlc_transformed.tlc))?;
         if verbose {
             info!("Wrote TLC to {}", tlc_path.display());
         }
     }
 
-    let (flattened, _backend) = time("flatten", verbose, || {
-        alias_checked.flatten(&frontend.module_manager, &frontend.schemes)
-    })?;
+    // Apply TLC partial evaluation if enabled
+    let tlc_optimized = if partial_eval {
+        time("tlc_partial_eval", verbose, || tlc_transformed.partial_eval())
+    } else {
+        tlc_transformed.skip_partial_eval()
+    };
 
-    // Write initial MIR if requested (right after flattening)
+    // Lift lambdas to top-level
+    let tlc_lifted = time("tlc_lift", verbose, || tlc_optimized.lift());
+
+    // Transform TLC to MIR
+    let flattened = time("to_mir", verbose, || tlc_lifted.to_mir());
+
+    // Write initial MIR if requested (right after TLC→MIR)
     write_mir_if_requested(&flattened.mir, &output_init_mir, "initial MIR", verbose)?;
 
     let hoisted = time("hoist_materializations", verbose, || {
@@ -224,11 +233,7 @@ fn compile_file(
     });
     let normalized = time("normalize", verbose, || hoisted.normalize());
     let monomorphized = time("monomorphize", verbose, || normalized.monomorphize())?;
-    let folded = if partial_eval {
-        time("partial_eval", verbose, || monomorphized.partial_eval())?
-    } else {
-        monomorphized.skip_folding()
-    };
+    let folded = monomorphized.skip_folding();
     let reachable = time("filter_reachable", verbose, || folded.filter_reachable());
     let lifted = time("lift_bindings", verbose, || reachable.lift_bindings());
 

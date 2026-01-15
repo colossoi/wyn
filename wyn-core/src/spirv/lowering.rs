@@ -2432,6 +2432,42 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                         ))
                     }
                 }
+                "_w_index" => {
+                    if args.len() != 2 {
+                        bail_spirv!("_w_index requires 2 args");
+                    }
+                    lower_index_intrinsic(constructor, body, args[0], args[1], result_type)
+                }
+                "_w_tuple_proj" => {
+                    // _w_tuple_proj tuple index - extracts field from a tuple/record
+                    if args.len() != 2 {
+                        bail_spirv!("_w_tuple_proj requires 2 args, got {}", args.len());
+                    }
+
+                    // Second arg should be a constant index
+                    let index = match body.get_expr(args[1]) {
+                        Expr::Int(s) => s.parse::<u32>().unwrap_or_else(|e| {
+                            panic!("BUG: _w_tuple_proj index '{}' failed to parse as u32: {}", s, e)
+                        }),
+                        _ => {
+                            panic!(
+                                "BUG: _w_tuple_proj requires a constant integer literal as second argument"
+                            )
+                        }
+                    };
+
+                    let arg0_ty = body.get_type(args[0]);
+                    let composite_id = if types::is_pointer(arg0_ty) {
+                        let ptr = lower_expr(constructor, body, args[0])?;
+                        let pointee_ty = types::pointee(arg0_ty).expect("Pointer type should have pointee");
+                        let value_type = constructor.ast_type_to_spirv(pointee_ty);
+                        constructor.builder.load(value_type, None, ptr, None, [])?
+                    } else {
+                        lower_expr(constructor, body, args[0])?
+                    };
+
+                    constructor.composite_extract_cached(result_type, composite_id, index)
+                }
                 _ => Err(err_spirv!("Unknown intrinsic: {}", name)),
             }
         }

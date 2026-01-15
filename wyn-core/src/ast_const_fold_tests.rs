@@ -168,7 +168,11 @@ fn test_fold_slice_both_components() {
     if let ExprKind::Slice(slice) = &expr.kind {
         let start = slice.start.as_ref().expect("start should exist");
         let end = slice.end.as_ref().expect("end should exist");
-        assert_eq!(start.kind, ExprKind::IntLiteral("2".into()), "start should fold to 2");
+        assert_eq!(
+            start.kind,
+            ExprKind::IntLiteral("2".into()),
+            "start should fold to 2"
+        );
         assert_eq!(end.kind, ExprKind::IntLiteral("8".into()), "end should fold to 8");
     } else {
         panic!("Expected Slice, got {:?}", expr.kind);
@@ -192,8 +196,16 @@ fn test_fold_slice_with_constant_inlining() {
     if let ExprKind::Slice(slice) = &expr.kind {
         let start = slice.start.as_ref().expect("start should exist");
         let end = slice.end.as_ref().expect("end should exist");
-        assert_eq!(start.kind, ExprKind::IntLiteral("2".into()), "start should inline to 2");
-        assert_eq!(end.kind, ExprKind::IntLiteral("10".into()), "end should inline to 10");
+        assert_eq!(
+            start.kind,
+            ExprKind::IntLiteral("2".into()),
+            "start should inline to 2"
+        );
+        assert_eq!(
+            end.kind,
+            ExprKind::IntLiteral("10".into()),
+            "end should inline to 10"
+        );
     } else {
         panic!("Expected Slice, got {:?}", expr.kind);
     }
