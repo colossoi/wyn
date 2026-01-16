@@ -472,6 +472,12 @@ impl Monomorphizer {
                             }
                         }
                         // Inner function is a builtin/intrinsic - call it directly
+                        if inner_func.starts_with("_w_") {
+                            return Ok(Expr::Intrinsic {
+                                name: inner_func,
+                                args: new_args,
+                            });
+                        }
                         return Ok(Expr::Call {
                             func: inner_func,
                             args: new_args,
@@ -887,26 +893,32 @@ fn body_has_unresolved_variables(body: &Body) -> bool {
 /// Returns the target function name if so.
 fn get_trivial_wrapper_target(def: &Def) -> Option<(String, Vec<LocalId>)> {
     if let Def::Function { params, body, .. } = def {
-        // The body's root must be a Call expression
+        // The body's root must be a Call or Intrinsic expression
         let root_expr = body.get_expr(body.root);
-        if let Expr::Call { func, args } = root_expr {
-            // Check if all args are just Local references to params (in order)
-            if args.len() != params.len() {
-                return None;
-            }
-            for (i, &arg_id) in args.iter().enumerate() {
-                let arg_expr = body.get_expr(arg_id);
-                if let Expr::Local(local_id) = arg_expr {
-                    if *local_id != params[i] {
-                        return None;
-                    }
-                } else {
+
+        // Extract func name and args from either Call or Intrinsic
+        let (func, args) = match root_expr {
+            Expr::Call { func, args } => (func.clone(), args),
+            Expr::Intrinsic { name, args } => (name.clone(), args),
+            _ => return None,
+        };
+
+        // Check if all args are just Local references to params (in order)
+        if args.len() != params.len() {
+            return None;
+        }
+        for (i, &arg_id) in args.iter().enumerate() {
+            let arg_expr = body.get_expr(arg_id);
+            if let Expr::Local(local_id) = arg_expr {
+                if *local_id != params[i] {
                     return None;
                 }
+            } else {
+                return None;
             }
-            // This is a trivial wrapper - it just forwards params to another function
-            return Some((func.clone(), params.clone()));
         }
+        // This is a trivial wrapper - it just forwards params to another function
+        return Some((func, params.clone()));
     }
     None
 }
