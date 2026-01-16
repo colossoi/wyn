@@ -14,11 +14,13 @@ pub struct TlcToMir {
     locals: HashMap<String, LocalId>,
     /// Maps top-level function names to their definitions
     top_level: HashMap<String, TlcDef>,
+    /// Maps intrinsic names to their arities
+    intrinsic_arities: HashMap<String, usize>,
 }
 
 impl TlcToMir {
     /// Transform a lifted TLC program to MIR.
-    pub fn transform(program: &TlcProgram) -> mir::Program {
+    pub fn transform(program: &TlcProgram, intrinsic_arities: HashMap<String, usize>) -> mir::Program {
         // Collect top-level names
         let top_level: HashMap<String, TlcDef> =
             program.defs.iter().map(|d| (d.name.clone(), d.clone())).collect();
@@ -26,6 +28,7 @@ impl TlcToMir {
         let mut transformer = Self {
             locals: HashMap::new(),
             top_level,
+            intrinsic_arities,
         };
 
         let mut defs: Vec<MirDef> = program.defs.iter().map(|def| transformer.transform_def(def)).collect();
@@ -858,10 +861,14 @@ impl TlcToMir {
                     }
                     return None;
                 }
-                FunctionName::Intrinsic(_) => {
-                    // Intrinsics don't have arity info in top_level.
-                    // They're handled specially by monomorphization, so partial
-                    // applications of intrinsics shouldn't cause the same issues.
+                FunctionName::Intrinsic(name) => {
+                    // Look up intrinsic arity
+                    if let Some(&arity) = self.intrinsic_arities.get(name) {
+                        if arity > 0 && args.len() == arity {
+                            args.reverse();
+                            return Some((name.clone(), true, args));
+                        }
+                    }
                     return None;
                 }
                 FunctionName::Term(inner_term) => {

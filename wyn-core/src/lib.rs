@@ -702,7 +702,9 @@ impl TlcLifted {
     pub fn to_mir(self) -> Flattened {
         // Specialize polymorphic intrinsics (sign → f32.sign, etc.)
         let specialized = tlc::specialize::specialize(self.tlc);
-        let mir = tlc::to_mir::TlcToMir::transform(&specialized);
+        // Get intrinsic arities for saturated call detection
+        let intrinsic_arities = intrinsics::IntrinsicSource::new(&mut polytype::Context::default()).all_arities();
+        let mir = tlc::to_mir::TlcToMir::transform(&specialized, intrinsic_arities);
         Flattened { mir }
     }
 }

@@ -119,7 +119,7 @@ mod tests {
             storage: vec![],
         };
 
-        let mir = TlcToMir::transform(&program);
+        let mir = TlcToMir::transform(&program, std::collections::HashMap::new());
 
         assert_eq!(mir.defs.len(), 1);
         match &mir.defs[0] {

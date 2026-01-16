@@ -231,6 +231,14 @@ impl IntrinsicSource {
         self.intrinsics.get(name).map(|entries| entries[0].arity())
     }
 
+    /// Get all intrinsic arities as a map (for use in to_mir)
+    pub fn all_arities(&self) -> HashMap<String, usize> {
+        self.intrinsics
+            .iter()
+            .map(|(name, entries)| (name.clone(), entries[0].arity()))
+            .collect()
+    }
+
     /// Look up an alias and return the intrinsic it maps to.
     /// Returns None if the name is not an alias.
     pub fn resolve_alias(name: &str) -> Option<&'static str> {
