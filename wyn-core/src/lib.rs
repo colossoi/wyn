@@ -210,6 +210,45 @@ pub use polytype::Context as PolytypeContext;
 pub type TypeTable = HashMap<NodeId, TypeScheme<TypeName>>;
 pub type SpanTable = HashMap<NodeId, ast::Span>;
 
+/// Build the set of builtin names that should not be captured as free variables.
+/// This includes intrinsics, user declarations, and prelude functions.
+pub fn build_builtins(
+    ast: &ast::Program,
+    module_manager: &module_manager::ModuleManager,
+) -> std::collections::HashSet<String> {
+    let mut builtins = impl_source::ImplSource::default().all_names();
+
+    // Also add polymorphic intrinsics from IntrinsicSource (sign, abs, magnitude, etc.)
+    let mut ctx = polytype::Context::<ast::TypeName>::default();
+    builtins.extend(intrinsics::IntrinsicSource::new(&mut ctx).all_names());
+
+    // Add top-level function names from user program
+    for decl in &ast.declarations {
+        match decl {
+            ast::Declaration::Decl(d) => {
+                builtins.insert(d.name.clone());
+            }
+            ast::Declaration::Entry(e) => {
+                builtins.insert(e.name.clone());
+            }
+            ast::Declaration::Uniform(u) => {
+                builtins.insert(u.name.clone());
+            }
+            ast::Declaration::Storage(s) => {
+                builtins.insert(s.name.clone());
+            }
+            _ => {}
+        }
+    }
+
+    // Add prelude function names
+    for decl in module_manager.get_prelude_function_declarations() {
+        builtins.insert(decl.name.clone());
+    }
+
+    builtins
+}
+
 /// Build a SpanTable from an AST by collecting all NodeId -> Span mappings
 pub fn build_span_table(program: &ast::Program) -> SpanTable {
     use std::ops::ControlFlow;
@@ -601,11 +640,13 @@ impl AliasChecked {
     }
 
     /// Transform AST to TLC (new pipeline path)
-    pub fn to_tlc(self) -> TlcTransformed {
+    /// `builtins` contains names that should not be captured as free variables during lambda lifting
+    pub fn to_tlc(self, builtins: std::collections::HashSet<String>) -> TlcTransformed {
         let tlc_program = tlc::transform(&self.ast, &self.type_table);
         TlcTransformed {
             tlc: tlc_program,
             type_table: self.type_table,
+            builtins,
         }
     }
 }
@@ -618,6 +659,8 @@ impl AliasChecked {
 pub struct TlcTransformed {
     pub tlc: tlc::Program,
     pub type_table: TypeTable,
+    /// Built-in names that should not be captured as free variables
+    builtins: std::collections::HashSet<String>,
 }
 
 impl TlcTransformed {
@@ -627,6 +670,7 @@ impl TlcTransformed {
         TlcTransformed {
             tlc: optimized,
             type_table: self.type_table,
+            builtins: self.builtins,
         }
     }
 
@@ -637,7 +681,7 @@ impl TlcTransformed {
 
     /// Lift all lambdas to top-level definitions
     pub fn lift(self) -> TlcLifted {
-        let lifted = tlc::lift::LambdaLifter::lift(self.tlc);
+        let lifted = tlc::lift::LambdaLifter::lift(self.tlc, &self.builtins);
         TlcLifted {
             tlc: lifted,
             type_table: self.type_table,

@@ -14,6 +14,10 @@ pub struct TlcToMir {
     locals: HashMap<String, LocalId>,
     /// Maps top-level function names to their definitions
     top_level: HashMap<String, TlcDef>,
+    /// Static value tracking: maps local variable names to their known function targets.
+    /// When we have `let f = some_lambda`, this records `f -> "some_lambda"`.
+    /// This enables direct calls instead of dynamic `_w_apply`.
+    static_values: HashMap<String, String>,
 }
 
 impl TlcToMir {
@@ -26,6 +30,7 @@ impl TlcToMir {
         let mut transformer = Self {
             locals: HashMap::new(),
             top_level,
+            static_values: HashMap::new(),
         };
 
         let mut defs: Vec<MirDef> = program.defs.iter().map(|def| transformer.transform_def(def)).collect();
@@ -62,6 +67,7 @@ impl TlcToMir {
 
     fn transform_def(&mut self, def: &TlcDef) -> MirDef {
         self.locals.clear();
+        self.static_values.clear();
 
         match &def.meta {
             DefMeta::Function => self.transform_function_def(def),
@@ -247,6 +253,23 @@ impl TlcToMir {
         }
     }
 
+    /// Extract the static function value from a term, if known.
+    /// Returns Some(function_name) if the term is a reference to a known function.
+    fn extract_static_value(&self, term: &Term) -> Option<String> {
+        match &term.kind {
+            TermKind::Var(name) => {
+                // Check if it's a top-level function
+                if self.top_level.contains_key(name) {
+                    Some(name.clone())
+                } else {
+                    // Check if it's a local bound to a known function
+                    self.static_values.get(name).cloned()
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Extract curried parameters from nested Lams.
     /// Returns (params, inner_body) where params is [(name, type, span), ...]
     fn extract_params<'a>(&self, term: &'a Term) -> (Vec<(String, Type<TypeName>, Span)>, &'a Term) {
@@ -297,6 +320,9 @@ impl TlcToMir {
                 rhs,
                 body: let_body,
             } => {
+                // Extract static value before transforming (for function tracking)
+                let static_val = self.extract_static_value(rhs);
+
                 let rhs_id = self.transform_term(rhs, body);
                 let local_id = body.alloc_local(LocalDecl {
                     name: name.clone(),
@@ -305,8 +331,16 @@ impl TlcToMir {
                     kind: LocalKind::Let,
                 });
                 self.locals.insert(name.clone(), local_id);
+
+                // Record static value if RHS is a known function
+                if let Some(func_name) = static_val {
+                    self.static_values.insert(name.clone(), func_name);
+                }
+
                 let body_id = self.transform_term(let_body, body);
+
                 self.locals.remove(name);
+                self.static_values.remove(name);
 
                 body.alloc_expr(
                     Expr::Let {
@@ -427,6 +461,21 @@ impl TlcToMir {
             }
 
             FunctionName::Term(inner_term) => {
+                // Check if inner_term is a variable with a known static function value
+                if let Some(func_name) = self.extract_static_value(inner_term) {
+                    // Direct call to the known function
+                    let arg_id = self.transform_term(arg, body);
+                    return body.alloc_expr(
+                        Expr::Call {
+                            func: func_name,
+                            args: vec![arg_id],
+                        },
+                        ty,
+                        span,
+                        node_id,
+                    );
+                }
+
                 // Check if inner_term is a binop partial application
                 if let TermKind::App {
                     func: inner_func,

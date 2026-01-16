@@ -201,8 +201,11 @@ fn compile_file(
         return Err(wyn_core::err_alias!("alias checking failed").into());
     }
 
+    // Build builtins set for lambda lifting (names that should not be captured)
+    let builtins = wyn_core::build_builtins(&alias_checked.ast, &frontend.module_manager);
+
     // Transform to TLC
-    let tlc_transformed = time("to_tlc", verbose, || alias_checked.to_tlc());
+    let tlc_transformed = time("to_tlc", verbose, || alias_checked.to_tlc(builtins));
 
     // Output TLC if requested (before optimization)
     if let Some(ref tlc_path) = output_tlc {

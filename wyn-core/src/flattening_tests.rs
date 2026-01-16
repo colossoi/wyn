@@ -1352,7 +1352,7 @@ def sum_positive(arr: [5]i32) i32 =
 fn compile_to_glsl(input: &str) -> String {
     let mut frontend = crate::cached_frontend();
     let parsed = crate::Compiler::parse(input, &mut frontend.node_counter).expect("Parsing failed");
-    let glsl = parsed
+    let alias_checked = parsed
         .desugar(&mut frontend.node_counter)
         .expect("Desugaring failed")
         .resolve(&frontend.module_manager)
@@ -1361,8 +1361,10 @@ fn compile_to_glsl(input: &str) -> String {
         .type_check(&frontend.module_manager, &mut frontend.schemes)
         .expect("Type checking failed")
         .alias_check()
-        .expect("Alias checking failed")
-        .to_tlc()
+        .expect("Alias checking failed");
+    let builtins = crate::build_builtins(&alias_checked.ast, &frontend.module_manager);
+    let glsl = alias_checked
+        .to_tlc(builtins)
         .partial_eval()
         .lift()
         .to_mir()

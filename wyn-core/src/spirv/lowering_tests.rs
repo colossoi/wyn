@@ -288,7 +288,7 @@ def test(x: f32) f32 =
 fn compile_to_spirv_with_partial_eval(source: &str) -> Result<Vec<u32>> {
     let mut frontend = crate::cached_frontend();
     let parsed = crate::Compiler::parse(source, &mut frontend.node_counter).expect("Parsing failed");
-    let lifted = parsed
+    let alias_checked = parsed
         .desugar(&mut frontend.node_counter)
         .expect("Desugaring failed")
         .resolve(&frontend.module_manager)
@@ -297,8 +297,10 @@ fn compile_to_spirv_with_partial_eval(source: &str) -> Result<Vec<u32>> {
         .type_check(&frontend.module_manager, &mut frontend.schemes)
         .expect("Type checking failed")
         .alias_check()
-        .expect("Alias checking failed")
-        .to_tlc()
+        .expect("Alias checking failed");
+    let builtins = crate::build_builtins(&alias_checked.ast, &frontend.module_manager);
+    let lifted = alias_checked
+        .to_tlc(builtins)
         .partial_eval()
         .lift()
         .to_mir()

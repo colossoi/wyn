@@ -194,6 +194,11 @@ impl IntrinsicSource {
         })
     }
 
+    /// Get all intrinsic names as a HashSet (for use in lambda lifting to exclude from capture)
+    pub fn all_names(&self) -> std::collections::HashSet<String> {
+        self.intrinsics.keys().cloned().collect()
+    }
+
     /// Register scalar math functions (abs, sign, floor, ceil, fract, min, max, clamp, mix, smoothstep)
     fn register_scalar_math_functions(&mut self, ctx: &mut impl TypeVarGenerator) {
         // Unary: abs, sign, floor, ceil, fract

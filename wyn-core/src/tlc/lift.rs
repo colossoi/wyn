@@ -10,9 +10,11 @@ use polytype::Type;
 use std::collections::HashSet;
 
 /// Lambda lifter - transforms all lambdas to top-level definitions.
-pub struct LambdaLifter {
+pub struct LambdaLifter<'a> {
     /// Top-level names (not captured)
     top_level: HashSet<String>,
+    /// Built-in names that should not be captured (intrinsics, prelude functions)
+    builtins: &'a HashSet<String>,
     /// New definitions created for lifted lambdas
     new_defs: Vec<Def>,
     /// Counter for generating unique lambda names
@@ -23,11 +25,12 @@ pub struct LambdaLifter {
     scope: Vec<(String, Type<TypeName>)>,
 }
 
-impl LambdaLifter {
+impl<'a> LambdaLifter<'a> {
     /// Lift all lambdas in a program to top-level definitions.
-    pub fn lift(program: Program) -> Program {
+    pub fn lift(program: Program, builtins: &'a HashSet<String>) -> Program {
         let mut lifter = Self {
             top_level: program.defs.iter().map(|d| d.name.clone()).collect(),
+            builtins,
             new_defs: vec![],
             lambda_counter: 0,
             term_ids: TermIdSource::new(),
@@ -80,11 +83,12 @@ impl LambdaLifter {
         }
     }
 
-    /// Check if a name is bound (in scope, top-level, or an intrinsic)
+    /// Check if a name is bound (in scope, top-level, or a builtin)
     fn is_bound(&self, name: &str) -> bool {
         self.scope.iter().any(|(n, _)| n == name)
             || self.top_level.contains(name)
-            || name.starts_with("_w_") // Intrinsics are always bound
+            || self.builtins.contains(name)
+            || name.starts_with("_w_") // Internal intrinsics are always bound
     }
 
     /// Push a name and type onto the scope stack
@@ -463,7 +467,8 @@ mod tests {
             storage: vec![],
         };
 
-        let lifted = LambdaLifter::lift(program);
+        let builtins = HashSet::new();
+        let lifted = LambdaLifter::lift(program, &builtins);
 
         // Should have 1 def: f with the lambda preserved
         assert_eq!(lifted.defs.len(), 1);
