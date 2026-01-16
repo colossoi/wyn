@@ -4,6 +4,7 @@ use crate::ast::{
     Decl, Declaration, ModuleExpression, ModuleTypeExpression, Node, NodeCounter, Pattern, PatternKind,
     Program, Spec, Type,
 };
+use crate::desugar;
 use crate::error::Result;
 use crate::lexer;
 use crate::parser::Parser;
@@ -240,7 +241,11 @@ impl ModuleManager {
         // Parse the source
         let tokens = lexer::tokenize(source).map_err(|e| err_parse!("{}", e))?;
         let mut parser = Parser::new(tokens, node_counter);
-        let program = parser.parse()?;
+        let mut program = parser.parse()?;
+
+        // Desugar range/slice expressions before elaboration
+        // This ensures prelude functions like `iota` don't have unexpanded range expressions
+        desugar::desugar_program(&mut program, node_counter)?;
 
         // Register module types first
         self.register_module_types(&program)?;

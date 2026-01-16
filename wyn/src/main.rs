@@ -205,7 +205,9 @@ fn compile_file(
     let builtins = wyn_core::build_builtins(&alias_checked.ast, &frontend.module_manager);
 
     // Transform to TLC
-    let tlc_transformed = time("to_tlc", verbose, || alias_checked.to_tlc(builtins));
+    let tlc_transformed = time("to_tlc", verbose, || {
+        alias_checked.to_tlc(builtins, &frontend.module_manager)
+    });
 
     // Output TLC if requested (before optimization)
     if let Some(ref tlc_path) = output_tlc {

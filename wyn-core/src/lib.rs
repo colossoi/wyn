@@ -641,8 +641,12 @@ impl AliasChecked {
 
     /// Transform AST to TLC (new pipeline path)
     /// `builtins` contains names that should not be captured as free variables during lambda lifting
-    pub fn to_tlc(self, builtins: std::collections::HashSet<String>) -> TlcTransformed {
-        let tlc_program = tlc::transform(&self.ast, &self.type_table);
+    pub fn to_tlc(
+        self,
+        builtins: std::collections::HashSet<String>,
+        module_manager: &module_manager::ModuleManager,
+    ) -> TlcTransformed {
+        let tlc_program = tlc::transform_with_modules(&self.ast, &self.type_table, module_manager);
         TlcTransformed {
             tlc: tlc_program,
             type_table: self.type_table,

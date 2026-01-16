@@ -624,6 +624,57 @@ impl TlcToMir {
                             )
                         }
                         "_w_tuple" => body.alloc_expr(Expr::Tuple(args), ty, span, node_id),
+                        "_w_range" if args.len() == 3 => {
+                            // _w_range(start, end, kind)
+                            // kind: 0=Inclusive, 1=Exclusive, 2=ExclusiveLt, 3=ExclusiveGt
+                            let kind = match body.get_expr(args[2]) {
+                                Expr::Int(s) => match s.parse::<i32>().unwrap_or(2) {
+                                    0 => mir::RangeKind::Inclusive,
+                                    1 => mir::RangeKind::Exclusive,
+                                    3 => mir::RangeKind::ExclusiveGt,
+                                    _ => mir::RangeKind::ExclusiveLt,
+                                },
+                                _ => mir::RangeKind::ExclusiveLt,
+                            };
+                            body.alloc_expr(
+                                Expr::Array {
+                                    backing: mir::ArrayBacking::Range {
+                                        start: args[0],
+                                        step: None,
+                                        kind,
+                                    },
+                                    size: args[1],
+                                },
+                                ty,
+                                span,
+                                node_id,
+                            )
+                        }
+                        "_w_range_step" if args.len() == 4 => {
+                            // _w_range_step(start, step, end, kind)
+                            let kind = match body.get_expr(args[3]) {
+                                Expr::Int(s) => match s.parse::<i32>().unwrap_or(2) {
+                                    0 => mir::RangeKind::Inclusive,
+                                    1 => mir::RangeKind::Exclusive,
+                                    3 => mir::RangeKind::ExclusiveGt,
+                                    _ => mir::RangeKind::ExclusiveLt,
+                                },
+                                _ => mir::RangeKind::ExclusiveLt,
+                            };
+                            body.alloc_expr(
+                                Expr::Array {
+                                    backing: mir::ArrayBacking::Range {
+                                        start: args[0],
+                                        step: Some(args[1]),
+                                        kind,
+                                    },
+                                    size: args[2],
+                                },
+                                ty,
+                                span,
+                                node_id,
+                            )
+                        }
                         _ => body.alloc_expr(
                             Expr::Call {
                                 func: func_name,
@@ -642,15 +693,69 @@ impl TlcToMir {
                     // Extend an intrinsic with more arguments
                     let mut args = existing_args;
                     args.push(arg_id);
-                    body.alloc_expr(
-                        Expr::Intrinsic {
-                            name: intrinsic_name,
-                            args,
-                        },
-                        ty,
-                        span,
-                        node_id,
-                    )
+
+                    // Check for special intrinsics that should become MIR constructs
+                    match intrinsic_name.as_str() {
+                        "_w_range" if args.len() == 3 => {
+                            // _w_range(start, end, kind)
+                            let kind = match body.get_expr(args[2]) {
+                                Expr::Int(s) => match s.parse::<i32>().unwrap_or(2) {
+                                    0 => mir::RangeKind::Inclusive,
+                                    1 => mir::RangeKind::Exclusive,
+                                    3 => mir::RangeKind::ExclusiveGt,
+                                    _ => mir::RangeKind::ExclusiveLt,
+                                },
+                                _ => mir::RangeKind::ExclusiveLt,
+                            };
+                            body.alloc_expr(
+                                Expr::Array {
+                                    backing: mir::ArrayBacking::Range {
+                                        start: args[0],
+                                        step: None,
+                                        kind,
+                                    },
+                                    size: args[1],
+                                },
+                                ty,
+                                span,
+                                node_id,
+                            )
+                        }
+                        "_w_range_step" if args.len() == 4 => {
+                            // _w_range_step(start, step, end, kind)
+                            let kind = match body.get_expr(args[3]) {
+                                Expr::Int(s) => match s.parse::<i32>().unwrap_or(2) {
+                                    0 => mir::RangeKind::Inclusive,
+                                    1 => mir::RangeKind::Exclusive,
+                                    3 => mir::RangeKind::ExclusiveGt,
+                                    _ => mir::RangeKind::ExclusiveLt,
+                                },
+                                _ => mir::RangeKind::ExclusiveLt,
+                            };
+                            body.alloc_expr(
+                                Expr::Array {
+                                    backing: mir::ArrayBacking::Range {
+                                        start: args[0],
+                                        step: Some(args[1]),
+                                        kind,
+                                    },
+                                    size: args[2],
+                                },
+                                ty,
+                                span,
+                                node_id,
+                            )
+                        }
+                        _ => body.alloc_expr(
+                            Expr::Intrinsic {
+                                name: intrinsic_name,
+                                args,
+                            },
+                            ty,
+                            span,
+                            node_id,
+                        ),
+                    }
                 } else if let Expr::Tuple(existing_elems) = body.get_expr(func_id).clone() {
                     // Extend an existing tuple literal
                     let mut elems = existing_elems;

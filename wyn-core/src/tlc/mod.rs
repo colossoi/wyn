@@ -208,12 +208,17 @@ impl<'a> Transformer<'a> {
     }
 
     fn transform_decl(&mut self, decl: &ast::Decl) -> Option<Def> {
+        self.transform_module_decl(decl, &decl.name)
+    }
+
+    /// Transform a declaration with a custom name (for module declarations and prelude functions)
+    pub fn transform_module_decl(&mut self, decl: &ast::Decl, qualified_name: &str) -> Option<Def> {
         let body_ty = self.lookup_type(decl.body.h.id)?;
         let full_ty = self.build_function_type(&decl.params, &body_ty);
         let body = self.transform_with_params(&decl.params, &decl.body);
 
         Some(Def {
-            name: decl.name.clone(),
+            name: qualified_name.to_string(),
             ty: full_ty,
             body,
             meta: DefMeta::Function,
@@ -730,8 +735,45 @@ impl<'a> Transformer<'a> {
 
             ast::ExprKind::Match(match_expr) => self.transform_match(match_expr, ty, span),
 
-            ast::ExprKind::Range(_) => {
-                todo!("Range expressions should be desugared before TLC")
+            ast::ExprKind::Range(range) => {
+                // Transform range to _w_range intrinsic call
+                let start = self.transform_expr(&range.start);
+                let end = self.transform_expr(&range.end);
+
+                // Encode range kind as an integer: 0=Inclusive, 1=Exclusive, 2=ExclusiveLt, 3=ExclusiveGt
+                let kind_val = match range.kind {
+                    ast::RangeKind::Inclusive => 0,
+                    ast::RangeKind::Exclusive => 1,
+                    ast::RangeKind::ExclusiveLt => 2,
+                    ast::RangeKind::ExclusiveGt => 3,
+                };
+                let kind_lit = self.mk_term(
+                    Type::Constructed(TypeName::Int(32), vec![]),
+                    span,
+                    TermKind::IntLit(kind_val.to_string()),
+                );
+
+                if let Some(step) = &range.step {
+                    let step_term = self.transform_expr(step);
+                    self.build_app4(
+                        FunctionName::Intrinsic("_w_range_step".to_string()),
+                        start,
+                        step_term,
+                        end,
+                        kind_lit,
+                        ty,
+                        span,
+                    )
+                } else {
+                    self.build_app3(
+                        FunctionName::Intrinsic("_w_range".to_string()),
+                        start,
+                        end,
+                        kind_lit,
+                        ty,
+                        span,
+                    )
+                }
             }
 
             ast::ExprKind::Slice(_) => {
@@ -1212,6 +1254,57 @@ impl<'a> Transformer<'a> {
         )
     }
 
+    // Helper: build App(App(App(App(func, arg1), arg2), arg3), arg4)
+    fn build_app4(
+        &mut self,
+        func: FunctionName,
+        arg1: Term,
+        arg2: Term,
+        arg3: Term,
+        arg4: Term,
+        result_ty: Type<TypeName>,
+        span: Span,
+    ) -> Term {
+        // Type of app3: arg4.ty -> result_ty
+        let app3_ty = Type::Constructed(TypeName::Arrow, vec![arg4.ty.clone(), result_ty.clone()]);
+        // Type of app2: arg3.ty -> app3_ty
+        let app2_ty = Type::Constructed(TypeName::Arrow, vec![arg3.ty.clone(), app3_ty.clone()]);
+        // Type of app1: arg2.ty -> app2_ty
+        let app1_ty = Type::Constructed(TypeName::Arrow, vec![arg2.ty.clone(), app2_ty.clone()]);
+        let app1 = self.mk_term(
+            app1_ty,
+            span,
+            TermKind::App {
+                func: Box::new(func),
+                arg: Box::new(arg1),
+            },
+        );
+        let app2 = self.mk_term(
+            app2_ty,
+            span,
+            TermKind::App {
+                func: Box::new(FunctionName::Term(Box::new(app1))),
+                arg: Box::new(arg2),
+            },
+        );
+        let app3 = self.mk_term(
+            app3_ty,
+            span,
+            TermKind::App {
+                func: Box::new(FunctionName::Term(Box::new(app2))),
+                arg: Box::new(arg3),
+            },
+        );
+        self.mk_term(
+            result_ty,
+            span,
+            TermKind::App {
+                func: Box::new(FunctionName::Term(Box::new(app3))),
+                arg: Box::new(arg4),
+            },
+        )
+    }
+
     // Helper: build binary op application
     fn build_binop(
         &mut self,
@@ -1377,4 +1470,32 @@ impl<'a> Transformer<'a> {
 pub fn transform(program: &ast::Program, type_table: &TypeTable) -> Program {
     let mut transformer = Transformer::new(type_table);
     transformer.transform_program(program)
+}
+
+/// Transform an AST program to TLC, including module declarations and prelude functions.
+/// This is the main entry point for the TLC pipeline.
+pub fn transform_with_modules(
+    program: &ast::Program,
+    type_table: &TypeTable,
+    module_manager: &crate::module_manager::ModuleManager,
+) -> Program {
+    let mut transformer = Transformer::new(type_table);
+    let mut tlc_program = transformer.transform_program(program);
+
+    // Transform module declarations (includes constants like f32.pi, excludes intrinsics)
+    for (module_name, decl) in module_manager.get_all_module_declarations() {
+        let qualified_name = format!("{}.{}", module_name, decl.name);
+        if let Some(def) = transformer.transform_module_decl(decl, &qualified_name) {
+            tlc_program.defs.push(def);
+        }
+    }
+
+    // Transform prelude function declarations (top-level, auto-imported like map, reduce)
+    for decl in module_manager.get_prelude_function_declarations() {
+        if let Some(def) = transformer.transform_module_decl(decl, &decl.name) {
+            tlc_program.defs.push(def);
+        }
+    }
+
+    tlc_program
 }

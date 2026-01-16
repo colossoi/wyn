@@ -1364,7 +1364,7 @@ fn compile_to_glsl(input: &str) -> String {
         .expect("Alias checking failed");
     let builtins = crate::build_builtins(&alias_checked.ast, &frontend.module_manager);
     let glsl = alias_checked
-        .to_tlc(builtins)
+        .to_tlc(builtins, &frontend.module_manager)
         .lift()
         .partial_eval()
         .to_mir()
