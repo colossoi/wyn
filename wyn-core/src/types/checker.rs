@@ -542,7 +542,11 @@ impl<'a> TypeChecker<'a> {
                 let prepared = self.prepare_array_type(&ty);
                 ResolvedValue {
                     display_name: name.to_string(),
-                    scheme_for_table: scheme,
+                    // Store the instantiated type as a Monotype, not the original scheme.
+                    // The scheme's quantified variables are internal to the scheme definition;
+                    // expression nodes should use the instantiated type with fresh variables
+                    // that can be unified with the surrounding context.
+                    scheme_for_table: TypeScheme::Monotype(prepared.clone()),
                     instantiated: prepared,
                     overloads: None,
                 }

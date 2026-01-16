@@ -252,11 +252,9 @@ impl<'a> Transformer<'a> {
     }
 
     fn pattern_type(&self, pattern: &ast::Pattern) -> Type<TypeName> {
-        match &pattern.kind {
-            ast::PatternKind::Typed(_, ty) => ty.clone(),
-            ast::PatternKind::Attributed(_, inner) => self.pattern_type(inner),
-            _ => self.lookup_type(pattern.h.id).expect("Pattern must have type in type table"),
-        }
+        // Always use type_table - it has UserVar/SizeVar converted to Type::Variable
+        // by the type checker. Using AST annotations directly would bypass this conversion.
+        self.lookup_type(pattern.h.id).expect("Pattern must have type in type table")
     }
 
     fn transform_with_params(&mut self, params: &[ast::Pattern], body: &ast::Expression) -> Term {

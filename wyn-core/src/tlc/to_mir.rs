@@ -462,6 +462,26 @@ impl TlcToMir {
             }
 
             FunctionName::Term(inner_term) => {
+                // First, try to collect a saturated call to a known function.
+                // This handles curried calls like map(f)(xs) by collecting all args
+                // and emitting a single Call, avoiding intermediate partial applications.
+                if let Some((func_name, _is_intrinsic, arg_terms)) =
+                    self.try_collect_saturated_call(func, arg)
+                {
+                    // Transform all arguments
+                    let arg_ids: Vec<ExprId> =
+                        arg_terms.iter().map(|t| self.transform_term(t, body)).collect();
+                    return body.alloc_expr(
+                        Expr::Call {
+                            func: func_name,
+                            args: arg_ids,
+                        },
+                        ty,
+                        span,
+                        node_id,
+                    );
+                }
+
                 // Check if inner_term is a variable with a known static function value
                 if let Some(func_name) = self.extract_static_value(inner_term) {
                     // Direct call to the known function
@@ -812,6 +832,61 @@ impl TlcToMir {
         // For now, just transform the single argument
         // A more complete implementation would walk nested Apps
         vec![self.transform_term(term, body)]
+    }
+
+    /// Walk a curried application chain and collect function name + all arg Terms.
+    /// Returns Some((func_name, is_intrinsic, arity, args)) if this is a saturated call
+    /// to a known function. Args are in application order (first arg first).
+    /// Returns None if not a known function call or not fully saturated.
+    fn try_collect_saturated_call<'a>(
+        &self,
+        func: &'a FunctionName,
+        first_arg: &'a Term,
+    ) -> Option<(String, bool, Vec<&'a Term>)> {
+        let mut args = vec![first_arg];
+        let mut current_func = func;
+
+        loop {
+            match current_func {
+                FunctionName::Var(name) => {
+                    // Found the base function - check arity
+                    if let Some(def) = self.top_level.get(name) {
+                        if def.arity > 0 && args.len() == def.arity {
+                            args.reverse();
+                            return Some((name.clone(), false, args));
+                        }
+                    }
+                    return None;
+                }
+                FunctionName::Intrinsic(_) => {
+                    // Intrinsics don't have arity info in top_level.
+                    // They're handled specially by monomorphization, so partial
+                    // applications of intrinsics shouldn't cause the same issues.
+                    return None;
+                }
+                FunctionName::Term(inner_term) => {
+                    match &inner_term.kind {
+                        TermKind::App { func: inner_func, arg: inner_arg } => {
+                            // Continue walking the chain
+                            args.push(inner_arg.as_ref());
+                            current_func = inner_func.as_ref();
+                        }
+                        TermKind::Var(name) => {
+                            // Found the base function wrapped in Term (from transform_application)
+                            if let Some(def) = self.top_level.get(name) {
+                                if def.arity > 0 && args.len() == def.arity {
+                                    args.reverse();
+                                    return Some((name.clone(), false, args));
+                                }
+                            }
+                            return None;
+                        }
+                        _ => return None,
+                    }
+                }
+                _ => return None, // BinOp, UnOp handled elsewhere
+            }
+        }
     }
 
     /// Transform a _w_loop_while intrinsic into an Expr::Loop.
