@@ -222,6 +222,32 @@ impl PartialEvaluator {
             return val;
         }
 
+        // Check if this is a let-bound variable aliasing a function.
+        // This handles cases like `let f = g in f x` where g is a known function.
+        if let Some(Value::Partial {
+            name: real_name,
+            args: partial_args,
+            ..
+        }) = self.env.lookup(name).cloned()
+        {
+            // Combine the partial application's args with the new args
+            let mut combined_args = partial_args;
+            combined_args.extend(args);
+            // Apply to the real function (recursive to handle chains like let h = f in let g = h in g x)
+            return self.apply_var(&real_name, combined_args, original);
+        }
+
+        // Check if this is a let-bound variable aliasing a function name
+        // (intrinsic, builtin, or top-level def). Handles `let f = f32.sin in f x`.
+        if let Some(Value::Unknown(Term {
+            kind: TermKind::Var(real_name),
+            ..
+        })) = self.env.lookup(name)
+        {
+            let real_name = real_name.clone();
+            return self.apply_var(&real_name, args, original);
+        }
+
         // Check for known function
         if let Some(def) = self.defs.get(name).cloned() {
             let args_len = args.len();

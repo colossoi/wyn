@@ -14,10 +14,6 @@ pub struct TlcToMir {
     locals: HashMap<String, LocalId>,
     /// Maps top-level function names to their definitions
     top_level: HashMap<String, TlcDef>,
-    /// Static value tracking: maps local variable names to their known function targets.
-    /// When we have `let f = some_lambda`, this records `f -> "some_lambda"`.
-    /// This enables direct calls instead of dynamic `_w_apply`.
-    static_values: HashMap<String, String>,
 }
 
 impl TlcToMir {
@@ -30,7 +26,6 @@ impl TlcToMir {
         let mut transformer = Self {
             locals: HashMap::new(),
             top_level,
-            static_values: HashMap::new(),
         };
 
         let mut defs: Vec<MirDef> = program.defs.iter().map(|def| transformer.transform_def(def)).collect();
@@ -67,7 +62,6 @@ impl TlcToMir {
 
     fn transform_def(&mut self, def: &TlcDef) -> MirDef {
         self.locals.clear();
-        self.static_values.clear();
 
         match &def.meta {
             DefMeta::Function => self.transform_function_def(def),
@@ -254,7 +248,7 @@ impl TlcToMir {
     }
 
     /// Extract the static function value from a term, if known.
-    /// Returns Some(function_name) if the term is a reference to a known function.
+    /// Returns Some(function_name) if the term is a reference to a known top-level function.
     fn extract_static_value(&self, term: &Term) -> Option<String> {
         match &term.kind {
             TermKind::Var(name) => {
@@ -266,8 +260,7 @@ impl TlcToMir {
                         None // Constants are not callable functions
                     }
                 } else {
-                    // Check if it's a local bound to a known function
-                    self.static_values.get(name).cloned()
+                    None
                 }
             }
             _ => None,
@@ -337,9 +330,6 @@ impl TlcToMir {
                 rhs,
                 body: let_body,
             } => {
-                // Extract static value before transforming (for function tracking)
-                let static_val = self.extract_static_value(rhs);
-
                 let rhs_id = self.transform_term(rhs, body);
                 let local_id = body.alloc_local(LocalDecl {
                     name: name.clone(),
@@ -349,15 +339,9 @@ impl TlcToMir {
                 });
                 self.locals.insert(name.clone(), local_id);
 
-                // Record static value if RHS is a known function
-                if let Some(func_name) = static_val {
-                    self.static_values.insert(name.clone(), func_name);
-                }
-
                 let body_id = self.transform_term(let_body, body);
 
                 self.locals.remove(name);
-                self.static_values.remove(name);
 
                 body.alloc_expr(
                     Expr::Let {

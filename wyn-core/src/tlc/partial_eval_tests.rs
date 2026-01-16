@@ -369,3 +369,300 @@ fn test_function_inlining() {
         other => panic!("Expected IntLit(17), got {:?}", other),
     }
 }
+
+fn int_ty() -> Type<TypeName> {
+    Type::Constructed(TypeName::Int(32), vec![])
+}
+
+fn arrow_ty(from: Type<TypeName>, to: Type<TypeName>) -> Type<TypeName> {
+    Type::Constructed(TypeName::Arrow, vec![from, to])
+}
+
+/// Test that `let f = g in f x` is inlined to `g x`
+#[test]
+fn test_function_alias_inlining() {
+    let mut ids = TermIdSource::new();
+    let span = make_span();
+
+    // Build: def g = |y| y  (identity function)
+    let g_body = Term {
+        id: ids.next_id(),
+        ty: arrow_ty(int_ty(), int_ty()),
+        span,
+        kind: TermKind::Lam {
+            param: "y".to_string(),
+            param_ty: int_ty(),
+            body: Box::new(Term {
+                id: ids.next_id(),
+                ty: int_ty(),
+                span,
+                kind: TermKind::Var("y".to_string()),
+            }),
+        },
+    };
+
+    // Build: def main = let f = g in f 42
+    // This is: Let { name: "f", rhs: Var("g"), body: App(Var("f"), 42) }
+    let main_body = Term {
+        id: ids.next_id(),
+        ty: int_ty(),
+        span,
+        kind: TermKind::Let {
+            name: "f".to_string(),
+            name_ty: arrow_ty(int_ty(), int_ty()),
+            rhs: Box::new(Term {
+                id: ids.next_id(),
+                ty: arrow_ty(int_ty(), int_ty()),
+                span,
+                kind: TermKind::Var("g".to_string()),
+            }),
+            body: Box::new(Term {
+                id: ids.next_id(),
+                ty: int_ty(),
+                span,
+                kind: TermKind::App {
+                    func: Box::new(FunctionName::Term(Box::new(Term {
+                        id: ids.next_id(),
+                        ty: arrow_ty(int_ty(), int_ty()),
+                        span,
+                        kind: TermKind::Var("f".to_string()),
+                    }))),
+                    arg: Box::new(Term {
+                        id: ids.next_id(),
+                        ty: int_ty(),
+                        span,
+                        kind: TermKind::IntLit("42".to_string()),
+                    }),
+                },
+            }),
+        },
+    };
+
+    let program = Program {
+        defs: vec![
+            Def {
+                name: "g".to_string(),
+                ty: g_body.ty.clone(),
+                body: g_body,
+                meta: DefMeta::Function,
+                arity: 1,
+            },
+            Def {
+                name: "main".to_string(),
+                ty: int_ty(),
+                body: main_body,
+                meta: DefMeta::Function,
+                arity: 0,
+            },
+        ],
+        uniforms: vec![],
+        storage: vec![],
+    };
+
+    let result = PartialEvaluator::partial_eval(program);
+
+    // Find main's body - it should be simplified to just `42`
+    // because g is identity and f aliases g, so f 42 = g 42 = 42
+    let main_def = result.defs.iter().find(|d| d.name == "main").unwrap();
+
+    // The result should be IntLit("42") since g is identity
+    match &main_def.body.kind {
+        TermKind::IntLit(s) => assert_eq!(s, "42"),
+        other => panic!("Expected IntLit(42), got {:?}", other),
+    }
+}
+
+/// Test that function alias without full application still uses correct name
+#[test]
+fn test_function_alias_partial_application() {
+    let mut ids = TermIdSource::new();
+    let span = make_span();
+
+    // Build: def g = |x| |y| x  (const function, arity 2)
+    let g_body = Term {
+        id: ids.next_id(),
+        ty: arrow_ty(int_ty(), arrow_ty(int_ty(), int_ty())),
+        span,
+        kind: TermKind::Lam {
+            param: "x".to_string(),
+            param_ty: int_ty(),
+            body: Box::new(Term {
+                id: ids.next_id(),
+                ty: arrow_ty(int_ty(), int_ty()),
+                span,
+                kind: TermKind::Lam {
+                    param: "y".to_string(),
+                    param_ty: int_ty(),
+                    body: Box::new(Term {
+                        id: ids.next_id(),
+                        ty: int_ty(),
+                        span,
+                        kind: TermKind::Var("x".to_string()),
+                    }),
+                },
+            }),
+        },
+    };
+
+    // Build: def main = let f = g in f 1 2
+    // f aliases g, so f 1 2 should become g 1 2 = 1
+    let main_body = Term {
+        id: ids.next_id(),
+        ty: int_ty(),
+        span,
+        kind: TermKind::Let {
+            name: "f".to_string(),
+            name_ty: arrow_ty(int_ty(), arrow_ty(int_ty(), int_ty())),
+            rhs: Box::new(Term {
+                id: ids.next_id(),
+                ty: arrow_ty(int_ty(), arrow_ty(int_ty(), int_ty())),
+                span,
+                kind: TermKind::Var("g".to_string()),
+            }),
+            body: Box::new(Term {
+                id: ids.next_id(),
+                ty: int_ty(),
+                span,
+                kind: TermKind::App {
+                    func: Box::new(FunctionName::Term(Box::new(Term {
+                        id: ids.next_id(),
+                        ty: arrow_ty(int_ty(), int_ty()),
+                        span,
+                        kind: TermKind::App {
+                            func: Box::new(FunctionName::Term(Box::new(Term {
+                                id: ids.next_id(),
+                                ty: arrow_ty(int_ty(), arrow_ty(int_ty(), int_ty())),
+                                span,
+                                kind: TermKind::Var("f".to_string()),
+                            }))),
+                            arg: Box::new(Term {
+                                id: ids.next_id(),
+                                ty: int_ty(),
+                                span,
+                                kind: TermKind::IntLit("1".to_string()),
+                            }),
+                        },
+                    }))),
+                    arg: Box::new(Term {
+                        id: ids.next_id(),
+                        ty: int_ty(),
+                        span,
+                        kind: TermKind::IntLit("2".to_string()),
+                    }),
+                },
+            }),
+        },
+    };
+
+    let program = Program {
+        defs: vec![
+            Def {
+                name: "g".to_string(),
+                ty: g_body.ty.clone(),
+                body: g_body,
+                meta: DefMeta::Function,
+                arity: 2,
+            },
+            Def {
+                name: "main".to_string(),
+                ty: int_ty(),
+                body: main_body,
+                meta: DefMeta::Function,
+                arity: 0,
+            },
+        ],
+        uniforms: vec![],
+        storage: vec![],
+    };
+
+    let result = PartialEvaluator::partial_eval(program);
+
+    // Find main's body - it should be simplified to `1`
+    // because g x y = x, so f 1 2 = g 1 2 = 1
+    let main_def = result.defs.iter().find(|d| d.name == "main").unwrap();
+
+    match &main_def.body.kind {
+        TermKind::IntLit(s) => assert_eq!(s, "1"),
+        other => panic!("Expected IntLit(1), got {:?}", other),
+    }
+}
+
+/// Test that `let f = f32.sin in f x` becomes `f32.sin x`
+#[test]
+fn test_intrinsic_alias_inlining() {
+    let mut ids = TermIdSource::new();
+    let span = make_span();
+    let float_ty = Type::Constructed(TypeName::Float(32), vec![]);
+
+    // Build: def main = let f = f32.sin in f 0.5
+    // f32.sin is an intrinsic (not in defs), so it evaluates to Unknown(Var("f32.sin"))
+    let main_body = Term {
+        id: ids.next_id(),
+        ty: float_ty.clone(),
+        span,
+        kind: TermKind::Let {
+            name: "f".to_string(),
+            name_ty: arrow_ty(float_ty.clone(), float_ty.clone()),
+            rhs: Box::new(Term {
+                id: ids.next_id(),
+                ty: arrow_ty(float_ty.clone(), float_ty.clone()),
+                span,
+                kind: TermKind::Var("f32.sin".to_string()),
+            }),
+            body: Box::new(Term {
+                id: ids.next_id(),
+                ty: float_ty.clone(),
+                span,
+                kind: TermKind::App {
+                    func: Box::new(FunctionName::Term(Box::new(Term {
+                        id: ids.next_id(),
+                        ty: arrow_ty(float_ty.clone(), float_ty.clone()),
+                        span,
+                        kind: TermKind::Var("f".to_string()),
+                    }))),
+                    arg: Box::new(Term {
+                        id: ids.next_id(),
+                        ty: float_ty.clone(),
+                        span,
+                        kind: TermKind::FloatLit(0.5),
+                    }),
+                },
+            }),
+        },
+    };
+
+    let program = Program {
+        defs: vec![Def {
+            name: "main".to_string(),
+            ty: float_ty.clone(),
+            body: main_body,
+            meta: DefMeta::Function,
+            arity: 0,
+        }],
+        uniforms: vec![],
+        storage: vec![],
+    };
+
+    let result = PartialEvaluator::partial_eval(program);
+    let main_def = result.defs.iter().find(|d| d.name == "main").unwrap();
+
+    // The result should be App(f32.sin, 0.5) - the alias `f` should be resolved to `f32.sin`
+    match &main_def.body.kind {
+        TermKind::App { func, arg } => {
+            // Check that the function is now f32.sin (not f)
+            match func.as_ref() {
+                FunctionName::Term(t) => match &t.kind {
+                    TermKind::Var(name) => assert_eq!(name, "f32.sin"),
+                    other => panic!("Expected Var(f32.sin), got {:?}", other),
+                },
+                other => panic!("Expected FunctionName::Term, got {:?}", other),
+            }
+            // Check the argument is still 0.5
+            match &arg.kind {
+                TermKind::FloatLit(f) => assert!((*f - 0.5).abs() < 0.001),
+                other => panic!("Expected FloatLit(0.5), got {:?}", other),
+            }
+        }
+        other => panic!("Expected App, got {:?}", other),
+    }
+}
