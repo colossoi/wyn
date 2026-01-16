@@ -462,7 +462,7 @@ impl TlcToMir {
                 )
             }
 
-            FunctionName::Var(name) => {
+            FunctionName::Var(name) | FunctionName::Intrinsic(name) => {
                 // Function call - but in curried form, this is partial application
                 // Collect all args by walking the nested Apps
                 let args = self.collect_curried_args(arg, body);
@@ -516,7 +516,7 @@ impl TlcToMir {
                     }
 
                     // Check for two-arg intrinsics: _w_index, _w_tuple_proj
-                    if let FunctionName::Var(name) = inner_func.as_ref() {
+                    if let FunctionName::Intrinsic(name) = inner_func.as_ref() {
                         match name.as_str() {
                             "_w_index" | "_w_tuple_proj" => {
                                 // Two-arg intrinsic: complete with both args
@@ -545,16 +545,13 @@ impl TlcToMir {
                             arg: init_arg,
                         } = &inner_inner_term.kind
                         {
-                            if let FunctionName::Var(intrinsic_name) = innermost_func.as_ref() {
+                            if let FunctionName::Intrinsic(intrinsic_name) = innermost_func.as_ref() {
                                 if intrinsic_name == "_w_loop_while" {
                                     return self.transform_loop_while(
-                                        init_arg,     // init
-                                        first_arg,    // cond_func
-                                        arg,          // body_func
-                                        ty,
-                                        span,
-                                        node_id,
-                                        body,
+                                        init_arg,  // init
+                                        first_arg, // cond_func
+                                        arg,       // body_func
+                                        ty, span, node_id, body,
                                     );
                                 }
                             }
@@ -762,12 +759,7 @@ impl TlcToMir {
         self.locals.insert(loop_var_name.clone(), loop_var);
 
         // Create a reference to the loop variable
-        let loop_var_ref = body.alloc_expr(
-            Expr::Local(loop_var),
-            init_ty.clone(),
-            span,
-            node_id,
-        );
+        let loop_var_ref = body.alloc_expr(Expr::Local(loop_var), init_ty.clone(), span, node_id);
 
         // Transform the condition: call cond_func with loop_var
         // We need to figure out the function name and any captures
@@ -775,15 +767,11 @@ impl TlcToMir {
         let cond_id = self.emit_func_call_with_arg(cond_func, loop_var_ref, bool_ty, span, node_id, body);
 
         // Create another reference to the loop variable for the body
-        let loop_var_ref2 = body.alloc_expr(
-            Expr::Local(loop_var),
-            init_ty,
-            span,
-            node_id,
-        );
+        let loop_var_ref2 = body.alloc_expr(Expr::Local(loop_var), init_ty, span, node_id);
 
         // Transform the body: call body_func with loop_var
-        let body_expr_id = self.emit_func_call_with_arg(body_func, loop_var_ref2, result_ty.clone(), span, node_id, body);
+        let body_expr_id =
+            self.emit_func_call_with_arg(body_func, loop_var_ref2, result_ty.clone(), span, node_id, body);
 
         // Remove the temporary local binding
         self.locals.remove(&loop_var_name);
@@ -793,7 +781,7 @@ impl TlcToMir {
             Expr::Loop {
                 loop_var,
                 init: init_id,
-                init_bindings: vec![],  // No pattern destructuring at MIR level
+                init_bindings: vec![], // No pattern destructuring at MIR level
                 kind: LoopKind::While { cond: cond_id },
                 body: body_expr_id,
             },
@@ -825,7 +813,10 @@ impl TlcToMir {
         args.push(extra_arg);
 
         body.alloc_expr(
-            Expr::Call { func: func_name, args },
+            Expr::Call {
+                func: func_name,
+                args,
+            },
             result_ty,
             span,
             node_id,
@@ -842,7 +833,7 @@ impl TlcToMir {
             TermKind::App { func, arg } => {
                 // Recursively collect from the function position
                 let (func_name, mut caps) = match func.as_ref() {
-                    FunctionName::Var(name) => (name.clone(), vec![]),
+                    FunctionName::Var(name) | FunctionName::Intrinsic(name) => (name.clone(), vec![]),
                     FunctionName::Term(inner) => self.collect_func_and_captures(inner, body),
                     _ => panic!("Unexpected function form in loop lambda: {:?}", func),
                 };

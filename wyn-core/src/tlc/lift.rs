@@ -130,10 +130,8 @@ impl<'a> LambdaLifter<'a> {
 
                 // Filter out unit-type captures - these don't need to be passed as parameters
                 // (they carry no runtime information)
-                let free_vars: Vec<_> = free_vars
-                    .into_iter()
-                    .filter(|(_, ty)| !Self::is_unit_type(ty))
-                    .collect();
+                let free_vars: Vec<_> =
+                    free_vars.into_iter().filter(|(_, ty)| !Self::is_unit_type(ty)).collect();
 
                 // Rebuild nested lambdas from inside out
                 let rebuilt_lam = self.rebuild_nested_lam(&params, lifted_body, span);
@@ -320,7 +318,7 @@ impl<'a> LambdaLifter<'a> {
         match func {
             FunctionName::Term(t) => self.collect_free_vars(t, free, seen, local_bindings),
             FunctionName::Var(name) => {
-                // FunctionName::Var is used for top-level functions and intrinsics,
+                // FunctionName::Var is used for top-level functions,
                 // which should always be bound. Local variables in function position
                 // use FunctionName::Term(Term::Var(...)) instead.
                 if !self.is_bound_with_locals(name, local_bindings) && !seen.contains(name) {
@@ -331,8 +329,8 @@ impl<'a> LambdaLifter<'a> {
                     );
                 }
             }
-            // BinOp and UnOp don't introduce free vars
-            FunctionName::BinOp(_) | FunctionName::UnOp(_) => {}
+            // Intrinsics, BinOp, and UnOp don't introduce free vars
+            FunctionName::Intrinsic(_) | FunctionName::BinOp(_) | FunctionName::UnOp(_) => {}
         }
     }
 
@@ -347,7 +345,12 @@ impl<'a> LambdaLifter<'a> {
         let mut params = Vec::new();
         let mut current = term;
 
-        while let TermKind::Lam { param, param_ty, body } = current.kind {
+        while let TermKind::Lam {
+            param,
+            param_ty,
+            body,
+        } = current.kind
+        {
             params.push((param, param_ty));
             current = *body;
         }
@@ -356,12 +359,7 @@ impl<'a> LambdaLifter<'a> {
     }
 
     /// Rebuild nested lambdas from a list of params and a body.
-    fn rebuild_nested_lam(
-        &mut self,
-        params: &[(String, Type<TypeName>)],
-        body: Term,
-        span: Span,
-    ) -> Term {
+    fn rebuild_nested_lam(&mut self, params: &[(String, Type<TypeName>)], body: Term, span: Span) -> Term {
         // Build from inside out
         params.iter().rev().fold(body, |acc, (param, param_ty)| {
             let lam_ty = Type::Constructed(TypeName::Arrow, vec![param_ty.clone(), acc.ty.clone()]);

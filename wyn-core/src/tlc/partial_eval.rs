@@ -123,7 +123,11 @@ impl PartialEvaluator {
             }
 
             // If expression
-            TermKind::If { cond, then_branch, else_branch } => {
+            TermKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
                 let cond_val = self.eval(cond);
                 match cond_val {
                     Value::Bool(true) => self.eval(then_branch),
@@ -159,7 +163,10 @@ impl PartialEvaluator {
 
     /// Collect the spine of an application: App(App(f, x), y) → (func_name, [x, y])
     /// Returns None for the function name if it's a complex term (not a simple Var/BinOp/UnOp).
-    fn collect_spine<'a>(&self, term: &'a Term) -> (Option<&'a FunctionName>, Option<&'a str>, Vec<&'a Term>) {
+    fn collect_spine<'a>(
+        &self,
+        term: &'a Term,
+    ) -> (Option<&'a FunctionName>, Option<&'a str>, Vec<&'a Term>) {
         let mut args = Vec::new();
         let mut current = term;
 
@@ -199,7 +206,7 @@ impl PartialEvaluator {
                 }
             }
 
-            FunctionName::Var(name) => self.apply_var(name, args, original),
+            FunctionName::Var(name) | FunctionName::Intrinsic(name) => self.apply_var(name, args, original),
 
             FunctionName::Term(_) => {
                 // Higher-order - shouldn't happen after spine collection
@@ -253,8 +260,7 @@ impl PartialEvaluator {
             }
             "_w_index" if args.len() >= 2 => {
                 match (&args[0], &args[1]) {
-                    (Value::Array(elems), Value::Int(idx)) |
-                    (Value::Vector(elems), Value::Int(idx)) => {
+                    (Value::Array(elems), Value::Int(idx)) | (Value::Vector(elems), Value::Int(idx)) => {
                         let i = *idx as usize;
                         if i < elems.len() {
                             return Some(elems[i].clone());
@@ -275,7 +281,10 @@ impl PartialEvaluator {
         let mut body = &def.body;
 
         for arg in args {
-            if let TermKind::Lam { param, body: inner, .. } = &body.kind {
+            if let TermKind::Lam {
+                param, body: inner, ..
+            } = &body.kind
+            {
                 self.env.insert(param.clone(), arg);
                 body = inner;
             } else {
@@ -445,7 +454,11 @@ impl PartialEvaluator {
     }
 
     fn reify_if(&mut self, cond: Value, then_val: Value, else_val: Value, original: &Term) -> Value {
-        let cond_term = self.reify(cond, &Type::Constructed(TypeName::Str("bool"), vec![]), original.span);
+        let cond_term = self.reify(
+            cond,
+            &Type::Constructed(TypeName::Str("bool"), vec![]),
+            original.span,
+        );
         let then_term = self.reify(then_val, &original.ty, original.span);
         let else_term = self.reify(else_val, &original.ty, original.span);
 

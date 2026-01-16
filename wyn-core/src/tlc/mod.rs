@@ -53,8 +53,11 @@ pub struct Term {
 /// What can appear in function position of an application.
 #[derive(Debug, Clone)]
 pub enum FunctionName {
-    /// A variable reference (user function or intrinsic like _w_fold)
+    /// A variable reference (user function)
     Var(String),
+    /// A compiler intrinsic (e.g., "_w_tuple_proj", "_w_array_lit", "_w_fold")
+    /// These are internal functions that don't need capture analysis.
+    Intrinsic(String),
     /// Binary operator: +, -, *, /, ==, etc.
     BinOp(ast::BinaryOp),
     /// Unary operator: -, !
@@ -401,7 +404,13 @@ impl<'a> Transformer<'a> {
                 span,
                 TermKind::IntLit(i.to_string()),
             );
-            let proj = self.build_app2("_w_tuple_proj", tuple_ref, index_lit, comp_ty.clone(), span);
+            let proj = self.build_app2(
+                FunctionName::Intrinsic("_w_tuple_proj".to_string()),
+                tuple_ref,
+                index_lit,
+                comp_ty.clone(),
+                span,
+            );
 
             result = self.bind_pattern_to_expr(pattern, comp_ty, proj, result, span);
         }
@@ -435,8 +444,13 @@ impl<'a> Transformer<'a> {
                 span,
                 TermKind::IntLit(field_idx.to_string()),
             );
-            let field_access =
-                self.build_app2("_w_tuple_proj", record_ref, index_lit, field_ty.clone(), span);
+            let field_access = self.build_app2(
+                FunctionName::Intrinsic("_w_tuple_proj".to_string()),
+                record_ref,
+                index_lit,
+                field_ty.clone(),
+                span,
+            );
 
             if let Some(pat) = &field.pattern {
                 result = self.bind_pattern_to_expr(pat, field_ty, field_access, result, span);
@@ -593,7 +607,12 @@ impl<'a> Transformer<'a> {
                         .map(|e| {
                             if let ast::ExprKind::ArrayLiteral(inner_elems) = &e.kind {
                                 // Transform as _w_vec_lit instead of _w_array_lit
-                                self.build_intrinsic_call("_w_vec_lit", inner_elems, col_type.clone(), e.h.span)
+                                self.build_intrinsic_call(
+                                    "_w_vec_lit",
+                                    inner_elems,
+                                    col_type.clone(),
+                                    e.h.span,
+                                )
                             } else {
                                 self.transform_expr(e)
                             }
@@ -608,14 +627,27 @@ impl<'a> Transformer<'a> {
             ast::ExprKind::ArrayIndex(array, index) => {
                 let arr = self.transform_expr(array);
                 let idx = self.transform_expr(index);
-                self.build_app2("_w_index", arr, idx, ty, span)
+                self.build_app2(
+                    FunctionName::Intrinsic("_w_index".to_string()),
+                    arr,
+                    idx,
+                    ty,
+                    span,
+                )
             }
 
             ast::ExprKind::ArrayWith { array, index, value } => {
                 let arr = self.transform_expr(array);
                 let idx = self.transform_expr(index);
                 let val = self.transform_expr(value);
-                self.build_app3("_w_array_with", arr, idx, val, ty, span)
+                self.build_app3(
+                    FunctionName::Intrinsic("_w_array_with".to_string()),
+                    arr,
+                    idx,
+                    val,
+                    ty,
+                    span,
+                )
             }
 
             ast::ExprKind::BinaryOp(op, lhs, rhs) => {
@@ -668,7 +700,13 @@ impl<'a> Transformer<'a> {
                     span,
                     TermKind::IntLit(field_idx.to_string()),
                 );
-                self.build_app2("_w_tuple_proj", rec, index_lit, ty, span)
+                self.build_app2(
+                    FunctionName::Intrinsic("_w_tuple_proj".to_string()),
+                    rec,
+                    index_lit,
+                    ty,
+                    span,
+                )
             }
 
             ast::ExprKind::If(if_expr) => {
@@ -702,7 +740,7 @@ impl<'a> Transformer<'a> {
 
             ast::ExprKind::TypeCoercion(inner, _) => {
                 let term = self.transform_expr(inner);
-                self.build_app1("_w_coerce", term, ty, span)
+                self.build_app1(FunctionName::Intrinsic("_w_coerce".to_string()), term, ty, span)
             }
 
             ast::ExprKind::TypeHole => {
@@ -807,10 +845,21 @@ impl<'a> Transformer<'a> {
                 );
 
                 match init {
-                    Some(init_term) => {
-                        self.build_app3("_w_loop_for", init_term, bound_term, body_lam, ty, span)
-                    }
-                    None => self.build_app2("_w_loop_for", bound_term, body_lam, ty, span),
+                    Some(init_term) => self.build_app3(
+                        FunctionName::Intrinsic("_w_loop_for".to_string()),
+                        init_term,
+                        bound_term,
+                        body_lam,
+                        ty,
+                        span,
+                    ),
+                    None => self.build_app2(
+                        FunctionName::Intrinsic("_w_loop_for".to_string()),
+                        bound_term,
+                        body_lam,
+                        ty,
+                        span,
+                    ),
                 }
             }
 
@@ -837,8 +886,21 @@ impl<'a> Transformer<'a> {
                 );
 
                 match init {
-                    Some(init_term) => self.build_app3("_w_fold", body_lam, init_term, iter_term, ty, span),
-                    None => self.build_app2("_w_fold", body_lam, iter_term, ty, span),
+                    Some(init_term) => self.build_app3(
+                        FunctionName::Intrinsic("_w_fold".to_string()),
+                        body_lam,
+                        init_term,
+                        iter_term,
+                        ty,
+                        span,
+                    ),
+                    None => self.build_app2(
+                        FunctionName::Intrinsic("_w_fold".to_string()),
+                        body_lam,
+                        iter_term,
+                        ty,
+                        span,
+                    ),
                 }
             }
 
@@ -853,10 +915,21 @@ impl<'a> Transformer<'a> {
                 let body_lam = self.pattern_to_lambda(&loop_expr.pattern, acc_ty, body);
 
                 match init {
-                    Some(init_term) => {
-                        self.build_app3("_w_loop_while", init_term, cond_lam, body_lam, ty, span)
-                    }
-                    None => self.build_app2("_w_loop_while", cond_lam, body_lam, ty, span),
+                    Some(init_term) => self.build_app3(
+                        FunctionName::Intrinsic("_w_loop_while".to_string()),
+                        init_term,
+                        cond_lam,
+                        body_lam,
+                        ty,
+                        span,
+                    ),
+                    None => self.build_app2(
+                        FunctionName::Intrinsic("_w_loop_while".to_string()),
+                        cond_lam,
+                        body_lam,
+                        ty,
+                        span,
+                    ),
                 }
             }
         }
@@ -951,7 +1024,7 @@ impl<'a> Transformer<'a> {
 
             ast::PatternKind::Constructor(ctor_name, patterns) => {
                 let is_ctor = self.build_app1(
-                    &format!("_w_is_{}", ctor_name),
+                    FunctionName::Intrinsic(format!("_w_is_{}", ctor_name)),
                     scrutinee.clone(),
                     Type::Constructed(TypeName::Str("bool"), vec![]),
                     span,
@@ -963,7 +1036,7 @@ impl<'a> Transformer<'a> {
                     let field_ty =
                         self.lookup_type(pat.h.id).expect("BUG: Constructor field pattern must have type");
                     let extract = self.build_app1(
-                        &format!("_w_extract_{}_{}", ctor_name, i),
+                        FunctionName::Intrinsic(format!("_w_extract_{}_{}", ctor_name, i)),
                         scrutinee.clone(),
                         field_ty.clone(),
                         span,
@@ -1058,22 +1131,22 @@ impl<'a> Transformer<'a> {
         }
     }
 
-    // Helper: build App(Var(name), arg)
-    fn build_app1(&mut self, name: &str, arg: Term, result_ty: Type<TypeName>, span: Span) -> Term {
+    // Helper: build App(func, arg)
+    fn build_app1(&mut self, func: FunctionName, arg: Term, result_ty: Type<TypeName>, span: Span) -> Term {
         self.mk_term(
             result_ty,
             span,
             TermKind::App {
-                func: Box::new(FunctionName::Var(name.to_string())),
+                func: Box::new(func),
                 arg: Box::new(arg),
             },
         )
     }
 
-    // Helper: build App(App(Var(name), arg1), arg2)
+    // Helper: build App(App(func, arg1), arg2)
     fn build_app2(
         &mut self,
-        name: &str,
+        func: FunctionName,
         arg1: Term,
         arg2: Term,
         result_ty: Type<TypeName>,
@@ -1083,7 +1156,7 @@ impl<'a> Transformer<'a> {
             Type::Constructed(TypeName::Arrow, vec![arg2.ty.clone(), result_ty.clone()]),
             span,
             TermKind::App {
-                func: Box::new(FunctionName::Var(name.to_string())),
+                func: Box::new(func),
                 arg: Box::new(arg1),
             },
         );
@@ -1097,10 +1170,10 @@ impl<'a> Transformer<'a> {
         )
     }
 
-    // Helper: build App(App(App(Var(name), arg1), arg2), arg3)
+    // Helper: build App(App(App(func, arg1), arg2), arg3)
     fn build_app3(
         &mut self,
-        name: &str,
+        func: FunctionName,
         arg1: Term,
         arg2: Term,
         arg3: Term,
@@ -1115,7 +1188,7 @@ impl<'a> Transformer<'a> {
             app1_ty,
             span,
             TermKind::App {
-                func: Box::new(FunctionName::Var(name.to_string())),
+                func: Box::new(func),
                 arg: Box::new(arg1),
             },
         );
@@ -1206,7 +1279,7 @@ impl<'a> Transformer<'a> {
             intermediate_types[0].clone(),
             span,
             TermKind::App {
-                func: Box::new(FunctionName::Var(name.to_string())),
+                func: Box::new(FunctionName::Intrinsic(name.to_string())),
                 arg: Box::new(arg_terms[0].clone()),
             },
         );
@@ -1253,7 +1326,7 @@ impl<'a> Transformer<'a> {
             intermediate_types[0].clone(),
             span,
             TermKind::App {
-                func: Box::new(FunctionName::Var(name.to_string())),
+                func: Box::new(FunctionName::Intrinsic(name.to_string())),
                 arg: Box::new(arg_terms[0].clone()),
             },
         );

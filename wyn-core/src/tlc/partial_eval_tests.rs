@@ -288,10 +288,7 @@ fn test_function_inlining() {
 
     let inner_lam = Term {
         id: ids.next_id(),
-        ty: Type::Constructed(
-            TypeName::Arrow,
-            vec![int_ty.clone(), int_ty.clone()],
-        ),
+        ty: Type::Constructed(TypeName::Arrow, vec![int_ty.clone(), int_ty.clone()]),
         span: make_span(),
         kind: TermKind::Lam {
             param: "b".to_string(),
@@ -302,10 +299,7 @@ fn test_function_inlining() {
 
     let foo_body = Term {
         id: ids.next_id(),
-        ty: Type::Constructed(
-            TypeName::Arrow,
-            vec![int_ty.clone(), inner_lam.ty.clone()],
-        ),
+        ty: Type::Constructed(TypeName::Arrow, vec![int_ty.clone(), inner_lam.ty.clone()]),
         span: make_span(),
         kind: TermKind::Lam {
             param: "a".to_string(),
