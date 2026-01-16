@@ -529,21 +529,19 @@ impl<'a> TypeChecker<'a> {
         self.module_schemes.get(qualified_name).cloned().map(SchemeLookup::Single)
     }
 
-    /// Returns (resolved_name, scheme_lookup) - resolved_name may differ from input if an alias was resolved
+    /// Returns (name, scheme_lookup) for an intrinsic.
+    /// Note: Aliases are resolved earlier in name_resolution, so we do direct lookup here.
     fn lookup_intrinsic(&mut self, name: &str) -> Option<(String, SchemeLookup)> {
-        use crate::intrinsics::{IntrinsicLookup, IntrinsicSource};
+        use crate::intrinsics::IntrinsicLookup;
 
-        // First try direct lookup, then try resolving as an alias
-        let intrinsic_name = IntrinsicSource::resolve_alias(name).unwrap_or(name);
-
-        self.intrinsics.get(intrinsic_name).map(|lookup| {
+        self.intrinsics.get(name).map(|lookup| {
             let scheme_lookup = match lookup {
                 IntrinsicLookup::Single(entry) => SchemeLookup::Single(entry.scheme.clone()),
                 IntrinsicLookup::Overloaded(set) => {
                     SchemeLookup::Overloaded(set.entries().iter().map(|e| e.scheme.clone()).collect())
                 }
             };
-            (intrinsic_name.to_string(), scheme_lookup)
+            (name.to_string(), scheme_lookup)
         })
     }
 

@@ -185,14 +185,9 @@ impl Specializer {
         arg1_ty: &Type<TypeName>,
         arg2_ty: &Type<TypeName>,
     ) -> Option<String> {
-        use crate::intrinsics::IntrinsicSource;
-
-        // First resolve any alias to its intrinsic name
-        let resolved = IntrinsicSource::resolve_alias(name).unwrap_or(name);
-
-        match resolved {
-            // mul alias resolves to _w_intrinsic_mul, match both
-            "mul" | "_w_intrinsic_mul" => {
+        // Note: Aliases are resolved in name_resolution, so mul -> _w_intrinsic_mul
+        match name {
+            "_w_intrinsic_mul" => {
                 let shape1 = self.classify_shape(arg1_ty);
                 let shape2 = self.classify_shape(arg2_ty);
                 match (shape1, shape2) {
@@ -216,22 +211,25 @@ impl Specializer {
     }
 
     /// Specialize a function name based on argument type.
-    /// Transforms: abs, sign, floor, ceil, fract, min, max, clamp → f32.abs, i32.sign, etc.
+    /// Transforms: abs, sign, min, max → f32.abs, i32.sign, etc.
+    /// Also handles intrinsic names: _w_intrinsic_floor → f32.floor, etc.
     fn specialize_name(&self, name: &str, arg_ty: &Type<TypeName>) -> String {
-        use crate::intrinsics::IntrinsicSource;
+        // Note: Aliases are resolved in name_resolution
+        // Direct names (not aliased): abs, sign, min, max
+        // Intrinsic names (from aliases): _w_intrinsic_floor, _w_intrinsic_ceil, etc.
 
-        // First resolve any alias to its intrinsic name
-        let resolved = IntrinsicSource::resolve_alias(name).unwrap_or(name);
+        // Extract base name from intrinsic prefix if present
+        let base_name = name.strip_prefix("_w_intrinsic_").unwrap_or(name);
 
-        match resolved {
+        match base_name {
             "abs" | "sign" | "floor" | "ceil" | "fract" | "min" | "max" | "clamp" => {
                 if let Some(prefix) = self.type_prefix(arg_ty) {
-                    format!("{}.{}", prefix, resolved)
+                    format!("{}.{}", prefix, base_name)
                 } else {
-                    resolved.to_string()
+                    name.to_string()
                 }
             }
-            _ => resolved.to_string(),
+            _ => name.to_string(),
         }
     }
 
