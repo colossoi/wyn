@@ -43,8 +43,8 @@ The compiler uses a multi-stage pipeline with typestate-driven phases:
 | Stage | Description |
 |-------|-------------|
 | **TlcTransformed** | AST converted to minimal typed lambda calculus |
-| **TlcPartialEval** | Constant folding and algebraic simplifications (optional) |
 | **TlcLifted** | All lambdas lifted to top-level, captures explicit |
+| **TlcPartialEval** | Constant folding and algebraic simplifications (optional) |
 
 ### Backend (MIR)
 | Stage | Description |

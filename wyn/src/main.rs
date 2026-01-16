@@ -215,18 +215,18 @@ fn compile_file(
         }
     }
 
+    // Lift lambdas to top-level
+    let tlc_lifted = time("tlc_lift", verbose, || tlc_transformed.lift());
+
     // Apply TLC partial evaluation if enabled
     let tlc_optimized = if partial_eval {
-        time("tlc_partial_eval", verbose, || tlc_transformed.partial_eval())
+        time("tlc_partial_eval", verbose, || tlc_lifted.partial_eval())
     } else {
-        tlc_transformed.skip_partial_eval()
+        tlc_lifted.skip_partial_eval()
     };
 
-    // Lift lambdas to top-level
-    let tlc_lifted = time("tlc_lift", verbose, || tlc_optimized.lift());
-
     // Transform TLC to MIR
-    let flattened = time("to_mir", verbose, || tlc_lifted.to_mir());
+    let flattened = time("to_mir", verbose, || tlc_optimized.to_mir());
 
     // Write initial MIR if requested (right after TLC→MIR)
     write_mir_if_requested(&flattened.mir, &output_init_mir, "initial MIR", verbose)?;

@@ -301,8 +301,8 @@ fn compile_to_spirv_with_partial_eval(source: &str) -> Result<Vec<u32>> {
     let builtins = crate::build_builtins(&alias_checked.ast, &frontend.module_manager);
     let lifted = alias_checked
         .to_tlc(builtins)
-        .partial_eval()
         .lift()
+        .partial_eval()
         .to_mir()
         .hoist_materializations()
         .normalize()

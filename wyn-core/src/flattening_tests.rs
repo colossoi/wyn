@@ -1365,8 +1365,8 @@ fn compile_to_glsl(input: &str) -> String {
     let builtins = crate::build_builtins(&alias_checked.ast, &frontend.module_manager);
     let glsl = alias_checked
         .to_tlc(builtins)
-        .partial_eval()
         .lift()
+        .partial_eval()
         .to_mir()
         .hoist_materializations()
         .normalize()

@@ -9,6 +9,8 @@ pub mod partial_eval;
 mod partial_eval_tests;
 pub mod specialize;
 pub mod to_mir;
+#[cfg(test)]
+mod to_mir_tests;
 
 use crate::TypeTable;
 use crate::ast::{self, NodeId, Span, TypeName};

@@ -300,8 +300,8 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 //
 // TLC Pipeline (AST -> MIR):
 //       -> .to_tlc()                                    -> TlcTransformed
-//       -> .partial_eval() or .skip_partial_eval()      -> TlcTransformed (optimized)
 //       -> .lift()                                      -> TlcLifted
+//       -> .partial_eval() or .skip_partial_eval()      -> TlcLifted (optimized)
 //       -> .to_mir()                                    -> Flattened
 //
 // BackEnd Pipeline (MIR -> output):
@@ -664,21 +664,6 @@ pub struct TlcTransformed {
 }
 
 impl TlcTransformed {
-    /// Apply partial evaluation (constant folding, algebraic simplifications, etc.)
-    pub fn partial_eval(self) -> TlcTransformed {
-        let optimized = tlc::partial_eval::PartialEvaluator::partial_eval(self.tlc);
-        TlcTransformed {
-            tlc: optimized,
-            type_table: self.type_table,
-            builtins: self.builtins,
-        }
-    }
-
-    /// Skip partial evaluation
-    pub fn skip_partial_eval(self) -> TlcTransformed {
-        self
-    }
-
     /// Lift all lambdas to top-level definitions
     pub fn lift(self) -> TlcLifted {
         let lifted = tlc::lift::LambdaLifter::lift(self.tlc, &self.builtins);
@@ -696,6 +681,20 @@ pub struct TlcLifted {
 }
 
 impl TlcLifted {
+    /// Apply partial evaluation (constant folding, algebraic simplifications, etc.)
+    pub fn partial_eval(self) -> TlcLifted {
+        let optimized = tlc::partial_eval::PartialEvaluator::partial_eval(self.tlc);
+        TlcLifted {
+            tlc: optimized,
+            type_table: self.type_table,
+        }
+    }
+
+    /// Skip partial evaluation
+    pub fn skip_partial_eval(self) -> TlcLifted {
+        self
+    }
+
     /// Transform TLC to MIR
     pub fn to_mir(self) -> Flattened {
         // Specialize polymorphic intrinsics (sign → f32.sign, etc.)
