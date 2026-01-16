@@ -238,6 +238,8 @@ impl LambdaLifter {
                 if free_vars.is_empty() {
                     // No captures: lift as-is
                     let name = self.fresh_name();
+                    // Add to globals so subsequent lambdas don't capture this as a free var
+                    self.globals.insert(name.clone());
                     self.new_defs.push(Def {
                         name: name.clone(),
                         ty: rebuilt_lam.ty.clone(),
@@ -254,6 +256,8 @@ impl LambdaLifter {
                 } else {
                     // Has captures: wrap with extra lambdas for captures, apply to captures
                     let name = self.fresh_name();
+                    // Add to globals so subsequent lambdas don't capture this as a free var
+                    self.globals.insert(name.clone());
                     let wrapped = self.wrap_lam_with_captures(rebuilt_lam, &free_vars, span);
                     let lifted_ty = wrapped.ty.clone();
                     self.new_defs.push(Def {
