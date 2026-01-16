@@ -83,14 +83,6 @@ impl<'a> LambdaLifter<'a> {
         }
     }
 
-    /// Check if a name is bound (in scope, top-level, or a builtin)
-    fn is_bound(&self, name: &str) -> bool {
-        self.scope.iter().any(|(n, _)| n == name)
-            || self.top_level.contains(name)
-            || self.builtins.contains(name)
-            || name.starts_with("_w_") // Internal intrinsics are always bound
-    }
-
     /// Push a name and type onto the scope stack
     fn push_scope(&mut self, name: &str, ty: Type<TypeName>) {
         self.scope.push((name.to_string(), ty));
@@ -124,14 +116,24 @@ impl<'a> LambdaLifter<'a> {
                     self.pop_scope();
                 }
 
-                // Compute free vars with all params in scope
+                // Compute free vars with ONLY the lambda's params in scope.
+                // We must save and clear the enclosing scope because those
+                // bindings ARE free variables from the lifted lambda's perspective
+                // (they need to be captured when the lambda is moved to top-level).
+                let saved_scope = std::mem::take(&mut self.scope);
                 for (p, pty) in &params {
                     self.push_scope(p, pty.clone());
                 }
                 let free_vars = self.free_vars_of(&lifted_body);
-                for _ in &params {
-                    self.pop_scope();
-                }
+                // Restore the enclosing scope
+                self.scope = saved_scope;
+
+                // Filter out unit-type captures - these don't need to be passed as parameters
+                // (they carry no runtime information)
+                let free_vars: Vec<_> = free_vars
+                    .into_iter()
+                    .filter(|(_, ty)| !Self::is_unit_type(ty))
+                    .collect();
 
                 // Rebuild nested lambdas from inside out
                 let rebuilt_lam = self.rebuild_nested_lam(&params, lifted_body, span);
@@ -247,8 +249,18 @@ impl<'a> LambdaLifter<'a> {
     fn free_vars_of(&self, term: &Term) -> Vec<(String, Type<TypeName>)> {
         let mut free = Vec::new();
         let mut seen = HashSet::new();
-        self.collect_free_vars(term, &mut free, &mut seen);
+        let mut local_bindings = HashSet::new();
+        self.collect_free_vars(term, &mut free, &mut seen, &mut local_bindings);
         free
+    }
+
+    /// Check if a name is bound (in scope, locally, top-level, or a builtin)
+    fn is_bound_with_locals(&self, name: &str, local_bindings: &HashSet<String>) -> bool {
+        local_bindings.contains(name)
+            || self.scope.iter().any(|(n, _)| n == name)
+            || self.top_level.contains(name)
+            || self.builtins.contains(name)
+            || name.starts_with("_w_") // Internal intrinsics are always bound
     }
 
     fn collect_free_vars(
@@ -256,35 +268,41 @@ impl<'a> LambdaLifter<'a> {
         term: &Term,
         free: &mut Vec<(String, Type<TypeName>)>,
         seen: &mut HashSet<String>,
+        local_bindings: &mut HashSet<String>,
     ) {
         match &term.kind {
             TermKind::Var(name) => {
-                if !self.is_bound(name) && !seen.contains(name) {
+                if !self.is_bound_with_locals(name, local_bindings) && !seen.contains(name) {
                     seen.insert(name.clone());
                     free.push((name.clone(), term.ty.clone()));
                 }
             }
-            TermKind::Lam { body, .. } => {
-                // Don't descend into nested lambdas for free var analysis -
-                // they'll be lifted separately and their free vars are their problem
-                self.collect_free_vars(body, free, seen);
+            TermKind::Lam { param, body, .. } => {
+                // Mark lambda param as locally bound when checking body
+                local_bindings.insert(param.clone());
+                self.collect_free_vars(body, free, seen, local_bindings);
+                local_bindings.remove(param);
             }
             TermKind::App { func, arg } => {
-                self.collect_free_vars_func(func, free, seen);
-                self.collect_free_vars(arg, free, seen);
+                self.collect_free_vars_func(func, free, seen, local_bindings);
+                self.collect_free_vars(arg, free, seen, local_bindings);
             }
-            TermKind::Let { rhs, body, .. } => {
-                self.collect_free_vars(rhs, free, seen);
-                self.collect_free_vars(body, free, seen);
+            TermKind::Let { name, rhs, body, .. } => {
+                // Check rhs first (name is not yet bound)
+                self.collect_free_vars(rhs, free, seen, local_bindings);
+                // Then check body with name bound
+                local_bindings.insert(name.clone());
+                self.collect_free_vars(body, free, seen, local_bindings);
+                local_bindings.remove(name);
             }
             TermKind::If {
                 cond,
                 then_branch,
                 else_branch,
             } => {
-                self.collect_free_vars(cond, free, seen);
-                self.collect_free_vars(then_branch, free, seen);
-                self.collect_free_vars(else_branch, free, seen);
+                self.collect_free_vars(cond, free, seen, local_bindings);
+                self.collect_free_vars(then_branch, free, seen, local_bindings);
+                self.collect_free_vars(else_branch, free, seen, local_bindings);
             }
             // Literals have no free vars
             TermKind::IntLit(_) | TermKind::FloatLit(_) | TermKind::BoolLit(_) | TermKind::StringLit(_) => {
@@ -297,14 +315,15 @@ impl<'a> LambdaLifter<'a> {
         func: &FunctionName,
         free: &mut Vec<(String, Type<TypeName>)>,
         seen: &mut HashSet<String>,
+        local_bindings: &mut HashSet<String>,
     ) {
         match func {
-            FunctionName::Term(t) => self.collect_free_vars(t, free, seen),
+            FunctionName::Term(t) => self.collect_free_vars(t, free, seen, local_bindings),
             FunctionName::Var(name) => {
                 // FunctionName::Var is used for top-level functions and intrinsics,
                 // which should always be bound. Local variables in function position
                 // use FunctionName::Term(Term::Var(...)) instead.
-                if !self.is_bound(name) && !seen.contains(name) {
+                if !self.is_bound_with_locals(name, local_bindings) && !seen.contains(name) {
                     panic!(
                         "BUG: Unexpected free FunctionName::Var '{}'. \
                          Local function variables should use FunctionName::Term.",
@@ -315,6 +334,11 @@ impl<'a> LambdaLifter<'a> {
             // BinOp and UnOp don't introduce free vars
             FunctionName::BinOp(_) | FunctionName::UnOp(_) => {}
         }
+    }
+
+    /// Check if a type is the unit type `()`.
+    fn is_unit_type(ty: &Type<TypeName>) -> bool {
+        matches!(ty, Type::Constructed(TypeName::Unit, _))
     }
 
     /// Extract all nested lambda parameters from a term.
@@ -363,45 +387,6 @@ impl<'a> LambdaLifter<'a> {
     ) -> Term {
         // Wrap with lambdas for each capture (in reverse order so first capture is outermost)
         captures.iter().rev().fold(lam, |acc, (cap_name, cap_ty)| {
-            let result_ty = Type::Constructed(TypeName::Arrow, vec![cap_ty.clone(), acc.ty.clone()]);
-            Term {
-                id: self.term_ids.next_id(),
-                ty: result_ty,
-                span,
-                kind: TermKind::Lam {
-                    param: cap_name.clone(),
-                    param_ty: cap_ty.clone(),
-                    body: Box::new(acc),
-                },
-            }
-        })
-    }
-
-    /// Wrap a lambda body with extra lambdas for each captured variable.
-    /// Build: |cap1| |cap2| ... |param| body
-    fn wrap_with_captures(
-        &mut self,
-        param: String,
-        param_ty: Type<TypeName>,
-        body: Term,
-        captures: &[(String, Type<TypeName>)],
-        span: Span,
-    ) -> Term {
-        // Start with the innermost lambda (the original one)
-        let inner_ty = Type::Constructed(TypeName::Arrow, vec![param_ty.clone(), body.ty.clone()]);
-        let inner = Term {
-            id: self.term_ids.next_id(),
-            ty: inner_ty,
-            span,
-            kind: TermKind::Lam {
-                param,
-                param_ty,
-                body: Box::new(body),
-            },
-        };
-
-        // Wrap with lambdas for each capture (in reverse order so first capture is outermost)
-        captures.iter().rev().fold(inner, |acc, (cap_name, cap_ty)| {
             let result_ty = Type::Constructed(TypeName::Arrow, vec![cap_ty.clone(), acc.ty.clone()]);
             Term {
                 id: self.term_ids.next_id(),

@@ -4,7 +4,7 @@
 
 use super::{Def as TlcDef, DefMeta, FunctionName, Program as TlcProgram, Term, TermKind};
 use crate::ast::{self, NodeId, PatternKind, Span, TypeName};
-use crate::mir::{self, Body, Def as MirDef, Expr, ExprId, LocalDecl, LocalId, LocalKind};
+use crate::mir::{self, Body, Def as MirDef, Expr, ExprId, LocalDecl, LocalId, LocalKind, LoopKind};
 use polytype::Type;
 use std::collections::HashMap;
 
@@ -258,9 +258,13 @@ impl TlcToMir {
     fn extract_static_value(&self, term: &Term) -> Option<String> {
         match &term.kind {
             TermKind::Var(name) => {
-                // Check if it's a top-level function
-                if self.top_level.contains_key(name) {
-                    Some(name.clone())
+                // Check if it's a top-level function (not a constant)
+                if let Some(def) = self.top_level.get(name) {
+                    if def.arity > 0 {
+                        Some(name.clone())
+                    } else {
+                        None // Constants are not callable functions
+                    }
                 } else {
                     // Check if it's a local bound to a known function
                     self.static_values.get(name).cloned()
@@ -297,17 +301,22 @@ impl TlcToMir {
                 if let Some(&local_id) = self.locals.get(name) {
                     // Local variable reference
                     body.alloc_expr(Expr::Local(local_id), ty, span, node_id)
-                } else if self.top_level.contains_key(name) {
-                    // Top-level function used as value → Closure with no captures
-                    body.alloc_expr(
-                        Expr::Closure {
-                            lambda_name: name.clone(),
-                            captures: vec![],
-                        },
-                        ty,
-                        span,
-                        node_id,
-                    )
+                } else if let Some(def) = self.top_level.get(name) {
+                    if def.arity > 0 {
+                        // Top-level function used as value → Closure with no captures
+                        body.alloc_expr(
+                            Expr::Closure {
+                                lambda_name: name.clone(),
+                                captures: vec![],
+                            },
+                            ty,
+                            span,
+                            node_id,
+                        )
+                    } else {
+                        // Top-level constant → Global reference
+                        body.alloc_expr(Expr::Global(name.clone()), ty, span, node_id)
+                    }
                 } else {
                     // Unknown variable - could be an intrinsic or global constant
                     body.alloc_expr(Expr::Global(name.clone()), ty, span, node_id)
@@ -526,6 +535,31 @@ impl TlcToMir {
                             _ => {}
                         }
                     }
+
+                    // Check for three-arg intrinsics like _w_loop_while
+                    // Pattern: App(App(App(Var("_w_loop_while"), init), cond), body)
+                    // At this level: inner_func = Term(App(Var("_w_loop_while"), init)), first_arg = cond
+                    if let FunctionName::Term(inner_inner_term) = inner_func.as_ref() {
+                        if let TermKind::App {
+                            func: innermost_func,
+                            arg: init_arg,
+                        } = &inner_inner_term.kind
+                        {
+                            if let FunctionName::Var(intrinsic_name) = innermost_func.as_ref() {
+                                if intrinsic_name == "_w_loop_while" {
+                                    return self.transform_loop_while(
+                                        init_arg,     // init
+                                        first_arg,    // cond_func
+                                        arg,          // body_func
+                                        ty,
+                                        span,
+                                        node_id,
+                                        body,
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Generic higher-order application
@@ -692,6 +726,133 @@ impl TlcToMir {
         // For now, just transform the single argument
         // A more complete implementation would walk nested Apps
         vec![self.transform_term(term, body)]
+    }
+
+    /// Transform a _w_loop_while intrinsic into an Expr::Loop.
+    ///
+    /// The TLC form is: _w_loop_while init cond_func body_func
+    /// Where:
+    /// - init is the initial accumulator value (usually a tuple)
+    /// - cond_func is a function from accumulator → bool
+    /// - body_func is a function from accumulator → accumulator
+    fn transform_loop_while(
+        &mut self,
+        init: &Term,
+        cond_func: &Term,
+        body_func: &Term,
+        result_ty: Type<TypeName>,
+        span: Span,
+        node_id: NodeId,
+        body: &mut Body,
+    ) -> ExprId {
+        // Transform the initial value
+        let init_id = self.transform_term(init, body);
+        let init_ty = init.ty.clone();
+
+        // Create a loop variable for the accumulator
+        let loop_var_name = format!("_loop_acc_{}", node_id.0);
+        let loop_var = body.alloc_local(LocalDecl {
+            name: loop_var_name.clone(),
+            ty: init_ty.clone(),
+            kind: LocalKind::LoopVar,
+            span,
+        });
+
+        // Add to locals map so it can be referenced in cond/body
+        self.locals.insert(loop_var_name.clone(), loop_var);
+
+        // Create a reference to the loop variable
+        let loop_var_ref = body.alloc_expr(
+            Expr::Local(loop_var),
+            init_ty.clone(),
+            span,
+            node_id,
+        );
+
+        // Transform the condition: call cond_func with loop_var
+        // We need to figure out the function name and any captures
+        let bool_ty = Type::Constructed(TypeName::Str("bool"), vec![]);
+        let cond_id = self.emit_func_call_with_arg(cond_func, loop_var_ref, bool_ty, span, node_id, body);
+
+        // Create another reference to the loop variable for the body
+        let loop_var_ref2 = body.alloc_expr(
+            Expr::Local(loop_var),
+            init_ty,
+            span,
+            node_id,
+        );
+
+        // Transform the body: call body_func with loop_var
+        let body_expr_id = self.emit_func_call_with_arg(body_func, loop_var_ref2, result_ty.clone(), span, node_id, body);
+
+        // Remove the temporary local binding
+        self.locals.remove(&loop_var_name);
+
+        // Create the Loop expression
+        body.alloc_expr(
+            Expr::Loop {
+                loop_var,
+                init: init_id,
+                init_bindings: vec![],  // No pattern destructuring at MIR level
+                kind: LoopKind::While { cond: cond_id },
+                body: body_expr_id,
+            },
+            result_ty,
+            span,
+            node_id,
+        )
+    }
+
+    /// Emit a function call that applies `func_term` to an additional `extra_arg`.
+    ///
+    /// Handles two cases:
+    /// 1. func_term is Var("name") -> Call { func: name, args: [extra_arg] }
+    /// 2. func_term is App(App(...Var("name")..., cap1), cap2) -> Call { func: name, args: [cap1, cap2, extra_arg] }
+    fn emit_func_call_with_arg(
+        &mut self,
+        func_term: &Term,
+        extra_arg: ExprId,
+        result_ty: Type<TypeName>,
+        span: Span,
+        node_id: NodeId,
+        body: &mut Body,
+    ) -> ExprId {
+        // Collect the function name and capture arguments
+        let (func_name, capture_args) = self.collect_func_and_captures(func_term, body);
+
+        // Build args: captures first, then the extra arg
+        let mut args = capture_args;
+        args.push(extra_arg);
+
+        body.alloc_expr(
+            Expr::Call { func: func_name, args },
+            result_ty,
+            span,
+            node_id,
+        )
+    }
+
+    /// Collect function name and capture arguments from a term.
+    ///
+    /// For Var("name"): returns ("name", [])
+    /// For App(App(Var("name"), cap1), cap2): returns ("name", [cap1_id, cap2_id])
+    fn collect_func_and_captures(&mut self, term: &Term, body: &mut Body) -> (String, Vec<ExprId>) {
+        match &term.kind {
+            TermKind::Var(name) => (name.clone(), vec![]),
+            TermKind::App { func, arg } => {
+                // Recursively collect from the function position
+                let (func_name, mut caps) = match func.as_ref() {
+                    FunctionName::Var(name) => (name.clone(), vec![]),
+                    FunctionName::Term(inner) => self.collect_func_and_captures(inner, body),
+                    _ => panic!("Unexpected function form in loop lambda: {:?}", func),
+                };
+                // Transform and add this argument
+                let arg_id = self.transform_term(arg, body);
+                caps.push(arg_id);
+                (func_name, caps)
+            }
+            _ => panic!("Unexpected term form in loop lambda: {:?}", term.kind),
+        }
     }
 }
 

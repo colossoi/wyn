@@ -548,6 +548,7 @@ impl ImplSource {
         self.register_unop(ty_name, "ceil", BuiltinImpl::PrimOp(PrimOp::GlslExt(9)));
         self.register_unop(ty_name, "round", BuiltinImpl::PrimOp(PrimOp::GlslExt(1)));
         self.register_unop(ty_name, "trunc", BuiltinImpl::PrimOp(PrimOp::GlslExt(3)));
+        self.register_unop(ty_name, "fract", BuiltinImpl::PrimOp(PrimOp::GlslExt(10)));
 
         // Misc operations (clamp is registered in register_numeric_ops)
         self.register_ternop(ty_name, "lerp", BuiltinImpl::PrimOp(PrimOp::GlslExt(46))); // FMix

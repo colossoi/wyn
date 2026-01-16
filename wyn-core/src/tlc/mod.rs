@@ -577,7 +577,32 @@ impl<'a> Transformer<'a> {
             }
 
             ast::ExprKind::VecMatLiteral(elements) => {
-                self.build_intrinsic_call("_w_vec_lit", elements, ty, span)
+                // For matrices, inner ArrayLiteral elements should become vectors, not arrays
+                if let Type::Constructed(TypeName::Mat, mat_args) = &ty {
+                    // Matrix type args: [rows, cols, elem_type]
+                    // Column vector type: Vec(rows, elem_type)
+                    let col_type = if mat_args.len() >= 3 {
+                        Type::Constructed(TypeName::Vec, vec![mat_args[0].clone(), mat_args[2].clone()])
+                    } else {
+                        ty.clone() // fallback
+                    };
+
+                    // Matrix: transform inner array literals as vectors
+                    let column_terms: Vec<Term> = elements
+                        .iter()
+                        .map(|e| {
+                            if let ast::ExprKind::ArrayLiteral(inner_elems) = &e.kind {
+                                // Transform as _w_vec_lit instead of _w_array_lit
+                                self.build_intrinsic_call("_w_vec_lit", inner_elems, col_type.clone(), e.h.span)
+                            } else {
+                                self.transform_expr(e)
+                            }
+                        })
+                        .collect();
+                    self.build_intrinsic_call_from_terms("_w_vec_lit", column_terms, ty, span)
+                } else {
+                    self.build_intrinsic_call("_w_vec_lit", elements, ty, span)
+                }
             }
 
             ast::ExprKind::ArrayIndex(array, index) => {
@@ -1168,6 +1193,53 @@ impl<'a> Transformer<'a> {
 
         // Compute intermediate types working backwards from result_ty
         // For f(a, b, c) with result R: f(a) : B -> C -> R, f(a)(b) : C -> R, f(a)(b)(c) : R
+        let mut intermediate_types = vec![result_ty.clone()];
+        for arg in arg_terms.iter().rev().skip(1) {
+            let prev_ty = intermediate_types.last().unwrap().clone();
+            let cur_ty = Type::Constructed(TypeName::Arrow, vec![arg.ty.clone(), prev_ty]);
+            intermediate_types.push(cur_ty);
+        }
+        intermediate_types.reverse();
+
+        // Build curried applications
+        let mut result = self.mk_term(
+            intermediate_types[0].clone(),
+            span,
+            TermKind::App {
+                func: Box::new(FunctionName::Var(name.to_string())),
+                arg: Box::new(arg_terms[0].clone()),
+            },
+        );
+
+        for (i, arg_term) in arg_terms.iter().enumerate().skip(1) {
+            let app_ty = intermediate_types.get(i).cloned().unwrap_or_else(|| result_ty.clone());
+            result = self.mk_term(
+                app_ty,
+                span,
+                TermKind::App {
+                    func: Box::new(FunctionName::Term(Box::new(result))),
+                    arg: Box::new(arg_term.clone()),
+                },
+            );
+        }
+
+        result
+    }
+
+    /// Build an intrinsic call from already-transformed Term arguments.
+    /// Similar to build_intrinsic_call but takes Terms instead of AST expressions.
+    fn build_intrinsic_call_from_terms(
+        &mut self,
+        name: &str,
+        arg_terms: Vec<Term>,
+        result_ty: Type<TypeName>,
+        span: Span,
+    ) -> Term {
+        if arg_terms.is_empty() {
+            return self.mk_term(result_ty, span, TermKind::Var(name.to_string()));
+        }
+
+        // Compute intermediate types working backwards from result_ty
         let mut intermediate_types = vec![result_ty.clone()];
         for arg in arg_terms.iter().rev().skip(1) {
             let prev_ty = intermediate_types.last().unwrap().clone();
