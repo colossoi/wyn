@@ -298,10 +298,18 @@ impl TlcToMir {
                     // Local variable reference
                     body.alloc_expr(Expr::Local(local_id), ty, span, node_id)
                 } else if self.top_level.contains_key(name) {
-                    // Global function reference
-                    body.alloc_expr(Expr::Global(name.clone()), ty, span, node_id)
+                    // Top-level function used as value → Closure with no captures
+                    body.alloc_expr(
+                        Expr::Closure {
+                            lambda_name: name.clone(),
+                            captures: vec![],
+                        },
+                        ty,
+                        span,
+                        node_id,
+                    )
                 } else {
-                    // Unknown variable - could be an intrinsic
+                    // Unknown variable - could be an intrinsic or global constant
                     body.alloc_expr(Expr::Global(name.clone()), ty, span, node_id)
                 }
             }

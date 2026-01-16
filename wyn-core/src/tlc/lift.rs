@@ -107,40 +107,44 @@ impl<'a> LambdaLifter<'a> {
         let span = term.span;
 
         match term.kind {
-            TermKind::Lam {
-                param,
-                param_ty,
-                body,
-            } => {
-                // Push param onto scope with its type
-                self.push_scope(&param, param_ty.clone());
-                let lifted_body = self.lift_term(*body);
-                self.pop_scope();
+            TermKind::Lam { .. } => {
+                // Extract ALL nested lambda params together (to keep multi-param functions intact)
+                let (params, inner_body) = self.extract_lambda_params(term);
 
-                // Compute free vars of this lambda (need to temporarily add param to scope)
-                self.push_scope(&param, param_ty.clone());
+                // Push all params onto scope
+                for (p, pty) in &params {
+                    self.push_scope(p, pty.clone());
+                }
+
+                // Lift the innermost body (which is not a lambda)
+                let lifted_body = self.lift_term(inner_body);
+
+                // Pop all params
+                for _ in &params {
+                    self.pop_scope();
+                }
+
+                // Compute free vars with all params in scope
+                for (p, pty) in &params {
+                    self.push_scope(p, pty.clone());
+                }
                 let free_vars = self.free_vars_of(&lifted_body);
-                self.pop_scope();
+                for _ in &params {
+                    self.pop_scope();
+                }
+
+                // Rebuild nested lambdas from inside out
+                let rebuilt_lam = self.rebuild_nested_lam(&params, lifted_body, span);
 
                 if free_vars.is_empty() {
                     // No captures: lift as-is
                     let name = self.fresh_name();
-                    let new_lam = Term {
-                        id: self.term_ids.next_id(),
-                        ty: ty.clone(),
-                        span,
-                        kind: TermKind::Lam {
-                            param,
-                            param_ty,
-                            body: Box::new(lifted_body),
-                        },
-                    };
                     self.new_defs.push(Def {
                         name: name.clone(),
-                        ty: ty.clone(),
-                        body: new_lam,
+                        ty: rebuilt_lam.ty.clone(),
+                        body: rebuilt_lam,
                         meta: DefMeta::Function,
-                        arity: 1, // Lifted lambda takes one arg
+                        arity: params.len(),
                     });
                     Term {
                         id: self.term_ids.next_id(),
@@ -149,16 +153,16 @@ impl<'a> LambdaLifter<'a> {
                         kind: TermKind::Var(name),
                     }
                 } else {
-                    // Has captures: wrap with extra lambdas, apply to captures
+                    // Has captures: wrap with extra lambdas for captures, apply to captures
                     let name = self.fresh_name();
-                    let wrapped = self.wrap_with_captures(param, param_ty, lifted_body, &free_vars, span);
+                    let wrapped = self.wrap_lam_with_captures(rebuilt_lam, &free_vars, span);
                     let lifted_ty = wrapped.ty.clone();
                     self.new_defs.push(Def {
                         name: name.clone(),
                         ty: lifted_ty.clone(),
                         body: wrapped,
                         meta: DefMeta::Function,
-                        arity: free_vars.len() + 1, // Captures + original param
+                        arity: free_vars.len() + params.len(),
                     });
                     self.apply_to_captures(&name, lifted_ty, &free_vars, ty, span)
                 }
@@ -311,6 +315,66 @@ impl<'a> LambdaLifter<'a> {
             // BinOp and UnOp don't introduce free vars
             FunctionName::BinOp(_) | FunctionName::UnOp(_) => {}
         }
+    }
+
+    /// Extract all nested lambda parameters from a term.
+    /// Returns (params, inner_body) where params is [(name, type), ...] outermost first.
+    fn extract_lambda_params(&self, term: Term) -> (Vec<(String, Type<TypeName>)>, Term) {
+        let mut params = Vec::new();
+        let mut current = term;
+
+        while let TermKind::Lam { param, param_ty, body } = current.kind {
+            params.push((param, param_ty));
+            current = *body;
+        }
+
+        (params, current)
+    }
+
+    /// Rebuild nested lambdas from a list of params and a body.
+    fn rebuild_nested_lam(
+        &mut self,
+        params: &[(String, Type<TypeName>)],
+        body: Term,
+        span: Span,
+    ) -> Term {
+        // Build from inside out
+        params.iter().rev().fold(body, |acc, (param, param_ty)| {
+            let lam_ty = Type::Constructed(TypeName::Arrow, vec![param_ty.clone(), acc.ty.clone()]);
+            Term {
+                id: self.term_ids.next_id(),
+                ty: lam_ty,
+                span,
+                kind: TermKind::Lam {
+                    param: param.clone(),
+                    param_ty: param_ty.clone(),
+                    body: Box::new(acc),
+                },
+            }
+        })
+    }
+
+    /// Wrap a lambda (possibly nested) with extra lambdas for captures.
+    fn wrap_lam_with_captures(
+        &mut self,
+        lam: Term,
+        captures: &[(String, Type<TypeName>)],
+        span: Span,
+    ) -> Term {
+        // Wrap with lambdas for each capture (in reverse order so first capture is outermost)
+        captures.iter().rev().fold(lam, |acc, (cap_name, cap_ty)| {
+            let result_ty = Type::Constructed(TypeName::Arrow, vec![cap_ty.clone(), acc.ty.clone()]);
+            Term {
+                id: self.term_ids.next_id(),
+                ty: result_ty,
+                span,
+                kind: TermKind::Lam {
+                    param: cap_name.clone(),
+                    param_ty: cap_ty.clone(),
+                    body: Box::new(acc),
+                },
+            }
+        })
     }
 
     /// Wrap a lambda body with extra lambdas for each captured variable.

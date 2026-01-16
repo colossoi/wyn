@@ -698,6 +698,8 @@ pub struct TlcLifted {
 impl TlcLifted {
     /// Transform TLC to MIR
     pub fn to_mir(self) -> Flattened {
+        // Debug: print lifted TLC
+        eprintln!("=== LIFTED TLC ===\n{}\n==================", self.tlc);
         // Specialize polymorphic intrinsics (sign → f32.sign, etc.)
         let specialized = tlc::specialize::specialize(self.tlc);
         let mir = tlc::to_mir::TlcToMir::transform(&specialized);
