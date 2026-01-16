@@ -6,35 +6,150 @@
 
 use super::{Def, DefMeta, FunctionName, Program, Term, TermIdSource, TermKind};
 use crate::ast::{Span, TypeName};
+use crate::scope::ScopeStack;
 use polytype::Type;
 use std::collections::HashSet;
 
+/// Analyzes a lambda body to find free variables that need to be captured.
+///
+/// This is a separate struct because free variable analysis doesn't need access
+/// to the lifting state - it only needs to know which names are globals (builtins
+/// + top-level defs) that should not be captured.
+struct FreeVarAnalyzer<'a> {
+    globals: &'a HashSet<String>,
+}
+
+impl<'a> FreeVarAnalyzer<'a> {
+    fn new(globals: &'a HashSet<String>) -> Self {
+        Self { globals }
+    }
+
+    /// Analyze a lambda and return its free variables with types.
+    fn analyze(&self, params: &[(String, Type<TypeName>)], body: &Term) -> Vec<(String, Type<TypeName>)> {
+        let mut local_bindings: HashSet<String> = params.iter().map(|(n, _)| n.clone()).collect();
+        let mut free_vars = Vec::new();
+        let mut seen = HashSet::new();
+        self.collect_free_vars(body, &mut local_bindings, &mut free_vars, &mut seen);
+        free_vars
+    }
+
+    /// Check if a name is free (not in local bindings and not a global).
+    fn is_free(&self, name: &str, local_bindings: &HashSet<String>) -> bool {
+        !local_bindings.contains(name) && !self.globals.contains(name) && !name.starts_with("_w_") // Internal intrinsics are always bound
+    }
+
+    fn collect_free_vars(
+        &self,
+        term: &Term,
+        local_bindings: &mut HashSet<String>,
+        free_vars: &mut Vec<(String, Type<TypeName>)>,
+        seen: &mut HashSet<String>,
+    ) {
+        match &term.kind {
+            TermKind::Var(name) => {
+                if self.is_free(name, local_bindings) && !seen.contains(name) {
+                    seen.insert(name.clone());
+                    free_vars.push((name.clone(), term.ty.clone()));
+                }
+            }
+            TermKind::Lam { param, body, .. } => {
+                // Mark lambda param as locally bound when checking body
+                local_bindings.insert(param.clone());
+                self.collect_free_vars(body, local_bindings, free_vars, seen);
+                local_bindings.remove(param);
+            }
+            TermKind::App { func, arg } => {
+                self.collect_free_vars_func(func, local_bindings, free_vars, seen);
+                self.collect_free_vars(arg, local_bindings, free_vars, seen);
+            }
+            TermKind::Let { name, rhs, body, .. } => {
+                // Check rhs first (name is not yet bound)
+                self.collect_free_vars(rhs, local_bindings, free_vars, seen);
+                // Then check body with name bound
+                local_bindings.insert(name.clone());
+                self.collect_free_vars(body, local_bindings, free_vars, seen);
+                local_bindings.remove(name);
+            }
+            TermKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                self.collect_free_vars(cond, local_bindings, free_vars, seen);
+                self.collect_free_vars(then_branch, local_bindings, free_vars, seen);
+                self.collect_free_vars(else_branch, local_bindings, free_vars, seen);
+            }
+            // Literals have no free vars
+            TermKind::IntLit(_) | TermKind::FloatLit(_) | TermKind::BoolLit(_) | TermKind::StringLit(_) => {
+            }
+        }
+    }
+
+    fn collect_free_vars_func(
+        &self,
+        func: &FunctionName,
+        local_bindings: &HashSet<String>,
+        free_vars: &mut Vec<(String, Type<TypeName>)>,
+        seen: &mut HashSet<String>,
+    ) {
+        match func {
+            FunctionName::Term(t) => {
+                self.collect_free_vars(t, &mut local_bindings.clone(), free_vars, seen)
+            }
+            FunctionName::Var(name) => {
+                // FunctionName::Var is used for top-level functions,
+                // which should always be bound. Local variables in function position
+                // use FunctionName::Term(Term::Var(...)) instead.
+                if self.is_free(name, local_bindings) && !seen.contains(name) {
+                    panic!(
+                        "BUG: Unexpected free FunctionName::Var '{}'. \
+                         Local function variables should use FunctionName::Term.",
+                        name
+                    );
+                }
+            }
+            // Intrinsics, BinOp, and UnOp don't introduce free vars
+            FunctionName::Intrinsic(_) | FunctionName::BinOp(_) | FunctionName::UnOp(_) => {}
+        }
+    }
+}
+
 /// Lambda lifter - transforms all lambdas to top-level definitions.
-pub struct LambdaLifter<'a> {
-    /// Top-level names (not captured)
-    top_level: HashSet<String>,
-    /// Built-in names that should not be captured (intrinsics, prelude functions)
-    builtins: &'a HashSet<String>,
+pub struct LambdaLifter {
+    /// Global names (builtins + top-level) - not captured
+    globals: HashSet<String>,
+    /// Scope stack: level 0 = globals, level 1+ = local bindings
+    scope: ScopeStack<Type<TypeName>>,
     /// New definitions created for lifted lambdas
     new_defs: Vec<Def>,
     /// Counter for generating unique lambda names
     lambda_counter: u32,
     /// Counter for generating unique term IDs
     term_ids: TermIdSource,
-    /// Scope stack for bound variables with their types
-    scope: Vec<(String, Type<TypeName>)>,
 }
 
-impl<'a> LambdaLifter<'a> {
+impl LambdaLifter {
     /// Lift all lambdas in a program to top-level definitions.
-    pub fn lift(program: Program, builtins: &'a HashSet<String>) -> Program {
+    pub fn lift(program: Program, builtins: &HashSet<String>) -> Program {
+        // Build globals set: builtins + top-level def names
+        let mut globals: HashSet<String> = builtins.clone();
+        for def in &program.defs {
+            globals.insert(def.name.clone());
+        }
+
+        // Build scope with globals at level 0
+        let mut scope = ScopeStack::new();
+        let placeholder_ty = Type::Constructed(TypeName::Unit, vec![]);
+        for name in &globals {
+            scope.insert(name.clone(), placeholder_ty.clone());
+        }
+
         let mut lifter = Self {
-            top_level: program.defs.iter().map(|d| d.name.clone()).collect(),
-            builtins,
+            globals,
+            scope,
             new_defs: vec![],
             lambda_counter: 0,
             term_ids: TermIdSource::new(),
-            scope: vec![],
         };
 
         let transformed_defs: Vec<_> = program
@@ -64,9 +179,11 @@ impl<'a> LambdaLifter<'a> {
                 body,
             } => {
                 // Keep this lambda, but recursively process its body
-                self.push_scope(&param, param_ty.clone());
+                self.scope.push_scope();
+                self.scope.insert(param.clone(), param_ty.clone());
                 let lifted_body = self.lift_preserving_params(*body);
-                self.pop_scope();
+                let popped = self.scope.pop_scope();
+                assert!(popped.is_some(), "BUG: attempted to pop global scope");
                 Term {
                     id: self.term_ids.next_id(),
                     ty: term.ty,
@@ -83,16 +200,6 @@ impl<'a> LambdaLifter<'a> {
         }
     }
 
-    /// Push a name and type onto the scope stack
-    fn push_scope(&mut self, name: &str, ty: Type<TypeName>) {
-        self.scope.push((name.to_string(), ty));
-    }
-
-    /// Pop from the scope stack
-    fn pop_scope(&mut self) {
-        self.scope.pop();
-    }
-
     /// Lift a term, transforming lambdas into references to lifted definitions.
     fn lift_term(&mut self, term: Term) -> Term {
         let ty = term.ty.clone();
@@ -103,30 +210,22 @@ impl<'a> LambdaLifter<'a> {
                 // Extract ALL nested lambda params together (to keep multi-param functions intact)
                 let (params, inner_body) = self.extract_lambda_params(term);
 
-                // Push all params onto scope
+                // Push all params onto scope for lifting the body
+                self.scope.push_scope();
                 for (p, pty) in &params {
-                    self.push_scope(p, pty.clone());
+                    self.scope.insert(p.clone(), pty.clone());
                 }
 
                 // Lift the innermost body (which is not a lambda)
                 let lifted_body = self.lift_term(inner_body);
 
-                // Pop all params
-                for _ in &params {
-                    self.pop_scope();
-                }
+                // Pop the params scope
+                let popped = self.scope.pop_scope();
+                assert!(popped.is_some(), "BUG: attempted to pop global scope");
 
-                // Compute free vars with ONLY the lambda's params in scope.
-                // We must save and clear the enclosing scope because those
-                // bindings ARE free variables from the lifted lambda's perspective
-                // (they need to be captured when the lambda is moved to top-level).
-                let saved_scope = std::mem::take(&mut self.scope);
-                for (p, pty) in &params {
-                    self.push_scope(p, pty.clone());
-                }
-                let free_vars = self.free_vars_of(&lifted_body);
-                // Restore the enclosing scope
-                self.scope = saved_scope;
+                // Compute free vars using FreeVarAnalyzer (no scope manipulation needed)
+                let analyzer = FreeVarAnalyzer::new(&self.globals);
+                let free_vars = analyzer.analyze(&params, &lifted_body);
 
                 // Filter out unit-type captures - these don't need to be passed as parameters
                 // (they carry no runtime information)
@@ -189,9 +288,11 @@ impl<'a> LambdaLifter<'a> {
                 body,
             } => {
                 let lifted_rhs = self.lift_term(*rhs);
-                self.push_scope(&name, name_ty.clone());
+                self.scope.push_scope();
+                self.scope.insert(name.clone(), name_ty.clone());
                 let lifted_body = self.lift_term(*body);
-                self.pop_scope();
+                let popped = self.scope.pop_scope();
+                assert!(popped.is_some(), "BUG: attempted to pop global scope");
                 Term {
                     id: self.term_ids.next_id(),
                     ty,
@@ -240,97 +341,6 @@ impl<'a> LambdaLifter<'a> {
             FunctionName::Term(t) => FunctionName::Term(Box::new(self.lift_term(*t))),
             // Var, BinOp, UnOp are unchanged
             other => other,
-        }
-    }
-
-    /// Compute free variables of a term (vars used but not bound in current scope or top-level)
-    fn free_vars_of(&self, term: &Term) -> Vec<(String, Type<TypeName>)> {
-        let mut free = Vec::new();
-        let mut seen = HashSet::new();
-        let mut local_bindings = HashSet::new();
-        self.collect_free_vars(term, &mut free, &mut seen, &mut local_bindings);
-        free
-    }
-
-    /// Check if a name is bound (in scope, locally, top-level, or a builtin)
-    fn is_bound_with_locals(&self, name: &str, local_bindings: &HashSet<String>) -> bool {
-        local_bindings.contains(name)
-            || self.scope.iter().any(|(n, _)| n == name)
-            || self.top_level.contains(name)
-            || self.builtins.contains(name)
-            || name.starts_with("_w_") // Internal intrinsics are always bound
-    }
-
-    fn collect_free_vars(
-        &self,
-        term: &Term,
-        free: &mut Vec<(String, Type<TypeName>)>,
-        seen: &mut HashSet<String>,
-        local_bindings: &mut HashSet<String>,
-    ) {
-        match &term.kind {
-            TermKind::Var(name) => {
-                if !self.is_bound_with_locals(name, local_bindings) && !seen.contains(name) {
-                    seen.insert(name.clone());
-                    free.push((name.clone(), term.ty.clone()));
-                }
-            }
-            TermKind::Lam { param, body, .. } => {
-                // Mark lambda param as locally bound when checking body
-                local_bindings.insert(param.clone());
-                self.collect_free_vars(body, free, seen, local_bindings);
-                local_bindings.remove(param);
-            }
-            TermKind::App { func, arg } => {
-                self.collect_free_vars_func(func, free, seen, local_bindings);
-                self.collect_free_vars(arg, free, seen, local_bindings);
-            }
-            TermKind::Let { name, rhs, body, .. } => {
-                // Check rhs first (name is not yet bound)
-                self.collect_free_vars(rhs, free, seen, local_bindings);
-                // Then check body with name bound
-                local_bindings.insert(name.clone());
-                self.collect_free_vars(body, free, seen, local_bindings);
-                local_bindings.remove(name);
-            }
-            TermKind::If {
-                cond,
-                then_branch,
-                else_branch,
-            } => {
-                self.collect_free_vars(cond, free, seen, local_bindings);
-                self.collect_free_vars(then_branch, free, seen, local_bindings);
-                self.collect_free_vars(else_branch, free, seen, local_bindings);
-            }
-            // Literals have no free vars
-            TermKind::IntLit(_) | TermKind::FloatLit(_) | TermKind::BoolLit(_) | TermKind::StringLit(_) => {
-            }
-        }
-    }
-
-    fn collect_free_vars_func(
-        &self,
-        func: &FunctionName,
-        free: &mut Vec<(String, Type<TypeName>)>,
-        seen: &mut HashSet<String>,
-        local_bindings: &mut HashSet<String>,
-    ) {
-        match func {
-            FunctionName::Term(t) => self.collect_free_vars(t, free, seen, local_bindings),
-            FunctionName::Var(name) => {
-                // FunctionName::Var is used for top-level functions,
-                // which should always be bound. Local variables in function position
-                // use FunctionName::Term(Term::Var(...)) instead.
-                if !self.is_bound_with_locals(name, local_bindings) && !seen.contains(name) {
-                    panic!(
-                        "BUG: Unexpected free FunctionName::Var '{}'. \
-                         Local function variables should use FunctionName::Term.",
-                        name
-                    );
-                }
-            }
-            // Intrinsics, BinOp, and UnOp don't introduce free vars
-            FunctionName::Intrinsic(_) | FunctionName::BinOp(_) | FunctionName::UnOp(_) => {}
         }
     }
 
