@@ -646,7 +646,7 @@ impl<'a> Transformer<'a> {
                 let idx = self.transform_expr(index);
                 let val = self.transform_expr(value);
                 self.build_app3(
-                    FunctionName::Intrinsic("_w_array_with".to_string()),
+                    FunctionName::Intrinsic("_w_intrinsic_array_with".to_string()),
                     arr,
                     idx,
                     val,

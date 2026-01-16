@@ -1402,9 +1402,9 @@ fn find_inplace_ops(
                 find_inplace_ops(body, *arg, uses_after, aliases, result);
             }
         }
-        Call { func, args } if func == "_w_array_with" && args.len() == 3 => {
+        Call { func, args } if func == "_w_intrinsic_array_with" && args.len() == 3 => {
             let args = args.clone();
-            // _w_array_with(arr, idx, val) - functional array update
+            // _w_intrinsic_array_with(arr, idx, val) - functional array update
             if let Local(arr_local) = body.get_expr(args[0]) {
                 if can_reuse_local(*arr_local, expr_id, uses_after, aliases) {
                     result.can_reuse_input.insert(body.get_node_id(expr_id));

@@ -60,7 +60,6 @@ fn test_query_f32_sin_from_math_prelude() {
 
     // Use TypeChecker to get the function type schemes
     let mut checker = TypeChecker::new(&manager);
-    checker.load_builtins().expect("Failed to load builtins");
     checker.check_module_functions().expect("Failed to check module functions");
 
     // Query for the f32 module's sin function type from the cache

@@ -360,41 +360,18 @@ impl Flattener {
     }
 
     /// Desugar overloaded function names based on argument types
-    /// - mul -> mul_mat_mat, mul_mat_vec, mul_vec_mat
     /// - matav -> matav_n_m
     /// - abs/sign -> abs_f32, abs_i32, abs_u32, sign_f32, sign_i32
     /// - min/max -> min_f32, min_i32, min_u32, max_f32, max_i32, max_u32
     /// - clamp -> clamp_f32, clamp_i32, clamp_u32
+    // TODO: Move these to tlc/specialize.rs if they haven't already been moved
     fn desugar_function_name(&self, name: &str, args: &[Expression]) -> Result<String> {
         match name {
-            "mul" => self.desugar_mul(args),
             "matav" => self.desugar_matav(args),
             // Type-dispatched math functions (different GLSL opcodes for float/signed/unsigned)
             "abs" | "sign" | "min" | "max" | "clamp" => self.desugar_numeric_op(name, args),
             _ => Ok(name.to_string()),
         }
-    }
-
-    /// Desugar mul based on argument shapes
-    fn desugar_mul(&self, args: &[Expression]) -> Result<String> {
-        if args.len() != 2 {
-            return Ok("mul".to_string()); // Let type checker handle the error
-        }
-
-        let arg1_ty = self.get_expr_type(&args[0]);
-        let arg2_ty = self.get_expr_type(&args[1]);
-
-        let shape1 = Self::classify_shape(&arg1_ty);
-        let shape2 = Self::classify_shape(&arg2_ty);
-
-        let variant = match (shape1, shape2) {
-            (ArgShape::Matrix, ArgShape::Matrix) => "mul_mat_mat",
-            (ArgShape::Matrix, ArgShape::Vector) => "mul_mat_vec",
-            (ArgShape::Vector, ArgShape::Matrix) => "mul_vec_mat",
-            _ => "mul", // Fall back to original name
-        };
-
-        Ok(variant.to_string())
     }
 
     /// Desugar matav based on array and vector dimensions
@@ -1147,16 +1124,16 @@ impl Flattener {
                 )
             }
             ExprKind::ArrayWith { array, index, value } => {
-                // Flatten array with syntax to a call to _w_array_with intrinsic
-                // _w_array_with : [n]a -> i32 -> a -> [n]a
+                // Flatten array with syntax to a call to _w_intrinsic_array_with intrinsic
+                // _w_intrinsic_array_with : [n]a -> i32 -> a -> [n]a
                 let (arr_id, _) = self.flatten_expr(array)?;
                 let (idx_id, _) = self.flatten_expr(index)?;
                 let (val_id, _) = self.flatten_expr(value)?;
 
-                // Generate a call to _w_array_with(arr, idx, val)
+                // Generate a call to _w_intrinsic_array_with(arr, idx, val)
                 (
                     mir::Expr::Call {
-                        func: "_w_array_with".to_string(),
+                        func: "_w_intrinsic_array_with".to_string(),
                         args: vec![arr_id, idx_id, val_id],
                     },
                     StaticValue::Dyn,

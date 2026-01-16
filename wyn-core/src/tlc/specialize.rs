@@ -185,14 +185,20 @@ impl Specializer {
         arg1_ty: &Type<TypeName>,
         arg2_ty: &Type<TypeName>,
     ) -> Option<String> {
-        match name {
-            "mul" => {
+        use crate::intrinsics::IntrinsicSource;
+
+        // First resolve any alias to its intrinsic name
+        let resolved = IntrinsicSource::resolve_alias(name).unwrap_or(name);
+
+        match resolved {
+            // mul alias resolves to _w_intrinsic_mul, match both
+            "mul" | "_w_intrinsic_mul" => {
                 let shape1 = self.classify_shape(arg1_ty);
                 let shape2 = self.classify_shape(arg2_ty);
                 match (shape1, shape2) {
-                    (ArgShape::Matrix, ArgShape::Matrix) => Some("mul_mat_mat".to_string()),
-                    (ArgShape::Matrix, ArgShape::Vector) => Some("mul_mat_vec".to_string()),
-                    (ArgShape::Vector, ArgShape::Matrix) => Some("mul_vec_mat".to_string()),
+                    (ArgShape::Matrix, ArgShape::Matrix) => Some("_w_intrinsic_mul_mat_mat".to_string()),
+                    (ArgShape::Matrix, ArgShape::Vector) => Some("_w_intrinsic_mul_mat_vec".to_string()),
+                    (ArgShape::Vector, ArgShape::Matrix) => Some("_w_intrinsic_mul_vec_mat".to_string()),
                     _ => None,
                 }
             }
@@ -212,15 +218,20 @@ impl Specializer {
     /// Specialize a function name based on argument type.
     /// Transforms: abs, sign, floor, ceil, fract, min, max, clamp → f32.abs, i32.sign, etc.
     fn specialize_name(&self, name: &str, arg_ty: &Type<TypeName>) -> String {
-        match name {
+        use crate::intrinsics::IntrinsicSource;
+
+        // First resolve any alias to its intrinsic name
+        let resolved = IntrinsicSource::resolve_alias(name).unwrap_or(name);
+
+        match resolved {
             "abs" | "sign" | "floor" | "ceil" | "fract" | "min" | "max" | "clamp" => {
                 if let Some(prefix) = self.type_prefix(arg_ty) {
-                    format!("{}.{}", prefix, name)
+                    format!("{}.{}", prefix, resolved)
                 } else {
-                    name.to_string()
+                    resolved.to_string()
                 }
             }
-            _ => name.to_string(),
+            _ => resolved.to_string(),
         }
     }
 

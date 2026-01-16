@@ -2029,10 +2029,10 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
             // Get the result type from the expression
             let result_type = constructor.ast_type_to_spirv(expr_ty);
 
-            // Special case for _w_array_with - check for in-place optimization
-            if func == "_w_array_with" {
+            // Special case for _w_intrinsic_array_with - check for in-place optimization
+            if func == "_w_intrinsic_array_with" {
                 if args.len() != 3 {
-                    bail_spirv!("_w_array_with requires 3 args (array, index, value)");
+                    bail_spirv!("_w_intrinsic_array_with requires 3 args (array, index, value)");
                 }
 
                 // Lower arguments
@@ -2056,7 +2056,7 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                     )?);
                 } else {
                     // Non-in-place: use copy-modify-load pattern
-                    let arr_var = constructor.declare_variable("_w_array_with_tmp", result_type)?;
+                    let arr_var = constructor.declare_variable("_w_intrinsic_array_with_tmp", result_type)?;
                     constructor.builder.store(arr_var, arr_id, None, [])?;
 
                     // Get pointer to element and store new value
@@ -2085,241 +2085,8 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                 }
                 _ => {
                     // Check if it's a builtin function
-                    if let Some(builtin_impl) = constructor.impl_source.get(func) {
-                        match builtin_impl {
-                            BuiltinImpl::PrimOp(spirv_op) => {
-                                // Handle core SPIR-V operations
-                                match spirv_op {
-                                    PrimOp::GlslExt(ext_op) => {
-                                        // Call GLSL extended instruction
-                                        let glsl_id = constructor.glsl_ext_inst_id;
-                                        let operands: Vec<Operand> =
-                                            arg_ids.iter().map(|&id| Operand::IdRef(id)).collect();
-                                        Ok(constructor.builder.ext_inst(
-                                            result_type,
-                                            None,
-                                            glsl_id,
-                                            *ext_op,
-                                            operands,
-                                        )?)
-                                    }
-                                    PrimOp::Dot => {
-                                        if arg_ids.len() != 2 {
-                                            bail_spirv!("dot requires 2 args");
-                                        }
-                                        Ok(constructor.builder.dot(
-                                            result_type,
-                                            None,
-                                            arg_ids[0],
-                                            arg_ids[1],
-                                        )?)
-                                    }
-                                    PrimOp::MatrixTimesMatrix => {
-                                        if arg_ids.len() != 2 {
-                                            bail_spirv!("matrix × matrix requires 2 args");
-                                        }
-                                        Ok(constructor.builder.matrix_times_matrix(
-                                            result_type,
-                                            None,
-                                            arg_ids[0],
-                                            arg_ids[1],
-                                        )?)
-                                    }
-                                    PrimOp::MatrixTimesVector => {
-                                        if arg_ids.len() != 2 {
-                                            bail_spirv!("matrix × vector requires 2 args");
-                                        }
-                                        Ok(constructor.builder.matrix_times_vector(
-                                            result_type,
-                                            None,
-                                            arg_ids[0],
-                                            arg_ids[1],
-                                        )?)
-                                    }
-                                    PrimOp::VectorTimesMatrix => {
-                                        if arg_ids.len() != 2 {
-                                            bail_spirv!("vector × matrix requires 2 args");
-                                        }
-                                        Ok(constructor.builder.vector_times_matrix(
-                                            result_type,
-                                            None,
-                                            arg_ids[0],
-                                            arg_ids[1],
-                                        )?)
-                                    }
-                                    // Type conversions
-                                    PrimOp::FPToSI => {
-                                        if arg_ids.len() != 1 {
-                                            bail_spirv!("FPToSI requires 1 arg");
-                                        }
-                                        Ok(constructor.builder.convert_f_to_s(
-                                            result_type,
-                                            None,
-                                            arg_ids[0],
-                                        )?)
-                                    }
-                                    PrimOp::FPToUI => {
-                                        if arg_ids.len() != 1 {
-                                            bail_spirv!("FPToUI requires 1 arg");
-                                        }
-                                        Ok(constructor.builder.convert_f_to_u(
-                                            result_type,
-                                            None,
-                                            arg_ids[0],
-                                        )?)
-                                    }
-                                    PrimOp::SIToFP => {
-                                        if arg_ids.len() != 1 {
-                                            bail_spirv!("SIToFP requires 1 arg");
-                                        }
-                                        Ok(constructor.builder.convert_s_to_f(
-                                            result_type,
-                                            None,
-                                            arg_ids[0],
-                                        )?)
-                                    }
-                                    PrimOp::UIToFP => {
-                                        if arg_ids.len() != 1 {
-                                            bail_spirv!("UIToFP requires 1 arg");
-                                        }
-                                        Ok(constructor.builder.convert_u_to_f(
-                                            result_type,
-                                            None,
-                                            arg_ids[0],
-                                        )?)
-                                    }
-                                    PrimOp::FPConvert => {
-                                        if arg_ids.len() != 1 {
-                                            bail_spirv!("FPConvert requires 1 arg");
-                                        }
-                                        Ok(constructor.builder.f_convert(result_type, None, arg_ids[0])?)
-                                    }
-                                    PrimOp::SConvert => {
-                                        if arg_ids.len() != 1 {
-                                            bail_spirv!("SConvert requires 1 arg");
-                                        }
-                                        Ok(constructor.builder.s_convert(result_type, None, arg_ids[0])?)
-                                    }
-                                    PrimOp::UConvert => {
-                                        if arg_ids.len() != 1 {
-                                            bail_spirv!("UConvert requires 1 arg");
-                                        }
-                                        Ok(constructor.builder.u_convert(result_type, None, arg_ids[0])?)
-                                    }
-                                    PrimOp::Bitcast => {
-                                        if arg_ids.len() != 1 {
-                                            bail_spirv!("Bitcast requires 1 arg");
-                                        }
-                                        Ok(constructor.builder.bitcast(result_type, None, arg_ids[0])?)
-                                    }
-                                    _ => {
-                                        bail_spirv!("Unsupported PrimOp for: {}", func)
-                                    }
-                                }
-                            }
-                            BuiltinImpl::Intrinsic(custom_impl) => {
-                                use crate::impl_source::Intrinsic;
-                                match custom_impl {
-                                    Intrinsic::Placeholder if func == "length" => {
-                                        if args.len() != 1 {
-                                            bail_spirv!("length expects exactly 1 argument");
-                                        }
-                                        lower_length_intrinsic(constructor, body, args[0], arg_ids[0])
-                                    }
-                                    Intrinsic::Placeholder => {
-                                        // Other placeholder intrinsics should have been desugared
-                                        bail_spirv!(
-                                            "Placeholder intrinsic '{}' should have been desugared before lowering",
-                                            func
-                                        )
-                                    }
-                                    Intrinsic::Uninit => {
-                                        // Return an undefined value of the result type
-                                        Ok(constructor.builder.undef(result_type, None))
-                                    }
-                                    Intrinsic::Replicate => {
-                                        // replicate n val: create array of n copies of val
-                                        if arg_ids.len() != 2 {
-                                            bail_spirv!("replicate expects exactly 2 arguments");
-                                        }
-                                        // Extract array size from result type
-                                        if let PolyType::Constructed(TypeName::Array, type_args) = expr_ty {
-                                            assert!(type_args.len() == 3);
-                                            if let PolyType::Constructed(TypeName::Size(n), _) =
-                                                &type_args[2]
-                                            {
-                                                // Build array by repeating the value
-                                                let val_id = arg_ids[1]; // second arg is the value
-                                                let elem_ids: Vec<_> = (0..*n).map(|_| val_id).collect();
-                                                Ok(constructor.builder.composite_construct(
-                                                    result_type,
-                                                    None,
-                                                    elem_ids,
-                                                )?)
-                                            } else {
-                                                bail_spirv!(
-                                                    "replicate: cannot determine array size at compile time"
-                                                )
-                                            }
-                                        } else {
-                                            bail_spirv!("replicate: result type is not an array")
-                                        }
-                                    }
-                                    Intrinsic::ArrayWith => {
-                                        // array_with arr idx val: functional update, returns new array
-                                        if arg_ids.len() != 3 {
-                                            bail_spirv!("array_with expects exactly 3 arguments");
-                                        }
-                                        let arr_id = arg_ids[0];
-                                        let idx_id = arg_ids[1];
-                                        let val_id = arg_ids[2];
-
-                                        // Store array in a variable, update element, load back
-                                        let arr_type = result_type;
-                                        let arr_var =
-                                            constructor.declare_variable("_w_array_with_tmp", arr_type)?;
-                                        constructor.builder.store(arr_var, arr_id, None, [])?;
-
-                                        // Get pointer to element and store new value
-                                        let arg2_ty = body.get_type(args[2]);
-                                        let elem_type = constructor.ast_type_to_spirv(arg2_ty);
-                                        let elem_ptr_type = constructor.builder.type_pointer(
-                                            None,
-                                            StorageClass::Function,
-                                            elem_type,
-                                        );
-                                        let elem_ptr = constructor.builder.access_chain(
-                                            elem_ptr_type,
-                                            None,
-                                            arr_var,
-                                            [idx_id],
-                                        )?;
-                                        constructor.builder.store(elem_ptr, val_id, None, [])?;
-
-                                        // Load and return the updated array
-                                        Ok(constructor.builder.load(arr_type, None, arr_var, None, [])?)
-                                    }
-                                    Intrinsic::BitcastI32ToU32 => {
-                                        // _w_bitcast_i32_to_u32(i) -> u32
-                                        // Reinterpret i32 bits as u32
-                                        let value_id = arg_ids[0];
-                                        Ok(constructor.builder.bitcast(
-                                            constructor.u32_type,
-                                            None,
-                                            value_id,
-                                        )?)
-                                    }
-                                    Intrinsic::Reduce => {
-                                        // reduce is handled specially above, should not reach here
-                                        bail_spirv!("BUG: reduce intrinsic should be handled specially")
-                                    }
-                                    Intrinsic::Filter => {
-                                        // filter is handled specially above, should not reach here
-                                        bail_spirv!("BUG: filter intrinsic should be handled specially")
-                                    }
-                                }
-                            }
-                        }
+                    if let Some(result) = try_lower_builtin(constructor, body, func, args, &arg_ids, result_type) {
+                        result
                     } else {
                         // Look up user-defined function
                         let func_id = *constructor
@@ -2450,7 +2217,19 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
 
                     constructor.composite_extract_cached(result_type, composite_id, index)
                 }
-                _ => Err(err_spirv!("Unknown intrinsic: {}", name)),
+                _ => {
+                    // Fallback: check impl_source for PrimOp intrinsics
+                    let arg_ids: Vec<spirv::Word> = args
+                        .iter()
+                        .map(|&a| lower_expr(constructor, body, a))
+                        .collect::<Result<Vec<_>>>()?;
+
+                    if let Some(result) = try_lower_builtin(constructor, body, name, args, &arg_ids, result_type) {
+                        result
+                    } else {
+                        Err(err_spirv!("Unknown intrinsic: {}", name))
+                    }
+                }
             }
         }
 
@@ -2907,6 +2686,152 @@ fn read_elem(
                 [zero, adjusted_index],
             )?;
             Ok(constructor.builder.load(elem_type, None, elem_ptr, None, [])?)
+        }
+    }
+}
+
+/// Try to lower a builtin function via impl_source lookup.
+/// Returns Some(result) if the name is found in impl_source, None otherwise.
+fn try_lower_builtin(
+    constructor: &mut Constructor,
+    body: &Body,
+    name: &str,
+    args: &[ExprId],
+    arg_ids: &[spirv::Word],
+    result_type: spirv::Word,
+) -> Option<Result<spirv::Word>> {
+    let builtin_impl = constructor.impl_source.get(name)?.clone();
+
+    Some(lower_builtin_impl(constructor, body, name, args, arg_ids, result_type, &builtin_impl))
+}
+
+/// Lower a builtin implementation (PrimOp or Intrinsic).
+fn lower_builtin_impl(
+    constructor: &mut Constructor,
+    body: &Body,
+    name: &str,
+    args: &[ExprId],
+    arg_ids: &[spirv::Word],
+    result_type: spirv::Word,
+    builtin_impl: &BuiltinImpl,
+) -> Result<spirv::Word> {
+    match builtin_impl {
+        BuiltinImpl::PrimOp(spirv_op) => match spirv_op {
+            PrimOp::GlslExt(ext_op) => {
+                let glsl_id = constructor.glsl_ext_inst_id;
+                let operands: Vec<Operand> = arg_ids.iter().map(|&id| Operand::IdRef(id)).collect();
+                Ok(constructor.builder.ext_inst(result_type, None, glsl_id, *ext_op, operands)?)
+            }
+            PrimOp::Dot => {
+                if arg_ids.len() != 2 {
+                    bail_spirv!("dot requires 2 args");
+                }
+                Ok(constructor.builder.dot(result_type, None, arg_ids[0], arg_ids[1])?)
+            }
+            PrimOp::MatrixTimesMatrix => {
+                if arg_ids.len() != 2 {
+                    bail_spirv!("matrix × matrix requires 2 args");
+                }
+                Ok(constructor.builder.matrix_times_matrix(result_type, None, arg_ids[0], arg_ids[1])?)
+            }
+            PrimOp::MatrixTimesVector => {
+                if arg_ids.len() != 2 {
+                    bail_spirv!("matrix × vector requires 2 args");
+                }
+                Ok(constructor.builder.matrix_times_vector(result_type, None, arg_ids[0], arg_ids[1])?)
+            }
+            PrimOp::VectorTimesMatrix => {
+                if arg_ids.len() != 2 {
+                    bail_spirv!("vector × matrix requires 2 args");
+                }
+                Ok(constructor.builder.vector_times_matrix(result_type, None, arg_ids[0], arg_ids[1])?)
+            }
+            PrimOp::FPToSI => {
+                if arg_ids.len() != 1 {
+                    bail_spirv!("FPToSI requires 1 arg");
+                }
+                Ok(constructor.builder.convert_f_to_s(result_type, None, arg_ids[0])?)
+            }
+            PrimOp::FPToUI => {
+                if arg_ids.len() != 1 {
+                    bail_spirv!("FPToUI requires 1 arg");
+                }
+                Ok(constructor.builder.convert_f_to_u(result_type, None, arg_ids[0])?)
+            }
+            PrimOp::SIToFP => {
+                if arg_ids.len() != 1 {
+                    bail_spirv!("SIToFP requires 1 arg");
+                }
+                Ok(constructor.builder.convert_s_to_f(result_type, None, arg_ids[0])?)
+            }
+            PrimOp::UIToFP => {
+                if arg_ids.len() != 1 {
+                    bail_spirv!("UIToFP requires 1 arg");
+                }
+                Ok(constructor.builder.convert_u_to_f(result_type, None, arg_ids[0])?)
+            }
+            PrimOp::FPConvert => {
+                if arg_ids.len() != 1 {
+                    bail_spirv!("FPConvert requires 1 arg");
+                }
+                Ok(constructor.builder.f_convert(result_type, None, arg_ids[0])?)
+            }
+            PrimOp::SConvert => {
+                if arg_ids.len() != 1 {
+                    bail_spirv!("SConvert requires 1 arg");
+                }
+                Ok(constructor.builder.s_convert(result_type, None, arg_ids[0])?)
+            }
+            PrimOp::UConvert => {
+                if arg_ids.len() != 1 {
+                    bail_spirv!("UConvert requires 1 arg");
+                }
+                Ok(constructor.builder.u_convert(result_type, None, arg_ids[0])?)
+            }
+            PrimOp::Bitcast => {
+                if arg_ids.len() != 1 {
+                    bail_spirv!("Bitcast requires 1 arg");
+                }
+                Ok(constructor.builder.bitcast(result_type, None, arg_ids[0])?)
+            }
+            _ => bail_spirv!("Unsupported PrimOp for: {}", name),
+        },
+        BuiltinImpl::Intrinsic(custom_impl) => {
+            use crate::impl_source::Intrinsic;
+            match custom_impl {
+                Intrinsic::Placeholder if name == "length" => {
+                    if args.len() != 1 {
+                        bail_spirv!("length expects exactly 1 argument");
+                    }
+                    lower_length_intrinsic(constructor, body, args[0], arg_ids[0])
+                }
+                Intrinsic::Placeholder => bail_spirv!(
+                    "Placeholder intrinsic '{}' should have been desugared before lowering",
+                    name
+                ),
+                Intrinsic::Uninit => Ok(constructor.builder.undef(result_type, None)),
+                Intrinsic::ArrayWith => {
+                    if arg_ids.len() != 3 {
+                        bail_spirv!("array_with expects exactly 3 arguments");
+                    }
+                    let arr_id = arg_ids[0];
+                    let idx_id = arg_ids[1];
+                    let val_id = arg_ids[2];
+
+                    let arr_type = result_type;
+                    let arr_var = constructor.declare_variable("_w_intrinsic_array_with_tmp", arr_type)?;
+                    constructor.builder.store(arr_var, arr_id, None, [])?;
+
+                    let arg2_ty = body.get_type(args[2]);
+                    let elem_type = constructor.ast_type_to_spirv(arg2_ty);
+                    let elem_ptr_type =
+                        constructor.builder.type_pointer(None, StorageClass::Function, elem_type);
+                    let elem_ptr = constructor.builder.access_chain(elem_ptr_type, None, arr_var, [idx_id])?;
+                    constructor.builder.store(elem_ptr, val_id, None, [])?;
+
+                    Ok(constructor.builder.load(arr_type, None, arr_var, None, [])?)
+                }
+            }
         }
     }
 }

@@ -866,7 +866,10 @@ impl TlcToMir {
                 }
                 FunctionName::Term(inner_term) => {
                     match &inner_term.kind {
-                        TermKind::App { func: inner_func, arg: inner_arg } => {
+                        TermKind::App {
+                            func: inner_func,
+                            arg: inner_arg,
+                        } => {
                             // Continue walking the chain
                             args.push(inner_arg.as_ref());
                             current_func = inner_func.as_ref();
@@ -1009,5 +1012,4 @@ impl TlcToMir {
             _ => panic!("Unexpected term form in loop lambda: {:?}", term.kind),
         }
     }
-
 }

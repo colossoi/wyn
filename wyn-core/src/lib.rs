@@ -490,7 +490,6 @@ impl AstConstFoldedEarly {
         schemes: &mut HashMap<String, TypeScheme<TypeName>>,
     ) -> Result<TypeChecked> {
         let mut checker = type_checker::TypeChecker::new(module_manager);
-        checker.load_builtins()?;
         let type_table = checker.check_program(&self.ast)?;
         // Populate schemes with function type schemes from type checking
         *schemes = checker.get_function_schemes();
