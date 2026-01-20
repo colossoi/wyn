@@ -9,6 +9,92 @@ use crate::ast::{Span, TypeName};
 use polytype::Type;
 use std::collections::HashSet;
 
+// =============================================================================
+// Standalone Free Variable Analysis
+// =============================================================================
+
+/// Compute free variables of a term, given explicit sets of bound names.
+/// This is independent of the lifter's scope state.
+fn compute_free_vars(
+    term: &Term,
+    bound: &HashSet<String>,
+    top_level: &HashSet<String>,
+    builtins: &HashSet<String>,
+) -> Vec<(String, Type<TypeName>)> {
+    let mut free = Vec::new();
+    let mut seen = HashSet::new();
+    collect_free_vars_standalone(term, bound, top_level, builtins, &mut free, &mut seen);
+    free
+}
+
+/// Recursively collect free variables, using immutable bound set passing.
+fn collect_free_vars_standalone(
+    term: &Term,
+    bound: &HashSet<String>,
+    top_level: &HashSet<String>,
+    builtins: &HashSet<String>,
+    free: &mut Vec<(String, Type<TypeName>)>,
+    seen: &mut HashSet<String>,
+) {
+    match &term.kind {
+        TermKind::Var(name) => {
+            if !bound.contains(name)
+                && !top_level.contains(name)
+                && !builtins.contains(name)
+                && !name.starts_with("_w_")
+                && !seen.contains(name)
+            {
+                seen.insert(name.clone());
+                free.push((name.clone(), term.ty.clone()));
+            }
+        }
+        TermKind::Let { name, rhs, body, .. } => {
+            collect_free_vars_standalone(rhs, bound, top_level, builtins, free, seen);
+            let mut inner_bound = bound.clone();
+            inner_bound.insert(name.clone());
+            collect_free_vars_standalone(body, &inner_bound, top_level, builtins, free, seen);
+        }
+        TermKind::Lam { param, body, .. } => {
+            let mut inner_bound = bound.clone();
+            inner_bound.insert(param.clone());
+            collect_free_vars_standalone(body, &inner_bound, top_level, builtins, free, seen);
+        }
+        TermKind::App { func, arg } => {
+            collect_free_vars_func_standalone(func, bound, top_level, builtins, free, seen);
+            collect_free_vars_standalone(arg, bound, top_level, builtins, free, seen);
+        }
+        TermKind::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_free_vars_standalone(cond, bound, top_level, builtins, free, seen);
+            collect_free_vars_standalone(then_branch, bound, top_level, builtins, free, seen);
+            collect_free_vars_standalone(else_branch, bound, top_level, builtins, free, seen);
+        }
+        TermKind::IntLit(_) | TermKind::FloatLit(_) | TermKind::BoolLit(_) | TermKind::StringLit(_) => {}
+    }
+}
+
+/// Collect free variables from a FunctionName.
+fn collect_free_vars_func_standalone(
+    func: &FunctionName,
+    bound: &HashSet<String>,
+    top_level: &HashSet<String>,
+    builtins: &HashSet<String>,
+    free: &mut Vec<(String, Type<TypeName>)>,
+    seen: &mut HashSet<String>,
+) {
+    match func {
+        FunctionName::Term(t) => collect_free_vars_standalone(t, bound, top_level, builtins, free, seen),
+        FunctionName::Var(_) | FunctionName::BinOp(_) | FunctionName::UnOp(_) => {}
+    }
+}
+
+// =============================================================================
+// Lambda Lifter
+// =============================================================================
+
 /// Lambda lifter - transforms all lambdas to top-level definitions.
 pub struct LambdaLifter<'a> {
     /// Top-level names (not captured)
@@ -124,14 +210,9 @@ impl<'a> LambdaLifter<'a> {
                     self.pop_scope();
                 }
 
-                // Compute free vars with all params in scope
-                for (p, pty) in &params {
-                    self.push_scope(p, pty.clone());
-                }
-                let free_vars = self.free_vars_of(&lifted_body);
-                for _ in &params {
-                    self.pop_scope();
-                }
+                // Compute free vars with only lambda params as bound (standalone analysis)
+                let bound: HashSet<String> = params.iter().map(|(p, _)| p.clone()).collect();
+                let free_vars = compute_free_vars(&lifted_body, &bound, &self.top_level, self.builtins);
 
                 // Rebuild nested lambdas from inside out
                 let rebuilt_lam = self.rebuild_nested_lam(&params, lifted_body, span);
@@ -240,80 +321,6 @@ impl<'a> LambdaLifter<'a> {
             FunctionName::Term(t) => FunctionName::Term(Box::new(self.lift_term(*t))),
             // Var, BinOp, UnOp are unchanged
             other => other,
-        }
-    }
-
-    /// Compute free variables of a term (vars used but not bound in current scope or top-level)
-    fn free_vars_of(&self, term: &Term) -> Vec<(String, Type<TypeName>)> {
-        let mut free = Vec::new();
-        let mut seen = HashSet::new();
-        self.collect_free_vars(term, &mut free, &mut seen);
-        free
-    }
-
-    fn collect_free_vars(
-        &self,
-        term: &Term,
-        free: &mut Vec<(String, Type<TypeName>)>,
-        seen: &mut HashSet<String>,
-    ) {
-        match &term.kind {
-            TermKind::Var(name) => {
-                if !self.is_bound(name) && !seen.contains(name) {
-                    seen.insert(name.clone());
-                    free.push((name.clone(), term.ty.clone()));
-                }
-            }
-            TermKind::Lam { body, .. } => {
-                // Don't descend into nested lambdas for free var analysis -
-                // they'll be lifted separately and their free vars are their problem
-                self.collect_free_vars(body, free, seen);
-            }
-            TermKind::App { func, arg } => {
-                self.collect_free_vars_func(func, free, seen);
-                self.collect_free_vars(arg, free, seen);
-            }
-            TermKind::Let { rhs, body, .. } => {
-                self.collect_free_vars(rhs, free, seen);
-                self.collect_free_vars(body, free, seen);
-            }
-            TermKind::If {
-                cond,
-                then_branch,
-                else_branch,
-            } => {
-                self.collect_free_vars(cond, free, seen);
-                self.collect_free_vars(then_branch, free, seen);
-                self.collect_free_vars(else_branch, free, seen);
-            }
-            // Literals have no free vars
-            TermKind::IntLit(_) | TermKind::FloatLit(_) | TermKind::BoolLit(_) | TermKind::StringLit(_) => {
-            }
-        }
-    }
-
-    fn collect_free_vars_func(
-        &self,
-        func: &FunctionName,
-        free: &mut Vec<(String, Type<TypeName>)>,
-        seen: &mut HashSet<String>,
-    ) {
-        match func {
-            FunctionName::Term(t) => self.collect_free_vars(t, free, seen),
-            FunctionName::Var(name) => {
-                // FunctionName::Var is used for top-level functions and intrinsics,
-                // which should always be bound. Local variables in function position
-                // use FunctionName::Term(Term::Var(...)) instead.
-                if !self.is_bound(name) && !seen.contains(name) {
-                    panic!(
-                        "BUG: Unexpected free FunctionName::Var '{}'. \
-                         Local function variables should use FunctionName::Term.",
-                        name
-                    );
-                }
-            }
-            // BinOp and UnOp don't introduce free vars
-            FunctionName::BinOp(_) | FunctionName::UnOp(_) => {}
         }
     }
 
