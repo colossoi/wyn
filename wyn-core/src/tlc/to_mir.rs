@@ -5,11 +5,12 @@
 use super::{Def as TlcDef, DefMeta, FunctionName, Program as TlcProgram, Term, TermKind};
 use crate::ast::{self, NodeId, PatternKind, Span, TypeName};
 use crate::mir::{self, Body, Def as MirDef, Expr, ExprId, LocalDecl, LocalId, LocalKind};
+use crate::types::TypeScheme;
 use polytype::Type;
 use std::collections::HashMap;
 
 /// Transforms TLC to MIR.
-pub struct TlcToMir {
+pub struct TlcToMir<'a> {
     /// Maps TLC variable names to MIR LocalIds (within current body)
     locals: HashMap<String, LocalId>,
     /// Maps top-level function names to their definitions
@@ -18,11 +19,16 @@ pub struct TlcToMir {
     /// When we have `let f = some_lambda`, this records `f -> "some_lambda"`.
     /// This enables direct calls instead of dynamic `_w_apply`.
     static_values: HashMap<String, String>,
+    /// Type schemes for functions (for monomorphization)
+    schemes: &'a HashMap<String, TypeScheme>,
 }
 
-impl TlcToMir {
+impl<'a> TlcToMir<'a> {
     /// Transform a lifted TLC program to MIR.
-    pub fn transform(program: &TlcProgram) -> mir::Program {
+    pub fn transform(
+        program: &TlcProgram,
+        schemes: &'a HashMap<String, TypeScheme>,
+    ) -> mir::Program {
         // Collect top-level names
         let top_level: HashMap<String, TlcDef> =
             program.defs.iter().map(|d| (d.name.clone(), d.clone())).collect();
@@ -31,6 +37,7 @@ impl TlcToMir {
             locals: HashMap::new(),
             top_level,
             static_values: HashMap::new(),
+            schemes,
         };
 
         let mut defs: Vec<MirDef> = program.defs.iter().map(|def| transformer.transform_def(def)).collect();
@@ -112,12 +119,14 @@ impl TlcToMir {
             }
         } else {
             // Function with parameters
+            // Look up type scheme for this function (if it's a prelude function)
+            let scheme = self.schemes.get(&def.name).cloned();
             MirDef::Function {
                 id: NodeId(0),
                 name: def.name.clone(),
                 params: param_ids,
                 ret_type: inner_body.ty.clone(),
-                scheme: None,
+                scheme,
                 attributes: vec![],
                 body,
                 span: def.body.span,
@@ -272,7 +281,7 @@ impl TlcToMir {
 
     /// Extract curried parameters from nested Lams.
     /// Returns (params, inner_body) where params is [(name, type, span), ...]
-    fn extract_params<'a>(&self, term: &'a Term) -> (Vec<(String, Type<TypeName>, Span)>, &'a Term) {
+    fn extract_params<'b>(&self, term: &'b Term) -> (Vec<(String, Type<TypeName>, Span)>, &'b Term) {
         match &term.kind {
             TermKind::Lam {
                 param,
@@ -297,17 +306,23 @@ impl TlcToMir {
                 if let Some(&local_id) = self.locals.get(name) {
                     // Local variable reference
                     body.alloc_expr(Expr::Local(local_id), ty, span, node_id)
-                } else if self.top_level.contains_key(name) {
-                    // Top-level function used as value → Closure with no captures
-                    body.alloc_expr(
-                        Expr::Closure {
-                            lambda_name: name.clone(),
-                            captures: vec![],
-                        },
-                        ty,
-                        span,
-                        node_id,
-                    )
+                } else if let Some(def) = self.top_level.get(name) {
+                    // Check if it's a function (has arity > 0) or a constant (arity 0)
+                    if def.arity == 0 {
+                        // Top-level constant → Global reference
+                        body.alloc_expr(Expr::Global(name.clone()), ty, span, node_id)
+                    } else {
+                        // Top-level function used as value → Closure with no captures
+                        body.alloc_expr(
+                            Expr::Closure {
+                                lambda_name: name.clone(),
+                                captures: vec![],
+                            },
+                            ty,
+                            span,
+                            node_id,
+                        )
+                    }
                 } else {
                     // Unknown variable - could be an intrinsic or global constant
                     body.alloc_expr(Expr::Global(name.clone()), ty, span, node_id)
@@ -471,17 +486,34 @@ impl TlcToMir {
             FunctionName::Term(inner_term) => {
                 // Check if inner_term is a variable with a known static function value
                 if let Some(func_name) = self.extract_static_value(inner_term) {
-                    // Direct call to the known function
-                    let arg_id = self.transform_term(arg, body);
-                    return body.alloc_expr(
-                        Expr::Call {
-                            func: func_name,
-                            args: vec![arg_id],
-                        },
-                        ty,
-                        span,
-                        node_id,
-                    );
+                    // Check the function's arity to determine if this is a full call or partial application
+                    let func_arity = self.top_level.get(&func_name).map(|d| d.arity).unwrap_or(1);
+
+                    if func_arity > 1 {
+                        // Partial application - create a Closure with the arg as a capture
+                        let arg_id = self.transform_term(arg, body);
+                        return body.alloc_expr(
+                            Expr::Closure {
+                                lambda_name: func_name,
+                                captures: vec![arg_id],
+                            },
+                            ty,
+                            span,
+                            node_id,
+                        );
+                    } else {
+                        // Direct call to the known function (arity 1)
+                        let arg_id = self.transform_term(arg, body);
+                        return body.alloc_expr(
+                            Expr::Call {
+                                func: func_name,
+                                args: vec![arg_id],
+                            },
+                            ty,
+                            span,
+                            node_id,
+                        );
+                    }
                 }
 
                 // Check if inner_term is a binop partial application
@@ -609,6 +641,40 @@ impl TlcToMir {
                             )
                         }
                         "_w_tuple" => body.alloc_expr(Expr::Tuple(args), ty, span, node_id),
+                        "_w_range" if args.len() == 3 => {
+                            // _w_range start end kind -> Array with Range backing
+                            let kind = self.extract_range_kind(body, args[2]);
+                            body.alloc_expr(
+                                Expr::Array {
+                                    backing: mir::ArrayBacking::Range {
+                                        start: args[0],
+                                        step: None,
+                                        kind,
+                                    },
+                                    size: args[1], // end is the size
+                                },
+                                ty,
+                                span,
+                                node_id,
+                            )
+                        }
+                        "_w_range_step" if args.len() == 4 => {
+                            // _w_range_step start step end kind -> Array with Range backing
+                            let kind = self.extract_range_kind(body, args[3]);
+                            body.alloc_expr(
+                                Expr::Array {
+                                    backing: mir::ArrayBacking::Range {
+                                        start: args[0],
+                                        step: Some(args[1]),
+                                        kind,
+                                    },
+                                    size: args[2], // end is the size
+                                },
+                                ty,
+                                span,
+                                node_id,
+                            )
+                        }
                         _ => body.alloc_expr(
                             Expr::Call {
                                 func: func_name,
@@ -670,6 +736,40 @@ impl TlcToMir {
                         span,
                         node_id,
                     )
+                } else if let Expr::Closure {
+                    lambda_name,
+                    captures: existing_captures,
+                } = body.get_expr(func_id).clone()
+                {
+                    // Extend closure with another captured argument
+                    let mut captures = existing_captures;
+                    captures.push(arg_id);
+
+                    // Check if we now have all arguments for a full call
+                    let func_arity = self.top_level.get(&lambda_name).map(|d| d.arity).unwrap_or(0);
+                    if captures.len() == func_arity {
+                        // Full application - convert to Call
+                        body.alloc_expr(
+                            Expr::Call {
+                                func: lambda_name,
+                                args: captures,
+                            },
+                            ty,
+                            span,
+                            node_id,
+                        )
+                    } else {
+                        // Still partial - keep as Closure
+                        body.alloc_expr(
+                            Expr::Closure {
+                                lambda_name,
+                                captures,
+                            },
+                            ty,
+                            span,
+                            node_id,
+                        )
+                    }
                 } else {
                     // True higher-order application - need closure apply
                     // For now, emit as intrinsic call
@@ -692,6 +792,21 @@ impl TlcToMir {
         // For now, just transform the single argument
         // A more complete implementation would walk nested Apps
         vec![self.transform_term(term, body)]
+    }
+
+    /// Extract RangeKind from an integer literal expression.
+    fn extract_range_kind(&self, body: &Body, expr_id: ExprId) -> mir::RangeKind {
+        if let Expr::Int(s) = body.get_expr(expr_id) {
+            match s.as_str() {
+                "0" => mir::RangeKind::Inclusive,
+                "1" => mir::RangeKind::Exclusive,
+                "2" => mir::RangeKind::ExclusiveLt,
+                "3" => mir::RangeKind::ExclusiveGt,
+                _ => mir::RangeKind::Exclusive, // Default
+            }
+        } else {
+            mir::RangeKind::Exclusive // Default
+        }
     }
 }
 
@@ -812,7 +927,8 @@ mod tests {
             storage: vec![],
         };
 
-        let mir = TlcToMir::transform(&program);
+        let schemes = std::collections::HashMap::new();
+        let mir = TlcToMir::transform(&program, &schemes);
 
         assert_eq!(mir.defs.len(), 1);
         match &mir.defs[0] {

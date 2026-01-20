@@ -113,6 +113,52 @@ impl Specializer {
                         return FunctionName::Term(Box::new(specialized_term));
                     }
                 }
+
+                // Check for fully-applied binary functions like mul
+                // Pattern: App { func: Term(App { func: Term(Var("mul")), arg: first_arg }), arg: second_arg }
+                // We're in specialize_func for the outer App, so:
+                // - t is the inner App { func: Term(Var("mul")), arg: first_arg }
+                // - arg is the second_arg
+                if let TermKind::App {
+                    func: inner_func,
+                    arg: first_arg,
+                } = &t.kind
+                {
+                    // Check if inner_func is Var("mul") (direct) or Term(Var("mul")) (wrapped)
+                    let maybe_mul_name = match inner_func.as_ref() {
+                        FunctionName::Var(name) => Some(name.as_str()),
+                        FunctionName::Term(term) => {
+                            if let TermKind::Var(name) = &term.kind {
+                                Some(name.as_str())
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
+
+                    if maybe_mul_name == Some("mul") {
+                        // Specialize mul based on both arg types
+                        if let Some(specialized_name) =
+                            self.specialize_mul(&first_arg.ty, &arg.ty)
+                        {
+                            // Build: App { func: Var(specialized_name), arg: first_arg }
+                            // This becomes the new inner term
+                            let specialized_first_arg = self.specialize_term(*first_arg.clone());
+                            let new_inner = Term {
+                                id: self.term_ids.next_id(),
+                                ty: t.ty.clone(),
+                                span: t.span,
+                                kind: TermKind::App {
+                                    func: Box::new(FunctionName::Var(specialized_name)),
+                                    arg: Box::new(specialized_first_arg),
+                                },
+                            };
+                            return FunctionName::Term(Box::new(new_inner));
+                        }
+                    }
+                }
+
                 // For nested applications or other terms, recursively specialize
                 let specialized = self.specialize_term(*t);
                 FunctionName::Term(Box::new(specialized))
@@ -152,6 +198,37 @@ impl Specializer {
             _ => None,
         }
     }
+
+    /// Specialize mul based on argument shapes.
+    /// Returns the specialized name: mul_mat_mat, mul_mat_vec, or mul_vec_mat
+    fn specialize_mul(&self, first_ty: &Type<TypeName>, second_ty: &Type<TypeName>) -> Option<String> {
+        let shape1 = Self::classify_shape(first_ty);
+        let shape2 = Self::classify_shape(second_ty);
+
+        match (shape1, shape2) {
+            (ArgShape::Matrix, ArgShape::Matrix) => Some("mul_mat_mat".to_string()),
+            (ArgShape::Matrix, ArgShape::Vector) => Some("mul_mat_vec".to_string()),
+            (ArgShape::Vector, ArgShape::Matrix) => Some("mul_vec_mat".to_string()),
+            _ => None, // Fall back to original mul (will error later if truly invalid)
+        }
+    }
+
+    /// Classify a type as Matrix, Vector, or Other for mul specialization
+    fn classify_shape(ty: &Type<TypeName>) -> ArgShape {
+        match ty {
+            Type::Constructed(TypeName::Mat, _) => ArgShape::Matrix,
+            Type::Constructed(TypeName::Vec, _) => ArgShape::Vector,
+            _ => ArgShape::Other,
+        }
+    }
+}
+
+/// Argument shape classification for mul specialization
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ArgShape {
+    Matrix,
+    Vector,
+    Other,
 }
 
 #[cfg(test)]
