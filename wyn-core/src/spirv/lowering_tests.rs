@@ -5,7 +5,7 @@ fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
     // Use the typestate API to ensure proper compilation pipeline
     let mut frontend = crate::cached_frontend();
     let parsed = crate::Compiler::parse(source, &mut frontend.node_counter).expect("Parsing failed");
-    let (flattened, _backend) = parsed
+    let alias_checked = parsed
         .desugar(&mut frontend.node_counter)
         .expect("Desugaring failed")
         .resolve(&frontend.module_manager)
@@ -14,9 +14,14 @@ fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
         .type_check(&frontend.module_manager, &mut frontend.schemes)
         .expect("Type checking failed")
         .alias_check()
-        .expect("Alias checking failed")
-        .flatten(&frontend.module_manager, &frontend.schemes)
-        .expect("Flattening failed");
+        .expect("Alias checking failed");
+
+    let builtins = crate::build_builtins(&alias_checked.ast, &frontend.module_manager);
+    let flattened = alias_checked
+        .to_tlc(builtins, &frontend.module_manager, &frontend.schemes)
+        .skip_partial_eval()
+        .lift()
+        .to_mir();
 
     let inplace_info = crate::alias_checker::analyze_inplace(&flattened.mir);
     lower(&flattened.mir, &inplace_info)
@@ -300,7 +305,7 @@ fn compile_to_spirv_with_partial_eval(source: &str) -> Result<Vec<u32>> {
         .expect("Alias checking failed");
     let builtins = crate::build_builtins(&alias_checked.ast, &frontend.module_manager);
     let lifted = alias_checked
-        .to_tlc(builtins)
+        .to_tlc(builtins, &frontend.module_manager, &frontend.schemes)
         .partial_eval()
         .lift()
         .to_mir()

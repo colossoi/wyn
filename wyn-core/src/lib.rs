@@ -2,7 +2,6 @@ pub mod ast;
 pub mod defun_analysis;
 pub mod diags;
 pub mod error;
-pub mod flattening;
 pub mod impl_source;
 pub mod interface;
 pub mod intrinsics;
@@ -53,10 +52,6 @@ mod constant_folding_tests;
 mod flattening_tests;
 #[cfg(test)]
 mod scope_tests;
-// #[cfg(test)]
-// mod monomorphization_tests;
-// #[cfg(test)]
-// mod normalize_tests;
 
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -578,75 +573,26 @@ impl AliasChecked {
         self.alias_result.print_errors();
     }
 
-    /// Flatten AST to MIR (with defunctionalization and desugaring).
-    /// Returns the flattened MIR and a BackEnd for subsequent passes.
-    pub fn flatten(
-        self,
-        module_manager: &module_manager::ModuleManager,
-        schemes: &HashMap<String, TypeScheme<TypeName>>,
-    ) -> Result<(Flattened, BackEnd)> {
-        let type_table = self.type_table;
-
-        let mut builtins = impl_source::ImplSource::default().all_names();
-
-        // Add top-level function names from user program - these should not be captured as free vars
-        for decl in &self.ast.declarations {
-            match decl {
-                ast::Declaration::Decl(d) => {
-                    builtins.insert(d.name.clone());
-                }
-                ast::Declaration::Entry(e) => {
-                    builtins.insert(e.name.clone());
-                }
-                ast::Declaration::Uniform(u) => {
-                    builtins.insert(u.name.clone());
-                }
-                ast::Declaration::Storage(s) => {
-                    builtins.insert(s.name.clone());
-                }
-                _ => {}
-            }
-        }
-
-        // Collect prelude function declarations for defun analysis
-        let prelude_decls: Vec<_> = module_manager.get_prelude_function_declarations();
-
-        // Add prelude function names to builtins - they should not be captured either
-        for decl in &prelude_decls {
-            builtins.insert(decl.name.clone());
-        }
-
-        let defun_analysis =
-            defun_analysis::analyze_program_with_decls(&self.ast, &prelude_decls, &type_table, &builtins);
-        let mut flattener =
-            flattening::Flattener::new(type_table, builtins, defun_analysis, schemes.clone());
-        let mut mir = flattener.flatten_program(&self.ast)?;
-
-        // Flatten module declarations (includes constants like f32.pi, excludes intrinsics)
-        for (module_name, decl) in module_manager.get_all_module_declarations() {
-            let qualified_name = format!("{}.{}", module_name, decl.name);
-            let defs = flattener.flatten_module_decl(decl, &qualified_name)?;
-            mir.defs.extend(defs);
-        }
-
-        // Flatten prelude function declarations (top-level, auto-imported)
-        for decl in module_manager.get_prelude_function_declarations() {
-            let defs = flattener.flatten_module_decl(decl, &decl.name)?;
-            mir.defs.extend(defs);
-        }
-
-        let node_counter = flattener.into_node_counter();
-        Ok((Flattened { mir }, BackEnd::new(node_counter)))
-    }
-
     /// Transform AST to TLC (new pipeline path)
     /// `builtins` contains names that should not be captured as free variables during lambda lifting
-    pub fn to_tlc(self, builtins: std::collections::HashSet<String>) -> TlcTransformed {
+    /// `schemes` contains type schemes for prelude functions (for monomorphization)
+    pub fn to_tlc(
+        self,
+        builtins: std::collections::HashSet<String>,
+        module_manager: &module_manager::ModuleManager,
+        schemes: &HashMap<String, types::TypeScheme>,
+    ) -> TlcTransformed {
+        // Transform user program to TLC
+        // Note: Prelude functions are NOT transformed to TLC. They remain as builtins
+        // and are handled specially during MIR lowering (they're thin wrappers around
+        // intrinsics like _w_intrinsic_map, _w_intrinsic_reduce, etc.)
         let tlc_program = tlc::transform(&self.ast, &self.type_table);
+
         TlcTransformed {
             tlc: tlc_program,
             type_table: self.type_table,
             builtins,
+            schemes: schemes.clone(),
         }
     }
 }
@@ -661,6 +607,8 @@ pub struct TlcTransformed {
     pub type_table: TypeTable,
     /// Built-in names that should not be captured as free variables
     builtins: std::collections::HashSet<String>,
+    /// Type schemes for functions (for monomorphization)
+    schemes: HashMap<String, types::TypeScheme>,
 }
 
 impl TlcTransformed {
@@ -671,6 +619,7 @@ impl TlcTransformed {
             tlc: optimized,
             type_table: self.type_table,
             builtins: self.builtins,
+            schemes: self.schemes,
         }
     }
 
@@ -685,6 +634,7 @@ impl TlcTransformed {
         TlcLifted {
             tlc: lifted,
             type_table: self.type_table,
+            schemes: self.schemes,
         }
     }
 }
@@ -693,6 +643,8 @@ impl TlcTransformed {
 pub struct TlcLifted {
     pub tlc: tlc::Program,
     pub type_table: TypeTable,
+    /// Type schemes for functions (for monomorphization)
+    schemes: HashMap<String, types::TypeScheme>,
 }
 
 impl TlcLifted {
@@ -702,7 +654,7 @@ impl TlcLifted {
         eprintln!("=== LIFTED TLC ===\n{}\n==================", self.tlc);
         // Specialize polymorphic intrinsics (sign → f32.sign, etc.)
         let specialized = tlc::specialize::specialize(self.tlc);
-        let mir = tlc::to_mir::TlcToMir::transform(&specialized);
+        let mir = tlc::to_mir::TlcToMir::transform(&specialized, &self.schemes);
         Flattened { mir }
     }
 }

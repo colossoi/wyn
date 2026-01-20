@@ -559,7 +559,8 @@ impl<'a> Transformer<'a> {
             ast::ExprKind::StringLiteral(s) => self.mk_term(ty, span, TermKind::StringLit(s.clone())),
 
             ast::ExprKind::Unit => {
-                todo!("Unit expressions")
+                // Unit value represented as _w_unit intrinsic call
+                self.build_intrinsic_call("_w_unit", &[], ty, span)
             }
 
             ast::ExprKind::Identifier(qualifiers, name) => {

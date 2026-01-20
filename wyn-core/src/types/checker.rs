@@ -1728,7 +1728,10 @@ impl<'a> TypeChecker<'a> {
                 debug!("Looking up identifier '{}'", full_name);
 
                 if let Some(resolved) = self.resolve_value_name(&full_name, is_qualified) {
-                    self.type_table.insert(expr.h.id, resolved.scheme_for_table);
+                    // Store instantiated type with substitutions applied
+                    let applied = resolved.instantiated.apply(&self.context);
+                    self.type_table
+                        .insert(expr.h.id, TypeScheme::Monotype(applied));
                     return Ok(resolved.instantiated);
                 }
 
@@ -2007,14 +2010,10 @@ impl<'a> TypeChecker<'a> {
                     // Check for partial application AFTER application (when types are resolved)
                     self.ensure_not_partial(&result_ty, &expr.h.span)?;
 
-                    // Store types in type table
-                    if let Some(s) = cand.scheme {
-                        self.type_table.insert(func.h.id, s);
-                    } else {
-                        let resolved = cand.ty.apply(&self.context);
-                        self.type_table
-                            .insert(func.h.id, TypeScheme::Monotype(resolved));
-                    }
+                    // Store resolved type in type table (apply substitutions)
+                    let resolved = cand.ty.apply(&self.context);
+                    self.type_table
+                        .insert(func.h.id, TypeScheme::Monotype(resolved));
                     self.type_table
                         .insert(expr.h.id, TypeScheme::Monotype(result_ty.clone()));
                     Ok(result_ty)
@@ -2034,13 +2033,10 @@ impl<'a> TypeChecker<'a> {
                         {
                             // Check for partial application
                             if self.ensure_not_partial(&result_ty, &expr.h.span).is_ok() {
+                                // Store resolved type (always apply substitutions)
                                 let resolved_func_ty = cand.ty.apply(&self.context);
-                                if let Some(s) = cand.scheme {
-                                    self.type_table.insert(func.h.id, s);
-                                } else {
-                                    self.type_table
-                                        .insert(func.h.id, TypeScheme::Monotype(resolved_func_ty));
-                                }
+                                self.type_table
+                                    .insert(func.h.id, TypeScheme::Monotype(resolved_func_ty));
                                 self.type_table
                                     .insert(expr.h.id, TypeScheme::Monotype(result_ty.clone()));
                                 return Ok(result_ty);

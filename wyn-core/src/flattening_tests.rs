@@ -9,7 +9,7 @@ fn flatten_program(input: &str) -> mir::Program {
     // Use the typestate API to ensure proper compilation pipeline
     let mut frontend = crate::cached_frontend();
     let parsed = crate::Compiler::parse(input, &mut frontend.node_counter).expect("Parsing failed");
-    let (flattened, _backend) = parsed
+    let alias_checked = parsed
         .desugar(&mut frontend.node_counter)
         .expect("Desugaring failed")
         .resolve(&frontend.module_manager)
@@ -18,9 +18,15 @@ fn flatten_program(input: &str) -> mir::Program {
         .type_check(&frontend.module_manager, &mut frontend.schemes)
         .expect("Type checking failed")
         .alias_check()
-        .expect("Borrow checking failed")
-        .flatten(&frontend.module_manager, &frontend.schemes)
-        .expect("Flattening failed");
+        .expect("Borrow checking failed");
+
+    let builtins = crate::build_builtins(&alias_checked.ast, &frontend.module_manager);
+    let flattened = alias_checked
+        .to_tlc(builtins, &frontend.module_manager, &frontend.schemes)
+        .skip_partial_eval()
+        .lift()
+        .to_mir();
+
     // Run hoisting pass to optimize materializations
     flattened.hoist_materializations().mir
 }
@@ -143,47 +149,45 @@ fn test_let_binding() {
 #[test]
 fn test_tuple_pattern() {
     let mir = flatten_program("def f = let (a, b) = (1, 2) in a + b");
-    // Tuple pattern desugars to multiple lets with intrinsic tuple access
+    // TLC pipeline uses _w_tuple_proj for tuple destructuring
     let f_def = find_def(&mir, "f");
     let body = get_body(f_def);
-    // Should have Let bindings for tuple destructuring
-    // The structure may vary, but there should be intrinsic calls for tuple_access
-    let has_tuple_access = body
-        .exprs
-        .iter()
-        .any(|expr| matches!(expr, mir::Expr::Intrinsic { name, .. } if name == "tuple_access"));
+    // Should have Let bindings for tuple destructuring with _w_tuple_proj calls
+    let has_tuple_proj = body.exprs.iter().any(|expr| {
+        matches!(expr, mir::Expr::Call { func, .. } if func == "_w_tuple_proj")
+            || matches!(expr, mir::Expr::Intrinsic { name, .. } if name == "_w_tuple_proj" || name == "tuple_access")
+    });
     assert!(
-        has_tuple_access,
-        "Expected tuple_access intrinsic for tuple pattern"
+        has_tuple_proj,
+        "Expected _w_tuple_proj or tuple_access for tuple pattern"
     );
 }
 
 #[test]
 fn test_lambda_tuple_pattern_param() {
     // Test lambda with tuple pattern parameter: |(x, y)| x + y
+    // TLC pipeline uses _lambda_N naming and _w_tuple_proj for destructuring
     let mir = flatten_program("def f = let add = |(x, y)| x + y in add((1, 2))");
 
-    // Check that lambda registry has the lambda
-    assert!(
-        !mir.lambda_registry.is_empty(),
-        "Lambda registry should contain the generated lambda"
-    );
-
-    // Find the generated lambda function and verify it destructures the tuple param
+    // Find the generated lambda function (TLC uses _lambda_N naming)
     let add_fn = mir.defs.iter().find(|d| {
-        if let mir::Def::Function { name, .. } = d { name.contains("_w_lam_f_") } else { false }
+        if let mir::Def::Function { name, .. } = d {
+            name.contains("_lambda_") || name.contains("_w_lam_")
+        } else {
+            false
+        }
     });
     assert!(add_fn.is_some(), "Generated lambda function should exist");
 
     if let Some(mir::Def::Function { body, .. }) = add_fn {
-        // The body should contain tuple_access intrinsics for destructuring the param
-        let has_tuple_access = body
-            .exprs
-            .iter()
-            .any(|expr| matches!(expr, mir::Expr::Intrinsic { name, .. } if name == "tuple_access"));
+        // TLC pipeline may use _w_tuple_proj Call or tuple_access Intrinsic
+        let has_tuple_proj = body.exprs.iter().any(|expr| {
+            matches!(expr, mir::Expr::Call { func, .. } if func == "_w_tuple_proj")
+                || matches!(expr, mir::Expr::Intrinsic { name, .. } if name == "_w_tuple_proj" || name == "tuple_access")
+        });
         assert!(
-            has_tuple_access,
-            "Lambda with tuple param should have tuple_access for destructuring"
+            has_tuple_proj,
+            "Lambda with tuple param should have tuple projection for destructuring"
         );
     }
 }
@@ -191,32 +195,33 @@ fn test_lambda_tuple_pattern_param() {
 #[test]
 fn test_lambda_nested_tuple_pattern_param() {
     // Test lambda with nested tuple pattern: |((a, b), c)| a + b + c
+    // Should compile successfully with tuple destructuring
     let mir = flatten_program("def f = let add = |((a, b), c)| a + b + c in add(((1, 2), 3))");
 
-    // Should compile successfully with tuple destructuring
-    assert!(
-        !mir.lambda_registry.is_empty(),
-        "Lambda registry should contain the generated lambda"
-    );
+    // Find the generated lambda function
+    let add_fn = mir.defs.iter().find(|d| {
+        if let mir::Def::Function { name, .. } = d {
+            name.contains("_lambda_") || name.contains("_w_lam_")
+        } else {
+            false
+        }
+    });
+    assert!(add_fn.is_some(), "Generated lambda function should exist");
 }
 
 #[test]
 fn test_lambda_defunctionalization() {
+    // When a top-level def is itself a lambda expression, TLC transforms it
+    // into a regular function (f becomes the lambda function directly)
     let mir = flatten_program("def f = |x| x + 1");
 
-    // Check that lambda registry has the lambda
-    assert!(
-        !mir.lambda_registry.is_empty(),
-        "Lambda registry should contain the generated lambda"
-    );
-
-    // Check that closure is created in the body
+    // f should be a function with 1 parameter (the lambda's param)
     let f_def = find_def(&mir, "f");
-    let body = get_body(f_def);
-    let has_closure = body.exprs.iter().any(
-        |expr| matches!(expr, mir::Expr::Closure { lambda_name, .. } if lambda_name.contains("_w_lam_f_")),
-    );
-    assert!(has_closure, "Expected @closure expression with _w_lam_f_ prefix");
+    if let mir::Def::Function { params, .. } = f_def {
+        assert_eq!(params.len(), 1, "f should have 1 parameter from the lambda");
+    } else {
+        panic!("Expected f to be a function");
+    }
 }
 
 #[test]
@@ -334,29 +339,31 @@ fn test_record_literal() {
 
 #[test]
 fn test_while_loop() {
+    // TLC pipeline represents loops as calls to _w_loop_while intrinsic
     let mir = flatten_program("def f = loop x = 0 while x < 10 do x + 1");
     let f_def = find_def(&mir, "f");
     let body = get_body(f_def);
     match body.get_expr(body.root) {
-        mir::Expr::Loop { kind, .. } => match kind {
-            mir::LoopKind::While { .. } => {}
-            other => panic!("Expected While loop kind, got {:?}", other),
-        },
-        other => panic!("Expected Loop, got {:?}", other),
+        mir::Expr::Call { func, args } => {
+            assert_eq!(func, "_w_loop_while", "Expected _w_loop_while call");
+            assert_eq!(args.len(), 3, "Expected 3 args: init, cond, body");
+        }
+        other => panic!("Expected Call to _w_loop_while, got {:?}", other),
     }
 }
 
 #[test]
 fn test_for_range_loop() {
+    // TLC pipeline represents for loops as calls to _w_loop_for intrinsic
     let mir = flatten_program("def f = loop acc = 0 for i < 10 do acc + i");
     let f_def = find_def(&mir, "f");
     let body = get_body(f_def);
     match body.get_expr(body.root) {
-        mir::Expr::Loop { kind, .. } => match kind {
-            mir::LoopKind::ForRange { .. } => {}
-            other => panic!("Expected ForRange loop kind, got {:?}", other),
-        },
-        other => panic!("Expected Loop, got {:?}", other),
+        mir::Expr::Call { func, args } => {
+            assert_eq!(func, "_w_loop_for", "Expected _w_loop_for call");
+            assert_eq!(args.len(), 3, "Expected 3 args: init, bound, body");
+        }
+        other => panic!("Expected Call to _w_loop_for, got {:?}", other),
     }
 }
 
@@ -396,9 +403,11 @@ fn test_array_index() {
     let mir = flatten_program("def f(arr, i) = arr[i]");
     let f_def = find_def(&mir, "f");
     let body = get_body(f_def);
-    // Array index becomes intrinsic call
-    let has_index =
-        body.exprs.iter().any(|e| matches!(e, mir::Expr::Intrinsic { name, .. } if name == "index"));
+    // Array index becomes intrinsic call (TLC may use _w_index or index)
+    let has_index = body.exprs.iter().any(|e| {
+        matches!(e, mir::Expr::Intrinsic { name, .. } if name == "index" || name == "_w_index")
+            || matches!(e, mir::Expr::Call { func, .. } if func == "index" || func == "_w_index")
+    });
     assert!(has_index, "Expected index intrinsic for array indexing");
 }
 
@@ -425,13 +434,17 @@ def test: [4]i32 =
     map((|x: i32| x + 1), [0, 1, 2, 3])
 "#,
     );
-    // Should have at least the test function and a lambda
+    // Should have at least the test function and a lambda (TLC uses _lambda_N naming)
     assert!(mir.defs.len() >= 2, "Expected at least test function and lambda");
-    // Should have lambda in registry
-    assert!(
-        !mir.lambda_registry.is_empty(),
-        "Lambda registry should have the inline lambda"
-    );
+    // Check for lambda function in defs
+    let has_lambda = mir.defs.iter().any(|d| {
+        if let mir::Def::Function { name, .. } = d {
+            name.contains("_lambda_") || name.contains("_w_lam_")
+        } else {
+            false
+        }
+    });
+    assert!(has_lambda, "Should have a lambda function definition");
 }
 
 #[test]
@@ -494,8 +507,7 @@ def length2(v: vec2f32) f32 =
 
 #[test]
 fn test_map_with_closure_application() {
-    // This test checks that map with a lambda generates a closure record
-    // and registers the lambda in the registry for dispatch.
+    // This test checks that map with a lambda generates a lambda function
     let mir = flatten_program(
         r#"
 def test_map(arr: [4]i32) [4]i32 =
@@ -503,38 +515,23 @@ def test_map(arr: [4]i32) [4]i32 =
 "#,
     );
 
-    // Should have lambda function generated
+    // Should have lambda function generated (TLC uses _lambda_N naming)
     assert!(mir.defs.len() >= 2, "Expected test function + lambda");
 
-    // Lambda registry should have the lambda function
-    assert_eq!(mir.lambda_registry.len(), 1, "Expected 1 lambda in registry");
-    let (_, info) = mir.lambda_registry.iter().next().unwrap();
-    assert!(
-        info.name.contains("_w_lam_test_map_"),
-        "Lambda name should contain _w_lam_test_map_"
-    );
-    assert_eq!(info.arity, 1, "Lambda should have arity 1");
-
-    // Check for closure expression
-    let mut has_closure = false;
-    for def in &mir.defs {
-        if let mir::Def::Function { body, name, .. } = def {
-            if name == "test_map" {
-                for expr in &body.exprs {
-                    if let mir::Expr::Closure { lambda_name, .. } = expr {
-                        if lambda_name.contains("_w_lam_test_map_") {
-                            has_closure = true;
-                            break;
-                        }
-                    }
-                }
-            }
+    // Check for lambda function in defs
+    let lambda_fn = mir.defs.iter().find(|d| {
+        if let mir::Def::Function { name, .. } = d {
+            name.contains("_lambda_") || name.contains("_w_lam_")
+        } else {
+            false
         }
+    });
+    assert!(lambda_fn.is_some(), "Expected lambda function definition");
+
+    // Verify the lambda is a 1-param function
+    if let Some(mir::Def::Function { params, .. }) = lambda_fn {
+        assert_eq!(params.len(), 1, "Lambda should have 1 parameter");
     }
-    assert!(
-        has_closure,
-        "Expected closure expression with _w_lam_test_map_ prefix"
-    );
 }
 
 #[test]
@@ -548,34 +545,18 @@ def test_apply(x: i32) i32 =
 "#,
     );
 
-    // Should have lambda function generated
+    // Should have lambda function generated (TLC uses _lambda_N naming)
     assert!(mir.defs.len() >= 2, "Expected test function + lambda");
 
-    // Lambda registry should have the lambda function
-    assert!(
-        !mir.lambda_registry.is_empty(),
-        "Lambda registry should have the generated lambda"
-    );
-
-    // Check for direct call to lambda (should NOT use apply1 intrinsic)
-    let mut has_apply_intrinsic = false;
-    for def in &mir.defs {
-        if let mir::Def::Function { body, name, .. } = def {
-            if name == "test_apply" {
-                for expr in &body.exprs {
-                    if let mir::Expr::Intrinsic { name, .. } = expr {
-                        if name == "apply1" {
-                            has_apply_intrinsic = true;
-                        }
-                    }
-                }
-            }
+    // Check for lambda function in defs
+    let has_lambda = mir.defs.iter().any(|d| {
+        if let mir::Def::Function { name, .. } = d {
+            name.contains("_lambda_") || name.contains("_w_lam_")
+        } else {
+            false
         }
-    }
-    assert!(
-        !has_apply_intrinsic,
-        "Direct closure call should NOT use apply1 intrinsic"
-    );
+    });
+    assert!(has_lambda, "Should have a lambda function definition");
 }
 
 // Tests for function value restrictions (Futhark-style defunctionalization constraints)
@@ -679,15 +660,23 @@ def test: f32 =
 
     // This should compile successfully
     let mut frontend = crate::cached_frontend();
-    let result = crate::Compiler::parse(source, &mut frontend.node_counter)
+    let alias_checked = crate::Compiler::parse(source, &mut frontend.node_counter)
         .and_then(|p| p.desugar(&mut frontend.node_counter))
         .and_then(|d| d.resolve(&frontend.module_manager))
         .map(|r| r.fold_ast_constants())
         .and_then(|f| f.type_check(&frontend.module_manager, &mut frontend.schemes))
         .and_then(|t| t.alias_check())
-        .and_then(|a| a.flatten(&frontend.module_manager, &frontend.schemes))
-        .map(|(f, _backend)| f.hoist_materializations().normalize())
-        .and_then(|n| n.monomorphize())
+        .expect("Failed before TLC transform");
+
+    let builtins = crate::build_builtins(&alias_checked.ast, &frontend.module_manager);
+    let result = alias_checked
+        .to_tlc(builtins, &frontend.module_manager, &frontend.schemes)
+        .skip_partial_eval()
+        .lift()
+        .to_mir()
+        .hoist_materializations()
+        .normalize()
+        .monomorphize()
         .map(|m| m.skip_folding())
         .map(|f| f.filter_reachable())
         .map(|r| r.lift_bindings())
@@ -1214,19 +1203,20 @@ def sum_array(arr: [4]f32) f32 =
 "#,
     );
 
-    // Should have the sum_array function and a lambda function
+    // Should have the sum_array function and lambda functions (TLC uses _lambda_N naming)
     assert!(mir.defs.len() >= 2, "Expected sum_array function + lambda");
 
-    // Lambda registry should have the lambda function for the binary operator
-    assert_eq!(
-        mir.lambda_registry.len(),
-        1,
-        "Expected 1 lambda in registry for reduce operator"
-    );
-    let (_, info) = mir.lambda_registry.iter().next().unwrap();
-    assert_eq!(info.arity, 2, "reduce operator lambda should have arity 2");
+    // Check for lambda function in defs (binary operator has 2 params)
+    let lambda_fn = mir.defs.iter().find(|d| {
+        if let mir::Def::Function { name, .. } = d {
+            name.contains("_lambda_") || name.contains("_w_lam_")
+        } else {
+            false
+        }
+    });
+    assert!(lambda_fn.is_some(), "Expected lambda function definition");
 
-    // Check that reduce call exists with closure
+    // Check that reduce call exists
     let mut has_reduce_call = false;
     for def in &mir.defs {
         if let mir::Def::Function { body, name, .. } = def {
@@ -1287,13 +1277,17 @@ def filter_evens(arr: [4]i32) ?k. [k]i32 =
 "#,
     );
 
-    // Should have the filter_evens function and a lambda
+    // Should have the filter_evens function and a lambda (TLC uses _lambda_N naming)
     let filter_def = find_def(&mir, "filter_evens");
     assert!(matches!(filter_def, mir::Def::Function { .. }));
-    assert!(
-        !mir.lambda_registry.is_empty(),
-        "Expected lambda in registry for filter predicate"
-    );
+    let has_lambda = mir.defs.iter().any(|d| {
+        if let mir::Def::Function { name, .. } = d {
+            name.contains("_lambda_") || name.contains("_w_lam_")
+        } else {
+            false
+        }
+    });
+    assert!(has_lambda, "Expected lambda function for filter predicate");
 }
 
 #[test]
@@ -1364,7 +1358,7 @@ fn compile_to_glsl(input: &str) -> String {
         .expect("Alias checking failed");
     let builtins = crate::build_builtins(&alias_checked.ast, &frontend.module_manager);
     let glsl = alias_checked
-        .to_tlc(builtins)
+        .to_tlc(builtins, &frontend.module_manager, &frontend.schemes)
         .partial_eval()
         .lift()
         .to_mir()

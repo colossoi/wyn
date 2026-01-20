@@ -204,8 +204,10 @@ fn compile_file(
     // Build builtins set for lambda lifting (names that should not be captured)
     let builtins = wyn_core::build_builtins(&alias_checked.ast, &frontend.module_manager);
 
-    // Transform to TLC
-    let tlc_transformed = time("to_tlc", verbose, || alias_checked.to_tlc(builtins));
+    // Transform to TLC (including prelude functions)
+    let tlc_transformed = time("to_tlc", verbose, || {
+        alias_checked.to_tlc(builtins, &frontend.module_manager, &frontend.schemes)
+    });
 
     // Output TLC if requested (before optimization)
     if let Some(ref tlc_path) = output_tlc {
