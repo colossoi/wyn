@@ -22,7 +22,7 @@ fn flatten_program(input: &str) -> mir::Program {
 
     let builtins = crate::build_builtins(&alias_checked.ast, &frontend.module_manager);
     let flattened = alias_checked
-        .to_tlc(builtins, &frontend.module_manager, &frontend.schemes)
+        .to_tlc(builtins, &frontend.schemes, &frontend.prelude_tlc_defs)
         .skip_partial_eval()
         .lift()
         .to_mir();
@@ -670,7 +670,7 @@ def test: f32 =
 
     let builtins = crate::build_builtins(&alias_checked.ast, &frontend.module_manager);
     let result = alias_checked
-        .to_tlc(builtins, &frontend.module_manager, &frontend.schemes)
+        .to_tlc(builtins, &frontend.schemes, &frontend.prelude_tlc_defs)
         .skip_partial_eval()
         .lift()
         .to_mir()
@@ -1358,7 +1358,7 @@ fn compile_to_glsl(input: &str) -> String {
         .expect("Alias checking failed");
     let builtins = crate::build_builtins(&alias_checked.ast, &frontend.module_manager);
     let glsl = alias_checked
-        .to_tlc(builtins, &frontend.module_manager, &frontend.schemes)
+        .to_tlc(builtins, &frontend.schemes, &frontend.prelude_tlc_defs)
         .partial_eval()
         .lift()
         .to_mir()

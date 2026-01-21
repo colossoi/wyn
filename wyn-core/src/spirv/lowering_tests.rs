@@ -18,7 +18,7 @@ fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
 
     let builtins = crate::build_builtins(&alias_checked.ast, &frontend.module_manager);
     let flattened = alias_checked
-        .to_tlc(builtins, &frontend.module_manager, &frontend.schemes)
+        .to_tlc(builtins, &frontend.schemes, &frontend.prelude_tlc_defs)
         .skip_partial_eval()
         .lift()
         .to_mir();
@@ -305,7 +305,7 @@ fn compile_to_spirv_with_partial_eval(source: &str) -> Result<Vec<u32>> {
         .expect("Alias checking failed");
     let builtins = crate::build_builtins(&alias_checked.ast, &frontend.module_manager);
     let lifted = alias_checked
-        .to_tlc(builtins, &frontend.module_manager, &frontend.schemes)
+        .to_tlc(builtins, &frontend.schemes, &frontend.prelude_tlc_defs)
         .partial_eval()
         .lift()
         .to_mir()

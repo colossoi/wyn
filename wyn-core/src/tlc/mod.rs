@@ -152,6 +152,8 @@ pub struct Program {
 pub struct Transformer<'a> {
     type_table: &'a TypeTable,
     term_ids: TermIdSource,
+    /// Optional namespace prefix for definition names (e.g., "f32" -> "f32.pi")
+    namespace: Option<String>,
 }
 
 impl<'a> Transformer<'a> {
@@ -159,6 +161,16 @@ impl<'a> Transformer<'a> {
         Self {
             type_table,
             term_ids: TermIdSource::new(),
+            namespace: None,
+        }
+    }
+
+    /// Create a transformer with a namespace prefix for definition names.
+    pub fn with_namespace(type_table: &'a TypeTable, namespace: &str) -> Self {
+        Self {
+            type_table,
+            term_ids: TermIdSource::new(),
+            namespace: Some(namespace.to_string()),
         }
     }
 
@@ -207,8 +219,14 @@ impl<'a> Transformer<'a> {
         let full_ty = self.build_function_type(&decl.params, &body_ty);
         let body = self.transform_with_params(&decl.params, &decl.body);
 
+        // Apply namespace prefix if set (e.g., "f32" + "pi" -> "f32.pi")
+        let name = match &self.namespace {
+            Some(ns) => format!("{}.{}", ns, decl.name),
+            None => decl.name.clone(),
+        };
+
         Some(Def {
-            name: decl.name.clone(),
+            name,
             ty: full_ty,
             body,
             meta: DefMeta::Function,
@@ -1382,3 +1400,4 @@ pub fn transform(program: &ast::Program, type_table: &TypeTable) -> Program {
     let mut transformer = Transformer::new(type_table);
     transformer.transform_program(program)
 }
+

@@ -270,7 +270,7 @@ fn analyze_inplace_ops(source: &str) -> InPlaceInfo {
 
     let builtins = crate::build_builtins(&alias_checked.ast, &frontend.module_manager);
     let flattened = alias_checked
-        .to_tlc(builtins, &frontend.module_manager, &frontend.schemes)
+        .to_tlc(builtins, &frontend.schemes, &frontend.prelude_tlc_defs)
         .skip_partial_eval()
         .lift()
         .to_mir();

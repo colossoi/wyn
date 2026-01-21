@@ -327,6 +327,8 @@ pub struct FrontEnd {
     pub schemes: HashMap<String, TypeScheme<TypeName>>,
     /// Per-module function type schemes cache (populated on first use)
     pub module_schemes: HashMap<String, HashMap<String, TypeScheme<TypeName>>>,
+    /// Precompiled TLC for module declarations (f32.pi, rand.init, etc.)
+    pub prelude_tlc_defs: Vec<tlc::Def>,
 }
 
 impl Default for FrontEnd {
@@ -341,7 +343,22 @@ impl FrontEnd {
     /// to ensure unique NodeIds across all AST nodes.
     pub fn new() -> Self {
         let mut node_counter = NodeCounter::new();
-        let module_manager = module_manager::ModuleManager::new(&mut node_counter);
+
+        // Create prelude and extract TLC defs before converting to ModuleManager
+        let (module_manager, prelude_tlc_defs) =
+            match module_manager::ModuleManager::create_prelude(&mut node_counter) {
+                Ok(prelude) => {
+                    let tlc_defs = prelude.module_tlc_defs.clone();
+                    (
+                        module_manager::ModuleManager::from_prelude(prelude),
+                        tlc_defs,
+                    )
+                }
+                Err(e) => {
+                    eprintln!("ERROR creating prelude: {:?}", e);
+                    (module_manager::ModuleManager::new_empty(), Vec::new())
+                }
+            };
 
         // Type-related state is populated during type_check()
         let context = Context::default();
@@ -355,6 +372,7 @@ impl FrontEnd {
             intrinsics,
             schemes: HashMap::new(),
             module_schemes: HashMap::new(),
+            prelude_tlc_defs,
         }
     }
 
@@ -364,6 +382,7 @@ impl FrontEnd {
         prelude: module_manager::PreElaboratedPrelude,
         node_counter: NodeCounter,
     ) -> Self {
+        let prelude_tlc_defs = prelude.module_tlc_defs.clone();
         let module_manager = module_manager::ModuleManager::from_prelude(prelude);
         let context = Context::default();
         let intrinsics = intrinsics::IntrinsicSource::new(&mut Context::default());
@@ -376,6 +395,7 @@ impl FrontEnd {
             intrinsics,
             schemes: HashMap::new(),
             module_schemes: HashMap::new(),
+            prelude_tlc_defs,
         }
     }
 }
@@ -576,17 +596,20 @@ impl AliasChecked {
     /// Transform AST to TLC (new pipeline path)
     /// `builtins` contains names that should not be captured as free variables during lambda lifting
     /// `schemes` contains type schemes for prelude functions (for monomorphization)
+    /// `prelude_tlc_defs` contains precompiled TLC for module declarations (f32.pi, etc.)
     pub fn to_tlc(
         self,
         builtins: std::collections::HashSet<String>,
-        module_manager: &module_manager::ModuleManager,
         schemes: &HashMap<String, types::TypeScheme>,
+        prelude_tlc_defs: &[tlc::Def],
     ) -> TlcTransformed {
         // Transform user program to TLC
-        // Note: Prelude functions are NOT transformed to TLC. They remain as builtins
-        // and are handled specially during MIR lowering (they're thin wrappers around
-        // intrinsics like _w_intrinsic_map, _w_intrinsic_reduce, etc.)
-        let tlc_program = tlc::transform(&self.ast, &self.type_table);
+        let mut tlc_program = tlc::transform(&self.ast, &self.type_table);
+
+        // Prepend prelude TLC defs (module declarations like f32.pi)
+        let mut merged_defs = prelude_tlc_defs.to_vec();
+        merged_defs.extend(tlc_program.defs);
+        tlc_program.defs = merged_defs;
 
         TlcTransformed {
             tlc: tlc_program,
