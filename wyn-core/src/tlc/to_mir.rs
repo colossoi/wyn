@@ -4,23 +4,31 @@
 
 use super::{Def as TlcDef, DefMeta, FunctionName, Program as TlcProgram, Term, TermKind};
 use crate::ast::{self, NodeId, PatternKind, Span, TypeName};
-use crate::mir::{self, Body, Def as MirDef, Expr, ExprId, LocalDecl, LocalId, LocalKind, LoopKind};
+use crate::mir::{self, Body, Def as MirDef, Expr, ExprId, LocalDecl, LocalId, LocalKind};
+use crate::types::TypeScheme;
 use polytype::Type;
 use std::collections::HashMap;
 
 /// Transforms TLC to MIR.
-pub struct TlcToMir {
+pub struct TlcToMir<'a> {
     /// Maps TLC variable names to MIR LocalIds (within current body)
     locals: HashMap<String, LocalId>,
     /// Maps top-level function names to their definitions
     top_level: HashMap<String, TlcDef>,
-    /// Maps intrinsic names to their arities
-    intrinsic_arities: HashMap<String, usize>,
+    /// Static value tracking: maps local variable names to their known function targets.
+    /// When we have `let f = some_lambda`, this records `f -> "some_lambda"`.
+    /// This enables direct calls instead of dynamic `_w_apply`.
+    static_values: HashMap<String, String>,
+    /// Type schemes for functions (for monomorphization)
+    schemes: &'a HashMap<String, TypeScheme>,
 }
 
-impl TlcToMir {
+impl<'a> TlcToMir<'a> {
     /// Transform a lifted TLC program to MIR.
-    pub fn transform(program: &TlcProgram, intrinsic_arities: HashMap<String, usize>) -> mir::Program {
+    pub fn transform(
+        program: &TlcProgram,
+        schemes: &'a HashMap<String, TypeScheme>,
+    ) -> mir::Program {
         // Collect top-level names
         let top_level: HashMap<String, TlcDef> =
             program.defs.iter().map(|d| (d.name.clone(), d.clone())).collect();
@@ -28,7 +36,8 @@ impl TlcToMir {
         let mut transformer = Self {
             locals: HashMap::new(),
             top_level,
-            intrinsic_arities,
+            static_values: HashMap::new(),
+            schemes,
         };
 
         let mut defs: Vec<MirDef> = program.defs.iter().map(|def| transformer.transform_def(def)).collect();
@@ -65,6 +74,7 @@ impl TlcToMir {
 
     fn transform_def(&mut self, def: &TlcDef) -> MirDef {
         self.locals.clear();
+        self.static_values.clear();
 
         match &def.meta {
             DefMeta::Function => self.transform_function_def(def),
@@ -109,12 +119,14 @@ impl TlcToMir {
             }
         } else {
             // Function with parameters
+            // Look up type scheme for this function (if it's a prelude function)
+            let scheme = self.schemes.get(&def.name).cloned();
             MirDef::Function {
                 id: NodeId(0),
                 name: def.name.clone(),
                 params: param_ids,
                 ret_type: inner_body.ty.clone(),
-                scheme: None,
+                scheme,
                 attributes: vec![],
                 body,
                 span: def.body.span,
@@ -251,19 +263,16 @@ impl TlcToMir {
     }
 
     /// Extract the static function value from a term, if known.
-    /// Returns Some(function_name) if the term is a reference to a known top-level function.
+    /// Returns Some(function_name) if the term is a reference to a known function.
     fn extract_static_value(&self, term: &Term) -> Option<String> {
         match &term.kind {
             TermKind::Var(name) => {
-                // Check if it's a top-level function (not a constant)
-                if let Some(def) = self.top_level.get(name) {
-                    if def.arity > 0 {
-                        Some(name.clone())
-                    } else {
-                        None // Constants are not callable functions
-                    }
+                // Check if it's a top-level function
+                if self.top_level.contains_key(name) {
+                    Some(name.clone())
                 } else {
-                    None
+                    // Check if it's a local bound to a known function
+                    self.static_values.get(name).cloned()
                 }
             }
             _ => None,
@@ -272,7 +281,7 @@ impl TlcToMir {
 
     /// Extract curried parameters from nested Lams.
     /// Returns (params, inner_body) where params is [(name, type, span), ...]
-    fn extract_params<'a>(&self, term: &'a Term) -> (Vec<(String, Type<TypeName>, Span)>, &'a Term) {
+    fn extract_params<'b>(&self, term: &'b Term) -> (Vec<(String, Type<TypeName>, Span)>, &'b Term) {
         match &term.kind {
             TermKind::Lam {
                 param,
@@ -298,7 +307,11 @@ impl TlcToMir {
                     // Local variable reference
                     body.alloc_expr(Expr::Local(local_id), ty, span, node_id)
                 } else if let Some(def) = self.top_level.get(name) {
-                    if def.arity > 0 {
+                    // Check if it's a function (has arity > 0) or a constant (arity 0)
+                    if def.arity == 0 {
+                        // Top-level constant → Global reference
+                        body.alloc_expr(Expr::Global(name.clone()), ty, span, node_id)
+                    } else {
                         // Top-level function used as value → Closure with no captures
                         body.alloc_expr(
                             Expr::Closure {
@@ -309,9 +322,6 @@ impl TlcToMir {
                             span,
                             node_id,
                         )
-                    } else {
-                        // Top-level constant → Global reference
-                        body.alloc_expr(Expr::Global(name.clone()), ty, span, node_id)
                     }
                 } else {
                     // Unknown variable - could be an intrinsic or global constant
@@ -333,6 +343,9 @@ impl TlcToMir {
                 rhs,
                 body: let_body,
             } => {
+                // Extract static value before transforming (for function tracking)
+                let static_val = self.extract_static_value(rhs);
+
                 let rhs_id = self.transform_term(rhs, body);
                 let local_id = body.alloc_local(LocalDecl {
                     name: name.clone(),
@@ -342,9 +355,15 @@ impl TlcToMir {
                 });
                 self.locals.insert(name.clone(), local_id);
 
+                // Record static value if RHS is a known function
+                if let Some(func_name) = static_val {
+                    self.static_values.insert(name.clone(), func_name);
+                }
+
                 let body_id = self.transform_term(let_body, body);
 
                 self.locals.remove(name);
+                self.static_values.remove(name);
 
                 body.alloc_expr(
                     Expr::Let {
@@ -449,7 +468,7 @@ impl TlcToMir {
                 )
             }
 
-            FunctionName::Var(name) | FunctionName::Intrinsic(name) => {
+            FunctionName::Var(name) => {
                 // Function call - but in curried form, this is partial application
                 // Collect all args by walking the nested Apps
                 let args = self.collect_curried_args(arg, body);
@@ -465,39 +484,36 @@ impl TlcToMir {
             }
 
             FunctionName::Term(inner_term) => {
-                // First, try to collect a saturated call to a known function.
-                // This handles curried calls like map(f)(xs) by collecting all args
-                // and emitting a single Call, avoiding intermediate partial applications.
-                if let Some((func_name, _is_intrinsic, arg_terms)) =
-                    self.try_collect_saturated_call(func, arg)
-                {
-                    // Transform all arguments
-                    let arg_ids: Vec<ExprId> =
-                        arg_terms.iter().map(|t| self.transform_term(t, body)).collect();
-                    return body.alloc_expr(
-                        Expr::Call {
-                            func: func_name,
-                            args: arg_ids,
-                        },
-                        ty,
-                        span,
-                        node_id,
-                    );
-                }
-
                 // Check if inner_term is a variable with a known static function value
                 if let Some(func_name) = self.extract_static_value(inner_term) {
-                    // Direct call to the known function
-                    let arg_id = self.transform_term(arg, body);
-                    return body.alloc_expr(
-                        Expr::Call {
-                            func: func_name,
-                            args: vec![arg_id],
-                        },
-                        ty,
-                        span,
-                        node_id,
-                    );
+                    // Check the function's arity to determine if this is a full call or partial application
+                    let func_arity = self.top_level.get(&func_name).map(|d| d.arity).unwrap_or(1);
+
+                    if func_arity > 1 {
+                        // Partial application - create a Closure with the arg as a capture
+                        let arg_id = self.transform_term(arg, body);
+                        return body.alloc_expr(
+                            Expr::Closure {
+                                lambda_name: func_name,
+                                captures: vec![arg_id],
+                            },
+                            ty,
+                            span,
+                            node_id,
+                        );
+                    } else {
+                        // Direct call to the known function (arity 1)
+                        let arg_id = self.transform_term(arg, body);
+                        return body.alloc_expr(
+                            Expr::Call {
+                                func: func_name,
+                                args: vec![arg_id],
+                            },
+                            ty,
+                            span,
+                            node_id,
+                        );
+                    }
                 }
 
                 // Check if inner_term is a binop partial application
@@ -523,7 +539,7 @@ impl TlcToMir {
                     }
 
                     // Check for two-arg intrinsics: _w_index, _w_tuple_proj
-                    if let FunctionName::Intrinsic(name) = inner_func.as_ref() {
+                    if let FunctionName::Var(name) = inner_func.as_ref() {
                         match name.as_str() {
                             "_w_index" | "_w_tuple_proj" => {
                                 // Two-arg intrinsic: complete with both args
@@ -540,28 +556,6 @@ impl TlcToMir {
                                 );
                             }
                             _ => {}
-                        }
-                    }
-
-                    // Check for three-arg intrinsics like _w_loop_while
-                    // Pattern: App(App(App(Var("_w_loop_while"), init), cond), body)
-                    // At this level: inner_func = Term(App(Var("_w_loop_while"), init)), first_arg = cond
-                    if let FunctionName::Term(inner_inner_term) = inner_func.as_ref() {
-                        if let TermKind::App {
-                            func: innermost_func,
-                            arg: init_arg,
-                        } = &inner_inner_term.kind
-                        {
-                            if let FunctionName::Intrinsic(intrinsic_name) = innermost_func.as_ref() {
-                                if intrinsic_name == "_w_loop_while" {
-                                    return self.transform_loop_while(
-                                        init_arg,  // init
-                                        first_arg, // cond_func
-                                        arg,       // body_func
-                                        ty, span, node_id, body,
-                                    );
-                                }
-                            }
                         }
                     }
                 }
@@ -648,17 +642,8 @@ impl TlcToMir {
                         }
                         "_w_tuple" => body.alloc_expr(Expr::Tuple(args), ty, span, node_id),
                         "_w_range" if args.len() == 3 => {
-                            // _w_range(start, end, kind)
-                            // kind: 0=Inclusive, 1=Exclusive, 2=ExclusiveLt, 3=ExclusiveGt
-                            let kind = match body.get_expr(args[2]) {
-                                Expr::Int(s) => match s.parse::<i32>().unwrap_or(2) {
-                                    0 => mir::RangeKind::Inclusive,
-                                    1 => mir::RangeKind::Exclusive,
-                                    3 => mir::RangeKind::ExclusiveGt,
-                                    _ => mir::RangeKind::ExclusiveLt,
-                                },
-                                _ => mir::RangeKind::ExclusiveLt,
-                            };
+                            // _w_range start end kind -> Array with Range backing
+                            let kind = self.extract_range_kind(body, args[2]);
                             body.alloc_expr(
                                 Expr::Array {
                                     backing: mir::ArrayBacking::Range {
@@ -666,7 +651,7 @@ impl TlcToMir {
                                         step: None,
                                         kind,
                                     },
-                                    size: args[1],
+                                    size: args[1], // end is the size
                                 },
                                 ty,
                                 span,
@@ -674,16 +659,8 @@ impl TlcToMir {
                             )
                         }
                         "_w_range_step" if args.len() == 4 => {
-                            // _w_range_step(start, step, end, kind)
-                            let kind = match body.get_expr(args[3]) {
-                                Expr::Int(s) => match s.parse::<i32>().unwrap_or(2) {
-                                    0 => mir::RangeKind::Inclusive,
-                                    1 => mir::RangeKind::Exclusive,
-                                    3 => mir::RangeKind::ExclusiveGt,
-                                    _ => mir::RangeKind::ExclusiveLt,
-                                },
-                                _ => mir::RangeKind::ExclusiveLt,
-                            };
+                            // _w_range_step start step end kind -> Array with Range backing
+                            let kind = self.extract_range_kind(body, args[3]);
                             body.alloc_expr(
                                 Expr::Array {
                                     backing: mir::ArrayBacking::Range {
@@ -691,7 +668,7 @@ impl TlcToMir {
                                         step: Some(args[1]),
                                         kind,
                                     },
-                                    size: args[2],
+                                    size: args[2], // end is the size
                                 },
                                 ty,
                                 span,
@@ -716,69 +693,15 @@ impl TlcToMir {
                     // Extend an intrinsic with more arguments
                     let mut args = existing_args;
                     args.push(arg_id);
-
-                    // Check for special intrinsics that should become MIR constructs
-                    match intrinsic_name.as_str() {
-                        "_w_range" if args.len() == 3 => {
-                            // _w_range(start, end, kind)
-                            let kind = match body.get_expr(args[2]) {
-                                Expr::Int(s) => match s.parse::<i32>().unwrap_or(2) {
-                                    0 => mir::RangeKind::Inclusive,
-                                    1 => mir::RangeKind::Exclusive,
-                                    3 => mir::RangeKind::ExclusiveGt,
-                                    _ => mir::RangeKind::ExclusiveLt,
-                                },
-                                _ => mir::RangeKind::ExclusiveLt,
-                            };
-                            body.alloc_expr(
-                                Expr::Array {
-                                    backing: mir::ArrayBacking::Range {
-                                        start: args[0],
-                                        step: None,
-                                        kind,
-                                    },
-                                    size: args[1],
-                                },
-                                ty,
-                                span,
-                                node_id,
-                            )
-                        }
-                        "_w_range_step" if args.len() == 4 => {
-                            // _w_range_step(start, step, end, kind)
-                            let kind = match body.get_expr(args[3]) {
-                                Expr::Int(s) => match s.parse::<i32>().unwrap_or(2) {
-                                    0 => mir::RangeKind::Inclusive,
-                                    1 => mir::RangeKind::Exclusive,
-                                    3 => mir::RangeKind::ExclusiveGt,
-                                    _ => mir::RangeKind::ExclusiveLt,
-                                },
-                                _ => mir::RangeKind::ExclusiveLt,
-                            };
-                            body.alloc_expr(
-                                Expr::Array {
-                                    backing: mir::ArrayBacking::Range {
-                                        start: args[0],
-                                        step: Some(args[1]),
-                                        kind,
-                                    },
-                                    size: args[2],
-                                },
-                                ty,
-                                span,
-                                node_id,
-                            )
-                        }
-                        _ => body.alloc_expr(
-                            Expr::Intrinsic {
-                                name: intrinsic_name,
-                                args,
-                            },
-                            ty,
-                            span,
-                            node_id,
-                        ),
-                    }
+                    body.alloc_expr(
+                        Expr::Intrinsic {
+                            name: intrinsic_name,
+                            args,
+                        },
+                        ty,
+                        span,
+                        node_id,
+                    )
                 } else if let Expr::Tuple(existing_elems) = body.get_expr(func_id).clone() {
                     // Extend an existing tuple literal
                     let mut elems = existing_elems;
@@ -813,6 +736,40 @@ impl TlcToMir {
                         span,
                         node_id,
                     )
+                } else if let Expr::Closure {
+                    lambda_name,
+                    captures: existing_captures,
+                } = body.get_expr(func_id).clone()
+                {
+                    // Extend closure with another captured argument
+                    let mut captures = existing_captures;
+                    captures.push(arg_id);
+
+                    // Check if we now have all arguments for a full call
+                    let func_arity = self.top_level.get(&lambda_name).map(|d| d.arity).unwrap_or(0);
+                    if captures.len() == func_arity {
+                        // Full application - convert to Call
+                        body.alloc_expr(
+                            Expr::Call {
+                                func: lambda_name,
+                                args: captures,
+                            },
+                            ty,
+                            span,
+                            node_id,
+                        )
+                    } else {
+                        // Still partial - keep as Closure
+                        body.alloc_expr(
+                            Expr::Closure {
+                                lambda_name,
+                                captures,
+                            },
+                            ty,
+                            span,
+                            node_id,
+                        )
+                    }
                 } else {
                     // True higher-order application - need closure apply
                     // For now, emit as intrinsic call
@@ -837,186 +794,149 @@ impl TlcToMir {
         vec![self.transform_term(term, body)]
     }
 
-    /// Walk a curried application chain and collect function name + all arg Terms.
-    /// Returns Some((func_name, is_intrinsic, arity, args)) if this is a saturated call
-    /// to a known function. Args are in application order (first arg first).
-    /// Returns None if not a known function call or not fully saturated.
-    fn try_collect_saturated_call<'a>(
-        &self,
-        func: &'a FunctionName,
-        first_arg: &'a Term,
-    ) -> Option<(String, bool, Vec<&'a Term>)> {
-        let mut args = vec![first_arg];
-        let mut current_func = func;
-
-        loop {
-            match current_func {
-                FunctionName::Var(name) => {
-                    // Found the base function - check arity
-                    if let Some(def) = self.top_level.get(name) {
-                        if def.arity > 0 && args.len() == def.arity {
-                            args.reverse();
-                            return Some((name.clone(), false, args));
-                        }
-                    }
-                    return None;
-                }
-                FunctionName::Intrinsic(name) => {
-                    // Look up intrinsic arity
-                    if let Some(&arity) = self.intrinsic_arities.get(name) {
-                        if arity > 0 && args.len() == arity {
-                            args.reverse();
-                            return Some((name.clone(), true, args));
-                        }
-                    }
-                    return None;
-                }
-                FunctionName::Term(inner_term) => {
-                    match &inner_term.kind {
-                        TermKind::App {
-                            func: inner_func,
-                            arg: inner_arg,
-                        } => {
-                            // Continue walking the chain
-                            args.push(inner_arg.as_ref());
-                            current_func = inner_func.as_ref();
-                        }
-                        TermKind::Var(name) => {
-                            // Found the base function wrapped in Term (from transform_application)
-                            if let Some(def) = self.top_level.get(name) {
-                                if def.arity > 0 && args.len() == def.arity {
-                                    args.reverse();
-                                    return Some((name.clone(), false, args));
-                                }
-                            }
-                            return None;
-                        }
-                        _ => return None,
-                    }
-                }
-                _ => return None, // BinOp, UnOp handled elsewhere
+    /// Extract RangeKind from an integer literal expression.
+    fn extract_range_kind(&self, body: &Body, expr_id: ExprId) -> mir::RangeKind {
+        if let Expr::Int(s) = body.get_expr(expr_id) {
+            match s.as_str() {
+                "0" => mir::RangeKind::Inclusive,
+                "1" => mir::RangeKind::Exclusive,
+                "2" => mir::RangeKind::ExclusiveLt,
+                "3" => mir::RangeKind::ExclusiveGt,
+                _ => mir::RangeKind::Exclusive, // Default
             }
+        } else {
+            mir::RangeKind::Exclusive // Default
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tlc::TermIdSource;
+
+    fn make_span(line: usize, col: usize) -> Span {
+        Span {
+            start_line: line,
+            start_col: col,
+            end_line: line,
+            end_col: col + 1,
         }
     }
 
-    /// Transform a _w_loop_while intrinsic into an Expr::Loop.
-    ///
-    /// The TLC form is: _w_loop_while init cond_func body_func
-    /// Where:
-    /// - init is the initial accumulator value (usually a tuple)
-    /// - cond_func is a function from accumulator → bool
-    /// - body_func is a function from accumulator → accumulator
-    fn transform_loop_while(
-        &mut self,
-        init: &Term,
-        cond_func: &Term,
-        body_func: &Term,
-        result_ty: Type<TypeName>,
-        span: Span,
-        node_id: NodeId,
-        body: &mut Body,
-    ) -> ExprId {
-        // Transform the initial value
-        let init_id = self.transform_term(init, body);
-        let init_ty = init.ty.clone();
+    #[test]
+    fn test_transform_simple_function() {
+        // def add(x, y) = x + y
+        // In TLC (after lifting): def add = |x| |y| (+) x y
+        let mut ids = TermIdSource::new();
+        let span = make_span(1, 1);
 
-        // Create a loop variable for the accumulator
-        let loop_var_name = format!("_loop_acc_{}", node_id.0);
-        let loop_var = body.alloc_local(LocalDecl {
-            name: loop_var_name.clone(),
-            ty: init_ty.clone(),
-            kind: LocalKind::LoopVar,
+        let x_var = Term {
+            id: ids.next_id(),
+            ty: Type::Constructed(TypeName::Int(32), vec![]),
             span,
-        });
+            kind: TermKind::Var("x".to_string()),
+        };
 
-        // Add to locals map so it can be referenced in cond/body
-        self.locals.insert(loop_var_name.clone(), loop_var);
+        let y_var = Term {
+            id: ids.next_id(),
+            ty: Type::Constructed(TypeName::Int(32), vec![]),
+            span,
+            kind: TermKind::Var("y".to_string()),
+        };
 
-        // Create a reference to the loop variable
-        let loop_var_ref = body.alloc_expr(Expr::Local(loop_var), init_ty.clone(), span, node_id);
-
-        // Transform the condition: call cond_func with loop_var
-        // We need to figure out the function name and any captures
-        let bool_ty = Type::Constructed(TypeName::Str("bool"), vec![]);
-        let cond_id = self.emit_func_call_with_arg(cond_func, loop_var_ref, bool_ty, span, node_id, body);
-
-        // Create another reference to the loop variable for the body
-        let loop_var_ref2 = body.alloc_expr(Expr::Local(loop_var), init_ty, span, node_id);
-
-        // Transform the body: call body_func with loop_var
-        let body_expr_id =
-            self.emit_func_call_with_arg(body_func, loop_var_ref2, result_ty.clone(), span, node_id, body);
-
-        // Remove the temporary local binding
-        self.locals.remove(&loop_var_name);
-
-        // Create the Loop expression
-        body.alloc_expr(
-            Expr::Loop {
-                loop_var,
-                init: init_id,
-                init_bindings: vec![], // No pattern destructuring at MIR level
-                kind: LoopKind::While { cond: cond_id },
-                body: body_expr_id,
+        // Build: (+) x y as App(App(BinOp(+), x), y)
+        use crate::ast::BinaryOp;
+        let binop_x = Term {
+            id: ids.next_id(),
+            ty: Type::Constructed(
+                TypeName::Arrow,
+                vec![
+                    Type::Constructed(TypeName::Int(32), vec![]),
+                    Type::Constructed(TypeName::Int(32), vec![]),
+                ],
+            ),
+            span,
+            kind: TermKind::App {
+                func: Box::new(FunctionName::BinOp(BinaryOp { op: "+".to_string() })),
+                arg: Box::new(x_var),
             },
-            result_ty,
+        };
+
+        let add_body = Term {
+            id: ids.next_id(),
+            ty: Type::Constructed(TypeName::Int(32), vec![]),
             span,
-            node_id,
-        )
-    }
-
-    /// Emit a function call that applies `func_term` to an additional `extra_arg`.
-    ///
-    /// Handles two cases:
-    /// 1. func_term is Var("name") -> Call { func: name, args: [extra_arg] }
-    /// 2. func_term is App(App(...Var("name")..., cap1), cap2) -> Call { func: name, args: [cap1, cap2, extra_arg] }
-    fn emit_func_call_with_arg(
-        &mut self,
-        func_term: &Term,
-        extra_arg: ExprId,
-        result_ty: Type<TypeName>,
-        span: Span,
-        node_id: NodeId,
-        body: &mut Body,
-    ) -> ExprId {
-        // Collect the function name and capture arguments
-        let (func_name, capture_args) = self.collect_func_and_captures(func_term, body);
-
-        // Build args: captures first, then the extra arg
-        let mut args = capture_args;
-        args.push(extra_arg);
-
-        body.alloc_expr(
-            Expr::Call {
-                func: func_name,
-                args,
+            kind: TermKind::App {
+                func: Box::new(FunctionName::Term(Box::new(binop_x))),
+                arg: Box::new(y_var),
             },
-            result_ty,
-            span,
-            node_id,
-        )
-    }
+        };
 
-    /// Collect function name and capture arguments from a term.
-    ///
-    /// For Var("name"): returns ("name", [])
-    /// For App(App(Var("name"), cap1), cap2): returns ("name", [cap1_id, cap2_id])
-    fn collect_func_and_captures(&mut self, term: &Term, body: &mut Body) -> (String, Vec<ExprId>) {
-        match &term.kind {
-            TermKind::Var(name) => (name.clone(), vec![]),
-            TermKind::App { func, arg } => {
-                // Recursively collect from the function position
-                let (func_name, mut caps) = match func.as_ref() {
-                    FunctionName::Var(name) | FunctionName::Intrinsic(name) => (name.clone(), vec![]),
-                    FunctionName::Term(inner) => self.collect_func_and_captures(inner, body),
-                    _ => panic!("Unexpected function form in loop lambda: {:?}", func),
-                };
-                // Transform and add this argument
-                let arg_id = self.transform_term(arg, body);
-                caps.push(arg_id);
-                (func_name, caps)
+        // |y| body
+        let lam_y = Term {
+            id: ids.next_id(),
+            ty: Type::Constructed(
+                TypeName::Arrow,
+                vec![
+                    Type::Constructed(TypeName::Int(32), vec![]),
+                    Type::Constructed(TypeName::Int(32), vec![]),
+                ],
+            ),
+            span,
+            kind: TermKind::Lam {
+                param: "y".to_string(),
+                param_ty: Type::Constructed(TypeName::Int(32), vec![]),
+                body: Box::new(add_body),
+            },
+        };
+
+        // |x| |y| body
+        let lam_x = Term {
+            id: ids.next_id(),
+            ty: Type::Constructed(
+                TypeName::Arrow,
+                vec![
+                    Type::Constructed(TypeName::Int(32), vec![]),
+                    Type::Constructed(
+                        TypeName::Arrow,
+                        vec![
+                            Type::Constructed(TypeName::Int(32), vec![]),
+                            Type::Constructed(TypeName::Int(32), vec![]),
+                        ],
+                    ),
+                ],
+            ),
+            span,
+            kind: TermKind::Lam {
+                param: "x".to_string(),
+                param_ty: Type::Constructed(TypeName::Int(32), vec![]),
+                body: Box::new(lam_y),
+            },
+        };
+
+        let program = TlcProgram {
+            defs: vec![TlcDef {
+                name: "add".to_string(),
+                ty: lam_x.ty.clone(),
+                body: lam_x,
+                meta: super::DefMeta::Function,
+                arity: 2,
+            }],
+            uniforms: vec![],
+            storage: vec![],
+        };
+
+        let schemes = std::collections::HashMap::new();
+        let mir = TlcToMir::transform(&program, &schemes);
+
+        assert_eq!(mir.defs.len(), 1);
+        match &mir.defs[0] {
+            MirDef::Function { name, params, .. } => {
+                assert_eq!(name, "add");
+                assert_eq!(params.len(), 2);
             }
-            _ => panic!("Unexpected term form in loop lambda: {:?}", term.kind),
+            _ => panic!("Expected Function"),
         }
     }
 }

@@ -267,8 +267,13 @@ fn analyze_inplace_ops(source: &str) -> InPlaceInfo {
     let type_checked =
         folded.type_check(&frontend.module_manager, &mut frontend.schemes).expect("type_check failed");
     let alias_checked = type_checked.alias_check().expect("alias check failed");
-    let (flattened, _backend) =
-        alias_checked.flatten(&frontend.module_manager, &frontend.schemes).expect("flatten failed");
+
+    let builtins = crate::build_builtins(&alias_checked.ast, &frontend.module_manager);
+    let flattened = alias_checked
+        .to_tlc(builtins, &frontend.module_manager, &frontend.schemes)
+        .skip_partial_eval()
+        .lift()
+        .to_mir();
 
     // For tests without entry points, analyze after flattening (before monomorphization)
     // since filter_reachable would remove all defs without an entry point

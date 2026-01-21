@@ -206,7 +206,7 @@ impl PartialEvaluator {
                 }
             }
 
-            FunctionName::Var(name) | FunctionName::Intrinsic(name) => self.apply_var(name, args, original),
+            FunctionName::Var(name) => self.apply_var(name, args, original),
 
             FunctionName::Term(_) => {
                 // Higher-order - shouldn't happen after spine collection

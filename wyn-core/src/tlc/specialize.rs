@@ -7,14 +7,6 @@ use super::{Def, FunctionName, Program, Term, TermIdSource, TermKind};
 use crate::ast::TypeName;
 use polytype::Type;
 
-/// Shape classification for matrix multiplication dispatch
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum ArgShape {
-    Matrix,
-    Vector,
-    Other,
-}
-
 /// Specialize polymorphic intrinsics in a TLC program.
 pub fn specialize(program: Program) -> Program {
     let mut specializer = Specializer {
@@ -111,120 +103,78 @@ impl Specializer {
                 if let TermKind::Var(name) = &t.kind {
                     let specialized_name = self.specialize_name(name, &arg.ty);
                     if specialized_name != *name {
-                        // Specialize the type too: polymorphic A -> A becomes concrete arg_ty -> arg_ty
-                        let specialized_ty = self.specialize_unary_type(&t.ty, &arg.ty);
                         // Return specialized var wrapped in Term
                         let specialized_term = Term {
                             id: self.term_ids.next_id(),
-                            ty: specialized_ty,
+                            ty: t.ty.clone(),
                             span: t.span,
                             kind: TermKind::Var(specialized_name),
                         };
                         return FunctionName::Term(Box::new(specialized_term));
                     }
                 }
-                // Check for 2-arg functions like mul: App(App(mul, arg1), arg2)
-                // Here t is App(mul, arg1) and arg is arg2
+
+                // Check for fully-applied binary functions like mul
+                // Pattern: App { func: Term(App { func: Term(Var("mul")), arg: first_arg }), arg: second_arg }
+                // We're in specialize_func for the outer App, so:
+                // - t is the inner App { func: Term(Var("mul")), arg: first_arg }
+                // - arg is the second_arg
                 if let TermKind::App {
                     func: inner_func,
-                    arg: inner_arg,
+                    arg: first_arg,
                 } = &t.kind
                 {
-                    if let Some(func_name) = Self::extract_func_name(inner_func) {
+                    // Check if inner_func is Var("mul") (direct) or Term(Var("mul")) (wrapped)
+                    let maybe_mul_name = match inner_func.as_ref() {
+                        FunctionName::Var(name) => Some(name.as_str()),
+                        FunctionName::Term(term) => {
+                            if let TermKind::Var(name) = &term.kind {
+                                Some(name.as_str())
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
+
+                    if maybe_mul_name == Some("mul") {
+                        // Specialize mul based on both arg types
                         if let Some(specialized_name) =
-                            self.specialize_two_arg(&func_name, &inner_arg.ty, &arg.ty)
+                            self.specialize_mul(&first_arg.ty, &arg.ty)
                         {
-                            // Specialize the inner arg recursively
-                            let specialized_inner_arg = self.specialize_term(*inner_arg.clone());
-                            // Specialize the type: partial app type becomes (arg2_ty -> result_ty)
-                            let specialized_partial_ty =
-                                self.specialize_mul_partial_type(&func_name, &inner_arg.ty, &arg.ty);
-                            // Rebuild: App(specialized_name, inner_arg)
-                            let new_inner_app = Term {
+                            // Build: App { func: Var(specialized_name), arg: first_arg }
+                            // This becomes the new inner term
+                            let specialized_first_arg = self.specialize_term(*first_arg.clone());
+                            let new_inner = Term {
                                 id: self.term_ids.next_id(),
-                                ty: specialized_partial_ty,
+                                ty: t.ty.clone(),
                                 span: t.span,
                                 kind: TermKind::App {
                                     func: Box::new(FunctionName::Var(specialized_name)),
-                                    arg: Box::new(specialized_inner_arg),
+                                    arg: Box::new(specialized_first_arg),
                                 },
                             };
-                            return FunctionName::Term(Box::new(new_inner_app));
+                            return FunctionName::Term(Box::new(new_inner));
                         }
                     }
                 }
+
                 // For nested applications or other terms, recursively specialize
                 let specialized = self.specialize_term(*t);
                 FunctionName::Term(Box::new(specialized))
             }
-            // Intrinsic, BinOp, and UnOp don't need specialization
+            // BinOp and UnOp don't need specialization
             other => other,
         }
     }
 
-    /// Extract function name from a FunctionName if it's a simple Var or Intrinsic
-    fn extract_func_name(func: &FunctionName) -> Option<String> {
-        match func {
-            FunctionName::Var(name) | FunctionName::Intrinsic(name) => Some(name.clone()),
-            FunctionName::Term(t) => {
-                if let TermKind::Var(name) = &t.kind {
-                    Some(name.clone())
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-    }
-
-    /// Specialize two-argument functions based on both argument types.
-    /// Returns None if no specialization needed.
-    fn specialize_two_arg(
-        &self,
-        name: &str,
-        arg1_ty: &Type<TypeName>,
-        arg2_ty: &Type<TypeName>,
-    ) -> Option<String> {
-        // Note: Aliases are resolved in name_resolution, so mul -> _w_intrinsic_mul
-        match name {
-            "_w_intrinsic_mul" => {
-                let shape1 = self.classify_shape(arg1_ty);
-                let shape2 = self.classify_shape(arg2_ty);
-                match (shape1, shape2) {
-                    (ArgShape::Matrix, ArgShape::Matrix) => Some("_w_intrinsic_mul_mat_mat".to_string()),
-                    (ArgShape::Matrix, ArgShape::Vector) => Some("_w_intrinsic_mul_mat_vec".to_string()),
-                    (ArgShape::Vector, ArgShape::Matrix) => Some("_w_intrinsic_mul_vec_mat".to_string()),
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
-    }
-
-    /// Classify a type as Matrix, Vector, or Other
-    fn classify_shape(&self, ty: &Type<TypeName>) -> ArgShape {
-        match ty {
-            Type::Constructed(TypeName::Mat, _) => ArgShape::Matrix,
-            Type::Constructed(TypeName::Vec, _) => ArgShape::Vector,
-            _ => ArgShape::Other,
-        }
-    }
-
     /// Specialize a function name based on argument type.
-    /// Transforms: abs, sign, min, max → f32.abs, i32.sign, etc.
-    /// Also handles intrinsic names: _w_intrinsic_floor → f32.floor, etc.
+    /// Transforms: abs, sign, min, max, clamp → f32.abs, i32.sign, etc.
     fn specialize_name(&self, name: &str, arg_ty: &Type<TypeName>) -> String {
-        // Note: Aliases are resolved in name_resolution
-        // Direct names (not aliased): abs, sign, min, max
-        // Intrinsic names (from aliases): _w_intrinsic_floor, _w_intrinsic_ceil, etc.
-
-        // Extract base name from intrinsic prefix if present
-        let base_name = name.strip_prefix("_w_intrinsic_").unwrap_or(name);
-
-        match base_name {
-            "abs" | "sign" | "floor" | "ceil" | "fract" | "min" | "max" | "clamp" => {
+        match name {
+            "abs" | "sign" | "min" | "max" | "clamp" => {
                 if let Some(prefix) = self.type_prefix(arg_ty) {
-                    format!("{}.{}", prefix, base_name)
+                    format!("{}.{}", prefix, name)
                 } else {
                     name.to_string()
                 }
@@ -249,56 +199,36 @@ impl Specializer {
         }
     }
 
-    /// Specialize a unary function type (A -> A) to concrete (arg_ty -> arg_ty).
-    /// For functions like abs, sign, floor, ceil, fract that have signature A -> A.
-    fn specialize_unary_type(&self, _func_ty: &Type<TypeName>, arg_ty: &Type<TypeName>) -> Type<TypeName> {
-        // Unary intrinsics like abs, sign, floor, ceil, fract have signature: A -> A
-        // When specialized, they become: concrete -> concrete
-        Type::Constructed(TypeName::Arrow, vec![arg_ty.clone(), arg_ty.clone()])
+    /// Specialize mul based on argument shapes.
+    /// Returns the specialized name: mul_mat_mat, mul_mat_vec, or mul_vec_mat
+    fn specialize_mul(&self, first_ty: &Type<TypeName>, second_ty: &Type<TypeName>) -> Option<String> {
+        let shape1 = Self::classify_shape(first_ty);
+        let shape2 = Self::classify_shape(second_ty);
+
+        match (shape1, shape2) {
+            (ArgShape::Matrix, ArgShape::Matrix) => Some("mul_mat_mat".to_string()),
+            (ArgShape::Matrix, ArgShape::Vector) => Some("mul_mat_vec".to_string()),
+            (ArgShape::Vector, ArgShape::Matrix) => Some("mul_vec_mat".to_string()),
+            _ => None, // Fall back to original mul (will error later if truly invalid)
+        }
     }
 
-    /// Specialize the partial application type for mul operations.
-    /// Returns the type after applying the first argument (arg2_ty -> result_ty).
-    fn specialize_mul_partial_type(
-        &self,
-        func_name: &str,
-        arg1_ty: &Type<TypeName>,
-        arg2_ty: &Type<TypeName>,
-    ) -> Type<TypeName> {
-        // Compute the result type based on the shapes
-        let result_ty = match func_name {
-            "mul" => {
-                let shape1 = self.classify_shape(arg1_ty);
-                let shape2 = self.classify_shape(arg2_ty);
-                match (shape1, shape2) {
-                    // mat * mat = mat
-                    (ArgShape::Matrix, ArgShape::Matrix) => arg1_ty.clone(),
-                    // mat * vec = vec (columns of matrix)
-                    (ArgShape::Matrix, ArgShape::Vector) => arg2_ty.clone(),
-                    // vec * mat = vec (rows of result)
-                    (ArgShape::Vector, ArgShape::Matrix) => {
-                        // Result is a vector with size = number of columns in matrix
-                        // Extract column count from mat type
-                        if let Type::Constructed(TypeName::Mat, args) = arg2_ty {
-                            if args.len() >= 3 {
-                                // mat(rows, cols, elem) -> vec(cols, elem)
-                                return Type::Constructed(
-                                    TypeName::Vec,
-                                    vec![args[1].clone(), args[2].clone()],
-                                );
-                            }
-                        }
-                        arg1_ty.clone() // fallback
-                    }
-                    _ => arg1_ty.clone(), // scalar or unknown
-                }
-            }
-            _ => arg1_ty.clone(), // unknown function
-        };
-
-        // Return partial application type: arg2_ty -> result_ty
-        Type::Constructed(TypeName::Arrow, vec![arg2_ty.clone(), result_ty])
+    /// Classify a type as Matrix, Vector, or Other for mul specialization
+    fn classify_shape(ty: &Type<TypeName>) -> ArgShape {
+        match ty {
+            Type::Constructed(TypeName::Mat, _) => ArgShape::Matrix,
+            Type::Constructed(TypeName::Vec, _) => ArgShape::Vector,
+            _ => ArgShape::Other,
+        }
     }
+}
+
+/// Argument shape classification for mul specialization
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ArgShape {
+    Matrix,
+    Vector,
+    Other,
 }
 
 #[cfg(test)]
@@ -443,7 +373,10 @@ mod tests {
             kind: TermKind::Var("b".to_string()),
         };
 
-        let partial_ty = Type::Constructed(TypeName::Arrow, vec![i32_ty.clone(), i32_ty.clone()]);
+        let partial_ty = Type::Constructed(
+            TypeName::Arrow,
+            vec![i32_ty.clone(), i32_ty.clone()],
+        );
 
         let min_a = Term {
             id: ids.next_id(),

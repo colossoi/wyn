@@ -1088,7 +1088,7 @@ impl tlc::Term {
                     write!(f, "(")?;
                 }
                 match func.as_ref() {
-                    tlc::FunctionName::Var(name) | tlc::FunctionName::Intrinsic(name) => {
+                    tlc::FunctionName::Var(name) => {
                         write!(f, "{}", name)?
                     }
                     tlc::FunctionName::BinOp(op) => write!(f, "({})", op.op)?,

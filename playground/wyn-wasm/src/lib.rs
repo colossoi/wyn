@@ -201,11 +201,15 @@ fn compile_impl(source: &str) -> CompileResult {
         return CompileResult::err_msg("Alias checking failed".to_string());
     }
 
-    // Flatten to MIR
-    let (flattened, _backend) = match alias_checked.flatten(&frontend.module_manager, &frontend.schemes) {
-        Ok(f) => f,
-        Err(e) => return CompileResult::err(e),
-    };
+    // Build builtins set for lambda lifting
+    let builtins = wyn_core::build_builtins(&alias_checked.ast, &frontend.module_manager);
+
+    // Transform to TLC and then to MIR
+    let flattened = alias_checked
+        .to_tlc(builtins, &frontend.module_manager, &frontend.schemes)
+        .partial_eval()
+        .lift()
+        .to_mir();
 
     // MIR passes
     let hoisted = flattened.hoist_materializations();
@@ -215,11 +219,7 @@ fn compile_impl(source: &str) -> CompileResult {
         Err(e) => return CompileResult::err(e),
     };
 
-    // Use partial eval for better optimization
-    let folded = match monomorphized.partial_eval() {
-        Ok(f) => f,
-        Err(e) => return CompileResult::err(e),
-    };
+    let folded = monomorphized.skip_folding();
 
     let reachable = folded.filter_reachable();
     let lifted = reachable.lift_bindings();

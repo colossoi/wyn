@@ -204,9 +204,9 @@ fn compile_file(
     // Build builtins set for lambda lifting (names that should not be captured)
     let builtins = wyn_core::build_builtins(&alias_checked.ast, &frontend.module_manager);
 
-    // Transform to TLC
+    // Transform to TLC (including prelude functions)
     let tlc_transformed = time("to_tlc", verbose, || {
-        alias_checked.to_tlc(builtins, &frontend.module_manager)
+        alias_checked.to_tlc(builtins, &frontend.module_manager, &frontend.schemes)
     });
 
     // Output TLC if requested (before optimization)
@@ -217,18 +217,18 @@ fn compile_file(
         }
     }
 
-    // Lift lambdas to top-level
-    let tlc_lifted = time("tlc_lift", verbose, || tlc_transformed.lift());
-
     // Apply TLC partial evaluation if enabled
     let tlc_optimized = if partial_eval {
-        time("tlc_partial_eval", verbose, || tlc_lifted.partial_eval())
+        time("tlc_partial_eval", verbose, || tlc_transformed.partial_eval())
     } else {
-        tlc_lifted.skip_partial_eval()
+        tlc_transformed.skip_partial_eval()
     };
 
+    // Lift lambdas to top-level
+    let tlc_lifted = time("tlc_lift", verbose, || tlc_optimized.lift());
+
     // Transform TLC to MIR
-    let flattened = time("to_mir", verbose, || tlc_optimized.to_mir());
+    let flattened = time("to_mir", verbose, || tlc_lifted.to_mir());
 
     // Write initial MIR if requested (right after TLC→MIR)
     write_mir_if_requested(&flattened.mir, &output_init_mir, "initial MIR", verbose)?;

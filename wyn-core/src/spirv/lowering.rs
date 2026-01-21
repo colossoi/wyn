@@ -2029,10 +2029,65 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
             // Get the result type from the expression
             let result_type = constructor.ast_type_to_spirv(expr_ty);
 
-            // Special case for _w_intrinsic_array_with - check for in-place optimization
-            if func == "_w_intrinsic_array_with" {
+            // SOAC (Second-Order Array Combinator) intrinsic dispatch
+            match func.as_str() {
+                "_w_intrinsic_map" => {
+                    // Non-mutating map: always produces a new value array
+                    // For storage inputs: loads elements, transforms, builds value array
+                    return lower_map(constructor, body, args, expr_ty, result_type);
+                }
+                "_w_intrinsic_inplace_map" => {
+                    // In-place map: may mutate storage arrays
+                    // For storage inputs: reads/writes in-place to same buffer
+                    // For value inputs: builds new array (same as map)
+                    return lower_inplace_map(constructor, body, args, expr_ty, result_type);
+                }
+                "_w_intrinsic_zip" => {
+                    return lower_zip(constructor, body, args, result_type);
+                }
+                "_w_intrinsic_reduce" => {
+                    return lower_reduce(constructor, body, args, result_type);
+                }
+                "_w_intrinsic_scan" => {
+                    return lower_scan(constructor, body, args, result_type);
+                }
+                "_w_intrinsic_filter" => {
+                    return lower_filter(constructor, body, args, result_type);
+                }
+                "_w_intrinsic_scatter" => {
+                    return lower_scatter(constructor, body, args, result_type);
+                }
+                "_w_intrinsic_hist_1d" => {
+                    return lower_hist_1d(constructor, body, args, result_type);
+                }
+                "_w_intrinsic_length" => {
+                    return lower_length(constructor, body, args);
+                }
+                "_w_intrinsic_replicate" => {
+                    return lower_replicate(constructor, body, args, expr_ty, result_type);
+                }
+                "_w_intrinsic_rotr32" => {
+                    return lower_rotr32(constructor, body, args);
+                }
+                "_w_intrinsic_sha256_block" => {
+                    return lower_sha256_block(constructor, body, args, result_type);
+                }
+                "_w_intrinsic_sha256_block_with_state" => {
+                    return lower_sha256_block_with_state(constructor, body, args, result_type);
+                }
+                "_w_loop_while" => {
+                    return lower_loop_while(constructor, body, args, result_type);
+                }
+                "_w_loop_for" => {
+                    return lower_loop_for(constructor, body, args, result_type);
+                }
+                _ => {} // Fall through to other special cases and regular calls
+            }
+
+            // Special case for _w_array_with - check for in-place optimization
+            if func == "_w_array_with" {
                 if args.len() != 3 {
-                    bail_spirv!("_w_intrinsic_array_with requires 3 args (array, index, value)");
+                    bail_spirv!("_w_array_with requires 3 args (array, index, value)");
                 }
 
                 // Lower arguments
@@ -2056,7 +2111,7 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                     )?);
                 } else {
                     // Non-in-place: use copy-modify-load pattern
-                    let arr_var = constructor.declare_variable("_w_intrinsic_array_with_tmp", result_type)?;
+                    let arr_var = constructor.declare_variable("_w_array_with_tmp", result_type)?;
                     constructor.builder.store(arr_var, arr_id, None, [])?;
 
                     // Get pointer to element and store new value
@@ -2085,8 +2140,195 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                 }
                 _ => {
                     // Check if it's a builtin function
-                    if let Some(result) = try_lower_builtin(constructor, body, func, args, &arg_ids, result_type) {
-                        result
+                    if let Some(builtin_impl) = constructor.impl_source.get(func) {
+                        match builtin_impl {
+                            BuiltinImpl::PrimOp(spirv_op) => {
+                                // Handle core SPIR-V operations
+                                match spirv_op {
+                                    PrimOp::GlslExt(ext_op) => {
+                                        // Call GLSL extended instruction
+                                        let glsl_id = constructor.glsl_ext_inst_id;
+                                        let operands: Vec<Operand> =
+                                            arg_ids.iter().map(|&id| Operand::IdRef(id)).collect();
+                                        Ok(constructor.builder.ext_inst(
+                                            result_type,
+                                            None,
+                                            glsl_id,
+                                            *ext_op,
+                                            operands,
+                                        )?)
+                                    }
+                                    PrimOp::Dot => {
+                                        if arg_ids.len() != 2 {
+                                            bail_spirv!("dot requires 2 args");
+                                        }
+                                        Ok(constructor.builder.dot(
+                                            result_type,
+                                            None,
+                                            arg_ids[0],
+                                            arg_ids[1],
+                                        )?)
+                                    }
+                                    PrimOp::MatrixTimesMatrix => {
+                                        if arg_ids.len() != 2 {
+                                            bail_spirv!("matrix × matrix requires 2 args");
+                                        }
+                                        Ok(constructor.builder.matrix_times_matrix(
+                                            result_type,
+                                            None,
+                                            arg_ids[0],
+                                            arg_ids[1],
+                                        )?)
+                                    }
+                                    PrimOp::MatrixTimesVector => {
+                                        if arg_ids.len() != 2 {
+                                            bail_spirv!("matrix × vector requires 2 args");
+                                        }
+                                        Ok(constructor.builder.matrix_times_vector(
+                                            result_type,
+                                            None,
+                                            arg_ids[0],
+                                            arg_ids[1],
+                                        )?)
+                                    }
+                                    PrimOp::VectorTimesMatrix => {
+                                        if arg_ids.len() != 2 {
+                                            bail_spirv!("vector × matrix requires 2 args");
+                                        }
+                                        Ok(constructor.builder.vector_times_matrix(
+                                            result_type,
+                                            None,
+                                            arg_ids[0],
+                                            arg_ids[1],
+                                        )?)
+                                    }
+                                    // Type conversions
+                                    PrimOp::FPToSI => {
+                                        if arg_ids.len() != 1 {
+                                            bail_spirv!("FPToSI requires 1 arg");
+                                        }
+                                        Ok(constructor.builder.convert_f_to_s(
+                                            result_type,
+                                            None,
+                                            arg_ids[0],
+                                        )?)
+                                    }
+                                    PrimOp::FPToUI => {
+                                        if arg_ids.len() != 1 {
+                                            bail_spirv!("FPToUI requires 1 arg");
+                                        }
+                                        Ok(constructor.builder.convert_f_to_u(
+                                            result_type,
+                                            None,
+                                            arg_ids[0],
+                                        )?)
+                                    }
+                                    PrimOp::SIToFP => {
+                                        if arg_ids.len() != 1 {
+                                            bail_spirv!("SIToFP requires 1 arg");
+                                        }
+                                        Ok(constructor.builder.convert_s_to_f(
+                                            result_type,
+                                            None,
+                                            arg_ids[0],
+                                        )?)
+                                    }
+                                    PrimOp::UIToFP => {
+                                        if arg_ids.len() != 1 {
+                                            bail_spirv!("UIToFP requires 1 arg");
+                                        }
+                                        Ok(constructor.builder.convert_u_to_f(
+                                            result_type,
+                                            None,
+                                            arg_ids[0],
+                                        )?)
+                                    }
+                                    PrimOp::FPConvert => {
+                                        if arg_ids.len() != 1 {
+                                            bail_spirv!("FPConvert requires 1 arg");
+                                        }
+                                        Ok(constructor.builder.f_convert(result_type, None, arg_ids[0])?)
+                                    }
+                                    PrimOp::SConvert => {
+                                        if arg_ids.len() != 1 {
+                                            bail_spirv!("SConvert requires 1 arg");
+                                        }
+                                        Ok(constructor.builder.s_convert(result_type, None, arg_ids[0])?)
+                                    }
+                                    PrimOp::UConvert => {
+                                        if arg_ids.len() != 1 {
+                                            bail_spirv!("UConvert requires 1 arg");
+                                        }
+                                        Ok(constructor.builder.u_convert(result_type, None, arg_ids[0])?)
+                                    }
+                                    PrimOp::Bitcast => {
+                                        if arg_ids.len() != 1 {
+                                            bail_spirv!("Bitcast requires 1 arg");
+                                        }
+                                        Ok(constructor.builder.bitcast(result_type, None, arg_ids[0])?)
+                                    }
+                                    _ => {
+                                        bail_spirv!("Unsupported PrimOp for: {}", func)
+                                    }
+                                }
+                            }
+                            BuiltinImpl::Intrinsic(custom_impl) => {
+                                use crate::impl_source::Intrinsic;
+                                match custom_impl {
+                                    Intrinsic::Placeholder if func == "length" => {
+                                        if args.len() != 1 {
+                                            bail_spirv!("length expects exactly 1 argument");
+                                        }
+                                        lower_length_intrinsic(constructor, body, args[0], arg_ids[0])
+                                    }
+                                    Intrinsic::Placeholder => {
+                                        // Other placeholder intrinsics should have been desugared
+                                        bail_spirv!(
+                                            "Placeholder intrinsic '{}' should have been desugared before lowering",
+                                            func
+                                        )
+                                    }
+                                    Intrinsic::Uninit => {
+                                        // Return an undefined value of the result type
+                                        Ok(constructor.builder.undef(result_type, None))
+                                    }
+                                    Intrinsic::ArrayWith => {
+                                        // array_with arr idx val: functional update, returns new array
+                                        if arg_ids.len() != 3 {
+                                            bail_spirv!("array_with expects exactly 3 arguments");
+                                        }
+                                        let arr_id = arg_ids[0];
+                                        let idx_id = arg_ids[1];
+                                        let val_id = arg_ids[2];
+
+                                        // Store array in a variable, update element, load back
+                                        let arr_type = result_type;
+                                        let arr_var =
+                                            constructor.declare_variable("_w_array_with_tmp", arr_type)?;
+                                        constructor.builder.store(arr_var, arr_id, None, [])?;
+
+                                        // Get pointer to element and store new value
+                                        let arg2_ty = body.get_type(args[2]);
+                                        let elem_type = constructor.ast_type_to_spirv(arg2_ty);
+                                        let elem_ptr_type = constructor.builder.type_pointer(
+                                            None,
+                                            StorageClass::Function,
+                                            elem_type,
+                                        );
+                                        let elem_ptr = constructor.builder.access_chain(
+                                            elem_ptr_type,
+                                            None,
+                                            arr_var,
+                                            [idx_id],
+                                        )?;
+                                        constructor.builder.store(elem_ptr, val_id, None, [])?;
+
+                                        // Load and return the updated array
+                                        Ok(constructor.builder.load(arr_type, None, arr_var, None, [])?)
+                                    }
+                                }
+                            }
+                        }
                     } else {
                         // Look up user-defined function
                         let func_id = *constructor
@@ -2104,37 +2346,6 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
             let result_type = constructor.ast_type_to_spirv(expr_ty);
 
             match name.as_str() {
-                // SOAC (Second-Order Array Combinator) intrinsics
-                "_w_intrinsic_map" => {
-                    return lower_map(constructor, body, args, expr_ty, result_type);
-                }
-                "_w_intrinsic_inplace_map" => {
-                    return lower_inplace_map(constructor, body, args, expr_ty, result_type);
-                }
-                "_w_intrinsic_zip" => {
-                    return lower_zip(constructor, body, args, result_type);
-                }
-                "_w_intrinsic_reduce" => {
-                    return lower_reduce(constructor, body, args, result_type);
-                }
-                "_w_intrinsic_scan" => {
-                    return lower_scan(constructor, body, args, result_type);
-                }
-                "_w_intrinsic_filter" => {
-                    return lower_filter(constructor, body, args, result_type);
-                }
-                "_w_intrinsic_scatter" => {
-                    return lower_scatter(constructor, body, args, result_type);
-                }
-                "_w_intrinsic_hist_1d" => {
-                    return lower_hist_1d(constructor, body, args, result_type);
-                }
-                "_w_intrinsic_length" => {
-                    return lower_length(constructor, body, args);
-                }
-                "_w_intrinsic_replicate" => {
-                    return lower_replicate(constructor, body, args, expr_ty, result_type);
-                }
                 "tuple_access" => {
                     if args.len() != 2 {
                         bail_spirv!("tuple_access requires 2 args");
@@ -2217,19 +2428,7 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
 
                     constructor.composite_extract_cached(result_type, composite_id, index)
                 }
-                _ => {
-                    // Fallback: check impl_source for PrimOp intrinsics
-                    let arg_ids: Vec<spirv::Word> = args
-                        .iter()
-                        .map(|&a| lower_expr(constructor, body, a))
-                        .collect::<Result<Vec<_>>>()?;
-
-                    if let Some(result) = try_lower_builtin(constructor, body, name, args, &arg_ids, result_type) {
-                        result
-                    } else {
-                        Err(err_spirv!("Unknown intrinsic: {}", name))
-                    }
-                }
+                _ => Err(err_spirv!("Unknown intrinsic: {}", name)),
             }
         }
 
@@ -2690,152 +2889,6 @@ fn read_elem(
     }
 }
 
-/// Try to lower a builtin function via impl_source lookup.
-/// Returns Some(result) if the name is found in impl_source, None otherwise.
-fn try_lower_builtin(
-    constructor: &mut Constructor,
-    body: &Body,
-    name: &str,
-    args: &[ExprId],
-    arg_ids: &[spirv::Word],
-    result_type: spirv::Word,
-) -> Option<Result<spirv::Word>> {
-    let builtin_impl = constructor.impl_source.get(name)?.clone();
-
-    Some(lower_builtin_impl(constructor, body, name, args, arg_ids, result_type, &builtin_impl))
-}
-
-/// Lower a builtin implementation (PrimOp or Intrinsic).
-fn lower_builtin_impl(
-    constructor: &mut Constructor,
-    body: &Body,
-    name: &str,
-    args: &[ExprId],
-    arg_ids: &[spirv::Word],
-    result_type: spirv::Word,
-    builtin_impl: &BuiltinImpl,
-) -> Result<spirv::Word> {
-    match builtin_impl {
-        BuiltinImpl::PrimOp(spirv_op) => match spirv_op {
-            PrimOp::GlslExt(ext_op) => {
-                let glsl_id = constructor.glsl_ext_inst_id;
-                let operands: Vec<Operand> = arg_ids.iter().map(|&id| Operand::IdRef(id)).collect();
-                Ok(constructor.builder.ext_inst(result_type, None, glsl_id, *ext_op, operands)?)
-            }
-            PrimOp::Dot => {
-                if arg_ids.len() != 2 {
-                    bail_spirv!("dot requires 2 args");
-                }
-                Ok(constructor.builder.dot(result_type, None, arg_ids[0], arg_ids[1])?)
-            }
-            PrimOp::MatrixTimesMatrix => {
-                if arg_ids.len() != 2 {
-                    bail_spirv!("matrix × matrix requires 2 args");
-                }
-                Ok(constructor.builder.matrix_times_matrix(result_type, None, arg_ids[0], arg_ids[1])?)
-            }
-            PrimOp::MatrixTimesVector => {
-                if arg_ids.len() != 2 {
-                    bail_spirv!("matrix × vector requires 2 args");
-                }
-                Ok(constructor.builder.matrix_times_vector(result_type, None, arg_ids[0], arg_ids[1])?)
-            }
-            PrimOp::VectorTimesMatrix => {
-                if arg_ids.len() != 2 {
-                    bail_spirv!("vector × matrix requires 2 args");
-                }
-                Ok(constructor.builder.vector_times_matrix(result_type, None, arg_ids[0], arg_ids[1])?)
-            }
-            PrimOp::FPToSI => {
-                if arg_ids.len() != 1 {
-                    bail_spirv!("FPToSI requires 1 arg");
-                }
-                Ok(constructor.builder.convert_f_to_s(result_type, None, arg_ids[0])?)
-            }
-            PrimOp::FPToUI => {
-                if arg_ids.len() != 1 {
-                    bail_spirv!("FPToUI requires 1 arg");
-                }
-                Ok(constructor.builder.convert_f_to_u(result_type, None, arg_ids[0])?)
-            }
-            PrimOp::SIToFP => {
-                if arg_ids.len() != 1 {
-                    bail_spirv!("SIToFP requires 1 arg");
-                }
-                Ok(constructor.builder.convert_s_to_f(result_type, None, arg_ids[0])?)
-            }
-            PrimOp::UIToFP => {
-                if arg_ids.len() != 1 {
-                    bail_spirv!("UIToFP requires 1 arg");
-                }
-                Ok(constructor.builder.convert_u_to_f(result_type, None, arg_ids[0])?)
-            }
-            PrimOp::FPConvert => {
-                if arg_ids.len() != 1 {
-                    bail_spirv!("FPConvert requires 1 arg");
-                }
-                Ok(constructor.builder.f_convert(result_type, None, arg_ids[0])?)
-            }
-            PrimOp::SConvert => {
-                if arg_ids.len() != 1 {
-                    bail_spirv!("SConvert requires 1 arg");
-                }
-                Ok(constructor.builder.s_convert(result_type, None, arg_ids[0])?)
-            }
-            PrimOp::UConvert => {
-                if arg_ids.len() != 1 {
-                    bail_spirv!("UConvert requires 1 arg");
-                }
-                Ok(constructor.builder.u_convert(result_type, None, arg_ids[0])?)
-            }
-            PrimOp::Bitcast => {
-                if arg_ids.len() != 1 {
-                    bail_spirv!("Bitcast requires 1 arg");
-                }
-                Ok(constructor.builder.bitcast(result_type, None, arg_ids[0])?)
-            }
-            _ => bail_spirv!("Unsupported PrimOp for: {}", name),
-        },
-        BuiltinImpl::Intrinsic(custom_impl) => {
-            use crate::impl_source::Intrinsic;
-            match custom_impl {
-                Intrinsic::Placeholder if name == "length" => {
-                    if args.len() != 1 {
-                        bail_spirv!("length expects exactly 1 argument");
-                    }
-                    lower_length_intrinsic(constructor, body, args[0], arg_ids[0])
-                }
-                Intrinsic::Placeholder => bail_spirv!(
-                    "Placeholder intrinsic '{}' should have been desugared before lowering",
-                    name
-                ),
-                Intrinsic::Uninit => Ok(constructor.builder.undef(result_type, None)),
-                Intrinsic::ArrayWith => {
-                    if arg_ids.len() != 3 {
-                        bail_spirv!("array_with expects exactly 3 arguments");
-                    }
-                    let arr_id = arg_ids[0];
-                    let idx_id = arg_ids[1];
-                    let val_id = arg_ids[2];
-
-                    let arr_type = result_type;
-                    let arr_var = constructor.declare_variable("_w_intrinsic_array_with_tmp", arr_type)?;
-                    constructor.builder.store(arr_var, arr_id, None, [])?;
-
-                    let arg2_ty = body.get_type(args[2]);
-                    let elem_type = constructor.ast_type_to_spirv(arg2_ty);
-                    let elem_ptr_type =
-                        constructor.builder.type_pointer(None, StorageClass::Function, elem_type);
-                    let elem_ptr = constructor.builder.access_chain(elem_ptr_type, None, arr_var, [idx_id])?;
-                    constructor.builder.store(elem_ptr, val_id, None, [])?;
-
-                    Ok(constructor.builder.load(arr_type, None, arr_var, None, [])?)
-                }
-            }
-        }
-    }
-}
-
 /// Lower the `length` intrinsic for arrays and slices.
 /// For static arrays, returns the compile-time size constant.
 /// For unsized arrays, extracts the dynamic length field.
@@ -3036,6 +3089,20 @@ fn extract_closure_info(
     body: &Body,
     arg_expr_id: ExprId,
 ) -> Result<(String, Vec<spirv::Word>)> {
+    extract_closure_info_inner(constructor, body, arg_expr_id, 0)
+}
+
+fn extract_closure_info_inner(
+    constructor: &mut Constructor,
+    body: &Body,
+    arg_expr_id: ExprId,
+    depth: usize,
+) -> Result<(String, Vec<spirv::Word>)> {
+    // Prevent infinite recursion
+    if depth > 10 {
+        bail_spirv!("Too deep recursion in extract_closure_info");
+    }
+
     match body.get_expr(arg_expr_id) {
         Expr::Closure {
             lambda_name,
@@ -3050,10 +3117,48 @@ fn extract_closure_info(
             // Named function reference - no captures
             Ok((name.clone(), vec![]))
         }
+        Expr::Call { func, args } => {
+            // Partial application to a lifted lambda: (_lambda_N arg1 arg2 ...)
+            // The args become captures for the resulting closure
+            let capture_vals: Vec<spirv::Word> =
+                args.iter().map(|&a| lower_expr(constructor, body, a)).collect::<Result<Vec<_>>>()?;
+            Ok((func.clone(), capture_vals))
+        }
+        Expr::Let { rhs, body: let_body, .. } => {
+            // Let binding - look at the body (the continuation)
+            // But first check the rhs in case it's the closure
+            if let Ok(result) = extract_closure_info_inner(constructor, body, *rhs, depth + 1) {
+                return Ok(result);
+            }
+            extract_closure_info_inner(constructor, body, *let_body, depth + 1)
+        }
+        Expr::Local(local_id) => {
+            // Local reference - try to find what it was assigned to
+            // Look through the expression tree to find the Let that binds this local
+            if let Some(rhs_id) = find_local_binding(body, *local_id, arg_expr_id) {
+                extract_closure_info_inner(constructor, body, rhs_id, depth + 1)
+            } else {
+                bail_spirv!("Cannot find binding for local {:?}", local_id);
+            }
+        }
         other => {
             bail_spirv!("Expected closure or function reference, got {:?}", other);
         }
     }
+}
+
+/// Find the RHS expression that binds a local variable by searching the expression tree.
+fn find_local_binding(body: &Body, target_local: LocalId, _start_expr: ExprId) -> Option<ExprId> {
+    // Search through all expressions to find the Let that binds this local
+    // This is a simple linear search - could be optimized with a pre-computed map
+    for expr in body.exprs.iter() {
+        if let Expr::Let { local, rhs, .. } = expr {
+            if *local == target_local {
+                return Some(*rhs);
+            }
+        }
+    }
+    None
 }
 
 /// Extract array size and element type from an array type.
@@ -3963,4 +4068,255 @@ fn lower_sha256_compress(
         None,
         vec![h0_new, h1_new, h2_new, h3_new, h4_new, h5_new, h6_new, h7_new],
     )?)
+}
+
+/// Lower `_w_loop_while init cond_fn body_fn` to SPIR-V control flow.
+/// This generates a proper structured loop with phi nodes.
+fn lower_loop_while(
+    constructor: &mut Constructor,
+    body: &Body,
+    args: &[ExprId],
+    result_type: spirv::Word,
+) -> Result<spirv::Word> {
+    if args.len() != 3 {
+        bail_spirv!(
+            "_w_loop_while requires 3 args (init, cond_fn, body_fn), got {}",
+            args.len()
+        );
+    }
+
+    // Extract function info for cond and body
+    let (cond_func_name, cond_captures) = extract_closure_info(constructor, body, args[1])?;
+    let (body_func_name, body_captures) = extract_closure_info(constructor, body, args[2])?;
+
+    // Lower initial value
+    let init_val = lower_expr(constructor, body, args[0])?;
+
+    // Get function IDs
+    let cond_func_id = *constructor
+        .functions
+        .get(&cond_func_name)
+        .ok_or_else(|| err_spirv!("Condition function not found: {}", cond_func_name))?;
+    let body_func_id = *constructor
+        .functions
+        .get(&body_func_name)
+        .ok_or_else(|| err_spirv!("Body function not found: {}", body_func_name))?;
+
+    // Create block IDs for loop structure
+    let header_block_id = constructor.builder.id();
+    let body_block_id = constructor.builder.id();
+    let continue_block_id = constructor.builder.id();
+    let merge_block_id = constructor.builder.id();
+
+    // Branch from current block to header
+    constructor.builder.branch(header_block_id)?;
+
+    // Remember pre-header block for phi
+    let pre_header_block_idx = constructor.current_block;
+
+    // Header block with phi for accumulator
+    constructor.begin_block(header_block_id)?;
+    let header_block_idx = constructor.builder.selected_block().expect("No block selected");
+
+    // Create phi for the loop accumulator (will be filled in later)
+    let acc_phi_id = constructor.builder.id();
+
+    // Call condition function: cond_fn(captures..., acc)
+    let mut cond_call_args = cond_captures.clone();
+    cond_call_args.push(acc_phi_id);
+    let cond_result = constructor.builder.function_call(
+        constructor.bool_type,
+        None,
+        cond_func_id,
+        cond_call_args,
+    )?;
+
+    // Loop merge and conditional branch
+    constructor.builder.loop_merge(
+        merge_block_id,
+        continue_block_id,
+        spirv::LoopControl::NONE,
+        [],
+    )?;
+    constructor
+        .builder
+        .branch_conditional(cond_result, body_block_id, merge_block_id, [])?;
+
+    // Body block
+    constructor.begin_block(body_block_id)?;
+
+    // Call body function: body_fn(captures..., acc)
+    let mut body_call_args = body_captures.clone();
+    body_call_args.push(acc_phi_id);
+    let new_acc = constructor.builder.function_call(
+        result_type,
+        None,
+        body_func_id,
+        body_call_args,
+    )?;
+
+    // Branch to continue block
+    constructor.builder.branch(continue_block_id)?;
+
+    // Continue block (just branches back to header)
+    constructor.begin_block(continue_block_id)?;
+    constructor.builder.branch(header_block_id)?;
+
+    // Get pre-header block ID for phi
+    let pre_header_block = pre_header_block_idx.expect("No pre-header block");
+
+    // Insert phi at the beginning of header block
+    // Need to select header block first
+    constructor.builder.select_block(Some(header_block_idx))?;
+    let phi_incoming = vec![
+        (init_val, pre_header_block),
+        (new_acc, continue_block_id),
+    ];
+    constructor.builder.insert_phi(
+        rspirv::dr::InsertPoint::Begin,
+        result_type,
+        Some(acc_phi_id),
+        phi_incoming,
+    )?;
+    constructor.builder.select_block(None)?;
+
+    // Merge block (loop exit)
+    constructor.begin_block(merge_block_id)?;
+
+    // Result is the phi value (final accumulator at loop exit)
+    Ok(acc_phi_id)
+}
+
+/// Lower `_w_loop_for init bound body_fn` to SPIR-V control flow.
+/// This generates a for-range loop: for i in 0..bound do body_fn(i, acc)
+fn lower_loop_for(
+    constructor: &mut Constructor,
+    body: &Body,
+    args: &[ExprId],
+    result_type: spirv::Word,
+) -> Result<spirv::Word> {
+    if args.len() != 3 {
+        bail_spirv!(
+            "_w_loop_for requires 3 args (init, bound, body_fn), got {}",
+            args.len()
+        );
+    }
+
+    // Extract function info for body
+    let (body_func_name, body_captures) = extract_closure_info(constructor, body, args[2])?;
+
+    // Lower initial value and bound
+    let init_val = lower_expr(constructor, body, args[0])?;
+    let bound_val = lower_expr(constructor, body, args[1])?;
+
+    // Get function ID
+    let body_func_id = *constructor
+        .functions
+        .get(&body_func_name)
+        .ok_or_else(|| err_spirv!("Body function not found: {}", body_func_name))?;
+
+    // Integer type for loop index
+    let i32_type = constructor.i32_type;
+    let zero = constructor.builder.constant_bit32(i32_type, 0);
+    let one = constructor.builder.constant_bit32(i32_type, 1);
+
+    // Create block IDs for loop structure
+    let header_block_id = constructor.builder.id();
+    let body_block_id = constructor.builder.id();
+    let continue_block_id = constructor.builder.id();
+    let merge_block_id = constructor.builder.id();
+
+    // Branch from current block to header
+    constructor.builder.branch(header_block_id)?;
+
+    // Remember pre-header block for phi
+    let pre_header_block_idx = constructor.current_block;
+
+    // Header block with phi nodes
+    constructor.begin_block(header_block_id)?;
+    let header_block_idx = constructor.builder.selected_block().expect("No block selected");
+
+    // Create phi IDs for loop index and accumulator
+    let idx_phi_id = constructor.builder.id();
+    let acc_phi_id = constructor.builder.id();
+
+    // Loop condition: idx < bound
+    let cond_result = constructor.builder.s_less_than(
+        constructor.bool_type,
+        None,
+        idx_phi_id,
+        bound_val,
+    )?;
+
+    // Loop merge and conditional branch
+    constructor.builder.loop_merge(
+        merge_block_id,
+        continue_block_id,
+        spirv::LoopControl::NONE,
+        [],
+    )?;
+    constructor
+        .builder
+        .branch_conditional(cond_result, body_block_id, merge_block_id, [])?;
+
+    // Body block
+    constructor.begin_block(body_block_id)?;
+
+    // Call body function: body_fn(captures..., idx, acc)
+    let mut body_call_args = body_captures.clone();
+    body_call_args.push(idx_phi_id);
+    body_call_args.push(acc_phi_id);
+    let new_acc = constructor.builder.function_call(
+        result_type,
+        None,
+        body_func_id,
+        body_call_args,
+    )?;
+
+    // Branch to continue block
+    constructor.builder.branch(continue_block_id)?;
+
+    // Continue block - increment index
+    constructor.begin_block(continue_block_id)?;
+    let new_idx = constructor.builder.i_add(i32_type, None, idx_phi_id, one)?;
+    constructor.builder.branch(header_block_id)?;
+
+    // Get pre-header block ID for phi
+    let pre_header_block = pre_header_block_idx.expect("No pre-header block");
+
+    // Insert phi instructions in header block
+    constructor.builder.select_block(Some(header_block_idx))?;
+
+    // Index phi: (0 from pre_header, new_idx from continue)
+    let idx_phi_incoming = vec![
+        (zero, pre_header_block),
+        (new_idx, continue_block_id),
+    ];
+    constructor.builder.insert_phi(
+        rspirv::dr::InsertPoint::Begin,
+        i32_type,
+        Some(idx_phi_id),
+        idx_phi_incoming,
+    )?;
+
+    // Accumulator phi: (init_val from pre_header, new_acc from continue)
+    // Note: Insert after idx phi since we're inserting at Begin
+    let acc_phi_incoming = vec![
+        (init_val, pre_header_block),
+        (new_acc, continue_block_id),
+    ];
+    constructor.builder.insert_phi(
+        rspirv::dr::InsertPoint::Begin,
+        result_type,
+        Some(acc_phi_id),
+        acc_phi_incoming,
+    )?;
+
+    constructor.builder.select_block(None)?;
+
+    // Merge block (loop exit)
+    constructor.begin_block(merge_block_id)?;
+
+    // Result is the accumulator phi value
+    Ok(acc_phi_id)
 }

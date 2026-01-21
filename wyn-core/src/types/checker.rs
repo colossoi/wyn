@@ -506,42 +506,32 @@ impl<'a> TypeChecker<'a> {
     ///
     /// Returns `None` if the name is not found (caller should produce error with span).
     fn resolve_value_name(&mut self, full_name: &str, is_qualified: bool) -> Option<ResolvedValue> {
-        if is_qualified {
+        let lookup = if is_qualified {
             // Qualified: intrinsics > modules (cache, then on-demand)
-            if let Some((resolved_name, scheme_lookup)) = self.lookup_intrinsic(full_name) {
-                return Some(self.resolve_scheme_lookup(&resolved_name, scheme_lookup));
-            }
-            self.lookup_module_scheme(full_name)
-                .map(|scheme_lookup| self.resolve_scheme_lookup(full_name, scheme_lookup))
+            self.lookup_intrinsic(full_name).or_else(|| self.lookup_module_scheme(full_name))
         } else {
             // Unqualified: scope > intrinsics
-            if let Some(scheme) = self.scope_stack.lookup(full_name).cloned() {
-                return Some(self.resolve_scheme_lookup(full_name, SchemeLookup::Single(scheme)));
-            }
-            if let Some((resolved_name, scheme_lookup)) = self.lookup_intrinsic(full_name) {
-                return Some(self.resolve_scheme_lookup(&resolved_name, scheme_lookup));
-            }
-            None
-        }
+            self.scope_stack
+                .lookup(full_name)
+                .cloned()
+                .map(SchemeLookup::Single)
+                .or_else(|| self.lookup_intrinsic(full_name))
+        };
+
+        lookup.map(|scheme_lookup| self.resolve_scheme_lookup(full_name, scheme_lookup))
     }
 
     fn lookup_module_scheme(&self, qualified_name: &str) -> Option<SchemeLookup> {
         self.module_schemes.get(qualified_name).cloned().map(SchemeLookup::Single)
     }
 
-    /// Returns (name, scheme_lookup) for an intrinsic.
-    /// Note: Aliases are resolved earlier in name_resolution, so we do direct lookup here.
-    fn lookup_intrinsic(&mut self, name: &str) -> Option<(String, SchemeLookup)> {
+    fn lookup_intrinsic(&mut self, name: &str) -> Option<SchemeLookup> {
         use crate::intrinsics::IntrinsicLookup;
-
-        self.intrinsics.get(name).map(|lookup| {
-            let scheme_lookup = match lookup {
-                IntrinsicLookup::Single(entry) => SchemeLookup::Single(entry.scheme.clone()),
-                IntrinsicLookup::Overloaded(set) => {
-                    SchemeLookup::Overloaded(set.entries().iter().map(|e| e.scheme.clone()).collect())
-                }
-            };
-            (name.to_string(), scheme_lookup)
+        self.intrinsics.get(name).map(|lookup| match lookup {
+            IntrinsicLookup::Single(entry) => SchemeLookup::Single(entry.scheme.clone()),
+            IntrinsicLookup::Overloaded(set) => {
+                SchemeLookup::Overloaded(set.entries().iter().map(|e| e.scheme.clone()).collect())
+            }
         })
     }
 
@@ -552,11 +542,7 @@ impl<'a> TypeChecker<'a> {
                 let prepared = self.prepare_array_type(&ty);
                 ResolvedValue {
                     display_name: name.to_string(),
-                    // Store the instantiated type as a Monotype, not the original scheme.
-                    // The scheme's quantified variables are internal to the scheme definition;
-                    // expression nodes should use the instantiated type with fresh variables
-                    // that can be unified with the surrounding context.
-                    scheme_for_table: TypeScheme::Monotype(prepared.clone()),
+                    scheme_for_table: scheme,
                     instantiated: prepared,
                     overloads: None,
                 }
@@ -917,9 +903,40 @@ impl<'a> TypeChecker<'a> {
         Self::substitute_type_params_static(&resolved, bindings)
     }
 
+    /// Allocate a fresh type variable and return its ID.
+    fn fresh_var(&mut self) -> polytype::Variable {
+        match self.context.new_variable() {
+            Type::Variable(id) => id,
+            _ => unreachable!(),
+        }
+    }
+
+    /// Convert a variable ID to a Type.
+    fn var(id: polytype::Variable) -> Type {
+        Type::Variable(id)
+    }
+
     /// Build a chain of arrows: p1 -> p2 -> ... -> ret
     fn arrow_chain(params: &[Type], ret: Type) -> Type {
         params.iter().rev().fold(ret, |acc, param| Type::arrow(param.clone(), acc))
+    }
+
+    /// Wrap a type in nested ∀ quantifiers.
+    fn forall(ids: &[polytype::Variable], body: Type) -> TypeScheme {
+        ids.iter().rev().fold(TypeScheme::Monotype(body), |acc, &id| TypeScheme::Polytype {
+            variable: id,
+            body: Box::new(acc),
+        })
+    }
+
+    /// Build an array type: Array[elem, addrspace, size]
+    fn array_ty(elem: Type, addrspace: polytype::Variable, size: polytype::Variable) -> Type {
+        Type::Constructed(TypeName::Array, vec![elem, Self::var(addrspace), Self::var(size)])
+    }
+
+    /// Build a Vec type: Vec(n, elem)
+    fn vec_ty(n: polytype::Variable, elem: Type) -> Type {
+        Type::Constructed(TypeName::Vec, vec![Self::var(n), elem])
     }
 
     /// Type a lambda expression, optionally with an expected type for bidirectional checking.
@@ -988,6 +1005,87 @@ impl<'a> TypeChecker<'a> {
         }
 
         Ok(func_type)
+    }
+
+    pub fn load_builtins(&mut self) -> Result<()> {
+        // length: ∀n a s. Array[a, s, n] -> i32
+        let (n, a, s) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
+        let body = Self::arrow_chain(&[Self::array_ty(Self::var(a), s, n)], i32());
+        self.scope_stack.insert("length".to_string(), Self::forall(&[n, a, s], body));
+
+        // map: ∀a b n s. (a -> b) -> Array[a, s, n] -> Array[b, s, n]
+        let (a, b, n, s) = (
+            self.fresh_var(),
+            self.fresh_var(),
+            self.fresh_var(),
+            self.fresh_var(),
+        );
+        let body = Self::arrow_chain(
+            &[
+                Type::arrow(Self::var(a), Self::var(b)),
+                Self::array_ty(Self::var(a), s, n),
+            ],
+            Self::array_ty(Self::var(b), s, n),
+        );
+        self.scope_stack.insert("map".to_string(), Self::forall(&[a, b, n, s], body));
+
+        // zip: ∀n a b s. Array[a, s, n] -> Array[b, s, n] -> Array[(a, b), s, n]
+        let (n, a, b, s) = (
+            self.fresh_var(),
+            self.fresh_var(),
+            self.fresh_var(),
+            self.fresh_var(),
+        );
+        let body = Self::arrow_chain(
+            &[
+                Self::array_ty(Self::var(a), s, n),
+                Self::array_ty(Self::var(b), s, n),
+            ],
+            Self::array_ty(tuple(vec![Self::var(a), Self::var(b)]), s, n),
+        );
+        self.scope_stack.insert("zip".to_string(), Self::forall(&[n, a, b, s], body));
+
+        // to_vec: ∀n a s. Array[a, s, n] -> Vec(n, a)
+        let (n, a, s) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
+        let body = Self::arrow_chain(
+            &[Self::array_ty(Self::var(a), s, n)],
+            Self::vec_ty(n, Self::var(a)),
+        );
+        self.scope_stack.insert("to_vec".to_string(), Self::forall(&[n, a, s], body));
+
+        // replicate: ∀size a s. i32 -> a -> Array[a, s, size]
+        let (size, a, s) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
+        let body = Self::arrow_chain(&[i32(), Self::var(a)], Self::array_ty(Self::var(a), s, size));
+        self.scope_stack.insert("replicate".to_string(), Self::forall(&[size, a, s], body));
+
+        // _w_alloc_array: ∀n t s. i32 -> Array[t, s, n]
+        let (n, t, s) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
+        let body = Self::arrow_chain(&[i32()], Self::array_ty(Self::var(t), s, n));
+        self.scope_stack.insert("_w_alloc_array".to_string(), Self::forall(&[n, t, s], body));
+
+        // dot: ∀n t. Vec(n, t) -> Vec(n, t) -> t
+        let (n, t) = (self.fresh_var(), self.fresh_var());
+        let vec = Self::vec_ty(n, Self::var(t));
+        let body = Self::arrow_chain(&[vec.clone(), vec], Self::var(t));
+        self.scope_stack.insert("dot".to_string(), Self::forall(&[n, t], body));
+
+        // Trigonometric functions: f32 -> f32
+        let trig_type = Type::arrow(f32(), f32());
+        self.scope_stack.insert("sin".to_string(), TypeScheme::Monotype(trig_type.clone()));
+        self.scope_stack.insert("cos".to_string(), TypeScheme::Monotype(trig_type.clone()));
+        self.scope_stack.insert("tan".to_string(), TypeScheme::Monotype(trig_type));
+
+        // Register vector field mappings
+        self.register_vector_fields();
+
+        // Note: Prelude files are automatically loaded when ModuleManager is created
+
+        Ok(())
+    }
+
+    fn register_vector_fields(&mut self) {
+        // Vector field access is now handled directly in the FieldAccess case
+        // Vec(size, element_type) fields (x, y, z, w) return element_type
     }
 
     /// Register a record type with its field mappings
@@ -1630,7 +1728,10 @@ impl<'a> TypeChecker<'a> {
                 debug!("Looking up identifier '{}'", full_name);
 
                 if let Some(resolved) = self.resolve_value_name(&full_name, is_qualified) {
-                    self.type_table.insert(expr.h.id, resolved.scheme_for_table);
+                    // Store instantiated type with substitutions applied
+                    let applied = resolved.instantiated.apply(&self.context);
+                    self.type_table
+                        .insert(expr.h.id, TypeScheme::Monotype(applied));
                     return Ok(resolved.instantiated);
                 }
 
@@ -1909,14 +2010,10 @@ impl<'a> TypeChecker<'a> {
                     // Check for partial application AFTER application (when types are resolved)
                     self.ensure_not_partial(&result_ty, &expr.h.span)?;
 
-                    // Store types in type table
-                    if let Some(s) = cand.scheme {
-                        self.type_table.insert(func.h.id, s);
-                    } else {
-                        let resolved = cand.ty.apply(&self.context);
-                        self.type_table
-                            .insert(func.h.id, TypeScheme::Monotype(resolved));
-                    }
+                    // Store resolved type in type table (apply substitutions)
+                    let resolved = cand.ty.apply(&self.context);
+                    self.type_table
+                        .insert(func.h.id, TypeScheme::Monotype(resolved));
                     self.type_table
                         .insert(expr.h.id, TypeScheme::Monotype(result_ty.clone()));
                     Ok(result_ty)
@@ -1936,13 +2033,10 @@ impl<'a> TypeChecker<'a> {
                         {
                             // Check for partial application
                             if self.ensure_not_partial(&result_ty, &expr.h.span).is_ok() {
+                                // Store resolved type (always apply substitutions)
                                 let resolved_func_ty = cand.ty.apply(&self.context);
-                                if let Some(s) = cand.scheme {
-                                    self.type_table.insert(func.h.id, s);
-                                } else {
-                                    self.type_table
-                                        .insert(func.h.id, TypeScheme::Monotype(resolved_func_ty));
-                                }
+                                self.type_table
+                                    .insert(func.h.id, TypeScheme::Monotype(resolved_func_ty));
                                 self.type_table
                                     .insert(expr.h.id, TypeScheme::Monotype(result_ty.clone()));
                                 return Ok(result_ty);

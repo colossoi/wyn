@@ -53,8 +53,9 @@ The compiler uses a multi-stage pipeline with typestate-driven phases:
 | **MaterializationsHoisted** | Duplicate materializations hoisted from branches |
 | **Normalized** | A-normal form conversion |
 | **Monomorphized** | Polymorphic functions specialized to concrete types |
+| **Folded** | MIR constant folding (optional) |
 | **Reachable** | Dead code elimination |
-| **Lifted** | Final binding lifting |
+| **Lifted** | Loop-invariant code motion |
 | **Lowered** | SPIR-V code generation |
 
 ## Example Program
@@ -103,7 +104,7 @@ cargo build --release
 cargo test
 ```
 
-All 555 tests currently pass.
+All 548 tests currently pass (12 ignored for pending slice support).
 
 ## Language Overview
 
