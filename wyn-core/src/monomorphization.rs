@@ -14,7 +14,7 @@
 use crate::IdArena;
 use crate::ast::TypeName;
 use crate::error::Result;
-use crate::mir::{ArrayBacking, Body, Def, Expr, ExprId, LocalDecl, LocalId, Program};
+use crate::mir::{ArrayBacking, Body, Def, Expr, ExprId, LocalDecl, Program};
 use crate::mir::{LambdaId, LambdaInfo};
 use crate::types::TypeScheme;
 use polytype::Type;
@@ -444,46 +444,6 @@ impl Monomorphizer {
 
                 // Check if this is a call to a user-defined function
                 if let Some(poly_def) = self.poly_functions.get(func).cloned() {
-                    // Check if this is a trivial wrapper (body just forwards to another call)
-                    // If so, inline it by calling the inner function directly
-                    if let Some((inner_func, _inner_args)) = get_trivial_wrapper_target(&poly_def) {
-                        // Look up the inner function
-                        if let Some(inner_def) = self.poly_functions.get(&inner_func).cloned() {
-                            let arg_types: Vec<_> =
-                                args.iter().map(|a| body.get_type(*a).clone()).collect();
-                            let subst = self.infer_substitution(&inner_def, &arg_types)?;
-                            let spec_key = SpecKey::new(&subst);
-
-                            if spec_key.needs_specialization() {
-                                // Specialize the inner function directly
-                                let specialized_name =
-                                    self.get_or_create_specialization(&inner_func, &spec_key, &inner_def)?;
-                                return Ok(Expr::Call {
-                                    func: specialized_name,
-                                    args: new_args,
-                                });
-                            } else {
-                                // Monomorphic call to inner function
-                                self.ensure_in_worklist(&inner_func, inner_def);
-                                return Ok(Expr::Call {
-                                    func: inner_func,
-                                    args: new_args,
-                                });
-                            }
-                        }
-                        // Inner function is a builtin/intrinsic - call it directly
-                        if inner_func.starts_with("_w_") {
-                            return Ok(Expr::Intrinsic {
-                                name: inner_func,
-                                args: new_args,
-                            });
-                        }
-                        return Ok(Expr::Call {
-                            func: inner_func,
-                            args: new_args,
-                        });
-                    }
-
                     // Get argument types to infer substitution
                     let arg_types: Vec<_> = args.iter().map(|a| body.get_type(*a).clone()).collect();
                     let subst = self.infer_substitution(&poly_def, &arg_types)?;
@@ -618,7 +578,18 @@ impl Monomorphizer {
                 if let Some(def) = self.poly_functions.get(lambda_name).cloned() {
                     // expr_type is the function type of this closure (Arrow type)
                     // Extract concrete param and return types from it
-                    let (concrete_params, concrete_ret) = split_function_type(expr_type);
+                    let (remaining_params, concrete_ret) = split_function_type(expr_type);
+
+                    // Get the types of captured values - these are the already-applied arguments
+                    // For a partial application `map f`, captures=[f] and remaining_params=[xs]
+                    // We need to include capture types to properly infer all type variables
+                    let capture_types: Vec<_> = captures.iter()
+                        .map(|c| body.get_type(*c).clone())
+                        .collect();
+
+                    // Combine captured args + remaining params to get full concrete param list
+                    let mut concrete_params = capture_types;
+                    concrete_params.extend(remaining_params);
 
                     // Build substitution by unifying lambda params AND return type
                     // against concrete types. This is necessary because lambdas may have
@@ -691,14 +662,10 @@ impl Monomorphizer {
     fn infer_substitution(&self, poly_def: &Def, arg_types: &[Type<TypeName>]) -> Result<Substitution> {
         let mut subst = Substitution::new();
 
-        let _func_name = match poly_def {
-            Def::Function { name, .. } => name.as_str(),
-            _ => "<unknown>",
-        };
-
         match poly_def {
             Def::Function {
-                scheme: Some(scheme), ..
+                scheme: Some(scheme),
+                ..
             } => {
                 // Use canonical scheme variable IDs (consistent with specialize_def)
                 let func_type = unwrap_scheme(scheme);
@@ -744,16 +711,28 @@ impl Monomorphizer {
     ) -> Result<Substitution> {
         let mut subst = Substitution::new();
 
-        if let Def::Function { params, body, .. } = lambda_def {
-            // Unify lambda's body param types against concrete param types
-            let body_param_types: Vec<_> = params.iter().map(|&p| &body.get_local(p).ty).collect();
-            for (param_ty, arg_ty) in body_param_types.iter().zip(concrete_params.iter()) {
-                self.unify_for_subst(param_ty, arg_ty, &mut subst)?;
-            }
+        if let Def::Function { scheme, params, body, .. } = lambda_def {
+            // If the function has a scheme, use scheme types for consistent variable IDs
+            // Otherwise fall back to body param types
+            if let Some(scheme) = scheme {
+                let func_type = unwrap_scheme(scheme);
+                let (scheme_params, scheme_ret) = split_function_type(func_type);
 
-            // Also unify lambda's return type against concrete return type
-            let body_ret = body.get_type(body.root);
-            self.unify_for_subst(body_ret, concrete_ret, &mut subst)?;
+                for (param_ty, arg_ty) in scheme_params.iter().zip(concrete_params.iter()) {
+                    self.unify_for_subst(param_ty, arg_ty, &mut subst)?;
+                }
+                self.unify_for_subst(&scheme_ret, concrete_ret, &mut subst)?;
+            } else {
+                // Fallback: use body param types for lambdas without schemes
+                let body_param_types: Vec<_> = params.iter().map(|&p| &body.get_local(p).ty).collect();
+                for (param_ty, arg_ty) in body_param_types.iter().zip(concrete_params.iter()) {
+                    self.unify_for_subst(param_ty, arg_ty, &mut subst)?;
+                }
+
+                // Also unify lambda's return type against concrete return type
+                let body_ret = body.get_type(body.root);
+                self.unify_for_subst(body_ret, concrete_ret, &mut subst)?;
+            }
         }
 
         Ok(subst)
@@ -887,40 +866,6 @@ fn body_has_unresolved_variables(body: &Body) -> bool {
         }
     }
     false
-}
-
-/// Check if a function is a trivial wrapper (body just forwards all params to another call).
-/// Returns the target function name if so.
-fn get_trivial_wrapper_target(def: &Def) -> Option<(String, Vec<LocalId>)> {
-    if let Def::Function { params, body, .. } = def {
-        // The body's root must be a Call or Intrinsic expression
-        let root_expr = body.get_expr(body.root);
-
-        // Extract func name and args from either Call or Intrinsic
-        let (func, args) = match root_expr {
-            Expr::Call { func, args } => (func.clone(), args),
-            Expr::Intrinsic { name, args } => (name.clone(), args),
-            _ => return None,
-        };
-
-        // Check if all args are just Local references to params (in order)
-        if args.len() != params.len() {
-            return None;
-        }
-        for (i, &arg_id) in args.iter().enumerate() {
-            let arg_expr = body.get_expr(arg_id);
-            if let Expr::Local(local_id) = arg_expr {
-                if *local_id != params[i] {
-                    return None;
-                }
-            } else {
-                return None;
-            }
-        }
-        // This is a trivial wrapper - it just forwards params to another function
-        return Some((func, params.clone()));
-    }
-    None
 }
 
 /// Collect variable mappings by unifying body type with concrete type.
@@ -1204,11 +1149,6 @@ fn apply_subst_partial(ty: &Type<TypeName>, subst: &Substitution) -> Type<TypeNa
 fn apply_subst_with_context(ty: &Type<TypeName>, subst: &Substitution, context: &str) -> Type<TypeName> {
     match ty {
         Type::Variable(id) => subst.get(id).cloned().unwrap_or_else(|| {
-            eprintln!(
-                "DEBUG: Unresolved type variable Variable({}) in context: {}\n\
-                 Substitution contains {} mappings: {:?}",
-                id, context, subst.len(), subst
-            );
             panic!(
                 "BUG: Unresolved type variable Variable({}) during monomorphization. \
                  The substitution is incomplete - this variable should have been resolved during type checking \

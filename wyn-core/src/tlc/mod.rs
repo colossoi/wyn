@@ -261,8 +261,10 @@ impl<'a> Transformer<'a> {
 
     fn pattern_type(&self, pattern: &ast::Pattern) -> Type<TypeName> {
         match &pattern.kind {
-            ast::PatternKind::Typed(_, ty) => ty.clone(),
+            // For attributed patterns, recurse into the inner pattern
             ast::PatternKind::Attributed(_, inner) => self.pattern_type(inner),
+            // Always look up from type_table - the type checker has substituted UserVars
+            // with Type::Variables. Using the AST type directly would retain UserVars.
             _ => self.lookup_type(pattern.h.id).expect("Pattern must have type in type table"),
         }
     }
@@ -730,8 +732,22 @@ impl<'a> Transformer<'a> {
                 }
             }
 
-            ast::ExprKind::Slice(_) => {
-                todo!("Slice expressions should be desugared before TLC")
+            ast::ExprKind::Slice(slice) => {
+                // Transform slice to _w_slice(arr, start, end)
+                // This represents a view into the array - aliases the source
+                let arr = self.transform_expr(&slice.array);
+
+                // Default start to 0 if not specified
+                let start = slice.start.as_ref()
+                    .map(|e| self.transform_expr(e))
+                    .unwrap_or_else(|| self.mk_i32(0, span));
+
+                // End is required for now (would need array length otherwise)
+                let end = slice.end.as_ref()
+                    .map(|e| self.transform_expr(e))
+                    .expect("Slice without end not yet supported");
+
+                self.build_app3("_w_slice", arr, start, end, ty, span)
             }
 
             ast::ExprKind::TypeAscription(inner, _) => self.transform_expr(inner),
@@ -1328,6 +1344,14 @@ impl<'a> Transformer<'a> {
             span,
             kind,
         }
+    }
+
+    fn mk_i32(&mut self, value: i32, span: Span) -> Term {
+        self.mk_term(
+            Type::Constructed(TypeName::Int(32), vec![]),
+            span,
+            TermKind::IntLit(value.to_string()),
+        )
     }
 
     /// Transform an expression as a vector, converting ArrayLiteral to _w_vec_lit

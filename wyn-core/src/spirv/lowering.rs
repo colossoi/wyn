@@ -2029,61 +2029,6 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
             // Get the result type from the expression
             let result_type = constructor.ast_type_to_spirv(expr_ty);
 
-            // SOAC (Second-Order Array Combinator) intrinsic dispatch
-            match func.as_str() {
-                "_w_intrinsic_map" => {
-                    // Non-mutating map: always produces a new value array
-                    // For storage inputs: loads elements, transforms, builds value array
-                    return lower_map(constructor, body, args, expr_ty, result_type);
-                }
-                "_w_intrinsic_inplace_map" => {
-                    // In-place map: may mutate storage arrays
-                    // For storage inputs: reads/writes in-place to same buffer
-                    // For value inputs: builds new array (same as map)
-                    return lower_inplace_map(constructor, body, args, expr_ty, result_type);
-                }
-                "_w_intrinsic_zip" => {
-                    return lower_zip(constructor, body, args, result_type);
-                }
-                "_w_intrinsic_reduce" => {
-                    return lower_reduce(constructor, body, args, result_type);
-                }
-                "_w_intrinsic_scan" => {
-                    return lower_scan(constructor, body, args, result_type);
-                }
-                "_w_intrinsic_filter" => {
-                    return lower_filter(constructor, body, args, result_type);
-                }
-                "_w_intrinsic_scatter" => {
-                    return lower_scatter(constructor, body, args, result_type);
-                }
-                "_w_intrinsic_hist_1d" => {
-                    return lower_hist_1d(constructor, body, args, result_type);
-                }
-                "_w_intrinsic_length" => {
-                    return lower_length(constructor, body, args);
-                }
-                "_w_intrinsic_replicate" => {
-                    return lower_replicate(constructor, body, args, expr_ty, result_type);
-                }
-                "_w_intrinsic_rotr32" => {
-                    return lower_rotr32(constructor, body, args);
-                }
-                "_w_intrinsic_sha256_block" => {
-                    return lower_sha256_block(constructor, body, args, result_type);
-                }
-                "_w_intrinsic_sha256_block_with_state" => {
-                    return lower_sha256_block_with_state(constructor, body, args, result_type);
-                }
-                "_w_loop_while" => {
-                    return lower_loop_while(constructor, body, args, result_type);
-                }
-                "_w_loop_for" => {
-                    return lower_loop_for(constructor, body, args, result_type);
-                }
-                _ => {} // Fall through to other special cases and regular calls
-            }
-
             // Special case for _w_array_with - check for in-place optimization
             if func == "_w_array_with" {
                 if args.len() != 3 {
@@ -2428,6 +2373,30 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
 
                     constructor.composite_extract_cached(result_type, composite_id, index)
                 }
+                // SOAC (Second-Order Array Combinator) intrinsics
+                "_w_intrinsic_map" | "map" => {
+                    lower_map(constructor, body, args, expr_ty, result_type)
+                }
+                "_w_intrinsic_inplace_map" => {
+                    lower_inplace_map(constructor, body, args, expr_ty, result_type)
+                }
+                "_w_intrinsic_zip" => lower_zip(constructor, body, args, result_type),
+                "_w_intrinsic_reduce" => lower_reduce(constructor, body, args, result_type),
+                "_w_intrinsic_scan" => lower_scan(constructor, body, args, result_type),
+                "_w_intrinsic_filter" => lower_filter(constructor, body, args, result_type),
+                "_w_intrinsic_scatter" => lower_scatter(constructor, body, args, result_type),
+                "_w_intrinsic_hist_1d" => lower_hist_1d(constructor, body, args, result_type),
+                "_w_intrinsic_length" => lower_length(constructor, body, args),
+                "_w_intrinsic_replicate" => {
+                    lower_replicate(constructor, body, args, expr_ty, result_type)
+                }
+                "_w_intrinsic_rotr32" => lower_rotr32(constructor, body, args),
+                "_w_intrinsic_sha256_block" => lower_sha256_block(constructor, body, args, result_type),
+                "_w_intrinsic_sha256_block_with_state" => {
+                    lower_sha256_block_with_state(constructor, body, args, result_type)
+                }
+                "_w_loop_while" => lower_loop_while(constructor, body, args, result_type),
+                "_w_loop_for" => lower_loop_for(constructor, body, args, result_type),
                 _ => Err(err_spirv!("Unknown intrinsic: {}", name)),
             }
         }

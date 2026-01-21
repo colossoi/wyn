@@ -1,8 +1,8 @@
-//! Tests for desugaring slices and ranges
+//! Tests for slices and ranges in the TLC pipeline
 //!
 //! These tests verify that:
-//! 1. Slices are desugared to map over ranges
-//! 2. Ranges stay as the primitive form (not desugared further)
+//! 1. Slices become borrowed views (ArrayBacking::View) in MIR
+//! 2. Ranges stay as the primitive form (ArrayBacking::Range)
 //! 3. The full pipeline works end-to-end with slices/ranges
 //! 4. Constant folding in slice indices works correctly
 
@@ -21,7 +21,7 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
 
     let builtins = crate::build_builtins(&alias_checked.ast, &frontend.module_manager);
     alias_checked
-        .to_tlc(builtins, &frontend.schemes, &frontend.prelude_tlc_defs)
+        .to_tlc(builtins, &frontend.schemes, &frontend.module_manager)
         .skip_partial_eval()
         .lift()
         .to_mir()
@@ -48,7 +48,7 @@ fn compile_through_flatten(input: &str) -> Result<crate::Flattened, CompilerErro
 
     let builtins = crate::build_builtins(&alias_checked.ast, &frontend.module_manager);
     let flattened = alias_checked
-        .to_tlc(builtins, &frontend.schemes, &frontend.prelude_tlc_defs)
+        .to_tlc(builtins, &frontend.schemes, &frontend.module_manager)
         .skip_partial_eval()
         .lift()
         .to_mir();
@@ -58,13 +58,10 @@ fn compile_through_flatten(input: &str) -> Result<crate::Flattened, CompilerErro
 // =============================================================================
 // Basic Slice Tests
 // =============================================================================
-// NOTE: Slice tests are currently ignored because the TLC pipeline doesn't
-// support slice expressions yet. The old flattening.rs handled them as
-// BorrowedSlice. These tests should be re-enabled once TLC slice support
-// is implemented.
+// Slices create borrowed views into the source array (ArrayBacking::View in MIR).
+// They alias their source - consuming a slice invalidates the original.
 
 #[test]
-#[ignore = "TLC pipeline doesn't support slice expressions yet"]
 fn test_simple_slice() {
     let source = r#"
 def slice_array(arr: [10]i32) [5]i32 =
@@ -81,7 +78,6 @@ entry vertex_main() #[builtin(position)] vec4f32 =
 }
 
 #[test]
-#[ignore = "TLC pipeline doesn't support slice expressions yet"]
 fn test_slice_with_computed_indices() {
     let source = r#"
 def slice_computed(arr: [10]i32) [3]i32 =
@@ -154,7 +150,6 @@ entry vertex_main() #[builtin(position)] vec4f32 =
 // Consuming a borrowed slice invalidates the source.
 
 #[test]
-#[ignore = "TLC pipeline doesn't support slice expressions yet"]
 fn test_slice_borrowed_from_original() {
     // Borrowed slices alias their source - this should compile (non-consuming use)
     let source = r#"
@@ -177,7 +172,6 @@ entry vertex_main() #[builtin(position)] vec4f32 =
 }
 
 #[test]
-#[ignore = "TLC pipeline doesn't support slice expressions yet"]
 fn test_multiple_slices_borrow_from_same() {
     // Multiple slices of same array all alias the original
     let source = r#"
@@ -205,7 +199,6 @@ entry vertex_main() #[builtin(position)] vec4f32 =
 // =============================================================================
 
 #[test]
-#[ignore = "TLC pipeline doesn't support slice expressions yet"]
 fn test_slice_with_constant_definition() {
     let source = r#"
 def SIZE: i32 = 5
@@ -227,7 +220,6 @@ entry vertex_main() #[builtin(position)] vec4f32 =
 }
 
 #[test]
-#[ignore = "TLC pipeline doesn't support slice expressions yet"]
 fn test_range_combined_with_map() {
     let source = r#"
 #[vertex]
@@ -280,7 +272,6 @@ def test: [4]i32 = map(|x| x * 2, 0..<4)
 }
 
 #[test]
-#[ignore = "TLC pipeline doesn't support slice expressions yet"]
 fn test_map_range_with_entry_point() {
     // Test map over range inside entry point
     let source = r#"
@@ -310,7 +301,6 @@ def test: i32 =
 }
 
 #[test]
-#[ignore = "TLC pipeline doesn't support slice expressions yet"]
 fn test_map_range_indirect_entry_point() {
     // Test map over range used in entry point (using result)
     // TODO: Non-trivial constant expressions like `map(...)` require inlining at use sites
@@ -328,7 +318,6 @@ entry vertex_main() #[builtin(position)] vec4f32 =
 }
 
 #[test]
-#[ignore = "TLC pipeline doesn't support slice expressions yet"]
 fn test_map_with_named_function() {
     let source = r#"
 def double(x: i32) i32 = x * 2
@@ -349,18 +338,16 @@ entry vertex_main() #[builtin(position)] vec4f32 =
 // =============================================================================
 
 #[test]
-#[ignore = "TLC pipeline doesn't support slice expressions yet"]
-fn test_slice_desugars_to_map_range() {
+fn test_slice_becomes_view() {
     let source = r#"
 def slice_test(arr: [10]i32) [5]i32 =
     arr[0..5]
 "#;
-    // Verify slice desugars correctly by checking compilation succeeds
-    // The actual desugaring to map over range is tested by compile_through_flatten
+    // Verify slice compiles to MIR as a View
     let flattened = compile_through_flatten(source);
     assert!(
         flattened.is_ok(),
-        "Slice should desugar and flatten: {:?}",
+        "Slice should compile as View: {:?}",
         flattened.err()
     );
 }

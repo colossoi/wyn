@@ -327,8 +327,6 @@ pub struct FrontEnd {
     pub schemes: HashMap<String, TypeScheme<TypeName>>,
     /// Per-module function type schemes cache (populated on first use)
     pub module_schemes: HashMap<String, HashMap<String, TypeScheme<TypeName>>>,
-    /// Precompiled TLC for module declarations (f32.pi, rand.init, etc.)
-    pub prelude_tlc_defs: Vec<tlc::Def>,
 }
 
 impl Default for FrontEnd {
@@ -344,19 +342,13 @@ impl FrontEnd {
     pub fn new() -> Self {
         let mut node_counter = NodeCounter::new();
 
-        // Create prelude and extract TLC defs before converting to ModuleManager
-        let (module_manager, prelude_tlc_defs) =
+        // Create prelude (parsed/elaborated ASTs only - type-checking happens later)
+        let module_manager =
             match module_manager::ModuleManager::create_prelude(&mut node_counter) {
-                Ok(prelude) => {
-                    let tlc_defs = prelude.module_tlc_defs.clone();
-                    (
-                        module_manager::ModuleManager::from_prelude(prelude),
-                        tlc_defs,
-                    )
-                }
+                Ok(prelude) => module_manager::ModuleManager::from_prelude(prelude),
                 Err(e) => {
                     eprintln!("ERROR creating prelude: {:?}", e);
-                    (module_manager::ModuleManager::new_empty(), Vec::new())
+                    module_manager::ModuleManager::new_empty()
                 }
             };
 
@@ -372,7 +364,6 @@ impl FrontEnd {
             intrinsics,
             schemes: HashMap::new(),
             module_schemes: HashMap::new(),
-            prelude_tlc_defs,
         }
     }
 
@@ -382,7 +373,6 @@ impl FrontEnd {
         prelude: module_manager::PreElaboratedPrelude,
         node_counter: NodeCounter,
     ) -> Self {
-        let prelude_tlc_defs = prelude.module_tlc_defs.clone();
         let module_manager = module_manager::ModuleManager::from_prelude(prelude);
         let context = Context::default();
         let intrinsics = intrinsics::IntrinsicSource::new(&mut Context::default());
@@ -395,7 +385,6 @@ impl FrontEnd {
             intrinsics,
             schemes: HashMap::new(),
             module_schemes: HashMap::new(),
-            prelude_tlc_defs,
         }
     }
 }
@@ -595,19 +584,48 @@ impl AliasChecked {
 
     /// Transform AST to TLC (new pipeline path)
     /// `builtins` contains names that should not be captured as free variables during lambda lifting
-    /// `schemes` contains type schemes for prelude functions (for monomorphization)
-    /// `prelude_tlc_defs` contains precompiled TLC for module declarations (f32.pi, etc.)
+    /// `schemes` contains type schemes for all functions (populated during type_check)
+    /// `module_manager` provides access to prelude declarations for TLC transformation
     pub fn to_tlc(
         self,
         builtins: std::collections::HashSet<String>,
         schemes: &HashMap<String, types::TypeScheme>,
-        prelude_tlc_defs: &[tlc::Def],
+        module_manager: &module_manager::ModuleManager,
     ) -> TlcTransformed {
+        // Transform prelude to TLC using the same type_table (consistent type variables)
+        let mut prelude_tlc_defs = Vec::new();
+
+        // Transform module declarations (f32.pi, rand.init, etc.)
+        for (module_name, elaborated) in module_manager.get_elaborated_modules() {
+            let mut transformer = tlc::Transformer::with_namespace(&self.type_table, module_name);
+            for item in &elaborated.items {
+                if let module_manager::ElaboratedItem::Decl(decl) = item {
+                    // Transform all def declarations - wrapper functions that call intrinsics
+                    // (like `zip` calling `_w_intrinsic_zip`) need to be in TLC so they can
+                    // be called by other prelude functions (like `zip3`).
+                    if let Some(def) = transformer.transform_decl(decl) {
+                        prelude_tlc_defs.push(def);
+                    }
+                }
+            }
+        }
+
+        // Transform top-level prelude functions (zip3, map2, etc.)
+        {
+            let mut transformer = tlc::Transformer::new(&self.type_table);
+            for decl in module_manager.get_prelude_function_declarations() {
+                // Transform all prelude functions - even those that wrap intrinsics
+                if let Some(def) = transformer.transform_decl(decl) {
+                    prelude_tlc_defs.push(def);
+                }
+            }
+        }
+
         // Transform user program to TLC
         let mut tlc_program = tlc::transform(&self.ast, &self.type_table);
 
-        // Prepend prelude TLC defs (module declarations like f32.pi)
-        let mut merged_defs = prelude_tlc_defs.to_vec();
+        // Prepend prelude TLC defs
+        let mut merged_defs = prelude_tlc_defs;
         merged_defs.extend(tlc_program.defs);
         tlc_program.defs = merged_defs;
 

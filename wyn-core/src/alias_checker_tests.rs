@@ -270,7 +270,7 @@ fn analyze_inplace_ops(source: &str) -> InPlaceInfo {
 
     let builtins = crate::build_builtins(&alias_checked.ast, &frontend.module_manager);
     let flattened = alias_checked
-        .to_tlc(builtins, &frontend.schemes, &frontend.prelude_tlc_defs)
+        .to_tlc(builtins, &frontend.schemes, &frontend.module_manager)
         .skip_partial_eval()
         .lift()
         .to_mir();
@@ -612,13 +612,13 @@ def main: i32 =
 // =============================================================================
 // Slice and Range Alias Tests
 // =============================================================================
-// Note: Borrowed slices (arr[i..j]) alias their source array.
-// This is the new semantics - slices are zero-copy views.
+// Note: Slices (arr[i..j]) create borrowed views into the source array.
+// They ALIAS the source - consuming a slice invalidates the original.
 
 #[test]
-fn test_borrowed_slice_consuming_invalidates_source() {
-    // Borrowed slices alias the source array.
-    // Consuming the slice invalidates the original array.
+fn test_slice_consumes_invalidates_source() {
+    // Slices are borrowed views into the source array.
+    // Consuming a slice invalidates the original.
     let source = r#"
 def consume(arr: *[3]i32) i32 = arr[0]
 
@@ -628,17 +628,17 @@ def main(arr: [10]i32) i32 =
     arr[0]
 "#;
     let result = check_alias(source);
-    // Should ERROR: sliced aliases arr, consuming sliced invalidates arr
+    // Should ERROR: sliced borrows arr, consuming sliced invalidates arr
     assert!(
         result.has_errors(),
-        "Borrowed slice aliases source; consuming slice should invalidate original"
+        "Borrowed slice aliases source - consuming it should invalidate original"
     );
 }
 
 #[test]
-fn test_multiple_borrowed_slices_alias_same_source() {
-    // Multiple slices of the same array all alias the original.
-    // Consuming one invalidates the others (they share the same backing store).
+fn test_multiple_slices_alias_through_source() {
+    // Multiple slices of the same array alias through the source.
+    // Consuming one invalidates both the source and other slices.
     let source = r#"
 def consume(arr: *[3]i32) i32 = arr[0]
 
@@ -649,16 +649,16 @@ def main(arr: [10]i32) i32 =
     consume(s2)
 "#;
     let result = check_alias(source);
-    // Should ERROR: s1 and s2 both alias arr, consuming s1 invalidates s2
+    // Should ERROR: s1 and s2 both alias arr, consuming s1 invalidates arr and thus s2
     assert!(
         result.has_errors(),
-        "Multiple borrowed slices alias same source; consuming one invalidates others"
+        "Multiple slices alias source - consuming one invalidates the other"
     );
 }
 
 #[test]
-fn test_consuming_source_invalidates_borrowed_slice() {
-    // If we consume the original array, borrowed slices are invalidated.
+fn test_consuming_source_invalidates_slice() {
+    // Slices are borrowed views; consuming the source invalidates the slice.
     let source = r#"
 def consume(arr: *[10]i32) i32 = arr[0]
 
@@ -668,7 +668,7 @@ def main(arr: [10]i32) i32 =
     sliced[0]
 "#;
     let result = check_alias(source);
-    // Should ERROR: sliced borrows from arr, consuming arr invalidates sliced
+    // Should ERROR: sliced borrows arr, consuming arr invalidates sliced
     assert!(
         result.has_errors(),
         "Borrowed slice is invalidated when source is consumed"
@@ -676,8 +676,8 @@ def main(arr: [10]i32) i32 =
 }
 
 #[test]
-fn test_borrowed_slice_alias_chain() {
-    // Slice bound to variable, then aliased - consuming alias invalidates original
+fn test_slice_alias_chain() {
+    // Slice creates a borrowed view; aliasing the view and consuming invalidates original
     let source = r#"
 def consume(arr: *[3]i32) i32 = arr[0]
 
@@ -691,7 +691,7 @@ def main(arr: [10]i32) i32 =
     // Should ERROR: alias -> sliced -> arr, consuming alias invalidates arr
     assert!(
         result.has_errors(),
-        "Borrowed slice alias chain: consuming alias invalidates original"
+        "Borrowed slice alias chain - consuming invalidates original"
     );
 }
 
@@ -729,9 +729,9 @@ def main: i32 =
 }
 
 #[test]
-fn test_borrowed_slice_aliases_base_array() {
-    // Borrowed slices alias their base array
-    // Consuming the slice should prevent using the original
+fn test_slice_creates_borrow_not_copy() {
+    // Slices create borrowed views, not copies.
+    // Consuming the slice invalidates the original array.
     let source = r#"
 def consume(arr: *[3]i32) i32 = arr[0]
 
@@ -741,10 +741,10 @@ def main(arr: [9]i32) i32 =
     arr[0]
 "#;
     let result = check_alias(source);
-    // Should ERROR: sliced borrows from arr, consuming sliced invalidates arr
+    // Should ERROR: sliced borrows arr, consuming sliced invalidates arr
     assert!(
         result.has_errors(),
-        "Borrowed slice should alias base array - using original after consuming slice is invalid"
+        "Borrowed slice aliases source - consuming it invalidates original"
     );
 }
 

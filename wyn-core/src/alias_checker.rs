@@ -1402,9 +1402,42 @@ fn find_inplace_ops(
                 find_inplace_ops(body, *arg, uses_after, aliases, result);
             }
         }
-        Call { func, args } if func == "_w_intrinsic_array_with" && args.len() == 3 => {
+        Call { func, args }
+            if (func == "_w_intrinsic_array_with" || func == "_w_array_with") && args.len() == 3 =>
+        {
             let args = args.clone();
-            // _w_intrinsic_array_with(arr, idx, val) - functional array update
+            // _w_intrinsic_array_with / _w_array_with (arr, idx, val) - functional array update
+            if let Local(arr_local) = body.get_expr(args[0]) {
+                if can_reuse_local(*arr_local, expr_id, uses_after, aliases) {
+                    result.can_reuse_input.insert(body.get_node_id(expr_id));
+                }
+            }
+            // Recurse into arguments
+            for arg in &args {
+                find_inplace_ops(body, *arg, uses_after, aliases, result);
+            }
+        }
+        // Also handle Intrinsic variants (TLC may emit these as intrinsics)
+        Intrinsic { name, args }
+            if (name == "_w_intrinsic_map" || name == "map") && args.len() == 2 =>
+        {
+            let args = args.clone();
+            // args[0] is closure, args[1] is array
+            if let Local(arr_local) = body.get_expr(args[1]) {
+                if can_reuse_local(*arr_local, expr_id, uses_after, aliases) {
+                    result.can_reuse_input.insert(body.get_node_id(expr_id));
+                }
+            }
+            // Recurse into arguments
+            for arg in &args {
+                find_inplace_ops(body, *arg, uses_after, aliases, result);
+            }
+        }
+        Intrinsic { name, args }
+            if (name == "_w_intrinsic_array_with" || name == "_w_array_with") && args.len() == 3 =>
+        {
+            let args = args.clone();
+            // _w_intrinsic_array_with / _w_array_with (arr, idx, val) - functional array update
             if let Local(arr_local) = body.get_expr(args[0]) {
                 if can_reuse_local(*arr_local, expr_id, uses_after, aliases) {
                     result.can_reuse_input.insert(body.get_node_id(expr_id));

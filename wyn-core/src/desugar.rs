@@ -127,19 +127,32 @@ impl<'a> Desugarer<'a> {
             | ExprKind::Unit
             | ExprKind::Identifier(_, _)
             | ExprKind::TypeHole => {}
-            // Range and Slice are handled below after recursion
-            ExprKind::Range(_) | ExprKind::Slice(_) => {}
+            // Range stays as-is in the AST (handled directly in TLC)
+            ExprKind::Range(range) => {
+                self.desugar_expr(&mut range.start)?;
+                if let Some(step) = &mut range.step {
+                    self.desugar_expr(step)?;
+                }
+                self.desugar_expr(&mut range.end)?;
+            }
+            // Slices are NOT desugared - they're preserved for TLC transformation
+            // where they become borrowed views (ArrayBacking::View in MIR)
+            ExprKind::Slice(slice) => {
+                self.desugar_expr(&mut slice.array)?;
+                if let Some(start) = &mut slice.start {
+                    self.desugar_expr(start)?;
+                }
+                if let Some(end) = &mut slice.end {
+                    self.desugar_expr(end)?;
+                }
+            }
         }
-
-        // Slice expressions are now handled in flattening as BorrowedSlice
-        // Range stays as-is in the AST
 
         Ok(())
     }
 
-    // NOTE: desugar_slice is no longer used - slices are now handled in flattening
-    // as BorrowedSlice. This code is kept for reference but should be deleted.
-    #[allow(dead_code)]
+    /// Desugar a slice expression into map over range.
+    /// `arr[start..end]` becomes `map(|idx| arr[start + idx], 0..<(end - start))`
     fn desugar_slice(&mut self, slice: &SliceExpr, span: Span) -> Result<Expression> {
         let array = &slice.array;
 

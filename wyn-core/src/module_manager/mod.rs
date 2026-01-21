@@ -9,7 +9,6 @@ use crate::error::Result;
 use crate::lexer;
 use crate::parser::Parser;
 use crate::scope::ScopeStack;
-use crate::tlc;
 use crate::{bail_module, err_module, err_parse};
 use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet};
@@ -125,6 +124,7 @@ pub struct FunctorModule {
 }
 
 /// Pre-elaborated prelude data that can be shared across compilations (for test performance)
+/// Contains only parsed/elaborated ASTs - type-checking happens during user compilation.
 #[derive(Clone)]
 pub struct PreElaboratedPrelude {
     /// Module type registry: type name -> ModuleTypeExpression
@@ -138,8 +138,6 @@ pub struct PreElaboratedPrelude {
     /// Top-level prelude function declarations (auto-imported)
     /// Uses IndexMap to preserve insertion order (file order) for proper type-checking
     pub prelude_functions: IndexMap<String, Decl>,
-    /// Precompiled TLC for module declarations (f32.pi, rand.init, etc.)
-    pub module_tlc_defs: Vec<tlc::Def>,
 }
 
 /// Manages lazy loading of module files
@@ -199,36 +197,13 @@ impl ModuleManager {
         Ok(())
     }
 
-    /// Create a pre-elaborated prelude by loading all prelude files
-    /// This can be cached and reused across compilations
-    /// Note: Type-checking happens separately in FrontEnd initialization
+    /// Create a pre-elaborated prelude by loading and parsing all prelude files.
+    /// This can be cached and reused across compilations.
+    /// Type-checking and TLC transformation happen during user compilation to ensure
+    /// consistent type variable IDs across prelude and user code.
     pub fn create_prelude(node_counter: &mut NodeCounter) -> Result<PreElaboratedPrelude> {
-        use crate::type_checker::TypeChecker;
-
         let mut manager = Self::new_empty();
         manager.load_prelude_files(node_counter)?;
-
-        // Type-check module declarations to get type_table for TLC transformation
-        let mut checker = TypeChecker::new(&manager);
-        checker.load_builtins()?;
-        checker.check_module_functions()?;
-        let type_table = checker.into_type_table();
-
-        // Transform module declarations to TLC, grouped by module namespace
-        let mut module_tlc_defs = Vec::new();
-        for (module_name, elaborated) in &manager.elaborated_modules {
-            let mut transformer = tlc::Transformer::with_namespace(&type_table, module_name);
-            for item in &elaborated.items {
-                if let ElaboratedItem::Decl(decl) = item {
-                    // Skip intrinsics
-                    if !Self::is_intrinsic_decl(decl) {
-                        if let Some(def) = transformer.transform_decl(decl) {
-                            module_tlc_defs.push(def);
-                        }
-                    }
-                }
-            }
-        }
 
         Ok(PreElaboratedPrelude {
             module_type_registry: manager.module_type_registry,
@@ -236,7 +211,6 @@ impl ModuleManager {
             known_modules: manager.known_modules,
             type_aliases: manager.type_aliases,
             prelude_functions: manager.prelude_functions,
-            module_tlc_defs,
         })
     }
 
@@ -596,8 +570,13 @@ impl ModuleManager {
     }
 
     /// Check if a declaration is an intrinsic (uses _w_intrinsic_* in its body)
-    fn is_intrinsic_decl(decl: &Decl) -> bool {
+    pub fn is_intrinsic_decl(decl: &Decl) -> bool {
         Self::expr_uses_intrinsic(&decl.body)
+    }
+
+    /// Get all elaborated modules for TLC transformation
+    pub fn get_elaborated_modules(&self) -> impl Iterator<Item = (&String, &ElaboratedModule)> {
+        self.elaborated_modules.iter()
     }
 
     /// Recursively check if an expression uses _w_intrinsic_* functions

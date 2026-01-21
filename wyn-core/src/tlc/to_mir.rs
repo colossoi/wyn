@@ -411,7 +411,48 @@ impl<'a> TlcToMir<'a> {
         }
     }
 
-    /// Transform an application. Handles curried BinOp/UnOp specially.
+    /// Collect the spine of a nested application chain.
+    /// Given `App(App(App(f, a), b), c)`, returns `(base_func, [a, b, c])`.
+    /// Walks through FunctionName::Term(App(...)) chains to collect all arguments.
+    fn collect_application_spine<'t>(
+        func: &'t FunctionName,
+        arg: &'t Term,
+    ) -> (&'t FunctionName, Vec<&'t Term>) {
+        let mut args = vec![arg];
+        let mut current_func = func;
+
+        // Walk up the chain of Term(App(...)) to collect all arguments
+        loop {
+            match current_func {
+                FunctionName::Term(inner_term) => {
+                    match &inner_term.kind {
+                        TermKind::App {
+                            func: inner_func,
+                            arg: inner_arg,
+                        } => {
+                            // Another application - add its arg and continue
+                            args.push(inner_arg.as_ref());
+                            current_func = inner_func.as_ref();
+                        }
+                        _ => {
+                            // Term that's not an App - this is the base
+                            args.reverse();
+                            return (current_func, args);
+                        }
+                    }
+                }
+                // Any other FunctionName (Var, BinOp, UnOp) is a base
+                _ => {
+                    args.reverse();
+                    return (current_func, args);
+                }
+            }
+        }
+    }
+
+    /// Transform an application using spine-based collection.
+    /// Collects all arguments from nested curried applications first,
+    /// then emits a single Call or Closure (never intermediate closures).
     fn transform_app(
         &mut self,
         func: &FunctionName,
@@ -421,42 +462,37 @@ impl<'a> TlcToMir<'a> {
         node_id: NodeId,
         body: &mut Body,
     ) -> ExprId {
-        match func {
-            FunctionName::BinOp(_op) => {
-                // BinOp applied to first arg - need to find the second arg
-                // This is a partial application: (+) x
-                // The outer App will complete it
-                // For now, we need to handle the pattern: App(Term(App(BinOp(+), lhs)), rhs)
+        // Collect the full application spine first
+        let (base_func, args) = Self::collect_application_spine(func, arg);
 
-                // This is the first application (BinOp to LHS)
-                // We return a marker that the outer transform_app will recognize
-                // Actually, let's look at the structure: the full binop is:
-                // App { func: Term(App { func: BinOp(+), arg: lhs }), arg: rhs }
-                //
-                // So when we see BinOp directly, we're in the inner App and just have the LHS
-                // We need to emit the full BinOp when we see the outer App with Term containing this
-
-                // For the inner application, just transform the arg and return it
-                // The outer FunctionName::Term case will handle completing the binop
-                let _lhs_id = self.transform_term(arg, body);
-
-                // We can't emit a BinOp here because we only have one operand
-                // Return a special "partial binop" - but MIR doesn't have this concept
-                // We need to restructure: detect the pattern at the outer level
-
-                // Actually, let's handle this differently: when we see FunctionName::Term
-                // containing an App with BinOp, we know it's a complete binary operation
-
-                // For now, panic - we need to handle this at the App level
-                panic!(
-                    "Direct BinOp application should be handled by outer App at {:?}",
-                    span
+        match base_func {
+            FunctionName::BinOp(op) => {
+                assert!(
+                    args.len() == 2,
+                    "BinOp requires exactly 2 arguments, got {}",
+                    args.len()
                 );
+                let lhs_id = self.transform_term(args[0], body);
+                let rhs_id = self.transform_term(args[1], body);
+                body.alloc_expr(
+                    Expr::BinOp {
+                        op: op.op.clone(),
+                        lhs: lhs_id,
+                        rhs: rhs_id,
+                    },
+                    ty,
+                    span,
+                    node_id,
+                )
             }
 
             FunctionName::UnOp(op) => {
-                // UnOp is complete with one argument
-                let operand_id = self.transform_term(arg, body);
+                assert!(
+                    args.len() == 1,
+                    "UnOp requires exactly 1 argument, got {}",
+                    args.len()
+                );
+                let operand_id = self.transform_term(args[0], body);
                 body.alloc_expr(
                     Expr::UnaryOp {
                         op: op.op.clone(),
@@ -469,329 +505,284 @@ impl<'a> TlcToMir<'a> {
             }
 
             FunctionName::Var(name) => {
-                // Function call - but in curried form, this is partial application
-                // Collect all args by walking the nested Apps
-                let args = self.collect_curried_args(arg, body);
+                self.transform_var_application(name, &args, ty, span, node_id, body)
+            }
+
+            FunctionName::Term(inner_term) => {
+                // The base is a computed function value (not an App - we would have
+                // unwrapped that in collect_application_spine)
+                self.transform_term_application(inner_term, &args, ty, span, node_id, body)
+            }
+        }
+    }
+
+    /// Transform an application where the base is a Var (named function).
+    fn transform_var_application(
+        &mut self,
+        name: &str,
+        args: &[&Term],
+        ty: Type<TypeName>,
+        span: Span,
+        node_id: NodeId,
+        body: &mut Body,
+    ) -> ExprId {
+        // Handle special intrinsics that become MIR literals
+        match name {
+            "_w_vec_lit" => {
+                let arg_ids: Vec<_> = args.iter().map(|a| self.transform_term(a, body)).collect();
+                return body.alloc_expr(Expr::Vector(arg_ids), ty, span, node_id);
+            }
+            "_w_array_lit" => {
+                let arg_ids: Vec<_> = args.iter().map(|a| self.transform_term(a, body)).collect();
+                let len = arg_ids.len();
+                let size = body.alloc_expr(
+                    Expr::Int(len.to_string()),
+                    Type::Constructed(TypeName::Int(32), vec![]),
+                    span,
+                    node_id,
+                );
+                return body.alloc_expr(
+                    Expr::Array {
+                        backing: mir::ArrayBacking::Literal(arg_ids),
+                        size,
+                    },
+                    ty,
+                    span,
+                    node_id,
+                );
+            }
+            "_w_tuple" => {
+                let arg_ids: Vec<_> = args.iter().map(|a| self.transform_term(a, body)).collect();
+                return body.alloc_expr(Expr::Tuple(arg_ids), ty, span, node_id);
+            }
+            "_w_range" if args.len() == 3 => {
+                let arg_ids: Vec<_> = args.iter().map(|a| self.transform_term(a, body)).collect();
+                let kind = self.extract_range_kind(body, arg_ids[2]);
+                return body.alloc_expr(
+                    Expr::Array {
+                        backing: mir::ArrayBacking::Range {
+                            start: arg_ids[0],
+                            step: None,
+                            kind,
+                        },
+                        size: arg_ids[1],
+                    },
+                    ty,
+                    span,
+                    node_id,
+                );
+            }
+            "_w_range_step" if args.len() == 4 => {
+                let arg_ids: Vec<_> = args.iter().map(|a| self.transform_term(a, body)).collect();
+                let kind = self.extract_range_kind(body, arg_ids[3]);
+                return body.alloc_expr(
+                    Expr::Array {
+                        backing: mir::ArrayBacking::Range {
+                            start: arg_ids[0],
+                            step: Some(arg_ids[1]),
+                            kind,
+                        },
+                        size: arg_ids[2],
+                    },
+                    ty,
+                    span,
+                    node_id,
+                );
+            }
+            "_w_slice" if args.len() == 3 => {
+                let arg_ids: Vec<_> = args.iter().map(|a| self.transform_term(a, body)).collect();
+                let size = body.alloc_expr(
+                    Expr::BinOp {
+                        op: "-".to_string(),
+                        lhs: arg_ids[2], // end
+                        rhs: arg_ids[1], // start
+                    },
+                    Type::Constructed(TypeName::Int(32), vec![]),
+                    span,
+                    node_id,
+                );
+                return body.alloc_expr(
+                    Expr::Array {
+                        backing: mir::ArrayBacking::View {
+                            base: arg_ids[0],
+                            offset: arg_ids[1],
+                        },
+                        size,
+                    },
+                    ty,
+                    span,
+                    node_id,
+                );
+            }
+            _ => {}
+        }
+
+        // Transform all arguments
+        let arg_ids: Vec<_> = args.iter().map(|a| self.transform_term(a, body)).collect();
+
+        // Check if this is a known function with arity info
+        if let Some(def) = self.top_level.get(name) {
+            let arity = def.arity;
+            if arg_ids.len() == arity {
+                // Full call
                 body.alloc_expr(
                     Expr::Call {
-                        func: name.clone(),
-                        args,
+                        func: name.to_string(),
+                        args: arg_ids,
                     },
                     ty,
                     span,
                     node_id,
                 )
+            } else if arg_ids.len() < arity {
+                // Partial application - emit Closure (legitimate for HOF arguments)
+                body.alloc_expr(
+                    Expr::Closure {
+                        lambda_name: name.to_string(),
+                        captures: arg_ids,
+                    },
+                    ty,
+                    span,
+                    node_id,
+                )
+            } else {
+                panic!(
+                    "Too many arguments for function {}: expected {}, got {}",
+                    name,
+                    arity,
+                    arg_ids.len()
+                )
             }
-
-            FunctionName::Term(inner_term) => {
-                // Check if inner_term is a variable with a known static function value
-                if let Some(func_name) = self.extract_static_value(inner_term) {
-                    // Check the function's arity to determine if this is a full call or partial application
-                    let func_arity = self.top_level.get(&func_name).map(|d| d.arity).unwrap_or(1);
-
-                    if func_arity > 1 {
-                        // Partial application - create a Closure with the arg as a capture
-                        let arg_id = self.transform_term(arg, body);
-                        return body.alloc_expr(
-                            Expr::Closure {
-                                lambda_name: func_name,
-                                captures: vec![arg_id],
-                            },
-                            ty,
-                            span,
-                            node_id,
-                        );
-                    } else {
-                        // Direct call to the known function (arity 1)
-                        let arg_id = self.transform_term(arg, body);
-                        return body.alloc_expr(
-                            Expr::Call {
-                                func: func_name,
-                                args: vec![arg_id],
-                            },
-                            ty,
-                            span,
-                            node_id,
-                        );
-                    }
-                }
-
-                // Check if inner_term is a binop partial application
-                if let TermKind::App {
-                    func: inner_func,
-                    arg: first_arg,
-                } = &inner_term.kind
-                {
-                    if let FunctionName::BinOp(op) = inner_func.as_ref() {
-                        // Complete binary operation: we have both lhs and rhs (arg)
-                        let lhs_id = self.transform_term(first_arg, body);
-                        let rhs_id = self.transform_term(arg, body);
-                        return body.alloc_expr(
-                            Expr::BinOp {
-                                op: op.op.clone(),
-                                lhs: lhs_id,
-                                rhs: rhs_id,
-                            },
-                            ty,
-                            span,
-                            node_id,
-                        );
-                    }
-
-                    // Check for two-arg intrinsics: _w_index, _w_tuple_proj
-                    if let FunctionName::Var(name) = inner_func.as_ref() {
-                        match name.as_str() {
-                            "_w_index" | "_w_tuple_proj" => {
-                                // Two-arg intrinsic: complete with both args
-                                let first_id = self.transform_term(first_arg, body);
-                                let second_id = self.transform_term(arg, body);
-                                return body.alloc_expr(
-                                    Expr::Intrinsic {
-                                        name: name.clone(),
-                                        args: vec![first_id, second_id],
-                                    },
-                                    ty,
-                                    span,
-                                    node_id,
-                                );
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-
-                // Generic higher-order application
-                // First transform the function term, then apply
-                let func_id = self.transform_term(inner_term, body);
-                let arg_id = self.transform_term(arg, body);
-
-                // Check if it's a call to a known function
-                if let Expr::Global(func_name) = body.get_expr(func_id) {
-                    let func_name = func_name.clone();
-                    // Check for literal intrinsics that should become MIR literals/intrinsics
-                    match func_name.as_str() {
-                        "_w_vec_lit" => body.alloc_expr(Expr::Vector(vec![arg_id]), ty, span, node_id),
-                        "_w_array_lit" => {
-                            // For arrays, we need the size expression
-                            let size = body.alloc_expr(
-                                Expr::Int("1".to_string()),
-                                Type::Constructed(TypeName::Int(32), vec![]),
-                                span,
-                                node_id,
-                            );
-                            body.alloc_expr(
-                                Expr::Array {
-                                    backing: mir::ArrayBacking::Literal(vec![arg_id]),
-                                    size,
-                                },
-                                ty,
-                                span,
-                                node_id,
-                            )
-                        }
-                        "_w_tuple" => body.alloc_expr(Expr::Tuple(vec![arg_id]), ty, span, node_id),
-                        // Intrinsics that need special handling
-                        name if name.starts_with("_w_") => body.alloc_expr(
-                            Expr::Intrinsic {
-                                name: func_name,
-                                args: vec![arg_id],
-                            },
-                            ty,
-                            span,
-                            node_id,
-                        ),
-                        _ => body.alloc_expr(
-                            Expr::Call {
-                                func: func_name,
-                                args: vec![arg_id],
-                            },
-                            ty,
-                            span,
-                            node_id,
-                        ),
-                    }
-                } else if let Expr::Call {
-                    func: func_name,
-                    args: existing_args,
-                } = body.get_expr(func_id).clone()
-                {
-                    // Extend the call with more arguments
-                    let mut args = existing_args;
-                    args.push(arg_id);
-
-                    // Check for literal intrinsics that should become MIR literals
-                    match func_name.as_str() {
-                        "_w_vec_lit" => body.alloc_expr(Expr::Vector(args), ty, span, node_id),
-                        "_w_array_lit" => {
-                            let len = args.len();
-                            let size = body.alloc_expr(
-                                Expr::Int(len.to_string()),
-                                Type::Constructed(TypeName::Int(32), vec![]),
-                                span,
-                                node_id,
-                            );
-                            body.alloc_expr(
-                                Expr::Array {
-                                    backing: mir::ArrayBacking::Literal(args),
-                                    size,
-                                },
-                                ty,
-                                span,
-                                node_id,
-                            )
-                        }
-                        "_w_tuple" => body.alloc_expr(Expr::Tuple(args), ty, span, node_id),
-                        "_w_range" if args.len() == 3 => {
-                            // _w_range start end kind -> Array with Range backing
-                            let kind = self.extract_range_kind(body, args[2]);
-                            body.alloc_expr(
-                                Expr::Array {
-                                    backing: mir::ArrayBacking::Range {
-                                        start: args[0],
-                                        step: None,
-                                        kind,
-                                    },
-                                    size: args[1], // end is the size
-                                },
-                                ty,
-                                span,
-                                node_id,
-                            )
-                        }
-                        "_w_range_step" if args.len() == 4 => {
-                            // _w_range_step start step end kind -> Array with Range backing
-                            let kind = self.extract_range_kind(body, args[3]);
-                            body.alloc_expr(
-                                Expr::Array {
-                                    backing: mir::ArrayBacking::Range {
-                                        start: args[0],
-                                        step: Some(args[1]),
-                                        kind,
-                                    },
-                                    size: args[2], // end is the size
-                                },
-                                ty,
-                                span,
-                                node_id,
-                            )
-                        }
-                        _ => body.alloc_expr(
-                            Expr::Call {
-                                func: func_name,
-                                args,
-                            },
-                            ty,
-                            span,
-                            node_id,
-                        ),
-                    }
-                } else if let Expr::Intrinsic {
-                    name: intrinsic_name,
-                    args: existing_args,
-                } = body.get_expr(func_id).clone()
-                {
-                    // Extend an intrinsic with more arguments
-                    let mut args = existing_args;
-                    args.push(arg_id);
-                    body.alloc_expr(
-                        Expr::Intrinsic {
-                            name: intrinsic_name,
-                            args,
-                        },
-                        ty,
-                        span,
-                        node_id,
-                    )
-                } else if let Expr::Tuple(existing_elems) = body.get_expr(func_id).clone() {
-                    // Extend an existing tuple literal
-                    let mut elems = existing_elems;
-                    elems.push(arg_id);
-                    body.alloc_expr(Expr::Tuple(elems), ty, span, node_id)
-                } else if let Expr::Vector(existing_elems) = body.get_expr(func_id).clone() {
-                    // Extend an existing vector literal
-                    let mut elems = existing_elems;
-                    elems.push(arg_id);
-                    body.alloc_expr(Expr::Vector(elems), ty, span, node_id)
-                } else if let Expr::Array {
-                    backing: mir::ArrayBacking::Literal(existing_elems),
-                    ..
-                } = body.get_expr(func_id).clone()
-                {
-                    // Extend an existing array literal
-                    let mut elems = existing_elems;
-                    elems.push(arg_id);
-                    let len = elems.len();
-                    let size = body.alloc_expr(
-                        Expr::Int(len.to_string()),
-                        Type::Constructed(TypeName::Int(32), vec![]),
-                        span,
-                        node_id,
-                    );
-                    body.alloc_expr(
-                        Expr::Array {
-                            backing: mir::ArrayBacking::Literal(elems),
-                            size,
-                        },
-                        ty,
-                        span,
-                        node_id,
-                    )
-                } else if let Expr::Closure {
-                    lambda_name,
-                    captures: existing_captures,
-                } = body.get_expr(func_id).clone()
-                {
-                    // Extend closure with another captured argument
-                    let mut captures = existing_captures;
-                    captures.push(arg_id);
-
-                    // Check if we now have all arguments for a full call
-                    let func_arity = self.top_level.get(&lambda_name).map(|d| d.arity).unwrap_or(0);
-                    if captures.len() == func_arity {
-                        // Full application - convert to Call
-                        body.alloc_expr(
-                            Expr::Call {
-                                func: lambda_name,
-                                args: captures,
-                            },
-                            ty,
-                            span,
-                            node_id,
-                        )
-                    } else {
-                        // Still partial - keep as Closure
-                        body.alloc_expr(
-                            Expr::Closure {
-                                lambda_name,
-                                captures,
-                            },
-                            ty,
-                            span,
-                            node_id,
-                        )
-                    }
-                } else {
-                    // True higher-order application - need closure apply
-                    // For now, emit as intrinsic call
-                    body.alloc_expr(
-                        Expr::Intrinsic {
-                            name: "_w_apply".to_string(),
-                            args: vec![func_id, arg_id],
-                        },
-                        ty,
-                        span,
-                        node_id,
-                    )
-                }
-            }
+        } else if name.starts_with("_w_") {
+            // Intrinsic
+            body.alloc_expr(
+                Expr::Intrinsic {
+                    name: name.to_string(),
+                    args: arg_ids,
+                },
+                ty,
+                span,
+                node_id,
+            )
+        } else {
+            // Unknown function - assume it's a full call
+            body.alloc_expr(
+                Expr::Call {
+                    func: name.to_string(),
+                    args: arg_ids,
+                },
+                ty,
+                span,
+                node_id,
+            )
         }
     }
 
-    /// Collect arguments from a curried application chain.
-    fn collect_curried_args(&mut self, term: &Term, body: &mut Body) -> Vec<ExprId> {
-        // For now, just transform the single argument
-        // A more complete implementation would walk nested Apps
-        vec![self.transform_term(term, body)]
+    /// Transform an application where the base is a Term (computed function value).
+    fn transform_term_application(
+        &mut self,
+        term: &Term,
+        args: &[&Term],
+        ty: Type<TypeName>,
+        span: Span,
+        node_id: NodeId,
+        body: &mut Body,
+    ) -> ExprId {
+        // Check if the term is a variable with a known static function value
+        if let Some(func_name) = self.extract_static_value(term) {
+            // Redirect to var application with the known function name
+            return self.transform_var_application(&func_name, args, ty, span, node_id, body);
+        }
+
+        // Transform all arguments
+        let arg_ids: Vec<_> = args.iter().map(|a| self.transform_term(a, body)).collect();
+
+        // Transform the function term
+        let func_id = self.transform_term(term, body);
+
+        // Check what kind of expression the function is
+        match body.get_expr(func_id).clone() {
+            Expr::Global(func_name) => {
+                // Global reference - could be a function or intrinsic
+                if func_name.starts_with("_w_") {
+                    body.alloc_expr(
+                        Expr::Intrinsic {
+                            name: func_name,
+                            args: arg_ids,
+                        },
+                        ty,
+                        span,
+                        node_id,
+                    )
+                } else {
+                    body.alloc_expr(
+                        Expr::Call {
+                            func: func_name,
+                            args: arg_ids,
+                        },
+                        ty,
+                        span,
+                        node_id,
+                    )
+                }
+            }
+            Expr::Closure {
+                lambda_name,
+                captures: existing_captures,
+            } => {
+                // Extend closure captures with the new arguments
+                let mut captures = existing_captures;
+                captures.extend(arg_ids);
+
+                // Check if we now have all arguments for a full call
+                let func_arity = self
+                    .top_level
+                    .get(&lambda_name)
+                    .map(|d| d.arity)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "BUG: Function '{}' not found in top_level - missing arity info",
+                            lambda_name
+                        )
+                    });
+
+                if captures.len() == func_arity {
+                    // Full application - convert to Call
+                    body.alloc_expr(
+                        Expr::Call {
+                            func: lambda_name,
+                            args: captures,
+                        },
+                        ty,
+                        span,
+                        node_id,
+                    )
+                } else {
+                    panic!(
+                        "BUG: Wrong number of arguments for closure {}: expected {}, got {} (no partial application allowed)",
+                        lambda_name,
+                        func_arity,
+                        captures.len()
+                    )
+                }
+            }
+            _ => {
+                // True higher-order application - need _w_apply for each argument
+                let mut result = func_id;
+                for arg_id in arg_ids {
+                    result = body.alloc_expr(
+                        Expr::Intrinsic {
+                            name: "_w_apply".to_string(),
+                            args: vec![result, arg_id],
+                        },
+                        ty.clone(),
+                        span,
+                        node_id,
+                    );
+                }
+                result
+            }
+        }
     }
 
     /// Extract RangeKind from an integer literal expression.
