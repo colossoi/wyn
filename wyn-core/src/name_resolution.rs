@@ -3,9 +3,6 @@
 //! Resolves module-qualified names by rewriting:
 //!   FieldAccess(Identifier(module), field) -> QualifiedName([module], field)
 //! when `module` is a known module name.
-//!
-//! Also resolves builtin aliases (e.g., magnitude -> _w_intrinsic_magnitude)
-//! for identifiers that are not shadowed by local bindings.
 
 use crate::ast::{Declaration, ExprKind, Expression, PatternKind, Program};
 use crate::error::Result;
@@ -191,14 +188,6 @@ fn resolve_expr(
             }
             if let Some(ref mut end) = slice.end {
                 resolve_expr(end, module_manager, scope)?;
-            }
-        }
-        // Resolve builtin aliases (e.g., magnitude -> _w_intrinsic_magnitude)
-        // Only resolve if the name is NOT shadowed by a local binding
-        ExprKind::Identifier(quals, name) if quals.is_empty() && scope.lookup(name).is_none() => {
-            use crate::intrinsics::IntrinsicSource;
-            if let Some(resolved) = IntrinsicSource::resolve_alias(name) {
-                *name = resolved.to_string();
             }
         }
         ExprKind::Identifier(_, _) => {}

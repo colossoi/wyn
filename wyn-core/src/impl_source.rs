@@ -716,21 +716,21 @@ impl ImplSource {
         self.register("_w_intrinsic_array_with", BuiltinImpl::Intrinsic(Intrinsic::ArrayWith));
 
         // Vector operations
-        self.register("_w_intrinsic_magnitude", BuiltinImpl::PrimOp(PrimOp::GlslExt(66)));
-        self.register("_w_intrinsic_normalize", BuiltinImpl::PrimOp(PrimOp::GlslExt(69)));
-        self.register("_w_intrinsic_dot", BuiltinImpl::PrimOp(PrimOp::Dot));
-        self.register("_w_intrinsic_cross", BuiltinImpl::PrimOp(PrimOp::GlslExt(68)));
-        self.register("_w_intrinsic_distance", BuiltinImpl::PrimOp(PrimOp::GlslExt(67)));
-        self.register("_w_intrinsic_reflect", BuiltinImpl::PrimOp(PrimOp::GlslExt(71)));
-        self.register("_w_intrinsic_refract", BuiltinImpl::PrimOp(PrimOp::GlslExt(72)));
+        self.register("magnitude", BuiltinImpl::PrimOp(PrimOp::GlslExt(66)));
+        self.register("normalize", BuiltinImpl::PrimOp(PrimOp::GlslExt(69)));
+        self.register("dot", BuiltinImpl::PrimOp(PrimOp::Dot));
+        self.register("cross", BuiltinImpl::PrimOp(PrimOp::GlslExt(68)));
+        self.register("distance", BuiltinImpl::PrimOp(PrimOp::GlslExt(67)));
+        self.register("reflect", BuiltinImpl::PrimOp(PrimOp::GlslExt(71)));
+        self.register("refract", BuiltinImpl::PrimOp(PrimOp::GlslExt(72)));
 
         // Float operations
-        self.register("_w_intrinsic_floor", BuiltinImpl::PrimOp(PrimOp::GlslExt(8)));
-        self.register("_w_intrinsic_ceil", BuiltinImpl::PrimOp(PrimOp::GlslExt(9)));
-        self.register("_w_intrinsic_fract", BuiltinImpl::PrimOp(PrimOp::GlslExt(10)));
-        self.register("_w_intrinsic_mix", BuiltinImpl::PrimOp(PrimOp::GlslExt(46))); // FMix
+        self.register("floor", BuiltinImpl::PrimOp(PrimOp::GlslExt(8)));
+        self.register("ceil", BuiltinImpl::PrimOp(PrimOp::GlslExt(9)));
+        self.register("fract", BuiltinImpl::PrimOp(PrimOp::GlslExt(10)));
+        self.register("mix", BuiltinImpl::PrimOp(PrimOp::GlslExt(46))); // FMix
         self.register(
-            "_w_intrinsic_smoothstep",
+            "smoothstep",
             BuiltinImpl::PrimOp(PrimOp::GlslExt(49)),
         );
     }
@@ -738,23 +738,23 @@ impl ImplSource {
     /// Register matrix operations (implementations only, types in intrinsics)
     fn register_matrix_operations(&mut self) {
         self.register(
-            "_w_intrinsic_determinant",
+            "determinant",
             BuiltinImpl::PrimOp(PrimOp::GlslExt(33)),
         );
-        self.register("_w_intrinsic_inverse", BuiltinImpl::PrimOp(PrimOp::GlslExt(34)));
-        self.register("_w_intrinsic_outer", BuiltinImpl::PrimOp(PrimOp::OuterProduct));
+        self.register("inverse", BuiltinImpl::PrimOp(PrimOp::GlslExt(34)));
+        self.register("outer", BuiltinImpl::PrimOp(PrimOp::OuterProduct));
 
         // mul dispatch happens in lowering based on argument types
         self.register(
-            "_w_intrinsic_mul_mat_mat",
+            "mul_mat_mat",
             BuiltinImpl::PrimOp(PrimOp::MatrixTimesMatrix),
         );
         self.register(
-            "_w_intrinsic_mul_mat_vec",
+            "mul_mat_vec",
             BuiltinImpl::PrimOp(PrimOp::MatrixTimesVector),
         );
         self.register(
-            "_w_intrinsic_mul_vec_mat",
+            "mul_vec_mat",
             BuiltinImpl::PrimOp(PrimOp::VectorTimesMatrix),
         );
     }
