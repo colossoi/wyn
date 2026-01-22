@@ -15,7 +15,7 @@ use crate::IdArena;
 use crate::ast::TypeName;
 use crate::err_type;
 use crate::error::Result;
-use crate::mir::{ArrayBacking, Body, Def, Expr, ExprId, LocalDecl, Program};
+use crate::mir::{Body, Def, Expr, ExprId, LocalDecl, Program};
 use crate::mir::{LambdaId, LambdaInfo};
 use crate::types::TypeScheme;
 use polytype::Type;
@@ -361,271 +361,71 @@ impl Monomorphizer {
         }
     }
 
-    fn process_function(&mut self, def: Def) -> Result<Def> {
-        match def {
-            Def::Function {
-                id,
-                name,
-                params,
-                ret_type,
-                scheme,
-                attributes,
-                body,
-                span,
-            } => {
-                let body = self.process_body(body)?;
-                Ok(Def::Function {
-                    id,
-                    name,
-                    params,
-                    ret_type,
-                    scheme,
-                    attributes,
-                    body,
-                    span,
-                })
+    fn process_function(&mut self, mut def: Def) -> Result<Def> {
+        match &mut def {
+            Def::Function { body, .. } | Def::Constant { body, .. } | Def::EntryPoint { body, .. } => {
+                self.process_body(body)?;
             }
-            Def::Constant {
-                id,
-                name,
-                ty,
-                attributes,
-                body,
-                span,
-            } => {
-                let body = self.process_body(body)?;
-                Ok(Def::Constant {
-                    id,
-                    name,
-                    ty,
-                    attributes,
-                    body,
-                    span,
-                })
-            }
-            Def::EntryPoint {
-                id,
-                name,
-                execution_model,
-                inputs,
-                outputs,
-                body,
-                span,
-            } => {
-                let body = self.process_body(body)?;
-                Ok(Def::EntryPoint {
-                    id,
-                    name,
-                    execution_model,
-                    inputs,
-                    outputs,
-                    body,
-                    span,
-                })
-            }
-            Def::Uniform { .. } => Ok(def),
-            Def::Storage { .. } => Ok(def),
+            Def::Uniform { .. } | Def::Storage { .. } => {}
         }
+        Ok(def)
     }
 
-    fn process_body(&mut self, old_body: Body) -> Result<Body> {
-        let mut new_body = Body::new();
+    /// Process a body in-place, rewriting Call/Global names for specialization.
+    /// Only modifies func names - ExprIds and structure remain unchanged.
+    fn process_body(&mut self, body: &mut Body) -> Result<()> {
+        // We need to iterate by index because we modify exprs and call methods on self
+        for idx in 0..body.exprs.len() {
+            let expr_id = ExprId(idx as u32);
 
-        // Copy locals
-        for local in &old_body.locals {
-            new_body.alloc_local(local.clone());
-        }
-
-        // Map old ExprIds to new ExprIds
-        let mut expr_map: HashMap<ExprId, ExprId> = HashMap::new();
-
-        // Process expressions in order
-        for (old_idx, old_expr) in old_body.exprs.iter().enumerate() {
-            let old_id = ExprId(old_idx as u32);
-            let ty = old_body.get_type(old_id).clone();
-            let span = old_body.get_span(old_id);
-            let node_id = old_body.get_node_id(old_id);
-
-            let new_expr = self.process_expr(&old_body, old_expr, &expr_map, &ty)?;
-            let new_id = new_body.alloc_expr(new_expr, ty, span, node_id);
-            expr_map.insert(old_id, new_id);
-        }
-
-        new_body.root = expr_map[&old_body.root];
-        Ok(new_body)
-    }
-
-    fn process_expr(
-        &mut self,
-        body: &Body,
-        expr: &Expr,
-        expr_map: &HashMap<ExprId, ExprId>,
-        _expr_type: &Type<TypeName>,
-    ) -> Result<Expr> {
-        match expr {
-            Expr::Call { func, args } => {
-                // Map arguments
-                let new_args: Vec<_> = args.iter().map(|a| expr_map[a]).collect();
-
-                // Check if this is a call to a user-defined function
-                if let Some(poly_def) = self.poly_functions.get(func).cloned() {
-                    // Get argument types to infer substitution
-                    let arg_types: Vec<_> = args.iter().map(|a| body.get_type(*a).clone()).collect();
-                    let subst = self.infer_substitution(&poly_def, &arg_types)?;
-                    let spec_key = SpecKey::new(&subst);
-
-                    if spec_key.needs_specialization() {
-                        // This call needs specialization (type vars and/or mem bindings)
-                        let specialized_name =
-                            self.get_or_create_specialization(func, &spec_key, &poly_def)?;
-                        return Ok(Expr::Call {
-                            func: specialized_name,
-                            args: new_args,
-                        });
-                    } else {
-                        // Monomorphic call with no mem bindings - ensure the callee is in the worklist
-                        self.ensure_in_worklist(func, poly_def);
-                    }
-                }
-
-                Ok(Expr::Call {
-                    func: func.clone(),
-                    args: new_args,
-                })
-            }
-
-            // Map subexpressions for compound expressions
-            Expr::BinOp { op, lhs, rhs } => Ok(Expr::BinOp {
-                op: op.clone(),
-                lhs: expr_map[lhs],
-                rhs: expr_map[rhs],
-            }),
-            Expr::UnaryOp { op, operand } => Ok(Expr::UnaryOp {
-                op: op.clone(),
-                operand: expr_map[operand],
-            }),
-            Expr::If { cond, then_, else_ } => Ok(Expr::If {
-                cond: expr_map[cond],
-                then_: expr_map[then_],
-                else_: expr_map[else_],
-            }),
-            Expr::Let {
-                local,
-                rhs,
-                body: let_body,
-            } => Ok(Expr::Let {
-                local: *local,
-                rhs: expr_map[rhs],
-                body: expr_map[let_body],
-            }),
-            Expr::Loop {
-                loop_var,
-                init,
-                init_bindings,
-                kind,
-                body: loop_body,
-            } => {
-                let new_init_bindings: Vec<_> =
-                    init_bindings.iter().map(|(local, e)| (*local, expr_map[e])).collect();
-                Ok(Expr::Loop {
-                    loop_var: *loop_var,
-                    init: expr_map[init],
-                    init_bindings: new_init_bindings,
-                    kind: map_loop_kind(kind, expr_map),
-                    body: expr_map[loop_body],
-                })
-            }
-            Expr::Intrinsic { name, args } => {
-                let new_args: Vec<_> = args.iter().map(|a| expr_map[a]).collect();
-                Ok(Expr::Intrinsic {
-                    name: name.clone(),
-                    args: new_args,
-                })
-            }
-            Expr::Attributed {
-                attributes,
-                expr: inner,
-            } => Ok(Expr::Attributed {
-                attributes: attributes.clone(),
-                expr: expr_map[inner],
-            }),
-            Expr::Materialize(inner) => Ok(Expr::Materialize(expr_map[inner])),
-            Expr::Tuple(elems) => {
-                let new_elems: Vec<_> = elems.iter().map(|e| expr_map[e]).collect();
-                Ok(Expr::Tuple(new_elems))
-            }
-            Expr::Array { backing, size } => {
-                let new_size = expr_map[size];
-                let new_backing = match backing {
-                    ArrayBacking::Literal(elems) => {
-                        ArrayBacking::Literal(elems.iter().map(|e| expr_map[e]).collect())
-                    }
-                    ArrayBacking::Range { start, step, kind } => ArrayBacking::Range {
-                        start: expr_map[start],
-                        step: step.map(|s| expr_map[&s]),
-                        kind: *kind,
-                    },
-                    ArrayBacking::IndexFn { index_fn } => ArrayBacking::IndexFn {
-                        index_fn: expr_map[index_fn],
-                    },
-                    ArrayBacking::View { base, offset } => ArrayBacking::View {
-                        base: expr_map[base],
-                        offset: expr_map[offset],
-                    },
-                    ArrayBacking::Owned { data } => ArrayBacking::Owned { data: expr_map[data] },
-                    ArrayBacking::Storage { name, offset } => ArrayBacking::Storage {
-                        name: name.clone(),
-                        offset: expr_map[offset],
-                    },
-                };
-                Ok(Expr::Array {
-                    backing: new_backing,
-                    size: new_size,
-                })
-            }
-            Expr::Vector(elems) => {
-                let new_elems: Vec<_> = elems.iter().map(|e| expr_map[e]).collect();
-                Ok(Expr::Vector(new_elems))
-            }
-            Expr::Matrix(rows) => {
-                let new_rows: Vec<Vec<_>> =
-                    rows.iter().map(|row| row.iter().map(|e| expr_map[e]).collect()).collect();
-                Ok(Expr::Matrix(new_rows))
-            }
-            Expr::Global(name) => {
-                // Global reference might refer to a top-level function/constant
-                if let Some(poly_def) = self.poly_functions.get(name).cloned() {
-                    // Check if the definition needs specialization based on the expression type
-                    // This handles lambdas passed to HOFs like map/reduce
-                    if let Some(subst) = self.infer_global_substitution(&poly_def, _expr_type) {
+            match &body.exprs[idx] {
+                Expr::Call { func, args } => {
+                    // Check if this is a call to a user-defined function that needs specialization
+                    if let Some(poly_def) = self.poly_functions.get(func).cloned() {
+                        let arg_types: Vec<_> = args.iter().map(|a| body.get_type(*a).clone()).collect();
+                        let subst = self.infer_substitution(&poly_def, &arg_types)?;
                         let spec_key = SpecKey::new(&subst);
+
                         if spec_key.needs_specialization() {
                             let specialized_name =
-                                self.get_or_create_specialization(name, &spec_key, &poly_def)?;
-                            return Ok(Expr::Global(specialized_name));
+                                self.get_or_create_specialization(&func.clone(), &spec_key, &poly_def)?;
+                            // Update func name in place
+                            if let Expr::Call { func, .. } = &mut body.exprs[idx] {
+                                *func = specialized_name;
+                            }
+                        } else {
+                            self.ensure_in_worklist(&func.clone(), poly_def);
                         }
                     }
-                    // No specialization needed - just ensure it's in the worklist
-                    self.ensure_in_worklist(name, poly_def);
                 }
-                Ok(Expr::Global(name.clone()))
+
+                Expr::Global(name) => {
+                    // Global reference might refer to a top-level function/constant
+                    if let Some(poly_def) = self.poly_functions.get(name).cloned() {
+                        let expr_type = body.get_type(expr_id).clone();
+                        if let Some(subst) = self.infer_global_substitution(&poly_def, &expr_type) {
+                            let spec_key = SpecKey::new(&subst);
+                            if spec_key.needs_specialization() {
+                                let specialized_name =
+                                    self.get_or_create_specialization(&name.clone(), &spec_key, &poly_def)?;
+                                // Update name in place
+                                if let Expr::Global(name) = &mut body.exprs[idx] {
+                                    *name = specialized_name;
+                                }
+                            } else {
+                                self.ensure_in_worklist(&name.clone(), poly_def);
+                            }
+                        } else {
+                            self.ensure_in_worklist(&name.clone(), poly_def);
+                        }
+                    }
+                }
+
+                // All other expressions don't need modification - ExprIds stay the same
+                _ => {}
             }
-
-            // Leaf nodes - just clone
-            Expr::Local(id) => Ok(Expr::Local(*id)),
-            Expr::Int(s) => Ok(Expr::Int(s.clone())),
-            Expr::Float(s) => Ok(Expr::Float(s.clone())),
-            Expr::Bool(b) => Ok(Expr::Bool(*b)),
-            Expr::String(s) => Ok(Expr::String(s.clone())),
-            Expr::Unit => Ok(Expr::Unit),
-
-            // Memory operations - map subexpressions
-            Expr::Load { ptr } => Ok(Expr::Load { ptr: expr_map[ptr] }),
-            Expr::Store { ptr, value } => Ok(Expr::Store {
-                ptr: expr_map[ptr],
-                value: expr_map[value],
-            }),
         }
+        Ok(())
     }
 
     /// Infer the substitution needed for a polymorphic function call.
@@ -802,21 +602,6 @@ impl Monomorphizer {
 
         self.specializations.insert(cache_key, specialized_name.clone());
         Ok(specialized_name)
-    }
-}
-
-fn map_loop_kind(kind: &crate::mir::LoopKind, expr_map: &HashMap<ExprId, ExprId>) -> crate::mir::LoopKind {
-    use crate::mir::LoopKind;
-    match kind {
-        LoopKind::For { var, iter } => LoopKind::For {
-            var: *var,
-            iter: expr_map[iter],
-        },
-        LoopKind::ForRange { var, bound } => LoopKind::ForRange {
-            var: *var,
-            bound: expr_map[bound],
-        },
-        LoopKind::While { cond } => LoopKind::While { cond: expr_map[cond] },
     }
 }
 
