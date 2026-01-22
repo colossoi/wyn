@@ -18,10 +18,6 @@ pub struct TlcToMir<'a> {
     locals: HashMap<String, LocalId>,
     /// Maps top-level function names to their definitions
     top_level: HashMap<String, TlcDef>,
-    /// Static value tracking: maps local variable names to their known function targets.
-    /// When we have `let f = some_lambda`, this records `f -> "some_lambda"`.
-    /// This enables direct calls instead of dynamic `_w_apply`.
-    static_values: HashMap<String, String>,
     /// Type schemes for functions (for monomorphization)
     schemes: &'a HashMap<String, TypeScheme>,
 }
@@ -36,7 +32,6 @@ impl<'a> TlcToMir<'a> {
         let mut transformer = Self {
             locals: HashMap::new(),
             top_level,
-            static_values: HashMap::new(),
             schemes,
         };
 
@@ -74,7 +69,6 @@ impl<'a> TlcToMir<'a> {
 
     fn transform_def(&mut self, def: &TlcDef) -> MirDef {
         self.locals.clear();
-        self.static_values.clear();
 
         match &def.meta {
             DefMeta::Function => self.transform_function_def(def),
@@ -262,23 +256,6 @@ impl<'a> TlcToMir<'a> {
         }
     }
 
-    /// Extract the static function value from a term, if known.
-    /// Returns Some(function_name) if the term is a reference to a known function.
-    fn extract_static_value(&self, term: &Term) -> Option<String> {
-        match &term.kind {
-            TermKind::Var(name) => {
-                // Check if it's a top-level function
-                if self.top_level.contains_key(name) {
-                    Some(name.clone())
-                } else {
-                    // Check if it's a local bound to a known function
-                    self.static_values.get(name).cloned()
-                }
-            }
-            _ => None,
-        }
-    }
-
     /// Extract curried parameters from nested Lams.
     /// Returns (params, inner_body) where params is [(name, type, span), ...]
     fn extract_params<'b>(&self, term: &'b Term) -> (Vec<(String, Type<TypeName>, Span)>, &'b Term) {
@@ -329,9 +306,6 @@ impl<'a> TlcToMir<'a> {
                 rhs,
                 body: let_body,
             } => {
-                // Extract static value before transforming (for function tracking)
-                let static_val = self.extract_static_value(rhs);
-
                 let rhs_id = self.transform_term(rhs, body);
                 let local_id = body.alloc_local(LocalDecl {
                     name: name.clone(),
@@ -341,15 +315,9 @@ impl<'a> TlcToMir<'a> {
                 });
                 self.locals.insert(name.clone(), local_id);
 
-                // Record static value if RHS is a known function
-                if let Some(func_name) = static_val {
-                    self.static_values.insert(name.clone(), func_name);
-                }
-
                 let body_id = self.transform_term(let_body, body);
 
                 self.locals.remove(name);
-                self.static_values.remove(name);
 
                 body.alloc_expr(
                     Expr::Let {
@@ -746,39 +714,22 @@ impl<'a> TlcToMir<'a> {
         node_id: NodeId,
         body: &mut Body,
     ) -> ExprId {
-        // Check if the term is a variable with a known static function value
-        if let Some(func_name) = self.extract_static_value(term) {
-            // Redirect to var application with the known function name
-            return self.transform_var_application(&func_name, args, ty, span, node_id, body);
-        }
-
         // Transform all arguments
         let arg_ids: Vec<_> = args.iter().map(|a| self.transform_term(a, body)).collect();
 
         // Transform the function term
         let func_id = self.transform_term(term, body);
 
-        // Check what kind of expression the function is
+        // After defunctionalization, all function applications should resolve to Global refs
         match body.get_expr(func_id).clone() {
             Expr::Global(func_name) => {
-                // Global reference - could be a function or intrinsic
                 self.emit_call_or_intrinsic(&func_name, arg_ids, ty, span, node_id, body)
             }
-            _ => {
-                // True higher-order application - need _w_apply for each argument
-                let mut result = func_id;
-                for arg_id in arg_ids {
-                    result = body.alloc_expr(
-                        Expr::Intrinsic {
-                            name: "_w_apply".to_string(),
-                            args: vec![result, arg_id],
-                        },
-                        ty.clone(),
-                        span,
-                        node_id,
-                    );
-                }
-                result
+            other => {
+                panic!(
+                    "BUG: Non-global function application after defunctionalization: {:?}",
+                    other
+                );
             }
         }
     }

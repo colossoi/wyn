@@ -7,38 +7,6 @@ mod tests {
     use crate::{Compiler, build_builtins};
     use polytype::Type;
 
-    /// Run full MIR pipeline (but not SPIR-V lowering) on source code.
-    /// Returns the final MIR after all passes.
-    fn full_mir_pipeline(input: &str) -> mir::Program {
-        let mut frontend = crate::cached_frontend();
-        let parsed = Compiler::parse(input, &mut frontend.node_counter).expect("Parsing failed");
-        let alias_checked = parsed
-            .desugar(&mut frontend.node_counter)
-            .expect("Desugaring failed")
-            .resolve(&frontend.module_manager)
-            .expect("Name resolution failed")
-            .fold_ast_constants()
-            .type_check(&frontend.module_manager, &mut frontend.schemes)
-            .expect("Type checking failed")
-            .alias_check()
-            .expect("Alias checking failed");
-
-        let builtins = build_builtins(&alias_checked.ast, &frontend.module_manager);
-        alias_checked
-            .to_tlc(builtins, &frontend.schemes, &frontend.module_manager)
-            .skip_partial_eval()
-            .defunctionalize()
-            .to_mir()
-            .hoist_materializations()
-            .normalize()
-            .monomorphize()
-            .expect("Monomorphization failed")
-            .skip_folding()
-            .filter_reachable()
-            .lift_bindings()
-            .mir
-    }
-
     fn make_span(line: usize, col: usize) -> Span {
         Span {
             start_line: line,
