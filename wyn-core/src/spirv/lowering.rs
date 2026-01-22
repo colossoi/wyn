@@ -1319,8 +1319,9 @@ fn lower_compute_pipeline(
     };
 
     // Apply the map function to the input element
-    let mut call_args = capture_vals.clone();
-    call_args.push(input_elem);
+    // Order: element first, then captures (captures are trailing params after lifting)
+    let mut call_args = vec![input_elem];
+    call_args.extend(capture_vals.clone());
     let result = constructor.builder.function_call(output_elem_type_id, None, map_func_id, call_args)?;
 
     // Write result to output buffer
@@ -3312,8 +3313,9 @@ fn lower_map(
                 let idx = constructor.const_i32(i as i32);
                 let input_elem = read_elem(constructor, body, arr_expr_id, backing, idx, elem_type)?;
 
-                let mut call_args = capture_vals.clone();
-                call_args.push(input_elem);
+                // Order: element first, then captures (captures are trailing params after lifting)
+                let mut call_args = vec![input_elem];
+                call_args.extend(capture_vals.clone());
                 let result_elem =
                     constructor.builder.function_call(output_elem_type, None, map_func_id, call_args)?;
                 result_elements.push(result_elem);
@@ -3328,8 +3330,9 @@ fn lower_map(
             let idx = constructor.const_u32(i);
             let input_elem = read_array_element(constructor, mem, arr_val, idx, elem_type)?;
 
-            let mut call_args = capture_vals.clone();
-            call_args.push(input_elem);
+            // Order: element first, then captures (captures are trailing params after lifting)
+            let mut call_args = vec![input_elem];
+            call_args.extend(capture_vals.clone());
             let result_elem =
                 constructor.builder.function_call(output_elem_type, None, map_func_id, call_args)?;
             result_elements.push(result_elem);
@@ -3404,9 +3407,9 @@ fn lower_inplace_map(
             let mut result_elements = Vec::with_capacity(array_size as usize);
             for i in 0..array_size {
                 let input_elem = constructor.builder.composite_extract(elem_type, None, arr_val, [i])?;
-                // Build call args: captures first, then input element
-                let mut call_args = capture_vals.clone();
-                call_args.push(input_elem);
+                // Order: element first, then captures (captures are trailing params after lifting)
+                let mut call_args = vec![input_elem];
+                call_args.extend(capture_vals.clone());
                 let result_elem =
                     constructor.builder.function_call(output_elem_type, None, map_func_id, call_args)?;
                 result_elements.push(result_elem);
@@ -3540,10 +3543,9 @@ fn lower_reduce(
     let mut acc = neutral_val;
     for i in 0..array_size {
         let elem = constructor.builder.composite_extract(elem_type, None, array_val, [i])?;
-        // Build call args: captures first, then acc and elem
-        let mut call_args = capture_vals.clone();
-        call_args.push(acc);
-        call_args.push(elem);
+        // Order: acc and elem first, then captures (captures are trailing params after lifting)
+        let mut call_args = vec![acc, elem];
+        call_args.extend(capture_vals.clone());
         acc = constructor.builder.function_call(result_type, None, op_func_id, call_args)?;
     }
 
@@ -3596,10 +3598,9 @@ fn lower_scan(
         let mut acc = first_elem;
         for i in 1..array_size {
             let elem = constructor.builder.composite_extract(elem_type, None, array_val, [i])?;
-            // Build call args: captures first, then acc and elem
-            let mut call_args = capture_vals.clone();
-            call_args.push(acc);
-            call_args.push(elem);
+            // Order: acc and elem first, then captures (captures are trailing params after lifting)
+            let mut call_args = vec![acc, elem];
+            call_args.extend(capture_vals.clone());
             acc = constructor.builder.function_call(elem_type, None, op_func_id, call_args)?;
             result_elements.push(acc);
         }
@@ -3647,9 +3648,9 @@ fn lower_filter(
 
     for i in 0..array_size {
         let elem = constructor.builder.composite_extract(elem_type, None, array_val, [i])?;
-        // Build call args: captures first, then elem
-        let mut call_args = capture_vals.clone();
-        call_args.push(elem);
+        // Order: element first, then captures (captures are trailing params after lifting)
+        let mut call_args = vec![elem];
+        call_args.extend(capture_vals.clone());
         let pred_result =
             constructor.builder.function_call(constructor.bool_type, None, pred_func_id, call_args)?;
 
@@ -3818,10 +3819,9 @@ fn lower_hist_1d(
                 constructor.builder.i_equal(constructor.bool_type, None, index, dest_idx_const)?;
 
             // Apply operator: new_acc = op(acc, value)
-            // Build call args: captures first, then acc and value
-            let mut call_args = capture_vals.clone();
-            call_args.push(acc);
-            call_args.push(value);
+            // Order: acc and value first, then captures (captures are trailing params after lifting)
+            let mut call_args = vec![acc, value];
+            call_args.extend(capture_vals.clone());
             let combined = constructor.builder.function_call(elem_type, None, op_func_id, call_args)?;
 
             // Select: if matches then combined else acc
