@@ -39,15 +39,19 @@ struct Monomorphizer {
     specializations: HashMap<(String, SpecKey), String>,
     /// Worklist of functions to process
     worklist: VecDeque<WorkItem>,
-    /// Functions already processed
-    processed: HashSet<String>,
+    /// Processed (original_name, spec_key) pairs
+    /// Using the conceptual key rather than serialized name avoids dedup bugs
+    /// if name formatting accidentally collides for distinct specializations.
+    processed: HashSet<(String, SpecKey)>,
     /// Lambda registry from original program
     lambda_registry: IdArena<LambdaId, LambdaInfo>,
 }
 
 struct WorkItem {
-    /// Name of the function to process
-    name: String,
+    /// Original function name (before specialization)
+    original_name: String,
+    /// Specialization key (empty for monomorphic functions)
+    spec_key: SpecKey,
     /// The function definition
     def: Def,
 }
@@ -94,6 +98,13 @@ impl SubstKey {
 }
 
 impl SpecKey {
+    /// Create an empty spec key (for monomorphic functions)
+    fn empty() -> Self {
+        SpecKey {
+            type_subst: SubstKey(Vec::new()),
+        }
+    }
+
     fn new(subst: &Substitution) -> Self {
         SpecKey {
             type_subst: SubstKey::from_subst(subst),
@@ -292,7 +303,8 @@ impl Monomorphizer {
             // rather than via mem bindings on LocalDecl
             if let Def::EntryPoint { .. } = &def {
                 entry_points.push(WorkItem {
-                    name: name.clone(),
+                    original_name: name.clone(),
+                    spec_key: SpecKey::empty(),
                     def: def.clone(),
                 });
             }
@@ -315,10 +327,11 @@ impl Monomorphizer {
 
     fn run(mut self) -> Result<Program> {
         while let Some(work_item) = self.worklist.pop_front() {
-            if self.processed.contains(&work_item.name) {
+            let key = (work_item.original_name.clone(), work_item.spec_key.clone());
+            if self.processed.contains(&key) {
                 continue;
             }
-            self.processed.insert(work_item.name.clone());
+            self.processed.insert(key);
 
             // Process this function: look for calls and specialize callees
             let def = self.process_function(work_item.def)?;
@@ -333,12 +346,15 @@ impl Monomorphizer {
 
     /// Ensure a definition is in the worklist (for monomorphic callees and constants)
     fn ensure_in_worklist(&mut self, name: &str, def: Def) {
-        if !self.processed.contains(name) {
+        let key = (name.to_string(), SpecKey::empty());
+        if !self.processed.contains(&key) {
             // Check if it's already in the worklist
-            let already_queued = self.worklist.iter().any(|w| w.name == name);
+            let already_queued =
+                self.worklist.iter().any(|w| w.original_name == name && !w.spec_key.needs_specialization());
             if !already_queued {
                 self.worklist.push_back(WorkItem {
-                    name: name.to_string(),
+                    original_name: name.to_string(),
+                    spec_key: SpecKey::empty(),
                     def,
                 });
             }
@@ -779,7 +795,8 @@ impl Monomorphizer {
 
         // Add to worklist to process its body
         self.worklist.push_back(WorkItem {
-            name: specialized_name.clone(),
+            original_name: func_name.to_string(),
+            spec_key: spec_key.clone(),
             def: specialized_def,
         });
 
