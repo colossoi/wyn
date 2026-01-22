@@ -211,10 +211,7 @@ impl IntrinsicSource {
 
     /// Get all intrinsic arities as a map (for use in to_mir)
     pub fn all_arities(&self) -> HashMap<String, usize> {
-        self.intrinsics
-            .iter()
-            .map(|(name, entries)| (name.clone(), entries[0].arity()))
-            .collect()
+        self.intrinsics.iter().map(|(name, entries)| (name.clone(), entries[0].arity())).collect()
     }
 
     /// Look up an alias and return the intrinsic it maps to.
@@ -236,7 +233,6 @@ impl IntrinsicSource {
             let a = ctx.new_variable();
             self.register_poly(name, vec![a.clone(), a.clone()], a);
         }
-
     }
 
     /// Register vector operations (magnitude, normalize, dot, cross, etc.)
@@ -267,11 +263,7 @@ impl IntrinsicSource {
                 Type::Constructed(TypeName::Float(32), vec![]),
             ],
         );
-        self.register_poly(
-            "cross",
-            vec![vec3f32.clone(), vec3f32.clone()],
-            vec3f32,
-        );
+        self.register_poly("cross", vec![vec3f32.clone(), vec3f32.clone()], vec3f32);
 
         // distance : ∀n a. vec<n,a> -> vec<n,a> -> a
         let n = ctx.new_variable();
@@ -283,21 +275,13 @@ impl IntrinsicSource {
         let n = ctx.new_variable();
         let a = ctx.new_variable();
         let vec_n_a = Type::Constructed(TypeName::Vec, vec![n, a]);
-        self.register_poly(
-            "reflect",
-            vec![vec_n_a.clone(), vec_n_a.clone()],
-            vec_n_a,
-        );
+        self.register_poly("reflect", vec![vec_n_a.clone(), vec_n_a.clone()], vec_n_a);
 
         // refract : ∀n a. vec<n,a> -> vec<n,a> -> a -> vec<n,a>
         let n = ctx.new_variable();
         let a = ctx.new_variable();
         let vec_n_a = Type::Constructed(TypeName::Vec, vec![n, a.clone()]);
-        self.register_poly(
-            "refract",
-            vec![vec_n_a.clone(), vec_n_a.clone(), a],
-            vec_n_a,
-        );
+        self.register_poly("refract", vec![vec_n_a.clone(), vec_n_a.clone(), a], vec_n_a);
 
         // floor, ceil, fract : a -> a (scalar)
         for name in ["floor", "ceil", "fract"] {
@@ -421,7 +405,11 @@ impl IntrinsicSource {
         let s = ctx.new_variable();
         let array_a = Self::array_type(a.clone(), s, n);
         let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
-        self.register_poly("_w_intrinsic_array_with", vec![array_a.clone(), i32_ty, a], array_a);
+        self.register_poly(
+            "_w_intrinsic_array_with",
+            vec![array_a.clone(), i32_ty, a],
+            array_a,
+        );
 
         // reduce : ∀a n s. (a -> a -> a) -> a -> Array[a, s, n] -> a
         let a = ctx.new_variable();

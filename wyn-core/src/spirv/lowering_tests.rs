@@ -288,7 +288,11 @@ entry fragment_main(#[builtin(frag_coord)] pos: vec4f32) #[location(0)] vec4f32 
 "#,
     );
     // Should compile without "Undefined global" error
-    assert!(result.is_ok(), "Expected successful compilation, got: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Expected successful compilation, got: {:?}",
+        result.err()
+    );
     let spirv = result.unwrap();
     assert!(!spirv.is_empty());
     assert_eq!(spirv[0], 0x07230203);

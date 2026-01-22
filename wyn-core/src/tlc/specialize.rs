@@ -176,9 +176,7 @@ impl Specializer {
 
                     if maybe_mul_name == Some("mul") {
                         // Specialize mul based on both arg types
-                        if let Some(specialized_name) =
-                            self.specialize_mul(&first_arg.ty, &arg.ty)
-                        {
+                        if let Some(specialized_name) = self.specialize_mul(&first_arg.ty, &arg.ty) {
                             // Build: App { func: Var(specialized_name), arg: first_arg }
                             // This becomes the new inner term
                             let specialized_first_arg = self.specialize_term(*first_arg.clone());
@@ -410,10 +408,7 @@ mod tests {
             kind: TermKind::Var("b".to_string()),
         };
 
-        let partial_ty = Type::Constructed(
-            TypeName::Arrow,
-            vec![i32_ty.clone(), i32_ty.clone()],
-        );
+        let partial_ty = Type::Constructed(TypeName::Arrow, vec![i32_ty.clone(), i32_ty.clone()]);
 
         let min_a = Term {
             id: ids.next_id(),

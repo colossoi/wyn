@@ -340,7 +340,10 @@ fn test_while_loop() {
     let body = get_body(f_def);
     match body.get_expr(body.root) {
         mir::Expr::Loop { kind, .. } => {
-            assert!(matches!(kind, mir::LoopKind::While { .. }), "Expected While loop kind");
+            assert!(
+                matches!(kind, mir::LoopKind::While { .. }),
+                "Expected While loop kind"
+            );
         }
         other => panic!("Expected Loop, got {:?}", other),
     }
@@ -354,7 +357,10 @@ fn test_for_range_loop() {
     let body = get_body(f_def);
     match body.get_expr(body.root) {
         mir::Expr::Loop { kind, .. } => {
-            assert!(matches!(kind, mir::LoopKind::ForRange { .. }), "Expected ForRange loop kind");
+            assert!(
+                matches!(kind, mir::LoopKind::ForRange { .. }),
+                "Expected ForRange loop kind"
+            );
         }
         other => panic!("Expected Loop, got {:?}", other),
     }
@@ -468,7 +474,10 @@ def test_capture(arr: [4]i32) i32 =
     let has_specialized_map = mir.defs.iter().any(|def| {
         if let mir::Def::Function { name, .. } = def { name.starts_with("map$") } else { false }
     });
-    assert!(has_specialized_map, "map should be specialized with captures as map$N");
+    assert!(
+        has_specialized_map,
+        "map should be specialized with captures as map$N"
+    );
 
     // Check that the specialized map contains the _w_intrinsic_map call
     let specialized_map = mir.defs.iter().find(|def| {
@@ -478,7 +487,10 @@ def test_capture(arr: [4]i32) i32 =
         let has_map_intrinsic = body.exprs.iter().any(|expr| {
             if let mir::Expr::Intrinsic { name, .. } = expr { name == "_w_intrinsic_map" } else { false }
         });
-        assert!(has_map_intrinsic, "Specialized map should have _w_intrinsic_map call");
+        assert!(
+            has_map_intrinsic,
+            "Specialized map should have _w_intrinsic_map call"
+        );
     }
 }
 
@@ -1240,7 +1252,10 @@ def sum_array(arr: [4]f32) f32 =
             }
         }
     }
-    assert!(has_reduce_intrinsic, "Expected _w_intrinsic_reduce with 3 arguments somewhere in MIR");
+    assert!(
+        has_reduce_intrinsic,
+        "Expected _w_intrinsic_reduce with 3 arguments somewhere in MIR"
+    );
 }
 
 #[test]
@@ -1288,7 +1303,11 @@ def minPair(hits: [4](f32, i32)) (f32, i32) =
                 {
                     if intrinsic_name == "_w_intrinsic_reduce" {
                         // reduce intrinsic should have at least 3 args: [op, ne, arr, captures...]
-                        assert!(args.len() >= 3, "reduce intrinsic should have at least 3 args, got {}", args.len());
+                        assert!(
+                            args.len() >= 3,
+                            "reduce intrinsic should have at least 3 args, got {}",
+                            args.len()
+                        );
                         has_reduce_intrinsic = true;
                     }
                 }
@@ -1520,24 +1539,29 @@ def nested_capture(x: i32, arr: [4]i32) [4]i32 =
     );
 
     // Should have multiple lifted lambdas
-    let lambda_count = mir.defs.iter().filter(|d| {
-        if let mir::Def::Function { name, .. } = d {
-            name.contains("_lambda_")
-        } else {
-            false
-        }
-    }).count();
-    assert!(lambda_count >= 2, "Expected at least 2 lifted lambdas (inner and outer), found {}", lambda_count);
+    let lambda_count = mir
+        .defs
+        .iter()
+        .filter(
+            |d| {
+                if let mir::Def::Function { name, .. } = d { name.contains("_lambda_") } else { false }
+            },
+        )
+        .count();
+    assert!(
+        lambda_count >= 2,
+        "Expected at least 2 lifted lambdas (inner and outer), found {}",
+        lambda_count
+    );
 
     // Should have specialized map
     let has_specialized_map = mir.defs.iter().any(|d| {
-        if let mir::Def::Function { name, .. } = d {
-            name.starts_with("map$")
-        } else {
-            false
-        }
+        if let mir::Def::Function { name, .. } = d { name.starts_with("map$") } else { false }
     });
-    assert!(has_specialized_map, "Expected specialized map function for nested captures");
+    assert!(
+        has_specialized_map,
+        "Expected specialized map function for nested captures"
+    );
 }
 
 #[test]
@@ -1554,17 +1578,17 @@ def double_map(x: i32, y: i32, arr: [4]i32) ([4]i32, [4]i32) =
     );
 
     // Should have two different specialized map functions (map$N and map$M where N != M)
-    let specialized_maps: Vec<_> = mir.defs.iter().filter_map(|d| {
-        if let mir::Def::Function { name, .. } = d {
-            if name.starts_with("map$") {
-                Some(name.clone())
+    let specialized_maps: Vec<_> = mir
+        .defs
+        .iter()
+        .filter_map(|d| {
+            if let mir::Def::Function { name, .. } = d {
+                if name.starts_with("map$") { Some(name.clone()) } else { None }
             } else {
                 None
             }
-        } else {
-            None
-        }
-    }).collect();
+        })
+        .collect();
 
     assert!(
         specialized_maps.len() >= 2,
@@ -1590,23 +1614,18 @@ def deep_capture(x: i32, y: i32, arr: [4]i32) [4]i32 =
 
     // Should compile and have lambdas
     let has_lambda = mir.defs.iter().any(|d| {
-        if let mir::Def::Function { name, .. } = d {
-            name.contains("_lambda_")
-        } else {
-            false
-        }
+        if let mir::Def::Function { name, .. } = d { name.contains("_lambda_") } else { false }
     });
     assert!(has_lambda, "Expected lifted lambda functions");
 
     // Should have specialized map for the outer lambda with captures
     let has_specialized_map = mir.defs.iter().any(|d| {
-        if let mir::Def::Function { name, .. } = d {
-            name.starts_with("map$")
-        } else {
-            false
-        }
+        if let mir::Def::Function { name, .. } = d { name.starts_with("map$") } else { false }
     });
-    assert!(has_specialized_map, "Expected specialized map for lambda with deep captures");
+    assert!(
+        has_specialized_map,
+        "Expected specialized map for lambda with deep captures"
+    );
 }
 
 #[test]
@@ -1622,17 +1641,17 @@ def chain(scale: i32, offset: i32, arr: [4]i32) i32 =
     );
 
     // Should have specialized maps for both scale and offset captures
-    let specialized_maps: Vec<_> = mir.defs.iter().filter_map(|d| {
-        if let mir::Def::Function { name, .. } = d {
-            if name.starts_with("map$") {
-                Some(name.clone())
+    let specialized_maps: Vec<_> = mir
+        .defs
+        .iter()
+        .filter_map(|d| {
+            if let mir::Def::Function { name, .. } = d {
+                if name.starts_with("map$") { Some(name.clone()) } else { None }
             } else {
                 None
             }
-        } else {
-            None
-        }
-    }).collect();
+        })
+        .collect();
     assert!(
         specialized_maps.len() >= 2,
         "Expected 2 specialized maps in chain, found: {:?}",
@@ -1641,11 +1660,7 @@ def chain(scale: i32, offset: i32, arr: [4]i32) i32 =
 
     // Should have specialized reduce
     let has_specialized_reduce = mir.defs.iter().any(|d| {
-        if let mir::Def::Function { name, .. } = d {
-            name.starts_with("reduce$")
-        } else {
-            false
-        }
+        if let mir::Def::Function { name, .. } = d { name.starts_with("reduce$") } else { false }
     });
     assert!(has_specialized_reduce, "Expected specialized reduce in chain");
 }
@@ -1664,22 +1679,17 @@ def capture_let(base: i32, arr: [4]i32) [4]i32 =
 
     // Should have a lifted lambda that captures `multiplier`
     let has_lambda = mir.defs.iter().any(|d| {
-        if let mir::Def::Function { name, .. } = d {
-            name.contains("_lambda_")
-        } else {
-            false
-        }
+        if let mir::Def::Function { name, .. } = d { name.contains("_lambda_") } else { false }
     });
     assert!(has_lambda, "Expected lifted lambda capturing let binding");
 
     let has_specialized_map = mir.defs.iter().any(|d| {
-        if let mir::Def::Function { name, .. } = d {
-            name.starts_with("map$")
-        } else {
-            false
-        }
+        if let mir::Def::Function { name, .. } = d { name.starts_with("map$") } else { false }
     });
-    assert!(has_specialized_map, "Expected specialized map for lambda with captured let binding");
+    assert!(
+        has_specialized_map,
+        "Expected specialized map for lambda with captured let binding"
+    );
 }
 
 #[test]
@@ -1696,27 +1706,26 @@ def apply_square(arr: [4]i32) [4]i32 =
 
     // Should have specialized map for the named function
     let has_specialized_map = mir.defs.iter().any(|d| {
-        if let mir::Def::Function { name, .. } = d {
-            name.starts_with("map$")
-        } else {
-            false
-        }
+        if let mir::Def::Function { name, .. } = d { name.starts_with("map$") } else { false }
     });
-    assert!(has_specialized_map, "Named functions passed to HOFs should trigger specialization");
+    assert!(
+        has_specialized_map,
+        "Named functions passed to HOFs should trigger specialization"
+    );
 
     // The specialized map should call _w_intrinsic_map with `square`
     let specialized_map = mir.defs.iter().find(|d| {
-        if let mir::Def::Function { name, .. } = d {
-            name.starts_with("map$")
-        } else {
-            false
-        }
+        if let mir::Def::Function { name, .. } = d { name.starts_with("map$") } else { false }
     });
     if let Some(mir::Def::Function { body, .. }) = specialized_map {
-        let has_intrinsic_map = body.exprs.iter().any(|e| {
-            matches!(e, mir::Expr::Intrinsic { name, .. } if name == "_w_intrinsic_map")
-        });
-        assert!(has_intrinsic_map, "Specialized map should contain _w_intrinsic_map");
+        let has_intrinsic_map = body
+            .exprs
+            .iter()
+            .any(|e| matches!(e, mir::Expr::Intrinsic { name, .. } if name == "_w_intrinsic_map"));
+        assert!(
+            has_intrinsic_map,
+            "Specialized map should contain _w_intrinsic_map"
+        );
     }
 }
 
@@ -1732,22 +1741,17 @@ def multi_capture(a: i32, b: i32, c: i32, arr: [4]i32) [4]i32 =
 
     // Should have lambda and specialized map
     let has_lambda = mir.defs.iter().any(|d| {
-        if let mir::Def::Function { name, .. } = d {
-            name.contains("_lambda_")
-        } else {
-            false
-        }
+        if let mir::Def::Function { name, .. } = d { name.contains("_lambda_") } else { false }
     });
     assert!(has_lambda, "Expected lifted lambda with multiple captures");
 
     let has_specialized_map = mir.defs.iter().any(|d| {
-        if let mir::Def::Function { name, .. } = d {
-            name.starts_with("map$")
-        } else {
-            false
-        }
+        if let mir::Def::Function { name, .. } = d { name.starts_with("map$") } else { false }
     });
-    assert!(has_specialized_map, "Expected specialized map for multi-capture lambda");
+    assert!(
+        has_specialized_map,
+        "Expected specialized map for multi-capture lambda"
+    );
 }
 
 #[test]
@@ -1764,17 +1768,17 @@ def reuse_lambda(x: i32, arr1: [4]i32, arr2: [4]i32) ([4]i32, [4]i32) =
     );
 
     // Should have exactly one specialized map (reused for both calls)
-    let specialized_maps: Vec<_> = mir.defs.iter().filter_map(|d| {
-        if let mir::Def::Function { name, .. } = d {
-            if name.starts_with("map$") {
-                Some(name.clone())
+    let specialized_maps: Vec<_> = mir
+        .defs
+        .iter()
+        .filter_map(|d| {
+            if let mir::Def::Function { name, .. } = d {
+                if name.starts_with("map$") { Some(name.clone()) } else { None }
             } else {
                 None
             }
-        } else {
-            None
-        }
-    }).collect();
+        })
+        .collect();
 
     // The specialization is keyed by (hof_name, lambda_name), so same lambda should reuse
     // Note: we might get duplicates from prelude, so check there's at least one

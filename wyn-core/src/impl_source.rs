@@ -713,7 +713,10 @@ impl ImplSource {
     /// Register vector operations (implementations only, types in intrinsics)
     fn register_vector_operations(&mut self) {
         self.register("_w_intrinsic_uninit", BuiltinImpl::Intrinsic(Intrinsic::Uninit));
-        self.register("_w_intrinsic_array_with", BuiltinImpl::Intrinsic(Intrinsic::ArrayWith));
+        self.register(
+            "_w_intrinsic_array_with",
+            BuiltinImpl::Intrinsic(Intrinsic::ArrayWith),
+        );
 
         // Vector operations
         self.register("magnitude", BuiltinImpl::PrimOp(PrimOp::GlslExt(66)));
@@ -729,34 +732,19 @@ impl ImplSource {
         self.register("ceil", BuiltinImpl::PrimOp(PrimOp::GlslExt(9)));
         self.register("fract", BuiltinImpl::PrimOp(PrimOp::GlslExt(10)));
         self.register("mix", BuiltinImpl::PrimOp(PrimOp::GlslExt(46))); // FMix
-        self.register(
-            "smoothstep",
-            BuiltinImpl::PrimOp(PrimOp::GlslExt(49)),
-        );
+        self.register("smoothstep", BuiltinImpl::PrimOp(PrimOp::GlslExt(49)));
     }
 
     /// Register matrix operations (implementations only, types in intrinsics)
     fn register_matrix_operations(&mut self) {
-        self.register(
-            "determinant",
-            BuiltinImpl::PrimOp(PrimOp::GlslExt(33)),
-        );
+        self.register("determinant", BuiltinImpl::PrimOp(PrimOp::GlslExt(33)));
         self.register("inverse", BuiltinImpl::PrimOp(PrimOp::GlslExt(34)));
         self.register("outer", BuiltinImpl::PrimOp(PrimOp::OuterProduct));
 
         // mul dispatch happens in lowering based on argument types
-        self.register(
-            "mul_mat_mat",
-            BuiltinImpl::PrimOp(PrimOp::MatrixTimesMatrix),
-        );
-        self.register(
-            "mul_mat_vec",
-            BuiltinImpl::PrimOp(PrimOp::MatrixTimesVector),
-        );
-        self.register(
-            "mul_vec_mat",
-            BuiltinImpl::PrimOp(PrimOp::VectorTimesMatrix),
-        );
+        self.register("mul_mat_mat", BuiltinImpl::PrimOp(PrimOp::MatrixTimesMatrix));
+        self.register("mul_mat_vec", BuiltinImpl::PrimOp(PrimOp::MatrixTimesVector));
+        self.register("mul_vec_mat", BuiltinImpl::PrimOp(PrimOp::VectorTimesMatrix));
     }
 }
 

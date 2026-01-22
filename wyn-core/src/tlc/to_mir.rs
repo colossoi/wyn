@@ -2,9 +2,14 @@
 //!
 //! Transforms a lifted TLC program (where all lambdas are top-level) into MIR.
 
-use super::{Def as TlcDef, DefMeta, FunctionName, LoopKind as TlcLoopKind, Program as TlcProgram, Term, TermKind};
+use super::{
+    Def as TlcDef, DefMeta, FunctionName, LoopKind as TlcLoopKind, Program as TlcProgram, Term, TermKind,
+};
 use crate::ast::{self, NodeId, PatternKind, Span, TypeName};
-use crate::mir::{self, ArrayBacking, Body, Def as MirDef, Expr, ExprId, LocalDecl, LocalId, LocalKind, LoopKind as MirLoopKind};
+use crate::mir::{
+    self, ArrayBacking, Body, Def as MirDef, Expr, ExprId, LocalDecl, LocalId, LocalKind,
+    LoopKind as MirLoopKind,
+};
 use crate::types::TypeScheme;
 use polytype::Type;
 use std::collections::HashMap;
@@ -430,7 +435,10 @@ impl<'a> TlcToMir<'a> {
                             kind: LocalKind::Let,
                         });
                         self.locals.insert(var.clone(), var_local);
-                        MirLoopKind::For { var: var_local, iter: iter_id }
+                        MirLoopKind::For {
+                            var: var_local,
+                            iter: iter_id,
+                        }
                     }
                     TlcLoopKind::ForRange { var, var_ty, bound } => {
                         let bound_id = self.transform_term(bound, body);
@@ -441,7 +449,10 @@ impl<'a> TlcToMir<'a> {
                             kind: LocalKind::Let,
                         });
                         self.locals.insert(var.clone(), var_local);
-                        MirLoopKind::ForRange { var: var_local, bound: bound_id }
+                        MirLoopKind::ForRange {
+                            var: var_local,
+                            bound: bound_id,
+                        }
                     }
                     TlcLoopKind::While { cond } => {
                         let cond_id = self.transform_term(cond, body);
@@ -714,7 +725,9 @@ impl<'a> TlcToMir<'a> {
                 panic!(
                     "Partial application not supported: {} expects {} args, got {}. \
                      SOAC closure flattening should handle this at TLC level.",
-                    name, arity, arg_ids.len()
+                    name,
+                    arity,
+                    arg_ids.len()
                 )
             } else {
                 panic!(

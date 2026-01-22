@@ -263,12 +263,9 @@ fn split_function_type(ty: &Type<TypeName>) -> (Vec<Type<TypeName>>, Type<TypeNa
 /// Build a curried function type from parameter types and return type.
 /// The inverse of split_function_type: ([A, B], C) becomes (A -> B -> C)
 fn build_function_type(param_types: &[Type<TypeName>], ret_type: &Type<TypeName>) -> Type<TypeName> {
-    param_types
-        .iter()
-        .rev()
-        .fold(ret_type.clone(), |acc, param_ty| {
-            Type::Constructed(TypeName::Arrow, vec![param_ty.clone(), acc])
-        })
+    param_types.iter().rev().fold(ret_type.clone(), |acc, param_ty| {
+        Type::Constructed(TypeName::Arrow, vec![param_ty.clone(), acc])
+    })
 }
 
 impl Monomorphizer {
