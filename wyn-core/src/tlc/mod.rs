@@ -1654,24 +1654,23 @@ impl<'a> Transformer<'a> {
     }
 
     // Helper: build curried application for variable number of args
-    fn build_intrinsic_call(
+    /// Build a curried call from a function name and already-transformed argument terms.
+    /// For f(a, b, c) with result R: builds f(a) : B -> C -> R, then f(a)(b) : C -> R, then f(a)(b)(c) : R
+    fn build_curried_call_terms(
         &mut self,
-        name: &str,
-        args: &[ast::Expression],
+        func_name: &str,
+        args: &[Term],
         result_ty: Type<TypeName>,
         span: Span,
     ) -> Term {
         if args.is_empty() {
-            return self.mk_term(result_ty, span, TermKind::Var(name.to_string()));
+            return self.mk_term(result_ty, span, TermKind::Var(func_name.to_string()));
         }
 
-        // Transform all args first to get their types
-        let arg_terms: Vec<Term> = args.iter().map(|a| self.transform_expr(a)).collect();
-
         // Compute intermediate types working backwards from result_ty
-        // For f(a, b, c) with result R: f(a) : B -> C -> R, f(a)(b) : C -> R, f(a)(b)(c) : R
+        // For f(a, b, c) with result R: after f(a) we have B -> C -> R, after f(a)(b) we have C -> R
         let mut intermediate_types = vec![result_ty.clone()];
-        for arg in arg_terms.iter().rev().skip(1) {
+        for arg in args.iter().rev().skip(1) {
             let prev_ty = intermediate_types.last().unwrap().clone();
             let cur_ty = Type::Constructed(TypeName::Arrow, vec![arg.ty.clone(), prev_ty]);
             intermediate_types.push(cur_ty);
@@ -1679,34 +1678,44 @@ impl<'a> Transformer<'a> {
         intermediate_types.reverse();
 
         // Build curried applications
-        // Compute the function type
         let func_ty = Type::Constructed(
             TypeName::Arrow,
-            vec![arg_terms[0].ty.clone(), intermediate_types[0].clone()],
+            vec![args[0].ty.clone(), intermediate_types[0].clone()],
         );
-        let func_term = self.mk_term(func_ty, span, TermKind::Var(name.to_string()));
+        let func_term = self.mk_term(func_ty, span, TermKind::Var(func_name.to_string()));
         let mut result = self.mk_term(
             intermediate_types[0].clone(),
             span,
             TermKind::App {
                 func: Box::new(func_term),
-                arg: Box::new(arg_terms[0].clone()),
+                arg: Box::new(args[0].clone()),
             },
         );
 
-        for (i, arg_term) in arg_terms.iter().enumerate().skip(1) {
+        for (i, arg) in args.iter().enumerate().skip(1) {
             let app_ty = intermediate_types.get(i).cloned().unwrap_or_else(|| result_ty.clone());
             result = self.mk_term(
                 app_ty,
                 span,
                 TermKind::App {
                     func: Box::new(result),
-                    arg: Box::new(arg_term.clone()),
+                    arg: Box::new(arg.clone()),
                 },
             );
         }
 
         result
+    }
+
+    fn build_intrinsic_call(
+        &mut self,
+        name: &str,
+        args: &[ast::Expression],
+        result_ty: Type<TypeName>,
+        span: Span,
+    ) -> Term {
+        let arg_terms: Vec<Term> = args.iter().map(|a| self.transform_expr(a)).collect();
+        self.build_curried_call_terms(name, &arg_terms, result_ty, span)
     }
 
     fn lookup_type(&self, node_id: NodeId) -> Option<Type<TypeName>> {
@@ -1754,47 +1763,7 @@ impl<'a> Transformer<'a> {
 
     /// Build a _w_vec_lit from already-transformed terms
     fn build_vec_lit_from_terms(&mut self, terms: &[Term], result_ty: Type<TypeName>, span: Span) -> Term {
-        if terms.is_empty() {
-            return self.mk_term(result_ty, span, TermKind::Var("_w_vec_lit".to_string()));
-        }
-
-        // Compute intermediate types working backwards from result_ty
-        let mut intermediate_types = vec![result_ty.clone()];
-        for term in terms.iter().rev().skip(1) {
-            let prev_ty = intermediate_types.last().unwrap().clone();
-            let cur_ty = Type::Constructed(TypeName::Arrow, vec![term.ty.clone(), prev_ty]);
-            intermediate_types.push(cur_ty);
-        }
-        intermediate_types.reverse();
-
-        // Build curried applications
-        let func_ty = Type::Constructed(
-            TypeName::Arrow,
-            vec![terms[0].ty.clone(), intermediate_types[0].clone()],
-        );
-        let func_term = self.mk_term(func_ty, span, TermKind::Var("_w_vec_lit".to_string()));
-        let mut result = self.mk_term(
-            intermediate_types[0].clone(),
-            span,
-            TermKind::App {
-                func: Box::new(func_term),
-                arg: Box::new(terms[0].clone()),
-            },
-        );
-
-        for (i, term) in terms.iter().enumerate().skip(1) {
-            let app_ty = intermediate_types.get(i).cloned().unwrap_or_else(|| result_ty.clone());
-            result = self.mk_term(
-                app_ty,
-                span,
-                TermKind::App {
-                    func: Box::new(result),
-                    arg: Box::new(term.clone()),
-                },
-            );
-        }
-
-        result
+        self.build_curried_call_terms("_w_vec_lit", terms, result_ty, span)
     }
 }
 
