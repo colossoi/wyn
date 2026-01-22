@@ -116,8 +116,16 @@ type TypeSubst = HashMap<polytype::Variable, Type<TypeName>>;
 fn build_type_subst(poly_ty: &Type<TypeName>, concrete_ty: &Type<TypeName>, subst: &mut TypeSubst) {
     match (poly_ty, concrete_ty) {
         (Type::Variable(id), concrete) => {
-            // Map type variable to concrete type
-            subst.insert(*id, concrete.clone());
+            // Map type variable to concrete type, checking for consistency
+            if let Some(existing) = subst.get(id) {
+                assert_eq!(
+                    existing, concrete,
+                    "BUG: Inconsistent type substitution for variable {}: {:?} vs {:?}",
+                    id, existing, concrete
+                );
+            } else {
+                subst.insert(*id, concrete.clone());
+            }
         }
         (Type::Constructed(poly_name, poly_args), Type::Constructed(_, concrete_args)) => {
             // Recursively unify arguments
