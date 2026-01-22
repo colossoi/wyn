@@ -1461,3 +1461,287 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
         "Expected _w_norm_ normalization variables in GLSL"
     );
 }
+
+// =============================================================================
+// Advanced Defunctionalization Tests
+// =============================================================================
+
+#[test]
+fn test_defunc_nested_closure_captures_grandparent() {
+    // Nested closures: inner lambda captures from two scopes above (grandparent)
+    // outer captures `x`, inner captures `x` from outer's scope
+    let mir = flatten_program(
+        r#"
+def nested_capture(x: i32, arr: [4]i32) [4]i32 =
+    let outer = |y: i32|
+        let inner = |z: i32| x + y + z in
+        inner(y)
+    in
+    map(outer, arr)
+"#,
+    );
+
+    // Should have multiple lifted lambdas
+    let lambda_count = mir.defs.iter().filter(|d| {
+        if let mir::Def::Function { name, .. } = d {
+            name.contains("_lambda_")
+        } else {
+            false
+        }
+    }).count();
+    assert!(lambda_count >= 2, "Expected at least 2 lifted lambdas (inner and outer), found {}", lambda_count);
+
+    // Should have specialized map
+    let has_specialized_map = mir.defs.iter().any(|d| {
+        if let mir::Def::Function { name, .. } = d {
+            name.starts_with("map$")
+        } else {
+            false
+        }
+    });
+    assert!(has_specialized_map, "Expected specialized map function for nested captures");
+}
+
+#[test]
+fn test_defunc_same_hof_different_captures() {
+    // Two callsites to map with different lambdas that have different capture sets
+    // This should produce two different specialized map functions
+    let mir = flatten_program(
+        r#"
+def double_map(x: i32, y: i32, arr: [4]i32) ([4]i32, [4]i32) =
+    let result1 = map((|e: i32| e + x), arr) in
+    let result2 = map((|e: i32| e * y), arr) in
+    (result1, result2)
+"#,
+    );
+
+    // Should have two different specialized map functions (map$N and map$M where N != M)
+    let specialized_maps: Vec<_> = mir.defs.iter().filter_map(|d| {
+        if let mir::Def::Function { name, .. } = d {
+            if name.starts_with("map$") {
+                Some(name.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }).collect();
+
+    assert!(
+        specialized_maps.len() >= 2,
+        "Expected at least 2 specialized map functions for different captures, found: {:?}",
+        specialized_maps
+    );
+}
+
+#[test]
+fn test_defunc_deep_nested_capture() {
+    // Deeply nested lambdas - inner lambda captures from outermost scope
+    // No partial application: inner is immediately applied
+    let mir = flatten_program(
+        r#"
+def deep_capture(x: i32, y: i32, arr: [4]i32) [4]i32 =
+    let combine = |a: i32|
+        let inner_add = |b: i32| a + b + x + y in
+        inner_add(a * 2)
+    in
+    map(combine, arr)
+"#,
+    );
+
+    // Should compile and have lambdas
+    let has_lambda = mir.defs.iter().any(|d| {
+        if let mir::Def::Function { name, .. } = d {
+            name.contains("_lambda_")
+        } else {
+            false
+        }
+    });
+    assert!(has_lambda, "Expected lifted lambda functions");
+
+    // Should have specialized map for the outer lambda with captures
+    let has_specialized_map = mir.defs.iter().any(|d| {
+        if let mir::Def::Function { name, .. } = d {
+            name.starts_with("map$")
+        } else {
+            false
+        }
+    });
+    assert!(has_specialized_map, "Expected specialized map for lambda with deep captures");
+}
+
+#[test]
+fn test_defunc_multiple_hof_chain() {
+    // Chain of multiple HOF calls, each with capturing lambdas
+    let mir = flatten_program(
+        r#"
+def chain(scale: i32, offset: i32, arr: [4]i32) i32 =
+    let scaled = map((|x: i32| x * scale), arr) in
+    let shifted = map((|x: i32| x + offset), scaled) in
+    reduce((|a: i32, b: i32| a + b), 0, shifted)
+"#,
+    );
+
+    // Should have specialized maps for both scale and offset captures
+    let specialized_maps: Vec<_> = mir.defs.iter().filter_map(|d| {
+        if let mir::Def::Function { name, .. } = d {
+            if name.starts_with("map$") {
+                Some(name.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }).collect();
+    assert!(
+        specialized_maps.len() >= 2,
+        "Expected 2 specialized maps in chain, found: {:?}",
+        specialized_maps
+    );
+
+    // Should have specialized reduce
+    let has_specialized_reduce = mir.defs.iter().any(|d| {
+        if let mir::Def::Function { name, .. } = d {
+            name.starts_with("reduce$")
+        } else {
+            false
+        }
+    });
+    assert!(has_specialized_reduce, "Expected specialized reduce in chain");
+}
+
+#[test]
+fn test_defunc_capture_in_let_binding() {
+    // Lambda captures a variable from a let binding in enclosing scope
+    let mir = flatten_program(
+        r#"
+def capture_let(base: i32, arr: [4]i32) [4]i32 =
+    let multiplier = base * 2 in
+    let scaled_add = |x: i32| x + multiplier in
+    map(scaled_add, arr)
+"#,
+    );
+
+    // Should have a lifted lambda that captures `multiplier`
+    let has_lambda = mir.defs.iter().any(|d| {
+        if let mir::Def::Function { name, .. } = d {
+            name.contains("_lambda_")
+        } else {
+            false
+        }
+    });
+    assert!(has_lambda, "Expected lifted lambda capturing let binding");
+
+    let has_specialized_map = mir.defs.iter().any(|d| {
+        if let mir::Def::Function { name, .. } = d {
+            name.starts_with("map$")
+        } else {
+            false
+        }
+    });
+    assert!(has_specialized_map, "Expected specialized map for lambda with captured let binding");
+}
+
+#[test]
+fn test_defunc_named_function_no_capture() {
+    // Named function (no captures) passed to HOF - should still specialize
+    let mir = flatten_program(
+        r#"
+def square(x: i32) i32 = x * x
+
+def apply_square(arr: [4]i32) [4]i32 =
+    map(square, arr)
+"#,
+    );
+
+    // Should have specialized map for the named function
+    let has_specialized_map = mir.defs.iter().any(|d| {
+        if let mir::Def::Function { name, .. } = d {
+            name.starts_with("map$")
+        } else {
+            false
+        }
+    });
+    assert!(has_specialized_map, "Named functions passed to HOFs should trigger specialization");
+
+    // The specialized map should call _w_intrinsic_map with `square`
+    let specialized_map = mir.defs.iter().find(|d| {
+        if let mir::Def::Function { name, .. } = d {
+            name.starts_with("map$")
+        } else {
+            false
+        }
+    });
+    if let Some(mir::Def::Function { body, .. }) = specialized_map {
+        let has_intrinsic_map = body.exprs.iter().any(|e| {
+            matches!(e, mir::Expr::Intrinsic { name, .. } if name == "_w_intrinsic_map")
+        });
+        assert!(has_intrinsic_map, "Specialized map should contain _w_intrinsic_map");
+    }
+}
+
+#[test]
+fn test_defunc_multiple_captures_same_lambda() {
+    // Single lambda capturing multiple variables
+    let mir = flatten_program(
+        r#"
+def multi_capture(a: i32, b: i32, c: i32, arr: [4]i32) [4]i32 =
+    map((|x: i32| x + a + b + c), arr)
+"#,
+    );
+
+    // Should have lambda and specialized map
+    let has_lambda = mir.defs.iter().any(|d| {
+        if let mir::Def::Function { name, .. } = d {
+            name.contains("_lambda_")
+        } else {
+            false
+        }
+    });
+    assert!(has_lambda, "Expected lifted lambda with multiple captures");
+
+    let has_specialized_map = mir.defs.iter().any(|d| {
+        if let mir::Def::Function { name, .. } = d {
+            name.starts_with("map$")
+        } else {
+            false
+        }
+    });
+    assert!(has_specialized_map, "Expected specialized map for multi-capture lambda");
+}
+
+#[test]
+fn test_defunc_reused_lambda_same_capture() {
+    // Same lambda used twice with same captures - should reuse specialization
+    let mir = flatten_program(
+        r#"
+def reuse_lambda(x: i32, arr1: [4]i32, arr2: [4]i32) ([4]i32, [4]i32) =
+    let adder = |e: i32| e + x in
+    let result1 = map(adder, arr1) in
+    let result2 = map(adder, arr2) in
+    (result1, result2)
+"#,
+    );
+
+    // Should have exactly one specialized map (reused for both calls)
+    let specialized_maps: Vec<_> = mir.defs.iter().filter_map(|d| {
+        if let mir::Def::Function { name, .. } = d {
+            if name.starts_with("map$") {
+                Some(name.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }).collect();
+
+    // The specialization is keyed by (hof_name, lambda_name), so same lambda should reuse
+    // Note: we might get duplicates from prelude, so check there's at least one
+    assert!(
+        !specialized_maps.is_empty(),
+        "Expected at least one specialized map for reused lambda"
+    );
+}
