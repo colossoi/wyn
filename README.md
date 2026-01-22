@@ -53,6 +53,7 @@ The compiler uses a multi-stage pipeline with typestate-driven phases. Each stag
 | **Flattened** | `tlc::to_mir` | TLC to MIR conversion |
 | **MaterializationsHoisted** | `materialize_hoisting` | Duplicate materializations hoisted from branches |
 | **Normalized** | `normalize` | A-normal form conversion |
+| **Canonicalized** | `canonicalize_vars` | Align body type variables with scheme type variables |
 | **Monomorphized** | `monomorphization` | Polymorphic functions specialized to concrete types |
 | **Reachable** | `reachability` | Dead code elimination, topological ordering |
 | **Lifted** | `binding_lifter` | Loop-invariant code motion |
@@ -63,11 +64,11 @@ The compiler uses a multi-stage pipeline with typestate-driven phases. Each stag
 ```
 Source → Parsed → Desugared → Resolved → AstConstFolded → TypeChecked → AliasChecked
                                                                             ↓
-              Lowered ← Lifted ← Reachable ← Monomorphized ← Normalized ← Flattened
-                                                                            ↑
-                              TlcDefunctionalized → TlcSpecialized → to_mir
-                                              ↑
-                  TlcTransformed → [TlcPartialEval] → defunctionalize
+    Lowered ← Lifted ← Reachable ← Monomorphized ← Canonicalized ← Normalized ← Flattened
+                                                                                    ↑
+                                    TlcDefunctionalized → TlcSpecialized → to_mir
+                                                    ↑
+                        TlcTransformed → [TlcPartialEval] → defunctionalize
 ```
 
 ### Defunctionalization
@@ -133,7 +134,7 @@ cargo build --release
 cargo test
 ```
 
-All 548 tests currently pass (12 ignored for pending slice support).
+All 578 tests currently pass (2 ignored for pending features).
 
 ## Language Overview
 
