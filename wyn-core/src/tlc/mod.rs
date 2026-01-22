@@ -260,7 +260,7 @@ impl<'a> Transformer<'a> {
     pub fn transform_decl(&mut self, decl: &ast::Decl) -> Option<Def> {
         let body_ty = self.lookup_type(decl.body.h.id)?;
         let full_ty = self.build_function_type(&decl.params, &body_ty);
-        let body = self.transform_with_params(&decl.params, &decl.body);
+        let body = self.transform_with_params(&decl.params, &decl.body, full_ty.clone());
 
         // Apply namespace prefix if set (e.g., "f32" + "pi" -> "f32.pi")
         let name = match &self.namespace {
@@ -280,7 +280,7 @@ impl<'a> Transformer<'a> {
     fn transform_entry(&mut self, entry: &ast::EntryDecl) -> Option<Def> {
         let body_ty = self.lookup_type(entry.body.h.id)?;
         let full_ty = self.build_function_type(&entry.params, &body_ty);
-        let body = self.transform_with_params(&entry.params, &entry.body);
+        let body = self.transform_with_params(&entry.params, &entry.body, full_ty.clone());
 
         Some(Def {
             name: entry.name.clone(),
@@ -312,105 +312,75 @@ impl<'a> Transformer<'a> {
         }
     }
 
-    fn transform_with_params(&mut self, params: &[ast::Pattern], body: &ast::Expression) -> Term {
+    fn transform_with_params(
+        &mut self,
+        params: &[ast::Pattern],
+        body: &ast::Expression,
+        full_ty: Type<TypeName>,
+    ) -> Term {
+        let span = params.first().map(|p| p.h.span).unwrap_or(body.h.span);
+        self.build_lambda_chain(params, body, full_ty, span)
+    }
+
+    /// Build a chain of nested lambdas from patterns, deferring all let-bindings
+    /// until after all lambdas are created. This ensures no let-bindings appear
+    /// between nested lambdas, which is important for consistent capture analysis.
+    fn build_lambda_chain(
+        &mut self,
+        params: &[ast::Pattern],
+        body: &ast::Expression,
+        full_ty: Type<TypeName>,
+        span: Span,
+    ) -> Term {
         if params.is_empty() {
             return self.transform_expr(body);
         }
 
-        let inner = self.transform_with_params(&params[1..], body);
-        let param = &params[0];
-        let param_ty = self.pattern_type(param);
+        // Collect all lambda parameters and their pending bindings
+        let mut lambda_info: Vec<(String, Type<TypeName>, Vec<PendingBinding>)> = Vec::new();
+        let mut current_ty = full_ty;
 
-        self.pattern_to_lambda(param, param_ty, inner)
-    }
+        for param in params {
+            let param_ty = self.get_param_type(&current_ty);
+            let (fresh_name, bindings) = self.collect_pattern_bindings(param, &param_ty, span);
+            lambda_info.push((fresh_name, param_ty.clone(), bindings));
+            current_ty = self.get_body_type(&current_ty);
+        }
 
-    fn pattern_to_lambda(&mut self, pattern: &ast::Pattern, param_ty: Type<TypeName>, body: Term) -> Term {
-        match &pattern.kind {
-            ast::PatternKind::Name(name) => {
-                let lam_ty = Type::Constructed(TypeName::Arrow, vec![param_ty.clone(), body.ty.clone()]);
-                self.mk_term(
-                    lam_ty,
-                    pattern.h.span,
-                    TermKind::Lam {
-                        param: name.clone(),
-                        param_ty,
-                        body: Box::new(body),
+        // Transform the body expression
+        let mut result = self.transform_expr(body);
+
+        // Apply all bindings in reverse order (innermost first, so outermost ends up innermost)
+        for (_, _, bindings) in lambda_info.iter().rev() {
+            for binding in bindings.iter().rev() {
+                result = self.mk_term(
+                    result.ty.clone(),
+                    span,
+                    TermKind::Let {
+                        name: binding.name.clone(),
+                        name_ty: binding.ty.clone(),
+                        rhs: Box::new(binding.expr.clone()),
+                        body: Box::new(result),
                     },
-                )
-            }
-
-            ast::PatternKind::Wildcard => {
-                let fresh = format!("_wild_{}", self.term_ids.next_id().0);
-                let lam_ty = Type::Constructed(TypeName::Arrow, vec![param_ty.clone(), body.ty.clone()]);
-                self.mk_term(
-                    lam_ty,
-                    pattern.h.span,
-                    TermKind::Lam {
-                        param: fresh,
-                        param_ty,
-                        body: Box::new(body),
-                    },
-                )
-            }
-
-            ast::PatternKind::Typed(inner, _) => self.pattern_to_lambda(inner, param_ty, body),
-
-            ast::PatternKind::Attributed(_, inner) => self.pattern_to_lambda(inner, param_ty, body),
-
-            ast::PatternKind::Tuple(patterns) => {
-                let fresh = format!("_tup_{}", self.term_ids.next_id().0);
-                let component_types = self.extract_tuple_types(&param_ty, patterns.len());
-                let inner =
-                    self.flatten_tuple_pattern(&fresh, patterns, &component_types, body, pattern.h.span);
-
-                let lam_ty = Type::Constructed(TypeName::Arrow, vec![param_ty.clone(), inner.ty.clone()]);
-                self.mk_term(
-                    lam_ty,
-                    pattern.h.span,
-                    TermKind::Lam {
-                        param: fresh,
-                        param_ty,
-                        body: Box::new(inner),
-                    },
-                )
-            }
-
-            ast::PatternKind::Record(fields) => {
-                let fresh = format!("_rec_{}", self.term_ids.next_id().0);
-                let field_types = self.extract_record_types(&param_ty);
-                let inner = self.flatten_record_pattern(
-                    &fresh,
-                    &param_ty,
-                    fields,
-                    &field_types,
-                    body,
-                    pattern.h.span,
                 );
-
-                let lam_ty = Type::Constructed(TypeName::Arrow, vec![param_ty.clone(), inner.ty.clone()]);
-                self.mk_term(
-                    lam_ty,
-                    pattern.h.span,
-                    TermKind::Lam {
-                        param: fresh,
-                        param_ty,
-                        body: Box::new(inner),
-                    },
-                )
-            }
-
-            ast::PatternKind::Unit => {
-                todo!("Unit patterns")
-            }
-
-            ast::PatternKind::Literal(_) => {
-                todo!("Literal patterns in lambdas")
-            }
-
-            ast::PatternKind::Constructor(_, _) => {
-                todo!("Constructor patterns in lambdas")
             }
         }
+
+        // Build nested lambdas from inside-out
+        for (fresh_name, param_ty, _) in lambda_info.into_iter().rev() {
+            let lam_ty = Type::Constructed(TypeName::Arrow, vec![param_ty.clone(), result.ty.clone()]);
+            result = self.mk_term(
+                lam_ty,
+                span,
+                TermKind::Lam {
+                    param: fresh_name,
+                    param_ty,
+                    body: Box::new(result),
+                },
+            );
+        }
+
+        result
     }
 
     /// Collect bindings from a pattern without wrapping in let expressions.
@@ -1077,56 +1047,7 @@ impl<'a> Transformer<'a> {
         ty: Type<TypeName>,
         span: Span,
     ) -> Term {
-        if params.is_empty() {
-            return self.transform_expr(body);
-        }
-
-        // Collect all lambda parameters and their pending bindings
-        // This avoids creating let-bindings between nested lambdas which causes captures
-        let mut lambda_info: Vec<(String, Type<TypeName>, Vec<PendingBinding>)> = Vec::new();
-        let mut current_ty = ty.clone();
-
-        for param in params {
-            let param_ty = self.get_param_type(&current_ty);
-            let (fresh_name, bindings) = self.collect_pattern_bindings(param, &param_ty, span);
-            lambda_info.push((fresh_name, param_ty.clone(), bindings));
-            current_ty = self.get_body_type(&current_ty);
-        }
-
-        // Transform the body expression
-        let mut result = self.transform_expr(body);
-
-        // Apply all bindings in reverse order (innermost first, so outermost ends up innermost)
-        for (_, _, bindings) in lambda_info.iter().rev() {
-            for binding in bindings.iter().rev() {
-                result = self.mk_term(
-                    result.ty.clone(),
-                    span,
-                    TermKind::Let {
-                        name: binding.name.clone(),
-                        name_ty: binding.ty.clone(),
-                        rhs: Box::new(binding.expr.clone()),
-                        body: Box::new(result),
-                    },
-                );
-            }
-        }
-
-        // Build nested lambdas from inside-out
-        for (fresh_name, param_ty, _) in lambda_info.into_iter().rev() {
-            let lam_ty = Type::Constructed(TypeName::Arrow, vec![param_ty.clone(), result.ty.clone()]);
-            result = self.mk_term(
-                lam_ty,
-                span,
-                TermKind::Lam {
-                    param: fresh_name,
-                    param_ty,
-                    body: Box::new(result),
-                },
-            );
-        }
-
-        result
+        self.build_lambda_chain(params, body, ty, span)
     }
 
     fn get_param_type(&self, ty: &Type<TypeName>) -> Type<TypeName> {
