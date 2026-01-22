@@ -3,9 +3,7 @@ mod tests {
     use crate::ast::{BinaryOp, Span, TypeName};
     use crate::mir::{self, Def as MirDef};
     use crate::tlc::to_mir::TlcToMir;
-    use crate::tlc::{
-        Def as TlcDef, DefMeta, Program as TlcProgram, Term, TermIdSource, TermKind,
-    };
+    use crate::tlc::{Def as TlcDef, DefMeta, Program as TlcProgram, Term, TermIdSource, TermKind};
     use crate::{Compiler, build_builtins};
     use polytype::Type;
 

@@ -153,11 +153,8 @@ impl Specializer {
                 arg: first_arg,
             } => {
                 // Check if inner_func is Var("mul")
-                let maybe_mul_name = if let TermKind::Var(name) = &inner_func.kind {
-                    Some(name.as_str())
-                } else {
-                    None
-                };
+                let maybe_mul_name =
+                    if let TermKind::Var(name) = &inner_func.kind { Some(name.as_str()) } else { None };
 
                 if maybe_mul_name == Some("mul") {
                     // Specialize mul based on both arg types

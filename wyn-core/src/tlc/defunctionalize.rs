@@ -109,37 +109,55 @@ fn intrinsic_hof_info() -> HashMap<String, HofInfo> {
     // map : (a -> b) -> Array -> Array  -- func at index 0
     info.insert(
         "_w_intrinsic_map".to_string(),
-        HofInfo { func_param_indices: vec![0], def: None },
+        HofInfo {
+            func_param_indices: vec![0],
+            def: None,
+        },
     );
 
     // inplace_map : (a -> a) -> Array -> Array  -- func at index 0
     info.insert(
         "_w_intrinsic_inplace_map".to_string(),
-        HofInfo { func_param_indices: vec![0], def: None },
+        HofInfo {
+            func_param_indices: vec![0],
+            def: None,
+        },
     );
 
     // reduce : (a -> a -> a) -> a -> Array -> a  -- func at index 0
     info.insert(
         "_w_intrinsic_reduce".to_string(),
-        HofInfo { func_param_indices: vec![0], def: None },
+        HofInfo {
+            func_param_indices: vec![0],
+            def: None,
+        },
     );
 
     // filter : (a -> bool) -> Array -> Array  -- func at index 0
     info.insert(
         "_w_intrinsic_filter".to_string(),
-        HofInfo { func_param_indices: vec![0], def: None },
+        HofInfo {
+            func_param_indices: vec![0],
+            def: None,
+        },
     );
 
     // scan : (a -> a -> a) -> a -> Array -> Array  -- func at index 0
     info.insert(
         "_w_intrinsic_scan".to_string(),
-        HofInfo { func_param_indices: vec![0], def: None },
+        HofInfo {
+            func_param_indices: vec![0],
+            def: None,
+        },
     );
 
     // hist_1d : Array -> (a -> a -> a) -> a -> Array -> Array -> Array  -- func at index 1
     info.insert(
         "_w_intrinsic_hist_1d".to_string(),
-        HofInfo { func_param_indices: vec![1], def: None },
+        HofInfo {
+            func_param_indices: vec![1],
+            def: None,
+        },
     );
 
     info
@@ -195,7 +213,6 @@ fn apply_type_subst(ty: &Type<TypeName>, subst: &TypeSubst) -> Type<TypeName> {
         }
     }
 }
-
 
 /// Format a type as a string key for cache lookups.
 /// Uses a compact representation that uniquely identifies the type.
@@ -455,6 +472,9 @@ pub struct Defunctionalizer<'a> {
     specialization_cache: HashMap<(String, String, Vec<String>), String>,
     /// Counter for generating unique specialization names
     specialization_counter: usize,
+    /// Captures for lifted lambdas: lambda_name -> [(capture_name, capture_type)]
+    /// Used during HOF specialization to know what captures to append
+    lifted_lambda_captures: HashMap<String, Vec<(String, Type<TypeName>)>>,
 }
 
 impl<'a> Defunctionalizer<'a> {
@@ -474,6 +494,7 @@ impl<'a> Defunctionalizer<'a> {
             hof_info,
             specialization_cache: HashMap::new(),
             specialization_counter: 0,
+            lifted_lambda_captures: HashMap::new(),
         };
 
         let transformed_defs: Vec<_> = program
@@ -533,6 +554,12 @@ impl<'a> Defunctionalizer<'a> {
                 // Look up static value from environment
                 let sv = if let Some(sv) = self.env.get(name) {
                     sv.clone()
+                } else if let Some(captures) = self.lifted_lambda_captures.get(name) {
+                    // Lifted lambda - we know its captures
+                    StaticVal::Lambda {
+                        lifted_name: name.clone(),
+                        captures: captures.clone(),
+                    }
                 } else if self.top_level.contains(name) && is_arrow_type(&ty) {
                     // Top-level function reference - treat as a Lambda with no captures
                     // This allows HOF specialization to work for named function references
@@ -734,6 +761,9 @@ impl<'a> Defunctionalizer<'a> {
         // Lift to top-level
         let lifted_name = self.fresh_name();
 
+        // Record captures for this lifted lambda (used during HOF specialization)
+        self.lifted_lambda_captures.insert(lifted_name.clone(), captures.clone());
+
         if captures.is_empty() {
             // No captures: lift as-is
             self.lifted_defs.push(Def {
@@ -789,13 +819,7 @@ impl<'a> Defunctionalizer<'a> {
     }
 
     /// Handle application: collect spine, flatten captures.
-    fn defunc_app(
-        &mut self,
-        func: Term,
-        arg: Term,
-        ty: Type<TypeName>,
-        span: Span,
-    ) -> DefuncResult {
+    fn defunc_app(&mut self, func: Term, arg: Term, ty: Type<TypeName>, span: Span) -> DefuncResult {
         // Collect the application spine: f a1 a2 ... an
         let (base_func, args) = self.collect_spine(func, arg);
 
@@ -1144,11 +1168,28 @@ impl<'a> Defunctionalizer<'a> {
         match &hof_info.def {
             Some(def) => {
                 // User-defined HOF: specialize by cloning and substituting
-                self.specialize_user_hof(hof_name, def, func_param_idx, &lambda_name, &captures, arg_results, ty, span)
+                self.specialize_user_hof(
+                    hof_name,
+                    def,
+                    func_param_idx,
+                    &lambda_name,
+                    &captures,
+                    arg_results,
+                    ty,
+                    span,
+                )
             }
             None => {
                 // Intrinsic HOF: just append captures to the call
-                self.build_intrinsic_hof_call(hof_name, func_param_idx, &lambda_name, &captures, arg_results, ty, span)
+                self.build_intrinsic_hof_call(
+                    hof_name,
+                    func_param_idx,
+                    &lambda_name,
+                    &captures,
+                    arg_results,
+                    ty,
+                    span,
+                )
             }
         }
     }
@@ -1198,7 +1239,13 @@ impl<'a> Defunctionalizer<'a> {
         }
     }
 
-    /// Specialize a user-defined HOF call by cloning and substituting.
+    /// Specialize a user-defined HOF call by cloning, substituting, and defunctionalizing.
+    ///
+    /// This is the fixpoint-enabled version: after substituting the function parameter
+    /// with the lambda name, we defunc the body. This handles:
+    /// - Capture appending for calls to the lambda (via apply_callable)
+    /// - Nested HOF calls with lambda args (triggers recursive specialization)
+    /// - New lambdas in the specialized body (get lifted)
     fn specialize_user_hof(
         &mut self,
         hof_name: &str,
@@ -1238,43 +1285,204 @@ impl<'a> Defunctionalizer<'a> {
         let specialized_name = format!("{}${}", hof_name, self.specialization_counter);
         self.specialization_counter += 1;
 
+        // Cache early to prevent infinite recursion on mutually recursive HOFs
+        self.specialization_cache.insert(cache_key, specialized_name.clone());
+
         // Get the function parameter name from the HOF definition
         let func_param_name = self.get_func_param_name(hof_def, func_param_idx);
 
-        // Clone HOF body and substitute f(args) -> lambda(args, captures)
-        let specialized_body = self.specialize_body(
-            &hof_def.body,
-            &func_param_name,
-            lambda_name,
-            captures,
-            span,
-        );
+        // Extract params FIRST, then substitute in the inner body
+        // (Substitution must happen AFTER unwrapping lambdas because the func param
+        // is bound by one of those lambdas, and substitute_var correctly avoids
+        // substituting in shadowed scopes)
+        let (params, inner_body) = self.extract_lambda_params(hof_def.body.clone());
 
-        // Apply type substitution to the specialized body
-        let specialized_body = apply_type_subst_to_term(&specialized_body, &type_subst, &mut self.term_ids);
+        // Simple substitution in inner body: replace func_param_name with lambda_name
+        let substituted_inner = self.substitute_var(&inner_body, &func_param_name, lambda_name);
 
-        // Build new def with captures as trailing params
-        let specialized_def = self.build_specialized_def(
-            &specialized_name,
-            hof_def,
-            specialized_body,
-            func_param_idx,
-            captures,
-        );
+        // Build new param list: remove function param at func_param_idx, add captures at end
+        let mut new_params: Vec<(String, Type<TypeName>)> =
+            params.into_iter().enumerate().filter(|(i, _)| *i != func_param_idx).map(|(_, p)| p).collect();
 
-        // Register and cache
+        // Add captures as trailing parameters
+        for (cap_name, cap_ty) in captures {
+            new_params.push((cap_name.clone(), cap_ty.clone()));
+        }
+
+        // Set up environment for defunc with new params as Dynamic
+        let old_env = std::mem::take(&mut self.env);
+        for (param_name, _) in &new_params {
+            self.env.insert(param_name.clone(), StaticVal::Dynamic);
+        }
+
+        // Defunc the substituted inner body - this handles:
+        // - Capture appending for calls to lambda_name (via apply_callable + lifted_lambda_captures)
+        // - Nested HOF calls with lambda args (triggers recursive specialization)
+        // - New lambdas (get lifted)
+        let defunced_body = self.defunc_term(substituted_inner).term;
+
+        // Restore env
+        self.env = old_env;
+
+        // Apply type substitution to the defunced body
+        let defunced_body = apply_type_subst_to_term(&defunced_body, &type_subst, &mut self.term_ids);
+
+        // Rebuild nested lambdas with new params
+        let rebuilt = self.rebuild_nested_lam(&new_params, defunced_body, hof_def.body.span);
+
+        let specialized_def = Def {
+            name: specialized_name.clone(),
+            ty: rebuilt.ty.clone(),
+            body: rebuilt,
+            meta: DefMeta::Function,
+            arity: new_params.len(),
+        };
+
+        // Register
         self.lifted_defs.push(specialized_def);
-        self.specialization_cache.insert(cache_key, specialized_name.clone());
 
         // Build call to specialized function
-        self.build_specialized_call(
-            &specialized_name,
-            func_param_idx,
-            arg_results,
-            captures,
-            ty,
-            span,
-        )
+        self.build_specialized_call(&specialized_name, func_param_idx, arg_results, captures, ty, span)
+    }
+
+    /// Simple variable substitution: replace all occurrences of old_name with new_name.
+    fn substitute_var(&mut self, term: &Term, old_name: &str, new_name: &str) -> Term {
+        match &term.kind {
+            TermKind::Var(name) if name == old_name => Term {
+                id: self.term_ids.next_id(),
+                ty: term.ty.clone(),
+                span: term.span,
+                kind: TermKind::Var(new_name.to_string()),
+            },
+
+            TermKind::Var(_)
+            | TermKind::IntLit(_)
+            | TermKind::FloatLit(_)
+            | TermKind::BoolLit(_)
+            | TermKind::StringLit(_)
+            | TermKind::BinOp(_)
+            | TermKind::UnOp(_) => term.clone(),
+
+            TermKind::App { func, arg } => Term {
+                id: self.term_ids.next_id(),
+                ty: term.ty.clone(),
+                span: term.span,
+                kind: TermKind::App {
+                    func: Box::new(self.substitute_var(func, old_name, new_name)),
+                    arg: Box::new(self.substitute_var(arg, old_name, new_name)),
+                },
+            },
+
+            TermKind::Lam {
+                param,
+                param_ty,
+                body,
+            } => {
+                // Don't substitute if the param shadows old_name
+                if param == old_name {
+                    term.clone()
+                } else {
+                    Term {
+                        id: self.term_ids.next_id(),
+                        ty: term.ty.clone(),
+                        span: term.span,
+                        kind: TermKind::Lam {
+                            param: param.clone(),
+                            param_ty: param_ty.clone(),
+                            body: Box::new(self.substitute_var(body, old_name, new_name)),
+                        },
+                    }
+                }
+            }
+
+            TermKind::Let {
+                name,
+                name_ty,
+                rhs,
+                body,
+            } => {
+                let new_rhs = self.substitute_var(rhs, old_name, new_name);
+                // Don't substitute in body if name shadows old_name
+                let new_body = if name == old_name {
+                    (**body).clone()
+                } else {
+                    self.substitute_var(body, old_name, new_name)
+                };
+                Term {
+                    id: self.term_ids.next_id(),
+                    ty: term.ty.clone(),
+                    span: term.span,
+                    kind: TermKind::Let {
+                        name: name.clone(),
+                        name_ty: name_ty.clone(),
+                        rhs: Box::new(new_rhs),
+                        body: Box::new(new_body),
+                    },
+                }
+            }
+
+            TermKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => Term {
+                id: self.term_ids.next_id(),
+                ty: term.ty.clone(),
+                span: term.span,
+                kind: TermKind::If {
+                    cond: Box::new(self.substitute_var(cond, old_name, new_name)),
+                    then_branch: Box::new(self.substitute_var(then_branch, old_name, new_name)),
+                    else_branch: Box::new(self.substitute_var(else_branch, old_name, new_name)),
+                },
+            },
+
+            TermKind::Loop {
+                loop_var,
+                loop_var_ty,
+                init,
+                init_bindings,
+                kind,
+                body,
+            } => {
+                let new_init = self.substitute_var(init, old_name, new_name);
+                let new_init_bindings: Vec<_> = init_bindings
+                    .iter()
+                    .map(|(n, ty, e)| (n.clone(), ty.clone(), self.substitute_var(e, old_name, new_name)))
+                    .collect();
+                let new_kind = match kind {
+                    LoopKind::For { var, var_ty, iter } => LoopKind::For {
+                        var: var.clone(),
+                        var_ty: var_ty.clone(),
+                        iter: Box::new(self.substitute_var(iter, old_name, new_name)),
+                    },
+                    LoopKind::ForRange { var, var_ty, bound } => LoopKind::ForRange {
+                        var: var.clone(),
+                        var_ty: var_ty.clone(),
+                        bound: Box::new(self.substitute_var(bound, old_name, new_name)),
+                    },
+                    LoopKind::While { cond } => LoopKind::While {
+                        cond: Box::new(self.substitute_var(cond, old_name, new_name)),
+                    },
+                };
+                // Check if loop_var or any init_binding shadows old_name
+                let shadows = loop_var == old_name || init_bindings.iter().any(|(n, _, _)| n == old_name);
+                let new_body =
+                    if shadows { (**body).clone() } else { self.substitute_var(body, old_name, new_name) };
+                Term {
+                    id: self.term_ids.next_id(),
+                    ty: term.ty.clone(),
+                    span: term.span,
+                    kind: TermKind::Loop {
+                        loop_var: loop_var.clone(),
+                        loop_var_ty: loop_var_ty.clone(),
+                        init: Box::new(new_init),
+                        init_bindings: new_init_bindings,
+                        kind: new_kind,
+                        body: Box::new(new_body),
+                    },
+                }
+            }
+        }
     }
 
     /// Get the parameter name at a given index from a function definition.
@@ -1292,359 +1500,6 @@ impl<'a> Defunctionalizer<'a> {
             body = inner;
         }
         format!("_param_{}", param_idx)
-    }
-
-    /// Recursively substitute calls to func_param with calls to lambda_name (with captures).
-    fn specialize_body(
-        &mut self,
-        term: &Term,
-        func_param_name: &str,
-        lambda_name: &str,
-        captures: &[(String, Type<TypeName>)],
-        span: Span,
-    ) -> Term {
-        match &term.kind {
-            TermKind::App { func, arg } => {
-                // Collect spine and check if base is the function param
-                let (base, args) = self.collect_spine_ref(func, arg);
-
-                if let TermKind::Var(name) = &base.kind {
-                    if name == func_param_name {
-                        // Replace f(args...) with lambda(args..., captures...)
-                        let new_args: Vec<Term> = args
-                            .iter()
-                            .map(|a| self.specialize_body(a, func_param_name, lambda_name, captures, span))
-                            .collect();
-
-                        // Add capture variables at the end
-                        let mut all_args = new_args;
-                        for (cap_name, cap_ty) in captures {
-                            all_args.push(Term {
-                                id: self.term_ids.next_id(),
-                                ty: cap_ty.clone(),
-                                span,
-                                kind: TermKind::Var(cap_name.clone()),
-                            });
-                        }
-
-                        return self.build_curried_app(lambda_name, all_args, term.ty.clone(), span);
-                    }
-                }
-
-                // Not a direct call to f, but check if f is passed as an argument
-                // If so, we need to append captures to THIS call
-                // e.g., _w_intrinsic_map f xs -> _w_intrinsic_map _lambda_10 xs arr
-                let args_contain_func_param =
-                    args.iter().any(|a| self.term_references_var(a, func_param_name));
-
-                if args_contain_func_param {
-                    // Transform args (replacing f with lambda_name)
-                    let new_args: Vec<Term> = args
-                        .iter()
-                        .map(|a| self.specialize_body(a, func_param_name, lambda_name, captures, span))
-                        .collect();
-
-                    // Append captures to the call
-                    let mut all_args = new_args;
-                    for (cap_name, cap_ty) in captures {
-                        all_args.push(Term {
-                            id: self.term_ids.next_id(),
-                            ty: cap_ty.clone(),
-                            span,
-                            kind: TermKind::Var(cap_name.clone()),
-                        });
-                    }
-
-                    // Build the application with the transformed args
-                    match &base.kind {
-                        TermKind::Var(n) => {
-                            return self.build_curried_app(n.as_str(), all_args, term.ty.clone(), span);
-                        }
-                        TermKind::BinOp(_) | TermKind::UnOp(_) => {
-                            // BinOp/UnOp - shouldn't have function params as args, but handle anyway
-                            // Fall through to normal handling
-                        }
-                        _ => {
-                            // Other term kinds (computed function) - specialize the function term
-                            let new_func_term =
-                                self.specialize_body(&base, func_param_name, lambda_name, captures, span);
-                            return self.build_curried_app_with_term(
-                                new_func_term,
-                                all_args,
-                                term.ty.clone(),
-                                span,
-                            );
-                        }
-                    }
-                }
-
-                // No function param reference, recurse normally
-                let new_func = self.specialize_body(func, func_param_name, lambda_name, captures, span);
-                let new_arg = self.specialize_body(arg, func_param_name, lambda_name, captures, span);
-                Term {
-                    id: self.term_ids.next_id(),
-                    ty: term.ty.clone(),
-                    span: term.span,
-                    kind: TermKind::App {
-                        func: Box::new(new_func),
-                        arg: Box::new(new_arg),
-                    },
-                }
-            }
-
-            TermKind::Var(name) => {
-                if name == func_param_name {
-                    // Bare reference to function param -> reference to lambda
-                    Term {
-                        id: self.term_ids.next_id(),
-                        ty: term.ty.clone(),
-                        span: term.span,
-                        kind: TermKind::Var(lambda_name.to_string()),
-                    }
-                } else {
-                    term.clone()
-                }
-            }
-
-            TermKind::Let {
-                name,
-                name_ty,
-                rhs,
-                body,
-            } => {
-                let new_rhs = self.specialize_body(rhs, func_param_name, lambda_name, captures, span);
-                let new_body = self.specialize_body(body, func_param_name, lambda_name, captures, span);
-                Term {
-                    id: self.term_ids.next_id(),
-                    ty: term.ty.clone(),
-                    span: term.span,
-                    kind: TermKind::Let {
-                        name: name.clone(),
-                        name_ty: name_ty.clone(),
-                        rhs: Box::new(new_rhs),
-                        body: Box::new(new_body),
-                    },
-                }
-            }
-
-            TermKind::Lam {
-                param,
-                param_ty,
-                body,
-            } => {
-                let new_body = self.specialize_body(body, func_param_name, lambda_name, captures, span);
-                Term {
-                    id: self.term_ids.next_id(),
-                    ty: term.ty.clone(),
-                    span: term.span,
-                    kind: TermKind::Lam {
-                        param: param.clone(),
-                        param_ty: param_ty.clone(),
-                        body: Box::new(new_body),
-                    },
-                }
-            }
-
-            TermKind::If {
-                cond,
-                then_branch,
-                else_branch,
-            } => {
-                let new_cond = self.specialize_body(cond, func_param_name, lambda_name, captures, span);
-                let new_then =
-                    self.specialize_body(then_branch, func_param_name, lambda_name, captures, span);
-                let new_else =
-                    self.specialize_body(else_branch, func_param_name, lambda_name, captures, span);
-                Term {
-                    id: self.term_ids.next_id(),
-                    ty: term.ty.clone(),
-                    span: term.span,
-                    kind: TermKind::If {
-                        cond: Box::new(new_cond),
-                        then_branch: Box::new(new_then),
-                        else_branch: Box::new(new_else),
-                    },
-                }
-            }
-
-            TermKind::Loop {
-                loop_var,
-                loop_var_ty,
-                init,
-                init_bindings,
-                kind,
-                body,
-            } => {
-                let new_init = self.specialize_body(init, func_param_name, lambda_name, captures, span);
-                let new_init_bindings: Vec<_> = init_bindings
-                    .iter()
-                    .map(|(name, ty, expr)| {
-                        (
-                            name.clone(),
-                            ty.clone(),
-                            self.specialize_body(expr, func_param_name, lambda_name, captures, span),
-                        )
-                    })
-                    .collect();
-                let new_kind = match kind {
-                    LoopKind::For { var, var_ty, iter } => LoopKind::For {
-                        var: var.clone(),
-                        var_ty: var_ty.clone(),
-                        iter: Box::new(self.specialize_body(
-                            iter,
-                            func_param_name,
-                            lambda_name,
-                            captures,
-                            span,
-                        )),
-                    },
-                    LoopKind::ForRange { var, var_ty, bound } => LoopKind::ForRange {
-                        var: var.clone(),
-                        var_ty: var_ty.clone(),
-                        bound: Box::new(self.specialize_body(
-                            bound,
-                            func_param_name,
-                            lambda_name,
-                            captures,
-                            span,
-                        )),
-                    },
-                    LoopKind::While { cond } => LoopKind::While {
-                        cond: Box::new(self.specialize_body(
-                            cond,
-                            func_param_name,
-                            lambda_name,
-                            captures,
-                            span,
-                        )),
-                    },
-                };
-                let new_body = self.specialize_body(body, func_param_name, lambda_name, captures, span);
-                Term {
-                    id: self.term_ids.next_id(),
-                    ty: term.ty.clone(),
-                    span: term.span,
-                    kind: TermKind::Loop {
-                        loop_var: loop_var.clone(),
-                        loop_var_ty: loop_var_ty.clone(),
-                        init: Box::new(new_init),
-                        init_bindings: new_init_bindings,
-                        kind: new_kind,
-                        body: Box::new(new_body),
-                    },
-                }
-            }
-
-            // Literals and operators are unchanged
-            TermKind::IntLit(_)
-            | TermKind::FloatLit(_)
-            | TermKind::BoolLit(_)
-            | TermKind::StringLit(_)
-            | TermKind::BinOp(_)
-            | TermKind::UnOp(_) => term.clone(),
-        }
-    }
-
-    /// Check if a term references a specific variable.
-    fn term_references_var(&self, term: &Term, var_name: &str) -> bool {
-        match &term.kind {
-            TermKind::Var(name) => name == var_name,
-            TermKind::App { func, arg } => {
-                self.term_references_var(func, var_name) || self.term_references_var(arg, var_name)
-            }
-            TermKind::Let { rhs, body, .. } => {
-                self.term_references_var(rhs, var_name) || self.term_references_var(body, var_name)
-            }
-            TermKind::Lam { body, .. } => self.term_references_var(body, var_name),
-            TermKind::If {
-                cond,
-                then_branch,
-                else_branch,
-            } => {
-                self.term_references_var(cond, var_name)
-                    || self.term_references_var(then_branch, var_name)
-                    || self.term_references_var(else_branch, var_name)
-            }
-            TermKind::Loop {
-                init,
-                init_bindings,
-                kind,
-                body,
-                ..
-            } => {
-                self.term_references_var(init, var_name)
-                    || init_bindings.iter().any(|(_, _, expr)| self.term_references_var(expr, var_name))
-                    || match kind {
-                        LoopKind::For { iter, .. } => self.term_references_var(iter, var_name),
-                        LoopKind::ForRange { bound, .. } => self.term_references_var(bound, var_name),
-                        LoopKind::While { cond } => self.term_references_var(cond, var_name),
-                    }
-                    || self.term_references_var(body, var_name)
-            }
-            TermKind::IntLit(_)
-            | TermKind::FloatLit(_)
-            | TermKind::BoolLit(_)
-            | TermKind::StringLit(_)
-            | TermKind::BinOp(_)
-            | TermKind::UnOp(_) => false,
-        }
-    }
-
-    /// Collect application spine from references (used during specialization).
-    fn collect_spine_ref<'b>(&self, func: &'b Term, arg: &'b Term) -> (Term, Vec<&'b Term>) {
-        let mut args = vec![arg];
-        let mut current = func;
-
-        // Walk up the spine
-        loop {
-            if let TermKind::App {
-                func: inner_func,
-                arg: inner_arg,
-            } = &current.kind
-            {
-                args.push(inner_arg.as_ref());
-                current = inner_func.as_ref();
-            } else {
-                break;
-            }
-        }
-
-        // Args were collected in reverse order
-        args.reverse();
-        (current.clone(), args)
-    }
-
-    /// Build a specialized definition with captures as trailing parameters.
-    fn build_specialized_def(
-        &mut self,
-        specialized_name: &str,
-        original_def: &Def,
-        specialized_body: Term,
-        func_param_idx: usize,
-        captures: &[(String, Type<TypeName>)],
-    ) -> Def {
-        // Extract original params
-        let (params, inner_body) = self.extract_lambda_params(specialized_body);
-
-        // Build new param list: remove function param at func_param_idx, add captures at end
-        let mut new_params: Vec<(String, Type<TypeName>)> =
-            params.into_iter().enumerate().filter(|(i, _)| *i != func_param_idx).map(|(_, p)| p).collect();
-
-        // Add captures as additional parameters
-        for (cap_name, cap_ty) in captures {
-            new_params.push((cap_name.clone(), cap_ty.clone()));
-        }
-
-        // Rebuild the nested lambdas
-        let rebuilt = self.rebuild_nested_lam(&new_params, inner_body, original_def.body.span);
-
-        Def {
-            name: specialized_name.to_string(),
-            ty: rebuilt.ty.clone(),
-            body: rebuilt,
-            meta: DefMeta::Function,
-            arity: new_params.len(),
-        }
     }
 
     /// Build a call to a specialized HOF.

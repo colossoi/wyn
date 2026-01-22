@@ -237,3 +237,269 @@ fn test_defunc_lambda_with_capture() {
     let lifted = result.defs.iter().find(|d| d.name.starts_with("_lambda_"));
     assert!(lifted.is_some(), "Should have a _lambda_ definition");
 }
+
+/// Test that specialized HOF bodies are properly defunctionalized.
+///
+/// This is a stricter test: hof_outer doesn't have a lambda in its body,
+/// it just passes `g` directly. But the CALL SITE wraps `g` in a new lambda.
+///
+/// hof_inner(f, x) = f(x)
+/// hof_outer(g, y) = hof_inner(g, y)  // No lambda here, just passes g through
+/// main(cap) = hof_outer(|a| a + cap, 5)
+///
+/// When hof_outer is specialized for _lambda_0:
+/// - hof_outer$0 body becomes: hof_inner(_lambda_0, y)
+/// - This should trigger specialization of hof_inner for _lambda_0
+///
+/// This test fails if specialized bodies aren't processed (fixpoint issue).
+#[test]
+fn test_nested_hof_passthrough() {
+    let mut ids = TermIdSource::new();
+    let span = dummy_span();
+
+    // hof_inner = |f| |x| f(x)
+    let hof_inner_body = Term {
+        id: ids.next_id(),
+        ty: i32_ty(),
+        span,
+        kind: TermKind::App {
+            func: Box::new(Term {
+                id: ids.next_id(),
+                ty: arrow(i32_ty(), i32_ty()),
+                span,
+                kind: TermKind::Var("f".to_string()),
+            }),
+            arg: Box::new(Term {
+                id: ids.next_id(),
+                ty: i32_ty(),
+                span,
+                kind: TermKind::Var("x".to_string()),
+            }),
+        },
+    };
+
+    let hof_inner = Term {
+        id: ids.next_id(),
+        ty: arrow(arrow(i32_ty(), i32_ty()), arrow(i32_ty(), i32_ty())),
+        span,
+        kind: TermKind::Lam {
+            param: "f".to_string(),
+            param_ty: arrow(i32_ty(), i32_ty()),
+            body: Box::new(Term {
+                id: ids.next_id(),
+                ty: arrow(i32_ty(), i32_ty()),
+                span,
+                kind: TermKind::Lam {
+                    param: "x".to_string(),
+                    param_ty: i32_ty(),
+                    body: Box::new(hof_inner_body),
+                },
+            }),
+        },
+    };
+
+    // hof_outer = |g| |y| hof_inner g y
+    // Just passes g directly to hof_inner, no lambda wrapping
+    let hof_inner_call = Term {
+        id: ids.next_id(),
+        ty: i32_ty(),
+        span,
+        kind: TermKind::App {
+            func: Box::new(Term {
+                id: ids.next_id(),
+                ty: arrow(i32_ty(), i32_ty()),
+                span,
+                kind: TermKind::App {
+                    func: Box::new(Term {
+                        id: ids.next_id(),
+                        ty: arrow(arrow(i32_ty(), i32_ty()), arrow(i32_ty(), i32_ty())),
+                        span,
+                        kind: TermKind::Var("hof_inner".to_string()),
+                    }),
+                    arg: Box::new(Term {
+                        id: ids.next_id(),
+                        ty: arrow(i32_ty(), i32_ty()),
+                        span,
+                        kind: TermKind::Var("g".to_string()), // <-- Just passes g, no lambda
+                    }),
+                },
+            }),
+            arg: Box::new(Term {
+                id: ids.next_id(),
+                ty: i32_ty(),
+                span,
+                kind: TermKind::Var("y".to_string()),
+            }),
+        },
+    };
+
+    let hof_outer = Term {
+        id: ids.next_id(),
+        ty: arrow(arrow(i32_ty(), i32_ty()), arrow(i32_ty(), i32_ty())),
+        span,
+        kind: TermKind::Lam {
+            param: "g".to_string(),
+            param_ty: arrow(i32_ty(), i32_ty()),
+            body: Box::new(Term {
+                id: ids.next_id(),
+                ty: arrow(i32_ty(), i32_ty()),
+                span,
+                kind: TermKind::Lam {
+                    param: "y".to_string(),
+                    param_ty: i32_ty(),
+                    body: Box::new(hof_inner_call),
+                },
+            }),
+        },
+    };
+
+    // main = |cap| hof_outer (|a| a + cap) 5
+    let a_plus_cap = Term {
+        id: ids.next_id(),
+        ty: i32_ty(),
+        span,
+        kind: TermKind::App {
+            func: Box::new(Term {
+                id: ids.next_id(),
+                ty: arrow(i32_ty(), i32_ty()),
+                span,
+                kind: TermKind::App {
+                    func: Box::new(Term {
+                        id: ids.next_id(),
+                        ty: arrow(i32_ty(), arrow(i32_ty(), i32_ty())),
+                        span,
+                        kind: TermKind::BinOp(BinaryOp { op: "+".to_string() }),
+                    }),
+                    arg: Box::new(Term {
+                        id: ids.next_id(),
+                        ty: i32_ty(),
+                        span,
+                        kind: TermKind::Var("a".to_string()),
+                    }),
+                },
+            }),
+            arg: Box::new(Term {
+                id: ids.next_id(),
+                ty: i32_ty(),
+                span,
+                kind: TermKind::Var("cap".to_string()),
+            }),
+        },
+    };
+
+    let capturing_lambda = Term {
+        id: ids.next_id(),
+        ty: arrow(i32_ty(), i32_ty()),
+        span,
+        kind: TermKind::Lam {
+            param: "a".to_string(),
+            param_ty: i32_ty(),
+            body: Box::new(a_plus_cap),
+        },
+    };
+
+    let main_body = Term {
+        id: ids.next_id(),
+        ty: i32_ty(),
+        span,
+        kind: TermKind::App {
+            func: Box::new(Term {
+                id: ids.next_id(),
+                ty: arrow(i32_ty(), i32_ty()),
+                span,
+                kind: TermKind::App {
+                    func: Box::new(Term {
+                        id: ids.next_id(),
+                        ty: arrow(arrow(i32_ty(), i32_ty()), arrow(i32_ty(), i32_ty())),
+                        span,
+                        kind: TermKind::Var("hof_outer".to_string()),
+                    }),
+                    arg: Box::new(capturing_lambda),
+                },
+            }),
+            arg: Box::new(Term {
+                id: ids.next_id(),
+                ty: i32_ty(),
+                span,
+                kind: TermKind::IntLit("5".to_string()),
+            }),
+        },
+    };
+
+    let main_def = Term {
+        id: ids.next_id(),
+        ty: arrow(i32_ty(), i32_ty()),
+        span,
+        kind: TermKind::Lam {
+            param: "cap".to_string(),
+            param_ty: i32_ty(),
+            body: Box::new(main_body),
+        },
+    };
+
+    let program = Program {
+        defs: vec![
+            Def {
+                name: "hof_inner".to_string(),
+                ty: hof_inner.ty.clone(),
+                body: hof_inner,
+                meta: DefMeta::Function,
+                arity: 2,
+            },
+            Def {
+                name: "hof_outer".to_string(),
+                ty: hof_outer.ty.clone(),
+                body: hof_outer,
+                meta: DefMeta::Function,
+                arity: 2,
+            },
+            Def {
+                name: "main".to_string(),
+                ty: main_def.ty.clone(),
+                body: main_def,
+                meta: DefMeta::Function,
+                arity: 1,
+            },
+        ],
+        uniforms: vec![],
+        storage: vec![],
+    };
+
+    let builtins = HashSet::new();
+    let result = defunctionalize(program, &builtins);
+
+    let def_names: Vec<&str> = result.defs.iter().map(|d| d.name.as_str()).collect();
+    eprintln!(
+        "Defs after defunctionalization (passthrough test): {:?}",
+        def_names
+    );
+
+    // Expected:
+    // - hof_inner (original)
+    // - hof_outer (original)
+    // - main (original)
+    // - _lambda_0 (lifted from main, captures cap)
+    // - hof_outer$0 (specialized for _lambda_0)
+    // - hof_inner$0 (specialized for _lambda_0, triggered by processing hof_outer$0's body)
+    //
+    // The key assertion: hof_inner MUST be specialized even though the original
+    // hof_outer doesn't have a lambda - the specialized body hof_inner(_lambda_0, y)
+    // contains a HOF call that needs specialization.
+
+    let hof_outer_specialized = result.defs.iter().any(|d| d.name.starts_with("hof_outer$"));
+    assert!(
+        hof_outer_specialized,
+        "hof_outer should be specialized. Defs: {:?}",
+        def_names
+    );
+
+    // THIS IS THE CRITICAL ASSERTION:
+    // hof_inner must be specialized because hof_outer$0's body is: hof_inner(_lambda_0, y)
+    // If we don't process hof_outer$0's body (fixpoint issue), hof_inner won't be specialized
+    let hof_inner_specialized = result.defs.iter().any(|d| d.name.starts_with("hof_inner$"));
+    assert!(
+        hof_inner_specialized,
+        "hof_inner should be specialized (from processing hof_outer$0's body). Defs: {:?}",
+        def_names
+    );
+}

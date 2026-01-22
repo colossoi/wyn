@@ -2,9 +2,7 @@
 //!
 //! Transforms a lifted TLC program (where all lambdas are top-level) into MIR.
 
-use super::{
-    Def as TlcDef, DefMeta, LoopKind as TlcLoopKind, Program as TlcProgram, Term, TermKind,
-};
+use super::{Def as TlcDef, DefMeta, LoopKind as TlcLoopKind, Program as TlcProgram, Term, TermKind};
 use crate::ast::{self, NodeId, PatternKind, Span, TypeName};
 use crate::mir::{
     self, ArrayBacking, Body, Def as MirDef, Expr, ExprId, LocalDecl, LocalId, LocalKind,
