@@ -1222,18 +1222,28 @@ impl<'a> Transformer<'a> {
         (loop_var, acc_ty.clone(), init_bindings)
     }
 
-    /// Get the type at a given projection path within a tuple type.
+    /// Get the type at a given projection path within a tuple/record type.
     fn type_at_path(&self, ty: &Type<TypeName>, path: &[usize]) -> Type<TypeName> {
         let mut current = ty.clone();
         for &idx in path {
             current = match &current {
                 Type::Constructed(TypeName::Tuple(_), args) => {
-                    args.get(idx).cloned().unwrap_or(current.clone())
+                    args.get(idx).cloned().unwrap_or_else(|| {
+                        panic!(
+                            "BUG: tuple projection index {} out of bounds for {:?}",
+                            idx, current
+                        )
+                    })
                 }
-                Type::Constructed(TypeName::Record(_), args) => {
-                    args.get(idx).cloned().unwrap_or(current.clone())
+                Type::Constructed(TypeName::Record(fields), args) => {
+                    args.get(idx).cloned().unwrap_or_else(|| {
+                        panic!(
+                            "BUG: record projection index {} out of bounds for {:?} (fields: {:?})",
+                            idx, current, fields
+                        )
+                    })
                 }
-                _ => current.clone(),
+                _ => panic!("BUG: projection on non-tuple/record type: {:?}", current),
             };
         }
         current
