@@ -515,7 +515,9 @@ impl<'a> Transformer<'a> {
                 .cloned()
                 .unwrap_or_else(|| panic!("BUG: Record field '{}' not found in type", field.field));
 
-            let field_idx = self.resolve_field_index(record_ty, &field.field).unwrap_or(0);
+            let field_idx = self
+                .resolve_field_index(record_ty, &field.field)
+                .unwrap_or_else(|| panic!("BUG: field '{}' not in record type", field.field));
 
             let record_ref = self.mk_term(record_ty.clone(), span, TermKind::Var(record_var.to_string()));
             let index_lit = self.mk_term(
@@ -624,7 +626,9 @@ impl<'a> Transformer<'a> {
                         .cloned()
                         .unwrap_or_else(|| panic!("BUG: Record field '{}' not found in type", field.field));
 
-                    let field_idx = self.resolve_field_index(pat_ty, &field.field).unwrap_or(0);
+                    let field_idx = self
+                        .resolve_field_index(pat_ty, &field.field)
+                        .unwrap_or_else(|| panic!("BUG: field '{}' not in record type", field.field));
 
                     let record_ref = self.mk_term(pat_ty.clone(), span, TermKind::Var(fresh.clone()));
                     let index_lit = self.mk_term(
@@ -672,6 +676,14 @@ impl<'a> Transformer<'a> {
     fn resolve_field_index(&self, ty: &Type<TypeName>, field: &str) -> Option<usize> {
         match ty {
             Type::Constructed(TypeName::Record(fields), _) => fields.iter().position(|f| f == field),
+            // Vec swizzle: x=0, y=1, z=2, w=3
+            Type::Constructed(TypeName::Vec, _) => match field {
+                "x" => Some(0),
+                "y" => Some(1),
+                "z" => Some(2),
+                "w" => Some(3),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -738,7 +750,9 @@ impl<'a> Transformer<'a> {
                 .unwrap_or_else(|| panic!("BUG: Record field '{}' not found in type", field.field));
 
             // Resolve field name to index, treat record as tuple
-            let field_idx = self.resolve_field_index(record_ty, &field.field).unwrap_or(0);
+            let field_idx = self
+                .resolve_field_index(record_ty, &field.field)
+                .unwrap_or_else(|| panic!("BUG: field '{}' not in record type", field.field));
 
             let record_ref = self.mk_term(record_ty.clone(), span, TermKind::Var(record_var.to_string()));
             let index_lit = self.mk_term(
@@ -962,7 +976,9 @@ impl<'a> Transformer<'a> {
             ast::ExprKind::FieldAccess(record, field) => {
                 let rec = self.transform_expr(record);
                 // Resolve field name to index, treat record as tuple
-                let field_idx = self.resolve_field_index(&rec.ty, field).unwrap_or(0);
+                let field_idx = self
+                    .resolve_field_index(&rec.ty, field)
+                    .unwrap_or_else(|| panic!("BUG: field '{}' not in record type", field));
                 let index_lit = self.mk_term(
                     Type::Constructed(TypeName::Int(32), vec![]),
                     span,
