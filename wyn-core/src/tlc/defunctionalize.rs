@@ -34,10 +34,10 @@ pub enum StaticVal {
 
     /// A lambda closure with:
     /// - The lifted function name
-    /// - Captured free variables (name, type)
+    /// - Captured terms (already typed, ready to append at call sites)
     Lambda {
         lifted_name: String,
-        captures: Vec<(String, Type<TypeName>)>,
+        captures: Vec<Term>,
     },
 
     /// Tuple/record of static values (for destructuring)
@@ -330,12 +330,13 @@ fn apply_type_subst_to_term(term: &Term, subst: &TypeSubst, term_ids: &mut TermI
 // =============================================================================
 
 /// Compute free variables of a term, given explicit sets of bound names.
+/// Returns the actual Term for each free variable (preserving its type and span).
 fn compute_free_vars(
     term: &Term,
     bound: &HashSet<String>,
     top_level: &HashSet<String>,
     builtins: &HashSet<String>,
-) -> Vec<(String, Type<TypeName>)> {
+) -> Vec<Term> {
     let mut free = Vec::new();
     let mut seen = HashSet::new();
     collect_free_vars(term, bound, top_level, builtins, &mut free, &mut seen);
@@ -347,7 +348,7 @@ fn collect_free_vars(
     bound: &HashSet<String>,
     top_level: &HashSet<String>,
     builtins: &HashSet<String>,
-    free: &mut Vec<(String, Type<TypeName>)>,
+    free: &mut Vec<Term>,
     seen: &mut HashSet<String>,
 ) {
     match &term.kind {
@@ -359,7 +360,7 @@ fn collect_free_vars(
                 && !seen.contains(name)
             {
                 seen.insert(name.clone());
-                free.push((name.clone(), term.ty.clone()));
+                free.push(term.clone());
             }
         }
         TermKind::Let { name, rhs, body, .. } => {
@@ -472,9 +473,9 @@ pub struct Defunctionalizer<'a> {
     specialization_cache: HashMap<(String, String, Vec<String>), String>,
     /// Counter for generating unique specialization names
     specialization_counter: usize,
-    /// Captures for lifted lambdas: lambda_name -> [(capture_name, capture_type)]
+    /// Captures for lifted lambdas: lambda_name -> capture terms
     /// Used during HOF specialization to know what captures to append
-    lifted_lambda_captures: HashMap<String, Vec<(String, Type<TypeName>)>>,
+    lifted_lambda_captures: HashMap<String, Vec<Term>>,
 }
 
 impl<'a> Defunctionalizer<'a> {
@@ -979,14 +980,8 @@ impl<'a> Defunctionalizer<'a> {
             } if !captures.is_empty() => {
                 // Function has captures - call lifted_name with args + captures
                 let mut all_args = args;
-                for (cap_name, cap_ty) in captures {
-                    all_args.push(Term {
-                        id: self.term_ids.next_id(),
-                        ty: cap_ty.clone(),
-                        span,
-                        kind: TermKind::Var(cap_name.clone()),
-                    });
-                }
+                // Captures are already Terms - just clone them
+                all_args.extend(captures.iter().cloned());
                 self.build_curried_app(lifted_name, all_args, result_ty, span)
             }
             _ => {
@@ -1085,12 +1080,7 @@ impl<'a> Defunctionalizer<'a> {
 
     /// Append capture parameters to a lambda (captures at end).
     /// Given `|x| |y| body` and captures [a, b], produces `|x| |y| |a| |b| body`.
-    fn append_capture_params(
-        &mut self,
-        lam: Term,
-        captures: &[(String, Type<TypeName>)],
-        span: Span,
-    ) -> Term {
+    fn append_capture_params(&mut self, lam: Term, captures: &[Term], span: Span) -> Term {
         // Find the innermost body (unwrap all lambdas)
         fn extract_inner(term: Term) -> (Vec<(String, Type<TypeName>, Type<TypeName>)>, Term) {
             match term.kind {
@@ -1110,14 +1100,20 @@ impl<'a> Defunctionalizer<'a> {
         let (orig_params, inner_body) = extract_inner(lam);
 
         // Wrap inner body with capture lambdas (innermost first, so reverse iterate)
-        let with_captures = captures.iter().rev().fold(inner_body, |acc, (cap_name, cap_ty)| {
+        let with_captures = captures.iter().rev().fold(inner_body, |acc, cap_term| {
+            // Extract name from the capture term (must be a Var)
+            let cap_name = match &cap_term.kind {
+                TermKind::Var(name) => name.clone(),
+                _ => panic!("BUG: capture term is not a Var: {:?}", cap_term.kind),
+            };
+            let cap_ty = &cap_term.ty;
             let result_ty = Type::Constructed(TypeName::Arrow, vec![cap_ty.clone(), acc.ty.clone()]);
             Term {
                 id: self.term_ids.next_id(),
                 ty: result_ty,
                 span,
                 kind: TermKind::Lam {
-                    param: cap_name.clone(),
+                    param: cap_name,
                     param_ty: cap_ty.clone(),
                     body: Box::new(acc),
                 },
@@ -1200,7 +1196,7 @@ impl<'a> Defunctionalizer<'a> {
         hof_name: &str,
         func_param_idx: usize,
         lambda_name: &str,
-        captures: &[(String, Type<TypeName>)],
+        captures: &[Term],
         arg_results: &[DefuncResult],
         ty: Type<TypeName>,
         span: Span,
@@ -1222,15 +1218,8 @@ impl<'a> Defunctionalizer<'a> {
             }
         }
 
-        // Append captures at the end
-        for (cap_name, cap_ty) in captures {
-            call_args.push(Term {
-                id: self.term_ids.next_id(),
-                ty: cap_ty.clone(),
-                span,
-                kind: TermKind::Var(cap_name.clone()),
-            });
-        }
+        // Append captures at the end (they're already Terms)
+        call_args.extend(captures.iter().cloned());
 
         let result_term = self.build_curried_app(hof_name, call_args, ty, span);
         DefuncResult {
@@ -1252,7 +1241,7 @@ impl<'a> Defunctionalizer<'a> {
         hof_def: &Def,
         func_param_idx: usize,
         lambda_name: &str,
-        captures: &[(String, Type<TypeName>)],
+        captures: &[Term],
         arg_results: &[DefuncResult],
         ty: Type<TypeName>,
         span: Span,
@@ -1304,9 +1293,13 @@ impl<'a> Defunctionalizer<'a> {
         let mut new_params: Vec<(String, Type<TypeName>)> =
             params.into_iter().enumerate().filter(|(i, _)| *i != func_param_idx).map(|(_, p)| p).collect();
 
-        // Add captures as trailing parameters
-        for (cap_name, cap_ty) in captures {
-            new_params.push((cap_name.clone(), cap_ty.clone()));
+        // Add captures as trailing parameters (extract name from each capture Term)
+        for cap_term in captures {
+            let cap_name = match &cap_term.kind {
+                TermKind::Var(name) => name.clone(),
+                _ => panic!("BUG: capture term is not a Var: {:?}", cap_term.kind),
+            };
+            new_params.push((cap_name, cap_term.ty.clone()));
         }
 
         // Set up environment for defunc with new params as Dynamic
@@ -1508,7 +1501,7 @@ impl<'a> Defunctionalizer<'a> {
         specialized_name: &str,
         func_param_idx: usize,
         arg_results: &[DefuncResult],
-        captures: &[(String, Type<TypeName>)],
+        captures: &[Term],
         ty: Type<TypeName>,
         span: Span,
     ) -> DefuncResult {
@@ -1521,15 +1514,8 @@ impl<'a> Defunctionalizer<'a> {
             }
         }
 
-        // Add captures at the end
-        for (cap_name, cap_ty) in captures {
-            call_args.push(Term {
-                id: self.term_ids.next_id(),
-                ty: cap_ty.clone(),
-                span,
-                kind: TermKind::Var(cap_name.clone()),
-            });
-        }
+        // Add captures at the end (they're already Terms)
+        call_args.extend(captures.iter().cloned());
 
         let call_term = self.build_curried_app(specialized_name, call_args, ty, span);
         DefuncResult {
