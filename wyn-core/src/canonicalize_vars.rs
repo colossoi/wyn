@@ -52,8 +52,9 @@ fn canonicalize_def(def: Def) -> Def {
             }
             compute_renaming(&body_ret, &scheme_ret, &mut renaming);
 
-            // If no renaming needed, return unchanged
+            // If no renaming needed, verify and return unchanged
             if renaming.is_empty() {
+                debug_verify_canonicalization(&name, scheme, &body);
                 return Def::Function {
                     id,
                     name,
@@ -69,6 +70,9 @@ fn canonicalize_def(def: Def) -> Def {
             // 4. Apply renaming to entire body and ret_type
             let body = apply_renaming_to_body(body, &renaming);
             let ret_type = apply_renaming(&ret_type, &renaming);
+
+            // Verify the invariant holds after canonicalization
+            debug_verify_canonicalization(&name, scheme, &body);
 
             Def::Function {
                 id,
@@ -163,6 +167,84 @@ fn apply_renaming_to_body(mut body: Body, renaming: &VarRenaming) -> Body {
     }
 
     body
+}
+
+/// Collect all type variable IDs from a scheme.
+#[cfg(debug_assertions)]
+fn collect_scheme_vars(scheme: &TypeScheme) -> std::collections::HashSet<usize> {
+    let mut vars = std::collections::HashSet::new();
+    collect_scheme_vars_inner(scheme, &mut vars);
+    vars
+}
+
+#[cfg(debug_assertions)]
+fn collect_scheme_vars_inner(scheme: &TypeScheme, vars: &mut std::collections::HashSet<usize>) {
+    match scheme {
+        TypeScheme::Monotype(ty) => collect_type_vars(ty, vars),
+        TypeScheme::Polytype { variable, body, .. } => {
+            vars.insert(*variable);
+            collect_scheme_vars_inner(body, vars);
+        }
+    }
+}
+
+/// Collect all type variable IDs from a type.
+#[cfg(debug_assertions)]
+fn collect_type_vars(ty: &Type<TypeName>, vars: &mut std::collections::HashSet<usize>) {
+    match ty {
+        Type::Variable(id) => {
+            vars.insert(*id);
+        }
+        Type::Constructed(_, args) => {
+            for arg in args {
+                collect_type_vars(arg, vars);
+            }
+        }
+    }
+}
+
+/// Debug assertion: verify all body variables are in the scheme's variable set.
+/// Call this after canonicalization to ensure the invariant holds.
+#[cfg(debug_assertions)]
+fn debug_verify_canonicalization(name: &str, scheme: &TypeScheme, body: &Body) {
+    let scheme_vars = collect_scheme_vars(scheme);
+
+    // Check all local types
+    for (idx, local) in body.locals.iter().enumerate() {
+        let mut local_vars = std::collections::HashSet::new();
+        collect_type_vars(&local.ty, &mut local_vars);
+        for var in &local_vars {
+            if !scheme_vars.contains(var) {
+                panic!(
+                    "canonicalize_vars BUG in '{}': local[{}] '{}' has Variable({}) \
+                     which is not in scheme vars {:?}. \
+                     This suggests incomplete renaming from body namespace to scheme namespace.",
+                    name, idx, local.name, var, scheme_vars
+                );
+            }
+        }
+    }
+
+    // Check all expression types
+    for (idx, ty) in body.types.iter().enumerate() {
+        let mut expr_vars = std::collections::HashSet::new();
+        collect_type_vars(ty, &mut expr_vars);
+        for var in &expr_vars {
+            if !scheme_vars.contains(var) {
+                panic!(
+                    "canonicalize_vars BUG in '{}': expr[{}] has Variable({}) \
+                     which is not in scheme vars {:?}. \
+                     This suggests incomplete renaming from body namespace to scheme namespace.",
+                    name, idx, var, scheme_vars
+                );
+            }
+        }
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn debug_verify_canonicalization(_name: &str, _scheme: &TypeScheme, _body: &Body) {
+    // No-op in release builds
 }
 
 #[cfg(test)]
