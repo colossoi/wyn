@@ -6,6 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Wyn is a minimal compiler for a Futhark-like language that generates SPIR-V code. It's structured as a Rust workspace with two crates: the compiler library and a CLI driver.
 
+## HIGH PRIORITY DIRECTIVE
+
+Wyn DOES NOT support partial function application.  If you find yourself implementing partial function application at any level of the compiler, you're probably doing something wrong.
+
 ## Commands
 
 Build the project:

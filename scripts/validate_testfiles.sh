@@ -6,7 +6,7 @@
 set -e
 
 echo "Building wyn (release)..."
-cargo build --release
+cargo build --release -p wyn
 
 for f in testfiles/*.wyn; do
     base=$(basename "$f" .wyn)

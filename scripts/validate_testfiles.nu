@@ -4,7 +4,7 @@
 # Runs twice: once without partial-eval, once with partial-eval
 def main [] {
     print "Building wyn (release)..."
-    cargo build --release
+    cargo build --release -p wyn
 
     ls testfiles/*.wyn | each { |f|
         let base = ($f.name | path parse | get stem)
