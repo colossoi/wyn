@@ -23,7 +23,7 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
     alias_checked
         .to_tlc(builtins, &frontend.schemes, &frontend.module_manager)
         .skip_partial_eval()
-        .lift()
+        .defunctionalize()
         .to_mir()
         .hoist_materializations()
         .normalize()
@@ -50,7 +50,7 @@ fn compile_through_flatten(input: &str) -> Result<crate::Flattened, CompilerErro
     let flattened = alias_checked
         .to_tlc(builtins, &frontend.schemes, &frontend.module_manager)
         .skip_partial_eval()
-        .lift()
+        .defunctionalize()
         .to_mir();
     Ok(flattened)
 }

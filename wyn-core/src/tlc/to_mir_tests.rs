@@ -29,7 +29,7 @@ mod tests {
         alias_checked
             .to_tlc(builtins, &frontend.schemes, &frontend.module_manager)
             .skip_partial_eval()
-            .lift()
+            .defunctionalize()
             .to_mir()
             .hoist_materializations()
             .normalize()
@@ -185,7 +185,7 @@ mod tests {
         alias_checked
             .to_tlc(builtins, &frontend.schemes, &frontend.module_manager)
             .skip_partial_eval()
-            .lift()
+            .defunctionalize()
             .to_mir()
             .hoist_materializations()
             .normalize()

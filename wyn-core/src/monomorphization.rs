@@ -435,7 +435,7 @@ impl Monomorphizer {
         body: &Body,
         expr: &Expr,
         expr_map: &HashMap<ExprId, ExprId>,
-        expr_type: &Type<TypeName>,
+        _expr_type: &Type<TypeName>,
     ) -> Result<Expr> {
         match expr {
             Expr::Call { func, args } => {
@@ -636,45 +636,6 @@ impl Monomorphizer {
         Ok(subst)
     }
 
-    /// Infer substitution for a lambda using both param types and return type from the closure's concrete type
-    fn infer_lambda_substitution(
-        &self,
-        lambda_def: &Def,
-        concrete_params: &[Type<TypeName>],
-        concrete_ret: &Type<TypeName>,
-    ) -> Result<Substitution> {
-        let mut subst = Substitution::new();
-
-        if let Def::Function {
-            scheme, params, body, ..
-        } = lambda_def
-        {
-            // If the function has a scheme, use scheme types for consistent variable IDs
-            // Otherwise fall back to body param types
-            if let Some(scheme) = scheme {
-                let func_type = unwrap_scheme(scheme);
-                let (scheme_params, scheme_ret) = split_function_type(func_type);
-
-                for (param_ty, arg_ty) in scheme_params.iter().zip(concrete_params.iter()) {
-                    self.unify_for_subst(param_ty, arg_ty, &mut subst)?;
-                }
-                self.unify_for_subst(&scheme_ret, concrete_ret, &mut subst)?;
-            } else {
-                // Fallback: use body param types for lambdas without schemes
-                let body_param_types: Vec<_> = params.iter().map(|&p| &body.get_local(p).ty).collect();
-                for (param_ty, arg_ty) in body_param_types.iter().zip(concrete_params.iter()) {
-                    self.unify_for_subst(param_ty, arg_ty, &mut subst)?;
-                }
-
-                // Also unify lambda's return type against concrete return type
-                let body_ret = body.get_type(body.root);
-                self.unify_for_subst(body_ret, concrete_ret, &mut subst)?;
-            }
-        }
-
-        Ok(subst)
-    }
-
     /// Unify two types to build a substitution
     fn unify_for_subst(
         &self,
@@ -785,24 +746,6 @@ fn contains_variables(ty: &Type<TypeName>) -> bool {
             args.iter().any(contains_variables)
         }
     }
-}
-
-/// Check if a function body contains any unresolved type variables
-fn body_has_unresolved_variables(body: &Body) -> bool {
-    // Check all expression types
-    for idx in 0..body.exprs.len() {
-        let ty = body.get_type(ExprId(idx as u32));
-        if contains_variables(ty) {
-            return true;
-        }
-    }
-    // Check all local declarations
-    for local in &body.locals {
-        if contains_variables(&local.ty) {
-            return true;
-        }
-    }
-    false
 }
 
 /// Collect variable mappings by unifying body type with concrete type.

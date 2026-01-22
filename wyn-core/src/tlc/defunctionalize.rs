@@ -14,7 +14,7 @@
 //!
 //! The lifted lambda is: _lambda_0 = |x| |y| x + y  (captures at end)
 
-use super::{Def, DefMeta, FunctionName, Program, Term, TermIdSource, TermKind};
+use super::{Def, DefMeta, FunctionName, LoopKind, Program, Term, TermIdSource, TermKind};
 use crate::ast::{Span, TypeName};
 use polytype::Type;
 use std::collections::{HashMap, HashSet};
@@ -187,6 +187,41 @@ fn apply_type_subst_to_term(term: &Term, subst: &TypeSubst, term_ids: &mut TermI
             then_branch: Box::new(apply_type_subst_to_term(then_branch, subst, term_ids)),
             else_branch: Box::new(apply_type_subst_to_term(else_branch, subst, term_ids)),
         },
+        TermKind::Loop { loop_var, loop_var_ty, init, init_bindings, kind, body } => {
+            let new_init_bindings = init_bindings
+                .iter()
+                .map(|(name, ty, expr)| {
+                    (
+                        name.clone(),
+                        apply_type_subst(ty, subst),
+                        apply_type_subst_to_term(expr, subst, term_ids),
+                    )
+                })
+                .collect();
+            let new_kind = match kind {
+                LoopKind::For { var, var_ty, iter } => LoopKind::For {
+                    var: var.clone(),
+                    var_ty: apply_type_subst(var_ty, subst),
+                    iter: Box::new(apply_type_subst_to_term(iter, subst, term_ids)),
+                },
+                LoopKind::ForRange { var, var_ty, bound } => LoopKind::ForRange {
+                    var: var.clone(),
+                    var_ty: apply_type_subst(var_ty, subst),
+                    bound: Box::new(apply_type_subst_to_term(bound, subst, term_ids)),
+                },
+                LoopKind::While { cond } => LoopKind::While {
+                    cond: Box::new(apply_type_subst_to_term(cond, subst, term_ids)),
+                },
+            };
+            TermKind::Loop {
+                loop_var: loop_var.clone(),
+                loop_var_ty: apply_type_subst(loop_var_ty, subst),
+                init: Box::new(apply_type_subst_to_term(init, subst, term_ids)),
+                init_bindings: new_init_bindings,
+                kind: new_kind,
+                body: Box::new(apply_type_subst_to_term(body, subst, term_ids)),
+            }
+        }
     };
     Term {
         id: term_ids.next_id(),
@@ -256,6 +291,41 @@ fn collect_free_vars(
             collect_free_vars(cond, bound, top_level, builtins, free, seen);
             collect_free_vars(then_branch, bound, top_level, builtins, free, seen);
             collect_free_vars(else_branch, bound, top_level, builtins, free, seen);
+        }
+        TermKind::Loop { loop_var, init, init_bindings, kind, body, .. } => {
+            // init is evaluated outside the loop
+            collect_free_vars(init, bound, top_level, builtins, free, seen);
+
+            // Build inner bound set with loop_var and init_binding names
+            let mut inner_bound = bound.clone();
+            inner_bound.insert(loop_var.clone());
+            for (name, _, _) in init_bindings {
+                inner_bound.insert(name.clone());
+            }
+
+            // Add loop kind variable(s)
+            match kind {
+                LoopKind::For { var, iter, .. } => {
+                    collect_free_vars(iter, bound, top_level, builtins, free, seen);
+                    inner_bound.insert(var.clone());
+                }
+                LoopKind::ForRange { var, bound: bound_expr, .. } => {
+                    collect_free_vars(bound_expr, bound, top_level, builtins, free, seen);
+                    inner_bound.insert(var.clone());
+                }
+                LoopKind::While { cond } => {
+                    // cond is evaluated inside the loop with loop_var in scope
+                    collect_free_vars(cond, &inner_bound, top_level, builtins, free, seen);
+                }
+            }
+
+            // init_bindings expressions reference loop_var
+            for (_, _, expr) in init_bindings {
+                collect_free_vars(expr, &inner_bound, top_level, builtins, free, seen);
+            }
+
+            // body has all bindings in scope
+            collect_free_vars(body, &inner_bound, top_level, builtins, free, seen);
         }
         TermKind::IntLit(_) | TermKind::FloatLit(_) | TermKind::BoolLit(_) | TermKind::StringLit(_) => {}
     }
@@ -454,6 +524,88 @@ impl<'a> Defunctionalizer<'a> {
                         },
                     },
                     sv: StaticVal::Dynamic, // Conditionals are dynamic
+                }
+            }
+
+            TermKind::Loop {
+                loop_var,
+                loop_var_ty,
+                init,
+                init_bindings,
+                kind,
+                body,
+            } => {
+                // Defunc init (outside loop scope)
+                let init_result = self.defunc_term(*init);
+
+                // Set up environment with loop_var as Dynamic
+                self.env.insert(loop_var.clone(), StaticVal::Dynamic);
+
+                // Defunc init_bindings and add them to env
+                let defunc_init_bindings: Vec<_> = init_bindings
+                    .into_iter()
+                    .map(|(name, binding_ty, expr)| {
+                        let expr_result = self.defunc_term(expr);
+                        self.env.insert(name.clone(), StaticVal::Dynamic);
+                        (name, binding_ty, expr_result.term)
+                    })
+                    .collect();
+
+                // Defunc kind (iter/bound/cond depending on variant)
+                let defunc_kind = match kind {
+                    LoopKind::For { var, var_ty, iter } => {
+                        let iter_result = self.defunc_term(*iter);
+                        self.env.insert(var.clone(), StaticVal::Dynamic);
+                        LoopKind::For {
+                            var,
+                            var_ty,
+                            iter: Box::new(iter_result.term),
+                        }
+                    }
+                    LoopKind::ForRange { var, var_ty, bound } => {
+                        let bound_result = self.defunc_term(*bound);
+                        self.env.insert(var.clone(), StaticVal::Dynamic);
+                        LoopKind::ForRange {
+                            var,
+                            var_ty,
+                            bound: Box::new(bound_result.term),
+                        }
+                    }
+                    LoopKind::While { cond } => {
+                        let cond_result = self.defunc_term(*cond);
+                        LoopKind::While {
+                            cond: Box::new(cond_result.term),
+                        }
+                    }
+                };
+
+                // Defunc body
+                let body_result = self.defunc_term(*body);
+
+                // Clean up environment
+                self.env.remove(&loop_var);
+                for (name, _, _) in &defunc_init_bindings {
+                    self.env.remove(name);
+                }
+                if let LoopKind::For { ref var, .. } | LoopKind::ForRange { ref var, .. } = defunc_kind {
+                    self.env.remove(var);
+                }
+
+                DefuncResult {
+                    term: Term {
+                        id: self.term_ids.next_id(),
+                        ty,
+                        span,
+                        kind: TermKind::Loop {
+                            loop_var,
+                            loop_var_ty,
+                            init: Box::new(init_result.term),
+                            init_bindings: defunc_init_bindings,
+                            kind: defunc_kind,
+                            body: Box::new(body_result.term),
+                        },
+                    },
+                    sv: StaticVal::Dynamic, // Loops are dynamic
                 }
             }
 
@@ -1284,6 +1436,45 @@ impl<'a> Defunctionalizer<'a> {
                 }
             }
 
+            TermKind::Loop { loop_var, loop_var_ty, init, init_bindings, kind, body } => {
+                let new_init = self.specialize_body(init, func_param_name, lambda_name, captures, span);
+                let new_init_bindings: Vec<_> = init_bindings
+                    .iter()
+                    .map(|(name, ty, expr)| {
+                        (name.clone(), ty.clone(), self.specialize_body(expr, func_param_name, lambda_name, captures, span))
+                    })
+                    .collect();
+                let new_kind = match kind {
+                    LoopKind::For { var, var_ty, iter } => LoopKind::For {
+                        var: var.clone(),
+                        var_ty: var_ty.clone(),
+                        iter: Box::new(self.specialize_body(iter, func_param_name, lambda_name, captures, span)),
+                    },
+                    LoopKind::ForRange { var, var_ty, bound } => LoopKind::ForRange {
+                        var: var.clone(),
+                        var_ty: var_ty.clone(),
+                        bound: Box::new(self.specialize_body(bound, func_param_name, lambda_name, captures, span)),
+                    },
+                    LoopKind::While { cond } => LoopKind::While {
+                        cond: Box::new(self.specialize_body(cond, func_param_name, lambda_name, captures, span)),
+                    },
+                };
+                let new_body = self.specialize_body(body, func_param_name, lambda_name, captures, span);
+                Term {
+                    id: self.term_ids.next_id(),
+                    ty: term.ty.clone(),
+                    span: term.span,
+                    kind: TermKind::Loop {
+                        loop_var: loop_var.clone(),
+                        loop_var_ty: loop_var_ty.clone(),
+                        init: Box::new(new_init),
+                        init_bindings: new_init_bindings,
+                        kind: new_kind,
+                        body: Box::new(new_body),
+                    },
+                }
+            }
+
             // Literals are unchanged
             TermKind::IntLit(_) | TermKind::FloatLit(_) | TermKind::BoolLit(_) | TermKind::StringLit(_) => {
                 term.clone()
@@ -1311,6 +1502,16 @@ impl<'a> Defunctionalizer<'a> {
                 self.term_references_var(cond, var_name)
                     || self.term_references_var(then_branch, var_name)
                     || self.term_references_var(else_branch, var_name)
+            }
+            TermKind::Loop { init, init_bindings, kind, body, .. } => {
+                self.term_references_var(init, var_name)
+                    || init_bindings.iter().any(|(_, _, expr)| self.term_references_var(expr, var_name))
+                    || match kind {
+                        LoopKind::For { iter, .. } => self.term_references_var(iter, var_name),
+                        LoopKind::ForRange { bound, .. } => self.term_references_var(bound, var_name),
+                        LoopKind::While { cond } => self.term_references_var(cond, var_name),
+                    }
+                    || self.term_references_var(body, var_name)
             }
             TermKind::IntLit(_) | TermKind::FloatLit(_) | TermKind::BoolLit(_) | TermKind::StringLit(_) => false,
         }
@@ -1481,6 +1682,16 @@ mod tests {
                     pad, print_term(cond, indent + 1),
                     pad, print_term(then_branch, indent + 1),
                     pad, print_term(else_branch, indent + 1))
+            }
+            TermKind::Loop { loop_var, init, kind, body, .. } => {
+                let kind_str = match kind {
+                    LoopKind::For { var, .. } => format!("for {} in ...", var),
+                    LoopKind::ForRange { var, .. } => format!("for {} < ...", var),
+                    LoopKind::While { .. } => "while ...".to_string(),
+                };
+                format!("{}Loop {} = {} ({})\n{}body:\n{}",
+                    pad, loop_var, print_term(init, 0).trim(),
+                    kind_str, pad, print_term(body, indent + 1))
             }
         }
     }

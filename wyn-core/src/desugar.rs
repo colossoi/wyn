@@ -15,6 +15,7 @@ use crate::error::Result;
 
 /// Desugars range and slice expressions into map/iota constructs.
 pub struct Desugarer<'a> {
+    #[allow(dead_code)]
     nc: &'a mut NodeCounter,
 }
 
@@ -153,6 +154,7 @@ impl<'a> Desugarer<'a> {
 
     /// Desugar a slice expression into map over range.
     /// `arr[start..end]` becomes `map(|idx| arr[start + idx], 0..<(end - start))`
+    #[allow(dead_code)]
     fn desugar_slice(&mut self, slice: &SliceExpr, span: Span) -> Result<Expression> {
         let array = &slice.array;
 

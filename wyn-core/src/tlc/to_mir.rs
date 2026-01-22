@@ -2,9 +2,9 @@
 //!
 //! Transforms a lifted TLC program (where all lambdas are top-level) into MIR.
 
-use super::{Def as TlcDef, DefMeta, FunctionName, Program as TlcProgram, Term, TermKind};
+use super::{Def as TlcDef, DefMeta, FunctionName, LoopKind as TlcLoopKind, Program as TlcProgram, Term, TermKind};
 use crate::ast::{self, NodeId, PatternKind, Span, TypeName};
-use crate::mir::{self, ArrayBacking, Body, Def as MirDef, Expr, ExprId, LocalDecl, LocalId, LocalKind};
+use crate::mir::{self, ArrayBacking, Body, Def as MirDef, Expr, ExprId, LocalDecl, LocalId, LocalKind, LoopKind as MirLoopKind};
 use crate::types::TypeScheme;
 use polytype::Type;
 use std::collections::HashMap;
@@ -383,6 +383,101 @@ impl<'a> TlcToMir<'a> {
 
             TermKind::App { func, arg } => self.transform_app(func, arg, ty, span, node_id, body),
 
+            TermKind::Loop {
+                loop_var,
+                loop_var_ty,
+                init,
+                init_bindings,
+                kind,
+                body: loop_body,
+            } => {
+                // Transform init (outside loop scope)
+                let init_id = self.transform_term(init, body);
+
+                // Allocate loop variable
+                let loop_var_local = body.alloc_local(LocalDecl {
+                    name: loop_var.clone(),
+                    span,
+                    ty: loop_var_ty.clone(),
+                    kind: LocalKind::LoopVar,
+                });
+                self.locals.insert(loop_var.clone(), loop_var_local);
+
+                // Transform init_bindings and allocate their locals
+                let mir_init_bindings: Vec<(LocalId, ExprId)> = init_bindings
+                    .iter()
+                    .map(|(name, binding_ty, expr)| {
+                        let expr_id = self.transform_term(expr, body);
+                        let local_id = body.alloc_local(LocalDecl {
+                            name: name.clone(),
+                            span,
+                            ty: binding_ty.clone(),
+                            kind: LocalKind::Let,
+                        });
+                        self.locals.insert(name.clone(), local_id);
+                        (local_id, expr_id)
+                    })
+                    .collect();
+
+                // Transform loop kind
+                let mir_kind = match kind {
+                    TlcLoopKind::For { var, var_ty, iter } => {
+                        let iter_id = self.transform_term(iter, body);
+                        let var_local = body.alloc_local(LocalDecl {
+                            name: var.clone(),
+                            span,
+                            ty: var_ty.clone(),
+                            kind: LocalKind::Let,
+                        });
+                        self.locals.insert(var.clone(), var_local);
+                        MirLoopKind::For { var: var_local, iter: iter_id }
+                    }
+                    TlcLoopKind::ForRange { var, var_ty, bound } => {
+                        let bound_id = self.transform_term(bound, body);
+                        let var_local = body.alloc_local(LocalDecl {
+                            name: var.clone(),
+                            span,
+                            ty: var_ty.clone(),
+                            kind: LocalKind::Let,
+                        });
+                        self.locals.insert(var.clone(), var_local);
+                        MirLoopKind::ForRange { var: var_local, bound: bound_id }
+                    }
+                    TlcLoopKind::While { cond } => {
+                        let cond_id = self.transform_term(cond, body);
+                        MirLoopKind::While { cond: cond_id }
+                    }
+                };
+
+                // Transform body
+                let body_id = self.transform_term(loop_body, body);
+
+                // Clean up locals
+                self.locals.remove(loop_var);
+                for (name, _, _) in init_bindings {
+                    self.locals.remove(name);
+                }
+                match kind {
+                    TlcLoopKind::For { var, .. } | TlcLoopKind::ForRange { var, .. } => {
+                        self.locals.remove(var);
+                    }
+                    TlcLoopKind::While { .. } => {}
+                }
+
+                body.alloc_expr(
+                    Expr::Loop {
+                        loop_var: loop_var_local,
+                        init: init_id,
+                        init_bindings: mir_init_bindings,
+                        kind: mir_kind,
+                        body: body_id,
+                    },
+                    ty,
+                    span,
+                    node_id,
+                )
+            }
+
             TermKind::Lam { .. } => {
                 // Lambdas should have been lifted - if we see one here, it's an error
                 panic!(
@@ -679,29 +774,6 @@ impl<'a> TlcToMir<'a> {
                 }
                 result
             }
-        }
-    }
-
-    /// Check if a function name is a SOAC (Second-Order Array Combinator).
-    fn is_soac(name: &str) -> bool {
-        matches!(
-            name,
-            "map" | "reduce" | "scan" | "filter" | "scatter"
-                | "map2" | "map3" | "map4" | "map5"
-                | "reduce_by_index" | "hist"
-        )
-    }
-
-    /// Get the intrinsic name for a SOAC.
-    fn soac_intrinsic(name: &str) -> &'static str {
-        match name {
-            "map" | "map2" | "map3" | "map4" | "map5" => "_w_intrinsic_map",
-            "reduce" => "_w_intrinsic_reduce",
-            "scan" => "_w_intrinsic_scan",
-            "filter" => "_w_intrinsic_filter",
-            "scatter" => "_w_intrinsic_scatter",
-            "reduce_by_index" | "hist" => "_w_intrinsic_hist",
-            _ => "_w_intrinsic_map", // fallback
         }
     }
 

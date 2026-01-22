@@ -272,7 +272,7 @@ fn analyze_inplace_ops(source: &str) -> InPlaceInfo {
     let flattened = alias_checked
         .to_tlc(builtins, &frontend.schemes, &frontend.module_manager)
         .skip_partial_eval()
-        .lift()
+        .defunctionalize()
         .to_mir();
 
     // For tests without entry points, analyze after flattening (before monomorphization)

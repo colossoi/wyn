@@ -1134,6 +1134,37 @@ impl tlc::Term {
                 }
                 Ok(())
             }
+
+            tlc::TermKind::Loop {
+                loop_var,
+                init,
+                kind,
+                body,
+                ..
+            } => {
+                if prec > 0 {
+                    write!(f, "(")?;
+                }
+                write!(f, "loop {} = ", loop_var)?;
+                init.fmt_prec(f, 0)?;
+                match kind {
+                    tlc::LoopKind::For { var, .. } => write!(f, " for {} in ... ", var)?,
+                    tlc::LoopKind::ForRange { var, bound, .. } => {
+                        write!(f, " for {} < ", var)?;
+                        bound.fmt_prec(f, 0)?;
+                    }
+                    tlc::LoopKind::While { cond } => {
+                        write!(f, " while ")?;
+                        cond.fmt_prec(f, 0)?;
+                    }
+                }
+                write!(f, " do ")?;
+                body.fmt_prec(f, 0)?;
+                if prec > 0 {
+                    write!(f, ")")?;
+                }
+                Ok(())
+            }
         }
     }
 }

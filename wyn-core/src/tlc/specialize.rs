@@ -3,7 +3,7 @@
 //! Specializes polymorphic intrinsic names based on argument types.
 //! For example: `sign(x)` where `x: f32` becomes `f32.sign(x)`.
 
-use super::{Def, FunctionName, Program, Term, TermIdSource, TermKind};
+use super::{Def, FunctionName, LoopKind, Program, Term, TermIdSource, TermKind};
 use crate::ast::TypeName;
 use polytype::Type;
 
@@ -74,6 +74,43 @@ impl Specializer {
                 then_branch: Box::new(self.specialize_term(*then_branch)),
                 else_branch: Box::new(self.specialize_term(*else_branch)),
             },
+
+            TermKind::Loop {
+                loop_var,
+                loop_var_ty,
+                init,
+                init_bindings,
+                kind,
+                body,
+            } => {
+                let new_init_bindings = init_bindings
+                    .into_iter()
+                    .map(|(name, ty, expr)| (name, ty, self.specialize_term(expr)))
+                    .collect();
+                let new_kind = match kind {
+                    LoopKind::For { var, var_ty, iter } => LoopKind::For {
+                        var,
+                        var_ty,
+                        iter: Box::new(self.specialize_term(*iter)),
+                    },
+                    LoopKind::ForRange { var, var_ty, bound } => LoopKind::ForRange {
+                        var,
+                        var_ty,
+                        bound: Box::new(self.specialize_term(*bound)),
+                    },
+                    LoopKind::While { cond } => LoopKind::While {
+                        cond: Box::new(self.specialize_term(*cond)),
+                    },
+                };
+                TermKind::Loop {
+                    loop_var,
+                    loop_var_ty,
+                    init: Box::new(self.specialize_term(*init)),
+                    init_bindings: new_init_bindings,
+                    kind: new_kind,
+                    body: Box::new(self.specialize_term(*body)),
+                }
+            }
 
             // Leaves unchanged
             k @ (TermKind::Var(_)

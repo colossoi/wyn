@@ -127,6 +127,90 @@ pub fn bound_names(pattern: &Pattern) -> Vec<String> {
     names
 }
 
+/// A path of tuple indices to reach a binding from the root value.
+pub type ProjectionPath = Vec<usize>;
+
+/// Information about a binding extracted from a pattern.
+#[derive(Debug, Clone)]
+pub struct BindingPath {
+    /// The name being bound.
+    pub name: String,
+    /// Sequence of tuple indices to project from root to reach this binding.
+    /// Empty if the pattern is just a name (no projection needed).
+    pub path: ProjectionPath,
+}
+
+/// Extract binding paths from a pattern.
+///
+/// For each name in the pattern, returns the sequence of tuple projections
+/// needed to extract it from the root value.
+///
+/// # Example
+/// ```ignore
+/// // Pattern: (x, (y, z))
+/// // Result: [
+/// //   BindingPath { name: "x", path: [0] },
+/// //   BindingPath { name: "y", path: [1, 0] },
+/// //   BindingPath { name: "z", path: [1, 1] },
+/// // ]
+/// ```
+pub fn binding_paths(pattern: &Pattern) -> Vec<BindingPath> {
+    let mut bindings = Vec::new();
+    collect_binding_paths(pattern, &[], &mut bindings);
+    bindings
+}
+
+fn collect_binding_paths(pattern: &Pattern, path: &[usize], bindings: &mut Vec<BindingPath>) {
+    match &pattern.kind {
+        PatternKind::Name(name) => {
+            bindings.push(BindingPath {
+                name: name.clone(),
+                path: path.to_vec(),
+            });
+        }
+
+        PatternKind::Wildcard | PatternKind::Unit | PatternKind::Literal(_) => {
+            // These don't bind anything
+        }
+
+        PatternKind::Tuple(patterns) => {
+            for (i, p) in patterns.iter().enumerate() {
+                let mut new_path = path.to_vec();
+                new_path.push(i);
+                collect_binding_paths(p, &new_path, bindings);
+            }
+        }
+
+        PatternKind::Typed(inner, _) | PatternKind::Attributed(_, inner) => {
+            collect_binding_paths(inner, path, bindings);
+        }
+
+        PatternKind::Record(fields) => {
+            for (i, field) in fields.iter().enumerate() {
+                let mut new_path = path.to_vec();
+                new_path.push(i);
+                if let Some(p) = &field.pattern {
+                    collect_binding_paths(p, &new_path, bindings);
+                } else {
+                    // Shorthand: field name is the binding
+                    bindings.push(BindingPath {
+                        name: field.field.clone(),
+                        path: new_path,
+                    });
+                }
+            }
+        }
+
+        PatternKind::Constructor(_, patterns) => {
+            for (i, p) in patterns.iter().enumerate() {
+                let mut new_path = path.to_vec();
+                new_path.push(i);
+                collect_binding_paths(p, &new_path, bindings);
+            }
+        }
+    }
+}
+
 fn collect_names(pattern: &Pattern, names: &mut Vec<String>) {
     match &pattern.kind {
         PatternKind::Name(name) => {

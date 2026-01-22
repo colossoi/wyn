@@ -132,8 +132,6 @@ struct CalleeCandidates {
 struct Candidate {
     /// Fresh instantiated monotype to unify against
     ty: Type,
-    /// Original scheme (for storing in type_table)
-    scheme: Option<TypeScheme>,
 }
 
 /// Result of resolving a value name (identifier or qualified name).
@@ -2430,16 +2428,12 @@ impl<'a> TypeChecker<'a> {
                             .into_iter()
                             .map(|scheme| {
                                 let ty = scheme.instantiate(&mut self.context);
-                                Candidate {
-                                    ty,
-                                    scheme: Some(scheme),
-                                }
+                                Candidate { ty }
                             })
                             .collect()
                     } else {
                         vec![Candidate {
                             ty: resolved.instantiated,
-                            scheme: Some(resolved.scheme_for_table),
                         }]
                     };
 
@@ -2456,7 +2450,7 @@ impl<'a> TypeChecker<'a> {
             _ => {
                 let ty = self.infer_expression(func)?;
                 Ok(CalleeCandidates {
-                    candidates: vec![Candidate { ty, scheme: None }],
+                    candidates: vec![Candidate { ty }],
                     display_name: "<expr>".to_string(),
                 })
             }

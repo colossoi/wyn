@@ -110,6 +110,42 @@ pub enum TermKind {
         then_branch: Box<Term>,
         else_branch: Box<Term>,
     },
+
+    /// Loop construct (mirrors MIR::Loop).
+    Loop {
+        /// The loop accumulator variable name.
+        loop_var: String,
+        /// Type of the loop variable.
+        loop_var_ty: Type<TypeName>,
+        /// Initial value for the accumulator.
+        init: Box<Term>,
+        /// Bindings that extract from loop_var (e.g., for tuple destructuring).
+        /// Each is (name, type, extraction_expr).
+        init_bindings: Vec<(String, Type<TypeName>, Term)>,
+        /// The kind of loop.
+        kind: LoopKind,
+        /// Loop body expression.
+        body: Box<Term>,
+    },
+}
+
+/// The kind of loop (mirrors MIR::LoopKind).
+#[derive(Debug, Clone)]
+pub enum LoopKind {
+    /// For loop over an array: `for x in arr`.
+    For {
+        var: String,
+        var_ty: Type<TypeName>,
+        iter: Box<Term>,
+    },
+    /// For loop with range bound: `for i < n`.
+    ForRange {
+        var: String,
+        var_ty: Type<TypeName>,
+        bound: Box<Term>,
+    },
+    /// While loop: `while cond`.
+    While { cond: Box<Term> },
 }
 
 // =============================================================================
@@ -839,81 +875,166 @@ impl<'a> Transformer<'a> {
     }
 
     fn transform_loop(&mut self, loop_expr: &ast::LoopExpr, ty: Type<TypeName>, span: Span) -> Term {
+        // Get the init expression and accumulator type
+        let init_term = loop_expr
+            .init
+            .as_ref()
+            .map(|e| self.transform_expr(e))
+            .unwrap_or_else(|| {
+                // No accumulator - use unit
+                self.build_intrinsic_call("_w_unit", &[], Type::Constructed(TypeName::Unit, vec![]), span)
+            });
+        let acc_ty = init_term.ty.clone();
+
+        // Build loop_var and init_bindings from the pattern
+        let (loop_var, loop_var_ty, init_bindings) =
+            self.build_loop_var_and_bindings(&loop_expr.pattern, &acc_ty, span);
+
+        // Transform body (pattern bindings are handled via init_bindings)
+        let body = self.transform_expr(&loop_expr.body);
+
         match &loop_expr.form {
-            ast::LoopForm::For(var, bound) => {
-                let init = loop_expr.init.as_ref().map(|e| self.transform_expr(e));
+            ast::LoopForm::For(idx_var, bound) => {
                 let bound_term = self.transform_expr(bound);
-                let body = self.transform_expr(&loop_expr.body);
-
-                let body_ty = body.ty.clone();
-                let inner_lam = self.pattern_to_lambda(&loop_expr.pattern, body_ty.clone(), body);
                 let index_ty = Type::Constructed(TypeName::Int(32), vec![]);
-                let outer_lam_ty =
-                    Type::Constructed(TypeName::Arrow, vec![index_ty.clone(), inner_lam.ty.clone()]);
-                let body_lam = self.mk_term(
-                    outer_lam_ty,
-                    span,
-                    TermKind::Lam {
-                        param: var.clone(),
-                        param_ty: index_ty,
-                        body: Box::new(inner_lam),
-                    },
-                );
 
-                match init {
-                    Some(init_term) => {
-                        self.build_app3("_w_loop_for", init_term, bound_term, body_lam, ty, span)
-                    }
-                    None => self.build_app2("_w_loop_for", bound_term, body_lam, ty, span),
-                }
+                self.mk_term(
+                    ty,
+                    span,
+                    TermKind::Loop {
+                        loop_var,
+                        loop_var_ty,
+                        init: Box::new(init_term),
+                        init_bindings,
+                        kind: LoopKind::ForRange {
+                            var: idx_var.clone(),
+                            var_ty: index_ty,
+                            bound: Box::new(bound_term),
+                        },
+                        body: Box::new(body),
+                    },
+                )
             }
 
-            ast::LoopForm::ForIn(pattern, iter) => {
-                let init = loop_expr.init.as_ref().map(|e| self.transform_expr(e));
+            ast::LoopForm::ForIn(elem_pattern, iter) => {
                 let iter_term = self.transform_expr(iter);
-                let body = self.transform_expr(&loop_expr.body);
-
                 let elem_ty = self.get_array_element_type(&iter_term.ty);
-                let elem_name = pattern.simple_name().unwrap_or("_elem").to_string();
+                let elem_var = elem_pattern.simple_name().unwrap_or("_elem").to_string();
 
-                let body_ty = body.ty.clone();
-                let inner_lam = self.pattern_to_lambda(&loop_expr.pattern, body_ty.clone(), body);
-                let outer_lam_ty =
-                    Type::Constructed(TypeName::Arrow, vec![elem_ty.clone(), inner_lam.ty.clone()]);
-                let body_lam = self.mk_term(
-                    outer_lam_ty,
+                self.mk_term(
+                    ty,
                     span,
-                    TermKind::Lam {
-                        param: elem_name,
-                        param_ty: elem_ty,
-                        body: Box::new(inner_lam),
+                    TermKind::Loop {
+                        loop_var,
+                        loop_var_ty,
+                        init: Box::new(init_term),
+                        init_bindings,
+                        kind: LoopKind::For {
+                            var: elem_var,
+                            var_ty: elem_ty,
+                            iter: Box::new(iter_term),
+                        },
+                        body: Box::new(body),
                     },
-                );
-
-                match init {
-                    Some(init_term) => self.build_app3("_w_fold", body_lam, init_term, iter_term, ty, span),
-                    None => self.build_app2("_w_fold", body_lam, iter_term, ty, span),
-                }
+                )
             }
 
             ast::LoopForm::While(cond) => {
-                let init = loop_expr.init.as_ref().map(|e| self.transform_expr(e));
                 let cond_term = self.transform_expr(cond);
-                let body = self.transform_expr(&loop_expr.body);
 
-                let acc_ty = init.as_ref().map(|t| t.ty.clone()).unwrap_or(ty.clone());
-
-                let cond_lam = self.pattern_to_lambda(&loop_expr.pattern, acc_ty.clone(), cond_term);
-                let body_lam = self.pattern_to_lambda(&loop_expr.pattern, acc_ty, body);
-
-                match init {
-                    Some(init_term) => {
-                        self.build_app3("_w_loop_while", init_term, cond_lam, body_lam, ty, span)
-                    }
-                    None => self.build_app2("_w_loop_while", cond_lam, body_lam, ty, span),
-                }
+                self.mk_term(
+                    ty,
+                    span,
+                    TermKind::Loop {
+                        loop_var,
+                        loop_var_ty,
+                        init: Box::new(init_term),
+                        init_bindings,
+                        kind: LoopKind::While {
+                            cond: Box::new(cond_term),
+                        },
+                        body: Box::new(body),
+                    },
+                )
             }
         }
+    }
+
+    /// Build loop variable name and init_bindings from a pattern.
+    fn build_loop_var_and_bindings(
+        &mut self,
+        pattern: &ast::Pattern,
+        acc_ty: &Type<TypeName>,
+        span: Span,
+    ) -> (String, Type<TypeName>, Vec<(String, Type<TypeName>, Term)>) {
+        use crate::pattern::binding_paths;
+
+        // For a simple name pattern, use it directly
+        if let ast::PatternKind::Name(name) = &pattern.kind {
+            return (name.clone(), acc_ty.clone(), vec![]);
+        }
+
+        // For complex patterns, create a fresh loop_var and build projections
+        let loop_var = format!("_loop_{}", self.term_ids.next_id().0);
+        let paths = binding_paths(pattern);
+
+        let init_bindings = paths
+            .into_iter()
+            .filter_map(|bp| {
+                if bp.path.is_empty() {
+                    // This is the root binding - shouldn't happen for complex patterns
+                    None
+                } else {
+                    let binding_ty = self.type_at_path(acc_ty, &bp.path);
+                    let proj_term = self.build_projection_chain(&loop_var, acc_ty, &bp.path, span);
+                    Some((bp.name, binding_ty, proj_term))
+                }
+            })
+            .collect();
+
+        (loop_var, acc_ty.clone(), init_bindings)
+    }
+
+    /// Get the type at a given projection path within a tuple type.
+    fn type_at_path(&self, ty: &Type<TypeName>, path: &[usize]) -> Type<TypeName> {
+        let mut current = ty.clone();
+        for &idx in path {
+            current = match &current {
+                Type::Constructed(TypeName::Tuple(_), args) => {
+                    args.get(idx).cloned().unwrap_or(current.clone())
+                }
+                Type::Constructed(TypeName::Record(_), args) => {
+                    args.get(idx).cloned().unwrap_or(current.clone())
+                }
+                _ => current.clone(),
+            };
+        }
+        current
+    }
+
+    /// Build a chain of tuple projections: proj[path[n-1]](...proj[path[0]](var))
+    fn build_projection_chain(
+        &mut self,
+        var: &str,
+        var_ty: &Type<TypeName>,
+        path: &[usize],
+        span: Span,
+    ) -> Term {
+        let mut current_ty = var_ty.clone();
+        let mut current = self.mk_term(current_ty.clone(), span, TermKind::Var(var.to_string()));
+
+        for &idx in path {
+            let elem_ty = self.type_at_path(&current_ty, &[idx]);
+            let index_lit = self.mk_term(
+                Type::Constructed(TypeName::Int(32), vec![]),
+                span,
+                TermKind::IntLit(idx.to_string()),
+            );
+            current = self.build_app2("_w_tuple_proj", current, index_lit, elem_ty.clone(), span);
+            current_ty = elem_ty;
+        }
+
+        current
     }
 
     fn get_array_element_type(&self, ty: &Type<TypeName>) -> Type<TypeName> {

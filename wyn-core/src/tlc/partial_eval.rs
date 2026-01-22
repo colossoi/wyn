@@ -158,6 +158,9 @@ impl PartialEvaluator {
 
             // Lambda - residualize (should be handled at def level)
             TermKind::Lam { .. } => Value::Unknown(term.clone()),
+
+            // Loop - residualize (not evaluating loops at compile time)
+            TermKind::Loop { .. } => Value::Unknown(term.clone()),
         }
     }
 

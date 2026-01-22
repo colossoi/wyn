@@ -24,7 +24,7 @@ fn flatten_program(input: &str) -> mir::Program {
     let flattened = alias_checked
         .to_tlc(builtins, &frontend.schemes, &frontend.module_manager)
         .skip_partial_eval()
-        .lift()
+        .defunctionalize()
         .to_mir();
 
     // Run hoisting pass to optimize materializations
@@ -334,31 +334,29 @@ fn test_record_literal() {
 
 #[test]
 fn test_while_loop() {
-    // TLC pipeline represents loops as intrinsic calls to _w_loop_while
+    // TLC pipeline represents loops with the Loop construct
     let mir = flatten_program("def f = loop x = 0 while x < 10 do x + 1");
     let f_def = find_def(&mir, "f");
     let body = get_body(f_def);
     match body.get_expr(body.root) {
-        mir::Expr::Intrinsic { name, args } => {
-            assert_eq!(name, "_w_loop_while", "Expected _w_loop_while intrinsic");
-            assert_eq!(args.len(), 3, "Expected 3 args: init, cond, body");
+        mir::Expr::Loop { kind, .. } => {
+            assert!(matches!(kind, mir::LoopKind::While { .. }), "Expected While loop kind");
         }
-        other => panic!("Expected Intrinsic _w_loop_while, got {:?}", other),
+        other => panic!("Expected Loop, got {:?}", other),
     }
 }
 
 #[test]
 fn test_for_range_loop() {
-    // TLC pipeline represents for loops as intrinsic calls to _w_loop_for
+    // TLC pipeline represents for loops with the Loop construct
     let mir = flatten_program("def f = loop acc = 0 for i < 10 do acc + i");
     let f_def = find_def(&mir, "f");
     let body = get_body(f_def);
     match body.get_expr(body.root) {
-        mir::Expr::Intrinsic { name, args } => {
-            assert_eq!(name, "_w_loop_for", "Expected _w_loop_for intrinsic");
-            assert_eq!(args.len(), 3, "Expected 3 args: init, bound, body");
+        mir::Expr::Loop { kind, .. } => {
+            assert!(matches!(kind, mir::LoopKind::ForRange { .. }), "Expected ForRange loop kind");
         }
-        other => panic!("Expected Intrinsic _w_loop_for, got {:?}", other),
+        other => panic!("Expected Loop, got {:?}", other),
     }
 }
 
@@ -679,7 +677,7 @@ def test: f32 =
     let result = alias_checked
         .to_tlc(builtins, &frontend.schemes, &frontend.module_manager)
         .skip_partial_eval()
-        .lift()
+        .defunctionalize()
         .to_mir()
         .hoist_materializations()
         .normalize()
@@ -1371,7 +1369,7 @@ fn compile_to_glsl(input: &str) -> String {
     let glsl = alias_checked
         .to_tlc(builtins, &frontend.schemes, &frontend.module_manager)
         .partial_eval()
-        .lift()
+        .defunctionalize()
         .to_mir()
         .hoist_materializations()
         .normalize()

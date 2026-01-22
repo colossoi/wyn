@@ -20,7 +20,7 @@ fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
     let flattened = alias_checked
         .to_tlc(builtins, &frontend.schemes, &frontend.module_manager)
         .skip_partial_eval()
-        .lift()
+        .defunctionalize()
         .to_mir();
 
     let inplace_info = crate::alias_checker::analyze_inplace(&flattened.mir);
@@ -307,7 +307,7 @@ fn compile_to_spirv_with_partial_eval(source: &str) -> Result<Vec<u32>> {
     let lifted = alias_checked
         .to_tlc(builtins, &frontend.schemes, &frontend.module_manager)
         .partial_eval()
-        .lift()
+        .defunctionalize()
         .to_mir()
         .hoist_materializations()
         .normalize()
