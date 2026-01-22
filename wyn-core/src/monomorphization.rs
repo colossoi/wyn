@@ -808,32 +808,10 @@ fn contains_variables(ty: &Type<TypeName>) -> bool {
     }
 }
 
-/// Collect variable mappings by unifying body type with concrete type.
-/// When body has a variable and concrete has a non-variable type,
-/// add the mapping body_var → concrete.
-fn collect_body_var_mappings(
-    body_ty: &Type<TypeName>,
-    concrete_ty: &Type<TypeName>,
-    extended: &mut Substitution,
-) {
-    match (body_ty, concrete_ty) {
-        (Type::Variable(body_id), concrete) => {
-            // Body has a var, concrete is the resolved type - map directly
-            if !contains_variables(concrete) {
-                extended.insert(*body_id, concrete.clone());
-            }
-        }
-        (Type::Constructed(_, body_args), Type::Constructed(_, concrete_args)) => {
-            // Recurse into type arguments
-            for (b, c) in body_args.iter().zip(concrete_args.iter()) {
-                collect_body_var_mappings(b, c, extended);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Create a specialized version of a function by applying substitution
+/// Create a specialized version of a function by applying substitution.
+///
+/// After canonicalize_vars, body type variables match scheme type variables,
+/// so we can directly apply the substitution without complex fixed-point propagation.
 fn specialize_def(def: Def, subst: &Substitution, new_name: &str) -> Result<Def> {
     use crate::mir::{EntryInput, EntryOutput};
 
@@ -848,126 +826,20 @@ fn specialize_def(def: Def, subst: &Substitution, new_name: &str) -> Result<Def>
             span,
             ..
         } => {
-            // Build extended substitution that includes body variable IDs
-            // Body expression types come from type_table (different var IDs than scheme)
-            // We need to map body vars to concrete types by comparing with scheme-derived types
-            let full_subst = if let Some(ref scheme) = scheme {
-                let mut extended = subst.clone();
-                let func_type = unwrap_scheme(scheme);
-                let (scheme_params, scheme_ret) = split_function_type(func_type);
-
-                // Apply substitution to scheme types to get concrete types
-                let concrete_params: Vec<_> = scheme_params.iter().map(|t| apply_subst(t, subst)).collect();
-                let concrete_ret = apply_subst(&scheme_ret, subst);
-
-                // Collect variable mappings from params and all body expressions
-                //
-                // The key insight: param LOCAL DECLARATIONS use scheme variable IDs
-                // (from flattening with prelude_schemes), while body expressions may use
-                // different variable IDs from type_table. We collect from:
-                // 1. Local declarations (canonical scheme vars)
-                // 2. Local reference expressions (may have same or different vars)
-                // 3. All other expressions (to catch nested lambdas etc.)
-
-                for (i, &param_id) in params.iter().enumerate() {
-                    if let Some(concrete_ty) = concrete_params.get(i) {
-                        // Collect from local declaration (canonical type with scheme vars)
-                        if let Some(local) = body.locals.get(param_id.0 as usize) {
-                            collect_body_var_mappings(&local.ty, concrete_ty, &mut extended);
-                        }
-
-                        // Also collect from expressions that reference this local
-                        for (expr_idx, expr) in body.exprs.iter().enumerate() {
-                            if matches!(expr, Expr::Local(id) if *id == param_id) {
-                                let expr_ty = body.get_type(ExprId(expr_idx as u32));
-                                collect_body_var_mappings(expr_ty, concrete_ty, &mut extended);
-                            }
-                        }
-                    }
-                }
-
-                // Also map body return type vars
-                let body_ret = body.get_type(body.root);
-                collect_body_var_mappings(body_ret, &concrete_ret, &mut extended);
-
-                // Now walk ALL expressions to propagate mappings transitively.
-                // This catches nested lambda types that use the same variables as params.
-                // We iterate until no new mappings are found (fixed point).
-                let mut changed = true;
-                while changed {
-                    changed = false;
-                    for (expr_idx, _) in body.exprs.iter().enumerate() {
-                        let expr_ty = body.get_type(ExprId(expr_idx as u32));
-                        // Try to resolve this expression's type using current mappings
-                        let resolved = apply_subst_partial(expr_ty, &extended);
-                        // If we got a fully concrete type, map any remaining vars
-                        if !contains_variables(&resolved) && contains_variables(expr_ty) {
-                            let before = extended.len();
-                            collect_body_var_mappings(expr_ty, &resolved, &mut extended);
-                            if extended.len() > before {
-                                changed = true;
-                            }
-                        }
-                    }
-                }
-
-                extended
-            } else {
-                // For functions without schemes (lambdas), build substitution from params
-                let mut extended = subst.clone();
-                // Collect variable mappings from param local declarations
-                for &param_id in params.iter() {
-                    if let Some(local) = body.locals.get(param_id.0 as usize) {
-                        // Try to resolve the param type using current substitution
-                        let resolved = apply_subst_partial(&local.ty, &extended);
-                        if !contains_variables(&resolved) && contains_variables(&local.ty) {
-                            collect_body_var_mappings(&local.ty, &resolved, &mut extended);
-                        }
-                    }
-                }
-
-                // Collect from return type
-                let body_ret = body.get_type(body.root);
-                let resolved_ret = apply_subst_partial(body_ret, &extended);
-                if !contains_variables(&resolved_ret) && contains_variables(body_ret) {
-                    collect_body_var_mappings(body_ret, &resolved_ret, &mut extended);
-                }
-
-                // Propagate mappings through all expressions
-                let mut changed = true;
-                while changed {
-                    changed = false;
-                    for (expr_idx, _) in body.exprs.iter().enumerate() {
-                        let expr_ty = body.get_type(ExprId(expr_idx as u32));
-                        let resolved = apply_subst_partial(expr_ty, &extended);
-                        if !contains_variables(&resolved) && contains_variables(expr_ty) {
-                            let before = extended.len();
-                            collect_body_var_mappings(expr_ty, &resolved, &mut extended);
-                            if extended.len() > before {
-                                changed = true;
-                            }
-                        }
-                    }
-                }
-
-                extended
-            };
-
-            // If the function has a scheme, use it for consistent return type
+            // Compute return type from scheme if available
             let ret_type = if let Some(ref scheme) = scheme {
-                // Unwrap the scheme to get the inner function type
-                // Use the same bound variable IDs as infer_substitution
                 let func_type = unwrap_scheme(scheme);
                 let (_, scheme_ret_type) = split_function_type(func_type);
                 apply_subst(&scheme_ret_type, subst)
             } else {
                 // Fallback: use the original ret_type
                 let ret_context = format!("{}::ret_type", new_name);
-                apply_subst_with_context(&ret_type, &full_subst, &ret_context)
+                apply_subst_with_context(&ret_type, subst, &ret_context)
             };
 
-            // Apply the extended substitution to the body
-            let body = apply_subst_body_with_context(body, &full_subst, new_name);
+            // Apply substitution directly to body
+            // (canonicalize_vars ensures body vars match scheme vars)
+            let body = apply_subst_body_with_context(body, subst, new_name);
 
             Ok(Def::Function {
                 id,
@@ -1071,18 +943,6 @@ fn specialize_def(def: Def, subst: &Substitution, new_name: &str) -> Result<Def>
 /// Apply a substitution to a type
 fn apply_subst(ty: &Type<TypeName>, subst: &Substitution) -> Type<TypeName> {
     apply_subst_with_context(ty, subst, "unknown")
-}
-
-/// Apply a substitution to a type, keeping unresolved variables as-is.
-/// This is used for collecting variable mappings where we may not have all mappings yet.
-fn apply_subst_partial(ty: &Type<TypeName>, subst: &Substitution) -> Type<TypeName> {
-    match ty {
-        Type::Variable(id) => subst.get(id).cloned().unwrap_or_else(|| ty.clone()),
-        Type::Constructed(name, args) => {
-            let new_args = args.iter().map(|arg| apply_subst_partial(arg, subst)).collect();
-            Type::Constructed(name.clone(), new_args)
-        }
-    }
 }
 
 /// Apply a substitution to a type with context for debugging
