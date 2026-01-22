@@ -1439,11 +1439,24 @@ impl<'a> Defunctionalizer<'a> {
                 kind,
                 body,
             } => {
+                // Check shadowing FIRST - loop_var and init_bindings are in scope for
+                // init_bindings exprs, While cond, and body
+                let shadows = loop_var == old_name || init_bindings.iter().any(|(n, _, _)| n == old_name);
+
+                // init is evaluated outside the loop scope
                 let new_init = self.substitute_var(init, old_name, new_name);
+
+                // init_bindings exprs reference loop_var (inside loop scope)
                 let new_init_bindings: Vec<_> = init_bindings
                     .iter()
-                    .map(|(n, ty, e)| (n.clone(), ty.clone(), self.substitute_var(e, old_name, new_name)))
+                    .map(|(n, ty, e)| {
+                        let new_e =
+                            if shadows { e.clone() } else { self.substitute_var(e, old_name, new_name) };
+                        (n.clone(), ty.clone(), new_e)
+                    })
                     .collect();
+
+                // iter/bound are outside loop scope, cond is inside
                 let new_kind = match kind {
                     LoopKind::For { var, var_ty, iter } => LoopKind::For {
                         var: var.clone(),
@@ -1455,14 +1468,21 @@ impl<'a> Defunctionalizer<'a> {
                         var_ty: var_ty.clone(),
                         bound: Box::new(self.substitute_var(bound, old_name, new_name)),
                     },
-                    LoopKind::While { cond } => LoopKind::While {
-                        cond: Box::new(self.substitute_var(cond, old_name, new_name)),
-                    },
+                    LoopKind::While { cond } => {
+                        let new_cond = if shadows {
+                            (**cond).clone()
+                        } else {
+                            self.substitute_var(cond, old_name, new_name)
+                        };
+                        LoopKind::While {
+                            cond: Box::new(new_cond),
+                        }
+                    }
                 };
-                // Check if loop_var or any init_binding shadows old_name
-                let shadows = loop_var == old_name || init_bindings.iter().any(|(n, _, _)| n == old_name);
+
                 let new_body =
                     if shadows { (**body).clone() } else { self.substitute_var(body, old_name, new_name) };
+
                 Term {
                     id: self.term_ids.next_id(),
                     ty: term.ty.clone(),
