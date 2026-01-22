@@ -53,8 +53,8 @@ pub enum StaticVal {
 struct HofInfo {
     /// Which parameter indices are function-typed
     func_param_indices: Vec<usize>,
-    /// Original definition for cloning during specialization
-    def: Def,
+    /// Original definition for cloning during specialization (None for intrinsics)
+    def: Option<Def>,
 }
 
 /// Check if a type is an arrow type (function type).
@@ -92,13 +92,57 @@ fn detect_hofs(defs: &[Def]) -> HashMap<String, HofInfo> {
                 def.name.clone(),
                 HofInfo {
                     func_param_indices,
-                    def: def.clone(),
+                    def: Some(def.clone()),
                 },
             );
         }
     }
 
     hof_info
+}
+
+/// Get HOF info for intrinsic SOAC functions.
+/// These are higher-order but don't have definitions to specialize.
+fn intrinsic_hof_info() -> HashMap<String, HofInfo> {
+    let mut info = HashMap::new();
+
+    // map : (a -> b) -> Array -> Array  -- func at index 0
+    info.insert(
+        "_w_intrinsic_map".to_string(),
+        HofInfo { func_param_indices: vec![0], def: None },
+    );
+
+    // inplace_map : (a -> a) -> Array -> Array  -- func at index 0
+    info.insert(
+        "_w_intrinsic_inplace_map".to_string(),
+        HofInfo { func_param_indices: vec![0], def: None },
+    );
+
+    // reduce : (a -> a -> a) -> a -> Array -> a  -- func at index 0
+    info.insert(
+        "_w_intrinsic_reduce".to_string(),
+        HofInfo { func_param_indices: vec![0], def: None },
+    );
+
+    // filter : (a -> bool) -> Array -> Array  -- func at index 0
+    info.insert(
+        "_w_intrinsic_filter".to_string(),
+        HofInfo { func_param_indices: vec![0], def: None },
+    );
+
+    // scan : (a -> a -> a) -> a -> Array -> Array  -- func at index 0
+    info.insert(
+        "_w_intrinsic_scan".to_string(),
+        HofInfo { func_param_indices: vec![0], def: None },
+    );
+
+    // hist_1d : Array -> (a -> a -> a) -> a -> Array -> Array -> Array  -- func at index 1
+    info.insert(
+        "_w_intrinsic_hist_1d".to_string(),
+        HofInfo { func_param_indices: vec![1], def: None },
+    );
+
+    info
 }
 
 // =============================================================================
@@ -416,8 +460,9 @@ pub struct Defunctionalizer<'a> {
 impl<'a> Defunctionalizer<'a> {
     /// Defunctionalize a program.
     pub fn defunctionalize(program: Program, builtins: &'a HashSet<String>) -> Program {
-        // Detect HOFs before defunctionalization
-        let hof_info = detect_hofs(&program.defs);
+        // Detect HOFs before defunctionalization (user-defined + intrinsics)
+        let mut hof_info = detect_hofs(&program.defs);
+        hof_info.extend(intrinsic_hof_info());
 
         let mut defunc = Self {
             top_level: program.defs.iter().map(|d| d.name.clone()).collect(),
@@ -756,13 +801,13 @@ impl<'a> Defunctionalizer<'a> {
 
         // Defunctionalize all arguments
         let arg_results: Vec<DefuncResult> = args.into_iter().map(|a| self.defunc_term(a)).collect();
+        let arg_terms: Vec<Term> = arg_results.iter().map(|ar| ar.term.clone()).collect();
 
         // Handle based on the function term kind
         match &base_func.kind {
             TermKind::BinOp(_) | TermKind::UnOp(_) => {
                 // Operators are preserved as-is - just rebuild the application
-                let result_term =
-                    self.rebuild_app_chain(base_func, &arg_results, ty.clone(), span);
+                let result_term = self.build_curried_app_with_term(base_func, arg_terms, ty.clone(), span);
                 DefuncResult {
                     term: result_term,
                     sv: StaticVal::Dynamic,
@@ -770,156 +815,55 @@ impl<'a> Defunctionalizer<'a> {
             }
 
             TermKind::Var(ref name) => {
-                // Check if this variable has a Lambda StaticVal (captured function)
-                let sv = self.env.get(name).cloned().unwrap_or(StaticVal::Dynamic);
-
-                match sv {
-                    StaticVal::Lambda {
-                        lifted_name,
-                        captures,
-                    } if !captures.is_empty() => {
-                        // Function has captures - append them after the original arguments
-                        let mut all_args = Vec::new();
-
-                        // Add original arguments first
-                        for ar in &arg_results {
-                            all_args.push(ar.term.clone());
+                // Get static value for the callee
+                let callee_sv = self.env.get(name).cloned().unwrap_or_else(|| {
+                    // Top-level function reference - treat as Lambda with no captures
+                    if self.top_level.contains(name) && is_arrow_type(&base_func.ty) {
+                        StaticVal::Lambda {
+                            lifted_name: name.clone(),
+                            captures: vec![],
                         }
-
-                        // Add capture values at the end
-                        for (cap_name, cap_ty) in &captures {
-                            all_args.push(Term {
-                                id: self.term_ids.next_id(),
-                                ty: cap_ty.clone(),
-                                span,
-                                kind: TermKind::Var(cap_name.clone()),
-                            });
-                        }
-
-                        // Build curried application to lifted function
-                        let result_term = self.build_curried_app(&lifted_name, all_args, ty.clone(), span);
-                        DefuncResult {
-                            term: result_term,
-                            sv: StaticVal::Dynamic,
-                        }
+                    } else {
+                        StaticVal::Dynamic
                     }
+                });
 
-                    _ => {
-                        // Check if this is a call to a user-defined HOF with a lambda argument
-                        // We specialize for ALL lambda arguments (even non-capturing ones) because
-                        // SPIRV doesn't support passing functions as values - they must be called directly
-                        if let Some(hof_info) = self.hof_info.get(name).cloned() {
-                            for &func_param_idx in &hof_info.func_param_indices {
-                                if func_param_idx < arg_results.len() {
-                                    if let StaticVal::Lambda { .. } = &arg_results[func_param_idx].sv {
-                                        // Need to specialize this HOF (for any lambda, not just capturing ones)
-                                        return self.specialize_hof_call(
-                                            name,
-                                            &hof_info,
-                                            func_param_idx,
-                                            &arg_results,
-                                            ty,
-                                            span,
-                                        );
-                                    }
-                                }
-                            }
-                        }
-
-                        // Check if any argument is a lambda with captures (for intrinsics/builtins)
-                        // This handles SOACs like _w_intrinsic_map, _w_intrinsic_reduce, etc.
-                        let mut has_lambda_with_captures = false;
-                        let mut all_captures: Vec<(String, Type<TypeName>)> = Vec::new();
-                        for ar in &arg_results {
-                            if let StaticVal::Lambda { captures, .. } = &ar.sv {
-                                if !captures.is_empty() {
-                                    has_lambda_with_captures = true;
-                                    // Collect captures (avoiding duplicates)
-                                    for cap in captures {
-                                        if !all_captures.iter().any(|(n, _)| n == &cap.0) {
-                                            all_captures.push(cap.clone());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        if has_lambda_with_captures {
-                            // Append captures as trailing arguments
-                            let mut all_args = Vec::new();
-                            for ar in &arg_results {
-                                all_args.push(ar.term.clone());
-                            }
-                            for (cap_name, cap_ty) in &all_captures {
-                                all_args.push(Term {
-                                    id: self.term_ids.next_id(),
-                                    ty: cap_ty.clone(),
+                // Check if this is a call to a HOF (user-defined or intrinsic) with a lambda argument
+                // We specialize for ALL lambda arguments (even non-capturing ones) because
+                // SPIRV doesn't support passing functions as values - they must be called directly
+                if let Some(hof_info) = self.hof_info.get(name).cloned() {
+                    for &func_param_idx in &hof_info.func_param_indices {
+                        if func_param_idx < arg_results.len() {
+                            if let StaticVal::Lambda { .. } = &arg_results[func_param_idx].sv {
+                                return self.handle_hof_call(
+                                    name,
+                                    &hof_info,
+                                    func_param_idx,
+                                    &arg_results,
+                                    ty,
                                     span,
-                                    kind: TermKind::Var(cap_name.clone()),
-                                });
+                                );
                             }
-                            let result_term = self.build_curried_app(name, all_args, ty.clone(), span);
-                            return DefuncResult {
-                                term: result_term,
-                                sv: StaticVal::Dynamic,
-                            };
-                        }
-
-                        // No captures - rebuild as-is
-                        let result_term =
-                            self.rebuild_app_chain(base_func, &arg_results, ty.clone(), span);
-                        DefuncResult {
-                            term: result_term,
-                            sv: StaticVal::Dynamic,
                         }
                     }
+                }
+
+                // Use unified apply_callable
+                let result_term = self.apply_callable(base_func, &callee_sv, arg_terms, ty.clone(), span);
+                DefuncResult {
+                    term: result_term,
+                    sv: StaticVal::Dynamic,
                 }
             }
 
             _ => {
-                // Other computed function term - defunc it and check for Lambda StaticVal
+                // Other computed function term - defunc it and use apply_callable
                 let func_result = self.defunc_term(base_func);
-
-                match &func_result.sv {
-                    StaticVal::Lambda {
-                        lifted_name,
-                        captures,
-                    } if !captures.is_empty() => {
-                        // Function has captures - append them after the original arguments
-                        let mut all_args = Vec::new();
-
-                        // Add original arguments first
-                        for ar in &arg_results {
-                            all_args.push(ar.term.clone());
-                        }
-
-                        // Add capture values at the end
-                        for (cap_name, cap_ty) in captures {
-                            all_args.push(Term {
-                                id: self.term_ids.next_id(),
-                                ty: cap_ty.clone(),
-                                span,
-                                kind: TermKind::Var(cap_name.clone()),
-                            });
-                        }
-
-                        // Build curried application to lifted function
-                        let result_term = self.build_curried_app(lifted_name, all_args, ty.clone(), span);
-                        DefuncResult {
-                            term: result_term,
-                            sv: StaticVal::Dynamic,
-                        }
-                    }
-
-                    _ => {
-                        // No captures - rebuild as-is
-                        let result_term =
-                            self.rebuild_app_chain(func_result.term, &arg_results, ty.clone(), span);
-                        DefuncResult {
-                            term: result_term,
-                            sv: StaticVal::Dynamic,
-                        }
-                    }
+                let result_term =
+                    self.apply_callable(func_result.term, &func_result.sv, arg_terms, ty.clone(), span);
+                DefuncResult {
+                    term: result_term,
+                    sv: StaticVal::Dynamic,
                 }
             }
         }
@@ -992,6 +936,42 @@ impl<'a> Defunctionalizer<'a> {
         current
     }
 
+    /// Unified function call handler.
+    ///
+    /// If callee_sv is Lambda with captures: emit call to lifted_name with args + capture_terms
+    /// Otherwise: emit call to callee_term with args
+    fn apply_callable(
+        &mut self,
+        callee_term: Term,
+        callee_sv: &StaticVal,
+        args: Vec<Term>,
+        result_ty: Type<TypeName>,
+        span: Span,
+    ) -> Term {
+        match callee_sv {
+            StaticVal::Lambda {
+                lifted_name,
+                captures,
+            } if !captures.is_empty() => {
+                // Function has captures - call lifted_name with args + captures
+                let mut all_args = args;
+                for (cap_name, cap_ty) in captures {
+                    all_args.push(Term {
+                        id: self.term_ids.next_id(),
+                        ty: cap_ty.clone(),
+                        span,
+                        kind: TermKind::Var(cap_name.clone()),
+                    });
+                }
+                self.build_curried_app(lifted_name, all_args, result_ty, span)
+            }
+            _ => {
+                // No captures - call callee_term directly with args
+                self.build_curried_app_with_term(callee_term, args, result_ty, span)
+            }
+        }
+    }
+
     /// Build a curried application: f a1 a2 a3 ...
     fn build_curried_app(
         &mut self,
@@ -1038,46 +1018,6 @@ impl<'a> Defunctionalizer<'a> {
         }
 
         // Fix up the final type
-        Term {
-            ty: result_ty,
-            ..current
-        }
-    }
-
-    /// Rebuild an application chain from defunc results.
-    fn rebuild_app_chain(
-        &mut self,
-        func_term: Term,
-        arg_results: &[DefuncResult],
-        result_ty: Type<TypeName>,
-        span: Span,
-    ) -> Term {
-        if arg_results.is_empty() {
-            return func_term;
-        }
-
-        let mut current = Term {
-            id: self.term_ids.next_id(),
-            ty: Type::Constructed(TypeName::Ignored, vec![]),
-            span,
-            kind: TermKind::App {
-                func: Box::new(func_term),
-                arg: Box::new(arg_results[0].term.clone()),
-            },
-        };
-
-        for ar in arg_results.iter().skip(1) {
-            current = Term {
-                id: self.term_ids.next_id(),
-                ty: Type::Constructed(TypeName::Ignored, vec![]),
-                span,
-                kind: TermKind::App {
-                    func: Box::new(current),
-                    arg: Box::new(ar.term.clone()),
-                },
-            };
-        }
-
         Term {
             ty: result_ty,
             ..current
@@ -1177,11 +1117,13 @@ impl<'a> Defunctionalizer<'a> {
     }
 
     // =========================================================================
-    // HOF Specialization
+    // HOF Handling (User-defined and Intrinsic)
     // =========================================================================
 
-    /// Specialize a HOF call when a function argument is a lambda with captures.
-    fn specialize_hof_call(
+    /// Handle a HOF call with a lambda argument.
+    /// Dispatches between user-defined HOFs (which get specialized) and intrinsic HOFs
+    /// (which just get captures appended).
+    fn handle_hof_call(
         &mut self,
         hof_name: &str,
         hof_info: &HofInfo,
@@ -1190,78 +1132,146 @@ impl<'a> Defunctionalizer<'a> {
         ty: Type<TypeName>,
         span: Span,
     ) -> DefuncResult {
-        // 1. Extract lambda info from function argument
+        // Extract lambda info from function argument
         let (lambda_name, captures) = match &arg_results[func_param_idx].sv {
             StaticVal::Lambda {
                 lifted_name,
                 captures,
             } => (lifted_name.clone(), captures.clone()),
-            _ => unreachable!("specialize_hof_call called without Lambda StaticVal"),
+            _ => unreachable!("handle_hof_call called without Lambda StaticVal"),
         };
 
-        // 2. Check cache (include arg types to handle different type instantiations)
+        match &hof_info.def {
+            Some(def) => {
+                // User-defined HOF: specialize by cloning and substituting
+                self.specialize_user_hof(hof_name, def, func_param_idx, &lambda_name, &captures, arg_results, ty, span)
+            }
+            None => {
+                // Intrinsic HOF: just append captures to the call
+                self.build_intrinsic_hof_call(hof_name, func_param_idx, &lambda_name, &captures, arg_results, ty, span)
+            }
+        }
+    }
+
+    /// Handle intrinsic HOF call by appending captures.
+    fn build_intrinsic_hof_call(
+        &mut self,
+        hof_name: &str,
+        func_param_idx: usize,
+        lambda_name: &str,
+        captures: &[(String, Type<TypeName>)],
+        arg_results: &[DefuncResult],
+        ty: Type<TypeName>,
+        span: Span,
+    ) -> DefuncResult {
+        // Build args: replace lambda arg with lifted name, keep others, append captures
+        let mut call_args = Vec::new();
+
+        for (i, ar) in arg_results.iter().enumerate() {
+            if i == func_param_idx {
+                // Replace lambda with reference to lifted function
+                call_args.push(Term {
+                    id: self.term_ids.next_id(),
+                    ty: ar.term.ty.clone(),
+                    span,
+                    kind: TermKind::Var(lambda_name.to_string()),
+                });
+            } else {
+                call_args.push(ar.term.clone());
+            }
+        }
+
+        // Append captures at the end
+        for (cap_name, cap_ty) in captures {
+            call_args.push(Term {
+                id: self.term_ids.next_id(),
+                ty: cap_ty.clone(),
+                span,
+                kind: TermKind::Var(cap_name.clone()),
+            });
+        }
+
+        let result_term = self.build_curried_app(hof_name, call_args, ty, span);
+        DefuncResult {
+            term: result_term,
+            sv: StaticVal::Dynamic,
+        }
+    }
+
+    /// Specialize a user-defined HOF call by cloning and substituting.
+    fn specialize_user_hof(
+        &mut self,
+        hof_name: &str,
+        hof_def: &Def,
+        func_param_idx: usize,
+        lambda_name: &str,
+        captures: &[(String, Type<TypeName>)],
+        arg_results: &[DefuncResult],
+        ty: Type<TypeName>,
+        span: Span,
+    ) -> DefuncResult {
+        // Check cache (include arg types to handle different type instantiations)
         let arg_type_keys: Vec<String> =
             arg_results.iter().map(|ar| format_type_for_key(&ar.term.ty)).collect();
-        let cache_key = (hof_name.to_string(), lambda_name.clone(), arg_type_keys);
+        let cache_key = (hof_name.to_string(), lambda_name.to_string(), arg_type_keys);
         if let Some(specialized_name) = self.specialization_cache.get(&cache_key).cloned() {
             return self.build_specialized_call(
                 &specialized_name,
                 func_param_idx,
                 arg_results,
-                &captures,
+                captures,
                 ty,
                 span,
             );
         }
 
-        // 3. Build type substitution from polymorphic params to concrete types
-        // This maps type variables in the HOF definition to concrete types at the call site
+        // Build type substitution from polymorphic params to concrete types
         let mut type_subst = TypeSubst::new();
-        let poly_param_types = extract_param_types(&hof_info.def.ty);
+        let poly_param_types = extract_param_types(&hof_def.ty);
         for (i, poly_ty) in poly_param_types.iter().enumerate() {
             if i < arg_results.len() {
                 build_type_subst(poly_ty, &arg_results[i].term.ty, &mut type_subst);
             }
         }
 
-        // 4. Generate specialized variant
+        // Generate specialized variant
         let specialized_name = format!("{}${}", hof_name, self.specialization_counter);
         self.specialization_counter += 1;
 
-        // 5. Get the function parameter name from the HOF definition
-        let func_param_name = self.get_func_param_name(&hof_info.def, func_param_idx);
+        // Get the function parameter name from the HOF definition
+        let func_param_name = self.get_func_param_name(hof_def, func_param_idx);
 
-        // 6. Clone HOF body and substitute f(args) -> lambda(args, captures)
+        // Clone HOF body and substitute f(args) -> lambda(args, captures)
         let specialized_body = self.specialize_body(
-            &hof_info.def.body,
+            &hof_def.body,
             &func_param_name,
-            &lambda_name,
-            &captures,
+            lambda_name,
+            captures,
             span,
         );
 
-        // 7. Apply type substitution to the specialized body
+        // Apply type substitution to the specialized body
         let specialized_body = apply_type_subst_to_term(&specialized_body, &type_subst, &mut self.term_ids);
 
-        // 8. Build new def with captures as trailing params
+        // Build new def with captures as trailing params
         let specialized_def = self.build_specialized_def(
             &specialized_name,
-            &hof_info.def,
+            hof_def,
             specialized_body,
             func_param_idx,
-            &captures,
+            captures,
         );
 
-        // 9. Register and cache
+        // Register and cache
         self.lifted_defs.push(specialized_def);
         self.specialization_cache.insert(cache_key, specialized_name.clone());
 
-        // 10. Build call to specialized function
+        // Build call to specialized function
         self.build_specialized_call(
             &specialized_name,
             func_param_idx,
             arg_results,
-            &captures,
+            captures,
             ty,
             span,
         )
