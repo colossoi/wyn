@@ -342,8 +342,22 @@ impl<'a> Transformer<'a> {
 
         for param in params {
             let param_ty = self.get_param_type(&current_ty);
-            let (fresh_name, bindings) = self.collect_pattern_bindings(param, &param_ty, span);
-            lambda_info.push((fresh_name, param_ty.clone(), bindings));
+
+            // Use a placeholder scrutinee - we need to call compute_pattern_bindings to get
+            // the param name and projection bindings, but the actual lambda param value
+            // won't exist until runtime
+            let placeholder =
+                self.mk_term(param_ty.clone(), span, TermKind::Var("_placeholder".to_string()));
+            let (param_name, mut bindings) = self.compute_pattern_bindings(param, placeholder, span);
+
+            // For complex patterns (Tuple/Record), compute_pattern_bindings returns bindings that
+            // include the top-level binding (fresh = scrutinee). For lambdas, we don't want this
+            // since the lambda param IS the fresh name. Skip the first binding if it matches.
+            if !bindings.is_empty() && bindings[0].name == param_name {
+                bindings.remove(0);
+            }
+
+            lambda_info.push((param_name, param_ty.clone(), bindings));
             current_ty = self.get_body_type(&current_ty);
         }
 
@@ -367,13 +381,13 @@ impl<'a> Transformer<'a> {
         }
 
         // Build nested lambdas from inside-out
-        for (fresh_name, param_ty, _) in lambda_info.into_iter().rev() {
+        for (param_name, param_ty, _) in lambda_info.into_iter().rev() {
             let lam_ty = Type::Constructed(TypeName::Arrow, vec![param_ty.clone(), result.ty.clone()]);
             result = self.mk_term(
                 lam_ty,
                 span,
                 TermKind::Lam {
-                    param: fresh_name,
+                    param: param_name,
                     param_ty,
                     body: Box::new(result),
                 },
@@ -383,42 +397,144 @@ impl<'a> Transformer<'a> {
         result
     }
 
-    /// Collect bindings from a pattern without wrapping in let expressions.
-    /// Returns (fresh_param_name, list_of_pending_bindings).
-    /// Used by transform_lambda to defer bindings until after all lambdas are created.
-    fn collect_pattern_bindings(
+    /// Compute bindings for a pattern matched against a scrutinee variable.
+    /// Returns (bound_name, list_of_pending_bindings).
+    ///
+    /// The bound_name is either:
+    /// - The pattern's name (for simple Name patterns)
+    /// - A fresh variable name (for complex patterns like Tuple/Record)
+    ///
+    /// For Name/Wildcard patterns, no bindings are returned - the caller is responsible
+    /// for creating the top-level binding if needed (e.g., for let-in).
+    ///
+    /// For Tuple/Record patterns, bindings include:
+    /// - The top-level binding (fresh_name = scrutinee)
+    /// - All projection bindings
+    ///
+    /// This is the single source of truth for pattern → binding plan transformation.
+    fn compute_pattern_bindings(
         &mut self,
         pattern: &ast::Pattern,
-        param_ty: &Type<TypeName>,
+        scrutinee: Term,
         span: Span,
+    ) -> (String, Vec<PendingBinding>) {
+        self.compute_pattern_bindings_inner(pattern, scrutinee, span, true)
+    }
+
+    /// Inner implementation that tracks whether we're at the top level.
+    /// At top level, Name/Wildcard don't create bindings (caller handles).
+    /// Nested Name/Wildcard DO create bindings (needed for tuple component extraction).
+    fn compute_pattern_bindings_inner(
+        &mut self,
+        pattern: &ast::Pattern,
+        scrutinee: Term,
+        span: Span,
+        is_top_level: bool,
     ) -> (String, Vec<PendingBinding>) {
         match &pattern.kind {
             ast::PatternKind::Name(name) => {
-                // Simple name - no extra bindings needed
-                (name.clone(), vec![])
+                if is_top_level {
+                    // Top-level Name: no binding needed, caller will use scrutinee directly
+                    // or wrap with Let as appropriate
+                    (name.clone(), vec![])
+                } else {
+                    // Nested Name (e.g., inside tuple): need binding for projection result
+                    let binding = PendingBinding {
+                        name: name.clone(),
+                        ty: scrutinee.ty.clone(),
+                        expr: scrutinee,
+                    };
+                    (name.clone(), vec![binding])
+                }
             }
 
             ast::PatternKind::Wildcard => {
                 let fresh = format!("_wild_{}", self.term_ids.next_id().0);
-                (fresh, vec![])
+                if is_top_level {
+                    // Top-level Wildcard: no binding needed
+                    (fresh, vec![])
+                } else {
+                    // Nested Wildcard: need binding to evaluate projection
+                    let binding = PendingBinding {
+                        name: fresh.clone(),
+                        ty: scrutinee.ty.clone(),
+                        expr: scrutinee,
+                    };
+                    (fresh, vec![binding])
+                }
             }
 
-            ast::PatternKind::Typed(inner, _) => self.collect_pattern_bindings(inner, param_ty, span),
-
-            ast::PatternKind::Attributed(_, inner) => self.collect_pattern_bindings(inner, param_ty, span),
+            ast::PatternKind::Typed(inner, _) | ast::PatternKind::Attributed(_, inner) => {
+                self.compute_pattern_bindings_inner(inner, scrutinee, span, is_top_level)
+            }
 
             ast::PatternKind::Tuple(patterns) => {
                 let fresh = format!("_tup_{}", self.term_ids.next_id().0);
-                let component_types = self.extract_tuple_types(param_ty, patterns.len());
-                let bindings =
-                    self.collect_tuple_bindings(&fresh, param_ty, patterns, &component_types, span);
+                let tuple_ty = scrutinee.ty.clone();
+                let component_types = self.extract_tuple_types(&tuple_ty, patterns.len());
+
+                // First bind the scrutinee to the fresh name
+                let mut bindings = vec![PendingBinding {
+                    name: fresh.clone(),
+                    ty: tuple_ty.clone(),
+                    expr: scrutinee,
+                }];
+
+                // Then recursively compute bindings for each component (NOT top-level)
+                for (i, sub_pattern) in patterns.iter().enumerate() {
+                    let comp_ty = component_types
+                        .get(i)
+                        .cloned()
+                        .expect("BUG: Tuple pattern has more elements than tuple type");
+
+                    let proj = self.build_tuple_projection(&fresh, &tuple_ty, i, comp_ty, span);
+                    let (_, sub_bindings) =
+                        self.compute_pattern_bindings_inner(sub_pattern, proj, span, false);
+                    bindings.extend(sub_bindings);
+                }
+
                 (fresh, bindings)
             }
 
             ast::PatternKind::Record(fields) => {
                 let fresh = format!("_rec_{}", self.term_ids.next_id().0);
-                let field_types = self.extract_record_types(param_ty);
-                let bindings = self.collect_record_bindings(&fresh, param_ty, fields, &field_types, span);
+                let record_ty = scrutinee.ty.clone();
+                let field_types = self.extract_record_types(&record_ty);
+
+                // First bind the scrutinee to the fresh name
+                let mut bindings = vec![PendingBinding {
+                    name: fresh.clone(),
+                    ty: record_ty.clone(),
+                    expr: scrutinee,
+                }];
+
+                // Then recursively compute bindings for each field (NOT top-level)
+                for field in fields {
+                    let field_ty = field_types
+                        .get(&field.field)
+                        .cloned()
+                        .unwrap_or_else(|| panic!("BUG: Record field '{}' not found in type", field.field));
+
+                    let field_idx = self
+                        .resolve_field_index(&record_ty, &field.field)
+                        .unwrap_or_else(|| panic!("BUG: field '{}' not in record type", field.field));
+
+                    let field_access =
+                        self.build_tuple_projection(&fresh, &record_ty, field_idx, field_ty.clone(), span);
+
+                    if let Some(pat) = &field.pattern {
+                        let (_, sub_bindings) =
+                            self.compute_pattern_bindings_inner(pat, field_access, span, false);
+                        bindings.extend(sub_bindings);
+                    } else {
+                        bindings.push(PendingBinding {
+                            name: field.field.clone(),
+                            ty: field_ty,
+                            expr: field_access,
+                        });
+                    }
+                }
+
                 (fresh, bindings)
             }
 
@@ -436,202 +552,55 @@ impl<'a> Transformer<'a> {
         }
     }
 
-    /// Collect bindings for a tuple pattern without wrapping in let.
-    fn collect_tuple_bindings(
+    /// Build a tuple projection: _w_tuple_proj(var, index)
+    fn build_tuple_projection(
         &mut self,
-        tuple_var: &str,
-        tuple_ty: &Type<TypeName>,
-        patterns: &[ast::Pattern],
-        component_types: &[Type<TypeName>],
+        var_name: &str,
+        var_ty: &Type<TypeName>,
+        index: usize,
+        result_ty: Type<TypeName>,
         span: Span,
-    ) -> Vec<PendingBinding> {
-        let mut bindings = Vec::new();
-
-        for (i, pattern) in patterns.iter().enumerate() {
-            let comp_ty = component_types
-                .get(i)
-                .cloned()
-                .expect("BUG: Tuple pattern has more elements than tuple type");
-
-            // Build projection: _w_tuple_proj tuple_var i
-            let tuple_ref = self.mk_term(tuple_ty.clone(), span, TermKind::Var(tuple_var.to_string()));
-            let index_lit = self.mk_term(
-                Type::Constructed(TypeName::Int(32), vec![]),
-                span,
-                TermKind::IntLit(i.to_string()),
-            );
-            let proj = self.build_app2("_w_tuple_proj", tuple_ref, index_lit, comp_ty.clone(), span);
-
-            self.collect_pattern_bindings_into(pattern, &comp_ty, proj, &mut bindings, span);
-        }
-
-        bindings
+    ) -> Term {
+        let var_term = self.mk_term(var_ty.clone(), span, TermKind::Var(var_name.to_string()));
+        let index_lit = self.mk_term(
+            Type::Constructed(TypeName::Int(32), vec![]),
+            span,
+            TermKind::IntLit(index.to_string()),
+        );
+        self.build_app2("_w_tuple_proj", var_term, index_lit, result_ty, span)
     }
 
-    /// Collect bindings for a record pattern without wrapping in let.
-    fn collect_record_bindings(
-        &mut self,
-        record_var: &str,
-        record_ty: &Type<TypeName>,
-        fields: &[ast::RecordPatternField],
-        field_types: &HashMap<String, Type<TypeName>>,
-        span: Span,
-    ) -> Vec<PendingBinding> {
-        let mut bindings = Vec::new();
-
-        for field in fields {
-            let field_ty = field_types
-                .get(&field.field)
-                .cloned()
-                .unwrap_or_else(|| panic!("BUG: Record field '{}' not found in type", field.field));
-
-            let field_idx = self
-                .resolve_field_index(record_ty, &field.field)
-                .unwrap_or_else(|| panic!("BUG: field '{}' not in record type", field.field));
-
-            let record_ref = self.mk_term(record_ty.clone(), span, TermKind::Var(record_var.to_string()));
-            let index_lit = self.mk_term(
-                Type::Constructed(TypeName::Int(32), vec![]),
+    /// Apply a list of bindings around a body term, creating nested let expressions.
+    /// Bindings are applied in reverse order so the first binding is outermost.
+    fn apply_bindings_around(&mut self, bindings: Vec<PendingBinding>, body: Term, span: Span) -> Term {
+        bindings.into_iter().rev().fold(body, |acc, b| {
+            self.mk_term(
+                acc.ty.clone(),
                 span,
-                TermKind::IntLit(field_idx.to_string()),
-            );
-            let field_access =
-                self.build_app2("_w_tuple_proj", record_ref, index_lit, field_ty.clone(), span);
-
-            if let Some(pat) = &field.pattern {
-                self.collect_pattern_bindings_into(pat, &field_ty, field_access, &mut bindings, span);
-            } else {
-                bindings.push(PendingBinding {
-                    name: field.field.clone(),
-                    ty: field_ty,
-                    expr: field_access,
-                });
-            }
-        }
-
-        bindings
+                TermKind::Let {
+                    name: b.name,
+                    name_ty: b.ty,
+                    rhs: Box::new(b.expr),
+                    body: Box::new(acc),
+                },
+            )
+        })
     }
 
-    /// Recursively collect bindings from a pattern into a list.
-    fn collect_pattern_bindings_into(
-        &mut self,
-        pattern: &ast::Pattern,
-        pat_ty: &Type<TypeName>,
-        expr: Term,
-        bindings: &mut Vec<PendingBinding>,
-        span: Span,
-    ) {
+    /// Returns Some(name) for simple patterns (Name, Wildcard, or wrapped versions),
+    /// None for complex patterns that need destructuring.
+    fn simple_pattern_name(&mut self, pattern: &ast::Pattern) -> Option<String> {
         match &pattern.kind {
-            ast::PatternKind::Name(name) => {
-                bindings.push(PendingBinding {
-                    name: name.clone(),
-                    ty: pat_ty.clone(),
-                    expr,
-                });
+            ast::PatternKind::Name(name) => Some(name.clone()),
+            ast::PatternKind::Wildcard => Some(format!("_wild_{}", self.term_ids.next_id().0)),
+            ast::PatternKind::Typed(inner, _) | ast::PatternKind::Attributed(_, inner) => {
+                self.simple_pattern_name(inner)
             }
-
-            ast::PatternKind::Wildcard => {
-                let fresh = format!("_wild_{}", self.term_ids.next_id().0);
-                bindings.push(PendingBinding {
-                    name: fresh,
-                    ty: pat_ty.clone(),
-                    expr,
-                });
-            }
-
-            ast::PatternKind::Typed(inner, _) => {
-                self.collect_pattern_bindings_into(inner, pat_ty, expr, bindings, span)
-            }
-
-            ast::PatternKind::Attributed(_, inner) => {
-                self.collect_pattern_bindings_into(inner, pat_ty, expr, bindings, span)
-            }
-
-            ast::PatternKind::Tuple(patterns) => {
-                let fresh = format!("_tup_{}", self.term_ids.next_id().0);
-                let component_types = self.extract_tuple_types(pat_ty, patterns.len());
-
-                // First bind the tuple to a fresh name
-                bindings.push(PendingBinding {
-                    name: fresh.clone(),
-                    ty: pat_ty.clone(),
-                    expr,
-                });
-
-                // Then recursively collect bindings for each component
-                for (i, sub_pattern) in patterns.iter().enumerate() {
-                    let comp_ty = component_types
-                        .get(i)
-                        .cloned()
-                        .expect("BUG: Tuple pattern has more elements than tuple type");
-
-                    let tuple_ref = self.mk_term(pat_ty.clone(), span, TermKind::Var(fresh.clone()));
-                    let index_lit = self.mk_term(
-                        Type::Constructed(TypeName::Int(32), vec![]),
-                        span,
-                        TermKind::IntLit(i.to_string()),
-                    );
-                    let proj =
-                        self.build_app2("_w_tuple_proj", tuple_ref, index_lit, comp_ty.clone(), span);
-
-                    self.collect_pattern_bindings_into(sub_pattern, &comp_ty, proj, bindings, span);
-                }
-            }
-
-            ast::PatternKind::Record(fields) => {
-                let fresh = format!("_rec_{}", self.term_ids.next_id().0);
-                let field_types = self.extract_record_types(pat_ty);
-
-                // First bind the record to a fresh name
-                bindings.push(PendingBinding {
-                    name: fresh.clone(),
-                    ty: pat_ty.clone(),
-                    expr,
-                });
-
-                // Then recursively collect bindings for each field
-                for field in fields {
-                    let field_ty = field_types
-                        .get(&field.field)
-                        .cloned()
-                        .unwrap_or_else(|| panic!("BUG: Record field '{}' not found in type", field.field));
-
-                    let field_idx = self
-                        .resolve_field_index(pat_ty, &field.field)
-                        .unwrap_or_else(|| panic!("BUG: field '{}' not in record type", field.field));
-
-                    let record_ref = self.mk_term(pat_ty.clone(), span, TermKind::Var(fresh.clone()));
-                    let index_lit = self.mk_term(
-                        Type::Constructed(TypeName::Int(32), vec![]),
-                        span,
-                        TermKind::IntLit(field_idx.to_string()),
-                    );
-                    let field_access =
-                        self.build_app2("_w_tuple_proj", record_ref, index_lit, field_ty.clone(), span);
-
-                    if let Some(pat) = &field.pattern {
-                        self.collect_pattern_bindings_into(pat, &field_ty, field_access, bindings, span);
-                    } else {
-                        bindings.push(PendingBinding {
-                            name: field.field.clone(),
-                            ty: field_ty,
-                            expr: field_access,
-                        });
-                    }
-                }
-            }
-
-            ast::PatternKind::Unit => {
-                todo!("Unit patterns in let bindings")
-            }
-
-            ast::PatternKind::Literal(_) => {
-                todo!("Literal patterns in let bindings")
-            }
-
-            ast::PatternKind::Constructor(_, _) => {
-                todo!("Constructor patterns in let bindings")
-            }
+            ast::PatternKind::Tuple(_)
+            | ast::PatternKind::Record(_)
+            | ast::PatternKind::Unit
+            | ast::PatternKind::Literal(_)
+            | ast::PatternKind::Constructor(_, _) => None,
         }
     }
 
@@ -664,179 +633,6 @@ impl<'a> Transformer<'a> {
                 fields.iter().cloned().zip(args.iter().cloned()).collect()
             }
             _ => HashMap::new(),
-        }
-    }
-
-    fn flatten_tuple_pattern(
-        &mut self,
-        tuple_var: &str,
-        patterns: &[ast::Pattern],
-        component_types: &[Type<TypeName>],
-        body: Term,
-        span: Span,
-    ) -> Term {
-        let mut result = body;
-
-        for (i, pattern) in patterns.iter().enumerate().rev() {
-            let comp_ty = component_types
-                .get(i)
-                .cloned()
-                .expect("BUG: Tuple pattern has more elements than tuple type");
-
-            // proj_i(tuple_var) as function application
-            let tuple_ref = self.mk_term(
-                Type::Constructed(TypeName::Tuple(patterns.len()), component_types.to_vec()),
-                span,
-                TermKind::Var(tuple_var.to_string()),
-            );
-            let index_lit = self.mk_term(
-                Type::Constructed(TypeName::Int(32), vec![]),
-                span,
-                TermKind::IntLit(i.to_string()),
-            );
-            let proj = self.build_app2("_w_tuple_proj", tuple_ref, index_lit, comp_ty.clone(), span);
-
-            result = self.bind_pattern_to_expr(pattern, comp_ty, proj, result, span);
-        }
-
-        result
-    }
-
-    fn flatten_record_pattern(
-        &mut self,
-        record_var: &str,
-        record_ty: &Type<TypeName>,
-        fields: &[ast::RecordPatternField],
-        field_types: &HashMap<String, Type<TypeName>>,
-        body: Term,
-        span: Span,
-    ) -> Term {
-        let mut result = body;
-
-        for field in fields.iter().rev() {
-            let field_ty = field_types
-                .get(&field.field)
-                .cloned()
-                .unwrap_or_else(|| panic!("BUG: Record field '{}' not found in type", field.field));
-
-            // Resolve field name to index, treat record as tuple
-            let field_idx = self
-                .resolve_field_index(record_ty, &field.field)
-                .unwrap_or_else(|| panic!("BUG: field '{}' not in record type", field.field));
-
-            let record_ref = self.mk_term(record_ty.clone(), span, TermKind::Var(record_var.to_string()));
-            let index_lit = self.mk_term(
-                Type::Constructed(TypeName::Int(32), vec![]),
-                span,
-                TermKind::IntLit(field_idx.to_string()),
-            );
-            let field_access =
-                self.build_app2("_w_tuple_proj", record_ref, index_lit, field_ty.clone(), span);
-
-            if let Some(pat) = &field.pattern {
-                result = self.bind_pattern_to_expr(pat, field_ty, field_access, result, span);
-            } else {
-                result = self.mk_term(
-                    result.ty.clone(),
-                    span,
-                    TermKind::Let {
-                        name: field.field.clone(),
-                        name_ty: field_ty,
-                        rhs: Box::new(field_access),
-                        body: Box::new(result),
-                    },
-                );
-            }
-        }
-
-        result
-    }
-
-    fn bind_pattern_to_expr(
-        &mut self,
-        pattern: &ast::Pattern,
-        pat_ty: Type<TypeName>,
-        expr: Term,
-        body: Term,
-        span: Span,
-    ) -> Term {
-        match &pattern.kind {
-            ast::PatternKind::Name(name) => self.mk_term(
-                body.ty.clone(),
-                span,
-                TermKind::Let {
-                    name: name.clone(),
-                    name_ty: pat_ty,
-                    rhs: Box::new(expr),
-                    body: Box::new(body),
-                },
-            ),
-
-            ast::PatternKind::Wildcard => {
-                let fresh = format!("_wild_{}", self.term_ids.next_id().0);
-                self.mk_term(
-                    body.ty.clone(),
-                    span,
-                    TermKind::Let {
-                        name: fresh,
-                        name_ty: pat_ty,
-                        rhs: Box::new(expr),
-                        body: Box::new(body),
-                    },
-                )
-            }
-
-            ast::PatternKind::Typed(inner, _) => self.bind_pattern_to_expr(inner, pat_ty, expr, body, span),
-
-            ast::PatternKind::Attributed(_, inner) => {
-                self.bind_pattern_to_expr(inner, pat_ty, expr, body, span)
-            }
-
-            ast::PatternKind::Tuple(patterns) => {
-                let fresh = format!("_tup_{}", self.term_ids.next_id().0);
-                let component_types = self.extract_tuple_types(&pat_ty, patterns.len());
-                let inner = self.flatten_tuple_pattern(&fresh, patterns, &component_types, body, span);
-
-                self.mk_term(
-                    inner.ty.clone(),
-                    span,
-                    TermKind::Let {
-                        name: fresh,
-                        name_ty: pat_ty,
-                        rhs: Box::new(expr),
-                        body: Box::new(inner),
-                    },
-                )
-            }
-
-            ast::PatternKind::Record(fields) => {
-                let fresh = format!("_rec_{}", self.term_ids.next_id().0);
-                let field_types = self.extract_record_types(&pat_ty);
-                let inner = self.flatten_record_pattern(&fresh, &pat_ty, fields, &field_types, body, span);
-
-                self.mk_term(
-                    inner.ty.clone(),
-                    span,
-                    TermKind::Let {
-                        name: fresh,
-                        name_ty: pat_ty,
-                        rhs: Box::new(expr),
-                        body: Box::new(inner),
-                    },
-                )
-            }
-
-            ast::PatternKind::Unit => {
-                todo!("Unit patterns in let bindings")
-            }
-
-            ast::PatternKind::Literal(_) => {
-                todo!("Literal patterns in let bindings")
-            }
-
-            ast::PatternKind::Constructor(_, _) => {
-                todo!("Constructor patterns in let bindings")
-            }
         }
     }
 
@@ -936,11 +732,33 @@ impl<'a> Transformer<'a> {
             ast::ExprKind::Application(func, args) => self.transform_application(func, args, ty, span),
 
             ast::ExprKind::LetIn(let_in) => {
-                let rhs = self.transform_expr(&let_in.value);
-                let body = self.transform_expr(&let_in.body);
-                let rhs_ty = rhs.ty.clone();
+                // Check pattern kind to avoid redundant transforms for simple patterns
+                let simple_name = match self.simple_pattern_name(&let_in.pattern) {
+                    Some(name) => Some(name),
+                    None => None,
+                };
 
-                self.bind_pattern_to_expr(&let_in.pattern, rhs_ty, rhs, body, span)
+                if let Some(bound_name) = simple_name {
+                    // Simple Name/Wildcard pattern - single Let binding
+                    let rhs = self.transform_expr(&let_in.value);
+                    let body = self.transform_expr(&let_in.body);
+                    self.mk_term(
+                        body.ty.clone(),
+                        span,
+                        TermKind::Let {
+                            name: bound_name,
+                            name_ty: rhs.ty.clone(),
+                            rhs: Box::new(rhs),
+                            body: Box::new(body),
+                        },
+                    )
+                } else {
+                    // Complex pattern - use compute_pattern_bindings
+                    let rhs = self.transform_expr(&let_in.value);
+                    let (_, bindings) = self.compute_pattern_bindings(&let_in.pattern, rhs, span);
+                    let body = self.transform_expr(&let_in.body);
+                    self.apply_bindings_around(bindings, body, span)
+                }
             }
 
             ast::ExprKind::FieldAccess(record, field) => {
@@ -1308,13 +1126,18 @@ impl<'a> Transformer<'a> {
 
         match &case.pattern.kind {
             ast::PatternKind::Wildcard | ast::PatternKind::Name(_) => {
+                // Simple pattern - bind scrutinee to pattern name
+                let bound_name = self.simple_pattern_name(&case.pattern).unwrap();
                 let body = self.transform_expr(&case.body);
-                self.bind_pattern_to_expr(
-                    &case.pattern,
-                    scrutinee.ty.clone(),
-                    scrutinee.clone(),
-                    body,
+                self.mk_term(
+                    ty,
                     span,
+                    TermKind::Let {
+                        name: bound_name,
+                        name_ty: scrutinee.ty.clone(),
+                        rhs: Box::new(scrutinee.clone()),
+                        body: Box::new(body),
+                    },
                 )
             }
 
@@ -1342,23 +1165,11 @@ impl<'a> Transformer<'a> {
                 )
             }
 
-            ast::PatternKind::Tuple(patterns) => {
+            ast::PatternKind::Tuple(_) | ast::PatternKind::Record(_) => {
+                // Complex pattern - use compute_pattern_bindings
+                let (_, bindings) = self.compute_pattern_bindings(&case.pattern, scrutinee.clone(), span);
                 let body = self.transform_expr(&case.body);
-                let component_types = self.extract_tuple_types(&scrutinee.ty, patterns.len());
-
-                let fresh = format!("_match_{}", self.term_ids.next_id().0);
-                let inner = self.flatten_tuple_pattern(&fresh, patterns, &component_types, body, span);
-
-                self.mk_term(
-                    ty,
-                    span,
-                    TermKind::Let {
-                        name: fresh,
-                        name_ty: scrutinee.ty.clone(),
-                        rhs: Box::new(scrutinee.clone()),
-                        body: Box::new(inner),
-                    },
-                )
+                self.apply_bindings_around(bindings, body, span)
             }
 
             ast::PatternKind::Constructor(ctor_name, patterns) => {
@@ -1369,9 +1180,9 @@ impl<'a> Transformer<'a> {
                     span,
                 );
 
-                let body = self.transform_expr(&case.body);
-                let mut bound_body = body;
-                for (i, pat) in patterns.iter().enumerate().rev() {
+                // Collect all constructor field bindings
+                let mut all_bindings = Vec::new();
+                for (i, pat) in patterns.iter().enumerate() {
                     let field_ty =
                         self.lookup_type(pat.h.id).expect("BUG: Constructor field pattern must have type");
                     let extract = self.build_app1(
@@ -1380,9 +1191,27 @@ impl<'a> Transformer<'a> {
                         field_ty.clone(),
                         span,
                     );
-                    bound_body = self.bind_pattern_to_expr(pat, field_ty, extract, bound_body, span);
+                    let (_, bindings) = self.compute_pattern_bindings(pat, extract, span);
+                    if bindings.is_empty() {
+                        // Simple pattern - need to create binding manually
+                        let bound_name = self.simple_pattern_name(pat).unwrap();
+                        all_bindings.push(PendingBinding {
+                            name: bound_name,
+                            ty: field_ty,
+                            expr: self.build_app1(
+                                &format!("_w_extract_{}_{}", ctor_name, i),
+                                scrutinee.clone(),
+                                self.lookup_type(pat.h.id).unwrap(),
+                                span,
+                            ),
+                        });
+                    } else {
+                        all_bindings.extend(bindings);
+                    }
                 }
 
+                let body = self.transform_expr(&case.body);
+                let bound_body = self.apply_bindings_around(all_bindings, body, span);
                 let else_branch = self.compile_match_cases(scrutinee, rest, ty.clone(), span);
 
                 self.mk_term(
@@ -1396,7 +1225,7 @@ impl<'a> Transformer<'a> {
                 )
             }
 
-            ast::PatternKind::Typed(inner, _) => {
+            ast::PatternKind::Typed(inner, _) | ast::PatternKind::Attributed(_, inner) => {
                 let adjusted_case = ast::MatchCase {
                     pattern: (**inner).clone(),
                     body: case.body.clone(),
@@ -1404,36 +1233,6 @@ impl<'a> Transformer<'a> {
                 let mut adjusted_cases = vec![adjusted_case];
                 adjusted_cases.extend(rest.iter().cloned());
                 self.compile_match_cases(scrutinee, &adjusted_cases, ty, span)
-            }
-
-            ast::PatternKind::Attributed(_, inner) => {
-                let adjusted_case = ast::MatchCase {
-                    pattern: (**inner).clone(),
-                    body: case.body.clone(),
-                };
-                let mut adjusted_cases = vec![adjusted_case];
-                adjusted_cases.extend(rest.iter().cloned());
-                self.compile_match_cases(scrutinee, &adjusted_cases, ty, span)
-            }
-
-            ast::PatternKind::Record(fields) => {
-                let body = self.transform_expr(&case.body);
-                let field_types = self.extract_record_types(&scrutinee.ty);
-
-                let fresh = format!("_match_{}", self.term_ids.next_id().0);
-                let inner =
-                    self.flatten_record_pattern(&fresh, &scrutinee.ty, fields, &field_types, body, span);
-
-                self.mk_term(
-                    ty,
-                    span,
-                    TermKind::Let {
-                        name: fresh,
-                        name_ty: scrutinee.ty.clone(),
-                        rhs: Box::new(scrutinee.clone()),
-                        body: Box::new(inner),
-                    },
-                )
             }
 
             ast::PatternKind::Unit => {
