@@ -931,13 +931,13 @@ impl AliasCheckResult {
 // MIR-level In-Place Optimization Analysis
 // =============================================================================
 
-use crate::mir;
+use crate::mir::{self, ExprId};
 
 /// Result of in-place array operation analysis
 #[derive(Debug, Default, Clone)]
 pub struct InPlaceInfo {
-    /// NodeIds of operations (map, array_with) where input array can be reused
-    pub can_reuse_input: HashSet<NodeId>,
+    /// ExprIds of operations (map, array_with) where input array can be reused
+    pub can_reuse_input: HashSet<ExprId>,
 }
 
 /// Check if a function name looks like a prelude function
@@ -1390,7 +1390,7 @@ fn find_inplace_ops(
             // args[0] is closure, args[1] is array
             if let Local(arr_local) = body.get_expr(args[1]) {
                 if can_reuse_local(*arr_local, expr_id, uses_after, aliases) {
-                    result.can_reuse_input.insert(body.get_node_id(expr_id));
+                    result.can_reuse_input.insert(expr_id);
                 }
             }
             // Recurse into arguments
@@ -1404,7 +1404,7 @@ fn find_inplace_ops(
             // args[0] is array (function arg has been removed by HOF specialization)
             if let Local(arr_local) = body.get_expr(args[0]) {
                 if can_reuse_local(*arr_local, expr_id, uses_after, aliases) {
-                    result.can_reuse_input.insert(body.get_node_id(expr_id));
+                    result.can_reuse_input.insert(expr_id);
                 }
             }
             // Recurse into arguments
@@ -1419,7 +1419,7 @@ fn find_inplace_ops(
             // _w_intrinsic_array_with / _w_array_with (arr, idx, val) - functional array update
             if let Local(arr_local) = body.get_expr(args[0]) {
                 if can_reuse_local(*arr_local, expr_id, uses_after, aliases) {
-                    result.can_reuse_input.insert(body.get_node_id(expr_id));
+                    result.can_reuse_input.insert(expr_id);
                 }
             }
             // Recurse into arguments
@@ -1433,7 +1433,7 @@ fn find_inplace_ops(
             // args[0] is closure, args[1] is array
             if let Local(arr_local) = body.get_expr(args[1]) {
                 if can_reuse_local(*arr_local, expr_id, uses_after, aliases) {
-                    result.can_reuse_input.insert(body.get_node_id(expr_id));
+                    result.can_reuse_input.insert(expr_id);
                 }
             }
             // Recurse into arguments
@@ -1447,7 +1447,7 @@ fn find_inplace_ops(
             // args[0] is array (function arg has been removed by HOF specialization)
             if let Local(arr_local) = body.get_expr(args[0]) {
                 if can_reuse_local(*arr_local, expr_id, uses_after, aliases) {
-                    result.can_reuse_input.insert(body.get_node_id(expr_id));
+                    result.can_reuse_input.insert(expr_id);
                 }
             }
             // Recurse into arguments
@@ -1462,7 +1462,7 @@ fn find_inplace_ops(
             // _w_intrinsic_array_with / _w_array_with (arr, idx, val) - functional array update
             if let Local(arr_local) = body.get_expr(args[0]) {
                 if can_reuse_local(*arr_local, expr_id, uses_after, aliases) {
-                    result.can_reuse_input.insert(body.get_node_id(expr_id));
+                    result.can_reuse_input.insert(expr_id);
                 }
             }
             // Recurse into arguments

@@ -276,7 +276,7 @@ impl<'a> TlcToMir<'a> {
     fn transform_term(&mut self, term: &Term, body: &mut Body) -> ExprId {
         let ty = term.ty.clone();
         let span = term.span;
-        let node_id = NodeId(term.id.0); // Use term ID as node ID
+        let node_id = NodeId(0); // Synthetic term - no AST origin
 
         match &term.kind {
             TermKind::Var(name) => {

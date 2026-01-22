@@ -127,8 +127,8 @@ struct Constructor {
     // Builtin function registry
     impl_source: ImplSource,
 
-    /// In-place optimization: NodeIds of operations where input array can be reused
-    inplace_nodes: HashSet<crate::ast::NodeId>,
+    /// In-place optimization: ExprIds of operations where input array can be reused
+    inplace_nodes: HashSet<crate::mir::ExprId>,
 
     /// Storage buffers for compute shaders: (set, binding) -> (buffer_var, elem_type_id)
     storage_buffers: HashMap<(u32, u32), (spirv::Word, spirv::Word)>,
@@ -1507,7 +1507,6 @@ fn lower_const_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId)
 
 fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Result<spirv::Word> {
     let expr_ty = body.get_type(expr_id);
-    let expr_node_id = body.get_node_id(expr_id);
 
     // Debug: check for address space types being used as expression types
     if let PolyType::Constructed(
@@ -2039,7 +2038,7 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                 let val_id = lower_expr(constructor, body, args[2])?;
 
                 // Check if we can do in-place update
-                let can_inplace = constructor.inplace_nodes.contains(&expr_node_id);
+                let can_inplace = constructor.inplace_nodes.contains(&expr_id);
 
                 if can_inplace {
                     // In-place optimization: use OpCompositeInsert

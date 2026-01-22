@@ -130,7 +130,7 @@ impl<'a> InPlaceRewriter<'a> {
             let span = old_body.get_span(old_id);
             let node_id = old_body.get_node_id(old_id);
 
-            let new_id = self.rewrite_expr(&mut new_body, &old_body, old_expr, &ty, span, node_id);
+            let new_id = self.rewrite_expr(&mut new_body, &old_body, old_id, old_expr, &ty, span, node_id);
             self.expr_map.insert(old_id, new_id);
         }
 
@@ -150,6 +150,7 @@ impl<'a> InPlaceRewriter<'a> {
         &self,
         new_body: &mut Body,
         old_body: &Body,
+        old_id: ExprId,
         expr: &Expr,
         ty: &Type<TypeName>,
         span: Span,
@@ -263,7 +264,7 @@ impl<'a> InPlaceRewriter<'a> {
 
                 // Check if this is a map call that can be rewritten to inplace_map
                 let new_func = if func == "_w_intrinsic_map" && args.len() == 2 {
-                    if self.can_use_inplace(old_body, args, node_id) {
+                    if self.can_use_inplace(old_body, args, old_id) {
                         "_w_intrinsic_inplace_map".to_string()
                     } else {
                         func.clone()
@@ -304,9 +305,9 @@ impl<'a> InPlaceRewriter<'a> {
     }
 
     /// Check if a map call can use the in-place variant.
-    fn can_use_inplace(&self, body: &Body, args: &[ExprId], node_id: NodeId) -> bool {
+    fn can_use_inplace(&self, body: &Body, args: &[ExprId], expr_id: ExprId) -> bool {
         // Check 1: Is this node marked as can_reuse_input by alias analysis?
-        if !self.info.can_reuse_input.contains(&node_id) {
+        if !self.info.can_reuse_input.contains(&expr_id) {
             return false;
         }
 
