@@ -711,8 +711,9 @@ impl Monomorphizer {
                 }
             }
             (Type::Constructed(name1, args1), Type::Constructed(name2, args2)) => {
-                // Recurse into constructed types
-                if std::mem::discriminant(name1) == std::mem::discriminant(name2) {
+                // Recurse into constructed types only if type constructors match exactly
+                // (same tuple arity, same int/float bit widths, same named type, etc.)
+                if name1 == name2 && args1.len() == args2.len() {
                     for (a1, a2) in args1.iter().zip(args2.iter()) {
                         self.unify_for_subst(a1, a2, subst)?;
                     }
