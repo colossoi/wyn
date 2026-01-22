@@ -4,6 +4,8 @@
 //! Lambdas remain as values (not yet defunctionalized).
 
 pub mod defunctionalize;
+#[cfg(test)]
+mod defunctionalize_tests;
 pub mod partial_eval;
 #[cfg(test)]
 mod partial_eval_tests;
@@ -145,7 +147,9 @@ pub enum LoopKind {
         bound: Box<Term>,
     },
     /// While loop: `while cond`.
-    While { cond: Box<Term> },
+    While {
+        cond: Box<Term>,
+    },
 }
 
 // =============================================================================
@@ -451,8 +455,7 @@ impl<'a> Transformer<'a> {
             ast::PatternKind::Record(fields) => {
                 let fresh = format!("_rec_{}", self.term_ids.next_id().0);
                 let field_types = self.extract_record_types(param_ty);
-                let bindings =
-                    self.collect_record_bindings(&fresh, param_ty, fields, &field_types, span);
+                let bindings = self.collect_record_bindings(&fresh, param_ty, fields, &field_types, span);
                 (fresh, bindings)
             }
 
@@ -603,7 +606,8 @@ impl<'a> Transformer<'a> {
                         span,
                         TermKind::IntLit(i.to_string()),
                     );
-                    let proj = self.build_app2("_w_tuple_proj", tuple_ref, index_lit, comp_ty.clone(), span);
+                    let proj =
+                        self.build_app2("_w_tuple_proj", tuple_ref, index_lit, comp_ty.clone(), span);
 
                     self.collect_pattern_bindings_into(sub_pattern, &comp_ty, proj, bindings, span);
                 }
@@ -1173,14 +1177,10 @@ impl<'a> Transformer<'a> {
 
     fn transform_loop(&mut self, loop_expr: &ast::LoopExpr, ty: Type<TypeName>, span: Span) -> Term {
         // Get the init expression and accumulator type
-        let init_term = loop_expr
-            .init
-            .as_ref()
-            .map(|e| self.transform_expr(e))
-            .unwrap_or_else(|| {
-                // No accumulator - use unit
-                self.build_intrinsic_call("_w_unit", &[], Type::Constructed(TypeName::Unit, vec![]), span)
-            });
+        let init_term = loop_expr.init.as_ref().map(|e| self.transform_expr(e)).unwrap_or_else(|| {
+            // No accumulator - use unit
+            self.build_intrinsic_call("_w_unit", &[], Type::Constructed(TypeName::Unit, vec![]), span)
+        });
         let acc_ty = init_term.ty.clone();
 
         // Build loop_var and init_bindings from the pattern

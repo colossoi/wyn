@@ -84,12 +84,8 @@ fn detect_hofs(defs: &[Def]) -> HashMap<String, HofInfo> {
 
     for def in defs {
         let param_types = extract_param_types(&def.ty);
-        let func_param_indices: Vec<usize> = param_types
-            .iter()
-            .enumerate()
-            .filter(|(_, ty)| is_arrow_type(ty))
-            .map(|(i, _)| i)
-            .collect();
+        let func_param_indices: Vec<usize> =
+            param_types.iter().enumerate().filter(|(_, ty)| is_arrow_type(ty)).map(|(i, _)| i).collect();
 
         if !func_param_indices.is_empty() {
             hof_info.insert(
@@ -157,12 +153,18 @@ fn apply_type_subst(ty: &Type<TypeName>, subst: &TypeSubst) -> Type<TypeName> {
 }
 
 /// Apply a type substitution to a FunctionName.
-fn apply_type_subst_to_funcname(func_name: &FunctionName, subst: &TypeSubst, term_ids: &mut TermIdSource) -> FunctionName {
+fn apply_type_subst_to_funcname(
+    func_name: &FunctionName,
+    subst: &TypeSubst,
+    term_ids: &mut TermIdSource,
+) -> FunctionName {
     match func_name {
         FunctionName::Var(name) => FunctionName::Var(name.clone()),
         FunctionName::BinOp(op) => FunctionName::BinOp(op.clone()),
         FunctionName::UnOp(op) => FunctionName::UnOp(op.clone()),
-        FunctionName::Term(term) => FunctionName::Term(Box::new(apply_type_subst_to_term(term, subst, term_ids))),
+        FunctionName::Term(term) => {
+            FunctionName::Term(Box::new(apply_type_subst_to_term(term, subst, term_ids)))
+        }
     }
 }
 
@@ -195,23 +197,43 @@ fn apply_type_subst_to_term(term: &Term, subst: &TypeSubst, term_ids: &mut TermI
             func: Box::new(apply_type_subst_to_funcname(func, subst, term_ids)),
             arg: Box::new(apply_type_subst_to_term(arg, subst, term_ids)),
         },
-        TermKind::Lam { param, param_ty, body } => TermKind::Lam {
+        TermKind::Lam {
+            param,
+            param_ty,
+            body,
+        } => TermKind::Lam {
             param: param.clone(),
             param_ty: apply_type_subst(param_ty, subst),
             body: Box::new(apply_type_subst_to_term(body, subst, term_ids)),
         },
-        TermKind::Let { name, name_ty, rhs, body } => TermKind::Let {
+        TermKind::Let {
+            name,
+            name_ty,
+            rhs,
+            body,
+        } => TermKind::Let {
             name: name.clone(),
             name_ty: apply_type_subst(name_ty, subst),
             rhs: Box::new(apply_type_subst_to_term(rhs, subst, term_ids)),
             body: Box::new(apply_type_subst_to_term(body, subst, term_ids)),
         },
-        TermKind::If { cond, then_branch, else_branch } => TermKind::If {
+        TermKind::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => TermKind::If {
             cond: Box::new(apply_type_subst_to_term(cond, subst, term_ids)),
             then_branch: Box::new(apply_type_subst_to_term(then_branch, subst, term_ids)),
             else_branch: Box::new(apply_type_subst_to_term(else_branch, subst, term_ids)),
         },
-        TermKind::Loop { loop_var, loop_var_ty, init, init_bindings, kind, body } => {
+        TermKind::Loop {
+            loop_var,
+            loop_var_ty,
+            init,
+            init_bindings,
+            kind,
+            body,
+        } => {
             let new_init_bindings = init_bindings
                 .iter()
                 .map(|(name, ty, expr)| {
@@ -316,7 +338,14 @@ fn collect_free_vars(
             collect_free_vars(then_branch, bound, top_level, builtins, free, seen);
             collect_free_vars(else_branch, bound, top_level, builtins, free, seen);
         }
-        TermKind::Loop { loop_var, init, init_bindings, kind, body, .. } => {
+        TermKind::Loop {
+            loop_var,
+            init,
+            init_bindings,
+            kind,
+            body,
+            ..
+        } => {
             // init is evaluated outside the loop
             collect_free_vars(init, bound, top_level, builtins, free, seen);
 
@@ -333,7 +362,11 @@ fn collect_free_vars(
                     collect_free_vars(iter, bound, top_level, builtins, free, seen);
                     inner_bound.insert(var.clone());
                 }
-                LoopKind::ForRange { var, bound: bound_expr, .. } => {
+                LoopKind::ForRange {
+                    var,
+                    bound: bound_expr,
+                    ..
+                } => {
                     collect_free_vars(bound_expr, bound, top_level, builtins, free, seen);
                     inner_bound.insert(var.clone());
                 }
@@ -1177,7 +1210,11 @@ impl<'a> Defunctionalizer<'a> {
         // Find the innermost body (unwrap all lambdas)
         fn extract_inner(term: Term) -> (Vec<(String, Type<TypeName>, Type<TypeName>)>, Term) {
             match term.kind {
-                TermKind::Lam { param, param_ty, body } => {
+                TermKind::Lam {
+                    param,
+                    param_ty,
+                    body,
+                } => {
                     let (mut params, inner) = extract_inner(*body);
                     params.insert(0, (param, param_ty, term.ty));
                     (params, inner)
@@ -1235,15 +1272,26 @@ impl<'a> Defunctionalizer<'a> {
     ) -> DefuncResult {
         // 1. Extract lambda info from function argument
         let (lambda_name, captures) = match &arg_results[func_param_idx].sv {
-            StaticVal::Lambda { lifted_name, captures } => (lifted_name.clone(), captures.clone()),
+            StaticVal::Lambda {
+                lifted_name,
+                captures,
+            } => (lifted_name.clone(), captures.clone()),
             _ => unreachable!("specialize_hof_call called without Lambda StaticVal"),
         };
 
         // 2. Check cache (include arg types to handle different type instantiations)
-        let arg_type_keys: Vec<String> = arg_results.iter().map(|ar| format_type_for_key(&ar.term.ty)).collect();
+        let arg_type_keys: Vec<String> =
+            arg_results.iter().map(|ar| format_type_for_key(&ar.term.ty)).collect();
         let cache_key = (hof_name.to_string(), lambda_name.clone(), arg_type_keys);
         if let Some(specialized_name) = self.specialization_cache.get(&cache_key).cloned() {
-            return self.build_specialized_call(&specialized_name, func_param_idx, arg_results, &captures, ty, span);
+            return self.build_specialized_call(
+                &specialized_name,
+                func_param_idx,
+                arg_results,
+                &captures,
+                ty,
+                span,
+            );
         }
 
         // 3. Build type substitution from polymorphic params to concrete types
@@ -1289,14 +1337,24 @@ impl<'a> Defunctionalizer<'a> {
         self.specialization_cache.insert(cache_key, specialized_name.clone());
 
         // 10. Build call to specialized function
-        self.build_specialized_call(&specialized_name, func_param_idx, arg_results, &captures, ty, span)
+        self.build_specialized_call(
+            &specialized_name,
+            func_param_idx,
+            arg_results,
+            &captures,
+            ty,
+            span,
+        )
     }
 
     /// Get the parameter name at a given index from a function definition.
     fn get_func_param_name(&self, def: &Def, param_idx: usize) -> String {
         let mut body = &def.body;
         let mut idx = 0;
-        while let TermKind::Lam { param, body: inner, .. } = &body.kind {
+        while let TermKind::Lam {
+            param, body: inner, ..
+        } = &body.kind
+        {
             if idx == param_idx {
                 return param.clone();
             }
@@ -1346,7 +1404,8 @@ impl<'a> Defunctionalizer<'a> {
                 // Not a direct call to f, but check if f is passed as an argument
                 // If so, we need to append captures to THIS call
                 // e.g., _w_intrinsic_map f xs -> _w_intrinsic_map _lambda_10 xs arr
-                let args_contain_func_param = args.iter().any(|a| self.term_references_var(a, func_param_name));
+                let args_contain_func_param =
+                    args.iter().any(|a| self.term_references_var(a, func_param_name));
 
                 if args_contain_func_param {
                     // Transform args (replacing f with lambda_name)
@@ -1373,8 +1432,14 @@ impl<'a> Defunctionalizer<'a> {
                         }
                         FunctionName::Term(t) => {
                             // Recursively specialize the function term
-                            let new_func_term = self.specialize_body(t, func_param_name, lambda_name, captures, span);
-                            return self.build_curried_app_with_term(new_func_term, all_args, term.ty.clone(), span);
+                            let new_func_term =
+                                self.specialize_body(t, func_param_name, lambda_name, captures, span);
+                            return self.build_curried_app_with_term(
+                                new_func_term,
+                                all_args,
+                                term.ty.clone(),
+                                span,
+                            );
                         }
                         _ => {
                             // BinOp/UnOp - shouldn't have function params as args, but handle anyway
@@ -1385,10 +1450,16 @@ impl<'a> Defunctionalizer<'a> {
 
                 // No function param reference, recurse normally
                 let new_func = match func.as_ref() {
-                    FunctionName::Var(_) | FunctionName::BinOp(_) | FunctionName::UnOp(_) => func.as_ref().clone(),
-                    FunctionName::Term(t) => {
-                        FunctionName::Term(Box::new(self.specialize_body(t, func_param_name, lambda_name, captures, span)))
+                    FunctionName::Var(_) | FunctionName::BinOp(_) | FunctionName::UnOp(_) => {
+                        func.as_ref().clone()
                     }
+                    FunctionName::Term(t) => FunctionName::Term(Box::new(self.specialize_body(
+                        t,
+                        func_param_name,
+                        lambda_name,
+                        captures,
+                        span,
+                    ))),
                 };
                 let new_arg = self.specialize_body(arg, func_param_name, lambda_name, captures, span);
                 Term {
@@ -1416,7 +1487,12 @@ impl<'a> Defunctionalizer<'a> {
                 }
             }
 
-            TermKind::Let { name, name_ty, rhs, body } => {
+            TermKind::Let {
+                name,
+                name_ty,
+                rhs,
+                body,
+            } => {
                 let new_rhs = self.specialize_body(rhs, func_param_name, lambda_name, captures, span);
                 let new_body = self.specialize_body(body, func_param_name, lambda_name, captures, span);
                 Term {
@@ -1432,7 +1508,11 @@ impl<'a> Defunctionalizer<'a> {
                 }
             }
 
-            TermKind::Lam { param, param_ty, body } => {
+            TermKind::Lam {
+                param,
+                param_ty,
+                body,
+            } => {
                 let new_body = self.specialize_body(body, func_param_name, lambda_name, captures, span);
                 Term {
                     id: self.term_ids.next_id(),
@@ -1446,10 +1526,16 @@ impl<'a> Defunctionalizer<'a> {
                 }
             }
 
-            TermKind::If { cond, then_branch, else_branch } => {
+            TermKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
                 let new_cond = self.specialize_body(cond, func_param_name, lambda_name, captures, span);
-                let new_then = self.specialize_body(then_branch, func_param_name, lambda_name, captures, span);
-                let new_else = self.specialize_body(else_branch, func_param_name, lambda_name, captures, span);
+                let new_then =
+                    self.specialize_body(then_branch, func_param_name, lambda_name, captures, span);
+                let new_else =
+                    self.specialize_body(else_branch, func_param_name, lambda_name, captures, span);
                 Term {
                     id: self.term_ids.next_id(),
                     ty: term.ty.clone(),
@@ -1462,27 +1548,56 @@ impl<'a> Defunctionalizer<'a> {
                 }
             }
 
-            TermKind::Loop { loop_var, loop_var_ty, init, init_bindings, kind, body } => {
+            TermKind::Loop {
+                loop_var,
+                loop_var_ty,
+                init,
+                init_bindings,
+                kind,
+                body,
+            } => {
                 let new_init = self.specialize_body(init, func_param_name, lambda_name, captures, span);
                 let new_init_bindings: Vec<_> = init_bindings
                     .iter()
                     .map(|(name, ty, expr)| {
-                        (name.clone(), ty.clone(), self.specialize_body(expr, func_param_name, lambda_name, captures, span))
+                        (
+                            name.clone(),
+                            ty.clone(),
+                            self.specialize_body(expr, func_param_name, lambda_name, captures, span),
+                        )
                     })
                     .collect();
                 let new_kind = match kind {
                     LoopKind::For { var, var_ty, iter } => LoopKind::For {
                         var: var.clone(),
                         var_ty: var_ty.clone(),
-                        iter: Box::new(self.specialize_body(iter, func_param_name, lambda_name, captures, span)),
+                        iter: Box::new(self.specialize_body(
+                            iter,
+                            func_param_name,
+                            lambda_name,
+                            captures,
+                            span,
+                        )),
                     },
                     LoopKind::ForRange { var, var_ty, bound } => LoopKind::ForRange {
                         var: var.clone(),
                         var_ty: var_ty.clone(),
-                        bound: Box::new(self.specialize_body(bound, func_param_name, lambda_name, captures, span)),
+                        bound: Box::new(self.specialize_body(
+                            bound,
+                            func_param_name,
+                            lambda_name,
+                            captures,
+                            span,
+                        )),
                     },
                     LoopKind::While { cond } => LoopKind::While {
-                        cond: Box::new(self.specialize_body(cond, func_param_name, lambda_name, captures, span)),
+                        cond: Box::new(self.specialize_body(
+                            cond,
+                            func_param_name,
+                            lambda_name,
+                            captures,
+                            span,
+                        )),
                     },
                 };
                 let new_body = self.specialize_body(body, func_param_name, lambda_name, captures, span);
@@ -1524,12 +1639,22 @@ impl<'a> Defunctionalizer<'a> {
                 self.term_references_var(rhs, var_name) || self.term_references_var(body, var_name)
             }
             TermKind::Lam { body, .. } => self.term_references_var(body, var_name),
-            TermKind::If { cond, then_branch, else_branch } => {
+            TermKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
                 self.term_references_var(cond, var_name)
                     || self.term_references_var(then_branch, var_name)
                     || self.term_references_var(else_branch, var_name)
             }
-            TermKind::Loop { init, init_bindings, kind, body, .. } => {
+            TermKind::Loop {
+                init,
+                init_bindings,
+                kind,
+                body,
+                ..
+            } => {
                 self.term_references_var(init, var_name)
                     || init_bindings.iter().any(|(_, _, expr)| self.term_references_var(expr, var_name))
                     || match kind {
@@ -1539,18 +1664,28 @@ impl<'a> Defunctionalizer<'a> {
                     }
                     || self.term_references_var(body, var_name)
             }
-            TermKind::IntLit(_) | TermKind::FloatLit(_) | TermKind::BoolLit(_) | TermKind::StringLit(_) => false,
+            TermKind::IntLit(_) | TermKind::FloatLit(_) | TermKind::BoolLit(_) | TermKind::StringLit(_) => {
+                false
+            }
         }
     }
 
     /// Collect application spine from references (used during specialization).
-    fn collect_spine_ref<'b>(&self, func: &'b FunctionName, arg: &'b Term) -> (FunctionName, Vec<&'b Term>) {
+    fn collect_spine_ref<'b>(
+        &self,
+        func: &'b FunctionName,
+        arg: &'b Term,
+    ) -> (FunctionName, Vec<&'b Term>) {
         let mut args = vec![arg];
         let mut current_func = func;
 
         // Walk up the spine
         while let FunctionName::Term(t) = current_func {
-            if let TermKind::App { func: inner_func, arg: inner_arg } = &t.kind {
+            if let TermKind::App {
+                func: inner_func,
+                arg: inner_arg,
+            } = &t.kind
+            {
                 args.push(inner_arg.as_ref());
                 current_func = inner_func.as_ref();
             } else {
@@ -1576,12 +1711,8 @@ impl<'a> Defunctionalizer<'a> {
         let (params, inner_body) = self.extract_lambda_params(specialized_body);
 
         // Build new param list: remove function param at func_param_idx, add captures at end
-        let mut new_params: Vec<(String, Type<TypeName>)> = params
-            .into_iter()
-            .enumerate()
-            .filter(|(i, _)| *i != func_param_idx)
-            .map(|(_, p)| p)
-            .collect();
+        let mut new_params: Vec<(String, Type<TypeName>)> =
+            params.into_iter().enumerate().filter(|(i, _)| *i != func_param_idx).map(|(_, p)| p).collect();
 
         // Add captures as additional parameters
         for (cap_name, cap_ty) in captures {
@@ -1655,206 +1786,4 @@ impl<'a> Defunctionalizer<'a> {
 /// - All call sites have captures flattened as trailing arguments
 pub fn defunctionalize(program: Program, builtins: &HashSet<String>) -> Program {
     Defunctionalizer::defunctionalize(program, builtins)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn dummy_span() -> Span {
-        Span::dummy()
-    }
-
-    fn i32_ty() -> Type<TypeName> {
-        Type::Constructed(TypeName::Int(32), vec![])
-    }
-
-    fn array_ty(elem: Type<TypeName>) -> Type<TypeName> {
-        Type::Constructed(TypeName::Array, vec![elem])
-    }
-
-    fn arrow(from: Type<TypeName>, to: Type<TypeName>) -> Type<TypeName> {
-        Type::Constructed(TypeName::Arrow, vec![from, to])
-    }
-
-    /// Helper to print TLC term structure for debugging
-    fn print_term(term: &Term, indent: usize) -> String {
-        let pad = "  ".repeat(indent);
-        match &term.kind {
-            TermKind::Var(name) => format!("{}Var({})", pad, name),
-            TermKind::IntLit(n) => format!("{}Int({})", pad, n),
-            TermKind::FloatLit(f) => format!("{}Float({})", pad, f),
-            TermKind::BoolLit(b) => format!("{}Bool({})", pad, b),
-            TermKind::StringLit(s) => format!("{}String({})", pad, s),
-            TermKind::Lam { param, body, .. } => {
-                format!("{}Lam({})\n{}", pad, param, print_term(body, indent + 1))
-            }
-            TermKind::App { func, arg } => {
-                let func_str = match func.as_ref() {
-                    FunctionName::Var(n) => format!("Var({})", n),
-                    FunctionName::BinOp(op) => format!("BinOp({})", op.op),
-                    FunctionName::UnOp(op) => format!("UnOp({})", op.op),
-                    FunctionName::Term(t) => format!("Term:\n{}", print_term(t, indent + 2)),
-                };
-                format!("{}App\n{}  func: {}\n{}  arg:\n{}",
-                    pad, pad, func_str, pad, print_term(arg, indent + 2))
-            }
-            TermKind::Let { name, rhs, body, .. } => {
-                format!("{}Let {} =\n{}\n{}in\n{}",
-                    pad, name, print_term(rhs, indent + 1), pad, print_term(body, indent + 1))
-            }
-            TermKind::If { cond, then_branch, else_branch } => {
-                format!("{}If\n{}\n{}then\n{}\n{}else\n{}",
-                    pad, print_term(cond, indent + 1),
-                    pad, print_term(then_branch, indent + 1),
-                    pad, print_term(else_branch, indent + 1))
-            }
-            TermKind::Loop { loop_var, init, kind, body, .. } => {
-                let kind_str = match kind {
-                    LoopKind::For { var, .. } => format!("for {} in ...", var),
-                    LoopKind::ForRange { var, .. } => format!("for {} < ...", var),
-                    LoopKind::While { .. } => "while ...".to_string(),
-                };
-                format!("{}Loop {} = {} ({})\n{}body:\n{}",
-                    pad, loop_var, print_term(init, 0).trim(),
-                    kind_str, pad, print_term(body, indent + 1))
-            }
-        }
-    }
-
-    /// Helper to print all defs in a program
-    fn print_program(program: &Program) -> String {
-        let mut out = String::new();
-        for def in &program.defs {
-            out.push_str(&format!("\n=== {} (arity {}) ===\n", def.name, def.arity));
-            out.push_str(&print_term(&def.body, 0));
-            out.push('\n');
-        }
-        out
-    }
-
-    #[test]
-    fn test_defunc_simple_lambda_no_capture() {
-        // def f = |x| x
-        let mut ids = TermIdSource::new();
-
-        let lam = Term {
-            id: ids.next_id(),
-            ty: arrow(i32_ty(), i32_ty()),
-            span: dummy_span(),
-            kind: TermKind::Lam {
-                param: "x".to_string(),
-                param_ty: i32_ty(),
-                body: Box::new(Term {
-                    id: ids.next_id(),
-                    ty: i32_ty(),
-                    span: dummy_span(),
-                    kind: TermKind::Var("x".to_string()),
-                }),
-            },
-        };
-
-        let program = Program {
-            defs: vec![Def {
-                name: "f".to_string(),
-                ty: lam.ty.clone(),
-                body: lam,
-                meta: DefMeta::Function,
-                arity: 1,
-            }],
-            uniforms: vec![],
-            storage: vec![],
-        };
-
-        let builtins = HashSet::new();
-        let result = defunctionalize(program, &builtins);
-
-        // Should preserve the parameter lambda (not lift it)
-        assert_eq!(result.defs.len(), 1);
-        assert!(matches!(result.defs[0].body.kind, TermKind::Lam { .. }));
-    }
-
-    #[test]
-    fn test_defunc_lambda_with_capture() {
-        // def f y = let g = |x| x + y in g
-        // The lambda |x| x + y captures y
-        let mut ids = TermIdSource::new();
-
-        // Build: |x| x + y  (where y is free)
-        let inner_lam = Term {
-            id: ids.next_id(),
-            ty: arrow(i32_ty(), i32_ty()),
-            span: dummy_span(),
-            kind: TermKind::Lam {
-                param: "x".to_string(),
-                param_ty: i32_ty(),
-                body: Box::new(Term {
-                    id: ids.next_id(),
-                    ty: i32_ty(),
-                    span: dummy_span(),
-                    kind: TermKind::App {
-                        func: Box::new(FunctionName::BinOp(crate::ast::BinaryOp { op: "+".to_string() })),
-                        arg: Box::new(Term {
-                            id: ids.next_id(),
-                            ty: i32_ty(),
-                            span: dummy_span(),
-                            kind: TermKind::Var("y".to_string()),
-                        }),
-                    },
-                }),
-            },
-        };
-
-        // let g = inner_lam in g
-        let let_expr = Term {
-            id: ids.next_id(),
-            ty: arrow(i32_ty(), i32_ty()),
-            span: dummy_span(),
-            kind: TermKind::Let {
-                name: "g".to_string(),
-                name_ty: arrow(i32_ty(), i32_ty()),
-                rhs: Box::new(inner_lam),
-                body: Box::new(Term {
-                    id: ids.next_id(),
-                    ty: arrow(i32_ty(), i32_ty()),
-                    span: dummy_span(),
-                    kind: TermKind::Var("g".to_string()),
-                }),
-            },
-        };
-
-        // |y| let_expr
-        let outer_lam = Term {
-            id: ids.next_id(),
-            ty: arrow(i32_ty(), arrow(i32_ty(), i32_ty())),
-            span: dummy_span(),
-            kind: TermKind::Lam {
-                param: "y".to_string(),
-                param_ty: i32_ty(),
-                body: Box::new(let_expr),
-            },
-        };
-
-        let program = Program {
-            defs: vec![Def {
-                name: "f".to_string(),
-                ty: outer_lam.ty.clone(),
-                body: outer_lam,
-                meta: DefMeta::Function,
-                arity: 1,
-            }],
-            uniforms: vec![],
-            storage: vec![],
-        };
-
-        let builtins = HashSet::new();
-        let result = defunctionalize(program, &builtins);
-
-        // Should have lifted the inner lambda
-        assert!(result.defs.len() >= 2, "Expected lifted lambda def");
-
-        // Find the lifted lambda
-        let lifted = result.defs.iter().find(|d| d.name.starts_with("_lambda_"));
-        assert!(lifted.is_some(), "Should have a _lambda_ definition");
-    }
 }
