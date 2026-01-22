@@ -158,6 +158,22 @@ fn apply_type_subst_to_funcname(func_name: &FunctionName, subst: &TypeSubst, ter
     }
 }
 
+/// Format a type as a string key for cache lookups.
+/// Uses a compact representation that uniquely identifies the type.
+fn format_type_for_key(ty: &Type<TypeName>) -> String {
+    match ty {
+        Type::Variable(v) => format!("${}", v),
+        Type::Constructed(name, args) => {
+            if args.is_empty() {
+                format!("{:?}", name)
+            } else {
+                let args_str: Vec<String> = args.iter().map(format_type_for_key).collect();
+                format!("{:?}<{}>", name, args_str.join(","))
+            }
+        }
+    }
+}
+
 /// Apply a type substitution to all types in a Term (recursively).
 fn apply_type_subst_to_term(term: &Term, subst: &TypeSubst, term_ids: &mut TermIdSource) -> Term {
     let new_ty = apply_type_subst(&term.ty, subst);
@@ -371,8 +387,9 @@ pub struct Defunctionalizer<'a> {
     env: HashMap<String, StaticVal>,
     /// HOF info from detection pass
     hof_info: HashMap<String, HofInfo>,
-    /// Cache: (hof_name, lambda_name) -> specialized_name
-    specialization_cache: HashMap<(String, String), String>,
+    /// Cache: (hof_name, lambda_name, arg_types) -> specialized_name
+    /// Includes arg types to handle same HOF+lambda at different type instantiations
+    specialization_cache: HashMap<(String, String, Vec<String>), String>,
     /// Counter for generating unique specialization names
     specialization_counter: usize,
 }
@@ -1214,8 +1231,9 @@ impl<'a> Defunctionalizer<'a> {
             _ => unreachable!("specialize_hof_call called without Lambda StaticVal"),
         };
 
-        // 2. Check cache
-        let cache_key = (hof_name.to_string(), lambda_name.clone());
+        // 2. Check cache (include arg types to handle different type instantiations)
+        let arg_type_keys: Vec<String> = arg_results.iter().map(|ar| format_type_for_key(&ar.term.ty)).collect();
+        let cache_key = (hof_name.to_string(), lambda_name.clone(), arg_type_keys);
         if let Some(specialized_name) = self.specialization_cache.get(&cache_key).cloned() {
             return self.build_specialized_call(&specialized_name, func_param_idx, arg_results, &captures, ty, span);
         }
