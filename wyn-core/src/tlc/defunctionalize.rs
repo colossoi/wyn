@@ -1317,10 +1317,12 @@ impl<'a> Defunctionalizer<'a> {
         // Restore env
         self.env = old_env;
 
-        // Apply type substitution to the defunced body
+        // Apply type substitution to the defunced body AND to the param types
         let defunced_body = apply_type_subst_to_term(&defunced_body, &type_subst, &mut self.term_ids);
+        let new_params: Vec<(String, Type<TypeName>)> =
+            new_params.into_iter().map(|(name, ty)| (name, apply_type_subst(&ty, &type_subst))).collect();
 
-        // Rebuild nested lambdas with new params
+        // Rebuild nested lambdas with substituted params
         let rebuilt = self.rebuild_nested_lam(&new_params, defunced_body, hof_def.body.span);
 
         let specialized_def = Def {
