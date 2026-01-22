@@ -283,15 +283,6 @@ impl<'a> InPlaceRewriter<'a> {
                 args: args.iter().map(|e| self.remap(*e)).collect(),
             },
 
-            // Closures
-            Expr::Closure {
-                lambda_name,
-                captures,
-            } => Expr::Closure {
-                lambda_name: lambda_name.clone(),
-                captures: captures.iter().map(|c| self.remap(*c)).collect(),
-            },
-
             // Special
             Expr::Materialize(inner) => Expr::Materialize(self.remap(*inner)),
             Expr::Attributed { attributes, expr } => Expr::Attributed {

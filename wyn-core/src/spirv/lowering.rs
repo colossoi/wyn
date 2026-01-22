@@ -886,9 +886,6 @@ impl<'a> LowerCtx<'a> {
                 Expr::Call { func, .. } => {
                     self.ensure_lowered(func)?;
                 }
-                Expr::Closure { lambda_name, .. } => {
-                    self.ensure_lowered(lambda_name)?;
-                }
                 _ => {}
             }
         }
@@ -2374,9 +2371,7 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                     constructor.composite_extract_cached(result_type, composite_id, index)
                 }
                 // SOAC (Second-Order Array Combinator) intrinsics
-                "_w_intrinsic_map" | "map" => {
-                    lower_map(constructor, body, args, expr_ty, result_type)
-                }
+                "_w_intrinsic_map" | "map" => lower_map(constructor, body, args, expr_ty, result_type),
                 "_w_intrinsic_inplace_map" => {
                     lower_inplace_map(constructor, body, args, expr_ty, result_type)
                 }
@@ -2387,9 +2382,7 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                 "_w_intrinsic_scatter" => lower_scatter(constructor, body, args, result_type),
                 "_w_intrinsic_hist_1d" => lower_hist_1d(constructor, body, args, result_type),
                 "_w_intrinsic_length" => lower_length(constructor, body, args),
-                "_w_intrinsic_replicate" => {
-                    lower_replicate(constructor, body, args, expr_ty, result_type)
-                }
+                "_w_intrinsic_replicate" => lower_replicate(constructor, body, args, expr_ty, result_type),
                 "_w_intrinsic_rotr32" => lower_rotr32(constructor, body, args),
                 "_w_intrinsic_sha256_block" => lower_sha256_block(constructor, body, args, result_type),
                 "_w_intrinsic_sha256_block_with_state" => {
@@ -2420,28 +2413,6 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
 
             // Return the variable pointer (for use with OpAccessChain)
             Ok(var_id)
-        }
-
-        Expr::Closure { captures, .. } => {
-            // Lower each capture individually
-            if captures.is_empty() {
-                // Empty closure - return dummy value
-                Ok(constructor.const_i32(0))
-            } else if captures.len() == 1 {
-                // Single capture - return it directly
-                lower_expr(constructor, body, captures[0])
-            } else {
-                // Multiple captures - construct struct from capture types
-                let elem_ids: Vec<spirv::Word> = captures
-                    .iter()
-                    .map(|&c| lower_expr(constructor, body, c))
-                    .collect::<Result<Vec<_>>>()?;
-                // Build struct type from capture types (not the closure's function type)
-                let elem_types: Vec<spirv::Word> =
-                    captures.iter().map(|&c| constructor.ast_type_to_spirv(body.get_type(c))).collect();
-                let struct_type = constructor.builder.type_struct(elem_types);
-                Ok(constructor.builder.composite_construct(struct_type, None, elem_ids)?)
-            }
         }
 
         Expr::Tuple(elems) => {
@@ -3051,7 +3022,30 @@ fn try_extract_const_int(body: &Body, expr_id: ExprId) -> Option<i32> {
 // SOAC (Second-Order Array Combinator) lowering helpers
 // =============================================================================
 
-/// Extract closure information from a SOAC operator argument.
+/// Extract closure information from flattened SOAC args.
+/// Args format: [func_ref, other_args..., captures...]
+/// For map: [func_ref, array, captures...]
+/// Returns (function_name, capture_values) where capture_values is a Vec of lowered captures.
+fn extract_flattened_closure_info(
+    constructor: &mut Constructor,
+    body: &Body,
+    args: &[ExprId],
+) -> Result<(String, Vec<spirv::Word>)> {
+    // args[0] should be a Global reference to the function name
+    let func_name = match body.get_expr(args[0]) {
+        Expr::Global(name) => name.clone(),
+        other => bail_spirv!("Expected function reference (Global) in SOAC, got {:?}", other),
+    };
+
+    // For map: args[1] is array, args[2..] are captures
+    // Lower captures (skip func_ref at 0 and array at 1)
+    let capture_vals: Vec<spirv::Word> =
+        args[2..].iter().map(|&c| lower_expr(constructor, body, c)).collect::<Result<Vec<_>>>()?;
+
+    Ok((func_name, capture_vals))
+}
+
+/// Extract function information from a SOAC operator argument.
 /// Returns (function_name, capture_values) where capture_values is a Vec of individual captures.
 fn extract_closure_info(
     constructor: &mut Constructor,
@@ -3073,15 +3067,6 @@ fn extract_closure_info_inner(
     }
 
     match body.get_expr(arg_expr_id) {
-        Expr::Closure {
-            lambda_name,
-            captures,
-        } => {
-            // Lower each capture individually
-            let capture_vals: Vec<spirv::Word> =
-                captures.iter().map(|&c| lower_expr(constructor, body, c)).collect::<Result<Vec<_>>>()?;
-            Ok((lambda_name.clone(), capture_vals))
-        }
         Expr::Global(name) => {
             // Named function reference - no captures
             Ok((name.clone(), vec![]))
@@ -3093,9 +3078,11 @@ fn extract_closure_info_inner(
                 args.iter().map(|&a| lower_expr(constructor, body, a)).collect::<Result<Vec<_>>>()?;
             Ok((func.clone(), capture_vals))
         }
-        Expr::Let { rhs, body: let_body, .. } => {
+        Expr::Let {
+            rhs, body: let_body, ..
+        } => {
             // Let binding - look at the body (the continuation)
-            // But first check the rhs in case it's the closure
+            // But first check the rhs in case it's the function
             if let Ok(result) = extract_closure_info_inner(constructor, body, *rhs, depth + 1) {
                 return Ok(result);
             }
@@ -3111,7 +3098,7 @@ fn extract_closure_info_inner(
             }
         }
         other => {
-            bail_spirv!("Expected closure or function reference, got {:?}", other);
+            bail_spirv!("Expected function reference (Global), got {:?}", other);
         }
     }
 }
@@ -3275,14 +3262,18 @@ fn lower_map(
     expr_ty: &PolyType<TypeName>,
     result_type: spirv::Word,
 ) -> Result<spirv::Word> {
-    if args.len() != 2 {
+    if args.len() < 2 {
         bail_spirv!(
-            "_w_intrinsic_map requires 2 args (function, array), got {}",
+            "_w_intrinsic_map requires at least 2 args (function, array), got {}",
             args.len()
         );
     }
 
-    let (func_name, capture_vals) = extract_closure_info(constructor, body, args[0])?;
+    // Args format: [func_ref, array, captures...]
+    // - args[0] is Global(func_name) or Closure
+    // - args[1] is the array
+    // - args[2..] are captures (may be empty)
+    let (func_name, capture_vals) = extract_flattened_closure_info(constructor, body, args)?;
 
     let arr_expr_id = args[1];
     let arr_ty = body.get_type(arr_expr_id);
@@ -3514,17 +3505,28 @@ fn lower_replicate(
 }
 
 /// Lower `reduce` SOAC: reduce op ne [a,b,c] = op(op(op(ne,a),b),c)
+/// Args format: [op_ref, ne, array, captures...]
 fn lower_reduce(
     constructor: &mut Constructor,
     body: &Body,
     args: &[ExprId],
     result_type: spirv::Word,
 ) -> Result<spirv::Word> {
-    if args.len() != 3 {
-        bail_spirv!("reduce requires 3 args (op, ne, array), got {}", args.len());
+    if args.len() < 3 {
+        bail_spirv!(
+            "reduce requires at least 3 args (op, ne, array), got {}",
+            args.len()
+        );
     }
 
-    let (func_name, capture_vals) = extract_closure_info(constructor, body, args[0])?;
+    // Args: [op_ref, ne, array, captures...]
+    let func_name = match body.get_expr(args[0]) {
+        Expr::Global(name) => name.clone(),
+        other => bail_spirv!("Expected function reference (Global) in reduce, got {:?}", other),
+    };
+    let capture_vals: Vec<spirv::Word> =
+        args[3..].iter().map(|&c| lower_expr(constructor, body, c)).collect::<Result<Vec<_>>>()?;
+
     let neutral_val = lower_expr(constructor, body, args[1])?;
     let array_val = lower_expr(constructor, body, args[2])?;
 
@@ -3551,17 +3553,28 @@ fn lower_reduce(
 }
 
 /// Lower `scan` SOAC (inclusive): scan op ne [a,b,c] = [a, op(a,b), op(op(a,b),c)]
+/// Args format: [op_ref, ne, array, captures...]
 fn lower_scan(
     constructor: &mut Constructor,
     body: &Body,
     args: &[ExprId],
     result_type: spirv::Word,
 ) -> Result<spirv::Word> {
-    if args.len() != 3 {
-        bail_spirv!("scan requires 3 args (op, ne, array), got {}", args.len());
+    if args.len() < 3 {
+        bail_spirv!(
+            "scan requires at least 3 args (op, ne, array), got {}",
+            args.len()
+        );
     }
 
-    let (func_name, capture_vals) = extract_closure_info(constructor, body, args[0])?;
+    // Args: [op_ref, ne, array, captures...]
+    let func_name = match body.get_expr(args[0]) {
+        Expr::Global(name) => name.clone(),
+        other => bail_spirv!("Expected function reference (Global) in scan, got {:?}", other),
+    };
+    let capture_vals: Vec<spirv::Word> =
+        args[3..].iter().map(|&c| lower_expr(constructor, body, c)).collect::<Result<Vec<_>>>()?;
+
     let _neutral_val = lower_expr(constructor, body, args[1])?; // Used for empty arrays
     let array_val = lower_expr(constructor, body, args[2])?;
 
@@ -3598,17 +3611,28 @@ fn lower_scan(
 }
 
 /// Lower `filter` SOAC: filter pred [a,b,c] = elements where pred is true
+/// Args format: [pred_ref, array, captures...]
 fn lower_filter(
     constructor: &mut Constructor,
     body: &Body,
     args: &[ExprId],
     result_type: spirv::Word,
 ) -> Result<spirv::Word> {
-    if args.len() != 2 {
-        bail_spirv!("filter requires 2 args (pred, array), got {}", args.len());
+    if args.len() < 2 {
+        bail_spirv!(
+            "filter requires at least 2 args (pred, array), got {}",
+            args.len()
+        );
     }
 
-    let (func_name, capture_vals) = extract_closure_info(constructor, body, args[0])?;
+    // Args: [pred_ref, array, captures...]
+    let func_name = match body.get_expr(args[0]) {
+        Expr::Global(name) => name.clone(),
+        other => bail_spirv!("Expected function reference (Global) in filter, got {:?}", other),
+    };
+    let capture_vals: Vec<spirv::Word> =
+        args[2..].iter().map(|&c| lower_expr(constructor, body, c)).collect::<Result<Vec<_>>>()?;
+
     let array_val = lower_expr(constructor, body, args[1])?;
 
     let arg1_ty = body.get_type(args[1]);
@@ -4093,23 +4117,12 @@ fn lower_loop_while(
     // Call condition function: cond_fn(captures..., acc)
     let mut cond_call_args = cond_captures.clone();
     cond_call_args.push(acc_phi_id);
-    let cond_result = constructor.builder.function_call(
-        constructor.bool_type,
-        None,
-        cond_func_id,
-        cond_call_args,
-    )?;
+    let cond_result =
+        constructor.builder.function_call(constructor.bool_type, None, cond_func_id, cond_call_args)?;
 
     // Loop merge and conditional branch
-    constructor.builder.loop_merge(
-        merge_block_id,
-        continue_block_id,
-        spirv::LoopControl::NONE,
-        [],
-    )?;
-    constructor
-        .builder
-        .branch_conditional(cond_result, body_block_id, merge_block_id, [])?;
+    constructor.builder.loop_merge(merge_block_id, continue_block_id, spirv::LoopControl::NONE, [])?;
+    constructor.builder.branch_conditional(cond_result, body_block_id, merge_block_id, [])?;
 
     // Body block
     constructor.begin_block(body_block_id)?;
@@ -4117,12 +4130,7 @@ fn lower_loop_while(
     // Call body function: body_fn(captures..., acc)
     let mut body_call_args = body_captures.clone();
     body_call_args.push(acc_phi_id);
-    let new_acc = constructor.builder.function_call(
-        result_type,
-        None,
-        body_func_id,
-        body_call_args,
-    )?;
+    let new_acc = constructor.builder.function_call(result_type, None, body_func_id, body_call_args)?;
 
     // Branch to continue block
     constructor.builder.branch(continue_block_id)?;
@@ -4137,10 +4145,7 @@ fn lower_loop_while(
     // Insert phi at the beginning of header block
     // Need to select header block first
     constructor.builder.select_block(Some(header_block_idx))?;
-    let phi_incoming = vec![
-        (init_val, pre_header_block),
-        (new_acc, continue_block_id),
-    ];
+    let phi_incoming = vec![(init_val, pre_header_block), (new_acc, continue_block_id)];
     constructor.builder.insert_phi(
         rspirv::dr::InsertPoint::Begin,
         result_type,
@@ -4210,23 +4215,12 @@ fn lower_loop_for(
     let acc_phi_id = constructor.builder.id();
 
     // Loop condition: idx < bound
-    let cond_result = constructor.builder.s_less_than(
-        constructor.bool_type,
-        None,
-        idx_phi_id,
-        bound_val,
-    )?;
+    let cond_result =
+        constructor.builder.s_less_than(constructor.bool_type, None, idx_phi_id, bound_val)?;
 
     // Loop merge and conditional branch
-    constructor.builder.loop_merge(
-        merge_block_id,
-        continue_block_id,
-        spirv::LoopControl::NONE,
-        [],
-    )?;
-    constructor
-        .builder
-        .branch_conditional(cond_result, body_block_id, merge_block_id, [])?;
+    constructor.builder.loop_merge(merge_block_id, continue_block_id, spirv::LoopControl::NONE, [])?;
+    constructor.builder.branch_conditional(cond_result, body_block_id, merge_block_id, [])?;
 
     // Body block
     constructor.begin_block(body_block_id)?;
@@ -4235,12 +4229,7 @@ fn lower_loop_for(
     let mut body_call_args = body_captures.clone();
     body_call_args.push(idx_phi_id);
     body_call_args.push(acc_phi_id);
-    let new_acc = constructor.builder.function_call(
-        result_type,
-        None,
-        body_func_id,
-        body_call_args,
-    )?;
+    let new_acc = constructor.builder.function_call(result_type, None, body_func_id, body_call_args)?;
 
     // Branch to continue block
     constructor.builder.branch(continue_block_id)?;
@@ -4257,10 +4246,7 @@ fn lower_loop_for(
     constructor.builder.select_block(Some(header_block_idx))?;
 
     // Index phi: (0 from pre_header, new_idx from continue)
-    let idx_phi_incoming = vec![
-        (zero, pre_header_block),
-        (new_idx, continue_block_id),
-    ];
+    let idx_phi_incoming = vec![(zero, pre_header_block), (new_idx, continue_block_id)];
     constructor.builder.insert_phi(
         rspirv::dr::InsertPoint::Begin,
         i32_type,
@@ -4270,10 +4256,7 @@ fn lower_loop_for(
 
     // Accumulator phi: (init_val from pre_header, new_acc from continue)
     // Note: Insert after idx phi since we're inserting at Begin
-    let acc_phi_incoming = vec![
-        (init_val, pre_header_block),
-        (new_acc, continue_block_id),
-    ];
+    let acc_phi_incoming = vec![(init_val, pre_header_block), (new_acc, continue_block_id)];
     constructor.builder.insert_phi(
         rspirv::dr::InsertPoint::Begin,
         result_type,

@@ -351,23 +351,6 @@ impl ConstantFolder {
                 ))
             }
 
-            // Closure - map captures
-            Expr::Closure {
-                lambda_name,
-                captures,
-            } => {
-                let new_captures: Vec<_> = captures.iter().map(|c| self.expr_map[c]).collect();
-                Ok(body.alloc_expr(
-                    Expr::Closure {
-                        lambda_name: lambda_name.clone(),
-                        captures: new_captures,
-                    },
-                    ty.clone(),
-                    span,
-                    node_id,
-                ))
-            }
-
             // Materialize - map inner
             Expr::Materialize(inner) => {
                 let new_inner = self.expr_map[inner];

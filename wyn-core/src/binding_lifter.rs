@@ -335,23 +335,6 @@ impl BindingLifter {
                 new_body.alloc_expr(Expr::Matrix(new_rows), ty.clone(), span, node_id)
             }
 
-            // Closure - map captures
-            Expr::Closure {
-                lambda_name,
-                captures,
-            } => {
-                let new_captures: Vec<_> = captures.iter().map(|c| self.expr_map[c]).collect();
-                new_body.alloc_expr(
-                    Expr::Closure {
-                        lambda_name: lambda_name.clone(),
-                        captures: new_captures,
-                    },
-                    ty.clone(),
-                    span,
-                    node_id,
-                )
-            }
-
             // Materialize - map inner
             Expr::Materialize(inner) => {
                 let new_inner = self.expr_map[inner];
@@ -704,12 +687,6 @@ fn collect_free_locals_inner(
                 for elem in row {
                     collect_free_locals_inner(body, *elem, bound, free);
                 }
-            }
-        }
-
-        Expr::Closure { captures, .. } => {
-            for cap in captures {
-                collect_free_locals_inner(body, *cap, bound, free);
             }
         }
 

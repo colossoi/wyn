@@ -4,7 +4,7 @@
 
 use super::{Def as TlcDef, DefMeta, FunctionName, Program as TlcProgram, Term, TermKind};
 use crate::ast::{self, NodeId, PatternKind, Span, TypeName};
-use crate::mir::{self, Body, Def as MirDef, Expr, ExprId, LocalDecl, LocalId, LocalKind};
+use crate::mir::{self, ArrayBacking, Body, Def as MirDef, Expr, ExprId, LocalDecl, LocalId, LocalKind};
 use crate::types::TypeScheme;
 use polytype::Type;
 use std::collections::HashMap;
@@ -25,10 +25,7 @@ pub struct TlcToMir<'a> {
 
 impl<'a> TlcToMir<'a> {
     /// Transform a lifted TLC program to MIR.
-    pub fn transform(
-        program: &TlcProgram,
-        schemes: &'a HashMap<String, TypeScheme>,
-    ) -> mir::Program {
+    pub fn transform(program: &TlcProgram, schemes: &'a HashMap<String, TypeScheme>) -> mir::Program {
         // Collect top-level names
         let top_level: HashMap<String, TlcDef> =
             program.defs.iter().map(|d| (d.name.clone(), d.clone())).collect();
@@ -306,23 +303,9 @@ impl<'a> TlcToMir<'a> {
                 if let Some(&local_id) = self.locals.get(name) {
                     // Local variable reference
                     body.alloc_expr(Expr::Local(local_id), ty, span, node_id)
-                } else if let Some(def) = self.top_level.get(name) {
-                    // Check if it's a function (has arity > 0) or a constant (arity 0)
-                    if def.arity == 0 {
-                        // Top-level constant → Global reference
-                        body.alloc_expr(Expr::Global(name.clone()), ty, span, node_id)
-                    } else {
-                        // Top-level function used as value → Closure with no captures
-                        body.alloc_expr(
-                            Expr::Closure {
-                                lambda_name: name.clone(),
-                                captures: vec![],
-                            },
-                            ty,
-                            span,
-                            node_id,
-                        )
-                    }
+                } else if self.top_level.contains_key(name) {
+                    // Top-level function or constant → Global reference
+                    body.alloc_expr(Expr::Global(name.clone()), ty, span, node_id)
                 } else {
                     // Unknown variable - could be an intrinsic or global constant
                     body.alloc_expr(Expr::Global(name.clone()), ty, span, node_id)
@@ -504,9 +487,7 @@ impl<'a> TlcToMir<'a> {
                 )
             }
 
-            FunctionName::Var(name) => {
-                self.transform_var_application(name, &args, ty, span, node_id, body)
-            }
+            FunctionName::Var(name) => self.transform_var_application(name, &args, ty, span, node_id, body),
 
             FunctionName::Term(inner_term) => {
                 // The base is a computed function value (not an App - we would have
@@ -635,15 +616,12 @@ impl<'a> TlcToMir<'a> {
                     node_id,
                 )
             } else if arg_ids.len() < arity {
-                // Partial application - emit Closure (legitimate for HOF arguments)
-                body.alloc_expr(
-                    Expr::Closure {
-                        lambda_name: name.to_string(),
-                        captures: arg_ids,
-                    },
-                    ty,
-                    span,
-                    node_id,
+                panic!(
+                    "BUG: Partial application not supported - {} requires {} args, got {}. \
+                     Defunctionalization should have eliminated partial applications.",
+                    name,
+                    arity,
+                    arg_ids.len()
                 )
             } else {
                 panic!(
@@ -653,28 +631,9 @@ impl<'a> TlcToMir<'a> {
                     arg_ids.len()
                 )
             }
-        } else if name.starts_with("_w_") {
-            // Intrinsic
-            body.alloc_expr(
-                Expr::Intrinsic {
-                    name: name.to_string(),
-                    args: arg_ids,
-                },
-                ty,
-                span,
-                node_id,
-            )
         } else {
-            // Unknown function - assume it's a full call
-            body.alloc_expr(
-                Expr::Call {
-                    func: name.to_string(),
-                    args: arg_ids,
-                },
-                ty,
-                span,
-                node_id,
-            )
+            // Intrinsic or unknown function
+            self.emit_call_or_intrinsic(name, arg_ids, ty, span, node_id, body)
         }
     }
 
@@ -704,67 +663,7 @@ impl<'a> TlcToMir<'a> {
         match body.get_expr(func_id).clone() {
             Expr::Global(func_name) => {
                 // Global reference - could be a function or intrinsic
-                if func_name.starts_with("_w_") {
-                    body.alloc_expr(
-                        Expr::Intrinsic {
-                            name: func_name,
-                            args: arg_ids,
-                        },
-                        ty,
-                        span,
-                        node_id,
-                    )
-                } else {
-                    body.alloc_expr(
-                        Expr::Call {
-                            func: func_name,
-                            args: arg_ids,
-                        },
-                        ty,
-                        span,
-                        node_id,
-                    )
-                }
-            }
-            Expr::Closure {
-                lambda_name,
-                captures: existing_captures,
-            } => {
-                // Extend closure captures with the new arguments
-                let mut captures = existing_captures;
-                captures.extend(arg_ids);
-
-                // Check if we now have all arguments for a full call
-                let func_arity = self
-                    .top_level
-                    .get(&lambda_name)
-                    .map(|d| d.arity)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "BUG: Function '{}' not found in top_level - missing arity info",
-                            lambda_name
-                        )
-                    });
-
-                if captures.len() == func_arity {
-                    // Full application - convert to Call
-                    body.alloc_expr(
-                        Expr::Call {
-                            func: lambda_name,
-                            args: captures,
-                        },
-                        ty,
-                        span,
-                        node_id,
-                    )
-                } else {
-                    panic!(
-                        "BUG: Wrong number of arguments for closure {}: expected {}, got {} (no partial application allowed)",
-                        lambda_name,
-                        func_arity,
-                        captures.len()
-                    )
-                }
+                self.emit_call_or_intrinsic(&func_name, arg_ids, ty, span, node_id, body)
             }
             _ => {
                 // True higher-order application - need _w_apply for each argument
@@ -782,6 +681,71 @@ impl<'a> TlcToMir<'a> {
                 }
                 result
             }
+        }
+    }
+
+    /// Emit either an Intrinsic or Call expression based on function name.
+    /// Handles SOAC closure flattening for intrinsics.
+    fn emit_call_or_intrinsic(
+        &self,
+        name: &str,
+        args: Vec<ExprId>,
+        ty: Type<TypeName>,
+        span: Span,
+        node_id: NodeId,
+        body: &mut Body,
+    ) -> ExprId {
+        // Handle special literal intrinsics that become MIR constructs
+        match name {
+            "_w_vec_lit" => {
+                return body.alloc_expr(Expr::Vector(args), ty, span, node_id);
+            }
+            "_w_array_lit" => {
+                let len = args.len();
+                let size = body.alloc_expr(
+                    Expr::Int(len.to_string()),
+                    Type::Constructed(TypeName::Int(32), vec![]),
+                    span,
+                    node_id,
+                );
+                return body.alloc_expr(
+                    Expr::Array {
+                        backing: ArrayBacking::Literal(args),
+                        size,
+                    },
+                    ty,
+                    span,
+                    node_id,
+                );
+            }
+            "_w_tuple" => {
+                return body.alloc_expr(Expr::Tuple(args), ty, span, node_id);
+            }
+            _ => {}
+        }
+
+        if name.starts_with("_w_") {
+            // Intrinsic call - args already flattened by defunctionalization
+            body.alloc_expr(
+                Expr::Intrinsic {
+                    name: name.to_string(),
+                    args,
+                },
+                ty,
+                span,
+                node_id,
+            )
+        } else {
+            // Regular function call
+            body.alloc_expr(
+                Expr::Call {
+                    func: name.to_string(),
+                    args,
+                },
+                ty,
+                span,
+                node_id,
+            )
         }
     }
 

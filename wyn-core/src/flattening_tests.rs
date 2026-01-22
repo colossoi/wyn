@@ -228,21 +228,16 @@ fn test_lambda_defunctionalization() {
 fn test_lambda_with_capture() {
     let mir = flatten_program("def f(y) = let g = |x| x + y in g(1)");
 
-    // Lambda should capture y - check for closure with captures
+    // After defunctionalization, lambda with captures becomes a lifted function
+    // that takes captures as extra parameters. The call g(1) becomes _lambda_N(y, 1).
     let f_def = find_def(&mir, "f");
     let body = get_body(f_def);
-    let has_closure_with_capture = body.exprs.iter().any(|expr| {
-        if let mir::Expr::Closure { captures, .. } = expr {
-            // Check that captures is non-empty (i.e., has actual captures)
-            !captures.is_empty()
-        } else {
-            false
-        }
+
+    // Check that there's a Call to a lifted lambda
+    let has_lambda_call = body.exprs.iter().any(|expr| {
+        if let mir::Expr::Call { func, .. } = expr { func.starts_with("_lambda") } else { false }
     });
-    assert!(
-        has_closure_with_capture,
-        "Expected closure with captured variables"
-    );
+    assert!(has_lambda_call, "Expected call to lifted lambda function");
 }
 
 #[test]
@@ -452,6 +447,9 @@ fn test_lambda_captures_typed_variable() {
     // This test reproduces an issue where a lambda captures a typed variable (like an array),
     // and the free variable rewriting creates _w_closure.mat, which then fails when trying
     // to resolve 'mat' as a field access on the closure.
+    //
+    // After defunctionalization, the lambda becomes a lifted function that takes arr as a
+    // parameter. The SOAC call becomes: _w_intrinsic_map(_lambda_N, [0,1,2,3], arr)
     let mir = flatten_program(
         r#"
 def test_capture(arr: [4]i32) i32 =
@@ -459,22 +457,20 @@ def test_capture(arr: [4]i32) i32 =
     result[0]
 "#,
     );
-    // Lambda should capture arr - check for closure with captures in body
-    let mut has_closure_with_capture = false;
-    for def in &mir.defs {
-        if let mir::Def::Function { body, .. } = def {
-            for expr in &body.exprs {
-                if let mir::Expr::Closure { captures, .. } = expr {
-                    // Check that captures is non-empty
-                    if !captures.is_empty() {
-                        has_closure_with_capture = true;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    assert!(has_closure_with_capture, "Lambda should capture arr");
+
+    // Check that there's a lifted lambda function with arr as a parameter
+    let has_lambda = mir.defs.iter().any(|def| {
+        if let mir::Def::Function { name, .. } = def { name.starts_with("_lambda") } else { false }
+    });
+    assert!(has_lambda, "Lambda should be lifted to a top-level function");
+
+    // Check that there's a map intrinsic call
+    let test_def = find_def(&mir, "test_capture");
+    let body = get_body(test_def);
+    let has_map_intrinsic = body.exprs.iter().any(|expr| {
+        if let mir::Expr::Intrinsic { name, .. } = expr { name == "_w_intrinsic_map" } else { false }
+    });
+    assert!(has_map_intrinsic, "Should have _w_intrinsic_map call");
 }
 
 #[test]
@@ -1216,14 +1212,20 @@ def sum_array(arr: [4]f32) f32 =
     });
     assert!(lambda_fn.is_some(), "Expected lambda function definition");
 
-    // Check that reduce call exists
+    // Check that reduce intrinsic call exists
+    // (reduce is rewritten to _w_intrinsic_reduce during desugaring)
     let mut has_reduce_call = false;
     for def in &mir.defs {
         if let mir::Def::Function { body, name, .. } = def {
             if name == "sum_array" {
                 for expr in &body.exprs {
-                    if let mir::Expr::Call { func, args } = expr {
-                        if func == "reduce" && args.len() == 3 {
+                    if let mir::Expr::Intrinsic {
+                        name: intrinsic_name,
+                        args,
+                    } = expr
+                    {
+                        // With no captures, reduce has 3 args: [lambda_ref, neutral_element, array]
+                        if intrinsic_name == "_w_intrinsic_reduce" && args.len() == 3 {
                             has_reduce_call = true;
                         }
                     }
@@ -1231,7 +1233,7 @@ def sum_array(arr: [4]f32) f32 =
             }
         }
     }
-    assert!(has_reduce_call, "Expected reduce call with 3 arguments");
+    assert!(has_reduce_call, "Expected _w_intrinsic_reduce with 3 arguments");
 }
 
 #[test]

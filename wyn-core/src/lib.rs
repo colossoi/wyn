@@ -1,5 +1,4 @@
 pub mod ast;
-pub mod defun_analysis;
 pub mod diags;
 pub mod error;
 pub mod impl_source;
@@ -296,7 +295,7 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 // TLC Pipeline (AST -> MIR):
 //       -> .to_tlc()                                    -> TlcTransformed
 //       -> .partial_eval() or .skip_partial_eval()      -> TlcTransformed (optimized)
-//       -> .lift()                                      -> TlcLifted
+//       -> .defunctionalize()                           -> TlcDefunctionalized
 //       -> .to_mir()                                    -> Flattened
 //
 // BackEnd Pipeline (MIR -> output):
@@ -343,14 +342,13 @@ impl FrontEnd {
         let mut node_counter = NodeCounter::new();
 
         // Create prelude (parsed/elaborated ASTs only - type-checking happens later)
-        let module_manager =
-            match module_manager::ModuleManager::create_prelude(&mut node_counter) {
-                Ok(prelude) => module_manager::ModuleManager::from_prelude(prelude),
-                Err(e) => {
-                    eprintln!("ERROR creating prelude: {:?}", e);
-                    module_manager::ModuleManager::new_empty()
-                }
-            };
+        let module_manager = match module_manager::ModuleManager::create_prelude(&mut node_counter) {
+            Ok(prelude) => module_manager::ModuleManager::from_prelude(prelude),
+            Err(e) => {
+                eprintln!("ERROR creating prelude: {:?}", e);
+                module_manager::ModuleManager::new_empty()
+            }
+        };
 
         // Type-related state is populated during type_check()
         let context = Context::default();
@@ -669,26 +667,35 @@ impl TlcTransformed {
         self
     }
 
-    /// Lift all lambdas to top-level definitions
-    pub fn lift(self) -> TlcLifted {
-        let lifted = tlc::lift::LambdaLifter::lift(self.tlc, &self.builtins);
-        TlcLifted {
-            tlc: lifted,
+    /// Defunctionalize: lift lambdas and flatten SOAC closure captures.
+    ///
+    /// This replaces the old `lift()` method with Futhark-style defunctionalization
+    /// that properly handles SOAC call sites.
+    pub fn defunctionalize(self) -> TlcDefunctionalized {
+        let defunc = tlc::defunctionalize::defunctionalize(self.tlc, &self.builtins);
+        TlcDefunctionalized {
+            tlc: defunc,
             type_table: self.type_table,
             schemes: self.schemes,
         }
     }
+
+    /// Old lift method - deprecated, use defunctionalize() instead
+    #[deprecated(note = "Use defunctionalize() instead")]
+    pub fn lift(self) -> TlcDefunctionalized {
+        self.defunctionalize()
+    }
 }
 
-/// TLC with all lambdas lifted to top-level
-pub struct TlcLifted {
+/// TLC with all lambdas defunctionalized (lifted + SOAC captures flattened)
+pub struct TlcDefunctionalized {
     pub tlc: tlc::Program,
     pub type_table: TypeTable,
     /// Type schemes for functions (for monomorphization)
     schemes: HashMap<String, types::TypeScheme>,
 }
 
-impl TlcLifted {
+impl TlcDefunctionalized {
     /// Transform TLC to MIR
     pub fn to_mir(self) -> Flattened {
         // Debug: print lifted TLC

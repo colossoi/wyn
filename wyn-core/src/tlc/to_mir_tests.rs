@@ -1,12 +1,45 @@
 #[cfg(test)]
 mod tests {
     use crate::ast::{BinaryOp, Span, TypeName};
-    use crate::mir::Def as MirDef;
+    use crate::mir::{self, Def as MirDef};
     use crate::tlc::to_mir::TlcToMir;
     use crate::tlc::{
         Def as TlcDef, DefMeta, FunctionName, Program as TlcProgram, Term, TermIdSource, TermKind,
     };
+    use crate::{Compiler, build_builtins};
     use polytype::Type;
+
+    /// Run full MIR pipeline (but not SPIR-V lowering) on source code.
+    /// Returns the final MIR after all passes.
+    fn full_mir_pipeline(input: &str) -> mir::Program {
+        let mut frontend = crate::cached_frontend();
+        let parsed = Compiler::parse(input, &mut frontend.node_counter).expect("Parsing failed");
+        let alias_checked = parsed
+            .desugar(&mut frontend.node_counter)
+            .expect("Desugaring failed")
+            .resolve(&frontend.module_manager)
+            .expect("Name resolution failed")
+            .fold_ast_constants()
+            .type_check(&frontend.module_manager, &mut frontend.schemes)
+            .expect("Type checking failed")
+            .alias_check()
+            .expect("Alias checking failed");
+
+        let builtins = build_builtins(&alias_checked.ast, &frontend.module_manager);
+        alias_checked
+            .to_tlc(builtins, &frontend.schemes, &frontend.module_manager)
+            .skip_partial_eval()
+            .lift()
+            .to_mir()
+            .hoist_materializations()
+            .normalize()
+            .monomorphize()
+            .expect("Monomorphization failed")
+            .skip_folding()
+            .filter_reachable()
+            .lift_bindings()
+            .mir
+    }
 
     fn make_span(line: usize, col: usize) -> Span {
         Span {
@@ -119,7 +152,7 @@ mod tests {
             storage: vec![],
         };
 
-        let mir = TlcToMir::transform(&program, std::collections::HashMap::new());
+        let mir = TlcToMir::transform(&program, &std::collections::HashMap::new());
 
         assert_eq!(mir.defs.len(), 1);
         match &mir.defs[0] {
@@ -129,5 +162,56 @@ mod tests {
             }
             _ => panic!("Expected Function"),
         }
+    }
+
+    /// Run MIR pipeline up to (but not including) reachability filtering.
+    /// This lets us see what MIR was generated before dead code elimination.
+    #[allow(dead_code)]
+    fn mir_before_reachability(input: &str) -> mir::Program {
+        let mut frontend = crate::cached_frontend();
+        let parsed = Compiler::parse(input, &mut frontend.node_counter).expect("Parsing failed");
+        let alias_checked = parsed
+            .desugar(&mut frontend.node_counter)
+            .expect("Desugaring failed")
+            .resolve(&frontend.module_manager)
+            .expect("Name resolution failed")
+            .fold_ast_constants()
+            .type_check(&frontend.module_manager, &mut frontend.schemes)
+            .expect("Type checking failed")
+            .alias_check()
+            .expect("Alias checking failed");
+
+        let builtins = build_builtins(&alias_checked.ast, &frontend.module_manager);
+        alias_checked
+            .to_tlc(builtins, &frontend.schemes, &frontend.module_manager)
+            .skip_partial_eval()
+            .lift()
+            .to_mir()
+            .hoist_materializations()
+            .normalize()
+            .monomorphize()
+            .expect("Monomorphization failed")
+            .skip_folding()
+            .mir
+    }
+
+    /// Integration test: full pipeline from source to MIR with `map` intrinsic.
+    /// This test is for debugging the map/prelude challenge.
+    #[test]
+    fn test_map_intrinsic_full_pipeline() {
+        let source = r#"
+def myfunc(x: i32, y: i32, arr: [4]i32) [4]i32 =
+  map(|e| e + x + y, arr)
+
+#[fragment]
+entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
+  let result = myfunc(1, 2, [1, 2, 3, 4]) in
+  @[f32.i32(result[0]), 0.0, 0.0, 1.0]
+"#;
+
+        let mir = mir_before_reachability(source);
+
+        // Print MIR
+        eprintln!("\n=== FINAL MIR ===\n{}\n=================\n", mir);
     }
 }

@@ -567,71 +567,6 @@ impl Monomorphizer {
                     rows.iter().map(|row| row.iter().map(|e| expr_map[e]).collect()).collect();
                 Ok(Expr::Matrix(new_rows))
             }
-            Expr::Closure {
-                lambda_name,
-                captures,
-            } => {
-                // Map each capture to the new body
-                let new_captures: Vec<_> = captures.iter().map(|c| expr_map[c]).collect();
-
-                // Try to specialize the lambda based on the closure's concrete type
-                if let Some(def) = self.poly_functions.get(lambda_name).cloned() {
-                    // expr_type is the function type of this closure (Arrow type)
-                    // Extract concrete param and return types from it
-                    let (remaining_params, concrete_ret) = split_function_type(expr_type);
-
-                    // Get the types of captured values - these are the already-applied arguments
-                    // For a partial application `map f`, captures=[f] and remaining_params=[xs]
-                    // We need to include capture types to properly infer all type variables
-                    let capture_types: Vec<_> = captures.iter()
-                        .map(|c| body.get_type(*c).clone())
-                        .collect();
-
-                    // Combine captured args + remaining params to get full concrete param list
-                    let mut concrete_params = capture_types;
-                    concrete_params.extend(remaining_params);
-
-                    // Build substitution by unifying lambda params AND return type
-                    // against concrete types. This is necessary because lambdas may have
-                    // different variable IDs for params vs return type (e.g., zip3's lambda
-                    // has ((A,B),C) -> (A,B,C) where param uses different vars than return)
-                    let subst = self.infer_lambda_substitution(&def, &concrete_params, &concrete_ret)?;
-
-                    let spec_key = SpecKey::new(&subst);
-
-                    if !subst.is_empty() {
-                        // Specialize the lambda with concrete types and/or mem bindings
-                        let specialized_name =
-                            self.get_or_create_specialization(lambda_name, &spec_key, &def)?;
-                        return Ok(Expr::Closure {
-                            lambda_name: specialized_name,
-                            captures: new_captures,
-                        });
-                    } else {
-                        // Check if lambda body has unresolved variables even with empty subst
-                        // This can happen for prelude lambdas whose param types are concrete
-                        // but whose internal expressions have stale type variables
-                        if let Def::Function { body, .. } = &def {
-                            if body_has_unresolved_variables(body) {
-                                // Force specialization even with empty subst to trigger
-                                // the variable resolution in specialize_def
-                                let specialized_name =
-                                    self.get_or_create_specialization(lambda_name, &spec_key, &def)?;
-                                return Ok(Expr::Closure {
-                                    lambda_name: specialized_name,
-                                    captures: new_captures,
-                                });
-                            }
-                        }
-                        self.ensure_in_worklist(lambda_name, def);
-                    }
-                }
-
-                Ok(Expr::Closure {
-                    lambda_name: lambda_name.clone(),
-                    captures: new_captures,
-                })
-            }
             Expr::Global(name) => {
                 // Global reference might refer to a top-level constant
                 if let Some(def) = self.poly_functions.get(name).cloned() {
@@ -664,8 +599,7 @@ impl Monomorphizer {
 
         match poly_def {
             Def::Function {
-                scheme: Some(scheme),
-                ..
+                scheme: Some(scheme), ..
             } => {
                 // Use canonical scheme variable IDs (consistent with specialize_def)
                 let func_type = unwrap_scheme(scheme);
@@ -711,7 +645,10 @@ impl Monomorphizer {
     ) -> Result<Substitution> {
         let mut subst = Substitution::new();
 
-        if let Def::Function { scheme, params, body, .. } = lambda_def {
+        if let Def::Function {
+            scheme, params, body, ..
+        } = lambda_def
+        {
             // If the function has a scheme, use scheme types for consistent variable IDs
             // Otherwise fall back to body param types
             if let Some(scheme) = scheme {

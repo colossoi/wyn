@@ -27,36 +27,65 @@ The project is organized as a Rust workspace:
 
 ## Compiler Architecture
 
-The compiler uses a multi-stage pipeline with typestate-driven phases:
+The compiler uses a multi-stage pipeline with typestate-driven phases. Each stage consumes `self` and returns the next stage, enforcing valid ordering at compile time.
 
 ### Frontend (AST)
-| Stage | Description |
-|-------|-------------|
-| **Parsed** | Tokenization and parsing into AST |
-| **Desugared** | Range/slice expressions desugared |
-| **Resolved** | Name resolution and module imports |
-| **AstConstFolded** | Compile-time constant folding |
-| **TypeChecked** | Hindley-Milner type inference and checking |
-| **AliasChecked** | Uniqueness/alias analysis for mutable references |
+| Stage | Module | Description |
+|-------|--------|-------------|
+| **Parsed** | `parser` | Tokenization and parsing into AST |
+| **Desugared** | `desugar` | Range/slice expressions desugared; SOAC names rewritten to intrinsics |
+| **Resolved** | `name_resolution` | Name resolution and module imports |
+| **AstConstFolded** | `ast_const_fold` | Compile-time integer constant folding |
+| **TypeChecked** | `types::checker` | Hindley-Milner type inference and checking |
+| **AliasChecked** | `alias_checker` | Uniqueness/alias analysis for in-place updates |
 
 ### TLC (Typed Lambda Calculus)
-| Stage | Description |
-|-------|-------------|
-| **TlcTransformed** | AST converted to minimal typed lambda calculus |
-| **TlcLifted** | All lambdas lifted to top-level, captures explicit |
-| **TlcPartialEval** | Constant folding and algebraic simplifications (optional) |
+| Stage | Module | Description |
+|-------|--------|-------------|
+| **TlcTransformed** | `tlc::transform` | AST converted to minimal typed lambda calculus |
+| **TlcPartialEval** | `tlc::partial_eval` | Constant folding and algebraic simplifications (optional) |
+| **TlcDefunctionalized** | `tlc::defunctionalize` | Futhark-style defunctionalization: lambda lifting + SOAC capture flattening |
+| **TlcSpecialized** | `tlc::specialize` | Polymorphic intrinsics specialized (e.g., `sign` → `f32.sign`) |
 
 ### Backend (MIR)
-| Stage | Description |
-|-------|-------------|
-| **Flattened** | TLC to MIR conversion |
-| **MaterializationsHoisted** | Duplicate materializations hoisted from branches |
-| **Normalized** | A-normal form conversion |
-| **Monomorphized** | Polymorphic functions specialized to concrete types |
-| **Folded** | MIR constant folding (optional) |
-| **Reachable** | Dead code elimination |
-| **Lifted** | Loop-invariant code motion |
-| **Lowered** | SPIR-V code generation |
+| Stage | Module | Description |
+|-------|--------|-------------|
+| **Flattened** | `tlc::to_mir` | TLC to MIR conversion |
+| **MaterializationsHoisted** | `materialize_hoisting` | Duplicate materializations hoisted from branches |
+| **Normalized** | `normalize` | A-normal form conversion |
+| **Monomorphized** | `monomorphization` | Polymorphic functions specialized to concrete types |
+| **Reachable** | `reachability` | Dead code elimination, topological ordering |
+| **Lifted** | `binding_lifter` | Loop-invariant code motion |
+| **InplaceRewritten** | `inplace_rewriter` | Eligible map ops rewritten for in-place execution |
+| **Lowered** | `spirv::lowering` | SPIR-V code generation |
+
+### Pipeline Flow
+```
+Source → Parsed → Desugared → Resolved → AstConstFolded → TypeChecked → AliasChecked
+                                                                            ↓
+              Lowered ← Lifted ← Reachable ← Monomorphized ← Normalized ← Flattened
+                                                                            ↑
+                              TlcDefunctionalized → TlcSpecialized → to_mir
+                                              ↑
+                  TlcTransformed → [TlcPartialEval] → defunctionalize
+```
+
+### Defunctionalization
+
+The `tlc::defunctionalize` pass implements Futhark-style defunctionalization:
+1. **Lambda lifting**: All lambdas become top-level definitions with captures as extra parameters
+2. **StaticVal tracking**: Tracks which values are known function closures with captured variables
+3. **SOAC capture flattening**: When a closure is passed to a SOAC (map, reduce, etc.), its captures are flattened as trailing arguments
+
+Example transformation:
+```
+-- Input (lambda with capture y):
+map(|x| x + y, arr)
+
+-- After defunctionalization:
+_lambda_0 = λ(y, x). x + y
+map(_lambda_0, arr, y)  -- capture y flattened as trailing arg
+```
 
 ## Example Program
 

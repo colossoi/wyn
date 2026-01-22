@@ -193,15 +193,6 @@ pub enum Expr {
         args: Vec<ExprId>,
     },
 
-    // --- Closures ---
-    /// A closure value (defunctionalized lambda).
-    /// Each captured variable is a separate ExprId in the captures vector.
-    /// The lambda function has one parameter per capture, followed by its regular params.
-    Closure {
-        lambda_name: String,
-        captures: Vec<ExprId>,
-    },
-
     // --- Special ---
     /// Materialize a value into a pointer for indexing.
     /// Creates a Pointer[T, Function] from a value of type T.

@@ -520,26 +520,6 @@ impl Normalizer {
                 self.wrap_bindings(body, loop_id, ty, span, node_id, all_bindings)
             }
 
-            // Closure - keep captures as-is (don't wrap in Let bindings)
-            // This preserves the Closure structure for SOAC lowering
-            Expr::Closure {
-                lambda_name,
-                captures,
-            } => {
-                // Map each capture to new body
-                let new_captures: Vec<_> = captures.iter().map(|c| self.expr_map[c]).collect();
-
-                body.alloc_expr(
-                    Expr::Closure {
-                        lambda_name: lambda_name.clone(),
-                        captures: new_captures,
-                    },
-                    ty.clone(),
-                    span,
-                    node_id,
-                )
-            }
-
             // Materialize - atomize inner
             Expr::Materialize(inner) => {
                 let new_inner = self.expr_map[inner];
@@ -708,7 +688,6 @@ fn is_atomic(expr: &Expr) -> bool {
     match expr {
         Expr::Local(_) | Expr::Global(_) | Expr::Unit => true,
         Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::String(_) => true,
-        Expr::Closure { .. } => true,           // Closures are atomic values
         Expr::Tuple(elems) => elems.is_empty(), // Empty tuple is atomic
         _ => false,
     }

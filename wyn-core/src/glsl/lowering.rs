@@ -399,10 +399,6 @@ impl<'a> LowerCtx<'a> {
                     self.collect_deps_recursive(func, deps, visited)?;
                 }
             }
-            Expr::Closure { lambda_name, .. } => {
-                // Collect the lambda function as a dependency
-                self.collect_deps_recursive(lambda_name, deps, visited)?;
-            }
             Expr::Global(name) => {
                 // Check if this references a constant
                 if let Some(&idx) = self.def_index.get(name) {
@@ -811,31 +807,6 @@ impl<'a> LowerCtx<'a> {
                 self.lower_intrinsic(body, name, &arg_strs, &arg_ids, ty)
             }
 
-            // --- Closures ---
-            Expr::Closure { captures, .. } => {
-                // Lower closure as its captures
-                if captures.is_empty() {
-                    output.push_str("0");
-                    Ok("int".to_string())
-                } else if captures.len() == 1 {
-                    self.lower_expr(body, captures[0], output)
-                } else {
-                    // Multiple captures - lower as tuple/struct
-                    let ty = body.get_type(expr_id);
-                    let type_str = self.type_to_glsl(ty);
-                    output.push_str(&type_str);
-                    output.push('(');
-                    for (i, &cap) in captures.iter().enumerate() {
-                        if i > 0 {
-                            output.push_str(", ");
-                        }
-                        self.lower_expr(body, cap, output)?;
-                    }
-                    output.push(')');
-                    Ok(type_str)
-                }
-            }
-
             // --- Special ---
             Expr::Materialize(inner) => self.lower_expr(body, *inner, output),
 
@@ -1219,12 +1190,11 @@ impl<'a> LowerCtx<'a> {
             bail_glsl!("reduce requires 3 args (op, ne, array), got {}", args.len());
         }
 
-        // Extract lambda name from the operator closure
+        // Extract function name from the operator reference
         let op_func_name = match body.get_expr(args[0]) {
-            Expr::Closure { lambda_name, .. } => lambda_name.clone(),
             Expr::Global(name) => name.clone(),
             other => bail_glsl!(
-                "reduce operator must be a closure or function reference, got {:?}",
+                "reduce operator must be a function reference (Global), got {:?}",
                 other
             ),
         };

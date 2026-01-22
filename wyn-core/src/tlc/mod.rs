@@ -3,12 +3,14 @@
 //! A minimal typed lambda calculus IR for SOAC fusion analysis.
 //! Lambdas remain as values (not yet defunctionalized).
 
-pub mod lift;
+pub mod defunctionalize;
 pub mod partial_eval;
 #[cfg(test)]
 mod partial_eval_tests;
 pub mod specialize;
 pub mod to_mir;
+#[cfg(test)]
+mod to_mir_tests;
 
 use crate::TypeTable;
 use crate::ast::{self, NodeId, Span, TypeName};
@@ -603,15 +605,11 @@ impl<'a> Transformer<'a> {
                 if let Type::Constructed(TypeName::Mat, args) = &ty {
                     // Mat<rows, cols, elem_ty> - column type is Vec<rows, elem_ty>
                     if args.len() >= 3 {
-                        let col_ty = Type::Constructed(
-                            TypeName::Vec,
-                            vec![args[0].clone(), args[2].clone()],
-                        );
+                        let col_ty =
+                            Type::Constructed(TypeName::Vec, vec![args[0].clone(), args[2].clone()]);
                         // Transform elements, treating ArrayLiterals as vectors
-                        let col_terms: Vec<Term> = elements
-                            .iter()
-                            .map(|e| self.transform_as_vector(e, col_ty.clone()))
-                            .collect();
+                        let col_terms: Vec<Term> =
+                            elements.iter().map(|e| self.transform_as_vector(e, col_ty.clone())).collect();
                         return self.build_vec_lit_from_terms(&col_terms, ty, span);
                     }
                 }
@@ -738,12 +736,16 @@ impl<'a> Transformer<'a> {
                 let arr = self.transform_expr(&slice.array);
 
                 // Default start to 0 if not specified
-                let start = slice.start.as_ref()
+                let start = slice
+                    .start
+                    .as_ref()
                     .map(|e| self.transform_expr(e))
                     .unwrap_or_else(|| self.mk_i32(0, span));
 
                 // End is required for now (would need array length otherwise)
-                let end = slice.end.as_ref()
+                let end = slice
+                    .end
+                    .as_ref()
                     .map(|e| self.transform_expr(e))
                     .expect("Slice without end not yet supported");
 
@@ -1370,12 +1372,7 @@ impl<'a> Transformer<'a> {
     }
 
     /// Build a _w_vec_lit from already-transformed terms
-    fn build_vec_lit_from_terms(
-        &mut self,
-        terms: &[Term],
-        result_ty: Type<TypeName>,
-        span: Span,
-    ) -> Term {
+    fn build_vec_lit_from_terms(&mut self, terms: &[Term], result_ty: Type<TypeName>, span: Span) -> Term {
         if terms.is_empty() {
             return self.mk_term(result_ty, span, TermKind::Var("_w_vec_lit".to_string()));
         }
@@ -1424,4 +1421,3 @@ pub fn transform(program: &ast::Program, type_table: &TypeTable) -> Program {
     let mut transformer = Transformer::new(type_table);
     transformer.transform_program(program)
 }
-

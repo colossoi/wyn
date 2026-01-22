@@ -224,11 +224,11 @@ fn compile_file(
         tlc_transformed.skip_partial_eval()
     };
 
-    // Lift lambdas to top-level
-    let tlc_lifted = time("tlc_lift", verbose, || tlc_optimized.lift());
+    // Defunctionalize: lift lambdas and flatten SOAC captures
+    let tlc_defunc = time("defunctionalize", verbose, || tlc_optimized.defunctionalize());
 
     // Transform TLC to MIR
-    let flattened = time("to_mir", verbose, || tlc_lifted.to_mir());
+    let flattened = time("to_mir", verbose, || tlc_defunc.to_mir());
 
     // Write initial MIR if requested (right after TLC→MIR)
     write_mir_if_requested(&flattened.mir, &output_init_mir, "initial MIR", verbose)?;

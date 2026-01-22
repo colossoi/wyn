@@ -986,16 +986,6 @@ impl Display for mir::Expr {
                 }
                 write!(f, ")")
             }
-            mir::Expr::Closure {
-                lambda_name,
-                captures,
-            } => {
-                write!(f, "@closure({}", lambda_name)?;
-                for cap in captures {
-                    write!(f, ", e{}", cap.0)?;
-                }
-                write!(f, ")")
-            }
             mir::Expr::Materialize(inner) => {
                 write!(f, "@materialize(e{})", inner.0)
             }
@@ -1088,9 +1078,7 @@ impl tlc::Term {
                     write!(f, "(")?;
                 }
                 match func.as_ref() {
-                    tlc::FunctionName::Var(name) => {
-                        write!(f, "{}", name)?
-                    }
+                    tlc::FunctionName::Var(name) => write!(f, "{}", name)?,
                     tlc::FunctionName::BinOp(op) => write!(f, "({})", op.op)?,
                     tlc::FunctionName::UnOp(op) => write!(f, "({})", op.op)?,
                     tlc::FunctionName::Term(term) => term.fmt_prec(f, 1)?,

@@ -98,10 +98,6 @@ fn collect_callees(body: &Body) -> HashSet<String> {
             Expr::Call { func, .. } => {
                 callees.insert(func.clone());
             }
-            Expr::Closure { lambda_name, .. } => {
-                // Closures reference their lambda function
-                callees.insert(lambda_name.clone());
-            }
             // Other expressions don't introduce new callees
             _ => {}
         }

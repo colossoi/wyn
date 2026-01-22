@@ -1123,11 +1123,6 @@ fn collect_uses(body: &mir::Body, expr_id: mir::ExprId) -> HashSet<mir::LocalId>
         Materialize(inner) => {
             uses.extend(collect_uses(body, *inner));
         }
-        Closure { captures, .. } => {
-            for cap in captures {
-                uses.extend(collect_uses(body, *cap));
-            }
-        }
         Load { ptr } => {
             uses.extend(collect_uses(body, *ptr));
         }
@@ -1324,11 +1319,6 @@ fn compute_uses_after(
             let inner = *inner;
             result.extend(compute_uses_after(body, inner, after, aliases));
         }
-        Closure { captures, .. } => {
-            for cap in captures {
-                result.extend(compute_uses_after(body, *cap, after, aliases));
-            }
-        }
         Load { ptr } => {
             let ptr = *ptr;
             result.extend(compute_uses_after(body, ptr, after, aliases));
@@ -1418,9 +1408,7 @@ fn find_inplace_ops(
             }
         }
         // Also handle Intrinsic variants (TLC may emit these as intrinsics)
-        Intrinsic { name, args }
-            if (name == "_w_intrinsic_map" || name == "map") && args.len() == 2 =>
-        {
+        Intrinsic { name, args } if (name == "_w_intrinsic_map" || name == "map") && args.len() == 2 => {
             let args = args.clone();
             // args[0] is closure, args[1] is array
             if let Local(arr_local) = body.get_expr(args[1]) {
@@ -1561,11 +1549,6 @@ fn find_inplace_ops(
         Materialize(inner) => {
             let inner = *inner;
             find_inplace_ops(body, inner, uses_after, aliases, result);
-        }
-        Closure { captures, .. } => {
-            for cap in captures {
-                find_inplace_ops(body, *cap, uses_after, aliases, result);
-            }
         }
         Load { ptr } => {
             find_inplace_ops(body, *ptr, uses_after, aliases, result);
