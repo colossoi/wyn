@@ -260,6 +260,17 @@ fn split_function_type(ty: &Type<TypeName>) -> (Vec<Type<TypeName>>, Type<TypeNa
     (params, current)
 }
 
+/// Build a curried function type from parameter types and return type.
+/// The inverse of split_function_type: ([A, B], C) becomes (A -> B -> C)
+fn build_function_type(param_types: &[Type<TypeName>], ret_type: &Type<TypeName>) -> Type<TypeName> {
+    param_types
+        .iter()
+        .rev()
+        .fold(ret_type.clone(), |acc, param_ty| {
+            Type::Constructed(TypeName::Arrow, vec![param_ty.clone(), acc])
+        })
+}
+
 impl Monomorphizer {
     fn new(program: Program) -> Self {
         // TODO(Phase 6): Storage buffer declarations are now tracked via types.
@@ -568,9 +579,20 @@ impl Monomorphizer {
                 Ok(Expr::Matrix(new_rows))
             }
             Expr::Global(name) => {
-                // Global reference might refer to a top-level constant
-                if let Some(def) = self.poly_functions.get(name).cloned() {
-                    self.ensure_in_worklist(name, def);
+                // Global reference might refer to a top-level function/constant
+                if let Some(poly_def) = self.poly_functions.get(name).cloned() {
+                    // Check if the definition needs specialization based on the expression type
+                    // This handles lambdas passed to HOFs like map/reduce
+                    if let Some(subst) = self.infer_global_substitution(&poly_def, _expr_type) {
+                        let spec_key = SpecKey::new(&subst);
+                        if spec_key.needs_specialization() {
+                            let specialized_name =
+                                self.get_or_create_specialization(name, &spec_key, &poly_def)?;
+                            return Ok(Expr::Global(specialized_name));
+                        }
+                    }
+                    // No specialization needed - just ensure it's in the worklist
+                    self.ensure_in_worklist(name, poly_def);
                 }
                 Ok(Expr::Global(name.clone()))
             }
@@ -634,6 +656,46 @@ impl Monomorphizer {
         }
 
         Ok(subst)
+    }
+
+    /// Infer the substitution needed for a global reference based on its concrete type.
+    /// This handles lambdas passed to HOFs where the lambda's polymorphic type
+    /// must be specialized to match the concrete function type in context.
+    fn infer_global_substitution(
+        &self,
+        poly_def: &Def,
+        concrete_type: &Type<TypeName>,
+    ) -> Option<Substitution> {
+        let mut subst = Substitution::new();
+
+        // Get the polymorphic type from the definition
+        let poly_type = match poly_def {
+            Def::Function {
+                scheme: Some(scheme), ..
+            } => unwrap_scheme(scheme).clone(),
+            Def::Function {
+                scheme: None,
+                ret_type,
+                params,
+                body,
+                ..
+            } => {
+                // Build function type from params and return type
+                let param_types: Vec<_> = params.iter().map(|&p| body.get_local(p).ty.clone()).collect();
+                build_function_type(&param_types, ret_type)
+            }
+            Def::Constant { body, .. } => body.get_type(body.root).clone(),
+            _ => return None,
+        };
+
+        // Unify the polymorphic type with the concrete type
+        if self.unify_for_subst(&poly_type, concrete_type, &mut subst).is_ok() {
+            if !subst.is_empty() {
+                return Some(subst);
+            }
+        }
+
+        None
     }
 
     /// Unify two types to build a substitution
