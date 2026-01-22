@@ -565,6 +565,7 @@ impl<'a> TlcToMir<'a> {
     }
 
     /// Transform an application where the base is a Var (named function).
+    /// Only handles arity checking for known defs; intrinsic lowering is in emit_call_or_intrinsic.
     fn transform_var_application(
         &mut self,
         name: &str,
@@ -574,97 +575,6 @@ impl<'a> TlcToMir<'a> {
         node_id: NodeId,
         body: &mut Body,
     ) -> ExprId {
-        // Handle special intrinsics that become MIR literals
-        match name {
-            "_w_vec_lit" => {
-                let arg_ids: Vec<_> = args.iter().map(|a| self.transform_term(a, body)).collect();
-                return body.alloc_expr(Expr::Vector(arg_ids), ty, span, node_id);
-            }
-            "_w_array_lit" => {
-                let arg_ids: Vec<_> = args.iter().map(|a| self.transform_term(a, body)).collect();
-                let len = arg_ids.len();
-                let size = body.alloc_expr(
-                    Expr::Int(len.to_string()),
-                    Type::Constructed(TypeName::Int(32), vec![]),
-                    span,
-                    node_id,
-                );
-                return body.alloc_expr(
-                    Expr::Array {
-                        backing: mir::ArrayBacking::Literal(arg_ids),
-                        size,
-                    },
-                    ty,
-                    span,
-                    node_id,
-                );
-            }
-            "_w_tuple" => {
-                let arg_ids: Vec<_> = args.iter().map(|a| self.transform_term(a, body)).collect();
-                return body.alloc_expr(Expr::Tuple(arg_ids), ty, span, node_id);
-            }
-            "_w_range" if args.len() == 3 => {
-                let arg_ids: Vec<_> = args.iter().map(|a| self.transform_term(a, body)).collect();
-                let kind = self.extract_range_kind(body, arg_ids[2]);
-                return body.alloc_expr(
-                    Expr::Array {
-                        backing: mir::ArrayBacking::Range {
-                            start: arg_ids[0],
-                            step: None,
-                            kind,
-                        },
-                        size: arg_ids[1],
-                    },
-                    ty,
-                    span,
-                    node_id,
-                );
-            }
-            "_w_range_step" if args.len() == 4 => {
-                let arg_ids: Vec<_> = args.iter().map(|a| self.transform_term(a, body)).collect();
-                let kind = self.extract_range_kind(body, arg_ids[3]);
-                return body.alloc_expr(
-                    Expr::Array {
-                        backing: mir::ArrayBacking::Range {
-                            start: arg_ids[0],
-                            step: Some(arg_ids[1]),
-                            kind,
-                        },
-                        size: arg_ids[2],
-                    },
-                    ty,
-                    span,
-                    node_id,
-                );
-            }
-            "_w_slice" if args.len() == 3 => {
-                let arg_ids: Vec<_> = args.iter().map(|a| self.transform_term(a, body)).collect();
-                let size = body.alloc_expr(
-                    Expr::BinOp {
-                        op: "-".to_string(),
-                        lhs: arg_ids[2], // end
-                        rhs: arg_ids[1], // start
-                    },
-                    Type::Constructed(TypeName::Int(32), vec![]),
-                    span,
-                    node_id,
-                );
-                return body.alloc_expr(
-                    Expr::Array {
-                        backing: mir::ArrayBacking::View {
-                            base: arg_ids[0],
-                            offset: arg_ids[1],
-                        },
-                        size,
-                    },
-                    ty,
-                    span,
-                    node_id,
-                );
-            }
-            _ => {}
-        }
-
         // Transform all arguments
         let arg_ids: Vec<_> = args.iter().map(|a| self.transform_term(a, body)).collect();
 
@@ -699,8 +609,8 @@ impl<'a> TlcToMir<'a> {
                 )
             }
         } else {
-            // Intrinsic or unknown function - check for SOAC with closure argument
-            self.emit_soac_or_intrinsic(name, arg_ids, ty, span, node_id, body)
+            // Intrinsic or unknown function
+            self.emit_call_or_intrinsic(name, arg_ids, ty, span, node_id, body)
         }
     }
 
@@ -734,22 +644,8 @@ impl<'a> TlcToMir<'a> {
         }
     }
 
-    /// Emit a SOAC or regular intrinsic/call.
-    /// Note: SOAC closure flattening is handled earlier at TLC level in transform_var_application.
-    fn emit_soac_or_intrinsic(
-        &self,
-        name: &str,
-        args: Vec<ExprId>,
-        ty: Type<TypeName>,
-        span: Span,
-        node_id: NodeId,
-        body: &mut Body,
-    ) -> ExprId {
-        // Regular intrinsic/call handling
-        self.emit_call_or_intrinsic(name, args, ty, span, node_id, body)
-    }
-
     /// Emit either an Intrinsic or Call expression based on function name.
+    /// All intrinsic-to-MIR-construct lowering happens here.
     fn emit_call_or_intrinsic(
         &self,
         name: &str,
@@ -759,7 +655,7 @@ impl<'a> TlcToMir<'a> {
         node_id: NodeId,
         body: &mut Body,
     ) -> ExprId {
-        // Handle special literal intrinsics that become MIR constructs
+        // Handle intrinsics that become MIR constructs
         match name {
             "_w_vec_lit" => {
                 return body.alloc_expr(Expr::Vector(args), ty, span, node_id);
@@ -784,6 +680,62 @@ impl<'a> TlcToMir<'a> {
             }
             "_w_tuple" => {
                 return body.alloc_expr(Expr::Tuple(args), ty, span, node_id);
+            }
+            "_w_range" if args.len() == 3 => {
+                let kind = self.extract_range_kind(body, args[2]);
+                return body.alloc_expr(
+                    Expr::Array {
+                        backing: ArrayBacking::Range {
+                            start: args[0],
+                            step: None,
+                            kind,
+                        },
+                        size: args[1],
+                    },
+                    ty,
+                    span,
+                    node_id,
+                );
+            }
+            "_w_range_step" if args.len() == 4 => {
+                let kind = self.extract_range_kind(body, args[3]);
+                return body.alloc_expr(
+                    Expr::Array {
+                        backing: ArrayBacking::Range {
+                            start: args[0],
+                            step: Some(args[1]),
+                            kind,
+                        },
+                        size: args[2],
+                    },
+                    ty,
+                    span,
+                    node_id,
+                );
+            }
+            "_w_slice" if args.len() == 3 => {
+                let size = body.alloc_expr(
+                    Expr::BinOp {
+                        op: "-".to_string(),
+                        lhs: args[2], // end
+                        rhs: args[1], // start
+                    },
+                    Type::Constructed(TypeName::Int(32), vec![]),
+                    span,
+                    node_id,
+                );
+                return body.alloc_expr(
+                    Expr::Array {
+                        backing: ArrayBacking::View {
+                            base: args[0],
+                            offset: args[1],
+                        },
+                        size,
+                    },
+                    ty,
+                    span,
+                    node_id,
+                );
             }
             _ => {}
         }
