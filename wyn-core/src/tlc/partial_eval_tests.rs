@@ -1,7 +1,7 @@
 //! Tests for TLC partial evaluation.
 
 use super::partial_eval::PartialEvaluator;
-use super::{Def, DefMeta, FunctionName, Program, Term, TermIdSource, TermKind};
+use super::{Def, DefMeta, Program, Term, TermIdSource, TermKind};
 use crate::ast::{BinaryOp, Span, TypeName};
 use polytype::Type;
 
@@ -47,21 +47,30 @@ fn make_bool(ids: &mut TermIdSource, b: bool) -> Term {
 }
 
 fn make_binop(ids: &mut TermIdSource, op: &str, lhs: Term, rhs: Term) -> Term {
+    let result_ty = lhs.ty.clone();
+    let partial_ty = Type::Constructed(TypeName::Arrow, vec![result_ty.clone(), result_ty.clone()]);
+    let binop_ty = Type::Constructed(TypeName::Arrow, vec![result_ty.clone(), partial_ty.clone()]);
+
     let partial = Term {
         id: ids.next_id(),
-        ty: lhs.ty.clone(),
+        ty: partial_ty,
         span: make_span(),
         kind: TermKind::App {
-            func: Box::new(FunctionName::BinOp(BinaryOp { op: op.to_string() })),
+            func: Box::new(Term {
+                id: ids.next_id(),
+                ty: binop_ty,
+                span: make_span(),
+                kind: TermKind::BinOp(BinaryOp { op: op.to_string() }),
+            }),
             arg: Box::new(lhs),
         },
     };
     Term {
         id: ids.next_id(),
-        ty: partial.ty.clone(),
+        ty: result_ty,
         span: make_span(),
         kind: TermKind::App {
-            func: Box::new(FunctionName::Term(Box::new(partial))),
+            func: Box::new(partial),
             arg: Box::new(rhs),
         },
     }
@@ -324,7 +333,7 @@ fn test_function_inlining() {
         ty: Type::Constructed(TypeName::Arrow, vec![int_ty.clone(), int_ty.clone()]),
         span: make_span(),
         kind: TermKind::App {
-            func: Box::new(FunctionName::Term(Box::new(foo_ref))),
+            func: Box::new(foo_ref),
             arg: Box::new(eight),
         },
     };
@@ -334,7 +343,7 @@ fn test_function_inlining() {
         ty: int_ty.clone(),
         span: make_span(),
         kind: TermKind::App {
-            func: Box::new(FunctionName::Term(Box::new(foo_8))),
+            func: Box::new(foo_8),
             arg: Box::new(nine),
         },
     };
@@ -421,12 +430,12 @@ fn test_function_alias_inlining() {
                 ty: int_ty(),
                 span,
                 kind: TermKind::App {
-                    func: Box::new(FunctionName::Term(Box::new(Term {
+                    func: Box::new(Term {
                         id: ids.next_id(),
                         ty: arrow_ty(int_ty(), int_ty()),
                         span,
                         kind: TermKind::Var("f".to_string()),
-                    }))),
+                    }),
                     arg: Box::new(Term {
                         id: ids.next_id(),
                         ty: int_ty(),
@@ -524,17 +533,17 @@ fn test_function_alias_partial_application() {
                 ty: int_ty(),
                 span,
                 kind: TermKind::App {
-                    func: Box::new(FunctionName::Term(Box::new(Term {
+                    func: Box::new(Term {
                         id: ids.next_id(),
                         ty: arrow_ty(int_ty(), int_ty()),
                         span,
                         kind: TermKind::App {
-                            func: Box::new(FunctionName::Term(Box::new(Term {
+                            func: Box::new(Term {
                                 id: ids.next_id(),
                                 ty: arrow_ty(int_ty(), arrow_ty(int_ty(), int_ty())),
                                 span,
                                 kind: TermKind::Var("f".to_string()),
-                            }))),
+                            }),
                             arg: Box::new(Term {
                                 id: ids.next_id(),
                                 ty: int_ty(),
@@ -542,7 +551,7 @@ fn test_function_alias_partial_application() {
                                 kind: TermKind::IntLit("1".to_string()),
                             }),
                         },
-                    }))),
+                    }),
                     arg: Box::new(Term {
                         id: ids.next_id(),
                         ty: int_ty(),
@@ -614,12 +623,12 @@ fn test_intrinsic_alias_inlining() {
                 ty: float_ty.clone(),
                 span,
                 kind: TermKind::App {
-                    func: Box::new(FunctionName::Term(Box::new(Term {
+                    func: Box::new(Term {
                         id: ids.next_id(),
                         ty: arrow_ty(float_ty.clone(), float_ty.clone()),
                         span,
                         kind: TermKind::Var("f".to_string()),
-                    }))),
+                    }),
                     arg: Box::new(Term {
                         id: ids.next_id(),
                         ty: float_ty.clone(),
@@ -650,12 +659,9 @@ fn test_intrinsic_alias_inlining() {
     match &main_def.body.kind {
         TermKind::App { func, arg } => {
             // Check that the function is now f32.sin (not f)
-            match func.as_ref() {
-                FunctionName::Term(t) => match &t.kind {
-                    TermKind::Var(name) => assert_eq!(name, "f32.sin"),
-                    other => panic!("Expected Var(f32.sin), got {:?}", other),
-                },
-                other => panic!("Expected FunctionName::Term, got {:?}", other),
+            match &func.kind {
+                TermKind::Var(name) => assert_eq!(name, "f32.sin"),
+                other => panic!("Expected Var(f32.sin), got {:?}", other),
             }
             // Check the argument is still 0.5
             match &arg.kind {

@@ -3,7 +3,7 @@
 //! Transforms a lifted TLC program (where all lambdas are top-level) into MIR.
 
 use super::{
-    Def as TlcDef, DefMeta, FunctionName, LoopKind as TlcLoopKind, Program as TlcProgram, Term, TermKind,
+    Def as TlcDef, DefMeta, LoopKind as TlcLoopKind, Program as TlcProgram, Term, TermKind,
 };
 use crate::ast::{self, NodeId, PatternKind, Span, TypeName};
 use crate::mir::{
@@ -497,43 +497,39 @@ impl<'a> TlcToMir<'a> {
                     span
                 )
             }
+
+            // Operators as values - these should always be applied
+            TermKind::BinOp(_) | TermKind::UnOp(_) => {
+                panic!(
+                    "Unexpected bare operator in TLC to MIR transformation at {:?}. \
+                     Operators should always be applied to arguments.",
+                    span
+                )
+            }
         }
     }
 
     /// Collect the spine of a nested application chain.
-    /// Given `App(App(App(f, a), b), c)`, returns `(base_func, [a, b, c])`.
-    /// Walks through FunctionName::Term(App(...)) chains to collect all arguments.
-    fn collect_application_spine<'t>(
-        func: &'t FunctionName,
-        arg: &'t Term,
-    ) -> (&'t FunctionName, Vec<&'t Term>) {
+    /// Given `App(App(App(f, a), b), c)`, returns `(base_term, [a, b, c])`.
+    fn collect_application_spine<'t>(func: &'t Term, arg: &'t Term) -> (&'t Term, Vec<&'t Term>) {
         let mut args = vec![arg];
-        let mut current_func = func;
+        let mut current = func;
 
-        // Walk up the chain of Term(App(...)) to collect all arguments
+        // Walk up the chain of App to collect all arguments
         loop {
-            match current_func {
-                FunctionName::Term(inner_term) => {
-                    match &inner_term.kind {
-                        TermKind::App {
-                            func: inner_func,
-                            arg: inner_arg,
-                        } => {
-                            // Another application - add its arg and continue
-                            args.push(inner_arg.as_ref());
-                            current_func = inner_func.as_ref();
-                        }
-                        _ => {
-                            // Term that's not an App - this is the base
-                            args.reverse();
-                            return (current_func, args);
-                        }
-                    }
+            match &current.kind {
+                TermKind::App {
+                    func: inner_func,
+                    arg: inner_arg,
+                } => {
+                    // Another application - add its arg and continue
+                    args.push(inner_arg.as_ref());
+                    current = inner_func.as_ref();
                 }
-                // Any other FunctionName (Var, BinOp, UnOp) is a base
                 _ => {
+                    // Not an App - this is the base
                     args.reverse();
-                    return (current_func, args);
+                    return (current, args);
                 }
             }
         }
@@ -544,7 +540,7 @@ impl<'a> TlcToMir<'a> {
     /// then emits a single Call or Closure (never intermediate closures).
     fn transform_app(
         &mut self,
-        func: &FunctionName,
+        func: &Term,
         arg: &Term,
         ty: Type<TypeName>,
         span: Span,
@@ -552,10 +548,10 @@ impl<'a> TlcToMir<'a> {
         body: &mut Body,
     ) -> ExprId {
         // Collect the full application spine first
-        let (base_func, args) = Self::collect_application_spine(func, arg);
+        let (base_term, args) = Self::collect_application_spine(func, arg);
 
-        match base_func {
-            FunctionName::BinOp(op) => {
+        match &base_term.kind {
+            TermKind::BinOp(op) => {
                 assert!(
                     args.len() == 2,
                     "BinOp requires exactly 2 arguments, got {}",
@@ -575,7 +571,7 @@ impl<'a> TlcToMir<'a> {
                 )
             }
 
-            FunctionName::UnOp(op) => {
+            TermKind::UnOp(op) => {
                 assert!(
                     args.len() == 1,
                     "UnOp requires exactly 1 argument, got {}",
@@ -593,12 +589,11 @@ impl<'a> TlcToMir<'a> {
                 )
             }
 
-            FunctionName::Var(name) => self.transform_var_application(name, &args, ty, span, node_id, body),
+            TermKind::Var(name) => self.transform_var_application(name, &args, ty, span, node_id, body),
 
-            FunctionName::Term(inner_term) => {
-                // The base is a computed function value (not an App - we would have
-                // unwrapped that in collect_application_spine)
-                self.transform_term_application(inner_term, &args, ty, span, node_id, body)
+            _ => {
+                // The base is a computed function value (not a simple Var/BinOp/UnOp)
+                self.transform_term_application(base_term, &args, ty, span, node_id, body)
             }
         }
     }
@@ -922,6 +917,26 @@ mod tests {
 
         // Build: (+) x y as App(App(BinOp(+), x), y)
         use crate::ast::BinaryOp;
+        let binop_ty = Type::Constructed(
+            TypeName::Arrow,
+            vec![
+                Type::Constructed(TypeName::Int(32), vec![]),
+                Type::Constructed(
+                    TypeName::Arrow,
+                    vec![
+                        Type::Constructed(TypeName::Int(32), vec![]),
+                        Type::Constructed(TypeName::Int(32), vec![]),
+                    ],
+                ),
+            ],
+        );
+        let binop_term = Term {
+            id: ids.next_id(),
+            ty: binop_ty,
+            span,
+            kind: TermKind::BinOp(BinaryOp { op: "+".to_string() }),
+        };
+
         let binop_x = Term {
             id: ids.next_id(),
             ty: Type::Constructed(
@@ -933,7 +948,7 @@ mod tests {
             ),
             span,
             kind: TermKind::App {
-                func: Box::new(FunctionName::BinOp(BinaryOp { op: "+".to_string() })),
+                func: Box::new(binop_term),
                 arg: Box::new(x_var),
             },
         };
@@ -943,7 +958,7 @@ mod tests {
             ty: Type::Constructed(TypeName::Int(32), vec![]),
             span,
             kind: TermKind::App {
-                func: Box::new(FunctionName::Term(Box::new(binop_x))),
+                func: Box::new(binop_x),
                 arg: Box::new(y_var),
             },
         };

@@ -3,7 +3,7 @@
 //! Simpler than NBE-style: collect application spines, evaluate args,
 //! apply when we have enough arguments (using arity metadata).
 
-use super::{Def, FunctionName, Program, Term, TermIdSource, TermKind};
+use super::{Def, Program, Term, TermIdSource, TermKind};
 use crate::ast::{BinaryOp, Span, TypeName, UnaryOp};
 use crate::scope::ScopeStack;
 use polytype::Type;
@@ -143,17 +143,9 @@ impl PartialEvaluator {
 
             // Application - collect spine and apply
             TermKind::App { .. } => {
-                let (func_name, var_name, args) = self.collect_spine(term);
+                let (base, args) = self.collect_spine(term);
                 let arg_vals: Vec<Value> = args.iter().map(|a| self.eval(a)).collect();
-
-                if let Some(func) = func_name {
-                    self.apply(func, arg_vals, term)
-                } else if let Some(name) = var_name {
-                    self.apply_var(name, arg_vals, term)
-                } else {
-                    // Complex function term - residualize
-                    Value::Unknown(term.clone())
-                }
+                self.apply(base, arg_vals, term)
             }
 
             // Lambda - residualize (should be handled at def level)
@@ -161,39 +153,31 @@ impl PartialEvaluator {
 
             // Loop - residualize (not evaluating loops at compile time)
             TermKind::Loop { .. } => Value::Unknown(term.clone()),
+
+            // Operators as values - residualize
+            TermKind::BinOp(_) | TermKind::UnOp(_) => Value::Unknown(term.clone()),
         }
     }
 
-    /// Collect the spine of an application: App(App(f, x), y) → (func_name, [x, y])
-    /// Returns None for the function name if it's a complex term (not a simple Var/BinOp/UnOp).
-    fn collect_spine<'a>(
-        &self,
-        term: &'a Term,
-    ) -> (Option<&'a FunctionName>, Option<&'a str>, Vec<&'a Term>) {
+    /// Collect the spine of an application: App(App(f, x), y) → (base_term, [x, y])
+    /// Returns the base term and collected arguments.
+    fn collect_spine<'a>(&self, term: &'a Term) -> (&'a Term, Vec<&'a Term>) {
         let mut args = Vec::new();
         let mut current = term;
 
         while let TermKind::App { func, arg } = &current.kind {
             args.push(arg.as_ref());
-            match func.as_ref() {
-                FunctionName::Term(inner) => current = inner,
-                func_name => return (Some(func_name), None, args.into_iter().rev().collect()),
-            }
+            current = func.as_ref();
         }
 
-        // Reached a non-App term - check if it's a Var
-        if let TermKind::Var(name) = &current.kind {
-            return (None, Some(name.as_str()), args.into_iter().rev().collect());
-        }
-
-        // Complex term in function position - can't collect
-        (None, None, args.into_iter().rev().collect())
+        args.reverse();
+        (current, args)
     }
 
-    /// Apply a function to arguments.
-    fn apply(&mut self, func: &FunctionName, args: Vec<Value>, original: &Term) -> Value {
-        match func {
-            FunctionName::BinOp(op) => {
+    /// Apply a function to arguments based on the base term kind.
+    fn apply(&mut self, base: &Term, args: Vec<Value>, original: &Term) -> Value {
+        match &base.kind {
+            TermKind::BinOp(op) => {
                 if args.len() >= 2 {
                     self.eval_binop(op, &args[0], &args[1], original)
                 } else {
@@ -201,7 +185,7 @@ impl PartialEvaluator {
                 }
             }
 
-            FunctionName::UnOp(op) => {
+            TermKind::UnOp(op) => {
                 if !args.is_empty() {
                     self.eval_unop(op, &args[0], original)
                 } else {
@@ -209,10 +193,10 @@ impl PartialEvaluator {
                 }
             }
 
-            FunctionName::Var(name) => self.apply_var(name, args, original),
+            TermKind::Var(name) => self.apply_var(name, args, original),
 
-            FunctionName::Term(_) => {
-                // Higher-order - shouldn't happen after spine collection
+            _ => {
+                // Higher-order or computed function - can't evaluate
                 Value::Unknown(original.clone())
             }
         }
@@ -398,7 +382,7 @@ impl PartialEvaluator {
                 ty.clone(),
                 span,
                 TermKind::App {
-                    func: Box::new(FunctionName::Term(Box::new(result))),
+                    func: Box::new(result),
                     arg: Box::new(elem_term),
                 },
             );
@@ -416,7 +400,7 @@ impl PartialEvaluator {
                 ty.clone(),
                 span,
                 TermKind::App {
-                    func: Box::new(FunctionName::Term(Box::new(result))),
+                    func: Box::new(result),
                     arg: Box::new(elem_term),
                 },
             );
@@ -434,7 +418,7 @@ impl PartialEvaluator {
                 ty.clone(),
                 span,
                 TermKind::App {
-                    func: Box::new(FunctionName::Term(Box::new(result))),
+                    func: Box::new(result),
                     arg: Box::new(elem_term),
                 },
             );
@@ -452,7 +436,7 @@ impl PartialEvaluator {
                 ty.clone(),
                 span,
                 TermKind::App {
-                    func: Box::new(FunctionName::Term(Box::new(result))),
+                    func: Box::new(result),
                     arg: Box::new(arg_term),
                 },
             );
@@ -474,7 +458,7 @@ impl PartialEvaluator {
                 original.ty.clone(),
                 original.span,
                 TermKind::App {
-                    func: Box::new(FunctionName::Term(Box::new(result))),
+                    func: Box::new(result),
                     arg: Box::new(arg_term),
                 },
             );

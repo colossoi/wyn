@@ -14,7 +14,7 @@
 //!
 //! The lifted lambda is: _lambda_0 = |x| |y| x + y  (captures at end)
 
-use super::{Def, DefMeta, FunctionName, LoopKind, Program, Term, TermIdSource, TermKind};
+use super::{Def, DefMeta, LoopKind, Program, Term, TermIdSource, TermKind};
 use crate::ast::{Span, TypeName};
 use polytype::Type;
 use std::collections::{HashMap, HashSet};
@@ -152,21 +152,6 @@ fn apply_type_subst(ty: &Type<TypeName>, subst: &TypeSubst) -> Type<TypeName> {
     }
 }
 
-/// Apply a type substitution to a FunctionName.
-fn apply_type_subst_to_funcname(
-    func_name: &FunctionName,
-    subst: &TypeSubst,
-    term_ids: &mut TermIdSource,
-) -> FunctionName {
-    match func_name {
-        FunctionName::Var(name) => FunctionName::Var(name.clone()),
-        FunctionName::BinOp(op) => FunctionName::BinOp(op.clone()),
-        FunctionName::UnOp(op) => FunctionName::UnOp(op.clone()),
-        FunctionName::Term(term) => {
-            FunctionName::Term(Box::new(apply_type_subst_to_term(term, subst, term_ids)))
-        }
-    }
-}
 
 /// Format a type as a string key for cache lookups.
 /// Uses a compact representation that uniquely identifies the type.
@@ -189,12 +174,14 @@ fn apply_type_subst_to_term(term: &Term, subst: &TypeSubst, term_ids: &mut TermI
     let new_ty = apply_type_subst(&term.ty, subst);
     let new_kind = match &term.kind {
         TermKind::Var(name) => TermKind::Var(name.clone()),
+        TermKind::BinOp(op) => TermKind::BinOp(op.clone()),
+        TermKind::UnOp(op) => TermKind::UnOp(op.clone()),
         TermKind::IntLit(s) => TermKind::IntLit(s.clone()),
         TermKind::FloatLit(f) => TermKind::FloatLit(*f),
         TermKind::BoolLit(b) => TermKind::BoolLit(*b),
         TermKind::StringLit(s) => TermKind::StringLit(s.clone()),
         TermKind::App { func, arg } => TermKind::App {
-            func: Box::new(apply_type_subst_to_funcname(func, subst, term_ids)),
+            func: Box::new(apply_type_subst_to_term(func, subst, term_ids)),
             arg: Box::new(apply_type_subst_to_term(arg, subst, term_ids)),
         },
         TermKind::Lam {
@@ -326,7 +313,7 @@ fn collect_free_vars(
             collect_free_vars(body, &inner_bound, top_level, builtins, free, seen);
         }
         TermKind::App { func, arg } => {
-            collect_free_vars_func(func, bound, top_level, builtins, free, seen);
+            collect_free_vars(func, bound, top_level, builtins, free, seen);
             collect_free_vars(arg, bound, top_level, builtins, free, seen);
         }
         TermKind::If {
@@ -384,21 +371,12 @@ fn collect_free_vars(
             // body has all bindings in scope
             collect_free_vars(body, &inner_bound, top_level, builtins, free, seen);
         }
-        TermKind::IntLit(_) | TermKind::FloatLit(_) | TermKind::BoolLit(_) | TermKind::StringLit(_) => {}
-    }
-}
-
-fn collect_free_vars_func(
-    func: &FunctionName,
-    bound: &HashSet<String>,
-    top_level: &HashSet<String>,
-    builtins: &HashSet<String>,
-    free: &mut Vec<(String, Type<TypeName>)>,
-    seen: &mut HashSet<String>,
-) {
-    match func {
-        FunctionName::Term(t) => collect_free_vars(t, bound, top_level, builtins, free, seen),
-        FunctionName::Var(_) | FunctionName::BinOp(_) | FunctionName::UnOp(_) => {}
+        TermKind::IntLit(_)
+        | TermKind::FloatLit(_)
+        | TermKind::BoolLit(_)
+        | TermKind::StringLit(_)
+        | TermKind::BinOp(_)
+        | TermKind::UnOp(_) => {}
     }
 }
 
@@ -667,13 +645,16 @@ impl<'a> Defunctionalizer<'a> {
                 }
             }
 
-            // Literals are dynamic
-            TermKind::IntLit(_) | TermKind::FloatLit(_) | TermKind::BoolLit(_) | TermKind::StringLit(_) => {
-                DefuncResult {
-                    term,
-                    sv: StaticVal::Dynamic,
-                }
-            }
+            // Literals and operators are dynamic
+            TermKind::IntLit(_)
+            | TermKind::FloatLit(_)
+            | TermKind::BoolLit(_)
+            | TermKind::StringLit(_)
+            | TermKind::BinOp(_)
+            | TermKind::UnOp(_) => DefuncResult {
+                term,
+                sv: StaticVal::Dynamic,
+            },
         }
     }
 
@@ -765,7 +746,7 @@ impl<'a> Defunctionalizer<'a> {
     /// Handle application: collect spine, flatten captures.
     fn defunc_app(
         &mut self,
-        func: FunctionName,
+        func: Term,
         arg: Term,
         ty: Type<TypeName>,
         span: Span,
@@ -776,19 +757,19 @@ impl<'a> Defunctionalizer<'a> {
         // Defunctionalize all arguments
         let arg_results: Vec<DefuncResult> = args.into_iter().map(|a| self.defunc_term(a)).collect();
 
-        // Handle based on the function type
-        match base_func {
-            FunctionName::BinOp(_) | FunctionName::UnOp(_) => {
+        // Handle based on the function term kind
+        match &base_func.kind {
+            TermKind::BinOp(_) | TermKind::UnOp(_) => {
                 // Operators are preserved as-is - just rebuild the application
                 let result_term =
-                    self.rebuild_app_with_func_name(base_func, &arg_results, ty.clone(), span);
+                    self.rebuild_app_chain(base_func, &arg_results, ty.clone(), span);
                 DefuncResult {
                     term: result_term,
                     sv: StaticVal::Dynamic,
                 }
             }
 
-            FunctionName::Var(ref name) => {
+            TermKind::Var(ref name) => {
                 // Check if this variable has a Lambda StaticVal (captured function)
                 let sv = self.env.get(name).cloned().unwrap_or(StaticVal::Dynamic);
 
@@ -885,12 +866,8 @@ impl<'a> Defunctionalizer<'a> {
                         }
 
                         // No captures - rebuild as-is
-                        let result_term = self.rebuild_app_with_func_name(
-                            FunctionName::Var(name.clone()),
-                            &arg_results,
-                            ty.clone(),
-                            span,
-                        );
+                        let result_term =
+                            self.rebuild_app_chain(base_func, &arg_results, ty.clone(), span);
                         DefuncResult {
                             term: result_term,
                             sv: StaticVal::Dynamic,
@@ -899,9 +876,9 @@ impl<'a> Defunctionalizer<'a> {
                 }
             }
 
-            FunctionName::Term(t) => {
-                // Defunc the term and check for Lambda StaticVal
-                let func_result = self.defunc_term(*t);
+            _ => {
+                // Other computed function term - defunc it and check for Lambda StaticVal
+                let func_result = self.defunc_term(base_func);
 
                 match &func_result.sv {
                     StaticVal::Lambda {
@@ -949,28 +926,22 @@ impl<'a> Defunctionalizer<'a> {
     }
 
     /// Collect application spine: f a1 a2 ... -> (f, [a1, a2, ...])
-    fn collect_spine(&self, func: FunctionName, arg: Term) -> (FunctionName, Vec<Term>) {
+    fn collect_spine(&self, func: Term, arg: Term) -> (Term, Vec<Term>) {
         let mut args = vec![arg];
-        let mut current_func = func;
+        let mut current = func;
 
         // Walk up the spine
-        while let FunctionName::Term(t) = current_func {
-            match t.kind {
+        loop {
+            match current.kind {
                 TermKind::App {
                     func: inner_func,
                     arg: inner_arg,
                 } => {
                     args.push(*inner_arg);
-                    current_func = *inner_func;
-                }
-                TermKind::Var(name) => {
-                    // Unwrap Term(Var(name)) to Var(name)
-                    current_func = FunctionName::Var(name);
-                    break;
+                    current = *inner_func;
                 }
                 _ => {
-                    // Hit a non-App, non-Var term in function position
-                    current_func = FunctionName::Term(t);
+                    // Hit a non-App term - this is the base
                     break;
                 }
             }
@@ -978,7 +949,7 @@ impl<'a> Defunctionalizer<'a> {
 
         // Args were collected in reverse order
         args.reverse();
-        (current_func, args)
+        (current, args)
     }
 
     /// Build a curried application with a term as the function: t a1 a2 a3 ...
@@ -999,7 +970,7 @@ impl<'a> Defunctionalizer<'a> {
             ty: Type::Constructed(TypeName::Ignored, vec![]),
             span,
             kind: TermKind::App {
-                func: Box::new(FunctionName::Term(Box::new(func_term))),
+                func: Box::new(func_term),
                 arg: Box::new(args[0].clone()),
             },
         };
@@ -1010,7 +981,7 @@ impl<'a> Defunctionalizer<'a> {
                 ty: Type::Constructed(TypeName::Ignored, vec![]),
                 span,
                 kind: TermKind::App {
-                    func: Box::new(FunctionName::Term(Box::new(current))),
+                    func: Box::new(current),
                     arg: Box::new(arg),
                 },
             };
@@ -1029,12 +1000,17 @@ impl<'a> Defunctionalizer<'a> {
         result_ty: Type<TypeName>,
         span: Span,
     ) -> Term {
+        let func_term = Term {
+            id: self.term_ids.next_id(),
+            ty: Type::Constructed(TypeName::Ignored, vec![]),
+            span,
+            kind: TermKind::Var(func_name.to_string()),
+        };
+
         if args.is_empty() {
             return Term {
-                id: self.term_ids.next_id(),
                 ty: result_ty,
-                span,
-                kind: TermKind::Var(func_name.to_string()),
+                ..func_term
             };
         }
 
@@ -1044,7 +1020,7 @@ impl<'a> Defunctionalizer<'a> {
             ty: Type::Constructed(TypeName::Ignored, vec![]),
             span,
             kind: TermKind::App {
-                func: Box::new(FunctionName::Var(func_name.to_string())),
+                func: Box::new(func_term),
                 arg: Box::new(args[0].clone()),
             },
         };
@@ -1055,7 +1031,7 @@ impl<'a> Defunctionalizer<'a> {
                 ty: Type::Constructed(TypeName::Ignored, vec![]),
                 span,
                 kind: TermKind::App {
-                    func: Box::new(FunctionName::Term(Box::new(current))),
+                    func: Box::new(current),
                     arg: Box::new(arg),
                 },
             };
@@ -1085,7 +1061,7 @@ impl<'a> Defunctionalizer<'a> {
             ty: Type::Constructed(TypeName::Ignored, vec![]),
             span,
             kind: TermKind::App {
-                func: Box::new(FunctionName::Term(Box::new(func_term))),
+                func: Box::new(func_term),
                 arg: Box::new(arg_results[0].term.clone()),
             },
         };
@@ -1096,63 +1072,7 @@ impl<'a> Defunctionalizer<'a> {
                 ty: Type::Constructed(TypeName::Ignored, vec![]),
                 span,
                 kind: TermKind::App {
-                    func: Box::new(FunctionName::Term(Box::new(current))),
-                    arg: Box::new(ar.term.clone()),
-                },
-            };
-        }
-
-        Term {
-            ty: result_ty,
-            ..current
-        }
-    }
-
-    /// Rebuild an application with a FunctionName (preserves BinOp/UnOp).
-    fn rebuild_app_with_func_name(
-        &mut self,
-        func: FunctionName,
-        arg_results: &[DefuncResult],
-        result_ty: Type<TypeName>,
-        span: Span,
-    ) -> Term {
-        if arg_results.is_empty() {
-            // No args - return the function as a term (for Var only)
-            match func {
-                FunctionName::Var(name) => {
-                    return Term {
-                        id: self.term_ids.next_id(),
-                        ty: result_ty,
-                        span,
-                        kind: TermKind::Var(name),
-                    };
-                }
-                _ => {
-                    // Can't return BinOp/UnOp without args
-                    panic!("BUG: BinOp/UnOp with no arguments");
-                }
-            }
-        }
-
-        // Build first application with the original FunctionName
-        let mut current = Term {
-            id: self.term_ids.next_id(),
-            ty: Type::Constructed(TypeName::Ignored, vec![]),
-            span,
-            kind: TermKind::App {
-                func: Box::new(func),
-                arg: Box::new(arg_results[0].term.clone()),
-            },
-        };
-
-        // Chain remaining arguments
-        for ar in arg_results.iter().skip(1) {
-            current = Term {
-                id: self.term_ids.next_id(),
-                ty: Type::Constructed(TypeName::Ignored, vec![]),
-                span,
-                kind: TermKind::App {
-                    func: Box::new(FunctionName::Term(Box::new(current))),
+                    func: Box::new(current),
                     arg: Box::new(ar.term.clone()),
                 },
             };
@@ -1378,7 +1298,7 @@ impl<'a> Defunctionalizer<'a> {
                 // Collect spine and check if base is the function param
                 let (base, args) = self.collect_spine_ref(func, arg);
 
-                if let FunctionName::Var(name) = &base {
+                if let TermKind::Var(name) = &base.kind {
                     if name == func_param_name {
                         // Replace f(args...) with lambda(args..., captures...)
                         let new_args: Vec<Term> = args
@@ -1426,14 +1346,18 @@ impl<'a> Defunctionalizer<'a> {
                     }
 
                     // Build the application with the transformed args
-                    match &base {
-                        FunctionName::Var(n) => {
-                            return self.build_curried_app(n, all_args, term.ty.clone(), span);
+                    match &base.kind {
+                        TermKind::Var(n) => {
+                            return self.build_curried_app(n.as_str(), all_args, term.ty.clone(), span);
                         }
-                        FunctionName::Term(t) => {
-                            // Recursively specialize the function term
+                        TermKind::BinOp(_) | TermKind::UnOp(_) => {
+                            // BinOp/UnOp - shouldn't have function params as args, but handle anyway
+                            // Fall through to normal handling
+                        }
+                        _ => {
+                            // Other term kinds (computed function) - specialize the function term
                             let new_func_term =
-                                self.specialize_body(t, func_param_name, lambda_name, captures, span);
+                                self.specialize_body(&base, func_param_name, lambda_name, captures, span);
                             return self.build_curried_app_with_term(
                                 new_func_term,
                                 all_args,
@@ -1441,26 +1365,11 @@ impl<'a> Defunctionalizer<'a> {
                                 span,
                             );
                         }
-                        _ => {
-                            // BinOp/UnOp - shouldn't have function params as args, but handle anyway
-                            // Fall through to normal handling
-                        }
                     }
                 }
 
                 // No function param reference, recurse normally
-                let new_func = match func.as_ref() {
-                    FunctionName::Var(_) | FunctionName::BinOp(_) | FunctionName::UnOp(_) => {
-                        func.as_ref().clone()
-                    }
-                    FunctionName::Term(t) => FunctionName::Term(Box::new(self.specialize_body(
-                        t,
-                        func_param_name,
-                        lambda_name,
-                        captures,
-                        span,
-                    ))),
-                };
+                let new_func = self.specialize_body(func, func_param_name, lambda_name, captures, span);
                 let new_arg = self.specialize_body(arg, func_param_name, lambda_name, captures, span);
                 Term {
                     id: self.term_ids.next_id(),
@@ -1616,10 +1525,13 @@ impl<'a> Defunctionalizer<'a> {
                 }
             }
 
-            // Literals are unchanged
-            TermKind::IntLit(_) | TermKind::FloatLit(_) | TermKind::BoolLit(_) | TermKind::StringLit(_) => {
-                term.clone()
-            }
+            // Literals and operators are unchanged
+            TermKind::IntLit(_)
+            | TermKind::FloatLit(_)
+            | TermKind::BoolLit(_)
+            | TermKind::StringLit(_)
+            | TermKind::BinOp(_)
+            | TermKind::UnOp(_) => term.clone(),
         }
     }
 
@@ -1628,12 +1540,7 @@ impl<'a> Defunctionalizer<'a> {
         match &term.kind {
             TermKind::Var(name) => name == var_name,
             TermKind::App { func, arg } => {
-                self.term_references_var(arg, var_name)
-                    || match func.as_ref() {
-                        FunctionName::Var(n) => n == var_name,
-                        FunctionName::Term(t) => self.term_references_var(t, var_name),
-                        _ => false,
-                    }
+                self.term_references_var(func, var_name) || self.term_references_var(arg, var_name)
             }
             TermKind::Let { rhs, body, .. } => {
                 self.term_references_var(rhs, var_name) || self.term_references_var(body, var_name)
@@ -1664,30 +1571,29 @@ impl<'a> Defunctionalizer<'a> {
                     }
                     || self.term_references_var(body, var_name)
             }
-            TermKind::IntLit(_) | TermKind::FloatLit(_) | TermKind::BoolLit(_) | TermKind::StringLit(_) => {
-                false
-            }
+            TermKind::IntLit(_)
+            | TermKind::FloatLit(_)
+            | TermKind::BoolLit(_)
+            | TermKind::StringLit(_)
+            | TermKind::BinOp(_)
+            | TermKind::UnOp(_) => false,
         }
     }
 
     /// Collect application spine from references (used during specialization).
-    fn collect_spine_ref<'b>(
-        &self,
-        func: &'b FunctionName,
-        arg: &'b Term,
-    ) -> (FunctionName, Vec<&'b Term>) {
+    fn collect_spine_ref<'b>(&self, func: &'b Term, arg: &'b Term) -> (Term, Vec<&'b Term>) {
         let mut args = vec![arg];
-        let mut current_func = func;
+        let mut current = func;
 
         // Walk up the spine
-        while let FunctionName::Term(t) = current_func {
+        loop {
             if let TermKind::App {
                 func: inner_func,
                 arg: inner_arg,
-            } = &t.kind
+            } = &current.kind
             {
                 args.push(inner_arg.as_ref());
-                current_func = inner_func.as_ref();
+                current = inner_func.as_ref();
             } else {
                 break;
             }
@@ -1695,7 +1601,7 @@ impl<'a> Defunctionalizer<'a> {
 
         // Args were collected in reverse order
         args.reverse();
-        (current_func.clone(), args)
+        (current.clone(), args)
     }
 
     /// Build a specialized definition with captures as trailing parameters.

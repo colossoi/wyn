@@ -1078,12 +1078,7 @@ impl tlc::Term {
                 if prec > 1 {
                     write!(f, "(")?;
                 }
-                match func.as_ref() {
-                    tlc::FunctionName::Var(name) => write!(f, "{}", name)?,
-                    tlc::FunctionName::BinOp(op) => write!(f, "({})", op.op)?,
-                    tlc::FunctionName::UnOp(op) => write!(f, "({})", op.op)?,
-                    tlc::FunctionName::Term(term) => term.fmt_prec(f, 1)?,
-                }
+                func.fmt_prec(f, 1)?;
                 write!(f, " ")?;
                 arg.fmt_prec(f, 2)?;
                 if prec > 1 {
@@ -1091,6 +1086,9 @@ impl tlc::Term {
                 }
                 Ok(())
             }
+
+            tlc::TermKind::BinOp(op) => write!(f, "({})", op.op),
+            tlc::TermKind::UnOp(op) => write!(f, "({})", op.op),
 
             tlc::TermKind::Let {
                 name,

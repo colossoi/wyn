@@ -54,24 +54,17 @@ pub struct Term {
     pub kind: TermKind,
 }
 
-/// What can appear in function position of an application.
-#[derive(Debug, Clone)]
-pub enum FunctionName {
-    /// A variable reference (user function or intrinsic like _w_fold)
-    Var(String),
-    /// Binary operator: +, -, *, /, ==, etc.
-    BinOp(ast::BinaryOp),
-    /// Unary operator: -, !
-    UnOp(ast::UnaryOp),
-    /// A term that evaluates to a function
-    Term(Box<Term>),
-}
-
 /// The kind of term.
 #[derive(Debug, Clone)]
 pub enum TermKind {
     /// Variable reference.
     Var(String),
+
+    /// Binary operator as a value: +, -, *, /, ==, etc.
+    BinOp(ast::BinaryOp),
+
+    /// Unary operator as a value: -, !
+    UnOp(ast::UnaryOp),
 
     /// Lambda abstraction: λ(x:T). body
     Lam {
@@ -82,7 +75,7 @@ pub enum TermKind {
 
     /// Application: f x
     App {
-        func: Box<FunctionName>,
+        func: Box<Term>,
         arg: Box<Term>,
     },
 
@@ -1147,18 +1140,18 @@ impl<'a> Transformer<'a> {
             return func_term;
         }
 
-        // First application uses the func_term wrapped in FunctionName::Term
+        // First application
         let first_arg = self.transform_expr(&args[0]);
         let mut result = self.mk_term(
             self.get_body_type(&func_term.ty),
             span,
             TermKind::App {
-                func: Box::new(FunctionName::Term(Box::new(func_term))),
+                func: Box::new(func_term),
                 arg: Box::new(first_arg),
             },
         );
 
-        // Subsequent applications chain with FunctionName::Term
+        // Subsequent applications chain
         for arg in &args[1..] {
             let arg_term = self.transform_expr(arg);
             let app_ty = self.get_body_type(&result.ty);
@@ -1166,7 +1159,7 @@ impl<'a> Transformer<'a> {
                 app_ty,
                 span,
                 TermKind::App {
-                    func: Box::new(FunctionName::Term(Box::new(result))),
+                    func: Box::new(result),
                     arg: Box::new(arg_term),
                 },
             );
@@ -1532,11 +1525,14 @@ impl<'a> Transformer<'a> {
 
     // Helper: build App(Var(name), arg)
     fn build_app1(&mut self, name: &str, arg: Term, result_ty: Type<TypeName>, span: Span) -> Term {
+        // Build the function type for the Var
+        let func_ty = Type::Constructed(TypeName::Arrow, vec![arg.ty.clone(), result_ty.clone()]);
+        let func_term = self.mk_term(func_ty, span, TermKind::Var(name.to_string()));
         self.mk_term(
             result_ty,
             span,
             TermKind::App {
-                func: Box::new(FunctionName::Var(name.to_string())),
+                func: Box::new(func_term),
                 arg: Box::new(arg),
             },
         )
@@ -1551,11 +1547,14 @@ impl<'a> Transformer<'a> {
         result_ty: Type<TypeName>,
         span: Span,
     ) -> Term {
+        let app1_result_ty = Type::Constructed(TypeName::Arrow, vec![arg2.ty.clone(), result_ty.clone()]);
+        let func_ty = Type::Constructed(TypeName::Arrow, vec![arg1.ty.clone(), app1_result_ty.clone()]);
+        let func_term = self.mk_term(func_ty, span, TermKind::Var(name.to_string()));
         let app1 = self.mk_term(
-            Type::Constructed(TypeName::Arrow, vec![arg2.ty.clone(), result_ty.clone()]),
+            app1_result_ty,
             span,
             TermKind::App {
-                func: Box::new(FunctionName::Var(name.to_string())),
+                func: Box::new(func_term),
                 arg: Box::new(arg1),
             },
         );
@@ -1563,7 +1562,7 @@ impl<'a> Transformer<'a> {
             result_ty,
             span,
             TermKind::App {
-                func: Box::new(FunctionName::Term(Box::new(app1))),
+                func: Box::new(app1),
                 arg: Box::new(arg2),
             },
         )
@@ -1583,11 +1582,14 @@ impl<'a> Transformer<'a> {
         let app2_ty = Type::Constructed(TypeName::Arrow, vec![arg3.ty.clone(), result_ty.clone()]);
         // Type of app1: arg2.ty -> app2_ty
         let app1_ty = Type::Constructed(TypeName::Arrow, vec![arg2.ty.clone(), app2_ty.clone()]);
+        // Type of func: arg1.ty -> app1_ty
+        let func_ty = Type::Constructed(TypeName::Arrow, vec![arg1.ty.clone(), app1_ty.clone()]);
+        let func_term = self.mk_term(func_ty, span, TermKind::Var(name.to_string()));
         let app1 = self.mk_term(
             app1_ty,
             span,
             TermKind::App {
-                func: Box::new(FunctionName::Var(name.to_string())),
+                func: Box::new(func_term),
                 arg: Box::new(arg1),
             },
         );
@@ -1595,7 +1597,7 @@ impl<'a> Transformer<'a> {
             app2_ty,
             span,
             TermKind::App {
-                func: Box::new(FunctionName::Term(Box::new(app1))),
+                func: Box::new(app1),
                 arg: Box::new(arg2),
             },
         );
@@ -1603,7 +1605,7 @@ impl<'a> Transformer<'a> {
             result_ty,
             span,
             TermKind::App {
-                func: Box::new(FunctionName::Term(Box::new(app2))),
+                func: Box::new(app2),
                 arg: Box::new(arg3),
             },
         )
@@ -1623,11 +1625,13 @@ impl<'a> Transformer<'a> {
         let app3_ty = Type::Constructed(TypeName::Arrow, vec![arg4.ty.clone(), result_ty.clone()]);
         let app2_ty = Type::Constructed(TypeName::Arrow, vec![arg3.ty.clone(), app3_ty.clone()]);
         let app1_ty = Type::Constructed(TypeName::Arrow, vec![arg2.ty.clone(), app2_ty.clone()]);
+        let func_ty = Type::Constructed(TypeName::Arrow, vec![arg1.ty.clone(), app1_ty.clone()]);
+        let func_term = self.mk_term(func_ty, span, TermKind::Var(name.to_string()));
         let app1 = self.mk_term(
             app1_ty,
             span,
             TermKind::App {
-                func: Box::new(FunctionName::Var(name.to_string())),
+                func: Box::new(func_term),
                 arg: Box::new(arg1),
             },
         );
@@ -1635,7 +1639,7 @@ impl<'a> Transformer<'a> {
             app2_ty,
             span,
             TermKind::App {
-                func: Box::new(FunctionName::Term(Box::new(app1))),
+                func: Box::new(app1),
                 arg: Box::new(arg2),
             },
         );
@@ -1643,7 +1647,7 @@ impl<'a> Transformer<'a> {
             app3_ty,
             span,
             TermKind::App {
-                func: Box::new(FunctionName::Term(Box::new(app2))),
+                func: Box::new(app2),
                 arg: Box::new(arg3),
             },
         );
@@ -1651,7 +1655,7 @@ impl<'a> Transformer<'a> {
             result_ty,
             span,
             TermKind::App {
-                func: Box::new(FunctionName::Term(Box::new(app3))),
+                func: Box::new(app3),
                 arg: Box::new(arg4),
             },
         )
@@ -1666,11 +1670,15 @@ impl<'a> Transformer<'a> {
         result_ty: Type<TypeName>,
         span: Span,
     ) -> Term {
+        // Build the binop type: lhs.ty -> rhs.ty -> result_ty
+        let app1_result_ty = Type::Constructed(TypeName::Arrow, vec![rhs.ty.clone(), result_ty.clone()]);
+        let binop_ty = Type::Constructed(TypeName::Arrow, vec![lhs.ty.clone(), app1_result_ty.clone()]);
+        let binop_term = self.mk_term(binop_ty, span, TermKind::BinOp(op));
         let app1 = self.mk_term(
-            Type::Constructed(TypeName::Arrow, vec![rhs.ty.clone(), result_ty.clone()]),
+            app1_result_ty,
             span,
             TermKind::App {
-                func: Box::new(FunctionName::BinOp(op)),
+                func: Box::new(binop_term),
                 arg: Box::new(lhs),
             },
         );
@@ -1678,7 +1686,7 @@ impl<'a> Transformer<'a> {
             result_ty,
             span,
             TermKind::App {
-                func: Box::new(FunctionName::Term(Box::new(app1))),
+                func: Box::new(app1),
                 arg: Box::new(rhs),
             },
         )
@@ -1686,11 +1694,13 @@ impl<'a> Transformer<'a> {
 
     // Helper: build unary op application
     fn build_unop(&mut self, op: ast::UnaryOp, arg: Term, result_ty: Type<TypeName>, span: Span) -> Term {
+        let unop_ty = Type::Constructed(TypeName::Arrow, vec![arg.ty.clone(), result_ty.clone()]);
+        let unop_term = self.mk_term(unop_ty, span, TermKind::UnOp(op));
         self.mk_term(
             result_ty,
             span,
             TermKind::App {
-                func: Box::new(FunctionName::UnOp(op)),
+                func: Box::new(unop_term),
                 arg: Box::new(arg),
             },
         )
@@ -1722,11 +1732,17 @@ impl<'a> Transformer<'a> {
         intermediate_types.reverse();
 
         // Build curried applications
+        // Compute the function type
+        let func_ty = Type::Constructed(
+            TypeName::Arrow,
+            vec![arg_terms[0].ty.clone(), intermediate_types[0].clone()],
+        );
+        let func_term = self.mk_term(func_ty, span, TermKind::Var(name.to_string()));
         let mut result = self.mk_term(
             intermediate_types[0].clone(),
             span,
             TermKind::App {
-                func: Box::new(FunctionName::Var(name.to_string())),
+                func: Box::new(func_term),
                 arg: Box::new(arg_terms[0].clone()),
             },
         );
@@ -1737,7 +1753,7 @@ impl<'a> Transformer<'a> {
                 app_ty,
                 span,
                 TermKind::App {
-                    func: Box::new(FunctionName::Term(Box::new(result))),
+                    func: Box::new(result),
                     arg: Box::new(arg_term.clone()),
                 },
             );
@@ -1805,11 +1821,16 @@ impl<'a> Transformer<'a> {
         intermediate_types.reverse();
 
         // Build curried applications
+        let func_ty = Type::Constructed(
+            TypeName::Arrow,
+            vec![terms[0].ty.clone(), intermediate_types[0].clone()],
+        );
+        let func_term = self.mk_term(func_ty, span, TermKind::Var("_w_vec_lit".to_string()));
         let mut result = self.mk_term(
             intermediate_types[0].clone(),
             span,
             TermKind::App {
-                func: Box::new(FunctionName::Var("_w_vec_lit".to_string())),
+                func: Box::new(func_term),
                 arg: Box::new(terms[0].clone()),
             },
         );
@@ -1820,7 +1841,7 @@ impl<'a> Transformer<'a> {
                 app_ty,
                 span,
                 TermKind::App {
-                    func: Box::new(FunctionName::Term(Box::new(result))),
+                    func: Box::new(result),
                     arg: Box::new(term.clone()),
                 },
             );

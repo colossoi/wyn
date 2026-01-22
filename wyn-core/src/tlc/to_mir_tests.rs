@@ -4,7 +4,7 @@ mod tests {
     use crate::mir::{self, Def as MirDef};
     use crate::tlc::to_mir::TlcToMir;
     use crate::tlc::{
-        Def as TlcDef, DefMeta, FunctionName, Program as TlcProgram, Term, TermIdSource, TermKind,
+        Def as TlcDef, DefMeta, Program as TlcProgram, Term, TermIdSource, TermKind,
     };
     use crate::{Compiler, build_builtins};
     use polytype::Type;
@@ -72,28 +72,31 @@ mod tests {
         };
 
         // Build: (+) x y as App(App(BinOp(+), x), y)
+        let int_ty = Type::Constructed(TypeName::Int(32), vec![]);
+        let partial_ty = Type::Constructed(TypeName::Arrow, vec![int_ty.clone(), int_ty.clone()]);
+        let binop_ty = Type::Constructed(TypeName::Arrow, vec![int_ty.clone(), partial_ty.clone()]);
+
         let binop_x = Term {
             id: ids.next_id(),
-            ty: Type::Constructed(
-                TypeName::Arrow,
-                vec![
-                    Type::Constructed(TypeName::Int(32), vec![]),
-                    Type::Constructed(TypeName::Int(32), vec![]),
-                ],
-            ),
+            ty: partial_ty,
             span,
             kind: TermKind::App {
-                func: Box::new(FunctionName::BinOp(BinaryOp { op: "+".to_string() })),
+                func: Box::new(Term {
+                    id: ids.next_id(),
+                    ty: binop_ty,
+                    span,
+                    kind: TermKind::BinOp(BinaryOp { op: "+".to_string() }),
+                }),
                 arg: Box::new(x_var),
             },
         };
 
         let add_body = Term {
             id: ids.next_id(),
-            ty: Type::Constructed(TypeName::Int(32), vec![]),
+            ty: int_ty,
             span,
             kind: TermKind::App {
-                func: Box::new(FunctionName::Term(Box::new(binop_x))),
+                func: Box::new(binop_x),
                 arg: Box::new(y_var),
             },
         };

@@ -1,6 +1,6 @@
 use super::defunctionalize::defunctionalize;
-use super::{Def, DefMeta, FunctionName, LoopKind, Program, Term, TermIdSource, TermKind};
-use crate::ast::{Span, TypeName};
+use super::{Def, DefMeta, LoopKind, Program, Term, TermIdSource, TermKind};
+use crate::ast::{BinaryOp, Span, TypeName};
 use polytype::Type;
 use std::collections::HashSet;
 
@@ -35,21 +35,17 @@ fn print_term(term: &Term, indent: usize) -> String {
             format!("{}Lam({})\n{}", pad, param, print_term(body, indent + 1))
         }
         TermKind::App { func, arg } => {
-            let func_str = match func.as_ref() {
-                FunctionName::Var(n) => format!("Var({})", n),
-                FunctionName::BinOp(op) => format!("BinOp({})", op.op),
-                FunctionName::UnOp(op) => format!("UnOp({})", op.op),
-                FunctionName::Term(t) => format!("Term:\n{}", print_term(t, indent + 2)),
-            };
             format!(
-                "{}App\n{}  func: {}\n{}  arg:\n{}",
+                "{}App\n{}  func:\n{}\n{}  arg:\n{}",
                 pad,
                 pad,
-                func_str,
+                print_term(func, indent + 2),
                 pad,
                 print_term(arg, indent + 2)
             )
         }
+        TermKind::BinOp(op) => format!("{}BinOp({})", pad, op.op),
+        TermKind::UnOp(op) => format!("{}UnOp({})", pad, op.op),
         TermKind::Let { name, rhs, body, .. } => {
             format!(
                 "{}Let {} =\n{}\n{}in\n{}",
@@ -172,7 +168,12 @@ fn test_defunc_lambda_with_capture() {
                 ty: i32_ty(),
                 span: dummy_span(),
                 kind: TermKind::App {
-                    func: Box::new(FunctionName::BinOp(crate::ast::BinaryOp { op: "+".to_string() })),
+                    func: Box::new(Term {
+                        id: ids.next_id(),
+                        ty: arrow(i32_ty(), arrow(i32_ty(), i32_ty())),
+                        span: dummy_span(),
+                        kind: TermKind::BinOp(BinaryOp { op: "+".to_string() }),
+                    }),
                     arg: Box::new(Term {
                         id: ids.next_id(),
                         ty: i32_ty(),

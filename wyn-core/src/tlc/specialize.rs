@@ -3,7 +3,7 @@
 //! Specializes polymorphic intrinsic names based on argument types.
 //! For example: `sign(x)` where `x: f32` becomes `f32.sign(x)`.
 
-use super::{Def, FunctionName, LoopKind, Program, Term, TermIdSource, TermKind};
+use super::{Def, LoopKind, Program, Term, TermIdSource, TermKind};
 use crate::ast::TypeName;
 use polytype::Type;
 
@@ -117,7 +117,9 @@ impl Specializer {
             | TermKind::IntLit(_)
             | TermKind::FloatLit(_)
             | TermKind::BoolLit(_)
-            | TermKind::StringLit(_)) => k,
+            | TermKind::StringLit(_)
+            | TermKind::BinOp(_)
+            | TermKind::UnOp(_)) => k,
         };
 
         Term {
@@ -128,78 +130,68 @@ impl Specializer {
         }
     }
 
-    fn specialize_func(&mut self, func: FunctionName, arg: &Term) -> FunctionName {
-        match func {
-            FunctionName::Var(name) => {
-                let specialized = self.specialize_name(&name, &arg.ty);
-                FunctionName::Var(specialized)
+    fn specialize_func(&mut self, func: Term, arg: &Term) -> Term {
+        match &func.kind {
+            TermKind::Var(name) => {
+                let specialized = self.specialize_name(name, &arg.ty);
+                if specialized != *name {
+                    Term {
+                        id: self.term_ids.next_id(),
+                        ty: func.ty.clone(),
+                        span: func.span,
+                        kind: TermKind::Var(specialized),
+                    }
+                } else {
+                    func
+                }
             }
-            FunctionName::Term(t) => {
-                // Check if the Term is a direct Var reference (sign, abs, etc.)
-                // This is the common case from transform_application
-                if let TermKind::Var(name) = &t.kind {
-                    let specialized_name = self.specialize_name(name, &arg.ty);
-                    if specialized_name != *name {
-                        // Return specialized var wrapped in Term
-                        let specialized_term = Term {
+
+            // Check for fully-applied binary functions like mul
+            // Pattern: App { func: Var("mul"), arg: first_arg }
+            TermKind::App {
+                func: inner_func,
+                arg: first_arg,
+            } => {
+                // Check if inner_func is Var("mul")
+                let maybe_mul_name = if let TermKind::Var(name) = &inner_func.kind {
+                    Some(name.as_str())
+                } else {
+                    None
+                };
+
+                if maybe_mul_name == Some("mul") {
+                    // Specialize mul based on both arg types
+                    if let Some(specialized_name) = self.specialize_mul(&first_arg.ty, &arg.ty) {
+                        // Build: App { func: Var(specialized_name), arg: first_arg }
+                        // This becomes the new inner term
+                        let specialized_first_arg = self.specialize_term(*first_arg.clone());
+                        let specialized_var = Term {
                             id: self.term_ids.next_id(),
-                            ty: t.ty.clone(),
-                            span: t.span,
+                            ty: inner_func.ty.clone(),
+                            span: inner_func.span,
                             kind: TermKind::Var(specialized_name),
                         };
-                        return FunctionName::Term(Box::new(specialized_term));
-                    }
-                }
-
-                // Check for fully-applied binary functions like mul
-                // Pattern: App { func: Term(App { func: Term(Var("mul")), arg: first_arg }), arg: second_arg }
-                // We're in specialize_func for the outer App, so:
-                // - t is the inner App { func: Term(Var("mul")), arg: first_arg }
-                // - arg is the second_arg
-                if let TermKind::App {
-                    func: inner_func,
-                    arg: first_arg,
-                } = &t.kind
-                {
-                    // Check if inner_func is Var("mul") (direct) or Term(Var("mul")) (wrapped)
-                    let maybe_mul_name = match inner_func.as_ref() {
-                        FunctionName::Var(name) => Some(name.as_str()),
-                        FunctionName::Term(term) => {
-                            if let TermKind::Var(name) = &term.kind {
-                                Some(name.as_str())
-                            } else {
-                                None
-                            }
-                        }
-                        _ => None,
-                    };
-
-                    if maybe_mul_name == Some("mul") {
-                        // Specialize mul based on both arg types
-                        if let Some(specialized_name) = self.specialize_mul(&first_arg.ty, &arg.ty) {
-                            // Build: App { func: Var(specialized_name), arg: first_arg }
-                            // This becomes the new inner term
-                            let specialized_first_arg = self.specialize_term(*first_arg.clone());
-                            let new_inner = Term {
-                                id: self.term_ids.next_id(),
-                                ty: t.ty.clone(),
-                                span: t.span,
-                                kind: TermKind::App {
-                                    func: Box::new(FunctionName::Var(specialized_name)),
-                                    arg: Box::new(specialized_first_arg),
-                                },
-                            };
-                            return FunctionName::Term(Box::new(new_inner));
-                        }
+                        return Term {
+                            id: self.term_ids.next_id(),
+                            ty: func.ty.clone(),
+                            span: func.span,
+                            kind: TermKind::App {
+                                func: Box::new(specialized_var),
+                                arg: Box::new(specialized_first_arg),
+                            },
+                        };
                     }
                 }
 
                 // For nested applications or other terms, recursively specialize
-                let specialized = self.specialize_term(*t);
-                FunctionName::Term(Box::new(specialized))
+                self.specialize_term(func)
             }
-            // BinOp and UnOp don't need specialization
-            other => other,
+
+            // BinOp and UnOp don't need specialization - return as-is
+            TermKind::BinOp(_) | TermKind::UnOp(_) => func,
+
+            // For other term kinds, recursively specialize
+            _ => self.specialize_term(func),
         }
     }
 
@@ -294,54 +286,6 @@ mod tests {
             kind: TermKind::Var("x".to_string()),
         };
 
-        let sign_call = Term {
-            id: ids.next_id(),
-            ty: f32_ty.clone(),
-            span: dummy_span(),
-            kind: TermKind::App {
-                func: Box::new(FunctionName::Var("sign".to_string())),
-                arg: Box::new(x_var),
-            },
-        };
-
-        let program = Program {
-            defs: vec![Def {
-                name: "test".to_string(),
-                ty: f32_ty.clone(),
-                body: sign_call,
-                meta: DefMeta::Function,
-                arity: 0,
-            }],
-            uniforms: vec![],
-            storage: vec![],
-        };
-
-        let specialized = specialize(program);
-
-        // Check that sign became f32.sign
-        match &specialized.defs[0].body.kind {
-            TermKind::App { func, .. } => match func.as_ref() {
-                FunctionName::Var(name) => assert_eq!(name, "f32.sign"),
-                _ => panic!("Expected Var"),
-            },
-            _ => panic!("Expected App"),
-        }
-    }
-
-    #[test]
-    fn test_specialize_sign_f32_term_var() {
-        // Test the case where sign comes through FunctionName::Term(Var)
-        // This is how transform_application produces it
-        let mut ids = TermIdSource::new();
-        let f32_ty = Type::Constructed(TypeName::Float(32), vec![]);
-
-        let x_var = Term {
-            id: ids.next_id(),
-            ty: f32_ty.clone(),
-            span: dummy_span(),
-            kind: TermKind::Var("x".to_string()),
-        };
-
         let sign_var = Term {
             id: ids.next_id(),
             ty: Type::Constructed(TypeName::Arrow, vec![f32_ty.clone(), f32_ty.clone()]),
@@ -349,13 +293,12 @@ mod tests {
             kind: TermKind::Var("sign".to_string()),
         };
 
-        // App { func: Term(Var("sign")), arg: x }
         let sign_call = Term {
             id: ids.next_id(),
             ty: f32_ty.clone(),
             span: dummy_span(),
             kind: TermKind::App {
-                func: Box::new(FunctionName::Term(Box::new(sign_var))),
+                func: Box::new(sign_var),
                 arg: Box::new(x_var),
             },
         };
@@ -376,12 +319,9 @@ mod tests {
 
         // Check that sign became f32.sign
         match &specialized.defs[0].body.kind {
-            TermKind::App { func, .. } => match func.as_ref() {
-                FunctionName::Term(inner) => match &inner.kind {
-                    TermKind::Var(name) => assert_eq!(name, "f32.sign"),
-                    _ => panic!("Expected Var inside Term, got {:?}", inner.kind),
-                },
-                _ => panic!("Expected Term, got {:?}", func),
+            TermKind::App { func, .. } => match &func.kind {
+                TermKind::Var(name) => assert_eq!(name, "f32.sign"),
+                _ => panic!("Expected Var, got {:?}", func.kind),
             },
             _ => panic!("Expected App"),
         }
@@ -393,7 +333,7 @@ mod tests {
         let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
 
         // Build: min(a, b) where a, b: i32
-        // In curried form: App(Term(App(Var("min"), a)), b)
+        // In curried form: App(App(Var("min"), a), b)
         let a_var = Term {
             id: ids.next_id(),
             ty: i32_ty.clone(),
@@ -409,13 +349,21 @@ mod tests {
         };
 
         let partial_ty = Type::Constructed(TypeName::Arrow, vec![i32_ty.clone(), i32_ty.clone()]);
+        let func_ty = Type::Constructed(TypeName::Arrow, vec![i32_ty.clone(), partial_ty.clone()]);
+
+        let min_var = Term {
+            id: ids.next_id(),
+            ty: func_ty,
+            span: dummy_span(),
+            kind: TermKind::Var("min".to_string()),
+        };
 
         let min_a = Term {
             id: ids.next_id(),
             ty: partial_ty,
             span: dummy_span(),
             kind: TermKind::App {
-                func: Box::new(FunctionName::Var("min".to_string())),
+                func: Box::new(min_var),
                 arg: Box::new(a_var),
             },
         };
@@ -425,7 +373,7 @@ mod tests {
             ty: i32_ty.clone(),
             span: dummy_span(),
             kind: TermKind::App {
-                func: Box::new(FunctionName::Term(Box::new(min_a))),
+                func: Box::new(min_a),
                 arg: Box::new(b_var),
             },
         };
@@ -446,15 +394,12 @@ mod tests {
 
         // Check that min became i32.min in the inner application
         match &specialized.defs[0].body.kind {
-            TermKind::App { func, .. } => match func.as_ref() {
-                FunctionName::Term(inner) => match &inner.kind {
-                    TermKind::App { func: inner_func, .. } => match inner_func.as_ref() {
-                        FunctionName::Var(name) => assert_eq!(name, "i32.min"),
-                        _ => panic!("Expected Var"),
-                    },
-                    _ => panic!("Expected inner App"),
+            TermKind::App { func, .. } => match &func.kind {
+                TermKind::App { func: inner_func, .. } => match &inner_func.kind {
+                    TermKind::Var(name) => assert_eq!(name, "i32.min"),
+                    _ => panic!("Expected Var, got {:?}", inner_func.kind),
                 },
-                _ => panic!("Expected Term"),
+                _ => panic!("Expected inner App, got {:?}", func.kind),
             },
             _ => panic!("Expected App"),
         }
