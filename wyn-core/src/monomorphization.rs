@@ -13,6 +13,7 @@
 
 use crate::IdArena;
 use crate::ast::TypeName;
+use crate::err_type;
 use crate::error::Result;
 use crate::mir::{ArrayBacking, Body, Def, Expr, ExprId, LocalDecl, Program};
 use crate::mir::{LambdaId, LambdaInfo};
@@ -695,33 +696,58 @@ impl Monomorphizer {
         None
     }
 
-    /// Unify two types to build a substitution
+    /// Unify two types to build a substitution.
+    ///
+    /// Requires that `actual` is fully concrete (no type variables).
+    /// At monomorphization time, all call sites should have concrete argument types.
     fn unify_for_subst(
         &self,
         expected: &Type<TypeName>,
         actual: &Type<TypeName>,
         subst: &mut Substitution,
     ) -> Result<()> {
+        // Invariant: call argument types should be concrete at monomorphization time
+        if contains_variables(actual) {
+            return Err(err_type!(
+                "monomorphization: actual type still contains variables: {}",
+                format_type_compact(actual)
+            ));
+        }
+
         match (expected, actual) {
             (Type::Variable(id), concrete) => {
-                // This is a type variable in the polymorphic function
-                // Map it to the concrete type from the call site
-                if !contains_variables(concrete) {
-                    subst.insert(*id, concrete.clone());
-                }
+                // Bind the scheme variable to the concrete type
+                subst.insert(*id, concrete.clone());
+                Ok(())
             }
             (Type::Constructed(name1, args1), Type::Constructed(name2, args2)) => {
                 // Recurse into constructed types only if type constructors match exactly
-                // (same tuple arity, same int/float bit widths, same named type, etc.)
-                if name1 == name2 && args1.len() == args2.len() {
-                    for (a1, a2) in args1.iter().zip(args2.iter()) {
-                        self.unify_for_subst(a1, a2, subst)?;
-                    }
+                if name1 != name2 {
+                    return Err(err_type!(
+                        "monomorphization: type constructor mismatch: {:?} vs {:?}",
+                        name1,
+                        name2
+                    ));
                 }
+                if args1.len() != args2.len() {
+                    return Err(err_type!(
+                        "monomorphization: arity mismatch for {:?}: {} vs {}",
+                        name1,
+                        args1.len(),
+                        args2.len()
+                    ));
+                }
+                for (a1, a2) in args1.iter().zip(args2.iter()) {
+                    self.unify_for_subst(a1, a2, subst)?;
+                }
+                Ok(())
             }
-            _ => {}
+            _ => Err(err_type!(
+                "monomorphization: structural mismatch between {} and {}",
+                format_type_compact(expected),
+                format_type_compact(actual)
+            )),
         }
-        Ok(())
     }
 
     /// Get or create a specialized version of a function
