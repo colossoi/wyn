@@ -145,6 +145,7 @@ fn format_constructed_type(name: &TypeName, args: &[PolyType<TypeName>]) -> Stri
         TypeName::AddressFunction => "function".to_string(),
         TypeName::AddressUnknown => "?addrspace".to_string(),
         TypeName::Skolem(id) => format!("{}", id),
+        TypeName::Ignored => "_".to_string(),
     }
 }
 

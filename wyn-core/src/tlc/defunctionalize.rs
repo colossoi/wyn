@@ -996,7 +996,7 @@ impl<'a> Defunctionalizer<'a> {
         // Build from left to right: ((t a1) a2) a3 ...
         let mut current = Term {
             id: self.term_ids.next_id(),
-            ty: Type::Variable(0), // Placeholder
+            ty: Type::Constructed(TypeName::Ignored, vec![]),
             span,
             kind: TermKind::App {
                 func: Box::new(FunctionName::Term(Box::new(func_term))),
@@ -1007,7 +1007,7 @@ impl<'a> Defunctionalizer<'a> {
         for arg in args.into_iter().skip(1) {
             current = Term {
                 id: self.term_ids.next_id(),
-                ty: Type::Variable(0), // Placeholder
+                ty: Type::Constructed(TypeName::Ignored, vec![]),
                 span,
                 kind: TermKind::App {
                     func: Box::new(FunctionName::Term(Box::new(current))),
@@ -1041,7 +1041,7 @@ impl<'a> Defunctionalizer<'a> {
         // Build from left to right: ((f a1) a2) a3 ...
         let mut current = Term {
             id: self.term_ids.next_id(),
-            ty: Type::Variable(0), // Placeholder
+            ty: Type::Constructed(TypeName::Ignored, vec![]),
             span,
             kind: TermKind::App {
                 func: Box::new(FunctionName::Var(func_name.to_string())),
@@ -1052,7 +1052,7 @@ impl<'a> Defunctionalizer<'a> {
         for arg in args.into_iter().skip(1) {
             current = Term {
                 id: self.term_ids.next_id(),
-                ty: Type::Variable(0), // Placeholder
+                ty: Type::Constructed(TypeName::Ignored, vec![]),
                 span,
                 kind: TermKind::App {
                     func: Box::new(FunctionName::Term(Box::new(current))),
@@ -1082,7 +1082,7 @@ impl<'a> Defunctionalizer<'a> {
 
         let mut current = Term {
             id: self.term_ids.next_id(),
-            ty: Type::Variable(0),
+            ty: Type::Constructed(TypeName::Ignored, vec![]),
             span,
             kind: TermKind::App {
                 func: Box::new(FunctionName::Term(Box::new(func_term))),
@@ -1093,7 +1093,7 @@ impl<'a> Defunctionalizer<'a> {
         for ar in arg_results.iter().skip(1) {
             current = Term {
                 id: self.term_ids.next_id(),
-                ty: Type::Variable(0),
+                ty: Type::Constructed(TypeName::Ignored, vec![]),
                 span,
                 kind: TermKind::App {
                     func: Box::new(FunctionName::Term(Box::new(current))),
@@ -1137,7 +1137,7 @@ impl<'a> Defunctionalizer<'a> {
         // Build first application with the original FunctionName
         let mut current = Term {
             id: self.term_ids.next_id(),
-            ty: Type::Variable(0),
+            ty: Type::Constructed(TypeName::Ignored, vec![]),
             span,
             kind: TermKind::App {
                 func: Box::new(func),
@@ -1149,7 +1149,7 @@ impl<'a> Defunctionalizer<'a> {
         for ar in arg_results.iter().skip(1) {
             current = Term {
                 id: self.term_ids.next_id(),
-                ty: Type::Variable(0),
+                ty: Type::Constructed(TypeName::Ignored, vec![]),
                 span,
                 kind: TermKind::App {
                     func: Box::new(FunctionName::Term(Box::new(current))),

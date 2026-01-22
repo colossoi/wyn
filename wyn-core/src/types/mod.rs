@@ -175,6 +175,10 @@ pub enum TypeName {
     /// Created when opening existential types (?k. T). Unlike unification variables,
     /// skolems only unify with themselves (same ID), enforcing opacity.
     Skolem(SkolemId),
+    /// Ignored/placeholder type for intermediate values whose types are never inspected.
+    /// Used in defunctionalization for curried application intermediates that get
+    /// reformulated into multi-arg calls.
+    Ignored,
 }
 
 impl std::fmt::Display for TypeName {
@@ -227,6 +231,7 @@ impl std::fmt::Display for TypeName {
             TypeName::AddressFunction => write!(f, "function"),
             TypeName::AddressUnknown => write!(f, "?addrspace"),
             TypeName::Skolem(id) => write!(f, "{}", id),
+            TypeName::Ignored => write!(f, "_"),
         }
     }
 }
@@ -281,6 +286,7 @@ impl polytype::Name for TypeName {
             TypeName::AddressFunction => "function".to_string(),
             TypeName::AddressUnknown => "?addrspace".to_string(),
             TypeName::Skolem(id) => format!("{}", id),
+            TypeName::Ignored => "_".to_string(),
         }
     }
 }
