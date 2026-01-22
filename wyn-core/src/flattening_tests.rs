@@ -1259,6 +1259,46 @@ def product_array(arr: [4]f32) f32 =
 }
 
 #[test]
+fn test_reduce_with_tuple_destructuring() {
+    // Test reduce with tuple pattern destructuring in the combiner
+    // This is the pattern used in raytrace.wyn's findClosestHit
+    let mir = flatten_program(
+        r#"
+def minPair(hits: [4](f32, i32)) (f32, i32) =
+  reduce(|(t1, m1): (f32, i32), (t2, m2): (f32, i32)|
+           if t1 < t2 then (t1, m1) else (t2, m2),
+         (1000.0, 0),
+         hits)
+"#,
+    );
+
+    // Should have the minPair function
+    let min_def = find_def(&mir, "minPair");
+    assert!(matches!(min_def, mir::Def::Function { .. }));
+
+    // Check that _w_intrinsic_reduce is called with correct arity
+    let mut has_reduce_intrinsic = false;
+    for def in &mir.defs {
+        if let mir::Def::Function { body, .. } = def {
+            for expr in &body.exprs {
+                if let mir::Expr::Intrinsic {
+                    name: intrinsic_name,
+                    args,
+                } = expr
+                {
+                    if intrinsic_name == "_w_intrinsic_reduce" {
+                        // reduce intrinsic should have at least 3 args: [op, ne, arr, captures...]
+                        assert!(args.len() >= 3, "reduce intrinsic should have at least 3 args, got {}", args.len());
+                        has_reduce_intrinsic = true;
+                    }
+                }
+            }
+        }
+    }
+    assert!(has_reduce_intrinsic, "Expected _w_intrinsic_reduce in MIR");
+}
+
+#[test]
 fn test_filter_basic() {
     // Test basic filter with a predicate
     let mir = flatten_program(

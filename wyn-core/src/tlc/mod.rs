@@ -186,6 +186,14 @@ pub struct Program {
 // AST to TLC Transformation
 // =============================================================================
 
+/// A pending let-binding to be applied after all lambdas are created.
+#[derive(Debug, Clone)]
+struct PendingBinding {
+    name: String,
+    ty: Type<TypeName>,
+    expr: Term,
+}
+
 /// Context for transforming AST to TLC.
 pub struct Transformer<'a> {
     type_table: &'a TypeTable,
@@ -404,6 +412,254 @@ impl<'a> Transformer<'a> {
 
             ast::PatternKind::Constructor(_, _) => {
                 todo!("Constructor patterns in lambdas")
+            }
+        }
+    }
+
+    /// Collect bindings from a pattern without wrapping in let expressions.
+    /// Returns (fresh_param_name, list_of_pending_bindings).
+    /// Used by transform_lambda to defer bindings until after all lambdas are created.
+    fn collect_pattern_bindings(
+        &mut self,
+        pattern: &ast::Pattern,
+        param_ty: &Type<TypeName>,
+        span: Span,
+    ) -> (String, Vec<PendingBinding>) {
+        match &pattern.kind {
+            ast::PatternKind::Name(name) => {
+                // Simple name - no extra bindings needed
+                (name.clone(), vec![])
+            }
+
+            ast::PatternKind::Wildcard => {
+                let fresh = format!("_wild_{}", self.term_ids.next_id().0);
+                (fresh, vec![])
+            }
+
+            ast::PatternKind::Typed(inner, _) => self.collect_pattern_bindings(inner, param_ty, span),
+
+            ast::PatternKind::Attributed(_, inner) => self.collect_pattern_bindings(inner, param_ty, span),
+
+            ast::PatternKind::Tuple(patterns) => {
+                let fresh = format!("_tup_{}", self.term_ids.next_id().0);
+                let component_types = self.extract_tuple_types(param_ty, patterns.len());
+                let bindings =
+                    self.collect_tuple_bindings(&fresh, param_ty, patterns, &component_types, span);
+                (fresh, bindings)
+            }
+
+            ast::PatternKind::Record(fields) => {
+                let fresh = format!("_rec_{}", self.term_ids.next_id().0);
+                let field_types = self.extract_record_types(param_ty);
+                let bindings =
+                    self.collect_record_bindings(&fresh, param_ty, fields, &field_types, span);
+                (fresh, bindings)
+            }
+
+            ast::PatternKind::Unit => {
+                todo!("Unit patterns")
+            }
+
+            ast::PatternKind::Literal(_) => {
+                todo!("Literal patterns in lambdas")
+            }
+
+            ast::PatternKind::Constructor(_, _) => {
+                todo!("Constructor patterns in lambdas")
+            }
+        }
+    }
+
+    /// Collect bindings for a tuple pattern without wrapping in let.
+    fn collect_tuple_bindings(
+        &mut self,
+        tuple_var: &str,
+        tuple_ty: &Type<TypeName>,
+        patterns: &[ast::Pattern],
+        component_types: &[Type<TypeName>],
+        span: Span,
+    ) -> Vec<PendingBinding> {
+        let mut bindings = Vec::new();
+
+        for (i, pattern) in patterns.iter().enumerate() {
+            let comp_ty = component_types
+                .get(i)
+                .cloned()
+                .expect("BUG: Tuple pattern has more elements than tuple type");
+
+            // Build projection: _w_tuple_proj tuple_var i
+            let tuple_ref = self.mk_term(tuple_ty.clone(), span, TermKind::Var(tuple_var.to_string()));
+            let index_lit = self.mk_term(
+                Type::Constructed(TypeName::Int(32), vec![]),
+                span,
+                TermKind::IntLit(i.to_string()),
+            );
+            let proj = self.build_app2("_w_tuple_proj", tuple_ref, index_lit, comp_ty.clone(), span);
+
+            self.collect_pattern_bindings_into(pattern, &comp_ty, proj, &mut bindings, span);
+        }
+
+        bindings
+    }
+
+    /// Collect bindings for a record pattern without wrapping in let.
+    fn collect_record_bindings(
+        &mut self,
+        record_var: &str,
+        record_ty: &Type<TypeName>,
+        fields: &[ast::RecordPatternField],
+        field_types: &HashMap<String, Type<TypeName>>,
+        span: Span,
+    ) -> Vec<PendingBinding> {
+        let mut bindings = Vec::new();
+
+        for field in fields {
+            let field_ty = field_types
+                .get(&field.field)
+                .cloned()
+                .unwrap_or_else(|| panic!("BUG: Record field '{}' not found in type", field.field));
+
+            let field_idx = self.resolve_field_index(record_ty, &field.field).unwrap_or(0);
+
+            let record_ref = self.mk_term(record_ty.clone(), span, TermKind::Var(record_var.to_string()));
+            let index_lit = self.mk_term(
+                Type::Constructed(TypeName::Int(32), vec![]),
+                span,
+                TermKind::IntLit(field_idx.to_string()),
+            );
+            let field_access =
+                self.build_app2("_w_tuple_proj", record_ref, index_lit, field_ty.clone(), span);
+
+            if let Some(pat) = &field.pattern {
+                self.collect_pattern_bindings_into(pat, &field_ty, field_access, &mut bindings, span);
+            } else {
+                bindings.push(PendingBinding {
+                    name: field.field.clone(),
+                    ty: field_ty,
+                    expr: field_access,
+                });
+            }
+        }
+
+        bindings
+    }
+
+    /// Recursively collect bindings from a pattern into a list.
+    fn collect_pattern_bindings_into(
+        &mut self,
+        pattern: &ast::Pattern,
+        pat_ty: &Type<TypeName>,
+        expr: Term,
+        bindings: &mut Vec<PendingBinding>,
+        span: Span,
+    ) {
+        match &pattern.kind {
+            ast::PatternKind::Name(name) => {
+                bindings.push(PendingBinding {
+                    name: name.clone(),
+                    ty: pat_ty.clone(),
+                    expr,
+                });
+            }
+
+            ast::PatternKind::Wildcard => {
+                let fresh = format!("_wild_{}", self.term_ids.next_id().0);
+                bindings.push(PendingBinding {
+                    name: fresh,
+                    ty: pat_ty.clone(),
+                    expr,
+                });
+            }
+
+            ast::PatternKind::Typed(inner, _) => {
+                self.collect_pattern_bindings_into(inner, pat_ty, expr, bindings, span)
+            }
+
+            ast::PatternKind::Attributed(_, inner) => {
+                self.collect_pattern_bindings_into(inner, pat_ty, expr, bindings, span)
+            }
+
+            ast::PatternKind::Tuple(patterns) => {
+                let fresh = format!("_tup_{}", self.term_ids.next_id().0);
+                let component_types = self.extract_tuple_types(pat_ty, patterns.len());
+
+                // First bind the tuple to a fresh name
+                bindings.push(PendingBinding {
+                    name: fresh.clone(),
+                    ty: pat_ty.clone(),
+                    expr,
+                });
+
+                // Then recursively collect bindings for each component
+                for (i, sub_pattern) in patterns.iter().enumerate() {
+                    let comp_ty = component_types
+                        .get(i)
+                        .cloned()
+                        .expect("BUG: Tuple pattern has more elements than tuple type");
+
+                    let tuple_ref = self.mk_term(pat_ty.clone(), span, TermKind::Var(fresh.clone()));
+                    let index_lit = self.mk_term(
+                        Type::Constructed(TypeName::Int(32), vec![]),
+                        span,
+                        TermKind::IntLit(i.to_string()),
+                    );
+                    let proj = self.build_app2("_w_tuple_proj", tuple_ref, index_lit, comp_ty.clone(), span);
+
+                    self.collect_pattern_bindings_into(sub_pattern, &comp_ty, proj, bindings, span);
+                }
+            }
+
+            ast::PatternKind::Record(fields) => {
+                let fresh = format!("_rec_{}", self.term_ids.next_id().0);
+                let field_types = self.extract_record_types(pat_ty);
+
+                // First bind the record to a fresh name
+                bindings.push(PendingBinding {
+                    name: fresh.clone(),
+                    ty: pat_ty.clone(),
+                    expr,
+                });
+
+                // Then recursively collect bindings for each field
+                for field in fields {
+                    let field_ty = field_types
+                        .get(&field.field)
+                        .cloned()
+                        .unwrap_or_else(|| panic!("BUG: Record field '{}' not found in type", field.field));
+
+                    let field_idx = self.resolve_field_index(pat_ty, &field.field).unwrap_or(0);
+
+                    let record_ref = self.mk_term(pat_ty.clone(), span, TermKind::Var(fresh.clone()));
+                    let index_lit = self.mk_term(
+                        Type::Constructed(TypeName::Int(32), vec![]),
+                        span,
+                        TermKind::IntLit(field_idx.to_string()),
+                    );
+                    let field_access =
+                        self.build_app2("_w_tuple_proj", record_ref, index_lit, field_ty.clone(), span);
+
+                    if let Some(pat) = &field.pattern {
+                        self.collect_pattern_bindings_into(pat, &field_ty, field_access, bindings, span);
+                    } else {
+                        bindings.push(PendingBinding {
+                            name: field.field.clone(),
+                            ty: field_ty,
+                            expr: field_access,
+                        });
+                    }
+                }
+            }
+
+            ast::PatternKind::Unit => {
+                todo!("Unit patterns in let bindings")
+            }
+
+            ast::PatternKind::Literal(_) => {
+                todo!("Literal patterns in let bindings")
+            }
+
+            ast::PatternKind::Constructor(_, _) => {
+                todo!("Constructor patterns in let bindings")
             }
         }
     }
@@ -812,11 +1068,52 @@ impl<'a> Transformer<'a> {
             return self.transform_expr(body);
         }
 
-        let body_term = self.transform_lambda(&params[1..], body, self.get_body_type(&ty), span);
-        let param = &params[0];
-        let param_ty = self.get_param_type(&ty);
+        // Collect all lambda parameters and their pending bindings
+        // This avoids creating let-bindings between nested lambdas which causes captures
+        let mut lambda_info: Vec<(String, Type<TypeName>, Vec<PendingBinding>)> = Vec::new();
+        let mut current_ty = ty.clone();
 
-        self.pattern_to_lambda(param, param_ty, body_term)
+        for param in params {
+            let param_ty = self.get_param_type(&current_ty);
+            let (fresh_name, bindings) = self.collect_pattern_bindings(param, &param_ty, span);
+            lambda_info.push((fresh_name, param_ty.clone(), bindings));
+            current_ty = self.get_body_type(&current_ty);
+        }
+
+        // Transform the body expression
+        let mut result = self.transform_expr(body);
+
+        // Apply all bindings in reverse order (innermost first, so outermost ends up innermost)
+        for (_, _, bindings) in lambda_info.iter().rev() {
+            for binding in bindings.iter().rev() {
+                result = self.mk_term(
+                    result.ty.clone(),
+                    span,
+                    TermKind::Let {
+                        name: binding.name.clone(),
+                        name_ty: binding.ty.clone(),
+                        rhs: Box::new(binding.expr.clone()),
+                        body: Box::new(result),
+                    },
+                );
+            }
+        }
+
+        // Build nested lambdas from inside-out
+        for (fresh_name, param_ty, _) in lambda_info.into_iter().rev() {
+            let lam_ty = Type::Constructed(TypeName::Arrow, vec![param_ty.clone(), result.ty.clone()]);
+            result = self.mk_term(
+                lam_ty,
+                span,
+                TermKind::Lam {
+                    param: fresh_name,
+                    param_ty,
+                    body: Box::new(result),
+                },
+            );
+        }
+
+        result
     }
 
     fn get_param_type(&self, ty: &Type<TypeName>) -> Type<TypeName> {

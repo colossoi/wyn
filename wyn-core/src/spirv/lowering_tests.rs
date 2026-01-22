@@ -266,6 +266,35 @@ def sum_u32(arr: [4]u32) u32 =
 }
 
 #[test]
+fn test_reduce_with_tuple_destructuring() {
+    // Test reduce with tuple pattern destructuring in the combiner.
+    // This pattern from raytrace.wyn's findClosestHit was causing:
+    // "Undefined global: _lambda_N" error because HOF specialization
+    // was not eliminating function parameters correctly.
+    let result = compile_to_spirv(
+        r#"
+def minPair(hits: [4](f32, i32)) (f32, i32) =
+  reduce(|(t1, m1): (f32, i32), (t2, m2): (f32, i32)|
+           if t1 < t2 then (t1, m1) else (t2, m2),
+         (1000.0, 0),
+         hits)
+
+def testHits: [4](f32, i32) = [(1.0, 1), (2.0, 2), (0.5, 3), (3.0, 4)]
+
+#[fragment]
+entry fragment_main(#[builtin(frag_coord)] pos: vec4f32) #[location(0)] vec4f32 =
+  let (t, m) = minPair(testHits) in
+  @[t, t, 0.0, 1.0]
+"#,
+    );
+    // Should compile without "Undefined global" error
+    assert!(result.is_ok(), "Expected successful compilation, got: {:?}", result.err());
+    let spirv = result.unwrap();
+    assert!(!spirv.is_empty());
+    assert_eq!(spirv[0], 0x07230203);
+}
+
+#[test]
 fn test_algebraic_simplifications() {
     // Test all algebraic identity simplifications compile correctly
     let spirv = compile_to_spirv(
