@@ -617,11 +617,9 @@ impl<'a> TlcToMir<'a> {
                 )
             } else if arg_ids.len() < arity {
                 panic!(
-                    "BUG: Partial application not supported - {} requires {} args, got {}. \
-                     Defunctionalization should have eliminated partial applications.",
-                    name,
-                    arity,
-                    arg_ids.len()
+                    "Partial application not supported: {} expects {} args, got {}. \
+                     SOAC closure flattening should handle this at TLC level.",
+                    name, arity, arg_ids.len()
                 )
             } else {
                 panic!(
@@ -632,8 +630,8 @@ impl<'a> TlcToMir<'a> {
                 )
             }
         } else {
-            // Intrinsic or unknown function
-            self.emit_call_or_intrinsic(name, arg_ids, ty, span, node_id, body)
+            // Intrinsic or unknown function - check for SOAC with closure argument
+            self.emit_soac_or_intrinsic(name, arg_ids, ty, span, node_id, body)
         }
     }
 
@@ -684,8 +682,45 @@ impl<'a> TlcToMir<'a> {
         }
     }
 
+    /// Check if a function name is a SOAC (Second-Order Array Combinator).
+    fn is_soac(name: &str) -> bool {
+        matches!(
+            name,
+            "map" | "reduce" | "scan" | "filter" | "scatter"
+                | "map2" | "map3" | "map4" | "map5"
+                | "reduce_by_index" | "hist"
+        )
+    }
+
+    /// Get the intrinsic name for a SOAC.
+    fn soac_intrinsic(name: &str) -> &'static str {
+        match name {
+            "map" | "map2" | "map3" | "map4" | "map5" => "_w_intrinsic_map",
+            "reduce" => "_w_intrinsic_reduce",
+            "scan" => "_w_intrinsic_scan",
+            "filter" => "_w_intrinsic_filter",
+            "scatter" => "_w_intrinsic_scatter",
+            "reduce_by_index" | "hist" => "_w_intrinsic_hist",
+            _ => "_w_intrinsic_map", // fallback
+        }
+    }
+
+    /// Emit a SOAC or regular intrinsic/call.
+    /// Note: SOAC closure flattening is handled earlier at TLC level in transform_var_application.
+    fn emit_soac_or_intrinsic(
+        &self,
+        name: &str,
+        args: Vec<ExprId>,
+        ty: Type<TypeName>,
+        span: Span,
+        node_id: NodeId,
+        body: &mut Body,
+    ) -> ExprId {
+        // Regular intrinsic/call handling
+        self.emit_call_or_intrinsic(name, args, ty, span, node_id, body)
+    }
+
     /// Emit either an Intrinsic or Call expression based on function name.
-    /// Handles SOAC closure flattening for intrinsics.
     fn emit_call_or_intrinsic(
         &self,
         name: &str,
@@ -725,7 +760,7 @@ impl<'a> TlcToMir<'a> {
         }
 
         if name.starts_with("_w_") {
-            // Intrinsic call - args already flattened by defunctionalization
+            // Intrinsic call
             body.alloc_expr(
                 Expr::Intrinsic {
                     name: name.to_string(),

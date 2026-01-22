@@ -950,6 +950,12 @@ fn is_prelude_function(name: &str) -> bool {
     if name.starts_with("_w_lam_") {
         return true;
     }
+    // Specialized HOF functions from defunctionalization (map$0, reduce$1, filter$2, etc.)
+    // Their bodies always pass arrays directly to intrinsics, making them appear
+    // as in-place candidates. The real decision is at the call site.
+    if name.starts_with("map$") || name.starts_with("reduce$") || name.starts_with("filter$") {
+        return true;
+    }
     // Known prelude SOAC wrapper functions
     const PRELUDE_SOACS: &[&str] = &[
         "map",
@@ -1392,6 +1398,20 @@ fn find_inplace_ops(
                 find_inplace_ops(body, *arg, uses_after, aliases, result);
             }
         }
+        // Specialized map functions (map$0, map$1, etc.) - array is first arg (function arg removed)
+        Call { func, args } if func.starts_with("map$") && !args.is_empty() => {
+            let args = args.clone();
+            // args[0] is array (function arg has been removed by HOF specialization)
+            if let Local(arr_local) = body.get_expr(args[0]) {
+                if can_reuse_local(*arr_local, expr_id, uses_after, aliases) {
+                    result.can_reuse_input.insert(body.get_node_id(expr_id));
+                }
+            }
+            // Recurse into arguments
+            for arg in &args {
+                find_inplace_ops(body, *arg, uses_after, aliases, result);
+            }
+        }
         Call { func, args }
             if (func == "_w_intrinsic_array_with" || func == "_w_array_with") && args.len() == 3 =>
         {
@@ -1412,6 +1432,20 @@ fn find_inplace_ops(
             let args = args.clone();
             // args[0] is closure, args[1] is array
             if let Local(arr_local) = body.get_expr(args[1]) {
+                if can_reuse_local(*arr_local, expr_id, uses_after, aliases) {
+                    result.can_reuse_input.insert(body.get_node_id(expr_id));
+                }
+            }
+            // Recurse into arguments
+            for arg in &args {
+                find_inplace_ops(body, *arg, uses_after, aliases, result);
+            }
+        }
+        // Specialized map functions as intrinsics (map$0, map$1, etc.)
+        Intrinsic { name, args } if name.starts_with("map$") && !args.is_empty() => {
+            let args = args.clone();
+            // args[0] is array (function arg has been removed by HOF specialization)
+            if let Local(arr_local) = body.get_expr(args[0]) {
                 if can_reuse_local(*arr_local, expr_id, uses_after, aliases) {
                     result.can_reuse_input.insert(body.get_node_id(expr_id));
                 }

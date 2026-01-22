@@ -448,8 +448,10 @@ fn test_lambda_captures_typed_variable() {
     // and the free variable rewriting creates _w_closure.mat, which then fails when trying
     // to resolve 'mat' as a field access on the closure.
     //
-    // After defunctionalization, the lambda becomes a lifted function that takes arr as a
-    // parameter. The SOAC call becomes: _w_intrinsic_map(_lambda_N, [0,1,2,3], arr)
+    // After defunctionalization with HOF specialization:
+    // 1. Lambda is lifted to _lambda_N(i, arr) with arr as capture param
+    // 2. map is specialized to map$N(xs, arr) which calls _w_intrinsic_map(_lambda_N, xs, arr)
+    // 3. test_capture calls map$N([0,1,2,3], arr)
     let mir = flatten_program(
         r#"
 def test_capture(arr: [4]i32) i32 =
@@ -464,13 +466,22 @@ def test_capture(arr: [4]i32) i32 =
     });
     assert!(has_lambda, "Lambda should be lifted to a top-level function");
 
-    // Check that there's a map intrinsic call
-    let test_def = find_def(&mir, "test_capture");
-    let body = get_body(test_def);
-    let has_map_intrinsic = body.exprs.iter().any(|expr| {
-        if let mir::Expr::Intrinsic { name, .. } = expr { name == "_w_intrinsic_map" } else { false }
+    // Check that there's a specialized map function (map$N)
+    let has_specialized_map = mir.defs.iter().any(|def| {
+        if let mir::Def::Function { name, .. } = def { name.starts_with("map$") } else { false }
     });
-    assert!(has_map_intrinsic, "Should have _w_intrinsic_map call");
+    assert!(has_specialized_map, "map should be specialized with captures as map$N");
+
+    // Check that the specialized map contains the _w_intrinsic_map call
+    let specialized_map = mir.defs.iter().find(|def| {
+        if let mir::Def::Function { name, .. } = def { name.starts_with("map$") } else { false }
+    });
+    if let Some(mir::Def::Function { body, .. }) = specialized_map {
+        let has_map_intrinsic = body.exprs.iter().any(|expr| {
+            if let mir::Expr::Intrinsic { name, .. } = expr { name == "_w_intrinsic_map" } else { false }
+        });
+        assert!(has_map_intrinsic, "Specialized map should have _w_intrinsic_map call");
+    }
 }
 
 #[test]
@@ -1212,28 +1223,26 @@ def sum_array(arr: [4]f32) f32 =
     });
     assert!(lambda_fn.is_some(), "Expected lambda function definition");
 
-    // Check that reduce intrinsic call exists
-    // (reduce is rewritten to _w_intrinsic_reduce during desugaring)
-    let mut has_reduce_call = false;
+    // Check that _w_intrinsic_reduce is called somewhere in the MIR
+    // (either in reduce prelude function or in sum_array)
+    let mut has_reduce_intrinsic = false;
     for def in &mir.defs {
-        if let mir::Def::Function { body, name, .. } = def {
-            if name == "sum_array" {
-                for expr in &body.exprs {
-                    if let mir::Expr::Intrinsic {
-                        name: intrinsic_name,
-                        args,
-                    } = expr
-                    {
-                        // With no captures, reduce has 3 args: [lambda_ref, neutral_element, array]
-                        if intrinsic_name == "_w_intrinsic_reduce" && args.len() == 3 {
-                            has_reduce_call = true;
-                        }
+        if let mir::Def::Function { body, .. } = def {
+            for expr in &body.exprs {
+                if let mir::Expr::Intrinsic {
+                    name: intrinsic_name,
+                    args,
+                } = expr
+                {
+                    // reduce has 3 args: [op, ne, arr]
+                    if intrinsic_name == "_w_intrinsic_reduce" && args.len() == 3 {
+                        has_reduce_intrinsic = true;
                     }
                 }
             }
         }
     }
-    assert!(has_reduce_call, "Expected _w_intrinsic_reduce with 3 arguments");
+    assert!(has_reduce_intrinsic, "Expected _w_intrinsic_reduce with 3 arguments somewhere in MIR");
 }
 
 #[test]
