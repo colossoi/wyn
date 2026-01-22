@@ -1175,6 +1175,10 @@ fn format_type_compact(ty: &Type<TypeName>) -> String {
         Type::Variable(id) => format!("v{}", id),
         Type::Constructed(TypeName::Size(n), _) => format!("n{}", n),
         Type::Constructed(TypeName::Str(s), args) if args.is_empty() => s.to_string(),
+        Type::Constructed(TypeName::Str(s), args) => {
+            let args_str = args.iter().map(format_type_compact).collect::<Vec<_>>().join("_");
+            format!("{}_{}", s, args_str)
+        }
         Type::Constructed(TypeName::Array, args) => {
             assert!(args.len() == 3);
             format!(
@@ -1184,6 +1188,31 @@ fn format_type_compact(ty: &Type<TypeName>) -> String {
                 format_type_compact(&args[2])
             )
         }
-        _ => "ty".to_string(),
+        Type::Constructed(TypeName::Tuple(arity), args) => {
+            let args_str = args.iter().map(format_type_compact).collect::<Vec<_>>().join("_");
+            format!("tup{}_{}", arity, args_str)
+        }
+        Type::Constructed(TypeName::Vec, args) => {
+            let args_str = args.iter().map(format_type_compact).collect::<Vec<_>>().join("_");
+            format!("vec_{}", args_str)
+        }
+        Type::Constructed(TypeName::Float(bits), _) => format!("f{}", bits),
+        Type::Constructed(TypeName::Int(bits), _) => format!("i{}", bits),
+        Type::Constructed(TypeName::UInt(bits), _) => format!("u{}", bits),
+        Type::Constructed(TypeName::Arrow, args) => {
+            let args_str = args.iter().map(format_type_compact).collect::<Vec<_>>().join("_");
+            format!("fn_{}", args_str)
+        }
+        Type::Constructed(TypeName::Unit, _) => "unit".to_string(),
+        Type::Constructed(TypeName::Named(name), args) if args.is_empty() => name.clone(),
+        Type::Constructed(TypeName::Named(name), args) => {
+            let args_str = args.iter().map(format_type_compact).collect::<Vec<_>>().join("_");
+            format!("{}_{}", name, args_str)
+        }
+        Type::Constructed(name, args) => {
+            // Fallback for other constructed types
+            let args_str = args.iter().map(format_type_compact).collect::<Vec<_>>().join("_");
+            if args_str.is_empty() { format!("{:?}", name) } else { format!("{:?}_{}", name, args_str) }
+        }
     }
 }
