@@ -2981,20 +2981,28 @@ fn lower_index_intrinsic(
                     }
                 }
             } else {
-                // Sized array - regular indexing
-                let array_var = {
-                    let array_val = lower_expr(constructor, body, array_expr_id)?;
+                // Sized array - check for constant index optimization
+                let array_val = lower_expr(constructor, body, array_expr_id)?;
+
+                // If index is a compile-time constant, use OpCompositeExtract
+                if let Some(literal_idx) = constructor.get_const_u32_value(index_val) {
+                    Ok(constructor
+                        .builder
+                        .composite_extract(result_type, None, array_val, [literal_idx])?)
+                } else {
+                    // Runtime index - must materialize to local variable
                     let array_type = constructor.ast_type_to_spirv(arg0_ty);
                     let array_var = constructor.declare_variable("_w_index_tmp", array_type)?;
                     constructor.builder.store(array_var, array_val, None, [])?;
-                    array_var
-                };
 
-                let elem_ptr_type =
-                    constructor.builder.type_pointer(None, StorageClass::Function, result_type);
-                let elem_ptr =
-                    constructor.builder.access_chain(elem_ptr_type, None, array_var, [index_val])?;
-                Ok(constructor.builder.load(result_type, None, elem_ptr, None, [])?)
+                    let elem_ptr_type =
+                        constructor.builder.type_pointer(None, StorageClass::Function, result_type);
+                    let elem_ptr =
+                        constructor
+                            .builder
+                            .access_chain(elem_ptr_type, None, array_var, [index_val])?;
+                    Ok(constructor.builder.load(result_type, None, elem_ptr, None, [])?)
+                }
             }
         }
         PolyType::Constructed(TypeName::Pointer, _) => {
