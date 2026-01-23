@@ -487,6 +487,19 @@ pub fn sized_array(size: usize, elem_type: Type) -> Type {
     )
 }
 
+/// Create a sized array with placeholder address space: Array[elem, Placeholder, Size(n)]
+/// Used for parser tests where address space hasn't been resolved yet.
+pub fn sized_array_placeholder(size: usize, elem_type: Type) -> Type {
+    Type::Constructed(
+        TypeName::Array,
+        vec![
+            elem_type,
+            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
+            Type::Constructed(TypeName::Size(size), vec![]),
+        ],
+    )
+}
+
 pub fn tuple(types: Vec<Type>) -> Type {
     if types.is_empty() { unit() } else { Type::Constructed(TypeName::Tuple(types.len()), types) }
 }

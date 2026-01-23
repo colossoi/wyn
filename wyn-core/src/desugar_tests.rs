@@ -10,28 +10,109 @@ use crate::error::CompilerError;
 
 /// Helper to run full pipeline through lowering, including desugar step
 fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
+    compile_through_lowering_debug(input, false)
+}
+
+fn compile_through_lowering_debug(input: &str, debug: bool) -> Result<(), CompilerError> {
     let mut frontend = crate::cached_frontend();
     let parsed = crate::Compiler::parse(input, &mut frontend.node_counter)?;
-    let alias_checked = parsed
+    let type_checked = parsed
         .desugar(&mut frontend.node_counter)?
-        .resolve(&frontend.module_manager)?
+        .resolve(&mut frontend.module_manager)?
         .fold_ast_constants()
-        .type_check(&frontend.module_manager, &mut frontend.schemes)?
-        .alias_check()?;
+        .type_check(&mut frontend.module_manager, &mut frontend.schemes)?;
 
-    let builtins = crate::build_builtins(&alias_checked.ast, &frontend.module_manager);
-    alias_checked
-        .to_tlc(builtins, &frontend.schemes, &frontend.module_manager)
-        .skip_partial_eval()
-        .defunctionalize()
-        .to_mir()
-        .hoist_materializations()
-        .normalize()
-        .monomorphize()?
-        .skip_folding()
-        .filter_reachable()
-        .lift_bindings()
-        .lower()?;
+    if debug {
+        eprintln!("=== AFTER type_check (type_table) ===");
+        for (node_id, scheme) in &type_checked.type_table {
+            let ty_str = format!("{:?}", scheme);
+            if ty_str.contains("1331") || ty_str.contains("1336") {
+                eprintln!("  NodeId({:?}): {:?}", node_id, scheme);
+            }
+        }
+    }
+
+    let alias_checked = type_checked.alias_check()?;
+
+    let builtins = crate::build_builtins(&alias_checked.ast, &mut frontend.module_manager);
+    let tlc_transformed = alias_checked.to_tlc(builtins, &frontend.schemes, &mut frontend.module_manager);
+
+    if debug {
+        eprintln!("\n=== AFTER to_tlc ===");
+        for def in &tlc_transformed.tlc.defs {
+            if def.name.contains("use_slice") || def.name.contains("borrow") {
+                eprintln!("\nTLC Def: {}", def.name);
+                let body_str = format!("{:?}", def.body);
+                if body_str.contains("1331") {
+                    eprintln!("  Body contains 1331!");
+                    // Find context around 1331
+                    if let Some(pos) = body_str.find("1331") {
+                        let start = pos.saturating_sub(100);
+                        let end = (pos + 150).min(body_str.len());
+                        eprintln!("  Context: ...{}...", &body_str[start..end]);
+                    }
+                }
+            }
+        }
+    }
+
+    let normalized =
+        tlc_transformed.skip_partial_eval().defunctionalize().to_mir().hoist_materializations().normalize();
+
+    if debug {
+        eprintln!("=== BEFORE canonicalize_vars ===");
+        for def in &normalized.mir.defs {
+            if let crate::mir::Def::Function {
+                name, scheme, body, ..
+            } = def
+            {
+                if name.contains("use_slice") || name.contains("borrow") {
+                    eprintln!("\nFunction: {}", name);
+                    eprintln!("  Scheme: {:?}", scheme);
+                    eprintln!("  Locals:");
+                    for (i, local) in body.locals.iter().enumerate() {
+                        eprintln!("    [{}] {}: {:?}", i, local.name, local.ty);
+                    }
+                    eprintln!("  Expr types:");
+                    for (i, ty) in body.types.iter().enumerate() {
+                        eprintln!("    [{}]: {:?}", i, ty);
+                    }
+                }
+            }
+        }
+    }
+
+    let _mir_before = normalized.mir.clone();
+    let mir_after = crate::canonicalize_vars::canonicalize_program(normalized.mir);
+
+    if debug {
+        eprintln!("\n=== AFTER canonicalize_vars ===");
+        for def in &mir_after.defs {
+            if let crate::mir::Def::Function {
+                name, scheme, body, ..
+            } = def
+            {
+                if name.contains("use_slice") || name.contains("borrow") {
+                    eprintln!("\nFunction: {}", name);
+                    eprintln!("  Scheme: {:?}", scheme);
+                    eprintln!("  Locals:");
+                    for (i, local) in body.locals.iter().enumerate() {
+                        eprintln!("    [{}] {}: {:?}", i, local.name, local.ty);
+                    }
+                    eprintln!("  Expr types:");
+                    for (i, ty) in body.types.iter().enumerate() {
+                        eprintln!("    [{}]: {:?}", i, ty);
+                    }
+                }
+            }
+        }
+    }
+
+    // Continue with monomorphization using the canonicalized MIR
+    let mir = crate::monomorphization::monomorphize(mir_after)?;
+    let monomorphized = crate::Monomorphized { mir };
+
+    monomorphized.skip_folding().filter_reachable().lift_bindings().lower()?;
     Ok(())
 }
 
@@ -41,14 +122,14 @@ fn compile_through_flatten(input: &str) -> Result<crate::Flattened, CompilerErro
     let parsed = crate::Compiler::parse(input, &mut frontend.node_counter)?;
     let alias_checked = parsed
         .desugar(&mut frontend.node_counter)?
-        .resolve(&frontend.module_manager)?
+        .resolve(&mut frontend.module_manager)?
         .fold_ast_constants()
-        .type_check(&frontend.module_manager, &mut frontend.schemes)?
+        .type_check(&mut frontend.module_manager, &mut frontend.schemes)?
         .alias_check()?;
 
-    let builtins = crate::build_builtins(&alias_checked.ast, &frontend.module_manager);
+    let builtins = crate::build_builtins(&alias_checked.ast, &mut frontend.module_manager);
     let flattened = alias_checked
-        .to_tlc(builtins, &frontend.schemes, &frontend.module_manager)
+        .to_tlc(builtins, &frontend.schemes, &mut frontend.module_manager)
         .skip_partial_eval()
         .defunctionalize()
         .to_mir();
@@ -165,10 +246,31 @@ entry vertex_main() #[builtin(position)] vec4f32 =
     let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] in
     @[f32.i32(use_slice(arr)), 0.0f32, 0.0f32, 1.0f32]
 "#;
+    let result = compile_through_lowering_debug(source, false);
+    if let Err(e) = &result {
+        eprintln!("Compilation error: {:?}", e);
+    }
     assert!(
-        compile_through_lowering(source).is_ok(),
+        result.is_ok(),
         "Non-consuming use of slice should allow original to be used"
     );
+}
+
+#[test]
+fn test_minimal_call_type_mismatch() {
+    // Minimal test: call sha256_80 from prelude to isolate type variable issue
+    let source = r#"
+#[vertex]
+entry vertex_main() #[builtin(position)] vec4f32 =
+    let h = sha256_80([0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32,
+                       0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32]) in
+    @[0.0f32, 0.0f32, 0.0f32, 1.0f32]
+"#;
+    let result = compile_through_lowering_debug(source, true);
+    if let Err(e) = &result {
+        eprintln!("Compilation error: {:?}", e);
+    }
+    assert!(result.is_ok(), "sha256_80 call should work");
 }
 
 #[test]

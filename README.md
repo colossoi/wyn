@@ -36,6 +36,7 @@ The compiler uses a multi-stage pipeline with typestate-driven phases. Each stag
 | **Desugared** | `desugar` | Range/slice expressions desugared; SOAC names rewritten to intrinsics |
 | **Resolved** | `name_resolution` | Name resolution and module imports |
 | **AstConstFolded** | `ast_const_fold` | Compile-time integer constant folding |
+| **PlaceholdersResolved** | `resolve_placeholders` | Convert type placeholders to fresh type variables |
 | **TypeChecked** | `types::checker` | Hindley-Milner type inference and checking |
 | **AliasChecked** | `alias_checker` | Uniqueness/alias analysis for in-place updates |
 
@@ -59,17 +60,6 @@ The compiler uses a multi-stage pipeline with typestate-driven phases. Each stag
 | **Lifted** | `binding_lifter` | Loop-invariant code motion |
 | **InplaceRewritten** | `inplace_rewriter` | Eligible map ops rewritten for in-place execution |
 | **Lowered** | `spirv::lowering` | SPIR-V code generation |
-
-### Pipeline Flow
-```
-Source → Parsed → Desugared → Resolved → AstConstFolded → TypeChecked → AliasChecked
-                                                                            ↓
-    Lowered ← Lifted ← Reachable ← Monomorphized ← Canonicalized ← Normalized ← Flattened
-                                                                                    ↑
-                                    TlcDefunctionalized → TlcSpecialized → to_mir
-                                                    ↑
-                        TlcTransformed → [TlcPartialEval] → defunctionalize
-```
 
 ### Defunctionalization
 
@@ -134,7 +124,7 @@ cargo build --release
 cargo test
 ```
 
-All 578 tests currently pass (2 ignored for pending features).
+All 588 tests currently pass (2 ignored for pending features).
 
 ## Language Overview
 

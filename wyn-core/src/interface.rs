@@ -208,7 +208,7 @@ fn format_type(ty: &polytype::Type<crate::ast::TypeName>) -> String {
             let elem = format_type(&args[0]);
             match &args[2] {
                 Type::Constructed(TypeName::Size(n), _) => format!("[{}]{}", n, elem),
-                Type::Constructed(TypeName::SizePlaceholder, _) => format!("[]{}", elem),
+                Type::Variable(_) => format!("[]{}", elem),
                 _ => format!("[?]{}", elem),
             }
         }

@@ -637,6 +637,16 @@ impl ModuleManager {
         self.prelude_functions.get(name)
     }
 
+    /// Get mutable access to prelude functions for placeholder resolution
+    pub fn prelude_functions_mut(&mut self) -> &mut IndexMap<String, Decl> {
+        &mut self.prelude_functions
+    }
+
+    /// Get mutable access to elaborated modules for placeholder resolution
+    pub fn elaborated_modules_mut(&mut self) -> &mut HashMap<String, ElaboratedModule> {
+        &mut self.elaborated_modules
+    }
+
     /// Get an elaborated module by name
     pub fn get_elaborated_module(&self, name: &str) -> Option<&ElaboratedModule> {
         self.elaborated_modules.get(name)

@@ -64,10 +64,6 @@ pub struct TypeChecker<'a> {
     warnings: Vec<TypeWarning>,          // Collected warnings
     type_holes: Vec<(NodeId, Span)>,     // Track type hole locations for warning emission
     arity_map: HashMap<String, usize>,   // function name -> required arity (number of params)
-    /// Scope stack for type parameter bindings (e.g., A -> var_1, B -> var_2).
-    /// Used to substitute UserVar/SizeVar in nested lambda type annotations.
-    /// Follows same scoping rules as value bindings - inner defs can shadow outer type params.
-    type_param_scope: ScopeStack<Type>,
     /// ID source for generating unique skolem constants when opening existential types.
     skolem_ids: crate::IdSource<SkolemId>,
     /// Current module context for resolving unqualified type aliases in expressions.
@@ -175,33 +171,6 @@ impl<'a> TypeChecker<'a> {
             }
             (Type::Variable(l_id), Type::Variable(r_id)) => l_id == r_id,
             _ => false,
-        }
-    }
-
-    /// Prepare array types for type checking by replacing placeholder types with fresh variables.
-    /// - `AddressPlaceholder` → fresh type variable (to be constrained)
-    /// - `SizePlaceholder` → fresh type variable (to be inferred or validated)
-    /// Returns the transformed type.
-    fn prepare_array_type(&mut self, ty: &Type) -> Type {
-        match ty {
-            Type::Constructed(TypeName::Array, args) => {
-                assert!(args.len() == 3);
-                let elem = self.prepare_array_type(&args[0]);
-                let addrspace = match &args[1] {
-                    Type::Constructed(TypeName::AddressPlaceholder, _) => self.context.new_variable(),
-                    other => self.prepare_array_type(other),
-                };
-                let size = match &args[2] {
-                    Type::Constructed(TypeName::SizePlaceholder, _) => self.context.new_variable(),
-                    other => self.prepare_array_type(other),
-                };
-                Type::Constructed(TypeName::Array, vec![elem, addrspace, size])
-            }
-            Type::Constructed(name, args) => {
-                let new_args: Vec<Type> = args.iter().map(|a| self.prepare_array_type(a)).collect();
-                Type::Constructed(name.clone(), new_args)
-            }
-            Type::Variable(_) => ty.clone(),
         }
     }
 
@@ -453,6 +422,74 @@ impl<'a> TypeChecker<'a> {
         quantify(TypeScheme::Monotype(applied), &fv_ty)
     }
 
+    /// Default unconstrained address space variables to AddressFunction.
+    ///
+    /// After type checking, some address space variables remain unconstrained
+    /// (e.g., intermediate values in polymorphic function calls). Since we only
+    /// have two address spaces (Function and Storage), and Storage is explicitly
+    /// constrained by type checking, unconstrained variables default to Function.
+    fn default_address_spaces(&mut self) {
+        // Collect all address space variables from the type table
+        let mut addr_vars = std::collections::HashSet::new();
+        for scheme in self.type_table.values() {
+            Self::collect_address_space_vars(scheme, &mut addr_vars);
+        }
+
+        // Also collect from function schemes in scope_stack
+        self.scope_stack.for_each_binding(|_, scheme| {
+            Self::collect_address_space_vars(scheme, &mut addr_vars);
+        });
+
+        // Also collect from module schemes
+        for scheme in self.module_schemes.values() {
+            Self::collect_address_space_vars(scheme, &mut addr_vars);
+        }
+
+        // Unify each unconstrained address space variable with AddressFunction
+        let addr_function = Type::Constructed(TypeName::AddressFunction, vec![]);
+        for var_id in addr_vars {
+            let var = Type::Variable(var_id);
+            let resolved = var.apply(&self.context);
+            // Only default if still a variable (not already resolved)
+            if matches!(resolved, Type::Variable(_)) {
+                // Unify with AddressFunction - ignore errors (already constrained to Storage)
+                let _ = self.context.unify(&resolved, &addr_function);
+            }
+        }
+    }
+
+    /// Collect type variable IDs that appear in address space position (second arg of Array).
+    fn collect_address_space_vars(scheme: &TypeScheme, vars: &mut std::collections::HashSet<usize>) {
+        match scheme {
+            TypeScheme::Monotype(ty) => Self::collect_address_space_vars_from_type(ty, vars),
+            TypeScheme::Polytype { body, .. } => Self::collect_address_space_vars(body, vars),
+        }
+    }
+
+    fn collect_address_space_vars_from_type(ty: &Type, vars: &mut std::collections::HashSet<usize>) {
+        match ty {
+            Type::Constructed(TypeName::Array, args) if args.len() == 3 => {
+                // args[1] is the address space
+                if let Type::Variable(id) = &args[1] {
+                    vars.insert(*id);
+                }
+                // Also check for variables inside the address space (in case it's nested)
+                Self::collect_address_space_vars_from_type(&args[1], vars);
+                // Recurse into element type and size
+                Self::collect_address_space_vars_from_type(&args[0], vars);
+                Self::collect_address_space_vars_from_type(&args[2], vars);
+            }
+            Type::Constructed(_, args) => {
+                for arg in args {
+                    Self::collect_address_space_vars_from_type(arg, vars);
+                }
+            }
+            Type::Variable(_) => {
+                // Don't collect non-address-space variables
+            }
+        }
+    }
+
     /// Check if a type contains any unsubstituted UserVar or SizeVar.
     /// These should be substituted with proper type Variables before generalization.
     /// Skips checking inside Existential types, as those intentionally contain SizeVar
@@ -539,11 +576,10 @@ impl<'a> TypeChecker<'a> {
         match lookup {
             SchemeLookup::Single(scheme) => {
                 let ty = scheme.instantiate(&mut self.context);
-                let prepared = self.prepare_array_type(&ty);
                 ResolvedValue {
                     display_name: name.to_string(),
                     scheme_for_table: scheme,
-                    instantiated: prepared,
+                    instantiated: ty,
                     overloads: None,
                 }
             }
@@ -569,12 +605,13 @@ impl<'a> TypeChecker<'a> {
         Self::with_type_table(module_manager, HashMap::new())
     }
 
-    /// Create a TypeChecker with an existing Context (from resolve_placeholders pass).
-    pub fn with_context(
+    /// Create a TypeChecker with an existing Context and spec_schemes (from resolve_placeholders pass).
+    pub fn with_context_and_schemes(
         module_manager: &'a crate::module_manager::ModuleManager,
         context: Context<TypeName>,
+        spec_schemes: HashMap<String, TypeScheme>,
     ) -> Self {
-        Self::with_context_and_type_table(module_manager, context, HashMap::new())
+        Self::with_context_and_type_table(module_manager, context, HashMap::new(), spec_schemes)
     }
 
     /// Create a TypeChecker with a given initial type table
@@ -582,7 +619,7 @@ impl<'a> TypeChecker<'a> {
         module_manager: &'a crate::module_manager::ModuleManager,
         type_table: HashMap<NodeId, TypeScheme>,
     ) -> Self {
-        Self::with_context_and_type_table(module_manager, Context::default(), type_table)
+        Self::with_context_and_type_table(module_manager, Context::default(), type_table, HashMap::new())
     }
 
     /// Create a TypeChecker with both an existing Context and type table.
@@ -590,6 +627,7 @@ impl<'a> TypeChecker<'a> {
         module_manager: &'a crate::module_manager::ModuleManager,
         mut context: Context<TypeName>,
         type_table: HashMap<NodeId, TypeScheme>,
+        spec_schemes: HashMap<String, TypeScheme>,
     ) -> Self {
         let impl_source = crate::impl_source::ImplSource::new();
         let poly_builtins = crate::intrinsics::IntrinsicSource::new(&mut context);
@@ -605,10 +643,9 @@ impl<'a> TypeChecker<'a> {
             warnings: Vec::new(),
             type_holes: Vec::new(),
             arity_map: HashMap::new(),
-            type_param_scope: ScopeStack::new(),
             skolem_ids: crate::IdSource::new(),
             current_module: None,
-            module_schemes: HashMap::new(),
+            module_schemes: spec_schemes,
         }
     }
 
@@ -878,45 +915,25 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    /// Substitute UserVar/SizeVar using the current type parameter scope stack.
-    fn substitute_from_type_param_scope(&self, ty: &Type) -> Type {
-        Self::substitute_named_vars(ty, &|tn| match tn {
-            TypeName::UserVar(name) | TypeName::SizeVar(name) => {
-                self.type_param_scope.lookup(name).cloned()
-            }
-            _ => None,
-        })
-    }
-
-    fn substitute_type_params_static(ty: &Type, bindings: &HashMap<String, Type>) -> Type {
-        Self::substitute_named_vars(ty, &|tn| match tn {
-            TypeName::UserVar(name) | TypeName::SizeVar(name) => bindings.get(name).cloned(),
-            _ => None,
-        })
-    }
-
-    /// Resolve type aliases and substitute type parameters from the current scope.
+    /// Resolve type aliases in a type annotation.
     ///
-    /// This is the canonical way to normalize a type annotation (e.g., in lambda params,
-    /// let bindings, type ascriptions). It combines alias resolution with type parameter
-    /// substitution from enclosing function scopes.
+    /// Note: SizeVar/UserVar substitution is now handled by the resolve_placeholders pass
+    /// before type checking, so this only needs to resolve type aliases.
     fn normalize_annotation_type(&self, ty: &Type, module: Option<&str>) -> Type {
-        let resolved = self.resolve_type_aliases_scoped(ty, module);
-        self.substitute_from_type_param_scope(&resolved)
+        self.resolve_type_aliases_scoped(ty, module)
     }
 
-    /// Resolve type aliases and substitute type parameters from a static bindings map.
+    /// Resolve type aliases in a type annotation (bindings parameter is ignored).
     ///
-    /// Used when type parameter bindings are explicitly tracked (e.g., in check_function_with_params)
-    /// rather than stored in type_param_scope.
+    /// Note: SizeVar/UserVar substitution is now handled by the resolve_placeholders pass.
+    /// The bindings parameter is kept for API compatibility but is no longer used.
     fn normalize_annotation_type_static(
         &self,
         ty: &Type,
         module: Option<&str>,
-        bindings: &HashMap<String, Type>,
+        _bindings: &HashMap<String, Type>,
     ) -> Type {
-        let resolved = self.resolve_type_aliases_scoped(ty, module);
-        Self::substitute_type_params_static(&resolved, bindings)
+        self.resolve_type_aliases_scoped(ty, module)
     }
 
     /// Allocate a fresh type variable and return its ID.
@@ -1127,6 +1144,9 @@ impl<'a> TypeChecker<'a> {
         // Emit warnings for all type holes now that types are fully inferred
         self.emit_hole_warnings();
 
+        // Default unconstrained address space variables to AddressFunction
+        self.default_address_spaces();
+
         // Apply the context to all types in the type table to resolve type variables
         let resolved_table: HashMap<crate::ast::NodeId, TypeScheme> = self
             .type_table
@@ -1213,9 +1233,7 @@ impl<'a> TypeChecker<'a> {
             .iter()
             .map(|p| {
                 let ty = p.pattern_type().cloned().unwrap_or_else(|| self.context.new_variable());
-                let normalized =
-                    self.normalize_annotation_type_static(&ty, module_name, type_param_bindings);
-                self.prepare_array_type(&normalized)
+                self.normalize_annotation_type_static(&ty, module_name, type_param_bindings)
             })
             .collect();
 
@@ -1280,28 +1298,10 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Type-check function bodies from modules (e.g., rand.init, rand.int, f32.pi)
-    /// This populates the type table and module_schemes cache so these functions can be flattened to MIR.
+    /// This populates the type table so these functions can be flattened to MIR.
+    /// Note: module_schemes for Spec::Sig items are pre-built by resolve_placeholders
+    /// and passed to the constructor.
     pub fn check_module_functions(&mut self) -> Result<()> {
-        use crate::module_manager::ElaboratedItem;
-
-        // First, cache all module Specs (signatures like f32.sin, f32.cos).
-        // These don't need type-checking - their types are declared.
-        for (module_name, elaborated) in self.module_manager.elaborated_modules.iter() {
-            for item in &elaborated.items {
-                if let ElaboratedItem::Spec(spec) = item {
-                    let (name, scheme) = match spec {
-                        Spec::Sig(name, type_params, ty) => {
-                            (name.clone(), self.convert_to_polytype(ty, type_params))
-                        }
-                        Spec::SigOp(op, ty) => (op.clone(), TypeScheme::Monotype(ty.clone())),
-                        _ => continue,
-                    };
-                    let qualified_name = format!("{}.{}", module_name, name);
-                    self.module_schemes.insert(qualified_name, scheme);
-                }
-            }
-        }
-
         // Collect all module declarations that need flattening (includes constants like f32.pi)
         let module_functions: Vec<(String, crate::ast::Decl)> = self
             .module_manager
@@ -1343,59 +1343,6 @@ impl<'a> TypeChecker<'a> {
         Ok(())
     }
 
-    /// Convert a type with type parameters to a polymorphic TypeScheme.
-    /// Converts SizeVar("n") and UserVar("t") to fresh Type::Variables
-    /// and wraps the result in nested TypeScheme::Polytype layers.
-    fn convert_to_polytype(&mut self, ty: &Type, type_params: &[TypeParam]) -> TypeScheme {
-        if type_params.is_empty() {
-            return TypeScheme::Monotype(ty.clone());
-        }
-
-        // Create fresh variables for each parameter and build substitution map
-        let mut substitutions: HashMap<String, polytype::Variable> = HashMap::new();
-        let mut var_ids = Vec::new();
-
-        for param in type_params {
-            let var = self.context.new_variable();
-            if let Type::Variable(id) = var {
-                var_ids.push(id);
-                match param {
-                    TypeParam::Size(name) => {
-                        substitutions.insert(name.clone(), id);
-                    }
-                    TypeParam::Type(name) => {
-                        substitutions.insert(name.clone(), id);
-                    }
-                    _ => {} // Ignore other param types for now
-                }
-            }
-        }
-
-        // Substitute SizeVar/UserVar with Variable in the type
-        let substituted_ty = Self::substitute_type_params(ty, &substitutions);
-
-        // Wrap in nested Polytype layers
-        let mut result = TypeScheme::Monotype(substituted_ty);
-        for &var_id in var_ids.iter().rev() {
-            result = TypeScheme::Polytype {
-                variable: var_id,
-                body: Box::new(result),
-            };
-        }
-
-        result
-    }
-
-    /// Recursively substitute SizeVar and UserVar with Variable.
-    fn substitute_type_params(ty: &Type, substitutions: &HashMap<String, polytype::Variable>) -> Type {
-        Self::substitute_named_vars(ty, &|tn| match tn {
-            TypeName::UserVar(name) | TypeName::SizeVar(name) => {
-                substitutions.get(name).map(|&var_id| Type::Variable(var_id))
-            }
-            _ => None,
-        })
-    }
-
     /// Consume the type checker and return the type table.
     /// Used to extract the prelude type table after type-checking prelude functions.
     pub fn into_type_table(self) -> std::collections::HashMap<crate::ast::NodeId, TypeScheme> {
@@ -1408,9 +1355,42 @@ impl<'a> TypeChecker<'a> {
     pub fn get_function_schemes(&self) -> std::collections::HashMap<String, TypeScheme> {
         let mut schemes = std::collections::HashMap::new();
         self.scope_stack.for_each_binding(|name, scheme| {
-            schemes.insert(name.to_string(), scheme.clone());
+            // Apply context to resolve address space variables that were defaulted
+            let resolved = self.apply_context_to_scheme(scheme);
+            schemes.insert(name.to_string(), resolved);
         });
         schemes
+    }
+
+    /// Apply the unification context to a TypeScheme, resolving type variables.
+    fn apply_context_to_scheme(&self, scheme: &TypeScheme) -> TypeScheme {
+        match scheme {
+            TypeScheme::Monotype(ty) => TypeScheme::Monotype(ty.apply(&self.context)),
+            TypeScheme::Polytype { variable, body } => {
+                // Check if this variable was resolved to a concrete type
+                let var_ty = Type::Variable(*variable);
+                let resolved = var_ty.apply(&self.context);
+                if let Type::Variable(v) = resolved {
+                    if v == *variable {
+                        // Variable is still free, keep the quantifier
+                        TypeScheme::Polytype {
+                            variable: *variable,
+                            body: Box::new(self.apply_context_to_scheme(body)),
+                        }
+                    } else {
+                        // Variable was unified with another variable, keep quantifying over it
+                        TypeScheme::Polytype {
+                            variable: *variable,
+                            body: Box::new(self.apply_context_to_scheme(body)),
+                        }
+                    }
+                } else {
+                    // Variable was resolved to a concrete type, remove the quantifier
+                    // and substitute in the body
+                    self.apply_context_to_scheme(body)
+                }
+            }
+        }
     }
 
     /// Get a module function scheme from the cache.
@@ -1459,8 +1439,6 @@ impl<'a> TypeChecker<'a> {
                 };
                 // Resolve type aliases (e.g., rand.state -> f32)
                 let expected_type = self.resolve_type_aliases_scoped(&expected_type, None);
-                // Replace AddressPlaceholder and SizePlaceholder markers with type variables
-                let expected_type = self.prepare_array_type(&expected_type);
 
                 // Validate body type matches declared outputs
                 self.context.unify(&body_type, &expected_type).map_err(|_| {
@@ -1546,28 +1524,8 @@ impl<'a> TypeChecker<'a> {
         let saved_module = self.current_module.take();
         self.current_module = module_name.map(|s| s.to_string());
 
-        // Push a new scope for type parameters
-        self.type_param_scope.push_scope();
-
-        // Bind type parameters to fresh type variables
-        // This ensures all occurrences of 'a in the function signature refer to the same variable
-        let mut type_param_bindings: HashMap<String, Type> = HashMap::new();
-        for type_param in &decl.type_params {
-            let fresh_var = self.context.new_variable();
-            type_param_bindings.insert(type_param.clone(), fresh_var.clone());
-            self.type_param_scope.insert(type_param.clone(), fresh_var);
-        }
-
-        // Bind size parameters to fresh type variables
-        // Size parameters like [n] in "def f [n] (xs: [n]i32): i32" are treated as type variables
-        // that can unify with concrete sizes (Size(8)) or other size variables
-        for size_param in &decl.size_params {
-            let fresh_var = self.context.new_variable();
-            type_param_bindings.insert(size_param.clone(), fresh_var.clone());
-            self.type_param_scope.insert(size_param.clone(), fresh_var);
-        }
-
-        // Note: substitution function defined as static method below
+        // Note: SizeVar/UserVar substitution is now handled by resolve_placeholders pass
+        // before type checking. Type parameter names are already converted to type variables.
 
         if decl.params.is_empty() {
             // Variable or entry point declaration: let/def name: type = value or let/def name = value
@@ -1607,7 +1565,7 @@ impl<'a> TypeChecker<'a> {
             let (param_types, body_type) = self.check_function_with_params(
                 &decl.params,
                 &decl.body,
-                &type_param_bindings,
+                &HashMap::new(), // Bindings no longer needed - resolve_placeholders handles substitution
                 module_name,
             )?;
             debug!(
@@ -1623,14 +1581,12 @@ impl<'a> TypeChecker<'a> {
 
             // Check against declared type if provided
             if let Some(declared_type) = &decl.ty {
-                let normalized_return_type =
-                    self.normalize_annotation_type_static(declared_type, module_name, &type_param_bindings);
-                let prepared_return_type = self.prepare_array_type(&normalized_return_type);
+                let normalized_return_type = self.normalize_annotation_type(declared_type, module_name);
 
                 // When a function has parameters, decl.ty is just the return type annotation
                 // Unify the body type with the declared return type
                 if !decl.params.is_empty() {
-                    self.context.unify(&body_type, &prepared_return_type).map_err(|e| {
+                    self.context.unify(&body_type, &normalized_return_type).map_err(|e| {
                         err_type_at!(
                             decl.body.h.span,
                             "Function return type mismatch for '{}': {}",
@@ -1643,7 +1599,7 @@ impl<'a> TypeChecker<'a> {
                     // But currently we're storing just the value type
                     // Since func_type for parameterless functions is just the body type,
                     // we can just check body_type against substituted declared_type
-                    self.context.unify(&body_type, &prepared_return_type).map_err(|_| {
+                    self.context.unify(&body_type, &normalized_return_type).map_err(|_| {
                         err_type_at!(
                             decl.body.h.span,
                             "Type mismatch for '{}': declared {}, inferred {}",
@@ -1667,9 +1623,6 @@ impl<'a> TypeChecker<'a> {
 
             debug!("Inferred type for {}: {}", scope_name, func_type);
         }
-
-        // Pop type parameter scope
-        self.type_param_scope.pop_scope();
 
         // Restore previous module context
         self.current_module = saved_module;
@@ -2493,6 +2446,15 @@ impl<'a> TypeChecker<'a> {
         // Strip uniqueness for unification
         let arg_stripped = strip_unique(arg_ty);
         let param_stripped = strip_unique(&expected_param);
+
+        // Debug: check if we're unifying borrow's param
+        let arg_str = format!("{:?}", arg_stripped);
+        let param_str = format!("{:?}", param_stripped);
+        if arg_str.contains("133") || param_str.contains("133") {
+            eprintln!("DEBUG unify_apply_arg: arg = {}", arg_str);
+            eprintln!("DEBUG unify_apply_arg: param = {}", param_str);
+            eprintln!("DEBUG unify_apply_arg: arg_ty (before strip) = {:?}", arg_ty);
+        }
 
         // Unify argument with expected param
         self.context.unify(&arg_stripped, &param_stripped).map_err(|e| {

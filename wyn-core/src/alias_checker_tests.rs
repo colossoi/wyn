@@ -5,10 +5,10 @@ fn check_alias(source: &str) -> AliasCheckResult {
     let mut frontend = crate::cached_frontend();
     let parsed = Compiler::parse(source, &mut frontend.node_counter).expect("parse failed");
     let desugared = parsed.desugar(&mut frontend.node_counter).expect("desugar failed");
-    let resolved = desugared.resolve(&frontend.module_manager).expect("resolve failed");
+    let resolved = desugared.resolve(&mut frontend.module_manager).expect("resolve failed");
     let folded = resolved.fold_ast_constants();
     let type_checked =
-        folded.type_check(&frontend.module_manager, &mut frontend.schemes).expect("type_check failed");
+        folded.type_check(&mut frontend.module_manager, &mut frontend.schemes).expect("type_check failed");
 
     let checker = AliasChecker::new(&type_checked.type_table, &type_checked.span_table);
     checker.check_program(&type_checked.ast).expect("alias check failed")
@@ -21,10 +21,10 @@ fn alias_check_pipeline(source: &str) -> crate::AliasChecked {
     parsed
         .desugar(&mut frontend.node_counter)
         .expect("desugar failed")
-        .resolve(&frontend.module_manager)
+        .resolve(&mut frontend.module_manager)
         .expect("resolve failed")
         .fold_ast_constants()
-        .type_check(&frontend.module_manager, &mut frontend.schemes)
+        .type_check(&mut frontend.module_manager, &mut frontend.schemes)
         .expect("type_check failed")
         .alias_check()
         .expect("alias_check failed")
@@ -262,15 +262,15 @@ fn analyze_inplace_ops(source: &str) -> InPlaceInfo {
     let mut frontend = crate::cached_frontend();
     let parsed = Compiler::parse(source, &mut frontend.node_counter).expect("parse failed");
     let desugared = parsed.desugar(&mut frontend.node_counter).expect("desugar failed");
-    let resolved = desugared.resolve(&frontend.module_manager).expect("resolve failed");
+    let resolved = desugared.resolve(&mut frontend.module_manager).expect("resolve failed");
     let folded = resolved.fold_ast_constants();
     let type_checked =
-        folded.type_check(&frontend.module_manager, &mut frontend.schemes).expect("type_check failed");
+        folded.type_check(&mut frontend.module_manager, &mut frontend.schemes).expect("type_check failed");
     let alias_checked = type_checked.alias_check().expect("alias check failed");
 
-    let builtins = crate::build_builtins(&alias_checked.ast, &frontend.module_manager);
+    let builtins = crate::build_builtins(&alias_checked.ast, &mut frontend.module_manager);
     let flattened = alias_checked
-        .to_tlc(builtins, &frontend.schemes, &frontend.module_manager)
+        .to_tlc(builtins, &frontend.schemes, &mut frontend.module_manager)
         .skip_partial_eval()
         .defunctionalize()
         .to_mir();

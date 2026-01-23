@@ -187,9 +187,17 @@ fn test_parse_entry_point_decl() {
     assert_typed_param!(&entry.params[1], "y", crate::types::f32());
 
     assert_eq!(entry.outputs.len(), 1);
+    // Parser produces AddressPlaceholder which is later resolved
     assert_eq!(
         entry.outputs[0].ty,
-        crate::types::sized_array(4, crate::types::f32())
+        Type::Constructed(
+            TypeName::Array,
+            vec![
+                crate::types::f32(),
+                Type::Constructed(TypeName::AddressPlaceholder, vec![]),
+                Type::Constructed(TypeName::Size(4), vec![]),
+            ],
+        )
     );
 }
 
@@ -289,7 +297,7 @@ fn test_parse_builtin_attribute_on_return_type() {
     );
     assert_eq!(
         entry.outputs[0].ty,
-        crate::types::sized_array(4, crate::types::f32())
+        crate::types::sized_array_placeholder(4, crate::types::f32())
     );
 }
 
@@ -352,7 +360,7 @@ fn test_parse_location_attribute_on_return_type() {
     assert_eq!(entry.outputs[0].attribute, Some(Attribute::Location(0)));
     assert_eq!(
         entry.outputs[0].ty,
-        crate::types::sized_array(4, crate::types::f32())
+        crate::types::sized_array_placeholder(4, crate::types::f32())
     );
 }
 
@@ -377,7 +385,7 @@ fn test_parse_parameter_with_location_attribute() {
     assert_typed_param_with_attrs!(
         &entry.params[0],
         "color",
-        crate::types::sized_array(3, crate::types::f32()),
+        crate::types::sized_array_placeholder(3, crate::types::f32()),
         vec![Attribute::Location(1)]
     );
 }
@@ -960,7 +968,10 @@ fn test_parse_unique_array_type() {
     assert_eq!(decl.params.len(), 1);
     let param_ty = decl.params[0].pattern_type().expect("Expected typed parameter");
     assert!(types::is_unique(param_ty));
-    assert_eq!(types::strip_unique(param_ty), types::sized_array(3, types::f32()));
+    assert_eq!(
+        types::strip_unique(param_ty),
+        types::sized_array_placeholder(3, types::f32())
+    );
 }
 
 #[test]
@@ -973,7 +984,7 @@ fn test_parse_nested_unique() {
     assert!(types::is_unique(param_ty));
     assert_eq!(
         types::strip_unique(param_ty),
-        types::sized_array(2, types::sized_array(3, types::i32()))
+        types::sized_array_placeholder(2, types::sized_array_placeholder(3, types::i32()))
     );
 }
 

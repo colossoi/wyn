@@ -490,15 +490,16 @@ impl AstConstFoldedEarly {
     /// Type check the program
     pub fn type_check(
         mut self,
-        module_manager: &module_manager::ModuleManager,
+        module_manager: &mut module_manager::ModuleManager,
         schemes: &mut HashMap<String, TypeScheme<TypeName>>,
     ) -> Result<TypeChecked> {
         // Resolve type placeholders to type variables before type checking
         let mut resolver = resolve_placeholders::PlaceholderResolver::new();
-        resolver.resolve_program(&mut self.ast);
-        let context = resolver.into_context();
+        resolver.resolve(module_manager, &mut self.ast);
+        let (context, spec_schemes) = resolver.into_parts();
 
-        let mut checker = type_checker::TypeChecker::with_context(module_manager, context);
+        let mut checker =
+            type_checker::TypeChecker::with_context_and_schemes(module_manager, context, spec_schemes);
         checker.load_builtins()?;
         let type_table = checker.check_program(&self.ast)?;
         // Populate schemes with function type schemes from type checking

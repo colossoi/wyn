@@ -1001,7 +1001,15 @@ impl<'a> Parser<'a> {
                 self.advance();
                 self.expect(Token::RightBracket)?;
                 let elem_type = self.parse_array_or_base_type()?; // Allow nested arrays
-                Ok(types::sized_array(size, elem_type))
+                // Array[elem, AddressPlaceholder, Size(n)]
+                Ok(Type::Constructed(
+                    TypeName::Array,
+                    vec![
+                        elem_type,
+                        Type::Constructed(TypeName::AddressPlaceholder, vec![]),
+                        Type::Constructed(TypeName::Size(size), vec![]),
+                    ],
+                ))
             } else if let Some(Token::Identifier(name)) = self.peek() {
                 // Size variable [n]
                 let size_var = name.clone();

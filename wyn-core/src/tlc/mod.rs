@@ -9,6 +9,7 @@ mod defunctionalize_tests;
 pub mod partial_eval;
 #[cfg(test)]
 mod partial_eval_tests;
+pub mod soac_analysis;
 pub mod specialize;
 pub mod to_mir;
 #[cfg(test)]

@@ -20,9 +20,9 @@ fn try_typecheck_program(input: &str) -> Result<(), CompilerError> {
     let _type_checked = parsed
         .elaborate_modules(&mut frontend.module_manager)?
         .desugar(&mut frontend.node_counter)?
-        .resolve(&frontend.module_manager)?
+        .resolve(&mut frontend.module_manager)?
         .fold_ast_constants()
-        .type_check(&frontend.module_manager, &mut frontend.schemes)?;
+        .type_check(&mut frontend.module_manager, &mut frontend.schemes)?;
     Ok(())
 }
 
@@ -96,15 +96,22 @@ def test_mul(mat1: mat4f32, mat2: mat4f32) mat4f32 =
 fn check_type_hole(source: &str) -> Type {
     use crate::lexer;
     use crate::parser::Parser;
+    use crate::resolve_placeholders::PlaceholderResolver;
 
     // Parse
-    let (module_manager, mut node_counter) = crate::cached_module_manager();
+    let (mut module_manager, mut node_counter) = crate::cached_module_manager();
     let tokens = lexer::tokenize(source).unwrap();
     let mut parser = Parser::new(tokens, &mut node_counter);
-    let program = parser.parse().unwrap();
+    let mut program = parser.parse().unwrap();
 
-    // Type check
-    let mut checker = TypeChecker::new(&module_manager);
+    // Resolve placeholders (required before type checking)
+    let mut resolver = PlaceholderResolver::new();
+    resolver.resolve(&mut module_manager, &mut program);
+    let (context, spec_schemes) = resolver.into_parts();
+
+    // Type check with the context from resolve_placeholders
+    let mut checker = TypeChecker::with_context_and_schemes(&module_manager, context, spec_schemes);
+    checker.load_builtins().unwrap();
     let _type_table = checker.check_program(&program).unwrap();
 
     // Check warnings

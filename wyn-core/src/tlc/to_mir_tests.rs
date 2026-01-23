@@ -142,17 +142,17 @@ mod tests {
         let alias_checked = parsed
             .desugar(&mut frontend.node_counter)
             .expect("Desugaring failed")
-            .resolve(&frontend.module_manager)
+            .resolve(&mut frontend.module_manager)
             .expect("Name resolution failed")
             .fold_ast_constants()
-            .type_check(&frontend.module_manager, &mut frontend.schemes)
+            .type_check(&mut frontend.module_manager, &mut frontend.schemes)
             .expect("Type checking failed")
             .alias_check()
             .expect("Alias checking failed");
 
-        let builtins = build_builtins(&alias_checked.ast, &frontend.module_manager);
+        let builtins = build_builtins(&alias_checked.ast, &mut frontend.module_manager);
         alias_checked
-            .to_tlc(builtins, &frontend.schemes, &frontend.module_manager)
+            .to_tlc(builtins, &frontend.schemes, &mut frontend.module_manager)
             .skip_partial_eval()
             .defunctionalize()
             .to_mir()

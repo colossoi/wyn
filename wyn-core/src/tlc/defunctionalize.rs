@@ -185,18 +185,11 @@ fn build_type_subst(poly_ty: &Type<TypeName>, concrete_ty: &Type<TypeName>, subs
                 subst.insert(*id, concrete.clone());
             }
         }
-        (Type::Constructed(poly_name, poly_args), Type::Constructed(_, concrete_args)) => {
+        (Type::Constructed(_, poly_args), Type::Constructed(_, concrete_args)) => {
             // Recursively unify arguments
             // Skip name check - we assume types are already unified by the type checker
             for (p, c) in poly_args.iter().zip(concrete_args.iter()) {
                 build_type_subst(p, c, subst);
-            }
-            // Also handle the case where poly_name itself contains a variable (for Size types)
-            if let TypeName::SizePlaceholder = poly_name {
-                // SizePlaceholder matches any size - extract size from concrete
-                if let Type::Constructed(TypeName::Size(_n), _) = concrete_ty {
-                    // Can't directly substitute SizePlaceholder, but the size is in the array type
-                }
             }
         }
         _ => {}

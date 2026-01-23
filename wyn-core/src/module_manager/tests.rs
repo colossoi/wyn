@@ -2,6 +2,7 @@ use super::{ElaboratedItem, ModuleManager};
 use crate::ast::{NodeCounter, Program, TypeName};
 use crate::lexer::tokenize;
 use crate::parser::Parser;
+use crate::resolve_placeholders::PlaceholderResolver;
 use crate::types::checker::TypeChecker;
 use polytype::Type;
 
@@ -50,7 +51,7 @@ fn get_monotype(scheme: &TypeScheme<TypeName>) -> &Type<TypeName> {
 #[test]
 fn test_query_f32_sin_from_math_prelude() {
     let mut node_counter = NodeCounter::new();
-    let manager = ModuleManager::new(&mut node_counter);
+    let mut manager = ModuleManager::new(&mut node_counter);
 
     // Prelude files are automatically loaded on creation
     println!(
@@ -58,8 +59,15 @@ fn test_query_f32_sin_from_math_prelude() {
         manager.elaborated_modules.keys().collect::<Vec<_>>()
     );
 
+    // Resolve placeholders in modules to build spec_schemes
+    // (No program to resolve, just pass an empty one)
+    let mut empty_program = crate::ast::Program { declarations: vec![] };
+    let mut resolver = PlaceholderResolver::new();
+    resolver.resolve(&mut manager, &mut empty_program);
+    let (context, spec_schemes) = resolver.into_parts();
+
     // Use TypeChecker to get the function type schemes
-    let mut checker = TypeChecker::new(&manager);
+    let mut checker = TypeChecker::with_context_and_schemes(&manager, context, spec_schemes);
     checker.check_module_functions().expect("Failed to check module functions");
 
     // Query for the f32 module's sin function type from the cache

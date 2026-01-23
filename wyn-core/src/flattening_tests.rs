@@ -1,9 +1,6 @@
 #![cfg(test)]
 
-use crate::lexer::tokenize;
 use crate::mir;
-use crate::parser::Parser;
-use crate::type_checker::TypeChecker;
 
 fn flatten_program(input: &str) -> mir::Program {
     // Use the typestate API to ensure proper compilation pipeline
@@ -12,17 +9,17 @@ fn flatten_program(input: &str) -> mir::Program {
     let alias_checked = parsed
         .desugar(&mut frontend.node_counter)
         .expect("Desugaring failed")
-        .resolve(&frontend.module_manager)
+        .resolve(&mut frontend.module_manager)
         .expect("Name resolution failed")
         .fold_ast_constants()
-        .type_check(&frontend.module_manager, &mut frontend.schemes)
+        .type_check(&mut frontend.module_manager, &mut frontend.schemes)
         .expect("Type checking failed")
         .alias_check()
         .expect("Borrow checking failed");
 
-    let builtins = crate::build_builtins(&alias_checked.ast, &frontend.module_manager);
+    let builtins = crate::build_builtins(&alias_checked.ast, &mut frontend.module_manager);
     let flattened = alias_checked
-        .to_tlc(builtins, &frontend.schemes, &frontend.module_manager)
+        .to_tlc(builtins, &frontend.schemes, &mut frontend.module_manager)
         .skip_partial_eval()
         .defunctionalize()
         .to_mir();
@@ -79,14 +76,14 @@ fn get_body<'a>(def: &'a mir::Def) -> &'a mir::Body {
 
 /// Helper to check that code fails type checking (for testing error cases)
 fn should_fail_type_check(input: &str) -> bool {
-    let (module_manager, mut node_counter) = crate::cached_module_manager();
-    let tokens = tokenize(input).expect("Tokenization failed");
-    let mut parser = Parser::new(tokens, &mut node_counter);
-    let ast = parser.parse().expect("Parsing failed");
-
-    let mut type_checker = TypeChecker::new(&module_manager);
-    type_checker.load_builtins().expect("Failed to load builtins");
-    type_checker.check_program(&ast).is_err()
+    // Use the typestate API to ensure resolve_placeholders runs
+    let mut frontend = crate::cached_frontend();
+    let result = crate::Compiler::parse(input, &mut frontend.node_counter)
+        .and_then(|parsed| parsed.desugar(&mut frontend.node_counter))
+        .and_then(|desugared| desugared.resolve(&mut frontend.module_manager))
+        .map(|resolved| resolved.fold_ast_constants())
+        .and_then(|folded| folded.type_check(&mut frontend.module_manager, &mut frontend.schemes));
+    result.is_err()
 }
 
 #[test]
@@ -679,15 +676,15 @@ def test: f32 =
     let mut frontend = crate::cached_frontend();
     let alias_checked = crate::Compiler::parse(source, &mut frontend.node_counter)
         .and_then(|p| p.desugar(&mut frontend.node_counter))
-        .and_then(|d| d.resolve(&frontend.module_manager))
+        .and_then(|d| d.resolve(&mut frontend.module_manager))
         .map(|r| r.fold_ast_constants())
-        .and_then(|f| f.type_check(&frontend.module_manager, &mut frontend.schemes))
+        .and_then(|f| f.type_check(&mut frontend.module_manager, &mut frontend.schemes))
         .and_then(|t| t.alias_check())
         .expect("Failed before TLC transform");
 
-    let builtins = crate::build_builtins(&alias_checked.ast, &frontend.module_manager);
+    let builtins = crate::build_builtins(&alias_checked.ast, &mut frontend.module_manager);
     let result = alias_checked
-        .to_tlc(builtins, &frontend.schemes, &frontend.module_manager)
+        .to_tlc(builtins, &frontend.schemes, &mut frontend.module_manager)
         .skip_partial_eval()
         .defunctionalize()
         .to_mir()
@@ -1417,16 +1414,16 @@ fn compile_to_glsl(input: &str) -> String {
     let alias_checked = parsed
         .desugar(&mut frontend.node_counter)
         .expect("Desugaring failed")
-        .resolve(&frontend.module_manager)
+        .resolve(&mut frontend.module_manager)
         .expect("Name resolution failed")
         .fold_ast_constants()
-        .type_check(&frontend.module_manager, &mut frontend.schemes)
+        .type_check(&mut frontend.module_manager, &mut frontend.schemes)
         .expect("Type checking failed")
         .alias_check()
         .expect("Alias checking failed");
-    let builtins = crate::build_builtins(&alias_checked.ast, &frontend.module_manager);
+    let builtins = crate::build_builtins(&alias_checked.ast, &mut frontend.module_manager);
     let glsl = alias_checked
-        .to_tlc(builtins, &frontend.schemes, &frontend.module_manager)
+        .to_tlc(builtins, &frontend.schemes, &mut frontend.module_manager)
         .partial_eval()
         .defunctionalize()
         .to_mir()
