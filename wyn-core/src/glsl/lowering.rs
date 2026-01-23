@@ -947,7 +947,7 @@ impl<'a> LowerCtx<'a> {
                         assert!(type_args.len() == 3);
                         // Check if unsized (slice-like) - size is at index 2
                         let is_unsized =
-                            matches!(&type_args[2], PolyType::Constructed(TypeName::Unsized, _));
+                            matches!(&type_args[2], PolyType::Constructed(TypeName::SizePlaceholder, _));
                         if is_unsized {
                             // Unsized array (slice) - check expression kind
                             match body.get_expr(arg_ids[0]) {
@@ -981,7 +981,7 @@ impl<'a> LowerCtx<'a> {
                         assert!(type_args.len() == 3);
                         // Check if unsized (slice-like)
                         let is_unsized =
-                            matches!(&type_args[2], PolyType::Constructed(TypeName::Unsized, _));
+                            matches!(&type_args[2], PolyType::Constructed(TypeName::SizePlaceholder, _));
                         if is_unsized {
                             // Unsized array: access len field
                             Ok(format!("{}.len", args[0]))
@@ -1024,7 +1024,7 @@ impl<'a> LowerCtx<'a> {
                     PolyType::Constructed(TypeName::Array, type_args) => {
                         assert!(type_args.len() == 3);
                         let is_unsized =
-                            matches!(&type_args[2], PolyType::Constructed(TypeName::Unsized, _));
+                            matches!(&type_args[2], PolyType::Constructed(TypeName::SizePlaceholder, _));
                         if is_unsized {
                             match body.get_expr(arg_ids[0]) {
                                 Expr::Array {

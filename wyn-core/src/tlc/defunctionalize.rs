@@ -192,10 +192,10 @@ fn build_type_subst(poly_ty: &Type<TypeName>, concrete_ty: &Type<TypeName>, subs
                 build_type_subst(p, c, subst);
             }
             // Also handle the case where poly_name itself contains a variable (for Size types)
-            if let TypeName::Unsized = poly_name {
-                // Unsized matches any size - extract size from concrete
+            if let TypeName::SizePlaceholder = poly_name {
+                // SizePlaceholder matches any size - extract size from concrete
                 if let Type::Constructed(TypeName::Size(_n), _) = concrete_ty {
-                    // Can't directly substitute Unsized, but the size is in the array type
+                    // Can't directly substitute SizePlaceholder, but the size is in the array type
                 }
             }
         }

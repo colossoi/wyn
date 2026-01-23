@@ -122,11 +122,11 @@ pub enum TypeName {
     /// Unified array type constructor.
     /// Type args: [elem_type, address_space, size]
     /// - elem_type: element type (f32, etc.)
-    /// - address_space: Storage, Function, AddressUnknown, or type variable
-    /// - size: Size(n), SizeVar("n"), Unsized, or type variable
+    /// - address_space: Storage, Function, AddressPlaceholder, or type variable
+    /// - size: Size(n), SizeVar("n"), SizePlaceholder, or type variable
     Array,
-    /// Unsized/anonymous array size placeholder (for []t syntax where size is inferred)
-    Unsized,
+    /// Size placeholder (for []t syntax where size is inferred). Replaced with type variable before type checking.
+    SizePlaceholder,
     /// Function arrow type constructor (T1 -> T2)
     Arrow,
     /// Vector type constructor (takes size and element type)
@@ -166,9 +166,9 @@ pub enum TypeName {
     AddressStorage,
     /// Function address space - function-local OpVariable.
     AddressFunction,
-    /// Unknown address space - placeholder before type checking resolves it.
-    /// Entry params get Storage, regular function params get a type variable.
-    AddressUnknown,
+    /// Address space placeholder. Replaced with type variable before type checking.
+    /// Entry point params are constrained to Storage, others remain polymorphic.
+    AddressPlaceholder,
 
     // --- Type system internals ---
     /// Rigid skolem constant for existential sizes.
@@ -189,7 +189,7 @@ impl std::fmt::Display for TypeName {
             TypeName::UInt(bits) => write!(f, "u{}", bits),
             TypeName::Int(bits) => write!(f, "i{}", bits),
             TypeName::Array => write!(f, "Array"),
-            TypeName::Unsized => write!(f, ""),
+            TypeName::SizePlaceholder => write!(f, ""),
             TypeName::Arrow => write!(f, "->"),
             TypeName::Vec => write!(f, "Vec"),
             TypeName::Mat => write!(f, "Mat"),
@@ -229,7 +229,7 @@ impl std::fmt::Display for TypeName {
             TypeName::Pointer => write!(f, "Ptr"),
             TypeName::AddressStorage => write!(f, "storage"),
             TypeName::AddressFunction => write!(f, "function"),
-            TypeName::AddressUnknown => write!(f, "?addrspace"),
+            TypeName::AddressPlaceholder => write!(f, "?addrspace"),
             TypeName::Skolem(id) => write!(f, "{}", id),
             TypeName::Ignored => write!(f, "_"),
         }
@@ -248,7 +248,7 @@ impl polytype::Name for TypeName {
             TypeName::UInt(bits) => format!("u{}", bits),
             TypeName::Int(bits) => format!("i{}", bits),
             TypeName::Array => "Array".to_string(),
-            TypeName::Unsized => "".to_string(),
+            TypeName::SizePlaceholder => "".to_string(),
             TypeName::Arrow => "->".to_string(),
             TypeName::Vec => "Vec".to_string(),
             TypeName::Mat => "Mat".to_string(),
@@ -284,7 +284,7 @@ impl polytype::Name for TypeName {
             TypeName::Pointer => "Ptr".to_string(),
             TypeName::AddressStorage => "storage".to_string(),
             TypeName::AddressFunction => "function".to_string(),
-            TypeName::AddressUnknown => "?addrspace".to_string(),
+            TypeName::AddressPlaceholder => "?addrspace".to_string(),
             TypeName::Skolem(id) => format!("{}", id),
             TypeName::Ignored => "_".to_string(),
         }
@@ -610,7 +610,7 @@ pub fn is_address_space(ty: &Type) -> bool {
     matches!(
         ty,
         Type::Constructed(
-            TypeName::AddressStorage | TypeName::AddressFunction | TypeName::AddressUnknown,
+            TypeName::AddressStorage | TypeName::AddressFunction | TypeName::AddressPlaceholder,
             _
         )
     )
@@ -618,8 +618,8 @@ pub fn is_address_space(ty: &Type) -> bool {
 
 /// Debug assertion that a type is valid as a top-level expression/variable type.
 /// Panics if the type is a marker type that should only appear nested inside other types:
-/// - Address space markers (AddressStorage, AddressFunction, AddressUnknown)
-/// - Size markers (Size, Unsized, SizeVar)
+/// - Address space markers (AddressStorage, AddressFunction, AddressPlaceholder)
+/// - Size markers (Size, SizePlaceholder, SizeVar)
 #[inline]
 pub fn debug_assert_top_level_type(ty: &Type, context: &str) {
     if !cfg!(debug_assertions) {
@@ -629,7 +629,7 @@ pub fn debug_assert_top_level_type(ty: &Type, context: &str) {
     match ty {
         Type::Constructed(name, _) => match name {
             // Address space markers - only valid inside Array[elem, addrspace, size]
-            TypeName::AddressStorage | TypeName::AddressFunction | TypeName::AddressUnknown => {
+            TypeName::AddressStorage | TypeName::AddressFunction | TypeName::AddressPlaceholder => {
                 panic!(
                     "BUG: Address space type {:?} used as top-level type in {}. \
                      Address space markers should only appear inside Array[elem, addrspace, size].",
@@ -637,7 +637,7 @@ pub fn debug_assert_top_level_type(ty: &Type, context: &str) {
                 );
             }
             // Size markers - only valid inside Array, Vec, Mat types
-            TypeName::Size(_) | TypeName::Unsized | TypeName::SizeVar(_) => {
+            TypeName::Size(_) | TypeName::SizePlaceholder | TypeName::SizeVar(_) => {
                 panic!(
                     "BUG: Size marker {:?} used as top-level type in {}. \
                      Size markers should only appear inside Array, Vec, or Mat types.",
@@ -681,21 +681,25 @@ pub fn pointer_addrspace(ty: &Type) -> Option<&Type> {
 // --- Array type helpers ---
 // Array[elem, addrspace, size] is the unified array type.
 
-/// Create an unsized array (slice): Array[elem, addrspace, Unsized]
+/// Create an unsized array (slice): Array[elem, addrspace, SizePlaceholder]
 pub fn unsized_array(elem: Type, addrspace: Type) -> Type {
     Type::Constructed(
         TypeName::Array,
-        vec![elem, addrspace, Type::Constructed(TypeName::Unsized, vec![])],
+        vec![
+            elem,
+            addrspace,
+            Type::Constructed(TypeName::SizePlaceholder, vec![]),
+        ],
     )
 }
 
-/// Check if a type is an unsized array (has Unsized as size arg)
+/// Check if a type is an unsized array (has SizePlaceholder as size arg)
 pub fn is_unsized_array(ty: &Type) -> bool {
     let Type::Constructed(TypeName::Array, args) = ty else {
         return false;
     };
     assert!(args.len() == 3);
-    matches!(&args[2], Type::Constructed(TypeName::Unsized, _))
+    matches!(&args[2], Type::Constructed(TypeName::SizePlaceholder, _))
 }
 
 /// Get the element type from an Array, or None if not an Array
@@ -732,7 +736,7 @@ pub fn is_bound_slice_access(ty: &Type) -> bool {
         Type::Constructed(TypeName::Array, args) if args.len() >= 3 => {
             assert!(args.len() == 3);
             let is_storage = matches!(&args[1], Type::Constructed(TypeName::AddressStorage, _));
-            let is_unsized = matches!(&args[2], Type::Constructed(TypeName::Unsized, _));
+            let is_unsized = matches!(&args[2], Type::Constructed(TypeName::SizePlaceholder, _));
             is_storage && is_unsized
         }
         _ => false,
@@ -755,7 +759,7 @@ pub fn format_type(ty: &Type) -> String {
             let size = &args[2];
             match size {
                 Type::Constructed(TypeName::Size(n), _) => format!("[{}]{}", n, elem),
-                Type::Constructed(TypeName::Unsized, _) => format!("[]{}", elem),
+                Type::Constructed(TypeName::SizePlaceholder, _) => format!("[]{}", elem),
                 _ => format!("[{}]{}", format_type(size), elem),
             }
         }

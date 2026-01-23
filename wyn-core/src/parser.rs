@@ -872,15 +872,15 @@ impl<'a> Parser<'a> {
                     self.advance();
 
                     if self.check(&Token::RightBracket) {
-                        // Empty brackets [] - unsized array with unknown address space
-                        // Array[elem, AddressUnknown, Unsized]
+                        // Empty brackets [] - unsized array with placeholder address space
+                        // Array[elem, AddressPlaceholder, SizePlaceholder]
                         self.advance();
                         base = Type::Constructed(
                             TypeName::Array,
                             vec![
                                 base,
-                                Type::Constructed(TypeName::AddressUnknown, vec![]),
-                                Type::Constructed(TypeName::Unsized, vec![]),
+                                Type::Constructed(TypeName::AddressPlaceholder, vec![]),
+                                Type::Constructed(TypeName::SizePlaceholder, vec![]),
                             ],
                         );
                     } else if let Some(Token::Identifier(name)) = self.peek() {
@@ -888,12 +888,12 @@ impl<'a> Parser<'a> {
                         let size_var = name.clone();
                         self.advance();
                         self.expect(Token::RightBracket)?;
-                        // Array[elem, AddressUnknown, SizeVar(n)]
+                        // Array[elem, AddressPlaceholder, SizeVar(n)]
                         base = Type::Constructed(
                             TypeName::Array,
                             vec![
                                 base,
-                                Type::Constructed(TypeName::AddressUnknown, vec![]),
+                                Type::Constructed(TypeName::AddressPlaceholder, vec![]),
                                 types::size_var(size_var),
                             ],
                         );
@@ -902,12 +902,12 @@ impl<'a> Parser<'a> {
                         let size = usize::try_from(n).map_err(|_| err_parse!("Invalid array size"))?;
                         self.advance();
                         self.expect(Token::RightBracket)?;
-                        // Array[elem, AddressUnknown, Size(n)]
+                        // Array[elem, AddressPlaceholder, Size(n)]
                         base = Type::Constructed(
                             TypeName::Array,
                             vec![
                                 base,
-                                Type::Constructed(TypeName::AddressUnknown, vec![]),
+                                Type::Constructed(TypeName::AddressPlaceholder, vec![]),
                                 Type::Constructed(TypeName::Size(size), vec![]),
                             ],
                         );
@@ -983,8 +983,8 @@ impl<'a> Parser<'a> {
                     TypeName::Array,
                     vec![
                         elem_type,
-                        Type::Constructed(TypeName::AddressUnknown, vec![]),
-                        Type::Constructed(TypeName::Unsized, vec![]),
+                        Type::Constructed(TypeName::AddressPlaceholder, vec![]),
+                        Type::Constructed(TypeName::SizePlaceholder, vec![]),
                     ],
                 ));
             }
@@ -1002,12 +1002,12 @@ impl<'a> Parser<'a> {
                 self.advance();
                 self.expect(Token::RightBracket)?;
                 let elem_type = self.parse_array_or_base_type()?;
-                // Array[elem, AddressUnknown, SizeVar(n)]
+                // Array[elem, AddressPlaceholder, SizeVar(n)]
                 Ok(Type::Constructed(
                     TypeName::Array,
                     vec![
                         elem_type,
-                        Type::Constructed(TypeName::AddressUnknown, vec![]),
+                        Type::Constructed(TypeName::AddressPlaceholder, vec![]),
                         types::size_var(size_var),
                     ],
                 ))

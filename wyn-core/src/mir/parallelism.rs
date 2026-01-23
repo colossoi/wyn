@@ -158,14 +158,14 @@ pub fn detect_simple_compute_map(def: &Def) -> Option<SimpleComputeMap> {
 
 /// Check if an input is a slice/array type suitable for compute shaders and extract its info.
 fn analyze_input_slice(input: &EntryInput) -> Option<InputSliceInfo> {
-    // Array[elem, addrspace, size] - check if size is Unsized or a type variable
+    // Array[elem, addrspace, size] - check if size is SizePlaceholder or a type variable
     let element_type = match &input.ty {
         Type::Constructed(TypeName::Array, args) => {
             assert!(args.len() == 3);
             // Array[elem, addrspace, size] - check if size is dynamically determined
             match &args[2] {
                 // Explicitly unsized
-                Type::Constructed(TypeName::Unsized, _) => args[0].clone(),
+                Type::Constructed(TypeName::SizePlaceholder, _) => args[0].clone(),
                 // Type variable means size is runtime-determined (polymorphic size)
                 Type::Variable(_) => args[0].clone(),
                 // Fixed-size arrays not supported for compute

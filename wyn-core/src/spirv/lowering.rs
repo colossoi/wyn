@@ -265,7 +265,7 @@ impl Constructor {
                                 let size_const = self.const_i32(*n as i32);
                                 self.builder.type_array(elem_type, size_const)
                             }
-                            PolyType::Constructed(TypeName::Unsized, _) => {
+                            PolyType::Constructed(TypeName::SizePlaceholder, _) => {
                                 // Unsized array - representation depends on address space
                                 if let PolyType::Constructed(TypeName::AddressStorage, _) = addrspace {
                                     // Storage array: struct { pointer, length }
@@ -368,7 +368,7 @@ impl Constructor {
                         // for type checking only. Map to unit type since it has no runtime representation.
                         self.void_type
                     }
-                    TypeName::AddressFunction | TypeName::AddressStorage | TypeName::AddressUnknown => {
+                    TypeName::AddressFunction | TypeName::AddressStorage | TypeName::AddressPlaceholder => {
                         // Address space markers are used within Array types but shouldn't appear
                         // as standalone types requiring SPIR-V representation.
                         panic!(
@@ -1510,7 +1510,7 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
 
     // Debug: check for address space types being used as expression types
     if let PolyType::Constructed(
-        TypeName::AddressFunction | TypeName::AddressStorage | TypeName::AddressUnknown,
+        TypeName::AddressFunction | TypeName::AddressStorage | TypeName::AddressPlaceholder,
         _,
     ) = expr_ty
     {
@@ -1897,7 +1897,7 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                     PolyType::Constructed(TypeName::Array, args) => {
                         assert!(args.len() == 3);
                         // Check if unsized
-                        if matches!(&args[2], PolyType::Constructed(TypeName::Unsized, _)) {
+                        if matches!(&args[2], PolyType::Constructed(TypeName::SizePlaceholder, _)) {
                             // Unsized array (slice) - this shouldn't happen in for-in directly
                             bail_spirv!("For-in loop over unsized array not supported: {:?}", iter_ty);
                         } else {
@@ -2551,7 +2551,7 @@ fn lower_array_expr(
                 PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 3 => {
                     let size_from_type = match &type_args[2] {
                         PolyType::Constructed(TypeName::Size(s), _) => Some(*s),
-                        PolyType::Constructed(TypeName::Unsized, _) => {
+                        PolyType::Constructed(TypeName::SizePlaceholder, _) => {
                             // Unsized - try to get from size expression
                             try_extract_const_int(body, size).map(|s| s as usize)
                         }
@@ -2848,7 +2848,7 @@ fn lower_length_intrinsic(
                     // Static size: return constant
                     Ok(constructor.const_i32(*n as i32))
                 }
-                PolyType::Constructed(TypeName::Unsized, _) => {
+                PolyType::Constructed(TypeName::SizePlaceholder, _) => {
                     // Unsized array: extract size from array expression
                     let array_expr = body.get_expr(arg_expr_id);
                     let i32_type = constructor.i32_type;
@@ -2883,7 +2883,7 @@ fn lower_index_intrinsic(
         PolyType::Constructed(TypeName::Array, type_args) => {
             assert!(type_args.len() == 3);
             // Check if this is an unsized array (slice-like)
-            let is_unsized = matches!(&type_args[2], PolyType::Constructed(TypeName::Unsized, _));
+            let is_unsized = matches!(&type_args[2], PolyType::Constructed(TypeName::SizePlaceholder, _));
 
             if is_unsized {
                 // Unsized array - handle slice semantics based on array backing
@@ -2964,7 +2964,7 @@ fn lower_index_intrinsic(
                         // Array value from a variable or function call
                         let slice_val = lower_expr(constructor, body, array_expr_id)?;
 
-                        // Check if this is a storage array (Array[elem, Storage, Unsized])
+                        // Check if this is a storage array (Array[elem, Storage, SizePlaceholder])
                         if types::is_bound_slice_access(arg0_ty) {
                             // Storage slice: {ptr, len} struct
                             let ptr_type = constructor
@@ -2986,9 +2986,12 @@ fn lower_index_intrinsic(
 
                 // If index is a compile-time constant, use OpCompositeExtract
                 if let Some(literal_idx) = constructor.get_const_u32_value(index_val) {
-                    Ok(constructor
-                        .builder
-                        .composite_extract(result_type, None, array_val, [literal_idx])?)
+                    Ok(constructor.builder.composite_extract(
+                        result_type,
+                        None,
+                        array_val,
+                        [literal_idx],
+                    )?)
                 } else {
                     // Runtime index - must materialize to local variable
                     let array_type = constructor.ast_type_to_spirv(arg0_ty);
@@ -2998,9 +3001,7 @@ fn lower_index_intrinsic(
                     let elem_ptr_type =
                         constructor.builder.type_pointer(None, StorageClass::Function, result_type);
                     let elem_ptr =
-                        constructor
-                            .builder
-                            .access_chain(elem_ptr_type, None, array_var, [index_val])?;
+                        constructor.builder.access_chain(elem_ptr_type, None, array_var, [index_val])?;
                     Ok(constructor.builder.load(result_type, None, elem_ptr, None, [])?)
                 }
             }

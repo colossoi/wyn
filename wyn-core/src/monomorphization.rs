@@ -160,7 +160,7 @@ impl TypeKey {
                     TypeName::Array => "array".to_string(),
                     TypeName::Vec => "vec".to_string(),
                     TypeName::Mat => "mat".to_string(),
-                    TypeName::Unsized => "unsized".to_string(),
+                    TypeName::SizePlaceholder => "size_placeholder".to_string(),
                     TypeName::Arrow => "arrow".to_string(),
                     TypeName::SizeVar(s) => format!("sizevar_{}", s),
                     TypeName::UserVar(s) => format!("uservar_{}", s),
@@ -176,7 +176,7 @@ impl TypeKey {
                     TypeName::Pointer => "ptr".to_string(),
                     TypeName::AddressFunction => "function".to_string(),
                     TypeName::AddressStorage => "storage".to_string(),
-                    TypeName::AddressUnknown => "address_unknown".to_string(),
+                    TypeName::AddressPlaceholder => "address_placeholder".to_string(),
                     _ => unreachable!("Should have been handled above: {:?}", name),
                 };
                 TypeKey::Constructed(name_str, args.iter().map(TypeKey::from_type).collect())
@@ -221,7 +221,7 @@ impl TypeKey {
                     "array" => TypeName::Array,
                     "vec" => TypeName::Vec,
                     "mat" => TypeName::Mat,
-                    "unsized" => TypeName::Unsized,
+                    "size_placeholder" => TypeName::SizePlaceholder,
                     "arrow" => TypeName::Arrow,
                     "unit" => TypeName::Unit,
                     "ptr" => TypeName::Pointer,

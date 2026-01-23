@@ -178,9 +178,9 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    /// Prepare array types for type checking by replacing marker types with fresh variables.
-    /// - `AddressUnknown` → fresh type variable (to be constrained)
-    /// - `Unsized` → fresh type variable (to be inferred or validated)
+    /// Prepare array types for type checking by replacing placeholder types with fresh variables.
+    /// - `AddressPlaceholder` → fresh type variable (to be constrained)
+    /// - `SizePlaceholder` → fresh type variable (to be inferred or validated)
     /// Returns the transformed type.
     fn prepare_array_type(&mut self, ty: &Type) -> Type {
         match ty {
@@ -188,11 +188,11 @@ impl<'a> TypeChecker<'a> {
                 assert!(args.len() == 3);
                 let elem = self.prepare_array_type(&args[0]);
                 let addrspace = match &args[1] {
-                    Type::Constructed(TypeName::AddressUnknown, _) => self.context.new_variable(),
+                    Type::Constructed(TypeName::AddressPlaceholder, _) => self.context.new_variable(),
                     other => self.prepare_array_type(other),
                 };
                 let size = match &args[2] {
-                    Type::Constructed(TypeName::Unsized, _) => self.context.new_variable(),
+                    Type::Constructed(TypeName::SizePlaceholder, _) => self.context.new_variable(),
                     other => self.prepare_array_type(other),
                 };
                 Type::Constructed(TypeName::Array, vec![elem, addrspace, size])
@@ -1443,7 +1443,7 @@ impl<'a> TypeChecker<'a> {
                 };
                 // Resolve type aliases (e.g., rand.state -> f32)
                 let expected_type = self.resolve_type_aliases_scoped(&expected_type, None);
-                // Replace AddressUnknown and Unsized markers with type variables
+                // Replace AddressPlaceholder and SizePlaceholder markers with type variables
                 let expected_type = self.prepare_array_type(&expected_type);
 
                 // Validate body type matches declared outputs

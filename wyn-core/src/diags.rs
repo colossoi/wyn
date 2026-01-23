@@ -53,7 +53,7 @@ fn format_constructed_type(name: &TypeName, args: &[PolyType<TypeName>]) -> Stri
         TypeName::Int(bits) => format!("i{}", bits),
         TypeName::Size(n) => format!("{}", n),
         TypeName::SizeVar(s) => s.clone(),
-        TypeName::Unsized => "?".to_string(),
+        TypeName::SizePlaceholder => "?".to_string(),
         TypeName::Array => {
             // Array[elem, addrspace, size] - unified array type
             assert!(args.len() == 3);
@@ -143,7 +143,7 @@ fn format_constructed_type(name: &TypeName, args: &[PolyType<TypeName>]) -> Stri
         }
         TypeName::AddressStorage => "storage".to_string(),
         TypeName::AddressFunction => "function".to_string(),
-        TypeName::AddressUnknown => "?addrspace".to_string(),
+        TypeName::AddressPlaceholder => "?addrspace".to_string(),
         TypeName::Skolem(id) => format!("{}", id),
         TypeName::Ignored => "_".to_string(),
     }

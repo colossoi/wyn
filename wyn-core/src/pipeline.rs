@@ -117,10 +117,10 @@ fn is_output_slice_type(ty: &Type<TypeName>) -> bool {
     match ty {
         Type::Constructed(TypeName::Array, args) => {
             assert!(args.len() == 3);
-            // Accept Unsized or type variable (polymorphic size = runtime determined)
+            // Accept SizePlaceholder or type variable (polymorphic size = runtime determined)
             matches!(
                 &args[2],
-                Type::Constructed(TypeName::Unsized, _) | Type::Variable(_)
+                Type::Constructed(TypeName::SizePlaceholder, _) | Type::Variable(_)
             )
         }
         _ => false,
@@ -128,16 +128,16 @@ fn is_output_slice_type(ty: &Type<TypeName>) -> bool {
 }
 
 /// Check if a type is a storage slice (unsized array in storage address space).
-/// Array[elem, addrspace, size] where addrspace is Storage and size is Unsized or a type variable.
+/// Array[elem, addrspace, size] where addrspace is Storage and size is SizePlaceholder or a type variable.
 fn is_slice_type(ty: &Type<TypeName>) -> bool {
     match ty {
         Type::Constructed(TypeName::Array, args) => {
             assert!(args.len() == 3);
             let is_storage = matches!(&args[1], Type::Constructed(TypeName::AddressStorage, _));
-            // Accept Unsized or type variable (polymorphic size = runtime determined)
+            // Accept SizePlaceholder or type variable (polymorphic size = runtime determined)
             let is_unsized = matches!(
                 &args[2],
-                Type::Constructed(TypeName::Unsized, _) | Type::Variable(_)
+                Type::Constructed(TypeName::SizePlaceholder, _) | Type::Variable(_)
             );
             is_storage && is_unsized
         }
