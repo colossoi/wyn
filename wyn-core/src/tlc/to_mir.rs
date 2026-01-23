@@ -737,6 +737,36 @@ impl<'a> TlcToMir<'a> {
                     node_id,
                 );
             }
+            "_w_index" if args.len() == 2 => {
+                let array_arg = args[0];
+                let index_arg = args[1];
+
+                // Check if index is a literal constant
+                let is_const_index = matches!(body.get_expr(index_arg), Expr::Int(_));
+
+                let final_array_arg = if is_const_index {
+                    // Constant index - no materialization needed (will use OpCompositeExtract)
+                    array_arg
+                } else {
+                    // Runtime index - wrap array in Materialize for potential hoisting
+                    let array_ty = body.get_type(array_arg).clone();
+                    let ptr_ty = Type::Constructed(
+                        TypeName::Pointer,
+                        vec![array_ty, Type::Constructed(TypeName::AddressFunction, vec![])],
+                    );
+                    body.alloc_expr(Expr::Materialize(array_arg), ptr_ty, span, node_id)
+                };
+
+                return body.alloc_expr(
+                    Expr::Intrinsic {
+                        name: "_w_index".to_string(),
+                        args: vec![final_array_arg, index_arg],
+                    },
+                    ty,
+                    span,
+                    node_id,
+                );
+            }
             _ => {}
         }
 

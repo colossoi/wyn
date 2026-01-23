@@ -14,8 +14,8 @@
 //! if c then @index(__mat_0, i) else @index(__mat_0, i)
 //! ```
 
-use crate::mir::{ArrayBacking, Body, Def, Expr, ExprId, Program};
-use std::collections::HashSet;
+use crate::mir::{ArrayBacking, Body, Def, Expr, ExprId, LocalId, LoopKind, Program};
+use std::collections::{HashMap, HashSet};
 
 /// Hoist duplicate materializations in a program.
 pub fn hoist_materializations(program: Program) -> Program {
@@ -23,6 +23,243 @@ pub fn hoist_materializations(program: Program) -> Program {
         defs: program.defs.into_iter().map(hoist_in_def).collect(),
         lambda_registry: program.lambda_registry,
     }
+}
+
+// =============================================================================
+// Expression reordering
+// =============================================================================
+
+/// Reorder expressions in a body to restore proper dependency order.
+/// After hoisting, expressions may be out of order (children after parents).
+/// This pass does a post-order traversal and rebuilds the arena.
+fn reorder_body(body: &mut Body) {
+    // Build new body with proper order via post-order traversal
+    let mut new_body = Body::new();
+
+    // Copy locals
+    for local in &body.locals {
+        new_body.alloc_local(local.clone());
+    }
+
+    // Map from old ExprId to new ExprId
+    let mut id_map: HashMap<ExprId, ExprId> = HashMap::new();
+
+    // Process expressions in post-order from root
+    reorder_expr(body, body.root, &mut new_body, &mut id_map);
+
+    // Update root
+    new_body.root = id_map[&body.root];
+
+    *body = new_body;
+}
+
+/// Recursively reorder an expression tree, ensuring children come before parents.
+fn reorder_expr(
+    old_body: &Body,
+    old_id: ExprId,
+    new_body: &mut Body,
+    id_map: &mut HashMap<ExprId, ExprId>,
+) -> ExprId {
+    // If already processed, return the new ID
+    if let Some(&new_id) = id_map.get(&old_id) {
+        return new_id;
+    }
+
+    let ty = old_body.get_type(old_id).clone();
+    let span = old_body.get_span(old_id);
+    let node_id = old_body.get_node_id(old_id);
+
+    // Process children first (post-order), then allocate this expression
+    let new_expr = match old_body.get_expr(old_id).clone() {
+        // Atoms - no children
+        Expr::Local(id) => Expr::Local(id),
+        Expr::Global(name) => Expr::Global(name),
+        Expr::Int(s) => Expr::Int(s),
+        Expr::Float(s) => Expr::Float(s),
+        Expr::Bool(b) => Expr::Bool(b),
+        Expr::Unit => Expr::Unit,
+        Expr::String(s) => Expr::String(s),
+
+        // Expressions with children
+        Expr::BinOp { op, lhs, rhs } => {
+            let new_lhs = reorder_expr(old_body, lhs, new_body, id_map);
+            let new_rhs = reorder_expr(old_body, rhs, new_body, id_map);
+            Expr::BinOp {
+                op,
+                lhs: new_lhs,
+                rhs: new_rhs,
+            }
+        }
+        Expr::UnaryOp { op, operand } => {
+            let new_operand = reorder_expr(old_body, operand, new_body, id_map);
+            Expr::UnaryOp { op, operand: new_operand }
+        }
+        Expr::Tuple(elems) => {
+            let new_elems: Vec<_> = elems
+                .iter()
+                .map(|e| reorder_expr(old_body, *e, new_body, id_map))
+                .collect();
+            Expr::Tuple(new_elems)
+        }
+        Expr::Vector(elems) => {
+            let new_elems: Vec<_> = elems
+                .iter()
+                .map(|e| reorder_expr(old_body, *e, new_body, id_map))
+                .collect();
+            Expr::Vector(new_elems)
+        }
+        Expr::Matrix(rows) => {
+            let new_rows: Vec<Vec<_>> = rows
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|e| reorder_expr(old_body, *e, new_body, id_map))
+                        .collect()
+                })
+                .collect();
+            Expr::Matrix(new_rows)
+        }
+        Expr::Array { backing, size } => {
+            let new_size = reorder_expr(old_body, size, new_body, id_map);
+            let new_backing = match backing {
+                ArrayBacking::Literal(elems) => {
+                    let new_elems: Vec<_> = elems
+                        .iter()
+                        .map(|e| reorder_expr(old_body, *e, new_body, id_map))
+                        .collect();
+                    ArrayBacking::Literal(new_elems)
+                }
+                ArrayBacking::Range { start, step, kind } => {
+                    let new_start = reorder_expr(old_body, start, new_body, id_map);
+                    let new_step = step.map(|s| reorder_expr(old_body, s, new_body, id_map));
+                    ArrayBacking::Range {
+                        start: new_start,
+                        step: new_step,
+                        kind,
+                    }
+                }
+                ArrayBacking::IndexFn { index_fn } => {
+                    let new_fn = reorder_expr(old_body, index_fn, new_body, id_map);
+                    ArrayBacking::IndexFn { index_fn: new_fn }
+                }
+                ArrayBacking::View { base, offset } => {
+                    let new_base = reorder_expr(old_body, base, new_body, id_map);
+                    let new_offset = reorder_expr(old_body, offset, new_body, id_map);
+                    ArrayBacking::View {
+                        base: new_base,
+                        offset: new_offset,
+                    }
+                }
+                ArrayBacking::Owned { data } => {
+                    let new_data = reorder_expr(old_body, data, new_body, id_map);
+                    ArrayBacking::Owned { data: new_data }
+                }
+                ArrayBacking::Storage { name, offset } => {
+                    let new_offset = reorder_expr(old_body, offset, new_body, id_map);
+                    ArrayBacking::Storage { name, offset: new_offset }
+                }
+            };
+            Expr::Array {
+                backing: new_backing,
+                size: new_size,
+            }
+        }
+        Expr::If { cond, then_, else_ } => {
+            let new_cond = reorder_expr(old_body, cond, new_body, id_map);
+            let new_then = reorder_expr(old_body, then_, new_body, id_map);
+            let new_else = reorder_expr(old_body, else_, new_body, id_map);
+            Expr::If {
+                cond: new_cond,
+                then_: new_then,
+                else_: new_else,
+            }
+        }
+        Expr::Let { local, rhs, body } => {
+            let new_rhs = reorder_expr(old_body, rhs, new_body, id_map);
+            let new_let_body = reorder_expr(old_body, body, new_body, id_map);
+            Expr::Let {
+                local,
+                rhs: new_rhs,
+                body: new_let_body,
+            }
+        }
+        Expr::Loop {
+            loop_var,
+            init,
+            init_bindings,
+            kind,
+            body,
+        } => {
+            let new_init = reorder_expr(old_body, init, new_body, id_map);
+            let new_bindings: Vec<_> = init_bindings
+                .iter()
+                .map(|(local, expr)| (*local, reorder_expr(old_body, *expr, new_body, id_map)))
+                .collect();
+            let new_kind = match kind {
+                LoopKind::For { var, iter } => {
+                    let new_iter = reorder_expr(old_body, iter, new_body, id_map);
+                    LoopKind::For { var, iter: new_iter }
+                }
+                LoopKind::ForRange { var, bound } => {
+                    let new_bound = reorder_expr(old_body, bound, new_body, id_map);
+                    LoopKind::ForRange { var, bound: new_bound }
+                }
+                LoopKind::While { cond } => {
+                    let new_cond = reorder_expr(old_body, cond, new_body, id_map);
+                    LoopKind::While { cond: new_cond }
+                }
+            };
+            let new_loop_body = reorder_expr(old_body, body, new_body, id_map);
+            Expr::Loop {
+                loop_var,
+                init: new_init,
+                init_bindings: new_bindings,
+                kind: new_kind,
+                body: new_loop_body,
+            }
+        }
+        Expr::Call { func, args } => {
+            let new_args: Vec<_> = args
+                .iter()
+                .map(|a| reorder_expr(old_body, *a, new_body, id_map))
+                .collect();
+            Expr::Call { func, args: new_args }
+        }
+        Expr::Intrinsic { name, args } => {
+            let new_args: Vec<_> = args
+                .iter()
+                .map(|a| reorder_expr(old_body, *a, new_body, id_map))
+                .collect();
+            Expr::Intrinsic { name, args: new_args }
+        }
+        Expr::Materialize(inner) => {
+            let new_inner = reorder_expr(old_body, inner, new_body, id_map);
+            Expr::Materialize(new_inner)
+        }
+        Expr::Attributed { attributes, expr } => {
+            let new_expr = reorder_expr(old_body, expr, new_body, id_map);
+            Expr::Attributed {
+                attributes,
+                expr: new_expr,
+            }
+        }
+        Expr::Load { ptr } => {
+            let new_ptr = reorder_expr(old_body, ptr, new_body, id_map);
+            Expr::Load { ptr: new_ptr }
+        }
+        Expr::Store { ptr, value } => {
+            let new_ptr = reorder_expr(old_body, ptr, new_body, id_map);
+            let new_value = reorder_expr(old_body, value, new_body, id_map);
+            Expr::Store {
+                ptr: new_ptr,
+                value: new_value,
+            }
+        }
+    };
+
+    let new_id = new_body.alloc_expr(new_expr, ty, span, node_id);
+    id_map.insert(old_id, new_id);
+    new_id
 }
 
 fn hoist_in_def(def: Def) -> Def {
@@ -91,7 +328,7 @@ fn hoist_in_def(def: Def) -> Def {
     }
 }
 
-/// Process a body, hoisting common materializations from if branches.
+/// Process a body, hoisting common materializations from if branches and loops.
 fn hoist_in_body(body: &mut Body) {
     // Find all If expressions
     let if_exprs: Vec<ExprId> = body
@@ -109,6 +346,28 @@ fn hoist_in_body(body: &mut Body) {
     for if_id in if_exprs {
         hoist_in_if(body, if_id);
     }
+
+    // Find all Loop expressions
+    let loop_exprs: Vec<ExprId> = body
+        .exprs
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, expr)| {
+            if matches!(expr, Expr::Loop { .. }) {
+                Some(ExprId(idx as u32))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Process each Loop expression
+    for loop_id in loop_exprs {
+        hoist_in_loop(body, loop_id);
+    }
+
+    // Reorder expressions to restore proper dependency order after hoisting
+    reorder_body(body);
 }
 
 /// Try to hoist common materializations from an If expression.
@@ -431,5 +690,197 @@ fn exprs_equal(body: &Body, a: ExprId, b: ExprId) -> bool {
         // For simplicity, don't consider if/let/loop as equal even if structurally same
         // (they're complex and unlikely to be duplicated materializations anyway)
         _ => false,
+    }
+}
+
+// =============================================================================
+// Loop hoisting
+// =============================================================================
+
+/// Try to hoist loop-invariant materializations before a Loop expression.
+fn hoist_in_loop(body: &mut Body, loop_id: ExprId) {
+    let loop_body_id = match body.get_expr(loop_id) {
+        Expr::Loop { body: b, .. } => *b,
+        _ => return,
+    };
+
+    // Collect all Materialize expressions in the loop body
+    let mats = collect_materializations(body, loop_body_id);
+
+    // Get locals defined by the loop (loop_var, init_bindings, and loop kind var)
+    let loop_locals = collect_loop_locals(body, loop_id);
+
+    // Filter to loop-invariant ones (inner expr only references locals defined outside loop)
+    let loop_invariant: Vec<ExprId> = mats
+        .into_iter()
+        .filter(|&mat_id| is_loop_invariant(body, mat_id, &loop_locals))
+        .collect();
+
+    // Hoist each loop-invariant materialization before the loop
+    for mat_id in loop_invariant {
+        body.hoist_before(mat_id, loop_id, None);
+    }
+}
+
+/// Collect all locals defined by a loop expression.
+fn collect_loop_locals(body: &Body, loop_id: ExprId) -> HashSet<LocalId> {
+    match body.get_expr(loop_id) {
+        Expr::Loop {
+            loop_var,
+            init_bindings,
+            kind,
+            ..
+        } => {
+            let mut locals = HashSet::new();
+            locals.insert(*loop_var);
+            for (local, _) in init_bindings {
+                locals.insert(*local);
+            }
+            // Add the loop kind variable
+            match kind {
+                LoopKind::For { var, .. } | LoopKind::ForRange { var, .. } => {
+                    locals.insert(*var);
+                }
+                LoopKind::While { .. } => {}
+            }
+            locals
+        }
+        _ => HashSet::new(),
+    }
+}
+
+/// Check if a Materialize expression is loop-invariant.
+/// It's loop-invariant if its inner expression only references:
+/// - Literals (Int, Float, Bool)
+/// - Globals
+/// - Locals defined OUTSIDE the loop (params, outer lets)
+fn is_loop_invariant(body: &Body, mat_id: ExprId, loop_locals: &HashSet<LocalId>) -> bool {
+    let inner = match body.get_expr(mat_id) {
+        Expr::Materialize(inner) => *inner,
+        _ => return false,
+    };
+
+    // Check that inner doesn't reference any loop-local variables
+    !references_any_local(body, inner, loop_locals)
+}
+
+/// Check if an expression tree references any local from the given set.
+fn references_any_local(body: &Body, expr_id: ExprId, locals: &HashSet<LocalId>) -> bool {
+    let mut visited = HashSet::new();
+    references_any_local_rec(body, expr_id, locals, &mut visited)
+}
+
+fn references_any_local_rec(
+    body: &Body,
+    expr_id: ExprId,
+    locals: &HashSet<LocalId>,
+    visited: &mut HashSet<ExprId>,
+) -> bool {
+    if !visited.insert(expr_id) {
+        return false;
+    }
+
+    let expr = body.get_expr(expr_id);
+
+    match expr {
+        Expr::Local(id) => locals.contains(id),
+
+        Expr::Materialize(inner) => references_any_local_rec(body, *inner, locals, visited),
+
+        Expr::BinOp { lhs, rhs, .. } => {
+            references_any_local_rec(body, *lhs, locals, visited)
+                || references_any_local_rec(body, *rhs, locals, visited)
+        }
+        Expr::UnaryOp { operand, .. } => references_any_local_rec(body, *operand, locals, visited),
+
+        Expr::If { cond, then_, else_ } => {
+            references_any_local_rec(body, *cond, locals, visited)
+                || references_any_local_rec(body, *then_, locals, visited)
+                || references_any_local_rec(body, *else_, locals, visited)
+        }
+
+        Expr::Let {
+            local,
+            rhs,
+            body: let_body,
+        } => {
+            // The let-bound local itself is not from the loop, but check rhs and body
+            // excluding newly bound local
+            let mut extended_locals = locals.clone();
+            extended_locals.remove(local);
+            references_any_local_rec(body, *rhs, locals, visited)
+                || references_any_local_rec(body, *let_body, &extended_locals, visited)
+        }
+
+        Expr::Loop {
+            init,
+            init_bindings,
+            body: loop_body,
+            ..
+        } => {
+            // Nested loop - check init and init_bindings, but not body (it's in a new scope)
+            if references_any_local_rec(body, *init, locals, visited) {
+                return true;
+            }
+            for (_, binding_expr) in init_bindings {
+                if references_any_local_rec(body, *binding_expr, locals, visited) {
+                    return true;
+                }
+            }
+            // Check loop body (conservatively include it)
+            references_any_local_rec(body, *loop_body, locals, visited)
+        }
+
+        Expr::Call { args, .. } | Expr::Intrinsic { args, .. } => {
+            args.iter().any(|arg| references_any_local_rec(body, *arg, locals, visited))
+        }
+
+        Expr::Tuple(elems) | Expr::Vector(elems) => {
+            elems.iter().any(|elem| references_any_local_rec(body, *elem, locals, visited))
+        }
+
+        Expr::Array { backing, size } => {
+            if references_any_local_rec(body, *size, locals, visited) {
+                return true;
+            }
+            match backing {
+                ArrayBacking::Literal(elems) => {
+                    elems.iter().any(|elem| references_any_local_rec(body, *elem, locals, visited))
+                }
+                ArrayBacking::Range { start, step, .. } => {
+                    references_any_local_rec(body, *start, locals, visited)
+                        || step.map_or(false, |s| references_any_local_rec(body, s, locals, visited))
+                }
+                ArrayBacking::IndexFn { index_fn } => {
+                    references_any_local_rec(body, *index_fn, locals, visited)
+                }
+                ArrayBacking::View { base, offset } => {
+                    references_any_local_rec(body, *base, locals, visited)
+                        || references_any_local_rec(body, *offset, locals, visited)
+                }
+                ArrayBacking::Owned { data } => references_any_local_rec(body, *data, locals, visited),
+                ArrayBacking::Storage { offset, .. } => {
+                    references_any_local_rec(body, *offset, locals, visited)
+                }
+            }
+        }
+
+        Expr::Matrix(rows) => rows
+            .iter()
+            .any(|row| row.iter().any(|elem| references_any_local_rec(body, *elem, locals, visited))),
+
+        Expr::Attributed { expr, .. } => references_any_local_rec(body, *expr, locals, visited),
+
+        Expr::Load { ptr } => references_any_local_rec(body, *ptr, locals, visited),
+
+        Expr::Store { ptr, value } => {
+            references_any_local_rec(body, *ptr, locals, visited)
+                || references_any_local_rec(body, *value, locals, visited)
+        }
+
+        // Atoms don't reference locals (except Local which is handled above)
+        Expr::Global(_) | Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Unit | Expr::String(_) => {
+            false
+        }
     }
 }
