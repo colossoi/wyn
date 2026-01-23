@@ -217,6 +217,8 @@ impl<'a> TypeChecker<'a> {
                 self.context.unify(&args[1], &storage).map_err(|_| {
                     err_type!("Entry point array parameter must have Storage address space")
                 })?;
+                // Recursively constrain nested arrays in element type
+                self.constrain_array_to_storage(&args[0])?;
                 Ok(())
             }
             _ => Ok(()), // Not an array type, nothing to constrain
