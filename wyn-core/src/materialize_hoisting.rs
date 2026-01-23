@@ -92,30 +92,25 @@ fn reorder_expr(
         }
         Expr::UnaryOp { op, operand } => {
             let new_operand = reorder_expr(old_body, operand, new_body, id_map);
-            Expr::UnaryOp { op, operand: new_operand }
+            Expr::UnaryOp {
+                op,
+                operand: new_operand,
+            }
         }
         Expr::Tuple(elems) => {
-            let new_elems: Vec<_> = elems
-                .iter()
-                .map(|e| reorder_expr(old_body, *e, new_body, id_map))
-                .collect();
+            let new_elems: Vec<_> =
+                elems.iter().map(|e| reorder_expr(old_body, *e, new_body, id_map)).collect();
             Expr::Tuple(new_elems)
         }
         Expr::Vector(elems) => {
-            let new_elems: Vec<_> = elems
-                .iter()
-                .map(|e| reorder_expr(old_body, *e, new_body, id_map))
-                .collect();
+            let new_elems: Vec<_> =
+                elems.iter().map(|e| reorder_expr(old_body, *e, new_body, id_map)).collect();
             Expr::Vector(new_elems)
         }
         Expr::Matrix(rows) => {
             let new_rows: Vec<Vec<_>> = rows
                 .iter()
-                .map(|row| {
-                    row.iter()
-                        .map(|e| reorder_expr(old_body, *e, new_body, id_map))
-                        .collect()
-                })
+                .map(|row| row.iter().map(|e| reorder_expr(old_body, *e, new_body, id_map)).collect())
                 .collect();
             Expr::Matrix(new_rows)
         }
@@ -123,10 +118,8 @@ fn reorder_expr(
             let new_size = reorder_expr(old_body, size, new_body, id_map);
             let new_backing = match backing {
                 ArrayBacking::Literal(elems) => {
-                    let new_elems: Vec<_> = elems
-                        .iter()
-                        .map(|e| reorder_expr(old_body, *e, new_body, id_map))
-                        .collect();
+                    let new_elems: Vec<_> =
+                        elems.iter().map(|e| reorder_expr(old_body, *e, new_body, id_map)).collect();
                     ArrayBacking::Literal(new_elems)
                 }
                 ArrayBacking::Range { start, step, kind } => {
@@ -156,7 +149,10 @@ fn reorder_expr(
                 }
                 ArrayBacking::Storage { name, offset } => {
                     let new_offset = reorder_expr(old_body, offset, new_body, id_map);
-                    ArrayBacking::Storage { name, offset: new_offset }
+                    ArrayBacking::Storage {
+                        name,
+                        offset: new_offset,
+                    }
                 }
             };
             Expr::Array {
@@ -202,7 +198,10 @@ fn reorder_expr(
                 }
                 LoopKind::ForRange { var, bound } => {
                     let new_bound = reorder_expr(old_body, bound, new_body, id_map);
-                    LoopKind::ForRange { var, bound: new_bound }
+                    LoopKind::ForRange {
+                        var,
+                        bound: new_bound,
+                    }
                 }
                 LoopKind::While { cond } => {
                     let new_cond = reorder_expr(old_body, cond, new_body, id_map);
@@ -219,17 +218,13 @@ fn reorder_expr(
             }
         }
         Expr::Call { func, args } => {
-            let new_args: Vec<_> = args
-                .iter()
-                .map(|a| reorder_expr(old_body, *a, new_body, id_map))
-                .collect();
+            let new_args: Vec<_> =
+                args.iter().map(|a| reorder_expr(old_body, *a, new_body, id_map)).collect();
             Expr::Call { func, args: new_args }
         }
         Expr::Intrinsic { name, args } => {
-            let new_args: Vec<_> = args
-                .iter()
-                .map(|a| reorder_expr(old_body, *a, new_body, id_map))
-                .collect();
+            let new_args: Vec<_> =
+                args.iter().map(|a| reorder_expr(old_body, *a, new_body, id_map)).collect();
             Expr::Intrinsic { name, args: new_args }
         }
         Expr::Materialize(inner) => {
@@ -352,13 +347,11 @@ fn hoist_in_body(body: &mut Body) {
         .exprs
         .iter()
         .enumerate()
-        .filter_map(|(idx, expr)| {
-            if matches!(expr, Expr::Loop { .. }) {
-                Some(ExprId(idx as u32))
-            } else {
-                None
-            }
-        })
+        .filter_map(
+            |(idx, expr)| {
+                if matches!(expr, Expr::Loop { .. }) { Some(ExprId(idx as u32)) } else { None }
+            },
+        )
         .collect();
 
     // Process each Loop expression
@@ -711,10 +704,8 @@ fn hoist_in_loop(body: &mut Body, loop_id: ExprId) {
     let loop_locals = collect_loop_locals(body, loop_id);
 
     // Filter to loop-invariant ones (inner expr only references locals defined outside loop)
-    let loop_invariant: Vec<ExprId> = mats
-        .into_iter()
-        .filter(|&mat_id| is_loop_invariant(body, mat_id, &loop_locals))
-        .collect();
+    let loop_invariant: Vec<ExprId> =
+        mats.into_iter().filter(|&mat_id| is_loop_invariant(body, mat_id, &loop_locals)).collect();
 
     // Hoist each loop-invariant materialization before the loop
     for mat_id in loop_invariant {

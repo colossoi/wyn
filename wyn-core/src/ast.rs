@@ -312,11 +312,13 @@ pub struct EntryOutput {
     pub attribute: Option<Attribute>,
 }
 
-/// Entry point declaration (vertex/fragment shader)
+/// Entry point declaration (vertex/fragment/compute shader)
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntryDecl {
-    pub entry_type: Attribute, // Attribute::Vertex or Attribute::Fragment
+    pub entry_type: Attribute, // Attribute::Vertex, Attribute::Fragment, or Attribute::Compute
     pub name: String,
+    pub size_params: Vec<String>,  // Size type parameters: <[n], [m]>
+    pub type_params: Vec<String>,  // Regular type parameters: <T, U>
     pub params: Vec<Pattern>,      // Input parameters as patterns
     pub outputs: Vec<EntryOutput>, // Output fields with optional attributes
     pub body: Expression,

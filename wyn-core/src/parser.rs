@@ -326,6 +326,10 @@ impl<'a> Parser<'a> {
         self.expect(Token::Entry)?;
         let name = self.expect_identifier()?;
 
+        // Parse optional type parameters: <[n], [m], T>
+        let (size_params, type_params) =
+            if self.check_binop("<") { self.parse_generic_params()? } else { (vec![], vec![]) };
+
         // Parse restrictive parameters: (id: type, id: type, ...)
         // Only typed identifiers allowed, not general patterns
         let params = self.parse_entry_params()?;
@@ -369,6 +373,8 @@ impl<'a> Parser<'a> {
         Ok(Declaration::Entry(EntryDecl {
             entry_type,
             name,
+            size_params,
+            type_params,
             params,
             outputs,
             body,

@@ -569,12 +569,28 @@ impl<'a> TypeChecker<'a> {
         Self::with_type_table(module_manager, HashMap::new())
     }
 
+    /// Create a TypeChecker with an existing Context (from resolve_placeholders pass).
+    pub fn with_context(
+        module_manager: &'a crate::module_manager::ModuleManager,
+        context: Context<TypeName>,
+    ) -> Self {
+        Self::with_context_and_type_table(module_manager, context, HashMap::new())
+    }
+
     /// Create a TypeChecker with a given initial type table
     fn with_type_table(
         module_manager: &'a crate::module_manager::ModuleManager,
         type_table: HashMap<NodeId, TypeScheme>,
     ) -> Self {
-        let mut context = Context::default();
+        Self::with_context_and_type_table(module_manager, Context::default(), type_table)
+    }
+
+    /// Create a TypeChecker with both an existing Context and type table.
+    fn with_context_and_type_table(
+        module_manager: &'a crate::module_manager::ModuleManager,
+        mut context: Context<TypeName>,
+        type_table: HashMap<NodeId, TypeScheme>,
+    ) -> Self {
         let impl_source = crate::impl_source::ImplSource::new();
         let poly_builtins = crate::intrinsics::IntrinsicSource::new(&mut context);
 
