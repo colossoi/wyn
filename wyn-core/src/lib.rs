@@ -33,6 +33,7 @@ pub mod inplace_rewriter;
 pub mod materialize_hoisting;
 pub mod monomorphization;
 pub mod normalize;
+pub mod resolve_placeholders;
 pub mod spirv;
 
 #[cfg(test)]
