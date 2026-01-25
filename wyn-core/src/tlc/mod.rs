@@ -10,6 +10,8 @@ pub mod partial_eval;
 #[cfg(test)]
 mod partial_eval_tests;
 pub mod soac_analysis;
+#[cfg(test)]
+mod soac_analysis_tests;
 pub mod specialize;
 pub mod to_mir;
 #[cfg(test)]
