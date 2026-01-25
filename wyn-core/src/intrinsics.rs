@@ -67,15 +67,14 @@ impl<'a> OverloadSet<'a> {
 
     /// Choose the correct overload based on argument types.
     /// Returns the matching entry and the resolved return type.
-    /// Uses backtracking: saves context, tries each overload, restores on failure.
+    /// Uses backtracking: checkpoints context, tries each overload, rolls back on failure.
     pub fn choose(
         &self,
         arg_types: &[Type],
         ctx: &mut Context<TypeName>,
     ) -> Option<(&'a IntrinsicEntry, Type)> {
         for entry in self.entries {
-            // Save context for backtracking
-            let saved_context = ctx.clone();
+            let checkpoint = ctx.len();
 
             // Instantiate this overload with fresh type variables
             let func_type = entry.scheme.instantiate(ctx);
@@ -85,8 +84,8 @@ impl<'a> OverloadSet<'a> {
                 return Some((entry, return_type));
             }
 
-            // Restore context and try next overload
-            *ctx = saved_context;
+            // Roll back and try next overload
+            ctx.rollback(checkpoint);
         }
         None
     }

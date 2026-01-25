@@ -1966,7 +1966,7 @@ impl<'a> TypeChecker<'a> {
 
                     // Try each overload with backtracking
                     for cand in callee.candidates {
-                        let saved_context = self.context.clone();
+                        let checkpoint = self.context.len();
 
                         if let Some(result_ty) =
                             Self::try_unify_overload(&cand.ty, &arg_types, &mut self.context)
@@ -1983,7 +1983,7 @@ impl<'a> TypeChecker<'a> {
                             }
                         }
 
-                        self.context = saved_context;
+                        self.context.rollback(checkpoint);
                     }
 
                     bail_type_at!(
