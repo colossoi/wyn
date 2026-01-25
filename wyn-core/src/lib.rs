@@ -26,7 +26,6 @@ pub mod lowering_common;
 pub mod tlc;
 
 pub mod binding_lifter;
-pub mod canonicalize_vars;
 pub mod constant_folding;
 pub mod glsl;
 pub mod inplace_rewriter;
@@ -750,10 +749,8 @@ pub struct Normalized {
 
 impl Normalized {
     /// Monomorphize polymorphic functions.
-    /// First canonicalizes type variables so body vars match scheme vars.
     pub fn monomorphize(self) -> Result<Monomorphized> {
-        let mir = canonicalize_vars::canonicalize_program(self.mir);
-        let mir = monomorphization::monomorphize(mir)?;
+        let mir = monomorphization::monomorphize(self.mir)?;
         Ok(Monomorphized { mir })
     }
 }

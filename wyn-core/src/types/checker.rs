@@ -895,26 +895,6 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    /// Substitute UserVars and SizeVars with bound type variables (recursive helper)
-    /// Generic substitution: walk the type tree and replace any TypeName for which `f` returns Some.
-    fn substitute_named_vars<F>(ty: &Type, f: &F) -> Type
-    where
-        F: Fn(&TypeName) -> Option<Type>,
-    {
-        match ty {
-            Type::Constructed(name, args) => {
-                if let Some(replacement) = f(name) {
-                    replacement
-                } else {
-                    let new_args: Vec<Type> =
-                        args.iter().map(|arg| Self::substitute_named_vars(arg, f)).collect();
-                    Type::Constructed(name.clone(), new_args)
-                }
-            }
-            Type::Variable(_) => ty.clone(),
-        }
-    }
-
     /// Resolve type aliases in a type annotation.
     ///
     /// Note: SizeVar/UserVar substitution is now handled by the resolve_placeholders pass
@@ -1378,9 +1358,9 @@ impl<'a> TypeChecker<'a> {
                             body: Box::new(self.apply_context_to_scheme(body)),
                         }
                     } else {
-                        // Variable was unified with another variable, keep quantifying over it
+                        // Variable was unified with another variable, use the resolved ID
                         TypeScheme::Polytype {
-                            variable: *variable,
+                            variable: v,
                             body: Box::new(self.apply_context_to_scheme(body)),
                         }
                     }

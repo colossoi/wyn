@@ -640,9 +640,6 @@ fn contains_variables(ty: &Type<TypeName>) -> bool {
 }
 
 /// Create a specialized version of a function by applying substitution.
-///
-/// After canonicalize_vars, body type variables match scheme type variables,
-/// so we can directly apply the substitution without complex fixed-point propagation.
 fn specialize_def(def: Def, subst: &Substitution, new_name: &str) -> Result<Def> {
     use crate::mir::{EntryInput, EntryOutput};
 
@@ -668,8 +665,6 @@ fn specialize_def(def: Def, subst: &Substitution, new_name: &str) -> Result<Def>
                 apply_subst_with_context(&ret_type, subst, &ret_context)
             };
 
-            // Apply substitution directly to body
-            // (canonicalize_vars ensures body vars match scheme vars)
             let body = apply_subst_body_with_context(body, subst, new_name);
 
             Ok(Def::Function {
