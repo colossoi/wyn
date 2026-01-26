@@ -50,8 +50,8 @@ entry compute_main(
 
     // Alias check and transform to TLC with prelude
     let alias_checked = typed.alias_check().expect("alias check failed");
-    let builtins = frontend.intrinsics.all_names();
-    let tlc_transformed = alias_checked.to_tlc(builtins, &frontend.schemes, &mut frontend.module_manager);
+    let known_defs = frontend.intrinsics.all_names();
+    let tlc_transformed = alias_checked.to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager);
 
     // Run SOAC analysis on the TLC program (before defunctionalization)
     let analysis = tlc::soac_analysis::analyze_program(&tlc_transformed.tlc);

@@ -268,9 +268,9 @@ fn analyze_inplace_ops(source: &str) -> InPlaceInfo {
         folded.type_check(&mut frontend.module_manager, &mut frontend.schemes).expect("type_check failed");
     let alias_checked = type_checked.alias_check().expect("alias check failed");
 
-    let builtins = crate::build_builtins(&alias_checked.ast, &mut frontend.module_manager);
+    let known_defs = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
     let flattened = alias_checked
-        .to_tlc(builtins, &frontend.schemes, &mut frontend.module_manager)
+        .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
         .skip_partial_eval()
         .defunctionalize()
         .to_mir();

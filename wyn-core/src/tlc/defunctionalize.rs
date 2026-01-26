@@ -328,11 +328,11 @@ fn compute_free_vars(
     term: &Term,
     bound: &HashSet<String>,
     top_level: &HashSet<String>,
-    builtins: &HashSet<String>,
+    known_defs: &HashSet<String>,
 ) -> Vec<Term> {
     let mut free = Vec::new();
     let mut seen = HashSet::new();
-    collect_free_vars(term, bound, top_level, builtins, &mut free, &mut seen);
+    collect_free_vars(term, bound, top_level, known_defs, &mut free, &mut seen);
     free
 }
 
@@ -340,7 +340,7 @@ fn collect_free_vars(
     term: &Term,
     bound: &HashSet<String>,
     top_level: &HashSet<String>,
-    builtins: &HashSet<String>,
+    known_defs: &HashSet<String>,
     free: &mut Vec<Term>,
     seen: &mut HashSet<String>,
 ) {
@@ -348,7 +348,7 @@ fn collect_free_vars(
         TermKind::Var(name) => {
             if !bound.contains(name)
                 && !top_level.contains(name)
-                && !builtins.contains(name)
+                && !known_defs.contains(name)
                 && !name.starts_with("_w_")
                 && !seen.contains(name)
             {
@@ -357,28 +357,28 @@ fn collect_free_vars(
             }
         }
         TermKind::Let { name, rhs, body, .. } => {
-            collect_free_vars(rhs, bound, top_level, builtins, free, seen);
+            collect_free_vars(rhs, bound, top_level, known_defs, free, seen);
             let mut inner_bound = bound.clone();
             inner_bound.insert(name.clone());
-            collect_free_vars(body, &inner_bound, top_level, builtins, free, seen);
+            collect_free_vars(body, &inner_bound, top_level, known_defs, free, seen);
         }
         TermKind::Lam { param, body, .. } => {
             let mut inner_bound = bound.clone();
             inner_bound.insert(param.clone());
-            collect_free_vars(body, &inner_bound, top_level, builtins, free, seen);
+            collect_free_vars(body, &inner_bound, top_level, known_defs, free, seen);
         }
         TermKind::App { func, arg } => {
-            collect_free_vars(func, bound, top_level, builtins, free, seen);
-            collect_free_vars(arg, bound, top_level, builtins, free, seen);
+            collect_free_vars(func, bound, top_level, known_defs, free, seen);
+            collect_free_vars(arg, bound, top_level, known_defs, free, seen);
         }
         TermKind::If {
             cond,
             then_branch,
             else_branch,
         } => {
-            collect_free_vars(cond, bound, top_level, builtins, free, seen);
-            collect_free_vars(then_branch, bound, top_level, builtins, free, seen);
-            collect_free_vars(else_branch, bound, top_level, builtins, free, seen);
+            collect_free_vars(cond, bound, top_level, known_defs, free, seen);
+            collect_free_vars(then_branch, bound, top_level, known_defs, free, seen);
+            collect_free_vars(else_branch, bound, top_level, known_defs, free, seen);
         }
         TermKind::Loop {
             loop_var,
@@ -389,7 +389,7 @@ fn collect_free_vars(
             ..
         } => {
             // init is evaluated outside the loop
-            collect_free_vars(init, bound, top_level, builtins, free, seen);
+            collect_free_vars(init, bound, top_level, known_defs, free, seen);
 
             // Build inner bound set with loop_var and init_binding names
             let mut inner_bound = bound.clone();
@@ -401,7 +401,7 @@ fn collect_free_vars(
             // Add loop kind variable(s)
             match kind {
                 LoopKind::For { var, iter, .. } => {
-                    collect_free_vars(iter, bound, top_level, builtins, free, seen);
+                    collect_free_vars(iter, bound, top_level, known_defs, free, seen);
                     inner_bound.insert(var.clone());
                 }
                 LoopKind::ForRange {
@@ -409,22 +409,22 @@ fn collect_free_vars(
                     bound: bound_expr,
                     ..
                 } => {
-                    collect_free_vars(bound_expr, bound, top_level, builtins, free, seen);
+                    collect_free_vars(bound_expr, bound, top_level, known_defs, free, seen);
                     inner_bound.insert(var.clone());
                 }
                 LoopKind::While { cond } => {
                     // cond is evaluated inside the loop with loop_var in scope
-                    collect_free_vars(cond, &inner_bound, top_level, builtins, free, seen);
+                    collect_free_vars(cond, &inner_bound, top_level, known_defs, free, seen);
                 }
             }
 
             // init_bindings expressions reference loop_var
             for (_, _, expr) in init_bindings {
-                collect_free_vars(expr, &inner_bound, top_level, builtins, free, seen);
+                collect_free_vars(expr, &inner_bound, top_level, known_defs, free, seen);
             }
 
             // body has all bindings in scope
-            collect_free_vars(body, &inner_bound, top_level, builtins, free, seen);
+            collect_free_vars(body, &inner_bound, top_level, known_defs, free, seen);
         }
         TermKind::IntLit(_)
         | TermKind::FloatLit(_)
@@ -450,7 +450,7 @@ pub struct Defunctionalizer<'a> {
     /// Top-level definition names
     top_level: HashSet<String>,
     /// Built-in names (intrinsics, prelude functions)
-    builtins: &'a HashSet<String>,
+    known_defs: &'a HashSet<String>,
     /// New definitions created for lifted lambdas
     lifted_defs: Vec<Def>,
     /// Counter for generating unique lambda names
@@ -473,14 +473,14 @@ pub struct Defunctionalizer<'a> {
 
 impl<'a> Defunctionalizer<'a> {
     /// Defunctionalize a program.
-    pub fn defunctionalize(program: Program, builtins: &'a HashSet<String>) -> Program {
+    pub fn defunctionalize(program: Program, known_defs: &'a HashSet<String>) -> Program {
         // Detect HOFs before defunctionalization (user-defined + intrinsics)
         let mut hof_info = detect_hofs(&program.defs);
         hof_info.extend(intrinsic_hof_info());
 
         let mut defunc = Self {
             top_level: program.defs.iter().map(|d| d.name.clone()).collect(),
-            builtins,
+            known_defs,
             lifted_defs: vec![],
             lambda_counter: 0,
             term_ids: TermIdSource::new(),
@@ -747,7 +747,7 @@ impl<'a> Defunctionalizer<'a> {
 
         // Compute free variables (captures)
         let bound: HashSet<String> = params.iter().map(|(p, _)| p.clone()).collect();
-        let captures = compute_free_vars(&body_result.term, &bound, &self.top_level, self.builtins);
+        let captures = compute_free_vars(&body_result.term, &bound, &self.top_level, self.known_defs);
 
         // Rebuild nested lambdas from inside out
         let rebuilt_lam = self.rebuild_nested_lam(&params, body_result.term, span);
@@ -1556,6 +1556,6 @@ impl<'a> Defunctionalizer<'a> {
 /// - All lambdas are lifted to top-level definitions
 /// - Captures become extra parameters (appended at end)
 /// - All call sites have captures flattened as trailing arguments
-pub fn defunctionalize(program: Program, builtins: &HashSet<String>) -> Program {
-    Defunctionalizer::defunctionalize(program, builtins)
+pub fn defunctionalize(program: Program, known_defs: &HashSet<String>) -> Program {
+    Defunctionalizer::defunctionalize(program, known_defs)
 }

@@ -90,9 +90,7 @@ fn collect_addr_vars(ty: &Type<TypeName>, vars: &mut HashSet<usize>) {
 
 fn default_in_def(def: &mut Def, addr_vars: &HashSet<usize>) {
     match def {
-        Def::Function {
-            ret_type, body, ..
-        } => {
+        Def::Function { ret_type, body, .. } => {
             default_in_type(ret_type, addr_vars);
             default_in_body(body, addr_vars);
         }

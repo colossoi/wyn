@@ -19,9 +19,9 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .type_check(&mut frontend.module_manager, &mut frontend.schemes)?
         .alias_check()?;
 
-    let builtins = crate::build_builtins(&alias_checked.ast, &mut frontend.module_manager);
+    let known_defs = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
     let monomorphized = alias_checked
-        .to_tlc(builtins, &frontend.schemes, &mut frontend.module_manager)
+        .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
         .skip_partial_eval()
         .defunctionalize()
         .to_mir()
@@ -44,9 +44,9 @@ fn compile_through_flatten(input: &str) -> Result<crate::Flattened, CompilerErro
         .type_check(&mut frontend.module_manager, &mut frontend.schemes)?
         .alias_check()?;
 
-    let builtins = crate::build_builtins(&alias_checked.ast, &mut frontend.module_manager);
+    let known_defs = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
     let flattened = alias_checked
-        .to_tlc(builtins, &frontend.schemes, &mut frontend.module_manager)
+        .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
         .skip_partial_eval()
         .defunctionalize()
         .to_mir();

@@ -206,32 +206,32 @@ pub use polytype::Context as PolytypeContext;
 pub type TypeTable = HashMap<NodeId, TypeScheme<TypeName>>;
 pub type SpanTable = HashMap<NodeId, ast::Span>;
 
-/// Build the set of builtin names that should not be captured as free variables.
+/// Build the set of known definition names that should not be captured as free variables.
 /// This includes intrinsics, user declarations, and prelude functions.
-pub fn build_builtins(
+pub fn build_known_defs(
     ast: &ast::Program,
     module_manager: &module_manager::ModuleManager,
 ) -> std::collections::HashSet<String> {
-    let mut builtins = impl_source::ImplSource::default().all_names();
+    let mut known_defs = impl_source::ImplSource::default().all_names();
 
     // Also add polymorphic intrinsics from IntrinsicSource (sign, abs, magnitude, etc.)
     let mut ctx = polytype::Context::<ast::TypeName>::default();
-    builtins.extend(intrinsics::IntrinsicSource::new(&mut ctx).all_names());
+    known_defs.extend(intrinsics::IntrinsicSource::new(&mut ctx).all_names());
 
     // Add top-level function names from user program
     for decl in &ast.declarations {
         match decl {
             ast::Declaration::Decl(d) => {
-                builtins.insert(d.name.clone());
+                known_defs.insert(d.name.clone());
             }
             ast::Declaration::Entry(e) => {
-                builtins.insert(e.name.clone());
+                known_defs.insert(e.name.clone());
             }
             ast::Declaration::Uniform(u) => {
-                builtins.insert(u.name.clone());
+                known_defs.insert(u.name.clone());
             }
             ast::Declaration::Storage(s) => {
-                builtins.insert(s.name.clone());
+                known_defs.insert(s.name.clone());
             }
             _ => {}
         }
@@ -239,10 +239,10 @@ pub fn build_builtins(
 
     // Add prelude function names
     for decl in module_manager.get_prelude_function_declarations() {
-        builtins.insert(decl.name.clone());
+        known_defs.insert(decl.name.clone());
     }
 
-    builtins
+    known_defs
 }
 
 /// Build a SpanTable from an AST by collecting all NodeId -> Span mappings
@@ -589,12 +589,12 @@ impl AliasChecked {
     }
 
     /// Transform AST to TLC (new pipeline path)
-    /// `builtins` contains names that should not be captured as free variables during lambda lifting
+    /// `known_defs` contains names that should not be captured as free variables during lambda lifting
     /// `schemes` contains type schemes for all functions (populated during type_check)
     /// `module_manager` provides access to prelude declarations for TLC transformation
     pub fn to_tlc(
         self,
-        builtins: std::collections::HashSet<String>,
+        known_defs: std::collections::HashSet<String>,
         schemes: &HashMap<String, types::TypeScheme>,
         module_manager: &module_manager::ModuleManager,
     ) -> TlcTransformed {
@@ -638,7 +638,7 @@ impl AliasChecked {
         TlcTransformed {
             tlc: tlc_program,
             type_table: self.type_table,
-            builtins,
+            known_defs,
             schemes: schemes.clone(),
         }
     }
@@ -653,7 +653,7 @@ pub struct TlcTransformed {
     pub tlc: tlc::Program,
     pub type_table: TypeTable,
     /// Built-in names that should not be captured as free variables
-    builtins: std::collections::HashSet<String>,
+    known_defs: std::collections::HashSet<String>,
     /// Type schemes for functions (for monomorphization)
     schemes: HashMap<String, types::TypeScheme>,
 }
@@ -665,7 +665,7 @@ impl TlcTransformed {
         TlcTransformed {
             tlc: optimized,
             type_table: self.type_table,
-            builtins: self.builtins,
+            known_defs: self.known_defs,
             schemes: self.schemes,
         }
     }
@@ -680,7 +680,7 @@ impl TlcTransformed {
     /// This replaces the old `lift()` method with Futhark-style defunctionalization
     /// that properly handles SOAC call sites.
     pub fn defunctionalize(self) -> TlcDefunctionalized {
-        let defunc = tlc::defunctionalize::defunctionalize(self.tlc, &self.builtins);
+        let defunc = tlc::defunctionalize::defunctionalize(self.tlc, &self.known_defs);
         TlcDefunctionalized {
             tlc: defunc,
             type_table: self.type_table,

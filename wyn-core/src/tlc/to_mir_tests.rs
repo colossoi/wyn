@@ -4,7 +4,7 @@ mod tests {
     use crate::mir::{self, Def as MirDef};
     use crate::tlc::to_mir::TlcToMir;
     use crate::tlc::{Def as TlcDef, DefMeta, Program as TlcProgram, Term, TermIdSource, TermKind};
-    use crate::{Compiler, build_builtins};
+    use crate::{Compiler, build_known_defs};
     use polytype::Type;
 
     fn make_span(line: usize, col: usize) -> Span {
@@ -150,9 +150,9 @@ mod tests {
             .alias_check()
             .expect("Alias checking failed");
 
-        let builtins = build_builtins(&alias_checked.ast, &mut frontend.module_manager);
+        let known_defs = build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
         alias_checked
-            .to_tlc(builtins, &frontend.schemes, &mut frontend.module_manager)
+            .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
             .skip_partial_eval()
             .defunctionalize()
             .to_mir()

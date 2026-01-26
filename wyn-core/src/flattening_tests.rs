@@ -17,9 +17,9 @@ fn flatten_program(input: &str) -> mir::Program {
         .alias_check()
         .expect("Borrow checking failed");
 
-    let builtins = crate::build_builtins(&alias_checked.ast, &mut frontend.module_manager);
+    let known_defs = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
     let flattened = alias_checked
-        .to_tlc(builtins, &frontend.schemes, &mut frontend.module_manager)
+        .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
         .skip_partial_eval()
         .defunctionalize()
         .to_mir();
@@ -682,7 +682,7 @@ def test: f32 =
         .and_then(|t| t.alias_check())
         .expect("Failed before TLC transform");
 
-    let builtins = crate::build_builtins(&alias_checked.ast, &mut frontend.module_manager);
+    let builtins = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
     let result = alias_checked
         .to_tlc(builtins, &frontend.schemes, &mut frontend.module_manager)
         .skip_partial_eval()
@@ -1421,7 +1421,7 @@ fn compile_to_glsl(input: &str) -> String {
         .expect("Type checking failed")
         .alias_check()
         .expect("Alias checking failed");
-    let builtins = crate::build_builtins(&alias_checked.ast, &mut frontend.module_manager);
+    let builtins = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
     let glsl = alias_checked
         .to_tlc(builtins, &frontend.schemes, &mut frontend.module_manager)
         .partial_eval()

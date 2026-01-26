@@ -16,9 +16,9 @@ fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
         .alias_check()
         .expect("Alias checking failed");
 
-    let builtins = crate::build_builtins(&alias_checked.ast, &mut frontend.module_manager);
+    let known_defs = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
     let flattened = alias_checked
-        .to_tlc(builtins, &frontend.schemes, &mut frontend.module_manager)
+        .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
         .skip_partial_eval()
         .defunctionalize()
         .to_mir();
@@ -336,9 +336,9 @@ fn compile_to_spirv_with_partial_eval(source: &str) -> Result<Vec<u32>> {
         .expect("Type checking failed")
         .alias_check()
         .expect("Alias checking failed");
-    let builtins = crate::build_builtins(&alias_checked.ast, &mut frontend.module_manager);
+    let known_defs = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
     let lifted = alias_checked
-        .to_tlc(builtins, &frontend.schemes, &mut frontend.module_manager)
+        .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
         .partial_eval()
         .defunctionalize()
         .to_mir()

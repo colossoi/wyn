@@ -141,8 +141,8 @@ fn test_defunc_simple_lambda_no_capture() {
         storage: vec![],
     };
 
-    let builtins = HashSet::new();
-    let result = defunctionalize(program, &builtins);
+    let known_defs = HashSet::new();
+    let result = defunctionalize(program, &known_defs);
 
     // Should preserve the parameter lambda (not lift it)
     assert_eq!(result.defs.len(), 1);
@@ -227,8 +227,8 @@ fn test_defunc_lambda_with_capture() {
         storage: vec![],
     };
 
-    let builtins = HashSet::new();
-    let result = defunctionalize(program, &builtins);
+    let known_defs = HashSet::new();
+    let result = defunctionalize(program, &known_defs);
 
     // Should have lifted the inner lambda
     assert!(result.defs.len() >= 2, "Expected lifted lambda def");
@@ -465,8 +465,8 @@ fn test_nested_hof_passthrough() {
         storage: vec![],
     };
 
-    let builtins = HashSet::new();
-    let result = defunctionalize(program, &builtins);
+    let known_defs = HashSet::new();
+    let result = defunctionalize(program, &known_defs);
 
     let def_names: Vec<&str> = result.defs.iter().map(|d| d.name.as_str()).collect();
     eprintln!(

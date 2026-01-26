@@ -202,11 +202,11 @@ fn compile_file(
     }
 
     // Build builtins set for lambda lifting (names that should not be captured)
-    let builtins = wyn_core::build_builtins(&alias_checked.ast, &frontend.module_manager);
+    let known_defs = wyn_core::build_known_defs(&alias_checked.ast, &frontend.module_manager);
 
     // Transform to TLC (including prelude code - transformed here for consistent type variables)
     let tlc_transformed = time("to_tlc", verbose, || {
-        alias_checked.to_tlc(builtins, &frontend.schemes, &frontend.module_manager)
+        alias_checked.to_tlc(known_defs, &frontend.schemes, &frontend.module_manager)
     });
 
     // Output TLC if requested (before optimization)

@@ -265,12 +265,7 @@ fn arrow_ty(from: Type<TypeName>, to: Type<TypeName>) -> Type<TypeName> {
 }
 
 /// Build a curried call: f(a1)(a2)...(an)
-fn mk_curried_call(
-    counter: &mut u32,
-    func_name: &str,
-    args: Vec<Term>,
-    result_ty: Type<TypeName>,
-) -> Term {
+fn mk_curried_call(counter: &mut u32, func_name: &str, args: Vec<Term>, result_ty: Type<TypeName>) -> Term {
     if args.is_empty() {
         return mk_var(counter, func_name, result_ty);
     }
@@ -319,12 +314,7 @@ fn test_hint_propagation_through_single_function_call() {
     let lambda_body = mk_var(&mut counter, "x", f32_ty()); // simplified: just return x
     let lambda = mk_lam(&mut counter, "x", f32_ty(), lambda_body);
     let arr_ref = mk_var(&mut counter, "arr", array_ty(f32_ty()));
-    let map_call = mk_curried_call(
-        &mut counter,
-        "map",
-        vec![lambda, arr_ref],
-        array_ty(f32_ty()),
-    );
+    let map_call = mk_curried_call(&mut counter, "map", vec![lambda, arr_ref], array_ty(f32_ty()));
     let process_body = mk_lam(&mut counter, "arr", array_ty(f32_ty()), map_call);
 
     let process_def = Def {
@@ -344,12 +334,7 @@ fn test_hint_propagation_through_single_function_call() {
 
     // Build the call: process(data)
     let data_ref = mk_var(&mut counter, "data", array_ty(f32_ty()));
-    let call_to_process = mk_curried_call(
-        &mut counter,
-        "process",
-        vec![data_ref],
-        array_ty(f32_ty()),
-    );
+    let call_to_process = mk_curried_call(&mut counter, "process", vec![data_ref], array_ty(f32_ty()));
 
     // Analyze the call
     analyzer.analyze_term(&call_to_process);
@@ -502,7 +487,12 @@ fn test_lambda_captures_hinted_variable() {
     // Outer map: map(|x| <reduce_call>, data)
     let map_lambda = mk_lam(&mut counter, "x", f32_ty(), reduce_call);
     let data_ref = mk_var(&mut counter, "data", array_ty(f32_ty()));
-    let map_call = mk_curried_call(&mut counter, "map", vec![map_lambda, data_ref], array_ty(f32_ty()));
+    let map_call = mk_curried_call(
+        &mut counter,
+        "map",
+        vec![map_lambda, data_ref],
+        array_ty(f32_ty()),
+    );
 
     // Set up analyzer with both hints
     let all_defs: HashMap<&str, &Def> = HashMap::new();
@@ -544,12 +534,22 @@ fn test_nested_soacs_with_different_hints() {
     let x_ref = mk_var(&mut counter, "x", f32_ty());
     let inner_lambda = mk_lam(&mut counter, "x", f32_ty(), x_ref);
     let row_ref = mk_var(&mut counter, "row", inner_array_ty.clone());
-    let inner_map = mk_curried_call(&mut counter, "map", vec![inner_lambda, row_ref], inner_array_ty.clone());
+    let inner_map = mk_curried_call(
+        &mut counter,
+        "map",
+        vec![inner_lambda, row_ref],
+        inner_array_ty.clone(),
+    );
 
     // Outer map: map(|row| inner_map, matrix)
     let outer_lambda = mk_lam(&mut counter, "row", inner_array_ty.clone(), inner_map);
     let matrix_ref = mk_var(&mut counter, "matrix", outer_array_ty.clone());
-    let outer_map = mk_curried_call(&mut counter, "map", vec![outer_lambda, matrix_ref], outer_array_ty.clone());
+    let outer_map = mk_curried_call(
+        &mut counter,
+        "map",
+        vec![outer_lambda, matrix_ref],
+        outer_array_ty.clone(),
+    );
 
     // Set up analyzer
     let all_defs: HashMap<&str, &Def> = HashMap::new();

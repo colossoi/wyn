@@ -7,10 +7,6 @@ use crate::type_checker::TypeVarGenerator;
 use polytype::Context;
 use std::collections::HashMap;
 
-/// Builtin aliases - no longer used, kept for reference.
-/// Simple names are now used directly (dot, normalize, etc.)
-pub const BUILTIN_ALIASES: &[(&str, &str)] = &[];
-
 /// Entry for a intrinsic with its type scheme
 #[derive(Debug, Clone)]
 pub struct IntrinsicEntry {
@@ -211,12 +207,6 @@ impl IntrinsicSource {
     /// Get all intrinsic arities as a map (for use in to_mir)
     pub fn all_arities(&self) -> HashMap<String, usize> {
         self.intrinsics.iter().map(|(name, entries)| (name.clone(), entries[0].arity())).collect()
-    }
-
-    /// Look up an alias and return the intrinsic it maps to.
-    /// Returns None if the name is not an alias.
-    pub fn resolve_alias(name: &str) -> Option<&'static str> {
-        BUILTIN_ALIASES.iter().find(|(alias, _)| *alias == name).map(|(_, intrinsic)| *intrinsic)
     }
 
     /// Register scalar math functions (abs, sign, floor, ceil, fract, min, max, clamp, mix, smoothstep)
