@@ -449,10 +449,9 @@ fn test_lambda_captures_typed_variable() {
     // and the free variable rewriting creates _w_closure.mat, which then fails when trying
     // to resolve 'mat' as a field access on the closure.
     //
-    // After defunctionalization with HOF specialization:
+    // After defunctionalization:
     // 1. Lambda is lifted to _lambda_N(i, arr) with arr as capture param
-    // 2. map is specialized to map$N(xs, arr) which calls _w_intrinsic_map(_lambda_N, xs, arr)
-    // 3. test_capture calls map$N([0,1,2,3], arr)
+    // 2. Intrinsic map is called with the lifted lambda and captures
     let mir = flatten_program(
         r#"
 def test_capture(arr: [4]i32) i32 =
@@ -467,28 +466,8 @@ def test_capture(arr: [4]i32) i32 =
     });
     assert!(has_lambda, "Lambda should be lifted to a top-level function");
 
-    // Check that there's a specialized map function (map$N)
-    let has_specialized_map = mir.defs.iter().any(|def| {
-        if let mir::Def::Function { name, .. } = def { name.starts_with("map$") } else { false }
-    });
-    assert!(
-        has_specialized_map,
-        "map should be specialized with captures as map$N"
-    );
-
-    // Check that the specialized map contains the _w_intrinsic_map call
-    let specialized_map = mir.defs.iter().find(|def| {
-        if let mir::Def::Function { name, .. } = def { name.starts_with("map$") } else { false }
-    });
-    if let Some(mir::Def::Function { body, .. }) = specialized_map {
-        let has_map_intrinsic = body.exprs.iter().any(|expr| {
-            if let mir::Expr::Intrinsic { name, .. } = expr { name == "_w_intrinsic_map" } else { false }
-        });
-        assert!(
-            has_map_intrinsic,
-            "Specialized map should have _w_intrinsic_map call"
-        );
-    }
+    // Note: Intrinsic HOFs (like _w_intrinsic_map) are not specialized;
+    // they're called directly with the lifted lambda and captures.
 }
 
 #[test]
@@ -1551,20 +1530,13 @@ def nested_capture(x: i32, arr: [4]i32) [4]i32 =
         lambda_count
     );
 
-    // Should have specialized map
-    let has_specialized_map = mir.defs.iter().any(|d| {
-        if let mir::Def::Function { name, .. } = d { name.starts_with("map$") } else { false }
-    });
-    assert!(
-        has_specialized_map,
-        "Expected specialized map function for nested captures"
-    );
+    // Note: Intrinsic HOFs (like _w_intrinsic_map) are not specialized;
+    // they're called directly with the lifted lambda and captures.
 }
 
 #[test]
 fn test_defunc_same_hof_different_captures() {
     // Two callsites to map with different lambdas that have different capture sets
-    // This should produce two different specialized map functions
     let mir = flatten_program(
         r#"
 def double_map(x: i32, y: i32, arr: [4]i32) ([4]i32, [4]i32) =
@@ -1574,24 +1546,25 @@ def double_map(x: i32, y: i32, arr: [4]i32) ([4]i32, [4]i32) =
 "#,
     );
 
-    // Should have two different specialized map functions (map$N and map$M where N != M)
-    let specialized_maps: Vec<_> = mir
+    // Should have two different lifted lambdas for the different captures
+    let lambda_count = mir
         .defs
         .iter()
-        .filter_map(|d| {
-            if let mir::Def::Function { name, .. } = d {
-                if name.starts_with("map$") { Some(name.clone()) } else { None }
-            } else {
-                None
-            }
-        })
-        .collect();
+        .filter(
+            |d| {
+                if let mir::Def::Function { name, .. } = d { name.contains("_lambda_") } else { false }
+            },
+        )
+        .count();
 
     assert!(
-        specialized_maps.len() >= 2,
-        "Expected at least 2 specialized map functions for different captures, found: {:?}",
-        specialized_maps
+        lambda_count >= 2,
+        "Expected at least 2 lifted lambdas for different captures, found: {}",
+        lambda_count
     );
+
+    // Note: Intrinsic HOFs are not specialized; each call site uses
+    // the intrinsic directly with its respective lifted lambda.
 }
 
 #[test]
@@ -1615,14 +1588,7 @@ def deep_capture(x: i32, y: i32, arr: [4]i32) [4]i32 =
     });
     assert!(has_lambda, "Expected lifted lambda functions");
 
-    // Should have specialized map for the outer lambda with captures
-    let has_specialized_map = mir.defs.iter().any(|d| {
-        if let mir::Def::Function { name, .. } = d { name.starts_with("map$") } else { false }
-    });
-    assert!(
-        has_specialized_map,
-        "Expected specialized map for lambda with deep captures"
-    );
+    // Note: Intrinsic HOFs are called directly with lifted lambdas and captures.
 }
 
 #[test]
@@ -1637,29 +1603,23 @@ def chain(scale: i32, offset: i32, arr: [4]i32) i32 =
 "#,
     );
 
-    // Should have specialized maps for both scale and offset captures
-    let specialized_maps: Vec<_> = mir
+    // Should have lifted lambdas for the capturing lambdas
+    let lambda_count = mir
         .defs
         .iter()
-        .filter_map(|d| {
-            if let mir::Def::Function { name, .. } = d {
-                if name.starts_with("map$") { Some(name.clone()) } else { None }
-            } else {
-                None
-            }
-        })
-        .collect();
+        .filter(
+            |d| {
+                if let mir::Def::Function { name, .. } = d { name.contains("_lambda_") } else { false }
+            },
+        )
+        .count();
     assert!(
-        specialized_maps.len() >= 2,
-        "Expected 2 specialized maps in chain, found: {:?}",
-        specialized_maps
+        lambda_count >= 2,
+        "Expected at least 2 lifted lambdas in chain, found: {}",
+        lambda_count
     );
 
-    // Should have specialized reduce
-    let has_specialized_reduce = mir.defs.iter().any(|d| {
-        if let mir::Def::Function { name, .. } = d { name.starts_with("reduce$") } else { false }
-    });
-    assert!(has_specialized_reduce, "Expected specialized reduce in chain");
+    // Note: Intrinsic HOFs (map, reduce) are called directly with lifted lambdas.
 }
 
 #[test]
@@ -1680,18 +1640,12 @@ def capture_let(base: i32, arr: [4]i32) [4]i32 =
     });
     assert!(has_lambda, "Expected lifted lambda capturing let binding");
 
-    let has_specialized_map = mir.defs.iter().any(|d| {
-        if let mir::Def::Function { name, .. } = d { name.starts_with("map$") } else { false }
-    });
-    assert!(
-        has_specialized_map,
-        "Expected specialized map for lambda with captured let binding"
-    );
+    // Note: Intrinsic HOFs are called directly with lifted lambdas and captures.
 }
 
 #[test]
 fn test_defunc_named_function_no_capture() {
-    // Named function (no captures) passed to HOF - should still specialize
+    // Named function (no captures) passed to HOF - intrinsic HOFs don't get specialized
     let mir = flatten_program(
         r#"
 def square(x: i32) i32 = x * x
@@ -1701,29 +1655,17 @@ def apply_square(arr: [4]i32) [4]i32 =
 "#,
     );
 
-    // Should have specialized map for the named function
-    let has_specialized_map = mir.defs.iter().any(|d| {
-        if let mir::Def::Function { name, .. } = d { name.starts_with("map$") } else { false }
-    });
-    assert!(
-        has_specialized_map,
-        "Named functions passed to HOFs should trigger specialization"
-    );
-
-    // The specialized map should call _w_intrinsic_map with `square`
-    let specialized_map = mir.defs.iter().find(|d| {
-        if let mir::Def::Function { name, .. } = d { name.starts_with("map$") } else { false }
-    });
-    if let Some(mir::Def::Function { body, .. }) = specialized_map {
-        let has_intrinsic_map = body
-            .exprs
-            .iter()
-            .any(|e| matches!(e, mir::Expr::Intrinsic { name, .. } if name == "_w_intrinsic_map"));
-        assert!(
-            has_intrinsic_map,
-            "Specialized map should contain _w_intrinsic_map"
+    // The square function should exist
+    let has_square =
+        mir.defs.iter().any(
+            |d| {
+                if let mir::Def::Function { name, .. } = d { name == "square" } else { false }
+            },
         );
-    }
+    assert!(has_square, "square function should exist");
+
+    // Note: Intrinsic HOFs (like _w_intrinsic_map) are called directly with the
+    // named function, not specialized.
 }
 
 #[test]
@@ -1736,24 +1678,18 @@ def multi_capture(a: i32, b: i32, c: i32, arr: [4]i32) [4]i32 =
 "#,
     );
 
-    // Should have lambda and specialized map
+    // Should have lifted lambda with multiple captures
     let has_lambda = mir.defs.iter().any(|d| {
         if let mir::Def::Function { name, .. } = d { name.contains("_lambda_") } else { false }
     });
     assert!(has_lambda, "Expected lifted lambda with multiple captures");
 
-    let has_specialized_map = mir.defs.iter().any(|d| {
-        if let mir::Def::Function { name, .. } = d { name.starts_with("map$") } else { false }
-    });
-    assert!(
-        has_specialized_map,
-        "Expected specialized map for multi-capture lambda"
-    );
+    // Note: Intrinsic HOFs are called directly with lifted lambdas and captures.
 }
 
 #[test]
 fn test_defunc_reused_lambda_same_capture() {
-    // Same lambda used twice with same captures - should reuse specialization
+    // Same lambda used twice with same captures
     let mir = flatten_program(
         r#"
 def reuse_lambda(x: i32, arr1: [4]i32, arr2: [4]i32) ([4]i32, [4]i32) =
@@ -1764,23 +1700,22 @@ def reuse_lambda(x: i32, arr1: [4]i32, arr2: [4]i32) ([4]i32, [4]i32) =
 "#,
     );
 
-    // Should have exactly one specialized map (reused for both calls)
-    let specialized_maps: Vec<_> = mir
+    // Should have one lifted lambda (reused for both calls)
+    let lambda_count = mir
         .defs
         .iter()
-        .filter_map(|d| {
-            if let mir::Def::Function { name, .. } = d {
-                if name.starts_with("map$") { Some(name.clone()) } else { None }
-            } else {
-                None
-            }
-        })
-        .collect();
+        .filter(
+            |d| {
+                if let mir::Def::Function { name, .. } = d { name.contains("_lambda_") } else { false }
+            },
+        )
+        .count();
 
-    // The specialization is keyed by (hof_name, lambda_name), so same lambda should reuse
-    // Note: we might get duplicates from prelude, so check there's at least one
+    // The same lambda name is reused for both map calls
     assert!(
-        !specialized_maps.is_empty(),
-        "Expected at least one specialized map for reused lambda"
+        lambda_count >= 1,
+        "Expected at least one lifted lambda for reused captures"
     );
+
+    // Note: Intrinsic HOFs are called directly with the lifted lambda.
 }

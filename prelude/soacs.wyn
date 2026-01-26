@@ -1,47 +1,12 @@
 -- Second-Order Array Combinators (SOACs)
 -- Based on Futhark's prelude/soacs module
 --
--- This file defines user-facing SOAC functions that wrap internal intrinsics.
-
-------------------------------------------------------------
--- Core SOAC wrappers (calling _w_intrinsic_* functions)
-------------------------------------------------------------
-
--- Apply function to each element of an array
-def map<[n], A, B>(f: A -> B, xs: [n]A) [n]B =
-  _w_intrinsic_map(f, xs)
-
--- Reduce array using associative operator and neutral element
-def reduce<[n], A>(op: A -> A -> A, ne: A, xs: [n]A) A =
-  _w_intrinsic_reduce(op, ne, xs)
-
--- Inclusive scan (prefix sum) with associative operator
-def scan<[n], A>(op: A -> A -> A, ne: A, xs: [n]A) [n]A =
-  _w_intrinsic_scan(op, ne, xs)
-
--- Filter elements that satisfy predicate
-def filter<[n], A>(p: A -> bool, xs: [n]A) ?k. [k]A =
-  _w_intrinsic_filter(p, xs)
-
--- Scatter values into destination array at specified indices
-def scatter<[n], [m], A>(dest: [n]A, indices: [m]i32, values: [m]A) [n]A =
-  _w_intrinsic_scatter(dest, indices, values)
-
--- Get the length of an array
-def length<[n], A>(xs: [n]A) i32 =
-  _w_intrinsic_length(xs)
-
--- Create array with n copies of value
-def replicate<[n], A>(n: i32, x: A) [n]A =
-  _w_intrinsic_replicate(n, x)
+-- Fundamental SOACs (map, reduce, scan, filter, scatter, zip, length, replicate, reduce_by_index)
+-- are true builtins registered in the type checker. This file provides derived combinators.
 
 ------------------------------------------------------------
 -- Zipping and unzipping
 ------------------------------------------------------------
-
--- Combine two arrays into an array of pairs
-def zip<[n], A, B>(xs: [n]A, ys: [n]B) [n](A, B) =
-  _w_intrinsic_zip(xs, ys)
 
 -- Split an array of pairs into two arrays
 def unzip<[n], A, B>(xys: [n](A, B)) ([n]A, [n]B) =
@@ -145,15 +110,9 @@ def spread<[n], [m], A>(size: i32, default: A, indices: [m]i32, values: [m]A) [n
   scatter(replicate(size, default), indices, values)
 
 ------------------------------------------------------------
--- Histogram / Reduce by index
+-- Histogram
 ------------------------------------------------------------
 
--- Generalized histogram: reduce values into destination using operator
--- For each i: dest[indices[i]] = op(dest[indices[i]], values[i])
--- Multiple values at the same index are combined using the operator
-def reduce_by_index<[n], [m], A>(dest: [n]A, op: A -> A -> A, ne: A, indices: [m]i32, values: [m]A) [n]A =
-  _w_intrinsic_hist_1d(dest, op, ne, indices, values)
-
--- Histogram (alias for reduce_by_index)
+-- Histogram (alias for reduce_by_index builtin)
 def hist<[n], [m], A>(dest: [n]A, op: A -> A -> A, ne: A, indices: [m]i32, values: [m]A) [n]A =
   reduce_by_index(dest, op, ne, indices, values)

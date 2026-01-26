@@ -1003,6 +1003,68 @@ impl<'a> TypeChecker<'a> {
         let body = Self::arrow_chain(&[i32(), Self::var(a)], Self::array_ty(Self::var(a), s, size));
         self.scope_stack.insert("replicate".to_string(), Self::forall(&[size, a, s], body));
 
+        // reduce: ∀a n s. (a -> a -> a) -> a -> Array[a, s, n] -> a
+        let (a, n, s) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
+        let op_ty = Type::arrow(Self::var(a), Type::arrow(Self::var(a), Self::var(a)));
+        let body = Self::arrow_chain(
+            &[op_ty, Self::var(a), Self::array_ty(Self::var(a), s, n)],
+            Self::var(a),
+        );
+        self.scope_stack.insert("reduce".to_string(), Self::forall(&[a, n, s], body));
+
+        // scan: ∀a n s. (a -> a -> a) -> a -> Array[a, s, n] -> Array[a, s, n]
+        let (a, n, s) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
+        let op_ty = Type::arrow(Self::var(a), Type::arrow(Self::var(a), Self::var(a)));
+        let body = Self::arrow_chain(
+            &[op_ty, Self::var(a), Self::array_ty(Self::var(a), s, n)],
+            Self::array_ty(Self::var(a), s, n),
+        );
+        self.scope_stack.insert("scan".to_string(), Self::forall(&[a, n, s], body));
+
+        // filter: ∀a n s. (a -> bool) -> Array[a, s, n] -> ?k. Array[a, s, k]
+        let (a, n, s) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
+        let bool_ty = Type::Constructed(TypeName::Str("bool"), vec![]);
+        let pred_ty = Type::arrow(Self::var(a), bool_ty);
+        let array_a = Self::array_ty(Self::var(a), s, n);
+        // Existential return type: ?k. Array[a, s, k]
+        let k = "k".to_string();
+        let k_var = Type::Constructed(TypeName::SizeVar(k.clone()), vec![]);
+        let result_array = Type::Constructed(TypeName::Array, vec![Self::var(a), Self::var(s), k_var]);
+        let existential_result = Type::Constructed(TypeName::Existential(vec![k]), vec![result_array]);
+        let body = Self::arrow_chain(&[pred_ty, array_a], existential_result);
+        self.scope_stack.insert("filter".to_string(), Self::forall(&[a, n, s], body));
+
+        // scatter: ∀a n m s1 s2 s3. Array[a, s1, n] -> Array[i32, s2, m] -> Array[a, s3, m] -> Array[a, s1, n]
+        let (a, n, m) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
+        let (s1, s2, s3) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
+        let dest_array = Self::array_ty(Self::var(a), s1, n);
+        let indices_array = Self::array_ty(i32(), s2, m);
+        let values_array = Self::array_ty(Self::var(a), s3, m);
+        let body = Self::arrow_chain(&[dest_array.clone(), indices_array, values_array], dest_array);
+        self.scope_stack.insert("scatter".to_string(), Self::forall(&[a, n, m, s1, s2, s3], body));
+
+        // reduce_by_index: ∀a n m s1 s2 s3. Array[a, s1, n] -> (a -> a -> a) -> a -> Array[i32, s2, m] -> Array[a, s3, m] -> Array[a, s1, n]
+        let (a, n, m) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
+        let (s1, s2, s3) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
+        let op_ty = Type::arrow(Self::var(a), Type::arrow(Self::var(a), Self::var(a)));
+        let dest_array = Self::array_ty(Self::var(a), s1, n);
+        let indices_array = Self::array_ty(i32(), s2, m);
+        let values_array = Self::array_ty(Self::var(a), s3, m);
+        let body = Self::arrow_chain(
+            &[
+                dest_array.clone(),
+                op_ty,
+                Self::var(a),
+                indices_array,
+                values_array,
+            ],
+            dest_array,
+        );
+        self.scope_stack.insert(
+            "reduce_by_index".to_string(),
+            Self::forall(&[a, n, m, s1, s2, s3], body),
+        );
+
         // _w_alloc_array: ∀n t s. i32 -> Array[t, s, n]
         let (n, t, s) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
         let body = Self::arrow_chain(&[i32()], Self::array_ty(Self::var(t), s, n));

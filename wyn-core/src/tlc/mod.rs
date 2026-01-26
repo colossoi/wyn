@@ -20,7 +20,21 @@ mod to_mir_tests;
 use crate::TypeTable;
 use crate::ast::{self, NodeId, Span, TypeName};
 use polytype::Type;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+/// Mapping from user-facing SOAC names to their internal intrinsic names.
+/// These are registered as builtins in the type checker and renamed here during TLC transformation.
+const FUNDAMENTAL_SOACS: &[(&str, &str)] = &[
+    ("map", "_w_intrinsic_map"),
+    ("reduce", "_w_intrinsic_reduce"),
+    ("scan", "_w_intrinsic_scan"),
+    ("filter", "_w_intrinsic_filter"),
+    ("scatter", "_w_intrinsic_scatter"),
+    ("zip", "_w_intrinsic_zip"),
+    ("length", "_w_intrinsic_length"),
+    ("replicate", "_w_intrinsic_replicate"),
+    ("reduce_by_index", "_w_intrinsic_hist_1d"),
+];
 
 // =============================================================================
 // TLC Terms
@@ -200,6 +214,8 @@ pub struct Transformer<'a> {
     term_ids: TermIdSource,
     /// Optional namespace prefix for definition names (e.g., "f32" -> "f32.pi")
     namespace: Option<String>,
+    /// Track locally bound names to prevent renaming shadowed SOAC identifiers
+    bound_names: HashSet<String>,
 }
 
 impl<'a> Transformer<'a> {
@@ -208,6 +224,7 @@ impl<'a> Transformer<'a> {
             type_table,
             term_ids: TermIdSource::new(),
             namespace: None,
+            bound_names: HashSet::new(),
         }
     }
 
@@ -217,6 +234,7 @@ impl<'a> Transformer<'a> {
             type_table,
             term_ids: TermIdSource::new(),
             namespace: Some(namespace.to_string()),
+            bound_names: HashSet::new(),
         }
     }
 
@@ -261,6 +279,8 @@ impl<'a> Transformer<'a> {
     }
 
     pub fn transform_decl(&mut self, decl: &ast::Decl) -> Option<Def> {
+        // Clear bound names for each definition to ensure fresh scope
+        self.bound_names.clear();
         let body_ty = self.lookup_type(decl.body.h.id)?;
         let full_ty = self.build_function_type(&decl.params, &body_ty);
         let body = self.transform_with_params(&decl.params, &decl.body, full_ty.clone());
@@ -281,6 +301,8 @@ impl<'a> Transformer<'a> {
     }
 
     fn transform_entry(&mut self, entry: &ast::EntryDecl) -> Option<Def> {
+        // Clear bound names for each entry to ensure fresh scope
+        self.bound_names.clear();
         let body_ty = self.lookup_type(entry.body.h.id)?;
         let full_ty = self.build_function_type(&entry.params, &body_ty);
         let body = self.transform_with_params(&entry.params, &entry.body, full_ty.clone());
@@ -362,6 +384,14 @@ impl<'a> Transformer<'a> {
 
             lambda_info.push((param_name, param_ty.clone(), bindings));
             current_ty = self.get_body_type(&current_ty);
+        }
+
+        // Add all lambda param names and binding names to bound_names before transforming body
+        for (param_name, _, bindings) in &lambda_info {
+            self.bound_names.insert(param_name.clone());
+            for binding in bindings {
+                self.bound_names.insert(binding.name.clone());
+            }
         }
 
         // Transform the body expression
@@ -659,7 +689,16 @@ impl<'a> Transformer<'a> {
 
             ast::ExprKind::Identifier(qualifiers, name) => {
                 let full_name = if qualifiers.is_empty() {
-                    name.clone()
+                    // Check if this is a fundamental SOAC not shadowed by a local binding
+                    if !self.bound_names.contains(name) {
+                        if let Some((_, intrinsic)) = FUNDAMENTAL_SOACS.iter().find(|(s, _)| *s == name) {
+                            intrinsic.to_string()
+                        } else {
+                            name.clone()
+                        }
+                    } else {
+                        name.clone()
+                    }
                 } else {
                     format!("{}.{}", qualifiers.join("."), name)
                 };
@@ -744,6 +783,8 @@ impl<'a> Transformer<'a> {
                 if let Some(bound_name) = simple_name {
                     // Simple Name/Wildcard pattern - single Let binding
                     let rhs = self.transform_expr(&let_in.value);
+                    // Track bound name before transforming body
+                    self.bound_names.insert(bound_name.clone());
                     let body = self.transform_expr(&let_in.body);
                     self.mk_term(
                         body.ty.clone(),
@@ -759,6 +800,10 @@ impl<'a> Transformer<'a> {
                     // Complex pattern - use compute_pattern_bindings
                     let rhs = self.transform_expr(&let_in.value);
                     let (_, bindings) = self.compute_pattern_bindings(&let_in.pattern, rhs, span);
+                    // Track all binding names before transforming body
+                    for binding in &bindings {
+                        self.bound_names.insert(binding.name.clone());
+                    }
                     let body = self.transform_expr(&let_in.body);
                     self.apply_bindings_around(bindings, body, span)
                 }

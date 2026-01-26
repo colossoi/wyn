@@ -1651,3 +1651,25 @@ def test_hypot(x: f32, y: f32) f32 = trig32.hypot(x, y)
         "#,
     );
 }
+
+#[test]
+fn test_builtin_soac_can_be_shadowed() {
+    // Test that local definitions can shadow builtin SOACs
+    typecheck_program(
+        r#"
+def test: i32 =
+    let map = 42 in
+    map
+"#,
+    );
+}
+
+#[test]
+fn test_builtin_soac_works_when_not_shadowed() {
+    typecheck_program(
+        r#"
+def test: [2]i32 =
+    map(|x| x + 1, [1, 2])
+"#,
+    );
+}
