@@ -347,7 +347,6 @@ fn compile_to_spirv_with_partial_eval(source: &str) -> Result<Vec<u32>> {
         .monomorphize()
         .expect("Monomorphization failed")
         .default_address_spaces()
-        .skip_folding()
         .filter_reachable()
         .lift_bindings();
 

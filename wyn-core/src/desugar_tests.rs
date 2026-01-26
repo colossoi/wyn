@@ -29,7 +29,7 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .normalize()
         .monomorphize()?;
 
-    monomorphized.default_address_spaces().skip_folding().filter_reachable().lift_bindings().lower()?;
+    monomorphized.default_address_spaces().filter_reachable().lift_bindings().lower()?;
     Ok(())
 }
 

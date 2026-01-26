@@ -239,8 +239,7 @@ fn compile_file(
     let normalized = time("normalize", verbose, || hoisted.normalize());
     let monomorphized = time("monomorphize", verbose, || normalized.monomorphize())?;
     let defaulted = monomorphized.default_address_spaces();
-    let folded = defaulted.skip_folding();
-    let reachable = time("filter_reachable", verbose, || folded.filter_reachable());
+    let reachable = time("filter_reachable", verbose, || defaulted.filter_reachable());
     let lifted = time("lift_bindings", verbose, || reachable.lift_bindings());
 
     // Write final MIR if requested (right before lowering)

@@ -304,7 +304,7 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 //     -> flattened.hoist_materializations()             -> MaterializationsHoisted
 //       -> .normalize()                                 -> Normalized
 //       -> .monomorphize()                              -> Monomorphized
-//       -> .skip_folding()                              -> Folded
+//       -> .default_address_spaces()                    -> AddressSpacesDefaulted
 //       -> .filter_reachable()                          -> Reachable
 //       -> .lift_bindings()                             -> Lifted
 //       -> .lower()                                     -> Lowered
@@ -775,19 +775,6 @@ pub struct AddressSpacesDefaulted {
 }
 
 impl AddressSpacesDefaulted {
-    /// Skip constant folding/partial evaluation entirely.
-    /// Partial evaluation now happens on TLC before MIR generation.
-    pub fn skip_folding(self) -> Folded {
-        Folded { mir: self.mir }
-    }
-}
-
-/// Constants have been folded (stub)
-pub struct Folded {
-    pub mir: mir::Program,
-}
-
-impl Folded {
     /// Filter out unreachable definitions and order them topologically.
     pub fn filter_reachable(self) -> Reachable {
         let mir = reachability::filter_reachable(self.mir);
