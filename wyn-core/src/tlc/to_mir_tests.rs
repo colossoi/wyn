@@ -160,6 +160,7 @@ mod tests {
             .normalize()
             .monomorphize()
             .expect("Monomorphization failed")
+            .default_address_spaces()
             .skip_folding()
             .mir
     }

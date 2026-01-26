@@ -691,7 +691,7 @@ def test: f32 =
         .hoist_materializations()
         .normalize()
         .monomorphize()
-        .map(|m| m.skip_folding())
+        .map(|m| m.default_address_spaces().skip_folding())
         .map(|f| f.filter_reachable())
         .map(|r| r.lift_bindings())
         .and_then(|l| l.lower());
@@ -1431,6 +1431,7 @@ fn compile_to_glsl(input: &str) -> String {
         .normalize()
         .monomorphize()
         .expect("Monomorphization failed")
+        .default_address_spaces()
         .skip_folding()
         .filter_reachable()
         .lift_bindings()

@@ -422,74 +422,6 @@ impl<'a> TypeChecker<'a> {
         quantify(TypeScheme::Monotype(applied), &fv_ty)
     }
 
-    /// Default unconstrained address space variables to AddressFunction.
-    ///
-    /// After type checking, some address space variables remain unconstrained
-    /// (e.g., intermediate values in polymorphic function calls). Since we only
-    /// have two address spaces (Function and Storage), and Storage is explicitly
-    /// constrained by type checking, unconstrained variables default to Function.
-    fn default_address_spaces(&mut self) {
-        // Collect all address space variables from the type table
-        let mut addr_vars = std::collections::HashSet::new();
-        for scheme in self.type_table.values() {
-            Self::collect_address_space_vars(scheme, &mut addr_vars);
-        }
-
-        // Also collect from function schemes in scope_stack
-        self.scope_stack.for_each_binding(|_, scheme| {
-            Self::collect_address_space_vars(scheme, &mut addr_vars);
-        });
-
-        // Also collect from module schemes
-        for scheme in self.module_schemes.values() {
-            Self::collect_address_space_vars(scheme, &mut addr_vars);
-        }
-
-        // Unify each unconstrained address space variable with AddressFunction
-        let addr_function = Type::Constructed(TypeName::AddressFunction, vec![]);
-        for var_id in addr_vars {
-            let var = Type::Variable(var_id);
-            let resolved = var.apply(&self.context);
-            // Only default if still a variable (not already resolved)
-            if matches!(resolved, Type::Variable(_)) {
-                // Unify with AddressFunction - ignore errors (already constrained to Storage)
-                let _ = self.context.unify(&resolved, &addr_function);
-            }
-        }
-    }
-
-    /// Collect type variable IDs that appear in address space position (second arg of Array).
-    fn collect_address_space_vars(scheme: &TypeScheme, vars: &mut std::collections::HashSet<usize>) {
-        match scheme {
-            TypeScheme::Monotype(ty) => Self::collect_address_space_vars_from_type(ty, vars),
-            TypeScheme::Polytype { body, .. } => Self::collect_address_space_vars(body, vars),
-        }
-    }
-
-    fn collect_address_space_vars_from_type(ty: &Type, vars: &mut std::collections::HashSet<usize>) {
-        match ty {
-            Type::Constructed(TypeName::Array, args) if args.len() == 3 => {
-                // args[1] is the address space
-                if let Type::Variable(id) = &args[1] {
-                    vars.insert(*id);
-                }
-                // Also check for variables inside the address space (in case it's nested)
-                Self::collect_address_space_vars_from_type(&args[1], vars);
-                // Recurse into element type and size
-                Self::collect_address_space_vars_from_type(&args[0], vars);
-                Self::collect_address_space_vars_from_type(&args[2], vars);
-            }
-            Type::Constructed(_, args) => {
-                for arg in args {
-                    Self::collect_address_space_vars_from_type(arg, vars);
-                }
-            }
-            Type::Variable(_) => {
-                // Don't collect non-address-space variables
-            }
-        }
-    }
-
     /// Check if a type contains any unsubstituted UserVar or SizeVar.
     /// These should be substituted with proper type Variables before generalization.
     /// Skips checking inside Existential types, as those intentionally contain SizeVar
@@ -1123,9 +1055,6 @@ impl<'a> TypeChecker<'a> {
 
         // Emit warnings for all type holes now that types are fully inferred
         self.emit_hole_warnings();
-
-        // Default unconstrained address space variables to AddressFunction
-        self.default_address_spaces();
 
         // Apply the context to all types in the type table to resolve type variables
         let resolved_table: HashMap<crate::ast::NodeId, TypeScheme> = self

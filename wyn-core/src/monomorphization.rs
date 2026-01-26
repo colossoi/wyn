@@ -516,23 +516,12 @@ impl Monomorphizer {
     }
 
     /// Unify two types to build a substitution.
-    ///
-    /// Requires that `actual` is fully concrete (no type variables).
-    /// At monomorphization time, all call sites should have concrete argument types.
     fn unify_for_subst(
         &self,
         expected: &Type<TypeName>,
         actual: &Type<TypeName>,
         subst: &mut Substitution,
     ) -> Result<()> {
-        // Invariant: call argument types should be concrete at monomorphization time
-        if contains_variables(actual) {
-            return Err(err_type!(
-                "monomorphization: actual type still contains variables: {}",
-                format_type_compact(actual)
-            ));
-        }
-
         match (expected, actual) {
             (Type::Variable(id), concrete) => {
                 // Bind the scheme variable to the concrete type
@@ -605,37 +594,6 @@ impl Monomorphizer {
 
         self.specializations.insert(cache_key, specialized_name.clone());
         Ok(specialized_name)
-    }
-}
-
-/// Check if a type contains type variables
-fn contains_variables(ty: &Type<TypeName>) -> bool {
-    match ty {
-        Type::Variable(_) => true,
-        Type::Constructed(name, args) => {
-            // Check for unresolved variables in TypeName itself
-            match name {
-                TypeName::SizeVar(_) | TypeName::UserVar(_) => return true,
-                TypeName::Record(_fields) => {
-                    // Check types inside record fields (stored in args)
-                    if args.iter().any(contains_variables) {
-                        return true;
-                    }
-                }
-                TypeName::Sum(variants) => {
-                    // Check types inside sum variants
-                    if variants.iter().any(|(_, types)| types.iter().any(contains_variables)) {
-                        return true;
-                    }
-                }
-                TypeName::Existential(_) => {
-                    // Inner type is now in args[0], checked below
-                }
-                _ => {}
-            }
-            // Check type arguments
-            args.iter().any(contains_variables)
-        }
     }
 }
 
@@ -774,16 +732,7 @@ fn apply_subst(ty: &Type<TypeName>, subst: &Substitution) -> Type<TypeName> {
 /// Apply a substitution to a type with context for debugging
 fn apply_subst_with_context(ty: &Type<TypeName>, subst: &Substitution, context: &str) -> Type<TypeName> {
     match ty {
-        Type::Variable(id) => subst.get(id).cloned().unwrap_or_else(|| {
-            panic!(
-                "BUG: Unresolved type variable Variable({}) during monomorphization. \
-                 The substitution is incomplete - this variable should have been resolved during type checking \
-                 or added to the substitution during monomorphization.\n\
-                 Context: {}\n\
-                 Substitution contains: {:?}",
-                id, context, subst
-            )
-        }),
+        Type::Variable(id) => subst.get(id).cloned().unwrap_or_else(|| ty.clone()),
         Type::Constructed(name, args) => {
             // Recursively apply substitution to type arguments
             let new_args = args.iter().map(|arg| apply_subst_with_context(arg, subst, context)).collect();

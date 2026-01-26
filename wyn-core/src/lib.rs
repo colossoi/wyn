@@ -27,6 +27,7 @@ pub mod tlc;
 
 pub mod binding_lifter;
 pub mod constant_folding;
+pub mod default_address_spaces;
 pub mod glsl;
 pub mod inplace_rewriter;
 pub mod materialize_hoisting;
@@ -755,12 +756,25 @@ impl Normalized {
     }
 }
 
-/// Program has been monomorphized (stub)
+/// Program has been monomorphized
 pub struct Monomorphized {
     pub mir: mir::Program,
 }
 
 impl Monomorphized {
+    /// Default unconstrained address space variables to Function.
+    pub fn default_address_spaces(self) -> AddressSpacesDefaulted {
+        let mir = default_address_spaces::default_address_spaces(self.mir);
+        AddressSpacesDefaulted { mir }
+    }
+}
+
+/// Address space variables have been defaulted
+pub struct AddressSpacesDefaulted {
+    pub mir: mir::Program,
+}
+
+impl AddressSpacesDefaulted {
     /// Skip constant folding/partial evaluation entirely.
     /// Partial evaluation now happens on TLC before MIR generation.
     pub fn skip_folding(self) -> Folded {

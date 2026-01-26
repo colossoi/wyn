@@ -238,7 +238,8 @@ fn compile_file(
     });
     let normalized = time("normalize", verbose, || hoisted.normalize());
     let monomorphized = time("monomorphize", verbose, || normalized.monomorphize())?;
-    let folded = monomorphized.skip_folding();
+    let defaulted = monomorphized.default_address_spaces();
+    let folded = defaulted.skip_folding();
     let reachable = time("filter_reachable", verbose, || folded.filter_reachable());
     let lifted = time("lift_bindings", verbose, || reachable.lift_bindings());
 
