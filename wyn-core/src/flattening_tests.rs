@@ -671,7 +671,8 @@ def test: f32 =
         .normalize()
         .monomorphize()
         .map(|m| m.default_address_spaces())
-        .map(|f| f.filter_reachable())
+        .map(|d| d.parallelize_soacs())
+        .map(|p| p.filter_reachable())
         .map(|r| r.lift_bindings())
         .and_then(|l| l.lower());
     assert!(result.is_ok(), "Compilation failed: {:?}", result.err());
@@ -1411,6 +1412,7 @@ fn compile_to_glsl(input: &str) -> String {
         .monomorphize()
         .expect("Monomorphization failed")
         .default_address_spaces()
+        .parallelize_soacs()
         .filter_reachable()
         .lift_bindings()
         .lower_shadertoy()

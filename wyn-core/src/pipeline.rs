@@ -33,14 +33,15 @@ pub struct PipelineStage {
 
 /// Build a Pipeline from a compute entry point.
 pub fn build_pipeline(def: &mir::Def) -> Option<Pipeline> {
-    let (name, execution_model, inputs, body) = match def {
+    let (name, execution_model, inputs, outputs, body) = match def {
         mir::Def::EntryPoint {
             name,
             execution_model,
             inputs,
+            outputs,
             body,
             ..
-        } => (name, execution_model, inputs, body),
+        } => (name, execution_model, inputs, outputs, body),
         _ => return None,
     };
 
@@ -76,10 +77,13 @@ pub fn build_pipeline(def: &mir::Def) -> Option<Pipeline> {
         }
     }
 
-    // Check if the return type is a slice - if so, add an output buffer
-    let return_type = body.get_type(body.root);
-    if is_output_slice_type(return_type) {
-        let output_elem_type = get_slice_element_type(return_type)?;
+    // Check if the declared output type is a slice - if so, add an output buffer
+    // Use the declared output type, not the body's root type, because
+    // soac_parallelize may transform the body to return () while using
+    // map_into to write to the output buffer.
+    let declared_output_type = outputs.first().map(|o| &o.ty);
+    if declared_output_type.map_or(false, is_output_slice_type) {
+        let output_elem_type = get_slice_element_type(declared_output_type.unwrap())?;
         let output_buffer = BufferBlock {
             id: crate::ast::NodeId(0),
             name: "_output".to_string(),

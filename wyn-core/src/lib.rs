@@ -34,6 +34,7 @@ pub mod materialize_hoisting;
 pub mod monomorphization;
 pub mod normalize;
 pub mod resolve_placeholders;
+pub mod soac_parallelize;
 pub mod spirv;
 
 #[cfg(test)]
@@ -775,6 +776,19 @@ pub struct AddressSpacesDefaulted {
 }
 
 impl AddressSpacesDefaulted {
+    /// Parallelize SOACs in compute shaders.
+    pub fn parallelize_soacs(self) -> SoacParallelized {
+        let mir = soac_parallelize::parallelize_soacs(self.mir);
+        SoacParallelized { mir }
+    }
+}
+
+/// SOACs have been parallelized for compute shaders
+pub struct SoacParallelized {
+    pub mir: mir::Program,
+}
+
+impl SoacParallelized {
     /// Filter out unreachable definitions and order them topologically.
     pub fn filter_reachable(self) -> Reachable {
         let mir = reachability::filter_reachable(self.mir);

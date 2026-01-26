@@ -9,7 +9,7 @@ use crate::ast::TypeName;
 use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
 use crate::lowering_common::is_empty_closure_type;
-use crate::mir::parallelism::{SimpleComputeMap, detect_simple_compute_map};
+// Note: detect_simple_compute_map removed - soac_parallelize transforms the MIR instead
 use crate::mir::{
     self, ArrayBacking, Body, Def, ExecutionModel, Expr, ExprId, LambdaId, LambdaInfo, LocalId, LoopKind,
     Program,
@@ -135,6 +135,9 @@ struct Constructor {
 
     /// Compute shader parameters: maps param name to (set, binding) for storage buffer lookup
     compute_params: HashMap<String, (u32, u32)>,
+
+    /// GlobalInvocationId variable for compute shaders (set during entry point setup)
+    global_invocation_id: Option<spirv::Word>,
 }
 
 impl Constructor {
@@ -189,6 +192,7 @@ impl Constructor {
             inplace_nodes: HashSet::new(),
             storage_buffers: HashMap::new(),
             compute_params: HashMap::new(),
+            global_invocation_id: None,
         }
     }
 
@@ -766,27 +770,20 @@ impl<'a> LowerCtx<'a> {
             Def::EntryPoint {
                 name,
                 execution_model: ExecutionModel::Compute { .. },
+                outputs,
                 body,
                 ..
             } => {
-                // Build pipeline from compute entry point
+                // Build pipeline from compute entry point for buffer setup
                 let Some(pipeline) = pipeline::build_pipeline(def) else {
                     bail_spirv!("Compute shader '{}' could not be converted to pipeline", name);
                 };
 
-                // Validate - must still be "simple" pattern for now
-                let Some(compute_info) = detect_simple_compute_map(def) else {
-                    bail_spirv!(
-                        "Compute shader '{}' is not supported: must have slice inputs and single map call at top level",
-                        name
-                    );
-                };
-
-                // Ensure dependencies (including map closure's lambda) are lowered
+                // Ensure dependencies are lowered
                 self.ensure_deps_lowered(body)?;
 
-                // Lower the compute shader using the pipeline's buffer bindings
-                lower_compute_pipeline(&mut self.constructor, &pipeline, &compute_info, body)?;
+                // Lower the compute shader - the MIR should already be transformed by soac_parallelize
+                lower_compute_entry_point(&mut self.constructor, &pipeline, outputs, body)?;
             }
             Def::EntryPoint {
                 name,
@@ -1175,11 +1172,18 @@ fn lower_entry_point_from_def(
     Ok(())
 }
 
-/// Lower a compute pipeline using the Pipeline's buffer bindings.
-fn lower_compute_pipeline(
+/// Lower a compute entry point.
+///
+/// The MIR is expected to have been transformed by soac_parallelize to use
+/// __builtin_thread_id for parallelization. This function:
+/// 1. Sets up storage buffers from the pipeline
+/// 2. Creates GlobalInvocationId input (for __builtin_thread_id intrinsic)
+/// 3. Lowers the body with regular expression lowering
+/// 4. Writes the result to the output buffer at thread_id index
+fn lower_compute_entry_point(
     constructor: &mut Constructor,
     pipeline: &Pipeline,
-    compute_info: &SimpleComputeMap,
+    outputs: &[mir::EntryOutput],
     body: &Body,
 ) -> Result<()> {
     // Set up the compute entry point
@@ -1238,6 +1242,9 @@ fn lower_compute_pipeline(
     );
     interface_vars.push(global_id_var);
 
+    // Store GlobalInvocationId var for __builtin_thread_id intrinsic
+    constructor.global_invocation_id = Some(global_id_var);
+
     // Store interface variables for entry point declaration
     constructor.entry_point_interfaces.insert(pipeline.name.clone(), interface_vars);
 
@@ -1262,116 +1269,72 @@ fn lower_compute_pipeline(
     constructor.builder.begin_block(Some(code_block_id))?;
     constructor.current_block = Some(code_block_id);
 
-    // Load global_invocation_id and extract x component (thread index)
-    let gid = constructor.builder.load(uvec3_type, None, global_id_var, None, [])?;
-    let thread_id = constructor.builder.composite_extract(constructor.u32_type, None, gid, [0])?;
+    // Lower the body - the MIR has been transformed by soac_parallelize to use
+    // __builtin_thread_id() for indexing, so regular expression lowering works
+    let _result = lower_expr(constructor, body, body.root)?;
 
-    // Extract closure info from the map expression
-    let (func_name, capture_vals) = extract_closure_info(constructor, body, compute_info.map_closure)?;
+    // Check if the body returns Unit - if so, map_into already wrote to output
+    let body_ty = body.get_type(body.root);
+    let body_returns_unit = matches!(body_ty, PolyType::Constructed(TypeName::Unit, _));
 
-    let map_func_id = *constructor
-        .functions
-        .get(&func_name)
-        .ok_or_else(|| err_spirv!("Map function not found: {}", func_name))?;
-
-    // Get the map array expression and its backing
-    let map_array_expr = body.get_expr(compute_info.map_array);
-
-    // Get input element type from the map array type
-    let map_array_ty = body.get_type(compute_info.map_array);
-    let input_elem_type_id = match map_array_ty {
-        types::Type::Constructed(TypeName::Array, args) if args.len() == 3 => {
-            constructor.ast_type_to_spirv(&args[0])
-        }
-        _ => constructor.i32_type, // Default to i32 for Range arrays
-    };
-
-    // Get output element type from the map expression's return type
-    let output_elem_type_id = {
-        let map_expr_type = body.get_type(compute_info.map_expr);
-        match map_expr_type {
-            types::Type::Constructed(TypeName::Array, args) if args.len() == 3 => {
-                constructor.ast_type_to_spirv(&args[0])
-            }
-            _ => input_elem_type_id, // Fallback to input type
-        }
-    };
-
-    // Convert thread_id to i32 for read_elem (which expects i32 indices)
-    let thread_id_i32 = constructor.builder.bitcast(constructor.i32_type, None, thread_id)?;
-
-    // Use read_elem to get the input value - works for all backing types:
-    // - Range: computes start + thread_id * stride (virtual, no memory)
-    // - Storage: loads from buffer[thread_id]
-    // - IndexFn: calls the function with thread_id
-    let input_elem = match map_array_expr {
-        Expr::Array { backing, .. } => read_elem(
-            constructor,
-            body,
-            compute_info.map_array,
-            backing,
-            thread_id_i32,
-            input_elem_type_id,
-        )?,
-        _ => {
-            // For Local references (storage buffer inputs), read from the first input buffer
-            let binding = (0u32, 0u32);
-            let (buffer_var, _) = constructor
-                .storage_buffers
-                .get(&binding)
-                .ok_or_else(|| err_spirv!("No input buffer at binding {:?}", binding))?;
-            let buffer_var = *buffer_var;
-
-            let elem_ptr_type =
-                constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, input_elem_type_id);
-            let zero = constructor.const_u32(0);
-            let elem_ptr =
-                constructor.builder.access_chain(elem_ptr_type, None, buffer_var, [zero, thread_id])?;
-            constructor.builder.load(input_elem_type_id, None, elem_ptr, None, [])?
-        }
-    };
-
-    // Apply the map function to the input element
-    // Order: element first, then captures (captures are trailing params after lifting)
-    let mut call_args = vec![input_elem];
-    call_args.extend(capture_vals.clone());
-    let result = constructor.builder.function_call(output_elem_type_id, None, map_func_id, call_args)?;
-
-    // Write result to output buffer
-    // Determine output buffer binding (after all input buffers)
-    let num_input_buffers = compute_info.inputs.len() as u32;
-    let output_buffer_binding = num_input_buffers;
-
-    // Check if we have a dedicated output buffer
-    let (output_buffer_var, output_mem) =
-        if let Some((out_var, _)) = constructor.storage_buffers.get(&(0, output_buffer_binding)) {
-            (
-                *out_var,
-                MemBinding::Storage {
-                    set: 0,
-                    binding: output_buffer_binding,
-                },
-            )
-        } else if let Some((out_var, _)) = constructor.storage_buffers.get(&(0, 0)) {
-            // Fallback to first buffer for in-place operations
-            (*out_var, MemBinding::Storage { set: 0, binding: 0 })
+    if !body_returns_unit {
+        // Body returns a value that needs to be written to output buffer
+        let output_elem_type_id = if let Some(output) = outputs.first() {
+            constructor.ast_type_to_spirv(&output.ty)
         } else {
-            bail_spirv!("No output buffer available for compute shader")
+            // No output - just return
+            constructor.builder.ret()?;
+            finalize_compute_entry(constructor)?;
+            return Ok(());
         };
 
-    write_array_element(
-        constructor,
-        Some(output_mem),
-        output_buffer_var,
-        thread_id,
-        result,
-        output_elem_type_id,
-        constructor.void_type,
-    )?;
+        // Get thread_id for output write - load GlobalInvocationId.x
+        let gid = constructor.builder.load(uvec3_type, None, global_id_var, None, [])?;
+        let thread_id = constructor.builder.composite_extract(constructor.u32_type, None, gid, [0])?;
+
+        // Find output buffer (last buffer in the pipeline)
+        let num_buffers = pipeline.buffers.len() as u32;
+        let output_buffer_binding = if num_buffers > 1 { num_buffers - 1 } else { 0 };
+
+        let (output_buffer_var, output_mem) =
+            if let Some((out_var, _)) = constructor.storage_buffers.get(&(0, output_buffer_binding)) {
+                (
+                    *out_var,
+                    MemBinding::Storage {
+                        set: 0,
+                        binding: output_buffer_binding,
+                    },
+                )
+            } else if let Some((out_var, _)) = constructor.storage_buffers.get(&(0, 0)) {
+                // Fallback to first buffer for in-place operations
+                (*out_var, MemBinding::Storage { set: 0, binding: 0 })
+            } else {
+                bail_spirv!("No output buffer available for compute shader")
+            };
+
+        // Write result to output buffer at thread_id index
+        write_array_element(
+            constructor,
+            Some(output_mem),
+            output_buffer_var,
+            thread_id,
+            _result,
+            output_elem_type_id,
+            constructor.void_type,
+        )?;
+    }
+    // If body returns Unit, map_into already wrote to output - nothing more to do
 
     // Return
     constructor.builder.ret()?;
 
+    finalize_compute_entry(constructor)?;
+
+    Ok(())
+}
+
+/// Finalize a compute entry point (terminate blocks, end function, cleanup).
+fn finalize_compute_entry(constructor: &mut Constructor) -> Result<()> {
     // Terminate variables block
     if let (Some(vars_block), Some(code_block)) =
         (constructor.variables_block, constructor.first_code_block)
@@ -1398,6 +1361,7 @@ fn lower_compute_pipeline(
     constructor.env.clear();
     constructor.storage_buffers.clear();
     constructor.compute_params.clear();
+    constructor.global_invocation_id = None;
 
     Ok(())
 }
@@ -2385,6 +2349,7 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                     lower_inplace_map(constructor, body, args, expr_ty, result_type)
                 }
                 "_w_intrinsic_zip" => lower_zip(constructor, body, args, result_type),
+                "_w_intrinsic_map_into" => lower_map_into(constructor, body, args),
                 "_w_intrinsic_reduce" => lower_reduce(constructor, body, args, result_type),
                 "_w_intrinsic_scan" => lower_scan(constructor, body, args, result_type),
                 "_w_intrinsic_filter" => lower_filter(constructor, body, args, result_type),
@@ -2396,6 +2361,18 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                 "_w_intrinsic_sha256_block" => lower_sha256_block(constructor, body, args, result_type),
                 "_w_intrinsic_sha256_block_with_state" => {
                     lower_sha256_block_with_state(constructor, body, args, result_type)
+                }
+                "__builtin_thread_id" => {
+                    // Get thread index from GlobalInvocationId.x
+                    let gid_var = constructor
+                        .global_invocation_id
+                        .ok_or_else(|| err_spirv!("__builtin_thread_id used outside of compute shader"))?;
+                    let uvec3_type = constructor.get_or_create_vec_type(constructor.u32_type, 3);
+                    let gid = constructor.builder.load(uvec3_type, None, gid_var, None, [])?;
+                    let thread_id_u32 =
+                        constructor.builder.composite_extract(constructor.u32_type, None, gid, [0])?;
+                    // Bitcast u32 to i32 for indexing
+                    Ok(constructor.builder.bitcast(constructor.i32_type, None, thread_id_u32)?)
                 }
                 _ => Err(err_spirv!("Unknown intrinsic: {}", name)),
             }
@@ -3269,8 +3246,9 @@ fn lower_inplace_map_core(
 
 /// Lower `_w_intrinsic_map`: map f [a,b,c] = [f(a), f(b), f(c)]
 ///
-/// Always produces a new value array. Uses read_elem for virtual arrays
-/// (Range, IndexFn) to avoid unnecessary materialization.
+/// For static-sized arrays: unrolls the loop at compile time.
+/// For dynamic-sized Views (e.g., in compute shaders): generates a runtime loop
+/// that reads from input and writes to output storage buffers.
 fn lower_map(
     constructor: &mut Constructor,
     body: &Body,
@@ -3293,15 +3271,29 @@ fn lower_map(
 
     let arr_expr_id = args[1];
     let arr_ty = body.get_type(arr_expr_id);
-    let (array_size, elem_type) = extract_array_info(constructor, arr_ty)?;
 
-    // Get result element type from the expression type
-    let output_elem_type = match expr_ty {
-        PolyType::Constructed(TypeName::Array, type_args) => {
-            assert!(type_args.len() == 3);
-            constructor.ast_type_to_spirv(&type_args[0])
+    // Try to get static size; if not available, check for dynamic View
+    let static_size = match arr_ty {
+        PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 3 => match &type_args[2] {
+            PolyType::Constructed(TypeName::Size(n), _) => Some(*n as u32),
+            _ => None,
+        },
+        _ => None,
+    };
+
+    // Get element types
+    let (elem_type, output_elem_type) = match arr_ty {
+        PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 3 => {
+            let elem = constructor.ast_type_to_spirv(&type_args[0]);
+            let out_elem = match expr_ty {
+                PolyType::Constructed(TypeName::Array, out_args) if out_args.len() == 3 => {
+                    constructor.ast_type_to_spirv(&out_args[0])
+                }
+                _ => elem,
+            };
+            (elem, out_elem)
         }
-        _ => bail_spirv!("map result must be array type, got {:?}", expr_ty),
+        _ => bail_spirv!("map input must be array type, got {:?}", arr_ty),
     };
 
     let map_func_id = *constructor
@@ -3309,9 +3301,40 @@ fn lower_map(
         .get(&func_name)
         .ok_or_else(|| err_spirv!("Map function not found: {}", func_name))?;
 
+    // Check if this is a dynamic-sized View into storage
+    // The View expression is passed directly (not through a local binding)
+    let arr_expr = body.get_expr(arr_expr_id);
+    let is_dynamic_storage_view = static_size.is_none()
+        && matches!(
+            arr_expr,
+            Expr::Array {
+                backing: ArrayBacking::View { .. },
+                ..
+            }
+        );
+
+    if is_dynamic_storage_view {
+        // Dynamic-sized View: generate a runtime loop
+        return lower_map_dynamic(
+            constructor,
+            body,
+            arr_expr_id,
+            map_func_id,
+            &capture_vals,
+            elem_type,
+            output_elem_type,
+        );
+    }
+
+    let array_size = static_size.ok_or_else(|| {
+        err_spirv!(
+            "map requires static array size or View into storage, got {:?}",
+            arr_ty
+        )
+    })?;
+
     // Check if input array has a virtual backing (Range, IndexFn)
     // If so, use read_elem directly to avoid materialization
-    let arr_expr = body.get_expr(arr_expr_id);
     let use_read_elem = matches!(
         arr_expr,
         Expr::Array {
@@ -3357,6 +3380,133 @@ fn lower_map(
     }
 
     Ok(constructor.builder.composite_construct(result_type, None, result_elements)?)
+}
+
+/// Lower map over a dynamic-sized View using a runtime loop.
+///
+/// Uses a variable-based loop instead of phi nodes for simplicity.
+/// Generates SPIR-V structured control flow that reads from input,
+/// applies the function, and writes results back in-place.
+fn lower_map_dynamic(
+    constructor: &mut Constructor,
+    body: &Body,
+    arr_expr_id: ExprId,
+    map_func_id: spirv::Word,
+    capture_vals: &[spirv::Word],
+    elem_type: spirv::Word,
+    output_elem_type: spirv::Word,
+) -> Result<spirv::Word> {
+    let arr_expr = body.get_expr(arr_expr_id);
+
+    // Extract View info
+    let (base_expr_id, offset_expr_id, size_expr_id) = match arr_expr {
+        Expr::Array {
+            backing: ArrayBacking::View { base, offset },
+            size,
+        } => (*base, *offset, *size),
+        _ => bail_spirv!("lower_map_dynamic requires View array"),
+    };
+
+    // Get the base storage buffer info
+    let base_expr = body.get_expr(base_expr_id);
+    let (storage_name, base_offset_expr_id) = match base_expr {
+        Expr::Array {
+            backing: ArrayBacking::Storage { name, offset },
+            ..
+        } => (name.clone(), *offset),
+        _ => bail_spirv!("lower_map_dynamic requires View into Storage array"),
+    };
+
+    // Get storage buffer binding
+    let (set, binding) = constructor
+        .compute_params
+        .get(&storage_name)
+        .ok_or_else(|| err_spirv!("Unknown storage buffer: {}", storage_name))?;
+    let (buffer_var, buffer_elem_type) = constructor
+        .storage_buffers
+        .get(&(*set, *binding))
+        .ok_or_else(|| err_spirv!("Storage buffer not found for set={}, binding={}", set, binding))?;
+    let buffer_var = *buffer_var;
+    let buffer_elem_type = *buffer_elem_type;
+
+    // Lower the offset and size expressions
+    let base_offset_val = lower_expr(constructor, body, base_offset_expr_id)?;
+    let view_offset_val = lower_expr(constructor, body, offset_expr_id)?;
+    let size_val = lower_expr(constructor, body, size_expr_id)?;
+
+    // Compute the combined offset: base_offset + view_offset
+    let i32_type = constructor.i32_type;
+    let combined_offset = constructor.builder.i_add(i32_type, None, base_offset_val, view_offset_val)?;
+
+    // Create loop index variable (in the function's variables block)
+    let loop_idx_var = constructor.declare_variable("__map_idx", i32_type)?;
+
+    // Initialize loop index to 0
+    let zero = constructor.const_i32(0);
+    let one = constructor.const_i32(1);
+    constructor.builder.store(loop_idx_var, zero, None, [])?;
+
+    // Create basic blocks
+    let header_label = constructor.builder.id();
+    let body_label = constructor.builder.id();
+    let continue_label = constructor.builder.id();
+    let merge_label = constructor.builder.id();
+
+    // Branch to header
+    constructor.builder.branch(header_label)?;
+
+    // Header block with loop merge
+    constructor.builder.begin_block(Some(header_label))?;
+    // Load current index and check if i < size (before loop_merge per SPIR-V rules)
+    let i_val = constructor.builder.load(i32_type, None, loop_idx_var, None, [])?;
+    let bool_type = constructor.bool_type;
+    let cond = constructor.builder.s_less_than(bool_type, None, i_val, size_val)?;
+    constructor.builder.loop_merge(merge_label, continue_label, spirv::LoopControl::NONE, [])?;
+    constructor.builder.branch_conditional(cond, body_label, merge_label, [])?;
+
+    // Body block: read, apply function, write
+    constructor.builder.begin_block(Some(body_label))?;
+
+    // Load index again (needed because we're in a new block)
+    let i_val_body = constructor.builder.load(i32_type, None, loop_idx_var, None, [])?;
+
+    // Compute actual index: combined_offset + i
+    let actual_idx = constructor.builder.i_add(i32_type, None, combined_offset, i_val_body)?;
+
+    // Read from storage buffer
+    let elem_ptr_type =
+        constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, buffer_elem_type);
+    let zero_u32 = constructor.const_u32(0);
+    // Cast i32 index to u32 for array indexing
+    let actual_idx_u32 = constructor.builder.bitcast(constructor.u32_type, None, actual_idx)?;
+    let elem_ptr =
+        constructor.builder.access_chain(elem_ptr_type, None, buffer_var, [zero_u32, actual_idx_u32])?;
+    let input_elem = constructor.builder.load(elem_type, None, elem_ptr, None, [])?;
+
+    // Call the map function
+    let mut call_args = vec![input_elem];
+    call_args.extend(capture_vals.iter().cloned());
+    let result_elem = constructor.builder.function_call(output_elem_type, None, map_func_id, call_args)?;
+
+    // Write result back to same location (in-place)
+    constructor.builder.store(elem_ptr, result_elem, None, [])?;
+
+    // Branch to continue
+    constructor.builder.branch(continue_label)?;
+
+    // Continue block: increment index and loop back
+    constructor.builder.begin_block(Some(continue_label))?;
+    let i_val_cont = constructor.builder.load(i32_type, None, loop_idx_var, None, [])?;
+    let i_next = constructor.builder.i_add(i32_type, None, i_val_cont, one)?;
+    constructor.builder.store(loop_idx_var, i_next, None, [])?;
+    constructor.builder.branch(header_label)?;
+
+    // Merge block
+    constructor.builder.begin_block(Some(merge_label))?;
+
+    // Return a dummy value (unit-like) - the actual output was written to the storage buffer
+    // Return 0 since we can't easily create a unit constant
+    Ok(zero)
 }
 
 /// Lower `_w_intrinsic_inplace_map`: in-place variant of map
@@ -3475,6 +3625,187 @@ fn lower_zip(
     Ok(constructor.builder.composite_construct(result_type, None, result_elements)?)
 }
 
+/// Lower `_w_intrinsic_map_into`: map f over input and write to output buffer.
+///
+/// Args: [func, input_array, output_storage_array, offset]
+/// Generates a loop that reads from input, applies f, writes to output[offset + i].
+fn lower_map_into(constructor: &mut Constructor, body: &Body, args: &[ExprId]) -> Result<spirv::Word> {
+    if args.len() != 4 {
+        bail_spirv!("_w_intrinsic_map_into requires 4 args, got {}", args.len());
+    }
+
+    // Extract function info - for map_into, args[0] is the function reference
+    // Unlike regular map, map_into doesn't include captures in its args
+    let func_name = match body.get_expr(args[0]) {
+        Expr::Global(name) => name.clone(),
+        other => bail_spirv!(
+            "Expected function reference (Global) in map_into, got {:?}",
+            other
+        ),
+    };
+    let map_func_id = *constructor
+        .functions
+        .get(&func_name)
+        .ok_or_else(|| err_spirv!("Map function not found: {}", func_name))?;
+
+    let offset_val = lower_expr(constructor, body, args[3])?;
+
+    // Get input array type info
+    let input_ty = body.get_type(args[1]);
+    let (input_elem_type, output_elem_type) = match input_ty {
+        PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 3 => {
+            let in_elem = constructor.ast_type_to_spirv(&type_args[0]);
+            // Get output element type from output array type
+            let output_ty = body.get_type(args[2]);
+            let out_elem = match output_ty {
+                PolyType::Constructed(TypeName::Array, out_args) if out_args.len() == 3 => {
+                    constructor.ast_type_to_spirv(&out_args[0])
+                }
+                _ => in_elem, // Same type if not specified
+            };
+            (in_elem, out_elem)
+        }
+        _ => bail_spirv!("_w_intrinsic_map_into input must be array type"),
+    };
+
+    // Get output storage buffer info
+    let output_expr = body.get_expr(args[2]);
+    let output_storage_name = match output_expr {
+        Expr::Array {
+            backing: ArrayBacking::Storage { name, .. },
+            ..
+        } => name.clone(),
+        _ => bail_spirv!("_w_intrinsic_map_into output must be storage array"),
+    };
+
+    let (out_set, out_binding) = constructor
+        .compute_params
+        .get(&output_storage_name)
+        .ok_or_else(|| err_spirv!("Unknown output storage buffer: {}", output_storage_name))?;
+    let (out_buffer_var, out_buffer_elem_type) =
+        constructor.storage_buffers.get(&(*out_set, *out_binding)).ok_or_else(|| {
+            err_spirv!(
+                "Output storage buffer not found for set={}, binding={}",
+                out_set,
+                out_binding
+            )
+        })?;
+    let out_buffer_var = *out_buffer_var;
+    let out_elem_ptr_type =
+        constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, *out_buffer_elem_type);
+
+    // Get input - must be a View into storage for dynamic sizes
+    let input_expr = body.get_expr(args[1]);
+    let (input_base, input_offset_expr, input_size_expr) = match input_expr {
+        Expr::Array {
+            backing: ArrayBacking::View { base, offset },
+            size,
+        } => (*base, *offset, *size),
+        _ => bail_spirv!("_w_intrinsic_map_into input must be a View"),
+    };
+
+    // Get the input storage buffer info
+    let input_base_expr = body.get_expr(input_base);
+    let input_storage_name = match input_base_expr {
+        Expr::Array {
+            backing: ArrayBacking::Storage { name, .. },
+            ..
+        } => name.clone(),
+        _ => bail_spirv!("_w_intrinsic_map_into input View base must be Storage"),
+    };
+
+    let (in_set, in_binding) = constructor
+        .compute_params
+        .get(&input_storage_name)
+        .ok_or_else(|| err_spirv!("Unknown input storage buffer: {}", input_storage_name))?;
+    let (in_buffer_var, in_buffer_elem_type) =
+        constructor.storage_buffers.get(&(*in_set, *in_binding)).ok_or_else(|| {
+            err_spirv!(
+                "Input storage buffer not found for set={}, binding={}",
+                in_set,
+                in_binding
+            )
+        })?;
+    let in_buffer_var = *in_buffer_var;
+    let in_elem_ptr_type =
+        constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, *in_buffer_elem_type);
+
+    // Get input length (from the View's size field) and offset
+    let input_len = lower_expr(constructor, body, input_size_expr)?;
+    let input_offset_val = lower_expr(constructor, body, input_offset_expr)?;
+
+    // Create loop index variable (in the function's variables block)
+    let i32_type = constructor.i32_type;
+    let loop_idx_var = constructor.declare_variable("__map_into_idx", i32_type)?;
+
+    let zero = constructor.const_i32(0);
+    let zero_u32 = constructor.const_u32(0);
+    let one = constructor.const_i32(1);
+    constructor.builder.store(loop_idx_var, zero, None, [])?;
+
+    // Create basic blocks
+    let header_label = constructor.builder.id();
+    let body_label = constructor.builder.id();
+    let continue_label = constructor.builder.id();
+    let merge_label = constructor.builder.id();
+
+    // Branch to header
+    constructor.builder.branch(header_label)?;
+
+    // Header block
+    constructor.builder.begin_block(Some(header_label))?;
+    // Compute condition before loop_merge (SPIR-V requires loop_merge immediately before branch)
+    let i_val = constructor.builder.load(i32_type, None, loop_idx_var, None, [])?;
+    let bool_type = constructor.bool_type;
+    let cond = constructor.builder.s_less_than(bool_type, None, i_val, input_len)?;
+    constructor.builder.loop_merge(merge_label, continue_label, spirv::LoopControl::NONE, [])?;
+    constructor.builder.branch_conditional(cond, body_label, merge_label, [])?;
+
+    // Body block: read from input, apply f, write to output
+    constructor.builder.begin_block(Some(body_label))?;
+
+    let i_val_body = constructor.builder.load(i32_type, None, loop_idx_var, None, [])?;
+
+    // Read from input: input_buffer[input_offset + i]
+    let in_idx = constructor.builder.i_add(i32_type, None, input_offset_val, i_val_body)?;
+    let in_idx_u32 = constructor.builder.bitcast(constructor.u32_type, None, in_idx)?;
+    let in_elem_ptr =
+        constructor.builder.access_chain(in_elem_ptr_type, None, in_buffer_var, [zero_u32, in_idx_u32])?;
+    let input_elem = constructor.builder.load(input_elem_type, None, in_elem_ptr, None, [])?;
+
+    // Apply function: result = f(input_elem)
+    // Note: map_into doesn't support captures currently - the lambda must be a simple function
+    let result_elem =
+        constructor.builder.function_call(output_elem_type, None, map_func_id, [input_elem])?;
+
+    // Write to output: output_buffer[offset + i]
+    let out_idx = constructor.builder.i_add(i32_type, None, offset_val, i_val_body)?;
+    let out_idx_u32 = constructor.builder.bitcast(constructor.u32_type, None, out_idx)?;
+    let out_elem_ptr = constructor.builder.access_chain(
+        out_elem_ptr_type,
+        None,
+        out_buffer_var,
+        [zero_u32, out_idx_u32],
+    )?;
+    constructor.builder.store(out_elem_ptr, result_elem, None, [])?;
+
+    // Branch to continue
+    constructor.builder.branch(continue_label)?;
+
+    // Continue block: increment index
+    constructor.builder.begin_block(Some(continue_label))?;
+    let i_val_cont = constructor.builder.load(i32_type, None, loop_idx_var, None, [])?;
+    let i_next = constructor.builder.i_add(i32_type, None, i_val_cont, one)?;
+    constructor.builder.store(loop_idx_var, i_next, None, [])?;
+    constructor.builder.branch(header_label)?;
+
+    // Merge block
+    constructor.builder.begin_block(Some(merge_label))?;
+
+    // Return unit (void-like constant)
+    Ok(constructor.const_i32(0))
+}
+
 /// Lower `_w_intrinsic_length`: length [a,b,c] = 3
 fn lower_length(constructor: &mut Constructor, body: &Body, args: &[ExprId]) -> Result<spirv::Word> {
     if args.len() != 1 {
@@ -3482,10 +3813,55 @@ fn lower_length(constructor: &mut Constructor, body: &Body, args: &[ExprId]) -> 
     }
 
     let arr_ty = body.get_type(args[0]);
-    let (size, _) = extract_array_info(constructor, arr_ty)?;
 
-    // Return the size as an i32 constant
-    Ok(constructor.const_i32(size as i32))
+    // Check if the array has a static size in its type
+    let static_size = match arr_ty {
+        PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 3 => match &type_args[2] {
+            PolyType::Constructed(TypeName::Size(n), _) => Some(*n as i32),
+            _ => None,
+        },
+        _ => None,
+    };
+
+    if let Some(size) = static_size {
+        // Static size - return as constant
+        Ok(constructor.const_i32(size))
+    } else {
+        // Dynamic size - check if this is a storage-backed array
+        let arr_expr = body.get_expr(args[0]);
+        match arr_expr {
+            Expr::Array {
+                backing: ArrayBacking::Storage { name, .. },
+                ..
+            } => {
+                // Use OpArrayLength to get the runtime size
+                let (set, binding) = constructor
+                    .compute_params
+                    .get(name)
+                    .ok_or_else(|| err_spirv!("Unknown storage buffer: {}", name))?;
+                let (buffer_var, _) =
+                    constructor.storage_buffers.get(&(*set, *binding)).ok_or_else(|| {
+                        err_spirv!("Storage buffer not found for set={}, binding={}", set, binding)
+                    })?;
+                // OpArrayLength returns u32, we need i32
+                let u32_type = constructor.builder.type_int(32, 0);
+                let len_u32 = constructor.builder.array_length(
+                    u32_type,
+                    None,
+                    *buffer_var,
+                    0, // Member index (the runtime array is at member 0)
+                )?;
+                // Convert to i32
+                Ok(constructor.builder.bitcast(constructor.i32_type, None, len_u32)?)
+            }
+            _ => {
+                bail_spirv!(
+                    "Cannot get length of dynamically-sized non-storage array: {:?}",
+                    arr_expr
+                )
+            }
+        }
+    }
 }
 
 /// Lower `_w_intrinsic_replicate`: replicate 3 x = [x, x, x]

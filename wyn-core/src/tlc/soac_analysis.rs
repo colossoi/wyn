@@ -154,6 +154,10 @@ pub struct TlcSoacInfo {
     pub nesting_depth: u32,
     /// Parent SOAC if nested.
     pub parent: Option<TermId>,
+    /// True if the input array traces back to an entry parameter.
+    /// This is used by the parallelization pass to determine if the SOAC
+    /// can be chunked across threads.
+    pub maps_entry_input: bool,
 }
 
 // =============================================================================
@@ -208,6 +212,9 @@ pub struct SoacAnalyzer<'a> {
     all_defs: HashMap<&'a str, &'a Def>,
     /// Size environment: variable name -> size expression.
     pub(crate) env: ScopeStack<SizeExpr>,
+    /// Entry parameter provenance: variable name -> is from entry param.
+    /// Variables that trace back to entry parameters are candidates for parallelization.
+    pub(crate) is_entry_param: ScopeStack<bool>,
     /// Collected SOAC info for the current entry point.
     pub(crate) results: Vec<TlcSoacInfo>,
     /// Current nesting depth.
@@ -223,6 +230,7 @@ impl<'a> SoacAnalyzer<'a> {
         Self {
             all_defs,
             env: ScopeStack::new(),
+            is_entry_param: ScopeStack::new(),
             results: Vec::new(),
             nesting_depth: 0,
             parent_soac: None,
@@ -233,6 +241,7 @@ impl<'a> SoacAnalyzer<'a> {
     /// Reset the analyzer for a new entry point.
     fn reset(&mut self) {
         self.env = ScopeStack::new();
+        self.is_entry_param = ScopeStack::new();
         self.results.clear();
         self.nesting_depth = 0;
         self.parent_soac = None;
@@ -270,16 +279,25 @@ impl<'a> SoacAnalyzer<'a> {
 
                 // Extract size from RHS and bind
                 let rhs_size = self.size_of_term(rhs);
+                // Track whether RHS traces back to entry param
+                let is_entry = self.is_from_entry_param(rhs);
                 self.env.push_scope();
+                self.is_entry_param.push_scope();
                 self.env.insert(name.clone(), rhs_size);
+                self.is_entry_param.insert(name.clone(), is_entry);
                 self.analyze_term(body);
+                self.is_entry_param.pop_scope();
                 self.env.pop_scope();
             }
 
             TermKind::Lam { param, body, .. } => {
                 self.env.push_scope();
+                self.is_entry_param.push_scope();
                 self.env.insert(param.clone(), SizeExpr::Unknown);
+                // Lambda parameters are not entry params
+                self.is_entry_param.insert(param.clone(), false);
                 self.analyze_term(body);
+                self.is_entry_param.pop_scope();
                 self.env.pop_scope();
             }
 
@@ -327,46 +345,55 @@ impl<'a> SoacAnalyzer<'a> {
 
     /// Handle a detected SOAC call.
     fn handle_soac(&mut self, term: &Term, kind: SoacKind, args: &[&Term]) {
-        // Determine which argument is the "main" array for size
-        let (input_size, lambda_to_analyze) = match kind {
+        // Determine which argument is the "main" array for size and entry param check
+        let (input_size, input_array, lambda_to_analyze) = match kind {
             SoacKind::Map | SoacKind::InplaceMap => {
                 // map(f, arr) - arr is args[1]
-                let arr_size = args.get(1).map(|a| self.size_of_term(a)).unwrap_or(SizeExpr::Unknown);
+                let arr = args.get(1).copied();
+                let arr_size = arr.map(|a| self.size_of_term(a)).unwrap_or(SizeExpr::Unknown);
                 let lambda = args.first().copied();
-                (arr_size, lambda)
+                (arr_size, arr, lambda)
             }
             SoacKind::Reduce | SoacKind::Scan => {
                 // reduce(op, ne, arr) - arr is args[2]
-                let arr_size = args.get(2).map(|a| self.size_of_term(a)).unwrap_or(SizeExpr::Unknown);
+                let arr = args.get(2).copied();
+                let arr_size = arr.map(|a| self.size_of_term(a)).unwrap_or(SizeExpr::Unknown);
                 let lambda = args.first().copied();
-                (arr_size, lambda)
+                (arr_size, arr, lambda)
             }
             SoacKind::Filter => {
                 // filter(pred, arr) - arr is args[1]
-                let arr_size = args.get(1).map(|a| self.size_of_term(a)).unwrap_or(SizeExpr::Unknown);
+                let arr = args.get(1).copied();
+                let arr_size = arr.map(|a| self.size_of_term(a)).unwrap_or(SizeExpr::Unknown);
                 let lambda = args.first().copied();
-                (arr_size, lambda)
+                (arr_size, arr, lambda)
             }
             SoacKind::Scatter => {
                 // scatter(dest, indices, values) - indices determines iteration count
-                let idx_size = args.get(1).map(|a| self.size_of_term(a)).unwrap_or(SizeExpr::Unknown);
-                (idx_size, None)
+                let arr = args.get(1).copied();
+                let idx_size = arr.map(|a| self.size_of_term(a)).unwrap_or(SizeExpr::Unknown);
+                (idx_size, arr, None)
             }
             SoacKind::Hist1D => {
                 // hist_1d(dest, op, ne, indices, values) - indices determines iteration count
-                let idx_size = args.get(3).map(|a| self.size_of_term(a)).unwrap_or(SizeExpr::Unknown);
+                let arr = args.get(3).copied();
+                let idx_size = arr.map(|a| self.size_of_term(a)).unwrap_or(SizeExpr::Unknown);
                 let lambda = args.get(1).copied();
-                (idx_size, lambda)
+                (idx_size, arr, lambda)
             }
             SoacKind::Zip => {
                 // zip(arr1, arr2) - both should be same size
-                let arr_size = args.first().map(|a| self.size_of_term(a)).unwrap_or(SizeExpr::Unknown);
-                (arr_size, None)
+                let arr = args.first().copied();
+                let arr_size = arr.map(|a| self.size_of_term(a)).unwrap_or(SizeExpr::Unknown);
+                (arr_size, arr, None)
             }
         };
 
         // Compute output size
         let output_size = self.output_size_for_soac(kind, &input_size);
+
+        // Check if the input array traces back to an entry parameter
+        let maps_entry_input = input_array.map(|a| self.is_from_entry_param(a)).unwrap_or(false);
 
         // Record this SOAC
         self.results.push(TlcSoacInfo {
@@ -377,6 +404,7 @@ impl<'a> SoacAnalyzer<'a> {
             output_size,
             nesting_depth: self.nesting_depth,
             parent: self.parent_soac,
+            maps_entry_input,
         });
 
         // Analyze lambda body at increased nesting depth
@@ -393,7 +421,7 @@ impl<'a> SoacAnalyzer<'a> {
         }
     }
 
-    /// Analyze a function call, propagating size info to the callee.
+    /// Analyze a function call, propagating size info and entry param status to the callee.
     fn analyze_function_call(&mut self, def: &Def, args: &[&Term]) {
         // Mark as analyzing to prevent recursion
         self.analyzing.insert(def.name.clone());
@@ -401,17 +429,21 @@ impl<'a> SoacAnalyzer<'a> {
         // Extract parameter names from curried lambdas
         let param_names = extract_param_names(&def.body);
 
-        // Push scope and bind params to arg sizes
+        // Push scope and bind params to arg sizes and entry param status
         self.env.push_scope();
+        self.is_entry_param.push_scope();
         for (param, arg) in param_names.iter().zip(args.iter()) {
             let arg_size = self.size_of_term(arg);
+            let is_entry = self.is_from_entry_param(arg);
             self.env.insert(param.clone(), arg_size);
+            self.is_entry_param.insert(param.clone(), is_entry);
         }
 
         // Analyze callee body, skipping outer lambdas (params already bound)
         let inner_body = skip_lambdas(&def.body, param_names.len());
         self.analyze_term(inner_body);
 
+        self.is_entry_param.pop_scope();
         self.env.pop_scope();
         self.analyzing.remove(&def.name);
     }
@@ -499,6 +531,23 @@ impl<'a> SoacAnalyzer<'a> {
             SoacKind::Filter | SoacKind::Scatter => SizeExpr::BoundedBy(Box::new(input.clone())),
             // Hist1D output size is the dest size (first arg), not indices
             SoacKind::Hist1D => SizeExpr::Unknown,
+        }
+    }
+
+    /// Check if a term traces back to an entry parameter.
+    ///
+    /// This is used to determine if a SOAC's input array comes from an entry
+    /// parameter, which means it can be parallelized by chunking.
+    fn is_from_entry_param(&self, term: &Term) -> bool {
+        match &term.kind {
+            TermKind::Var(name) => {
+                // Look up in entry param tracking environment
+                self.is_entry_param.lookup(name).copied().unwrap_or(false)
+            }
+            // For other terms, we conservatively return false.
+            // In the future, we could trace through let bindings in the term itself,
+            // but for now we rely on the scope tracking done during analyze_term.
+            _ => false,
         }
     }
 }
@@ -603,11 +652,13 @@ pub fn analyze_program(program: &Program) -> SoacAnalysis {
                 let hints = extract_size_hints(entry);
                 let param_names = extract_param_names(&def.body);
 
-                // Initialize environment with hinted sizes
+                // Initialize environment with hinted sizes and mark as entry params
                 for param_name in &param_names {
                     let size =
                         hints.get(param_name).map(|h| SizeExpr::Hint(*h)).unwrap_or(SizeExpr::Unknown);
                     analyzer.env.insert(param_name.clone(), size);
+                    // All entry point parameters are entry params (can be parallelized)
+                    analyzer.is_entry_param.insert(param_name.clone(), true);
                 }
 
                 // Analyze the entry body, skipping the outer lambdas (params already bound)

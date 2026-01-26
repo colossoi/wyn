@@ -145,14 +145,16 @@ impl<'a> TlcToMir<'a> {
             });
             self.locals.insert(name.clone(), local_id);
 
-            // Get decoration from original AST pattern
+            // Get decoration and size_hint from original AST pattern
             let decoration = entry.params.get(i).and_then(|p| self.extract_io_decoration(p));
+            let size_hint = entry.params.get(i).and_then(|p| self.extract_size_hint(p));
 
             inputs.push(mir::EntryInput {
                 local: local_id,
                 name: name.clone(),
                 ty: ty.clone(),
                 decoration,
+                size_hint,
             });
         }
 
@@ -203,6 +205,22 @@ impl<'a> TlcToMir<'a> {
                 self.extract_io_decoration(inner)
             }
             PatternKind::Typed(inner, _) => self.extract_io_decoration(inner),
+            _ => None,
+        }
+    }
+
+    /// Extract size hint from a pattern (for compute shader arrays)
+    fn extract_size_hint(&self, pattern: &ast::Pattern) -> Option<u32> {
+        match &pattern.kind {
+            PatternKind::Attributed(attrs, inner) => {
+                for attr in attrs {
+                    if let ast::Attribute::SizeHint(n) = attr {
+                        return Some(*n);
+                    }
+                }
+                self.extract_size_hint(inner)
+            }
+            PatternKind::Typed(inner, _) => self.extract_size_hint(inner),
             _ => None,
         }
     }

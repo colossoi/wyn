@@ -43,11 +43,15 @@ impl ParallelismAnalysis {
         let mut soacs = Vec::new();
 
         for (idx, expr) in body.exprs.iter().enumerate() {
-            if let Expr::Call { func, .. } = expr {
-                if let Some(parallelism) = classify_soac(func) {
+            let name = match expr {
+                Expr::Intrinsic { name, .. } => Some(name.as_str()),
+                _ => None,
+            };
+            if let Some(name) = name {
+                if let Some(parallelism) = classify_soac(name) {
                     soacs.push(SoacInfo {
                         expr_id: ExprId(idx as u32),
-                        soac_name: func.clone(),
+                        soac_name: name.to_string(),
                         parallelism,
                     });
                 }
@@ -203,8 +207,8 @@ fn find_single_map_at_root(body: &Body) -> Option<(ExprId, ExprId, ExprId)> {
             Expr::Let { body: inner, .. } => {
                 current = *inner;
             }
-            Expr::Call { func, args }
-                if func == "_w_intrinsic_map" || func == "_w_intrinsic_inplace_map" || func == "map" =>
+            Expr::Intrinsic { name, args }
+                if name == "_w_intrinsic_map" || name == "_w_intrinsic_inplace_map" =>
             {
                 // Found the map! Should have 2 args: closure, array
                 if args.len() == 2 {

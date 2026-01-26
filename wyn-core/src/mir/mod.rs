@@ -20,6 +20,7 @@ use polytype::Type;
 pub mod binding_allocator;
 pub mod layout;
 pub mod parallelism;
+pub mod soac_analysis;
 
 #[cfg(test)]
 mod tests;
@@ -580,6 +581,8 @@ pub struct EntryInput {
     pub ty: Type<TypeName>,
     /// I/O decoration.
     pub decoration: Option<IoDecoration>,
+    /// Size hint from `#[size_hint(N)]` attribute (for compute shader arrays).
+    pub size_hint: Option<u32>,
 }
 
 /// An output from a shader entry point.

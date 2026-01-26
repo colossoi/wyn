@@ -654,6 +654,7 @@ fn specialize_def(def: Def, subst: &Substitution, new_name: &str) -> Result<Def>
                         name: i.name,
                         ty: apply_subst_with_context(&i.ty, subst, &ctx),
                         decoration: i.decoration,
+                        size_hint: i.size_hint,
                     }
                 })
                 .collect();

@@ -570,3 +570,225 @@ fn test_nested_soacs_with_different_hints() {
     // Inner map sees Unknown (row comes from lambda param, not tracked)
     assert_eq!(inner_soac.input_size, SizeExpr::Unknown);
 }
+
+// =============================================================================
+// Tests for maps_entry_input tracking
+// =============================================================================
+
+#[test]
+fn test_map_over_entry_param_detected() {
+    // Scenario:
+    // entry main(arr: []f32) []f32 = map(|x| x * 2.0, arr)
+    // The map should have maps_entry_input = true.
+
+    let mut counter = 0u32;
+
+    // Build: map(|x| x, arr)
+    let x_ref = mk_var(&mut counter, "x", f32_ty());
+    let map_lambda = mk_lam(&mut counter, "x", f32_ty(), x_ref);
+    let arr_ref = mk_var(&mut counter, "arr", array_ty(f32_ty()));
+    let map_call = mk_curried_call(&mut counter, "map", vec![map_lambda, arr_ref], array_ty(f32_ty()));
+
+    // Set up analyzer with arr marked as entry param
+    let all_defs: HashMap<&str, &Def> = HashMap::new();
+    let mut analyzer = SoacAnalyzer::new(all_defs);
+    analyzer.env.insert("arr".to_string(), SizeExpr::Unknown);
+    analyzer.is_entry_param.insert("arr".to_string(), true);
+
+    analyzer.analyze_term(&map_call);
+
+    assert_eq!(analyzer.results.len(), 1);
+    assert!(analyzer.results[0].maps_entry_input);
+}
+
+#[test]
+fn test_map_through_helper_function_propagates_entry_param() {
+    // Scenario:
+    // def helper(data: []f32) = map(|x| x * 2.0, data)
+    // entry main(input: []f32) = helper(input)
+    //
+    // The map inside `helper` should have maps_entry_input = true because
+    // `data` was passed from entry param `input`.
+
+    let mut counter = 0u32;
+
+    // Build helper: Lam("data", map(|x| x, data))
+    let x_ref = mk_var(&mut counter, "x", f32_ty());
+    let lambda = mk_lam(&mut counter, "x", f32_ty(), x_ref);
+    let data_ref = mk_var(&mut counter, "data", array_ty(f32_ty()));
+    let map_call = mk_curried_call(&mut counter, "map", vec![lambda, data_ref], array_ty(f32_ty()));
+    let helper_body = mk_lam(&mut counter, "data", array_ty(f32_ty()), map_call);
+
+    let helper_def = Def {
+        name: "helper".to_string(),
+        ty: arrow_ty(array_ty(f32_ty()), array_ty(f32_ty())),
+        body: helper_body,
+        meta: DefMeta::Function,
+        arity: 1,
+    };
+
+    // Set up analyzer with helper definition
+    let all_defs: HashMap<&str, &Def> = [("helper", &helper_def)].into_iter().collect();
+    let mut analyzer = SoacAnalyzer::new(all_defs);
+
+    // Mark `input` as entry param
+    analyzer.env.insert("input".to_string(), SizeExpr::Unknown);
+    analyzer.is_entry_param.insert("input".to_string(), true);
+
+    // Build the call: helper(input)
+    let input_ref = mk_var(&mut counter, "input", array_ty(f32_ty()));
+    let call_to_helper = mk_curried_call(&mut counter, "helper", vec![input_ref], array_ty(f32_ty()));
+
+    analyzer.analyze_term(&call_to_helper);
+
+    // Should find one map SOAC with maps_entry_input = true
+    assert_eq!(analyzer.results.len(), 1);
+    assert!(
+        analyzer.results[0].maps_entry_input,
+        "Map inside helper should trace back to entry param"
+    );
+}
+
+#[test]
+fn test_map_over_local_array_not_entry_param() {
+    // Scenario:
+    // entry main(n: i32) []f32 =
+    //   let local_arr = some_function() in
+    //   map(|x| x * 2.0, local_arr)
+    //
+    // The map should have maps_entry_input = false because local_arr
+    // does not come from an entry parameter.
+
+    let mut counter = 0u32;
+
+    // Build: let local_arr = ... in map(|x| x, local_arr)
+    // Simplified: just map over local_arr that's not from entry param
+    let x_ref = mk_var(&mut counter, "x", f32_ty());
+    let map_lambda = mk_lam(&mut counter, "x", f32_ty(), x_ref);
+    let local_arr_ref = mk_var(&mut counter, "local_arr", array_ty(f32_ty()));
+    let map_call = mk_curried_call(
+        &mut counter,
+        "map",
+        vec![map_lambda, local_arr_ref],
+        array_ty(f32_ty()),
+    );
+
+    // Wrap in let binding to simulate local array
+    let rhs = mk_var(&mut counter, "some_array_source", array_ty(f32_ty())); // simulating a non-entry source
+    let let_expr = mk_let(&mut counter, "local_arr", rhs, map_call);
+
+    // Set up analyzer - n is entry param but not an array
+    let all_defs: HashMap<&str, &Def> = HashMap::new();
+    let mut analyzer = SoacAnalyzer::new(all_defs);
+    // some_array_source is not an entry param
+    analyzer.env.insert("some_array_source".to_string(), SizeExpr::Unknown);
+    analyzer.is_entry_param.insert("some_array_source".to_string(), false);
+
+    analyzer.analyze_term(&let_expr);
+
+    assert_eq!(analyzer.results.len(), 1);
+    assert!(
+        !analyzer.results[0].maps_entry_input,
+        "Map over local array should not be marked as entry input"
+    );
+}
+
+#[test]
+fn test_map_over_entry_param_via_let_binding() {
+    // Scenario:
+    // entry main(arr: []f32) []f32 =
+    //   let data = arr in
+    //   map(|x| x * 2.0, data)
+    //
+    // The map should have maps_entry_input = true because data = arr
+    // and arr is an entry parameter.
+
+    let mut counter = 0u32;
+
+    // Build: let data = arr in map(|x| x, data)
+    let x_ref = mk_var(&mut counter, "x", f32_ty());
+    let map_lambda = mk_lam(&mut counter, "x", f32_ty(), x_ref);
+    let data_ref = mk_var(&mut counter, "data", array_ty(f32_ty()));
+    let map_call = mk_curried_call(
+        &mut counter,
+        "map",
+        vec![map_lambda, data_ref],
+        array_ty(f32_ty()),
+    );
+
+    let arr_ref = mk_var(&mut counter, "arr", array_ty(f32_ty()));
+    let let_expr = mk_let(&mut counter, "data", arr_ref, map_call);
+
+    // Set up analyzer with arr as entry param
+    let all_defs: HashMap<&str, &Def> = HashMap::new();
+    let mut analyzer = SoacAnalyzer::new(all_defs);
+    analyzer.env.insert("arr".to_string(), SizeExpr::Unknown);
+    analyzer.is_entry_param.insert("arr".to_string(), true);
+
+    analyzer.analyze_term(&let_expr);
+
+    assert_eq!(analyzer.results.len(), 1);
+    assert!(
+        analyzer.results[0].maps_entry_input,
+        "Map over data (which = arr) should trace back to entry param"
+    );
+}
+
+#[test]
+fn test_nested_map_inner_not_entry_param() {
+    // Scenario:
+    // entry main(data: []f32) =
+    //   map(|x| map(|y| y, [1, 2, 3]), data)
+    //
+    // Outer map: maps_entry_input = true (data is entry param)
+    // Inner map: maps_entry_input = false (literal array, not entry param)
+
+    let mut counter = 0u32;
+
+    // Build inner map: map(|y| y, [1, 2, 3]) - but we simulate with a non-entry var
+    let y_ref = mk_var(&mut counter, "y", f32_ty());
+    let inner_lambda = mk_lam(&mut counter, "y", f32_ty(), y_ref);
+    // For simplicity, use "literal_arr" variable that's not an entry param
+    let literal_ref = mk_var(&mut counter, "literal_arr", array_ty(f32_ty()));
+    let inner_map = mk_curried_call(
+        &mut counter,
+        "map",
+        vec![inner_lambda, literal_ref],
+        array_ty(f32_ty()),
+    );
+
+    // Build outer map: map(|x| inner_map, data)
+    let outer_lambda = mk_lam(&mut counter, "x", f32_ty(), inner_map);
+    let data_ref = mk_var(&mut counter, "data", array_ty(f32_ty()));
+    let outer_map = mk_curried_call(
+        &mut counter,
+        "map",
+        vec![outer_lambda, data_ref],
+        array_ty(f32_ty()),
+    );
+
+    // Set up analyzer
+    let all_defs: HashMap<&str, &Def> = HashMap::new();
+    let mut analyzer = SoacAnalyzer::new(all_defs);
+    analyzer.env.insert("data".to_string(), SizeExpr::Unknown);
+    analyzer.is_entry_param.insert("data".to_string(), true);
+    // literal_arr is not an entry param
+    analyzer.env.insert("literal_arr".to_string(), SizeExpr::Const(3));
+    analyzer.is_entry_param.insert("literal_arr".to_string(), false);
+
+    analyzer.analyze_term(&outer_map);
+
+    assert_eq!(analyzer.results.len(), 2);
+
+    let outer_soac = analyzer.results.iter().find(|s| s.nesting_depth == 0).unwrap();
+    let inner_soac = analyzer.results.iter().find(|s| s.nesting_depth == 1).unwrap();
+
+    assert!(
+        outer_soac.maps_entry_input,
+        "Outer map over data should be entry input"
+    );
+    assert!(
+        !inner_soac.maps_entry_input,
+        "Inner map over literal should not be entry input"
+    );
+}

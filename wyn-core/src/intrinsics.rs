@@ -467,6 +467,27 @@ impl IntrinsicSource {
         let result_array = Self::array_type(pair_type, s, n);
         self.register_poly("_w_intrinsic_zip", vec![array_a, array_b], result_array);
 
+        // _w_intrinsic_map_into : (a -> b) -> Array[a, s1, n] -> Array[b, s2, m] -> i32 -> ()
+        // Map f over input array and write results to output buffer starting at offset.
+        // Used by soac_parallelize for compute shaders with separate input/output buffers.
+        // Unlike map (which returns a new array), map_into writes directly to the destination.
+        let a = ctx.new_variable();
+        let b = ctx.new_variable();
+        let n = ctx.new_variable();
+        let m = ctx.new_variable();
+        let s1 = ctx.new_variable();
+        let s2 = ctx.new_variable();
+        let f_type = Type::arrow(a.clone(), b.clone());
+        let input_array = Self::array_type(a, s1, n);
+        let output_array = Self::array_type(b, s2, m);
+        let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+        let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
+        self.register_poly(
+            "_w_intrinsic_map_into",
+            vec![f_type, input_array, output_array, i32_ty],
+            unit_ty,
+        );
+
         // _w_intrinsic_scatter : Array[a, s1, n] -> Array[i32, s2, m] -> Array[a, s3, m] -> Array[a, s1, n]
         // scatter dest indices values: write values[i] to dest[indices[i]]
         let a = ctx.new_variable();
