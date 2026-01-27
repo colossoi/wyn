@@ -7,9 +7,10 @@ use std::collections::HashMap;
 
 /// Implementation strategy for a builtin function
 ///
-/// Builtins are organized into two categories:
+/// Builtins are organized into three categories:
 /// 1. Core primitives (PrimOp): Map fairly directly to backend operations
 /// 2. Genuine intrinsics (Intrinsic): Require backend-specific lowering
+/// 3. Linked SPIR-V (LinkedSpirv): External functions linked from pre-compiled SPIR-V
 #[derive(Debug, Clone, PartialEq)]
 pub enum BuiltinImpl {
     /// Core primitive operation: maps fairly directly to SPIR-V/backend ops
@@ -19,6 +20,12 @@ pub enum BuiltinImpl {
     /// Genuine intrinsic: needs backend-specific lowering, can't be written in language
     /// Examples: atomics, barriers, subgroup ops, uninit/poison
     Intrinsic(Intrinsic),
+
+    /// Linked SPIR-V: function imported from external pre-compiled SPIR-V module
+    /// The compiler generates an Import decoration and forward declaration,
+    /// then the final binary is linked with spirv-link.
+    /// Contains: linkage name (the string in OpDecorate LinkageAttributes)
+    LinkedSpirv(String),
 }
 
 /// Core primitive operations that map fairly directly to SPIR-V/backend ops
@@ -125,6 +132,7 @@ impl ImplSource {
         source.register_float_modules();
         source.register_vector_operations();
         source.register_matrix_operations();
+        source.register_linked_spirv();
 
         source
     }
@@ -745,6 +753,16 @@ impl ImplSource {
         self.register("mul_mat_mat", BuiltinImpl::PrimOp(PrimOp::MatrixTimesMatrix));
         self.register("mul_mat_vec", BuiltinImpl::PrimOp(PrimOp::MatrixTimesVector));
         self.register("mul_vec_mat", BuiltinImpl::PrimOp(PrimOp::VectorTimesMatrix));
+    }
+
+    /// Register functions implemented via linked external SPIR-V modules
+    fn register_linked_spirv(&mut self) {
+        // SHA256 compression: ([8]u32, [16]u32) -> [8]u32
+        // Linked from sha256_compress.spv
+        self.register(
+            "_w_intrinsic_sha256_block_with_state",
+            BuiltinImpl::LinkedSpirv("sha256_compress".to_string()),
+        );
     }
 }
 

@@ -135,6 +135,12 @@ struct Constructor {
 
     /// Compute shader parameters: maps param name to (set, binding) for storage buffer lookup
     compute_params: HashMap<String, (u32, u32)>,
+
+    /// Linked SPIR-V functions: linkage_name -> function_id
+    linked_functions: HashMap<String, spirv::Word>,
+
+    /// Whether we need linkage capability
+    needs_linkage: bool,
 }
 
 impl Constructor {
@@ -189,6 +195,8 @@ impl Constructor {
             inplace_nodes: HashSet::new(),
             storage_buffers: HashMap::new(),
             compute_params: HashMap::new(),
+            linked_functions: HashMap::new(),
+            needs_linkage: false,
         }
     }
 
@@ -205,6 +213,54 @@ impl Constructor {
         let ty = self.builder.type_pointer(None, storage_class, pointee_id);
         self.ptr_type_cache.insert(key, ty);
         ty
+    }
+
+    /// Get or declare a linked (imported) external function
+    /// Creates an OpFunction with Import linkage decoration
+    fn get_or_declare_linked_function(
+        &mut self,
+        linkage_name: &str,
+        arg_types: &[spirv::Word],
+        return_type: spirv::Word,
+    ) -> Result<spirv::Word> {
+        // Return cached function if already declared
+        if let Some(&func_id) = self.linked_functions.get(linkage_name) {
+            return Ok(func_id);
+        }
+
+        // Enable linkage capability if not already done
+        if !self.needs_linkage {
+            self.builder.capability(Capability::Linkage);
+            self.needs_linkage = true;
+        }
+
+        // Create function type
+        let func_type = self.builder.type_function(return_type, arg_types.to_vec());
+
+        // Declare the function (empty body - will be linked)
+        let func_id = self.builder.begin_function(
+            return_type,
+            None,
+            spirv::FunctionControl::NONE,
+            func_type,
+        )?;
+
+        // Add Import linkage decoration
+        self.builder.decorate(
+            func_id,
+            spirv::Decoration::LinkageAttributes,
+            [
+                Operand::LiteralString(linkage_name.to_string()),
+                Operand::LinkageType(spirv::LinkageType::Import),
+            ],
+        );
+
+        // End the empty function body
+        self.builder.end_function()?;
+
+        // Cache and return
+        self.linked_functions.insert(linkage_name.to_string(), func_id);
+        Ok(func_id)
     }
 
     /// Convert a polytype Type to a SPIR-V type ID
@@ -2083,6 +2139,12 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
             let arg_ids: Vec<spirv::Word> =
                 args.iter().map(|&a| lower_expr(constructor, body, a)).collect::<Result<Vec<_>>>()?;
 
+            // Collect argument types for linked function declarations
+            let arg_types: Vec<spirv::Word> = args
+                .iter()
+                .map(|&a| constructor.ast_type_to_spirv(body.get_type(a)))
+                .collect();
+
             // Check for builtin vector constructors
             match func.as_str() {
                 "vec2" | "vec3" | "vec4" => {
@@ -2278,6 +2340,15 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                                         Ok(constructor.builder.load(arr_type, None, arr_var, None, [])?)
                                     }
                                 }
+                            }
+                            BuiltinImpl::LinkedSpirv(linkage_name) => {
+                                let linkage_name = linkage_name.clone();
+                                let func_id = constructor.get_or_declare_linked_function(
+                                    &linkage_name,
+                                    &arg_types,
+                                    result_type,
+                                )?;
+                                Ok(constructor.builder.function_call(result_type, None, func_id, arg_ids)?)
                             }
                         }
                     } else {

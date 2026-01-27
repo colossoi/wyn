@@ -830,6 +830,9 @@ impl<'a> LowerCtx<'a> {
             BuiltinImpl::Intrinsic(intr) => {
                 bail_glsl!("Intrinsic {:?} not supported in GLSL", intr)
             }
+            BuiltinImpl::LinkedSpirv(name) => {
+                bail_glsl!("Linked SPIR-V function '{}' not supported in GLSL target", name)
+            }
         }
     }
 
