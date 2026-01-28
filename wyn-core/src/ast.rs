@@ -227,6 +227,7 @@ pub enum Declaration {
     Uniform(UniformDecl), // Uniform declarations (no initializer)
     Storage(StorageDecl), // Storage buffer declarations
     Sig(SigDecl),
+    Extern(ExternDecl),             // External linked SPIR-V function
     TypeBind(TypeBind),             // Type declarations
     Module(ModuleDecl),             // Module and functor declarations
     ModuleTypeBind(ModuleTypeBind), // Module type declarations
@@ -255,6 +256,8 @@ pub enum Attribute {
     /// Hint for the expected size of a dynamic array (in elements).
     /// Used for parallelization decisions. Ignored on non-arrays or statically sized arrays.
     SizeHint(u32),
+    /// Linked SPIR-V function - the string is the linkage name for spirv-link
+    Linked(String),
 }
 
 impl Attribute {
@@ -373,6 +376,17 @@ pub enum StorageAccess {
     WriteOnly,
     #[default]
     ReadWrite,
+}
+
+/// External function declaration - linked from pre-compiled SPIR-V
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExternDecl {
+    pub name: String,             // Wyn-visible function name
+    pub linkage_name: String,     // SPIR-V linkage name (from #[linked("...")])
+    pub size_params: Vec<String>, // Size parameters: [n], [m]
+    pub type_params: Vec<String>, // Type parameters: 'a, 'b
+    pub ty: Type,                 // Function type signature
+    pub span: Span,               // Source location
 }
 
 // Module system types

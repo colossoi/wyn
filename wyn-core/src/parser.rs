@@ -131,6 +131,7 @@ impl<'a> Parser<'a> {
                 let path = self.expect_string_literal()?;
                 Ok(Declaration::Import(path))
             }
+            Some(Token::Extern) => self.parse_extern_decl(attributes),
             _ => Err(err_parse_at!(
                 self.current_span(),
                 "Expected declaration, got {:?}",
@@ -304,6 +305,81 @@ impl<'a> Parser<'a> {
             type_params,
             ty,
         })
+    }
+
+    /// Parse an extern declaration for linked SPIR-V functions.
+    /// Syntax: `#[linked("linkage_name")] extern name(param: Type, ...) ReturnType`
+    fn parse_extern_decl(&mut self, attributes: Vec<Attribute>) -> Result<Declaration> {
+        trace!("parse_extern_decl: next token = {:?}", self.peek());
+        let start_span = self.current_span();
+
+        // Find the linked attribute
+        let linkage_name = attributes
+            .iter()
+            .find_map(|attr| {
+                if let Attribute::Linked(name) = attr {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| err_parse!("extern declaration requires #[linked(\"name\")] attribute"))?;
+
+        self.expect(Token::Extern)?;
+        let name = self.expect_identifier()?;
+
+        // Parse optional type parameters: <[n], [m], T>
+        let (size_params, type_params) =
+            if self.check_binop("<") { self.parse_generic_params()? } else { (vec![], vec![]) };
+
+        // Parse parameters: (param: Type, ...)
+        let params = self.parse_extern_params()?;
+
+        // Parse return type (required for extern functions)
+        let ret_type = self.parse_return_type_simple()?;
+
+        let end_span = self.current_span();
+
+        // Build function type from params and return type
+        let ty = if params.is_empty() {
+            ret_type
+        } else {
+            // Build curried function type: T1 -> T2 -> ... -> Ret
+            params.into_iter().rev().fold(ret_type, |acc, (_, param_ty)| types::function(param_ty, acc))
+        };
+
+        Ok(Declaration::Extern(ExternDecl {
+            name,
+            linkage_name,
+            size_params,
+            type_params,
+            ty,
+            span: start_span.merge(&end_span),
+        }))
+    }
+
+    /// Parse extern function parameters: (name: Type, ...)
+    /// Returns (name, type) pairs.
+    fn parse_extern_params(&mut self) -> Result<Vec<(String, Type)>> {
+        self.expect(Token::LeftParen)?;
+        let mut params = Vec::new();
+
+        if !self.check(&Token::RightParen) {
+            loop {
+                let param_name = self.expect_identifier()?;
+                self.expect(Token::Colon)?;
+                let ty = self.parse_type()?;
+                params.push((param_name, ty));
+
+                if !self.check(&Token::Comma) {
+                    break;
+                }
+                self.advance(); // consume comma
+            }
+        }
+
+        self.expect(Token::RightParen)?;
+        Ok(params)
     }
 
     /// Parse an entry point declaration.
@@ -701,6 +777,18 @@ impl<'a> Parser<'a> {
                 self.expect(Token::RightParen)?;
                 self.expect(Token::RightBracket)?;
                 Ok(Attribute::SizeHint(hint))
+            }
+            "linked" => {
+                // Parse linked SPIR-V function: #[linked("linkage_name")]
+                self.expect(Token::LeftParen)?;
+                let linkage_name = if let Some(Token::StringLiteral(s)) = self.advance() {
+                    s.to_string()
+                } else {
+                    bail_parse!("Expected string literal for linkage name");
+                };
+                self.expect(Token::RightParen)?;
+                self.expect(Token::RightBracket)?;
+                Ok(Attribute::Linked(linkage_name))
             }
             _ => Err(err_parse!("Unknown attribute: {}", attr_name)),
         }

@@ -239,7 +239,8 @@ pub fn walk_declaration<V: Visitor>(v: &mut V, d: &Declaration) -> ControlFlow<V
         | Declaration::Module(_)
         | Declaration::ModuleTypeBind(_)
         | Declaration::Open(_)
-        | Declaration::Import(_) => ControlFlow::Continue(()),
+        | Declaration::Import(_)
+        | Declaration::Extern(_) => ControlFlow::Continue(()),
     }
 }
 

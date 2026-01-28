@@ -577,6 +577,7 @@ fn copy_expr_tree(
     let new_expr = match src.get_expr(expr_id) {
         Expr::Local(local_id) => Expr::Local(*local_map.get(local_id).unwrap_or(local_id)),
         Expr::Global(name) => Expr::Global(name.clone()),
+        Expr::Extern(linkage) => Expr::Extern(linkage.clone()),
         Expr::Int(s) => Expr::Int(s.clone()),
         Expr::Float(s) => Expr::Float(s.clone()),
         Expr::Bool(b) => Expr::Bool(*b),

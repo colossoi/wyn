@@ -12,6 +12,24 @@ use crate::types::TypeScheme;
 use polytype::Type;
 use std::collections::HashMap;
 
+/// Extract parameter types and return type from a curried function type.
+/// For `A -> B -> C`, returns `([A, B], C)`.
+fn extract_function_signature(ty: &Type<TypeName>) -> (Vec<Type<TypeName>>, Type<TypeName>) {
+    let mut params = Vec::new();
+    let mut current = ty.clone();
+
+    while let Type::Constructed(TypeName::Arrow, ref args) = current {
+        if args.len() == 2 {
+            params.push(args[0].clone());
+            current = args[1].clone();
+        } else {
+            break;
+        }
+    }
+
+    (params, current)
+}
+
 /// Transforms TLC to MIR.
 pub struct TlcToMir<'a> {
     /// Maps TLC variable names to MIR LocalIds (within current body)
@@ -78,6 +96,42 @@ impl<'a> TlcToMir<'a> {
 
     fn transform_function_def(&mut self, def: &TlcDef) -> MirDef {
         let mut body = Body::new();
+
+        // Check if this is an extern function (linked SPIR-V)
+        if let TermKind::Extern(_linkage_name) = &def.body.kind {
+            // For extern functions, extract parameter types from the function type
+            let (param_types, ret_type) = extract_function_signature(&def.ty);
+
+            // Create synthetic parameter locals
+            let param_ids: Vec<LocalId> = param_types
+                .iter()
+                .enumerate()
+                .map(|(i, ty)| {
+                    let name = format!("arg{}", i);
+                    body.alloc_local(LocalDecl {
+                        name,
+                        span: def.body.span,
+                        ty: ty.clone(),
+                        kind: LocalKind::Param,
+                    })
+                })
+                .collect();
+
+            // Transform the extern marker
+            let root = self.transform_term(&def.body, &mut body);
+            body.set_root(root);
+
+            return MirDef::Function {
+                id: NodeId(0),
+                name: def.name.clone(),
+                params: param_ids,
+                ret_type,
+                scheme: None,
+                attributes: vec![],
+                body,
+                span: def.body.span,
+            };
+        }
 
         // Extract parameters from nested Lams
         let (params, inner_body) = self.extract_params(&def.body);
@@ -489,6 +543,11 @@ impl<'a> TlcToMir<'a> {
                      Operators should always be applied to arguments.",
                     span
                 )
+            }
+
+            // External function reference (linked SPIR-V)
+            TermKind::Extern(linkage_name) => {
+                body.alloc_expr(Expr::Extern(linkage_name.clone()), ty, span, node_id)
             }
         }
     }

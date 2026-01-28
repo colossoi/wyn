@@ -234,6 +234,7 @@ fn apply_type_subst_to_term(term: &Term, subst: &TypeSubst, term_ids: &mut TermI
         TermKind::FloatLit(f) => TermKind::FloatLit(*f),
         TermKind::BoolLit(b) => TermKind::BoolLit(*b),
         TermKind::StringLit(s) => TermKind::StringLit(s.clone()),
+        TermKind::Extern(linkage) => TermKind::Extern(linkage.clone()),
         TermKind::App { func, arg } => TermKind::App {
             func: Box::new(apply_type_subst_to_term(func, subst, term_ids)),
             arg: Box::new(apply_type_subst_to_term(arg, subst, term_ids)),
@@ -431,7 +432,8 @@ fn collect_free_vars(
         | TermKind::BoolLit(_)
         | TermKind::StringLit(_)
         | TermKind::BinOp(_)
-        | TermKind::UnOp(_) => {}
+        | TermKind::UnOp(_)
+        | TermKind::Extern(_) => {}
     }
 }
 
@@ -711,13 +713,14 @@ impl<'a> Defunctionalizer<'a> {
                 }
             }
 
-            // Literals and operators are dynamic
+            // Literals, operators, and extern declarations are dynamic
             TermKind::IntLit(_)
             | TermKind::FloatLit(_)
             | TermKind::BoolLit(_)
             | TermKind::StringLit(_)
             | TermKind::BinOp(_)
-            | TermKind::UnOp(_) => DefuncResult {
+            | TermKind::UnOp(_)
+            | TermKind::Extern(_) => DefuncResult {
                 term,
                 sv: StaticVal::Dynamic,
             },
@@ -1349,7 +1352,8 @@ impl<'a> Defunctionalizer<'a> {
             | TermKind::BoolLit(_)
             | TermKind::StringLit(_)
             | TermKind::BinOp(_)
-            | TermKind::UnOp(_) => term.clone(),
+            | TermKind::UnOp(_)
+            | TermKind::Extern(_) => term.clone(),
 
             TermKind::App { func, arg } => Term {
                 id: self.term_ids.next_id(),

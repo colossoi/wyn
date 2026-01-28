@@ -140,6 +140,7 @@ pub enum Token {
     Type,
     Include,
     With,
+    Extern,
 
     // Identifiers and literals
     Identifier(String),
@@ -224,6 +225,7 @@ fn parse_keyword(input: &str) -> IResult<&str, Token> {
             keyword("case", Token::Case),
         )),
         alt((
+            keyword("extern", Token::Extern),
             keyword("entry", Token::Entry),
             keyword("let", Token::Let),
             keyword("loop", Token::Loop),

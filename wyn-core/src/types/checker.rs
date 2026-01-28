@@ -1462,6 +1462,10 @@ impl<'a> TypeChecker<'a> {
                 // Import declarations should be resolved during elaboration
                 Ok(())
             }
+            Declaration::Extern(extern_decl) => {
+                debug!("Checking Extern declaration: {}", extern_decl.name);
+                self.check_extern_decl(extern_decl)
+            }
         }
     }
 
@@ -1605,6 +1609,17 @@ impl<'a> TypeChecker<'a> {
         // Sig declarations are just type signatures - register them in scope
         let type_scheme = TypeScheme::Monotype(decl.ty.clone());
         self.scope_stack.insert(decl.name.clone(), type_scheme);
+        Ok(())
+    }
+
+    fn check_extern_decl(&mut self, decl: &ExternDecl) -> Result<()> {
+        // Extern declarations register a type signature for a linked SPIR-V function
+        let type_scheme = TypeScheme::Monotype(decl.ty.clone());
+        self.scope_stack.insert(decl.name.clone(), type_scheme);
+        debug!(
+            "Registered extern function '{}' with linkage '{}'",
+            decl.name, decl.linkage_name
+        );
         Ok(())
     }
 

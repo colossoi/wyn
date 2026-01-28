@@ -119,7 +119,8 @@ impl Specializer {
             | TermKind::BoolLit(_)
             | TermKind::StringLit(_)
             | TermKind::BinOp(_)
-            | TermKind::UnOp(_)) => k,
+            | TermKind::UnOp(_)
+            | TermKind::Extern(_)) => k,
         };
 
         Term {

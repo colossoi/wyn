@@ -173,6 +173,9 @@ impl BindingLifter {
             Expr::Global(name) => {
                 new_body.alloc_expr(Expr::Global(name.clone()), ty.clone(), span, node_id)
             }
+            Expr::Extern(linkage) => {
+                new_body.alloc_expr(Expr::Extern(linkage.clone()), ty.clone(), span, node_id)
+            }
             Expr::Int(s) => new_body.alloc_expr(Expr::Int(s.clone()), ty.clone(), span, node_id),
             Expr::Float(s) => new_body.alloc_expr(Expr::Float(s.clone()), ty.clone(), span, node_id),
             Expr::Bool(b) => new_body.alloc_expr(Expr::Bool(*b), ty.clone(), span, node_id),
@@ -708,6 +711,6 @@ fn collect_free_locals_inner(
         }
 
         // Leaf nodes - no locals to collect
-        Expr::Global(_) | Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::String(_) | Expr::Unit => {}
+        Expr::Global(_) | Expr::Extern(_) | Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::String(_) | Expr::Unit => {}
     }
 }

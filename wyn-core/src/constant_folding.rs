@@ -148,6 +148,9 @@ impl ConstantFolder {
             Expr::Global(name) => {
                 Ok(body.alloc_expr(Expr::Global(name.clone()), ty.clone(), span, node_id))
             }
+            Expr::Extern(linkage) => {
+                Ok(body.alloc_expr(Expr::Extern(linkage.clone()), ty.clone(), span, node_id))
+            }
             Expr::Int(s) => Ok(body.alloc_expr(Expr::Int(s.clone()), ty.clone(), span, node_id)),
             Expr::Float(s) => Ok(body.alloc_expr(Expr::Float(s.clone()), ty.clone(), span, node_id)),
             Expr::Bool(b) => Ok(body.alloc_expr(Expr::Bool(*b), ty.clone(), span, node_id)),

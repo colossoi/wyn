@@ -174,6 +174,7 @@ impl<'a> MirSoacAnalyzer<'a> {
             // Terminals - no sub-expressions
             Expr::Local(_)
             | Expr::Global(_)
+            | Expr::Extern(_)
             | Expr::Int(_)
             | Expr::Float(_)
             | Expr::Bool(_)

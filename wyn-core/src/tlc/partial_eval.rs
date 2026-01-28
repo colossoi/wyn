@@ -156,6 +156,9 @@ impl PartialEvaluator {
 
             // Operators as values - residualize
             TermKind::BinOp(_) | TermKind::UnOp(_) => Value::Unknown(term.clone()),
+
+            // Extern declarations - residualize (linked at SPIR-V level)
+            TermKind::Extern(_) => Value::Unknown(term.clone()),
         }
     }
 

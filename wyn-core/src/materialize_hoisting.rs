@@ -74,6 +74,7 @@ fn reorder_expr(
         // Atoms - no children
         Expr::Local(id) => Expr::Local(id),
         Expr::Global(name) => Expr::Global(name),
+        Expr::Extern(linkage) => Expr::Extern(linkage),
         Expr::Int(s) => Expr::Int(s),
         Expr::Float(s) => Expr::Float(s),
         Expr::Bool(b) => Expr::Bool(b),
@@ -505,6 +506,7 @@ fn collect_materializations_rec(
         // Atoms have no children
         Expr::Local(_)
         | Expr::Global(_)
+        | Expr::Extern(_)
         | Expr::Int(_)
         | Expr::Float(_)
         | Expr::Bool(_)
@@ -870,8 +872,12 @@ fn references_any_local_rec(
         }
 
         // Atoms don't reference locals (except Local which is handled above)
-        Expr::Global(_) | Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Unit | Expr::String(_) => {
-            false
-        }
+        Expr::Global(_)
+        | Expr::Extern(_)
+        | Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Bool(_)
+        | Expr::Unit
+        | Expr::String(_) => false,
     }
 }

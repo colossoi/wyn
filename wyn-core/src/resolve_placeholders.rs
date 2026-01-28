@@ -207,6 +207,9 @@ impl PlaceholderResolver {
             | Declaration::Open(_) => {
                 // No type annotations to resolve
             }
+            Declaration::Extern(e) => {
+                e.ty = self.resolve_type(&e.ty);
+            }
         }
     }
 

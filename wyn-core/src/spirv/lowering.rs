@@ -817,11 +817,17 @@ impl<'a> LowerCtx<'a> {
                 body,
                 ..
             } => {
-                // First, ensure all dependencies are lowered
-                self.ensure_deps_lowered(body)?;
+                // Check if this is an extern function declaration
+                if let Expr::Extern(linkage_name) = body.get_expr(body.root) {
+                    // This is an extern function - create an imported function declaration
+                    lower_extern_function(&mut self.constructor, name, params, ret_type, body, linkage_name)?;
+                } else {
+                    // First, ensure all dependencies are lowered
+                    self.ensure_deps_lowered(body)?;
 
-                // Regular function (entry points are now Def::EntryPoint)
-                lower_regular_function(&mut self.constructor, name, params, ret_type, body)?;
+                    // Regular function (entry points are now Def::EntryPoint)
+                    lower_regular_function(&mut self.constructor, name, params, ret_type, body)?;
+                }
             }
             Def::EntryPoint {
                 name,
@@ -1062,6 +1068,74 @@ fn lower_regular_function(
     }
 
     constructor.end_function()?;
+    Ok(())
+}
+
+/// Lower an extern function declaration to a SPIR-V import.
+/// This creates a function declaration with Import linkage that will be resolved by spirv-link.
+fn lower_extern_function(
+    constructor: &mut Constructor,
+    name: &str,
+    params: &[LocalId],
+    ret_type: &PolyType<TypeName>,
+    body: &Body,
+    linkage_name: &str,
+) -> Result<()> {
+    // Add Linkage capability if not already added
+    if !constructor.needs_linkage {
+        constructor.builder.capability(Capability::Linkage);
+        constructor.needs_linkage = true;
+    }
+
+    // Skip empty closure parameters (same logic as regular functions)
+    let skip_first_param = if let Some(&first_param_id) = params.first() {
+        is_empty_closure_type(&body.get_local(first_param_id).ty)
+    } else {
+        false
+    };
+
+    let params_to_lower = if skip_first_param { &params[1..] } else { params };
+
+    // Build parameter types
+    let param_types: Vec<spirv::Word> =
+        params_to_lower.iter().map(|&p| constructor.ast_type_to_spirv(&body.get_local(p).ty)).collect();
+    let return_type = constructor.ast_type_to_spirv(ret_type);
+
+    // Create function type
+    let func_type = constructor.builder.type_function(return_type, param_types.iter().copied());
+
+    // Create the function declaration with no body
+    // Use Pure function control to indicate no side effects
+    let func_id = constructor.builder.begin_function(
+        return_type,
+        None,
+        spirv::FunctionControl::NONE,
+        func_type,
+    )?;
+
+    // Add function parameters (required even for imported functions)
+    for &param_id in params_to_lower {
+        let param_ty = constructor.ast_type_to_spirv(&body.get_local(param_id).ty);
+        constructor.builder.function_parameter(param_ty)?;
+    }
+
+    // End the function (no body for imports)
+    constructor.builder.end_function()?;
+
+    // Decorate with Import linkage
+    constructor.builder.decorate(
+        func_id,
+        spirv::Decoration::LinkageAttributes,
+        [
+            Operand::LiteralString(linkage_name.to_string()),
+            Operand::LinkageType(spirv::LinkageType::Import),
+        ],
+    );
+
+    // Store the function ID for later reference
+    constructor.functions.insert(name.to_string(), func_id);
+    constructor.linked_functions.insert(linkage_name.to_string(), func_id);
+
     Ok(())
 }
 
@@ -1636,6 +1710,17 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                 return Ok(load_id);
             }
             Err(err_spirv!("Undefined global: {}", name))
+        }
+
+        Expr::Extern(linkage_name) => {
+            // Look up the externally-linked function by its linkage name
+            if let Some(&func_id) = constructor.linked_functions.get(linkage_name) {
+                return Ok(func_id);
+            }
+            Err(err_spirv!(
+                "Undefined external function with linkage name: {}",
+                linkage_name
+            ))
         }
 
         Expr::BinOp { op, lhs, rhs } => {

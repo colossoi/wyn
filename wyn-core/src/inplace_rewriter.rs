@@ -160,6 +160,7 @@ impl<'a> InPlaceRewriter<'a> {
             // Leaf nodes - just copy
             Expr::Local(local_id) => Expr::Local(*local_id),
             Expr::Global(name) => Expr::Global(name.clone()),
+            Expr::Extern(linkage) => Expr::Extern(linkage.clone()),
             Expr::Int(s) => Expr::Int(s.clone()),
             Expr::Float(s) => Expr::Float(s.clone()),
             Expr::Bool(b) => Expr::Bool(*b),

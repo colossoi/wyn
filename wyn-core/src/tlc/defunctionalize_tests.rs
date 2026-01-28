@@ -93,6 +93,7 @@ fn print_term(term: &Term, indent: usize) -> String {
                 print_term(body, indent + 1)
             )
         }
+        TermKind::Extern(linkage) => format!("{}Extern(\"{}\")", pad, linkage),
     }
 }
 

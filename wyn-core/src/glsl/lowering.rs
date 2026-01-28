@@ -617,6 +617,13 @@ impl<'a> LowerCtx<'a> {
 
             Expr::Global(name) => Ok(name.clone()),
 
+            Expr::Extern(linkage) => {
+                bail_glsl!(
+                    "Extern functions (linked SPIR-V) not supported in GLSL target: \"{}\"",
+                    linkage
+                )
+            }
+
             // --- Aggregates ---
             Expr::Tuple(elems) => {
                 // Empty tuples should not reach lowering - they indicate a bug

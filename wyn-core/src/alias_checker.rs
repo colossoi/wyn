@@ -1022,7 +1022,7 @@ fn collect_uses(body: &mir::Body, expr_id: mir::ExprId) -> HashSet<mir::LocalId>
         Local(local_id) => {
             uses.insert(*local_id);
         }
-        Global(_) | Int(_) | Float(_) | Bool(_) | String(_) | Unit => {}
+        Global(_) | Extern(_) | Int(_) | Float(_) | Bool(_) | String(_) | Unit => {}
         Tuple(elems) | Vector(elems) => {
             for elem in elems {
                 uses.extend(collect_uses(body, *elem));
@@ -1158,7 +1158,7 @@ fn compute_uses_after(
     let expr = body.get_expr(expr_id);
 
     match expr {
-        Local(_) | Global(_) | Int(_) | Float(_) | Bool(_) | String(_) | Unit => {}
+        Local(_) | Global(_) | Extern(_) | Int(_) | Float(_) | Bool(_) | String(_) | Unit => {}
         Tuple(elems) | Vector(elems) => {
             let elems = elems.clone();
             let mut current_after = after.clone();
@@ -1471,7 +1471,7 @@ fn find_inplace_ops(
             }
         }
         // Recurse into all subexpressions
-        Local(_) | Global(_) | Int(_) | Float(_) | Bool(_) | String(_) | Unit => {}
+        Local(_) | Global(_) | Extern(_) | Int(_) | Float(_) | Bool(_) | String(_) | Unit => {}
         Tuple(elems) | Vector(elems) => {
             let elems = elems.clone();
             for elem in &elems {

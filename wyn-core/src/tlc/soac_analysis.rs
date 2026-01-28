@@ -332,14 +332,15 @@ impl<'a> SoacAnalyzer<'a> {
                 self.analyze_term(body);
             }
 
-            // Literals and variables don't contain SOACs
+            // Literals, variables, and extern declarations don't contain SOACs
             TermKind::Var(_)
             | TermKind::IntLit(_)
             | TermKind::FloatLit(_)
             | TermKind::BoolLit(_)
             | TermKind::StringLit(_)
             | TermKind::BinOp(_)
-            | TermKind::UnOp(_) => {}
+            | TermKind::UnOp(_)
+            | TermKind::Extern(_) => {}
         }
     }
 

@@ -256,6 +256,12 @@ impl AstFormatter {
             Declaration::Import(path) => {
                 self.write_line(&format!("import \"{}\"", path));
             }
+            Declaration::Extern(e) => {
+                self.write_line(&format!(
+                    "#[linked(\"{}\")]\nextern {}: {}",
+                    e.linkage_name, e.name, e.ty
+                ));
+            }
         }
     }
 
@@ -847,6 +853,7 @@ impl Display for mir::Expr {
         match self {
             mir::Expr::Local(id) => write!(f, "local_{}", id.0),
             mir::Expr::Global(name) => write!(f, "{}", name),
+            mir::Expr::Extern(linkage) => write!(f, "extern \"{}\"", linkage),
             mir::Expr::Int(s) => write!(f, "{}", s),
             mir::Expr::Float(s) => write!(f, "{}", s),
             mir::Expr::Bool(b) => write!(f, "{}", b),
@@ -1163,6 +1170,10 @@ impl tlc::Term {
                     write!(f, ")")?;
                 }
                 Ok(())
+            }
+
+            tlc::TermKind::Extern(linkage_name) => {
+                write!(f, "extern \"{}\"", linkage_name)
             }
         }
     }

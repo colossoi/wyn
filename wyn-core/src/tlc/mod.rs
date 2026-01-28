@@ -37,6 +37,22 @@ const FUNDAMENTAL_SOACS: &[(&str, &str)] = &[
 ];
 
 // =============================================================================
+// Helper functions
+// =============================================================================
+
+/// Count the arity of a function type by counting the number of arrow constructors.
+/// For `A -> B -> C`, returns 2.
+/// For non-function types, returns 0.
+fn count_function_arity(ty: &Type<TypeName>) -> usize {
+    match ty {
+        Type::Constructed(TypeName::Arrow, args) if args.len() == 2 => {
+            1 + count_function_arity(&args[1])
+        }
+        _ => 0,
+    }
+}
+
+// =============================================================================
 // TLC Terms
 // =============================================================================
 
@@ -115,6 +131,11 @@ pub enum TermKind {
 
     /// String literal.
     StringLit(String),
+
+    /// External function reference (linked SPIR-V).
+    /// The string is the linkage name for spirv-link.
+    /// The Wyn-visible name comes from the parent Def.
+    Extern(String),
 
     /// Conditional: if cond then t else e
     If {
@@ -261,6 +282,23 @@ impl<'a> Transformer<'a> {
                 }
                 ast::Declaration::Storage(s) => {
                     storage.push(s.clone());
+                }
+                ast::Declaration::Extern(e) => {
+                    // Create a forward declaration for linked SPIR-V function
+                    let body = self.mk_term(
+                        e.ty.clone(),
+                        e.span,
+                        TermKind::Extern(e.linkage_name.clone()),
+                    );
+                    // Compute arity by counting arrows in the function type
+                    let arity = count_function_arity(&e.ty);
+                    defs.push(Def {
+                        name: e.name.clone(),
+                        ty: e.ty.clone(),
+                        body,
+                        meta: DefMeta::Function,
+                        arity,
+                    });
                 }
                 ast::Declaration::Sig(_)
                 | ast::Declaration::TypeBind(_)

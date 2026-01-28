@@ -115,6 +115,8 @@ pub enum Expr {
     Local(LocalId),
     /// Reference to a global (top-level def).
     Global(String),
+    /// External function (linked SPIR-V). The string is the linkage name.
+    Extern(String),
     /// Integer literal.
     Int(String),
     /// Float literal.
