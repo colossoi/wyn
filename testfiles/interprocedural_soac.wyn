@@ -1,0 +1,9 @@
+-- Test file for interprocedural SOAC analysis
+-- The map operation is inside a helper function, not directly in the entry point
+
+def double(x: f32) f32 = x * 2.0
+
+def apply_double(arr: []f32) []f32 = map(double, arr)
+
+#[compute]
+entry main(data: []f32) []f32 = apply_double(data)

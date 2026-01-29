@@ -1,30 +1,40 @@
 //! SOAC parallelization pass for compute shaders.
 //!
 //! This pass transforms compute shaders that map over input arrays into
-//! parallel versions where each thread processes one element.
+//! parallel versions where each thread processes a chunk of elements.
 //!
-//! Transformation:
+//! Transformation for direct maps:
 //! ```text
 //! entry compute(arr: []f32) []f32 = map(|x| x * 2.0, arr)
 //! ```
 //! Becomes:
 //! ```text
-//! entry compute(arr: []f32) f32 =
-//!   let idx = __thread_id in     // GlobalInvocationId.x
-//!   let elem = arr[idx] in
-//!   elem * 2.0                   // result stored to output[idx]
+//! entry compute(arr: []f32) ()  =
+//!   let __thread_id = __builtin_thread_id() in
+//!   let __chunk_start = __thread_id * __chunk_size in
+//!   let __chunk_end = min(__chunk_start + __chunk_size, length(arr)) in
+//!   let __local_chunk = arr[__chunk_start..__chunk_end] in
+//!   map_into(|x| x * 2.0, __local_chunk, _output, __chunk_start)
 //! ```
 //!
-//! The lowering then:
-//! - Sets up storage buffers for arr and output
-//! - Maps `__thread_id` to GlobalInvocationId.x
-//! - Stores the result to output[thread_id]
+//! For interprocedural maps (map inside helper function):
+//! ```text
+//! def apply_double(arr: []f32) []f32 = map(double, arr)
+//! entry main(data: []f32) []f32 = apply_double(data)
+//! ```
+//! Becomes:
+//! ```text
+//! entry main(data: []f32) () =
+//!   let __thread_id = ... in
+//!   let __local_chunk = data[__chunk_start..__chunk_end] in
+//!   apply_double(__local_chunk)  -- helper receives the chunk View
+//! ```
 
 use crate::ast::{NodeId, Span, TypeName};
 use crate::mir::{
     ArrayBacking, Body, Def, EntryInput, EntryOutput, ExecutionModel, Expr, ExprId, LocalDecl, LocalId,
     LocalKind, Program,
-    soac_analysis::{self, MirSoacAnalysis, ParallelizableMap},
+    soac_analysis::{self, ArrayProvenance, MirSoacAnalysis, ParallelizableMap},
 };
 use polytype::Type;
 use std::collections::HashMap;
@@ -89,19 +99,6 @@ fn parallelize_def(def: Def, analysis: &MirSoacAnalysis) -> Def {
 }
 
 /// Try to parallelize a compute shader body using the analysis results.
-///
-/// Transforms:
-/// ```text
-/// map(closure, arr)
-/// ```
-/// Into:
-/// ```text
-/// let __thread_id = __builtin_thread_id() in
-/// let __chunk_start = __thread_id * __chunk_size in
-/// let __chunk_end = min(__chunk_start + __chunk_size, length(arr)) in
-/// let __local_chunk = arr[__chunk_start..__chunk_end] in
-/// map(closure, __local_chunk)
-/// ```
 fn try_parallelize_body(
     body: &Body,
     inputs: &[EntryInput],
@@ -109,18 +106,27 @@ fn try_parallelize_body(
     map_info: &ParallelizableMap,
     local_size: (u32, u32, u32),
 ) -> Option<(Body, Vec<EntryOutput>)> {
-    // Get the array type to determine element type
-    let array_ty = body.get_type(map_info.array);
-    let _elem_ty = soac_analysis::get_element_type(array_ty)?;
+    // Extract info based on provenance
+    let (storage_name, storage_local, array_ty) = match &map_info.source {
+        ArrayProvenance::EntryStorage { name, local } => {
+            let input = inputs.iter().find(|i| i.local == *local)?;
+            (name.clone(), *local, input.ty.clone())
+        }
+        ArrayProvenance::Range { .. } => {
+            // TODO: Handle range chunking (adjust bounds instead of creating View)
+            return None;
+        }
+        ArrayProvenance::Unknown => return None,
+    };
 
     // Calculate total threads from workgroup size
     let total_threads = local_size.0 * local_size.1 * local_size.2;
 
     // Find the size hint for the mapped array (if available)
-    let size_hint: Option<u32> = match body.get_expr(map_info.array) {
-        Expr::Local(local_id) => inputs.iter().find(|i| i.local == *local_id).and_then(|i| i.size_hint),
-        _ => None,
-    };
+    let size_hint: Option<u32> = inputs
+        .iter()
+        .find(|i| i.local == storage_local)
+        .and_then(|i| i.size_hint);
 
     // Create new body with the transformation
     let mut new_body = Body::new();
@@ -170,28 +176,23 @@ fn try_parallelize_body(
         kind: LocalKind::Let,
     });
 
-    // Build expressions bottom-up:
+    let array_len_local = new_body.alloc_local(LocalDecl {
+        name: "__array_len".to_string(),
+        span: dummy_span,
+        ty: i32_ty.clone(),
+        kind: LocalKind::Let,
+    });
 
-    // 1. First, compute the array length expression (we need this for both the base array and chunk calculations)
-    // Find the input for the mapped array
-    let array_input = match body.get_expr(map_info.array) {
-        Expr::Local(local_id) => inputs.iter().find(|i| i.local == *local_id),
-        _ => None,
-    };
-
-    // Create array length expression - either from size_hint or a runtime length call
+    // 1. Create array length expression
     let array_len_expr = if let Some(hint) = size_hint {
-        // Use compile-time size hint
         new_body.alloc_expr(
             Expr::Int(hint.to_string()),
             i32_ty.clone(),
             dummy_span,
             dummy_node_id,
         )
-    } else if let Some(input) = array_input {
+    } else {
         // Runtime: call length intrinsic on the storage buffer
-        // First create a temporary reference to the storage buffer (with size 0 as placeholder
-        // since length() doesn't need the size, it queries the buffer directly)
         let offset_zero = new_body.alloc_expr(
             Expr::Int("0".to_string()),
             i32_ty.clone(),
@@ -207,7 +208,7 @@ fn try_parallelize_body(
         let temp_arr_ref = new_body.alloc_expr(
             Expr::Array {
                 backing: ArrayBacking::Storage {
-                    name: input.name.clone(),
+                    name: storage_name.clone(),
                     offset: offset_zero,
                 },
                 size: temp_size,
@@ -225,65 +226,33 @@ fn try_parallelize_body(
             dummy_span,
             dummy_node_id,
         )
-    } else {
-        // Non-storage array - copy it and call length
-        let arr_copy = copy_expr_tree(&mut new_body, body, map_info.array, &local_map);
-        new_body.alloc_expr(
-            Expr::Intrinsic {
-                name: "_w_intrinsic_length".to_string(),
-                args: vec![arr_copy],
+    };
+
+    // 2. Create the base storage array expression
+    let zero = new_body.alloc_expr(
+        Expr::Int("0".to_string()),
+        i32_ty.clone(),
+        dummy_span,
+        dummy_node_id,
+    );
+    let size_ref = new_body.alloc_expr(
+        Expr::Local(array_len_local),
+        i32_ty.clone(),
+        dummy_span,
+        dummy_node_id,
+    );
+    let base_array_expr_id = new_body.alloc_expr(
+        Expr::Array {
+            backing: ArrayBacking::Storage {
+                name: storage_name.clone(),
+                offset: zero,
             },
-            i32_ty.clone(),
-            dummy_span,
-            dummy_node_id,
-        )
-    };
-
-    // Add a local for array_len so we can reference it multiple times
-    let array_len_local = new_body.alloc_local(LocalDecl {
-        name: "__array_len".to_string(),
-        span: dummy_span,
-        ty: i32_ty.clone(),
-        kind: LocalKind::Let,
-    });
-
-    // 2. Create the base array expression with the proper size
-    let base_array_expr_id = match body.get_expr(map_info.array) {
-        Expr::Local(local_id) => {
-            // Check if this local is an entry input (storage buffer)
-            if let Some(input) = inputs.iter().find(|i| i.local == *local_id) {
-                // Create a Storage-backed array expression
-                let zero = new_body.alloc_expr(
-                    Expr::Int("0".to_string()),
-                    i32_ty.clone(),
-                    dummy_span,
-                    dummy_node_id,
-                );
-                // Use the array_len_local as the size
-                let size_ref = new_body.alloc_expr(
-                    Expr::Local(array_len_local),
-                    i32_ty.clone(),
-                    dummy_span,
-                    dummy_node_id,
-                );
-                new_body.alloc_expr(
-                    Expr::Array {
-                        backing: ArrayBacking::Storage {
-                            name: input.name.clone(),
-                            offset: zero,
-                        },
-                        size: size_ref,
-                    },
-                    array_ty.clone(),
-                    dummy_span,
-                    dummy_node_id,
-                )
-            } else {
-                copy_expr_tree(&mut new_body, body, map_info.array, &local_map)
-            }
-        }
-        _ => copy_expr_tree(&mut new_body, body, map_info.array, &local_map),
-    };
+            size: size_ref,
+        },
+        array_ty.clone(),
+        dummy_span,
+        dummy_node_id,
+    );
 
     // 3. __builtin_thread_id() intrinsic
     let thread_id_intrinsic = new_body.alloc_expr(
@@ -296,8 +265,7 @@ fn try_parallelize_body(
         dummy_node_id,
     );
 
-    // 4. __chunk_size = (array_len + total_threads - 1) / total_threads
-    //    This is ceiling division: ceil(array_len / total_threads)
+    // 4. __chunk_size = ceil(array_len / total_threads)
     let total_threads_expr = new_body.alloc_expr(
         Expr::Int(total_threads.to_string()),
         i32_ty.clone(),
@@ -384,7 +352,6 @@ fn try_parallelize_body(
         dummy_span,
         dummy_node_id,
     );
-    // Use array_len_local for the min call
     let array_len_for_min = new_body.alloc_expr(
         Expr::Local(array_len_local),
         i32_ty.clone(),
@@ -401,7 +368,7 @@ fn try_parallelize_body(
         dummy_node_id,
     );
 
-    // 6. Create local chunk as a View into the base array
+    // 7. Create local chunk as a View into the base array
     let chunk_start_ref2 = new_body.alloc_expr(
         Expr::Local(chunk_start_local),
         i32_ty.clone(),
@@ -414,7 +381,6 @@ fn try_parallelize_body(
         dummy_span,
         dummy_node_id,
     );
-    // Size of chunk = end - start
     let chunk_len = new_body.alloc_expr(
         Expr::BinOp {
             op: "-".to_string(),
@@ -444,69 +410,83 @@ fn try_parallelize_body(
         dummy_node_id,
     );
 
-    // 7. Copy the closure expression
-    let closure_expr = copy_expr_tree(&mut new_body, body, map_info.closure, &local_map);
-
-    // 8. Create the output storage buffer expression
-    // The output buffer is named "_output" by convention (see pipeline.rs)
-    let output_zero = new_body.alloc_expr(
-        Expr::Int("0".to_string()),
-        i32_ty.clone(),
-        dummy_span,
-        dummy_node_id,
-    );
-    let output_size_ref = new_body.alloc_expr(
-        Expr::Local(array_len_local),
-        i32_ty.clone(),
-        dummy_span,
-        dummy_node_id,
-    );
-    let output_storage_expr = new_body.alloc_expr(
-        Expr::Array {
-            backing: ArrayBacking::Storage {
-                name: "_output".to_string(),
-                offset: output_zero,
-            },
-            size: output_size_ref,
-        },
-        array_ty.clone(),
-        dummy_span,
-        dummy_node_id,
-    );
-
-    // 9. Create the map_into call: map_into(closure, input_view, output_storage, chunk_start)
-    // This reads from input, applies the function, and writes to output
-    let chunk_start_for_map = new_body.alloc_expr(
-        Expr::Local(chunk_start_local),
-        i32_ty.clone(),
-        dummy_span,
-        dummy_node_id,
-    );
+    // 8. Create the final expression based on whether this is direct or interprocedural
     let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
-    let map_expr = new_body.alloc_expr(
-        Expr::Intrinsic {
-            name: "_w_intrinsic_map_into".to_string(),
-            args: vec![
-                closure_expr,
-                local_chunk_expr,
-                output_storage_expr,
-                chunk_start_for_map,
-            ],
-        },
-        unit_ty.clone(),
-        dummy_span,
-        dummy_node_id,
-    );
 
-    // 10. Wrap in let bindings (innermost to outermost)
-    // The body returns () since map_into writes to output as a side effect
-    let let_chunk_end_body = map_expr;
+    let final_expr = if let Some(ref call_info) = map_info.entry_call {
+        // Interprocedural: call the helper function with the chunk View
+        // We need to copy the original call but replace the array argument with the chunk
+        create_call_with_chunk(
+            &mut new_body,
+            body,
+            call_info.call_expr,
+            call_info.array_arg_index,
+            local_chunk_expr,
+            &local_map,
+        )
+    } else {
+        // Direct map: create map_into(closure, chunk, output, offset)
+        let closure_expr = new_body.alloc_expr(
+            Expr::Global(map_info.closure_name.clone()),
+            Type::Variable(0), // Type doesn't matter much here
+            dummy_span,
+            dummy_node_id,
+        );
 
+        let output_zero = new_body.alloc_expr(
+            Expr::Int("0".to_string()),
+            i32_ty.clone(),
+            dummy_span,
+            dummy_node_id,
+        );
+        let output_size_ref = new_body.alloc_expr(
+            Expr::Local(array_len_local),
+            i32_ty.clone(),
+            dummy_span,
+            dummy_node_id,
+        );
+        let output_storage_expr = new_body.alloc_expr(
+            Expr::Array {
+                backing: ArrayBacking::Storage {
+                    name: "_output".to_string(),
+                    offset: output_zero,
+                },
+                size: output_size_ref,
+            },
+            array_ty.clone(),
+            dummy_span,
+            dummy_node_id,
+        );
+
+        let chunk_start_for_map = new_body.alloc_expr(
+            Expr::Local(chunk_start_local),
+            i32_ty.clone(),
+            dummy_span,
+            dummy_node_id,
+        );
+
+        new_body.alloc_expr(
+            Expr::Intrinsic {
+                name: "_w_intrinsic_map_into".to_string(),
+                args: vec![
+                    closure_expr,
+                    local_chunk_expr,
+                    output_storage_expr,
+                    chunk_start_for_map,
+                ],
+            },
+            unit_ty.clone(),
+            dummy_span,
+            dummy_node_id,
+        )
+    };
+
+    // 9. Wrap in let bindings (innermost to outermost)
     let let_chunk_end = new_body.alloc_expr(
         Expr::Let {
             local: chunk_end_local,
             rhs: chunk_end_expr,
-            body: let_chunk_end_body,
+            body: final_expr,
         },
         unit_ty.clone(),
         dummy_span,
@@ -561,6 +541,52 @@ fn try_parallelize_body(
 
     // Keep original outputs - the map still returns an array
     Some((new_body, outputs.to_vec()))
+}
+
+/// Create a call expression with one argument replaced by the chunk View.
+fn create_call_with_chunk(
+    new_body: &mut Body,
+    old_body: &Body,
+    call_expr_id: ExprId,
+    array_arg_index: usize,
+    chunk_expr: ExprId,
+    local_map: &HashMap<LocalId, LocalId>,
+) -> ExprId {
+    let call_expr = old_body.get_expr(call_expr_id);
+    let ty = old_body.get_type(call_expr_id).clone();
+    let span = old_body.get_span(call_expr_id);
+    let node_id = old_body.node_ids[call_expr_id.index()];
+
+    match call_expr {
+        Expr::Call { func, args } => {
+            // Copy all arguments, but replace the array argument with the chunk
+            let new_args: Vec<ExprId> = args
+                .iter()
+                .enumerate()
+                .map(|(i, &arg)| {
+                    if i == array_arg_index {
+                        chunk_expr
+                    } else {
+                        copy_expr_tree(new_body, old_body, arg, local_map)
+                    }
+                })
+                .collect();
+
+            new_body.alloc_expr(
+                Expr::Call {
+                    func: func.clone(),
+                    args: new_args,
+                },
+                ty,
+                span,
+                node_id,
+            )
+        }
+        _ => {
+            // Shouldn't happen - entry_call should always point to a Call expr
+            copy_expr_tree(new_body, old_body, call_expr_id, local_map)
+        }
+    }
 }
 
 /// Copy an expression tree from one body to another, remapping locals.

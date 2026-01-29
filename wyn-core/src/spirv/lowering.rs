@@ -3457,19 +3457,17 @@ fn lower_map(
         .get(&func_name)
         .ok_or_else(|| err_spirv!("Map function not found: {}", func_name))?;
 
-    // Check if this is a dynamic-sized View into storage
-    // The View expression is passed directly (not through a local binding)
+    // Check if this is a dynamic-sized storage array (View, parameter, etc.)
+    // Storage arrays always have their length available at runtime via fat pointer.
     let arr_expr = body.get_expr(arr_expr_id);
-    let is_dynamic_storage_view = static_size.is_none()
+    let is_dynamic_storage = static_size.is_none()
         && matches!(
-            arr_expr,
-            Expr::Array {
-                backing: ArrayBacking::View { .. },
-                ..
-            }
+            arr_ty,
+            PolyType::Constructed(TypeName::Array, args)
+                if args.len() == 3 && matches!(&args[1], PolyType::Constructed(TypeName::AddressStorage, _))
         );
 
-    if is_dynamic_storage_view {
+    if is_dynamic_storage {
         // Dynamic-sized View: generate a runtime loop
         return lower_map_dynamic(
             constructor,

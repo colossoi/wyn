@@ -229,6 +229,8 @@ impl TypeKey {
                     "unit" => TypeName::Unit,
                     "ptr" => TypeName::Pointer,
                     "unique" => TypeName::Unique,
+                    "storage" => TypeName::AddressStorage,
+                    "function" => TypeName::AddressFunction,
                     s if s.starts_with("tuple") => {
                         let n: usize = s[5..].parse().unwrap_or(0);
                         TypeName::Tuple(n)
