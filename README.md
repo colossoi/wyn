@@ -46,20 +46,19 @@ The compiler uses a multi-stage pipeline with typestate-driven phases. Each stag
 | **TlcTransformed** | `tlc::transform` | AST converted to minimal typed lambda calculus |
 | **TlcPartialEval** | `tlc::partial_eval` | Constant folding and algebraic simplifications (optional) |
 | **TlcDefunctionalized** | `tlc::defunctionalize` | Futhark-style defunctionalization: lambda lifting + SOAC capture flattening |
-| **TlcSpecialized** | `tlc::specialize` | Polymorphic intrinsics specialized (e.g., `sign` → `f32.sign`) |
+| **TlcMonomorphized** | `tlc::specialize`, `tlc::monomorphize` | Polymorphic intrinsics specialized; user functions monomorphized |
 
 ### Backend (MIR)
 | Stage | Module | Description |
 |-------|--------|-------------|
-| **Flattened** | `tlc::to_mir` | TLC to MIR conversion |
+| **Flattened** | `tlc::to_mir` | TLC to MIR conversion (all functions already monomorphic) |
 | **MaterializationsHoisted** | `materialize_hoisting` | Duplicate materializations hoisted from branches |
 | **Normalized** | `normalize` | A-normal form conversion |
-| **Canonicalized** | `canonicalize_vars` | Align body type variables with scheme type variables |
-| **Monomorphized** | `monomorphization` | Polymorphic functions specialized to concrete types |
+| **AddressSpacesDefaulted** | `default_address_spaces` | Unconstrained address space variables defaulted |
+| **SoacParallelized** | `soac_parallelize` | SOACs parallelized for compute shaders |
 | **Reachable** | `reachability` | Dead code elimination, topological ordering |
 | **Lifted** | `binding_lifter` | Loop-invariant code motion |
-| **InplaceRewritten** | `inplace_rewriter` | Eligible map ops rewritten for in-place execution |
-| **Lowered** | `spirv::lowering` | SPIR-V code generation |
+| **Lowered** | `spirv::lowering` | In-place analysis, rewriting, and SPIR-V code generation |
 
 ### Defunctionalization
 
@@ -124,7 +123,7 @@ cargo build --release
 cargo test
 ```
 
-All 588 tests currently pass (2 ignored for pending features).
+All 544 tests currently pass (2 ignored for pending features).
 
 ## Language Overview
 
