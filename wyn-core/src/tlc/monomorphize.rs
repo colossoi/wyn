@@ -179,8 +179,8 @@ impl TypeKey {
                     TypeName::Unit => "unit".to_string(),
                     TypeName::Tuple(n) => format!("tuple{}", n),
                     TypeName::Pointer => "ptr".to_string(),
-                    TypeName::AddressFunction => "function".to_string(),
-                    TypeName::AddressStorage => "storage".to_string(),
+                    TypeName::ArrayVariantComposite => "array_composite".to_string(),
+                    TypeName::ArrayVariantView => "array_view".to_string(),
                     TypeName::AddressPlaceholder => {
                         panic!("AddressPlaceholder should be resolved before monomorphization")
                     }
@@ -232,8 +232,8 @@ impl TypeKey {
                     "unit" => TypeName::Unit,
                     "ptr" => TypeName::Pointer,
                     "unique" => TypeName::Unique,
-                    "storage" => TypeName::AddressStorage,
-                    "function" => TypeName::AddressFunction,
+                    "array_view" => TypeName::ArrayVariantView,
+                    "array_composite" => TypeName::ArrayVariantComposite,
                     s if s.starts_with("tuple") => {
                         let n: usize = s[5..].parse().unwrap_or(0);
                         TypeName::Tuple(n)
@@ -876,8 +876,9 @@ fn format_type_compact(ty: &Type<TypeName>) -> String {
             let args_str = args.iter().map(format_type_compact).collect::<Vec<_>>().join("_");
             format!("{}_{}", name, args_str)
         }
-        Type::Constructed(TypeName::AddressStorage, _) => "AddressStorage".to_string(),
-        Type::Constructed(TypeName::AddressFunction, _) => "AddressFunction".to_string(),
+        Type::Constructed(TypeName::ArrayVariantView, _) => "array_view".to_string(),
+        Type::Constructed(TypeName::ArrayVariantComposite, _) => "array_composite".to_string(),
+        Type::Constructed(TypeName::ArrayVariantVirtual, _) => todo!(),
         Type::Constructed(name, args) => {
             // Fallback for other constructed types
             let args_str = args.iter().map(format_type_compact).collect::<Vec<_>>().join("_");

@@ -133,7 +133,7 @@ fn is_slice_type(ty: &Type<TypeName>) -> bool {
     match ty {
         Type::Constructed(TypeName::Array, args) => {
             assert!(args.len() == 3);
-            let is_storage = matches!(&args[1], Type::Constructed(TypeName::AddressStorage, _));
+            let is_storage = matches!(&args[1], Type::Constructed(TypeName::ArrayVariantView, _));
             // Type variable means size is runtime determined
             let is_unsized = matches!(&args[2], Type::Variable(_));
             is_storage && is_unsized

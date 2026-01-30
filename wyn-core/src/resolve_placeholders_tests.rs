@@ -5,7 +5,7 @@ use crate::types;
 fn test_resolve_size_placeholder() {
     let mut resolver = PlaceholderResolver::new();
 
-    let ty = types::unsized_array(types::f32(), types::storage_addrspace());
+    let ty = types::unsized_array(types::f32(), types::array_variant_view());
     let resolved = resolver.resolve_type(&ty);
 
     // Should have replaced SizePlaceholder with a variable

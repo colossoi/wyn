@@ -84,7 +84,7 @@ fn test_extract_size_from_type() {
         TypeName::Array,
         vec![
             Type::Constructed(TypeName::Float(32), vec![]),
-            Type::Constructed(TypeName::AddressFunction, vec![]),
+            Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Constructed(TypeName::Size(10), vec![]),
         ],
     );
@@ -95,7 +95,7 @@ fn test_extract_size_from_type() {
         TypeName::Array,
         vec![
             Type::Constructed(TypeName::Float(32), vec![]),
-            Type::Constructed(TypeName::AddressStorage, vec![]),
+            Type::Constructed(TypeName::ArrayVariantView, vec![]),
             Type::Variable(42), // Type variable for size
         ],
     );
@@ -106,7 +106,7 @@ fn test_extract_size_from_type() {
         TypeName::Array,
         vec![
             Type::Constructed(TypeName::Float(32), vec![]),
-            Type::Constructed(TypeName::AddressStorage, vec![]),
+            Type::Constructed(TypeName::ArrayVariantView, vec![]),
             Type::Constructed(TypeName::SizeVar("n".to_string()), vec![]),
         ],
     );
@@ -254,7 +254,7 @@ fn array_ty(elem: Type<TypeName>) -> Type<TypeName> {
         TypeName::Array,
         vec![
             elem,
-            Type::Constructed(TypeName::AddressStorage, vec![]),
+            Type::Constructed(TypeName::ArrayVariantView, vec![]),
             Type::Variable(99), // Unknown size
         ],
     )

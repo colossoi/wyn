@@ -132,7 +132,7 @@ fn default_in_body(body: &mut Body, addr_vars: &HashSet<usize>) {
 fn default_in_type(ty: &mut Type<TypeName>, addr_vars: &HashSet<usize>) {
     match ty {
         Type::Variable(id) if addr_vars.contains(id) => {
-            *ty = Type::Constructed(TypeName::AddressFunction, vec![]);
+            *ty = Type::Constructed(TypeName::ArrayVariantComposite, vec![]);
         }
         Type::Variable(_) => {}
         Type::Constructed(_, args) => {

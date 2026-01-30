@@ -151,6 +151,7 @@ impl Constructor {
         let mut builder = Builder::new();
         builder.set_version(1, 5);
         builder.capability(Capability::Shader);
+        builder.capability(Capability::VariablePointersStorageBuffer);
         builder.memory_model(AddressingModel::Logical, MemoryModel::GLSL450);
 
         let void_type = builder.type_void();
@@ -309,54 +310,46 @@ impl Constructor {
                         self.get_or_create_struct_type(field_types)
                     }
                     TypeName::Array => {
-                        // Array[elem, addrspace, size]
+                        // Array[elem, variant, size]
                         assert!(args.len() == 3);
                         let elem_type = self.ast_type_to_spirv(&args[0]);
-                        let addrspace = &args[1];
+                        let variant = &args[1];
                         let size = &args[2];
 
-                        match size {
-                            PolyType::Constructed(TypeName::Size(n), _) => {
-                                // Fixed-size array
-                                let size_const = self.const_i32(*n as i32);
-                                self.builder.type_array(elem_type, size_const)
-                            }
-                            PolyType::Constructed(TypeName::SizePlaceholder, _) => {
-                                panic!("SizePlaceholder should be resolved before SPIR-V lowering");
-                            }
-                            PolyType::Variable(_) => {
-                                // Unsized array (size is unresolved type variable) - representation depends on address space
-                                if let PolyType::Constructed(TypeName::AddressStorage, _) = addrspace {
-                                    // Storage array: struct { pointer, length }
-                                    let ptr_type = self.get_or_create_ptr_type(
-                                        spirv::StorageClass::StorageBuffer,
-                                        elem_type,
-                                    );
-                                    self.get_or_create_struct_type(vec![ptr_type, self.i32_type])
-                                } else if let PolyType::Constructed(TypeName::AddressFunction, _) =
-                                    addrspace
-                                {
-                                    // Function-local unsized array
-                                    panic!(
-                                        "BUG: Function address space unsized arrays not yet implemented: {:?}",
-                                        ty
-                                    );
-                                } else if let PolyType::Variable(_) = addrspace {
-                                    // Address space should have been resolved by default_address_spaces pass
-                                    panic!(
-                                        "BUG: Unresolved address space variable reached lowering: {:?}",
-                                        ty
-                                    );
-                                } else {
-                                    // Unknown address space
-                                    panic!("BUG: Unsized array has unexpected address space: {:?}", ty);
+                        // Dispatch on variant first - View arrays are always {ptr, len} structs
+                        if let PolyType::Constructed(TypeName::ArrayVariantView, _) = variant {
+                            // View variant: always struct { pointer, length } regardless of size
+                            let ptr_type =
+                                self.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_type);
+                            self.get_or_create_struct_type(vec![ptr_type, self.i32_type])
+                        } else if let PolyType::Constructed(TypeName::ArrayVariantVirtual, _) = variant {
+                            // Virtual variant: struct { start, step, len } for range representation
+                            self.get_or_create_struct_type(vec![
+                                self.i32_type,
+                                self.i32_type,
+                                self.i32_type,
+                            ])
+                        } else {
+                            // Composite variant (or placeholder): sized array value
+                            match size {
+                                PolyType::Constructed(TypeName::Size(n), _) => {
+                                    // Fixed-size array
+                                    let size_const = self.const_i32(*n as i32);
+                                    self.builder.type_array(elem_type, size_const)
                                 }
-                            }
-                            _ => {
-                                panic!(
-                                    "BUG: Array type has invalid size argument: {:?}. This should have been resolved during type checking.",
-                                    size
-                                );
+                                PolyType::Constructed(TypeName::SizePlaceholder, _) => {
+                                    panic!("SizePlaceholder should be resolved before SPIR-V lowering");
+                                }
+                                PolyType::Variable(_) => {
+                                    // Unsized composite array - not supported
+                                    panic!("BUG: Composite variant unsized arrays not supported: {:?}", ty);
+                                }
+                                _ => {
+                                    panic!(
+                                        "BUG: Array type has invalid size argument: {:?}. This should have been resolved during type checking.",
+                                        size
+                                    );
+                                }
                             }
                         }
                     }
@@ -433,7 +426,7 @@ impl Constructor {
                         // for type checking only. Map to unit type since it has no runtime representation.
                         self.void_type
                     }
-                    TypeName::AddressFunction | TypeName::AddressStorage => {
+                    TypeName::ArrayVariantComposite | TypeName::ArrayVariantView => {
                         // Address space markers are used within Array types but shouldn't appear
                         // as standalone types requiring SPIR-V representation.
                         panic!(
@@ -1614,7 +1607,8 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
     let expr_ty = body.get_type(expr_id);
 
     // Debug: check for address space types being used as expression types
-    if let PolyType::Constructed(TypeName::AddressFunction | TypeName::AddressStorage, _) = expr_ty {
+    if let PolyType::Constructed(TypeName::ArrayVariantComposite | TypeName::ArrayVariantView, _) = expr_ty
+    {
         panic!(
             "BUG: Expression {:?} has address space type {:?}. Expression: {:?}",
             expr_id,
@@ -2685,89 +2679,40 @@ fn lower_array_expr(
         }
 
         ArrayBacking::View { base, offset } => {
-            // View: creates a view into base[offset..offset+size]
-            let result_ty = expr_ty;
-            let base_ty = body.get_type(*base);
+            // View: constructs a {ptr, len} struct pointing into the base array
+            // The base should be a View-variant array (another {ptr, len} struct or Storage backing)
+            let base_val = lower_expr(constructor, body, *base)?;
+            let offset_val = lower_expr(constructor, body, *offset)?;
+            let len_val = lower_expr(constructor, body, size)?;
 
-            // Extract element type and static size from the result type
-            let (elem_ty, static_size) = match result_ty {
+            // Extract element type from the result type
+            let elem_ty = match expr_ty {
                 PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 3 => {
-                    let size_from_type = match &type_args[2] {
-                        PolyType::Constructed(TypeName::Size(s), _) => Some(*s),
-                        PolyType::Variable(_) => {
-                            // Unsized (type variable) - try to get from size expression
-                            try_extract_const_int(body, size).map(|s| s as usize)
-                        }
-                        _ => None,
-                    };
-                    (type_args[0].clone(), size_from_type)
+                    type_args[0].clone()
                 }
                 _ => {
-                    return Err(err_spirv!("View result must be Array type, got {:?}", result_ty));
+                    return Err(err_spirv!("View result must be Array type, got {:?}", expr_ty));
                 }
             };
+            let elem_spirv_type = constructor.ast_type_to_spirv(&elem_ty);
+            let elem_ptr_type =
+                constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_spirv_type);
 
-            if let Some(sz) = static_size {
-                let offset_is_zero = matches!(body.get_expr(*offset), Expr::Int(s) if s == "0");
-                let elem_spirv_type = constructor.ast_type_to_spirv(&elem_ty);
+            // Extract ptr from base {ptr, len} struct and offset it
+            let base_ptr = constructor.builder.composite_extract(elem_ptr_type, None, base_val, [0])?;
+            let adjusted_ptr =
+                constructor.builder.ptr_access_chain(elem_ptr_type, None, base_ptr, offset_val, [])?;
 
-                if offset_is_zero {
-                    // Optimization: if offset is 0, we can use compile-time indices
-                    let base_val = lower_expr(constructor, body, *base)?;
-                    let mut elements = Vec::with_capacity(sz);
-
-                    for i in 0..sz {
-                        let elem = constructor.builder.composite_extract(
-                            elem_spirv_type,
-                            None,
-                            base_val,
-                            [i as u32],
-                        )?;
-                        elements.push(elem);
-                    }
-
-                    let result_array_type = constructor.type_array(elem_spirv_type, sz as u32);
-                    Ok(constructor.builder.composite_construct(result_array_type, None, elements)?)
-                } else {
-                    // For non-zero offset, use array indexing with runtime computation
-                    let base_val = lower_expr(constructor, body, *base)?;
-                    let offset_val = lower_expr(constructor, body, *offset)?;
-                    let base_spirv_ty = constructor.ast_type_to_spirv(base_ty);
-
-                    let ptr_type = constructor.builder.type_pointer(
-                        None,
-                        spirv::StorageClass::Function,
-                        base_spirv_ty,
-                    );
-                    let var =
-                        constructor.builder.variable(ptr_type, None, spirv::StorageClass::Function, None);
-                    constructor.builder.store(var, base_val, None, [])?;
-
-                    let i32_type = constructor.i32_type;
-                    let elem_ptr_type = constructor.builder.type_pointer(
-                        None,
-                        spirv::StorageClass::Function,
-                        elem_spirv_type,
-                    );
-                    let mut elements = Vec::with_capacity(sz);
-
-                    for i in 0..sz {
-                        let i_const = constructor.const_i32(i as i32);
-                        let idx = constructor.builder.i_add(i32_type, None, offset_val, i_const)?;
-                        let ptr = constructor.builder.access_chain(elem_ptr_type, None, var, [idx])?;
-                        let elem = constructor.builder.load(elem_spirv_type, None, ptr, None, [])?;
-                        elements.push(elem);
-                    }
-
-                    let result_array_type = constructor.type_array(elem_spirv_type, sz as u32);
-                    Ok(constructor.builder.composite_construct(result_array_type, None, elements)?)
-                }
-            } else {
-                Err(err_spirv!(
-                    "View with dynamic size not yet supported, result type: {:?}",
-                    result_ty
-                ))
-            }
+            // Construct new {ptr, len} struct
+            let slice_struct_type =
+                constructor.get_or_create_struct_type(vec![elem_ptr_type, constructor.i32_type]);
+            Ok(
+                constructor.builder.composite_construct(
+                    slice_struct_type,
+                    None,
+                    [adjusted_ptr, len_val],
+                )?,
+            )
         }
 
         ArrayBacking::Owned { data } => {
@@ -3025,128 +2970,18 @@ fn lower_index_intrinsic(
     match arg0_ty {
         PolyType::Constructed(TypeName::Array, type_args) => {
             assert!(type_args.len() == 3);
-            // Check if this is an unsized array (slice-like) - size is a type variable
-            let is_unsized = matches!(&type_args[2], PolyType::Variable(_));
+            let variant = &type_args[1];
 
-            if is_unsized {
-                // Unsized array - handle slice semantics based on array backing
-                let array_expr = body.get_expr(array_expr_id);
-                match array_expr {
-                    Expr::Array {
-                        backing: ArrayBacking::Owned { data },
-                        ..
-                    } => {
-                        // Owned: data is already a complete array, index into it
-                        lower_index_intrinsic(constructor, body, *data, index_expr_id, result_type)
-                    }
-                    Expr::Array {
-                        backing: ArrayBacking::View { base, offset },
-                        ..
-                    } => {
-                        // View: adjust index by offset and access base array
-                        let offset_val = lower_expr(constructor, body, *offset)?;
-                        let i32_type = constructor.i32_type;
-                        let adjusted_index =
-                            constructor.builder.i_add(i32_type, None, offset_val, index_val)?;
-
-                        let base_ty = body.get_type(*base);
-                        let base_var = if types::is_pointer(base_ty) {
-                            lower_expr(constructor, body, *base)?
-                        } else {
-                            let base_val = lower_expr(constructor, body, *base)?;
-                            let base_type = constructor.ast_type_to_spirv(base_ty);
-                            let base_var = constructor.declare_variable("_w_slice_base_tmp", base_type)?;
-                            constructor.builder.store(base_var, base_val, None, [])?;
-                            base_var
-                        };
-
-                        let elem_ptr_type =
-                            constructor.builder.type_pointer(None, StorageClass::Function, result_type);
-                        let elem_ptr = constructor.builder.access_chain(
-                            elem_ptr_type,
-                            None,
-                            base_var,
-                            [adjusted_index],
-                        )?;
-                        Ok(constructor.builder.load(result_type, None, elem_ptr, None, [])?)
-                    }
-                    Expr::Array {
-                        backing: ArrayBacking::Storage { name, offset },
-                        ..
-                    } => {
-                        // Storage: access external buffer by name
-                        let (set, binding) = constructor
-                            .compute_params
-                            .get(name)
-                            .ok_or_else(|| err_spirv!("Unknown storage buffer: {}", name))?;
-                        let (set, binding) = (*set, *binding);
-
-                        let (buffer_var, _elem_type_id) =
-                            constructor.storage_buffers.get(&(set, binding)).ok_or_else(|| {
-                                err_spirv!("Storage buffer not registered: {}:{}", set, binding)
-                            })?;
-                        let buffer_var = *buffer_var;
-
-                        let offset_val = lower_expr(constructor, body, *offset)?;
-                        let i32_type = constructor.i32_type;
-                        let adjusted_index =
-                            constructor.builder.i_add(i32_type, None, offset_val, index_val)?;
-
-                        let elem_ptr_type = constructor
-                            .get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, result_type);
-                        let zero = constructor.const_u32(0);
-                        let elem_ptr = constructor.builder.access_chain(
-                            elem_ptr_type,
-                            None,
-                            buffer_var,
-                            [zero, adjusted_index],
-                        )?;
-                        Ok(constructor.builder.load(result_type, None, elem_ptr, None, [])?)
-                    }
-                    _ => {
-                        // Array value from a variable or function call
-                        let slice_val = lower_expr(constructor, body, array_expr_id)?;
-
-                        // Check if this is a storage array (Array[elem, Storage, ?size])
-                        if types::is_bound_slice_access(arg0_ty) {
-                            // Storage slice: {ptr, len} struct
-                            let ptr_type = constructor
-                                .get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, result_type);
-                            let ptr =
-                                constructor.builder.composite_extract(ptr_type, None, slice_val, [0])?;
-                            let elem_ptr =
-                                constructor.builder.ptr_access_chain(ptr_type, None, ptr, index_val, [])?;
-                            return Ok(constructor.builder.load(result_type, None, elem_ptr, None, [])?);
-                        }
-
-                        // Owned array layout: extract data field and index into it
-                        bail_spirv!("Unsupported unsized array indexing: {:?}", arg0_ty)
-                    }
-                }
+            // Dispatch on array variant
+            if let PolyType::Constructed(TypeName::ArrayVariantView, _) = variant {
+                // View variant: {ptr, len} struct - extract ptr and use PtrAccessChain
+                lower_view_index(constructor, body, array_expr_id, index_val, result_type)
+            } else if let PolyType::Constructed(TypeName::ArrayVariantVirtual, _) = variant {
+                // Virtual variant: {start, step, len} - compute start + index * step
+                lower_virtual_index(constructor, body, array_expr_id, index_val, result_type)
             } else {
-                // Sized array - check for constant index optimization
-                let array_val = lower_expr(constructor, body, array_expr_id)?;
-
-                // If index is a compile-time constant, use OpCompositeExtract
-                if let Some(literal_idx) = constructor.get_const_u32_value(index_val) {
-                    Ok(constructor.builder.composite_extract(
-                        result_type,
-                        None,
-                        array_val,
-                        [literal_idx],
-                    )?)
-                } else {
-                    // Runtime index - must materialize to local variable
-                    let array_type = constructor.ast_type_to_spirv(arg0_ty);
-                    let array_var = constructor.declare_variable("_w_index_tmp", array_type)?;
-                    constructor.builder.store(array_var, array_val, None, [])?;
-
-                    let elem_ptr_type =
-                        constructor.builder.type_pointer(None, StorageClass::Function, result_type);
-                    let elem_ptr =
-                        constructor.builder.access_chain(elem_ptr_type, None, array_var, [index_val])?;
-                    Ok(constructor.builder.load(result_type, None, elem_ptr, None, [])?)
-                }
+                // Composite variant: SPIR-V array value
+                lower_composite_index(constructor, body, array_expr_id, index_val, result_type, arg0_ty)
             }
         }
         PolyType::Constructed(TypeName::Pointer, _) => {
@@ -3160,6 +2995,138 @@ fn lower_index_intrinsic(
     }
 }
 
+/// Lower indexing into a View array ({ptr, len} struct).
+fn lower_view_index(
+    constructor: &mut Constructor,
+    body: &Body,
+    array_expr_id: ExprId,
+    index_val: spirv::Word,
+    result_type: spirv::Word,
+) -> Result<spirv::Word> {
+    let array_expr = body.get_expr(array_expr_id);
+
+    // Check if we can optimize based on the backing
+    match array_expr {
+        Expr::Array {
+            backing: ArrayBacking::Storage { name, offset },
+            ..
+        } => {
+            // Direct storage access - use the buffer variable directly
+            let (set, binding) = constructor
+                .compute_params
+                .get(name)
+                .ok_or_else(|| err_spirv!("Unknown storage buffer: {}", name))?;
+            let (set, binding) = (*set, *binding);
+
+            let (buffer_var, _elem_type_id) = constructor
+                .storage_buffers
+                .get(&(set, binding))
+                .ok_or_else(|| err_spirv!("Storage buffer not registered: {}:{}", set, binding))?;
+            let buffer_var = *buffer_var;
+
+            let offset_val = lower_expr(constructor, body, *offset)?;
+            let i32_type = constructor.i32_type;
+            let adjusted_index = constructor.builder.i_add(i32_type, None, offset_val, index_val)?;
+
+            let elem_ptr_type =
+                constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, result_type);
+            let zero = constructor.const_u32(0);
+            let elem_ptr = constructor.builder.access_chain(
+                elem_ptr_type,
+                None,
+                buffer_var,
+                [zero, adjusted_index],
+            )?;
+            Ok(constructor.builder.load(result_type, None, elem_ptr, None, [])?)
+        }
+        Expr::Array {
+            backing: ArrayBacking::View { base, offset },
+            ..
+        } => {
+            // Nested view - adjust index and recurse
+            let offset_val = lower_expr(constructor, body, *offset)?;
+            let i32_type = constructor.i32_type;
+            let adjusted_index = constructor.builder.i_add(i32_type, None, offset_val, index_val)?;
+            lower_view_index(constructor, body, *base, adjusted_index, result_type)
+        }
+        _ => {
+            // General case: array value is a {ptr, len} struct
+            let view_val = lower_expr(constructor, body, array_expr_id)?;
+            let ptr_type =
+                constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, result_type);
+            let ptr = constructor.builder.composite_extract(ptr_type, None, view_val, [0])?;
+            let elem_ptr = constructor.builder.ptr_access_chain(ptr_type, None, ptr, index_val, [])?;
+            Ok(constructor.builder.load(result_type, None, elem_ptr, None, [])?)
+        }
+    }
+}
+
+/// Lower indexing into a Virtual array ({start, step, len} struct).
+fn lower_virtual_index(
+    constructor: &mut Constructor,
+    body: &Body,
+    array_expr_id: ExprId,
+    index_val: spirv::Word,
+    result_type: spirv::Word,
+) -> Result<spirv::Word> {
+    let array_expr = body.get_expr(array_expr_id);
+
+    // Check if we can optimize based on the backing
+    match array_expr {
+        Expr::Array {
+            backing: ArrayBacking::Range { start, step, .. },
+            ..
+        } => {
+            // Direct range - compute start + index * step
+            let start_val = lower_expr(constructor, body, *start)?;
+            let i32_type = constructor.i32_type;
+
+            if let Some(step_expr) = step {
+                let step_val = lower_expr(constructor, body, *step_expr)?;
+                let offset = constructor.builder.i_mul(i32_type, None, index_val, step_val)?;
+                Ok(constructor.builder.i_add(i32_type, None, start_val, offset)?)
+            } else {
+                // Step is 1
+                Ok(constructor.builder.i_add(i32_type, None, start_val, index_val)?)
+            }
+        }
+        _ => {
+            // General case: array value is a {start, step, len} struct
+            let range_val = lower_expr(constructor, body, array_expr_id)?;
+            let i32_type = constructor.i32_type;
+            let start = constructor.builder.composite_extract(i32_type, None, range_val, [0])?;
+            let step = constructor.builder.composite_extract(i32_type, None, range_val, [1])?;
+            let offset = constructor.builder.i_mul(i32_type, None, index_val, step)?;
+            Ok(constructor.builder.i_add(result_type, None, start, offset)?)
+        }
+    }
+}
+
+/// Lower indexing into a Composite array (SPIR-V array value).
+fn lower_composite_index(
+    constructor: &mut Constructor,
+    body: &Body,
+    array_expr_id: ExprId,
+    index_val: spirv::Word,
+    result_type: spirv::Word,
+    array_type: &PolyType<TypeName>,
+) -> Result<spirv::Word> {
+    let array_val = lower_expr(constructor, body, array_expr_id)?;
+
+    // If index is a compile-time constant, use OpCompositeExtract
+    if let Some(literal_idx) = constructor.get_const_u32_value(index_val) {
+        Ok(constructor.builder.composite_extract(result_type, None, array_val, [literal_idx])?)
+    } else {
+        // Runtime index - must materialize to local variable
+        let spirv_array_type = constructor.ast_type_to_spirv(array_type);
+        let array_var = constructor.declare_variable("_w_index_tmp", spirv_array_type)?;
+        constructor.builder.store(array_var, array_val, None, [])?;
+
+        let elem_ptr_type = constructor.builder.type_pointer(None, StorageClass::Function, result_type);
+        let elem_ptr = constructor.builder.access_chain(elem_ptr_type, None, array_var, [index_val])?;
+        Ok(constructor.builder.load(result_type, None, elem_ptr, None, [])?)
+    }
+}
 /// Try to extract a compile-time constant integer from an expression.
 fn try_extract_const_int(body: &Body, expr_id: ExprId) -> Option<i32> {
     match body.get_expr(expr_id) {
@@ -3465,7 +3432,7 @@ fn lower_map(
         && matches!(
             arr_ty,
             PolyType::Constructed(TypeName::Array, args)
-                if args.len() == 3 && matches!(&args[1], PolyType::Constructed(TypeName::AddressStorage, _))
+                if args.len() == 3 && matches!(&args[1], PolyType::Constructed(TypeName::ArrayVariantView, _))
         );
 
     if is_dynamic_storage {

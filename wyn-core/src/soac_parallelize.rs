@@ -83,19 +83,365 @@ fn parallelize_def(def: Def, analysis: &MirSoacAnalysis) -> Def {
                 }
             }
 
-            // Can't parallelize - return unchanged
+            // Can't parallelize - create single-thread fallback
+            let (new_body, new_outputs) = create_single_thread_fallback(&body, &inputs, &outputs);
             Def::EntryPoint {
                 id,
                 name,
                 execution_model: ExecutionModel::Compute { local_size },
                 inputs,
-                outputs,
-                body,
+                outputs: new_outputs,
+                body: new_body,
                 span,
             }
         }
         other => other,
     }
+}
+
+/// Create a single-thread fallback for compute shaders that can't be parallelized.
+///
+/// This runs the shader body only on thread 0, with input parameters rewritten
+/// to use storage-backed arrays instead of locals.
+fn create_single_thread_fallback(
+    body: &Body,
+    inputs: &[EntryInput],
+    _outputs: &[EntryOutput],
+) -> (Body, Vec<EntryOutput>) {
+    let mut new_body = Body::new();
+    let dummy_span = Span {
+        start_line: 1,
+        start_col: 1,
+        end_line: 1,
+        end_col: 1,
+    };
+    let dummy_node_id = NodeId(0);
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+    let bool_ty = Type::Constructed(TypeName::Str("bool"), vec![]);
+    let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
+
+    // Create local mapping for non-storage inputs
+    let mut local_map: HashMap<LocalId, LocalId> = HashMap::new();
+    let mut storage_locals: HashMap<LocalId, (String, Type<TypeName>)> = HashMap::new();
+
+    for (old_idx, local) in body.locals.iter().enumerate() {
+        let old_id = LocalId(old_idx as u32);
+
+        // Check if this local is a storage input
+        let is_storage_input = inputs.iter().any(|input| {
+            input.local == old_id
+                && matches!(
+                    &input.ty,
+                    Type::Constructed(TypeName::Array, args) if args.len() >= 2 && matches!(&args[1], Type::Constructed(TypeName::ArrayVariantView, _))
+                )
+        });
+
+        if is_storage_input {
+            // Find the input to get its name
+            if let Some(input) = inputs.iter().find(|i| i.local == old_id) {
+                storage_locals.insert(old_id, (input.name.clone(), input.ty.clone()));
+            }
+            // Still need to allocate the local for the mapping
+            let new_id = new_body.alloc_local(local.clone());
+            local_map.insert(old_id, new_id);
+        } else {
+            let new_id = new_body.alloc_local(local.clone());
+            local_map.insert(old_id, new_id);
+        }
+    }
+
+    // Create thread_id local
+    let thread_id_local = new_body.alloc_local(LocalDecl {
+        name: "__thread_id".to_string(),
+        span: dummy_span,
+        ty: i32_ty.clone(),
+        kind: LocalKind::Let,
+    });
+
+    // 1. __builtin_thread_id()
+    let thread_id_intrinsic = new_body.alloc_expr(
+        Expr::Intrinsic {
+            name: "__builtin_thread_id".to_string(),
+            args: vec![],
+        },
+        i32_ty.clone(),
+        dummy_span,
+        dummy_node_id,
+    );
+
+    // 2. thread_id == 0 check
+    let zero = new_body.alloc_expr(
+        Expr::Int("0".to_string()),
+        i32_ty.clone(),
+        dummy_span,
+        dummy_node_id,
+    );
+    let thread_id_ref = new_body.alloc_expr(
+        Expr::Local(thread_id_local),
+        i32_ty.clone(),
+        dummy_span,
+        dummy_node_id,
+    );
+    let is_thread_zero = new_body.alloc_expr(
+        Expr::BinOp {
+            op: "==".to_string(),
+            lhs: thread_id_ref,
+            rhs: zero,
+        },
+        bool_ty.clone(),
+        dummy_span,
+        dummy_node_id,
+    );
+
+    // 3. Copy body with storage rewrites
+    let body_copy =
+        copy_expr_tree_with_storage(&mut new_body, body, body.root, &local_map, &storage_locals);
+
+    // 4. Unit value for early return
+    let unit_expr = new_body.alloc_expr(Expr::Unit, unit_ty.clone(), dummy_span, dummy_node_id);
+
+    // 5. if thread_id == 0 then body else ()
+    let if_expr = new_body.alloc_expr(
+        Expr::If {
+            cond: is_thread_zero,
+            then_: body_copy,
+            else_: unit_expr,
+        },
+        unit_ty.clone(),
+        dummy_span,
+        dummy_node_id,
+    );
+
+    // 6. Wrap in let for thread_id
+    let root_expr = new_body.alloc_expr(
+        Expr::Let {
+            local: thread_id_local,
+            rhs: thread_id_intrinsic,
+            body: if_expr,
+        },
+        unit_ty.clone(),
+        dummy_span,
+        dummy_node_id,
+    );
+
+    new_body.set_root(root_expr);
+
+    // Output becomes unit since we're writing to storage directly (or just discarding)
+    let new_outputs = vec![EntryOutput {
+        ty: unit_ty,
+        decoration: None,
+    }];
+
+    (new_body, new_outputs)
+}
+
+/// Copy an expression tree, rewriting storage locals to Storage-backed arrays.
+fn copy_expr_tree_with_storage(
+    dest: &mut Body,
+    src: &Body,
+    expr_id: ExprId,
+    local_map: &HashMap<LocalId, LocalId>,
+    storage_locals: &HashMap<LocalId, (String, Type<TypeName>)>,
+) -> ExprId {
+    let ty = src.get_type(expr_id).clone();
+    let span = src.get_span(expr_id);
+    let node_id = src.node_ids[expr_id.index()];
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+    let dummy_node_id = NodeId(0);
+
+    let new_expr = match src.get_expr(expr_id) {
+        Expr::Local(local_id) => {
+            // Check if this is a storage local that needs rewriting
+            if let Some((name, array_ty)) = storage_locals.get(local_id) {
+                // Create Storage-backed array: Storage { name, offset: 0 }
+                let zero = dest.alloc_expr(Expr::Int("0".to_string()), i32_ty.clone(), span, dummy_node_id);
+                // Size: we don't know it statically, use a placeholder that lowering will handle
+                let size = dest.alloc_expr(Expr::Int("0".to_string()), i32_ty.clone(), span, dummy_node_id);
+                return dest.alloc_expr(
+                    Expr::Array {
+                        backing: ArrayBacking::Storage {
+                            name: name.clone(),
+                            offset: zero,
+                        },
+                        size,
+                    },
+                    array_ty.clone(),
+                    span,
+                    node_id,
+                );
+            }
+            Expr::Local(*local_map.get(local_id).unwrap_or(local_id))
+        }
+        Expr::Global(name) => Expr::Global(name.clone()),
+        Expr::Extern(linkage) => Expr::Extern(linkage.clone()),
+        Expr::Int(s) => Expr::Int(s.clone()),
+        Expr::Float(s) => Expr::Float(s.clone()),
+        Expr::Bool(b) => Expr::Bool(*b),
+        Expr::Unit => Expr::Unit,
+        Expr::String(s) => Expr::String(s.clone()),
+        Expr::Array { backing, size } => {
+            let new_size = copy_expr_tree_with_storage(dest, src, *size, local_map, storage_locals);
+            let new_backing = match backing {
+                ArrayBacking::Literal(elems) => {
+                    let new_elems: Vec<ExprId> = elems
+                        .iter()
+                        .map(|e| copy_expr_tree_with_storage(dest, src, *e, local_map, storage_locals))
+                        .collect();
+                    ArrayBacking::Literal(new_elems)
+                }
+                ArrayBacking::Range { start, step, kind } => {
+                    let new_start =
+                        copy_expr_tree_with_storage(dest, src, *start, local_map, storage_locals);
+                    let new_step =
+                        step.map(|s| copy_expr_tree_with_storage(dest, src, s, local_map, storage_locals));
+                    ArrayBacking::Range {
+                        start: new_start,
+                        step: new_step,
+                        kind: *kind,
+                    }
+                }
+                ArrayBacking::View { base, offset } => {
+                    let new_base = copy_expr_tree_with_storage(dest, src, *base, local_map, storage_locals);
+                    let new_offset =
+                        copy_expr_tree_with_storage(dest, src, *offset, local_map, storage_locals);
+                    ArrayBacking::View {
+                        base: new_base,
+                        offset: new_offset,
+                    }
+                }
+                ArrayBacking::Storage { name, offset } => {
+                    let new_offset =
+                        copy_expr_tree_with_storage(dest, src, *offset, local_map, storage_locals);
+                    ArrayBacking::Storage {
+                        name: name.clone(),
+                        offset: new_offset,
+                    }
+                }
+                ArrayBacking::Owned { data } => {
+                    let new_data = copy_expr_tree_with_storage(dest, src, *data, local_map, storage_locals);
+                    ArrayBacking::Owned { data: new_data }
+                }
+                ArrayBacking::IndexFn { index_fn } => {
+                    let new_fn =
+                        copy_expr_tree_with_storage(dest, src, *index_fn, local_map, storage_locals);
+                    ArrayBacking::IndexFn { index_fn: new_fn }
+                }
+            };
+            Expr::Array {
+                backing: new_backing,
+                size: new_size,
+            }
+        }
+        Expr::Tuple(elems) => {
+            let new_elems: Vec<ExprId> = elems
+                .iter()
+                .map(|e| copy_expr_tree_with_storage(dest, src, *e, local_map, storage_locals))
+                .collect();
+            Expr::Tuple(new_elems)
+        }
+        Expr::Vector(elems) => {
+            let new_elems: Vec<ExprId> = elems
+                .iter()
+                .map(|e| copy_expr_tree_with_storage(dest, src, *e, local_map, storage_locals))
+                .collect();
+            Expr::Vector(new_elems)
+        }
+        Expr::Matrix(rows) => {
+            let new_rows: Vec<Vec<ExprId>> = rows
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|e| copy_expr_tree_with_storage(dest, src, *e, local_map, storage_locals))
+                        .collect()
+                })
+                .collect();
+            Expr::Matrix(new_rows)
+        }
+        Expr::BinOp { op, lhs, rhs } => {
+            let new_lhs = copy_expr_tree_with_storage(dest, src, *lhs, local_map, storage_locals);
+            let new_rhs = copy_expr_tree_with_storage(dest, src, *rhs, local_map, storage_locals);
+            Expr::BinOp {
+                op: op.clone(),
+                lhs: new_lhs,
+                rhs: new_rhs,
+            }
+        }
+        Expr::UnaryOp { op, operand } => {
+            let new_operand = copy_expr_tree_with_storage(dest, src, *operand, local_map, storage_locals);
+            Expr::UnaryOp {
+                op: op.clone(),
+                operand: new_operand,
+            }
+        }
+        Expr::Call { func, args } => {
+            let new_args: Vec<ExprId> = args
+                .iter()
+                .map(|e| copy_expr_tree_with_storage(dest, src, *e, local_map, storage_locals))
+                .collect();
+            Expr::Call {
+                func: func.clone(),
+                args: new_args,
+            }
+        }
+        Expr::Intrinsic { name, args } => {
+            let new_args: Vec<ExprId> = args
+                .iter()
+                .map(|e| copy_expr_tree_with_storage(dest, src, *e, local_map, storage_locals))
+                .collect();
+            Expr::Intrinsic {
+                name: name.clone(),
+                args: new_args,
+            }
+        }
+        Expr::If { cond, then_, else_ } => {
+            let new_cond = copy_expr_tree_with_storage(dest, src, *cond, local_map, storage_locals);
+            let new_then = copy_expr_tree_with_storage(dest, src, *then_, local_map, storage_locals);
+            let new_else = copy_expr_tree_with_storage(dest, src, *else_, local_map, storage_locals);
+            Expr::If {
+                cond: new_cond,
+                then_: new_then,
+                else_: new_else,
+            }
+        }
+        Expr::Let { local, rhs, body } => {
+            let new_rhs = copy_expr_tree_with_storage(dest, src, *rhs, local_map, storage_locals);
+            let new_body = copy_expr_tree_with_storage(dest, src, *body, local_map, storage_locals);
+            Expr::Let {
+                local: *local_map.get(local).unwrap_or(local),
+                rhs: new_rhs,
+                body: new_body,
+            }
+        }
+        Expr::Materialize(inner) => {
+            let new_inner = copy_expr_tree_with_storage(dest, src, *inner, local_map, storage_locals);
+            Expr::Materialize(new_inner)
+        }
+        Expr::Load { ptr } => {
+            let new_ptr = copy_expr_tree_with_storage(dest, src, *ptr, local_map, storage_locals);
+            Expr::Load { ptr: new_ptr }
+        }
+        Expr::Store { ptr, value } => {
+            let new_ptr = copy_expr_tree_with_storage(dest, src, *ptr, local_map, storage_locals);
+            let new_value = copy_expr_tree_with_storage(dest, src, *value, local_map, storage_locals);
+            Expr::Store {
+                ptr: new_ptr,
+                value: new_value,
+            }
+        }
+        Expr::Loop { .. } => {
+            // Loops are complex - just copy unchanged for now
+            src.get_expr(expr_id).clone()
+        }
+        Expr::Attributed { attributes, expr } => {
+            let new_expr_inner = copy_expr_tree_with_storage(dest, src, *expr, local_map, storage_locals);
+            Expr::Attributed {
+                attributes: attributes.clone(),
+                expr: new_expr_inner,
+            }
+        }
+    };
+
+    dest.alloc_expr(new_expr, ty, span, node_id)
 }
 
 /// Try to parallelize a compute shader body using the analysis results.

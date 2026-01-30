@@ -821,7 +821,10 @@ impl TlcToMir {
                     let array_ty = body.get_type(array_arg).clone();
                     let ptr_ty = Type::Constructed(
                         TypeName::Pointer,
-                        vec![array_ty, Type::Constructed(TypeName::AddressFunction, vec![])],
+                        vec![
+                            array_ty,
+                            Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
+                        ],
                     );
                     body.alloc_expr(Expr::Materialize(array_arg), ptr_ty, span, node_id)
                 };

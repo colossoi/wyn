@@ -182,7 +182,7 @@ impl<'a> TypeChecker<'a> {
             Type::Constructed(TypeName::Array, args) => {
                 assert!(args.len() == 3);
                 // Constrain address space (args[1]) to Storage
-                let storage = Type::Constructed(TypeName::AddressStorage, vec![]);
+                let storage = Type::Constructed(TypeName::ArrayVariantView, vec![]);
                 self.context.unify(&args[1], &storage).map_err(|_| {
                     err_type!("Entry point array parameter must have Storage address space")
                 })?;
@@ -2236,7 +2236,7 @@ impl<'a> TypeChecker<'a> {
 
                 let elem_type = start_type.apply(&self.context);
                 // Range literals produce function-local arrays
-                let addrspace = Type::Constructed(TypeName::AddressFunction, vec![]);
+                let addrspace = Type::Constructed(TypeName::ArrayVariantComposite, vec![]);
                 Ok(Type::Constructed(TypeName::Array, vec![elem_type, addrspace, size_type]))
             }
 

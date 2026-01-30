@@ -1,0 +1,13 @@
+-- Demo: calling a function with different array sources
+
+-- A simple function that takes a sized array and sums first two elements
+def sum_first_two (arr: [4]i32) i32 =
+    arr[0] + arr[1]
+
+#[compute]
+entry compute_main(data: []i32) i32 =
+    -- Slice unsized storage to sized view, then call
+    let from_storage = sum_first_two(data[0..4]) in
+    -- Call with local array literal
+    let from_literal = sum_first_two([1, 2, 3, 4]) in
+    from_storage + from_literal

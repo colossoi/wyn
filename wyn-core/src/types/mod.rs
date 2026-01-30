@@ -161,12 +161,14 @@ pub enum TypeName {
     /// Type args: [pointee_type, addrspace]
     Pointer,
 
-    // --- Address spaces ---
-    /// Storage address space - data backed by SSBO (storage buffer).
-    AddressStorage,
-    /// Function address space - function-local OpVariable.
-    AddressFunction,
-    /// Address space placeholder. Replaced with type variable before type checking.
+    // --- Array variants (how the array is represented at runtime) ---
+    /// View variant - {ptr, len} struct pointing into storage buffer.
+    ArrayVariantView,
+    /// Composite variant - sized array value in registers/locals.
+    ArrayVariantComposite,
+    /// Virtual variant - computed on-the-fly (e.g., ranges). No storage.
+    ArrayVariantVirtual,
+    /// Array variant placeholder. Replaced with type variable before type checking.
     /// Entry point params are constrained to Storage, others remain polymorphic.
     AddressPlaceholder,
 
@@ -227,8 +229,9 @@ impl std::fmt::Display for TypeName {
                 write!(f, "?{}.", vars.join(" "))
             }
             TypeName::Pointer => write!(f, "Ptr"),
-            TypeName::AddressStorage => write!(f, "storage"),
-            TypeName::AddressFunction => write!(f, "function"),
+            TypeName::ArrayVariantView => write!(f, "view"),
+            TypeName::ArrayVariantComposite => write!(f, "composite"),
+            TypeName::ArrayVariantVirtual => write!(f, "virtual"),
             TypeName::AddressPlaceholder => write!(f, "?addrspace"),
             TypeName::Skolem(id) => write!(f, "{}", id),
             TypeName::Ignored => write!(f, "_"),
@@ -282,9 +285,10 @@ impl polytype::Name for TypeName {
             }
             TypeName::Existential(vars) => format!("?{}.", vars.join(" ")),
             TypeName::Pointer => "Ptr".to_string(),
-            TypeName::AddressStorage => "storage".to_string(),
-            TypeName::AddressFunction => "function".to_string(),
-            TypeName::AddressPlaceholder => "?addrspace".to_string(),
+            TypeName::ArrayVariantView => "view".to_string(),
+            TypeName::ArrayVariantComposite => "composite".to_string(),
+            TypeName::ArrayVariantVirtual => "virtual".to_string(),
+            TypeName::AddressPlaceholder => "?variant".to_string(),
             TypeName::Skolem(id) => format!("{}", id),
             TypeName::Ignored => "_".to_string(),
         }
@@ -481,7 +485,7 @@ pub fn sized_array(size: usize, elem_type: Type) -> Type {
         TypeName::Array,
         vec![
             elem_type,
-            Type::Constructed(TypeName::AddressFunction, vec![]),
+            Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Constructed(TypeName::Size(size), vec![]),
         ],
     )
@@ -597,33 +601,52 @@ pub fn strip_unique(ty: &Type) -> Type {
 // --- Address space constructors ---
 
 /// Create a storage address space type
-pub fn storage_addrspace() -> Type {
-    Type::Constructed(TypeName::AddressStorage, vec![])
+pub fn array_variant_view() -> Type {
+    Type::Constructed(TypeName::ArrayVariantView, vec![])
 }
 
 /// Create a function (local) address space type
-pub fn function_addrspace() -> Type {
-    Type::Constructed(TypeName::AddressFunction, vec![])
+pub fn array_variant_composite() -> Type {
+    Type::Constructed(TypeName::ArrayVariantComposite, vec![])
 }
 
 /// Check if a type is the storage address space
-pub fn is_storage_addrspace(ty: &Type) -> bool {
-    matches!(ty, Type::Constructed(TypeName::AddressStorage, _))
+pub fn is_array_variant_view(ty: &Type) -> bool {
+    matches!(ty, Type::Constructed(TypeName::ArrayVariantView, _))
 }
 
 /// Check if a type is the function address space
-pub fn is_function_addrspace(ty: &Type) -> bool {
-    matches!(ty, Type::Constructed(TypeName::AddressFunction, _))
+pub fn is_array_variant_composite(ty: &Type) -> bool {
+    matches!(ty, Type::Constructed(TypeName::ArrayVariantComposite, _))
 }
 
-/// Check if a type is an address space marker (Storage, Function, or Unknown).
+/// Check if a type is a virtual array (computed on-the-fly, like ranges)
+pub fn is_array_variant_virtual(ty: &Type) -> bool {
+    matches!(ty, Type::Constructed(TypeName::ArrayVariantVirtual, _))
+}
+
+/// Get the array variant from an array type (returns the second type argument)
+pub fn get_array_variant(ty: &Type) -> Option<&TypeName> {
+    match ty {
+        Type::Constructed(TypeName::Array, args) if args.len() >= 2 => match &args[1] {
+            Type::Constructed(name, _) => Some(name),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Check if a type is an array variant marker (View, Composite, Virtual, or Placeholder).
 /// These types should only appear as the second argument of Array types,
 /// never as standalone expression types.
-pub fn is_address_space(ty: &Type) -> bool {
+pub fn is_array_variant(ty: &Type) -> bool {
     matches!(
         ty,
         Type::Constructed(
-            TypeName::AddressStorage | TypeName::AddressFunction | TypeName::AddressPlaceholder,
+            TypeName::ArrayVariantView
+                | TypeName::ArrayVariantComposite
+                | TypeName::ArrayVariantVirtual
+                | TypeName::AddressPlaceholder,
             _
         )
     )
@@ -642,7 +665,7 @@ pub fn debug_assert_top_level_type(ty: &Type, context: &str) {
     match ty {
         Type::Constructed(name, _) => match name {
             // Address space markers - only valid inside Array[elem, addrspace, size]
-            TypeName::AddressStorage | TypeName::AddressFunction | TypeName::AddressPlaceholder => {
+            TypeName::ArrayVariantView | TypeName::ArrayVariantComposite | TypeName::AddressPlaceholder => {
                 panic!(
                     "BUG: Address space type {:?} used as top-level type in {}. \
                      Address space markers should only appear inside Array[elem, addrspace, size].",
@@ -748,7 +771,7 @@ pub fn is_bound_slice_access(ty: &Type) -> bool {
     match ty {
         Type::Constructed(TypeName::Array, args) if args.len() >= 3 => {
             assert!(args.len() == 3);
-            let is_storage = matches!(&args[1], Type::Constructed(TypeName::AddressStorage, _));
+            let is_storage = matches!(&args[1], Type::Constructed(TypeName::ArrayVariantView, _));
             let is_unsized = matches!(&args[2], Type::Constructed(TypeName::SizePlaceholder, _));
             is_storage && is_unsized
         }

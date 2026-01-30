@@ -141,9 +141,10 @@ fn format_constructed_type(name: &TypeName, args: &[PolyType<TypeName>]) -> Stri
             // Ptr<T>
             if args.len() == 1 { format!("Ptr<{}>", format_type(&args[0])) } else { "Ptr<?>".to_string() }
         }
-        TypeName::AddressStorage => "storage".to_string(),
-        TypeName::AddressFunction => "function".to_string(),
-        TypeName::AddressPlaceholder => "?addrspace".to_string(),
+        TypeName::ArrayVariantView => "view".to_string(),
+        TypeName::ArrayVariantComposite => "composite".to_string(),
+        TypeName::ArrayVariantVirtual => "virtual".to_string(),
+        TypeName::AddressPlaceholder => "?variant".to_string(),
         TypeName::Skolem(id) => format!("{}", id),
         TypeName::Ignored => "_".to_string(),
     }
