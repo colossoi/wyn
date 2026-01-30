@@ -703,7 +703,12 @@ impl<'a> Transformer<'a> {
     }
 
     fn transform_expr(&mut self, expr: &ast::Expression) -> Term {
-        let ty = self.lookup_type(expr.h.id).expect("BUG: Expression must have type in type table");
+        let ty = self.lookup_type(expr.h.id).unwrap_or_else(|| {
+            panic!(
+                "BUG: Expression must have type in type table. NodeId={:?}, kind={:?}, span={:?}",
+                expr.h.id, expr.kind, expr.h.span
+            )
+        });
         let span = expr.h.span;
 
         match &expr.kind {

@@ -194,6 +194,16 @@ impl ModuleManager {
         self.load_str(include_str!("../../../prelude/rand.wyn"), node_counter)?;
         self.load_str(include_str!("../../../prelude/soacs.wyn"), node_counter)?;
         self.load_str(include_str!("../../../prelude/crypto.wyn"), node_counter)?;
+        self.load_str(include_str!("../../../prelude/compute.wyn"), node_counter)?;
+
+        // Resolve names in prelude functions (rewrite FieldAccess -> QualifiedName)
+        // Use std::mem::take to avoid borrow checker issues with &mut prelude_functions + &self
+        let mut funcs = std::mem::take(&mut self.prelude_functions);
+        for decl in funcs.values_mut() {
+            crate::name_resolution::resolve_decl(decl, self)?;
+        }
+        self.prelude_functions = funcs;
+
         Ok(())
     }
 

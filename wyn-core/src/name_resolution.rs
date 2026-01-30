@@ -45,6 +45,12 @@ pub fn resolve_program(program: &mut Program, module_manager: &ModuleManager) ->
     Ok(())
 }
 
+/// Resolve names in a single Decl (for prelude functions)
+pub fn resolve_decl(decl: &mut crate::ast::Decl, module_manager: &ModuleManager) -> Result<()> {
+    let mut scope = ScopeStack::new();
+    resolve_expr(&mut decl.body, module_manager, &mut scope)
+}
+
 fn resolve_declaration(decl: &mut Declaration, module_manager: &ModuleManager) -> Result<()> {
     let mut scope = ScopeStack::new();
     match decl {

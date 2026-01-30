@@ -1,0 +1,15 @@
+-- Compute shader helper functions
+
+-- Compute chunk bounds for parallel work distribution.
+-- Given a thread ID, total array length, and number of threads,
+-- returns (chunk_start, chunk_end) for this thread's work range.
+--
+-- Uses ceiling division to ensure all elements are covered:
+--   chunk_size = ceil(array_len / total_threads)
+--   chunk_start = thread_id * chunk_size
+--   chunk_end = min(chunk_start + chunk_size, array_len)
+def _w_compute_chunk_bounds(thread_id: i32, array_len: i32, total_threads: i32) (i32, i32) =
+    let chunk_size = (array_len + total_threads - 1) / total_threads in
+    let chunk_start = thread_id * chunk_size in
+    let chunk_end = i32.min(chunk_start + chunk_size, array_len) in
+    (chunk_start, chunk_end)
