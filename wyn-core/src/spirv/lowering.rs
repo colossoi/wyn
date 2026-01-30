@@ -342,12 +342,11 @@ impl Constructor {
                                         ty
                                     );
                                 } else if let PolyType::Variable(_) = addrspace {
-                                    // Unresolved address space - treat as storage for now
-                                    let ptr_type = self.get_or_create_ptr_type(
-                                        spirv::StorageClass::StorageBuffer,
-                                        elem_type,
+                                    // Address space should have been resolved by default_address_spaces pass
+                                    panic!(
+                                        "BUG: Unresolved address space variable reached lowering: {:?}",
+                                        ty
                                     );
-                                    self.get_or_create_struct_type(vec![ptr_type, self.i32_type])
                                 } else {
                                     // Unknown address space
                                     panic!("BUG: Unsized array has unexpected address space: {:?}", ty);
