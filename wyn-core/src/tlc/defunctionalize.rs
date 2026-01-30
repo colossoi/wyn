@@ -10,9 +10,9 @@
 //!
 //! Example transformation:
 //!   Input:  f(|x| x + y, arr)     where y is captured
-//!   Output: f _lambda_0 arr y
+//!   Output: f _w_lambda_0 arr y
 //!
-//! The lifted lambda is: _lambda_0 = |x| |y| x + y  (captures at end)
+//! The lifted lambda is: _w_lambda_0 = |x| |y| x + y  (captures at end)
 
 use super::{Def, DefMeta, LoopKind, Program, Term, TermIdSource, TermKind};
 use crate::ast::{Span, TypeName};
@@ -1544,7 +1544,7 @@ impl<'a> Defunctionalizer<'a> {
     }
 
     fn fresh_name(&mut self) -> String {
-        let name = format!("_lambda_{}", self.lambda_counter);
+        let name = format!("_w_lambda_{}", self.lambda_counter);
         self.lambda_counter += 1;
         name
     }

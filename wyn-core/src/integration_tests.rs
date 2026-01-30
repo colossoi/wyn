@@ -293,7 +293,7 @@ entry vertex_main() #[builtin(position)] vec4f32 =
     let lambda_count = mir
         .defs
         .iter()
-        .filter(|d| matches!(d, mir::Def::Function { name, .. } if name.contains("_lambda_")))
+        .filter(|d| matches!(d, mir::Def::Function { name, .. } if name.contains("_w_lambda_")))
         .count();
     assert!(lambda_count >= 1, "Expected at least one lifted lambda");
 }
@@ -420,7 +420,7 @@ entry vertex_main() #[builtin(position)] vec4f32 =
     let lambda_count = mir
         .defs
         .iter()
-        .filter(|d| matches!(d, mir::Def::Function { name, .. } if name.contains("_lambda_")))
+        .filter(|d| matches!(d, mir::Def::Function { name, .. } if name.contains("_w_lambda_")))
         .count();
     assert!(
         lambda_count >= 4,
@@ -726,8 +726,10 @@ entry fragment_main(#[builtin(frag_coord)] pos: vec4f32) #[location(0)] vec4f32 
     assert!(mir_str.contains("main_image"), "Expected main_image");
 
     // Should have lambda for map
-    let has_lambda =
-        mir.defs.iter().any(|d| matches!(d, mir::Def::Function { name, .. } if name.contains("_lambda_")));
+    let has_lambda = mir
+        .defs
+        .iter()
+        .any(|d| matches!(d, mir::Def::Function { name, .. } if name.contains("_w_lambda_")));
     assert!(has_lambda, "Expected lifted lambda for map");
 }
 

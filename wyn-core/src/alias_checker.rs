@@ -946,8 +946,8 @@ fn is_prelude_function(name: &str) -> bool {
     if name.contains('.') {
         return true;
     }
-    // Generated lambdas from prelude
-    if name.starts_with("_w_lam_") {
+    // Generated lambdas from defunctionalization
+    if name.starts_with("_w_lambda_") {
         return true;
     }
     // Specialized HOF functions from defunctionalization (map$0, reduce$1, filter$2, etc.)

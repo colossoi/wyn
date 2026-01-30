@@ -3222,7 +3222,7 @@ fn extract_closure_info_inner(
             Ok((name.clone(), vec![]))
         }
         Expr::Call { func, args } => {
-            // Partial application to a lifted lambda: (_lambda_N arg1 arg2 ...)
+            // Partial application to a lifted lambda: (_w_lambda_N arg1 arg2 ...)
             // The args become captures for the resulting closure
             let capture_vals: Vec<spirv::Word> =
                 args.iter().map(|&a| lower_expr(constructor, body, a)).collect::<Result<Vec<_>>>()?;

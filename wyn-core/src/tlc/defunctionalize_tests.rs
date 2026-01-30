@@ -235,8 +235,8 @@ fn test_defunc_lambda_with_capture() {
     assert!(result.defs.len() >= 2, "Expected lifted lambda def");
 
     // Find the lifted lambda
-    let lifted = result.defs.iter().find(|d| d.name.starts_with("_lambda_"));
-    assert!(lifted.is_some(), "Should have a _lambda_ definition");
+    let lifted = result.defs.iter().find(|d| d.name.starts_with("_w_lambda_"));
+    assert!(lifted.is_some(), "Should have a _w_lambda_ definition");
 }
 
 /// Test that specialized HOF bodies are properly defunctionalized.
@@ -248,9 +248,9 @@ fn test_defunc_lambda_with_capture() {
 /// hof_outer(g, y) = hof_inner(g, y)  // No lambda here, just passes g through
 /// main(cap) = hof_outer(|a| a + cap, 5)
 ///
-/// When hof_outer is specialized for _lambda_0:
-/// - hof_outer$0 body becomes: hof_inner(_lambda_0, y)
-/// - This should trigger specialization of hof_inner for _lambda_0
+/// When hof_outer is specialized for _w_lambda_0:
+/// - hof_outer$0 body becomes: hof_inner(_w_lambda_0, y)
+/// - This should trigger specialization of hof_inner for _w_lambda_0
 ///
 /// This test fails if specialized bodies aren't processed (fixpoint issue).
 #[test]
@@ -479,12 +479,12 @@ fn test_nested_hof_passthrough() {
     // - hof_inner (original)
     // - hof_outer (original)
     // - main (original)
-    // - _lambda_0 (lifted from main, captures cap)
-    // - hof_outer$0 (specialized for _lambda_0)
-    // - hof_inner$0 (specialized for _lambda_0, triggered by processing hof_outer$0's body)
+    // - _w_lambda_0 (lifted from main, captures cap)
+    // - hof_outer$0 (specialized for _w_lambda_0)
+    // - hof_inner$0 (specialized for _w_lambda_0, triggered by processing hof_outer$0's body)
     //
     // The key assertion: hof_inner MUST be specialized even though the original
-    // hof_outer doesn't have a lambda - the specialized body hof_inner(_lambda_0, y)
+    // hof_outer doesn't have a lambda - the specialized body hof_inner(_w_lambda_0, y)
     // contains a HOF call that needs specialization.
 
     let hof_outer_specialized = result.defs.iter().any(|d| d.name.starts_with("hof_outer$"));
@@ -495,7 +495,7 @@ fn test_nested_hof_passthrough() {
     );
 
     // THIS IS THE CRITICAL ASSERTION:
-    // hof_inner must be specialized because hof_outer$0's body is: hof_inner(_lambda_0, y)
+    // hof_inner must be specialized because hof_outer$0's body is: hof_inner(_w_lambda_0, y)
     // If we don't process hof_outer$0's body (fixpoint issue), hof_inner won't be specialized
     let hof_inner_specialized = result.defs.iter().any(|d| d.name.starts_with("hof_inner$"));
     assert!(

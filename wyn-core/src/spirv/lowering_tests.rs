@@ -270,7 +270,7 @@ def sum_u32(arr: [4]u32) u32 =
 fn test_reduce_with_tuple_destructuring() {
     // Test reduce with tuple pattern destructuring in the combiner.
     // This pattern from raytrace.wyn's findClosestHit was causing:
-    // "Undefined global: _lambda_N" error because HOF specialization
+    // "Undefined global: _w_lambda_N" error because HOF specialization
     // was not eliminating function parameters correctly.
     let result = compile_to_spirv(
         r#"
