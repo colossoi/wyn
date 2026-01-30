@@ -713,7 +713,6 @@ impl TlcDefunctionalized {
         TlcMonomorphized {
             tlc: monomorphized,
             type_table: self.type_table,
-            schemes: self.schemes,
         }
     }
 }
@@ -722,14 +721,12 @@ impl TlcDefunctionalized {
 pub struct TlcMonomorphized {
     pub tlc: tlc::Program,
     pub type_table: TypeTable,
-    /// Type schemes for functions (for MIR lowering)
-    schemes: HashMap<String, types::TypeScheme>,
 }
 
 impl TlcMonomorphized {
     /// Transform TLC to MIR
     pub fn to_mir(self) -> Flattened {
-        let mir = tlc::to_mir::TlcToMir::transform(&self.tlc, &self.schemes);
+        let mir = tlc::to_mir::TlcToMir::transform(&self.tlc);
         Flattened { mir }
     }
 }

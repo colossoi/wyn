@@ -316,13 +316,11 @@ impl<'a> Parser<'a> {
         // Find the linked attribute
         let linkage_name = attributes
             .iter()
-            .find_map(|attr| {
-                if let Attribute::Linked(name) = attr {
-                    Some(name.clone())
-                } else {
-                    None
-                }
-            })
+            .find_map(
+                |attr| {
+                    if let Attribute::Linked(name) = attr { Some(name.clone()) } else { None }
+                },
+            )
             .ok_or_else(|| err_parse!("extern declaration requires #[linked(\"name\")] attribute"))?;
 
         self.expect(Token::Extern)?;

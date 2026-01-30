@@ -242,12 +242,8 @@ impl Constructor {
         let func_type = self.builder.type_function(return_type, arg_types.to_vec());
 
         // Declare the function (empty body - will be linked)
-        let func_id = self.builder.begin_function(
-            return_type,
-            None,
-            spirv::FunctionControl::NONE,
-            func_type,
-        )?;
+        let func_id =
+            self.builder.begin_function(return_type, None, spirv::FunctionControl::NONE, func_type)?;
 
         // Add Import linkage decoration
         self.builder.decorate(
@@ -820,7 +816,14 @@ impl<'a> LowerCtx<'a> {
                 // Check if this is an extern function declaration
                 if let Expr::Extern(linkage_name) = body.get_expr(body.root) {
                     // This is an extern function - create an imported function declaration
-                    lower_extern_function(&mut self.constructor, name, params, ret_type, body, linkage_name)?;
+                    lower_extern_function(
+                        &mut self.constructor,
+                        name,
+                        params,
+                        ret_type,
+                        body,
+                        linkage_name,
+                    )?;
                 } else {
                     // First, ensure all dependencies are lowered
                     self.ensure_deps_lowered(body)?;
@@ -1106,12 +1109,8 @@ fn lower_extern_function(
 
     // Create the function declaration with no body
     // Use Pure function control to indicate no side effects
-    let func_id = constructor.builder.begin_function(
-        return_type,
-        None,
-        spirv::FunctionControl::NONE,
-        func_type,
-    )?;
+    let func_id =
+        constructor.builder.begin_function(return_type, None, spirv::FunctionControl::NONE, func_type)?;
 
     // Add function parameters (required even for imported functions)
     for &param_id in params_to_lower {
@@ -2189,10 +2188,8 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                 args.iter().map(|&a| lower_expr(constructor, body, a)).collect::<Result<Vec<_>>>()?;
 
             // Collect argument types for linked function declarations
-            let arg_types: Vec<spirv::Word> = args
-                .iter()
-                .map(|&a| constructor.ast_type_to_spirv(body.get_type(a)))
-                .collect();
+            let arg_types: Vec<spirv::Word> =
+                args.iter().map(|&a| constructor.ast_type_to_spirv(body.get_type(a))).collect();
 
             // Check for builtin vector constructors
             match func.as_str() {
@@ -2397,7 +2394,12 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                                     &arg_types,
                                     result_type,
                                 )?;
-                                Ok(constructor.builder.function_call(result_type, None, func_id, arg_ids)?)
+                                Ok(constructor.builder.function_call(
+                                    result_type,
+                                    None,
+                                    func_id,
+                                    arg_ids,
+                                )?)
                             }
                         }
                     } else {

@@ -123,10 +123,7 @@ fn try_parallelize_body(
     let total_threads = local_size.0 * local_size.1 * local_size.2;
 
     // Find the size hint for the mapped array (if available)
-    let size_hint: Option<u32> = inputs
-        .iter()
-        .find(|i| i.local == storage_local)
-        .and_then(|i| i.size_hint);
+    let size_hint: Option<u32> = inputs.iter().find(|i| i.local == storage_local).and_then(|i| i.size_hint);
 
     // Create new body with the transformation
     let mut new_body = Body::new();

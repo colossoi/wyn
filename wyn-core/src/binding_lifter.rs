@@ -86,7 +86,6 @@ impl BindingLifter {
                 name,
                 params,
                 ret_type,
-                scheme,
                 attributes,
                 body,
                 span,
@@ -97,7 +96,6 @@ impl BindingLifter {
                     name,
                     params,
                     ret_type,
-                    scheme,
                     attributes,
                     body: new_body,
                     span,
@@ -711,6 +709,12 @@ fn collect_free_locals_inner(
         }
 
         // Leaf nodes - no locals to collect
-        Expr::Global(_) | Expr::Extern(_) | Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::String(_) | Expr::Unit => {}
+        Expr::Global(_)
+        | Expr::Extern(_)
+        | Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Bool(_)
+        | Expr::String(_)
+        | Expr::Unit => {}
     }
 }

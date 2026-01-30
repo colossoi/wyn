@@ -8,7 +8,6 @@ use crate::mir::{
     self, ArrayBacking, Body, Def as MirDef, Expr, ExprId, LocalDecl, LocalId, LocalKind,
     LoopKind as MirLoopKind,
 };
-use crate::types::TypeScheme;
 use polytype::Type;
 use std::collections::HashMap;
 
@@ -31,18 +30,16 @@ fn extract_function_signature(ty: &Type<TypeName>) -> (Vec<Type<TypeName>>, Type
 }
 
 /// Transforms TLC to MIR.
-pub struct TlcToMir<'a> {
+pub struct TlcToMir {
     /// Maps TLC variable names to MIR LocalIds (within current body)
     locals: HashMap<String, LocalId>,
     /// Maps top-level function names to their definitions
     top_level: HashMap<String, TlcDef>,
-    /// Type schemes for functions (for monomorphization)
-    schemes: &'a HashMap<String, TypeScheme>,
 }
 
-impl<'a> TlcToMir<'a> {
+impl TlcToMir {
     /// Transform a lifted TLC program to MIR.
-    pub fn transform(program: &TlcProgram, schemes: &'a HashMap<String, TypeScheme>) -> mir::Program {
+    pub fn transform(program: &TlcProgram) -> mir::Program {
         // Collect top-level names
         let top_level: HashMap<String, TlcDef> =
             program.defs.iter().map(|d| (d.name.clone(), d.clone())).collect();
@@ -50,7 +47,6 @@ impl<'a> TlcToMir<'a> {
         let mut transformer = Self {
             locals: HashMap::new(),
             top_level,
-            schemes,
         };
 
         let mut defs: Vec<MirDef> = program.defs.iter().map(|def| transformer.transform_def(def)).collect();
@@ -126,7 +122,6 @@ impl<'a> TlcToMir<'a> {
                 name: def.name.clone(),
                 params: param_ids,
                 ret_type,
-                scheme: None,
                 attributes: vec![],
                 body,
                 span: def.body.span,
@@ -167,14 +162,11 @@ impl<'a> TlcToMir<'a> {
             }
         } else {
             // Function with parameters
-            // Look up type scheme for this function (if it's a prelude function)
-            let scheme = self.schemes.get(&def.name).cloned();
             MirDef::Function {
                 id: NodeId(0),
                 name: def.name.clone(),
                 params: param_ids,
                 ret_type: inner_body.ty.clone(),
-                scheme,
                 attributes: vec![],
                 body,
                 span: def.body.span,
@@ -1025,8 +1017,7 @@ mod tests {
             storage: vec![],
         };
 
-        let schemes = std::collections::HashMap::new();
-        let mir = TlcToMir::transform(&program, &schemes);
+        let mir = TlcToMir::transform(&program);
 
         assert_eq!(mir.defs.len(), 1);
         match &mir.defs[0] {

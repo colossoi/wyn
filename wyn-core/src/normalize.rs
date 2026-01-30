@@ -59,7 +59,6 @@ impl Normalizer {
                 name,
                 params,
                 ret_type,
-                scheme,
                 attributes,
                 body,
                 span,
@@ -70,7 +69,6 @@ impl Normalizer {
                     name,
                     params,
                     ret_type,
-                    scheme,
                     attributes,
                     body: new_body,
                     span,
@@ -144,7 +142,9 @@ impl Normalizer {
             // Already atomic - just copy
             Expr::Local(local_id) => body.alloc_expr(Expr::Local(*local_id), ty.clone(), span, node_id),
             Expr::Global(name) => body.alloc_expr(Expr::Global(name.clone()), ty.clone(), span, node_id),
-            Expr::Extern(linkage) => body.alloc_expr(Expr::Extern(linkage.clone()), ty.clone(), span, node_id),
+            Expr::Extern(linkage) => {
+                body.alloc_expr(Expr::Extern(linkage.clone()), ty.clone(), span, node_id)
+            }
             Expr::Int(s) => body.alloc_expr(Expr::Int(s.clone()), ty.clone(), span, node_id),
             Expr::Float(s) => body.alloc_expr(Expr::Float(s.clone()), ty.clone(), span, node_id),
             Expr::Bool(b) => body.alloc_expr(Expr::Bool(*b), ty.clone(), span, node_id),

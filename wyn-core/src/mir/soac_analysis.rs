@@ -10,7 +10,9 @@
 //! - Function calls and parameter passing
 
 use crate::ast::TypeName;
-use crate::mir::{ArrayBacking, Body, Def, EntryInput, ExecutionModel, Expr, ExprId, LocalId, Program, RangeKind};
+use crate::mir::{
+    ArrayBacking, Body, Def, EntryInput, ExecutionModel, Expr, ExprId, LocalId, Program, RangeKind,
+};
 use polytype::Type;
 use std::collections::HashMap;
 
@@ -238,11 +240,7 @@ impl<'a> ProvenanceAnalyzer<'a> {
                         if let Some(map) = self.find_map_in_expr(start) {
                             return Some(map);
                         }
-                        if let Some(s) = step {
-                            self.find_map_in_expr(s)
-                        } else {
-                            None
-                        }
+                        if let Some(s) = step { self.find_map_in_expr(s) } else { None }
                     }
                     ArrayBacking::IndexFn { index_fn } => self.find_map_in_expr(index_fn),
                     ArrayBacking::Literal(elems) => {
@@ -383,10 +381,7 @@ impl<'a> ProvenanceAnalyzer<'a> {
                 ArrayBacking::Storage { name, .. } => {
                     // Try to find the entry input this corresponds to
                     for (local_id, prov) in &self.provenance {
-                        if let ArrayProvenance::EntryStorage {
-                            name: entry_name, ..
-                        } = prov
-                        {
+                        if let ArrayProvenance::EntryStorage { name: entry_name, .. } = prov {
                             if entry_name == name {
                                 return prov.clone();
                             }
