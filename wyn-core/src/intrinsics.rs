@@ -532,44 +532,8 @@ impl IntrinsicSource {
     }
 
     /// Register miscellaneous utility intrinsics
-    fn register_misc_intrinsics(&mut self, ctx: &mut impl TypeVarGenerator) {
-        // Register cryptographic intrinsics
-        self.register_crypto_intrinsics(ctx);
-    }
-
-    /// Register cryptographic intrinsics (SHA256, etc.)
-    fn register_crypto_intrinsics(&mut self, ctx: &mut impl TypeVarGenerator) {
+    fn register_misc_intrinsics(&mut self, _ctx: &mut impl TypeVarGenerator) {
         let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
-
-        // Fixed-size array helper (uses a fresh address space variable)
-        let fixed_array = |elem: Type, size: usize, s: Type| -> Type {
-            Type::Constructed(
-                TypeName::Array,
-                vec![elem, s, Type::Constructed(TypeName::Size(size), vec![])],
-            )
-        };
-
-        // _w_intrinsic_sha256_block : [16]u32 -> [8]u32
-        // SHA256 compression of a single 512-bit block with standard IV
-        let s1 = ctx.new_variable();
-        let s2 = ctx.new_variable();
-        let block_16 = fixed_array(u32_ty.clone(), 16, s1);
-        let hash_8 = fixed_array(u32_ty.clone(), 8, s2);
-        self.register_poly("_w_intrinsic_sha256_block", vec![block_16], hash_8);
-
-        // _w_intrinsic_sha256_block_with_state : [8]u32 -> [16]u32 -> [8]u32
-        // SHA256 compression with custom initial state (for multi-block hashing)
-        let s1 = ctx.new_variable();
-        let s2 = ctx.new_variable();
-        let s3 = ctx.new_variable();
-        let state_8 = fixed_array(u32_ty.clone(), 8, s1);
-        let block_16 = fixed_array(u32_ty.clone(), 16, s2);
-        let result_8 = fixed_array(u32_ty.clone(), 8, s3);
-        self.register_poly(
-            "_w_intrinsic_sha256_block_with_state",
-            vec![state_8, block_16],
-            result_8,
-        );
 
         // _w_intrinsic_rotr32 : u32 -> u32 -> u32
         // Right rotate: rotr32(x, n) = (x >> n) | (x << (32 - n))

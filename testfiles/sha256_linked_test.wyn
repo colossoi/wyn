@@ -1,5 +1,7 @@
 -- Test SHA256 using linked SPIR-V implementation
--- The sha256_block_with_state function is imported from sha256_compress.spv
+
+#[linked("sha256_compress")]
+extern sha256_block(block: [16]u32) [8]u32
 
 #[compute]
 entry test_sha256(blocks: [][16]u32) [][8]u32 =

@@ -755,15 +755,7 @@ impl ImplSource {
         self.register("mul_vec_mat", BuiltinImpl::PrimOp(PrimOp::VectorTimesMatrix));
     }
 
-    /// Register functions implemented via linked external SPIR-V modules
-    fn register_linked_spirv(&mut self) {
-        // SHA256 compression: ([8]u32, [16]u32) -> [8]u32
-        // Linked from sha256_compress.spv
-        self.register(
-            "_w_intrinsic_sha256_block_with_state",
-            BuiltinImpl::LinkedSpirv("sha256_compress".to_string()),
-        );
-    }
+    fn register_linked_spirv(&mut self) {}
 }
 
 impl Default for ImplSource {

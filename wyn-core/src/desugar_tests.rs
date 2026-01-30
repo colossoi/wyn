@@ -178,20 +178,21 @@ entry vertex_main() #[builtin(position)] vec4f32 =
 }
 
 #[test]
-fn test_minimal_call_type_mismatch() {
-    // Minimal test: call sha256_80 from prelude to isolate type variable issue
+fn test_array_function_call() {
+    // Test calling a function that takes and returns arrays
     let source = r#"
+def process(arr: [4]i32) [4]i32 = arr
+
 #[vertex]
 entry vertex_main() #[builtin(position)] vec4f32 =
-    let h = sha256_80([0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32,
-                       0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32]) in
+    let h = process([1i32, 2i32, 3i32, 4i32]) in
     @[0.0f32, 0.0f32, 0.0f32, 1.0f32]
 "#;
     let result = compile_through_lowering(source);
     if let Err(e) = &result {
         eprintln!("Compilation error: {:?}", e);
     }
-    assert!(result.is_ok(), "sha256_80 call should work");
+    assert!(result.is_ok(), "array function call should work");
 }
 
 #[test]
