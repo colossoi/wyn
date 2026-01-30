@@ -1,10 +1,9 @@
 #[cfg(test)]
 mod tests {
     use crate::ast::{BinaryOp, Span, TypeName};
-    use crate::mir::{self, Def as MirDef};
+    use crate::mir::Def as MirDef;
     use crate::tlc::to_mir::TlcToMir;
     use crate::tlc::{Def as TlcDef, DefMeta, Program as TlcProgram, Term, TermIdSource, TermKind};
-    use crate::{Compiler, build_known_defs};
     use polytype::Type;
 
     fn make_span(line: usize, col: usize) -> Span {
@@ -16,6 +15,10 @@ mod tests {
         }
     }
 
+    /// Unit test for TlcToMir::transform.
+    ///
+    /// This directly constructs TLC terms and transforms them to MIR,
+    /// testing the TLC→MIR lowering in isolation without running the full pipeline.
     #[test]
     fn test_transform_simple_function() {
         // def add(x, y) = x + y
@@ -131,56 +134,5 @@ mod tests {
             }
             _ => panic!("Expected Function"),
         }
-    }
-
-    /// Run MIR pipeline up to (but not including) reachability filtering.
-    /// This lets us see what MIR was generated before dead code elimination.
-    #[allow(dead_code)]
-    fn mir_before_reachability(input: &str) -> mir::Program {
-        let mut frontend = crate::cached_frontend();
-        let parsed = Compiler::parse(input, &mut frontend.node_counter).expect("Parsing failed");
-        let alias_checked = parsed
-            .desugar(&mut frontend.node_counter)
-            .expect("Desugaring failed")
-            .resolve(&mut frontend.module_manager)
-            .expect("Name resolution failed")
-            .fold_ast_constants()
-            .type_check(&mut frontend.module_manager, &mut frontend.schemes)
-            .expect("Type checking failed")
-            .alias_check()
-            .expect("Alias checking failed");
-
-        let known_defs = build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
-        alias_checked
-            .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
-            .skip_partial_eval()
-            .defunctionalize()
-            .to_mir()
-            .hoist_materializations()
-            .normalize()
-            .monomorphize()
-            .expect("Monomorphization failed")
-            .default_address_spaces()
-            .mir
-    }
-
-    /// Integration test: full pipeline from source to MIR with `map` intrinsic.
-    /// This test is for debugging the map/prelude challenge.
-    #[test]
-    fn test_map_intrinsic_full_pipeline() {
-        let source = r#"
-def myfunc(x: i32, y: i32, arr: [4]i32) [4]i32 =
-  map(|e| e + x + y, arr)
-
-#[fragment]
-entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
-  let result = myfunc(1, 2, [1, 2, 3, 4]) in
-  @[f32.i32(result[0]), 0.0, 0.0, 1.0]
-"#;
-
-        let mir = mir_before_reachability(source);
-
-        // Print MIR
-        eprintln!("\n=== FINAL MIR ===\n{}\n=================\n", mir);
     }
 }

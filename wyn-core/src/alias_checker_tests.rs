@@ -273,9 +273,10 @@ fn analyze_inplace_ops(source: &str) -> InPlaceInfo {
         .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
         .skip_partial_eval()
         .defunctionalize()
+        .monomorphize()
         .to_mir();
 
-    // For tests without entry points, analyze after flattening (before monomorphization)
+    // For tests without entry points, analyze after flattening
     // since filter_reachable would remove all defs without an entry point
     analyze_inplace(&flattened.mir)
 }
@@ -288,6 +289,11 @@ def double(x: i32) i32 = x * 2
 
 def main(arr: [4]i32) [4]i32 =
     map(double, arr)
+
+#[vertex]
+entry vertex_main() #[builtin(position)] vec4f32 =
+    let _ = main([1, 2, 3, 4]) in
+    @[0.0f32, 0.0f32, 0.0f32, 1.0f32]
 "#;
     let info = analyze_inplace_ops(source);
     assert!(
@@ -341,6 +347,11 @@ def double(x: i32) i32 = x * 2
 
 def main(arr: [4]i32) [4]i32 =
     map(double, map(double, arr))
+
+#[vertex]
+entry vertex_main() #[builtin(position)] vec4f32 =
+    let _ = main([1, 2, 3, 4]) in
+    @[0.0f32, 0.0f32, 0.0f32, 1.0f32]
 "#;
     let info = analyze_inplace_ops(source);
     // At least one of the maps should be eligible
@@ -360,6 +371,11 @@ def double(x: i32) i32 = x * 2
 def main(arr: [4]i32) [4]i32 =
     let result = map(double, arr) in
     result
+
+#[vertex]
+entry vertex_main() #[builtin(position)] vec4f32 =
+    let _ = main([1, 2, 3, 4]) in
+    @[0.0f32, 0.0f32, 0.0f32, 1.0f32]
 "#;
     let info = analyze_inplace_ops(source);
     assert!(
@@ -378,6 +394,11 @@ fn test_inplace_with_simple_dead_after() {
     let source = r#"
 def main(arr: [4]i32) [4]i32 =
     arr with [0] = 42
+
+#[vertex]
+entry vertex_main() #[builtin(position)] vec4f32 =
+    let _ = main([1, 2, 3, 4]) in
+    @[0.0f32, 0.0f32, 0.0f32, 1.0f32]
 "#;
     let info = analyze_inplace_ops(source);
     assert!(
@@ -408,6 +429,11 @@ fn test_inplace_with_discarded() {
 def main(arr: [4]i32) () =
     let _ = arr with [0] = 42 in
     ()
+
+#[vertex]
+entry vertex_main() #[builtin(position)] vec4f32 =
+    let _ = main([1, 2, 3, 4]) in
+    @[0.0f32, 0.0f32, 0.0f32, 1.0f32]
 "#;
     let info = analyze_inplace_ops(source);
     assert!(
@@ -423,6 +449,11 @@ fn test_inplace_with_chained() {
 def main(arr: [4]i32) [4]i32 =
     let arr2 = arr with [0] = 1 in
     arr2 with [1] = 2
+
+#[vertex]
+entry vertex_main() #[builtin(position)] vec4f32 =
+    let _ = main([1, 2, 3, 4]) in
+    @[0.0f32, 0.0f32, 0.0f32, 1.0f32]
 "#;
     let info = analyze_inplace_ops(source);
     // Both operations should be eligible since arr is dead after first,

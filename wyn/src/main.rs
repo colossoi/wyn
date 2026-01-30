@@ -227,8 +227,11 @@ fn compile_file(
     // Defunctionalize: lift lambdas and flatten SOAC captures
     let tlc_defunc = time("defunctionalize", verbose, || tlc_optimized.defunctionalize());
 
+    // Monomorphize polymorphic functions at TLC level
+    let tlc_mono = time("tlc_monomorphize", verbose, || tlc_defunc.monomorphize());
+
     // Transform TLC to MIR
-    let flattened = time("to_mir", verbose, || tlc_defunc.to_mir());
+    let flattened = time("to_mir", verbose, || tlc_mono.to_mir());
 
     // Write initial MIR if requested (right after TLC→MIR)
     write_mir_if_requested(&flattened.mir, &output_init_mir, "initial MIR", verbose)?;
@@ -237,8 +240,7 @@ fn compile_file(
         flattened.hoist_materializations()
     });
     let normalized = time("normalize", verbose, || hoisted.normalize());
-    let monomorphized = time("monomorphize", verbose, || normalized.monomorphize())?;
-    let defaulted = monomorphized.default_address_spaces();
+    let defaulted = normalized.default_address_spaces();
     let parallelized = time("parallelize_soacs", verbose, || defaulted.parallelize_soacs());
     let reachable = time("filter_reachable", verbose, || parallelized.filter_reachable());
     let lifted = time("lift_bindings", verbose, || reachable.lift_bindings());

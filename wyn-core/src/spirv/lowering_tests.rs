@@ -21,6 +21,7 @@ fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
         .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
         .skip_partial_eval()
         .defunctionalize()
+        .monomorphize()
         .to_mir();
 
     let inplace_info = crate::alias_checker::analyze_inplace(&flattened.mir);
@@ -341,11 +342,10 @@ fn compile_to_spirv_with_partial_eval(source: &str) -> Result<Vec<u32>> {
         .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
         .partial_eval()
         .defunctionalize()
+        .monomorphize()
         .to_mir()
         .hoist_materializations()
         .normalize()
-        .monomorphize()
-        .expect("Monomorphization failed")
         .default_address_spaces()
         .parallelize_soacs()
         .filter_reachable()

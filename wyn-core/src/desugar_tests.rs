@@ -20,16 +20,14 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .alias_check()?;
 
     let known_defs = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
-    let monomorphized = alias_checked
+    alias_checked
         .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
         .skip_partial_eval()
         .defunctionalize()
+        .monomorphize()
         .to_mir()
         .hoist_materializations()
         .normalize()
-        .monomorphize()?;
-
-    monomorphized
         .default_address_spaces()
         .parallelize_soacs()
         .filter_reachable()
@@ -54,6 +52,7 @@ fn compile_through_flatten(input: &str) -> Result<crate::Flattened, CompilerErro
         .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
         .skip_partial_eval()
         .defunctionalize()
+        .monomorphize()
         .to_mir();
     Ok(flattened)
 }

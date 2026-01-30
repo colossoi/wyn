@@ -31,7 +31,6 @@ pub mod default_address_spaces;
 pub mod glsl;
 pub mod inplace_rewriter;
 pub mod materialize_hoisting;
-pub mod monomorphization;
 pub mod normalize;
 pub mod resolve_placeholders;
 pub mod soac_parallelize;
@@ -51,7 +50,7 @@ mod binding_lifter_tests;
 #[cfg(test)]
 mod constant_folding_tests;
 #[cfg(test)]
-mod flattening_tests;
+mod integration_tests;
 #[cfg(test)]
 mod scope_tests;
 
@@ -299,12 +298,12 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 //       -> .to_tlc()                                    -> TlcTransformed
 //       -> .partial_eval() or .skip_partial_eval()      -> TlcTransformed (optimized)
 //       -> .defunctionalize()                           -> TlcDefunctionalized
+//       -> .monomorphize()                              -> TlcMonomorphized
 //       -> .to_mir()                                    -> Flattened
 //
 // BackEnd Pipeline (MIR -> output):
 //     -> flattened.hoist_materializations()             -> MaterializationsHoisted
 //       -> .normalize()                                 -> Normalized
-//       -> .monomorphize()                              -> Monomorphized
 //       -> .default_address_spaces()                    -> AddressSpacesDefaulted
 //       -> .filter_reachable()                          -> Reachable
 //       -> .lift_bindings()                             -> Lifted
@@ -705,11 +704,32 @@ pub struct TlcDefunctionalized {
 }
 
 impl TlcDefunctionalized {
-    /// Transform TLC to MIR
-    pub fn to_mir(self) -> Flattened {
+    /// Specialize polymorphic intrinsics and monomorphize user functions.
+    pub fn monomorphize(self) -> TlcMonomorphized {
         // Specialize polymorphic intrinsics (sign → f32.sign, etc.)
         let specialized = tlc::specialize::specialize(self.tlc);
-        let mir = tlc::to_mir::TlcToMir::transform(&specialized, &self.schemes);
+        // Monomorphize polymorphic user functions
+        let monomorphized = tlc::monomorphize::monomorphize(specialized, &self.schemes);
+        TlcMonomorphized {
+            tlc: monomorphized,
+            type_table: self.type_table,
+            schemes: self.schemes,
+        }
+    }
+}
+
+/// TLC with all functions monomorphized (no type variables remain)
+pub struct TlcMonomorphized {
+    pub tlc: tlc::Program,
+    pub type_table: TypeTable,
+    /// Type schemes for functions (for MIR lowering)
+    schemes: HashMap<String, types::TypeScheme>,
+}
+
+impl TlcMonomorphized {
+    /// Transform TLC to MIR
+    pub fn to_mir(self) -> Flattened {
+        let mir = tlc::to_mir::TlcToMir::transform(&self.tlc, &self.schemes);
         Flattened { mir }
     }
 }
@@ -750,20 +770,8 @@ pub struct Normalized {
 }
 
 impl Normalized {
-    /// Monomorphize polymorphic functions.
-    pub fn monomorphize(self) -> Result<Monomorphized> {
-        let mir = monomorphization::monomorphize(self.mir)?;
-        Ok(Monomorphized { mir })
-    }
-}
-
-/// Program has been monomorphized
-pub struct Monomorphized {
-    pub mir: mir::Program,
-}
-
-impl Monomorphized {
     /// Default unconstrained address space variables to Function.
+    /// Note: Monomorphization now happens at TLC level (in to_mir), not MIR level.
     pub fn default_address_spaces(self) -> AddressSpacesDefaulted {
         let mir = default_address_spaces::default_address_spaces(self.mir);
         AddressSpacesDefaulted { mir }

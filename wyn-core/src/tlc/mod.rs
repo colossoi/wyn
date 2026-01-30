@@ -6,6 +6,7 @@
 pub mod defunctionalize;
 #[cfg(test)]
 mod defunctionalize_tests;
+pub mod monomorphize;
 pub mod partial_eval;
 #[cfg(test)]
 mod partial_eval_tests;
@@ -45,9 +46,7 @@ const FUNDAMENTAL_SOACS: &[(&str, &str)] = &[
 /// For non-function types, returns 0.
 fn count_function_arity(ty: &Type<TypeName>) -> usize {
     match ty {
-        Type::Constructed(TypeName::Arrow, args) if args.len() == 2 => {
-            1 + count_function_arity(&args[1])
-        }
+        Type::Constructed(TypeName::Arrow, args) if args.len() == 2 => 1 + count_function_arity(&args[1]),
         _ => 0,
     }
 }
@@ -285,11 +284,7 @@ impl<'a> Transformer<'a> {
                 }
                 ast::Declaration::Extern(e) => {
                     // Create a forward declaration for linked SPIR-V function
-                    let body = self.mk_term(
-                        e.ty.clone(),
-                        e.span,
-                        TermKind::Extern(e.linkage_name.clone()),
-                    );
+                    let body = self.mk_term(e.ty.clone(), e.span, TermKind::Extern(e.linkage_name.clone()));
                     // Compute arity by counting arrows in the function type
                     let arity = count_function_arity(&e.ty);
                     defs.push(Def {
