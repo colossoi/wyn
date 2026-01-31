@@ -151,7 +151,6 @@ impl Constructor {
         let mut builder = Builder::new();
         builder.set_version(1, 5);
         builder.capability(Capability::Shader);
-        builder.capability(Capability::VariablePointersStorageBuffer);
         builder.memory_model(AddressingModel::Logical, MemoryModel::GLSL450);
 
         let void_type = builder.type_void();
@@ -992,6 +991,8 @@ impl<'a> LowerCtx<'a> {
                         );
                     }
                     spirv::ExecutionModel::GLCompute => {
+                        // Compute shaders need VariablePointersStorageBuffer for buffer access
+                        self.constructor.builder.capability(Capability::VariablePointersStorageBuffer);
                         if let Some((x, y, z)) = ep.local_size {
                             self.constructor.builder.execution_mode(
                                 func_id,
