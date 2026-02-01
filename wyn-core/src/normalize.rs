@@ -62,6 +62,7 @@ impl Normalizer {
                 attributes,
                 body,
                 span,
+                dps_output,
             } => {
                 let new_body = self.normalize_body(body);
                 Def::Function {
@@ -72,6 +73,7 @@ impl Normalizer {
                     attributes,
                     body: new_body,
                     span,
+                    dps_output,
                 }
             }
             // Constants must remain compile-time literals, so don't normalize them
@@ -320,26 +322,6 @@ impl Normalizer {
 
                         let bindings = vec![size_binding, data_binding];
                         self.wrap_bindings(body, owned_id, ty, span, node_id, bindings)
-                    }
-                    ArrayBacking::Storage { name, offset } => {
-                        let new_offset = self.expr_map[&offset];
-                        let (atom_offset, offset_binding) = self.atomize(body, new_offset, node_id);
-
-                        let storage_id = body.alloc_expr(
-                            Expr::Array {
-                                backing: ArrayBacking::Storage {
-                                    name: name.clone(),
-                                    offset: atom_offset,
-                                },
-                                size: atom_size,
-                            },
-                            ty.clone(),
-                            span,
-                            node_id,
-                        );
-
-                        let bindings = vec![size_binding, offset_binding];
-                        self.wrap_bindings(body, storage_id, ty, span, node_id, bindings)
                     }
                 }
             }

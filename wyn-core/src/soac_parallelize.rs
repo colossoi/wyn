@@ -252,24 +252,9 @@ fn copy_expr_tree_with_storage(
     let new_expr = match src.get_expr(expr_id) {
         Expr::Local(local_id) => {
             // Check if this is a storage local that needs rewriting
-            if let Some((name, array_ty)) = storage_locals.get(local_id) {
-                // Create Storage-backed array: Storage { name, offset: 0 }
-                let zero = dest.alloc_expr(Expr::Int("0".to_string()), i32_ty.clone(), span, dummy_node_id);
-                // Size: we don't know it statically, use a placeholder that lowering will handle
-                let size = dest.alloc_expr(Expr::Int("0".to_string()), i32_ty.clone(), span, dummy_node_id);
-                return dest.alloc_expr(
-                    Expr::Array {
-                        backing: ArrayBacking::Storage {
-                            name: name.clone(),
-                            offset: zero,
-                        },
-                        size,
-                    },
-                    array_ty.clone(),
-                    span,
-                    node_id,
-                );
-            }
+            // Storage locals are now represented as View-typed Locals
+            // Just use the mapped local directly
+            let _ = storage_locals; // Storage locals are handled by lowering preamble
             Expr::Local(*local_map.get(local_id).unwrap_or(local_id))
         }
         Expr::Global(name) => Expr::Global(name.clone()),
@@ -306,14 +291,6 @@ fn copy_expr_tree_with_storage(
                         copy_expr_tree_with_storage(dest, src, *offset, local_map, storage_locals);
                     ArrayBacking::View {
                         base: new_base,
-                        offset: new_offset,
-                    }
-                }
-                ArrayBacking::Storage { name, offset } => {
-                    let new_offset =
-                        copy_expr_tree_with_storage(dest, src, *offset, local_map, storage_locals);
-                    ArrayBacking::Storage {
-                        name: name.clone(),
                         offset: new_offset,
                     }
                 }
@@ -490,6 +467,14 @@ fn try_parallelize_body(
         local_map.insert(old_id, new_id);
     }
 
+    // Create output local (for output View that lowering will set up)
+    let output_local = new_body.alloc_local(LocalDecl {
+        name: "_output".to_string(),
+        span: dummy_span,
+        ty: array_ty.clone(),
+        kind: LocalKind::Param,
+    });
+
     // Create locals for chunking
     let thread_id_local = new_body.alloc_local(LocalDecl {
         name: "__thread_id".to_string(),
@@ -526,6 +511,9 @@ fn try_parallelize_body(
         kind: LocalKind::Let,
     });
 
+    // The mapped local now holds a View {ptr, len} directly
+    let mapped_storage_local = *local_map.get(&storage_local).unwrap_or(&storage_local);
+
     // 1. Create array length expression
     let array_len_expr = if let Some(hint) = size_hint {
         new_body.alloc_expr(
@@ -535,27 +523,9 @@ fn try_parallelize_body(
             dummy_node_id,
         )
     } else {
-        // Runtime: call length intrinsic on the storage buffer
-        let offset_zero = new_body.alloc_expr(
-            Expr::Int("0".to_string()),
-            i32_ty.clone(),
-            dummy_span,
-            dummy_node_id,
-        );
-        let temp_size = new_body.alloc_expr(
-            Expr::Int("0".to_string()),
-            i32_ty.clone(),
-            dummy_span,
-            dummy_node_id,
-        );
-        let temp_arr_ref = new_body.alloc_expr(
-            Expr::Array {
-                backing: ArrayBacking::Storage {
-                    name: storage_name.clone(),
-                    offset: offset_zero,
-                },
-                size: temp_size,
-            },
+        // Runtime: call length intrinsic on the storage buffer local
+        let arr_ref = new_body.alloc_expr(
+            Expr::Local(mapped_storage_local),
             array_ty.clone(),
             dummy_span,
             dummy_node_id,
@@ -563,7 +533,7 @@ fn try_parallelize_body(
         new_body.alloc_expr(
             Expr::Intrinsic {
                 name: "_w_intrinsic_length".to_string(),
-                args: vec![temp_arr_ref],
+                args: vec![arr_ref],
             },
             i32_ty.clone(),
             dummy_span,
@@ -571,27 +541,9 @@ fn try_parallelize_body(
         )
     };
 
-    // 2. Create the base storage array expression
-    let zero = new_body.alloc_expr(
-        Expr::Int("0".to_string()),
-        i32_ty.clone(),
-        dummy_span,
-        dummy_node_id,
-    );
-    let size_ref = new_body.alloc_expr(
-        Expr::Local(array_len_local),
-        i32_ty.clone(),
-        dummy_span,
-        dummy_node_id,
-    );
+    // 2. The base array is just the storage local (which holds a View)
     let base_array_expr_id = new_body.alloc_expr(
-        Expr::Array {
-            backing: ArrayBacking::Storage {
-                name: storage_name.clone(),
-                offset: zero,
-            },
-            size: size_ref,
-        },
+        Expr::Local(mapped_storage_local),
         array_ty.clone(),
         dummy_span,
         dummy_node_id,
@@ -776,26 +728,9 @@ fn try_parallelize_body(
             dummy_node_id,
         );
 
-        let output_zero = new_body.alloc_expr(
-            Expr::Int("0".to_string()),
-            i32_ty.clone(),
-            dummy_span,
-            dummy_node_id,
-        );
-        let output_size_ref = new_body.alloc_expr(
-            Expr::Local(array_len_local),
-            i32_ty.clone(),
-            dummy_span,
-            dummy_node_id,
-        );
+        // Output is a Local holding a View (set up by lowering preamble)
         let output_storage_expr = new_body.alloc_expr(
-            Expr::Array {
-                backing: ArrayBacking::Storage {
-                    name: "_output".to_string(),
-                    offset: output_zero,
-                },
-                size: output_size_ref,
-            },
+            Expr::Local(output_local),
             array_ty.clone(),
             dummy_span,
             dummy_node_id,
@@ -1097,13 +1032,6 @@ fn copy_backing(
         ArrayBacking::Owned { data } => {
             let new_data = copy_expr_tree(dest, src, *data, local_map);
             ArrayBacking::Owned { data: new_data }
-        }
-        ArrayBacking::Storage { name, offset } => {
-            let new_offset = copy_expr_tree(dest, src, *offset, local_map);
-            ArrayBacking::Storage {
-                name: name.clone(),
-                offset: new_offset,
-            }
         }
     }
 }

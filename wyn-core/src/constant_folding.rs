@@ -42,6 +42,7 @@ impl ConstantFolder {
                     attributes,
                     body,
                     span,
+                    dps_output,
                 } => {
                     let new_body = self.fold_body(body)?;
                     Def::Function {
@@ -52,6 +53,7 @@ impl ConstantFolder {
                         attributes,
                         body: new_body,
                         span,
+                        dps_output,
                     }
                 }
                 Def::Constant {
@@ -185,10 +187,6 @@ impl ConstantFolder {
                     },
                     ArrayBacking::Owned { data } => ArrayBacking::Owned {
                         data: self.expr_map[data],
-                    },
-                    ArrayBacking::Storage { name, offset } => ArrayBacking::Storage {
-                        name: name.clone(),
-                        offset: self.expr_map[offset],
                     },
                 };
                 Ok(body.alloc_expr(

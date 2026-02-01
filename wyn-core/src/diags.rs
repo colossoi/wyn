@@ -907,13 +907,6 @@ impl Display for mir::Expr {
                 mir::ArrayBacking::Owned { data } => {
                     write!(f, "@owned(data=e{}, len=e{})", data.0, size.0)
                 }
-                mir::ArrayBacking::Storage { name, offset } => {
-                    write!(
-                        f,
-                        "@storage(name={}, offset=e{}, len=e{})",
-                        name, offset.0, size.0
-                    )
-                }
             },
             mir::Expr::Vector(ids) => {
                 write!(f, "@[")?;

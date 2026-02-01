@@ -252,7 +252,6 @@ impl<'a> ProvenanceAnalyzer<'a> {
                         None
                     }
                     ArrayBacking::Owned { data } => self.find_map_in_expr(data),
-                    ArrayBacking::Storage { .. } => None,
                 }
             }
 
@@ -377,19 +376,6 @@ impl<'a> ProvenanceAnalyzer<'a> {
                     kind: *kind,
                     inline_path: self.call_path.clone(),
                 },
-
-                ArrayBacking::Storage { name, .. } => {
-                    // Try to find the entry input this corresponds to
-                    for (local_id, prov) in &self.provenance {
-                        if let ArrayProvenance::EntryStorage { name: entry_name, .. } = prov {
-                            if entry_name == name {
-                                return prov.clone();
-                            }
-                        }
-                        let _ = local_id; // suppress warning
-                    }
-                    ArrayProvenance::Unknown
-                }
 
                 ArrayBacking::View { base, .. } => {
                     // Provenance flows through views

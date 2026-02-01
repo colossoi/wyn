@@ -664,9 +664,6 @@ impl<'a> LowerCtx<'a> {
                 ArrayBacking::Owned { .. } => {
                     bail_glsl!("Owned arrays not supported in GLSL lowering")
                 }
-                ArrayBacking::Storage { .. } => {
-                    bail_glsl!("Storage arrays not supported in GLSL lowering")
-                }
             },
 
             Expr::Vector(elems) => {
@@ -969,10 +966,6 @@ impl<'a> LowerCtx<'a> {
                                     backing: ArrayBacking::View { .. },
                                     ..
                                 } => Ok(format!("{}.base[{}.offset + {}]", args[0], args[0], args[1])),
-                                Expr::Array {
-                                    backing: ArrayBacking::Storage { name, .. },
-                                    ..
-                                } => Ok(format!("{}[{}.offset + {}]", name, args[0], args[1])),
                                 _ => Ok(format!("{}.data[{}]", args[0], args[1])),
                             }
                         } else {
@@ -1045,10 +1038,6 @@ impl<'a> LowerCtx<'a> {
                                     backing: ArrayBacking::View { .. },
                                     ..
                                 } => Ok(format!("{}.base[{}.offset + {}]", args[0], args[0], args[1])),
-                                Expr::Array {
-                                    backing: ArrayBacking::Storage { name, .. },
-                                    ..
-                                } => Ok(format!("{}[{}.offset + {}]", name, args[0], args[1])),
                                 _ => Ok(format!("{}.data[{}]", args[0], args[1])),
                             }
                         } else {

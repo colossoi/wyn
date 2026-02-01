@@ -458,6 +458,10 @@ pub enum Def {
         body: Body,
         /// Source location.
         span: Span,
+        /// DPS output parameter (if this function uses destination-passing style).
+        /// When Some, the function writes to this output buffer instead of returning
+        /// an array value. The return type will be Unit.
+        dps_output: Option<LocalId>,
     },
     /// A constant definition (no parameters).
     Constant {
@@ -656,16 +660,6 @@ pub enum ArrayBacking {
     Owned {
         /// The backing buffer: [capacity]elem
         data: ExprId,
-    },
-
-    /// Reference to external storage buffer (SSBO, uniform, etc).
-    /// Identified by name, accessed via OpAccessChain into module-level variables.
-    /// (Replaces BoundSlice)
-    Storage {
-        /// Name of the bound resource (e.g., "factors", "data")
-        name: String,
-        /// Start offset into the buffer
-        offset: ExprId,
     },
 }
 

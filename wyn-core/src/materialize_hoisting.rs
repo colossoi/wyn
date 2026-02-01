@@ -148,13 +148,6 @@ fn reorder_expr(
                     let new_data = reorder_expr(old_body, data, new_body, id_map);
                     ArrayBacking::Owned { data: new_data }
                 }
-                ArrayBacking::Storage { name, offset } => {
-                    let new_offset = reorder_expr(old_body, offset, new_body, id_map);
-                    ArrayBacking::Storage {
-                        name,
-                        offset: new_offset,
-                    }
-                }
             };
             Expr::Array {
                 backing: new_backing,
@@ -268,6 +261,7 @@ fn hoist_in_def(def: Def) -> Def {
             attributes,
             mut body,
             span,
+            dps_output,
         } => {
             hoist_in_body(&mut body);
             Def::Function {
@@ -278,6 +272,7 @@ fn hoist_in_def(def: Def) -> Def {
                 attributes,
                 body,
                 span,
+                dps_output,
             }
         }
         Def::Constant {
@@ -479,9 +474,6 @@ fn collect_materializations_rec(
                 ArrayBacking::Owned { data } => {
                     collect_materializations_rec(body, *data, result, visited);
                 }
-                ArrayBacking::Storage { offset, .. } => {
-                    collect_materializations_rec(body, *offset, result, visited);
-                }
             }
         }
         Expr::Matrix(rows) => {
@@ -658,16 +650,6 @@ fn exprs_equal(body: &Body, a: ExprId, b: ExprId) -> bool {
                 (ArrayBacking::Owned { data: da }, ArrayBacking::Owned { data: db }) => {
                     exprs_equal(body, *da, *db)
                 }
-                (
-                    ArrayBacking::Storage {
-                        name: na,
-                        offset: offa,
-                    },
-                    ArrayBacking::Storage {
-                        name: nb,
-                        offset: offb,
-                    },
-                ) => na == nb && exprs_equal(body, *offa, *offb),
                 _ => false,
             }
         }
@@ -850,9 +832,6 @@ fn references_any_local_rec(
                         || references_any_local_rec(body, *offset, locals, visited)
                 }
                 ArrayBacking::Owned { data } => references_any_local_rec(body, *data, locals, visited),
-                ArrayBacking::Storage { offset, .. } => {
-                    references_any_local_rec(body, *offset, locals, visited)
-                }
             }
         }
 

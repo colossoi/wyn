@@ -802,6 +802,7 @@ impl<'a> LowerCtx<'a> {
                 params,
                 ret_type,
                 body,
+                dps_output,
                 ..
             } => {
                 // Check if this is an extern function declaration
@@ -820,7 +821,15 @@ impl<'a> LowerCtx<'a> {
                     self.ensure_deps_lowered(body)?;
 
                     // Regular function (entry points are now Def::EntryPoint)
-                    lower_regular_function(&mut self.constructor, name, params, ret_type, body)?;
+                    // DPS functions have dps_output set and return Unit
+                    lower_regular_function(
+                        &mut self.constructor,
+                        name,
+                        params,
+                        ret_type,
+                        body,
+                        *dps_output,
+                    )?;
                 }
             }
             Def::EntryPoint {
@@ -1037,6 +1046,7 @@ fn lower_regular_function(
     params: &[LocalId],
     ret_type: &PolyType<TypeName>,
     body: &Body,
+    dps_output: Option<LocalId>,
 ) -> Result<()> {
     // Check if first parameter is an empty closure (lambda with no captures)
     // If so, skip it - don't include in SPIR-V function signature
@@ -1056,8 +1066,9 @@ fn lower_regular_function(
 
     let result = lower_expr(constructor, body, body.root)?;
 
-    // Use ret() for void functions, ret_value() for functions that return a value
-    if matches!(ret_type, PolyType::Constructed(TypeName::Unit, _)) {
+    // Use ret() for void functions (including DPS functions), ret_value() for functions that return a value
+    // DPS functions have dps_output set and already wrote to the output buffer, so they just return
+    if matches!(ret_type, PolyType::Constructed(TypeName::Unit, _)) || dps_output.is_some() {
         constructor.builder.ret()?;
     } else {
         constructor.builder.ret_value(result)?;
@@ -2716,35 +2727,6 @@ fn lower_array_expr(
             // Owned: the data is already a complete array, just return it
             lower_expr(constructor, body, *data)
         }
-
-        ArrayBacking::Storage { name, offset } => {
-            // Storage: creates a (pointer, length) pair for a storage buffer slice
-            let (set, binding) = constructor
-                .compute_params
-                .get(name)
-                .ok_or_else(|| err_spirv!("Unknown storage buffer: {}", name))?;
-            let (set, binding) = (*set, *binding);
-
-            let (buffer_var, elem_type_id) = constructor
-                .storage_buffers
-                .get(&(set, binding))
-                .ok_or_else(|| err_spirv!("Storage buffer not registered: {}:{}", set, binding))?;
-            let (buffer_var, elem_type_id) = (*buffer_var, *elem_type_id);
-
-            let offset_val = lower_expr(constructor, body, *offset)?;
-            let len_val = lower_expr(constructor, body, size)?;
-
-            let elem_ptr_type =
-                constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_type_id);
-            let zero = constructor.const_u32(0);
-            let ptr =
-                constructor.builder.access_chain(elem_ptr_type, None, buffer_var, [zero, offset_val])?;
-
-            let slice_struct_type =
-                constructor.get_or_create_struct_type(vec![elem_ptr_type, constructor.i32_type]);
-
-            Ok(constructor.builder.composite_construct(slice_struct_type, None, [ptr, len_val])?)
-        }
     }
 }
 
@@ -2879,36 +2861,6 @@ fn read_elem(
             let elem_ptr = constructor.builder.access_chain(elem_ptr_type, None, data_var, [index])?;
             Ok(constructor.builder.load(elem_type, None, elem_ptr, None, [])?)
         }
-
-        ArrayBacking::Storage { name, offset } => {
-            // Storage: load from external buffer at offset + index
-            let (set, binding) = constructor
-                .compute_params
-                .get(name)
-                .ok_or_else(|| err_spirv!("Unknown storage buffer: {}", name))?;
-            let (set, binding) = (*set, *binding);
-
-            let (buffer_var, _) = constructor
-                .storage_buffers
-                .get(&(set, binding))
-                .ok_or_else(|| err_spirv!("Storage buffer not registered: {}:{}", set, binding))?;
-            let buffer_var = *buffer_var;
-
-            let i32_type = constructor.i32_type;
-            let offset_val = lower_expr(constructor, body, *offset)?;
-            let adjusted_index = constructor.builder.i_add(i32_type, None, offset_val, index)?;
-
-            let elem_ptr_type =
-                constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_type);
-            let zero = constructor.const_u32(0);
-            let elem_ptr = constructor.builder.access_chain(
-                elem_ptr_type,
-                None,
-                buffer_var,
-                [zero, adjusted_index],
-            )?;
-            Ok(constructor.builder.load(elem_type, None, elem_ptr, None, [])?)
-        }
     }
 }
 
@@ -3004,38 +2956,6 @@ fn lower_view_index(
 
     // Check if we can optimize based on the backing
     match array_expr {
-        Expr::Array {
-            backing: ArrayBacking::Storage { name, offset },
-            ..
-        } => {
-            // Direct storage access - use the buffer variable directly
-            let (set, binding) = constructor
-                .compute_params
-                .get(name)
-                .ok_or_else(|| err_spirv!("Unknown storage buffer: {}", name))?;
-            let (set, binding) = (*set, *binding);
-
-            let (buffer_var, _elem_type_id) = constructor
-                .storage_buffers
-                .get(&(set, binding))
-                .ok_or_else(|| err_spirv!("Storage buffer not registered: {}:{}", set, binding))?;
-            let buffer_var = *buffer_var;
-
-            let offset_val = lower_expr(constructor, body, *offset)?;
-            let i32_type = constructor.i32_type;
-            let adjusted_index = constructor.builder.i_add(i32_type, None, offset_val, index_val)?;
-
-            let elem_ptr_type =
-                constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, result_type);
-            let zero = constructor.const_u32(0);
-            let elem_ptr = constructor.builder.access_chain(
-                elem_ptr_type,
-                None,
-                buffer_var,
-                [zero, adjusted_index],
-            )?;
-            Ok(constructor.builder.load(result_type, None, elem_ptr, None, [])?)
-        }
         Expr::Array {
             backing: ArrayBacking::View { base, offset },
             ..
@@ -3519,59 +3439,13 @@ fn lower_map_dynamic(
     elem_type: spirv::Word,
     output_elem_type: spirv::Word,
 ) -> Result<spirv::Word> {
-    let arr_expr = body.get_expr(arr_expr_id);
     let i32_type = constructor.i32_type;
 
-    // Try to extract explicit View->Storage structure for fast path
-    let direct_storage_info = try_extract_view_storage_info(body, arr_expr);
-
-    let (base_ptr, size_val) =
-        if let Some((storage_name, base_offset_expr_id, view_offset_expr_id, size_expr_id)) =
-            direct_storage_info
-        {
-            // Fast path: explicit View into Storage - use buffer_var directly
-            let (set, binding) = constructor
-                .compute_params
-                .get(&storage_name)
-                .ok_or_else(|| err_spirv!("Unknown storage buffer: {}", storage_name))?;
-            let (buffer_var, _buffer_elem_type) =
-                constructor.storage_buffers.get(&(*set, *binding)).ok_or_else(|| {
-                    err_spirv!("Storage buffer not found for set={}, binding={}", set, binding)
-                })?;
-            let buffer_var = *buffer_var;
-
-            // Lower offset and size expressions
-            let base_offset_val = lower_expr(constructor, body, base_offset_expr_id)?;
-            let view_offset_val = lower_expr(constructor, body, view_offset_expr_id)?;
-            let size_val = lower_expr(constructor, body, size_expr_id)?;
-
-            // Compute combined offset and get base pointer
-            let combined_offset =
-                constructor.builder.i_add(i32_type, None, base_offset_val, view_offset_val)?;
-            let combined_offset_u32 =
-                constructor.builder.bitcast(constructor.u32_type, None, combined_offset)?;
-            let zero_u32 = constructor.const_u32(0);
-            let elem_ptr_type =
-                constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_type);
-            let base_ptr = constructor.builder.access_chain(
-                elem_ptr_type,
-                None,
-                buffer_var,
-                [zero_u32, combined_offset_u32],
-            )?;
-
-            (base_ptr, size_val)
-        } else {
-            // General path: View-typed expression (e.g., function parameter)
-            // Lower array expression to get {ptr, len} struct, then extract components
-            let view_val = lower_expr(constructor, body, arr_expr_id)?;
-            let ptr_type =
-                constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_type);
-            let base_ptr = constructor.builder.composite_extract(ptr_type, None, view_val, [0])?;
-            let size_val = constructor.builder.composite_extract(i32_type, None, view_val, [1])?;
-
-            (base_ptr, size_val)
-        };
+    // Lower array expression to get {ptr, len} struct, then extract components
+    let view_val = lower_expr(constructor, body, arr_expr_id)?;
+    let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_type);
+    let base_ptr = constructor.builder.composite_extract(ptr_type, None, view_val, [0])?;
+    let size_val = constructor.builder.composite_extract(i32_type, None, view_val, [1])?;
 
     // Create loop index variable
     let loop_idx_var = constructor.declare_variable("__map_idx", i32_type)?;
@@ -3635,31 +3509,6 @@ fn lower_map_dynamic(
     let result_view =
         constructor.builder.composite_construct(view_struct_type, None, [base_ptr, size_val])?;
     Ok(result_view)
-}
-
-/// Try to extract View->Storage structure for fast path in lower_map_dynamic.
-/// Returns (storage_name, base_offset_expr, view_offset_expr, size_expr) if successful.
-fn try_extract_view_storage_info(body: &Body, arr_expr: &Expr) -> Option<(String, ExprId, ExprId, ExprId)> {
-    // Must be a View array
-    let (base_expr_id, offset_expr_id, size_expr_id) = match arr_expr {
-        Expr::Array {
-            backing: ArrayBacking::View { base, offset },
-            size,
-        } => (*base, *offset, *size),
-        _ => return None,
-    };
-
-    // Base must be a Storage array
-    let base_expr = body.get_expr(base_expr_id);
-    let (storage_name, base_offset_expr_id) = match base_expr {
-        Expr::Array {
-            backing: ArrayBacking::Storage { name, offset },
-            ..
-        } => (name.clone(), *offset),
-        _ => return None,
-    };
-
-    Some((storage_name, base_offset_expr_id, offset_expr_id, size_expr_id))
 }
 
 /// Lower `_w_intrinsic_inplace_map`: in-place variant of map
@@ -3821,78 +3670,24 @@ fn lower_map_into(constructor: &mut Constructor, body: &Body, args: &[ExprId]) -
         _ => bail_spirv!("_w_intrinsic_map_into input must be array type"),
     };
 
-    // Get output storage buffer info
-    let output_expr = body.get_expr(args[2]);
-    let output_storage_name = match output_expr {
-        Expr::Array {
-            backing: ArrayBacking::Storage { name, .. },
-            ..
-        } => name.clone(),
-        _ => bail_spirv!("_w_intrinsic_map_into output must be storage array"),
-    };
-
-    let (out_set, out_binding) = constructor
-        .compute_params
-        .get(&output_storage_name)
-        .ok_or_else(|| err_spirv!("Unknown output storage buffer: {}", output_storage_name))?;
-    let (out_buffer_var, out_buffer_elem_type) =
-        constructor.storage_buffers.get(&(*out_set, *out_binding)).ok_or_else(|| {
-            err_spirv!(
-                "Output storage buffer not found for set={}, binding={}",
-                out_set,
-                out_binding
-            )
-        })?;
-    let out_buffer_var = *out_buffer_var;
-    let out_elem_ptr_type =
-        constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, *out_buffer_elem_type);
-
-    // Get input - must be a View into storage for dynamic sizes
-    let input_expr = body.get_expr(args[1]);
-    let (input_base, input_offset_expr, input_size_expr) = match input_expr {
-        Expr::Array {
-            backing: ArrayBacking::View { base, offset },
-            size,
-        } => (*base, *offset, *size),
-        _ => bail_spirv!("_w_intrinsic_map_into input must be a View"),
-    };
-
-    // Get the input storage buffer info
-    let input_base_expr = body.get_expr(input_base);
-    let input_storage_name = match input_base_expr {
-        Expr::Array {
-            backing: ArrayBacking::Storage { name, .. },
-            ..
-        } => name.clone(),
-        _ => bail_spirv!("_w_intrinsic_map_into input View base must be Storage"),
-    };
-
-    let (in_set, in_binding) = constructor
-        .compute_params
-        .get(&input_storage_name)
-        .ok_or_else(|| err_spirv!("Unknown input storage buffer: {}", input_storage_name))?;
-    let (in_buffer_var, in_buffer_elem_type) =
-        constructor.storage_buffers.get(&(*in_set, *in_binding)).ok_or_else(|| {
-            err_spirv!(
-                "Input storage buffer not found for set={}, binding={}",
-                in_set,
-                in_binding
-            )
-        })?;
-    let in_buffer_var = *in_buffer_var;
+    // Lower input View - extract (ptr, len)
+    let input_view = lower_expr(constructor, body, args[1])?;
     let in_elem_ptr_type =
-        constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, *in_buffer_elem_type);
+        constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, input_elem_type);
+    let in_ptr = constructor.builder.composite_extract(in_elem_ptr_type, None, input_view, [0])?;
+    let input_len = constructor.builder.composite_extract(constructor.i32_type, None, input_view, [1])?;
 
-    // Get input length (from the View's size field) and offset
-    let input_len = lower_expr(constructor, body, input_size_expr)?;
-    let input_offset_val = lower_expr(constructor, body, input_offset_expr)?;
+    // Lower output View - extract ptr (len not needed for output)
+    let output_view = lower_expr(constructor, body, args[2])?;
+    let out_elem_ptr_type =
+        constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, output_elem_type);
+    let out_ptr = constructor.builder.composite_extract(out_elem_ptr_type, None, output_view, [0])?;
 
     // Create loop index variable (in the function's variables block)
     let i32_type = constructor.i32_type;
     let loop_idx_var = constructor.declare_variable("__map_into_idx", i32_type)?;
 
     let zero = constructor.const_i32(0);
-    let zero_u32 = constructor.const_u32(0);
     let one = constructor.const_i32(1);
     constructor.builder.store(loop_idx_var, zero, None, [])?;
 
@@ -3919,11 +3714,10 @@ fn lower_map_into(constructor: &mut Constructor, body: &Body, args: &[ExprId]) -
 
     let i_val_body = constructor.builder.load(i32_type, None, loop_idx_var, None, [])?;
 
-    // Read from input: input_buffer[input_offset + i]
-    let in_idx = constructor.builder.i_add(i32_type, None, input_offset_val, i_val_body)?;
-    let in_idx_u32 = constructor.builder.bitcast(constructor.u32_type, None, in_idx)?;
+    // Read from input: in_ptr[i] (ptr already points to start of view)
+    let in_idx_u32 = constructor.builder.bitcast(constructor.u32_type, None, i_val_body)?;
     let in_elem_ptr =
-        constructor.builder.access_chain(in_elem_ptr_type, None, in_buffer_var, [zero_u32, in_idx_u32])?;
+        constructor.builder.ptr_access_chain(in_elem_ptr_type, None, in_ptr, in_idx_u32, [])?;
     let input_elem = constructor.builder.load(input_elem_type, None, in_elem_ptr, None, [])?;
 
     // Apply function: result = f(input_elem)
@@ -3931,15 +3725,11 @@ fn lower_map_into(constructor: &mut Constructor, body: &Body, args: &[ExprId]) -
     let result_elem =
         constructor.builder.function_call(output_elem_type, None, map_func_id, [input_elem])?;
 
-    // Write to output: output_buffer[offset + i]
+    // Write to output: out_ptr[offset + i] (ptr points to start of output view)
     let out_idx = constructor.builder.i_add(i32_type, None, offset_val, i_val_body)?;
     let out_idx_u32 = constructor.builder.bitcast(constructor.u32_type, None, out_idx)?;
-    let out_elem_ptr = constructor.builder.access_chain(
-        out_elem_ptr_type,
-        None,
-        out_buffer_var,
-        [zero_u32, out_idx_u32],
-    )?;
+    let out_elem_ptr =
+        constructor.builder.ptr_access_chain(out_elem_ptr_type, None, out_ptr, out_idx_u32, [])?;
     constructor.builder.store(out_elem_ptr, result_elem, None, [])?;
 
     // Branch to continue
@@ -3980,40 +3770,10 @@ fn lower_length(constructor: &mut Constructor, body: &Body, args: &[ExprId]) -> 
         // Static size - return as constant
         Ok(constructor.const_i32(size))
     } else {
-        // Dynamic size - check if this is a storage-backed array
-        let arr_expr = body.get_expr(args[0]);
-        match arr_expr {
-            Expr::Array {
-                backing: ArrayBacking::Storage { name, .. },
-                ..
-            } => {
-                // Use OpArrayLength to get the runtime size
-                let (set, binding) = constructor
-                    .compute_params
-                    .get(name)
-                    .ok_or_else(|| err_spirv!("Unknown storage buffer: {}", name))?;
-                let (buffer_var, _) =
-                    constructor.storage_buffers.get(&(*set, *binding)).ok_or_else(|| {
-                        err_spirv!("Storage buffer not found for set={}, binding={}", set, binding)
-                    })?;
-                // OpArrayLength returns u32, we need i32
-                let u32_type = constructor.builder.type_int(32, 0);
-                let len_u32 = constructor.builder.array_length(
-                    u32_type,
-                    None,
-                    *buffer_var,
-                    0, // Member index (the runtime array is at member 0)
-                )?;
-                // Convert to i32
-                Ok(constructor.builder.bitcast(constructor.i32_type, None, len_u32)?)
-            }
-            _ => {
-                bail_spirv!(
-                    "Cannot get length of dynamically-sized non-storage array: {:?}",
-                    arr_expr
-                )
-            }
-        }
+        // Dynamic size - lower array to get View {ptr, len} and extract length
+        let view_val = lower_expr(constructor, body, args[0])?;
+        let len = constructor.builder.composite_extract(constructor.i32_type, None, view_val, [1])?;
+        Ok(len)
     }
 }
 

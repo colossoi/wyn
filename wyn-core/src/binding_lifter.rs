@@ -89,6 +89,7 @@ impl BindingLifter {
                 attributes,
                 body,
                 span,
+                dps_output,
             } => {
                 let new_body = self.lift_body(body);
                 Def::Function {
@@ -99,6 +100,7 @@ impl BindingLifter {
                     attributes,
                     body: new_body,
                     span,
+                    dps_output,
                 }
             }
             Def::Constant { .. } => def,
@@ -306,10 +308,6 @@ impl BindingLifter {
                     },
                     ArrayBacking::Owned { data } => ArrayBacking::Owned {
                         data: self.expr_map[data],
-                    },
-                    ArrayBacking::Storage { name, offset } => ArrayBacking::Storage {
-                        name: name.clone(),
-                        offset: self.expr_map[offset],
                     },
                 };
                 new_body.alloc_expr(
@@ -676,9 +674,6 @@ fn collect_free_locals_inner(
                 }
                 ArrayBacking::Owned { data } => {
                     collect_free_locals_inner(body, *data, bound, free);
-                }
-                ArrayBacking::Storage { offset, .. } => {
-                    collect_free_locals_inner(body, *offset, bound, free);
                 }
             }
         }

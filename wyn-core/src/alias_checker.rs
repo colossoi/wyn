@@ -1052,9 +1052,6 @@ fn collect_uses(body: &mir::Body, expr_id: mir::ExprId) -> HashSet<mir::LocalId>
                 mir::ArrayBacking::Owned { data } => {
                     uses.extend(collect_uses(body, *data));
                 }
-                mir::ArrayBacking::Storage { offset, .. } => {
-                    uses.extend(collect_uses(body, *offset));
-                }
             }
         }
         Matrix(rows) => {
@@ -1193,9 +1190,6 @@ fn compute_uses_after(
                 }
                 mir::ArrayBacking::Owned { data } => {
                     result.extend(compute_uses_after(body, data, after, aliases));
-                }
-                mir::ArrayBacking::Storage { offset, .. } => {
-                    result.extend(compute_uses_after(body, offset, after, aliases));
                 }
             }
         }
@@ -1502,9 +1496,6 @@ fn find_inplace_ops(
                 }
                 mir::ArrayBacking::Owned { data } => {
                     find_inplace_ops(body, data, uses_after, aliases, result);
-                }
-                mir::ArrayBacking::Storage { offset, .. } => {
-                    find_inplace_ops(body, offset, uses_after, aliases, result);
                 }
             }
         }

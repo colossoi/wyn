@@ -55,6 +55,7 @@ impl<'a> InPlaceRewriter<'a> {
                 attributes,
                 body,
                 span,
+                dps_output,
             } => {
                 let new_body = self.rewrite_body(body);
                 Def::Function {
@@ -65,6 +66,7 @@ impl<'a> InPlaceRewriter<'a> {
                     attributes,
                     body: new_body,
                     span,
+                    dps_output,
                 }
             }
             Def::Constant {
@@ -187,10 +189,6 @@ impl<'a> InPlaceRewriter<'a> {
                     },
                     ArrayBacking::Owned { data } => ArrayBacking::Owned {
                         data: self.remap(*data),
-                    },
-                    ArrayBacking::Storage { name, offset } => ArrayBacking::Storage {
-                        name: name.clone(),
-                        offset: self.remap(*offset),
                     },
                 };
                 Expr::Array {
