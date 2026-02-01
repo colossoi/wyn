@@ -2615,6 +2615,75 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                 "Load/Store expressions not yet implemented in SPIR-V lowering"
             ))
         }
+
+        // --- View and pointer operations ---
+        Expr::View { ptr, len } => {
+            // View constructs a {ptr, len} struct
+            let ptr_val = lower_expr(constructor, body, *ptr)?;
+            let len_val = lower_expr(constructor, body, *len)?;
+
+            // Extract element type from the result type
+            let elem_ty = match expr_ty {
+                PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 3 => {
+                    type_args[0].clone()
+                }
+                _ => {
+                    return Err(err_spirv!("View result must be Array type, got {:?}", expr_ty));
+                }
+            };
+            let elem_spirv_type = constructor.ast_type_to_spirv(&elem_ty);
+            let elem_ptr_type =
+                constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_spirv_type);
+
+            // Construct {ptr, len} struct
+            let slice_struct_type =
+                constructor.get_or_create_struct_type(vec![elem_ptr_type, constructor.i32_type]);
+            Ok(constructor.builder.composite_construct(slice_struct_type, None, [ptr_val, len_val])?)
+        }
+
+        Expr::ViewPtr { view } => {
+            // Extract the pointer (first element) from a view struct
+            let view_val = lower_expr(constructor, body, *view)?;
+            let view_ty = body.get_type(*view);
+
+            let elem_ty = match view_ty {
+                PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 3 => {
+                    type_args[0].clone()
+                }
+                _ => {
+                    return Err(err_spirv!("ViewPtr argument must be Array type, got {:?}", view_ty));
+                }
+            };
+            let elem_spirv_type = constructor.ast_type_to_spirv(&elem_ty);
+            let elem_ptr_type =
+                constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_spirv_type);
+
+            Ok(constructor.builder.composite_extract(elem_ptr_type, None, view_val, [0])?)
+        }
+
+        Expr::ViewLen { view } => {
+            // Extract the length (second element) from a view struct
+            let view_val = lower_expr(constructor, body, *view)?;
+            Ok(constructor.builder.composite_extract(constructor.i32_type, None, view_val, [1])?)
+        }
+
+        Expr::PtrAdd { ptr, offset } => {
+            // Pointer arithmetic: advance pointer by offset elements
+            let ptr_val = lower_expr(constructor, body, *ptr)?;
+            let offset_val = lower_expr(constructor, body, *offset)?;
+
+            // Get the element type from the pointer
+            let ptr_ty = body.get_type(*ptr);
+            let elem_ty = match ptr_ty {
+                // For now, assume ptr is i32 type (element pointer)
+                _ => ptr_ty.clone(),
+            };
+            let elem_spirv_type = constructor.ast_type_to_spirv(&elem_ty);
+            let result_ptr_type =
+                constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_spirv_type);
+
+            Ok(constructor.builder.ptr_access_chain(result_ptr_type, None, ptr_val, offset_val, [])?)
+        }
     }
 }
 
@@ -2681,30 +2750,6 @@ fn lower_array_expr(
             Ok(constructor.builder.composite_construct(array_type, None, elem_ids)?)
         }
 
-        ArrayBacking::View { ptr, len } => {
-            // View: constructs a {ptr, len} struct
-            // The ptr and len are already the adjusted values from MIR
-            let ptr_val = lower_expr(constructor, body, *ptr)?;
-            let len_val = lower_expr(constructor, body, *len)?;
-
-            // Extract element type from the result type
-            let elem_ty = match expr_ty {
-                PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 3 => {
-                    type_args[0].clone()
-                }
-                _ => {
-                    return Err(err_spirv!("View result must be Array type, got {:?}", expr_ty));
-                }
-            };
-            let elem_spirv_type = constructor.ast_type_to_spirv(&elem_ty);
-            let elem_ptr_type =
-                constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_spirv_type);
-
-            // Construct {ptr, len} struct
-            let slice_struct_type =
-                constructor.get_or_create_struct_type(vec![elem_ptr_type, constructor.i32_type]);
-            Ok(constructor.builder.composite_construct(slice_struct_type, None, [ptr_val, len_val])?)
-        }
     }
 }
 
@@ -2777,14 +2822,6 @@ fn read_elem(
             }
         }
 
-        ArrayBacking::View { ptr, .. } => {
-            // View: ptr points to first element, read at ptr[index]
-            let ptr_val = lower_expr(constructor, body, *ptr)?;
-            let elem_ptr_type =
-                constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_type);
-            let elem_ptr = constructor.builder.ptr_access_chain(elem_ptr_type, None, ptr_val, index, [])?;
-            Ok(constructor.builder.load(elem_type, None, elem_ptr, None, [])?)
-        }
     }
 }
 

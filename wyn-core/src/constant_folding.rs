@@ -178,10 +178,6 @@ impl ConstantFolder {
                             kind: *kind,
                         }
                     }
-                    ArrayBacking::View { ptr, len } => ArrayBacking::View {
-                        ptr: self.expr_map[ptr],
-                        len: self.expr_map[len],
-                    },
                 };
                 Ok(body.alloc_expr(
                     Expr::Array {
@@ -385,6 +381,29 @@ impl ConstantFolder {
                     span,
                     node_id,
                 ))
+            }
+
+            // View and pointer operations - map subexpressions
+            Expr::View { ptr, len } => {
+                let new_ptr = self.expr_map[ptr];
+                let new_len = self.expr_map[len];
+                Ok(body.alloc_expr(Expr::View { ptr: new_ptr, len: new_len }, ty.clone(), span, node_id))
+            }
+
+            Expr::ViewPtr { view } => {
+                let new_view = self.expr_map[view];
+                Ok(body.alloc_expr(Expr::ViewPtr { view: new_view }, ty.clone(), span, node_id))
+            }
+
+            Expr::ViewLen { view } => {
+                let new_view = self.expr_map[view];
+                Ok(body.alloc_expr(Expr::ViewLen { view: new_view }, ty.clone(), span, node_id))
+            }
+
+            Expr::PtrAdd { ptr, offset } => {
+                let new_ptr = self.expr_map[ptr];
+                let new_offset = self.expr_map[offset];
+                Ok(body.alloc_expr(Expr::PtrAdd { ptr: new_ptr, offset: new_offset }, ty.clone(), span, node_id))
             }
         }
     }

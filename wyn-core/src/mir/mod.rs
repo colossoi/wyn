@@ -219,6 +219,30 @@ pub enum Expr {
         ptr: ExprId,
         value: ExprId,
     },
+
+    // --- View and pointer operations ---
+    /// Create a view from a pointer and length.
+    /// view_make(ptr, len) -> View<T>
+    View {
+        ptr: ExprId,
+        len: ExprId,
+    },
+    /// Extract the pointer from a view.
+    /// view_ptr(view) -> Ptr<T>
+    ViewPtr {
+        view: ExprId,
+    },
+    /// Extract the length from a view.
+    /// view_len(view) -> i32
+    ViewLen {
+        view: ExprId,
+    },
+    /// Pointer arithmetic: advance pointer by offset elements.
+    /// ptr_add(ptr, offset) -> Ptr<T>
+    PtrAdd {
+        ptr: ExprId,
+        offset: ExprId,
+    },
 }
 
 // =============================================================================
@@ -616,9 +640,8 @@ pub enum RangeKind {
 
 /// The representation/backing of an array - how element values are computed.
 ///
-/// This unifies all array representations under a single umbrella:
-/// - Virtual arrays (Range) compute elements on-demand without storage
-/// - Materialized arrays (Literal, View) have actual backing storage
+/// For arrays with known elements (Literal) or computed elements (Range).
+/// Views into storage are represented separately as Expr::View.
 #[derive(Debug, Clone)]
 pub enum ArrayBacking {
     /// Literal array: elements are ExprIds to concrete values.
@@ -632,16 +655,6 @@ pub enum ArrayBacking {
         /// None means step = 1
         step: Option<ExprId>,
         kind: RangeKind,
-    },
-
-    /// View: a pointer and length pair.
-    /// Used for storage buffers, slices, and owned arrays.
-    /// Slicing a View produces a new View with adjusted ptr/len.
-    View {
-        /// Pointer to the first element
-        ptr: ExprId,
-        /// Number of elements
-        len: ExprId,
     },
 }
 

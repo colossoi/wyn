@@ -132,14 +132,6 @@ fn reorder_expr(
                         kind,
                     }
                 }
-                ArrayBacking::View { ptr, len } => {
-                    let new_ptr = reorder_expr(old_body, ptr, new_body, id_map);
-                    let new_len = reorder_expr(old_body, len, new_body, id_map);
-                    ArrayBacking::View {
-                        ptr: new_ptr,
-                        len: new_len,
-                    }
-                }
             };
             Expr::Array {
                 backing: new_backing,
@@ -235,6 +227,24 @@ fn reorder_expr(
                 ptr: new_ptr,
                 value: new_value,
             }
+        }
+        Expr::View { ptr, len } => {
+            let new_ptr = reorder_expr(old_body, ptr, new_body, id_map);
+            let new_len = reorder_expr(old_body, len, new_body, id_map);
+            Expr::View { ptr: new_ptr, len: new_len }
+        }
+        Expr::ViewPtr { view } => {
+            let new_view = reorder_expr(old_body, view, new_body, id_map);
+            Expr::ViewPtr { view: new_view }
+        }
+        Expr::ViewLen { view } => {
+            let new_view = reorder_expr(old_body, view, new_body, id_map);
+            Expr::ViewLen { view: new_view }
+        }
+        Expr::PtrAdd { ptr, offset } => {
+            let new_ptr = reorder_expr(old_body, ptr, new_body, id_map);
+            let new_offset = reorder_expr(old_body, offset, new_body, id_map);
+            Expr::PtrAdd { ptr: new_ptr, offset: new_offset }
         }
     };
 
@@ -456,10 +466,6 @@ fn collect_materializations_rec(
                         collect_materializations_rec(body, *s, result, visited);
                     }
                 }
-                ArrayBacking::View { ptr, len } => {
-                    collect_materializations_rec(body, *ptr, result, visited);
-                    collect_materializations_rec(body, *len, result, visited);
-                }
             }
         }
         Expr::Matrix(rows) => {
@@ -478,6 +484,17 @@ fn collect_materializations_rec(
         Expr::Store { ptr, value } => {
             collect_materializations_rec(body, *ptr, result, visited);
             collect_materializations_rec(body, *value, result, visited);
+        }
+        Expr::View { ptr, len } => {
+            collect_materializations_rec(body, *ptr, result, visited);
+            collect_materializations_rec(body, *len, result, visited);
+        }
+        Expr::ViewPtr { view } | Expr::ViewLen { view } => {
+            collect_materializations_rec(body, *view, result, visited);
+        }
+        Expr::PtrAdd { ptr, offset } => {
+            collect_materializations_rec(body, *ptr, result, visited);
+            collect_materializations_rec(body, *offset, result, visited);
         }
         // Atoms have no children
         Expr::Local(_)
@@ -620,18 +637,17 @@ fn exprs_equal(body: &Body, a: ExprId, b: ExprId) -> bool {
                             _ => false,
                         }
                 }
-                (
-                    ArrayBacking::View {
-                        ptr: ptra,
-                        len: lena,
-                    },
-                    ArrayBacking::View {
-                        ptr: ptrb,
-                        len: lenb,
-                    },
-                ) => exprs_equal(body, *ptra, *ptrb) && exprs_equal(body, *lena, *lenb),
                 _ => false,
             }
+        }
+
+        (Expr::View { ptr: pa, len: la }, Expr::View { ptr: pb, len: lb }) => {
+            exprs_equal(body, *pa, *pb) && exprs_equal(body, *la, *lb)
+        }
+        (Expr::ViewPtr { view: va }, Expr::ViewPtr { view: vb }) => exprs_equal(body, *va, *vb),
+        (Expr::ViewLen { view: va }, Expr::ViewLen { view: vb }) => exprs_equal(body, *va, *vb),
+        (Expr::PtrAdd { ptr: pa, offset: oa }, Expr::PtrAdd { ptr: pb, offset: ob }) => {
+            exprs_equal(body, *pa, *pb) && exprs_equal(body, *oa, *ob)
         }
 
         (Expr::Matrix(ra), Expr::Matrix(rb)) => {
@@ -804,10 +820,6 @@ fn references_any_local_rec(
                     references_any_local_rec(body, *start, locals, visited)
                         || step.map_or(false, |s| references_any_local_rec(body, s, locals, visited))
                 }
-                ArrayBacking::View { ptr, len } => {
-                    references_any_local_rec(body, *ptr, locals, visited)
-                        || references_any_local_rec(body, *len, locals, visited)
-                }
             }
         }
 
@@ -822,6 +834,20 @@ fn references_any_local_rec(
         Expr::Store { ptr, value } => {
             references_any_local_rec(body, *ptr, locals, visited)
                 || references_any_local_rec(body, *value, locals, visited)
+        }
+
+        Expr::View { ptr, len } => {
+            references_any_local_rec(body, *ptr, locals, visited)
+                || references_any_local_rec(body, *len, locals, visited)
+        }
+
+        Expr::ViewPtr { view } | Expr::ViewLen { view } => {
+            references_any_local_rec(body, *view, locals, visited)
+        }
+
+        Expr::PtrAdd { ptr, offset } => {
+            references_any_local_rec(body, *ptr, locals, visited)
+                || references_any_local_rec(body, *offset, locals, visited)
         }
 
         // Atoms don't reference locals (except Local which is handled above)

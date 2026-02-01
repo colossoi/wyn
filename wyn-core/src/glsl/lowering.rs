@@ -655,9 +655,6 @@ impl<'a> LowerCtx<'a> {
                 ArrayBacking::Range { .. } => {
                     bail_glsl!("Range arrays not supported in GLSL lowering")
                 }
-                ArrayBacking::View { .. } => {
-                    bail_glsl!("View arrays not supported in GLSL lowering")
-                }
             },
 
             Expr::Vector(elems) => {
@@ -814,6 +811,11 @@ impl<'a> LowerCtx<'a> {
             Expr::Load { .. } | Expr::Store { .. } => {
                 bail_glsl!("Load/Store expressions not yet implemented in GLSL lowering")
             }
+
+            // --- View and pointer operations ---
+            Expr::View { .. } | Expr::ViewPtr { .. } | Expr::ViewLen { .. } | Expr::PtrAdd { .. } => {
+                bail_glsl!("View/pointer operations not yet implemented in GLSL lowering")
+            }
         }
     }
 
@@ -951,13 +953,7 @@ impl<'a> LowerCtx<'a> {
                             matches!(&type_args[2], PolyType::Constructed(TypeName::SizePlaceholder, _));
                         if is_unsized {
                             // Unsized array (slice) - View has {ptr, len}
-                            match body.get_expr(arg_ids[0]) {
-                                Expr::Array {
-                                    backing: ArrayBacking::View { .. },
-                                    ..
-                                } => Ok(format!("{}.ptr[{}]", args[0], args[1])),
-                                _ => Ok(format!("{}.ptr[{}]", args[0], args[1])),
-                            }
+                            Ok(format!("{}.ptr[{}]", args[0], args[1]))
                         } else {
                             // Sized array - regular indexing
                             Ok(format!("{}[{}]", args[0], args[1]))
@@ -1020,13 +1016,7 @@ impl<'a> LowerCtx<'a> {
                             matches!(&type_args[2], PolyType::Constructed(TypeName::SizePlaceholder, _));
                         if is_unsized {
                             // View has {ptr, len}
-                            match body.get_expr(arg_ids[0]) {
-                                Expr::Array {
-                                    backing: ArrayBacking::View { .. },
-                                    ..
-                                } => Ok(format!("{}.ptr[{}]", args[0], args[1])),
-                                _ => Ok(format!("{}.ptr[{}]", args[0], args[1])),
-                            }
+                            Ok(format!("{}.ptr[{}]", args[0], args[1]))
                         } else {
                             Ok(format!("{}[{}]", args[0], args[1]))
                         }

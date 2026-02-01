@@ -180,10 +180,6 @@ impl<'a> InPlaceRewriter<'a> {
                         step: step.map(|s| self.remap(s)),
                         kind: *kind,
                     },
-                    ArrayBacking::View { ptr, len } => ArrayBacking::View {
-                        ptr: self.remap(*ptr),
-                        len: self.remap(*len),
-                    },
                 };
                 Expr::Array {
                     backing: new_backing,
@@ -289,6 +285,22 @@ impl<'a> InPlaceRewriter<'a> {
             Expr::Store { ptr, value } => Expr::Store {
                 ptr: self.remap(*ptr),
                 value: self.remap(*value),
+            },
+
+            // View and pointer operations
+            Expr::View { ptr, len } => Expr::View {
+                ptr: self.remap(*ptr),
+                len: self.remap(*len),
+            },
+            Expr::ViewPtr { view } => Expr::ViewPtr {
+                view: self.remap(*view),
+            },
+            Expr::ViewLen { view } => Expr::ViewLen {
+                view: self.remap(*view),
+            },
+            Expr::PtrAdd { ptr, offset } => Expr::PtrAdd {
+                ptr: self.remap(*ptr),
+                offset: self.remap(*offset),
             },
         };
 

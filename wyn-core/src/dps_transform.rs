@@ -859,6 +859,24 @@ fn copy_expr_tree_with_dps(
                 body: new_body,
             }
         }
+        Expr::View { ptr, len } => {
+            let new_ptr = transform_expr_for_entry_dps(src, dest, *ptr, local_map, dps_functions, output_storage_expr, output_ty);
+            let new_len = transform_expr_for_entry_dps(src, dest, *len, local_map, dps_functions, output_storage_expr, output_ty);
+            Expr::View { ptr: new_ptr, len: new_len }
+        }
+        Expr::ViewPtr { view } => {
+            let new_view = transform_expr_for_entry_dps(src, dest, *view, local_map, dps_functions, output_storage_expr, output_ty);
+            Expr::ViewPtr { view: new_view }
+        }
+        Expr::ViewLen { view } => {
+            let new_view = transform_expr_for_entry_dps(src, dest, *view, local_map, dps_functions, output_storage_expr, output_ty);
+            Expr::ViewLen { view: new_view }
+        }
+        Expr::PtrAdd { ptr, offset } => {
+            let new_ptr = transform_expr_for_entry_dps(src, dest, *ptr, local_map, dps_functions, output_storage_expr, output_ty);
+            let new_offset = transform_expr_for_entry_dps(src, dest, *offset, local_map, dps_functions, output_storage_expr, output_ty);
+            Expr::PtrAdd { ptr: new_ptr, offset: new_offset }
+        }
     };
 
     dest.alloc_expr(new_expr, ty, span, node_id)
@@ -917,30 +935,6 @@ fn copy_backing_with_dps(
                 start: new_start,
                 step: new_step,
                 kind: *kind,
-            }
-        }
-        ArrayBacking::View { ptr, len } => {
-            let new_ptr = transform_expr_for_entry_dps(
-                src,
-                dest,
-                *ptr,
-                local_map,
-                dps_functions,
-                output_storage_expr,
-                output_ty,
-            );
-            let new_len = transform_expr_for_entry_dps(
-                src,
-                dest,
-                *len,
-                local_map,
-                dps_functions,
-                output_storage_expr,
-                output_ty,
-            );
-            ArrayBacking::View {
-                ptr: new_ptr,
-                len: new_len,
             }
         }
     }
@@ -1142,6 +1136,24 @@ fn copy_expr_tree(
                 body: new_body,
             }
         }
+        Expr::View { ptr, len } => {
+            let new_ptr = copy_expr_tree(dest, src, *ptr, local_map);
+            let new_len = copy_expr_tree(dest, src, *len, local_map);
+            Expr::View { ptr: new_ptr, len: new_len }
+        }
+        Expr::ViewPtr { view } => {
+            let new_view = copy_expr_tree(dest, src, *view, local_map);
+            Expr::ViewPtr { view: new_view }
+        }
+        Expr::ViewLen { view } => {
+            let new_view = copy_expr_tree(dest, src, *view, local_map);
+            Expr::ViewLen { view: new_view }
+        }
+        Expr::PtrAdd { ptr, offset } => {
+            let new_ptr = copy_expr_tree(dest, src, *ptr, local_map);
+            let new_offset = copy_expr_tree(dest, src, *offset, local_map);
+            Expr::PtrAdd { ptr: new_ptr, offset: new_offset }
+        }
     };
 
     dest.alloc_expr(new_expr, ty, span, node_id)
@@ -1167,14 +1179,6 @@ fn copy_backing(
                 start: new_start,
                 step: new_step,
                 kind: *kind,
-            }
-        }
-        ArrayBacking::View { ptr, len } => {
-            let new_ptr = copy_expr_tree(dest, src, *ptr, local_map);
-            let new_len = copy_expr_tree(dest, src, *len, local_map);
-            ArrayBacking::View {
-                ptr: new_ptr,
-                len: new_len,
             }
         }
     }

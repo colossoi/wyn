@@ -230,12 +230,6 @@ impl<'a> ProvenanceAnalyzer<'a> {
                 }
                 // Check backing expressions
                 match backing {
-                    ArrayBacking::View { ptr, len } => {
-                        if let Some(map) = self.find_map_in_expr(ptr) {
-                            return Some(map);
-                        }
-                        self.find_map_in_expr(len)
-                    }
                     ArrayBacking::Range { start, step, .. } => {
                         if let Some(map) = self.find_map_in_expr(start) {
                             return Some(map);
@@ -251,6 +245,20 @@ impl<'a> ProvenanceAnalyzer<'a> {
                         None
                     }
                 }
+            }
+
+            Expr::View { ptr, len } => {
+                if let Some(map) = self.find_map_in_expr(ptr) {
+                    return Some(map);
+                }
+                self.find_map_in_expr(len)
+            }
+            Expr::ViewPtr { view } | Expr::ViewLen { view } => self.find_map_in_expr(view),
+            Expr::PtrAdd { ptr, offset } => {
+                if let Some(map) = self.find_map_in_expr(ptr) {
+                    return Some(map);
+                }
+                self.find_map_in_expr(offset)
             }
 
             Expr::BinOp { lhs, rhs, .. } => {
@@ -374,14 +382,13 @@ impl<'a> ProvenanceAnalyzer<'a> {
                     kind: *kind,
                     inline_path: self.call_path.clone(),
                 },
-
-                ArrayBacking::View { ptr, .. } => {
-                    // Provenance flows through views - try to trace through the ptr
-                    self.compute_provenance(*ptr)
-                }
-
                 _ => ArrayProvenance::Unknown,
             },
+
+            Expr::View { ptr, .. } => {
+                // Provenance flows through views - try to trace through the ptr
+                self.compute_provenance(*ptr)
+            }
 
             // For other expressions, provenance is unknown
             _ => ArrayProvenance::Unknown,

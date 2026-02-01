@@ -1042,10 +1042,6 @@ fn collect_uses(body: &mir::Body, expr_id: mir::ExprId) -> HashSet<mir::LocalId>
                         uses.extend(collect_uses(body, *s));
                     }
                 }
-                mir::ArrayBacking::View { ptr, len } => {
-                    uses.extend(collect_uses(body, *ptr));
-                    uses.extend(collect_uses(body, *len));
-                }
             }
         }
         Matrix(rows) => {
@@ -1127,6 +1123,17 @@ fn collect_uses(body: &mir::Body, expr_id: mir::ExprId) -> HashSet<mir::LocalId>
             uses.extend(collect_uses(body, *ptr));
             uses.extend(collect_uses(body, *value));
         }
+        View { ptr, len } => {
+            uses.extend(collect_uses(body, *ptr));
+            uses.extend(collect_uses(body, *len));
+        }
+        ViewPtr { view } | ViewLen { view } => {
+            uses.extend(collect_uses(body, *view));
+        }
+        PtrAdd { ptr, offset } => {
+            uses.extend(collect_uses(body, *ptr));
+            uses.extend(collect_uses(body, *offset));
+        }
     }
 
     uses
@@ -1174,10 +1181,6 @@ fn compute_uses_after(
                     if let Some(s) = step {
                         result.extend(compute_uses_after(body, s, after, aliases));
                     }
-                }
-                mir::ArrayBacking::View { ptr, len } => {
-                    result.extend(compute_uses_after(body, ptr, after, aliases));
-                    result.extend(compute_uses_after(body, len, after, aliases));
                 }
             }
         }
@@ -1232,11 +1235,7 @@ fn compute_uses_after(
                 aliases.insert(local, alias_set);
             }
             // Track aliases for borrowed slices (views): let s = arr[i:j] -> s aliases arr
-            if let Array {
-                backing: mir::ArrayBacking::View { ptr, .. },
-                ..
-            } = body.get_expr(rhs)
-            {
+            if let View { ptr, .. } = body.get_expr(rhs) {
                 if let Local(source_local) = body.get_expr(*ptr) {
                     let mut alias_set = HashSet::new();
                     alias_set.insert(*source_local);
@@ -1316,6 +1315,24 @@ fn compute_uses_after(
             let mut current_after = after.clone();
             result.extend(compute_uses_after(body, value, &current_after, aliases));
             current_after.extend(collect_uses(body, value));
+            result.extend(compute_uses_after(body, ptr, &current_after, aliases));
+        }
+        View { ptr, len } => {
+            let (ptr, len) = (*ptr, *len);
+            let mut current_after = after.clone();
+            result.extend(compute_uses_after(body, len, &current_after, aliases));
+            current_after.extend(collect_uses(body, len));
+            result.extend(compute_uses_after(body, ptr, &current_after, aliases));
+        }
+        ViewPtr { view } | ViewLen { view } => {
+            let view = *view;
+            result.extend(compute_uses_after(body, view, after, aliases));
+        }
+        PtrAdd { ptr, offset } => {
+            let (ptr, offset) = (*ptr, *offset);
+            let mut current_after = after.clone();
+            result.extend(compute_uses_after(body, offset, &current_after, aliases));
+            current_after.extend(collect_uses(body, offset));
             result.extend(compute_uses_after(body, ptr, &current_after, aliases));
         }
     }
@@ -1475,10 +1492,6 @@ fn find_inplace_ops(
                         find_inplace_ops(body, s, uses_after, aliases, result);
                     }
                 }
-                mir::ArrayBacking::View { ptr, len } => {
-                    find_inplace_ops(body, ptr, uses_after, aliases, result);
-                    find_inplace_ops(body, len, uses_after, aliases, result);
-                }
             }
         }
         Matrix(rows) => {
@@ -1563,6 +1576,17 @@ fn find_inplace_ops(
         Store { ptr, value } => {
             find_inplace_ops(body, *ptr, uses_after, aliases, result);
             find_inplace_ops(body, *value, uses_after, aliases, result);
+        }
+        View { ptr, len } => {
+            find_inplace_ops(body, *ptr, uses_after, aliases, result);
+            find_inplace_ops(body, *len, uses_after, aliases, result);
+        }
+        ViewPtr { view } | ViewLen { view } => {
+            find_inplace_ops(body, *view, uses_after, aliases, result);
+        }
+        PtrAdd { ptr, offset } => {
+            find_inplace_ops(body, *ptr, uses_after, aliases, result);
+            find_inplace_ops(body, *offset, uses_after, aliases, result);
         }
     }
 }

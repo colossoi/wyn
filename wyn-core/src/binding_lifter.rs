@@ -299,10 +299,6 @@ impl BindingLifter {
                         step: step.map(|s| self.expr_map[&s]),
                         kind: *kind,
                     },
-                    ArrayBacking::View { ptr, len } => ArrayBacking::View {
-                        ptr: self.expr_map[ptr],
-                        len: self.expr_map[len],
-                    },
                 };
                 new_body.alloc_expr(
                     Expr::Array {
@@ -365,6 +361,31 @@ impl BindingLifter {
                         ptr: new_ptr,
                         value: new_value,
                     },
+                    ty.clone(),
+                    span,
+                    node_id,
+                )
+            }
+
+            // View and pointer operations
+            Expr::View { ptr, len } => {
+                let new_ptr = self.expr_map[ptr];
+                let new_len = self.expr_map[len];
+                new_body.alloc_expr(Expr::View { ptr: new_ptr, len: new_len }, ty.clone(), span, node_id)
+            }
+            Expr::ViewPtr { view } => {
+                let new_view = self.expr_map[view];
+                new_body.alloc_expr(Expr::ViewPtr { view: new_view }, ty.clone(), span, node_id)
+            }
+            Expr::ViewLen { view } => {
+                let new_view = self.expr_map[view];
+                new_body.alloc_expr(Expr::ViewLen { view: new_view }, ty.clone(), span, node_id)
+            }
+            Expr::PtrAdd { ptr, offset } => {
+                let new_ptr = self.expr_map[ptr];
+                let new_offset = self.expr_map[offset];
+                new_body.alloc_expr(
+                    Expr::PtrAdd { ptr: new_ptr, offset: new_offset },
                     ty.clone(),
                     span,
                     node_id,
@@ -659,10 +680,6 @@ fn collect_free_locals_inner(
                         collect_free_locals_inner(body, *s, bound, free);
                     }
                 }
-                ArrayBacking::View { ptr, len } => {
-                    collect_free_locals_inner(body, *ptr, bound, free);
-                    collect_free_locals_inner(body, *len, bound, free);
-                }
             }
         }
 
@@ -689,6 +706,19 @@ fn collect_free_locals_inner(
         Expr::Store { ptr, value } => {
             collect_free_locals_inner(body, *ptr, bound, free);
             collect_free_locals_inner(body, *value, bound, free);
+        }
+
+        // View and pointer operations
+        Expr::View { ptr, len } => {
+            collect_free_locals_inner(body, *ptr, bound, free);
+            collect_free_locals_inner(body, *len, bound, free);
+        }
+        Expr::ViewPtr { view } | Expr::ViewLen { view } => {
+            collect_free_locals_inner(body, *view, bound, free);
+        }
+        Expr::PtrAdd { ptr, offset } => {
+            collect_free_locals_inner(body, *ptr, bound, free);
+            collect_free_locals_inner(body, *offset, bound, free);
         }
 
         // Leaf nodes - no locals to collect

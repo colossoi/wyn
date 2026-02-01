@@ -797,32 +797,26 @@ impl TlcToMir {
                     span,
                     node_id,
                 );
-                // Extract ptr from source array
+                // Extract ptr from source array using ViewPtr
                 let base_ptr = body.alloc_expr(
-                    Expr::Intrinsic {
-                        name: "_w_intrinsic_view_ptr".to_string(),
-                        args: vec![args[0]],
-                    },
+                    Expr::ViewPtr { view: args[0] },
                     i32_ty.clone(), // ptr type at MIR level
                     span,
                     node_id,
                 );
-                // Compute new ptr = base_ptr + offset
+                // Compute new ptr = base_ptr + offset using PtrAdd
                 let ptr = body.alloc_expr(
-                    Expr::BinOp {
-                        op: "+".to_string(),
-                        lhs: base_ptr,
-                        rhs: args[1], // start offset
+                    Expr::PtrAdd {
+                        ptr: base_ptr,
+                        offset: args[1], // start offset
                     },
                     i32_ty.clone(),
                     span,
                     node_id,
                 );
+                // Create the View
                 return body.alloc_expr(
-                    Expr::Array {
-                        backing: ArrayBacking::View { ptr, len },
-                        size: len,
-                    },
+                    Expr::View { ptr, len },
                     ty,
                     span,
                     node_id,

@@ -285,14 +285,6 @@ fn copy_expr_tree_with_storage(
                         kind: *kind,
                     }
                 }
-                ArrayBacking::View { ptr, len } => {
-                    let new_ptr = copy_expr_tree_with_storage(dest, src, *ptr, local_map, storage_locals);
-                    let new_len = copy_expr_tree_with_storage(dest, src, *len, local_map, storage_locals);
-                    ArrayBacking::View {
-                        ptr: new_ptr,
-                        len: new_len,
-                    }
-                }
             };
             Expr::Array {
                 backing: new_backing,
@@ -405,6 +397,24 @@ fn copy_expr_tree_with_storage(
                 attributes: attributes.clone(),
                 expr: new_expr_inner,
             }
+        }
+        Expr::View { ptr, len } => {
+            let new_ptr = copy_expr_tree_with_storage(dest, src, *ptr, local_map, storage_locals);
+            let new_len = copy_expr_tree_with_storage(dest, src, *len, local_map, storage_locals);
+            Expr::View { ptr: new_ptr, len: new_len }
+        }
+        Expr::ViewPtr { view } => {
+            let new_view = copy_expr_tree_with_storage(dest, src, *view, local_map, storage_locals);
+            Expr::ViewPtr { view: new_view }
+        }
+        Expr::ViewLen { view } => {
+            let new_view = copy_expr_tree_with_storage(dest, src, *view, local_map, storage_locals);
+            Expr::ViewLen { view: new_view }
+        }
+        Expr::PtrAdd { ptr, offset } => {
+            let new_ptr = copy_expr_tree_with_storage(dest, src, *ptr, local_map, storage_locals);
+            let new_offset = copy_expr_tree_with_storage(dest, src, *offset, local_map, storage_locals);
+            Expr::PtrAdd { ptr: new_ptr, offset: new_offset }
         }
     };
 
@@ -677,12 +687,10 @@ fn try_parallelize_body(
         dummy_node_id,
     );
     // Extract the ptr from the base array and add the chunk offset
+    // Extract the ptr from the base array using ViewPtr
     let base_ptr = new_body.alloc_expr(
-        Expr::Intrinsic {
-            name: "_w_intrinsic_view_ptr".to_string(),
-            args: vec![base_array_expr_id],
-        },
-        i32_ty.clone(), // ptr type at MIR level is i32
+        Expr::ViewPtr { view: base_array_expr_id },
+        i32_ty.clone(), // ptr type at MIR level
         dummy_span,
         dummy_node_id,
     );
@@ -692,23 +700,21 @@ fn try_parallelize_body(
         dummy_span,
         dummy_node_id,
     );
+    // Compute chunk_ptr = base_ptr + chunk_start using PtrAdd
     let chunk_ptr = new_body.alloc_expr(
-        Expr::BinOp {
-            op: "+".to_string(),
-            lhs: base_ptr,
-            rhs: chunk_start_ref3,
+        Expr::PtrAdd {
+            ptr: base_ptr,
+            offset: chunk_start_ref3,
         },
         i32_ty.clone(),
         dummy_span,
         dummy_node_id,
     );
+    // Create the local chunk view using Expr::View
     let local_chunk_expr = new_body.alloc_expr(
-        Expr::Array {
-            backing: ArrayBacking::View {
-                ptr: chunk_ptr,
-                len: chunk_len,
-            },
-            size: chunk_len,
+        Expr::View {
+            ptr: chunk_ptr,
+            len: chunk_len,
         },
         array_ty.clone(),
         dummy_span,
@@ -1000,6 +1006,24 @@ fn copy_expr_tree(
             // Loops are complex - just copy unchanged for now
             src.get_expr(expr_id).clone()
         }
+        Expr::View { ptr, len } => {
+            let new_ptr = copy_expr_tree(dest, src, *ptr, local_map);
+            let new_len = copy_expr_tree(dest, src, *len, local_map);
+            Expr::View { ptr: new_ptr, len: new_len }
+        }
+        Expr::ViewPtr { view } => {
+            let new_view = copy_expr_tree(dest, src, *view, local_map);
+            Expr::ViewPtr { view: new_view }
+        }
+        Expr::ViewLen { view } => {
+            let new_view = copy_expr_tree(dest, src, *view, local_map);
+            Expr::ViewLen { view: new_view }
+        }
+        Expr::PtrAdd { ptr, offset } => {
+            let new_ptr = copy_expr_tree(dest, src, *ptr, local_map);
+            let new_offset = copy_expr_tree(dest, src, *offset, local_map);
+            Expr::PtrAdd { ptr: new_ptr, offset: new_offset }
+        }
     };
 
     dest.alloc_expr(new_expr, ty, span, node_id)
@@ -1025,14 +1049,6 @@ fn copy_backing(
                 start: new_start,
                 step: new_step,
                 kind: *kind,
-            }
-        }
-        ArrayBacking::View { ptr, len } => {
-            let new_ptr = copy_expr_tree(dest, src, *ptr, local_map);
-            let new_len = copy_expr_tree(dest, src, *len, local_map);
-            ArrayBacking::View {
-                ptr: new_ptr,
-                len: new_len,
             }
         }
     }

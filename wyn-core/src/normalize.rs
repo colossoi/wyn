@@ -269,28 +269,6 @@ impl Normalizer {
                         let bindings = vec![size_binding, step_binding, start_binding];
                         self.wrap_bindings(body, range_id, ty, span, node_id, bindings)
                     }
-                    ArrayBacking::View { ptr, len } => {
-                        let new_ptr = self.expr_map[&ptr];
-                        let (atom_ptr, ptr_binding) = self.atomize(body, new_ptr, node_id);
-                        let new_len = self.expr_map[&len];
-                        let (atom_len, len_binding) = self.atomize(body, new_len, node_id);
-
-                        let view_id = body.alloc_expr(
-                            Expr::Array {
-                                backing: ArrayBacking::View {
-                                    ptr: atom_ptr,
-                                    len: atom_len,
-                                },
-                                size: atom_size,
-                            },
-                            ty.clone(),
-                            span,
-                            node_id,
-                        );
-
-                        let bindings = vec![size_binding, len_binding, ptr_binding];
-                        self.wrap_bindings(body, view_id, ty, span, node_id, bindings)
-                    }
                 }
             }
 
@@ -531,6 +509,69 @@ impl Normalizer {
                     node_id,
                     vec![value_binding, ptr_binding],
                 )
+            }
+
+            // View operations - atomize subexpressions
+            Expr::View { ptr, len } => {
+                let new_ptr = self.expr_map[ptr];
+                let new_len = self.expr_map[len];
+
+                let (atom_ptr, ptr_binding) = self.atomize(body, new_ptr, node_id);
+                let (atom_len, len_binding) = self.atomize(body, new_len, node_id);
+
+                let view_id = body.alloc_expr(
+                    Expr::View { ptr: atom_ptr, len: atom_len },
+                    ty.clone(),
+                    span,
+                    node_id,
+                );
+
+                self.wrap_bindings(body, view_id, ty, span, node_id, vec![len_binding, ptr_binding])
+            }
+
+            Expr::ViewPtr { view } => {
+                let new_view = self.expr_map[view];
+                let (atom_view, binding) = self.atomize(body, new_view, node_id);
+
+                let viewptr_id = body.alloc_expr(
+                    Expr::ViewPtr { view: atom_view },
+                    ty.clone(),
+                    span,
+                    node_id,
+                );
+
+                self.wrap_bindings(body, viewptr_id, ty, span, node_id, vec![binding])
+            }
+
+            Expr::ViewLen { view } => {
+                let new_view = self.expr_map[view];
+                let (atom_view, binding) = self.atomize(body, new_view, node_id);
+
+                let viewlen_id = body.alloc_expr(
+                    Expr::ViewLen { view: atom_view },
+                    ty.clone(),
+                    span,
+                    node_id,
+                );
+
+                self.wrap_bindings(body, viewlen_id, ty, span, node_id, vec![binding])
+            }
+
+            Expr::PtrAdd { ptr, offset } => {
+                let new_ptr = self.expr_map[ptr];
+                let new_offset = self.expr_map[offset];
+
+                let (atom_ptr, ptr_binding) = self.atomize(body, new_ptr, node_id);
+                let (atom_offset, offset_binding) = self.atomize(body, new_offset, node_id);
+
+                let ptradd_id = body.alloc_expr(
+                    Expr::PtrAdd { ptr: atom_ptr, offset: atom_offset },
+                    ty.clone(),
+                    span,
+                    node_id,
+                );
+
+                self.wrap_bindings(body, ptradd_id, ty, span, node_id, vec![offset_binding, ptr_binding])
             }
         }
     }

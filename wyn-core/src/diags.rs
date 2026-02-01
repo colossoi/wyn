@@ -894,9 +894,6 @@ impl Display for mir::Expr {
                         write!(f, "e{}{}e{}", start.0, kind_str, size.0)
                     }
                 }
-                mir::ArrayBacking::View { ptr, len } => {
-                    write!(f, "@view(ptr=e{}, len=e{})", ptr.0, len.0)
-                }
             },
             mir::Expr::Vector(ids) => {
                 write!(f, "@[")?;
@@ -992,6 +989,18 @@ impl Display for mir::Expr {
             }
             mir::Expr::Store { ptr, value } => {
                 write!(f, "@store(e{}, e{})", ptr.0, value.0)
+            }
+            mir::Expr::View { ptr, len } => {
+                write!(f, "@view(ptr=e{}, len=e{})", ptr.0, len.0)
+            }
+            mir::Expr::ViewPtr { view } => {
+                write!(f, "@view_ptr(e{})", view.0)
+            }
+            mir::Expr::ViewLen { view } => {
+                write!(f, "@view_len(e{})", view.0)
+            }
+            mir::Expr::PtrAdd { ptr, offset } => {
+                write!(f, "@ptr_add(e{}, e{})", ptr.0, offset.0)
             }
         }
     }
