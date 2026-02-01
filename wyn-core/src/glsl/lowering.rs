@@ -655,14 +655,8 @@ impl<'a> LowerCtx<'a> {
                 ArrayBacking::Range { .. } => {
                     bail_glsl!("Range arrays not supported in GLSL lowering")
                 }
-                ArrayBacking::IndexFn { .. } => {
-                    bail_glsl!("Index function arrays not supported in GLSL lowering")
-                }
                 ArrayBacking::View { .. } => {
                     bail_glsl!("View arrays not supported in GLSL lowering")
-                }
-                ArrayBacking::Owned { .. } => {
-                    bail_glsl!("Owned arrays not supported in GLSL lowering")
                 }
             },
 
@@ -956,17 +950,13 @@ impl<'a> LowerCtx<'a> {
                         let is_unsized =
                             matches!(&type_args[2], PolyType::Constructed(TypeName::SizePlaceholder, _));
                         if is_unsized {
-                            // Unsized array (slice) - check expression kind
+                            // Unsized array (slice) - View has {ptr, len}
                             match body.get_expr(arg_ids[0]) {
-                                Expr::Array {
-                                    backing: ArrayBacking::Owned { .. },
-                                    ..
-                                } => Ok(format!("{}.data[{}]", args[0], args[1])),
                                 Expr::Array {
                                     backing: ArrayBacking::View { .. },
                                     ..
-                                } => Ok(format!("{}.base[{}.offset + {}]", args[0], args[0], args[1])),
-                                _ => Ok(format!("{}.data[{}]", args[0], args[1])),
+                                } => Ok(format!("{}.ptr[{}]", args[0], args[1])),
+                                _ => Ok(format!("{}.ptr[{}]", args[0], args[1])),
                             }
                         } else {
                             // Sized array - regular indexing
@@ -1029,16 +1019,13 @@ impl<'a> LowerCtx<'a> {
                         let is_unsized =
                             matches!(&type_args[2], PolyType::Constructed(TypeName::SizePlaceholder, _));
                         if is_unsized {
+                            // View has {ptr, len}
                             match body.get_expr(arg_ids[0]) {
-                                Expr::Array {
-                                    backing: ArrayBacking::Owned { .. },
-                                    ..
-                                } => Ok(format!("{}.data[{}]", args[0], args[1])),
                                 Expr::Array {
                                     backing: ArrayBacking::View { .. },
                                     ..
-                                } => Ok(format!("{}.base[{}.offset + {}]", args[0], args[0], args[1])),
-                                _ => Ok(format!("{}.data[{}]", args[0], args[1])),
+                                } => Ok(format!("{}.ptr[{}]", args[0], args[1])),
+                                _ => Ok(format!("{}.ptr[{}]", args[0], args[1])),
                             }
                         } else {
                             Ok(format!("{}[{}]", args[0], args[1]))

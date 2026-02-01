@@ -132,21 +132,13 @@ fn reorder_expr(
                         kind,
                     }
                 }
-                ArrayBacking::IndexFn { index_fn } => {
-                    let new_fn = reorder_expr(old_body, index_fn, new_body, id_map);
-                    ArrayBacking::IndexFn { index_fn: new_fn }
-                }
-                ArrayBacking::View { base, offset } => {
-                    let new_base = reorder_expr(old_body, base, new_body, id_map);
-                    let new_offset = reorder_expr(old_body, offset, new_body, id_map);
+                ArrayBacking::View { ptr, len } => {
+                    let new_ptr = reorder_expr(old_body, ptr, new_body, id_map);
+                    let new_len = reorder_expr(old_body, len, new_body, id_map);
                     ArrayBacking::View {
-                        base: new_base,
-                        offset: new_offset,
+                        ptr: new_ptr,
+                        len: new_len,
                     }
-                }
-                ArrayBacking::Owned { data } => {
-                    let new_data = reorder_expr(old_body, data, new_body, id_map);
-                    ArrayBacking::Owned { data: new_data }
                 }
             };
             Expr::Array {
@@ -464,15 +456,9 @@ fn collect_materializations_rec(
                         collect_materializations_rec(body, *s, result, visited);
                     }
                 }
-                ArrayBacking::IndexFn { index_fn } => {
-                    collect_materializations_rec(body, *index_fn, result, visited);
-                }
-                ArrayBacking::View { base, offset } => {
-                    collect_materializations_rec(body, *base, result, visited);
-                    collect_materializations_rec(body, *offset, result, visited);
-                }
-                ArrayBacking::Owned { data } => {
-                    collect_materializations_rec(body, *data, result, visited);
+                ArrayBacking::View { ptr, len } => {
+                    collect_materializations_rec(body, *ptr, result, visited);
+                    collect_materializations_rec(body, *len, result, visited);
                 }
             }
         }
@@ -634,22 +620,16 @@ fn exprs_equal(body: &Body, a: ExprId, b: ExprId) -> bool {
                             _ => false,
                         }
                 }
-                (ArrayBacking::IndexFn { index_fn: fa }, ArrayBacking::IndexFn { index_fn: fb }) => {
-                    exprs_equal(body, *fa, *fb)
-                }
                 (
                     ArrayBacking::View {
-                        base: basea,
-                        offset: offa,
+                        ptr: ptra,
+                        len: lena,
                     },
                     ArrayBacking::View {
-                        base: baseb,
-                        offset: offb,
+                        ptr: ptrb,
+                        len: lenb,
                     },
-                ) => exprs_equal(body, *basea, *baseb) && exprs_equal(body, *offa, *offb),
-                (ArrayBacking::Owned { data: da }, ArrayBacking::Owned { data: db }) => {
-                    exprs_equal(body, *da, *db)
-                }
+                ) => exprs_equal(body, *ptra, *ptrb) && exprs_equal(body, *lena, *lenb),
                 _ => false,
             }
         }
@@ -824,14 +804,10 @@ fn references_any_local_rec(
                     references_any_local_rec(body, *start, locals, visited)
                         || step.map_or(false, |s| references_any_local_rec(body, s, locals, visited))
                 }
-                ArrayBacking::IndexFn { index_fn } => {
-                    references_any_local_rec(body, *index_fn, locals, visited)
+                ArrayBacking::View { ptr, len } => {
+                    references_any_local_rec(body, *ptr, locals, visited)
+                        || references_any_local_rec(body, *len, locals, visited)
                 }
-                ArrayBacking::View { base, offset } => {
-                    references_any_local_rec(body, *base, locals, visited)
-                        || references_any_local_rec(body, *offset, locals, visited)
-                }
-                ArrayBacking::Owned { data } => references_any_local_rec(body, *data, locals, visited),
             }
         }
 

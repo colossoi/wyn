@@ -1042,15 +1042,9 @@ fn collect_uses(body: &mir::Body, expr_id: mir::ExprId) -> HashSet<mir::LocalId>
                         uses.extend(collect_uses(body, *s));
                     }
                 }
-                mir::ArrayBacking::IndexFn { index_fn } => {
-                    uses.extend(collect_uses(body, *index_fn));
-                }
-                mir::ArrayBacking::View { base, offset } => {
-                    uses.extend(collect_uses(body, *base));
-                    uses.extend(collect_uses(body, *offset));
-                }
-                mir::ArrayBacking::Owned { data } => {
-                    uses.extend(collect_uses(body, *data));
+                mir::ArrayBacking::View { ptr, len } => {
+                    uses.extend(collect_uses(body, *ptr));
+                    uses.extend(collect_uses(body, *len));
                 }
             }
         }
@@ -1181,15 +1175,9 @@ fn compute_uses_after(
                         result.extend(compute_uses_after(body, s, after, aliases));
                     }
                 }
-                mir::ArrayBacking::IndexFn { index_fn } => {
-                    result.extend(compute_uses_after(body, index_fn, after, aliases));
-                }
-                mir::ArrayBacking::View { base, offset } => {
-                    result.extend(compute_uses_after(body, base, after, aliases));
-                    result.extend(compute_uses_after(body, offset, after, aliases));
-                }
-                mir::ArrayBacking::Owned { data } => {
-                    result.extend(compute_uses_after(body, data, after, aliases));
+                mir::ArrayBacking::View { ptr, len } => {
+                    result.extend(compute_uses_after(body, ptr, after, aliases));
+                    result.extend(compute_uses_after(body, len, after, aliases));
                 }
             }
         }
@@ -1245,11 +1233,11 @@ fn compute_uses_after(
             }
             // Track aliases for borrowed slices (views): let s = arr[i:j] -> s aliases arr
             if let Array {
-                backing: mir::ArrayBacking::View { base, .. },
+                backing: mir::ArrayBacking::View { ptr, .. },
                 ..
             } = body.get_expr(rhs)
             {
-                if let Local(source_local) = body.get_expr(*base) {
+                if let Local(source_local) = body.get_expr(*ptr) {
                     let mut alias_set = HashSet::new();
                     alias_set.insert(*source_local);
                     // Transitively include aliases of source
@@ -1487,15 +1475,9 @@ fn find_inplace_ops(
                         find_inplace_ops(body, s, uses_after, aliases, result);
                     }
                 }
-                mir::ArrayBacking::IndexFn { index_fn } => {
-                    find_inplace_ops(body, index_fn, uses_after, aliases, result);
-                }
-                mir::ArrayBacking::View { base, offset } => {
-                    find_inplace_ops(body, base, uses_after, aliases, result);
-                    find_inplace_ops(body, offset, uses_after, aliases, result);
-                }
-                mir::ArrayBacking::Owned { data } => {
-                    find_inplace_ops(body, data, uses_after, aliases, result);
+                mir::ArrayBacking::View { ptr, len } => {
+                    find_inplace_ops(body, ptr, uses_after, aliases, result);
+                    find_inplace_ops(body, len, uses_after, aliases, result);
                 }
             }
         }

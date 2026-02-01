@@ -894,18 +894,8 @@ impl Display for mir::Expr {
                         write!(f, "e{}{}e{}", start.0, kind_str, size.0)
                     }
                 }
-                mir::ArrayBacking::IndexFn { index_fn } => {
-                    write!(f, "@index_fn(e{}, size=e{})", index_fn.0, size.0)
-                }
-                mir::ArrayBacking::View { base, offset } => {
-                    write!(
-                        f,
-                        "@view(base=e{}, offset=e{}, len=e{})",
-                        base.0, offset.0, size.0
-                    )
-                }
-                mir::ArrayBacking::Owned { data } => {
-                    write!(f, "@owned(data=e{}, len=e{})", data.0, size.0)
+                mir::ArrayBacking::View { ptr, len } => {
+                    write!(f, "@view(ptr=e{}, len=e{})", ptr.0, len.0)
                 }
             },
             mir::Expr::Vector(ids) => {

@@ -617,13 +617,12 @@ pub enum RangeKind {
 /// The representation/backing of an array - how element values are computed.
 ///
 /// This unifies all array representations under a single umbrella:
-/// - Virtual arrays (Range, IndexFn) compute elements on-demand without storage
-/// - Materialized arrays (Literal, Owned, View, Storage) have actual backing storage
+/// - Virtual arrays (Range) compute elements on-demand without storage
+/// - Materialized arrays (Literal, View) have actual backing storage
 #[derive(Debug, Clone)]
 pub enum ArrayBacking {
     /// Literal array: elements are ExprIds to concrete values.
     /// Generates OpConstantComposite, accessed via OpCompositeExtract.
-    /// Distinct from Owned because we have direct access to element ExprIds.
     Literal(Vec<ExprId>),
 
     /// Range: value at i = start + i * step.
@@ -635,31 +634,14 @@ pub enum ArrayBacking {
         kind: RangeKind,
     },
 
-    /// Index function: value at i = f(i).
-    /// Virtual - elements computed by calling the closure.
-    IndexFn {
-        /// Closure that computes element: i32 -> T
-        index_fn: ExprId,
-    },
-
-    /// View into another array: value at i = base[offset + i].
-    /// Zero-copy, base must outlive this view.
-    /// (Replaces InlineSlice)
+    /// View: a pointer and length pair.
+    /// Used for storage buffers, slices, and owned arrays.
+    /// Slicing a View produces a new View with adjusted ptr/len.
     View {
-        /// The source array expression
-        base: ExprId,
-        /// Start offset into base
-        offset: ExprId,
-    },
-
-    /// Owned buffer with dynamic length (for filter results, etc.).
-    /// Has capacity >= length. The backing data is materialized.
-    /// Accessed via memory operations (store to variable, access chain).
-    /// Distinct from Literal: we have a reference to the buffer, not individual elements.
-    /// (Replaces OwnedSlice)
-    Owned {
-        /// The backing buffer: [capacity]elem
-        data: ExprId,
+        /// Pointer to the first element
+        ptr: ExprId,
+        /// Number of elements
+        len: ExprId,
     },
 }
 

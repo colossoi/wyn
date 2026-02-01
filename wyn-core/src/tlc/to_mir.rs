@@ -125,6 +125,7 @@ impl TlcToMir {
                 attributes: vec![],
                 body,
                 span: def.body.span,
+                dps_output: None, // Extern functions don't use DPS
             };
         }
 
@@ -170,6 +171,7 @@ impl TlcToMir {
                 attributes: vec![],
                 body,
                 span: def.body.span,
+                dps_output: None, // DPS transformation handled later if needed
             }
         }
     }
@@ -783,23 +785,43 @@ impl TlcToMir {
                 );
             }
             "_w_slice" if args.len() == 3 => {
-                let size = body.alloc_expr(
+                let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+                // Compute len = end - start
+                let len = body.alloc_expr(
                     Expr::BinOp {
                         op: "-".to_string(),
                         lhs: args[2], // end
                         rhs: args[1], // start
                     },
-                    Type::Constructed(TypeName::Int(32), vec![]),
+                    i32_ty.clone(),
+                    span,
+                    node_id,
+                );
+                // Extract ptr from source array
+                let base_ptr = body.alloc_expr(
+                    Expr::Intrinsic {
+                        name: "_w_intrinsic_view_ptr".to_string(),
+                        args: vec![args[0]],
+                    },
+                    i32_ty.clone(), // ptr type at MIR level
+                    span,
+                    node_id,
+                );
+                // Compute new ptr = base_ptr + offset
+                let ptr = body.alloc_expr(
+                    Expr::BinOp {
+                        op: "+".to_string(),
+                        lhs: base_ptr,
+                        rhs: args[1], // start offset
+                    },
+                    i32_ty.clone(),
                     span,
                     node_id,
                 );
                 return body.alloc_expr(
                     Expr::Array {
-                        backing: ArrayBacking::View {
-                            base: args[0],
-                            offset: args[1],
-                        },
-                        size,
+                        backing: ArrayBacking::View { ptr, len },
+                        size: len,
                     },
                     ty,
                     span,

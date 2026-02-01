@@ -178,15 +178,9 @@ impl ConstantFolder {
                             kind: *kind,
                         }
                     }
-                    ArrayBacking::IndexFn { index_fn } => ArrayBacking::IndexFn {
-                        index_fn: self.expr_map[index_fn],
-                    },
-                    ArrayBacking::View { base, offset } => ArrayBacking::View {
-                        base: self.expr_map[base],
-                        offset: self.expr_map[offset],
-                    },
-                    ArrayBacking::Owned { data } => ArrayBacking::Owned {
-                        data: self.expr_map[data],
+                    ArrayBacking::View { ptr, len } => ArrayBacking::View {
+                        ptr: self.expr_map[ptr],
+                        len: self.expr_map[len],
                     },
                 };
                 Ok(body.alloc_expr(

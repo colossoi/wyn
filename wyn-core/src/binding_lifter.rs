@@ -299,15 +299,9 @@ impl BindingLifter {
                         step: step.map(|s| self.expr_map[&s]),
                         kind: *kind,
                     },
-                    ArrayBacking::IndexFn { index_fn } => ArrayBacking::IndexFn {
-                        index_fn: self.expr_map[index_fn],
-                    },
-                    ArrayBacking::View { base, offset } => ArrayBacking::View {
-                        base: self.expr_map[base],
-                        offset: self.expr_map[offset],
-                    },
-                    ArrayBacking::Owned { data } => ArrayBacking::Owned {
-                        data: self.expr_map[data],
+                    ArrayBacking::View { ptr, len } => ArrayBacking::View {
+                        ptr: self.expr_map[ptr],
+                        len: self.expr_map[len],
                     },
                 };
                 new_body.alloc_expr(
@@ -665,15 +659,9 @@ fn collect_free_locals_inner(
                         collect_free_locals_inner(body, *s, bound, free);
                     }
                 }
-                ArrayBacking::IndexFn { index_fn } => {
-                    collect_free_locals_inner(body, *index_fn, bound, free);
-                }
-                ArrayBacking::View { base, offset } => {
-                    collect_free_locals_inner(body, *base, bound, free);
-                    collect_free_locals_inner(body, *offset, bound, free);
-                }
-                ArrayBacking::Owned { data } => {
-                    collect_free_locals_inner(body, *data, bound, free);
+                ArrayBacking::View { ptr, len } => {
+                    collect_free_locals_inner(body, *ptr, bound, free);
+                    collect_free_locals_inner(body, *len, bound, free);
                 }
             }
         }

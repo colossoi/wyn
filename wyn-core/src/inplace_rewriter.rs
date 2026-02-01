@@ -180,15 +180,9 @@ impl<'a> InPlaceRewriter<'a> {
                         step: step.map(|s| self.remap(s)),
                         kind: *kind,
                     },
-                    ArrayBacking::IndexFn { index_fn } => ArrayBacking::IndexFn {
-                        index_fn: self.remap(*index_fn),
-                    },
-                    ArrayBacking::View { base, offset } => ArrayBacking::View {
-                        base: self.remap(*base),
-                        offset: self.remap(*offset),
-                    },
-                    ArrayBacking::Owned { data } => ArrayBacking::Owned {
-                        data: self.remap(*data),
+                    ArrayBacking::View { ptr, len } => ArrayBacking::View {
+                        ptr: self.remap(*ptr),
+                        len: self.remap(*len),
                     },
                 };
                 Expr::Array {

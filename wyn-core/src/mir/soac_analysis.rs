@@ -230,11 +230,11 @@ impl<'a> ProvenanceAnalyzer<'a> {
                 }
                 // Check backing expressions
                 match backing {
-                    ArrayBacking::View { base, offset } => {
-                        if let Some(map) = self.find_map_in_expr(base) {
+                    ArrayBacking::View { ptr, len } => {
+                        if let Some(map) = self.find_map_in_expr(ptr) {
                             return Some(map);
                         }
-                        self.find_map_in_expr(offset)
+                        self.find_map_in_expr(len)
                     }
                     ArrayBacking::Range { start, step, .. } => {
                         if let Some(map) = self.find_map_in_expr(start) {
@@ -242,7 +242,6 @@ impl<'a> ProvenanceAnalyzer<'a> {
                         }
                         if let Some(s) = step { self.find_map_in_expr(s) } else { None }
                     }
-                    ArrayBacking::IndexFn { index_fn } => self.find_map_in_expr(index_fn),
                     ArrayBacking::Literal(elems) => {
                         for e in elems {
                             if let Some(map) = self.find_map_in_expr(e) {
@@ -251,7 +250,6 @@ impl<'a> ProvenanceAnalyzer<'a> {
                         }
                         None
                     }
-                    ArrayBacking::Owned { data } => self.find_map_in_expr(data),
                 }
             }
 
@@ -377,9 +375,9 @@ impl<'a> ProvenanceAnalyzer<'a> {
                     inline_path: self.call_path.clone(),
                 },
 
-                ArrayBacking::View { base, .. } => {
-                    // Provenance flows through views
-                    self.compute_provenance(*base)
+                ArrayBacking::View { ptr, .. } => {
+                    // Provenance flows through views - try to trace through the ptr
+                    self.compute_provenance(*ptr)
                 }
 
                 _ => ArrayProvenance::Unknown,

@@ -2681,17 +2681,11 @@ fn lower_array_expr(
             Ok(constructor.builder.composite_construct(array_type, None, elem_ids)?)
         }
 
-        ArrayBacking::IndexFn { .. } => {
-            // Index functions should be materialized before lowering
-            bail_spirv!("IndexFn arrays should be materialized before SPIR-V lowering")
-        }
-
-        ArrayBacking::View { base, offset } => {
-            // View: constructs a {ptr, len} struct pointing into the base array
-            // The base should be a View-variant array (another {ptr, len} struct or Storage backing)
-            let base_val = lower_expr(constructor, body, *base)?;
-            let offset_val = lower_expr(constructor, body, *offset)?;
-            let len_val = lower_expr(constructor, body, size)?;
+        ArrayBacking::View { ptr, len } => {
+            // View: constructs a {ptr, len} struct
+            // The ptr and len are already the adjusted values from MIR
+            let ptr_val = lower_expr(constructor, body, *ptr)?;
+            let len_val = lower_expr(constructor, body, *len)?;
 
             // Extract element type from the result type
             let elem_ty = match expr_ty {
@@ -2706,26 +2700,10 @@ fn lower_array_expr(
             let elem_ptr_type =
                 constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_spirv_type);
 
-            // Extract ptr from base {ptr, len} struct and offset it
-            let base_ptr = constructor.builder.composite_extract(elem_ptr_type, None, base_val, [0])?;
-            let adjusted_ptr =
-                constructor.builder.ptr_access_chain(elem_ptr_type, None, base_ptr, offset_val, [])?;
-
-            // Construct new {ptr, len} struct
+            // Construct {ptr, len} struct
             let slice_struct_type =
                 constructor.get_or_create_struct_type(vec![elem_ptr_type, constructor.i32_type]);
-            Ok(
-                constructor.builder.composite_construct(
-                    slice_struct_type,
-                    None,
-                    [adjusted_ptr, len_val],
-                )?,
-            )
-        }
-
-        ArrayBacking::Owned { data } => {
-            // Owned: the data is already a complete array, just return it
-            lower_expr(constructor, body, *data)
+            Ok(constructor.builder.composite_construct(slice_struct_type, None, [ptr_val, len_val])?)
         }
     }
 }
@@ -2799,66 +2777,12 @@ fn read_elem(
             }
         }
 
-        ArrayBacking::IndexFn { index_fn } => {
-            // Virtual: call the index function with the index
-            // The index function should be a closure: i32 -> T
-            let (func_name, capture_vals) = extract_closure_info(constructor, body, *index_fn)?;
-            let func_id = *constructor
-                .functions
-                .get(&func_name)
-                .ok_or_else(|| err_spirv!("IndexFn function not found: {}", func_name))?;
-
-            let mut call_args = capture_vals;
-            call_args.push(index);
-            Ok(constructor.builder.function_call(elem_type, None, func_id, call_args)?)
-        }
-
-        ArrayBacking::View { base, offset } => {
-            // View: adjust index by offset and read from base
-            let i32_type = constructor.i32_type;
-            let offset_val = lower_expr(constructor, body, *offset)?;
-            let adjusted_index = constructor.builder.i_add(i32_type, None, offset_val, index)?;
-
-            // Get base array's backing and recurse
-            let base_expr = body.get_expr(*base);
-            match base_expr {
-                Expr::Array {
-                    backing: base_backing,
-                    ..
-                } => read_elem(constructor, body, *base, base_backing, adjusted_index, elem_type),
-                _ => {
-                    // Base is a value expression, not an Array with backing
-                    // Fall back to storing and indexing
-                    let base_val = lower_expr(constructor, body, *base)?;
-                    let base_ty = body.get_type(*base);
-                    let base_type = constructor.ast_type_to_spirv(base_ty);
-                    let base_var = constructor.declare_variable("_w_view_base_tmp", base_type)?;
-                    constructor.builder.store(base_var, base_val, None, [])?;
-
-                    let elem_ptr_type =
-                        constructor.builder.type_pointer(None, spirv::StorageClass::Function, elem_type);
-                    let elem_ptr = constructor.builder.access_chain(
-                        elem_ptr_type,
-                        None,
-                        base_var,
-                        [adjusted_index],
-                    )?;
-                    Ok(constructor.builder.load(elem_type, None, elem_ptr, None, [])?)
-                }
-            }
-        }
-
-        ArrayBacking::Owned { data } => {
-            // Owned: the data is a complete array, index into it
-            let data_val = lower_expr(constructor, body, *data)?;
-            let data_ty = body.get_type(*data);
-            let data_type = constructor.ast_type_to_spirv(data_ty);
-            let data_var = constructor.declare_variable("_w_owned_tmp", data_type)?;
-            constructor.builder.store(data_var, data_val, None, [])?;
-
+        ArrayBacking::View { ptr, .. } => {
+            // View: ptr points to first element, read at ptr[index]
+            let ptr_val = lower_expr(constructor, body, *ptr)?;
             let elem_ptr_type =
-                constructor.builder.type_pointer(None, spirv::StorageClass::Function, elem_type);
-            let elem_ptr = constructor.builder.access_chain(elem_ptr_type, None, data_var, [index])?;
+                constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_type);
+            let elem_ptr = constructor.builder.ptr_access_chain(elem_ptr_type, None, ptr_val, index, [])?;
             Ok(constructor.builder.load(elem_type, None, elem_ptr, None, [])?)
         }
     }
@@ -2954,28 +2878,12 @@ fn lower_view_index(
 ) -> Result<spirv::Word> {
     let array_expr = body.get_expr(array_expr_id);
 
-    // Check if we can optimize based on the backing
-    match array_expr {
-        Expr::Array {
-            backing: ArrayBacking::View { base, offset },
-            ..
-        } => {
-            // Nested view - adjust index and recurse
-            let offset_val = lower_expr(constructor, body, *offset)?;
-            let i32_type = constructor.i32_type;
-            let adjusted_index = constructor.builder.i_add(i32_type, None, offset_val, index_val)?;
-            lower_view_index(constructor, body, *base, adjusted_index, result_type)
-        }
-        _ => {
-            // General case: array value is a {ptr, len} struct
-            let view_val = lower_expr(constructor, body, array_expr_id)?;
-            let ptr_type =
-                constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, result_type);
-            let ptr = constructor.builder.composite_extract(ptr_type, None, view_val, [0])?;
-            let elem_ptr = constructor.builder.ptr_access_chain(ptr_type, None, ptr, index_val, [])?;
-            Ok(constructor.builder.load(result_type, None, elem_ptr, None, [])?)
-        }
-    }
+    // View has {ptr, len} - extract ptr and index into it
+    let view_val = lower_expr(constructor, body, array_expr_id)?;
+    let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, result_type);
+    let ptr = constructor.builder.composite_extract(ptr_type, None, view_val, [0])?;
+    let elem_ptr = constructor.builder.ptr_access_chain(ptr_type, None, ptr, index_val, [])?;
+    Ok(constructor.builder.load(result_type, None, elem_ptr, None, [])?)
 }
 
 /// Lower indexing into a Virtual array ({start, step, len} struct).
@@ -3372,12 +3280,12 @@ fn lower_map(
         )
     })?;
 
-    // Check if input array has a virtual backing (Range, IndexFn)
+    // Check if input array has a virtual backing (Range)
     // If so, use read_elem directly to avoid materialization
     let use_read_elem = matches!(
         arr_expr,
         Expr::Array {
-            backing: ArrayBacking::Range { .. } | ArrayBacking::IndexFn { .. },
+            backing: ArrayBacking::Range { .. },
             ..
         }
     );

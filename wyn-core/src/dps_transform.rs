@@ -919,53 +919,29 @@ fn copy_backing_with_dps(
                 kind: *kind,
             }
         }
-        ArrayBacking::IndexFn { index_fn } => {
-            let new_fn = transform_expr_for_entry_dps(
+        ArrayBacking::View { ptr, len } => {
+            let new_ptr = transform_expr_for_entry_dps(
                 src,
                 dest,
-                *index_fn,
+                *ptr,
                 local_map,
                 dps_functions,
                 output_storage_expr,
                 output_ty,
             );
-            ArrayBacking::IndexFn { index_fn: new_fn }
-        }
-        ArrayBacking::View { base, offset } => {
-            let new_base = transform_expr_for_entry_dps(
+            let new_len = transform_expr_for_entry_dps(
                 src,
                 dest,
-                *base,
-                local_map,
-                dps_functions,
-                output_storage_expr,
-                output_ty,
-            );
-            let new_offset = transform_expr_for_entry_dps(
-                src,
-                dest,
-                *offset,
+                *len,
                 local_map,
                 dps_functions,
                 output_storage_expr,
                 output_ty,
             );
             ArrayBacking::View {
-                base: new_base,
-                offset: new_offset,
+                ptr: new_ptr,
+                len: new_len,
             }
-        }
-        ArrayBacking::Owned { data } => {
-            let new_data = transform_expr_for_entry_dps(
-                src,
-                dest,
-                *data,
-                local_map,
-                dps_functions,
-                output_storage_expr,
-                output_ty,
-            );
-            ArrayBacking::Owned { data: new_data }
         }
     }
 }
@@ -1193,21 +1169,13 @@ fn copy_backing(
                 kind: *kind,
             }
         }
-        ArrayBacking::IndexFn { index_fn } => {
-            let new_fn = copy_expr_tree(dest, src, *index_fn, local_map);
-            ArrayBacking::IndexFn { index_fn: new_fn }
-        }
-        ArrayBacking::View { base, offset } => {
-            let new_base = copy_expr_tree(dest, src, *base, local_map);
-            let new_offset = copy_expr_tree(dest, src, *offset, local_map);
+        ArrayBacking::View { ptr, len } => {
+            let new_ptr = copy_expr_tree(dest, src, *ptr, local_map);
+            let new_len = copy_expr_tree(dest, src, *len, local_map);
             ArrayBacking::View {
-                base: new_base,
-                offset: new_offset,
+                ptr: new_ptr,
+                len: new_len,
             }
-        }
-        ArrayBacking::Owned { data } => {
-            let new_data = copy_expr_tree(dest, src, *data, local_map);
-            ArrayBacking::Owned { data: new_data }
         }
     }
 }

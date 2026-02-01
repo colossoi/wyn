@@ -269,32 +269,17 @@ impl Normalizer {
                         let bindings = vec![size_binding, step_binding, start_binding];
                         self.wrap_bindings(body, range_id, ty, span, node_id, bindings)
                     }
-                    ArrayBacking::IndexFn { index_fn } => {
-                        let new_fn = self.expr_map[&index_fn];
-                        // Don't atomize the closure - keep it as-is
-                        let array_id = body.alloc_expr(
-                            Expr::Array {
-                                backing: ArrayBacking::IndexFn { index_fn: new_fn },
-                                size: atom_size,
-                            },
-                            ty.clone(),
-                            span,
-                            node_id,
-                        );
-                        let bindings = vec![size_binding];
-                        self.wrap_bindings(body, array_id, ty, span, node_id, bindings)
-                    }
-                    ArrayBacking::View { base, offset } => {
-                        let new_base = self.expr_map[&base];
-                        let (atom_base, base_binding) = self.atomize(body, new_base, node_id);
-                        let new_offset = self.expr_map[&offset];
-                        let (atom_offset, offset_binding) = self.atomize(body, new_offset, node_id);
+                    ArrayBacking::View { ptr, len } => {
+                        let new_ptr = self.expr_map[&ptr];
+                        let (atom_ptr, ptr_binding) = self.atomize(body, new_ptr, node_id);
+                        let new_len = self.expr_map[&len];
+                        let (atom_len, len_binding) = self.atomize(body, new_len, node_id);
 
                         let view_id = body.alloc_expr(
                             Expr::Array {
                                 backing: ArrayBacking::View {
-                                    base: atom_base,
-                                    offset: atom_offset,
+                                    ptr: atom_ptr,
+                                    len: atom_len,
                                 },
                                 size: atom_size,
                             },
@@ -303,25 +288,8 @@ impl Normalizer {
                             node_id,
                         );
 
-                        let bindings = vec![size_binding, offset_binding, base_binding];
+                        let bindings = vec![size_binding, len_binding, ptr_binding];
                         self.wrap_bindings(body, view_id, ty, span, node_id, bindings)
-                    }
-                    ArrayBacking::Owned { data } => {
-                        let new_data = self.expr_map[&data];
-                        let (atom_data, data_binding) = self.atomize(body, new_data, node_id);
-
-                        let owned_id = body.alloc_expr(
-                            Expr::Array {
-                                backing: ArrayBacking::Owned { data: atom_data },
-                                size: atom_size,
-                            },
-                            ty.clone(),
-                            span,
-                            node_id,
-                        );
-
-                        let bindings = vec![size_binding, data_binding];
-                        self.wrap_bindings(body, owned_id, ty, span, node_id, bindings)
                     }
                 }
             }
