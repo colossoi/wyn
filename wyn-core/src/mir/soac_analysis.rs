@@ -11,7 +11,7 @@
 
 use crate::ast::TypeName;
 use crate::mir::{
-    ArrayBacking, Body, Def, EntryInput, ExecutionModel, Expr, ExprId, LocalId, Program, RangeKind,
+    ArrayBacking, Block, Body, Def, EntryInput, ExecutionModel, Expr, ExprId, LocalId, Program, RangeKind,
 };
 use polytype::Type;
 use std::collections::HashMap;
@@ -150,28 +150,26 @@ impl<'a> ProvenanceAnalyzer<'a> {
         self.find_map_in_expr(self.body.root)
     }
 
+    /// Search for a map in a block, checking statements first then the result.
+    fn find_map_in_block(&mut self, block: &Block) -> Option<ParallelizableMap> {
+        // Check all statement RHS expressions
+        for stmt in &block.stmts {
+            if let Some(map) = self.find_map_in_expr(stmt.rhs) {
+                return Some(map);
+            }
+            // Track provenance for this binding
+            let prov = self.compute_provenance(stmt.rhs);
+            self.provenance.insert(stmt.local, prov);
+        }
+        // Check the result expression
+        self.find_map_in_expr(block.result)
+    }
+
     /// Recursively search for a map, tracking provenance along the way.
     fn find_map_in_expr(&mut self, expr_id: ExprId) -> Option<ParallelizableMap> {
         match self.body.get_expr(expr_id).clone() {
-            Expr::Let { local, rhs, body } => {
-                // First check if RHS contains a map
-                if let Some(map) = self.find_map_in_expr(rhs) {
-                    return Some(map);
-                }
-
-                // Track provenance for this binding
-                let prov = self.compute_provenance(rhs);
-                self.provenance.insert(local, prov);
-
-                // Continue in the body
-                self.find_map_in_expr(body)
-            }
-
             Expr::Intrinsic { name, args } => {
-                let is_map = name == "_w_intrinsic_map";
-                let is_inplace_map = name == "_w_intrinsic_inplace_map";
-
-                if (is_map || is_inplace_map) && args.len() >= 2 {
+                if name == "_w_intrinsic_map" && args.len() >= 2 {
                     let closure_expr = args[0];
                     let array_expr = args[1];
 
@@ -185,7 +183,7 @@ impl<'a> ProvenanceAnalyzer<'a> {
                         source,
                         closure_name,
                         entry_call: self.entry_call.clone(),
-                        is_inplace: is_inplace_map,
+                        is_inplace: false,
                     });
                 }
 
@@ -217,10 +215,10 @@ impl<'a> ProvenanceAnalyzer<'a> {
                 if let Some(map) = self.find_map_in_expr(cond) {
                     return Some(map);
                 }
-                if let Some(map) = self.find_map_in_expr(then_) {
+                if let Some(map) = self.find_map_in_block(&then_) {
                     return Some(map);
                 }
-                self.find_map_in_expr(else_)
+                self.find_map_in_block(&else_)
             }
 
             Expr::Array { backing, size } => {
@@ -292,7 +290,7 @@ impl<'a> ProvenanceAnalyzer<'a> {
                 if let Some(map) = self.find_map_in_expr(init) {
                     return Some(map);
                 }
-                self.find_map_in_expr(body)
+                self.find_map_in_block(&body)
             }
 
             Expr::Materialize(inner) | Expr::Load { ptr: inner } => self.find_map_in_expr(inner),

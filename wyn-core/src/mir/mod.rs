@@ -72,6 +72,47 @@ impl From<u32> for LambdaId {
 }
 
 // =============================================================================
+// Flat Statement Representation
+// =============================================================================
+
+/// A binding statement (local = rhs).
+///
+/// Represents a single assignment in the flat statement list.
+#[derive(Debug, Clone)]
+pub struct Stmt {
+    /// The local variable being assigned.
+    pub local: LocalId,
+    /// The expression being assigned to the local.
+    pub rhs: ExprId,
+}
+
+/// A block with its own bindings and result expression.
+///
+/// Used for If/Loop branches that need local bindings scoped to the branch.
+#[derive(Debug, Clone)]
+pub struct Block {
+    /// Statements executed in this block.
+    pub stmts: Vec<Stmt>,
+    /// The result expression of this block.
+    pub result: ExprId,
+}
+
+impl Block {
+    /// Create a new block with no statements and the given result.
+    pub fn new(result: ExprId) -> Self {
+        Block {
+            stmts: Vec::new(),
+            result,
+        }
+    }
+
+    /// Create a block with statements and a result.
+    pub fn with_stmts(stmts: Vec<Stmt>, result: ExprId) -> Self {
+        Block { stmts, result }
+    }
+}
+
+// =============================================================================
 // Local Variable Tracking
 // =============================================================================
 
@@ -158,17 +199,11 @@ pub enum Expr {
     },
 
     // --- Binding & Control ---
-    /// Let binding: allocates a local and evaluates body with it in scope.
-    Let {
-        local: LocalId,
-        rhs: ExprId,
-        body: ExprId,
-    },
     /// Conditional expression.
     If {
         cond: ExprId,
-        then_: ExprId,
-        else_: ExprId,
+        then_: Block,
+        else_: Block,
     },
     /// Unified loop construct.
     Loop {
@@ -176,12 +211,12 @@ pub enum Expr {
         loop_var: LocalId,
         /// Initial value for the accumulator.
         init: ExprId,
-        /// Bindings that extract from loop_var.
+        /// Bindings that extract from loop_var (evaluated in header, reference loop_var phi).
         init_bindings: Vec<(LocalId, ExprId)>,
         /// The kind of loop.
         kind: LoopKind,
-        /// Loop body expression.
-        body: ExprId,
+        /// Loop body block (statements executed each iteration + result expression).
+        body: Block,
     },
 
     // --- Calls ---
@@ -269,6 +304,8 @@ pub struct Body {
     pub spans: Vec<Span>,
     /// NodeId per expression (parallel to exprs, for diagnostics).
     pub node_ids: Vec<NodeId>,
+    /// Sequential binding statements (flat representation).
+    pub stmts: Vec<Stmt>,
     /// Root expression of the body.
     pub root: ExprId,
 }
@@ -284,6 +321,7 @@ impl Body {
             types: Vec::new(),
             spans: Vec::new(),
             node_ids: Vec::new(),
+            stmts: Vec::new(),
             root: ExprId(0), // Will be set when root is allocated
         }
     }
@@ -369,6 +407,25 @@ impl Body {
     }
 
     // =========================================================================
+    // Flat Statement Helpers
+    // =========================================================================
+
+    /// Push a binding statement to the flat statement list.
+    pub fn push_stmt(&mut self, local: LocalId, rhs: ExprId) {
+        self.stmts.push(Stmt { local, rhs });
+    }
+
+    /// Iterate over all statements in the body.
+    pub fn iter_stmts(&self) -> impl Iterator<Item = &Stmt> {
+        self.stmts.iter()
+    }
+
+    /// Number of statements in this body.
+    pub fn num_stmts(&self) -> usize {
+        self.stmts.len()
+    }
+
+    // =========================================================================
     // Hoist Helpers
     // =========================================================================
 
@@ -379,7 +436,7 @@ impl Body {
     /// 2. Replaces the expression at `expr_id` with `Expr::Local(local_id)`
     /// 3. Returns the local ID and the original expression
     ///
-    /// The caller is responsible for creating a Let binding with the returned expression.
+    /// The caller is responsible for adding a statement binding the local to the expression.
     pub fn extract_to_local(&mut self, expr_id: ExprId, name: Option<String>) -> (LocalId, Expr) {
         let ty = self.get_type(expr_id).clone();
         let span = self.get_span(expr_id);
@@ -400,16 +457,17 @@ impl Body {
         (local_id, original)
     }
 
-    /// Hoist an expression before a target expression by wrapping target in a Let binding.
+    /// Hoist an expression by extracting it to a local and adding a statement.
     ///
-    /// This replaces `to_hoist` with a Local reference and wraps `target` in a Let:
+    /// This replaces `to_hoist` with a Local reference and adds a stmt binding:
     /// ```text
-    /// Before: ... target containing to_hoist ...
-    /// After:  let _hoist_N = <original to_hoist> in ... target containing Local(_hoist_N) ...
+    /// Before: ... expression containing to_hoist ...
+    /// After:  stmts += [_hoist_N = <original to_hoist>]
+    ///         ... expression containing Local(_hoist_N) ...
     /// ```
     ///
     /// Returns the LocalId of the new binding.
-    pub fn hoist_before(&mut self, to_hoist: ExprId, target: ExprId, name: Option<String>) -> LocalId {
+    pub fn hoist_to_stmt(&mut self, to_hoist: ExprId, name: Option<String>) -> LocalId {
         let to_hoist_ty = self.get_type(to_hoist).clone();
         let to_hoist_span = self.get_span(to_hoist);
         let to_hoist_node_id = self.get_node_id(to_hoist);
@@ -417,22 +475,9 @@ impl Body {
         // Extract the expression to hoist, replacing it with a Local reference
         let (local_id, original_expr) = self.extract_to_local(to_hoist, name);
 
-        // Allocate the original expression as rhs for the Let
+        // Allocate the original expression and add as a statement
         let rhs_id = self.alloc_expr(original_expr, to_hoist_ty, to_hoist_span, to_hoist_node_id);
-
-        // Clone the target expression and allocate as body of the Let
-        let target_ty = self.get_type(target).clone();
-        let target_span = self.get_span(target);
-        let target_node_id = self.get_node_id(target);
-        let target_expr = self.get_expr(target).clone();
-        let body_id = self.alloc_expr(target_expr, target_ty.clone(), target_span, target_node_id);
-
-        // Replace target with the Let expression
-        *self.get_expr_mut(target) = Expr::Let {
-            local: local_id,
-            rhs: rhs_id,
-            body: body_id,
-        };
+        self.push_stmt(local_id, rhs_id);
 
         local_id
     }

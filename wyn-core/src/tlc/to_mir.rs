@@ -5,7 +5,7 @@
 use super::{Def as TlcDef, DefMeta, LoopKind as TlcLoopKind, Program as TlcProgram, Term, TermKind};
 use crate::ast::{self, NodeId, PatternKind, Span, TypeName};
 use crate::mir::{
-    self, ArrayBacking, Body, Def as MirDef, Expr, ExprId, LocalDecl, LocalId, LocalKind,
+    self, ArrayBacking, Block, Body, Def as MirDef, Expr, ExprId, LocalDecl, LocalId, LocalKind,
     LoopKind as MirLoopKind,
 };
 use polytype::Type;
@@ -399,7 +399,10 @@ impl TlcToMir {
                 rhs,
                 body: let_body,
             } => {
+                // Transform the RHS first
                 let rhs_id = self.transform_term(rhs, body);
+
+                // Allocate a local for this binding
                 let local_id = body.alloc_local(LocalDecl {
                     name: name.clone(),
                     span: rhs.span,
@@ -408,20 +411,16 @@ impl TlcToMir {
                 });
                 self.locals.insert(name.clone(), local_id);
 
+                // Push statement to flat list
+                body.push_stmt(local_id, rhs_id);
+
+                // Transform the body - the result becomes the overall result
                 let body_id = self.transform_term(let_body, body);
 
                 self.locals.remove(name);
 
-                body.alloc_expr(
-                    Expr::Let {
-                        local: local_id,
-                        rhs: rhs_id,
-                        body: body_id,
-                    },
-                    ty,
-                    span,
-                    node_id,
-                )
+                // Return the body expression directly (no Expr::Let wrapper)
+                body_id
             }
 
             TermKind::If {
@@ -436,8 +435,8 @@ impl TlcToMir {
                 body.alloc_expr(
                     Expr::If {
                         cond: cond_id,
-                        then_: then_id,
-                        else_: else_id,
+                        then_: Block::new(then_id),
+                        else_: Block::new(else_id),
                     },
                     ty,
                     span,
@@ -540,7 +539,7 @@ impl TlcToMir {
                         init: init_id,
                         init_bindings: mir_init_bindings,
                         kind: mir_kind,
-                        body: body_id,
+                        body: Block::new(body_id),
                     },
                     ty,
                     span,

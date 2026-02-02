@@ -4,15 +4,14 @@
 //! It uses a Constructor wrapper that handles variable hoisting automatically.
 //! Dependencies are lowered on-demand using ensure_lowered pattern.
 
-use crate::alias_checker::InPlaceInfo;
 use crate::ast::TypeName;
 use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
 use crate::lowering_common::is_empty_closure_type;
 // Note: detect_simple_compute_map removed - soac_parallelize transforms the MIR instead
 use crate::mir::{
-    self, ArrayBacking, Body, Def, ExecutionModel, Expr, ExprId, LambdaId, LambdaInfo, LocalId, LoopKind,
-    Program,
+    self, ArrayBacking, Block, Body, Def, ExecutionModel, Expr, ExprId, LambdaId, LambdaInfo, LocalId,
+    LoopKind, Program,
 };
 use crate::pipeline::{self, Pipeline};
 
@@ -34,7 +33,7 @@ use rspirv::binary::Assemble;
 use rspirv::dr::Operand;
 use rspirv::dr::{Builder, InsertPoint};
 use rspirv::spirv::{self, AddressingModel, Capability, MemoryModel, StorageClass};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// Tracks the lowering state of each definition
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -128,7 +127,6 @@ struct Constructor {
     impl_source: ImplSource,
 
     /// In-place optimization: ExprIds of operations where input array can be reused
-    inplace_nodes: HashSet<crate::mir::ExprId>,
 
     /// Storage buffers for compute shaders: (set, binding) -> (buffer_var, elem_type_id, buffer_ptr_type)
     storage_buffers: HashMap<(u32, u32), (spirv::Word, spirv::Word, spirv::Word)>,
@@ -195,7 +193,6 @@ impl Constructor {
             extract_cache: HashMap::new(),
             lambda_registry: IdArena::new(),
             impl_source: ImplSource::default(),
-            inplace_nodes: HashSet::new(),
             storage_buffers: HashMap::new(),
             compute_params: HashMap::new(),
             global_invocation_id: None,
@@ -723,10 +720,9 @@ impl Constructor {
 }
 
 impl<'a> LowerCtx<'a> {
-    fn new(program: &'a Program, inplace_info: &InPlaceInfo) -> Self {
+    fn new(program: &'a Program) -> Self {
         let mut constructor = Constructor::new();
         constructor.lambda_registry = program.lambda_registry.clone();
-        constructor.inplace_nodes = inplace_info.can_reuse_input.clone();
 
         // Build index from name to def position
         let mut def_index = HashMap::new();
@@ -1033,19 +1029,18 @@ impl<'a> LowerCtx<'a> {
 }
 
 /// Lower a MIR program to SPIR-V
-pub fn lower(program: &mir::Program, inplace_info: &InPlaceInfo) -> Result<Vec<u32>> {
+pub fn lower(program: &mir::Program) -> Result<Vec<u32>> {
     // Use a thread with larger stack size to handle deeply nested expressions
     // Default Rust stack is 2MB on macOS which is too small for complex shaders
     const STACK_SIZE: usize = 16 * 1024 * 1024; // 16MB
 
-    // Clone program and inplace info since we need 'static lifetime for thread
+    // Clone program since we need 'static lifetime for thread
     let program_clone = program.clone();
-    let inplace_info_clone = inplace_info.clone();
 
     let handle = std::thread::Builder::new()
         .stack_size(STACK_SIZE)
         .spawn(move || {
-            let ctx = LowerCtx::new(&program_clone, &inplace_info_clone);
+            let ctx = LowerCtx::new(&program_clone);
             ctx.run()
         })
         .expect("Failed to spawn lowering thread");
@@ -1077,7 +1072,7 @@ fn lower_regular_function(
     let return_type = constructor.ast_type_to_spirv(ret_type);
     constructor.begin_function(name, &param_names, &param_types, return_type)?;
 
-    let result = lower_expr(constructor, body, body.root)?;
+    let result = lower_body_with_stmts(constructor, body)?;
 
     // Use ret() for void functions (including DPS functions), ret_value() for functions that return a value
     // DPS functions have dps_output set and already wrote to the output buffer, so they just return
@@ -1269,8 +1264,8 @@ fn lower_entry_point_from_def(
         constructor.env.insert(param_name, loaded);
     }
 
-    // Lower the body
-    let result = lower_expr(constructor, body, body.root)?;
+    // Lower the body (including flat statements)
+    let result = lower_body_with_stmts(constructor, body)?;
 
     // Store result to output variables
     if outputs.len() > 1 {
@@ -1421,7 +1416,7 @@ fn lower_compute_entry_point(
 
     // Lower the body - the MIR has been transformed by soac_parallelize to use
     // __builtin_thread_id() for indexing, so regular expression lowering works
-    let _result = lower_expr(constructor, body, body.root)?;
+    let _result = lower_body_with_stmts(constructor, body)?;
 
     // Check if the body returns Unit - if so, map_into already wrote to output
     let body_ty = body.get_type(body.root);
@@ -1698,6 +1693,53 @@ fn get_storage_buffer_binding(
     None
 }
 
+/// Lower all statements in body.stmts and then lower the root expression.
+/// This processes the flat statement representation before the root.
+fn lower_body_with_stmts(constructor: &mut Constructor, body: &Body) -> Result<spirv::Word> {
+    // Process all statements from the flat list
+    for stmt in body.iter_stmts() {
+        let name = &body.get_local(stmt.local).name;
+        // If binding to _, evaluate value for side effects but don't store it
+        if name != "_" {
+            let value_id = lower_expr(constructor, body, stmt.rhs)?;
+            constructor.env.insert(name.clone(), value_id);
+        } else {
+            let _ = lower_expr(constructor, body, stmt.rhs)?;
+        }
+    }
+
+    // Then lower the root expression
+    lower_expr(constructor, body, body.root)
+}
+
+/// Lower a block by processing its statements and then lowering the result expression.
+fn lower_block(constructor: &mut Constructor, body: &Body, block: &Block) -> Result<spirv::Word> {
+    // Process statements in this block
+    for stmt in &block.stmts {
+        let name = &body.get_local(stmt.local).name;
+        if name != "_" {
+            let val = lower_expr(constructor, body, stmt.rhs)?;
+            constructor.env.insert(name.clone(), val);
+        } else {
+            // Evaluate for side effects but don't store
+            let _ = lower_expr(constructor, body, stmt.rhs)?;
+        }
+    }
+
+    // Lower the result expression
+    let result = lower_expr(constructor, body, block.result)?;
+
+    // Clean up block-local bindings
+    for stmt in &block.stmts {
+        let name = &body.get_local(stmt.local).name;
+        if name != "_" {
+            constructor.env.remove(name);
+        }
+    }
+
+    Ok(result)
+}
+
 fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Result<spirv::Word> {
     let expr_ty = body.get_type(expr_id);
 
@@ -1959,14 +2001,14 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
 
             // Then block
             constructor.begin_block(then_block_id)?;
-            let then_result = lower_expr(constructor, body, *then_)?;
+            let then_result = lower_block(constructor, body, then_)?;
             let then_exit_block = constructor.current_block.unwrap();
 
             constructor.builder.branch(merge_block_id)?;
 
             // Else block
             constructor.begin_block(else_block_id)?;
-            let else_result = lower_expr(constructor, body, *else_)?;
+            let else_result = lower_block(constructor, body, else_)?;
             let else_exit_block = constructor.current_block.unwrap();
             constructor.builder.branch(merge_block_id)?;
 
@@ -1980,25 +2022,6 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
             } else {
                 let incoming = vec![(then_result, then_exit_block), (else_result, else_exit_block)];
                 let result = constructor.builder.phi(result_type, None, incoming)?;
-                Ok(result)
-            }
-        }
-
-        Expr::Let {
-            local,
-            rhs,
-            body: let_body,
-        } => {
-            let name = &body.get_local(*local).name;
-            // If binding to _, evaluate value for side effects but don't store it
-            if name == "_" {
-                let _ = lower_expr(constructor, body, *rhs)?;
-                lower_expr(constructor, body, *let_body)
-            } else {
-                let value_id = lower_expr(constructor, body, *rhs)?;
-                constructor.env.insert(name.clone(), value_id);
-                let result = lower_expr(constructor, body, *let_body)?;
-                constructor.env.remove(name);
                 Ok(result)
             }
         }
@@ -2172,7 +2195,7 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
 
             // Body block
             constructor.begin_block(body_block_id)?;
-            let body_result = lower_expr(constructor, body, *loop_body)?;
+            let body_result = lower_block(constructor, body, loop_body)?;
             constructor.builder.branch(continue_block_id)?;
 
             // Continue block - body_result is the new value for loop_var
@@ -2252,37 +2275,21 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                 let idx_id = lower_expr(constructor, body, args[1])?;
                 let val_id = lower_expr(constructor, body, args[2])?;
 
-                // Check if we can do in-place update
-                let can_inplace = constructor.inplace_nodes.contains(&expr_id);
+                // Use copy-modify-load pattern
+                let arr_var = constructor.declare_variable("_w_array_with_tmp", result_type)?;
+                constructor.builder.store(arr_var, arr_id, None, [])?;
 
-                if can_inplace {
-                    // In-place optimization: use OpCompositeInsert
-                    // This creates a new SSA value but signals to the optimizer
-                    // that the input array can potentially be reused
-                    return Ok(constructor.builder.composite_insert(
-                        result_type,
-                        None,
-                        val_id,
-                        arr_id,
-                        [idx_id],
-                    )?);
-                } else {
-                    // Non-in-place: use copy-modify-load pattern
-                    let arr_var = constructor.declare_variable("_w_array_with_tmp", result_type)?;
-                    constructor.builder.store(arr_var, arr_id, None, [])?;
+                // Get pointer to element and store new value
+                let arg2_ty = body.get_type(args[2]);
+                let elem_type = constructor.ast_type_to_spirv(arg2_ty);
+                let elem_ptr_type =
+                    constructor.builder.type_pointer(None, StorageClass::Function, elem_type);
+                let elem_ptr =
+                    constructor.builder.access_chain(elem_ptr_type, None, arr_var, [idx_id])?;
+                constructor.builder.store(elem_ptr, val_id, None, [])?;
 
-                    // Get pointer to element and store new value
-                    let arg2_ty = body.get_type(args[2]);
-                    let elem_type = constructor.ast_type_to_spirv(arg2_ty);
-                    let elem_ptr_type =
-                        constructor.builder.type_pointer(None, StorageClass::Function, elem_type);
-                    let elem_ptr =
-                        constructor.builder.access_chain(elem_ptr_type, None, arr_var, [idx_id])?;
-                    constructor.builder.store(elem_ptr, val_id, None, [])?;
-
-                    // Load and return the updated array
-                    return Ok(constructor.builder.load(result_type, None, arr_var, None, [])?);
-                }
+                // Load and return the updated array
+                return Ok(constructor.builder.load(result_type, None, arr_var, None, [])?);
             }
 
             // For all other calls, lower arguments normally
@@ -2605,9 +2612,6 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                 }
                 // SOAC (Second-Order Array Combinator) intrinsics
                 "_w_intrinsic_map" | "map" => lower_map(constructor, body, args, expr_ty, result_type),
-                "_w_intrinsic_inplace_map" => {
-                    lower_inplace_map(constructor, body, args, expr_ty, result_type)
-                }
                 "_w_intrinsic_zip" => lower_zip(constructor, body, args, result_type),
                 "_w_intrinsic_map_into" => lower_map_into(constructor, body, args),
                 "_w_intrinsic_reduce" => lower_reduce(constructor, body, args, result_type),
@@ -3292,16 +3296,6 @@ fn extract_closure_info_inner(
                 args.iter().map(|&a| lower_expr(constructor, body, a)).collect::<Result<Vec<_>>>()?;
             Ok((func.clone(), capture_vals))
         }
-        Expr::Let {
-            rhs, body: let_body, ..
-        } => {
-            // Let binding - look at the body (the continuation)
-            // But first check the rhs in case it's the function
-            if let Ok(result) = extract_closure_info_inner(constructor, body, *rhs, depth + 1) {
-                return Ok(result);
-            }
-            extract_closure_info_inner(constructor, body, *let_body, depth + 1)
-        }
         Expr::Local(local_id) => {
             // Local reference - try to find what it was assigned to
             // Look through the expression tree to find the Let that binds this local
@@ -3317,15 +3311,12 @@ fn extract_closure_info_inner(
     }
 }
 
-/// Find the RHS expression that binds a local variable by searching the expression tree.
+/// Find the RHS expression that binds a local variable by searching the statements.
 fn find_local_binding(body: &Body, target_local: LocalId, _start_expr: ExprId) -> Option<ExprId> {
-    // Search through all expressions to find the Let that binds this local
-    // This is a simple linear search - could be optimized with a pre-computed map
-    for expr in body.exprs.iter() {
-        if let Expr::Let { local, rhs, .. } = expr {
-            if *local == target_local {
-                return Some(*rhs);
-            }
+    // Search through all statements to find the one that binds this local
+    for stmt in body.iter_stmts() {
+        if stmt.local == target_local {
+            return Some(stmt.rhs);
         }
     }
     None
@@ -3421,48 +3412,6 @@ fn write_array_element(
             Ok(constructor.builder.composite_insert(result_type, None, value, array_val, [literal_idx])?)
         }
     }
-}
-
-/// Core in-place map over storage array elements.
-///
-/// This is the general-purpose lowering for in-place map, used by both:
-/// - `lower_inplace_map` (passes constant indices 0..array_size)
-/// - `lower_compute_entry_point` (passes single runtime thread_id)
-///
-/// The caller provides the indices to iterate over, allowing the same
-/// lowering logic to handle both compile-time and runtime iteration.
-fn lower_inplace_map_core(
-    constructor: &mut Constructor,
-    mem: MemBinding,
-    array_val: spirv::Word,
-    elem_type: spirv::Word,
-    map_func_id: spirv::Word,
-    capture_vals: &[spirv::Word],
-    output_elem_type: spirv::Word,
-    indices: &[spirv::Word],
-) -> Result<()> {
-    for &index in indices {
-        // Read element
-        let input_elem = read_array_element(constructor, Some(mem), array_val, index, elem_type)?;
-
-        // Apply function: captures first, then input element
-        let mut call_args = capture_vals.to_vec();
-        call_args.push(input_elem);
-        let result_elem =
-            constructor.builder.function_call(output_elem_type, None, map_func_id, call_args)?;
-
-        // Write result back
-        write_array_element(
-            constructor,
-            Some(mem),
-            array_val,
-            index,
-            result_elem,
-            output_elem_type,
-            constructor.void_type,
-        )?;
-    }
-    Ok(())
 }
 
 /// Lower `_w_intrinsic_map`: map f [a,b,c] = [f(a), f(b), f(c)]
@@ -3703,83 +3652,6 @@ fn lower_map_dynamic(
         [buffer_ptr, base_offset, size_u32],
     )?;
     Ok(result_view)
-}
-
-/// Lower `_w_intrinsic_inplace_map`: in-place variant of map
-///
-/// For storage-backed arrays: reads/writes in-place to same buffer (side-effect)
-/// For value arrays: builds new array (same as regular map)
-fn lower_inplace_map(
-    constructor: &mut Constructor,
-    body: &Body,
-    args: &[ExprId],
-    expr_ty: &PolyType<TypeName>,
-    result_type: spirv::Word,
-) -> Result<spirv::Word> {
-    if args.len() != 2 {
-        bail_spirv!(
-            "_w_intrinsic_inplace_map requires 2 args (function, array), got {}",
-            args.len()
-        );
-    }
-
-    // TODO(Phase 5): Address space is now tracked in types (Slice[elem, Storage/Function])
-    // For now, use None for mem binding since we don't have LocalDecl.mem anymore
-    let mem: Option<MemBinding> = None;
-
-    let (func_name, capture_vals) = extract_closure_info(constructor, body, args[0])?;
-
-    // Lower the input array
-    let arr_val = lower_expr(constructor, body, args[1])?;
-    let arr_ty = body.get_type(args[1]);
-    let (array_size, elem_type) = extract_array_info(constructor, arr_ty)?;
-
-    // Get result element type from the expression type
-    let output_elem_type = match expr_ty {
-        PolyType::Constructed(TypeName::Array, type_args) => {
-            assert!(type_args.len() == 3);
-            constructor.ast_type_to_spirv(&type_args[0])
-        }
-        _ => bail_spirv!("inplace_map result must be array type, got {:?}", expr_ty),
-    };
-
-    let map_func_id = *constructor
-        .functions
-        .get(&func_name)
-        .ok_or_else(|| err_spirv!("Map function not found: {}", func_name))?;
-
-    match mem {
-        Some(mem_binding) => {
-            // Storage-backed array: build index list and delegate to core
-            let indices: Vec<_> = (0..array_size).map(|i| constructor.const_u32(i)).collect();
-            lower_inplace_map_core(
-                constructor,
-                mem_binding,
-                arr_val,
-                elem_type,
-                map_func_id,
-                &capture_vals,
-                output_elem_type,
-                &indices,
-            )?;
-            // Return unit for storage ops (side-effect only)
-            Ok(constructor.const_i32(0))
-        }
-        None => {
-            // Value array: build new array (same as regular map)
-            let mut result_elements = Vec::with_capacity(array_size as usize);
-            for i in 0..array_size {
-                let input_elem = constructor.builder.composite_extract(elem_type, None, arr_val, [i])?;
-                // Order: element first, then captures (captures are trailing params after lifting)
-                let mut call_args = vec![input_elem];
-                call_args.extend(capture_vals.clone());
-                let result_elem =
-                    constructor.builder.function_call(output_elem_type, None, map_func_id, call_args)?;
-                result_elements.push(result_elem);
-            }
-            Ok(constructor.builder.composite_construct(result_type, None, result_elements)?)
-        }
-    }
 }
 
 /// Lower `_w_intrinsic_zip`: zip [a,b,c] [x,y,z] = [(a,x), (b,y), (c,z)]

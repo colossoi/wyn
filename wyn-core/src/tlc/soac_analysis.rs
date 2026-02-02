@@ -66,8 +66,6 @@ impl std::fmt::Display for SizeExpr {
 pub enum SoacKind {
     /// `map(f, arr)` - applies f to each element, preserves size.
     Map,
-    /// `inplace_map(f, arr)` - in-place map variant, preserves size.
-    InplaceMap,
     /// `reduce(op, ne, arr)` - reduces array to single value.
     Reduce,
     /// `scan(op, ne, arr)` - prefix scan, preserves size.
@@ -88,7 +86,6 @@ impl SoacKind {
         match name {
             // Intrinsic names
             "_w_intrinsic_map" | "map" => Some(SoacKind::Map),
-            "_w_intrinsic_inplace_map" | "inplace_map" => Some(SoacKind::InplaceMap),
             "_w_intrinsic_reduce" | "reduce" => Some(SoacKind::Reduce),
             "_w_intrinsic_scan" | "scan" => Some(SoacKind::Scan),
             "_w_intrinsic_filter" | "filter" => Some(SoacKind::Filter),
@@ -101,13 +98,13 @@ impl SoacKind {
 
     /// Returns true if this SOAC can be parallelized independently.
     pub fn is_independent(&self) -> bool {
-        matches!(self, SoacKind::Map | SoacKind::InplaceMap | SoacKind::Zip)
+        matches!(self, SoacKind::Map | SoacKind::Zip)
     }
 
     /// Returns the expected number of arguments for a SOAC intrinsic application.
     pub fn expected_args(&self) -> usize {
         match self {
-            SoacKind::Map | SoacKind::InplaceMap => 2, // (f, arr)
+            SoacKind::Map => 2, // (f, arr)
             SoacKind::Reduce | SoacKind::Scan => 3,    // (op, ne, arr)
             SoacKind::Filter => 2,                     // (pred, arr)
             SoacKind::Scatter => 3,                    // (dest, indices, values)
@@ -121,7 +118,6 @@ impl std::fmt::Display for SoacKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = match self {
             SoacKind::Map => "map",
-            SoacKind::InplaceMap => "inplace_map",
             SoacKind::Reduce => "reduce",
             SoacKind::Scan => "scan",
             SoacKind::Filter => "filter",
@@ -348,7 +344,7 @@ impl<'a> SoacAnalyzer<'a> {
     fn handle_soac(&mut self, term: &Term, kind: SoacKind, args: &[&Term]) {
         // Determine which argument is the "main" array for size and entry param check
         let (input_size, input_array, lambda_to_analyze) = match kind {
-            SoacKind::Map | SoacKind::InplaceMap => {
+            SoacKind::Map => {
                 // map(f, arr) - arr is args[1]
                 let arr = args.get(1).copied();
                 let arr_size = arr.map(|a| self.size_of_term(a)).unwrap_or(SizeExpr::Unknown);
@@ -493,7 +489,7 @@ impl<'a> SoacAnalyzer<'a> {
                 // Check if this is a SOAC call
                 if let Some((soac_kind, args)) = self.parse_soac_call(term) {
                     let input_size = match soac_kind {
-                        SoacKind::Map | SoacKind::InplaceMap | SoacKind::Filter => {
+                        SoacKind::Map | SoacKind::Filter => {
                             args.get(1).map(|a| self.size_of_term(a)).unwrap_or(SizeExpr::Unknown)
                         }
                         SoacKind::Reduce | SoacKind::Scan => {
@@ -525,7 +521,7 @@ impl<'a> SoacAnalyzer<'a> {
     pub fn output_size_for_soac(&self, kind: SoacKind, input: &SizeExpr) -> SizeExpr {
         match kind {
             // These preserve size
-            SoacKind::Map | SoacKind::InplaceMap | SoacKind::Scan | SoacKind::Zip => input.clone(),
+            SoacKind::Map | SoacKind::Scan | SoacKind::Zip => input.clone(),
             // Reduce produces a scalar
             SoacKind::Reduce => SizeExpr::Const(1),
             // Filter/Scatter output size is bounded by input

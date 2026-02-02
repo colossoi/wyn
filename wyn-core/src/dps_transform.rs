@@ -8,7 +8,7 @@
 //! This is necessary because SPIR-V can't return runtime-sized arrays.
 
 use crate::ast::{NodeId, Span, TypeName};
-use crate::mir::{ArrayBacking, Body, Def, Expr, ExprId, LocalDecl, LocalId, LocalKind, Program};
+use crate::mir::{ArrayBacking, Block, Body, Def, Expr, ExprId, LocalDecl, LocalId, LocalKind, LoopKind, Program};
 use polytype::Type;
 use std::collections::{HashMap, HashSet};
 
@@ -156,8 +156,14 @@ fn transform_function_to_dps(
     params = new_params;
     params.push(out_local);
 
+    // Copy statements from source body
+    for stmt in body.iter_stmts() {
+        let new_local = *local_map.get(&stmt.local).unwrap_or(&stmt.local);
+        let new_rhs = copy_expr_tree(&mut new_body, &body, stmt.rhs, &local_map);
+        new_body.push_stmt(new_local, new_rhs);
+    }
+
     // Transform the body to use DPS
-    // For now, we handle the common case: body is a `map` expression
     let root = transform_body_to_dps(&body, &mut new_body, &local_map, out_local);
     new_body.set_root(root);
 
@@ -231,89 +237,11 @@ fn transform_body_to_dps(
                 dummy_node_id,
             )
         }
-        Expr::Let {
-            local,
-            rhs,
-            body: let_body,
-        } => {
-            // Transform let bindings - preserve the structure
-            let new_rhs = copy_expr_tree(dest, src, *rhs, local_map);
-            let inner_body = transform_body_to_dps_inner(src, dest, *let_body, local_map, out_local);
-            dest.alloc_expr(
-                Expr::Let {
-                    local: *local_map.get(local).unwrap_or(local),
-                    rhs: new_rhs,
-                    body: inner_body,
-                },
-                unit_ty,
-                root_span,
-                dummy_node_id,
-            )
-        }
         _ => {
             // For other expressions, we need to copy to the output buffer
             // This is more complex - for now, just copy and the SPIR-V lowering will handle it
             copy_expr_tree(dest, src, src.root, local_map)
         }
-    }
-}
-
-/// Helper for transforming nested expressions within let bindings.
-fn transform_body_to_dps_inner(
-    src: &Body,
-    dest: &mut Body,
-    expr_id: ExprId,
-    local_map: &HashMap<LocalId, LocalId>,
-    out_local: LocalId,
-) -> ExprId {
-    let expr = src.get_expr(expr_id);
-    let ty = src.get_type(expr_id);
-    let span = src.get_span(expr_id);
-    let dummy_node_id = NodeId(0);
-    let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
-    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
-
-    match expr {
-        Expr::Intrinsic { name, args } if name == "_w_intrinsic_map" || name == "map" => {
-            // Transform map to map_into
-            let mut new_args: Vec<ExprId> =
-                args.iter().map(|&e| copy_expr_tree(dest, src, e, local_map)).collect();
-
-            let out_ref = dest.alloc_expr(Expr::Local(out_local), ty.clone(), span, dummy_node_id);
-            new_args.push(out_ref);
-
-            let zero = dest.alloc_expr(Expr::Int("0".to_string()), i32_ty, span, dummy_node_id);
-            new_args.push(zero);
-
-            dest.alloc_expr(
-                Expr::Intrinsic {
-                    name: "_w_intrinsic_map_into".to_string(),
-                    args: new_args,
-                },
-                unit_ty,
-                span,
-                dummy_node_id,
-            )
-        }
-        Expr::Let {
-            local,
-            rhs,
-            body: let_body,
-        } => {
-            let new_rhs = copy_expr_tree(dest, src, *rhs, local_map);
-            let inner = transform_body_to_dps_inner(src, dest, *let_body, local_map, out_local);
-            dest.alloc_expr(
-                Expr::Let {
-                    local: *local_map.get(local).unwrap_or(local),
-                    rhs: new_rhs,
-                    body: inner,
-                },
-                unit_ty,
-                span,
-                dummy_node_id,
-            )
-        }
-        _ => copy_expr_tree(dest, src, expr_id, local_map),
     }
 }
 
@@ -431,6 +359,21 @@ fn transform_entry_call_sites(
         dummy_node_id,
     );
 
+    // Copy statements from source body
+    for stmt in body.iter_stmts() {
+        let new_local = *local_map.get(&stmt.local).unwrap_or(&stmt.local);
+        let new_rhs = transform_expr_for_entry_dps(
+            body,
+            &mut new_body,
+            stmt.rhs,
+            &local_map,
+            dps_functions,
+            output_storage_expr,
+            output_ty,
+        );
+        new_body.push_stmt(new_local, new_rhs);
+    }
+
     // Transform expressions, adding output storage to DPS calls
     let new_root = transform_expr_for_entry_dps(
         body,
@@ -456,70 +399,31 @@ fn transform_expr_for_entry_dps(
     output_storage_expr: ExprId,
     output_ty: &Type<TypeName>,
 ) -> ExprId {
-    let _ty = src.get_type(expr_id);
+    let ty = src.get_type(expr_id).clone();
     let span = src.get_span(expr_id);
     let node_id = src.node_ids[expr_id.index()];
 
-    match src.get_expr(expr_id) {
+    let new_expr = match src.get_expr(expr_id) {
         Expr::Call { func, args } if dps_functions.contains(func) => {
             // Transform DPS call: add output storage as last argument
             let mut new_args: Vec<ExprId> = args
                 .iter()
                 .map(|&e| {
                     transform_expr_for_entry_dps(
-                        src,
-                        dest,
-                        e,
-                        local_map,
-                        dps_functions,
-                        output_storage_expr,
-                        output_ty,
+                        src, dest, e, local_map, dps_functions, output_storage_expr, output_ty,
                     )
                 })
                 .collect();
-
-            // Add output storage expression
             new_args.push(output_storage_expr);
 
             // DPS calls return Unit
-            dest.alloc_expr(
-                Expr::Call {
-                    func: func.clone(),
-                    args: new_args,
-                },
+            return dest.alloc_expr(
+                Expr::Call { func: func.clone(), args: new_args },
                 Type::Constructed(TypeName::Unit, vec![]),
                 span,
                 node_id,
-            )
+            );
         }
-        // For all other expressions, recursively transform children
-        _ => copy_expr_tree_with_dps(
-            src,
-            dest,
-            expr_id,
-            local_map,
-            dps_functions,
-            output_storage_expr,
-            output_ty,
-        ),
-    }
-}
-
-/// Copy an expression tree, transforming DPS calls along the way.
-fn copy_expr_tree_with_dps(
-    src: &Body,
-    dest: &mut Body,
-    expr_id: ExprId,
-    local_map: &HashMap<LocalId, LocalId>,
-    dps_functions: &HashSet<String>,
-    output_storage_expr: ExprId,
-    output_ty: &Type<TypeName>,
-) -> ExprId {
-    let ty = src.get_type(expr_id).clone();
-    let span = src.get_span(expr_id);
-    let node_id = src.node_ids[expr_id.index()];
-
-    let new_expr = match src.get_expr(expr_id) {
         Expr::Local(local_id) => Expr::Local(*local_map.get(local_id).unwrap_or(local_id)),
         Expr::Global(name) => Expr::Global(name.clone()),
         Expr::Extern(linkage) => Expr::Extern(linkage.clone()),
@@ -529,359 +433,84 @@ fn copy_expr_tree_with_dps(
         Expr::Unit => Expr::Unit,
         Expr::String(s) => Expr::String(s.clone()),
         Expr::Array { backing, size } => {
-            let new_size = transform_expr_for_entry_dps(
-                src,
-                dest,
-                *size,
-                local_map,
-                dps_functions,
-                output_storage_expr,
-                output_ty,
-            );
-            let new_backing = copy_backing_with_dps(
-                src,
-                dest,
-                backing,
-                local_map,
-                dps_functions,
-                output_storage_expr,
-                output_ty,
-            );
-            Expr::Array {
-                backing: new_backing,
-                size: new_size,
-            }
+            let new_size = transform_expr_for_entry_dps(src, dest, *size, local_map, dps_functions, output_storage_expr, output_ty);
+            let new_backing = copy_backing_with_dps(src, dest, backing, local_map, dps_functions, output_storage_expr, output_ty);
+            Expr::Array { backing: new_backing, size: new_size }
         }
         Expr::Tuple(elems) => {
-            let new_elems: Vec<ExprId> = elems
-                .iter()
-                .map(|e| {
-                    transform_expr_for_entry_dps(
-                        src,
-                        dest,
-                        *e,
-                        local_map,
-                        dps_functions,
-                        output_storage_expr,
-                        output_ty,
-                    )
-                })
+            let new_elems: Vec<ExprId> = elems.iter()
+                .map(|e| transform_expr_for_entry_dps(src, dest, *e, local_map, dps_functions, output_storage_expr, output_ty))
                 .collect();
             Expr::Tuple(new_elems)
         }
         Expr::Vector(elems) => {
-            let new_elems: Vec<ExprId> = elems
-                .iter()
-                .map(|e| {
-                    transform_expr_for_entry_dps(
-                        src,
-                        dest,
-                        *e,
-                        local_map,
-                        dps_functions,
-                        output_storage_expr,
-                        output_ty,
-                    )
-                })
+            let new_elems: Vec<ExprId> = elems.iter()
+                .map(|e| transform_expr_for_entry_dps(src, dest, *e, local_map, dps_functions, output_storage_expr, output_ty))
                 .collect();
             Expr::Vector(new_elems)
         }
         Expr::Matrix(rows) => {
-            let new_rows: Vec<Vec<ExprId>> = rows
-                .iter()
-                .map(|row| {
-                    row.iter()
-                        .map(|e| {
-                            transform_expr_for_entry_dps(
-                                src,
-                                dest,
-                                *e,
-                                local_map,
-                                dps_functions,
-                                output_storage_expr,
-                                output_ty,
-                            )
-                        })
-                        .collect()
-                })
+            let new_rows: Vec<Vec<ExprId>> = rows.iter()
+                .map(|row| row.iter()
+                    .map(|e| transform_expr_for_entry_dps(src, dest, *e, local_map, dps_functions, output_storage_expr, output_ty))
+                    .collect())
                 .collect();
             Expr::Matrix(new_rows)
         }
         Expr::BinOp { op, lhs, rhs } => {
-            let new_lhs = transform_expr_for_entry_dps(
-                src,
-                dest,
-                *lhs,
-                local_map,
-                dps_functions,
-                output_storage_expr,
-                output_ty,
-            );
-            let new_rhs = transform_expr_for_entry_dps(
-                src,
-                dest,
-                *rhs,
-                local_map,
-                dps_functions,
-                output_storage_expr,
-                output_ty,
-            );
-            Expr::BinOp {
-                op: op.clone(),
-                lhs: new_lhs,
-                rhs: new_rhs,
-            }
+            let new_lhs = transform_expr_for_entry_dps(src, dest, *lhs, local_map, dps_functions, output_storage_expr, output_ty);
+            let new_rhs = transform_expr_for_entry_dps(src, dest, *rhs, local_map, dps_functions, output_storage_expr, output_ty);
+            Expr::BinOp { op: op.clone(), lhs: new_lhs, rhs: new_rhs }
         }
         Expr::UnaryOp { op, operand } => {
-            let new_operand = transform_expr_for_entry_dps(
-                src,
-                dest,
-                *operand,
-                local_map,
-                dps_functions,
-                output_storage_expr,
-                output_ty,
-            );
-            Expr::UnaryOp {
-                op: op.clone(),
-                operand: new_operand,
-            }
-        }
-        Expr::Let { local, rhs, body } => {
-            let new_rhs = transform_expr_for_entry_dps(
-                src,
-                dest,
-                *rhs,
-                local_map,
-                dps_functions,
-                output_storage_expr,
-                output_ty,
-            );
-            let new_body = transform_expr_for_entry_dps(
-                src,
-                dest,
-                *body,
-                local_map,
-                dps_functions,
-                output_storage_expr,
-                output_ty,
-            );
-            Expr::Let {
-                local: *local_map.get(local).unwrap_or(local),
-                rhs: new_rhs,
-                body: new_body,
-            }
+            let new_operand = transform_expr_for_entry_dps(src, dest, *operand, local_map, dps_functions, output_storage_expr, output_ty);
+            Expr::UnaryOp { op: op.clone(), operand: new_operand }
         }
         Expr::If { cond, then_, else_ } => {
-            let new_cond = transform_expr_for_entry_dps(
-                src,
-                dest,
-                *cond,
-                local_map,
-                dps_functions,
-                output_storage_expr,
-                output_ty,
-            );
-            let new_then = transform_expr_for_entry_dps(
-                src,
-                dest,
-                *then_,
-                local_map,
-                dps_functions,
-                output_storage_expr,
-                output_ty,
-            );
-            let new_else = transform_expr_for_entry_dps(
-                src,
-                dest,
-                *else_,
-                local_map,
-                dps_functions,
-                output_storage_expr,
-                output_ty,
-            );
-            Expr::If {
-                cond: new_cond,
-                then_: new_then,
-                else_: new_else,
-            }
-        }
-        Expr::Call { func, args } if dps_functions.contains(func) => {
-            // DPS call - add output storage
-            let mut new_args: Vec<ExprId> = args
-                .iter()
-                .map(|a| {
-                    transform_expr_for_entry_dps(
-                        src,
-                        dest,
-                        *a,
-                        local_map,
-                        dps_functions,
-                        output_storage_expr,
-                        output_ty,
-                    )
-                })
-                .collect();
-            new_args.push(output_storage_expr);
-            Expr::Call {
-                func: func.clone(),
-                args: new_args,
-            }
+            let new_cond = transform_expr_for_entry_dps(src, dest, *cond, local_map, dps_functions, output_storage_expr, output_ty);
+            let new_then = copy_block_with_dps(src, dest, then_, local_map, dps_functions, output_storage_expr, output_ty);
+            let new_else = copy_block_with_dps(src, dest, else_, local_map, dps_functions, output_storage_expr, output_ty);
+            Expr::If { cond: new_cond, then_: new_then, else_: new_else }
         }
         Expr::Call { func, args } => {
-            let new_args: Vec<ExprId> = args
-                .iter()
-                .map(|a| {
-                    transform_expr_for_entry_dps(
-                        src,
-                        dest,
-                        *a,
-                        local_map,
-                        dps_functions,
-                        output_storage_expr,
-                        output_ty,
-                    )
-                })
+            let new_args: Vec<ExprId> = args.iter()
+                .map(|a| transform_expr_for_entry_dps(src, dest, *a, local_map, dps_functions, output_storage_expr, output_ty))
                 .collect();
-            Expr::Call {
-                func: func.clone(),
-                args: new_args,
-            }
+            Expr::Call { func: func.clone(), args: new_args }
         }
         Expr::Intrinsic { name, args } => {
-            let new_args: Vec<ExprId> = args
-                .iter()
-                .map(|a| {
-                    transform_expr_for_entry_dps(
-                        src,
-                        dest,
-                        *a,
-                        local_map,
-                        dps_functions,
-                        output_storage_expr,
-                        output_ty,
-                    )
-                })
+            let new_args: Vec<ExprId> = args.iter()
+                .map(|a| transform_expr_for_entry_dps(src, dest, *a, local_map, dps_functions, output_storage_expr, output_ty))
                 .collect();
-            Expr::Intrinsic {
-                name: name.clone(),
-                args: new_args,
-            }
+            Expr::Intrinsic { name: name.clone(), args: new_args }
         }
         Expr::Materialize(inner) => {
-            let new_inner = transform_expr_for_entry_dps(
-                src,
-                dest,
-                *inner,
-                local_map,
-                dps_functions,
-                output_storage_expr,
-                output_ty,
-            );
+            let new_inner = transform_expr_for_entry_dps(src, dest, *inner, local_map, dps_functions, output_storage_expr, output_ty);
             Expr::Materialize(new_inner)
         }
         Expr::Attributed { attributes, expr } => {
-            let new_expr = transform_expr_for_entry_dps(
-                src,
-                dest,
-                *expr,
-                local_map,
-                dps_functions,
-                output_storage_expr,
-                output_ty,
-            );
-            Expr::Attributed {
-                attributes: attributes.clone(),
-                expr: new_expr,
-            }
+            let new_expr = transform_expr_for_entry_dps(src, dest, *expr, local_map, dps_functions, output_storage_expr, output_ty);
+            Expr::Attributed { attributes: attributes.clone(), expr: new_expr }
         }
         Expr::Load { ptr } => {
-            let new_ptr = transform_expr_for_entry_dps(
-                src,
-                dest,
-                *ptr,
-                local_map,
-                dps_functions,
-                output_storage_expr,
-                output_ty,
-            );
+            let new_ptr = transform_expr_for_entry_dps(src, dest, *ptr, local_map, dps_functions, output_storage_expr, output_ty);
             Expr::Load { ptr: new_ptr }
         }
         Expr::Store { ptr, value } => {
-            let new_ptr = transform_expr_for_entry_dps(
-                src,
-                dest,
-                *ptr,
-                local_map,
-                dps_functions,
-                output_storage_expr,
-                output_ty,
-            );
-            let new_value = transform_expr_for_entry_dps(
-                src,
-                dest,
-                *value,
-                local_map,
-                dps_functions,
-                output_storage_expr,
-                output_ty,
-            );
-            Expr::Store {
-                ptr: new_ptr,
-                value: new_value,
-            }
+            let new_ptr = transform_expr_for_entry_dps(src, dest, *ptr, local_map, dps_functions, output_storage_expr, output_ty);
+            let new_value = transform_expr_for_entry_dps(src, dest, *value, local_map, dps_functions, output_storage_expr, output_ty);
+            Expr::Store { ptr: new_ptr, value: new_value }
         }
-        Expr::Loop {
-            loop_var,
-            init,
-            init_bindings,
-            kind,
-            body: loop_body,
-        } => {
-            let new_init = transform_expr_for_entry_dps(
-                src,
-                dest,
-                *init,
-                local_map,
-                dps_functions,
-                output_storage_expr,
-                output_ty,
-            );
-            let new_init_bindings: Vec<(LocalId, ExprId)> = init_bindings
-                .iter()
-                .map(|(l, e)| {
-                    (
-                        *local_map.get(l).unwrap_or(l),
-                        transform_expr_for_entry_dps(
-                            src,
-                            dest,
-                            *e,
-                            local_map,
-                            dps_functions,
-                            output_storage_expr,
-                            output_ty,
-                        ),
-                    )
-                })
+        Expr::Loop { loop_var, init, init_bindings, kind, body: loop_body } => {
+            let new_init = transform_expr_for_entry_dps(src, dest, *init, local_map, dps_functions, output_storage_expr, output_ty);
+            let new_init_bindings: Vec<(LocalId, ExprId)> = init_bindings.iter()
+                .map(|(l, e)| (
+                    *local_map.get(l).unwrap_or(l),
+                    transform_expr_for_entry_dps(src, dest, *e, local_map, dps_functions, output_storage_expr, output_ty),
+                ))
                 .collect();
-            let new_kind = copy_loop_kind_with_dps(
-                src,
-                dest,
-                kind,
-                local_map,
-                dps_functions,
-                output_storage_expr,
-                output_ty,
-            );
-            let new_body = transform_expr_for_entry_dps(
-                src,
-                dest,
-                *loop_body,
-                local_map,
-                dps_functions,
-                output_storage_expr,
-                output_ty,
-            );
+            let new_kind = copy_loop_kind_with_dps(src, dest, kind, local_map, dps_functions, output_storage_expr, output_ty);
+            let new_body = copy_block_with_dps(src, dest, loop_body, local_map, dps_functions, output_storage_expr, output_ty);
             Expr::Loop {
                 loop_var: *local_map.get(loop_var).unwrap_or(loop_var),
                 init: new_init,
@@ -915,6 +544,26 @@ fn copy_expr_tree_with_dps(
     dest.alloc_expr(new_expr, ty, span, node_id)
 }
 
+/// Copy a Block with DPS transformation.
+fn copy_block_with_dps(
+    src: &Body,
+    dest: &mut Body,
+    block: &Block,
+    local_map: &HashMap<LocalId, LocalId>,
+    dps_functions: &HashSet<String>,
+    output_storage_expr: ExprId,
+    output_ty: &Type<TypeName>,
+) -> Block {
+    let new_stmts: Vec<crate::mir::Stmt> = block.stmts.iter()
+        .map(|stmt| crate::mir::Stmt {
+            local: *local_map.get(&stmt.local).unwrap_or(&stmt.local),
+            rhs: transform_expr_for_entry_dps(src, dest, stmt.rhs, local_map, dps_functions, output_storage_expr, output_ty),
+        })
+        .collect();
+    let new_result = transform_expr_for_entry_dps(src, dest, block.result, local_map, dps_functions, output_storage_expr, output_ty);
+    Block::with_stmts(new_stmts, new_result)
+}
+
 /// Copy array backing with DPS transformation.
 fn copy_backing_with_dps(
     src: &Body,
@@ -927,48 +576,15 @@ fn copy_backing_with_dps(
 ) -> ArrayBacking {
     match backing {
         ArrayBacking::Literal(elems) => {
-            let new_elems: Vec<ExprId> = elems
-                .iter()
-                .map(|e| {
-                    transform_expr_for_entry_dps(
-                        src,
-                        dest,
-                        *e,
-                        local_map,
-                        dps_functions,
-                        output_storage_expr,
-                        output_ty,
-                    )
-                })
+            let new_elems: Vec<ExprId> = elems.iter()
+                .map(|e| transform_expr_for_entry_dps(src, dest, *e, local_map, dps_functions, output_storage_expr, output_ty))
                 .collect();
             ArrayBacking::Literal(new_elems)
         }
         ArrayBacking::Range { start, step, kind } => {
-            let new_start = transform_expr_for_entry_dps(
-                src,
-                dest,
-                *start,
-                local_map,
-                dps_functions,
-                output_storage_expr,
-                output_ty,
-            );
-            let new_step = step.map(|s| {
-                transform_expr_for_entry_dps(
-                    src,
-                    dest,
-                    s,
-                    local_map,
-                    dps_functions,
-                    output_storage_expr,
-                    output_ty,
-                )
-            });
-            ArrayBacking::Range {
-                start: new_start,
-                step: new_step,
-                kind: *kind,
-            }
+            let new_start = transform_expr_for_entry_dps(src, dest, *start, local_map, dps_functions, output_storage_expr, output_ty);
+            let new_step = step.map(|s| transform_expr_for_entry_dps(src, dest, s, local_map, dps_functions, output_storage_expr, output_ty));
+            ArrayBacking::Range { start: new_start, step: new_step, kind: *kind }
         }
     }
 }
@@ -977,48 +593,23 @@ fn copy_backing_with_dps(
 fn copy_loop_kind_with_dps(
     src: &Body,
     dest: &mut Body,
-    kind: &crate::mir::LoopKind,
+    kind: &LoopKind,
     local_map: &HashMap<LocalId, LocalId>,
     dps_functions: &HashSet<String>,
     output_storage_expr: ExprId,
     output_ty: &Type<TypeName>,
-) -> crate::mir::LoopKind {
-    use crate::mir::LoopKind;
+) -> LoopKind {
     match kind {
         LoopKind::For { var, iter } => LoopKind::For {
             var: *local_map.get(var).unwrap_or(var),
-            iter: transform_expr_for_entry_dps(
-                src,
-                dest,
-                *iter,
-                local_map,
-                dps_functions,
-                output_storage_expr,
-                output_ty,
-            ),
+            iter: transform_expr_for_entry_dps(src, dest, *iter, local_map, dps_functions, output_storage_expr, output_ty),
         },
         LoopKind::ForRange { var, bound } => LoopKind::ForRange {
             var: *local_map.get(var).unwrap_or(var),
-            bound: transform_expr_for_entry_dps(
-                src,
-                dest,
-                *bound,
-                local_map,
-                dps_functions,
-                output_storage_expr,
-                output_ty,
-            ),
+            bound: transform_expr_for_entry_dps(src, dest, *bound, local_map, dps_functions, output_storage_expr, output_ty),
         },
         LoopKind::While { cond } => LoopKind::While {
-            cond: transform_expr_for_entry_dps(
-                src,
-                dest,
-                *cond,
-                local_map,
-                dps_functions,
-                output_storage_expr,
-                output_ty,
-            ),
+            cond: transform_expr_for_entry_dps(src, dest, *cond, local_map, dps_functions, output_storage_expr, output_ty),
         },
     }
 }
@@ -1046,24 +637,18 @@ fn copy_expr_tree(
         Expr::Array { backing, size } => {
             let new_size = copy_expr_tree(dest, src, *size, local_map);
             let new_backing = copy_backing(dest, src, backing, local_map);
-            Expr::Array {
-                backing: new_backing,
-                size: new_size,
-            }
+            Expr::Array { backing: new_backing, size: new_size }
         }
         Expr::Tuple(elems) => {
-            let new_elems: Vec<ExprId> =
-                elems.iter().map(|e| copy_expr_tree(dest, src, *e, local_map)).collect();
+            let new_elems: Vec<ExprId> = elems.iter().map(|e| copy_expr_tree(dest, src, *e, local_map)).collect();
             Expr::Tuple(new_elems)
         }
         Expr::Vector(elems) => {
-            let new_elems: Vec<ExprId> =
-                elems.iter().map(|e| copy_expr_tree(dest, src, *e, local_map)).collect();
+            let new_elems: Vec<ExprId> = elems.iter().map(|e| copy_expr_tree(dest, src, *e, local_map)).collect();
             Expr::Vector(new_elems)
         }
         Expr::Matrix(rows) => {
-            let new_rows: Vec<Vec<ExprId>> = rows
-                .iter()
+            let new_rows: Vec<Vec<ExprId>> = rows.iter()
                 .map(|row| row.iter().map(|e| copy_expr_tree(dest, src, *e, local_map)).collect())
                 .collect();
             Expr::Matrix(new_rows)
@@ -1071,53 +656,25 @@ fn copy_expr_tree(
         Expr::BinOp { op, lhs, rhs } => {
             let new_lhs = copy_expr_tree(dest, src, *lhs, local_map);
             let new_rhs = copy_expr_tree(dest, src, *rhs, local_map);
-            Expr::BinOp {
-                op: op.clone(),
-                lhs: new_lhs,
-                rhs: new_rhs,
-            }
+            Expr::BinOp { op: op.clone(), lhs: new_lhs, rhs: new_rhs }
         }
         Expr::UnaryOp { op, operand } => {
             let new_operand = copy_expr_tree(dest, src, *operand, local_map);
-            Expr::UnaryOp {
-                op: op.clone(),
-                operand: new_operand,
-            }
-        }
-        Expr::Let { local, rhs, body } => {
-            let new_rhs = copy_expr_tree(dest, src, *rhs, local_map);
-            let new_body = copy_expr_tree(dest, src, *body, local_map);
-            Expr::Let {
-                local: *local_map.get(local).unwrap_or(local),
-                rhs: new_rhs,
-                body: new_body,
-            }
+            Expr::UnaryOp { op: op.clone(), operand: new_operand }
         }
         Expr::If { cond, then_, else_ } => {
             let new_cond = copy_expr_tree(dest, src, *cond, local_map);
-            let new_then = copy_expr_tree(dest, src, *then_, local_map);
-            let new_else = copy_expr_tree(dest, src, *else_, local_map);
-            Expr::If {
-                cond: new_cond,
-                then_: new_then,
-                else_: new_else,
-            }
+            let new_then = copy_block(dest, src, then_, local_map);
+            let new_else = copy_block(dest, src, else_, local_map);
+            Expr::If { cond: new_cond, then_: new_then, else_: new_else }
         }
         Expr::Call { func, args } => {
-            let new_args: Vec<ExprId> =
-                args.iter().map(|a| copy_expr_tree(dest, src, *a, local_map)).collect();
-            Expr::Call {
-                func: func.clone(),
-                args: new_args,
-            }
+            let new_args: Vec<ExprId> = args.iter().map(|a| copy_expr_tree(dest, src, *a, local_map)).collect();
+            Expr::Call { func: func.clone(), args: new_args }
         }
         Expr::Intrinsic { name, args } => {
-            let new_args: Vec<ExprId> =
-                args.iter().map(|a| copy_expr_tree(dest, src, *a, local_map)).collect();
-            Expr::Intrinsic {
-                name: name.clone(),
-                args: new_args,
-            }
+            let new_args: Vec<ExprId> = args.iter().map(|a| copy_expr_tree(dest, src, *a, local_map)).collect();
+            Expr::Intrinsic { name: name.clone(), args: new_args }
         }
         Expr::Materialize(inner) => {
             let new_inner = copy_expr_tree(dest, src, *inner, local_map);
@@ -1125,10 +682,7 @@ fn copy_expr_tree(
         }
         Expr::Attributed { attributes, expr } => {
             let new_expr = copy_expr_tree(dest, src, *expr, local_map);
-            Expr::Attributed {
-                attributes: attributes.clone(),
-                expr: new_expr,
-            }
+            Expr::Attributed { attributes: attributes.clone(), expr: new_expr }
         }
         Expr::Load { ptr } => {
             let new_ptr = copy_expr_tree(dest, src, *ptr, local_map);
@@ -1137,30 +691,15 @@ fn copy_expr_tree(
         Expr::Store { ptr, value } => {
             let new_ptr = copy_expr_tree(dest, src, *ptr, local_map);
             let new_value = copy_expr_tree(dest, src, *value, local_map);
-            Expr::Store {
-                ptr: new_ptr,
-                value: new_value,
-            }
+            Expr::Store { ptr: new_ptr, value: new_value }
         }
-        Expr::Loop {
-            loop_var,
-            init,
-            init_bindings,
-            kind,
-            body: loop_body,
-        } => {
+        Expr::Loop { loop_var, init, init_bindings, kind, body: loop_body } => {
             let new_init = copy_expr_tree(dest, src, *init, local_map);
-            let new_init_bindings: Vec<(LocalId, ExprId)> = init_bindings
-                .iter()
-                .map(|(l, e)| {
-                    (
-                        *local_map.get(l).unwrap_or(l),
-                        copy_expr_tree(dest, src, *e, local_map),
-                    )
-                })
+            let new_init_bindings: Vec<(LocalId, ExprId)> = init_bindings.iter()
+                .map(|(l, e)| (*local_map.get(l).unwrap_or(l), copy_expr_tree(dest, src, *e, local_map)))
                 .collect();
             let new_kind = copy_loop_kind(dest, src, kind, local_map);
-            let new_body = copy_expr_tree(dest, src, *loop_body, local_map);
+            let new_body = copy_block(dest, src, loop_body, local_map);
             Expr::Loop {
                 loop_var: *local_map.get(loop_var).unwrap_or(loop_var),
                 init: new_init,
@@ -1194,6 +733,23 @@ fn copy_expr_tree(
     dest.alloc_expr(new_expr, ty, span, node_id)
 }
 
+/// Copy a Block, remapping locals.
+fn copy_block(
+    dest: &mut Body,
+    src: &Body,
+    block: &Block,
+    local_map: &HashMap<LocalId, LocalId>,
+) -> Block {
+    let new_stmts: Vec<crate::mir::Stmt> = block.stmts.iter()
+        .map(|stmt| crate::mir::Stmt {
+            local: *local_map.get(&stmt.local).unwrap_or(&stmt.local),
+            rhs: copy_expr_tree(dest, src, stmt.rhs, local_map),
+        })
+        .collect();
+    let new_result = copy_expr_tree(dest, src, block.result, local_map);
+    Block::with_stmts(new_stmts, new_result)
+}
+
 /// Copy an array backing, remapping locals.
 fn copy_backing(
     dest: &mut Body,
@@ -1203,18 +759,13 @@ fn copy_backing(
 ) -> ArrayBacking {
     match backing {
         ArrayBacking::Literal(elems) => {
-            let new_elems: Vec<ExprId> =
-                elems.iter().map(|e| copy_expr_tree(dest, src, *e, local_map)).collect();
+            let new_elems: Vec<ExprId> = elems.iter().map(|e| copy_expr_tree(dest, src, *e, local_map)).collect();
             ArrayBacking::Literal(new_elems)
         }
         ArrayBacking::Range { start, step, kind } => {
             let new_start = copy_expr_tree(dest, src, *start, local_map);
             let new_step = step.map(|s| copy_expr_tree(dest, src, s, local_map));
-            ArrayBacking::Range {
-                start: new_start,
-                step: new_step,
-                kind: *kind,
-            }
+            ArrayBacking::Range { start: new_start, step: new_step, kind: *kind }
         }
     }
 }
@@ -1223,10 +774,9 @@ fn copy_backing(
 fn copy_loop_kind(
     dest: &mut Body,
     src: &Body,
-    kind: &crate::mir::LoopKind,
+    kind: &LoopKind,
     local_map: &HashMap<LocalId, LocalId>,
-) -> crate::mir::LoopKind {
-    use crate::mir::LoopKind;
+) -> LoopKind {
     match kind {
         LoopKind::For { var, iter } => LoopKind::For {
             var: *local_map.get(var).unwrap_or(var),
