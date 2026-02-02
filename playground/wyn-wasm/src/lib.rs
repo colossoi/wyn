@@ -735,13 +735,14 @@ def verts: [3]vec4f32 =
    @[-1.0, 3.0, 0.0, 1.0]]
 
 #[vertex]
-def vertex_main(#[builtin(vertex_index)] vertex_id: i32) -> #[builtin(position)] vec4f32 = verts[vertex_id]
+entry vertex_main(#[builtin(vertex_index)] vertex_id: i32)  #[builtin(position)] vec4f32 =
+  verts[vertex_id]
 
 ------------------------------------------------------------
 -- Fragment shader
 ------------------------------------------------------------
 #[fragment]
-def fragment_main(#[builtin(position)] fragCoord: vec4f32) -> #[location(0)] vec4f32 =
+entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
   -- Flip Y for Vulkan
   let coord = @[fragCoord.x, iResolution.y - fragCoord.y] in
   let uv = @[coord.x / iResolution.x, coord.y / iResolution.y] in
