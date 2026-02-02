@@ -357,11 +357,13 @@ impl<'a> ProvenanceAnalyzer<'a> {
 
         // Set entry_call if we're at the top level (call_path was empty)
         if self.call_path.len() == 1 {
-            self.entry_call = Some(CallInfo {
-                call_expr,
-                func_name: func_name.to_string(),
-                array_arg_index: array_arg_index.unwrap_or(0),
-            });
+            if let Some(idx) = array_arg_index {
+                self.entry_call = Some(CallInfo {
+                    call_expr,
+                    func_name: func_name.to_string(),
+                    array_arg_index: idx,
+                });
+            }
         }
 
         // Analyze callee

@@ -319,7 +319,8 @@ impl Constructor {
                         if let PolyType::Constructed(TypeName::ArrayVariantView, _) = variant {
                             // View variant: struct { buffer_ptr, offset, len }
                             // buffer_ptr points to the StorageBuffer block struct containing the runtime array
-                            let stride = crate::mir::layout::type_byte_size(&args[0]).unwrap_or(4);
+                            let stride = crate::mir::layout::type_byte_size(&args[0])
+                                .expect("View element type must have computable size");
                             let runtime_array_type =
                                 self.get_or_create_runtime_array_type(elem_type, stride);
                             let buffer_struct_type =
@@ -1344,7 +1345,8 @@ fn lower_compute_entry_point(
         let elem_type_id = constructor.ast_type_to_spirv(&field.ty);
 
         // Calculate proper array stride from element type
-        let stride = crate::mir::layout::type_byte_size(&field.ty).unwrap_or(4);
+        let stride = crate::mir::layout::type_byte_size(&field.ty)
+            .expect("Storage buffer element type must have computable size");
 
         let runtime_array_type = constructor.get_or_create_runtime_array_type(elem_type_id, stride);
         let buffer_struct_type = constructor.get_or_create_buffer_block_type(runtime_array_type);

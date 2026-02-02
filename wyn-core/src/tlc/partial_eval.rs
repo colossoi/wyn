@@ -85,7 +85,9 @@ impl PartialEvaluator {
     fn eval(&mut self, term: &Term) -> Value {
         match &term.kind {
             // Literals → known values
-            TermKind::IntLit(s) => Value::Int(s.parse().unwrap_or(0)),
+            TermKind::IntLit(s) => Value::Int(
+                s.parse().unwrap_or_else(|_| panic!("BUG: invalid integer literal from lexer: {}", s)),
+            ),
             TermKind::FloatLit(f) => Value::Float(*f as f64),
             TermKind::BoolLit(b) => Value::Bool(*b),
             TermKind::StringLit(_) => Value::Unknown(term.clone()),

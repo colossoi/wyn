@@ -235,7 +235,9 @@ impl TypeKey {
                     "array_view" => TypeName::ArrayVariantView,
                     "array_composite" => TypeName::ArrayVariantComposite,
                     s if s.starts_with("tuple") => {
-                        let n: usize = s[5..].parse().unwrap_or(0);
+                        let n: usize = s[5..]
+                            .parse()
+                            .unwrap_or_else(|_| panic!("BUG: invalid tuple arity in mangled name: {}", s));
                         TypeName::Tuple(n)
                     }
                     s if s.starts_with("sizevar_") => TypeName::SizeVar(s[8..].to_string()),
