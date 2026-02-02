@@ -24,8 +24,7 @@ fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
         .monomorphize()
         .to_mir();
 
-    let inplace_info = crate::alias_checker::analyze_inplace(&flattened.mir);
-    lower(&flattened.mir, &inplace_info)
+    lower(&flattened.mir)
 }
 
 #[test]
@@ -351,8 +350,7 @@ fn compile_to_spirv_with_partial_eval(source: &str) -> Result<Vec<u32>> {
         .filter_reachable()
         .lift_bindings();
 
-    let inplace_info = crate::alias_checker::analyze_inplace(&lifted.mir);
-    lower(&lifted.mir, &inplace_info)
+    lower(&lifted.mir)
 }
 
 #[test]

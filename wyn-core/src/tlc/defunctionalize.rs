@@ -115,15 +115,6 @@ fn intrinsic_hof_info() -> HashMap<String, HofInfo> {
         },
     );
 
-    // inplace_map : (a -> a) -> Array -> Array  -- func at index 0
-    info.insert(
-        "_w_intrinsic_inplace_map".to_string(),
-        HofInfo {
-            func_param_indices: vec![0],
-            def: None,
-        },
-    );
-
     // reduce : (a -> a -> a) -> a -> Array -> a  -- func at index 0
     info.insert(
         "_w_intrinsic_reduce".to_string(),

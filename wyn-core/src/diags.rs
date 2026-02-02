@@ -928,11 +928,8 @@ impl Display for mir::Expr {
             mir::Expr::UnaryOp { op, operand } => {
                 write!(f, "({}e{})", op, operand.0)
             }
-            mir::Expr::Let { local, rhs, body } => {
-                write!(f, "let local_{} = e{} in e{}", local.0, rhs.0, body.0)
-            }
             mir::Expr::If { cond, then_, else_ } => {
-                write!(f, "if e{} then e{} else e{}", cond.0, then_.0, else_.0)
+                write!(f, "if e{} then e{} else e{}", cond.0, then_.result.0, else_.result.0)
             }
             mir::Expr::Loop {
                 loop_var,
@@ -953,7 +950,7 @@ impl Display for mir::Expr {
                         write!(f, "while e{}", cond.0)?;
                     }
                 }
-                write!(f, " do e{}", body.0)
+                write!(f, " do e{}", body.result.0)
             }
             mir::Expr::Call { func, args } => {
                 write!(f, "{}(", func)?;

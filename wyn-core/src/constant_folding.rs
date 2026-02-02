@@ -5,7 +5,7 @@
 
 use crate::ast::{NodeId, Span, TypeName};
 use crate::error::Result;
-use crate::mir::{ArrayBacking, Body, Def, Expr, ExprId, LoopKind, Program};
+use crate::mir::{ArrayBacking, Block, Body, Def, Expr, ExprId, LoopKind, Program};
 use crate::{bail_type_at, err_type_at};
 use polytype::Type;
 use std::collections::HashMap;
@@ -128,6 +128,12 @@ impl ConstantFolder {
             self.expr_map.insert(old_id, new_id);
         }
 
+        // Copy statements, remapping their ExprIds
+        for stmt in old_body.iter_stmts() {
+            let new_rhs = self.expr_map[&stmt.rhs];
+            new_body.push_stmt(stmt.local, new_rhs);
+        }
+
         // Update root to point to the transformed root
         new_body.root = self.expr_map[&old_body.root];
 
@@ -244,8 +250,8 @@ impl ConstantFolder {
             // If - try to fold on constant condition
             Expr::If { cond, then_, else_ } => {
                 let new_cond = self.expr_map[cond];
-                let new_then = self.expr_map[then_];
-                let new_else = self.expr_map[else_];
+                let new_then = self.expr_map[&then_.result];
+                let new_else = self.expr_map[&else_.result];
 
                 // If condition is a constant bool, return the appropriate branch
                 if let Expr::Bool(b) = body.get_expr(new_cond) {
@@ -255,28 +261,8 @@ impl ConstantFolder {
                 Ok(body.alloc_expr(
                     Expr::If {
                         cond: new_cond,
-                        then_: new_then,
-                        else_: new_else,
-                    },
-                    ty.clone(),
-                    span,
-                    node_id,
-                ))
-            }
-
-            // Let - map subexpressions
-            Expr::Let {
-                local,
-                rhs,
-                body: let_body,
-            } => {
-                let new_rhs = self.expr_map[rhs];
-                let new_body = self.expr_map[let_body];
-                Ok(body.alloc_expr(
-                    Expr::Let {
-                        local: *local,
-                        rhs: new_rhs,
-                        body: new_body,
+                        then_: Block::new(new_then),
+                        else_: Block::new(new_else),
                     },
                     ty.clone(),
                     span,
@@ -296,7 +282,7 @@ impl ConstantFolder {
                 let new_init_bindings: Vec<_> =
                     init_bindings.iter().map(|(local, expr)| (*local, self.expr_map[expr])).collect();
                 let new_kind = self.map_loop_kind(kind);
-                let new_loop_body = self.expr_map[loop_body];
+                let new_loop_body = self.expr_map[&loop_body.result];
 
                 Ok(body.alloc_expr(
                     Expr::Loop {
@@ -304,7 +290,7 @@ impl ConstantFolder {
                         init: new_init,
                         init_bindings: new_init_bindings,
                         kind: new_kind,
-                        body: new_loop_body,
+                        body: Block::new(new_loop_body),
                     },
                     ty.clone(),
                     span,

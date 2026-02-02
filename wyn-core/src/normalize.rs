@@ -9,7 +9,7 @@
 //! - If/Loop conditions are Local or scalar literal
 
 use crate::ast::{NodeId, Span, TypeName};
-use crate::mir::{ArrayBacking, Body, Def, Expr, ExprId, LocalDecl, LocalId, LocalKind, LoopKind, Program};
+use crate::mir::{ArrayBacking, Block, Body, Def, Expr, ExprId, LocalDecl, LocalId, LocalKind, LoopKind, Program};
 use polytype::Type;
 use std::collections::HashMap;
 
@@ -104,6 +104,16 @@ impl Normalizer {
     }
 
     /// Normalize a function body.
+    ///
+    /// Statement ordering strategy:
+    /// - Build a map from RHS ExprId to stmt for quick lookup
+    /// - Process expressions in arena order (dependency order)
+    /// - After processing each expression, check if any original stmt has that expr as RHS
+    /// - If so, emit that stmt immediately (after any atomization for its RHS)
+    /// - Atomization temps and Expr::Let bindings are also emitted immediately
+    ///
+    /// This ensures correct ordering: atomization temps come before bindings that use them,
+    /// and original bindings come before expressions that reference them.
     fn normalize_body(&mut self, old_body: Body) -> Body {
         self.expr_map.clear();
 
@@ -114,7 +124,16 @@ impl Normalizer {
             new_body.alloc_local(local.clone());
         }
 
-        // Process expressions in order (they're stored in dependency order)
+        // Build a map from RHS ExprId to the stmt that binds it
+        let mut rhs_to_stmt: HashMap<ExprId, (LocalId, ExprId)> = HashMap::new();
+        for stmt in old_body.iter_stmts() {
+            rhs_to_stmt.insert(stmt.rhs, (stmt.local, stmt.rhs));
+        }
+
+        // Track which original stmts have been emitted
+        let mut emitted_stmts: std::collections::HashSet<ExprId> = std::collections::HashSet::new();
+
+        // Process expressions in order, emitting stmts at the right time
         for (old_idx, old_expr) in old_body.exprs.iter().enumerate() {
             let old_id = ExprId(old_idx as u32);
             let ty = old_body.get_type(old_id).clone();
@@ -123,6 +142,15 @@ impl Normalizer {
 
             let new_id = self.normalize_expr(&mut new_body, old_expr, &ty, span, node_id);
             self.expr_map.insert(old_id, new_id);
+
+            // If this expression is the RHS of an original stmt, emit that stmt now
+            if let Some((local, rhs)) = rhs_to_stmt.get(&old_id) {
+                if !emitted_stmts.contains(&rhs) {
+                    let new_rhs = self.expr_map[rhs];
+                    new_body.push_stmt(*local, new_rhs);
+                    emitted_stmts.insert(*rhs);
+                }
+            }
         }
 
         // Update root to point to the transformed root
@@ -371,39 +399,19 @@ impl Normalizer {
                 self.wrap_bindings(body, intrinsic_id, ty, span, node_id, bindings)
             }
 
-            // Let - map subexpressions (let body creates its own scope for bindings)
-            Expr::Let {
-                local,
-                rhs,
-                body: let_body,
-            } => {
-                let new_rhs = self.expr_map[rhs];
-                let new_body = self.expr_map[let_body];
-                body.alloc_expr(
-                    Expr::Let {
-                        local: *local,
-                        rhs: new_rhs,
-                        body: new_body,
-                    },
-                    ty.clone(),
-                    span,
-                    node_id,
-                )
-            }
-
             // If - atomize condition, branches are their own scopes
             Expr::If { cond, then_, else_ } => {
                 let new_cond = self.expr_map[cond];
-                let new_then = self.expr_map[then_];
-                let new_else = self.expr_map[else_];
+                let new_then = self.expr_map[&then_.result];
+                let new_else = self.expr_map[&else_.result];
 
                 let (atom_cond, cond_binding) = self.atomize(body, new_cond, node_id);
 
                 let if_id = body.alloc_expr(
                     Expr::If {
                         cond: atom_cond,
-                        then_: new_then,
-                        else_: new_else,
+                        then_: Block::new(new_then),
+                        else_: Block::new(new_else),
                     },
                     ty.clone(),
                     span,
@@ -428,7 +436,7 @@ impl Normalizer {
                     init_bindings.iter().map(|(local, expr)| (*local, self.expr_map[expr])).collect();
 
                 let (new_kind, kind_bindings) = self.map_loop_kind(body, kind, node_id);
-                let new_loop_body = self.expr_map[loop_body];
+                let new_loop_body = self.expr_map[&loop_body.result];
 
                 let loop_id = body.alloc_expr(
                     Expr::Loop {
@@ -436,7 +444,7 @@ impl Normalizer {
                         init: atom_init,
                         init_bindings: new_init_bindings,
                         kind: new_kind,
-                        body: new_loop_body,
+                        body: Block::new(new_loop_body),
                     },
                     ty.clone(),
                     span,
@@ -691,28 +699,23 @@ impl Normalizer {
         }
     }
 
-    /// Wrap an expression with Let bindings for atomization.
+    /// Emit atomization bindings as flat statements directly to body.stmts.
+    /// Since expressions are processed in dependency order, emitting immediately
+    /// ensures correct ordering.
     fn wrap_bindings(
-        &self,
+        &mut self,
         body: &mut Body,
-        mut expr_id: ExprId,
-        ty: &Type<TypeName>,
-        span: Span,
-        node_id: NodeId,
+        expr_id: ExprId,
+        _ty: &Type<TypeName>,
+        _span: Span,
+        _node_id: NodeId,
         bindings: Vec<Option<(LocalId, ExprId)>>,
     ) -> ExprId {
-        for binding in bindings.into_iter().flatten() {
+        // Bindings come in reverse order (outermost first for nested Lets),
+        // so reverse to get execution order
+        for binding in bindings.into_iter().rev().flatten() {
             let (local_id, rhs) = binding;
-            expr_id = body.alloc_expr(
-                Expr::Let {
-                    local: local_id,
-                    rhs,
-                    body: expr_id,
-                },
-                ty.clone(),
-                span,
-                node_id,
-            );
+            body.push_stmt(local_id, rhs);
         }
         expr_id
     }

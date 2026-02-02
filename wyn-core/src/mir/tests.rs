@@ -2,7 +2,7 @@
 
 use crate::IdArena;
 use crate::ast::{NodeCounter, Span, TypeName};
-use crate::mir::{Body, Def, Expr, LocalDecl, LocalKind, Program};
+use crate::mir::{Block, Body, Def, Expr, LocalDecl, LocalKind, Program};
 use polytype::Type;
 
 fn i32_type() -> Type<TypeName> {
@@ -130,7 +130,7 @@ fn test_let_binding() {
     let mut nc = NodeCounter::new();
     let span = test_span();
 
-    // Build body for: let x = 42 in x + 1
+    // Build body for: let x = 42 in x + 1 (using flat statements)
     let mut body = Body::new();
 
     // Allocate local for x
@@ -155,36 +155,24 @@ fn test_let_binding() {
         span,
         nc.next_id(),
     );
-    let let_expr = body.alloc_expr(
-        Expr::Let {
-            local: x_local,
-            rhs: lit_42,
-            body: add_expr,
-        },
-        i32_type(),
-        span,
-        nc.next_id(),
-    );
-    body.set_root(let_expr);
 
-    // Verify structure
+    // Add statement: x = 42
+    body.push_stmt(x_local, lit_42);
+    body.set_root(add_expr);
+
+    // Verify structure via statements
+    let stmts: Vec<_> = body.iter_stmts().collect();
+    assert_eq!(stmts.len(), 1);
+    assert_eq!(body.get_local(stmts[0].local).name, "x");
+    match body.get_expr(stmts[0].rhs) {
+        Expr::Int(s) => assert_eq!(s, "42"),
+        other => panic!("Expected Int, got {:?}", other),
+    }
+
+    // Verify root is the add expression
     match body.get_expr(body.root) {
-        Expr::Let {
-            local,
-            rhs,
-            body: let_body,
-        } => {
-            assert_eq!(body.get_local(*local).name, "x");
-            match body.get_expr(*rhs) {
-                Expr::Int(s) => assert_eq!(s, "42"),
-                other => panic!("Expected Int, got {:?}", other),
-            }
-            match body.get_expr(*let_body) {
-                Expr::BinOp { op, .. } => assert_eq!(op, "+"),
-                other => panic!("Expected BinOp, got {:?}", other),
-            }
-        }
-        other => panic!("Expected Let, got {:?}", other),
+        Expr::BinOp { op, .. } => assert_eq!(op, "+"),
+        other => panic!("Expected BinOp, got {:?}", other),
     }
 }
 
@@ -201,7 +189,16 @@ fn test_if_expression() {
     let cond = body.alloc_expr(Expr::Bool(true), bool_type.clone(), span, nc.next_id());
     let then_ = body.alloc_expr(Expr::Int("1".to_string()), i32_type(), span, nc.next_id());
     let else_ = body.alloc_expr(Expr::Int("2".to_string()), i32_type(), span, nc.next_id());
-    let if_expr = body.alloc_expr(Expr::If { cond, then_, else_ }, i32_type(), span, nc.next_id());
+    let if_expr = body.alloc_expr(
+        Expr::If {
+            cond,
+            then_: Block::new(then_),
+            else_: Block::new(else_),
+        },
+        i32_type(),
+        span,
+        nc.next_id(),
+    );
     body.set_root(if_expr);
 
     // Verify structure
@@ -211,11 +208,11 @@ fn test_if_expression() {
                 Expr::Bool(b) => assert!(*b),
                 other => panic!("Expected Bool, got {:?}", other),
             }
-            match body.get_expr(*then_) {
+            match body.get_expr(then_.result) {
                 Expr::Int(s) => assert_eq!(s, "1"),
                 other => panic!("Expected Int, got {:?}", other),
             }
-            match body.get_expr(*else_) {
+            match body.get_expr(else_.result) {
                 Expr::Int(s) => assert_eq!(s, "2"),
                 other => panic!("Expected Int, got {:?}", other),
             }

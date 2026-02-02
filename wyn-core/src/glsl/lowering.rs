@@ -8,7 +8,7 @@ use crate::bail_glsl;
 use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
 use crate::lowering_common::ShaderStage;
-use crate::mir::{ArrayBacking, Body, Def, ExecutionModel, Expr, ExprId, LocalId, LoopKind, Program};
+use crate::mir::{ArrayBacking, Block, Body, Def, ExecutionModel, Expr, ExprId, LocalId, LoopKind, Program};
 use polytype::Type as PolyType;
 use rspirv::spirv;
 use std::collections::{HashMap, HashSet};
@@ -99,6 +99,70 @@ impl<'a> LowerCtx<'a> {
             ty,
             PolyType::Constructed(TypeName::Tuple(_), _) | PolyType::Constructed(TypeName::Record(_), _)
         )
+    }
+
+    /// Emit all statements from body.stmts and then lower the root expression.
+    /// This is the main entry point for lowering a body with the flat statement representation.
+    fn lower_body(&mut self, body: &Body, output: &mut String) -> Result<String> {
+        // First, emit all statements from the flat list
+        for stmt in body.iter_stmts() {
+            let local_decl = body.get_local(stmt.local);
+            let name = &local_decl.name;
+            let v = self.lower_expr(body, stmt.rhs, output)?;
+
+            if self.declared_vars.contains(name) {
+                // Variable already declared, just assign
+                writeln!(output, "{}{} = {};", self.indent_str(), name, v).unwrap();
+            } else {
+                // New variable, declare with type
+                let rhs_ty = body.get_type(stmt.rhs);
+                writeln!(
+                    output,
+                    "{}{} {} = {};",
+                    self.indent_str(),
+                    self.type_to_glsl(rhs_ty),
+                    name,
+                    v
+                )
+                .unwrap();
+                self.declared_vars.insert(name.clone());
+            }
+        }
+
+        // Then lower the root expression
+        self.lower_expr(body, body.root, output)
+    }
+
+    /// Lower a Block by emitting its statements and then lowering its result expression.
+    /// Used for If/Loop branches that have their own local bindings.
+    fn lower_block(&mut self, body: &Body, block: &Block, output: &mut String) -> Result<String> {
+        // Emit all statements in the block
+        for stmt in &block.stmts {
+            let local_decl = body.get_local(stmt.local);
+            let name = &local_decl.name;
+            let v = self.lower_expr(body, stmt.rhs, output)?;
+
+            if self.declared_vars.contains(name) {
+                // Variable already declared, just assign
+                writeln!(output, "{}{} = {};", self.indent_str(), name, v).unwrap();
+            } else {
+                // New variable, declare with type
+                let rhs_ty = body.get_type(stmt.rhs);
+                writeln!(
+                    output,
+                    "{}{} {} = {};",
+                    self.indent_str(),
+                    self.type_to_glsl(rhs_ty),
+                    name,
+                    v
+                )
+                .unwrap();
+                self.declared_vars.insert(name.clone());
+            }
+        }
+
+        // Lower the result expression
+        self.lower_expr(body, block.result, output)
     }
 
     fn lower_program(&mut self) -> Result<GlslOutput> {
@@ -242,7 +306,7 @@ impl<'a> LowerCtx<'a> {
                 self.declared_vars.insert(name.clone());
             }
 
-            let result = self.lower_expr(body, body.root, output)?;
+            let result = self.lower_body(body, output)?;
 
             // Write to fragColor output
             writeln!(output, "{}fragColor = {};", self.indent_str(), result).unwrap();
@@ -443,7 +507,7 @@ impl<'a> LowerCtx<'a> {
                 writeln!(output, ") {{").unwrap();
 
                 self.indent += 1;
-                let result = self.lower_expr(body, body.root, output)?;
+                let result = self.lower_body(body, output)?;
                 writeln!(output, "{}return {};", self.indent_str(), result).unwrap();
                 self.indent -= 1;
 
@@ -452,7 +516,7 @@ impl<'a> LowerCtx<'a> {
             }
             Def::Constant { name, ty, body, .. } => {
                 write!(output, "const {} {} = ", self.type_to_glsl(ty), name).unwrap();
-                let val = self.lower_expr(body, body.root, output)?;
+                let val = self.lower_body(body, output)?;
                 writeln!(output, "{};", val).unwrap();
             }
             Def::Uniform { .. } => {
@@ -545,7 +609,7 @@ impl<'a> LowerCtx<'a> {
                 self.declared_vars.insert(name.clone());
             }
 
-            let result = self.lower_expr(body, body.root, output)?;
+            let result = self.lower_body(body, output)?;
 
             // Assign to outputs - handle tuple returns by extracting components
             for (tuple_idx, _loc) in &location_outputs {
@@ -717,12 +781,12 @@ impl<'a> LowerCtx<'a> {
                     let c = self.lower_expr(body, *cond, output)?;
                     writeln!(output, "{}if ({}) {{", self.indent_str(), c).unwrap();
                     self.indent += 1;
-                    let t = self.lower_expr(body, *then_, output)?;
+                    let t = self.lower_block(body, then_, output)?;
                     writeln!(output, "{}{} = {};", self.indent_str(), result_var, t).unwrap();
                     self.indent -= 1;
                     writeln!(output, "{}}} else {{", self.indent_str()).unwrap();
                     self.indent += 1;
-                    let e = self.lower_expr(body, *else_, output)?;
+                    let e = self.lower_block(body, else_, output)?;
                     writeln!(output, "{}{} = {};", self.indent_str(), result_var, e).unwrap();
                     self.indent -= 1;
                     writeln!(output, "{}}}", self.indent_str()).unwrap();
@@ -730,39 +794,10 @@ impl<'a> LowerCtx<'a> {
                     Ok(result_var)
                 } else {
                     let c = self.lower_expr(body, *cond, output)?;
-                    let t = self.lower_expr(body, *then_, output)?;
-                    let e = self.lower_expr(body, *else_, output)?;
+                    let t = self.lower_block(body, then_, output)?;
+                    let e = self.lower_block(body, else_, output)?;
                     Ok(format!("({} ? {} : {})", c, t, e))
                 }
-            }
-
-            Expr::Let {
-                local,
-                rhs,
-                body: let_body,
-            } => {
-                let local_decl = body.get_local(*local);
-                let name = &local_decl.name;
-                let v = self.lower_expr(body, *rhs, output)?;
-
-                if self.declared_vars.contains(name) {
-                    // Variable already declared, just assign
-                    writeln!(output, "{}{} = {};", self.indent_str(), name, v).unwrap();
-                } else {
-                    // New variable, declare with type
-                    let rhs_ty = body.get_type(*rhs);
-                    writeln!(
-                        output,
-                        "{}{} {} = {};",
-                        self.indent_str(),
-                        self.type_to_glsl(rhs_ty),
-                        name,
-                        v
-                    )
-                    .unwrap();
-                    self.declared_vars.insert(name.clone());
-                }
-                self.lower_expr(body, *let_body, output)
             }
 
             Expr::Loop {
@@ -771,7 +806,7 @@ impl<'a> LowerCtx<'a> {
                 init_bindings,
                 kind,
                 body: loop_body,
-            } => self.lower_loop(body, *loop_var, *init, init_bindings, kind, *loop_body, output),
+            } => self.lower_loop(body, *loop_var, *init, init_bindings, kind, loop_body, output),
 
             // --- Calls ---
             Expr::Call { func, args } => {
@@ -1038,7 +1073,7 @@ impl<'a> LowerCtx<'a> {
         init: ExprId,
         init_bindings: &[(LocalId, ExprId)],
         kind: &LoopKind,
-        loop_body: ExprId,
+        loop_body: &Block,
         output: &mut String,
     ) -> Result<String> {
         let loop_var_name = body.get_local(loop_var).name.clone();
@@ -1132,7 +1167,7 @@ impl<'a> LowerCtx<'a> {
         }
 
         self.indent += 1;
-        let body_result = self.lower_expr(body, loop_body, output)?;
+        let body_result = self.lower_block(body, loop_body, output)?;
         writeln!(
             output,
             "{}{} = {};",

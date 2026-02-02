@@ -1,9 +1,9 @@
-//! Tests for the binding lifting (code motion) optimization pass.
+//! Tests for the binding lifting (expression remapping) pass.
 
 use crate::IdArena;
 use crate::ast::{NodeId, Span, TypeName};
 use crate::binding_lifter::lift_bindings;
-use crate::mir::{Body, Def, Expr, ExprId, LocalDecl, LocalId, LocalKind, LoopKind, Program};
+use crate::mir::{Block, Body, Def, Expr, ExprId, LocalDecl, LocalId, LocalKind, LoopKind, Program};
 use polytype::Type;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -76,10 +76,9 @@ impl TestBodyBuilder {
         )
     }
 
-    /// Create a let binding expression.
-    fn let_bind(&mut self, local: LocalId, rhs: ExprId, body: ExprId) -> ExprId {
-        let ty = self.body.get_type(body).clone();
-        self.body.alloc_expr(Expr::Let { local, rhs, body }, ty, test_span(), next_id())
+    /// Add a statement binding.
+    fn stmt(&mut self, local: LocalId, rhs: ExprId) {
+        self.body.push_stmt(local, rhs);
     }
 
     /// Create a for-range loop expression.
@@ -100,7 +99,7 @@ impl TestBodyBuilder {
                 init,
                 init_bindings: vec![(loop_var, loop_var_ref)],
                 kind: LoopKind::ForRange { var: iter_var, bound },
-                body,
+                body: Block::new(body),
             },
             ty,
             test_span(),
@@ -133,350 +132,165 @@ fn make_test_program(body: Body) -> Program {
 }
 
 // =============================================================================
-// Test Helpers - Structure Inspection
-// =============================================================================
-
-/// Get a simplified structural representation of an expression.
-/// Returns a vector of tags like ["let", "loop", "let", "expr"].
-fn get_structure(body: &Body, expr_id: ExprId) -> Vec<&'static str> {
-    let mut result = vec![];
-    collect_structure(body, expr_id, &mut result);
-    result
-}
-
-fn collect_structure(body: &Body, expr_id: ExprId, result: &mut Vec<&'static str>) {
-    match body.get_expr(expr_id) {
-        Expr::Let { body: let_body, .. } => {
-            result.push("let");
-            collect_structure(body, *let_body, result);
-        }
-        Expr::Loop { body: loop_body, .. } => {
-            result.push("loop");
-            collect_structure(body, *loop_body, result);
-        }
-        _ => {
-            result.push("expr");
-        }
-    }
-}
-
-/// Get the structure of a program's first function.
-fn get_program_structure(program: &Program) -> Vec<&'static str> {
-    match &program.defs[0] {
-        Def::Function { body, .. } => get_structure(body, body.root),
-        _ => panic!("Expected Function def"),
-    }
-}
-
-// =============================================================================
 // Unit Tests
 // =============================================================================
 
 #[test]
-fn test_hoist_constant_from_loop() {
-    // loop acc = 0 for i < 10 do
-    //   let x = 42 in acc + x
-    // =>
-    // let x = 42 in loop acc = 0 for i < 10 do acc + x
-
+fn test_simple_expression_remapping() {
+    // Test that lift_bindings correctly remaps a simple expression
     let mut b = TestBodyBuilder::new();
 
-    // Create locals
+    let x = b.alloc_local("x", i32_type(), LocalKind::Let);
+    let lit_42 = b.int_lit(42);
+    let x_ref = b.local(x);
+    let lit_1 = b.int_lit(1);
+    let add_expr = b.binop("+", x_ref, lit_1);
+
+    // x = 42; root = x + 1
+    b.stmt(x, lit_42);
+    let body = b.build(add_expr);
+    let program = make_test_program(body);
+    let result = lift_bindings(program);
+
+    // Verify the structure is preserved
+    match &result.defs[0] {
+        Def::Function { body, .. } => {
+            // Should have 1 local
+            assert_eq!(body.locals.len(), 1);
+            assert_eq!(body.get_local(LocalId(0)).name, "x");
+
+            // Should have 1 statement
+            let stmts: Vec<_> = body.iter_stmts().collect();
+            assert_eq!(stmts.len(), 1);
+
+            // Root should be a BinOp
+            match body.get_expr(body.root) {
+                Expr::BinOp { op, .. } => assert_eq!(op, "+"),
+                other => panic!("Expected BinOp, got {:?}", other),
+            }
+        }
+        _ => panic!("Expected Function def"),
+    }
+}
+
+#[test]
+fn test_loop_with_statements() {
+    // Test that statements and loops are correctly handled
+    let mut b = TestBodyBuilder::new();
+
     let acc = b.alloc_local("acc", i32_type(), LocalKind::LoopVar);
     let i = b.alloc_local("i", i32_type(), LocalKind::LoopVar);
     let x = b.alloc_local("x", i32_type(), LocalKind::Let);
 
-    // Build: let x = 42 in acc + x
+    // x = 42 (statement before loop)
     let lit_42 = b.int_lit(42);
+    b.stmt(x, lit_42);
+
+    // Loop body: acc + x
     let acc_ref = b.local(acc);
     let x_ref = b.local(x);
     let add_expr = b.binop("+", acc_ref, x_ref);
-    let let_x = b.let_bind(x, lit_42, add_expr);
 
-    // Build: loop acc = 0 for i < 10 do <body>
+    // loop acc = 0 for i < 10 do acc + x
     let init = b.int_lit(0);
     let bound = b.int_lit(10);
-    let loop_expr = b.for_range_loop(acc, init, i, bound, let_x);
+    let loop_expr = b.for_range_loop(acc, init, i, bound, add_expr);
 
     let body = b.build(loop_expr);
     let program = make_test_program(body);
     let result = lift_bindings(program);
 
-    let structure = get_program_structure(&result);
-    assert_eq!(structure, vec!["let", "loop", "expr"]); // x hoisted before loop
+    match &result.defs[0] {
+        Def::Function { body, .. } => {
+            // Should have 3 locals (acc, i, x)
+            assert_eq!(body.locals.len(), 3);
+
+            // Should have 1 statement (x = 42)
+            let stmts: Vec<_> = body.iter_stmts().collect();
+            assert_eq!(stmts.len(), 1);
+
+            // Root should be a Loop
+            match body.get_expr(body.root) {
+                Expr::Loop { loop_var, .. } => {
+                    assert_eq!(body.get_local(*loop_var).name, "acc");
+                }
+                other => panic!("Expected Loop, got {:?}", other),
+            }
+        }
+        _ => panic!("Expected Function def"),
+    }
 }
 
 #[test]
-fn test_no_hoist_loop_dependent() {
-    // loop acc = 0 for i < 10 do
-    //   let x = acc + 1 in x * 2
-    // => unchanged (x depends on acc)
-
+fn test_chain_of_statements() {
+    // Test multiple chained statements
     let mut b = TestBodyBuilder::new();
 
-    let acc = b.alloc_local("acc", i32_type(), LocalKind::LoopVar);
-    let i = b.alloc_local("i", i32_type(), LocalKind::LoopVar);
-    let x = b.alloc_local("x", i32_type(), LocalKind::Let);
-
-    // Build: let x = acc + 1 in x * 2
-    let acc_ref = b.local(acc);
-    let lit_1 = b.int_lit(1);
-    let acc_plus_1 = b.binop("+", acc_ref, lit_1);
-    let x_ref = b.local(x);
-    let lit_2 = b.int_lit(2);
-    let x_times_2 = b.binop("*", x_ref, lit_2);
-    let let_x = b.let_bind(x, acc_plus_1, x_times_2);
-
-    let init = b.int_lit(0);
-    let bound = b.int_lit(10);
-    let loop_expr = b.for_range_loop(acc, init, i, bound, let_x);
-
-    let body = b.build(loop_expr);
-    let program = make_test_program(body);
-    let result = lift_bindings(program);
-
-    let structure = get_program_structure(&result);
-    assert_eq!(structure, vec!["loop", "let", "expr"]); // x stays in loop
-}
-
-#[test]
-fn test_hoist_chain_of_invariants() {
-    // loop acc = 0 for i < 10 do
-    //   let x = 1 in
-    //   let y = x + 2 in
-    //   acc + y
-    // =>
-    // let x = 1 in let y = x + 2 in loop acc = 0 for i < 10 do acc + y
-
-    let mut b = TestBodyBuilder::new();
-
-    let acc = b.alloc_local("acc", i32_type(), LocalKind::LoopVar);
-    let i = b.alloc_local("i", i32_type(), LocalKind::LoopVar);
     let x = b.alloc_local("x", i32_type(), LocalKind::Let);
     let y = b.alloc_local("y", i32_type(), LocalKind::Let);
 
-    // Build innermost: acc + y
-    let acc_ref = b.local(acc);
-    let y_ref = b.local(y);
-    let acc_plus_y = b.binop("+", acc_ref, y_ref);
+    // x = 1
+    let lit_1 = b.int_lit(1);
+    b.stmt(x, lit_1);
 
-    // Build: let y = x + 2 in acc + y
+    // y = x + 2
     let x_ref = b.local(x);
     let lit_2 = b.int_lit(2);
     let x_plus_2 = b.binop("+", x_ref, lit_2);
-    let let_y = b.let_bind(y, x_plus_2, acc_plus_y);
+    b.stmt(y, x_plus_2);
 
-    // Build: let x = 1 in <let_y>
-    let lit_1 = b.int_lit(1);
-    let let_x = b.let_bind(x, lit_1, let_y);
-
-    let init = b.int_lit(0);
-    let bound = b.int_lit(10);
-    let loop_expr = b.for_range_loop(acc, init, i, bound, let_x);
-
-    let body = b.build(loop_expr);
+    // root = y
+    let y_ref = b.local(y);
+    let body = b.build(y_ref);
     let program = make_test_program(body);
     let result = lift_bindings(program);
 
-    let structure = get_program_structure(&result);
-    assert_eq!(structure, vec!["let", "let", "loop", "expr"]);
+    match &result.defs[0] {
+        Def::Function { body, .. } => {
+            // Should have 2 locals
+            assert_eq!(body.locals.len(), 2);
+
+            // Should have 2 statements in order
+            let stmts: Vec<_> = body.iter_stmts().collect();
+            assert_eq!(stmts.len(), 2);
+            assert_eq!(body.get_local(stmts[0].local).name, "x");
+            assert_eq!(body.get_local(stmts[1].local).name, "y");
+
+            // Root should be Local(y)
+            match body.get_expr(body.root) {
+                Expr::Local(local_id) => {
+                    assert_eq!(body.get_local(*local_id).name, "y");
+                }
+                other => panic!("Expected Local, got {:?}", other),
+            }
+        }
+        _ => panic!("Expected Function def"),
+    }
 }
 
 #[test]
-fn test_partial_hoist_transitive_dependency() {
-    // loop acc = 0 for i < 10 do
-    //   let x = 42 in          -- hoistable (no deps)
-    //   let y = acc + x in     -- NOT hoistable (depends on acc)
-    //   let z = y * 2 in       -- NOT hoistable (depends on y which depends on acc)
-    //   z
-
+fn test_no_statements() {
+    // Test body with no statements (just a root expression)
     let mut b = TestBodyBuilder::new();
 
-    let acc = b.alloc_local("acc", i32_type(), LocalKind::LoopVar);
-    let i = b.alloc_local("i", i32_type(), LocalKind::LoopVar);
-    let x = b.alloc_local("x", i32_type(), LocalKind::Let);
-    let y = b.alloc_local("y", i32_type(), LocalKind::Let);
-    let z = b.alloc_local("z", i32_type(), LocalKind::Let);
-
-    // Build innermost: z
-    let z_ref = b.local(z);
-
-    // Build: let z = y * 2 in z
-    let y_ref = b.local(y);
-    let lit_2 = b.int_lit(2);
-    let y_times_2 = b.binop("*", y_ref, lit_2);
-    let let_z = b.let_bind(z, y_times_2, z_ref);
-
-    // Build: let y = acc + x in <let_z>
-    let acc_ref = b.local(acc);
-    let x_ref = b.local(x);
-    let acc_plus_x = b.binop("+", acc_ref, x_ref);
-    let let_y = b.let_bind(y, acc_plus_x, let_z);
-
-    // Build: let x = 42 in <let_y>
     let lit_42 = b.int_lit(42);
-    let let_x = b.let_bind(x, lit_42, let_y);
-
-    let init = b.int_lit(0);
-    let bound = b.int_lit(10);
-    let loop_expr = b.for_range_loop(acc, init, i, bound, let_x);
-
-    let body = b.build(loop_expr);
+    let body = b.build(lit_42);
     let program = make_test_program(body);
     let result = lift_bindings(program);
 
-    let structure = get_program_structure(&result);
-    // x hoisted, y and z stay (transitive dependency through y)
-    assert_eq!(structure, vec!["let", "loop", "let", "let", "expr"]);
-}
+    match &result.defs[0] {
+        Def::Function { body, .. } => {
+            // No locals, no statements
+            assert_eq!(body.locals.len(), 0);
+            let stmts: Vec<_> = body.iter_stmts().collect();
+            assert_eq!(stmts.len(), 0);
 
-#[test]
-fn test_iteration_var_dependency() {
-    // loop acc = 0 for i < 10 do
-    //   let x = i * 2 in       -- NOT hoistable (depends on i)
-    //   acc + x
-
-    let mut b = TestBodyBuilder::new();
-
-    let acc = b.alloc_local("acc", i32_type(), LocalKind::LoopVar);
-    let i = b.alloc_local("i", i32_type(), LocalKind::LoopVar);
-    let x = b.alloc_local("x", i32_type(), LocalKind::Let);
-
-    // Build: let x = i * 2 in acc + x
-    let i_ref = b.local(i);
-    let lit_2 = b.int_lit(2);
-    let i_times_2 = b.binop("*", i_ref, lit_2);
-    let acc_ref = b.local(acc);
-    let x_ref = b.local(x);
-    let acc_plus_x = b.binop("+", acc_ref, x_ref);
-    let let_x = b.let_bind(x, i_times_2, acc_plus_x);
-
-    let init = b.int_lit(0);
-    let bound = b.int_lit(10);
-    let loop_expr = b.for_range_loop(acc, init, i, bound, let_x);
-
-    let body = b.build(loop_expr);
-    let program = make_test_program(body);
-    let result = lift_bindings(program);
-
-    let structure = get_program_structure(&result);
-    assert_eq!(structure, vec!["loop", "let", "expr"]); // x stays in loop
-}
-
-#[test]
-fn test_no_bindings_in_loop() {
-    // loop acc = 0 for i < 10 do acc + 1
-    // => unchanged (nothing to hoist)
-
-    let mut b = TestBodyBuilder::new();
-
-    let acc = b.alloc_local("acc", i32_type(), LocalKind::LoopVar);
-    let i = b.alloc_local("i", i32_type(), LocalKind::LoopVar);
-
-    // Build: acc + 1
-    let acc_ref = b.local(acc);
-    let lit_1 = b.int_lit(1);
-    let acc_plus_1 = b.binop("+", acc_ref, lit_1);
-
-    let init = b.int_lit(0);
-    let bound = b.int_lit(10);
-    let loop_expr = b.for_range_loop(acc, init, i, bound, acc_plus_1);
-
-    let body = b.build(loop_expr);
-    let program = make_test_program(body);
-    let result = lift_bindings(program);
-
-    let structure = get_program_structure(&result);
-    assert_eq!(structure, vec!["loop", "expr"]);
-}
-
-#[test]
-fn test_multiple_independent_hoistable() {
-    // loop acc = 0 for i < 10 do
-    //   let x = 1 in
-    //   let y = 2 in
-    //   acc + x + y
-    // =>
-    // let x = 1 in let y = 2 in loop ... acc + x + y
-
-    let mut b = TestBodyBuilder::new();
-
-    let acc = b.alloc_local("acc", i32_type(), LocalKind::LoopVar);
-    let i = b.alloc_local("i", i32_type(), LocalKind::LoopVar);
-    let x = b.alloc_local("x", i32_type(), LocalKind::Let);
-    let y = b.alloc_local("y", i32_type(), LocalKind::Let);
-
-    // Build: acc + x + y
-    let acc_ref = b.local(acc);
-    let x_ref = b.local(x);
-    let y_ref = b.local(y);
-    let acc_plus_x = b.binop("+", acc_ref, x_ref);
-    let add_y = b.binop("+", acc_plus_x, y_ref);
-
-    // Build: let y = 2 in <add_y>
-    let lit_2 = b.int_lit(2);
-    let let_y = b.let_bind(y, lit_2, add_y);
-
-    // Build: let x = 1 in <let_y>
-    let lit_1 = b.int_lit(1);
-    let let_x = b.let_bind(x, lit_1, let_y);
-
-    let init = b.int_lit(0);
-    let bound = b.int_lit(10);
-    let loop_expr = b.for_range_loop(acc, init, i, bound, let_x);
-
-    let body = b.build(loop_expr);
-    let program = make_test_program(body);
-    let result = lift_bindings(program);
-
-    let structure = get_program_structure(&result);
-    assert_eq!(structure, vec!["let", "let", "loop", "expr"]);
-}
-
-#[test]
-fn test_mixed_hoistable_and_dependent() {
-    // loop acc = 0 for i < 10 do
-    //   let a = 100 in         -- hoistable
-    //   let b = acc in         -- NOT hoistable
-    //   let c = 200 in         -- hoistable (doesn't depend on b)
-    //   b + a + c
-
-    let mut b = TestBodyBuilder::new();
-
-    let acc = b.alloc_local("acc", i32_type(), LocalKind::LoopVar);
-    let i = b.alloc_local("i", i32_type(), LocalKind::LoopVar);
-    let a = b.alloc_local("a", i32_type(), LocalKind::Let);
-    let b_local = b.alloc_local("b", i32_type(), LocalKind::Let);
-    let c = b.alloc_local("c", i32_type(), LocalKind::Let);
-
-    // Build: b + a + c
-    let b_ref = b.local(b_local);
-    let a_ref = b.local(a);
-    let c_ref = b.local(c);
-    let b_plus_a = b.binop("+", b_ref, a_ref);
-    let add_c = b.binop("+", b_plus_a, c_ref);
-
-    // Build: let c = 200 in <add_c>
-    let lit_200 = b.int_lit(200);
-    let let_c = b.let_bind(c, lit_200, add_c);
-
-    // Build: let b = acc in <let_c>
-    let acc_ref = b.local(acc);
-    let let_b = b.let_bind(b_local, acc_ref, let_c);
-
-    // Build: let a = 100 in <let_b>
-    let lit_100 = b.int_lit(100);
-    let let_a = b.let_bind(a, lit_100, let_b);
-
-    let init = b.int_lit(0);
-    let bound = b.int_lit(10);
-    let loop_expr = b.for_range_loop(acc, init, i, bound, let_a);
-
-    let body = b.build(loop_expr);
-    let program = make_test_program(body);
-    let result = lift_bindings(program);
-
-    let structure = get_program_structure(&result);
-    // a and c hoisted, b stays
-    assert_eq!(structure, vec!["let", "let", "loop", "let", "expr"]);
+            // Root should be Int(42)
+            match body.get_expr(body.root) {
+                Expr::Int(s) => assert_eq!(s, "42"),
+                other => panic!("Expected Int, got {:?}", other),
+            }
+        }
+        _ => panic!("Expected Function def"),
+    }
 }

@@ -14,10 +14,6 @@ fn test_soac_kind_from_name() {
         Some(SoacKind::Map)
     );
     assert_eq!(
-        SoacKind::from_intrinsic_name("_w_intrinsic_inplace_map"),
-        Some(SoacKind::InplaceMap)
-    );
-    assert_eq!(
         SoacKind::from_intrinsic_name("_w_intrinsic_reduce"),
         Some(SoacKind::Reduce)
     );
@@ -47,7 +43,6 @@ fn test_soac_kind_from_name() {
 #[test]
 fn test_soac_kind_is_independent() {
     assert!(SoacKind::Map.is_independent());
-    assert!(SoacKind::InplaceMap.is_independent());
     assert!(SoacKind::Zip.is_independent());
 
     assert!(!SoacKind::Reduce.is_independent());
@@ -153,7 +148,6 @@ fn test_output_size_for_soac() {
 #[test]
 fn test_soac_expected_args() {
     assert_eq!(SoacKind::Map.expected_args(), 2);
-    assert_eq!(SoacKind::InplaceMap.expected_args(), 2);
     assert_eq!(SoacKind::Reduce.expected_args(), 3);
     assert_eq!(SoacKind::Scan.expected_args(), 3);
     assert_eq!(SoacKind::Filter.expected_args(), 2);

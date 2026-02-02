@@ -14,7 +14,7 @@
 //! if c then @index(__mat_0, i) else @index(__mat_0, i)
 //! ```
 
-use crate::mir::{ArrayBacking, Body, Def, Expr, ExprId, LocalId, LoopKind, Program};
+use crate::mir::{ArrayBacking, Block, Body, Def, Expr, ExprId, LocalId, LoopKind, Program};
 use std::collections::{HashMap, HashSet};
 
 /// Hoist duplicate materializations in a program.
@@ -44,8 +44,19 @@ fn reorder_body(body: &mut Body) {
     // Map from old ExprId to new ExprId
     let mut id_map: HashMap<ExprId, ExprId> = HashMap::new();
 
-    // Process expressions in post-order from root
+    // First, process statement RHS expressions (they may not be reachable from root)
+    for stmt in body.iter_stmts() {
+        reorder_expr(body, stmt.rhs, &mut new_body, &mut id_map);
+    }
+
+    // Then process expressions in post-order from root
     reorder_expr(body, body.root, &mut new_body, &mut id_map);
+
+    // Copy statements, remapping their ExprIds
+    for stmt in body.iter_stmts() {
+        let new_rhs = id_map[&stmt.rhs];
+        new_body.push_stmt(stmt.local, new_rhs);
+    }
 
     // Update root
     new_body.root = id_map[&body.root];
@@ -140,21 +151,12 @@ fn reorder_expr(
         }
         Expr::If { cond, then_, else_ } => {
             let new_cond = reorder_expr(old_body, cond, new_body, id_map);
-            let new_then = reorder_expr(old_body, then_, new_body, id_map);
-            let new_else = reorder_expr(old_body, else_, new_body, id_map);
+            let new_then = reorder_expr(old_body, then_.result, new_body, id_map);
+            let new_else = reorder_expr(old_body, else_.result, new_body, id_map);
             Expr::If {
                 cond: new_cond,
-                then_: new_then,
-                else_: new_else,
-            }
-        }
-        Expr::Let { local, rhs, body } => {
-            let new_rhs = reorder_expr(old_body, rhs, new_body, id_map);
-            let new_let_body = reorder_expr(old_body, body, new_body, id_map);
-            Expr::Let {
-                local,
-                rhs: new_rhs,
-                body: new_let_body,
+                then_: Block::new(new_then),
+                else_: Block::new(new_else),
             }
         }
         Expr::Loop {
@@ -186,13 +188,13 @@ fn reorder_expr(
                     LoopKind::While { cond: new_cond }
                 }
             };
-            let new_loop_body = reorder_expr(old_body, body, new_body, id_map);
+            let new_loop_body = reorder_expr(old_body, body.result, new_body, id_map);
             Expr::Loop {
                 loop_var,
                 init: new_init,
                 init_bindings: new_bindings,
                 kind: new_kind,
-                body: new_loop_body,
+                body: Block::new(new_loop_body),
             }
         }
         Expr::Call { func, args } => {
@@ -382,7 +384,7 @@ fn hoist_in_body(body: &mut Body) {
 fn hoist_in_if(body: &mut Body, if_id: ExprId) {
     // Get the then/else branch IDs
     let (then_id, else_id) = match body.get_expr(if_id) {
-        Expr::If { then_, else_, .. } => (*then_, *else_),
+        Expr::If { then_, else_, .. } => (then_.result, else_.result),
         _ => return,
     };
 
@@ -395,8 +397,8 @@ fn hoist_in_if(body: &mut Body, if_id: ExprId) {
 
     // Hoist each common materialization and replace its counterpart
     for (then_mat, else_mat) in common {
-        // Hoist the then-branch materialization before the if
-        let local_id = body.hoist_before(then_mat, if_id, None);
+        // Hoist the then-branch materialization to a statement
+        let local_id = body.hoist_to_stmt(then_mat, None);
         // Replace the else-branch equivalent with a reference to the hoisted local
         *body.get_expr_mut(else_mat) = Expr::Local(local_id);
     }
@@ -440,14 +442,8 @@ fn collect_materializations_rec(
         }
         Expr::If { cond, then_, else_ } => {
             collect_materializations_rec(body, *cond, result, visited);
-            collect_materializations_rec(body, *then_, result, visited);
-            collect_materializations_rec(body, *else_, result, visited);
-        }
-        Expr::Let {
-            rhs, body: let_body, ..
-        } => {
-            collect_materializations_rec(body, *rhs, result, visited);
-            collect_materializations_rec(body, *let_body, result, visited);
+            collect_materializations_rec(body, then_.result, result, visited);
+            collect_materializations_rec(body, else_.result, result, visited);
         }
         Expr::Loop {
             init,
@@ -459,7 +455,7 @@ fn collect_materializations_rec(
             for (_, binding_expr) in init_bindings {
                 collect_materializations_rec(body, *binding_expr, result, visited);
             }
-            collect_materializations_rec(body, *loop_body, result, visited);
+            collect_materializations_rec(body, loop_body.result, result, visited);
         }
         Expr::Call { args, .. } | Expr::Intrinsic { args, .. } => {
             for arg in args {
@@ -720,7 +716,7 @@ fn exprs_equal(body: &Body, a: ExprId, b: ExprId) -> bool {
 /// Try to hoist loop-invariant materializations before a Loop expression.
 fn hoist_in_loop(body: &mut Body, loop_id: ExprId) {
     let loop_body_id = match body.get_expr(loop_id) {
-        Expr::Loop { body: b, .. } => *b,
+        Expr::Loop { body: b, .. } => b.result,
         _ => return,
     };
 
@@ -734,9 +730,9 @@ fn hoist_in_loop(body: &mut Body, loop_id: ExprId) {
     let loop_invariant: Vec<ExprId> =
         mats.into_iter().filter(|&mat_id| is_loop_invariant(body, mat_id, &loop_locals)).collect();
 
-    // Hoist each loop-invariant materialization before the loop
+    // Hoist each loop-invariant materialization to a statement
     for mat_id in loop_invariant {
-        body.hoist_before(mat_id, loop_id, None);
+        body.hoist_to_stmt(mat_id, None);
     }
 }
 
@@ -813,22 +809,10 @@ fn references_any_local_rec(
 
         Expr::If { cond, then_, else_ } => {
             references_any_local_rec(body, *cond, locals, visited)
-                || references_any_local_rec(body, *then_, locals, visited)
-                || references_any_local_rec(body, *else_, locals, visited)
+                || references_any_local_rec(body, then_.result, locals, visited)
+                || references_any_local_rec(body, else_.result, locals, visited)
         }
 
-        Expr::Let {
-            local,
-            rhs,
-            body: let_body,
-        } => {
-            // The let-bound local itself is not from the loop, but check rhs and body
-            // excluding newly bound local
-            let mut extended_locals = locals.clone();
-            extended_locals.remove(local);
-            references_any_local_rec(body, *rhs, locals, visited)
-                || references_any_local_rec(body, *let_body, &extended_locals, visited)
-        }
 
         Expr::Loop {
             init,
@@ -846,7 +830,7 @@ fn references_any_local_rec(
                 }
             }
             // Check loop body (conservatively include it)
-            references_any_local_rec(body, *loop_body, locals, visited)
+            references_any_local_rec(body, loop_body.result, locals, visited)
         }
 
         Expr::Call { args, .. } | Expr::Intrinsic { args, .. } => {

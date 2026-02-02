@@ -3,7 +3,7 @@
 use crate::IdArena;
 use crate::ast::{NodeId, Span, TypeName};
 use crate::constant_folding::fold_constants;
-use crate::mir::{ArrayBacking, Body, Def, Expr, ExprId, LocalDecl, LocalId, LocalKind, Program};
+use crate::mir::{ArrayBacking, Block, Body, Def, Expr, ExprId, LocalDecl, LocalId, LocalKind, Program};
 use polytype::Type;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -109,7 +109,16 @@ impl TestBodyBuilder {
     /// Create an if expression.
     fn if_expr(&mut self, cond: ExprId, then_: ExprId, else_: ExprId) -> ExprId {
         let ty = self.body.get_type(then_).clone();
-        self.body.alloc_expr(Expr::If { cond, then_, else_ }, ty, test_span(), next_id())
+        self.body.alloc_expr(
+            Expr::If {
+                cond,
+                then_: Block::new(then_),
+                else_: Block::new(else_),
+            },
+            ty,
+            test_span(),
+            next_id(),
+        )
     }
 
     /// Create an array literal expression.

@@ -199,26 +199,17 @@ fn analyze_input_slice(input: &EntryInput) -> Option<InputSliceInfo> {
 ///
 /// Returns (map_expr_id, closure_arg, array_arg) if found.
 fn find_single_map_at_root(body: &Body) -> Option<(ExprId, ExprId, ExprId)> {
-    let mut current = body.root;
-
-    // Walk through Let bindings
-    loop {
-        match body.get_expr(current) {
-            Expr::Let { body: inner, .. } => {
-                current = *inner;
+    // Check if root is directly a map intrinsic
+    match body.get_expr(body.root) {
+        Expr::Intrinsic { name, args } if name == "_w_intrinsic_map" => {
+            // Found the map! Should have 2 args: closure, array
+            if args.len() == 2 {
+                return Some((body.root, args[0], args[1]));
             }
-            Expr::Intrinsic { name, args }
-                if name == "_w_intrinsic_map" || name == "_w_intrinsic_inplace_map" =>
-            {
-                // Found the map! Should have 2 args: closure, array
-                if args.len() == 2 {
-                    return Some((current, args[0], args[1]));
-                }
-                return None;
-            }
-            // Any other expression at root level means this isn't a simple pattern
-            _ => return None,
+            None
         }
+        // Any other expression at root level means this isn't a simple pattern
+        _ => None,
     }
 }
 
@@ -233,7 +224,7 @@ fn classify_soac(name: &str) -> Option<ParallelismKind> {
 
     match name {
         // Independent: each output element can be computed without knowledge of others
-        "_w_intrinsic_map" | "_w_intrinsic_inplace_map" => Some(Independent),
+        "_w_intrinsic_map" => Some(Independent),
         "_w_intrinsic_zip" => Some(Independent),
 
         // Dependent: output elements depend on other elements or require coordination
