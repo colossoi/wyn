@@ -1,7 +1,7 @@
 import wasmInit, {
   version,
   init_compiler,
-  compile_to_shadertoy,
+  compile_with_ir,
   get_example_program,
 } from "./pkg/wyn_wasm.js";
 
@@ -14,6 +14,10 @@ const statusDot = document.getElementById("status-dot");
 const statusText = document.getElementById("status-text");
 const fpsDisplay = document.getElementById("fps");
 const loadingOverlay = document.getElementById("loading");
+const tlcTree = document.getElementById("tlc-tree");
+const initialMirTree = document.getElementById("initial-mir-tree");
+const finalMirTree = document.getElementById("final-mir-tree");
+const glslOutput = document.getElementById("glsl-output");
 
 // CodeMirror editor instance
 let editor = null;
@@ -56,6 +60,23 @@ function initEditor() {
   editor.setOption("extraKeys", {
     "Ctrl-Enter": compileAndRun,
     "Cmd-Enter": compileAndRun,
+  });
+}
+
+// Initialize tabs
+function initTabs() {
+  const tabs = document.querySelectorAll(".tab");
+  tabs.forEach((tab) => {
+    tab.addEventListener("click", () => {
+      // Deactivate all tabs
+      tabs.forEach((t) => t.classList.remove("active"));
+      document.querySelectorAll(".tab-content").forEach((c) => c.classList.remove("active"));
+
+      // Activate clicked tab
+      tab.classList.add("active");
+      const tabId = tab.dataset.tab;
+      document.getElementById(`tab-${tabId}`).classList.add("active");
+    });
   });
 }
 
@@ -295,6 +316,65 @@ void main() {
 `;
 }
 
+// Render a tree node recursively
+function renderTreeNode(node, depth = 0) {
+  const container = document.createElement("div");
+  container.className = "tree-node";
+  if (depth === 0) {
+    container.style.marginLeft = "0";
+  }
+
+  const hasChildren = node.children && node.children.length > 0;
+
+  const label = document.createElement("div");
+  label.className = "tree-node-label";
+
+  const toggle = document.createElement("span");
+  toggle.className = `tree-toggle ${hasChildren ? "expanded" : "leaf"}`;
+  label.appendChild(toggle);
+
+  const text = document.createElement("span");
+  text.className = "tree-text";
+  text.textContent = node.name;
+  label.appendChild(text);
+
+  container.appendChild(label);
+
+  if (hasChildren) {
+    const childrenContainer = document.createElement("div");
+    childrenContainer.className = "tree-children";
+
+    for (const child of node.children) {
+      childrenContainer.appendChild(renderTreeNode(child, depth + 1));
+    }
+
+    container.appendChild(childrenContainer);
+
+    // Toggle collapse/expand
+    label.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const isExpanded = toggle.classList.contains("expanded");
+      toggle.classList.toggle("expanded", !isExpanded);
+      toggle.classList.toggle("collapsed", isExpanded);
+      childrenContainer.classList.toggle("collapsed", isExpanded);
+    });
+  }
+
+  return container;
+}
+
+// Render tree data into a container
+function renderTree(container, nodes) {
+  container.innerHTML = "";
+  if (!nodes || nodes.length === 0) {
+    container.textContent = "(empty)";
+    return;
+  }
+  for (const node of nodes) {
+    container.appendChild(renderTreeNode(node));
+  }
+}
+
 // Compile and run
 function compileAndRun() {
   const source = editor.getValue();
@@ -306,8 +386,8 @@ function compileAndRun() {
   compileBtn.disabled = true;
 
   try {
-    // Compile Wyn to GLSL
-    const result = compile_to_shadertoy(source);
+    // Compile Wyn to GLSL with IR trees
+    const result = compile_with_ir(source);
 
     if (!result.success) {
       const errorInfo = result.error || {
@@ -319,16 +399,27 @@ function compileAndRun() {
       setStatus("error", "Error");
       stopRendering();
       compileBtn.disabled = false;
+
+      // Clear IR views on error
+      tlcTree.innerHTML = "";
+      initialMirTree.innerHTML = "";
+      finalMirTree.innerHTML = "";
+      glslOutput.textContent = "";
       return;
     }
 
     const shadertoyGlsl = result.glsl;
     const glslSource = wrapForWebGL2(shadertoyGlsl);
     console.log("=== Generated GLSL (wrapped for WebGL2) ===\n" + glslSource);
-    setOutput(
-      "Compilation successful!\n\n--- Generated GLSL ---\n" + shadertoyGlsl,
-      false,
-    );
+
+    // Update output tab
+    setOutput("Compilation successful!", false);
+
+    // Update IR tabs
+    renderTree(tlcTree, result.tlc);
+    renderTree(initialMirTree, result.initial_mir);
+    renderTree(finalMirTree, result.final_mir);
+    glslOutput.textContent = shadertoyGlsl;
 
     // Clean up old program
     if (program) {
@@ -373,6 +464,9 @@ async function main() {
 
     // Initialize CodeMirror editor
     initEditor();
+
+    // Initialize tabs
+    initTabs();
 
     // Initialize WebGL
     if (!initWebGL()) {

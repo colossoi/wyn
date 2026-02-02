@@ -126,6 +126,7 @@ fn make_test_program(body: Body) -> Program {
             attributes: vec![],
             body,
             span: test_span(),
+            dps_output: None,
         }],
         lambda_registry: IdArena::new(),
     }

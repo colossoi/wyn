@@ -210,10 +210,47 @@
       }
 
       .output-panel {
-        height: 150px;
+        height: 200px;
         background: var(--bg-darker);
         border-top: 1px solid var(--border);
+        display: flex;
+        flex-direction: column;
+      }
+
+      /* Tabs */
+      .tab-bar {
+        display: flex;
+        background: var(--bg-darker);
+        border-bottom: 1px solid var(--border);
+        padding: 0 8px;
+      }
+
+      .tab {
+        padding: 8px 16px;
+        font-size: 0.8rem;
+        color: var(--text-secondary);
+        cursor: pointer;
+        border-bottom: 2px solid transparent;
+        transition: color 0.2s, border-color 0.2s;
+      }
+
+      .tab:hover {
+        color: var(--text-primary);
+      }
+
+      .tab.active {
+        color: var(--accent);
+        border-bottom-color: var(--accent);
+      }
+
+      .tab-content {
+        flex: 1;
         overflow: auto;
+        display: none;
+      }
+
+      .tab-content.active {
+        display: block;
       }
 
       #output {
@@ -255,6 +292,70 @@
 
       .error-item .error-message {
         color: var(--text-primary);
+      }
+
+      /* Tree View */
+      .tree-container {
+        padding: 8px 12px;
+        font-family: "JetBrains Mono", "Fira Code", monospace;
+        font-size: 12px;
+      }
+
+      .tree-node {
+        margin-left: 16px;
+      }
+
+      .tree-node-label {
+        display: flex;
+        align-items: center;
+        padding: 2px 0;
+        cursor: pointer;
+        user-select: none;
+      }
+
+      .tree-node-label:hover {
+        background: rgba(99, 102, 241, 0.1);
+      }
+
+      .tree-toggle {
+        width: 16px;
+        height: 16px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--text-secondary);
+        font-size: 10px;
+        margin-right: 4px;
+      }
+
+      .tree-toggle.expanded::before {
+        content: "▼";
+      }
+
+      .tree-toggle.collapsed::before {
+        content: "▶";
+      }
+
+      .tree-toggle.leaf {
+        visibility: hidden;
+      }
+
+      .tree-text {
+        color: var(--text-primary);
+      }
+
+      .tree-type {
+        color: var(--accent);
+        margin-left: 8px;
+        opacity: 0.8;
+      }
+
+      .tree-children {
+        display: block;
+      }
+
+      .tree-children.collapsed {
+        display: none;
       }
 
       .status {
@@ -375,10 +476,28 @@
           <div id="fps" class="fps">-- FPS</div>
         </div>
         <div class="output-panel">
-          <div class="panel-header">
-            <span>Output</span>
+          <div class="tab-bar">
+            <div class="tab active" data-tab="output">Output</div>
+            <div class="tab" data-tab="tlc">TLC</div>
+            <div class="tab" data-tab="initial-mir">Initial MIR</div>
+            <div class="tab" data-tab="final-mir">Final MIR</div>
+            <div class="tab" data-tab="glsl">GLSL</div>
           </div>
-          <div id="output"></div>
+          <div id="tab-output" class="tab-content active">
+            <div id="output"></div>
+          </div>
+          <div id="tab-tlc" class="tab-content">
+            <div id="tlc-tree" class="tree-container"></div>
+          </div>
+          <div id="tab-initial-mir" class="tab-content">
+            <div id="initial-mir-tree" class="tree-container"></div>
+          </div>
+          <div id="tab-final-mir" class="tab-content">
+            <div id="final-mir-tree" class="tree-container"></div>
+          </div>
+          <div id="tab-glsl" class="tab-content">
+            <pre id="glsl-output" style="padding: 12px 16px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-primary);"></pre>
+          </div>
         </div>
       </div>
     </main>

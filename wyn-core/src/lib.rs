@@ -676,9 +676,6 @@ impl TlcTransformed {
     }
 
     /// Defunctionalize: lift lambdas and flatten SOAC closure captures.
-    ///
-    /// This replaces the old `lift()` method with Futhark-style defunctionalization
-    /// that properly handles SOAC call sites.
     pub fn defunctionalize(self) -> TlcDefunctionalized {
         let defunc = tlc::defunctionalize::defunctionalize(self.tlc, &self.known_defs);
         TlcDefunctionalized {
@@ -686,12 +683,6 @@ impl TlcTransformed {
             type_table: self.type_table,
             schemes: self.schemes,
         }
-    }
-
-    /// Old lift method - deprecated, use defunctionalize() instead
-    #[deprecated(note = "Use defunctionalize() instead")]
-    pub fn lift(self) -> TlcDefunctionalized {
-        self.defunctionalize()
     }
 }
 
