@@ -1,0 +1,16 @@
+{
+  "name": "wyn-wasm",
+  "type": "module",
+  "description": "WebAssembly bindings for the Wyn compiler",
+  "version": "0.1.0",
+  "files": [
+    "wyn_wasm_bg.wasm",
+    "wyn_wasm.js",
+    "wyn_wasm.d.ts"
+  ],
+  "main": "wyn_wasm.js",
+  "types": "wyn_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
