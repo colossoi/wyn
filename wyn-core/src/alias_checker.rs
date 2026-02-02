@@ -1123,16 +1123,21 @@ fn collect_uses(body: &mir::Body, expr_id: mir::ExprId) -> HashSet<mir::LocalId>
             uses.extend(collect_uses(body, *ptr));
             uses.extend(collect_uses(body, *value));
         }
-        View { ptr, len } => {
-            uses.extend(collect_uses(body, *ptr));
+        StorageView { offset, len, .. } => {
+            uses.extend(collect_uses(body, *offset));
             uses.extend(collect_uses(body, *len));
         }
-        ViewPtr { view } | ViewLen { view } => {
+        SliceStorageView { view, start, len } => {
             uses.extend(collect_uses(body, *view));
+            uses.extend(collect_uses(body, *start));
+            uses.extend(collect_uses(body, *len));
         }
-        PtrAdd { ptr, offset } => {
-            uses.extend(collect_uses(body, *ptr));
-            uses.extend(collect_uses(body, *offset));
+        StorageViewIndex { view, index } => {
+            uses.extend(collect_uses(body, *view));
+            uses.extend(collect_uses(body, *index));
+        }
+        StorageViewLen { view } => {
+            uses.extend(collect_uses(body, *view));
         }
     }
 
@@ -1235,8 +1240,8 @@ fn compute_uses_after(
                 aliases.insert(local, alias_set);
             }
             // Track aliases for borrowed slices (views): let s = arr[i:j] -> s aliases arr
-            if let View { ptr, .. } = body.get_expr(rhs) {
-                if let Local(source_local) = body.get_expr(*ptr) {
+            if let SliceStorageView { view, .. } = body.get_expr(rhs) {
+                if let Local(source_local) = body.get_expr(*view) {
                     let mut alias_set = HashSet::new();
                     alias_set.insert(*source_local);
                     // Transitively include aliases of source
@@ -1317,23 +1322,32 @@ fn compute_uses_after(
             current_after.extend(collect_uses(body, value));
             result.extend(compute_uses_after(body, ptr, &current_after, aliases));
         }
-        View { ptr, len } => {
-            let (ptr, len) = (*ptr, *len);
+        StorageView { offset, len, .. } => {
+            let (offset, len) = (*offset, *len);
             let mut current_after = after.clone();
             result.extend(compute_uses_after(body, len, &current_after, aliases));
             current_after.extend(collect_uses(body, len));
-            result.extend(compute_uses_after(body, ptr, &current_after, aliases));
+            result.extend(compute_uses_after(body, offset, &current_after, aliases));
         }
-        ViewPtr { view } | ViewLen { view } => {
+        SliceStorageView { view, start, len } => {
+            let (view, start, len) = (*view, *start, *len);
+            let mut current_after = after.clone();
+            result.extend(compute_uses_after(body, len, &current_after, aliases));
+            current_after.extend(collect_uses(body, len));
+            result.extend(compute_uses_after(body, start, &current_after, aliases));
+            current_after.extend(collect_uses(body, start));
+            result.extend(compute_uses_after(body, view, &current_after, aliases));
+        }
+        StorageViewIndex { view, index } => {
+            let (view, index) = (*view, *index);
+            let mut current_after = after.clone();
+            result.extend(compute_uses_after(body, index, &current_after, aliases));
+            current_after.extend(collect_uses(body, index));
+            result.extend(compute_uses_after(body, view, &current_after, aliases));
+        }
+        StorageViewLen { view } => {
             let view = *view;
             result.extend(compute_uses_after(body, view, after, aliases));
-        }
-        PtrAdd { ptr, offset } => {
-            let (ptr, offset) = (*ptr, *offset);
-            let mut current_after = after.clone();
-            result.extend(compute_uses_after(body, offset, &current_after, aliases));
-            current_after.extend(collect_uses(body, offset));
-            result.extend(compute_uses_after(body, ptr, &current_after, aliases));
         }
     }
 
@@ -1577,16 +1591,21 @@ fn find_inplace_ops(
             find_inplace_ops(body, *ptr, uses_after, aliases, result);
             find_inplace_ops(body, *value, uses_after, aliases, result);
         }
-        View { ptr, len } => {
-            find_inplace_ops(body, *ptr, uses_after, aliases, result);
+        StorageView { offset, len, .. } => {
+            find_inplace_ops(body, *offset, uses_after, aliases, result);
             find_inplace_ops(body, *len, uses_after, aliases, result);
         }
-        ViewPtr { view } | ViewLen { view } => {
+        SliceStorageView { view, start, len } => {
             find_inplace_ops(body, *view, uses_after, aliases, result);
+            find_inplace_ops(body, *start, uses_after, aliases, result);
+            find_inplace_ops(body, *len, uses_after, aliases, result);
         }
-        PtrAdd { ptr, offset } => {
-            find_inplace_ops(body, *ptr, uses_after, aliases, result);
-            find_inplace_ops(body, *offset, uses_after, aliases, result);
+        StorageViewIndex { view, index } => {
+            find_inplace_ops(body, *view, uses_after, aliases, result);
+            find_inplace_ops(body, *index, uses_after, aliases, result);
+        }
+        StorageViewLen { view } => {
+            find_inplace_ops(body, *view, uses_after, aliases, result);
         }
     }
 }

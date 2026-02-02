@@ -228,23 +228,42 @@ fn reorder_expr(
                 value: new_value,
             }
         }
-        Expr::View { ptr, len } => {
-            let new_ptr = reorder_expr(old_body, ptr, new_body, id_map);
-            let new_len = reorder_expr(old_body, len, new_body, id_map);
-            Expr::View { ptr: new_ptr, len: new_len }
-        }
-        Expr::ViewPtr { view } => {
-            let new_view = reorder_expr(old_body, view, new_body, id_map);
-            Expr::ViewPtr { view: new_view }
-        }
-        Expr::ViewLen { view } => {
-            let new_view = reorder_expr(old_body, view, new_body, id_map);
-            Expr::ViewLen { view: new_view }
-        }
-        Expr::PtrAdd { ptr, offset } => {
-            let new_ptr = reorder_expr(old_body, ptr, new_body, id_map);
+        Expr::StorageView {
+            set,
+            binding,
+            offset,
+            len,
+        } => {
             let new_offset = reorder_expr(old_body, offset, new_body, id_map);
-            Expr::PtrAdd { ptr: new_ptr, offset: new_offset }
+            let new_len = reorder_expr(old_body, len, new_body, id_map);
+            Expr::StorageView {
+                set,
+                binding,
+                offset: new_offset,
+                len: new_len,
+            }
+        }
+        Expr::SliceStorageView { view, start, len } => {
+            let new_view = reorder_expr(old_body, view, new_body, id_map);
+            let new_start = reorder_expr(old_body, start, new_body, id_map);
+            let new_len = reorder_expr(old_body, len, new_body, id_map);
+            Expr::SliceStorageView {
+                view: new_view,
+                start: new_start,
+                len: new_len,
+            }
+        }
+        Expr::StorageViewIndex { view, index } => {
+            let new_view = reorder_expr(old_body, view, new_body, id_map);
+            let new_index = reorder_expr(old_body, index, new_body, id_map);
+            Expr::StorageViewIndex {
+                view: new_view,
+                index: new_index,
+            }
+        }
+        Expr::StorageViewLen { view } => {
+            let new_view = reorder_expr(old_body, view, new_body, id_map);
+            Expr::StorageViewLen { view: new_view }
         }
     };
 
@@ -485,16 +504,21 @@ fn collect_materializations_rec(
             collect_materializations_rec(body, *ptr, result, visited);
             collect_materializations_rec(body, *value, result, visited);
         }
-        Expr::View { ptr, len } => {
-            collect_materializations_rec(body, *ptr, result, visited);
+        Expr::StorageView { offset, len, .. } => {
+            collect_materializations_rec(body, *offset, result, visited);
             collect_materializations_rec(body, *len, result, visited);
         }
-        Expr::ViewPtr { view } | Expr::ViewLen { view } => {
+        Expr::SliceStorageView { view, start, len } => {
             collect_materializations_rec(body, *view, result, visited);
+            collect_materializations_rec(body, *start, result, visited);
+            collect_materializations_rec(body, *len, result, visited);
         }
-        Expr::PtrAdd { ptr, offset } => {
-            collect_materializations_rec(body, *ptr, result, visited);
-            collect_materializations_rec(body, *offset, result, visited);
+        Expr::StorageViewIndex { view, index } => {
+            collect_materializations_rec(body, *view, result, visited);
+            collect_materializations_rec(body, *index, result, visited);
+        }
+        Expr::StorageViewLen { view } => {
+            collect_materializations_rec(body, *view, result, visited);
         }
         // Atoms have no children
         Expr::Local(_)
@@ -641,13 +665,38 @@ fn exprs_equal(body: &Body, a: ExprId, b: ExprId) -> bool {
             }
         }
 
-        (Expr::View { ptr: pa, len: la }, Expr::View { ptr: pb, len: lb }) => {
-            exprs_equal(body, *pa, *pb) && exprs_equal(body, *la, *lb)
-        }
-        (Expr::ViewPtr { view: va }, Expr::ViewPtr { view: vb }) => exprs_equal(body, *va, *vb),
-        (Expr::ViewLen { view: va }, Expr::ViewLen { view: vb }) => exprs_equal(body, *va, *vb),
-        (Expr::PtrAdd { ptr: pa, offset: oa }, Expr::PtrAdd { ptr: pb, offset: ob }) => {
-            exprs_equal(body, *pa, *pb) && exprs_equal(body, *oa, *ob)
+        (
+            Expr::StorageView {
+                set: sa,
+                binding: ba,
+                offset: oa,
+                len: la,
+            },
+            Expr::StorageView {
+                set: sb,
+                binding: bb,
+                offset: ob,
+                len: lb,
+            },
+        ) => sa == sb && ba == bb && exprs_equal(body, *oa, *ob) && exprs_equal(body, *la, *lb),
+        (
+            Expr::SliceStorageView {
+                view: va,
+                start: sa,
+                len: la,
+            },
+            Expr::SliceStorageView {
+                view: vb,
+                start: sb,
+                len: lb,
+            },
+        ) => exprs_equal(body, *va, *vb) && exprs_equal(body, *sa, *sb) && exprs_equal(body, *la, *lb),
+        (
+            Expr::StorageViewIndex { view: va, index: ia },
+            Expr::StorageViewIndex { view: vb, index: ib },
+        ) => exprs_equal(body, *va, *vb) && exprs_equal(body, *ia, *ib),
+        (Expr::StorageViewLen { view: va }, Expr::StorageViewLen { view: vb }) => {
+            exprs_equal(body, *va, *vb)
         }
 
         (Expr::Matrix(ra), Expr::Matrix(rb)) => {
@@ -836,19 +885,23 @@ fn references_any_local_rec(
                 || references_any_local_rec(body, *value, locals, visited)
         }
 
-        Expr::View { ptr, len } => {
-            references_any_local_rec(body, *ptr, locals, visited)
+        Expr::StorageView { offset, len, .. } => {
+            references_any_local_rec(body, *offset, locals, visited)
                 || references_any_local_rec(body, *len, locals, visited)
         }
 
-        Expr::ViewPtr { view } | Expr::ViewLen { view } => {
+        Expr::SliceStorageView { view, start, len } => {
             references_any_local_rec(body, *view, locals, visited)
+                || references_any_local_rec(body, *start, locals, visited)
+                || references_any_local_rec(body, *len, locals, visited)
         }
 
-        Expr::PtrAdd { ptr, offset } => {
-            references_any_local_rec(body, *ptr, locals, visited)
-                || references_any_local_rec(body, *offset, locals, visited)
+        Expr::StorageViewIndex { view, index } => {
+            references_any_local_rec(body, *view, locals, visited)
+                || references_any_local_rec(body, *index, locals, visited)
         }
+
+        Expr::StorageViewLen { view } => references_any_local_rec(body, *view, locals, visited),
 
         // Atoms don't reference locals (except Local which is handled above)
         Expr::Global(_)

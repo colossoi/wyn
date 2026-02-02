@@ -287,20 +287,29 @@ impl<'a> InPlaceRewriter<'a> {
                 value: self.remap(*value),
             },
 
-            // View and pointer operations
-            Expr::View { ptr, len } => Expr::View {
-                ptr: self.remap(*ptr),
+            // Storage view operations
+            Expr::StorageView {
+                set,
+                binding,
+                offset,
+                len,
+            } => Expr::StorageView {
+                set: *set,
+                binding: *binding,
+                offset: self.remap(*offset),
                 len: self.remap(*len),
             },
-            Expr::ViewPtr { view } => Expr::ViewPtr {
+            Expr::SliceStorageView { view, start, len } => Expr::SliceStorageView {
                 view: self.remap(*view),
+                start: self.remap(*start),
+                len: self.remap(*len),
             },
-            Expr::ViewLen { view } => Expr::ViewLen {
+            Expr::StorageViewIndex { view, index } => Expr::StorageViewIndex {
                 view: self.remap(*view),
+                index: self.remap(*index),
             },
-            Expr::PtrAdd { ptr, offset } => Expr::PtrAdd {
-                ptr: self.remap(*ptr),
-                offset: self.remap(*offset),
+            Expr::StorageViewLen { view } => Expr::StorageViewLen {
+                view: self.remap(*view),
             },
         };
 

@@ -29,6 +29,18 @@ fn extract_function_signature(ty: &Type<TypeName>) -> (Vec<Type<TypeName>>, Type
     (params, current)
 }
 
+/// Check if a type is an unsized array (runtime-sized storage buffer).
+/// These are Array types where the size component is a type variable.
+fn is_unsized_array(ty: &Type<TypeName>) -> bool {
+    match ty {
+        Type::Constructed(TypeName::Array, args) if args.len() == 3 => {
+            // Size is the third argument - unsized if it's a type variable
+            matches!(&args[2], Type::Variable(_))
+        }
+        _ => false,
+    }
+}
+
 /// Transforms TLC to MIR.
 pub struct TlcToMir {
     /// Maps TLC variable names to MIR LocalIds (within current body)
@@ -182,8 +194,13 @@ impl TlcToMir {
         // Extract parameters from nested Lams
         let (params, inner_body) = self.extract_params(&def.body);
 
+        // Check if this is a compute shader (storage bindings only apply to compute)
+        let is_compute = matches!(entry.entry_type, ast::Attribute::Compute);
+
         // Build inputs with decorations from AST
+        // Assign storage bindings sequentially to unsized array inputs
         let mut inputs = Vec::new();
+        let mut binding_num = 0u32;
         for (i, (name, ty, span)) in params.iter().enumerate() {
             let local_id = body.alloc_local(LocalDecl {
                 name: name.clone(),
@@ -197,12 +214,22 @@ impl TlcToMir {
             let decoration = entry.params.get(i).and_then(|p| self.extract_io_decoration(p));
             let size_hint = entry.params.get(i).and_then(|p| self.extract_size_hint(p));
 
+            // Assign storage binding for unsized array inputs in compute shaders
+            let storage_binding = if is_compute && is_unsized_array(ty) {
+                let binding = (0, binding_num); // set 0, sequential binding
+                binding_num += 1;
+                Some(binding)
+            } else {
+                None
+            };
+
             inputs.push(mir::EntryInput {
                 local: local_id,
                 name: name.clone(),
                 ty: ty.clone(),
                 decoration,
                 size_hint,
+                storage_binding,
             });
         }
 
@@ -797,26 +824,13 @@ impl TlcToMir {
                     span,
                     node_id,
                 );
-                // Extract ptr from source array using ViewPtr
-                let base_ptr = body.alloc_expr(
-                    Expr::ViewPtr { view: args[0] },
-                    i32_ty.clone(), // ptr type at MIR level
-                    span,
-                    node_id,
-                );
-                // Compute new ptr = base_ptr + offset using PtrAdd
-                let ptr = body.alloc_expr(
-                    Expr::PtrAdd {
-                        ptr: base_ptr,
-                        offset: args[1], // start offset
-                    },
-                    i32_ty.clone(),
-                    span,
-                    node_id,
-                );
-                // Create the View
+                // Create a slice of the source view
                 return body.alloc_expr(
-                    Expr::View { ptr, len },
+                    Expr::SliceStorageView {
+                        view: args[0],
+                        start: args[1],
+                        len,
+                    },
                     ty,
                     span,
                     node_id,

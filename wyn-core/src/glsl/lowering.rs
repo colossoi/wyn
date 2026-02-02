@@ -812,9 +812,12 @@ impl<'a> LowerCtx<'a> {
                 bail_glsl!("Load/Store expressions not yet implemented in GLSL lowering")
             }
 
-            // --- View and pointer operations ---
-            Expr::View { .. } | Expr::ViewPtr { .. } | Expr::ViewLen { .. } | Expr::PtrAdd { .. } => {
-                bail_glsl!("View/pointer operations not yet implemented in GLSL lowering")
+            // --- Storage view operations ---
+            Expr::StorageView { .. }
+            | Expr::SliceStorageView { .. }
+            | Expr::StorageViewIndex { .. }
+            | Expr::StorageViewLen { .. } => {
+                bail_glsl!("Storage view operations not yet implemented in GLSL lowering")
             }
         }
     }

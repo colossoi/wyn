@@ -64,6 +64,7 @@ fn test_simple_function() {
         attributes: vec![],
         body,
         span,
+        dps_output: None,
     };
 
     let program = Program {

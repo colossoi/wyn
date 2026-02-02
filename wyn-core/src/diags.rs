@@ -990,17 +990,30 @@ impl Display for mir::Expr {
             mir::Expr::Store { ptr, value } => {
                 write!(f, "@store(e{}, e{})", ptr.0, value.0)
             }
-            mir::Expr::View { ptr, len } => {
-                write!(f, "@view(ptr=e{}, len=e{})", ptr.0, len.0)
+            mir::Expr::StorageView {
+                set,
+                binding,
+                offset,
+                len,
+            } => {
+                write!(
+                    f,
+                    "@storage_view(set={}, binding={}, offset=e{}, len=e{})",
+                    set, binding, offset.0, len.0
+                )
             }
-            mir::Expr::ViewPtr { view } => {
-                write!(f, "@view_ptr(e{})", view.0)
+            mir::Expr::SliceStorageView { view, start, len } => {
+                write!(
+                    f,
+                    "@slice_storage_view(e{}, start=e{}, len=e{})",
+                    view.0, start.0, len.0
+                )
             }
-            mir::Expr::ViewLen { view } => {
-                write!(f, "@view_len(e{})", view.0)
+            mir::Expr::StorageViewIndex { view, index } => {
+                write!(f, "@storage_view_index(e{}, e{})", view.0, index.0)
             }
-            mir::Expr::PtrAdd { ptr, offset } => {
-                write!(f, "@ptr_add(e{}, e{})", ptr.0, offset.0)
+            mir::Expr::StorageViewLen { view } => {
+                write!(f, "@storage_view_len(e{})", view.0)
             }
         }
     }

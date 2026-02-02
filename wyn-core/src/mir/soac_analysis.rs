@@ -247,19 +247,28 @@ impl<'a> ProvenanceAnalyzer<'a> {
                 }
             }
 
-            Expr::View { ptr, len } => {
-                if let Some(map) = self.find_map_in_expr(ptr) {
+            Expr::StorageView { offset, len, .. } => {
+                if let Some(map) = self.find_map_in_expr(offset) {
                     return Some(map);
                 }
                 self.find_map_in_expr(len)
             }
-            Expr::ViewPtr { view } | Expr::ViewLen { view } => self.find_map_in_expr(view),
-            Expr::PtrAdd { ptr, offset } => {
-                if let Some(map) = self.find_map_in_expr(ptr) {
+            Expr::SliceStorageView { view, start, len } => {
+                if let Some(map) = self.find_map_in_expr(view) {
                     return Some(map);
                 }
-                self.find_map_in_expr(offset)
+                if let Some(map) = self.find_map_in_expr(start) {
+                    return Some(map);
+                }
+                self.find_map_in_expr(len)
             }
+            Expr::StorageViewIndex { view, index } => {
+                if let Some(map) = self.find_map_in_expr(view) {
+                    return Some(map);
+                }
+                self.find_map_in_expr(index)
+            }
+            Expr::StorageViewLen { view } => self.find_map_in_expr(view),
 
             Expr::BinOp { lhs, rhs, .. } => {
                 if let Some(map) = self.find_map_in_expr(lhs) {
@@ -385,9 +394,16 @@ impl<'a> ProvenanceAnalyzer<'a> {
                 _ => ArrayProvenance::Unknown,
             },
 
-            Expr::View { ptr, .. } => {
-                // Provenance flows through views - try to trace through the ptr
-                self.compute_provenance(*ptr)
+            Expr::SliceStorageView { view, .. } => {
+                // Provenance flows through view slices
+                self.compute_provenance(*view)
+            }
+            Expr::StorageView {
+                set: _, binding: _, ..
+            } => {
+                // Storage views - try to find the corresponding entry storage
+                // For now, mark as unknown since we'd need to trace set/binding to a parameter
+                ArrayProvenance::Unknown
             }
 
             // For other expressions, provenance is unknown

@@ -220,28 +220,31 @@ pub enum Expr {
         value: ExprId,
     },
 
-    // --- View and pointer operations ---
-    /// Create a view from a pointer and length.
-    /// view_make(ptr, len) -> View<T>
-    View {
-        ptr: ExprId,
+    // --- Storage buffer view operations ---
+    // Views are "buffer slice descriptors" stored as {set, binding, offset, len}.
+    // The actual pointer is reconstructed via OpAccessChain at each access.
+    /// Create a view into a storage buffer with known set/binding.
+    StorageView {
+        set: u32,
+        binding: u32,
+        offset: ExprId,
         len: ExprId,
     },
-    /// Extract the pointer from a view.
-    /// view_ptr(view) -> Ptr<T>
-    ViewPtr {
+    /// Slice an existing storage view: view[start..start+len]
+    SliceStorageView {
         view: ExprId,
+        start: ExprId,
+        len: ExprId,
     },
-    /// Extract the length from a view.
-    /// view_len(view) -> i32
-    ViewLen {
+    /// Get pointer to element in a storage view: view[index]
+    /// Lowers to: OpAccessChain buffer[0][view.offset + index]
+    StorageViewIndex {
         view: ExprId,
+        index: ExprId,
     },
-    /// Pointer arithmetic: advance pointer by offset elements.
-    /// ptr_add(ptr, offset) -> Ptr<T>
-    PtrAdd {
-        ptr: ExprId,
-        offset: ExprId,
+    /// Get the length of a storage view.
+    StorageViewLen {
+        view: ExprId,
     },
 }
 
@@ -610,6 +613,9 @@ pub struct EntryInput {
     pub decoration: Option<IoDecoration>,
     /// Size hint from `#[size_hint(N)]` attribute (for compute shader arrays).
     pub size_hint: Option<u32>,
+    /// Storage buffer binding (set, binding) for slice-type parameters.
+    /// Assigned during MIR creation for unsized array inputs.
+    pub storage_binding: Option<(u32, u32)>,
 }
 
 /// An output from a shader entry point.
