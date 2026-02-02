@@ -211,10 +211,23 @@
 
       .output-panel {
         height: 200px;
+        min-height: 100px;
         background: var(--bg-darker);
-        border-top: 1px solid var(--border);
         display: flex;
         flex-direction: column;
+      }
+
+      .resize-handle-h {
+        height: 6px;
+        background: var(--border);
+        cursor: ns-resize;
+        flex-shrink: 0;
+        transition: background 0.2s;
+      }
+
+      .resize-handle-h:hover,
+      .resize-handle-h.dragging {
+        background: var(--accent);
       }
 
       /* Tabs */
@@ -475,6 +488,7 @@
           <canvas id="canvas" width="640" height="360"></canvas>
           <div id="fps" class="fps">-- FPS</div>
         </div>
+        <div id="resize-handle" class="resize-handle-h"></div>
         <div class="output-panel">
           <div class="tab-bar">
             <div class="tab active" data-tab="output">Output</div>

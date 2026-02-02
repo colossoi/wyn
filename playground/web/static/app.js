@@ -80,6 +80,44 @@ function initTabs() {
   });
 }
 
+// Initialize resize handle for output panel
+function initResizeHandle() {
+  const resizeHandle = document.getElementById("resize-handle");
+  const outputPanel = document.querySelector(".output-panel");
+  const previewPanel = document.querySelector(".preview-panel");
+
+  let isResizing = false;
+  let startY = 0;
+  let startHeight = 0;
+
+  resizeHandle.addEventListener("mousedown", (e) => {
+    isResizing = true;
+    startY = e.clientY;
+    startHeight = outputPanel.offsetHeight;
+    resizeHandle.classList.add("dragging");
+    document.body.style.cursor = "ns-resize";
+    document.body.style.userSelect = "none";
+    e.preventDefault();
+  });
+
+  document.addEventListener("mousemove", (e) => {
+    if (!isResizing) return;
+
+    const deltaY = startY - e.clientY;
+    const newHeight = Math.max(100, Math.min(startHeight + deltaY, previewPanel.offsetHeight - 100));
+    outputPanel.style.height = `${newHeight}px`;
+  });
+
+  document.addEventListener("mouseup", () => {
+    if (isResizing) {
+      isResizing = false;
+      resizeHandle.classList.remove("dragging");
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    }
+  });
+}
+
 // Clear all error markers
 function clearErrors() {
   // Clear text markers
@@ -467,6 +505,9 @@ async function main() {
 
     // Initialize tabs
     initTabs();
+
+    // Initialize resize handle
+    initResizeHandle();
 
     // Initialize WebGL
     if (!initWebGL()) {

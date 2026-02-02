@@ -176,8 +176,9 @@ mod mir_tree {
             Def::Storage { name, ty, set, binding, .. } => {
                 TreeNode::leaf(format!("storage {} : {} @set={} @binding={}", name, fmt_ty(ty), set, binding))
             }
-            Def::EntryPoint { name, execution_model, .. } => {
-                TreeNode::leaf(format!("entry {} ({:?})", name, execution_model))
+            Def::EntryPoint { name, execution_model, body, .. } => {
+                let label = format!("entry {} ({:?})", name, execution_model);
+                TreeNode::branch(label, vec![body_to_tree(body)])
             }
         }
     }
