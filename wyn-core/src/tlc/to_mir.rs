@@ -29,6 +29,18 @@ fn extract_function_signature(ty: &Type<TypeName>) -> (Vec<Type<TypeName>>, Type
     (params, current)
 }
 
+/// Check if a type is an unsized array (runtime-sized storage buffer).
+/// These are Array types where the size component is a type variable.
+fn is_unsized_array(ty: &Type<TypeName>) -> bool {
+    match ty {
+        Type::Constructed(TypeName::Array, args) if args.len() == 3 => {
+            // Size is the third argument - unsized if it's a type variable
+            matches!(&args[2], Type::Variable(_))
+        }
+        _ => false,
+    }
+}
+
 /// Transforms TLC to MIR.
 pub struct TlcToMir {
     /// Maps TLC variable names to MIR LocalIds (within current body)
@@ -182,8 +194,13 @@ impl TlcToMir {
         // Extract parameters from nested Lams
         let (params, inner_body) = self.extract_params(&def.body);
 
+        // Check if this is a compute shader (storage bindings only apply to compute)
+        let is_compute = matches!(entry.entry_type, ast::Attribute::Compute);
+
         // Build inputs with decorations from AST
+        // Assign storage bindings sequentially to unsized array inputs
         let mut inputs = Vec::new();
+        let mut binding_num = 0u32;
         for (i, (name, ty, span)) in params.iter().enumerate() {
             let local_id = body.alloc_local(LocalDecl {
                 name: name.clone(),
@@ -197,12 +214,22 @@ impl TlcToMir {
             let decoration = entry.params.get(i).and_then(|p| self.extract_io_decoration(p));
             let size_hint = entry.params.get(i).and_then(|p| self.extract_size_hint(p));
 
+            // Assign storage binding for unsized array inputs in compute shaders
+            let storage_binding = if is_compute && is_unsized_array(ty) {
+                let binding = (0, binding_num); // set 0, sequential binding
+                binding_num += 1;
+                Some(binding)
+            } else {
+                None
+            };
+
             inputs.push(mir::EntryInput {
                 local: local_id,
                 name: name.clone(),
                 ty: ty.clone(),
                 decoration,
                 size_hint,
+                storage_binding,
             });
         }
 

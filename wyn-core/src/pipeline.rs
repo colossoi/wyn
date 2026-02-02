@@ -50,20 +50,20 @@ pub fn build_pipeline(def: &mir::Def) -> Option<Pipeline> {
         _ => return None,
     };
 
-    // Create buffer blocks for each slice-typed input
+    // Create buffer blocks for each input with a pre-assigned storage binding
     let mut buffers = Vec::new();
     let mut param_buffers = Vec::new();
-    let mut binding_num = 0u32;
+    let mut max_binding = 0u32;
 
     for input in inputs {
-        if is_slice_type(&input.ty) {
+        if let Some((set, binding)) = input.storage_binding {
             let elem_type = get_slice_element_type(&input.ty)?;
             let buffer = BufferBlock {
                 id: crate::ast::NodeId(0), // TODO: proper id allocation
                 name: input.name.clone(),
                 layout: StorageLayout::Std430,
-                set: 0,
-                binding: binding_num,
+                set,
+                binding,
                 access: StorageAccess::ReadOnly,
                 fields: vec![BufferField {
                     name: "data".to_string(),
@@ -73,7 +73,7 @@ pub fn build_pipeline(def: &mir::Def) -> Option<Pipeline> {
             };
             param_buffers.push((input.name.clone(), buffers.len()));
             buffers.push(buffer);
-            binding_num += 1;
+            max_binding = max_binding.max(binding + 1);
         }
     }
 
@@ -89,7 +89,7 @@ pub fn build_pipeline(def: &mir::Def) -> Option<Pipeline> {
             name: "_output".to_string(),
             layout: StorageLayout::Std430,
             set: 0,
-            binding: binding_num,
+            binding: max_binding,
             access: StorageAccess::WriteOnly,
             fields: vec![BufferField {
                 name: "data".to_string(),
@@ -123,20 +123,6 @@ fn is_output_slice_type(ty: &Type<TypeName>) -> bool {
             assert!(args.len() == 3);
             // Type variable means size is runtime determined
             matches!(&args[2], Type::Variable(_))
-        }
-        _ => false,
-    }
-}
-
-/// Check if a type is a storage slice (unsized array in storage address space).
-fn is_slice_type(ty: &Type<TypeName>) -> bool {
-    match ty {
-        Type::Constructed(TypeName::Array, args) => {
-            assert!(args.len() == 3);
-            let is_storage = matches!(&args[1], Type::Constructed(TypeName::ArrayVariantView, _));
-            // Type variable means size is runtime determined
-            let is_unsized = matches!(&args[2], Type::Variable(_));
-            is_storage && is_unsized
         }
         _ => false,
     }

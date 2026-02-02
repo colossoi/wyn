@@ -318,9 +318,10 @@ impl Constructor {
                         // Dispatch on variant first - View arrays are always {ptr, len} structs
                         if let PolyType::Constructed(TypeName::ArrayVariantView, _) = variant {
                             // View variant: always struct { pointer, length } regardless of size
+                            // Length is u32 to match SPIR-V's OpArrayLength result type
                             let ptr_type =
                                 self.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_type);
-                            self.get_or_create_struct_type(vec![ptr_type, self.i32_type])
+                            self.get_or_create_struct_type(vec![ptr_type, self.u32_type])
                         } else if let PolyType::Constructed(TypeName::ArrayVariantVirtual, _) = variant {
                             // Virtual variant: struct { start, step, len } for range representation
                             self.get_or_create_struct_type(vec![
@@ -2533,6 +2534,56 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                     // Bitcast u32 to i32 for indexing
                     Ok(constructor.builder.bitcast(constructor.i32_type, None, thread_id_u32)?)
                 }
+                "_w_storage_ptr" => {
+                    // Get pointer to first element of a storage buffer
+                    // Args: (set: i32, binding: i32)
+                    if args.len() != 2 {
+                        bail_spirv!("_w_storage_ptr requires 2 args (set, binding), got {}", args.len());
+                    }
+                    // Extract set and binding from integer literals
+                    let set = match body.get_expr(args[0]) {
+                        Expr::Int(s) => s.parse::<u32>().map_err(|_| err_spirv!("_w_storage_ptr: set must be integer literal"))?,
+                        _ => bail_spirv!("_w_storage_ptr: set must be integer literal"),
+                    };
+                    let binding = match body.get_expr(args[1]) {
+                        Expr::Int(s) => s.parse::<u32>().map_err(|_| err_spirv!("_w_storage_ptr: binding must be integer literal"))?,
+                        _ => bail_spirv!("_w_storage_ptr: binding must be integer literal"),
+                    };
+                    if let Some(&(buffer_var, elem_type_id)) = constructor.storage_buffers.get(&(set, binding)) {
+                        let elem_ptr_type = constructor.get_or_create_ptr_type(
+                            spirv::StorageClass::StorageBuffer,
+                            elem_type_id,
+                        );
+                        let zero = constructor.const_i32(0);
+                        // OpAccessChain to get pointer to first element: buffer[0][0]
+                        Ok(constructor.builder.access_chain(elem_ptr_type, None, buffer_var, [zero, zero])?)
+                    } else {
+                        bail_spirv!("_w_storage_ptr: no storage buffer at set={}, binding={}", set, binding)
+                    }
+                }
+                "_w_storage_len" => {
+                    // Get runtime length of a storage buffer via OpArrayLength
+                    // Args: (set: i32, binding: i32)
+                    if args.len() != 2 {
+                        bail_spirv!("_w_storage_len requires 2 args (set, binding), got {}", args.len());
+                    }
+                    // Extract set and binding from integer literals
+                    let set = match body.get_expr(args[0]) {
+                        Expr::Int(s) => s.parse::<u32>().map_err(|_| err_spirv!("_w_storage_len: set must be integer literal"))?,
+                        _ => bail_spirv!("_w_storage_len: set must be integer literal"),
+                    };
+                    let binding = match body.get_expr(args[1]) {
+                        Expr::Int(s) => s.parse::<u32>().map_err(|_| err_spirv!("_w_storage_len: binding must be integer literal"))?,
+                        _ => bail_spirv!("_w_storage_len: binding must be integer literal"),
+                    };
+                    if let Some(&(buffer_var, _elem_type_id)) = constructor.storage_buffers.get(&(set, binding)) {
+                        // OpArrayLength: get length of runtime array at member index 0
+                        // SPIR-V requires OpArrayLength to return u32
+                        Ok(constructor.builder.array_length(constructor.u32_type, None, buffer_var, 0)?)
+                    } else {
+                        bail_spirv!("_w_storage_len: no storage buffer at set={}, binding={}", set, binding)
+                    }
+                }
                 _ => Err(err_spirv!("Unknown intrinsic: {}", name)),
             }
         }
@@ -2616,73 +2667,94 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
             ))
         }
 
-        // --- View and pointer operations ---
-        Expr::View { ptr, len } => {
-            // View constructs a {ptr, len} struct
-            let ptr_val = lower_expr(constructor, body, *ptr)?;
+        // --- Storage view operations ---
+        // StorageView is a buffer slice descriptor: {set, binding, offset, len}
+        // At runtime it's represented as a struct with the offset and length values.
+        // set/binding are used at compile time to identify the buffer.
+        Expr::StorageView { set, binding, offset, len } => {
+            // Lower offset and length expressions
+            let offset_val = lower_expr(constructor, body, *offset)?;
             let len_val = lower_expr(constructor, body, *len)?;
 
-            // Extract element type from the result type
-            let elem_ty = match expr_ty {
-                PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 3 => {
-                    type_args[0].clone()
-                }
-                _ => {
-                    return Err(err_spirv!("View result must be Array type, got {:?}", expr_ty));
-                }
-            };
-            let elem_spirv_type = constructor.ast_type_to_spirv(&elem_ty);
-            let elem_ptr_type =
-                constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_spirv_type);
+            // StorageView is stored as {u32 offset, u32 len} at runtime
+            // The set/binding are used later when we need to access the actual buffer
+            let view_struct_type =
+                constructor.get_or_create_struct_type(vec![constructor.u32_type, constructor.u32_type, constructor.u32_type, constructor.u32_type]);
 
-            // Construct {ptr, len} struct
-            let slice_struct_type =
-                constructor.get_or_create_struct_type(vec![elem_ptr_type, constructor.i32_type]);
-            Ok(constructor.builder.composite_construct(slice_struct_type, None, [ptr_val, len_val])?)
+            // Store set and binding as constants in the struct
+            let set_const = constructor.builder.constant_bit32(constructor.u32_type, *set);
+            let binding_const = constructor.builder.constant_bit32(constructor.u32_type, *binding);
+
+            // Cast offset to u32 if needed (it may be i32)
+            let offset_u32 = constructor.builder.bitcast(constructor.u32_type, None, offset_val)?;
+
+            Ok(constructor.builder.composite_construct(view_struct_type, None, [set_const, binding_const, offset_u32, len_val])?)
         }
 
-        Expr::ViewPtr { view } => {
-            // Extract the pointer (first element) from a view struct
+        Expr::SliceStorageView { view, start, len } => {
+            // Slice creates a new view with adjusted offset
+            // view.offset + start, len
             let view_val = lower_expr(constructor, body, *view)?;
-            let view_ty = body.get_type(*view);
+            let start_val = lower_expr(constructor, body, *start)?;
+            let len_val = lower_expr(constructor, body, *len)?;
 
-            let elem_ty = match view_ty {
-                PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 3 => {
-                    type_args[0].clone()
-                }
-                _ => {
-                    return Err(err_spirv!("ViewPtr argument must be Array type, got {:?}", view_ty));
-                }
-            };
-            let elem_spirv_type = constructor.ast_type_to_spirv(&elem_ty);
-            let elem_ptr_type =
-                constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_spirv_type);
+            // Extract fields from existing view: {set, binding, offset, len}
+            let set_val = constructor.builder.composite_extract(constructor.u32_type, None, view_val, [0])?;
+            let binding_val = constructor.builder.composite_extract(constructor.u32_type, None, view_val, [1])?;
+            let old_offset = constructor.builder.composite_extract(constructor.u32_type, None, view_val, [2])?;
 
-            Ok(constructor.builder.composite_extract(elem_ptr_type, None, view_val, [0])?)
+            // Cast start to u32 if needed
+            let start_u32 = constructor.builder.bitcast(constructor.u32_type, None, start_val)?;
+
+            // new_offset = old_offset + start
+            let new_offset = constructor.builder.i_add(constructor.u32_type, None, old_offset, start_u32)?;
+
+            // Cast len to u32 if needed
+            let len_u32 = constructor.builder.bitcast(constructor.u32_type, None, len_val)?;
+
+            // Create new view struct
+            let view_struct_type =
+                constructor.get_or_create_struct_type(vec![constructor.u32_type, constructor.u32_type, constructor.u32_type, constructor.u32_type]);
+            Ok(constructor.builder.composite_construct(view_struct_type, None, [set_val, binding_val, new_offset, len_u32])?)
         }
 
-        Expr::ViewLen { view } => {
-            // Extract the length (second element) from a view struct
+        Expr::StorageViewIndex { view, index } => {
+            // Get pointer to element: OpAccessChain buffer[0][view.offset + index]
             let view_val = lower_expr(constructor, body, *view)?;
-            Ok(constructor.builder.composite_extract(constructor.i32_type, None, view_val, [1])?)
+            let index_val = lower_expr(constructor, body, *index)?;
+
+            // Extract set, binding, offset from view
+            let set_val = constructor.builder.composite_extract(constructor.u32_type, None, view_val, [0])?;
+            let binding_val = constructor.builder.composite_extract(constructor.u32_type, None, view_val, [1])?;
+            let offset_val = constructor.builder.composite_extract(constructor.u32_type, None, view_val, [2])?;
+
+            // Cast index to u32 if needed (for add)
+            let index_u32 = constructor.builder.bitcast(constructor.u32_type, None, index_val)?;
+
+            // Compute final index = offset + index
+            let final_index = constructor.builder.i_add(constructor.u32_type, None, offset_val, index_u32)?;
+
+            // Cast back to i32 for OpAccessChain
+            let final_index_i32 = constructor.builder.bitcast(constructor.i32_type, None, final_index)?;
+
+            // Look up the storage buffer by set/binding
+            // For now, we find the buffer variable directly from the constructor
+            // TODO: This needs proper set/binding lookup - for now use the first storage buffer
+            let (buffer_var, elem_ty) = constructor.find_storage_buffer_by_binding(set_val, binding_val)?;
+
+            // Get element pointer type
+            let elem_spirv_type = constructor.ast_type_to_spirv(&elem_ty);
+            let elem_ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_spirv_type);
+
+            // OpAccessChain buffer[0][final_index]
+            let zero = constructor.builder.constant_bit32(constructor.i32_type, 0);
+            Ok(constructor.builder.access_chain(elem_ptr_type, None, buffer_var, [zero, final_index_i32])?)
         }
 
-        Expr::PtrAdd { ptr, offset } => {
-            // Pointer arithmetic: advance pointer by offset elements
-            let ptr_val = lower_expr(constructor, body, *ptr)?;
-            let offset_val = lower_expr(constructor, body, *offset)?;
-
-            // Get the element type from the pointer
-            let ptr_ty = body.get_type(*ptr);
-            let elem_ty = match ptr_ty {
-                // For now, assume ptr is i32 type (element pointer)
-                _ => ptr_ty.clone(),
-            };
-            let elem_spirv_type = constructor.ast_type_to_spirv(&elem_ty);
-            let result_ptr_type =
-                constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_spirv_type);
-
-            Ok(constructor.builder.ptr_access_chain(result_ptr_type, None, ptr_val, offset_val, [])?)
+        Expr::StorageViewLen { view } => {
+            // Extract length from view struct (field 3)
+            let view_val = lower_expr(constructor, body, *view)?;
+            Ok(constructor.builder.composite_extract(constructor.u32_type, None, view_val, [3])?)
         }
     }
 }
@@ -3385,12 +3457,15 @@ fn lower_map_dynamic(
     output_elem_type: spirv::Word,
 ) -> Result<spirv::Word> {
     let i32_type = constructor.i32_type;
+    let u32_type = constructor.u32_type;
 
     // Lower array expression to get {ptr, len} struct, then extract components
+    // View struct is {ptr, u32_len} - extract and cast length to i32 for loop comparison
     let view_val = lower_expr(constructor, body, arr_expr_id)?;
     let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_type);
     let base_ptr = constructor.builder.composite_extract(ptr_type, None, view_val, [0])?;
-    let size_val = constructor.builder.composite_extract(i32_type, None, view_val, [1])?;
+    let size_u32 = constructor.builder.composite_extract(u32_type, None, view_val, [1])?;
+    let size_val = constructor.builder.bitcast(i32_type, None, size_u32)?;
 
     // Create loop index variable
     let loop_idx_var = constructor.declare_variable("__map_idx", i32_type)?;
@@ -3448,11 +3523,11 @@ fn lower_map_dynamic(
     // Merge block
     constructor.builder.begin_block(Some(merge_label))?;
 
-    // Return the View struct {ptr, len} - since map is in-place, it's the same view
+    // Return the View struct {ptr, u32_len} - since map is in-place, it's the same view
     let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, output_elem_type);
-    let view_struct_type = constructor.get_or_create_struct_type(vec![ptr_type, i32_type]);
+    let view_struct_type = constructor.get_or_create_struct_type(vec![ptr_type, u32_type]);
     let result_view =
-        constructor.builder.composite_construct(view_struct_type, None, [base_ptr, size_val])?;
+        constructor.builder.composite_construct(view_struct_type, None, [base_ptr, size_u32])?;
     Ok(result_view)
 }
 
@@ -3616,11 +3691,13 @@ fn lower_map_into(constructor: &mut Constructor, body: &Body, args: &[ExprId]) -
     };
 
     // Lower input View - extract (ptr, len)
+    // View struct is {ptr, u32_len} - extract and cast length to i32 for loop comparison
     let input_view = lower_expr(constructor, body, args[1])?;
     let in_elem_ptr_type =
         constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, input_elem_type);
     let in_ptr = constructor.builder.composite_extract(in_elem_ptr_type, None, input_view, [0])?;
-    let input_len = constructor.builder.composite_extract(constructor.i32_type, None, input_view, [1])?;
+    let input_len_u32 = constructor.builder.composite_extract(constructor.u32_type, None, input_view, [1])?;
+    let input_len = constructor.builder.bitcast(constructor.i32_type, None, input_len_u32)?;
 
     // Lower output View - extract ptr (len not needed for output)
     let output_view = lower_expr(constructor, body, args[2])?;
@@ -3716,8 +3793,10 @@ fn lower_length(constructor: &mut Constructor, body: &Body, args: &[ExprId]) -> 
         Ok(constructor.const_i32(size))
     } else {
         // Dynamic size - lower array to get View {ptr, len} and extract length
+        // View struct is {ptr, u32_len} - extract and cast to i32
         let view_val = lower_expr(constructor, body, args[0])?;
-        let len = constructor.builder.composite_extract(constructor.i32_type, None, view_val, [1])?;
+        let len_u32 = constructor.builder.composite_extract(constructor.u32_type, None, view_val, [1])?;
+        let len = constructor.builder.bitcast(constructor.i32_type, None, len_u32)?;
         Ok(len)
     }
 }

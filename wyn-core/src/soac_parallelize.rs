@@ -398,23 +398,25 @@ fn copy_expr_tree_with_storage(
                 expr: new_expr_inner,
             }
         }
-        Expr::View { ptr, len } => {
-            let new_ptr = copy_expr_tree_with_storage(dest, src, *ptr, local_map, storage_locals);
-            let new_len = copy_expr_tree_with_storage(dest, src, *len, local_map, storage_locals);
-            Expr::View { ptr: new_ptr, len: new_len }
-        }
-        Expr::ViewPtr { view } => {
-            let new_view = copy_expr_tree_with_storage(dest, src, *view, local_map, storage_locals);
-            Expr::ViewPtr { view: new_view }
-        }
-        Expr::ViewLen { view } => {
-            let new_view = copy_expr_tree_with_storage(dest, src, *view, local_map, storage_locals);
-            Expr::ViewLen { view: new_view }
-        }
-        Expr::PtrAdd { ptr, offset } => {
-            let new_ptr = copy_expr_tree_with_storage(dest, src, *ptr, local_map, storage_locals);
+        Expr::StorageView { set, binding, offset, len } => {
             let new_offset = copy_expr_tree_with_storage(dest, src, *offset, local_map, storage_locals);
-            Expr::PtrAdd { ptr: new_ptr, offset: new_offset }
+            let new_len = copy_expr_tree_with_storage(dest, src, *len, local_map, storage_locals);
+            Expr::StorageView { set: *set, binding: *binding, offset: new_offset, len: new_len }
+        }
+        Expr::SliceStorageView { view, start, len } => {
+            let new_view = copy_expr_tree_with_storage(dest, src, *view, local_map, storage_locals);
+            let new_start = copy_expr_tree_with_storage(dest, src, *start, local_map, storage_locals);
+            let new_len = copy_expr_tree_with_storage(dest, src, *len, local_map, storage_locals);
+            Expr::SliceStorageView { view: new_view, start: new_start, len: new_len }
+        }
+        Expr::StorageViewIndex { view, index } => {
+            let new_view = copy_expr_tree_with_storage(dest, src, *view, local_map, storage_locals);
+            let new_index = copy_expr_tree_with_storage(dest, src, *index, local_map, storage_locals);
+            Expr::StorageViewIndex { view: new_view, index: new_index }
+        }
+        Expr::StorageViewLen { view } => {
+            let new_view = copy_expr_tree_with_storage(dest, src, *view, local_map, storage_locals);
+            Expr::StorageViewLen { view: new_view }
         }
     };
 
@@ -458,13 +460,47 @@ fn try_parallelize_body(
     };
     let dummy_node_id = NodeId(0);
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+    let u32_ty = Type::Constructed(TypeName::Int(32), vec![]); // For lengths (same bit pattern)
+
+    // Extract element type from the array type for pointer operations
+    let elem_ty = match &array_ty {
+        Type::Constructed(TypeName::Array, args) if args.len() == 3 => args[0].clone(),
+        _ => panic!("Expected Array type, got {:?}", array_ty),
+    };
 
     // Copy locals from original body (parameters)
+    // For storage buffer inputs, we create View locals that wrap the underlying buffers
     let mut local_map: HashMap<LocalId, LocalId> = HashMap::new();
+    // (view_local, set, binding, ty) - using pre-computed storage_binding from EntryInput
+    let mut storage_buffer_wrappings: Vec<(LocalId, u32, u32, Type<TypeName>)> = Vec::new();
+
+    for input in inputs {
+        if let Some((set, binding)) = input.storage_binding {
+            // This is a storage buffer input - create a View local for it
+            let old_id = input.local;
+            let local = &body.locals[old_id.0 as usize];
+
+            // Create view local with original name (will be bound to View{ptr, len})
+            let view_local = new_body.alloc_local(LocalDecl {
+                name: local.name.clone(),
+                span: local.span,
+                ty: local.ty.clone(),
+                kind: LocalKind::Let,
+            });
+
+            // Map old local to view local (so body references use the view)
+            local_map.insert(old_id, view_local);
+            storage_buffer_wrappings.push((view_local, set, binding, local.ty.clone()));
+        }
+    }
+
+    // Copy non-storage locals
     for (old_idx, local) in body.locals.iter().enumerate() {
         let old_id = LocalId(old_idx as u32);
-        let new_id = new_body.alloc_local(local.clone());
-        local_map.insert(old_id, new_id);
+        if !local_map.contains_key(&old_id) {
+            let new_id = new_body.alloc_local(local.clone());
+            local_map.insert(old_id, new_id);
+        }
     }
 
     // Create output local (for output View that lowering will set up)
@@ -511,8 +547,61 @@ fn try_parallelize_body(
         kind: LocalKind::Let,
     });
 
-    // The mapped local now holds a View {ptr, len} directly
+    // The mapped local now holds a StorageView {set, binding, offset, len} directly
     let mapped_storage_local = *local_map.get(&storage_local).unwrap_or(&storage_local);
+
+    // Create StorageView expressions to wrap storage buffers
+    // Each view_expr is: StorageView { set, binding, offset: 0, len: _w_storage_len(set, binding) }
+    let mut view_bindings: Vec<(LocalId, ExprId)> = Vec::new();
+    for &(view_local, set, binding, ref ty) in &storage_buffer_wrappings {
+        // Create zero offset (start of buffer)
+        let zero_offset = new_body.alloc_expr(
+            Expr::Int("0".to_string()),
+            i32_ty.clone(),
+            dummy_span,
+            dummy_node_id,
+        );
+
+        // Create integer literals for _w_storage_len intrinsic
+        let set_expr = new_body.alloc_expr(
+            Expr::Int(set.to_string()),
+            i32_ty.clone(),
+            dummy_span,
+            dummy_node_id,
+        );
+        let binding_expr = new_body.alloc_expr(
+            Expr::Int(binding.to_string()),
+            i32_ty.clone(),
+            dummy_span,
+            dummy_node_id,
+        );
+
+        // _w_storage_len(set, binding) - get runtime length via OpArrayLength
+        let storage_len = new_body.alloc_expr(
+            Expr::Intrinsic {
+                name: "_w_storage_len".to_string(),
+                args: vec![set_expr, binding_expr],
+            },
+            i32_ty.clone(),
+            dummy_span,
+            dummy_node_id,
+        );
+
+        // StorageView { set, binding, offset: 0, len }
+        let view_expr = new_body.alloc_expr(
+            Expr::StorageView {
+                set,
+                binding,
+                offset: zero_offset,
+                len: storage_len,
+            },
+            ty.clone(),
+            dummy_span,
+            dummy_node_id,
+        );
+
+        view_bindings.push((view_local, view_expr));
+    }
 
     // 1. Create array length expression
     let array_len_expr = if let Some(hint) = size_hint {
@@ -686,34 +775,18 @@ fn try_parallelize_body(
         dummy_span,
         dummy_node_id,
     );
-    // Extract the ptr from the base array and add the chunk offset
-    // Extract the ptr from the base array using ViewPtr
-    let base_ptr = new_body.alloc_expr(
-        Expr::ViewPtr { view: base_array_expr_id },
-        i32_ty.clone(), // ptr type at MIR level
-        dummy_span,
-        dummy_node_id,
-    );
+    // Create the local chunk as a slice of the base storage view
+    // SliceStorageView { view, start, len } creates a sub-view
     let chunk_start_ref3 = new_body.alloc_expr(
         Expr::Local(chunk_start_local),
         i32_ty.clone(),
         dummy_span,
         dummy_node_id,
     );
-    // Compute chunk_ptr = base_ptr + chunk_start using PtrAdd
-    let chunk_ptr = new_body.alloc_expr(
-        Expr::PtrAdd {
-            ptr: base_ptr,
-            offset: chunk_start_ref3,
-        },
-        i32_ty.clone(),
-        dummy_span,
-        dummy_node_id,
-    );
-    // Create the local chunk view using Expr::View
     let local_chunk_expr = new_body.alloc_expr(
-        Expr::View {
-            ptr: chunk_ptr,
+        Expr::SliceStorageView {
+            view: base_array_expr_id,
+            start: chunk_start_ref3,
             len: chunk_len,
         },
         array_ty.clone(),
@@ -820,11 +893,27 @@ fn try_parallelize_body(
         dummy_node_id,
     );
 
+    // Wrap with view bindings (innermost to outermost)
+    // These need to be inside thread_id but outside array_len
+    let mut inner_body = let_array_len;
+    for (view_local, view_expr) in view_bindings.into_iter().rev() {
+        inner_body = new_body.alloc_expr(
+            Expr::Let {
+                local: view_local,
+                rhs: view_expr,
+                body: inner_body,
+            },
+            unit_ty.clone(),
+            dummy_span,
+            dummy_node_id,
+        );
+    }
+
     let root_expr = new_body.alloc_expr(
         Expr::Let {
             local: thread_id_local,
             rhs: thread_id_intrinsic,
-            body: let_array_len,
+            body: inner_body,
         },
         unit_ty.clone(),
         dummy_span,
@@ -1006,23 +1095,25 @@ fn copy_expr_tree(
             // Loops are complex - just copy unchanged for now
             src.get_expr(expr_id).clone()
         }
-        Expr::View { ptr, len } => {
-            let new_ptr = copy_expr_tree(dest, src, *ptr, local_map);
-            let new_len = copy_expr_tree(dest, src, *len, local_map);
-            Expr::View { ptr: new_ptr, len: new_len }
-        }
-        Expr::ViewPtr { view } => {
-            let new_view = copy_expr_tree(dest, src, *view, local_map);
-            Expr::ViewPtr { view: new_view }
-        }
-        Expr::ViewLen { view } => {
-            let new_view = copy_expr_tree(dest, src, *view, local_map);
-            Expr::ViewLen { view: new_view }
-        }
-        Expr::PtrAdd { ptr, offset } => {
-            let new_ptr = copy_expr_tree(dest, src, *ptr, local_map);
+        Expr::StorageView { set, binding, offset, len } => {
             let new_offset = copy_expr_tree(dest, src, *offset, local_map);
-            Expr::PtrAdd { ptr: new_ptr, offset: new_offset }
+            let new_len = copy_expr_tree(dest, src, *len, local_map);
+            Expr::StorageView { set: *set, binding: *binding, offset: new_offset, len: new_len }
+        }
+        Expr::SliceStorageView { view, start, len } => {
+            let new_view = copy_expr_tree(dest, src, *view, local_map);
+            let new_start = copy_expr_tree(dest, src, *start, local_map);
+            let new_len = copy_expr_tree(dest, src, *len, local_map);
+            Expr::SliceStorageView { view: new_view, start: new_start, len: new_len }
+        }
+        Expr::StorageViewIndex { view, index } => {
+            let new_view = copy_expr_tree(dest, src, *view, local_map);
+            let new_index = copy_expr_tree(dest, src, *index, local_map);
+            Expr::StorageViewIndex { view: new_view, index: new_index }
+        }
+        Expr::StorageViewLen { view } => {
+            let new_view = copy_expr_tree(dest, src, *view, local_map);
+            Expr::StorageViewLen { view: new_view }
         }
     };
 

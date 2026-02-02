@@ -511,67 +511,72 @@ impl Normalizer {
                 )
             }
 
-            // View operations - atomize subexpressions
-            Expr::View { ptr, len } => {
-                let new_ptr = self.expr_map[ptr];
+            // Storage view operations - atomize subexpressions
+            Expr::StorageView { set, binding, offset, len } => {
+                let new_offset = self.expr_map[offset];
                 let new_len = self.expr_map[len];
 
-                let (atom_ptr, ptr_binding) = self.atomize(body, new_ptr, node_id);
+                let (atom_offset, offset_binding) = self.atomize(body, new_offset, node_id);
                 let (atom_len, len_binding) = self.atomize(body, new_len, node_id);
 
                 let view_id = body.alloc_expr(
-                    Expr::View { ptr: atom_ptr, len: atom_len },
+                    Expr::StorageView { set: *set, binding: *binding, offset: atom_offset, len: atom_len },
                     ty.clone(),
                     span,
                     node_id,
                 );
 
-                self.wrap_bindings(body, view_id, ty, span, node_id, vec![len_binding, ptr_binding])
+                self.wrap_bindings(body, view_id, ty, span, node_id, vec![len_binding, offset_binding])
             }
 
-            Expr::ViewPtr { view } => {
+            Expr::SliceStorageView { view, start, len } => {
                 let new_view = self.expr_map[view];
-                let (atom_view, binding) = self.atomize(body, new_view, node_id);
+                let new_start = self.expr_map[start];
+                let new_len = self.expr_map[len];
 
-                let viewptr_id = body.alloc_expr(
-                    Expr::ViewPtr { view: atom_view },
+                let (atom_view, view_binding) = self.atomize(body, new_view, node_id);
+                let (atom_start, start_binding) = self.atomize(body, new_start, node_id);
+                let (atom_len, len_binding) = self.atomize(body, new_len, node_id);
+
+                let slice_id = body.alloc_expr(
+                    Expr::SliceStorageView { view: atom_view, start: atom_start, len: atom_len },
                     ty.clone(),
                     span,
                     node_id,
                 );
 
-                self.wrap_bindings(body, viewptr_id, ty, span, node_id, vec![binding])
+                self.wrap_bindings(body, slice_id, ty, span, node_id, vec![len_binding, start_binding, view_binding])
             }
 
-            Expr::ViewLen { view } => {
+            Expr::StorageViewIndex { view, index } => {
+                let new_view = self.expr_map[view];
+                let new_index = self.expr_map[index];
+
+                let (atom_view, view_binding) = self.atomize(body, new_view, node_id);
+                let (atom_index, index_binding) = self.atomize(body, new_index, node_id);
+
+                let viewidx_id = body.alloc_expr(
+                    Expr::StorageViewIndex { view: atom_view, index: atom_index },
+                    ty.clone(),
+                    span,
+                    node_id,
+                );
+
+                self.wrap_bindings(body, viewidx_id, ty, span, node_id, vec![index_binding, view_binding])
+            }
+
+            Expr::StorageViewLen { view } => {
                 let new_view = self.expr_map[view];
                 let (atom_view, binding) = self.atomize(body, new_view, node_id);
 
                 let viewlen_id = body.alloc_expr(
-                    Expr::ViewLen { view: atom_view },
+                    Expr::StorageViewLen { view: atom_view },
                     ty.clone(),
                     span,
                     node_id,
                 );
 
                 self.wrap_bindings(body, viewlen_id, ty, span, node_id, vec![binding])
-            }
-
-            Expr::PtrAdd { ptr, offset } => {
-                let new_ptr = self.expr_map[ptr];
-                let new_offset = self.expr_map[offset];
-
-                let (atom_ptr, ptr_binding) = self.atomize(body, new_ptr, node_id);
-                let (atom_offset, offset_binding) = self.atomize(body, new_offset, node_id);
-
-                let ptradd_id = body.alloc_expr(
-                    Expr::PtrAdd { ptr: atom_ptr, offset: atom_offset },
-                    ty.clone(),
-                    span,
-                    node_id,
-                );
-
-                self.wrap_bindings(body, ptradd_id, ty, span, node_id, vec![offset_binding, ptr_binding])
             }
         }
     }

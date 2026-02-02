@@ -367,29 +367,26 @@ impl BindingLifter {
                 )
             }
 
-            // View and pointer operations
-            Expr::View { ptr, len } => {
-                let new_ptr = self.expr_map[ptr];
-                let new_len = self.expr_map[len];
-                new_body.alloc_expr(Expr::View { ptr: new_ptr, len: new_len }, ty.clone(), span, node_id)
-            }
-            Expr::ViewPtr { view } => {
-                let new_view = self.expr_map[view];
-                new_body.alloc_expr(Expr::ViewPtr { view: new_view }, ty.clone(), span, node_id)
-            }
-            Expr::ViewLen { view } => {
-                let new_view = self.expr_map[view];
-                new_body.alloc_expr(Expr::ViewLen { view: new_view }, ty.clone(), span, node_id)
-            }
-            Expr::PtrAdd { ptr, offset } => {
-                let new_ptr = self.expr_map[ptr];
+            // Storage view operations
+            Expr::StorageView { set, binding, offset, len } => {
                 let new_offset = self.expr_map[offset];
-                new_body.alloc_expr(
-                    Expr::PtrAdd { ptr: new_ptr, offset: new_offset },
-                    ty.clone(),
-                    span,
-                    node_id,
-                )
+                let new_len = self.expr_map[len];
+                new_body.alloc_expr(Expr::StorageView { set: *set, binding: *binding, offset: new_offset, len: new_len }, ty.clone(), span, node_id)
+            }
+            Expr::SliceStorageView { view, start, len } => {
+                let new_view = self.expr_map[view];
+                let new_start = self.expr_map[start];
+                let new_len = self.expr_map[len];
+                new_body.alloc_expr(Expr::SliceStorageView { view: new_view, start: new_start, len: new_len }, ty.clone(), span, node_id)
+            }
+            Expr::StorageViewIndex { view, index } => {
+                let new_view = self.expr_map[view];
+                let new_index = self.expr_map[index];
+                new_body.alloc_expr(Expr::StorageViewIndex { view: new_view, index: new_index }, ty.clone(), span, node_id)
+            }
+            Expr::StorageViewLen { view } => {
+                let new_view = self.expr_map[view];
+                new_body.alloc_expr(Expr::StorageViewLen { view: new_view }, ty.clone(), span, node_id)
             }
         }
     }
@@ -708,17 +705,22 @@ fn collect_free_locals_inner(
             collect_free_locals_inner(body, *value, bound, free);
         }
 
-        // View and pointer operations
-        Expr::View { ptr, len } => {
-            collect_free_locals_inner(body, *ptr, bound, free);
+        // Storage view operations
+        Expr::StorageView { offset, len, .. } => {
+            collect_free_locals_inner(body, *offset, bound, free);
             collect_free_locals_inner(body, *len, bound, free);
         }
-        Expr::ViewPtr { view } | Expr::ViewLen { view } => {
+        Expr::SliceStorageView { view, start, len } => {
             collect_free_locals_inner(body, *view, bound, free);
+            collect_free_locals_inner(body, *start, bound, free);
+            collect_free_locals_inner(body, *len, bound, free);
         }
-        Expr::PtrAdd { ptr, offset } => {
-            collect_free_locals_inner(body, *ptr, bound, free);
-            collect_free_locals_inner(body, *offset, bound, free);
+        Expr::StorageViewIndex { view, index } => {
+            collect_free_locals_inner(body, *view, bound, free);
+            collect_free_locals_inner(body, *index, bound, free);
+        }
+        Expr::StorageViewLen { view } => {
+            collect_free_locals_inner(body, *view, bound, free);
         }
 
         // Leaf nodes - no locals to collect

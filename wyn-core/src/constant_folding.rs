@@ -383,27 +383,29 @@ impl ConstantFolder {
                 ))
             }
 
-            // View and pointer operations - map subexpressions
-            Expr::View { ptr, len } => {
-                let new_ptr = self.expr_map[ptr];
-                let new_len = self.expr_map[len];
-                Ok(body.alloc_expr(Expr::View { ptr: new_ptr, len: new_len }, ty.clone(), span, node_id))
-            }
-
-            Expr::ViewPtr { view } => {
-                let new_view = self.expr_map[view];
-                Ok(body.alloc_expr(Expr::ViewPtr { view: new_view }, ty.clone(), span, node_id))
-            }
-
-            Expr::ViewLen { view } => {
-                let new_view = self.expr_map[view];
-                Ok(body.alloc_expr(Expr::ViewLen { view: new_view }, ty.clone(), span, node_id))
-            }
-
-            Expr::PtrAdd { ptr, offset } => {
-                let new_ptr = self.expr_map[ptr];
+            // Storage view operations - map subexpressions
+            Expr::StorageView { set, binding, offset, len } => {
                 let new_offset = self.expr_map[offset];
-                Ok(body.alloc_expr(Expr::PtrAdd { ptr: new_ptr, offset: new_offset }, ty.clone(), span, node_id))
+                let new_len = self.expr_map[len];
+                Ok(body.alloc_expr(Expr::StorageView { set: *set, binding: *binding, offset: new_offset, len: new_len }, ty.clone(), span, node_id))
+            }
+
+            Expr::SliceStorageView { view, start, len } => {
+                let new_view = self.expr_map[view];
+                let new_start = self.expr_map[start];
+                let new_len = self.expr_map[len];
+                Ok(body.alloc_expr(Expr::SliceStorageView { view: new_view, start: new_start, len: new_len }, ty.clone(), span, node_id))
+            }
+
+            Expr::StorageViewIndex { view, index } => {
+                let new_view = self.expr_map[view];
+                let new_index = self.expr_map[index];
+                Ok(body.alloc_expr(Expr::StorageViewIndex { view: new_view, index: new_index }, ty.clone(), span, node_id))
+            }
+
+            Expr::StorageViewLen { view } => {
+                let new_view = self.expr_map[view];
+                Ok(body.alloc_expr(Expr::StorageViewLen { view: new_view }, ty.clone(), span, node_id))
             }
         }
     }
