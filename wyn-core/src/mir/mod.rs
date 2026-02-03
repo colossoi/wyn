@@ -21,6 +21,7 @@ pub mod binding_allocator;
 pub mod layout;
 pub mod parallelism;
 pub mod soac_analysis;
+pub mod transform;
 
 #[cfg(test)]
 mod tests;
@@ -423,6 +424,17 @@ impl Body {
     /// Number of statements in this body.
     pub fn num_stmts(&self) -> usize {
         self.stmts.len()
+    }
+
+    /// Drain statements starting from the given index.
+    /// Returns the drained statements as a Vec and removes them from the body.
+    pub fn drain_stmts_from(&mut self, start: usize) -> Vec<Stmt> {
+        self.stmts.drain(start..).collect()
+    }
+
+    /// Drain all statements from the body.
+    pub fn drain_all_stmts(&mut self) -> Vec<Stmt> {
+        self.stmts.drain(..).collect()
     }
 
     // =========================================================================

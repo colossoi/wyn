@@ -52,6 +52,8 @@ mod constant_folding_tests;
 #[cfg(test)]
 mod integration_tests;
 #[cfg(test)]
+mod mir_transform_tests;
+#[cfg(test)]
 mod scope_tests;
 
 use std::collections::HashMap;

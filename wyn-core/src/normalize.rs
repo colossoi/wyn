@@ -3,16 +3,15 @@
 //! This pass ensures that all compound expressions have atomic operands,
 //! enabling code motion optimizations. After normalization:
 //! - BinOp/UnaryOp operands are Local or scalar literals
-//! - Call/Intrinsic args are Local or scalar literals
+//! - Call/Intrinsic args are Local or scalar literal
 //! - Tuple/Array/Vector/Matrix elements are Local only
 //! - Materialize inner is Local or scalar literal
 //! - If/Loop conditions are Local or scalar literal
 
-use crate::ast::{NodeId, Span, TypeName};
+use crate::mir::transform::{AccumulatorStack, is_atomic, sort_stmts_by_deps};
 use crate::mir::{
-    ArrayBacking, Block, Body, Def, Expr, ExprId, LocalDecl, LocalId, LocalKind, LoopKind, Program,
+    ArrayBacking, Block, Body, Def, Expr, ExprId, LocalDecl, LocalId, LocalKind, LoopKind, Program, Stmt,
 };
-use polytype::Type;
 use std::collections::HashMap;
 
 /// Normalize a MIR program to A-normal form.
@@ -27,6 +26,9 @@ struct Normalizer {
     next_temp_id: usize,
     /// Mapping from old ExprId to new ExprId in the current body.
     expr_map: HashMap<ExprId, ExprId>,
+    /// Scoped accumulator for atomization stmts.
+    /// Stmts are accumulated in the current scope and collected when the scope ends.
+    stmt_stack: AccumulatorStack<Stmt>,
 }
 
 impl Normalizer {
@@ -34,6 +36,7 @@ impl Normalizer {
         Normalizer {
             next_temp_id: 0,
             expr_map: HashMap::new(),
+            stmt_stack: AccumulatorStack::new(),
         }
     }
 
@@ -106,324 +109,262 @@ impl Normalizer {
     }
 
     /// Normalize a function body.
-    ///
-    /// Statement ordering strategy:
-    /// - Build a map from RHS ExprId to stmt for quick lookup
-    /// - Process expressions in arena order (dependency order)
-    /// - After processing each expression, check if any original stmt has that expr as RHS
-    /// - If so, emit that stmt immediately (after any atomization for its RHS)
-    /// - Atomization temps and Expr::Let bindings are also emitted immediately
-    ///
-    /// This ensures correct ordering: atomization temps come before bindings that use them,
-    /// and original bindings come before expressions that reference them.
     fn normalize_body(&mut self, old_body: Body) -> Body {
         self.expr_map.clear();
+        self.stmt_stack = AccumulatorStack::new(); // Fresh accumulator for this body
 
         let mut new_body = Body::new();
 
         // Copy locals (they don't change during normalization, new temps will be added)
-        for local in &old_body.locals {
-            new_body.alloc_local(local.clone());
+        let mut local_map: HashMap<LocalId, LocalId> = HashMap::new();
+        for (old_idx, local) in old_body.locals.iter().enumerate() {
+            let old_id = LocalId(old_idx as u32);
+            let new_id = new_body.alloc_local(local.clone());
+            local_map.insert(old_id, new_id);
         }
 
-        // Build a map from RHS ExprId to the stmt that binds it
-        let mut rhs_to_stmt: HashMap<ExprId, (LocalId, ExprId)> = HashMap::new();
-        for stmt in old_body.iter_stmts() {
-            rhs_to_stmt.insert(stmt.rhs, (stmt.local, stmt.rhs));
+        // Collect all stmts - we'll process them in order
+        let stmts: Vec<Stmt> = old_body.iter_stmts().cloned().collect();
+
+        // Process each stmt - atomization stmts go to stmt_stack
+        for stmt in &stmts {
+            // Normalize the RHS expression (atomizations go to stmt_stack)
+            let new_rhs = self.normalize_expr(&mut new_body, &old_body, stmt.rhs, &local_map);
+
+            // Add the original stmt with mapped local and new RHS
+            let new_local = *local_map.get(&stmt.local).unwrap_or(&stmt.local);
+            self.stmt_stack.push(Stmt {
+                local: new_local,
+                rhs: new_rhs,
+            });
         }
 
-        // Track which original stmts have been emitted
-        let mut emitted_stmts: std::collections::HashSet<ExprId> = std::collections::HashSet::new();
+        // Normalize the root expression
+        let new_root = self.normalize_expr(&mut new_body, &old_body, old_body.root, &local_map);
 
-        // Process expressions in order, emitting stmts at the right time
-        for (old_idx, old_expr) in old_body.exprs.iter().enumerate() {
-            let old_id = ExprId(old_idx as u32);
-            let ty = old_body.get_type(old_id).clone();
-            let span = old_body.get_span(old_id);
-            let node_id = old_body.get_node_id(old_id);
-
-            let new_id = self.normalize_expr(&mut new_body, old_expr, &ty, span, node_id);
-            self.expr_map.insert(old_id, new_id);
-
-            // If this expression is the RHS of an original stmt, emit that stmt now
-            if let Some((local, rhs)) = rhs_to_stmt.get(&old_id) {
-                if !emitted_stmts.contains(&rhs) {
-                    let new_rhs = self.expr_map[rhs];
-                    new_body.push_stmt(*local, new_rhs);
-                    emitted_stmts.insert(*rhs);
-                }
-            }
+        // Collect all stmts from the accumulator and sort by dependencies
+        let all_stmts = self.stmt_stack.drain_all();
+        let sorted_stmts = sort_stmts_by_deps(&new_body, &all_stmts);
+        for stmt in sorted_stmts {
+            new_body.push_stmt(stmt.local, stmt.rhs);
         }
 
-        // Update root to point to the transformed root
-        new_body.root = self.expr_map[&old_body.root];
+        // Set root
+        new_body.root = new_root;
 
         new_body
     }
 
-    /// Normalize an expression, potentially wrapping it with Let bindings for atomization.
+    /// Normalize an expression, creating atomization bindings as needed.
     fn normalize_expr(
         &mut self,
-        body: &mut Body,
-        expr: &Expr,
-        ty: &Type<TypeName>,
-        span: Span,
-        node_id: NodeId,
+        new_body: &mut Body,
+        old_body: &Body,
+        old_id: ExprId,
+        local_map: &HashMap<LocalId, LocalId>,
     ) -> ExprId {
-        match expr {
-            // Already atomic - just copy
-            Expr::Local(local_id) => body.alloc_expr(Expr::Local(*local_id), ty.clone(), span, node_id),
-            Expr::Global(name) => body.alloc_expr(Expr::Global(name.clone()), ty.clone(), span, node_id),
-            Expr::Extern(linkage) => {
-                body.alloc_expr(Expr::Extern(linkage.clone()), ty.clone(), span, node_id)
+        // Check if already processed
+        if let Some(&new_id) = self.expr_map.get(&old_id) {
+            return new_id;
+        }
+
+        let ty = old_body.get_type(old_id).clone();
+        let span = old_body.get_span(old_id);
+        let node_id = old_body.get_node_id(old_id);
+
+        let new_id = match old_body.get_expr(old_id).clone() {
+            // Already atomic - just copy with local mapping
+            Expr::Local(local_id) => {
+                let new_local = *local_map.get(&local_id).unwrap_or(&local_id);
+                new_body.alloc_expr(Expr::Local(new_local), ty, span, node_id)
             }
-            Expr::Int(s) => body.alloc_expr(Expr::Int(s.clone()), ty.clone(), span, node_id),
-            Expr::Float(s) => body.alloc_expr(Expr::Float(s.clone()), ty.clone(), span, node_id),
-            Expr::Bool(b) => body.alloc_expr(Expr::Bool(*b), ty.clone(), span, node_id),
-            Expr::Unit => body.alloc_expr(Expr::Unit, ty.clone(), span, node_id),
-            Expr::String(s) => body.alloc_expr(Expr::String(s.clone()), ty.clone(), span, node_id),
+            Expr::Global(name) => new_body.alloc_expr(Expr::Global(name), ty, span, node_id),
+            Expr::Extern(linkage) => new_body.alloc_expr(Expr::Extern(linkage), ty, span, node_id),
+            Expr::Int(s) => new_body.alloc_expr(Expr::Int(s), ty, span, node_id),
+            Expr::Float(s) => new_body.alloc_expr(Expr::Float(s), ty, span, node_id),
+            Expr::Bool(b) => new_body.alloc_expr(Expr::Bool(b), ty, span, node_id),
+            Expr::Unit => new_body.alloc_expr(Expr::Unit, ty, span, node_id),
+            Expr::String(s) => new_body.alloc_expr(Expr::String(s), ty, span, node_id),
 
-            // Binary operation - atomize both operands
+            // Binary operation - atomize operands
             Expr::BinOp { op, lhs, rhs } => {
-                let new_lhs = self.expr_map[lhs];
-                let new_rhs = self.expr_map[rhs];
+                let new_lhs = self.normalize_expr(new_body, old_body, lhs, local_map);
+                let new_rhs = self.normalize_expr(new_body, old_body, rhs, local_map);
 
-                let (atom_lhs, lhs_binding) = self.atomize(body, new_lhs, node_id);
-                let (atom_rhs, rhs_binding) = self.atomize(body, new_rhs, node_id);
+                let atom_lhs = self.atomize_if_needed(new_body, new_lhs, node_id);
+                let atom_rhs = self.atomize_if_needed(new_body, new_rhs, node_id);
 
-                let binop_id = body.alloc_expr(
+                new_body.alloc_expr(
                     Expr::BinOp {
-                        op: op.clone(),
+                        op,
                         lhs: atom_lhs,
                         rhs: atom_rhs,
                     },
-                    ty.clone(),
+                    ty,
                     span,
                     node_id,
-                );
-
-                self.wrap_bindings(body, binop_id, ty, span, node_id, vec![rhs_binding, lhs_binding])
+                )
             }
 
             // Unary operation - atomize operand
             Expr::UnaryOp { op, operand } => {
-                let new_operand = self.expr_map[operand];
-                let (atom_operand, binding) = self.atomize(body, new_operand, node_id);
+                let new_operand = self.normalize_expr(new_body, old_body, operand, local_map);
+                let atom_operand = self.atomize_if_needed(new_body, new_operand, node_id);
 
-                let unop_id = body.alloc_expr(
+                new_body.alloc_expr(
                     Expr::UnaryOp {
-                        op: op.clone(),
+                        op,
                         operand: atom_operand,
                     },
-                    ty.clone(),
+                    ty,
                     span,
                     node_id,
-                );
-
-                self.wrap_bindings(body, unop_id, ty, span, node_id, vec![binding])
+                )
             }
 
-            // Tuple - atomize all elements (tuples need all elements to be vars)
+            // Tuple - atomize elements
             Expr::Tuple(elems) => {
-                let mut new_elems = Vec::new();
-                let mut bindings = Vec::new();
+                let new_elems: Vec<ExprId> = elems
+                    .iter()
+                    .map(|&e| {
+                        let new_e = self.normalize_expr(new_body, old_body, e, local_map);
+                        self.atomize_if_needed(new_body, new_e, node_id)
+                    })
+                    .collect();
 
-                for elem in elems {
-                    let new_elem = self.expr_map[elem];
-                    let (atom_elem, binding) = self.atomize(body, new_elem, node_id);
-                    new_elems.push(atom_elem);
-                    bindings.push(binding);
-                }
-
-                let tuple_id = body.alloc_expr(Expr::Tuple(new_elems), ty.clone(), span, node_id);
-                bindings.reverse();
-                self.wrap_bindings(body, tuple_id, ty, span, node_id, bindings)
+                new_body.alloc_expr(Expr::Tuple(new_elems), ty, span, node_id)
             }
 
-            // Array - handle all backing types
+            // Vector - atomize elements
+            Expr::Vector(elems) => {
+                let new_elems: Vec<ExprId> = elems
+                    .iter()
+                    .map(|&e| {
+                        let new_e = self.normalize_expr(new_body, old_body, e, local_map);
+                        self.atomize_if_needed(new_body, new_e, node_id)
+                    })
+                    .collect();
+
+                new_body.alloc_expr(Expr::Vector(new_elems), ty, span, node_id)
+            }
+
+            // Matrix - atomize elements
+            Expr::Matrix(rows) => {
+                let new_rows: Vec<Vec<ExprId>> = rows
+                    .iter()
+                    .map(|row| {
+                        row.iter()
+                            .map(|&e| {
+                                let new_e = self.normalize_expr(new_body, old_body, e, local_map);
+                                self.atomize_if_needed(new_body, new_e, node_id)
+                            })
+                            .collect()
+                    })
+                    .collect();
+
+                new_body.alloc_expr(Expr::Matrix(new_rows), ty, span, node_id)
+            }
+
+            // Array - atomize elements and size
             Expr::Array { backing, size } => {
-                let new_size = self.expr_map[&size];
-                let (atom_size, size_binding) = self.atomize(body, new_size, node_id);
+                let new_size = self.normalize_expr(new_body, old_body, size, local_map);
+                let atom_size = self.atomize_if_needed(new_body, new_size, node_id);
 
-                match backing {
+                let new_backing = match backing {
                     ArrayBacking::Literal(elems) => {
-                        let mut new_elems = Vec::new();
-                        let mut bindings = Vec::new();
-
-                        for elem in elems {
-                            let new_elem = self.expr_map[&elem];
-                            let (atom_elem, binding) = self.atomize(body, new_elem, node_id);
-                            new_elems.push(atom_elem);
-                            bindings.push(binding);
-                        }
-
-                        bindings.push(size_binding);
-                        let array_id = body.alloc_expr(
-                            Expr::Array {
-                                backing: ArrayBacking::Literal(new_elems),
-                                size: atom_size,
-                            },
-                            ty.clone(),
-                            span,
-                            node_id,
-                        );
-                        bindings.reverse();
-                        self.wrap_bindings(body, array_id, ty, span, node_id, bindings)
+                        let new_elems: Vec<ExprId> = elems
+                            .iter()
+                            .map(|&e| {
+                                let new_e = self.normalize_expr(new_body, old_body, e, local_map);
+                                self.atomize_if_needed(new_body, new_e, node_id)
+                            })
+                            .collect();
+                        ArrayBacking::Literal(new_elems)
                     }
                     ArrayBacking::Range { start, step, kind } => {
-                        let new_start = self.expr_map[&start];
-                        let (atom_start, start_binding) = self.atomize(body, new_start, node_id);
+                        let new_start = self.normalize_expr(new_body, old_body, start, local_map);
+                        let atom_start = self.atomize_if_needed(new_body, new_start, node_id);
 
-                        let (atom_step, step_binding) = if let Some(step) = step {
-                            let new_step = self.expr_map[&step];
-                            let (atom, binding) = self.atomize(body, new_step, node_id);
-                            (Some(atom), binding)
-                        } else {
-                            (None, None)
-                        };
+                        let atom_step = step.map(|s| {
+                            let new_s = self.normalize_expr(new_body, old_body, s, local_map);
+                            self.atomize_if_needed(new_body, new_s, node_id)
+                        });
 
-                        let range_id = body.alloc_expr(
-                            Expr::Array {
-                                backing: ArrayBacking::Range {
-                                    start: atom_start,
-                                    step: atom_step,
-                                    kind: *kind,
-                                },
-                                size: atom_size,
-                            },
-                            ty.clone(),
-                            span,
-                            node_id,
-                        );
-
-                        let bindings = vec![size_binding, step_binding, start_binding];
-                        self.wrap_bindings(body, range_id, ty, span, node_id, bindings)
+                        ArrayBacking::Range {
+                            start: atom_start,
+                            step: atom_step,
+                            kind,
+                        }
                     }
-                }
+                };
+
+                new_body.alloc_expr(
+                    Expr::Array {
+                        backing: new_backing,
+                        size: atom_size,
+                    },
+                    ty,
+                    span,
+                    node_id,
+                )
             }
 
-            // Vector - atomize all elements
-            Expr::Vector(elems) => {
-                let mut new_elems = Vec::new();
-                let mut bindings = Vec::new();
-
-                for elem in elems {
-                    let new_elem = self.expr_map[elem];
-                    let (atom_elem, binding) = self.atomize(body, new_elem, node_id);
-                    new_elems.push(atom_elem);
-                    bindings.push(binding);
-                }
-
-                let vector_id = body.alloc_expr(Expr::Vector(new_elems), ty.clone(), span, node_id);
-                bindings.reverse();
-                self.wrap_bindings(body, vector_id, ty, span, node_id, bindings)
-            }
-
-            // Matrix - atomize all elements
-            Expr::Matrix(rows) => {
-                let mut new_rows = Vec::new();
-                let mut bindings = Vec::new();
-
-                for row in rows {
-                    let mut new_row = Vec::new();
-                    for elem in row {
-                        let new_elem = self.expr_map[elem];
-                        let (atom_elem, binding) = self.atomize(body, new_elem, node_id);
-                        new_row.push(atom_elem);
-                        bindings.push(binding);
-                    }
-                    new_rows.push(new_row);
-                }
-
-                let matrix_id = body.alloc_expr(Expr::Matrix(new_rows), ty.clone(), span, node_id);
-                bindings.reverse();
-                self.wrap_bindings(body, matrix_id, ty, span, node_id, bindings)
-            }
-
-            // Call - atomize args (but preserve Closures for map/reduce)
+            // Call - atomize args (but preserve closure structure for SOACs)
             Expr::Call { func, args } => {
-                let mut new_args = Vec::new();
-                let mut bindings = Vec::new();
-
-                // For map/reduce, keep first arg (closure) as-is to preserve Closure structure
                 let is_soac = func == "map" || func == "reduce" || func == "filter" || func == "scan";
 
-                for (i, arg) in args.iter().enumerate() {
-                    let new_arg = self.expr_map[arg];
+                let new_args: Vec<ExprId> = args
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &a)| {
+                        let new_a = self.normalize_expr(new_body, old_body, a, local_map);
+                        // Don't atomize closure argument for SOACs
+                        if is_soac && i == 0 {
+                            new_a
+                        } else {
+                            self.atomize_if_needed(new_body, new_a, node_id)
+                        }
+                    })
+                    .collect();
 
-                    // Don't atomize the closure argument for SOACs
-                    if is_soac && i == 0 {
-                        // Keep the closure expression as-is (but still map to new body)
-                        new_args.push(new_arg);
-                        bindings.push(None);
-                    } else {
-                        let (atom_arg, binding) = self.atomize(body, new_arg, node_id);
-                        new_args.push(atom_arg);
-                        bindings.push(binding);
-                    }
-                }
-
-                let call_id = body.alloc_expr(
-                    Expr::Call {
-                        func: func.clone(),
-                        args: new_args,
-                    },
-                    ty.clone(),
-                    span,
-                    node_id,
-                );
-                bindings.reverse();
-                self.wrap_bindings(body, call_id, ty, span, node_id, bindings)
+                new_body.alloc_expr(Expr::Call { func, args: new_args }, ty, span, node_id)
             }
 
-            // Intrinsic - atomize all args
+            // Intrinsic - atomize args
             Expr::Intrinsic { name, args } => {
-                let mut new_args = Vec::new();
-                let mut bindings = Vec::new();
+                let new_args: Vec<ExprId> = args
+                    .iter()
+                    .map(|&a| {
+                        let new_a = self.normalize_expr(new_body, old_body, a, local_map);
+                        self.atomize_if_needed(new_body, new_a, node_id)
+                    })
+                    .collect();
 
-                for arg in args {
-                    let new_arg = self.expr_map[arg];
-                    let (atom_arg, binding) = self.atomize(body, new_arg, node_id);
-                    new_args.push(atom_arg);
-                    bindings.push(binding);
-                }
-
-                let intrinsic_id = body.alloc_expr(
-                    Expr::Intrinsic {
-                        name: name.clone(),
-                        args: new_args,
-                    },
-                    ty.clone(),
-                    span,
-                    node_id,
-                );
-                bindings.reverse();
-                self.wrap_bindings(body, intrinsic_id, ty, span, node_id, bindings)
+                new_body.alloc_expr(Expr::Intrinsic { name, args: new_args }, ty, span, node_id)
             }
 
-            // If - atomize condition, branches are their own scopes
+            // If - atomize condition, normalize branches
             Expr::If { cond, then_, else_ } => {
-                let new_cond = self.expr_map[cond];
-                let new_then = self.expr_map[&then_.result];
-                let new_else = self.expr_map[&else_.result];
+                let new_cond = self.normalize_expr(new_body, old_body, cond, local_map);
+                let atom_cond = self.atomize_if_needed(new_body, new_cond, node_id);
 
-                let (atom_cond, cond_binding) = self.atomize(body, new_cond, node_id);
+                // Process branches in their own scopes
+                let new_then = self.normalize_block(new_body, old_body, &then_, local_map);
+                let new_else = self.normalize_block(new_body, old_body, &else_, local_map);
 
-                let if_id = body.alloc_expr(
+                new_body.alloc_expr(
                     Expr::If {
                         cond: atom_cond,
-                        then_: Block::new(new_then),
-                        else_: Block::new(new_else),
+                        then_: new_then,
+                        else_: new_else,
                     },
-                    ty.clone(),
+                    ty,
                     span,
                     node_id,
-                );
-
-                self.wrap_bindings(body, if_id, ty, span, node_id, vec![cond_binding])
+                )
             }
 
-            // Loop - atomize init and loop kind subexpressions
+            // Loop - atomize init and kind, normalize body
             Expr::Loop {
                 loop_var,
                 init,
@@ -431,55 +372,83 @@ impl Normalizer {
                 kind,
                 body: loop_body,
             } => {
-                let new_init = self.expr_map[init];
-                let (atom_init, init_binding) = self.atomize(body, new_init, node_id);
+                let new_init = self.normalize_expr(new_body, old_body, init, local_map);
+                let atom_init = self.atomize_if_needed(new_body, new_init, node_id);
 
-                let new_init_bindings: Vec<_> =
-                    init_bindings.iter().map(|(local, expr)| (*local, self.expr_map[expr])).collect();
+                let new_loop_var = *local_map.get(&loop_var).unwrap_or(&loop_var);
 
-                let (new_kind, kind_bindings) = self.map_loop_kind(body, kind, node_id);
-                let new_loop_body = self.expr_map[&loop_body.result];
+                let new_init_bindings: Vec<(LocalId, ExprId)> = init_bindings
+                    .iter()
+                    .map(|(local, expr)| {
+                        let new_local = *local_map.get(local).unwrap_or(local);
+                        let new_expr = self.normalize_expr(new_body, old_body, *expr, local_map);
+                        (new_local, new_expr)
+                    })
+                    .collect();
 
-                let loop_id = body.alloc_expr(
+                let new_kind = match kind {
+                    LoopKind::For { var, iter } => {
+                        let new_var = *local_map.get(&var).unwrap_or(&var);
+                        let new_iter = self.normalize_expr(new_body, old_body, iter, local_map);
+                        let atom_iter = self.atomize_if_needed(new_body, new_iter, node_id);
+                        LoopKind::For {
+                            var: new_var,
+                            iter: atom_iter,
+                        }
+                    }
+                    LoopKind::ForRange { var, bound } => {
+                        let new_var = *local_map.get(&var).unwrap_or(&var);
+                        let new_bound = self.normalize_expr(new_body, old_body, bound, local_map);
+                        let atom_bound = self.atomize_if_needed(new_body, new_bound, node_id);
+                        LoopKind::ForRange {
+                            var: new_var,
+                            bound: atom_bound,
+                        }
+                    }
+                    LoopKind::While { cond } => {
+                        // Don't atomize While conditions - they're re-evaluated each iteration
+                        // and may depend on loop variables that aren't in scope at this level
+                        let new_cond = self.normalize_expr(new_body, old_body, cond, local_map);
+                        LoopKind::While { cond: new_cond }
+                    }
+                };
+
+                let new_loop_body = self.normalize_block(new_body, old_body, &loop_body, local_map);
+
+                new_body.alloc_expr(
                     Expr::Loop {
-                        loop_var: *loop_var,
+                        loop_var: new_loop_var,
                         init: atom_init,
                         init_bindings: new_init_bindings,
                         kind: new_kind,
-                        body: Block::new(new_loop_body),
+                        body: new_loop_body,
                     },
-                    ty.clone(),
+                    ty,
                     span,
                     node_id,
-                );
-
-                // Combine all bindings: kind bindings first (outermost), then init binding
-                let mut all_bindings = kind_bindings;
-                all_bindings.push(init_binding);
-                self.wrap_bindings(body, loop_id, ty, span, node_id, all_bindings)
+                )
             }
 
             // Materialize - atomize inner
             Expr::Materialize(inner) => {
-                let new_inner = self.expr_map[inner];
-                let (atom_inner, binding) = self.atomize(body, new_inner, node_id);
+                let new_inner = self.normalize_expr(new_body, old_body, inner, local_map);
+                let atom_inner = self.atomize_if_needed(new_body, new_inner, node_id);
 
-                let mat_id = body.alloc_expr(Expr::Materialize(atom_inner), ty.clone(), span, node_id);
-                self.wrap_bindings(body, mat_id, ty, span, node_id, vec![binding])
+                new_body.alloc_expr(Expr::Materialize(atom_inner), ty, span, node_id)
             }
 
-            // Attributed - pass through (the inner expression is already normalized)
+            // Attributed - pass through
             Expr::Attributed {
                 attributes,
                 expr: inner,
             } => {
-                let new_inner = self.expr_map[inner];
-                body.alloc_expr(
+                let new_inner = self.normalize_expr(new_body, old_body, inner, local_map);
+                new_body.alloc_expr(
                     Expr::Attributed {
-                        attributes: attributes.clone(),
+                        attributes,
                         expr: new_inner,
                     },
-                    ty.clone(),
+                    ty,
                     span,
                     node_id,
                 )
@@ -487,248 +456,172 @@ impl Normalizer {
 
             // Memory operations - atomize subexpressions
             Expr::Load { ptr } => {
-                let new_ptr = self.expr_map[ptr];
-                let (atom_ptr, ptr_binding) = self.atomize(body, new_ptr, node_id);
+                let new_ptr = self.normalize_expr(new_body, old_body, ptr, local_map);
+                let atom_ptr = self.atomize_if_needed(new_body, new_ptr, node_id);
 
-                let load_id = body.alloc_expr(Expr::Load { ptr: atom_ptr }, ty.clone(), span, node_id);
-                self.wrap_bindings(body, load_id, ty, span, node_id, vec![ptr_binding])
+                new_body.alloc_expr(Expr::Load { ptr: atom_ptr }, ty, span, node_id)
             }
 
             Expr::Store { ptr, value } => {
-                let new_ptr = self.expr_map[ptr];
-                let new_value = self.expr_map[value];
+                let new_ptr = self.normalize_expr(new_body, old_body, ptr, local_map);
+                let new_value = self.normalize_expr(new_body, old_body, value, local_map);
 
-                let (atom_ptr, ptr_binding) = self.atomize(body, new_ptr, node_id);
-                let (atom_value, value_binding) = self.atomize(body, new_value, node_id);
+                let atom_ptr = self.atomize_if_needed(new_body, new_ptr, node_id);
+                let atom_value = self.atomize_if_needed(new_body, new_value, node_id);
 
-                let store_id = body.alloc_expr(
+                new_body.alloc_expr(
                     Expr::Store {
                         ptr: atom_ptr,
                         value: atom_value,
                     },
-                    ty.clone(),
-                    span,
-                    node_id,
-                );
-
-                self.wrap_bindings(
-                    body,
-                    store_id,
                     ty,
                     span,
                     node_id,
-                    vec![value_binding, ptr_binding],
                 )
             }
 
-            // Storage view operations - atomize subexpressions
             Expr::StorageView {
                 set,
                 binding,
                 offset,
                 len,
             } => {
-                let new_offset = self.expr_map[offset];
-                let new_len = self.expr_map[len];
+                let new_offset = self.normalize_expr(new_body, old_body, offset, local_map);
+                let new_len = self.normalize_expr(new_body, old_body, len, local_map);
 
-                let (atom_offset, offset_binding) = self.atomize(body, new_offset, node_id);
-                let (atom_len, len_binding) = self.atomize(body, new_len, node_id);
+                let atom_offset = self.atomize_if_needed(new_body, new_offset, node_id);
+                let atom_len = self.atomize_if_needed(new_body, new_len, node_id);
 
-                let view_id = body.alloc_expr(
+                new_body.alloc_expr(
                     Expr::StorageView {
-                        set: *set,
-                        binding: *binding,
+                        set,
+                        binding,
                         offset: atom_offset,
                         len: atom_len,
                     },
-                    ty.clone(),
-                    span,
-                    node_id,
-                );
-
-                self.wrap_bindings(
-                    body,
-                    view_id,
                     ty,
                     span,
                     node_id,
-                    vec![len_binding, offset_binding],
                 )
             }
 
             Expr::SliceStorageView { view, start, len } => {
-                let new_view = self.expr_map[view];
-                let new_start = self.expr_map[start];
-                let new_len = self.expr_map[len];
+                let new_view = self.normalize_expr(new_body, old_body, view, local_map);
+                let new_start = self.normalize_expr(new_body, old_body, start, local_map);
+                let new_len = self.normalize_expr(new_body, old_body, len, local_map);
 
-                let (atom_view, view_binding) = self.atomize(body, new_view, node_id);
-                let (atom_start, start_binding) = self.atomize(body, new_start, node_id);
-                let (atom_len, len_binding) = self.atomize(body, new_len, node_id);
+                let atom_view = self.atomize_if_needed(new_body, new_view, node_id);
+                let atom_start = self.atomize_if_needed(new_body, new_start, node_id);
+                let atom_len = self.atomize_if_needed(new_body, new_len, node_id);
 
-                let slice_id = body.alloc_expr(
+                new_body.alloc_expr(
                     Expr::SliceStorageView {
                         view: atom_view,
                         start: atom_start,
                         len: atom_len,
                     },
-                    ty.clone(),
-                    span,
-                    node_id,
-                );
-
-                self.wrap_bindings(
-                    body,
-                    slice_id,
                     ty,
                     span,
                     node_id,
-                    vec![len_binding, start_binding, view_binding],
                 )
             }
 
             Expr::StorageViewIndex { view, index } => {
-                let new_view = self.expr_map[view];
-                let new_index = self.expr_map[index];
+                let new_view = self.normalize_expr(new_body, old_body, view, local_map);
+                let new_index = self.normalize_expr(new_body, old_body, index, local_map);
 
-                let (atom_view, view_binding) = self.atomize(body, new_view, node_id);
-                let (atom_index, index_binding) = self.atomize(body, new_index, node_id);
+                let atom_view = self.atomize_if_needed(new_body, new_view, node_id);
+                let atom_index = self.atomize_if_needed(new_body, new_index, node_id);
 
-                let viewidx_id = body.alloc_expr(
+                new_body.alloc_expr(
                     Expr::StorageViewIndex {
                         view: atom_view,
                         index: atom_index,
                     },
-                    ty.clone(),
-                    span,
-                    node_id,
-                );
-
-                self.wrap_bindings(
-                    body,
-                    viewidx_id,
                     ty,
                     span,
                     node_id,
-                    vec![index_binding, view_binding],
                 )
             }
 
             Expr::StorageViewLen { view } => {
-                let new_view = self.expr_map[view];
-                let (atom_view, binding) = self.atomize(body, new_view, node_id);
+                let new_view = self.normalize_expr(new_body, old_body, view, local_map);
+                let atom_view = self.atomize_if_needed(new_body, new_view, node_id);
 
-                let viewlen_id = body.alloc_expr(
-                    Expr::StorageViewLen { view: atom_view },
-                    ty.clone(),
-                    span,
-                    node_id,
-                );
-
-                self.wrap_bindings(body, viewlen_id, ty, span, node_id, vec![binding])
+                new_body.alloc_expr(Expr::StorageViewLen { view: atom_view }, ty, span, node_id)
             }
-        }
+        };
+
+        self.expr_map.insert(old_id, new_id);
+        new_id
     }
 
-    /// Map a loop kind, atomizing its subexpressions where appropriate.
-    /// Returns the new LoopKind and any bindings needed for atomization.
-    ///
-    /// Note: While conditions are NOT atomized because they must be re-evaluated
-    /// on each iteration and may reference loop variables that change.
-    /// ForRange bounds and For iterators ARE atomized because they're evaluated once.
-    fn map_loop_kind(
+    /// Normalize a block, processing stmts and result.
+    fn normalize_block(
         &mut self,
-        body: &mut Body,
-        kind: &LoopKind,
-        node_id: NodeId,
-    ) -> (LoopKind, Vec<Option<(LocalId, ExprId)>>) {
-        match kind {
-            LoopKind::For { var, iter } => {
-                let new_iter = self.expr_map[iter];
-                let (atom_iter, binding) = self.atomize(body, new_iter, node_id);
-                (
-                    LoopKind::For {
-                        var: *var,
-                        iter: atom_iter,
-                    },
-                    vec![binding],
-                )
-            }
-            LoopKind::ForRange { var, bound } => {
-                let new_bound = self.expr_map[bound];
-                let (atom_bound, binding) = self.atomize(body, new_bound, node_id);
-                (
-                    LoopKind::ForRange {
-                        var: *var,
-                        bound: atom_bound,
-                    },
-                    vec![binding],
-                )
-            }
-            LoopKind::While { cond } => {
-                // While conditions must NOT be atomized - they are re-evaluated each iteration
-                // and may reference loop variables (like `i < 16` where `i` is the loop counter)
-                let new_cond = self.expr_map[cond];
-                (LoopKind::While { cond: new_cond }, vec![])
-            }
-        }
-    }
+        new_body: &mut Body,
+        old_body: &Body,
+        block: &Block,
+        local_map: &HashMap<LocalId, LocalId>,
+    ) -> Block {
+        // Push a new scope for this block's stmts
+        self.stmt_stack.push_scope();
 
-    /// Atomize an expression if needed. Returns the atomic ExprId and optional binding.
-    fn atomize(
-        &mut self,
-        body: &mut Body,
-        expr_id: ExprId,
-        node_id: NodeId,
-    ) -> (ExprId, Option<(LocalId, ExprId)>) {
-        if is_atomic(body.get_expr(expr_id)) {
-            (expr_id, None)
-        } else {
-            let ty = body.get_type(expr_id).clone();
-            let span = body.get_span(expr_id);
+        // Process each stmt in the block
+        for stmt in &block.stmts {
+            let new_rhs = self.normalize_expr(new_body, old_body, stmt.rhs, local_map);
 
-            // Create temp local
-            let local_id = body.alloc_local(LocalDecl {
-                name: self.fresh_temp_name(),
-                span,
-                ty: ty.clone(),
-                kind: LocalKind::Let,
+            // Add the original stmt to this scope
+            let new_local = *local_map.get(&stmt.local).unwrap_or(&stmt.local);
+            self.stmt_stack.push(Stmt {
+                local: new_local,
+                rhs: new_rhs,
             });
-
-            // Create reference to local
-            let local_ref = body.alloc_expr(Expr::Local(local_id), ty, span, node_id);
-
-            (local_ref, Some((local_id, expr_id)))
         }
+
+        // Process the result expression
+        let new_result = self.normalize_expr(new_body, old_body, block.result, local_map);
+
+        // Pop this scope's stmts and sort by dependencies
+        let block_stmts = self.stmt_stack.pop_scope();
+        let sorted_stmts = sort_stmts_by_deps(new_body, &block_stmts);
+
+        Block::with_stmts(sorted_stmts, new_result)
     }
 
-    /// Emit atomization bindings as flat statements directly to body.stmts.
-    /// Since expressions are processed in dependency order, emitting immediately
-    /// ensures correct ordering.
-    fn wrap_bindings(
+    /// Atomize an expression if it's not already atomic.
+    /// Creates a new local binding and returns a reference to it.
+    fn atomize_if_needed(
         &mut self,
-        body: &mut Body,
+        new_body: &mut Body,
         expr_id: ExprId,
-        _ty: &Type<TypeName>,
-        _span: Span,
-        _node_id: NodeId,
-        bindings: Vec<Option<(LocalId, ExprId)>>,
+        _node_id: crate::ast::NodeId,
     ) -> ExprId {
-        // Bindings come in reverse order (outermost first for nested Lets),
-        // so reverse to get execution order
-        for binding in bindings.into_iter().rev().flatten() {
-            let (local_id, rhs) = binding;
-            body.push_stmt(local_id, rhs);
+        let expr = new_body.get_expr(expr_id);
+        if is_atomic(expr) {
+            return expr_id;
         }
-        expr_id
-    }
-}
 
-/// Check if an expression is atomic (can appear as an operand without binding).
-fn is_atomic(expr: &Expr) -> bool {
-    match expr {
-        Expr::Local(_) | Expr::Global(_) | Expr::Unit => true,
-        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::String(_) => true,
-        Expr::Tuple(elems) => elems.is_empty(), // Empty tuple is atomic
-        _ => false,
+        // Create a new local for this expression
+        let name = self.fresh_temp_name();
+        let ty = new_body.get_type(expr_id).clone();
+        let span = new_body.get_span(expr_id);
+        let node_id = new_body.get_node_id(expr_id);
+
+        let local_id = new_body.alloc_local(LocalDecl {
+            name,
+            ty: ty.clone(),
+            span,
+            kind: LocalKind::Let,
+        });
+
+        // Add a stmt binding the local to the accumulator (current scope)
+        self.stmt_stack.push(Stmt {
+            local: local_id,
+            rhs: expr_id,
+        });
+
+        // Return a reference to the local
+        new_body.alloc_expr(Expr::Local(local_id), ty, span, node_id)
     }
 }
