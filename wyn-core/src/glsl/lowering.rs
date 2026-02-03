@@ -8,7 +8,9 @@ use crate::bail_glsl;
 use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
 use crate::lowering_common::ShaderStage;
-use crate::mir::{ArrayBacking, Block, Body, Def, ExecutionModel, Expr, ExprId, LocalId, LoopKind, Program};
+use crate::mir::{
+    ArrayBacking, Block, Body, Def, ExecutionModel, Expr, ExprId, LocalId, LoopKind, Program,
+};
 use polytype::Type as PolyType;
 use rspirv::spirv;
 use std::collections::{HashMap, HashSet};

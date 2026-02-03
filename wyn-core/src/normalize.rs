@@ -9,7 +9,9 @@
 //! - If/Loop conditions are Local or scalar literal
 
 use crate::ast::{NodeId, Span, TypeName};
-use crate::mir::{ArrayBacking, Block, Body, Def, Expr, ExprId, LocalDecl, LocalId, LocalKind, LoopKind, Program};
+use crate::mir::{
+    ArrayBacking, Block, Body, Def, Expr, ExprId, LocalDecl, LocalId, LocalKind, LoopKind, Program,
+};
 use polytype::Type;
 use std::collections::HashMap;
 

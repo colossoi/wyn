@@ -32,8 +32,8 @@
 
 use crate::ast::{NodeId, Span, TypeName};
 use crate::mir::{
-    ArrayBacking, Block, Body, Def, EntryInput, EntryOutput, ExecutionModel, Expr, ExprId, LocalDecl, LocalId,
-    LocalKind, Program,
+    ArrayBacking, Block, Body, Def, EntryInput, EntryOutput, ExecutionModel, Expr, ExprId, LocalDecl,
+    LocalId, LocalKind, Program,
     soac_analysis::{self, ArrayProvenance, MirSoacAnalysis, ParallelizableMap},
 };
 use polytype::Type;

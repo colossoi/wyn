@@ -10,7 +10,6 @@ use crate::ast::{NodeId, Span, TypeName};
 use crate::mir::{ArrayBacking, Block, Body, Def, Expr, ExprId, LoopKind, Program};
 use polytype::Type;
 
-
 /// Process a MIR program, remapping expressions in all bodies.
 pub fn lift_bindings(program: Program) -> Program {
     let mut lifter = BindingLifter::new();

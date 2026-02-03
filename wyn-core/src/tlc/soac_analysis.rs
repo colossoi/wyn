@@ -104,12 +104,12 @@ impl SoacKind {
     /// Returns the expected number of arguments for a SOAC intrinsic application.
     pub fn expected_args(&self) -> usize {
         match self {
-            SoacKind::Map => 2, // (f, arr)
-            SoacKind::Reduce | SoacKind::Scan => 3,    // (op, ne, arr)
-            SoacKind::Filter => 2,                     // (pred, arr)
-            SoacKind::Scatter => 3,                    // (dest, indices, values)
-            SoacKind::Hist1D => 5,                     // (dest, op, ne, indices, values)
-            SoacKind::Zip => 2,                        // (arr1, arr2)
+            SoacKind::Map => 2,                     // (f, arr)
+            SoacKind::Reduce | SoacKind::Scan => 3, // (op, ne, arr)
+            SoacKind::Filter => 2,                  // (pred, arr)
+            SoacKind::Scatter => 3,                 // (dest, indices, values)
+            SoacKind::Hist1D => 5,                  // (dest, op, ne, indices, values)
+            SoacKind::Zip => 2,                     // (arr1, arr2)
         }
     }
 }

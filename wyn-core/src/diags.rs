@@ -929,7 +929,11 @@ impl Display for mir::Expr {
                 write!(f, "({}e{})", op, operand.0)
             }
             mir::Expr::If { cond, then_, else_ } => {
-                write!(f, "if e{} then e{} else e{}", cond.0, then_.result.0, else_.result.0)
+                write!(
+                    f,
+                    "if e{} then e{} else e{}",
+                    cond.0, then_.result.0, else_.result.0
+                )
             }
             mir::Expr::Loop {
                 loop_var,

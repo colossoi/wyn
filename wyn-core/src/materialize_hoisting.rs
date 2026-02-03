@@ -813,7 +813,6 @@ fn references_any_local_rec(
                 || references_any_local_rec(body, else_.result, locals, visited)
         }
 
-
         Expr::Loop {
             init,
             init_bindings,

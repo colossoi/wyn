@@ -2284,8 +2284,7 @@ fn lower_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId) -> Re
                 let elem_type = constructor.ast_type_to_spirv(arg2_ty);
                 let elem_ptr_type =
                     constructor.builder.type_pointer(None, StorageClass::Function, elem_type);
-                let elem_ptr =
-                    constructor.builder.access_chain(elem_ptr_type, None, arr_var, [idx_id])?;
+                let elem_ptr = constructor.builder.access_chain(elem_ptr_type, None, arr_var, [idx_id])?;
                 constructor.builder.store(elem_ptr, val_id, None, [])?;
 
                 // Load and return the updated array

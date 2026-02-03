@@ -145,7 +145,7 @@ mod tlc_tree {
 mod mir_tree {
     use super::TreeNode;
     use wyn_core::ast::TypeName;
-    use wyn_core::mir::{ArrayBacking, Body, Def, Expr, ExprId, LoopKind, Program};
+    use wyn_core::mir::{ArrayBacking, Block, Body, Def, Expr, ExprId, LoopKind, Program};
 
     fn fmt_ty(ty: &polytype::Type<TypeName>) -> String {
         wyn_core::diags::format_type(ty)
@@ -184,7 +184,53 @@ mod mir_tree {
     }
 
     fn body_to_tree(body: &Body) -> TreeNode {
-        expr_to_tree(body, body.root)
+        let mut children = Vec::new();
+
+        // Add statements as children
+        if !body.stmts.is_empty() {
+            let stmt_nodes: Vec<_> = body
+                .stmts
+                .iter()
+                .map(|stmt| {
+                    let name = body.get_local(stmt.local).name.as_str();
+                    TreeNode::branch(
+                        format!("_{} {} =", stmt.local.0, name),
+                        vec![expr_to_tree(body, stmt.rhs)],
+                    )
+                })
+                .collect();
+            children.push(TreeNode::branch("stmts", stmt_nodes));
+        }
+
+        // Add root expression
+        children.push(TreeNode::branch("result", vec![expr_to_tree(body, body.root)]));
+
+        TreeNode::branch("Body", children)
+    }
+
+    fn block_to_tree(body: &Body, block: &Block) -> TreeNode {
+        let mut children = Vec::new();
+
+        // Add statements as children
+        if !block.stmts.is_empty() {
+            let stmt_nodes: Vec<_> = block
+                .stmts
+                .iter()
+                .map(|stmt| {
+                    let name = body.get_local(stmt.local).name.as_str();
+                    TreeNode::branch(
+                        format!("_{} {} =", stmt.local.0, name),
+                        vec![expr_to_tree(body, stmt.rhs)],
+                    )
+                })
+                .collect();
+            children.push(TreeNode::branch("stmts", stmt_nodes));
+        }
+
+        // Add result expression
+        children.push(TreeNode::branch("result", vec![expr_to_tree(body, block.result)]));
+
+        TreeNode::branch("Block", children)
     }
 
     fn expr_to_tree(body: &Body, id: ExprId) -> TreeNode {
@@ -237,18 +283,11 @@ mod mir_tree {
             Expr::UnaryOp { op, operand } => {
                 TreeNode::branch(format!("UnaryOp({}) : {}", op, ty), vec![expr_to_tree(body, *operand)])
             }
-            Expr::Let { local, rhs, body: let_body } => {
-                let name = body.get_local(*local).name.as_str();
-                TreeNode::branch(format!("Let(_{} {})", local.0, name), vec![
-                    TreeNode::branch("rhs", vec![expr_to_tree(body, *rhs)]),
-                    TreeNode::branch("body", vec![expr_to_tree(body, *let_body)]),
-                ])
-            }
             Expr::If { cond, then_, else_ } => {
                 TreeNode::branch(format!("If : {}", ty), vec![
                     TreeNode::branch("cond", vec![expr_to_tree(body, *cond)]),
-                    TreeNode::branch("then", vec![expr_to_tree(body, *then_)]),
-                    TreeNode::branch("else", vec![expr_to_tree(body, *else_)]),
+                    TreeNode::branch("then", vec![block_to_tree(body, then_)]),
+                    TreeNode::branch("else", vec![block_to_tree(body, else_)]),
                 ])
             }
             Expr::Loop { loop_var, init, init_bindings, kind, body: loop_body } => {
@@ -265,7 +304,7 @@ mod mir_tree {
                     children.push(TreeNode::branch("bindings", bindings));
                 }
                 children.push(loop_kind_to_tree(body, kind));
-                children.push(TreeNode::branch("body", vec![expr_to_tree(body, *loop_body)]));
+                children.push(TreeNode::branch("body", vec![block_to_tree(body, loop_body)]));
                 TreeNode::branch(format!("Loop(_{} {})", loop_var.0, name), children)
             }
             Expr::Call { func, args } => {
@@ -603,7 +642,8 @@ fn compile_impl(source: &str) -> CompileResult {
     let normalized = hoisted.normalize();
     let defaulted = normalized.default_address_spaces();
     let parallelized = defaulted.parallelize_soacs();
-    let reachable = parallelized.filter_reachable();
+    let dps_applied = parallelized.apply_dps();
+    let reachable = dps_applied.filter_reachable();
     let lifted = reachable.lift_bindings();
 
     // Lower to Shadertoy GLSL
@@ -695,7 +735,8 @@ fn compile_with_ir_impl(source: &str) -> CompileResultWithIR {
     let normalized = hoisted.normalize();
     let defaulted = normalized.default_address_spaces();
     let parallelized = defaulted.parallelize_soacs();
-    let reachable = parallelized.filter_reachable();
+    let dps_applied = parallelized.apply_dps();
+    let reachable = dps_applied.filter_reachable();
     let lifted = reachable.lift_bindings();
 
     // Capture final MIR
