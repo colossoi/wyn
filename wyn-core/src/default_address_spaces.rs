@@ -131,7 +131,44 @@ fn default_in_body(body: &mut Body, addr_vars: &HashSet<usize>) {
 
 fn default_in_type(ty: &mut Type<TypeName>, addr_vars: &HashSet<usize>) {
     match ty {
+        Type::Constructed(TypeName::Array, args) if args.len() == 3 => {
+            // Array[elem, variant, size] - handle specially
+            // Recurse into element type first
+            default_in_type(&mut args[0], addr_vars);
+
+            let is_runtime_sized = matches!(&args[2], Type::Variable(_));
+
+            // Check if variant is an unconstrained variable
+            if let Type::Variable(id) = &args[1] {
+                if addr_vars.contains(id) {
+                    // Default variant based on whether size is runtime or fixed
+                    args[1] = if is_runtime_sized {
+                        // Runtime-sized arrays must use View variant
+                        Type::Constructed(TypeName::ArrayVariantView, vec![])
+                    } else {
+                        // Fixed-size arrays can use Composite variant
+                        Type::Constructed(TypeName::ArrayVariantComposite, vec![])
+                    };
+                }
+            } else if is_runtime_sized {
+                // Variant is already set, but if size is runtime and variant is Composite,
+                // we must correct it to View (runtime-sized arrays can't be Composite)
+                if matches!(&args[1], Type::Constructed(TypeName::ArrayVariantComposite, _)) {
+                    args[1] = Type::Constructed(TypeName::ArrayVariantView, vec![]);
+                } else {
+                    default_in_type(&mut args[1], addr_vars);
+                }
+            } else {
+                // Fixed-size, just recurse
+                default_in_type(&mut args[1], addr_vars);
+            }
+
+            // Recurse into size (though size variables aren't in addr_vars)
+            default_in_type(&mut args[2], addr_vars);
+        }
         Type::Variable(id) if addr_vars.contains(id) => {
+            // Non-array variable in addr position - should not happen
+            // but default to Composite for safety
             *ty = Type::Constructed(TypeName::ArrayVariantComposite, vec![]);
         }
         Type::Variable(_) => {}

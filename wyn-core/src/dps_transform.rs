@@ -101,7 +101,7 @@ fn transform_def(def: Def, dps_functions: &HashSet<String>) -> Def {
             span,
         } => {
             // Entry points may call DPS functions - transform their call sites
-            let new_body = transform_entry_call_sites(&body, dps_functions, &outputs);
+            let new_body = transform_entry_call_sites(&body, dps_functions, &inputs, &outputs);
             Def::EntryPoint {
                 id,
                 name,
@@ -343,6 +343,7 @@ fn transform_body_call_sites(body: &Body, dps_functions: &HashSet<String>) -> Bo
 fn transform_entry_call_sites(
     body: &Body,
     dps_functions: &HashSet<String>,
+    inputs: &[crate::mir::EntryInput],
     outputs: &[crate::mir::EntryOutput],
 ) -> Body {
     // Check if there are any DPS calls in this entry point
@@ -376,6 +377,7 @@ fn transform_entry_call_sites(
         end_col: 1,
     };
     let dummy_node_id = NodeId(0);
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
 
     // Copy locals
     let mut local_map: HashMap<LocalId, LocalId> = HashMap::new();
@@ -385,16 +387,45 @@ fn transform_entry_call_sites(
         local_map.insert(old_id, new_id);
     }
 
-    // TODO: Create a View for the output buffer instead of Storage
-    // For now, use a placeholder Local that will be set up by parallelization
-    let output_local = new_body.alloc_local(LocalDecl {
-        name: "_output_view".to_string(),
-        span: dummy_span,
-        ty: output_ty.clone(),
-        kind: LocalKind::Param,
-    });
+    // Count input storage buffers to determine output buffer binding
+    let num_input_storage_buffers = inputs.iter().filter(|i| i.storage_binding.is_some()).count() as u32;
+    let output_binding = (0, num_input_storage_buffers); // set 0, next sequential binding
+
+    // Create a StorageView expression for the output buffer
+    // Use _w_storage_len intrinsic to get the buffer length via OpArrayLength (like SOAC does)
+    let output_len = {
+        let set_expr = new_body.alloc_expr(
+            Expr::Int(output_binding.0.to_string()),
+            i32_ty.clone(),
+            dummy_span,
+            dummy_node_id,
+        );
+        let binding_expr = new_body.alloc_expr(
+            Expr::Int(output_binding.1.to_string()),
+            i32_ty.clone(),
+            dummy_span,
+            dummy_node_id,
+        );
+        new_body.alloc_expr(
+            Expr::Intrinsic {
+                name: "_w_storage_len".to_string(),
+                args: vec![set_expr, binding_expr],
+            },
+            i32_ty.clone(),
+            dummy_span,
+            dummy_node_id,
+        )
+    };
+
+    // Create the output StorageView
+    let zero_offset = new_body.alloc_expr(Expr::Int("0".to_string()), i32_ty.clone(), dummy_span, dummy_node_id);
     let output_storage_expr = new_body.alloc_expr(
-        Expr::Local(output_local),
+        Expr::StorageView {
+            set: output_binding.0,
+            binding: output_binding.1,
+            offset: zero_offset,
+            len: output_len,
+        },
         output_ty.clone(),
         dummy_span,
         dummy_node_id,

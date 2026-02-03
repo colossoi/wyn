@@ -28,6 +28,7 @@ pub mod tlc;
 pub mod binding_lifter;
 pub mod constant_folding;
 pub mod default_address_spaces;
+pub mod dps_transform;
 pub mod glsl;
 pub mod inplace_rewriter;
 pub mod materialize_hoisting;
@@ -785,6 +786,19 @@ pub struct SoacParallelized {
 }
 
 impl SoacParallelized {
+    /// Apply destination-passing style transformation to functions returning runtime-sized arrays.
+    pub fn apply_dps(self) -> DpsApplied {
+        let mir = dps_transform::apply_dps_transform(self.mir);
+        DpsApplied { mir }
+    }
+}
+
+/// DPS transformation has been applied
+pub struct DpsApplied {
+    pub mir: mir::Program,
+}
+
+impl DpsApplied {
     /// Filter out unreachable definitions and order them topologically.
     pub fn filter_reachable(self) -> Reachable {
         let mir = reachability::filter_reachable(self.mir);

@@ -242,7 +242,8 @@ fn compile_file(
     let normalized = time("normalize", verbose, || hoisted.normalize());
     let defaulted = normalized.default_address_spaces();
     let parallelized = time("parallelize_soacs", verbose, || defaulted.parallelize_soacs());
-    let reachable = time("filter_reachable", verbose, || parallelized.filter_reachable());
+    let dps_applied = parallelized.apply_dps();
+    let reachable = time("filter_reachable", verbose, || dps_applied.filter_reachable());
     let lifted = time("lift_bindings", verbose, || reachable.lift_bindings());
 
     // Write final MIR if requested (right before lowering)

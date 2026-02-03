@@ -30,6 +30,7 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .normalize()
         .default_address_spaces()
         .parallelize_soacs()
+        .apply_dps()
         .filter_reachable()
         .lift_bindings()
         .lower()?;

@@ -348,6 +348,7 @@ fn compile_to_spirv_with_partial_eval(source: &str) -> Result<Vec<u32>> {
         .normalize()
         .default_address_spaces()
         .parallelize_soacs()
+        .apply_dps()
         .filter_reachable()
         .lift_bindings();
 

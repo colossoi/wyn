@@ -59,6 +59,7 @@ fn compile_to_glsl(input: &str) -> String {
         .normalize()
         .default_address_spaces()
         .parallelize_soacs()
+        .apply_dps()
         .filter_reachable()
         .lift_bindings()
         .lower_shadertoy()
@@ -774,6 +775,7 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
         .normalize()
         .default_address_spaces()
         .parallelize_soacs()
+        .apply_dps()
         .filter_reachable()
         .lift_bindings()
         .lower();
