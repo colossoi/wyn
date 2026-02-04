@@ -504,9 +504,8 @@ impl<'a> Visitor for AliasChecker<'a> {
         if self.node_is_copy_type(id) {
             self.set_result(id, AliasInfo::copy());
         } else {
-            // Non-copy element could alias the array
-            // For simplicity, treat as copy for now
-            self.set_result(id, AliasInfo::copy());
+            // Non-copy elements should track aliasing with the array
+            unimplemented!("alias tracking for non-copy array elements");
         }
         ControlFlow::Continue(())
     }
@@ -753,8 +752,8 @@ fn is_copy_type(ty: &polytype::Type<TypeName>) -> bool {
             TypeName::Str("bool") => true,
             TypeName::Str("unit") => true,
             TypeName::Array => false,
-            TypeName::Vec => false,
-            TypeName::Mat => false,
+            TypeName::Vec => true, // Vectors are primitive value types
+            TypeName::Mat => true, // Matrices are primitive value types
             TypeName::Tuple(_) => args.iter().all(is_copy_type),
             TypeName::Arrow => true, // Functions are copy
             TypeName::Unique => unreachable!("Handled above via is_unique()"),

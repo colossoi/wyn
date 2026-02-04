@@ -56,6 +56,7 @@ pub enum PrimOp {
     UDiv,
     SRem,
     SMod,
+    UMod,
     // Comparison ops
     FOrdEqual,
     FOrdNotEqual,
@@ -277,7 +278,7 @@ impl ImplSource {
             } else if is_signed {
                 BuiltinImpl::PrimOp(PrimOp::SRem)
             } else {
-                BuiltinImpl::PrimOp(PrimOp::UDiv) // Unsigned uses UMod, but we don't have it, use same as div for now
+                BuiltinImpl::PrimOp(PrimOp::UMod)
             },
         );
 

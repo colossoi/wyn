@@ -460,28 +460,6 @@ fn create_single_thread_fallback(entry: &SsaEntryPoint, _local_size: (u32, u32, 
         })
         .ok()?;
 
-    // Then block: execute original body (simplified - just return unit for now)
-    // TODO: Copy the original body here
-    builder.switch_to_block(then_block).ok()?;
-    builder
-        .terminate(Terminator::Branch {
-            target: merge_block,
-            args: vec![],
-        })
-        .ok()?;
-
-    // Else block: skip
-    builder.switch_to_block(else_block).ok()?;
-    builder
-        .terminate(Terminator::Branch {
-            target: merge_block,
-            args: vec![],
-        })
-        .ok()?;
-
-    // Merge block: return unit
-    builder.switch_to_block(merge_block).ok()?;
-    builder.terminate(Terminator::ReturnUnit).ok()?;
-
-    builder.finish().ok()
+    // Then block: should execute original body for thread 0 only
+    unimplemented!("single-thread fallback: copying original body into conditional");
 }

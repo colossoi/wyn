@@ -1042,7 +1042,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             FSub | ISub => Ok(format!("({} - {})", args[0], args[1])),
             FMul | IMul => Ok(format!("({} * {})", args[0], args[1])),
             FDiv | SDiv | UDiv => Ok(format!("({} / {})", args[0], args[1])),
-            FRem | FMod | SRem | SMod => Ok(format!("mod({}, {})", args[0], args[1])),
+            FRem | FMod | SRem | SMod | UMod => Ok(format!("mod({}, {})", args[0], args[1])),
             FOrdEqual | IEqual => Ok(format!("({} == {})", args[0], args[1])),
             FOrdNotEqual | INotEqual => Ok(format!("({} != {})", args[0], args[1])),
             FOrdLessThan | SLessThan | ULessThan => Ok(format!("({} < {})", args[0], args[1])),

@@ -1522,12 +1522,8 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
             }
 
             "_w_slice_storage_view" => {
-                // Slice a storage view - for now, return the input (simplified)
-                if args.len() != 3 {
-                    bail_spirv!("_w_slice_storage_view requires 3 arguments");
-                }
-                // TODO: Proper slice implementation
-                Ok(args[0])
+                // Slicing storage views is not yet implemented
+                bail_spirv!("_w_slice_storage_view is not yet implemented");
             }
 
             "__builtin_thread_id" => {
@@ -1907,7 +1903,8 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
             | PrimOp::SDiv
             | PrimOp::UDiv
             | PrimOp::SRem
-            | PrimOp::SMod => {
+            | PrimOp::SMod
+            | PrimOp::UMod => {
                 if arg_ids.len() != 2 {
                     bail_spirv!("Integer binary op requires 2 args");
                 }
@@ -1932,6 +1929,9 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                     }
                     PrimOp::SMod => {
                         Ok(self.constructor.builder.s_mod(result_ty, None, arg_ids[0], arg_ids[1])?)
+                    }
+                    PrimOp::UMod => {
+                        Ok(self.constructor.builder.u_mod(result_ty, None, arg_ids[0], arg_ids[1])?)
                     }
                     _ => unreachable!(),
                 }
