@@ -725,6 +725,17 @@ impl<'a> Converter<'a> {
         span: Span,
         node_id: NodeId,
     ) -> Result<ValueId, ConvertError> {
+        // Handle HOF intrinsics BEFORE converting args (they handle function args specially)
+        match name {
+            "_w_intrinsic_reduce" => {
+                return self.convert_reduce(args, ty, span, node_id);
+            }
+            "_w_intrinsic_map" => {
+                return self.convert_map(args, ty, span, node_id);
+            }
+            _ => {}
+        }
+
         let arg_values: Vec<ValueId> =
             args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
 
@@ -806,12 +817,6 @@ impl<'a> Converter<'a> {
                     .builder
                     .push_project(base, index, ty, span, node_id)
                     .map_err(|e| ConvertError::BuilderError(e.to_string()));
-            }
-            "_w_intrinsic_reduce" => {
-                return self.convert_reduce(args, ty, span, node_id);
-            }
-            "_w_intrinsic_map" => {
-                return self.convert_map(args, ty, span, node_id);
             }
             _ => {}
         }
@@ -1335,6 +1340,7 @@ impl<'a> Converter<'a> {
 
         let f_term = args[0];
         let arr_term = args[1];
+        let capture_terms = &args[2..]; // Captured variables from defunctionalization
 
         // Get function name
         let f_name = match &f_term.kind {
@@ -1346,12 +1352,23 @@ impl<'a> Converter<'a> {
             }
         };
 
+        // Convert captures to SSA values (these are passed as extra args to the lifted function)
+        let capture_values: Vec<ValueId> =
+            capture_terms.iter().map(|t| self.convert_term(t)).collect::<Result<_, _>>()?;
+
         let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
         let bool_ty = Type::Constructed(TypeName::Str("bool"), vec![]);
 
-        // Get element types
-        let input_elem_ty = match &arr_term.ty {
-            Type::Constructed(TypeName::Array, type_args) if !type_args.is_empty() => type_args[0].clone(),
+        // Get element types and array size from the type
+        let (input_elem_ty, array_size) = match &arr_term.ty {
+            Type::Constructed(TypeName::Array, type_args) if type_args.len() >= 3 => {
+                let elem = type_args[0].clone();
+                let size = match &type_args[2] {
+                    Type::Constructed(TypeName::Size(n), _) => Some(*n),
+                    _ => None,
+                };
+                (elem, size)
+            }
             _ => {
                 return Err(ConvertError::InvalidIntrinsic(
                     "_w_intrinsic_map: second argument must be an array".to_string(),
@@ -1366,17 +1383,23 @@ impl<'a> Converter<'a> {
         // Convert array
         let arr_value = self.convert_term(arr_term)?;
 
-        // Get length
-        let len = self
-            .builder
-            .push_intrinsic(
-                "_w_intrinsic_length",
-                vec![arr_value],
-                i32_ty.clone(),
-                span,
-                node_id,
-            )
-            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+        // Get length - use compile-time size for fixed arrays
+        let len = match array_size {
+            Some(n) => self
+                .builder
+                .push_int(&n.to_string(), i32_ty.clone(), span, node_id)
+                .map_err(|e| ConvertError::BuilderError(e.to_string()))?,
+            None => self
+                .builder
+                .push_intrinsic(
+                    "_w_intrinsic_length",
+                    vec![arr_value],
+                    i32_ty.clone(),
+                    span,
+                    node_id,
+                )
+                .map_err(|e| ConvertError::BuilderError(e.to_string()))?,
+        };
 
         // Create uninitialized result array
         let init_array = self
@@ -1428,9 +1451,12 @@ impl<'a> Converter<'a> {
             .push_index(arr_value, loop_blocks.index, input_elem_ty, span, node_id)
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
 
+        // Call function with element + captures
+        let mut call_args = vec![input_elem];
+        call_args.extend(capture_values.iter().copied());
         let output_elem = self
             .builder
-            .push_call(&f_name, vec![input_elem], output_elem_ty, span, node_id)
+            .push_call(&f_name, call_args, output_elem_ty, span, node_id)
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
 
         let new_arr = self

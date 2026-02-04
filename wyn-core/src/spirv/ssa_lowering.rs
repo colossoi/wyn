@@ -1640,11 +1640,12 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                                 self.constructor.declare_variable("_array_with_tmp", result_ty)?;
                             self.constructor.builder.store(arr_var, arr, None, [])?;
 
-                            // Get element pointer type
+                            // Get element type from array type
+                            let elem_ty = self.constructor.get_array_element_type(result_ty)?;
                             let elem_ptr_ty = self.constructor.builder.type_pointer(
                                 None,
                                 spirv::StorageClass::Function,
-                                result_ty, // This should be element type, simplified here
+                                elem_ty,
                             );
                             let elem_ptr =
                                 self.constructor.builder.access_chain(elem_ptr_ty, None, arr_var, [idx])?;
