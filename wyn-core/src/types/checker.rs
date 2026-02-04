@@ -242,13 +242,15 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    /// Check if a type is numeric (Int, UInt, or Float).
+    /// Check if a type is numeric (Int, UInt, Float, or Vec with numeric elements).
     /// Returns None if the type is a variable (not yet resolved).
     fn is_numeric_type(ty: &Type) -> Option<bool> {
         match ty {
             Type::Constructed(TypeName::Int(_), _) => Some(true),
             Type::Constructed(TypeName::UInt(_), _) => Some(true),
             Type::Constructed(TypeName::Float(_), _) => Some(true),
+            // Vec types are numeric if their element type is numeric
+            Type::Constructed(TypeName::Vec, args) if args.len() == 2 => Self::is_numeric_type(&args[1]),
             Type::Variable(_) => None,
             _ => Some(false),
         }
@@ -1830,21 +1832,19 @@ impl<'a> TypeChecker<'a> {
                 let left_type = self.infer_expression(left)?;
                 let right_type = self.infer_expression(right)?;
 
-                // Check that both operands have compatible types
-                self.context.unify(&left_type, &right_type).map_err(|_| {
-                    err_type_at!(
-                        expr.h.span,
-                        "Binary operator '{}' requires operands of the same type, got {} and {}",
-                        op.op,
-                        left_type,
-                        right_type
-                    )
-                })?;
-
                 // Determine return type based on operator
                 match op.op.as_str() {
                     "==" | "!=" | "<" | ">" | "<=" | ">=" => {
-                        // Comparison operators return boolean
+                        // Comparison operators - unify operands, return boolean
+                        self.context.unify(&left_type, &right_type).map_err(|_| {
+                            err_type_at!(
+                                expr.h.span,
+                                "Binary operator '{}' requires operands of the same type, got {} and {}",
+                                op.op,
+                                left_type,
+                                right_type
+                            )
+                        })?;
                         Ok(Type::Constructed(TypeName::Str("bool"), vec![]))
                     }
                     "&&" | "||" => {
@@ -1858,20 +1858,98 @@ impl<'a> TypeChecker<'a> {
                                 self.format_type(&left_type)
                             )
                         })?;
+                        self.context.unify(&right_type, &bool_type).map_err(|_| {
+                            err_type_at!(
+                                expr.h.span,
+                                "Logical operator '{}' requires boolean operands, got {}",
+                                op.op,
+                                self.format_type(&right_type)
+                            )
+                        })?;
                         Ok(bool_type)
                     }
                     "+" | "-" | "*" | "/" | "%" | "**" => {
-                        // Arithmetic operators require numeric operands
-                        let resolved = left_type.apply(&self.context);
-                        if let Some(false) = Self::is_numeric_type(&resolved) {
+                        // Arithmetic operators: support scalar-scalar, vec-vec, and vec-scalar
+                        let left_resolved = left_type.apply(&self.context);
+                        let right_resolved = right_type.apply(&self.context);
+
+                        // Check for vec-scalar or scalar-vec operations
+                        let (vec_type, scalar_type, is_vec_op) = match (&left_resolved, &right_resolved) {
+                            (Type::Constructed(TypeName::Vec, left_args), Type::Constructed(TypeName::Vec, _)) => {
+                                // vec op vec - unify types and return vec
+                                self.context.unify(&left_type, &right_type).map_err(|_| {
+                                    err_type_at!(
+                                        expr.h.span,
+                                        "Vector arithmetic requires matching vector types, got {} and {}",
+                                        self.format_type(&left_resolved),
+                                        self.format_type(&right_resolved)
+                                    )
+                                })?;
+                                (left_resolved.clone(), left_args.get(1).cloned(), true)
+                            }
+                            (Type::Constructed(TypeName::Vec, args), scalar) => {
+                                // vec op scalar - result is vec type
+                                if let Some(elem_type) = args.get(1) {
+                                    self.context.unify(elem_type, scalar).map_err(|_| {
+                                        err_type_at!(
+                                            expr.h.span,
+                                            "Vector-scalar operation requires matching element type, got {} and {}",
+                                            self.format_type(elem_type),
+                                            self.format_type(scalar)
+                                        )
+                                    })?;
+                                }
+                                (left_resolved.clone(), Some(right_resolved.clone()), true)
+                            }
+                            (scalar, Type::Constructed(TypeName::Vec, args)) => {
+                                // scalar op vec - result is vec type
+                                if let Some(elem_type) = args.get(1) {
+                                    self.context.unify(scalar, elem_type).map_err(|_| {
+                                        err_type_at!(
+                                            expr.h.span,
+                                            "Scalar-vector operation requires matching element type, got {} and {}",
+                                            self.format_type(scalar),
+                                            self.format_type(elem_type)
+                                        )
+                                    })?;
+                                }
+                                (right_resolved.clone(), Some(left_resolved.clone()), true)
+                            }
+                            _ => {
+                                // scalar op scalar - unify types
+                                self.context.unify(&left_type, &right_type).map_err(|_| {
+                                    err_type_at!(
+                                        expr.h.span,
+                                        "Binary operator '{}' requires operands of the same type, got {} and {}",
+                                        op.op,
+                                        left_type,
+                                        right_type
+                                    )
+                                })?;
+                                (left_resolved.clone(), None, false)
+                            }
+                        };
+
+                        // Check that operands are numeric
+                        let check_type = if is_vec_op {
+                            scalar_type.as_ref().unwrap_or(&vec_type)
+                        } else {
+                            &vec_type
+                        };
+                        if let Some(false) = Self::is_numeric_type(check_type) {
                             return Err(err_type_at!(
                                 expr.h.span,
                                 "Arithmetic operator '{}' requires numeric operands, got {}",
                                 op.op,
-                                self.format_type(&resolved)
+                                self.format_type(check_type)
                             ));
                         }
-                        Ok(resolved)
+
+                        if is_vec_op {
+                            Ok(vec_type)
+                        } else {
+                            Ok(left_resolved)
+                        }
                     }
                     _ => Err(err_type_at!(expr.h.span, "Unknown binary operator: {}", op.op)),
                 }

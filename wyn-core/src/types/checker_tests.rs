@@ -1576,7 +1576,6 @@ def test(x: f32) f32 =
 }
 
 #[test]
-#[ignore] // TODO: Implement vector arithmetic (v1 + v2, v1 - v2, etc.)
 fn test_vector_arithmetic() {
     // Vector addition/subtraction should work element-wise
     typecheck_program(
