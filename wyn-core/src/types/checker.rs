@@ -160,6 +160,19 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
+    /// Try to extract constant size from a slice (e.g., `arr[0..4]` → size 4).
+    /// Returns None if end is missing or bounds aren't constant.
+    // TODO: Currently AST constant folding does not cross function boundaries,
+    // so slices with bounds from function parameters won't have constant sizes.
+    fn try_extract_slice_size(slice: &SliceExpr) -> Option<usize> {
+        let start = match &slice.start {
+            Some(s) => Self::try_extract_const_int(s)?,
+            None => 0,
+        };
+        let end = Self::try_extract_const_int(slice.end.as_ref()?)?;
+        if end >= start { Some((end - start) as usize) } else { None }
+    }
+
     /// Pure structural equality without applying substitution.
     /// Used internally after types have already been resolved.
     fn types_equal_structural(left: &Type, right: &Type) -> bool {
@@ -2334,56 +2347,34 @@ impl<'a> TypeChecker<'a> {
                     "Cannot slice non-array type",
                 )?;
 
-                // Extract integer literal value from start (default 0)
-                let start_val: Option<i32> = match &slice.start {
-                    Some(start) => {
-                        let start_type = self.infer_expression(start)?;
-                        self.context.unify(&start_type, &i32()).map_err(|_| {
-                            err_type_at!(
-                                start.h.span,
-                                "Slice start must be an integer, got {}",
-                                self.format_type(&start_type.apply(&self.context))
-                            )
-                        })?;
-                        // Try to extract literal value
-                        match &start.kind {
-                            ExprKind::IntLiteral(n) => i32::try_from(n).ok(),
-                            _ => None,
-                        }
-                    }
-                    None => Some(0), // Default start is 0
-                };
+                // Type-check start bound if present
+                if let Some(start) = &slice.start {
+                    let start_type = self.infer_expression(start)?;
+                    self.context.unify(&start_type, &i32()).map_err(|_| {
+                        err_type_at!(
+                            start.h.span,
+                            "Slice start must be an integer, got {}",
+                            self.format_type(&start_type.apply(&self.context))
+                        )
+                    })?;
+                }
 
-                // Extract integer literal value from end
-                let end_val: Option<i32> = match &slice.end {
-                    Some(end) => {
-                        let end_type = self.infer_expression(end)?;
-                        self.context.unify(&end_type, &i32()).map_err(|_| {
-                            err_type_at!(
-                                end.h.span,
-                                "Slice end must be an integer, got {}",
-                                self.format_type(&end_type.apply(&self.context))
-                            )
-                        })?;
-                        // Try to extract literal value
-                        match &end.kind {
-                            ExprKind::IntLiteral(n) => i32::try_from(n).ok(),
-                            _ => None,
-                        }
-                    }
-                    None => None, // No default for end - would need array length
-                };
+                // Type-check end bound if present
+                if let Some(end) = &slice.end {
+                    let end_type = self.infer_expression(end)?;
+                    self.context.unify(&end_type, &i32()).map_err(|_| {
+                        err_type_at!(
+                            end.h.span,
+                            "Slice end must be an integer, got {}",
+                            self.format_type(&end_type.apply(&self.context))
+                        )
+                    })?;
+                }
 
-                // Compute result size: concrete if both bounds are known, otherwise fresh variable
-                let result_size = match (start_val, end_val) {
-                    (Some(s), Some(e)) if e >= s => {
-                        // Both bounds are known literals - compute concrete size
-                        Type::Constructed(TypeName::Size((e - s) as usize), vec![])
-                    }
-                    _ => {
-                        // Dynamic bounds - use fresh type variable
-                        self.context.new_variable()
-                    }
+                // Compute result size from constant bounds, or use fresh variable
+                let result_size = match Self::try_extract_slice_size(slice) {
+                    Some(size) => Type::Constructed(TypeName::Size(size), vec![]),
+                    None => self.context.new_variable(),
                 };
 
                 // Slice result preserves element type and address space

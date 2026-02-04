@@ -601,3 +601,36 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
 
     assert!(result.is_ok(), "SPIR-V compilation failed: {:?}", result.err());
 }
+
+// =============================================================================
+// Array Variant Monomorphization
+// =============================================================================
+
+#[test]
+fn test_array_variant_monomorphization() {
+    // A function taking [4]i32 should be monomorphized separately for View vs Composite.
+    // When called with data[0..4] (View) and [1,2,3,4] (Composite), we expect two versions.
+    let ssa = compile_to_ssa(
+        r#"
+def sum_first_two(arr: [4]i32) i32 =
+    arr[0] + arr[1]
+
+#[compute]
+entry compute_main(data: []i32) i32 =
+    let from_storage = sum_first_two(data[0..4]) in
+    let from_literal = sum_first_two([1, 2, 3, 4]) in
+    from_storage + from_literal
+"#,
+    );
+
+    // Check that two versions of sum_first_two were created
+    let sum_versions: Vec<_> =
+        ssa.functions.iter().filter(|f| f.name.starts_with("sum_first_two")).collect();
+
+    assert_eq!(
+        sum_versions.len(),
+        2,
+        "Expected 2 monomorphized versions of sum_first_two (View and Composite), got: {:?}",
+        sum_versions.iter().map(|f| &f.name).collect::<Vec<_>>()
+    );
+}
