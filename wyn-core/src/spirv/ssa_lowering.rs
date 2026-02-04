@@ -207,10 +207,22 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                 self.constructor.builder.composite_construct(result_ty, None, elem_ids)?
             }
 
-            InstKind::ArrayRange { .. } => {
-                // ArrayRange is typically handled by expanding into actual values
-                // For now, return an error - this should be lowered earlier
-                bail_spirv!("ArrayRange should be expanded before SPIR-V lowering")
+            InstKind::ArrayRange { start, len, step } => {
+                // Virtual array represented as {start, step, len} struct
+                // This matches the layout expected by lower_virtual_index
+                let start_id = self.get_value(*start)?;
+                let len_id = self.get_value(*len)?;
+                let step_id = match step {
+                    Some(s) => self.get_value(*s)?,
+                    None => self.constructor.const_i32(1), // default step = 1
+                };
+
+                // Construct the struct: {start, step, len}
+                self.constructor.builder.composite_construct(
+                    result_ty,
+                    None,
+                    vec![start_id, step_id, len_id],
+                )?
             }
 
             InstKind::Vector(elems) => {
@@ -718,8 +730,12 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                 let uvec3_type = self.constructor.get_or_create_vec_type(self.constructor.u32_type, 3);
                 let gid = self.constructor.builder.load(uvec3_type, None, gid_var, None, [])?;
                 // Extract x component (flattened thread ID)
-                let thread_id_u32 =
-                    self.constructor.builder.composite_extract(self.constructor.u32_type, None, gid, [0])?;
+                let thread_id_u32 = self.constructor.builder.composite_extract(
+                    self.constructor.u32_type,
+                    None,
+                    gid,
+                    [0],
+                )?;
                 // Convert to i32 (result_ty should be i32)
                 Ok(self.constructor.builder.bitcast(result_ty, None, thread_id_u32)?)
             }
