@@ -245,6 +245,9 @@ pub struct Transformer<'a> {
     top_level_symbols: &'a mut HashMap<String, SymbolId>,
     /// Optional namespace prefix for definition names (e.g., "f32" -> "f32.pi")
     namespace: Option<String>,
+    /// Shared placeholder symbol for pattern matching scrutinees.
+    /// Allocated once and reused to avoid polluting the symbol table.
+    placeholder_sym: SymbolId,
 }
 
 impl<'a> Transformer<'a> {
@@ -253,6 +256,7 @@ impl<'a> Transformer<'a> {
         symbols: &'a mut SymbolTable,
         top_level_symbols: &'a mut HashMap<String, SymbolId>,
     ) -> Self {
+        let placeholder_sym = symbols.alloc("_placeholder".to_string());
         Self {
             type_table,
             term_ids: TermIdSource::new(),
@@ -260,6 +264,7 @@ impl<'a> Transformer<'a> {
             scope: HashMap::new(),
             top_level_symbols,
             namespace: None,
+            placeholder_sym,
         }
     }
 
@@ -270,6 +275,7 @@ impl<'a> Transformer<'a> {
         top_level_symbols: &'a mut HashMap<String, SymbolId>,
         namespace: &str,
     ) -> Self {
+        let placeholder_sym = symbols.alloc("_placeholder".to_string());
         Self {
             type_table,
             term_ids: TermIdSource::new(),
@@ -277,6 +283,7 @@ impl<'a> Transformer<'a> {
             scope: HashMap::new(),
             top_level_symbols,
             namespace: Some(namespace.to_string()),
+            placeholder_sym,
         }
     }
 
@@ -503,8 +510,8 @@ impl<'a> Transformer<'a> {
         let mut lambda_info: Vec<(SymbolId, Type<TypeName>, Vec<PendingBinding>)> = Vec::new();
         let mut current_ty = full_ty;
 
-        // Use a placeholder symbol for the scrutinee in compute_pattern_bindings
-        let placeholder_sym = self.symbols.alloc("_placeholder".to_string());
+        // Use the shared placeholder symbol for the scrutinee in compute_pattern_bindings
+        let placeholder_sym = self.placeholder_sym;
 
         for param in params {
             let param_ty = self.get_param_type(&current_ty);

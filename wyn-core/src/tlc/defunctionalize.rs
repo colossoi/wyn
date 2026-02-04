@@ -121,10 +121,8 @@ const INTRINSIC_HOFS: &[(&str, &[usize])] = &[
 /// Uses existing SymbolIds from the symbol table (intrinsics not referenced in the program are skipped).
 fn register_intrinsic_hofs(symbols: &SymbolTable, hof_info: &mut HashMap<SymbolId, HofInfo>) {
     // Build reverse lookup: name -> SymbolId
-    let name_to_sym: HashMap<&str, SymbolId> = symbols
-        .iter()
-        .map(|(&id, name)| (name.as_str(), id))
-        .collect();
+    let name_to_sym: HashMap<&str, SymbolId> =
+        symbols.iter().map(|(&id, name)| (name.as_str(), id)).collect();
 
     for &(name, indices) in INTRINSIC_HOFS {
         if let Some(&sym) = name_to_sym.get(name) {
