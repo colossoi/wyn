@@ -378,7 +378,7 @@ impl PartialEvaluator {
 
     fn reify_tuple(&mut self, elems: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
         // Build: _w_tuple elem0 elem1 ...
-        let unit_ty = Type::Constructed(TypeName::Str("unit"), vec![]);
+        let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
         let mut result = self.mk_term(ty.clone(), span, TermKind::Var("_w_tuple".to_string()));
 
         for elem in elems {
@@ -396,7 +396,7 @@ impl PartialEvaluator {
     }
 
     fn reify_array(&mut self, elems: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
-        let unit_ty = Type::Constructed(TypeName::Str("unit"), vec![]);
+        let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
         let mut result = self.mk_term(ty.clone(), span, TermKind::Var("_w_array_lit".to_string()));
 
         for elem in elems {
@@ -414,7 +414,7 @@ impl PartialEvaluator {
     }
 
     fn reify_vector(&mut self, elems: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
-        let unit_ty = Type::Constructed(TypeName::Str("unit"), vec![]);
+        let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
         let mut result = self.mk_term(ty.clone(), span, TermKind::Var("_w_vec_lit".to_string()));
 
         for elem in elems {
@@ -432,7 +432,7 @@ impl PartialEvaluator {
     }
 
     fn reify_partial(&mut self, name: &str, args: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
-        let unit_ty = Type::Constructed(TypeName::Str("unit"), vec![]);
+        let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
         let mut result = self.mk_term(ty.clone(), span, TermKind::Var(name.to_string()));
 
         for arg in args {
@@ -450,7 +450,7 @@ impl PartialEvaluator {
     }
 
     fn reify_call(&mut self, name: &str, args: Vec<Value>, original: &Term) -> Value {
-        let unit_ty = Type::Constructed(TypeName::Str("unit"), vec![]);
+        let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
         let mut result = self.mk_term(
             original.ty.clone(),
             original.span,

@@ -638,16 +638,13 @@ fn compile_impl(source: &str) -> CompileResult {
         .to_mir();
 
     // MIR passes
-    let hoisted = flattened.hoist_materializations();
-    let normalized = hoisted.normalize();
-    let defaulted = normalized.default_address_spaces();
+    let defaulted = flattened.default_address_spaces();
     let parallelized = defaulted.parallelize_soacs();
     let dps_applied = parallelized.apply_dps();
     let reachable = dps_applied.filter_reachable();
-    let lifted = reachable.lift_bindings();
 
     // Lower to Shadertoy GLSL
-    match lifted.lower_shadertoy() {
+    match reachable.lower_shadertoy() {
         Ok(glsl) => CompileResult::ok(glsl),
         Err(e) => CompileResult::err(e),
     }
@@ -731,19 +728,16 @@ fn compile_with_ir_impl(source: &str) -> CompileResultWithIR {
     let initial_mir_tree = mir_tree::program_to_tree(&flattened.mir);
 
     // MIR passes
-    let hoisted = flattened.hoist_materializations();
-    let normalized = hoisted.normalize();
-    let defaulted = normalized.default_address_spaces();
+    let defaulted = flattened.default_address_spaces();
     let parallelized = defaulted.parallelize_soacs();
     let dps_applied = parallelized.apply_dps();
     let reachable = dps_applied.filter_reachable();
-    let lifted = reachable.lift_bindings();
 
     // Capture final MIR
-    let final_mir_tree = mir_tree::program_to_tree(&lifted.mir);
+    let final_mir_tree = mir_tree::program_to_tree(&reachable.mir);
 
     // Lower to Shadertoy GLSL
-    match lifted.lower_shadertoy() {
+    match reachable.lower_shadertoy() {
         Ok(glsl) => CompileResultWithIR {
             success: true,
             glsl: Some(glsl),

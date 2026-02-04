@@ -30,7 +30,6 @@ fn compile_to_mir(input: &str) -> mir::Program {
         .defunctionalize()
         .monomorphize()
         .to_mir()
-        .hoist_materializations()
         .mir
 }
 
@@ -55,13 +54,10 @@ fn compile_to_glsl(input: &str) -> String {
         .defunctionalize()
         .monomorphize()
         .to_mir()
-        .hoist_materializations()
-        .normalize()
         .default_address_spaces()
         .parallelize_soacs()
         .apply_dps()
         .filter_reachable()
-        .lift_bindings()
         .lower_shadertoy()
         .expect("GLSL lowering failed")
 }
@@ -636,7 +632,7 @@ entry vertex_main() #[builtin(position)] vec4f32 =
 
 #[test]
 fn test_glsl_output() {
-    // Tests GLSL-specific output: vector constructors, let bindings, normalization
+    // Tests GLSL-specific output: vector constructors, let bindings
     let glsl = compile_to_glsl(
         r#"
 #[uniform(set=0, binding=0)] def iResolution: vec2f32
@@ -658,9 +654,6 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     // Should have local variables
     assert!(glsl.contains("vec2 coord"), "Expected coord local variable");
     assert!(glsl.contains("vec2 uv"), "Expected uv local variable");
-
-    // Should have normalization variables
-    assert!(glsl.contains("_w_norm_"), "Expected normalization variables");
 }
 
 // =============================================================================
@@ -739,6 +732,84 @@ entry fragment_main(#[builtin(frag_coord)] pos: vec4f32) #[location(0)] vec4f32 
 // =============================================================================
 
 #[test]
+fn test_function_call_with_array_arg() {
+    // Test calling a function with an array literal argument
+    let source = r#"
+def sum_first_two(arr: [4]i32) i32 =
+    arr[0] + arr[1]
+
+#[vertex]
+entry vertex_main() #[builtin(position)] vec4f32 =
+    let result = sum_first_two([1, 2, 3, 4]) in
+    @[f32.i32(result), 0.0, 0.0, 1.0]
+"#;
+
+    let mut frontend = crate::cached_frontend();
+    let alias_checked = crate::Compiler::parse(source, &mut frontend.node_counter)
+        .and_then(|p| p.desugar(&mut frontend.node_counter))
+        .and_then(|d| d.resolve(&mut frontend.module_manager))
+        .map(|r| r.fold_ast_constants())
+        .and_then(|f| f.type_check(&mut frontend.module_manager, &mut frontend.schemes))
+        .and_then(|t| t.alias_check())
+        .expect("Failed before TLC transform");
+
+    let builtins = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
+    let result = alias_checked
+        .to_tlc(builtins, &frontend.schemes, &mut frontend.module_manager)
+        .skip_partial_eval()
+        .defunctionalize()
+        .monomorphize()
+        .to_mir()
+        .default_address_spaces()
+        .parallelize_soacs()
+        .apply_dps()
+        .filter_reachable()
+        .lower();
+
+    assert!(result.is_ok(), "SPIR-V compilation failed: {:?}", result.err());
+}
+
+#[test]
+#[ignore] // TODO: parallelize_soacs needs to use push_stmt for binding locals
+fn test_compute_shader_with_storage_slice() {
+    // Test compute shader with storage buffer slice - reproduces array_call_demo.wyn
+    let source = r#"
+def sum_first_two(arr: [4]i32) i32 =
+    arr[0] + arr[1]
+
+#[compute]
+entry compute_main(data: []i32) i32 =
+    let from_storage = sum_first_two(data[0..4]) in
+    let from_literal = sum_first_two([1, 2, 3, 4]) in
+    from_storage + from_literal
+"#;
+
+    let mut frontend = crate::cached_frontend();
+    let alias_checked = crate::Compiler::parse(source, &mut frontend.node_counter)
+        .and_then(|p| p.desugar(&mut frontend.node_counter))
+        .and_then(|d| d.resolve(&mut frontend.module_manager))
+        .map(|r| r.fold_ast_constants())
+        .and_then(|f| f.type_check(&mut frontend.module_manager, &mut frontend.schemes))
+        .and_then(|t| t.alias_check())
+        .expect("Failed before TLC transform");
+
+    let builtins = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
+    let result = alias_checked
+        .to_tlc(builtins, &frontend.schemes, &mut frontend.module_manager)
+        .skip_partial_eval()
+        .defunctionalize()
+        .monomorphize()
+        .to_mir()
+        .default_address_spaces()
+        .parallelize_soacs()
+        .apply_dps()
+        .filter_reachable()
+        .lower();
+
+    assert!(result.is_ok(), "SPIR-V compilation failed: {:?}", result.err());
+}
+
+#[test]
 fn test_full_pipeline_to_spirv() {
     // Verify the full pipeline compiles successfully to SPIR-V
     let source = r#"
@@ -771,13 +842,10 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
         .defunctionalize()
         .monomorphize()
         .to_mir()
-        .hoist_materializations()
-        .normalize()
         .default_address_spaces()
         .parallelize_soacs()
         .apply_dps()
         .filter_reachable()
-        .lift_bindings()
         .lower();
 
     assert!(result.is_ok(), "SPIR-V compilation failed: {:?}", result.err());

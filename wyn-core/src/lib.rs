@@ -25,13 +25,10 @@ pub mod desugar;
 pub mod lowering_common;
 pub mod tlc;
 
-pub mod binding_lifter;
 pub mod constant_folding;
 pub mod default_address_spaces;
 pub mod dps_transform;
 pub mod glsl;
-pub mod materialize_hoisting;
-pub mod normalize;
 pub mod resolve_placeholders;
 pub mod soac_parallelize;
 pub mod spirv;
@@ -45,8 +42,6 @@ mod desugar_tests;
 #[cfg(test)]
 mod pattern_tests;
 
-#[cfg(test)]
-mod binding_lifter_tests;
 #[cfg(test)]
 mod constant_folding_tests;
 #[cfg(test)]
@@ -304,11 +299,8 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 //       -> .to_mir()                                    -> Flattened
 //
 // BackEnd Pipeline (MIR -> output):
-//     -> flattened.hoist_materializations()             -> MaterializationsHoisted
-//       -> .normalize()                                 -> Normalized
-//       -> .default_address_spaces()                    -> AddressSpacesDefaulted
+//     -> flattened.default_address_spaces()             -> AddressSpacesDefaulted
 //       -> .filter_reachable()                          -> Reachable
-//       -> .lift_bindings()                             -> Lifted
 //       -> .lower()                                     -> Lowered
 
 // =============================================================================
@@ -734,32 +726,6 @@ pub struct Flattened {
 }
 
 impl Flattened {
-    /// Hoist duplicate materializations from if branches.
-    pub fn hoist_materializations(self) -> MaterializationsHoisted {
-        let mir = materialize_hoisting::hoist_materializations(self.mir);
-        MaterializationsHoisted { mir }
-    }
-}
-
-/// Duplicate materializations have been hoisted (stub)
-pub struct MaterializationsHoisted {
-    pub mir: mir::Program,
-}
-
-impl MaterializationsHoisted {
-    /// Normalize MIR to A-normal form.
-    pub fn normalize(self) -> Normalized {
-        let mir = normalize::normalize_program(self.mir);
-        Normalized { mir }
-    }
-}
-
-/// MIR has been normalized to A-normal form (stub)
-pub struct Normalized {
-    pub mir: mir::Program,
-}
-
-impl Normalized {
     /// Default unconstrained address space variables to Function.
     /// Note: Monomorphization now happens at TLC level (in to_mir), not MIR level.
     pub fn default_address_spaces(self) -> AddressSpacesDefaulted {
@@ -807,28 +773,14 @@ impl DpsApplied {
     }
 }
 
-/// Unreachable code has been filtered out (stub)
+/// Unreachable code has been filtered out
 pub struct Reachable {
     pub mir: mir::Program,
 }
 
 impl Reachable {
-    /// Hoist loop-invariant bindings out of loops.
-    pub fn lift_bindings(self) -> Lifted {
-        let mir = binding_lifter::lift_bindings(self.mir);
-        Lifted { mir }
-    }
-}
-
-/// Bindings have been lifted (loop-invariant code motion)
-pub struct Lifted {
-    pub mir: mir::Program,
-}
-
-impl Lifted {
     /// Lower MIR to SPIR-V
     pub fn lower(self) -> Result<Lowered> {
-        // Lower to SPIR-V
         let spirv = spirv::lowering::lower(&self.mir)?;
         Ok(Lowered { mir: self.mir, spirv })
     }

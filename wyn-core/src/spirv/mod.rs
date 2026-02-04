@@ -5,5 +5,6 @@
 pub mod lowering;
 #[cfg(test)]
 mod lowering_tests;
+pub mod ssa_lowering;
 
 pub use lowering::lower;

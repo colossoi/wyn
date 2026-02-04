@@ -236,22 +236,17 @@ fn compile_file(
     // Write initial MIR if requested (right after TLC→MIR)
     write_mir_if_requested(&flattened.mir, &output_init_mir, "initial MIR", verbose)?;
 
-    let hoisted = time("hoist_materializations", verbose, || {
-        flattened.hoist_materializations()
-    });
-    let normalized = time("normalize", verbose, || hoisted.normalize());
-    let defaulted = normalized.default_address_spaces();
+    let defaulted = flattened.default_address_spaces();
     let parallelized = time("parallelize_soacs", verbose, || defaulted.parallelize_soacs());
     let dps_applied = parallelized.apply_dps();
     let reachable = time("filter_reachable", verbose, || dps_applied.filter_reachable());
-    let lifted = time("lift_bindings", verbose, || reachable.lift_bindings());
 
     // Write final MIR if requested (right before lowering)
-    write_mir_if_requested(&lifted.mir, &output_final_mir, "final MIR", verbose)?;
+    write_mir_if_requested(&reachable.mir, &output_final_mir, "final MIR", verbose)?;
 
     // Write interface JSON if requested
     if let Some(ref interface_path) = output_interface {
-        let interface = wyn_core::interface::extract_interface(&lifted.mir);
+        let interface = wyn_core::interface::extract_interface(&reachable.mir);
         let json = wyn_core::interface::to_json(&interface).expect("Failed to serialize interface");
         fs::write(interface_path, json)?;
         if verbose {
@@ -261,7 +256,7 @@ fn compile_file(
 
     match target {
         Target::Spirv => {
-            let lowered = time("lower", verbose, || lifted.lower())?;
+            let lowered = time("lower", verbose, || reachable.lower())?;
 
             // Determine output path
             let output_path = output.unwrap_or_else(|| {
@@ -283,7 +278,7 @@ fn compile_file(
             }
         }
         Target::Glsl => {
-            let lowered = time("lower_glsl", verbose, || lifted.lower_glsl())?;
+            let lowered = time("lower_glsl", verbose, || reachable.lower_glsl())?;
 
             // Determine base output path
             let base_path = output.unwrap_or_else(|| input.clone());
@@ -313,7 +308,7 @@ fn compile_file(
             }
         }
         Target::Shadertoy => {
-            let shader_src = time("lower_shadertoy", verbose, || lifted.lower_shadertoy())?;
+            let shader_src = time("lower_shadertoy", verbose, || reachable.lower_shadertoy())?;
 
             // Determine output path
             let output_path = output.unwrap_or_else(|| {

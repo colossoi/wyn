@@ -52,13 +52,10 @@ The compiler uses a multi-stage pipeline with typestate-driven phases. Each stag
 | Stage | Module | Description |
 |-------|--------|-------------|
 | **Flattened** | `tlc::to_mir` | TLC to MIR conversion (all functions already monomorphic) |
-| **MaterializationsHoisted** | `materialize_hoisting` | Duplicate materializations hoisted from branches |
-| **Normalized** | `normalize` | A-normal form conversion |
 | **AddressSpacesDefaulted** | `default_address_spaces` | Unconstrained array variant variables defaulted |
 | **SoacParallelized** | `soac_parallelize` | SOACs parallelized for compute shaders |
 | **Reachable** | `reachability` | Dead code elimination, topological ordering |
-| **Lifted** | `binding_lifter` | Loop-invariant code motion |
-| **Lowered** | `spirv::lowering` | In-place analysis, rewriting, and SPIR-V code generation |
+| **Lowered** | `spirv::lowering` | In-place analysis, SSA conversion, and SPIR-V code generation |
 
 ### Defunctionalization
 
