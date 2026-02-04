@@ -26,7 +26,7 @@ pub(crate) type Substitution = HashMap<usize, Type<TypeName>>;
 ///
 /// This walks through all definitions starting from entry points, finds calls
 /// to polymorphic functions, and creates specialized versions with concrete types.
-pub fn monomorphize(program: Program, schemes: &HashMap<String, TypeScheme>) -> Program {
+pub fn monomorphize(program: Program, schemes: &HashMap<SymbolId, TypeScheme>) -> Program {
     let mono = Monomorphizer::new(program, schemes);
     mono.run()
 }
@@ -44,8 +44,8 @@ pub(crate) struct Monomorphizer<'a> {
     worklist: VecDeque<WorkItem>,
     /// Processed (original_sym, spec_key) pairs
     processed: HashSet<(SymbolId, SpecKey)>,
-    /// Type schemes for polymorphic functions (keyed by string name)
-    schemes: &'a HashMap<String, TypeScheme>,
+    /// Type schemes for polymorphic functions (keyed by SymbolId)
+    schemes: &'a HashMap<SymbolId, TypeScheme>,
     /// Term ID source for creating new terms
     term_ids: TermIdSource,
     /// Uniform declarations (passed through unchanged)
@@ -286,7 +286,7 @@ fn split_function_type(ty: &Type<TypeName>) -> (Vec<Type<TypeName>>, Type<TypeNa
 }
 
 impl<'a> Monomorphizer<'a> {
-    fn new(program: Program, schemes: &'a HashMap<String, TypeScheme>) -> Self {
+    fn new(program: Program, schemes: &'a HashMap<SymbolId, TypeScheme>) -> Self {
         // Build function map and collect entry points
         let mut poly_functions = HashMap::new();
         let mut entry_points = Vec::new();
@@ -585,9 +585,8 @@ impl<'a> Monomorphizer<'a> {
     fn infer_substitution(&self, poly_def: &Def, arg_types: &[Type<TypeName>]) -> Substitution {
         let mut subst = Substitution::new();
 
-        // Get the type scheme for this function (look up by string name)
-        let name_str = self.symbols.get(poly_def.name).expect("BUG: def symbol not in table");
-        if let Some(scheme) = self.schemes.get(name_str) {
+        // Get the type scheme for this function
+        if let Some(scheme) = self.schemes.get(&poly_def.name) {
             let func_type = unwrap_scheme(scheme);
             let (param_types, _ret_type) = split_function_type(func_type);
 
@@ -614,9 +613,8 @@ impl<'a> Monomorphizer<'a> {
     ) -> Option<Substitution> {
         let mut subst = Substitution::new();
 
-        // Get the polymorphic type from scheme or def (look up by string name)
-        let name_str = self.symbols.get(poly_def.name).expect("BUG: def symbol not in table");
-        let poly_type = if let Some(scheme) = self.schemes.get(name_str) {
+        // Get the polymorphic type from scheme or def
+        let poly_type = if let Some(scheme) = self.schemes.get(&poly_def.name) {
             unwrap_scheme(scheme).clone()
         } else {
             poly_def.ty.clone()
