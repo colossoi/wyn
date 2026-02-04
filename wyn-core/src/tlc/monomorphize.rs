@@ -19,7 +19,7 @@ use polytype::Type;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// A substitution mapping type variables to concrete types
-type Substitution = HashMap<usize, Type<TypeName>>;
+pub(crate) type Substitution = HashMap<usize, Type<TypeName>>;
 
 /// Monomorphize a TLC program.
 ///
@@ -30,7 +30,7 @@ pub fn monomorphize(program: Program, schemes: &HashMap<String, TypeScheme>) -> 
     mono.run()
 }
 
-struct Monomorphizer<'a> {
+pub(crate) struct Monomorphizer<'a> {
     /// Original polymorphic functions by name
     poly_functions: HashMap<String, Def>,
     /// Generated monomorphic functions
@@ -67,7 +67,7 @@ struct SubstKey(Vec<(usize, TypeKey)>);
 
 /// Combined specialization key: type substitution.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct SpecKey {
+pub(crate) struct SpecKey {
     /// Type substitution for specialization
     type_subst: SubstKey,
 }
@@ -102,20 +102,20 @@ impl SubstKey {
 
 impl SpecKey {
     /// Create an empty spec key (for monomorphic functions)
-    fn empty() -> Self {
+    pub(crate) fn empty() -> Self {
         SpecKey {
             type_subst: SubstKey(Vec::new()),
         }
     }
 
-    fn new(subst: &Substitution) -> Self {
+    pub(crate) fn new(subst: &Substitution) -> Self {
         SpecKey {
             type_subst: SubstKey::from_subst(subst),
         }
     }
 
     /// Returns true if this represents a non-trivial specialization
-    fn needs_specialization(&self) -> bool {
+    pub(crate) fn needs_specialization(&self) -> bool {
         !self.type_subst.is_empty()
     }
 }
@@ -527,7 +527,10 @@ impl<'a> Monomorphizer<'a> {
 
     /// Collect the spine of a nested application chain.
     /// Given `App(App(App(f, a), b), c)`, returns `(f, [a, b, c])`.
-    fn collect_application_spine<'t>(func: &'t Term, arg: &'t Term) -> (&'t Term, Vec<&'t Term>) {
+    pub(crate) fn collect_application_spine<'t>(
+        func: &'t Term,
+        arg: &'t Term,
+    ) -> (&'t Term, Vec<&'t Term>) {
         let mut args = vec![arg];
         let mut current = func;
 
@@ -839,7 +842,7 @@ fn format_subst(subst: &Substitution) -> String {
     items.iter().map(|(_, ty)| format_type_compact(ty)).collect::<Vec<_>>().join("_")
 }
 
-fn format_type_compact(ty: &Type<TypeName>) -> String {
+pub(crate) fn format_type_compact(ty: &Type<TypeName>) -> String {
     match ty {
         Type::Variable(id) => format!("v{}", id),
         Type::Constructed(TypeName::Size(n), _) => format!("n{}", n),
@@ -886,95 +889,5 @@ fn format_type_compact(ty: &Type<TypeName>) -> String {
             let args_str = args.iter().map(format_type_compact).collect::<Vec<_>>().join("_");
             if args_str.is_empty() { format!("{:?}", name) } else { format!("{:?}_{}", name, args_str) }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ast::Span;
-
-    fn dummy_span() -> Span {
-        Span {
-            start_line: 0,
-            start_col: 0,
-            end_line: 0,
-            end_col: 0,
-        }
-    }
-
-    #[test]
-    fn test_format_type_compact() {
-        let f32_ty = Type::Constructed(TypeName::Float(32), vec![]);
-        assert_eq!(format_type_compact(&f32_ty), "f32");
-
-        let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
-        assert_eq!(format_type_compact(&i32_ty), "i32");
-
-        let size_ty = Type::Constructed(TypeName::Size(4), vec![]);
-        assert_eq!(format_type_compact(&size_ty), "n4");
-    }
-
-    #[test]
-    fn test_spec_key_empty() {
-        let key = SpecKey::empty();
-        assert!(!key.needs_specialization());
-    }
-
-    #[test]
-    fn test_spec_key_with_subst() {
-        let mut subst = Substitution::new();
-        subst.insert(0, Type::Constructed(TypeName::Float(32), vec![]));
-
-        let key = SpecKey::new(&subst);
-        assert!(key.needs_specialization());
-    }
-
-    #[test]
-    fn test_collect_application_spine() {
-        // Build: f(a, b) as App(App(Var(f), a), b)
-        let mut ids = TermIdSource::new();
-        let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
-
-        let f_var = Term {
-            id: ids.next_id(),
-            ty: i32_ty.clone(),
-            span: dummy_span(),
-            kind: TermKind::Var("f".to_string()),
-        };
-
-        let a_var = Term {
-            id: ids.next_id(),
-            ty: i32_ty.clone(),
-            span: dummy_span(),
-            kind: TermKind::Var("a".to_string()),
-        };
-
-        let b_var = Term {
-            id: ids.next_id(),
-            ty: i32_ty.clone(),
-            span: dummy_span(),
-            kind: TermKind::Var("b".to_string()),
-        };
-
-        let app1 = Term {
-            id: ids.next_id(),
-            ty: i32_ty.clone(),
-            span: dummy_span(),
-            kind: TermKind::App {
-                func: Box::new(f_var),
-                arg: Box::new(a_var.clone()),
-            },
-        };
-
-        let (base, args) = Monomorphizer::collect_application_spine(&app1, &b_var);
-
-        // Check base is f
-        assert!(matches!(&base.kind, TermKind::Var(name) if name == "f"));
-
-        // Check args are [a, b]
-        assert_eq!(args.len(), 2);
-        assert!(matches!(&args[0].kind, TermKind::Var(name) if name == "a"));
-        assert!(matches!(&args[1].kind, TermKind::Var(name) if name == "b"));
     }
 }

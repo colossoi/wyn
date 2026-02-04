@@ -18,3 +18,12 @@ pub mod ssa_builder;
 pub mod ssa_parallelize;
 pub mod ssa_soac_analysis;
 pub mod ssa_verify;
+
+#[cfg(test)]
+mod ssa_builder_tests;
+#[cfg(test)]
+mod ssa_soac_analysis_tests;
+#[cfg(test)]
+mod ssa_tests;
+#[cfg(test)]
+mod ssa_verify_tests;

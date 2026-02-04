@@ -7,11 +7,17 @@ pub mod defunctionalize;
 #[cfg(test)]
 mod defunctionalize_tests;
 pub mod monomorphize;
+#[cfg(test)]
+mod monomorphize_tests;
 pub mod partial_eval;
 #[cfg(test)]
 mod partial_eval_tests;
 pub mod specialize;
+#[cfg(test)]
+mod specialize_tests;
 pub mod to_ssa;
+#[cfg(test)]
+mod to_ssa_tests;
 
 use crate::TypeTable;
 use crate::ast::{self, NodeId, Span, TypeName};
