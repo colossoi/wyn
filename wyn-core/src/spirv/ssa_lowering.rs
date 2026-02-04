@@ -551,6 +551,12 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
             ("!=", Constructed(Float(_), _)) => {
                 Ok(self.constructor.builder.f_ord_not_equal(bool_type, None, lhs, rhs)?)
             }
+            ("**", Constructed(Float(_), _)) => {
+                // Power operator using GLSL pow (opcode 26)
+                let glsl = self.constructor.glsl_ext_inst_id;
+                let operands = vec![Operand::IdRef(lhs), Operand::IdRef(rhs)];
+                Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 26, operands)?)
+            }
 
             // Integer operations (signed)
             ("+", Constructed(Int(_), _)) => {
@@ -702,14 +708,15 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
             "cross" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 68, operands)?),
             "reflect" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 71, operands)?),
 
-            "_w_length" => {
-                // Array length - extract from struct or use constant
+            "_w_intrinsic_length" => {
+                // Array length - extract from struct
                 if args.len() != 1 {
-                    bail_spirv!("_w_length requires 1 argument");
+                    bail_spirv!("_w_intrinsic_length requires 1 argument");
                 }
-                // For view arrays, length is at index 1 of the struct {ptr, len}
-                // For now, try extracting index 1
-                Ok(self.constructor.builder.composite_extract(result_ty, None, args[0], [1u32])?)
+                // For virtual arrays (ranges), length is at index 2 of struct {start, step, len}
+                // For view arrays, length is at index 1 of struct {ptr, len}
+                // TODO: dispatch based on array type
+                Ok(self.constructor.builder.composite_extract(result_ty, None, args[0], [2u32])?)
             }
 
             "_w_slice_storage_view" => {

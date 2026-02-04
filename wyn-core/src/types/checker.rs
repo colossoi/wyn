@@ -2313,8 +2313,8 @@ impl<'a> TypeChecker<'a> {
                 };
 
                 let elem_type = start_type.apply(&self.context);
-                // Range literals produce function-local arrays
-                let addrspace = Type::Constructed(TypeName::ArrayVariantComposite, vec![]);
+                // Range literals produce virtual arrays (struct {start, step, len})
+                let addrspace = Type::Constructed(TypeName::ArrayVariantVirtual, vec![]);
                 Ok(Type::Constructed(TypeName::Array, vec![elem_type, addrspace, size_type]))
             }
 

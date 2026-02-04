@@ -5,8 +5,8 @@
 use super::{Def as TlcDef, DefMeta, LoopKind as TlcLoopKind, Program as TlcProgram, Term, TermKind};
 use crate::ast::{self, NodeId, PatternKind, Span, TypeName};
 use crate::mir::{
-    self, ArrayBacking, Block, Body, Def as MirDef, Expr, ExprId, LocalDecl, LocalId, LocalKind,
-    LoopKind as MirLoopKind,
+    self, ArrayBacking, Body, BodyBuilder, Def as MirDef, Expr, ExprId, LocalDecl, LocalId,
+    LocalKind, LoopKind as MirLoopKind,
 };
 use polytype::Type;
 use std::collections::HashMap;
@@ -126,7 +126,9 @@ impl TlcToMir {
                 .collect();
 
             // Transform the extern marker
-            let root = self.transform_term(&def.body, &mut body);
+            let mut builder = BodyBuilder::new(&mut body);
+            let root = self.transform_term(&def.body, &mut builder);
+            builder.finish();
             body.set_root(root);
 
             return MirDef::Function {
@@ -160,7 +162,9 @@ impl TlcToMir {
             .collect();
 
         // Transform the body
-        let root = self.transform_term(inner_body, &mut body);
+        let mut builder = BodyBuilder::new(&mut body);
+        let root = self.transform_term(inner_body, &mut builder);
+        builder.finish();
         body.set_root(root);
 
         if params.is_empty() {
@@ -234,7 +238,9 @@ impl TlcToMir {
         }
 
         // Transform the body
-        let root = self.transform_term(inner_body, &mut body);
+        let mut builder = BodyBuilder::new(&mut body);
+        let root = self.transform_term(inner_body, &mut builder);
+        builder.finish();
         body.set_root(root);
 
         // Convert entry type to ExecutionModel
@@ -366,7 +372,7 @@ impl TlcToMir {
         }
     }
 
-    fn transform_term(&mut self, term: &Term, body: &mut Body) -> ExprId {
+    fn transform_term(&mut self, term: &Term, builder: &mut BodyBuilder) -> ExprId {
         let ty = term.ty.clone();
         let span = term.span;
         let node_id = NodeId(0); // Synthetic term - no AST origin
@@ -375,23 +381,23 @@ impl TlcToMir {
             TermKind::Var(name) => {
                 if let Some(&local_id) = self.locals.get(name) {
                     // Local variable reference
-                    body.alloc_expr(Expr::Local(local_id), ty, span, node_id)
+                    builder.alloc_expr(Expr::Local(local_id), ty, span, node_id)
                 } else if self.top_level.contains_key(name) {
                     // Top-level function or constant → Global reference
-                    body.alloc_expr(Expr::Global(name.clone()), ty, span, node_id)
+                    builder.alloc_expr(Expr::Global(name.clone()), ty, span, node_id)
                 } else {
                     // Unknown variable - could be an intrinsic or global constant
-                    body.alloc_expr(Expr::Global(name.clone()), ty, span, node_id)
+                    builder.alloc_expr(Expr::Global(name.clone()), ty, span, node_id)
                 }
             }
 
-            TermKind::IntLit(s) => body.alloc_expr(Expr::Int(s.clone()), ty, span, node_id),
+            TermKind::IntLit(s) => builder.alloc_expr(Expr::Int(s.clone()), ty, span, node_id),
 
-            TermKind::FloatLit(f) => body.alloc_expr(Expr::Float(f.to_string()), ty, span, node_id),
+            TermKind::FloatLit(f) => builder.alloc_expr(Expr::Float(f.to_string()), ty, span, node_id),
 
-            TermKind::BoolLit(b) => body.alloc_expr(Expr::Bool(*b), ty, span, node_id),
+            TermKind::BoolLit(b) => builder.alloc_expr(Expr::Bool(*b), ty, span, node_id),
 
-            TermKind::StringLit(s) => body.alloc_expr(Expr::String(s.clone()), ty, span, node_id),
+            TermKind::StringLit(s) => builder.alloc_expr(Expr::String(s.clone()), ty, span, node_id),
 
             TermKind::Let {
                 name,
@@ -400,10 +406,10 @@ impl TlcToMir {
                 body: let_body,
             } => {
                 // Transform the RHS first
-                let rhs_id = self.transform_term(rhs, body);
+                let rhs_id = self.transform_term(rhs, builder);
 
                 // Allocate a local for this binding
-                let local_id = body.alloc_local(LocalDecl {
+                let local_id = builder.alloc_local(LocalDecl {
                     name: name.clone(),
                     span: rhs.span,
                     ty: name_ty.clone(),
@@ -411,11 +417,11 @@ impl TlcToMir {
                 });
                 self.locals.insert(name.clone(), local_id);
 
-                // Push statement to flat list
-                body.push_stmt(local_id, rhs_id);
+                // Push statement to current scope
+                builder.push_stmt(local_id, rhs_id);
 
                 // Transform the body - the result becomes the overall result
-                let body_id = self.transform_term(let_body, body);
+                let body_id = self.transform_term(let_body, builder);
 
                 self.locals.remove(name);
 
@@ -428,15 +434,23 @@ impl TlcToMir {
                 then_branch,
                 else_branch,
             } => {
-                let cond_id = self.transform_term(cond, body);
-                let then_id = self.transform_term(then_branch, body);
-                let else_id = self.transform_term(else_branch, body);
+                let cond_id = self.transform_term(cond, builder);
 
-                body.alloc_expr(
+                // Transform then branch in its own scope
+                builder.enter_block();
+                let then_id = self.transform_term(then_branch, builder);
+                let then_block = builder.exit_block(then_id);
+
+                // Transform else branch in its own scope
+                builder.enter_block();
+                let else_id = self.transform_term(else_branch, builder);
+                let else_block = builder.exit_block(else_id);
+
+                builder.alloc_expr(
                     Expr::If {
                         cond: cond_id,
-                        then_: Block::new(then_id),
-                        else_: Block::new(else_id),
+                        then_: then_block,
+                        else_: else_block,
                     },
                     ty,
                     span,
@@ -444,7 +458,7 @@ impl TlcToMir {
                 )
             }
 
-            TermKind::App { func, arg } => self.transform_app(func, arg, ty, span, node_id, body),
+            TermKind::App { func, arg } => self.transform_app(func, arg, ty, span, node_id, builder),
 
             TermKind::Loop {
                 loop_var,
@@ -455,10 +469,10 @@ impl TlcToMir {
                 body: loop_body,
             } => {
                 // Transform init (outside loop scope)
-                let init_id = self.transform_term(init, body);
+                let init_id = self.transform_term(init, builder);
 
                 // Allocate loop variable
-                let loop_var_local = body.alloc_local(LocalDecl {
+                let loop_var_local = builder.alloc_local(LocalDecl {
                     name: loop_var.clone(),
                     span,
                     ty: loop_var_ty.clone(),
@@ -470,8 +484,8 @@ impl TlcToMir {
                 let mir_init_bindings: Vec<(LocalId, ExprId)> = init_bindings
                     .iter()
                     .map(|(name, binding_ty, expr)| {
-                        let expr_id = self.transform_term(expr, body);
-                        let local_id = body.alloc_local(LocalDecl {
+                        let expr_id = self.transform_term(expr, builder);
+                        let local_id = builder.alloc_local(LocalDecl {
                             name: name.clone(),
                             span,
                             ty: binding_ty.clone(),
@@ -485,8 +499,8 @@ impl TlcToMir {
                 // Transform loop kind
                 let mir_kind = match kind {
                     TlcLoopKind::For { var, var_ty, iter } => {
-                        let iter_id = self.transform_term(iter, body);
-                        let var_local = body.alloc_local(LocalDecl {
+                        let iter_id = self.transform_term(iter, builder);
+                        let var_local = builder.alloc_local(LocalDecl {
                             name: var.clone(),
                             span,
                             ty: var_ty.clone(),
@@ -499,8 +513,8 @@ impl TlcToMir {
                         }
                     }
                     TlcLoopKind::ForRange { var, var_ty, bound } => {
-                        let bound_id = self.transform_term(bound, body);
-                        let var_local = body.alloc_local(LocalDecl {
+                        let bound_id = self.transform_term(bound, builder);
+                        let var_local = builder.alloc_local(LocalDecl {
                             name: var.clone(),
                             span,
                             ty: var_ty.clone(),
@@ -513,13 +527,15 @@ impl TlcToMir {
                         }
                     }
                     TlcLoopKind::While { cond } => {
-                        let cond_id = self.transform_term(cond, body);
+                        let cond_id = self.transform_term(cond, builder);
                         MirLoopKind::While { cond: cond_id }
                     }
                 };
 
-                // Transform body
-                let body_id = self.transform_term(loop_body, body);
+                // Transform body in its own scope
+                builder.enter_block();
+                let body_result_id = self.transform_term(loop_body, builder);
+                let body_block = builder.exit_block(body_result_id);
 
                 // Clean up locals
                 self.locals.remove(loop_var);
@@ -533,13 +549,13 @@ impl TlcToMir {
                     TlcLoopKind::While { .. } => {}
                 }
 
-                body.alloc_expr(
+                builder.alloc_expr(
                     Expr::Loop {
                         loop_var: loop_var_local,
                         init: init_id,
                         init_bindings: mir_init_bindings,
                         kind: mir_kind,
-                        body: Block::new(body_id),
+                        body: body_block,
                     },
                     ty,
                     span,
@@ -567,7 +583,7 @@ impl TlcToMir {
 
             // External function reference (linked SPIR-V)
             TermKind::Extern(linkage_name) => {
-                body.alloc_expr(Expr::Extern(linkage_name.clone()), ty, span, node_id)
+                builder.alloc_expr(Expr::Extern(linkage_name.clone()), ty, span, node_id)
             }
         }
     }
@@ -608,7 +624,7 @@ impl TlcToMir {
         ty: Type<TypeName>,
         span: Span,
         node_id: NodeId,
-        body: &mut Body,
+        builder: &mut BodyBuilder,
     ) -> ExprId {
         // Collect the full application spine first
         let (base_term, args) = Self::collect_application_spine(func, arg);
@@ -620,9 +636,9 @@ impl TlcToMir {
                     "BinOp requires exactly 2 arguments, got {}",
                     args.len()
                 );
-                let lhs_id = self.transform_term(args[0], body);
-                let rhs_id = self.transform_term(args[1], body);
-                body.alloc_expr(
+                let lhs_id = self.transform_term(args[0], builder);
+                let rhs_id = self.transform_term(args[1], builder);
+                builder.alloc_expr(
                     Expr::BinOp {
                         op: op.op.clone(),
                         lhs: lhs_id,
@@ -640,8 +656,8 @@ impl TlcToMir {
                     "UnOp requires exactly 1 argument, got {}",
                     args.len()
                 );
-                let operand_id = self.transform_term(args[0], body);
-                body.alloc_expr(
+                let operand_id = self.transform_term(args[0], builder);
+                builder.alloc_expr(
                     Expr::UnaryOp {
                         op: op.op.clone(),
                         operand: operand_id,
@@ -652,11 +668,11 @@ impl TlcToMir {
                 )
             }
 
-            TermKind::Var(name) => self.transform_var_application(name, &args, ty, span, node_id, body),
+            TermKind::Var(name) => self.transform_var_application(name, &args, ty, span, node_id, builder),
 
             _ => {
                 // The base is a computed function value (not a simple Var/BinOp/UnOp)
-                self.transform_term_application(base_term, &args, ty, span, node_id, body)
+                self.transform_term_application(base_term, &args, ty, span, node_id, builder)
             }
         }
     }
@@ -670,17 +686,17 @@ impl TlcToMir {
         ty: Type<TypeName>,
         span: Span,
         node_id: NodeId,
-        body: &mut Body,
+        builder: &mut BodyBuilder,
     ) -> ExprId {
         // Transform all arguments
-        let arg_ids: Vec<_> = args.iter().map(|a| self.transform_term(a, body)).collect();
+        let arg_ids: Vec<_> = args.iter().map(|a| self.transform_term(a, builder)).collect();
 
         // Check if this is a known function with arity info
         if let Some(def) = self.top_level.get(name) {
             let arity = def.arity;
             if arg_ids.len() == arity {
                 // Full call
-                body.alloc_expr(
+                builder.alloc_expr(
                     Expr::Call {
                         func: name.to_string(),
                         args: arg_ids,
@@ -707,7 +723,7 @@ impl TlcToMir {
             }
         } else {
             // Intrinsic or unknown function
-            self.emit_call_or_intrinsic(name, arg_ids, ty, span, node_id, body)
+            self.emit_call_or_intrinsic(name, arg_ids, ty, span, node_id, builder)
         }
     }
 
@@ -719,18 +735,18 @@ impl TlcToMir {
         ty: Type<TypeName>,
         span: Span,
         node_id: NodeId,
-        body: &mut Body,
+        builder: &mut BodyBuilder,
     ) -> ExprId {
         // Transform all arguments
-        let arg_ids: Vec<_> = args.iter().map(|a| self.transform_term(a, body)).collect();
+        let arg_ids: Vec<_> = args.iter().map(|a| self.transform_term(a, builder)).collect();
 
         // Transform the function term
-        let func_id = self.transform_term(term, body);
+        let func_id = self.transform_term(term, builder);
 
         // After defunctionalization, all function applications should resolve to Global refs
-        match body.get_expr(func_id).clone() {
+        match builder.get_expr(func_id).clone() {
             Expr::Global(func_name) => {
-                self.emit_call_or_intrinsic(&func_name, arg_ids, ty, span, node_id, body)
+                self.emit_call_or_intrinsic(&func_name, arg_ids, ty, span, node_id, builder)
             }
             other => {
                 panic!(
@@ -750,22 +766,22 @@ impl TlcToMir {
         ty: Type<TypeName>,
         span: Span,
         node_id: NodeId,
-        body: &mut Body,
+        builder: &mut BodyBuilder,
     ) -> ExprId {
         // Handle intrinsics that become MIR constructs
         match name {
             "_w_vec_lit" => {
-                return body.alloc_expr(Expr::Vector(args), ty, span, node_id);
+                return builder.alloc_expr(Expr::Vector(args), ty, span, node_id);
             }
             "_w_array_lit" => {
                 let len = args.len();
-                let size = body.alloc_expr(
+                let size = builder.alloc_expr(
                     Expr::Int(len.to_string()),
                     Type::Constructed(TypeName::Int(32), vec![]),
                     span,
                     node_id,
                 );
-                return body.alloc_expr(
+                return builder.alloc_expr(
                     Expr::Array {
                         backing: ArrayBacking::Literal(args),
                         size,
@@ -776,11 +792,11 @@ impl TlcToMir {
                 );
             }
             "_w_tuple" => {
-                return body.alloc_expr(Expr::Tuple(args), ty, span, node_id);
+                return builder.alloc_expr(Expr::Tuple(args), ty, span, node_id);
             }
             "_w_range" if args.len() == 3 => {
-                let kind = self.extract_range_kind(body, args[2]);
-                return body.alloc_expr(
+                let kind = self.extract_range_kind(builder, args[2]);
+                return builder.alloc_expr(
                     Expr::Array {
                         backing: ArrayBacking::Range {
                             start: args[0],
@@ -795,8 +811,8 @@ impl TlcToMir {
                 );
             }
             "_w_range_step" if args.len() == 4 => {
-                let kind = self.extract_range_kind(body, args[3]);
-                return body.alloc_expr(
+                let kind = self.extract_range_kind(builder, args[3]);
+                return builder.alloc_expr(
                     Expr::Array {
                         backing: ArrayBacking::Range {
                             start: args[0],
@@ -813,7 +829,7 @@ impl TlcToMir {
             "_w_slice" if args.len() == 3 => {
                 let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
                 // Compute len = end - start
-                let len = body.alloc_expr(
+                let len = builder.alloc_expr(
                     Expr::BinOp {
                         op: "-".to_string(),
                         lhs: args[2], // end
@@ -824,7 +840,7 @@ impl TlcToMir {
                     node_id,
                 );
                 // Create a slice of the source view
-                return body.alloc_expr(
+                return builder.alloc_expr(
                     Expr::SliceStorageView {
                         view: args[0],
                         start: args[1],
@@ -840,14 +856,14 @@ impl TlcToMir {
                 let index_arg = args[1];
 
                 // Check if index is a literal constant
-                let is_const_index = matches!(body.get_expr(index_arg), Expr::Int(_));
+                let is_const_index = matches!(builder.get_expr(index_arg), Expr::Int(_));
 
                 let final_array_arg = if is_const_index {
                     // Constant index - no materialization needed (will use OpCompositeExtract)
                     array_arg
                 } else {
                     // Runtime index - wrap array in Materialize for potential hoisting
-                    let array_ty = body.get_type(array_arg).clone();
+                    let array_ty = builder.get_type(array_arg).clone();
                     let ptr_ty = Type::Constructed(
                         TypeName::Pointer,
                         vec![
@@ -855,10 +871,10 @@ impl TlcToMir {
                             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
                         ],
                     );
-                    body.alloc_expr(Expr::Materialize(array_arg), ptr_ty, span, node_id)
+                    builder.alloc_expr(Expr::Materialize(array_arg), ptr_ty, span, node_id)
                 };
 
-                return body.alloc_expr(
+                return builder.alloc_expr(
                     Expr::Intrinsic {
                         name: "_w_index".to_string(),
                         args: vec![final_array_arg, index_arg],
@@ -873,7 +889,7 @@ impl TlcToMir {
 
         if name.starts_with("_w_") {
             // Intrinsic call
-            body.alloc_expr(
+            builder.alloc_expr(
                 Expr::Intrinsic {
                     name: name.to_string(),
                     args,
@@ -884,7 +900,7 @@ impl TlcToMir {
             )
         } else {
             // Regular function call
-            body.alloc_expr(
+            builder.alloc_expr(
                 Expr::Call {
                     func: name.to_string(),
                     args,
@@ -897,8 +913,8 @@ impl TlcToMir {
     }
 
     /// Extract RangeKind from an integer literal expression.
-    fn extract_range_kind(&self, body: &Body, expr_id: ExprId) -> mir::RangeKind {
-        if let Expr::Int(s) = body.get_expr(expr_id) {
+    fn extract_range_kind(&self, builder: &BodyBuilder, expr_id: ExprId) -> mir::RangeKind {
+        if let Expr::Int(s) = builder.get_expr(expr_id) {
             match s.as_str() {
                 "0" => mir::RangeKind::Inclusive,
                 "1" => mir::RangeKind::Exclusive,

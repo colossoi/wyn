@@ -506,6 +506,133 @@ impl Default for Body {
 }
 
 // =============================================================================
+// BodyBuilder - Scoped Statement Collection
+// =============================================================================
+
+/// Builder for constructing a MIR Body with proper scoped statement collection.
+///
+/// When transforming nested constructs (loops, if-branches), let bindings inside
+/// those constructs should be collected into the construct's Block.stmts, not
+/// the function-level Body.stmts. This builder manages a stack of statement
+/// scopes to handle this correctly.
+///
+/// Usage:
+/// ```ignore
+/// let mut builder = BodyBuilder::new(&mut body);
+///
+/// // Top-level statements go to function body
+/// builder.push_stmt(local1, expr1);
+///
+/// // For a loop body:
+/// builder.enter_block();
+/// // ... transform loop body, any push_stmt goes to this block ...
+/// let body_block = builder.exit_block(result_expr_id);
+///
+/// builder.finish(); // Transfers top-level statements to body
+/// ```
+pub struct BodyBuilder<'a> {
+    body: &'a mut Body,
+    /// Stack of statement scopes.
+    /// Index 0 is the function-level statements.
+    /// Higher indices are nested block scopes (loop body, if branches, etc.)
+    stmt_scopes: Vec<Vec<Stmt>>,
+}
+
+impl<'a> BodyBuilder<'a> {
+    /// Create a new builder wrapping a Body.
+    pub fn new(body: &'a mut Body) -> Self {
+        BodyBuilder {
+            body,
+            // Start with one scope for function-level statements
+            stmt_scopes: vec![Vec::new()],
+        }
+    }
+
+    /// Push a statement to the current scope.
+    pub fn push_stmt(&mut self, local: LocalId, rhs: ExprId) {
+        self.stmt_scopes
+            .last_mut()
+            .expect("stmt_scopes should never be empty")
+            .push(Stmt { local, rhs });
+    }
+
+    /// Enter a new block scope (for loop body, if branch, etc.)
+    pub fn enter_block(&mut self) {
+        self.stmt_scopes.push(Vec::new());
+    }
+
+    /// Exit the current block scope and return a Block with the collected statements.
+    ///
+    /// Panics if called when only the function-level scope remains.
+    pub fn exit_block(&mut self, result: ExprId) -> Block {
+        assert!(
+            self.stmt_scopes.len() > 1,
+            "exit_block called without matching enter_block"
+        );
+        let stmts = self.stmt_scopes.pop().unwrap();
+        Block::with_stmts(stmts, result)
+    }
+
+    /// Finish building and transfer top-level statements to the body.
+    ///
+    /// Panics if there are unclosed block scopes.
+    pub fn finish(mut self) {
+        assert!(
+            self.stmt_scopes.len() == 1,
+            "finish called with {} unclosed block scopes",
+            self.stmt_scopes.len() - 1
+        );
+        let top_level_stmts = self.stmt_scopes.pop().unwrap();
+        self.body.stmts = top_level_stmts;
+    }
+
+    // =========================================================================
+    // Delegated methods to Body
+    // =========================================================================
+
+    /// Allocate a new local variable.
+    pub fn alloc_local(&mut self, decl: LocalDecl) -> LocalId {
+        self.body.alloc_local(decl)
+    }
+
+    /// Allocate a new expression with its metadata.
+    pub fn alloc_expr(
+        &mut self,
+        expr: Expr,
+        ty: Type<TypeName>,
+        span: Span,
+        node_id: NodeId,
+    ) -> ExprId {
+        self.body.alloc_expr(expr, ty, span, node_id)
+    }
+
+    /// Get an expression by ID.
+    pub fn get_expr(&self, id: ExprId) -> &Expr {
+        self.body.get_expr(id)
+    }
+
+    /// Get the type of an expression.
+    pub fn get_type(&self, id: ExprId) -> &Type<TypeName> {
+        self.body.get_type(id)
+    }
+
+    /// Get the span of an expression.
+    pub fn get_span(&self, id: ExprId) -> Span {
+        self.body.get_span(id)
+    }
+
+    /// Get the NodeId of an expression.
+    pub fn get_node_id(&self, id: ExprId) -> NodeId {
+        self.body.get_node_id(id)
+    }
+
+    /// Get a local declaration by ID.
+    pub fn get_local(&self, id: LocalId) -> &LocalDecl {
+        self.body.get_local(id)
+    }
+}
+
+// =============================================================================
 // Program and Definitions
 // =============================================================================
 

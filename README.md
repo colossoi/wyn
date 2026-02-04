@@ -35,8 +35,7 @@ The compiler uses a multi-stage pipeline with typestate-driven phases. Each stag
 | **Parsed** | `parser` | Tokenization and parsing into AST |
 | **Desugared** | `desugar` | Range/slice expressions desugared; SOAC names rewritten to intrinsics |
 | **Resolved** | `name_resolution` | Name resolution and module imports |
-| **AstConstFolded** | `ast_const_fold` | Compile-time integer constant folding |
-| **PlaceholdersResolved** | `resolve_placeholders` | Convert type placeholders to fresh type variables |
+| **AstConstFoldedEarly** | `ast_const_fold` | Compile-time integer constant folding |
 | **TypeChecked** | `types::checker` | Hindley-Milner type inference and checking |
 | **AliasChecked** | `alias_checker` | Uniqueness/alias analysis for in-place updates |
 
@@ -48,14 +47,20 @@ The compiler uses a multi-stage pipeline with typestate-driven phases. Each stag
 | **TlcDefunctionalized** | `tlc::defunctionalize` | Futhark-style defunctionalization: lambda lifting + SOAC capture flattening |
 | **TlcMonomorphized** | `tlc::specialize`, `tlc::monomorphize` | Polymorphic intrinsics specialized; user functions monomorphized |
 
-### Backend (MIR)
+### Backend (MIR → SSA → SPIR-V)
+
+The backend uses two intermediate representations:
+- **MIR** (`mir/mod.rs`): Expression-based IR with locals, control flow as expressions (If/Loop)
+- **SSA** (`mir/ssa.rs`): CFG with basic blocks, block parameters (not phi nodes), explicit terminators
+
 | Stage | Module | Description |
 |-------|--------|-------------|
 | **Flattened** | `tlc::to_mir` | TLC to MIR conversion (all functions already monomorphic) |
 | **AddressSpacesDefaulted** | `default_address_spaces` | Unconstrained array variant variables defaulted |
 | **SoacParallelized** | `soac_parallelize` | SOACs parallelized for compute shaders |
+| **DpsApplied** | `dps_transform` | Destination-passing style for runtime-sized array returns |
 | **Reachable** | `reachability` | Dead code elimination, topological ordering |
-| **Lowered** | `spirv::lowering` | In-place analysis, SSA conversion, and SPIR-V code generation |
+| **Lowered** | `spirv::lowering` | MIR → SSA (`mir/to_ssa`) → SPIR-V (`spirv/ssa_lowering`) |
 
 ### Defunctionalization
 

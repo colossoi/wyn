@@ -797,7 +797,7 @@ impl<'a> Converter<'a> {
         let _iter_ty = self.old_body.get_type(iter).clone();
         let len = self
             .builder
-            .push_intrinsic("_w_length", vec![iter_value], i32_ty.clone(), span, node_id)
+            .push_intrinsic("_w_intrinsic_length", vec![iter_value], i32_ty.clone(), span, node_id)
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
 
         // Branch to header with (init, 0)
@@ -940,7 +940,7 @@ impl<'a> Converter<'a> {
         // Get array length
         let len = self
             .builder
-            .push_intrinsic("_w_length", vec![arr_value], i32_ty.clone(), span, node_id)
+            .push_intrinsic("_w_intrinsic_length", vec![arr_value], i32_ty.clone(), span, node_id)
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
 
         // Create loop blocks
@@ -1075,7 +1075,7 @@ impl<'a> Converter<'a> {
         // Get array length
         let len = self
             .builder
-            .push_intrinsic("_w_length", vec![arr_value], i32_ty.clone(), span, node_id)
+            .push_intrinsic("_w_intrinsic_length", vec![arr_value], i32_ty.clone(), span, node_id)
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
 
         // For map, we need to build up the result array element by element.
