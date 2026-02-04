@@ -19,13 +19,11 @@ use polytype::Type;
 
 pub mod binding_allocator;
 pub mod layout;
-pub mod parallelism;
-pub mod soac_analysis;
 pub mod ssa;
 pub mod ssa_builder;
+pub mod ssa_parallelize;
+pub mod ssa_soac_analysis;
 pub mod ssa_verify;
-pub mod to_ssa;
-pub mod transform;
 
 #[cfg(test)]
 mod tests;

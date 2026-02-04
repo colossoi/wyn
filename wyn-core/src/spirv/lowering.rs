@@ -108,7 +108,7 @@ pub(crate) struct Constructor {
     buffer_block_cache: HashMap<spirv::Word, spirv::Word>, // runtime_array_type -> Block-decorated struct
 
     // Entry point interface tracking
-    entry_point_interfaces: HashMap<String, Vec<spirv::Word>>,
+    pub(crate) entry_point_interfaces: HashMap<String, Vec<spirv::Word>>,
     current_is_entry_point: bool,
     current_output_vars: Vec<spirv::Word>,
     current_input_vars: Vec<(spirv::Word, String, spirv::Word)>, // (var_id, param_name, type_id)
@@ -146,7 +146,7 @@ pub(crate) struct Constructor {
 }
 
 impl Constructor {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let mut builder = Builder::new();
         builder.set_version(1, 5);
         builder.capability(Capability::Shader);
@@ -219,7 +219,7 @@ impl Constructor {
     }
 
     /// Convert a polytype Type to a SPIR-V type ID
-    pub(crate) fn ast_type_to_spirv(&mut self, ty: &PolyType<TypeName>) -> spirv::Word {
+    pub(crate) fn polytype_to_spirv(&mut self, ty: &PolyType<TypeName>) -> spirv::Word {
         match ty {
             PolyType::Variable(id) => {
                 panic!("BUG: Unresolved type variable Variable({}) reached lowering.", id);
@@ -260,13 +260,13 @@ impl Constructor {
                         }
                         // Non-empty tuple becomes struct
                         let field_types: Vec<spirv::Word> =
-                            args.iter().map(|a| self.ast_type_to_spirv(a)).collect();
+                            args.iter().map(|a| self.polytype_to_spirv(a)).collect();
                         self.get_or_create_struct_type(field_types)
                     }
                     TypeName::Array => {
                         // Array[elem, variant, size]
                         assert!(args.len() == 3);
-                        let elem_type = self.ast_type_to_spirv(&args[0]);
+                        let elem_type = self.polytype_to_spirv(&args[0]);
                         let variant = &args[1];
                         let size = &args[2];
 
@@ -334,7 +334,7 @@ impl Constructor {
                                 panic!("BUG: Vec type has invalid size argument: {:?}.", args[0]);
                             }
                         };
-                        let elem_type = self.ast_type_to_spirv(&args[1]);
+                        let elem_type = self.polytype_to_spirv(&args[1]);
                         self.get_or_create_vec_type(elem_type, size)
                     }
                     TypeName::Mat => {
@@ -357,7 +357,7 @@ impl Constructor {
                                 panic!("BUG: Mat type has invalid rows argument: {:?}.", args[1]);
                             }
                         };
-                        let elem_type = self.ast_type_to_spirv(&args[2]);
+                        let elem_type = self.polytype_to_spirv(&args[2]);
                         let col_vec_type = self.get_or_create_vec_type(elem_type, rows);
                         self.builder.type_matrix(col_vec_type, cols)
                     }
@@ -369,7 +369,7 @@ impl Constructor {
                         if args.is_empty() {
                             panic!("BUG: Pointer type requires a pointee type argument.");
                         }
-                        let pointee_type = self.ast_type_to_spirv(&args[0]);
+                        let pointee_type = self.polytype_to_spirv(&args[0]);
                         self.builder.type_pointer(None, StorageClass::Function, pointee_type)
                     }
                     TypeName::Unique => {
@@ -378,13 +378,13 @@ impl Constructor {
                         if args.is_empty() {
                             panic!("BUG: Unique type requires an underlying type argument.");
                         }
-                        self.ast_type_to_spirv(&args[0])
+                        self.polytype_to_spirv(&args[0])
                     }
                     TypeName::Existential(_) => {
                         // Existential type: unwrap and convert the inner type (in args[0])
                         // The size variable is runtime-determined, handled by Slice representation
                         let inner = &args[0];
-                        self.ast_type_to_spirv(inner)
+                        self.polytype_to_spirv(inner)
                     }
                     TypeName::Arrow => {
                         // Arrow types (function types) come from closures that have been defunctionalized.
@@ -397,7 +397,7 @@ impl Constructor {
                         // Address space markers are used within Array types but shouldn't appear
                         // as standalone types requiring SPIR-V representation.
                         panic!(
-                            "BUG: Address space marker {:?} reached ast_type_to_spirv as standalone type. \
+                            "BUG: Address space marker {:?} reached polytype_to_spirv as standalone type. \
                             This should only appear as part of Array[elem, addrspace, size]. Full type: {:?}",
                             name, ty
                         );
@@ -468,7 +468,7 @@ impl Constructor {
     /// Create a Block-decorated struct type for a uniform buffer.
     /// Returns the struct type ID. Each uniform gets its own unique struct
     /// (not cached) since Block structs shouldn't be shared.
-    fn create_uniform_block_type(&mut self, value_type: spirv::Word) -> spirv::Word {
+    pub(crate) fn create_uniform_block_type(&mut self, value_type: spirv::Word) -> spirv::Word {
         let block_struct = self.builder.type_struct(vec![value_type]);
 
         // Decorate as Block (required for UBO in Vulkan)
@@ -486,7 +486,7 @@ impl Constructor {
     }
 
     /// Begin a new function
-    fn begin_function(
+    pub(crate) fn begin_function(
         &mut self,
         name: &str,
         param_names: &[&str],
@@ -821,7 +821,7 @@ impl<'a> LowerCtx<'a> {
             } => {
                 // Create a SPIR-V uniform variable wrapped in a Block-decorated struct
                 // (required for Vulkan uniform buffer compatibility)
-                let value_type = self.constructor.ast_type_to_spirv(ty);
+                let value_type = self.constructor.polytype_to_spirv(ty);
                 let block_type = self.constructor.create_uniform_block_type(value_type);
                 let ptr_type =
                     self.constructor.get_or_create_ptr_type(spirv::StorageClass::Uniform, block_type);
@@ -856,7 +856,7 @@ impl<'a> LowerCtx<'a> {
                 // A cleaner implementation might:
                 // 1. Rename to `descriptor_variables` (more accurate)
                 // 2. Or have separate `uniform_variables` and `storage_variables` maps
-                let storage_type = self.constructor.ast_type_to_spirv(ty);
+                let storage_type = self.constructor.polytype_to_spirv(ty);
                 let ptr_type = self
                     .constructor
                     .get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, storage_type);
@@ -997,8 +997,8 @@ fn lower_regular_function(
 
     let param_names: Vec<&str> = params_to_lower.iter().map(|&p| body.get_local(p).name.as_str()).collect();
     let param_types: Vec<spirv::Word> =
-        params_to_lower.iter().map(|&p| constructor.ast_type_to_spirv(&body.get_local(p).ty)).collect();
-    let return_type = constructor.ast_type_to_spirv(ret_type);
+        params_to_lower.iter().map(|&p| constructor.polytype_to_spirv(&body.get_local(p).ty)).collect();
+    let return_type = constructor.polytype_to_spirv(ret_type);
 
     // Convert to SSA form
     let param_names_owned: Vec<String> = param_names.iter().map(|s| s.to_string()).collect();
@@ -1039,8 +1039,8 @@ fn lower_extern_function(
 
     // Build parameter types
     let param_types: Vec<spirv::Word> =
-        params_to_lower.iter().map(|&p| constructor.ast_type_to_spirv(&body.get_local(p).ty)).collect();
-    let return_type = constructor.ast_type_to_spirv(ret_type);
+        params_to_lower.iter().map(|&p| constructor.polytype_to_spirv(&body.get_local(p).ty)).collect();
+    let return_type = constructor.polytype_to_spirv(ret_type);
 
     // Create function type
     let func_type = constructor.builder.type_function(return_type, param_types.iter().copied());
@@ -1052,7 +1052,7 @@ fn lower_extern_function(
 
     // Add function parameters (required even for imported functions)
     for &param_id in params_to_lower {
-        let param_ty = constructor.ast_type_to_spirv(&body.get_local(param_id).ty);
+        let param_ty = constructor.polytype_to_spirv(&body.get_local(param_id).ty);
         constructor.builder.function_parameter(param_ty)?;
     }
 
@@ -1092,7 +1092,7 @@ fn lower_entry_point_from_def(
 
     // Create Input variables for parameters
     for input in inputs.iter() {
-        let input_type_id = constructor.ast_type_to_spirv(&input.ty);
+        let input_type_id = constructor.polytype_to_spirv(&input.ty);
         let ptr_type_id = constructor.get_or_create_ptr_type(StorageClass::Input, input_type_id);
         let var_id = constructor.builder.variable(ptr_type_id, None, StorageClass::Input, None);
 
@@ -1127,7 +1127,7 @@ fn lower_entry_point_from_def(
             continue;
         }
 
-        let output_type_id = constructor.ast_type_to_spirv(&output.ty);
+        let output_type_id = constructor.polytype_to_spirv(&output.ty);
         let ptr_type_id = constructor.get_or_create_ptr_type(StorageClass::Output, output_type_id);
         let var_id = constructor.builder.variable(ptr_type_id, None, StorageClass::Output, None);
 
@@ -1211,7 +1211,7 @@ fn lower_entry_point_from_def(
     if outputs.len() > 1 {
         // Multiple outputs - extract components from tuple result
         for (i, &output_var) in constructor.current_output_vars.clone().iter().enumerate() {
-            let comp_type_id = constructor.ast_type_to_spirv(&outputs[i].ty);
+            let comp_type_id = constructor.polytype_to_spirv(&outputs[i].ty);
             let component =
                 constructor.builder.composite_extract(comp_type_id, None, result, [i as u32])?;
             constructor.builder.store(output_var, component, None, [])?;
@@ -1277,7 +1277,7 @@ fn lower_compute_entry_point(
     // Create storage buffers from pipeline buffer blocks
     for buffer in &pipeline.buffers {
         let field = &buffer.fields[0]; // Single runtime-sized field for now
-        let elem_type_id = constructor.ast_type_to_spirv(&field.ty);
+        let elem_type_id = constructor.polytype_to_spirv(&field.ty);
 
         // Calculate proper array stride from element type
         let stride = crate::mir::layout::type_byte_size(&field.ty)
@@ -1372,7 +1372,7 @@ fn lower_compute_entry_point(
     if !body_returns_unit {
         // Body returns a value that needs to be written to output buffer
         let output_elem_type_id = if let Some(output) = outputs.first() {
-            constructor.ast_type_to_spirv(&output.ty)
+            constructor.polytype_to_spirv(&output.ty)
         } else {
             // No output - just return
             constructor.builder.ret()?;
@@ -1521,7 +1521,7 @@ fn lower_const_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId)
             let elem_ids: Result<Vec<_>> =
                 elems.iter().map(|&id| lower_const_expr(constructor, body, id)).collect();
             let elem_ids = elem_ids?;
-            let struct_type = constructor.ast_type_to_spirv(ty);
+            let struct_type = constructor.polytype_to_spirv(ty);
             Ok(constructor.builder.constant_composite(struct_type, elem_ids))
         }
         Expr::Array { backing, .. } => match backing {
@@ -1529,7 +1529,7 @@ fn lower_const_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId)
                 let elem_ids: Result<Vec<_>> =
                     elems.iter().map(|&id| lower_const_expr(constructor, body, id)).collect();
                 let elem_ids = elem_ids?;
-                let array_type = constructor.ast_type_to_spirv(ty);
+                let array_type = constructor.polytype_to_spirv(ty);
                 Ok(constructor.builder.constant_composite(array_type, elem_ids))
             }
             _ => {
@@ -1540,7 +1540,7 @@ fn lower_const_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId)
             let elem_ids: Result<Vec<_>> =
                 elems.iter().map(|&id| lower_const_expr(constructor, body, id)).collect();
             let elem_ids = elem_ids?;
-            let array_type = constructor.ast_type_to_spirv(ty);
+            let array_type = constructor.polytype_to_spirv(ty);
             Ok(constructor.builder.constant_composite(array_type, elem_ids))
         }
         Expr::Matrix(rows) => {
@@ -1554,14 +1554,14 @@ fn lower_const_expr(constructor: &mut Constructor, body: &Body, expr_id: ExprId)
                         .collect::<Result<Vec<_>>>()?;
                     // Get element type from first element
                     let elem_ty = body.get_type(row[0]);
-                    let elem_spirv_type = constructor.ast_type_to_spirv(elem_ty);
+                    let elem_spirv_type = constructor.polytype_to_spirv(elem_ty);
                     let row_type = constructor.get_or_create_vec_type(elem_spirv_type, row.len() as u32);
                     Ok(constructor.builder.constant_composite(row_type, elem_ids))
                 })
                 .collect::<Result<Vec<_>>>()?;
 
             // Get the matrix type
-            let result_type = constructor.ast_type_to_spirv(ty);
+            let result_type = constructor.polytype_to_spirv(ty);
 
             // Construct the constant matrix from row vectors
             Ok(constructor.builder.constant_composite(result_type, row_ids))
