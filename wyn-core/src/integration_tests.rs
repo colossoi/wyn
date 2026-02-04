@@ -770,7 +770,6 @@ entry vertex_main() #[builtin(position)] vec4f32 =
 }
 
 #[test]
-#[ignore] // TODO: parallelize_soacs needs to use push_stmt for binding locals
 fn test_compute_shader_with_storage_slice() {
     // Test compute shader with storage buffer slice - reproduces array_call_demo.wyn
     let source = r#"

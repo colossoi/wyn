@@ -709,6 +709,63 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                 Ok(args[0])
             }
 
+            "__builtin_thread_id" => {
+                // Load GlobalInvocationId.x as the thread ID
+                let gid_var = self
+                    .constructor
+                    .global_invocation_id
+                    .ok_or_else(|| err_spirv!("GlobalInvocationId not set for compute shader"))?;
+                let uvec3_type = self.constructor.get_or_create_vec_type(self.constructor.u32_type, 3);
+                let gid = self.constructor.builder.load(uvec3_type, None, gid_var, None, [])?;
+                // Extract x component (flattened thread ID)
+                let thread_id_u32 =
+                    self.constructor.builder.composite_extract(self.constructor.u32_type, None, gid, [0])?;
+                // Convert to i32 (result_ty should be i32)
+                Ok(self.constructor.builder.bitcast(result_ty, None, thread_id_u32)?)
+            }
+
+            "_w_storage_len" => {
+                // Get the length of a storage buffer via OpArrayLength
+                // Args: [set_id, binding_id] (as i32 constants that were lowered to SPIR-V)
+                if args.len() != 2 {
+                    bail_spirv!("_w_storage_len requires 2 arguments (set, binding)");
+                }
+                // The args are SPIR-V IDs of constants. We need to extract their values.
+                // For now, since we're generating these from known integer literals in
+                // soac_parallelize, we can look them up in the constructor's constant cache.
+                let set = self
+                    .constructor
+                    .int_const_reverse
+                    .get(&args[0])
+                    .copied()
+                    .ok_or_else(|| err_spirv!("_w_storage_len: set must be a constant"))?
+                    as u32;
+                let binding = self
+                    .constructor
+                    .int_const_reverse
+                    .get(&args[1])
+                    .copied()
+                    .ok_or_else(|| err_spirv!("_w_storage_len: binding must be a constant"))?
+                    as u32;
+
+                let &(buffer_var, _, _) =
+                    self.constructor.storage_buffers.get(&(set, binding)).ok_or_else(|| {
+                        err_spirv!("Storage buffer not found for set={}, binding={}", set, binding)
+                    })?;
+
+                // OpArrayLength returns u32 length of a runtime array in a struct
+                // The struct is at index 0 (the buffer block), the array is member 0
+                let len_u32 = self.constructor.builder.array_length(
+                    self.constructor.u32_type,
+                    None,
+                    buffer_var,
+                    0, // Member index of the runtime array in the struct
+                )?;
+
+                // Convert to i32 if needed
+                Ok(self.constructor.builder.bitcast(result_ty, None, len_u32)?)
+            }
+
             _ => bail_spirv!("Unknown intrinsic: {}", name),
         }
     }

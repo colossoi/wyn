@@ -136,7 +136,7 @@ pub(crate) struct Constructor {
     compute_params: HashMap<String, (u32, u32)>,
 
     /// GlobalInvocationId variable for compute shaders (set during entry point setup)
-    global_invocation_id: Option<spirv::Word>,
+    pub(crate) global_invocation_id: Option<spirv::Word>,
 
     /// Linked SPIR-V functions: linkage_name -> function_id
     pub(crate) linked_functions: HashMap<String, spirv::Word>,
@@ -417,7 +417,7 @@ impl Constructor {
     }
 
     /// Get or create a vector type
-    fn get_or_create_vec_type(&mut self, elem_type: spirv::Word, size: u32) -> spirv::Word {
+    pub(crate) fn get_or_create_vec_type(&mut self, elem_type: spirv::Word, size: u32) -> spirv::Word {
         let key = (elem_type, size);
         if let Some(&ty) = self.vec_type_cache.get(&key) {
             return ty;

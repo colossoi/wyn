@@ -120,31 +120,38 @@ fn create_single_thread_fallback(
     let bool_ty = Type::Constructed(TypeName::Str("bool"), vec![]);
     let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
 
-    // Create local mapping for non-storage inputs
+    // Create local mapping for all inputs
+    // Storage buffer inputs need special handling - they're Let bindings, not Params
     let mut local_map: HashMap<LocalId, LocalId> = HashMap::new();
     let mut storage_locals: HashMap<LocalId, (String, Type<TypeName>)> = HashMap::new();
+    // (view_local, set, binding, ty) for storage buffers
+    let mut storage_buffer_wrappings: Vec<(LocalId, u32, u32, Type<TypeName>)> = Vec::new();
 
+    // First, handle storage buffer inputs
+    for input in inputs {
+        if let Some((set, binding)) = input.storage_binding {
+            let old_id = input.local;
+            let local = &body.locals[old_id.0 as usize];
+
+            // Create view local with LocalKind::Let (not Param)
+            let view_local = new_body.alloc_local(LocalDecl {
+                name: local.name.clone(),
+                span: local.span,
+                ty: local.ty.clone(),
+                kind: LocalKind::Let,
+            });
+
+            local_map.insert(old_id, view_local);
+            storage_locals.insert(old_id, (input.name.clone(), input.ty.clone()));
+            storage_buffer_wrappings.push((view_local, set, binding, local.ty.clone()));
+        }
+    }
+
+    // Then handle non-storage locals
     for (old_idx, local) in body.locals.iter().enumerate() {
         let old_id = LocalId(old_idx as u32);
-
-        // Check if this local is a storage input
-        let is_storage_input = inputs.iter().any(|input| {
-            input.local == old_id
-                && matches!(
-                    &input.ty,
-                    Type::Constructed(TypeName::Array, args) if args.len() >= 2 && matches!(&args[1], Type::Constructed(TypeName::ArrayVariantView, _))
-                )
-        });
-
-        if is_storage_input {
-            // Find the input to get its name
-            if let Some(input) = inputs.iter().find(|i| i.local == old_id) {
-                storage_locals.insert(old_id, (input.name.clone(), input.ty.clone()));
-            }
-            // Still need to allocate the local for the mapping
-            let new_id = new_body.alloc_local(local.clone());
-            local_map.insert(old_id, new_id);
-        } else {
+        if !local_map.contains_key(&old_id) {
+            // Non-storage locals keep their original kind
             let new_id = new_body.alloc_local(local.clone());
             local_map.insert(old_id, new_id);
         }
@@ -158,10 +165,59 @@ fn create_single_thread_fallback(
         kind: LocalKind::Let,
     });
 
-    // 1. __builtin_thread_id()
-    // TODO: This expression is allocated but not used since Expr::Let was removed.
-    // The pass needs restructuring to properly bind the thread_id.
-    let _thread_id_intrinsic = new_body.alloc_expr(
+    // 1. Create StorageView expressions for storage buffers and bind them
+    for &(view_local, set, binding, ref ty) in &storage_buffer_wrappings {
+        // Create zero offset (start of buffer)
+        let zero_offset = new_body.alloc_expr(
+            Expr::Int("0".to_string()),
+            i32_ty.clone(),
+            dummy_span,
+            dummy_node_id,
+        );
+
+        // Create integer literals for _w_storage_len intrinsic
+        let set_expr = new_body.alloc_expr(
+            Expr::Int(set.to_string()),
+            i32_ty.clone(),
+            dummy_span,
+            dummy_node_id,
+        );
+        let binding_expr = new_body.alloc_expr(
+            Expr::Int(binding.to_string()),
+            i32_ty.clone(),
+            dummy_span,
+            dummy_node_id,
+        );
+
+        // _w_storage_len(set, binding) - get runtime length via OpArrayLength
+        let storage_len = new_body.alloc_expr(
+            Expr::Intrinsic {
+                name: "_w_storage_len".to_string(),
+                args: vec![set_expr, binding_expr],
+            },
+            i32_ty.clone(),
+            dummy_span,
+            dummy_node_id,
+        );
+
+        // StorageView { set, binding, offset: 0, len }
+        let view_expr = new_body.alloc_expr(
+            Expr::StorageView {
+                set,
+                binding,
+                offset: zero_offset,
+                len: storage_len,
+            },
+            ty.clone(),
+            dummy_span,
+            dummy_node_id,
+        );
+
+        new_body.push_stmt(view_local, view_expr);
+    }
+
+    // 2. __builtin_thread_id()
+    let thread_id_intrinsic = new_body.alloc_expr(
         Expr::Intrinsic {
             name: "__builtin_thread_id".to_string(),
             args: vec![],
@@ -170,8 +226,9 @@ fn create_single_thread_fallback(
         dummy_span,
         dummy_node_id,
     );
+    new_body.push_stmt(thread_id_local, thread_id_intrinsic);
 
-    // 2. thread_id == 0 check
+    // 3. thread_id == 0 check
     let zero = new_body.alloc_expr(
         Expr::Int("0".to_string()),
         i32_ty.clone(),
@@ -195,18 +252,33 @@ fn create_single_thread_fallback(
         dummy_node_id,
     );
 
-    // 3. Copy body with storage rewrites
+    // 4. Copy statements from original body (let bindings) into a block
+    let mut then_stmts = Vec::new();
+    for stmt in &body.stmts {
+        let new_rhs =
+            copy_expr_tree_with_storage(&mut new_body, body, stmt.rhs, &local_map, &storage_locals);
+        let new_local = *local_map.get(&stmt.local).unwrap_or(&stmt.local);
+        then_stmts.push(crate::mir::Stmt { local: new_local, rhs: new_rhs });
+    }
+
+    // 5. Copy body root expression with storage rewrites
     let body_copy =
         copy_expr_tree_with_storage(&mut new_body, body, body.root, &local_map, &storage_locals);
 
-    // 4. Unit value for early return
+    // 6. Build the then-block with statements and result
+    let then_block = Block {
+        stmts: then_stmts,
+        result: body_copy,
+    };
+
+    // 7. Unit value for early return
     let unit_expr = new_body.alloc_expr(Expr::Unit, unit_ty.clone(), dummy_span, dummy_node_id);
 
-    // 5. if thread_id == 0 then body else ()
+    // 8. if thread_id == 0 then body else ()
     let if_expr = new_body.alloc_expr(
         Expr::If {
             cond: is_thread_zero,
-            then_: Block::new(body_copy),
+            then_: then_block,
             else_: Block::new(unit_expr),
         },
         unit_ty.clone(),
@@ -214,8 +286,7 @@ fn create_single_thread_fallback(
         dummy_node_id,
     );
 
-    // 6. Set up the body - thread_id check wraps the body
-    // TODO: This needs to be rewritten to use the new MIR structure without Expr::Let
+    // 9. Set the root expression
     new_body.set_root(if_expr);
 
     // Output becomes unit since we're writing to storage directly (or just discarding)
@@ -842,24 +913,27 @@ fn try_parallelize_body(
         )
     };
 
-    // 9. Set the root expression
-    // TODO: This pass needs to be rewritten to use the new MIR structure without Expr::Let.
-    // The binding setup (thread_id, chunk calculations, view bindings) must be done
-    // through a different mechanism now that Expr::Let has been removed.
-    // For now, just use the final expression as the root.
-    let _ = (
-        thread_id_local,
-        thread_id_intrinsic,
-        chunk_start_local,
-        chunk_start_expr,
-        chunk_size_local,
-        chunk_size_expr,
-        chunk_end_local,
-        chunk_end_expr,
-        array_len_local,
-        array_len_expr,
-        view_bindings,
-    );
+    // 9. Bind all locals via push_stmt (order matters for dependencies)
+    // First: storage view bindings (no dependencies)
+    for (view_local, view_expr) in view_bindings {
+        new_body.push_stmt(view_local, view_expr);
+    }
+
+    // Thread ID (no dependencies)
+    new_body.push_stmt(thread_id_local, thread_id_intrinsic);
+
+    // Array length (no dependencies)
+    new_body.push_stmt(array_len_local, array_len_expr);
+
+    // Chunk size (depends on array_len_local)
+    new_body.push_stmt(chunk_size_local, chunk_size_expr);
+
+    // Chunk start (depends on thread_id_local, chunk_size_local)
+    new_body.push_stmt(chunk_start_local, chunk_start_expr);
+
+    // Chunk end (depends on chunk_start_local, chunk_size_local, array_len_local)
+    new_body.push_stmt(chunk_end_local, chunk_end_expr);
+
     new_body.set_root(final_expr);
 
     // Keep original outputs - the map still returns an array
