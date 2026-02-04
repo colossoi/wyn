@@ -2,7 +2,6 @@ pub mod ast;
 pub mod diags;
 pub mod error;
 pub mod impl_source;
-pub mod interface;
 pub mod intrinsics;
 pub mod lexer;
 pub mod mir;
@@ -10,8 +9,6 @@ pub mod module_manager;
 pub mod name_resolution;
 pub mod parser;
 pub mod pattern;
-pub mod pipeline;
-pub mod reachability;
 pub mod scope;
 pub mod types;
 pub mod visitor;
@@ -25,12 +22,8 @@ pub mod desugar;
 pub mod lowering_common;
 pub mod tlc;
 
-pub mod constant_folding;
-pub mod default_address_spaces;
-pub mod dps_transform;
 pub mod glsl;
 pub mod resolve_placeholders;
-pub mod soac_parallelize;
 pub mod spirv;
 
 #[cfg(test)]
@@ -43,11 +36,7 @@ mod desugar_tests;
 mod pattern_tests;
 
 #[cfg(test)]
-mod constant_folding_tests;
-#[cfg(test)]
 mod integration_tests;
-#[cfg(test)]
-mod mir_transform_tests;
 #[cfg(test)]
 mod scope_tests;
 
@@ -709,116 +698,52 @@ pub struct TlcMonomorphized {
 }
 
 impl TlcMonomorphized {
-    /// Transform TLC to MIR
-    pub fn to_mir(self) -> Flattened {
-        let mir = tlc::to_mir::TlcToMir::transform(&self.tlc);
-        Flattened { mir }
+    /// Transform TLC directly to SSA.
+    pub fn to_ssa(self) -> std::result::Result<SsaConverted, tlc::to_ssa::ConvertError> {
+        let ssa = tlc::to_ssa::convert_program(&self.tlc)?;
+        Ok(SsaConverted { ssa })
     }
 }
 
-// =============================================================================
-// BackEnd stages (MIR-based)
-// =============================================================================
-
-/// AST has been flattened to MIR
-pub struct Flattened {
-    pub mir: mir::Program,
+/// TLC has been converted directly to SSA
+pub struct SsaConverted {
+    pub ssa: tlc::to_ssa::SsaProgram,
 }
 
-impl Flattened {
-    /// Default unconstrained address space variables to Function.
-    /// Note: Monomorphization now happens at TLC level (in to_mir), not MIR level.
-    pub fn default_address_spaces(self) -> AddressSpacesDefaulted {
-        let mir = default_address_spaces::default_address_spaces(self.mir);
-        AddressSpacesDefaulted { mir }
-    }
-}
-
-/// Address space variables have been defaulted
-pub struct AddressSpacesDefaulted {
-    pub mir: mir::Program,
-}
-
-impl AddressSpacesDefaulted {
+impl SsaConverted {
     /// Parallelize SOACs in compute shaders.
-    pub fn parallelize_soacs(self) -> SoacParallelized {
-        let mir = soac_parallelize::parallelize_soacs(self.mir);
-        SoacParallelized { mir }
+    pub fn parallelize_soacs(self) -> SsaParallelized {
+        let ssa = mir::ssa_parallelize::parallelize_soacs(self.ssa);
+        SsaParallelized { ssa }
     }
 }
 
-/// SOACs have been parallelized for compute shaders
-pub struct SoacParallelized {
-    pub mir: mir::Program,
+/// SSA with parallelized SOACs for compute shaders
+pub struct SsaParallelized {
+    pub ssa: tlc::to_ssa::SsaProgram,
 }
 
-impl SoacParallelized {
-    /// Apply destination-passing style transformation to functions returning runtime-sized arrays.
-    pub fn apply_dps(self) -> DpsApplied {
-        let mir = dps_transform::apply_dps_transform(self.mir);
-        DpsApplied { mir }
+impl SsaParallelized {
+    /// Lower SSA to SPIR-V.
+    pub fn lower(self) -> error::Result<Lowered> {
+        let spirv = spirv::lower_ssa_program(&self.ssa)?;
+        Ok(Lowered { spirv })
+    }
+
+    /// Lower SSA to GLSL.
+    pub fn lower_glsl(self) -> error::Result<glsl::GlslOutput> {
+        glsl::lower(&self.ssa)
+    }
+
+    /// Lower SSA to Shadertoy-compatible GLSL.
+    pub fn lower_shadertoy(self) -> error::Result<String> {
+        glsl::lower_shadertoy(&self.ssa)
     }
 }
 
-/// DPS transformation has been applied
-pub struct DpsApplied {
-    pub mir: mir::Program,
-}
-
-impl DpsApplied {
-    /// Filter out unreachable definitions and order them topologically.
-    pub fn filter_reachable(self) -> Reachable {
-        let mir = reachability::filter_reachable(self.mir);
-        Reachable { mir }
-    }
-}
-
-/// Unreachable code has been filtered out
-pub struct Reachable {
-    pub mir: mir::Program,
-}
-
-impl Reachable {
-    /// Lower MIR to SPIR-V
-    pub fn lower(self) -> Result<Lowered> {
-        let spirv = spirv::lowering::lower(&self.mir)?;
-        Ok(Lowered { mir: self.mir, spirv })
-    }
-
-    /// Lower MIR to GLSL
-    pub fn lower_glsl(self) -> Result<LoweredGlsl> {
-        let glsl_output = glsl::lowering::lower(&self.mir)?;
-        Ok(LoweredGlsl {
-            mir: self.mir,
-            glsl: GlslOutput {
-                vertex: glsl_output.vertex,
-                fragment: glsl_output.fragment,
-            },
-        })
-    }
-
-    /// Lower MIR to Shadertoy-compatible GLSL (fragment shader only)
-    pub fn lower_shadertoy(self) -> Result<String> {
-        glsl::lowering::lower_shadertoy(&self.mir)
-    }
-}
-
-/// Final stage - contains MIR and SPIR-V bytecode
+/// Final SPIR-V output
 pub struct Lowered {
-    pub mir: mir::Program,
     pub spirv: Vec<u32>,
-}
-
-/// GLSL output containing vertex and fragment shader sources
-pub struct GlslOutput {
-    pub vertex: Option<String>,
-    pub fragment: Option<String>,
-}
-
-/// Final stage for GLSL - contains MIR and GLSL source strings
-pub struct LoweredGlsl {
-    pub mir: mir::Program,
-    pub glsl: GlslOutput,
 }
 
 // =============================================================================

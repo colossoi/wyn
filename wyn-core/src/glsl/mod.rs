@@ -1,7 +1,7 @@
 //! GLSL code generation backend.
 //!
-//! This module contains the lowering pass from MIR to GLSL.
+//! This module contains the SSA to GLSL lowering pass.
 
-pub mod lowering;
+pub mod ssa_lowering;
 
-pub use lowering::{GlslOutput, lower, lower_shadertoy};
+pub use ssa_lowering::{GlslOutput, lower, lower_shadertoy};

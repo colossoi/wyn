@@ -1,7 +1,7 @@
 //! Common utilities shared between lowering backends (SPIR-V, GLSL, etc.)
 
 use crate::ast::TypeName;
-use crate::mir::{self, Def, ExecutionModel};
+use crate::tlc::to_ssa::ExecutionModel;
 use polytype::Type as PolyType;
 
 /// Shader stage for entry points
@@ -24,32 +24,16 @@ impl From<ExecutionModel> for ShaderStage {
     }
 }
 
-/// An entry point extracted from MIR
-#[derive(Debug, Clone)]
-pub struct EntryPoint {
-    pub name: String,
-    pub stage: ShaderStage,
-}
-
-/// Extract all entry points from a MIR program
-pub fn find_entry_points(program: &mir::Program) -> Vec<EntryPoint> {
-    let mut entry_points = Vec::new();
-
-    for def in &program.defs {
-        if let Def::EntryPoint {
-            name,
-            execution_model,
-            ..
-        } = def
-        {
-            entry_points.push(EntryPoint {
-                name: name.clone(),
-                stage: (*execution_model).into(),
-            });
+impl From<&ExecutionModel> for ShaderStage {
+    fn from(model: &ExecutionModel) -> Self {
+        match model {
+            ExecutionModel::Vertex => ShaderStage::Vertex,
+            ExecutionModel::Fragment => ShaderStage::Fragment,
+            ExecutionModel::Compute { local_size } => ShaderStage::Compute {
+                local_size: *local_size,
+            },
         }
     }
-
-    entry_points
 }
 
 /// Check if a type represents an empty closure (no captured variables)

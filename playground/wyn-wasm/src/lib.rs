@@ -629,22 +629,23 @@ fn compile_impl(source: &str) -> CompileResult {
     // Build builtins set for lambda lifting
     let builtins = wyn_core::build_known_defs(&alias_checked.ast, &frontend.module_manager);
 
-    // Transform to TLC, monomorphize, then to MIR
-    let flattened = alias_checked
+    // Transform to TLC, monomorphize, then to SSA
+    let ssa = match alias_checked
         .to_tlc(builtins, &frontend.schemes, &frontend.module_manager)
         .partial_eval()
         .defunctionalize()
         .monomorphize()
-        .to_mir();
+        .to_ssa()
+    {
+        Ok(s) => s,
+        Err(e) => return CompileResult::err_msg(format!("SSA conversion error: {:?}", e)),
+    };
 
-    // MIR passes
-    let defaulted = flattened.default_address_spaces();
-    let parallelized = defaulted.parallelize_soacs();
-    let dps_applied = parallelized.apply_dps();
-    let reachable = dps_applied.filter_reachable();
+    // Parallelize SOACs (for compute shaders)
+    let parallelized = ssa.parallelize_soacs();
 
     // Lower to Shadertoy GLSL
-    match reachable.lower_shadertoy() {
+    match parallelized.lower_shadertoy() {
         Ok(glsl) => CompileResult::ok(glsl),
         Err(e) => CompileResult::err(e),
     }
@@ -718,32 +719,28 @@ fn compile_with_ir_impl(source: &str) -> CompileResultWithIR {
     let tlc_after_partial_eval = tlc_program.partial_eval();
     let tlc_tree = tlc_tree::program_to_tree(&tlc_after_partial_eval.tlc);
 
-    // Continue pipeline: defunctionalize, monomorphize, then to MIR
-    let flattened = tlc_after_partial_eval
+    // Continue pipeline: defunctionalize, monomorphize, then to SSA
+    let ssa = match tlc_after_partial_eval
         .defunctionalize()
         .monomorphize()
-        .to_mir();
+        .to_ssa()
+    {
+        Ok(s) => s,
+        Err(e) => return CompileResultWithIR::err_msg(format!("SSA conversion error: {:?}", e)),
+    };
 
-    // Capture initial MIR (after flattening, before MIR passes)
-    let initial_mir_tree = mir_tree::program_to_tree(&flattened.mir);
-
-    // MIR passes
-    let defaulted = flattened.default_address_spaces();
-    let parallelized = defaulted.parallelize_soacs();
-    let dps_applied = parallelized.apply_dps();
-    let reachable = dps_applied.filter_reachable();
-
-    // Capture final MIR
-    let final_mir_tree = mir_tree::program_to_tree(&reachable.mir);
+    // Parallelize SOACs
+    let parallelized = ssa.parallelize_soacs();
 
     // Lower to Shadertoy GLSL
-    match reachable.lower_shadertoy() {
+    // Note: MIR visualization is no longer available (MIR eliminated from pipeline)
+    match parallelized.lower_shadertoy() {
         Ok(glsl) => CompileResultWithIR {
             success: true,
             glsl: Some(glsl),
             tlc: Some(tlc_tree),
-            initial_mir: Some(initial_mir_tree),
-            final_mir: Some(final_mir_tree),
+            initial_mir: None, // MIR no longer in pipeline
+            final_mir: None,   // MIR no longer in pipeline
             error: None,
         },
         Err(e) => CompileResultWithIR::err(e),

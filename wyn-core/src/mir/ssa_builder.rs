@@ -441,6 +441,44 @@ impl FuncBuilder {
         self.push_inst(InstKind::Global(name.to_string()), ty, span, node_id)
     }
 
+    /// Push an output pointer reference (for entry points).
+    /// Returns a pointer to the output variable at the given index.
+    pub fn push_output_ptr(
+        &mut self,
+        index: usize,
+        ty: Type<TypeName>,
+        span: Span,
+        node_id: NodeId,
+    ) -> Result<ValueId, BuilderError> {
+        self.push_inst(InstKind::OutputPtr { index }, ty, span, node_id)
+    }
+
+    /// Push a store instruction.
+    /// Returns the output effect token.
+    pub fn push_store(
+        &mut self,
+        ptr: ValueId,
+        value: ValueId,
+        effect_in: EffectToken,
+        span: Span,
+        node_id: NodeId,
+    ) -> Result<EffectToken, BuilderError> {
+        let effect_out = self.alloc_effect();
+        let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
+        self.push_inst(
+            InstKind::Store {
+                ptr,
+                value,
+                effect_in,
+                effect_out,
+            },
+            unit_ty,
+            span,
+            node_id,
+        )?;
+        Ok(effect_out)
+    }
+
     // =========================================================================
     // Control Flow Pattern Helpers
     // =========================================================================

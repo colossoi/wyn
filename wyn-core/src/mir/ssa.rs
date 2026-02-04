@@ -349,6 +349,16 @@ pub enum InstKind {
     StorageViewLen {
         view: ValueId,
     },
+
+    // =========================================================================
+    // Entry Point I/O
+    // =========================================================================
+    /// Get a pointer to an entry point output variable.
+    /// Used in entry points to explicitly store results before returning.
+    OutputPtr {
+        /// Index of the output (0 for single output, 0..n for tuple outputs).
+        index: usize,
+    },
 }
 
 // =============================================================================

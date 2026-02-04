@@ -1,0 +1,1159 @@
+//! SSA to GLSL lowering.
+//!
+//! This module converts SSA programs to GLSL shader source code.
+//! It generates separate strings for vertex and fragment shaders.
+
+use crate::ast::TypeName;
+use crate::bail_glsl;
+use crate::error::Result;
+use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
+use crate::lowering_common::ShaderStage;
+use crate::mir::ssa::{BlockId, FuncBody, Inst, InstKind, Terminator, ValueId};
+use crate::tlc::to_ssa::{ExecutionModel, IoDecoration, SsaEntryPoint, SsaFunction, SsaProgram};
+use polytype::Type as PolyType;
+use rspirv::spirv;
+use std::collections::{HashMap, HashSet};
+use std::fmt::Write;
+
+/// Output from GLSL lowering - separate shader strings
+#[derive(Debug, Clone)]
+pub struct GlslOutput {
+    /// Vertex shader source (None if no vertex entry point)
+    pub vertex: Option<String>,
+    /// Fragment shader source (None if no fragment entry point)
+    pub fragment: Option<String>,
+}
+
+/// Lower an SSA program to GLSL
+pub fn lower(program: &SsaProgram) -> Result<GlslOutput> {
+    let mut ctx = LowerCtx::new(program);
+    ctx.lower_program()
+}
+
+/// Lower an SSA program to Shadertoy-compatible GLSL
+/// Returns just the fragment shader with mainImage entry point
+pub fn lower_shadertoy(program: &SsaProgram) -> Result<String> {
+    let mut ctx = LowerCtx::new(program);
+    ctx.lower_shadertoy()
+}
+
+/// Context for lowering SSA to GLSL
+struct LowerCtx<'a> {
+    program: &'a SsaProgram,
+    /// Functions by name
+    func_index: HashMap<String, usize>,
+    /// Functions that have been lowered
+    lowered: HashSet<String>,
+    /// Builtin implementations
+    impl_source: ImplSource,
+    /// Current indentation level
+    indent: usize,
+    /// Tuple types that need struct definitions (keyed by struct name)
+    tuple_structs: HashMap<String, Vec<String>>,
+    /// Counter for unique tuple struct names
+    tuple_counter: usize,
+    /// Cache from tuple type signature to struct name
+    tuple_type_cache: HashMap<String, String>,
+    /// Counter for generating unique temporary names
+    temp_counter: usize,
+}
+
+impl<'a> LowerCtx<'a> {
+    fn new(program: &'a SsaProgram) -> Self {
+        let mut func_index = HashMap::new();
+        for (i, func) in program.functions.iter().enumerate() {
+            func_index.insert(func.name.clone(), i);
+        }
+
+        LowerCtx {
+            program,
+            func_index,
+            lowered: HashSet::new(),
+            impl_source: ImplSource::default(),
+            indent: 0,
+            tuple_structs: HashMap::new(),
+            tuple_counter: 0,
+            tuple_type_cache: HashMap::new(),
+            temp_counter: 0,
+        }
+    }
+
+    fn fresh_id(&mut self) -> usize {
+        let id = self.temp_counter;
+        self.temp_counter += 1;
+        id
+    }
+
+    fn lower_program(&mut self) -> Result<GlslOutput> {
+        let mut vertex_shader = None;
+        let mut fragment_shader = None;
+
+        for entry in &self.program.entry_points {
+            match &entry.execution_model {
+                ExecutionModel::Vertex => {
+                    vertex_shader = Some(self.lower_shader(&entry.name, ShaderStage::Vertex)?);
+                }
+                ExecutionModel::Fragment => {
+                    fragment_shader = Some(self.lower_shader(&entry.name, ShaderStage::Fragment)?);
+                }
+                ExecutionModel::Compute { .. } => {
+                    bail_glsl!("Compute shaders are not supported in GLSL output format");
+                }
+            }
+        }
+
+        Ok(GlslOutput {
+            vertex: vertex_shader,
+            fragment: fragment_shader,
+        })
+    }
+
+    fn lower_shadertoy(&mut self) -> Result<String> {
+        // Find fragment entry point
+        let entry = self
+            .program
+            .entry_points
+            .iter()
+            .find(|e| matches!(e.execution_model, ExecutionModel::Fragment))
+            .ok_or_else(|| {
+                crate::error::CompilerError::GlslError("No fragment entry point found".to_string(), None)
+            })?;
+
+        // Clear state
+        self.tuple_structs.clear();
+        self.tuple_type_cache.clear();
+        self.tuple_counter = 0;
+        self.lowered.clear();
+
+        let mut code = String::new();
+
+        // Lower helper functions first
+        let deps = self.collect_dependencies(&entry.name)?;
+        for dep_name in &deps {
+            if dep_name != &entry.name {
+                if let Some(&idx) = self.func_index.get(dep_name) {
+                    self.lower_function(&self.program.functions[idx].clone(), &mut code)?;
+                }
+            }
+        }
+
+        // Lower Shadertoy entry point
+        self.lower_shadertoy_entry_point(entry, &mut code)?;
+
+        // Build final output with struct definitions first
+        let mut output = String::new();
+        writeln!(output, "// Generated by Wyn compiler for Shadertoy").unwrap();
+        writeln!(output).unwrap();
+
+        // Emit struct definitions for tuple types
+        if !self.tuple_structs.is_empty() {
+            for (struct_name, field_types) in &self.tuple_structs {
+                writeln!(output, "struct {} {{", struct_name).unwrap();
+                for (i, field_type) in field_types.iter().enumerate() {
+                    writeln!(output, "    {} _{};", field_type, i).unwrap();
+                }
+                writeln!(output, "}};").unwrap();
+            }
+            writeln!(output).unwrap();
+        }
+
+        output.push_str(&code);
+        Ok(output)
+    }
+
+    fn lower_shadertoy_entry_point(&mut self, entry: &SsaEntryPoint, output: &mut String) -> Result<()> {
+        // Find the fragCoord parameter
+        let mut frag_coord_name = None;
+        for input in &entry.inputs {
+            if let Some(IoDecoration::BuiltIn(spirv::BuiltIn::Position)) = &input.decoration {
+                frag_coord_name = Some(input.name.clone());
+            }
+        }
+
+        writeln!(
+            output,
+            "void mainImage(out vec4 fragColor, in vec2 _st_fragCoord) {{"
+        )
+        .unwrap();
+        self.indent += 1;
+
+        // If the shader expects vec4 fragCoord, convert from vec2
+        if let Some(ref name) = frag_coord_name {
+            writeln!(
+                output,
+                "{}vec4 {} = vec4(_st_fragCoord.x, iResolution.y - _st_fragCoord.y, 0.0, 1.0);",
+                self.indent_str(),
+                name
+            )
+            .unwrap();
+        }
+
+        let result = self.lower_body(&entry.body, output)?;
+
+        writeln!(output, "{}fragColor = {};", self.indent_str(), result).unwrap();
+
+        self.indent -= 1;
+        writeln!(output, "}}").unwrap();
+
+        Ok(())
+    }
+
+    fn lower_shader(&mut self, entry_name: &str, stage: ShaderStage) -> Result<String> {
+        self.tuple_structs.clear();
+        self.tuple_type_cache.clear();
+        self.tuple_counter = 0;
+        self.lowered.clear();
+
+        let mut code = String::new();
+
+        // Emit uniforms
+        for uniform in &self.program.uniforms {
+            writeln!(
+                code,
+                "layout(set = {}, binding = {}) uniform {} {};",
+                uniform.set,
+                uniform.binding,
+                self.type_to_glsl(&uniform.ty),
+                uniform.name
+            )
+            .unwrap();
+        }
+        writeln!(code).unwrap();
+
+        // Lower helper functions
+        let deps = self.collect_dependencies(entry_name)?;
+        for dep_name in &deps {
+            if dep_name != entry_name {
+                if let Some(&idx) = self.func_index.get(dep_name) {
+                    self.lower_function(&self.program.functions[idx].clone(), &mut code)?;
+                }
+            }
+        }
+
+        // Find and lower entry point
+        let entry = self.program.entry_points.iter().find(|e| e.name == entry_name).ok_or_else(|| {
+            crate::error::CompilerError::GlslError(format!("Entry point '{}' not found", entry_name), None)
+        })?;
+
+        self.lower_entry_point(entry, stage, &mut code)?;
+
+        // Build final output
+        let mut output = String::new();
+        writeln!(output, "#version 450").unwrap();
+        writeln!(output, "#extension GL_ARB_shading_language_420pack : enable").unwrap();
+        writeln!(output).unwrap();
+
+        // Emit struct definitions
+        if !self.tuple_structs.is_empty() {
+            writeln!(output, "// Tuple struct definitions").unwrap();
+            let mut structs: Vec<_> = self.tuple_structs.iter().collect();
+            structs.sort_by_key(|(name, _)| *name);
+            for (struct_name, field_types) in structs {
+                writeln!(output, "struct {} {{", struct_name).unwrap();
+                for (i, field_type) in field_types.iter().enumerate() {
+                    writeln!(output, "    {} _{};", field_type, i).unwrap();
+                }
+                writeln!(output, "}};").unwrap();
+            }
+            writeln!(output).unwrap();
+        }
+
+        output.push_str(&code);
+        Ok(output)
+    }
+
+    fn collect_dependencies(&self, name: &str) -> Result<Vec<String>> {
+        let mut deps = Vec::new();
+        let mut visited = HashSet::new();
+        self.collect_deps_recursive(name, &mut deps, &mut visited)?;
+        Ok(deps)
+    }
+
+    fn collect_deps_recursive(
+        &self,
+        name: &str,
+        deps: &mut Vec<String>,
+        visited: &mut HashSet<String>,
+    ) -> Result<()> {
+        if visited.contains(name) {
+            return Ok(());
+        }
+        visited.insert(name.to_string());
+
+        // Check if it's a function
+        if let Some(&idx) = self.func_index.get(name) {
+            let func = &self.program.functions[idx];
+            self.collect_body_deps(&func.body, deps, visited)?;
+        }
+
+        // Check if it's an entry point
+        for entry in &self.program.entry_points {
+            if entry.name == name {
+                self.collect_body_deps(&entry.body, deps, visited)?;
+            }
+        }
+
+        deps.push(name.to_string());
+        Ok(())
+    }
+
+    fn collect_body_deps(
+        &self,
+        body: &FuncBody,
+        deps: &mut Vec<String>,
+        visited: &mut HashSet<String>,
+    ) -> Result<()> {
+        for block in &body.blocks {
+            for &inst_id in &block.insts {
+                let inst = body.get_inst(inst_id);
+                if let InstKind::Call { func, .. } = &inst.kind {
+                    if self.func_index.contains_key(func) && self.impl_source.get(func).is_none() {
+                        self.collect_deps_recursive(func, deps, visited)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn lower_function(&mut self, func: &SsaFunction, output: &mut String) -> Result<()> {
+        if func.linkage_name.is_some() {
+            // Skip extern functions
+            return Ok(());
+        }
+
+        if self.lowered.contains(&func.name) {
+            return Ok(());
+        }
+        self.lowered.insert(func.name.clone());
+
+        let body = &func.body;
+
+        // Build parameter list
+        let params: Vec<String> =
+            body.params.iter().map(|(_, ty, name)| format!("{} {}", self.type_to_glsl(ty), name)).collect();
+
+        let ret_ty = self.type_to_glsl(&body.return_ty);
+        writeln!(output, "{} {}({}) {{", ret_ty, func.name, params.join(", ")).unwrap();
+
+        self.indent += 1;
+        let result = self.lower_body(body, output)?;
+        writeln!(output, "{}return {};", self.indent_str(), result).unwrap();
+        self.indent -= 1;
+
+        writeln!(output, "}}").unwrap();
+        writeln!(output).unwrap();
+
+        Ok(())
+    }
+
+    fn lower_entry_point(
+        &mut self,
+        entry: &SsaEntryPoint,
+        stage: ShaderStage,
+        output: &mut String,
+    ) -> Result<()> {
+        let body = &entry.body;
+
+        // Emit input declarations
+        let mut builtin_assignments = Vec::new();
+        for input in &entry.inputs {
+            match &input.decoration {
+                Some(IoDecoration::Location(loc)) => {
+                    writeln!(
+                        output,
+                        "layout(location = {}) in {} {};",
+                        loc,
+                        self.type_to_glsl(&input.ty),
+                        input.name
+                    )
+                    .unwrap();
+                }
+                Some(IoDecoration::BuiltIn(builtin)) => {
+                    let gl_var = match builtin {
+                        spirv::BuiltIn::Position => {
+                            if stage == ShaderStage::Fragment {
+                                "gl_FragCoord"
+                            } else {
+                                "gl_Position"
+                            }
+                        }
+                        spirv::BuiltIn::VertexIndex => "gl_VertexID",
+                        spirv::BuiltIn::InstanceIndex => "gl_InstanceID",
+                        spirv::BuiltIn::FragCoord => "gl_FragCoord",
+                        spirv::BuiltIn::FrontFacing => "gl_FrontFacing",
+                        spirv::BuiltIn::PointSize => "gl_PointSize",
+                        spirv::BuiltIn::FragDepth => "gl_FragDepth",
+                        _ => continue,
+                    };
+                    builtin_assignments.push((
+                        input.name.clone(),
+                        self.type_to_glsl(&input.ty),
+                        gl_var.to_string(),
+                    ));
+                }
+                None => {}
+            }
+        }
+
+        // Emit output declarations
+        let mut location_outputs: Vec<(usize, u32)> = Vec::new();
+        let is_tuple_return = entry.outputs.len() > 1;
+        for (i, out) in entry.outputs.iter().enumerate() {
+            if let Some(IoDecoration::Location(loc)) = &out.decoration {
+                writeln!(
+                    output,
+                    "layout(location = {}) out {} _out{};",
+                    loc,
+                    self.type_to_glsl(&out.ty),
+                    i
+                )
+                .unwrap();
+                location_outputs.push((i, *loc));
+            }
+        }
+
+        writeln!(output).unwrap();
+        writeln!(output, "void main() {{").unwrap();
+        self.indent += 1;
+
+        // Emit builtin assignments
+        for (name, ty, gl_var) in &builtin_assignments {
+            writeln!(output, "{}{} {} = {};", self.indent_str(), ty, name, gl_var).unwrap();
+        }
+
+        let result = self.lower_body(body, output)?;
+
+        // Write to outputs
+        for (tuple_idx, _loc) in &location_outputs {
+            if is_tuple_return {
+                writeln!(
+                    output,
+                    "{}_out{} = {}._{};",
+                    self.indent_str(),
+                    tuple_idx,
+                    result,
+                    tuple_idx
+                )
+                .unwrap();
+            } else {
+                writeln!(output, "{}_out0 = {};", self.indent_str(), result).unwrap();
+            }
+        }
+
+        // Handle gl_Position for vertex shaders
+        if stage == ShaderStage::Vertex {
+            for (i, out) in entry.outputs.iter().enumerate() {
+                if let Some(IoDecoration::BuiltIn(spirv::BuiltIn::Position)) = &out.decoration {
+                    if is_tuple_return {
+                        writeln!(output, "{}gl_Position = {}._{};", self.indent_str(), result, i).unwrap();
+                    } else {
+                        writeln!(output, "{}gl_Position = {};", self.indent_str(), result).unwrap();
+                    }
+                }
+            }
+        }
+
+        self.indent -= 1;
+        writeln!(output, "}}").unwrap();
+
+        Ok(())
+    }
+
+    /// Lower an SSA function body to GLSL.
+    ///
+    /// This walks the CFG and generates GLSL code. For now, we use a simple
+    /// approach that emits variables for each SSA value and handles control
+    /// flow by detecting patterns.
+    fn lower_body(&mut self, body: &FuncBody, output: &mut String) -> Result<String> {
+        let mut body_ctx = BodyLowerCtx::new(self, body);
+        body_ctx.lower(output)
+    }
+
+    fn type_to_glsl(&mut self, ty: &PolyType<TypeName>) -> String {
+        match ty {
+            PolyType::Constructed(name, args) => match name {
+                TypeName::Float(32) => "float".to_string(),
+                TypeName::Float(64) => "double".to_string(),
+                TypeName::Int(32) => "int".to_string(),
+                TypeName::Int(64) => "int64_t".to_string(),
+                TypeName::UInt(32) => "uint".to_string(),
+                TypeName::UInt(64) => "uint64_t".to_string(),
+                TypeName::Str(s) if *s == "bool" => "bool".to_string(),
+                TypeName::Unit => "void".to_string(),
+                TypeName::Tuple(_) => {
+                    let elem_types: Vec<String> = args.iter().map(|a| self.type_to_glsl(a)).collect();
+                    let sig = elem_types.join(",");
+
+                    if let Some(name) = self.tuple_type_cache.get(&sig) {
+                        return name.clone();
+                    }
+
+                    let struct_name = format!("_Tuple{}", self.tuple_counter);
+                    self.tuple_counter += 1;
+
+                    self.tuple_structs.insert(struct_name.clone(), elem_types);
+                    self.tuple_type_cache.insert(sig, struct_name.clone());
+
+                    struct_name
+                }
+                TypeName::Vec if args.len() >= 2 => {
+                    let n = match &args[0] {
+                        PolyType::Constructed(TypeName::Size(n), _) => *n,
+                        _ => 4,
+                    };
+                    let elem = self.type_to_glsl(&args[1]);
+                    match elem.as_str() {
+                        "float" => format!("vec{}", n),
+                        "double" => format!("dvec{}", n),
+                        "int" => format!("ivec{}", n),
+                        "uint" => format!("uvec{}", n),
+                        "bool" => format!("bvec{}", n),
+                        _ => format!("vec{}", n),
+                    }
+                }
+                TypeName::Mat if args.len() >= 3 => {
+                    let cols = match &args[0] {
+                        PolyType::Constructed(TypeName::Size(n), _) => *n,
+                        _ => 4,
+                    };
+                    let rows = match &args[1] {
+                        PolyType::Constructed(TypeName::Size(n), _) => *n,
+                        _ => 4,
+                    };
+                    let elem = self.type_to_glsl(&args[2]);
+                    match elem.as_str() {
+                        "float" => {
+                            if rows == cols {
+                                format!("mat{}", rows)
+                            } else {
+                                format!("mat{}x{}", cols, rows)
+                            }
+                        }
+                        "double" => {
+                            if rows == cols {
+                                format!("dmat{}", rows)
+                            } else {
+                                format!("dmat{}x{}", cols, rows)
+                            }
+                        }
+                        _ => format!("mat{}", rows),
+                    }
+                }
+                TypeName::Array => {
+                    assert!(args.len() == 3);
+                    format!("{}[]", self.type_to_glsl(&args[0]))
+                }
+                TypeName::Record(fields) => {
+                    panic!("BUG: Record type reached GLSL lowering. Fields: {:?}", fields);
+                }
+                _ => "/* unknown */".to_string(),
+            },
+            _ => "/* unknown */".to_string(),
+        }
+    }
+
+    fn indent_str(&self) -> String {
+        "    ".repeat(self.indent)
+    }
+}
+
+/// Context for lowering a single function body.
+struct BodyLowerCtx<'a, 'b> {
+    ctx: &'a mut LowerCtx<'b>,
+    body: &'a FuncBody,
+    /// Map from ValueId to GLSL expression string.
+    value_map: HashMap<ValueId, String>,
+    /// Set of declared variables
+    declared: HashSet<String>,
+}
+
+impl<'a, 'b> BodyLowerCtx<'a, 'b> {
+    fn new(ctx: &'a mut LowerCtx<'b>, body: &'a FuncBody) -> Self {
+        BodyLowerCtx {
+            ctx,
+            body,
+            value_map: HashMap::new(),
+            declared: HashSet::new(),
+        }
+    }
+
+    fn lower(&mut self, output: &mut String) -> Result<String> {
+        // Map function parameters to their names
+        for (value_id, _, name) in &self.body.params {
+            self.value_map.insert(*value_id, name.clone());
+            self.declared.insert(name.clone());
+        }
+
+        // For simple single-block functions, just lower the instructions
+        if self.body.blocks.len() == 1 {
+            return self.lower_single_block(output);
+        }
+
+        // For multi-block functions, we need to handle control flow
+        self.lower_cfg(output)
+    }
+
+    /// Lower a single-block function (no control flow)
+    fn lower_single_block(&mut self, output: &mut String) -> Result<String> {
+        let block = &self.body.blocks[0];
+
+        // Lower each instruction
+        for &inst_id in &block.insts {
+            let inst = self.body.get_inst(inst_id);
+            let expr = self.lower_inst(inst, output)?;
+
+            if let Some(result) = inst.result {
+                // Emit as variable declaration
+                let var_name = format!("_v{}", result.0);
+                let ty = self.ctx.type_to_glsl(&inst.result_ty);
+                writeln!(output, "{}{} {} = {};", self.ctx.indent_str(), ty, var_name, expr).unwrap();
+                self.value_map.insert(result, var_name.clone());
+                self.declared.insert(var_name);
+            }
+        }
+
+        // Get the return value from terminator
+        match &block.terminator {
+            Some(Terminator::Return(val)) => self.get_value(*val),
+            Some(Terminator::ReturnUnit) => Ok("".to_string()),
+            _ => bail_glsl!("Unexpected terminator in single-block function"),
+        }
+    }
+
+    /// Lower a multi-block CFG.
+    ///
+    /// This is more complex as we need to reconstruct structured control flow.
+    /// For now, we use a simple approach that handles common patterns.
+    fn lower_cfg(&mut self, output: &mut String) -> Result<String> {
+        // Detect the CFG pattern and lower accordingly
+        // For now, implement a simple linear walk that handles basic patterns
+
+        let mut current_block = BlockId::ENTRY;
+        let mut result_var = String::new();
+
+        loop {
+            let block = &self.body.blocks[current_block.index()];
+
+            // Lower block parameters (these come from branch arguments)
+            // Skip for entry block (handled by function params)
+            if current_block != BlockId::ENTRY {
+                for param in &block.params {
+                    // The value should already be in value_map from the branch
+                    if !self.value_map.contains_key(&param.value) {
+                        // Declare variable for block param
+                        let var_name = format!("_v{}", param.value.0);
+                        let ty = self.ctx.type_to_glsl(&param.ty);
+                        writeln!(output, "{}{} {};", self.ctx.indent_str(), ty, var_name).unwrap();
+                        self.value_map.insert(param.value, var_name.clone());
+                        self.declared.insert(var_name);
+                    }
+                }
+            }
+
+            // Lower instructions
+            for &inst_id in &block.insts {
+                let inst = self.body.get_inst(inst_id);
+                let expr = self.lower_inst(inst, output)?;
+
+                if let Some(result) = inst.result {
+                    let var_name = format!("_v{}", result.0);
+                    let ty = self.ctx.type_to_glsl(&inst.result_ty);
+                    writeln!(output, "{}{} {} = {};", self.ctx.indent_str(), ty, var_name, expr).unwrap();
+                    self.value_map.insert(result, var_name.clone());
+                    self.declared.insert(var_name);
+                }
+            }
+
+            // Handle terminator
+            match &block.terminator {
+                Some(Terminator::Return(val)) => {
+                    result_var = self.get_value(*val)?;
+                    break;
+                }
+                Some(Terminator::ReturnUnit) => {
+                    result_var = "".to_string();
+                    break;
+                }
+                Some(Terminator::Branch { target, args }) => {
+                    // Pass arguments to target block params
+                    let target_block = &self.body.blocks[target.index()];
+                    for (param, arg) in target_block.params.iter().zip(args.iter()) {
+                        let arg_val = self.get_value(*arg)?;
+                        let var_name = format!("_v{}", param.value.0);
+                        if self.declared.contains(&var_name) {
+                            writeln!(output, "{}{} = {};", self.ctx.indent_str(), var_name, arg_val)
+                                .unwrap();
+                        } else {
+                            let ty = self.ctx.type_to_glsl(&param.ty);
+                            writeln!(
+                                output,
+                                "{}{} {} = {};",
+                                self.ctx.indent_str(),
+                                ty,
+                                var_name,
+                                arg_val
+                            )
+                            .unwrap();
+                            self.declared.insert(var_name.clone());
+                        }
+                        self.value_map.insert(param.value, var_name);
+                    }
+                    current_block = *target;
+                }
+                Some(Terminator::CondBranch {
+                    cond,
+                    then_target,
+                    then_args,
+                    else_target,
+                    else_args,
+                }) => {
+                    // Check if this is an if-then-else that merges
+                    let merge_block = self.find_merge_block(*then_target, *else_target);
+
+                    if let Some(merge) = merge_block {
+                        // Structured if-then-else
+                        result_var = self.lower_if_then_else(
+                            *cond,
+                            *then_target,
+                            then_args,
+                            *else_target,
+                            else_args,
+                            merge,
+                            output,
+                        )?;
+                        current_block = merge;
+
+                        // If merge block is a return, we're done
+                        let merge_blk = &self.body.blocks[merge.index()];
+                        if matches!(
+                            merge_blk.terminator,
+                            Some(Terminator::Return(_)) | Some(Terminator::ReturnUnit)
+                        ) {
+                            // Continue to process merge block
+                            continue;
+                        }
+                    } else {
+                        // Unstructured control flow - not supported in GLSL
+                        bail_glsl!("Unstructured control flow not supported in GLSL");
+                    }
+                }
+                Some(Terminator::Unreachable) => {
+                    bail_glsl!("Unreachable terminator encountered");
+                }
+                None => {
+                    bail_glsl!("Block without terminator");
+                }
+            }
+        }
+
+        Ok(result_var)
+    }
+
+    /// Find the merge block for an if-then-else.
+    fn find_merge_block(&self, then_block: BlockId, else_block: BlockId) -> Option<BlockId> {
+        // Simple heuristic: if both branches go to the same block, that's the merge
+        let then_blk = &self.body.blocks[then_block.index()];
+        let else_blk = &self.body.blocks[else_block.index()];
+
+        match (&then_blk.terminator, &else_blk.terminator) {
+            (Some(Terminator::Branch { target: t1, .. }), Some(Terminator::Branch { target: t2, .. })) => {
+                if t1 == t2 {
+                    Some(*t1)
+                } else {
+                    None
+                }
+            }
+            // Both return - no merge needed, treat as structured
+            (Some(Terminator::Return(_)), Some(Terminator::Return(_))) => None,
+            _ => None,
+        }
+    }
+
+    /// Lower an if-then-else construct.
+    fn lower_if_then_else(
+        &mut self,
+        cond: ValueId,
+        then_target: BlockId,
+        then_args: &[ValueId],
+        else_target: BlockId,
+        else_args: &[ValueId],
+        merge: BlockId,
+        output: &mut String,
+    ) -> Result<String> {
+        let cond_val = self.get_value(cond)?;
+        let merge_block = &self.body.blocks[merge.index()];
+
+        // Declare result variable if merge block has params
+        let result_var = if !merge_block.params.is_empty() {
+            let param = &merge_block.params[0];
+            let var_name = format!("_v{}", param.value.0);
+            let ty = self.ctx.type_to_glsl(&param.ty);
+            writeln!(output, "{}{} {};", self.ctx.indent_str(), ty, var_name).unwrap();
+            self.declared.insert(var_name.clone());
+            self.value_map.insert(param.value, var_name.clone());
+            var_name
+        } else {
+            String::new()
+        };
+
+        // Emit if statement
+        writeln!(output, "{}if ({}) {{", self.ctx.indent_str(), cond_val).unwrap();
+        self.ctx.indent += 1;
+
+        // Lower then block
+        let then_result = self.lower_block_inline(then_target, then_args, output)?;
+        if !result_var.is_empty() {
+            writeln!(
+                output,
+                "{}{} = {};",
+                self.ctx.indent_str(),
+                result_var,
+                then_result
+            )
+            .unwrap();
+        }
+
+        self.ctx.indent -= 1;
+        writeln!(output, "{}}} else {{", self.ctx.indent_str()).unwrap();
+        self.ctx.indent += 1;
+
+        // Lower else block
+        let else_result = self.lower_block_inline(else_target, else_args, output)?;
+        if !result_var.is_empty() {
+            writeln!(
+                output,
+                "{}{} = {};",
+                self.ctx.indent_str(),
+                result_var,
+                else_result
+            )
+            .unwrap();
+        }
+
+        self.ctx.indent -= 1;
+        writeln!(output, "{}}}", self.ctx.indent_str()).unwrap();
+
+        Ok(result_var)
+    }
+
+    /// Lower a block inline (for use in if/else branches).
+    fn lower_block_inline(
+        &mut self,
+        block_id: BlockId,
+        args: &[ValueId],
+        output: &mut String,
+    ) -> Result<String> {
+        let block = &self.body.blocks[block_id.index()];
+
+        // Set up block params from args
+        for (param, arg) in block.params.iter().zip(args.iter()) {
+            let arg_val = self.get_value(*arg)?;
+            self.value_map.insert(param.value, arg_val);
+        }
+
+        // Lower instructions
+        for &inst_id in &block.insts {
+            let inst = self.body.get_inst(inst_id);
+            let expr = self.lower_inst(inst, output)?;
+
+            if let Some(result) = inst.result {
+                let var_name = format!("_v{}", result.0);
+                let ty = self.ctx.type_to_glsl(&inst.result_ty);
+                writeln!(output, "{}{} {} = {};", self.ctx.indent_str(), ty, var_name, expr).unwrap();
+                self.value_map.insert(result, var_name.clone());
+                self.declared.insert(var_name);
+            }
+        }
+
+        // Return the branch argument for the merge block
+        match &block.terminator {
+            Some(Terminator::Branch { args, .. }) if !args.is_empty() => self.get_value(args[0]),
+            Some(Terminator::Return(val)) => self.get_value(*val),
+            _ => Ok(String::new()),
+        }
+    }
+
+    fn lower_inst(&mut self, inst: &Inst, output: &mut String) -> Result<String> {
+        match &inst.kind {
+            InstKind::Int(s) => Ok(s.clone()),
+            InstKind::Float(s) => {
+                if s.contains('.') || s.contains('e') || s.contains('E') {
+                    Ok(s.clone())
+                } else {
+                    Ok(format!("{}.0", s))
+                }
+            }
+            InstKind::Bool(b) => Ok(if *b { "true" } else { "false" }.to_string()),
+            InstKind::String(s) => Ok(format!("\"{}\"", s)),
+            InstKind::Unit => Ok("".to_string()),
+
+            InstKind::BinOp { op, lhs, rhs } => {
+                let l = self.get_value(*lhs)?;
+                let r = self.get_value(*rhs)?;
+                match op.as_str() {
+                    "**" => Ok(format!("pow({}, {})", l, r)),
+                    _ => Ok(format!("({} {} {})", l, op, r)),
+                }
+            }
+
+            InstKind::UnaryOp { op, operand } => {
+                let inner = self.get_value(*operand)?;
+                Ok(format!("({}{})", op, inner))
+            }
+
+            InstKind::Tuple(elems) => {
+                if elems.is_empty() {
+                    bail_glsl!("Empty tuple in GLSL lowering");
+                }
+                let parts: Result<Vec<_>> = elems.iter().map(|e| self.get_value(*e)).collect();
+                let struct_name = self.ctx.type_to_glsl(&inst.result_ty);
+                Ok(format!("{}({})", struct_name, parts?.join(", ")))
+            }
+
+            InstKind::ArrayLit { elements } => {
+                let parts: Result<Vec<_>> = elements.iter().map(|e| self.get_value(*e)).collect();
+                let ty = self.ctx.type_to_glsl(&inst.result_ty);
+                Ok(format!("{}[]({})", ty, parts?.join(", ")))
+            }
+
+            InstKind::Vector(elems) => {
+                let parts: Result<Vec<_>> = elems.iter().map(|e| self.get_value(*e)).collect();
+                let ty = self.ctx.type_to_glsl(&inst.result_ty);
+                Ok(format!("{}({})", ty, parts?.join(", ")))
+            }
+
+            InstKind::Index { base, index } => {
+                let base_val = self.get_value(*base)?;
+                let index_val = self.get_value(*index)?;
+                Ok(format!("{}[{}]", base_val, index_val))
+            }
+
+            InstKind::Project { base, index } => {
+                let base_val = self.get_value(*base)?;
+                let base_ty = self.body.get_value_type(*base);
+
+                // Check if it's a vector type - use swizzle
+                if matches!(base_ty, PolyType::Constructed(TypeName::Vec, _)) {
+                    let swizzle = match index {
+                        0 => "x",
+                        1 => "y",
+                        2 => "z",
+                        3 => "w",
+                        _ => bail_glsl!("Invalid vector swizzle index: {}", index),
+                    };
+                    Ok(format!("{}.{}", base_val, swizzle))
+                } else {
+                    // Struct field access
+                    Ok(format!("{}._{}", base_val, index))
+                }
+            }
+
+            InstKind::Call { func, args } => {
+                let arg_strs: Result<Vec<_>> = args.iter().map(|a| self.get_value(*a)).collect();
+                let arg_strs = arg_strs?;
+
+                // Check if it's a builtin
+                if let Some(impl_) = self.ctx.impl_source.get(func) {
+                    self.lower_builtin_call(impl_, &arg_strs, &inst.result_ty)
+                } else {
+                    Ok(format!("{}({})", func, arg_strs.join(", ")))
+                }
+            }
+
+            InstKind::Intrinsic { name, args } => {
+                let arg_strs: Result<Vec<_>> = args.iter().map(|a| self.get_value(*a)).collect();
+                self.lower_intrinsic(name, &arg_strs?, args, &inst.result_ty)
+            }
+
+            InstKind::ArrayRange { start, step, len } => {
+                bail_glsl!(
+                    "ArrayRange not supported in GLSL: start={:?}, step={:?}, len={:?}",
+                    start,
+                    step,
+                    len
+                )
+            }
+
+            InstKind::Global(name) => Ok(name.clone()),
+
+            InstKind::Extern(linkage) => {
+                bail_glsl!("Extern functions not supported in GLSL: {}", linkage)
+            }
+
+            InstKind::Matrix(_) => {
+                bail_glsl!("Matrix literals not yet implemented in GLSL lowering")
+            }
+
+            InstKind::StorageView { .. }
+            | InstKind::StorageViewIndex { .. }
+            | InstKind::StorageViewLen { .. } => {
+                bail_glsl!("Storage view operations not supported in GLSL")
+            }
+
+            InstKind::Alloca { .. } | InstKind::Load { .. } | InstKind::Store { .. } => {
+                bail_glsl!("Memory operations not supported in GLSL")
+            }
+
+            InstKind::OutputPtr { .. } => {
+                bail_glsl!("OutputPtr not supported in GLSL (use different entry point handling)")
+            }
+        }
+    }
+
+    fn get_value(&self, val: ValueId) -> Result<String> {
+        self.value_map
+            .get(&val)
+            .cloned()
+            .ok_or_else(|| crate::err_glsl!("Value {:?} not found in value_map", val))
+    }
+
+    fn lower_builtin_call(
+        &self,
+        impl_: &BuiltinImpl,
+        args: &[String],
+        ret_ty: &PolyType<TypeName>,
+    ) -> Result<String> {
+        match impl_ {
+            BuiltinImpl::PrimOp(op) => self.lower_primop(op, args, ret_ty),
+            BuiltinImpl::Intrinsic(intr) => {
+                bail_glsl!("Intrinsic {:?} not supported in GLSL", intr)
+            }
+            BuiltinImpl::LinkedSpirv(name) => {
+                bail_glsl!("Linked SPIR-V function '{}' not supported in GLSL", name)
+            }
+        }
+    }
+
+    fn lower_primop(&self, op: &PrimOp, args: &[String], ret_ty: &PolyType<TypeName>) -> Result<String> {
+        use PrimOp::*;
+        match op {
+            GlslExt(id) => {
+                let func = glsl_ext_to_name(*id);
+                Ok(format!("{}({})", func, args.join(", ")))
+            }
+            Dot => Ok(format!("dot({}, {})", args[0], args[1])),
+            OuterProduct => Ok(format!("outerProduct({}, {})", args[0], args[1])),
+            MatrixTimesMatrix | MatrixTimesVector | VectorTimesMatrix => {
+                Ok(format!("({} * {})", args[0], args[1]))
+            }
+            VectorTimesScalar | MatrixTimesScalar => Ok(format!("({} * {})", args[0], args[1])),
+            FAdd | IAdd => Ok(format!("({} + {})", args[0], args[1])),
+            FSub | ISub => Ok(format!("({} - {})", args[0], args[1])),
+            FMul | IMul => Ok(format!("({} * {})", args[0], args[1])),
+            FDiv | SDiv | UDiv => Ok(format!("({} / {})", args[0], args[1])),
+            FRem | FMod | SRem | SMod => Ok(format!("mod({}, {})", args[0], args[1])),
+            FOrdEqual | IEqual => Ok(format!("({} == {})", args[0], args[1])),
+            FOrdNotEqual | INotEqual => Ok(format!("({} != {})", args[0], args[1])),
+            FOrdLessThan | SLessThan | ULessThan => Ok(format!("({} < {})", args[0], args[1])),
+            FOrdGreaterThan | SGreaterThan | UGreaterThan => Ok(format!("({} > {})", args[0], args[1])),
+            FOrdLessThanEqual | SLessThanEqual | ULessThanEqual => {
+                Ok(format!("({} <= {})", args[0], args[1]))
+            }
+            FOrdGreaterThanEqual | SGreaterThanEqual | UGreaterThanEqual => {
+                Ok(format!("({} >= {})", args[0], args[1]))
+            }
+            BitwiseAnd => Ok(format!("({} & {})", args[0], args[1])),
+            BitwiseOr => Ok(format!("({} | {})", args[0], args[1])),
+            BitwiseXor => Ok(format!("({} ^ {})", args[0], args[1])),
+            Not => Ok(format!("(~{})", args[0])),
+            ShiftLeftLogical => Ok(format!("({} << {})", args[0], args[1])),
+            ShiftRightArithmetic | ShiftRightLogical => Ok(format!("({} >> {})", args[0], args[1])),
+            FPToSI => Ok(format!("int({})", args[0])),
+            FPToUI => Ok(format!("uint({})", args[0])),
+            SIToFP | UIToFP => Ok(format!("float({})", args[0])),
+            FPConvert => Ok(format!("float({})", args[0])),
+            SConvert | UConvert => Ok(format!("int({})", args[0])),
+            Bitcast => {
+                let func = match ret_ty {
+                    PolyType::Constructed(TypeName::Int(32), _) => "floatBitsToInt",
+                    PolyType::Constructed(TypeName::UInt(32), _) => "floatBitsToUint",
+                    PolyType::Constructed(TypeName::Float(32), _) => "intBitsToFloat",
+                    _ => "floatBitsToInt",
+                };
+                Ok(format!("{}({})", func, args[0]))
+            }
+        }
+    }
+
+    fn lower_intrinsic(
+        &self,
+        name: &str,
+        args: &[String],
+        _arg_ids: &[ValueId],
+        _ret_ty: &PolyType<TypeName>,
+    ) -> Result<String> {
+        match name {
+            "_w_tuple_proj" | "tuple_access" => {
+                // args[0] is tuple, args[1] is index (should be constant)
+                // For now, assume it's already been lowered to TupleProj
+                Ok(format!("{}._{}", args[0], args[1]))
+            }
+            "_w_index" | "index" => Ok(format!("{}[{}]", args[0], args[1])),
+            "length" => Ok(format!("{}.length()", args[0])),
+            _ => bail_glsl!("Unknown intrinsic: {}", name),
+        }
+    }
+}
+
+/// Map GLSLstd450 extended instruction opcodes to GLSL function names
+fn glsl_ext_to_name(id: u32) -> &'static str {
+    match id {
+        1 => "round",
+        2 => "roundEven",
+        3 => "trunc",
+        4 => "abs",
+        5 => "abs",
+        6 => "sign",
+        7 => "sign",
+        8 => "floor",
+        9 => "ceil",
+        10 => "fract",
+        11 => "radians",
+        12 => "degrees",
+        13 => "sin",
+        14 => "cos",
+        15 => "tan",
+        16 => "asin",
+        17 => "acos",
+        18 => "atan",
+        19 => "sinh",
+        20 => "cosh",
+        21 => "tanh",
+        22 => "asinh",
+        23 => "acosh",
+        24 => "atanh",
+        25 => "atan",
+        26 => "pow",
+        27 => "exp",
+        28 => "log",
+        29 => "exp2",
+        30 => "log2",
+        31 => "sqrt",
+        32 => "inversesqrt",
+        33 => "determinant",
+        34 => "inverse",
+        37 => "min",
+        38 => "min",
+        39 => "min",
+        40 => "max",
+        41 => "max",
+        42 => "max",
+        43 => "clamp",
+        44 => "clamp",
+        45 => "clamp",
+        46 => "mix",
+        48 => "step",
+        49 => "smoothstep",
+        50 => "fma",
+        53 => "ldexp",
+        66 => "length",
+        67 => "distance",
+        68 => "cross",
+        69 => "normalize",
+        70 => "faceforward",
+        71 => "reflect",
+        72 => "refract",
+        _ => "/* unknown_glsl_ext */",
+    }
+}

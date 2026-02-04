@@ -1,22 +1,646 @@
-//! SSA to SPIR-V lowering.
+//! SPIR-V code generation from SSA.
 //!
 //! This module converts SSA FuncBody to SPIR-V instructions.
 //! The explicit CFG in SSA form maps naturally to SPIR-V blocks.
+//!
+//! The main entry point is `lower_ssa_program` which converts an entire
+//! SSA program to SPIR-V binary output.
 
 use std::collections::HashMap;
 
 use crate::ast::TypeName;
 use crate::error::Result;
-use crate::impl_source::{BuiltinImpl, PrimOp};
+use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
 use crate::mir::ssa::{BlockId, FuncBody, Inst, InstKind, Terminator, ValueId};
+use crate::tlc::to_ssa::{ExecutionModel, IoDecoration, SsaEntryPoint, SsaFunction, SsaProgram};
 use crate::types;
 use crate::{bail_spirv, err_spirv};
 use polytype::Type as PolyType;
-use rspirv::dr::{InsertPoint, Operand};
-use rspirv::spirv;
-use spirv::StorageClass;
+use rspirv::binary::Assemble;
+use rspirv::dr::{Builder, InsertPoint, Operand};
+use rspirv::spirv::{self, AddressingModel, Capability, MemoryModel, StorageClass};
 
-use super::lowering::Constructor;
+// =============================================================================
+// Constructor - SPIR-V Builder Wrapper
+// =============================================================================
+
+/// Constructor wraps rspirv::Builder with an ergonomic API that handles:
+/// - Automatic variable hoisting to function entry block
+/// - Block management with implicit branch from variables block to code
+/// - Value and type caching
+struct Constructor {
+    builder: Builder,
+
+    // Type caching
+    void_type: spirv::Word,
+    bool_type: spirv::Word,
+    i32_type: spirv::Word,
+    u32_type: spirv::Word,
+    f32_type: spirv::Word,
+
+    // Constant caching
+    int_const_cache: HashMap<i32, spirv::Word>,
+    int_const_reverse: HashMap<spirv::Word, i32>, // reverse lookup: ID -> value
+    uint_const_cache: HashMap<u32, spirv::Word>,
+    uint_const_reverse: HashMap<spirv::Word, u32>, // reverse lookup: ID -> value
+    float_const_cache: HashMap<u32, spirv::Word>,  // bits as u32
+    bool_const_cache: HashMap<bool, spirv::Word>,
+
+    // Current function state
+    current_block: Option<spirv::Word>,
+    variables_block: Option<spirv::Word>, // Block for OpVariable declarations
+    first_code_block: Option<spirv::Word>, // First block with actual code
+
+    // Environment: name -> value ID
+    env: HashMap<String, spirv::Word>,
+
+    // Function map: name -> function ID
+    functions: HashMap<String, spirv::Word>,
+
+    // GLSL extended instruction set
+    glsl_ext_inst_id: spirv::Word,
+
+    // Type cache: avoid recreating same types
+    vec_type_cache: HashMap<(spirv::Word, u32), spirv::Word>,
+    struct_type_cache: HashMap<Vec<spirv::Word>, spirv::Word>,
+    ptr_type_cache: HashMap<(spirv::StorageClass, spirv::Word), spirv::Word>,
+    runtime_array_cache: HashMap<(spirv::Word, u32), spirv::Word>, // (elem_type, stride) -> decorated type
+    buffer_block_cache: HashMap<spirv::Word, spirv::Word>, // runtime_array_type -> Block-decorated struct
+    array_elem_cache: HashMap<spirv::Word, spirv::Word>,   // array_type -> element_type
+
+    // Entry point interface tracking
+    entry_point_interfaces: HashMap<String, Vec<spirv::Word>>,
+
+    // Global constants: name -> constant_id (SPIR-V OpConstant)
+    global_constants: HashMap<String, spirv::Word>,
+    uniform_variables: HashMap<String, spirv::Word>,
+    uniform_types: HashMap<String, spirv::Word>, // uniform name -> SPIR-V type ID
+    uniform_load_cache: HashMap<String, spirv::Word>, // cached OpLoad results per function
+    extract_cache: HashMap<(spirv::Word, u32), spirv::Word>, // CSE for OpCompositeExtract
+
+    // Builtin function registry
+    impl_source: ImplSource,
+
+    /// Storage buffers for compute shaders: (set, binding) -> (buffer_var, elem_type_id, buffer_ptr_type)
+    storage_buffers: HashMap<(u32, u32), (spirv::Word, spirv::Word, spirv::Word)>,
+
+    /// GlobalInvocationId variable for compute shaders (set during entry point setup)
+    global_invocation_id: Option<spirv::Word>,
+
+    /// Linked SPIR-V functions: linkage_name -> function_id
+    linked_functions: HashMap<String, spirv::Word>,
+
+    /// Output variables for the current entry point being lowered.
+    /// Set during entry point setup, cleared at end. Used by OutputPtr lowering.
+    current_entry_outputs: Vec<spirv::Word>,
+}
+
+impl Constructor {
+    fn new() -> Self {
+        let mut builder = Builder::new();
+        builder.set_version(1, 5);
+        builder.capability(Capability::Shader);
+        builder.memory_model(AddressingModel::Logical, MemoryModel::GLSL450);
+
+        let void_type = builder.type_void();
+        let bool_type = builder.type_bool();
+        let i32_type = builder.type_int(32, 1);
+        let u32_type = builder.type_int(32, 0);
+        let f32_type = builder.type_float(32);
+        let glsl_ext_inst_id = builder.ext_inst_import("GLSL.std.450");
+
+        Constructor {
+            builder,
+            void_type,
+            bool_type,
+            i32_type,
+            u32_type,
+            f32_type,
+            int_const_cache: HashMap::new(),
+            int_const_reverse: HashMap::new(),
+            uint_const_cache: HashMap::new(),
+            uint_const_reverse: HashMap::new(),
+            float_const_cache: HashMap::new(),
+            bool_const_cache: HashMap::new(),
+            current_block: None,
+            variables_block: None,
+            first_code_block: None,
+            env: HashMap::new(),
+            functions: HashMap::new(),
+            glsl_ext_inst_id,
+            vec_type_cache: HashMap::new(),
+            struct_type_cache: HashMap::new(),
+            ptr_type_cache: HashMap::new(),
+            runtime_array_cache: HashMap::new(),
+            buffer_block_cache: HashMap::new(),
+            array_elem_cache: HashMap::new(),
+            entry_point_interfaces: HashMap::new(),
+            global_constants: HashMap::new(),
+            uniform_variables: HashMap::new(),
+            uniform_types: HashMap::new(),
+            uniform_load_cache: HashMap::new(),
+            extract_cache: HashMap::new(),
+            impl_source: ImplSource::default(),
+            storage_buffers: HashMap::new(),
+            global_invocation_id: None,
+            linked_functions: HashMap::new(),
+            current_entry_outputs: Vec::new(),
+        }
+    }
+
+    /// Get or create a pointer type
+    fn get_or_create_ptr_type(
+        &mut self,
+        storage_class: spirv::StorageClass,
+        pointee_id: spirv::Word,
+    ) -> spirv::Word {
+        let key = (storage_class, pointee_id);
+        if let Some(&ty) = self.ptr_type_cache.get(&key) {
+            return ty;
+        }
+        let ty = self.builder.type_pointer(None, storage_class, pointee_id);
+        self.ptr_type_cache.insert(key, ty);
+        ty
+    }
+
+    /// Convert a polytype Type to a SPIR-V type ID
+    fn polytype_to_spirv(&mut self, ty: &PolyType<TypeName>) -> spirv::Word {
+        match ty {
+            PolyType::Variable(id) => {
+                panic!("BUG: Unresolved type variable Variable({}) reached lowering.", id);
+            }
+            PolyType::Constructed(name, args) => {
+                // Assert that no UserVar or SizeVar reaches lowering
+                match name {
+                    TypeName::UserVar(v) => {
+                        panic!("BUG: UserVar('{}') reached lowering.", v);
+                    }
+                    TypeName::SizeVar(v) => {
+                        panic!("BUG: SizeVar('{}') reached lowering.", v);
+                    }
+                    _ => {}
+                }
+
+                match name {
+                    TypeName::Int(32) => self.i32_type,
+                    TypeName::Float(32) => self.f32_type,
+                    TypeName::Int(bits) => self.builder.type_int(*bits as u32, 1),
+                    TypeName::UInt(bits) => self.builder.type_int(*bits as u32, 0),
+                    TypeName::Float(bits) => self.builder.type_float(*bits as u32),
+                    TypeName::Str(s) if *s == "bool" => self.bool_type,
+                    TypeName::Unit => {
+                        // Unit type - use void type
+                        // Unit values are never actually constructed since they can only be assigned to _
+                        self.void_type
+                    }
+                    TypeName::Tuple(_) => {
+                        // Empty tuples should not reach lowering:
+                        // - Unit values are bound to _ (not stored)
+                        // - Empty closures are handled specially in map (dummy i32 passed directly)
+                        if args.is_empty() {
+                            panic!(
+                                "BUG: Empty tuple type reached lowering. Empty tuples/unit values should be \
+                                handled at call sites (let _ = ..., map with empty closures, etc.)"
+                            );
+                        }
+                        // Non-empty tuple becomes struct
+                        let field_types: Vec<spirv::Word> =
+                            args.iter().map(|a| self.polytype_to_spirv(a)).collect();
+                        self.get_or_create_struct_type(field_types)
+                    }
+                    TypeName::Array => {
+                        // Array[elem, variant, size]
+                        assert!(args.len() == 3);
+                        let elem_type = self.polytype_to_spirv(&args[0]);
+                        let variant = &args[1];
+                        let size = &args[2];
+
+                        // Dispatch on variant first - View arrays are always {buffer_ptr, offset, len} structs
+                        if let PolyType::Constructed(TypeName::ArrayVariantView, _) = variant {
+                            // View variant: struct { buffer_ptr, offset, len }
+                            // buffer_ptr points to the StorageBuffer block struct containing the runtime array
+                            let stride = crate::mir::layout::type_byte_size(&args[0])
+                                .expect("View element type must have computable size");
+                            let runtime_array_type =
+                                self.get_or_create_runtime_array_type(elem_type, stride);
+                            let buffer_struct_type =
+                                self.get_or_create_buffer_block_type(runtime_array_type);
+                            let buffer_ptr_type = self.get_or_create_ptr_type(
+                                spirv::StorageClass::StorageBuffer,
+                                buffer_struct_type,
+                            );
+                            self.get_or_create_struct_type(vec![
+                                buffer_ptr_type,
+                                self.u32_type,
+                                self.u32_type,
+                            ])
+                        } else if let PolyType::Constructed(TypeName::ArrayVariantVirtual, _) = variant {
+                            // Virtual variant: struct { start, step, len } for range representation
+                            self.get_or_create_struct_type(vec![
+                                self.i32_type,
+                                self.i32_type,
+                                self.i32_type,
+                            ])
+                        } else {
+                            // Composite variant (or placeholder): sized array value
+                            match size {
+                                PolyType::Constructed(TypeName::Size(n), _) => {
+                                    // Fixed-size array
+                                    let size_const = self.const_i32(*n as i32);
+                                    let arr_type = self.builder.type_array(elem_type, size_const);
+                                    // Cache element type for later lookup
+                                    self.array_elem_cache.insert(arr_type, elem_type);
+                                    arr_type
+                                }
+                                PolyType::Constructed(TypeName::SizePlaceholder, _) => {
+                                    panic!("SizePlaceholder should be resolved before SPIR-V lowering");
+                                }
+                                PolyType::Variable(_) => {
+                                    // Unsized composite array - not supported
+                                    panic!("BUG: Composite variant unsized arrays not supported: {:?}", ty);
+                                }
+                                _ => {
+                                    panic!(
+                                        "BUG: Array type has invalid size argument: {:?}. This should have been resolved during type checking.",
+                                        size
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    TypeName::Vec => {
+                        // Vec type with args: args[0] is size, args[1] is element type
+                        if args.len() < 2 {
+                            panic!(
+                                "BUG: Vec type requires 2 arguments (size, element_type), got {}.",
+                                args.len()
+                            );
+                        }
+                        let size = match &args[0] {
+                            PolyType::Constructed(TypeName::Size(n), _) => *n as u32,
+                            _ => {
+                                panic!("BUG: Vec type has invalid size argument: {:?}.", args[0]);
+                            }
+                        };
+                        let elem_type = self.polytype_to_spirv(&args[1]);
+                        self.get_or_create_vec_type(elem_type, size)
+                    }
+                    TypeName::Mat => {
+                        // Mat type with args: args[0] is cols, args[1] is rows, args[2] is element type
+                        if args.len() < 3 {
+                            panic!(
+                                "BUG: Mat type requires 3 arguments (cols, rows, element_type), got {}.",
+                                args.len()
+                            );
+                        }
+                        let cols = match &args[0] {
+                            PolyType::Constructed(TypeName::Size(n), _) => *n as u32,
+                            _ => {
+                                panic!("BUG: Mat type has invalid cols argument: {:?}.", args[0]);
+                            }
+                        };
+                        let rows = match &args[1] {
+                            PolyType::Constructed(TypeName::Size(n), _) => *n as u32,
+                            _ => {
+                                panic!("BUG: Mat type has invalid rows argument: {:?}.", args[1]);
+                            }
+                        };
+                        let elem_type = self.polytype_to_spirv(&args[2]);
+                        let col_vec_type = self.get_or_create_vec_type(elem_type, rows);
+                        self.builder.type_matrix(col_vec_type, cols)
+                    }
+                    TypeName::Record(_fields) => {
+                        panic!("should never get here")
+                    }
+                    TypeName::Pointer => {
+                        // Pointer type: args[0] is pointee type
+                        if args.is_empty() {
+                            panic!("BUG: Pointer type requires a pointee type argument.");
+                        }
+                        let pointee_type = self.polytype_to_spirv(&args[0]);
+                        self.builder.type_pointer(None, StorageClass::Function, pointee_type)
+                    }
+                    TypeName::Unique => {
+                        // Unique type wrapper: strip and convert underlying type
+                        // Unique is only used for alias checking, has no runtime representation
+                        if args.is_empty() {
+                            panic!("BUG: Unique type requires an underlying type argument.");
+                        }
+                        self.polytype_to_spirv(&args[0])
+                    }
+                    TypeName::Existential(_) => {
+                        // Existential type: unwrap and convert the inner type (in args[0])
+                        // The size variable is runtime-determined, handled by Slice representation
+                        let inner = &args[0];
+                        self.polytype_to_spirv(inner)
+                    }
+                    TypeName::Arrow => {
+                        // Arrow types (function types) come from closures that have been defunctionalized.
+                        // Since closures are represented as (captures_tuple, lambda_name), the actual
+                        // runtime value is just the captures. The Arrow type is a phantom type used
+                        // for type checking only. Map to unit type since it has no runtime representation.
+                        self.void_type
+                    }
+                    TypeName::ArrayVariantComposite | TypeName::ArrayVariantView => {
+                        // Address space markers are used within Array types but shouldn't appear
+                        // as standalone types requiring SPIR-V representation.
+                        panic!(
+                            "BUG: Address space marker {:?} reached polytype_to_spirv as standalone type. \
+                            This should only appear as part of Array[elem, addrspace, size]. Full type: {:?}",
+                            name, ty
+                        );
+                    }
+                    TypeName::AddressPlaceholder | TypeName::SizePlaceholder => {
+                        panic!("Placeholders should be resolved before SPIR-V lowering");
+                    }
+                    _ => {
+                        panic!(
+                            "BUG: Unknown type reached lowering: {:?}. This should have been caught during type checking.",
+                            name
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /// Get or create a vector type
+    fn get_or_create_vec_type(&mut self, elem_type: spirv::Word, size: u32) -> spirv::Word {
+        let key = (elem_type, size);
+        if let Some(&ty) = self.vec_type_cache.get(&key) {
+            return ty;
+        }
+        let ty = self.builder.type_vector(elem_type, size);
+        self.vec_type_cache.insert(key, ty);
+        ty
+    }
+
+    /// Get or create a struct type
+    fn get_or_create_struct_type(&mut self, field_types: Vec<spirv::Word>) -> spirv::Word {
+        if let Some(&ty) = self.struct_type_cache.get(&field_types) {
+            return ty;
+        }
+        let ty = self.builder.type_struct(field_types.clone());
+        self.struct_type_cache.insert(field_types, ty);
+        ty
+    }
+
+    /// Get or create a runtime array type with ArrayStride decoration
+    fn get_or_create_runtime_array_type(&mut self, elem_type: spirv::Word, stride: u32) -> spirv::Word {
+        let key = (elem_type, stride);
+        if let Some(&ty) = self.runtime_array_cache.get(&key) {
+            return ty;
+        }
+        let ty = self.builder.type_runtime_array(elem_type);
+        self.builder.decorate(
+            ty,
+            spirv::Decoration::ArrayStride,
+            [Operand::LiteralBit32(stride)],
+        );
+        self.runtime_array_cache.insert(key, ty);
+        ty
+    }
+
+    /// Get or create a Block-decorated struct wrapping a runtime array (for storage buffers)
+    fn get_or_create_buffer_block_type(&mut self, runtime_array_type: spirv::Word) -> spirv::Word {
+        if let Some(&ty) = self.buffer_block_cache.get(&runtime_array_type) {
+            return ty;
+        }
+        let ty = self.builder.type_struct([runtime_array_type]);
+        self.builder.decorate(ty, spirv::Decoration::Block, []);
+        self.builder.member_decorate(ty, 0, spirv::Decoration::Offset, [Operand::LiteralBit32(0)]);
+        self.buffer_block_cache.insert(runtime_array_type, ty);
+        ty
+    }
+
+    /// Create a Block-decorated struct type for a uniform buffer.
+    /// Returns the struct type ID. Each uniform gets its own unique struct
+    /// (not cached) since Block structs shouldn't be shared.
+    fn create_uniform_block_type(&mut self, value_type: spirv::Word) -> spirv::Word {
+        let block_struct = self.builder.type_struct(vec![value_type]);
+
+        // Decorate as Block (required for UBO in Vulkan)
+        self.builder.decorate(block_struct, spirv::Decoration::Block, []);
+
+        // Decorate member 0 with Offset 0
+        self.builder.member_decorate(
+            block_struct,
+            0,
+            spirv::Decoration::Offset,
+            [Operand::LiteralBit32(0)],
+        );
+
+        block_struct
+    }
+
+    /// Forward-declare a function (reserve ID without emitting body).
+    /// This allows functions to call each other regardless of order.
+    fn forward_declare_function(
+        &mut self,
+        name: &str,
+        _param_types: &[spirv::Word],
+        _return_type: spirv::Word,
+    ) -> spirv::Word {
+        // Check if already declared
+        if let Some(&id) = self.functions.get(name) {
+            return id;
+        }
+
+        // Reserve an ID for the function
+        let func_id = self.builder.id();
+
+        // Store the mapping (we'll use this ID when we actually define the function)
+        self.functions.insert(name.to_string(), func_id);
+
+        func_id
+    }
+
+    /// Begin a new function
+    fn begin_function(
+        &mut self,
+        name: &str,
+        param_names: &[&str],
+        param_types: &[spirv::Word],
+        return_type: spirv::Word,
+    ) -> Result<spirv::Word> {
+        let func_type = self.builder.type_function(return_type, param_types.to_vec());
+
+        // Check if this function was forward-declared
+        let func_id = if let Some(&pre_id) = self.functions.get(name) {
+            // Use the pre-allocated ID
+            self.builder.begin_function(
+                return_type,
+                Some(pre_id),
+                spirv::FunctionControl::NONE,
+                func_type,
+            )?
+        } else {
+            let id =
+                self.builder.begin_function(return_type, None, spirv::FunctionControl::NONE, func_type)?;
+            self.functions.insert(name.to_string(), id);
+            id
+        };
+
+        // Create function parameters
+        for (i, &param_name) in param_names.iter().enumerate() {
+            let param_id = self.builder.function_parameter(param_types[i])?;
+            self.env.insert(param_name.to_string(), param_id);
+        }
+
+        // Create two blocks: one for variables, one for code
+        let vars_block_id = self.builder.id();
+        let code_block_id = self.builder.id();
+        self.variables_block = Some(vars_block_id);
+        self.first_code_block = Some(code_block_id);
+
+        // Begin variables block (leave it open - no terminator yet)
+        self.builder.begin_block(Some(vars_block_id))?;
+
+        // Deselect current block so we can begin a new one
+        self.builder.select_block(None)?;
+
+        // Begin code block - this is where we'll emit code
+        self.builder.begin_block(Some(code_block_id))?;
+        self.current_block = Some(code_block_id);
+
+        Ok(func_id)
+    }
+
+    /// End the current function
+    fn end_function(&mut self) -> Result<()> {
+        // Terminate the variables block with a branch to the code block
+        if let (Some(vars_block), Some(code_block)) = (self.variables_block, self.first_code_block) {
+            // Find the variables block index and select it
+            let func = self.builder.module_ref().functions.last().expect("No function");
+            let vars_idx = func
+                .blocks
+                .iter()
+                .position(|b| b.label.as_ref().map(|l| l.result_id) == Some(Some(vars_block)));
+
+            if let Some(idx) = vars_idx {
+                self.builder.select_block(Some(idx))?;
+                self.builder.branch(code_block)?;
+            }
+        }
+
+        self.builder.end_function()?;
+
+        // Clear function state
+        self.current_block = None;
+        self.variables_block = None;
+        self.first_code_block = None;
+        self.env.clear();
+        self.uniform_load_cache.clear();
+        self.extract_cache.clear();
+
+        Ok(())
+    }
+
+    /// Declare a variable in the function's variables block
+    fn declare_variable(&mut self, _name: &str, value_type: spirv::Word) -> Result<spirv::Word> {
+        let ptr_type = self.builder.type_pointer(None, StorageClass::Function, value_type);
+
+        // Save current block
+        let current_idx = self.builder.selected_block();
+
+        // Find and select the variables block
+        let vars_block = self.variables_block.expect("declare_variable called outside function");
+        let func = self.builder.module_ref().functions.last().expect("No function");
+        let vars_idx = func
+            .blocks
+            .iter()
+            .position(|b| b.label.as_ref().map(|l| l.result_id) == Some(Some(vars_block)))
+            .expect("Variables block not found");
+
+        self.builder.select_block(Some(vars_idx))?;
+
+        // Emit the variable
+        let var_id = self.builder.variable(ptr_type, None, StorageClass::Function, None);
+
+        // Restore current block
+        self.builder.select_block(current_idx)?;
+
+        Ok(var_id)
+    }
+
+    /// Get or create an i32 constant
+    fn const_i32(&mut self, value: i32) -> spirv::Word {
+        if let Some(&id) = self.int_const_cache.get(&value) {
+            return id;
+        }
+        let id = self.builder.constant_bit32(self.i32_type, value as u32);
+        self.int_const_cache.insert(value, id);
+        self.int_const_reverse.insert(id, value);
+        id
+    }
+
+    /// Get the literal i32 value from a constant ID (reverse lookup)
+    fn get_const_i32_value(&self, id: spirv::Word) -> Option<i32> {
+        self.int_const_reverse.get(&id).copied()
+    }
+
+    /// Get or create a u32 constant
+    fn const_u32(&mut self, value: u32) -> spirv::Word {
+        if let Some(&id) = self.uint_const_cache.get(&value) {
+            return id;
+        }
+        let id = self.builder.constant_bit32(self.u32_type, value);
+        self.uint_const_cache.insert(value, id);
+        self.uint_const_reverse.insert(id, value);
+        id
+    }
+
+    /// Get the literal u32 value from a constant ID (reverse lookup)
+    fn get_const_u32_value(&self, id: spirv::Word) -> Option<u32> {
+        self.uint_const_reverse.get(&id).copied()
+    }
+
+    /// Get the element type of an array type
+    fn get_array_element_type(&self, array_type: spirv::Word) -> Result<spirv::Word> {
+        self.array_elem_cache
+            .get(&array_type)
+            .copied()
+            .ok_or_else(|| crate::err_spirv!("Array element type not found for type ID: {}", array_type))
+    }
+
+    /// Get or create an f32 constant
+    fn const_f32(&mut self, value: f32) -> spirv::Word {
+        let bits = value.to_bits();
+        if let Some(&id) = self.float_const_cache.get(&bits) {
+            return id;
+        }
+        let id = self.builder.constant_bit32(self.f32_type, bits);
+        self.float_const_cache.insert(bits, id);
+        id
+    }
+
+    /// Get or create a bool constant
+    fn const_bool(&mut self, value: bool) -> spirv::Word {
+        if let Some(&id) = self.bool_const_cache.get(&value) {
+            return id;
+        }
+        let id = if value {
+            self.builder.constant_true(self.bool_type)
+        } else {
+            self.builder.constant_false(self.bool_type)
+        };
+        self.bool_const_cache.insert(value, id);
+        id
+    }
+
+    /// Begin a block (must be called before emitting instructions into it)
+    fn begin_block(&mut self, block_id: spirv::Word) -> Result<()> {
+        self.builder.begin_block(Some(block_id))?;
+        self.current_block = Some(block_id);
+        // Clear extract cache since values from previous blocks may not dominate this block
+        self.extract_cache.clear();
+        Ok(())
+    }
+}
+
+// =============================================================================
+// SSA to SPIR-V Lowering
+// =============================================================================
 
 /// Lower an SSA function body to SPIR-V.
 ///
@@ -24,8 +648,8 @@ use super::lowering::Constructor;
 /// - SSA blocks become SPIR-V blocks
 /// - Block parameters become OpPhi nodes
 /// - Terminators become branch instructions
-pub(crate) fn lower_ssa_body(constructor: &mut Constructor, body: &FuncBody) -> Result<spirv::Word> {
-    let mut ctx = SsaLowerCtx::new(constructor, body, false);
+fn lower_ssa_body(constructor: &mut Constructor, body: &FuncBody) -> Result<spirv::Word> {
+    let mut ctx = SsaLowerCtx::new(constructor, body);
     ctx.lower()
 }
 
@@ -34,11 +658,8 @@ pub(crate) fn lower_ssa_body(constructor: &mut Constructor, body: &FuncBody) -> 
 /// Entry points are void functions that don't emit OpReturn/OpReturnValue.
 /// Instead, this returns the computed result value which the caller stores
 /// to output variables before emitting OpReturn.
-pub(crate) fn lower_ssa_body_for_entry(
-    constructor: &mut Constructor,
-    body: &FuncBody,
-) -> Result<spirv::Word> {
-    let mut ctx = SsaLowerCtx::new(constructor, body, true);
+fn lower_ssa_body_for_entry(constructor: &mut Constructor, body: &FuncBody) -> Result<spirv::Word> {
+    let mut ctx = SsaLowerCtx::new(constructor, body);
     ctx.lower()
 }
 
@@ -55,14 +676,10 @@ struct SsaLowerCtx<'a, 'b> {
     /// Phi node info: (target_block, param_idx, value, source_block)
     /// Collected during terminator lowering, inserted after all blocks processed.
     phi_inputs: Vec<(BlockId, usize, spirv::Word, spirv::Word)>,
-    /// Whether this is an entry point (don't emit OpReturn)
-    is_entry_point: bool,
-    /// The return value (captured for entry points)
-    return_value: Option<spirv::Word>,
 }
 
 impl<'a, 'b> SsaLowerCtx<'a, 'b> {
-    fn new(constructor: &'a mut Constructor, body: &'b FuncBody, is_entry_point: bool) -> Self {
+    fn new(constructor: &'a mut Constructor, body: &'b FuncBody) -> Self {
         SsaLowerCtx {
             constructor,
             body,
@@ -70,8 +687,6 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
             block_map: HashMap::new(),
             block_indices: HashMap::new(),
             phi_inputs: Vec::new(),
-            is_entry_point,
-            return_value: None,
         }
     }
 
@@ -113,7 +728,7 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
 
             // Allocate phi IDs for block parameters (but don't insert yet)
             for (param_idx, param) in block.params.iter().enumerate() {
-                let param_ty = self.constructor.ast_type_to_spirv(&param.ty);
+                let param_ty = self.constructor.polytype_to_spirv(&param.ty);
                 let phi_id = self.constructor.builder.id();
                 self.value_map.insert(param.value, phi_id);
 
@@ -137,26 +752,12 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
         // Insert phi nodes for all block parameters
         self.insert_phi_nodes()?;
 
-        // For entry points, re-select the last block so caller can emit stores/ret
-        // (insert_phi_nodes leaves no block selected)
-        if self.is_entry_point && !self.body.blocks.is_empty() {
-            let last_block_id = BlockId((self.body.blocks.len() - 1) as u32);
-            if let Some(&block_idx) = self.block_indices.get(&last_block_id) {
-                self.constructor.builder.select_block(Some(block_idx))?;
-            }
-        }
-
-        // For entry points, return the captured return value
-        // For regular functions, the return is handled by the terminator
-        if self.is_entry_point {
-            Ok(self.return_value.unwrap_or_else(|| self.constructor.const_i32(0)))
-        } else {
-            Ok(self.constructor.const_i32(0)) // Placeholder - actual return in terminator
-        }
+        // Return placeholder - actual return handled by terminators in SSA
+        Ok(self.constructor.const_i32(0))
     }
 
     fn lower_inst(&mut self, inst: &Inst) -> Result<()> {
-        let result_ty = self.constructor.ast_type_to_spirv(&inst.result_ty);
+        let result_ty = self.constructor.polytype_to_spirv(&inst.result_ty);
 
         let spirv_result = match &inst.kind {
             InstKind::Int(s) => match &inst.result_ty {
@@ -245,7 +846,7 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                 // If base is a pointer, load it first
                 let composite_id = if types::is_pointer(base_ty) {
                     let pointee_ty = types::pointee(base_ty).expect("Pointer should have pointee");
-                    let value_type = self.constructor.ast_type_to_spirv(pointee_ty);
+                    let value_type = self.constructor.polytype_to_spirv(pointee_ty);
                     self.constructor.builder.load(value_type, None, base_id, None, [])?
                 } else {
                     base_id
@@ -312,7 +913,7 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
 
             // Effectful operations - for now, just handle the simple cases
             InstKind::Alloca { elem_ty, .. } => {
-                let elem_spirv_ty = self.constructor.ast_type_to_spirv(elem_ty);
+                let elem_spirv_ty = self.constructor.polytype_to_spirv(elem_ty);
                 self.constructor.declare_variable("_alloca", elem_spirv_ty)?
             }
 
@@ -389,6 +990,15 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                 // Extract len from view struct (index 2)
                 self.constructor.builder.composite_extract(result_ty, None, view_id, [2u32])?
             }
+
+            InstKind::OutputPtr { index } => {
+                // Return the output variable pointer for this index
+                if *index < self.constructor.current_entry_outputs.len() {
+                    self.constructor.current_entry_outputs[*index]
+                } else {
+                    bail_spirv!("Output index {} out of bounds (have {} outputs)", index, self.constructor.current_entry_outputs.len())
+                }
+            }
         };
 
         // Map the result
@@ -443,19 +1053,15 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
 
             Terminator::Return(value) => {
                 let value_id = self.get_value(*value)?;
-                if self.is_entry_point {
-                    // For entry points, capture the value but don't emit return
-                    self.return_value = Some(value_id);
-                } else {
-                    self.constructor.builder.ret_value(value_id)?;
-                }
+                // Always emit ret_value - with OutputPtr+Store, entry points
+                // shouldn't use Return(value), but emit it anyway to avoid unterminated blocks.
+                self.constructor.builder.ret_value(value_id)?;
             }
 
             Terminator::ReturnUnit => {
-                if !self.is_entry_point {
-                    self.constructor.builder.ret()?;
-                }
-                // For entry points, no return instruction needed
+                // Always emit ret() - with OutputPtr+Store, entry points handle
+                // outputs explicitly in SSA, so no special case needed here.
+                self.constructor.builder.ret()?;
             }
 
             Terminator::Unreachable => {
@@ -478,7 +1084,7 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
         for ((block_id, param_idx), incoming) in phi_map {
             let block = &self.body.blocks[block_id.index()];
             let param = &block.params[param_idx];
-            let param_ty = self.constructor.ast_type_to_spirv(&param.ty);
+            let param_ty = self.constructor.polytype_to_spirv(&param.ty);
 
             // Get the pre-allocated phi ID
             let phi_id = self.value_map[&param.value];
@@ -719,6 +1325,45 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                 Ok(self.constructor.builder.composite_extract(result_ty, None, args[0], [2u32])?)
             }
 
+            "_w_slice" => {
+                // Slice an array: _w_slice(arr, start, end) -> new array
+                // For fixed-size result arrays, construct by extracting elements
+                if args.len() != 3 {
+                    bail_spirv!("_w_slice requires 3 arguments (arr, start, end)");
+                }
+                let arr = args[0];
+                let start_id = args[1];
+                let end_id = args[2];
+
+                // Get compile-time constant values for start and end
+                let start = self
+                    .constructor
+                    .get_const_i32_value(start_id)
+                    .ok_or_else(|| err_spirv!("_w_slice: start must be a constant"))?
+                    as u32;
+                let end = self
+                    .constructor
+                    .get_const_i32_value(end_id)
+                    .ok_or_else(|| err_spirv!("_w_slice: end must be a constant"))?
+                    as u32;
+
+                if end <= start {
+                    bail_spirv!("_w_slice: end ({}) must be greater than start ({})", end, start);
+                }
+
+                // Extract element type from result type (result_ty is array type)
+                let elem_type = self.constructor.get_array_element_type(result_ty)?;
+
+                // Extract each element and construct new array
+                let mut elements = Vec::with_capacity((end - start) as usize);
+                for i in start..end {
+                    let elem = self.constructor.builder.composite_extract(elem_type, None, arr, [i])?;
+                    elements.push(elem);
+                }
+
+                Ok(self.constructor.builder.composite_construct(result_ty, None, elements)?)
+            }
+
             "_w_slice_storage_view" => {
                 // Slice a storage view - for now, return the input (simplified)
                 if args.len() != 3 {
@@ -904,7 +1549,7 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
             Ok(self.constructor.builder.composite_extract(result_ty, None, array_id, [literal_idx])?)
         } else {
             // Runtime index - must materialize to local variable
-            let spirv_array_type = self.constructor.ast_type_to_spirv(array_ty);
+            let spirv_array_type = self.constructor.polytype_to_spirv(array_ty);
             let array_var = self.constructor.declare_variable("_w_index_tmp", spirv_array_type)?;
             self.constructor.builder.store(array_var, array_id, None, [])?;
 
@@ -1314,4 +1959,328 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
             }
         }
     }
+}
+
+// =============================================================================
+// SSA Program Lowering (new direct path)
+// =============================================================================
+
+/// Lower an SSA program directly to SPIR-V.
+///
+/// This is the new direct path: TLC → SSA → SPIR-V, bypassing MIR.
+pub fn lower_ssa_program(program: &SsaProgram) -> Result<Vec<u32>> {
+    // Use a thread with larger stack size for complex shaders
+    const STACK_SIZE: usize = 16 * 1024 * 1024; // 16MB
+
+    let program_clone = program.clone();
+
+    let handle = std::thread::Builder::new()
+        .stack_size(STACK_SIZE)
+        .spawn(move || lower_ssa_program_impl(&program_clone))
+        .expect("Failed to spawn lowering thread");
+
+    handle.join().expect("Lowering thread panicked")
+}
+
+fn lower_ssa_program_impl(program: &SsaProgram) -> Result<Vec<u32>> {
+    let mut constructor = Constructor::new();
+
+    // Collect entry point info for later
+    let mut entry_info: Vec<(String, spirv::ExecutionModel, Option<(u32, u32, u32)>)> = Vec::new();
+
+    // Lower uniforms
+    for uniform in &program.uniforms {
+        let value_type = constructor.polytype_to_spirv(&uniform.ty);
+        let block_type = constructor.create_uniform_block_type(value_type);
+        let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::Uniform, block_type);
+        let var_id = constructor.builder.variable(ptr_type, None, spirv::StorageClass::Uniform, None);
+
+        constructor.builder.decorate(
+            var_id,
+            spirv::Decoration::DescriptorSet,
+            [Operand::LiteralBit32(uniform.set)],
+        );
+        constructor.builder.decorate(
+            var_id,
+            spirv::Decoration::Binding,
+            [Operand::LiteralBit32(uniform.binding)],
+        );
+
+        constructor.uniform_variables.insert(uniform.name.clone(), var_id);
+        constructor.uniform_types.insert(uniform.name.clone(), value_type);
+    }
+
+    // Lower storage buffers
+    for storage in &program.storage {
+        let storage_type = constructor.polytype_to_spirv(&storage.ty);
+        let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, storage_type);
+        let var_id = constructor.builder.variable(ptr_type, None, spirv::StorageClass::StorageBuffer, None);
+
+        constructor.builder.decorate(
+            var_id,
+            spirv::Decoration::DescriptorSet,
+            [Operand::LiteralBit32(storage.set)],
+        );
+        constructor.builder.decorate(
+            var_id,
+            spirv::Decoration::Binding,
+            [Operand::LiteralBit32(storage.binding)],
+        );
+
+        constructor.uniform_variables.insert(storage.name.clone(), var_id);
+        constructor.uniform_types.insert(storage.name.clone(), storage_type);
+    }
+
+    // Forward-declare all functions first (so they can call each other in any order)
+    for func in &program.functions {
+        if func.linkage_name.is_some() {
+            continue;
+        }
+        let body = &func.body;
+        let param_types: Vec<spirv::Word> =
+            body.params.iter().map(|(_, ty, _)| constructor.polytype_to_spirv(ty)).collect();
+        let return_type = constructor.polytype_to_spirv(&body.return_ty);
+        constructor.forward_declare_function(&func.name, &param_types, return_type);
+    }
+
+    // Now lower all function bodies
+    for func in &program.functions {
+        if func.linkage_name.is_some() {
+            // Extern function - skip for now (handled at call sites)
+            continue;
+        }
+
+        lower_ssa_function(&mut constructor, func)?;
+    }
+
+    // Lower all entry points
+    for entry in &program.entry_points {
+        let (spirv_model, local_size) = match &entry.execution_model {
+            ExecutionModel::Vertex => (spirv::ExecutionModel::Vertex, None),
+            ExecutionModel::Fragment => (spirv::ExecutionModel::Fragment, None),
+            ExecutionModel::Compute { local_size } => (spirv::ExecutionModel::GLCompute, Some(*local_size)),
+        };
+
+        entry_info.push((entry.name.clone(), spirv_model, local_size));
+        lower_ssa_entry_point(&mut constructor, entry)?;
+    }
+
+    // Emit entry point declarations
+    for (name, model, local_size) in &entry_info {
+        if let Some(&func_id) = constructor.functions.get(name) {
+            let mut interfaces = constructor.entry_point_interfaces.get(name).cloned().unwrap_or_default();
+
+            // Add all uniform variables to the interface
+            for &uniform_var in constructor.uniform_variables.values() {
+                if !interfaces.contains(&uniform_var) {
+                    interfaces.push(uniform_var);
+                }
+            }
+
+            constructor.builder.entry_point(*model, func_id, name, interfaces);
+
+            // Add execution modes
+            match model {
+                spirv::ExecutionModel::Fragment => {
+                    constructor.builder.execution_mode(func_id, spirv::ExecutionMode::OriginUpperLeft, []);
+                }
+                spirv::ExecutionModel::GLCompute => {
+                    constructor.builder.capability(Capability::VariablePointersStorageBuffer);
+                    if let Some((x, y, z)) = local_size {
+                        constructor.builder.execution_mode(
+                            func_id,
+                            spirv::ExecutionMode::LocalSize,
+                            [*x, *y, *z],
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(constructor.builder.module().assemble())
+}
+
+/// Lower an SSA function to SPIR-V.
+fn lower_ssa_function(constructor: &mut Constructor, func: &SsaFunction) -> Result<()> {
+    let body = &func.body;
+
+    // Extract parameter types and names, converting types to SPIR-V
+    let param_names: Vec<&str> = body.params.iter().map(|(_, _, name)| name.as_str()).collect();
+    let param_types: Vec<spirv::Word> =
+        body.params.iter().map(|(_, ty, _)| constructor.polytype_to_spirv(ty)).collect();
+
+    let return_type = constructor.polytype_to_spirv(&body.return_ty);
+
+    constructor.begin_function(&func.name, &param_names, &param_types, return_type)?;
+    lower_ssa_body(constructor, body)?;
+    constructor.end_function()?;
+
+    Ok(())
+}
+
+/// Lower an SSA entry point to SPIR-V.
+fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &SsaEntryPoint) -> Result<()> {
+    let body = &entry.body;
+    let is_compute = matches!(entry.execution_model, ExecutionModel::Compute { .. });
+
+    // Create I/O variables for entry point
+    let mut interfaces = Vec::new();
+
+    // For compute shaders, automatically create GlobalInvocationId if not already present
+    if is_compute && constructor.global_invocation_id.is_none() {
+        let uvec3_type = constructor.get_or_create_vec_type(constructor.u32_type, 3);
+        let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::Input, uvec3_type);
+        let gid_var = constructor.builder.variable(ptr_type, None, spirv::StorageClass::Input, None);
+        constructor.builder.decorate(
+            gid_var,
+            spirv::Decoration::BuiltIn,
+            [Operand::BuiltIn(spirv::BuiltIn::GlobalInvocationId)],
+        );
+        constructor.global_invocation_id = Some(gid_var);
+        interfaces.push(gid_var);
+    }
+
+    // Handle inputs
+    let mut location = 0u32;
+    for input in &entry.inputs {
+        let input_type = constructor.polytype_to_spirv(&input.ty);
+
+        if let Some(IoDecoration::BuiltIn(builtin)) = &input.decoration {
+            // Built-in input
+            let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::Input, input_type);
+            let var_id = constructor.builder.variable(ptr_type, None, spirv::StorageClass::Input, None);
+            constructor.builder.decorate(var_id, spirv::Decoration::BuiltIn, [Operand::BuiltIn(*builtin)]);
+            constructor.env.insert(input.name.clone(), var_id);
+            interfaces.push(var_id);
+
+            // Track GlobalInvocationId for compute shaders
+            if *builtin == spirv::BuiltIn::GlobalInvocationId {
+                constructor.global_invocation_id = Some(var_id);
+            }
+        } else if let Some((set, binding)) = input.storage_binding {
+            // Storage buffer input for compute shaders
+            let elem_ty = match &input.ty {
+                PolyType::Constructed(TypeName::Array, args) if !args.is_empty() => args[0].clone(),
+                _ => input.ty.clone(),
+            };
+            let elem_spirv = constructor.polytype_to_spirv(&elem_ty);
+
+            // Create runtime array type for storage buffer
+            let runtime_array = constructor.builder.type_runtime_array(elem_spirv);
+            constructor.builder.decorate(
+                runtime_array,
+                spirv::Decoration::ArrayStride,
+                [Operand::LiteralBit32(4)], // TODO: proper stride calculation
+            );
+
+            // Create block struct containing the runtime array
+            let block_struct = constructor.builder.type_struct([runtime_array]);
+            constructor.builder.decorate(block_struct, spirv::Decoration::Block, []);
+            constructor.builder.member_decorate(
+                block_struct,
+                0,
+                spirv::Decoration::Offset,
+                [Operand::LiteralBit32(0)],
+            );
+
+            let ptr_type =
+                constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, block_struct);
+            let var_id =
+                constructor.builder.variable(ptr_type, None, spirv::StorageClass::StorageBuffer, None);
+
+            constructor.builder.decorate(
+                var_id,
+                spirv::Decoration::DescriptorSet,
+                [Operand::LiteralBit32(set)],
+            );
+            constructor.builder.decorate(
+                var_id,
+                spirv::Decoration::Binding,
+                [Operand::LiteralBit32(binding)],
+            );
+
+            // Store for later lookup
+            constructor.storage_buffers.insert((set, binding), (var_id, block_struct, elem_spirv));
+            interfaces.push(var_id);
+        } else {
+            // Regular input with location
+            let loc = input
+                .decoration
+                .as_ref()
+                .and_then(|d| match d {
+                    IoDecoration::Location(l) => Some(*l),
+                    _ => None,
+                })
+                .unwrap_or_else(|| {
+                    let l = location;
+                    location += 1;
+                    l
+                });
+
+            let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::Input, input_type);
+            let var_id = constructor.builder.variable(ptr_type, None, spirv::StorageClass::Input, None);
+            constructor.builder.decorate(var_id, spirv::Decoration::Location, [Operand::LiteralBit32(loc)]);
+            constructor.env.insert(input.name.clone(), var_id);
+            interfaces.push(var_id);
+        }
+    }
+
+    // Handle outputs
+    let mut output_vars = Vec::new();
+    let mut output_location = 0u32;
+    for output in &entry.outputs {
+        let output_type = constructor.polytype_to_spirv(&output.ty);
+
+        if let Some(IoDecoration::BuiltIn(builtin)) = &output.decoration {
+            let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::Output, output_type);
+            let var_id = constructor.builder.variable(ptr_type, None, spirv::StorageClass::Output, None);
+            constructor.builder.decorate(var_id, spirv::Decoration::BuiltIn, [Operand::BuiltIn(*builtin)]);
+            output_vars.push(var_id);
+            interfaces.push(var_id);
+        } else {
+            let loc = output
+                .decoration
+                .as_ref()
+                .and_then(|d| match d {
+                    IoDecoration::Location(l) => Some(*l),
+                    _ => None,
+                })
+                .unwrap_or_else(|| {
+                    let l = output_location;
+                    output_location += 1;
+                    l
+                });
+
+            let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::Output, output_type);
+            let var_id = constructor.builder.variable(ptr_type, None, spirv::StorageClass::Output, None);
+            constructor.builder.decorate(var_id, spirv::Decoration::Location, [Operand::LiteralBit32(loc)]);
+            output_vars.push(var_id);
+            interfaces.push(var_id);
+        }
+    }
+
+    // Store interfaces for entry point declaration
+    constructor.entry_point_interfaces.insert(entry.name.clone(), interfaces);
+
+    // Set output variables for OutputPtr lowering
+    constructor.current_entry_outputs = output_vars;
+
+    // Begin void function for entry point (no parameters - I/O is via variables)
+    let void_type = constructor.void_type;
+    let param_names: Vec<&str> = Vec::new();
+    let param_types: Vec<spirv::Word> = Vec::new();
+    constructor.begin_function(&entry.name, &param_names, &param_types, void_type)?;
+
+    // Lower the body (stores to outputs are now explicit in SSA)
+    // ReturnUnit blocks now emit ret() directly, so no extra return needed here.
+    let _result = lower_ssa_body_for_entry(constructor, body)?;
+
+    constructor.end_function()?;
+
+    // Clear output variables
+    constructor.current_entry_outputs.clear();
+
+    Ok(())
 }

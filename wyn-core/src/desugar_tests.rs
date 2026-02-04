@@ -1,12 +1,12 @@
 //! Tests for slices and ranges in the TLC pipeline
 //!
 //! These tests verify that:
-//! 1. Slices become borrowed views (ArrayBacking::View) in MIR
-//! 2. Ranges stay as the primitive form (ArrayBacking::Range)
-//! 3. The full pipeline works end-to-end with slices/ranges
-//! 4. Constant folding in slice indices works correctly
+//! 1. Slices and ranges compile correctly through SSA
+//! 2. The full pipeline works end-to-end with slices/ranges
+//! 3. Constant folding in slice indices works correctly
 
 use crate::error::CompilerError;
+use crate::tlc::to_ssa::SsaProgram;
 
 /// Helper to run full pipeline through lowering, including desugar step
 fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
@@ -25,17 +25,15 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .skip_partial_eval()
         .defunctionalize()
         .monomorphize()
-        .to_mir()
-        .default_address_spaces()
+        .to_ssa()
+        .map_err(|e| crate::err_spirv!("{}", e))?
         .parallelize_soacs()
-        .apply_dps()
-        .filter_reachable()
         .lower()?;
     Ok(())
 }
 
-/// Helper to run pipeline through flattening (checks desugar correctness)
-fn compile_through_flatten(input: &str) -> Result<crate::Flattened, CompilerError> {
+/// Helper to run pipeline through SSA (checks desugar correctness)
+fn compile_through_ssa(input: &str) -> Result<SsaProgram, CompilerError> {
     let mut frontend = crate::cached_frontend();
     let parsed = crate::Compiler::parse(input, &mut frontend.node_counter)?;
     let alias_checked = parsed
@@ -46,13 +44,14 @@ fn compile_through_flatten(input: &str) -> Result<crate::Flattened, CompilerErro
         .alias_check()?;
 
     let known_defs = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
-    let flattened = alias_checked
+    let ssa = alias_checked
         .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
         .skip_partial_eval()
         .defunctionalize()
         .monomorphize()
-        .to_mir();
-    Ok(flattened)
+        .to_ssa()
+        .map_err(|e| crate::err_spirv!("{}", e))?;
+    Ok(ssa.ssa)
 }
 
 // =============================================================================
@@ -366,7 +365,7 @@ def slice_test(arr: [10]i32) [5]i32 =
     arr[0..5]
 "#;
     // Verify slice compiles to MIR as a View
-    let flattened = compile_through_flatten(source);
+    let flattened = compile_through_ssa(source);
     assert!(
         flattened.is_ok(),
         "Slice should compile as View: {:?}",
@@ -381,7 +380,7 @@ def range_test: [5]i32 =
     0..<5
 "#;
     // Verify range stays as primitive form by checking compilation succeeds
-    let flattened = compile_through_flatten(source);
+    let flattened = compile_through_ssa(source);
     assert!(
         flattened.is_ok(),
         "Simple range should compile: {:?}",
@@ -396,7 +395,7 @@ def range_test: [5]i32 =
     1..<6
 "#;
     // Verify complex range compiles correctly
-    let flattened = compile_through_flatten(source);
+    let flattened = compile_through_ssa(source);
     assert!(
         flattened.is_ok(),
         "Complex range should compile: {:?}",

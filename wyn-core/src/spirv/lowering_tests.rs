@@ -1,4 +1,3 @@
-use super::lower;
 use crate::error::Result;
 
 fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
@@ -17,14 +16,16 @@ fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
         .expect("Alias checking failed");
 
     let known_defs = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
-    let flattened = alias_checked
+    let ssa = alias_checked
         .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
         .skip_partial_eval()
         .defunctionalize()
         .monomorphize()
-        .to_mir();
+        .to_ssa()
+        .expect("SSA conversion failed")
+        .parallelize_soacs();
 
-    lower(&flattened.mir)
+    ssa.lower().map(|l| l.spirv)
 }
 
 #[test]
@@ -337,18 +338,16 @@ fn compile_to_spirv_with_partial_eval(source: &str) -> Result<Vec<u32>> {
         .alias_check()
         .expect("Alias checking failed");
     let known_defs = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
-    let reachable = alias_checked
+    let ssa = alias_checked
         .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
         .partial_eval()
         .defunctionalize()
         .monomorphize()
-        .to_mir()
-        .default_address_spaces()
-        .parallelize_soacs()
-        .apply_dps()
-        .filter_reachable();
+        .to_ssa()
+        .expect("SSA conversion failed")
+        .parallelize_soacs();
 
-    lower(&reachable.mir)
+    ssa.lower().map(|l| l.spirv)
 }
 
 #[test]
@@ -422,6 +421,35 @@ entry fragment_main() #[location(0)] vec4f32 =
 "#,
     )
     .unwrap();
+    assert!(!spirv.is_empty());
+    assert_eq!(spirv[0], 0x07230203);
+}
+
+#[test]
+fn test_nested_if_else_in_entry_point() {
+    // Regression test: nested if-else directly in entry point body
+    // was causing NestedBlock error in SPIR-V builder.
+    //
+    // The issue: when an entry point has nested conditionals, the SSA
+    // lowering's special handling for entry points (re-selecting the
+    // "last block" for emitting OpReturn) was interfering with the
+    // multi-block structure created by nested if-else.
+    let result = compile_to_spirv(
+        r#"
+#[fragment]
+entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+  let x = fragCoord.x in
+  if x < 0.5 then @[1.0, 0.0, 0.0, 1.0]
+  else if x < 1.5 then @[0.0, 1.0, 0.0, 1.0]
+  else @[0.0, 0.0, 1.0, 1.0]
+"#,
+    );
+    assert!(
+        result.is_ok(),
+        "Nested if-else in entry point should compile. Got: {:?}",
+        result.err()
+    );
+    let spirv = result.unwrap();
     assert!(!spirv.is_empty());
     assert_eq!(spirv[0], 0x07230203);
 }

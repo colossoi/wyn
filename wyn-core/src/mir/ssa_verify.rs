@@ -342,6 +342,7 @@ impl<'a> Verifier<'a> {
             InstKind::StorageView { offset, len, .. } => vec![*offset, *len],
             InstKind::StorageViewIndex { view, index } => vec![*view, *index],
             InstKind::StorageViewLen { view } => vec![*view],
+            InstKind::OutputPtr { .. } => vec![],
         }
     }
 

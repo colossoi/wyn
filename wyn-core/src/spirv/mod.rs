@@ -1,10 +1,9 @@
 //! SPIR-V code generation backend.
 //!
-//! This module contains the lowering pass from MIR to SPIR-V.
+//! This module contains the lowering pass from SSA to SPIR-V.
 
-pub mod lowering;
 #[cfg(test)]
 mod lowering_tests;
-pub mod ssa_lowering;
+mod ssa_lowering;
 
-pub use lowering::lower;
+pub use ssa_lowering::lower_ssa_program;

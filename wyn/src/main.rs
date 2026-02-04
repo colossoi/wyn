@@ -54,14 +54,6 @@ enum Commands {
         #[arg(short, long, default_value = "spirv")]
         target: Target,
 
-        /// Output initial MIR (right after flattening, before optimizations)
-        #[arg(long, value_name = "FILE")]
-        output_init_mir: Option<PathBuf>,
-
-        /// Output final MIR (right before lowering)
-        #[arg(long, value_name = "FILE")]
-        output_final_mir: Option<PathBuf>,
-
         /// Output annotated source code with block IDs and locations
         #[arg(long, value_name = "FILE")]
         output_annotated: Option<PathBuf>,
@@ -69,10 +61,6 @@ enum Commands {
         /// Output typed lambda calculus representation
         #[arg(long, value_name = "FILE")]
         output_tlc: Option<PathBuf>,
-
-        /// Output shader interface as JSON (bindings, entry points, types)
-        #[arg(long, value_name = "FILE")]
-        output_interface: Option<PathBuf>,
 
         /// Enable partial evaluation (compile-time function inlining and loop unrolling)
         #[arg(long)]
@@ -106,6 +94,9 @@ enum DriverError {
 
     #[error("Compilation error: {0}")]
     CompilationError(#[from] wyn_core::error::CompilerError),
+
+    #[error("SSA conversion error: {0}")]
+    SsaConversionError(#[from] wyn_core::tlc::to_ssa::ConvertError),
 }
 
 fn main() -> Result<(), DriverError> {
@@ -117,11 +108,8 @@ fn main() -> Result<(), DriverError> {
             input,
             output,
             target,
-            output_init_mir,
-            output_final_mir,
             output_annotated,
             output_tlc,
-            output_interface,
             partial_eval,
             verbose,
         } => {
@@ -129,11 +117,8 @@ fn main() -> Result<(), DriverError> {
                 input,
                 output,
                 target,
-                output_init_mir,
-                output_final_mir,
                 output_annotated,
                 output_tlc,
-                output_interface,
                 partial_eval,
                 verbose,
             )?;
@@ -154,11 +139,8 @@ fn compile_file(
     input: PathBuf,
     output: Option<PathBuf>,
     target: Target,
-    output_init_mir: Option<PathBuf>,
-    output_final_mir: Option<PathBuf>,
     output_annotated: Option<PathBuf>,
     output_tlc: Option<PathBuf>,
-    output_interface: Option<PathBuf>,
     partial_eval: bool,
     verbose: bool,
 ) -> Result<(), DriverError> {
@@ -230,33 +212,15 @@ fn compile_file(
     // Monomorphize polymorphic functions at TLC level
     let tlc_mono = time("tlc_monomorphize", verbose, || tlc_defunc.monomorphize());
 
-    // Transform TLC to MIR
-    let flattened = time("to_mir", verbose, || tlc_mono.to_mir());
+    // Transform TLC to SSA
+    let ssa = time("to_ssa", verbose, || tlc_mono.to_ssa())?;
 
-    // Write initial MIR if requested (right after TLC→MIR)
-    write_mir_if_requested(&flattened.mir, &output_init_mir, "initial MIR", verbose)?;
-
-    let defaulted = flattened.default_address_spaces();
-    let parallelized = time("parallelize_soacs", verbose, || defaulted.parallelize_soacs());
-    let dps_applied = parallelized.apply_dps();
-    let reachable = time("filter_reachable", verbose, || dps_applied.filter_reachable());
-
-    // Write final MIR if requested (right before lowering)
-    write_mir_if_requested(&reachable.mir, &output_final_mir, "final MIR", verbose)?;
-
-    // Write interface JSON if requested
-    if let Some(ref interface_path) = output_interface {
-        let interface = wyn_core::interface::extract_interface(&reachable.mir);
-        let json = wyn_core::interface::to_json(&interface).expect("Failed to serialize interface");
-        fs::write(interface_path, json)?;
-        if verbose {
-            info!("Wrote interface to {}", interface_path.display());
-        }
-    }
+    // Parallelize SOACs in compute shaders
+    let parallelized = time("parallelize_soacs", verbose, || ssa.parallelize_soacs());
 
     match target {
         Target::Spirv => {
-            let lowered = time("lower", verbose, || reachable.lower())?;
+            let lowered = time("lower", verbose, || parallelized.lower())?;
 
             // Determine output path
             let output_path = output.unwrap_or_else(|| {
@@ -268,7 +232,7 @@ fn compile_file(
             // Write SPIR-V binary
             let mut file = fs::File::create(&output_path)?;
             let spirv_len = lowered.spirv.len();
-            for word in lowered.spirv {
+            for word in &lowered.spirv {
                 file.write_all(&word.to_le_bytes())?;
             }
 
@@ -277,50 +241,10 @@ fn compile_file(
                 info!("Generated {} words of SPIR-V", spirv_len);
             }
         }
-        Target::Glsl => {
-            let lowered = time("lower_glsl", verbose, || reachable.lower_glsl())?;
-
-            // Determine base output path
-            let base_path = output.unwrap_or_else(|| input.clone());
-
-            // Write vertex shader if present
-            if let Some(ref vert_src) = lowered.glsl.vertex {
-                let mut vert_path = base_path.clone();
-                vert_path.set_extension("vert.glsl");
-                fs::write(&vert_path, vert_src)?;
-                if verbose {
-                    info!("Wrote vertex shader to {}", vert_path.display());
-                }
-            }
-
-            // Write fragment shader if present
-            if let Some(ref frag_src) = lowered.glsl.fragment {
-                let mut frag_path = base_path.clone();
-                frag_path.set_extension("frag.glsl");
-                fs::write(&frag_path, frag_src)?;
-                if verbose {
-                    info!("Wrote fragment shader to {}", frag_path.display());
-                }
-            }
-
-            if verbose && lowered.glsl.vertex.is_none() && lowered.glsl.fragment.is_none() {
-                info!("No entry points found - no shaders generated");
-            }
-        }
-        Target::Shadertoy => {
-            let shader_src = time("lower_shadertoy", verbose, || reachable.lower_shadertoy())?;
-
-            // Determine output path
-            let output_path = output.unwrap_or_else(|| {
-                let mut path = input.clone();
-                path.set_extension("shadertoy.glsl");
-                path
-            });
-
-            fs::write(&output_path, &shader_src)?;
-            if verbose {
-                info!("Wrote Shadertoy shader to {}", output_path.display());
-            }
+        Target::Glsl | Target::Shadertoy => {
+            return Err(
+                wyn_core::err_spirv!("GLSL/Shadertoy targets not yet supported with SSA pipeline").into(),
+            );
         }
     }
 
@@ -360,21 +284,6 @@ fn check_file(input: PathBuf, output_annotated: Option<PathBuf>, verbose: bool) 
         info!("✓ {} is valid", input.display());
     }
 
-    Ok(())
-}
-
-fn write_mir_if_requested(
-    mir: &wyn_core::mir::Program,
-    output_mir: &Option<PathBuf>,
-    description: &str,
-    verbose: bool,
-) -> Result<(), DriverError> {
-    if let Some(ref mir_path) = output_mir {
-        fs::write(mir_path, format!("{}", mir))?;
-        if verbose {
-            info!("Wrote {} to {}", description, mir_path.display());
-        }
-    }
     Ok(())
 }
 

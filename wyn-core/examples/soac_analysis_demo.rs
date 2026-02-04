@@ -1,37 +1,26 @@
 // SOAC Analysis Demo
-// Demonstrates TLC-level SOAC analysis for compute shader workload estimation
+// Demonstrates SSA-level SOAC analysis for compute shader parallelization
 
-use wyn_core::{Compiler, FrontEnd, tlc};
+use wyn_core::{Compiler, FrontEnd, mir};
 
 fn main() {
     let source = r#"
 -- SOAC Analysis Demo
--- Tests: size hints, call chains, interprocedural propagation
+-- Tests: map loop detection, array provenance tracking
 
 -- Helper function: does the actual map
 def process_array(data: []f32) []f32 =
     map(|x| x * 2.0, data)
 
--- Sum an array using reduce
-def sum_array(arr: []f32) f32 =
-    reduce(|a, b| a + b, 0.0, arr)
-
--- Chain two maps together
-def double_process(data: []f32) []f32 =
-    let step1 = map(|x| x + 1.0, data) in
-    map(|x| x * 2.0, step1)
-
 -- Main compute entry point with size hints
 #[compute]
 entry compute_main(
     #[size_hint(1024)] vectors: []f32
-) ([]f32, f32) =
-    let processed = double_process(vectors) in
-    let total = sum_array(processed) in
-    (processed, total)
+) []f32 =
+    process_array(vectors)
 "#;
 
-    println!("=== SOAC Analysis Demo ===\n");
+    println!("=== SSA SOAC Analysis Demo ===\n");
     println!("Source program:");
     println!("---------------");
     for (i, line) in source.lines().enumerate() {
@@ -53,43 +42,42 @@ entry compute_main(
     let known_defs = frontend.intrinsics.all_names();
     let tlc_transformed = alias_checked.to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager);
 
-    // Run SOAC analysis on the TLC program (before defunctionalization)
-    let analysis = tlc::soac_analysis::analyze_program(&tlc_transformed.tlc);
+    // Continue through TLC transformations
+    let defunctionalized = tlc_transformed.defunctionalize();
+    let monomorphized = defunctionalized.monomorphize();
+
+    // Convert to SSA using the new direct path
+    let ssa_converted = monomorphized.to_ssa().expect("SSA conversion failed");
+
+    // Run SSA SOAC analysis
+    let analysis = mir::ssa_soac_analysis::analyze_program(&ssa_converted.ssa);
 
     // Print results
     println!("=== Analysis Results ===\n");
-    println!("Total compute entry points: {}", analysis.by_entry.len());
-    println!("Total SOACs found: {}\n", analysis.total_soac_count());
+    println!("Total compute entry points analyzed: {}", analysis.by_entry.len());
+    println!();
 
-    for (entry_name, soacs) in &analysis.by_entry {
+    for (entry_name, entry_analysis) in &analysis.by_entry {
         println!("Entry point: {}", entry_name);
         println!("{}", "-".repeat(40));
+        println!("  Local size: {:?}", entry_analysis.local_size);
 
-        if soacs.is_empty() {
-            println!("  No SOACs found");
+        if let Some(ref par_map) = entry_analysis.parallelizable_map {
+            println!("  Parallelizable map found!");
+            println!("    Map function: {}", par_map.map_function);
+            println!("    Source: {:?}", par_map.source);
+            println!("    Loop header block: {:?}", par_map.map_loop.loop_info.header);
         } else {
-            for (i, soac) in soacs.iter().enumerate() {
-                println!("  SOAC #{}", i + 1);
-                println!("    Kind:           {}", soac.kind);
-                println!("    Location:       line {}", soac.span.start_line);
-                println!("    Input size:     {}", soac.input_size);
-                println!("    Output size:    {}", soac.output_size);
-                println!("    Nesting:        depth {}", soac.nesting_depth);
-                if let Some(parent) = soac.parent {
-                    println!("    Parent:         TermId({})", parent.0);
-                }
-                println!("    Independent:    {}", soac.kind.is_independent());
-                println!();
-            }
+            println!("  No parallelizable map found");
         }
         println!();
     }
 
     // Summary
     println!("=== Summary ===");
-    let total_independent =
-        analysis.by_entry.values().flat_map(|s| s.iter()).filter(|s| s.kind.is_independent()).count();
-    let total_dependent = analysis.total_soac_count() - total_independent;
-    println!("Independent SOACs (parallelizable): {}", total_independent);
-    println!("Dependent SOACs (need coordination): {}", total_dependent);
+    let parallelizable_count =
+        analysis.by_entry.values().filter(|a| a.parallelizable_map.is_some()).count();
+    let non_parallelizable_count = analysis.by_entry.len() - parallelizable_count;
+    println!("Parallelizable compute shaders: {}", parallelizable_count);
+    println!("Non-parallelizable compute shaders: {}", non_parallelizable_count);
 }
