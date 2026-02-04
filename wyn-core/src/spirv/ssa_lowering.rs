@@ -1640,8 +1640,13 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                                 self.constructor.declare_variable("_array_with_tmp", result_ty)?;
                             self.constructor.builder.store(arr_var, arr, None, [])?;
 
-                            // Get element type from array type
-                            let elem_ty = self.constructor.get_array_element_type(result_ty)?;
+                            // Get element type from array type.
+                            // This will fail for virtual arrays (ranges) which can't be modified.
+                            let elem_ty = self.constructor.get_array_element_type(result_ty)
+                                .map_err(|_| crate::err_spirv!(
+                                    "ArrayWith requires a concrete array type, not a virtual array (range). \
+                                     Map over ranges produces virtual results; consider using a fixed-size array instead."
+                                ))?;
                             let elem_ptr_ty = self.constructor.builder.type_pointer(
                                 None,
                                 spirv::StorageClass::Function,
