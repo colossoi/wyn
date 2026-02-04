@@ -15,6 +15,7 @@
 use super::{Def, DefMeta, LoopKind, Program, Term, TermIdSource, TermKind};
 use crate::ast::TypeName;
 use crate::types::TypeScheme;
+use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -31,17 +32,19 @@ pub fn monomorphize(program: Program, schemes: &HashMap<String, TypeScheme>) -> 
 }
 
 pub(crate) struct Monomorphizer<'a> {
-    /// Original polymorphic functions by name
-    poly_functions: HashMap<String, Def>,
+    /// Symbol table for name lookup and allocation
+    symbols: SymbolTable,
+    /// Original polymorphic functions by symbol
+    poly_functions: HashMap<SymbolId, Def>,
     /// Generated monomorphic functions
     mono_functions: Vec<Def>,
-    /// Map from (function_name, spec_key) to specialized name
-    specializations: HashMap<(String, SpecKey), String>,
+    /// Map from (function_sym, spec_key) to specialized symbol
+    specializations: HashMap<(SymbolId, SpecKey), SymbolId>,
     /// Worklist of functions to process
     worklist: VecDeque<WorkItem>,
-    /// Processed (original_name, spec_key) pairs
-    processed: HashSet<(String, SpecKey)>,
-    /// Type schemes for polymorphic functions
+    /// Processed (original_sym, spec_key) pairs
+    processed: HashSet<(SymbolId, SpecKey)>,
+    /// Type schemes for polymorphic functions (keyed by string name)
     schemes: &'a HashMap<String, TypeScheme>,
     /// Term ID source for creating new terms
     term_ids: TermIdSource,
@@ -52,8 +55,8 @@ pub(crate) struct Monomorphizer<'a> {
 }
 
 struct WorkItem {
-    /// Original function name (before specialization)
-    original_name: String,
+    /// Original function symbol (before specialization)
+    original_sym: SymbolId,
     /// Specialization key (empty for monomorphic functions)
     spec_key: SpecKey,
     /// The function definition
@@ -288,25 +291,26 @@ impl<'a> Monomorphizer<'a> {
         let mut poly_functions = HashMap::new();
         let mut entry_points = Vec::new();
 
-        for def in program.defs {
-            let name = def.name.clone();
+        for def in program.defs.iter() {
+            let sym = def.name;
 
             // For entry points, add to worklist
             if matches!(&def.meta, DefMeta::EntryPoint(_)) {
                 entry_points.push(WorkItem {
-                    original_name: name.clone(),
+                    original_sym: sym,
                     spec_key: SpecKey::empty(),
                     def: def.clone(),
                 });
             }
 
-            poly_functions.insert(name, def);
+            poly_functions.insert(sym, def.clone());
         }
 
         let mut worklist = VecDeque::new();
         worklist.extend(entry_points);
 
         Monomorphizer {
+            symbols: program.symbols,
             poly_functions,
             mono_functions: Vec::new(),
             specializations: HashMap::new(),
@@ -321,7 +325,7 @@ impl<'a> Monomorphizer<'a> {
 
     fn run(mut self) -> Program {
         while let Some(work_item) = self.worklist.pop_front() {
-            let key = (work_item.original_name.clone(), work_item.spec_key.clone());
+            let key = (work_item.original_sym, work_item.spec_key.clone());
             if self.processed.contains(&key) {
                 continue;
             }
@@ -336,19 +340,20 @@ impl<'a> Monomorphizer<'a> {
             defs: self.mono_functions,
             uniforms: self.uniforms,
             storage: self.storage,
+            symbols: self.symbols,
         }
     }
 
     /// Ensure a definition is in the worklist (for monomorphic callees and constants)
-    fn ensure_in_worklist(&mut self, name: &str, def: Def) {
-        let key = (name.to_string(), SpecKey::empty());
+    fn ensure_in_worklist(&mut self, sym: SymbolId, def: Def) {
+        let key = (sym, SpecKey::empty());
         if !self.processed.contains(&key) {
             // Check if it's already in the worklist
             let already_queued =
-                self.worklist.iter().any(|w| w.original_name == name && !w.spec_key.needs_specialization());
+                self.worklist.iter().any(|w| w.original_sym == sym && !w.spec_key.needs_specialization());
             if !already_queued {
                 self.worklist.push_back(WorkItem {
-                    original_name: name.to_string(),
+                    original_sym: sym,
                     spec_key: SpecKey::empty(),
                     def,
                 });
@@ -375,8 +380,9 @@ impl<'a> Monomorphizer<'a> {
                 let (base, args) = Self::collect_application_spine(func, arg);
 
                 // Check if base is a variable referencing a known function
-                if let TermKind::Var(name) = &base.kind {
-                    if let Some(poly_def) = self.poly_functions.get(name).cloned() {
+                if let TermKind::Var(sym) = &base.kind {
+                    let sym = *sym;
+                    if let Some(poly_def) = self.poly_functions.get(&sym).cloned() {
                         // Infer substitution from argument types
                         let arg_types: Vec<_> = args.iter().map(|a| a.ty.clone()).collect();
                         let subst = self.infer_substitution(&poly_def, &arg_types);
@@ -384,10 +390,10 @@ impl<'a> Monomorphizer<'a> {
 
                         if spec_key.needs_specialization() {
                             // Get or create specialized version
-                            let specialized_name =
-                                self.get_or_create_specialization(name, &spec_key, &poly_def);
-                            // Rebuild the application with the specialized function name
-                            let new_func = self.rewrite_var_name(func, name, &specialized_name);
+                            let specialized_sym =
+                                self.get_or_create_specialization(sym, &spec_key, &poly_def);
+                            // Rebuild the application with the specialized function symbol
+                            let new_func = self.rewrite_var_sym(func, sym, specialized_sym);
                             return Term {
                                 id: self.term_ids.next_id(),
                                 ty: term.ty.clone(),
@@ -399,7 +405,7 @@ impl<'a> Monomorphizer<'a> {
                             };
                         } else {
                             // Monomorphic call - ensure callee is in worklist
-                            self.ensure_in_worklist(name, poly_def);
+                            self.ensure_in_worklist(sym, poly_def);
                         }
                     }
                 }
@@ -412,30 +418,31 @@ impl<'a> Monomorphizer<'a> {
                 }
             }
 
-            TermKind::Var(name) => {
+            TermKind::Var(sym) => {
+                let sym = *sym;
                 // Check if this is a reference to a polymorphic function
                 // This handles cases like `let f = some_poly_fn in ...`
-                if let Some(poly_def) = self.poly_functions.get(name).cloned() {
+                if let Some(poly_def) = self.poly_functions.get(&sym).cloned() {
                     // Try to infer specialization from the term's type
                     if let Some(subst) = self.infer_var_substitution(&poly_def, &term.ty) {
                         let spec_key = SpecKey::new(&subst);
                         if spec_key.needs_specialization() {
-                            let specialized_name =
-                                self.get_or_create_specialization(name, &spec_key, &poly_def);
+                            let specialized_sym =
+                                self.get_or_create_specialization(sym, &spec_key, &poly_def);
                             return Term {
                                 id: self.term_ids.next_id(),
                                 ty: term.ty.clone(),
                                 span: term.span,
-                                kind: TermKind::Var(specialized_name),
+                                kind: TermKind::Var(specialized_sym),
                             };
                         } else {
-                            self.ensure_in_worklist(name, poly_def);
+                            self.ensure_in_worklist(sym, poly_def);
                         }
                     } else {
-                        self.ensure_in_worklist(name, poly_def);
+                        self.ensure_in_worklist(sym, poly_def);
                     }
                 }
-                TermKind::Var(name.clone())
+                TermKind::Var(sym)
             }
 
             TermKind::Lam {
@@ -551,22 +558,22 @@ impl<'a> Monomorphizer<'a> {
         }
     }
 
-    /// Rewrite Var nodes that match old_name to use new_name.
-    /// This traverses nested App nodes to find the function name.
-    fn rewrite_var_name(&mut self, term: &Term, old_name: &str, new_name: &str) -> Term {
+    /// Rewrite Var nodes that match old_sym to use new_sym.
+    /// This traverses nested App nodes to find the function symbol.
+    fn rewrite_var_sym(&mut self, term: &Term, old_sym: SymbolId, new_sym: SymbolId) -> Term {
         match &term.kind {
-            TermKind::Var(name) if name == old_name => Term {
+            TermKind::Var(sym) if *sym == old_sym => Term {
                 id: self.term_ids.next_id(),
                 ty: term.ty.clone(),
                 span: term.span,
-                kind: TermKind::Var(new_name.to_string()),
+                kind: TermKind::Var(new_sym),
             },
             TermKind::App { func, arg } => Term {
                 id: self.term_ids.next_id(),
                 ty: term.ty.clone(),
                 span: term.span,
                 kind: TermKind::App {
-                    func: Box::new(self.rewrite_var_name(func, old_name, new_name)),
+                    func: Box::new(self.rewrite_var_sym(func, old_sym, new_sym)),
                     arg: arg.clone(),
                 },
             },
@@ -578,8 +585,9 @@ impl<'a> Monomorphizer<'a> {
     fn infer_substitution(&self, poly_def: &Def, arg_types: &[Type<TypeName>]) -> Substitution {
         let mut subst = Substitution::new();
 
-        // Get the type scheme for this function
-        if let Some(scheme) = self.schemes.get(&poly_def.name) {
+        // Get the type scheme for this function (look up by string name)
+        let name_str = self.symbols.get(poly_def.name).expect("BUG: def symbol not in table");
+        if let Some(scheme) = self.schemes.get(name_str) {
             let func_type = unwrap_scheme(scheme);
             let (param_types, _ret_type) = split_function_type(func_type);
 
@@ -606,8 +614,9 @@ impl<'a> Monomorphizer<'a> {
     ) -> Option<Substitution> {
         let mut subst = Substitution::new();
 
-        // Get the polymorphic type from scheme or def
-        let poly_type = if let Some(scheme) = self.schemes.get(&poly_def.name) {
+        // Get the polymorphic type from scheme or def (look up by string name)
+        let name_str = self.symbols.get(poly_def.name).expect("BUG: def symbol not in table");
+        let poly_type = if let Some(scheme) = self.schemes.get(name_str) {
             unwrap_scheme(scheme).clone()
         } else {
             poly_def.ty.clone()
@@ -653,45 +662,47 @@ impl<'a> Monomorphizer<'a> {
     /// Get or create a specialized version of a function
     fn get_or_create_specialization(
         &mut self,
-        func_name: &str,
+        func_sym: SymbolId,
         spec_key: &SpecKey,
         poly_def: &Def,
-    ) -> String {
-        let cache_key = (func_name.to_string(), spec_key.clone());
+    ) -> SymbolId {
+        let cache_key = (func_sym, spec_key.clone());
 
-        if let Some(specialized_name) = self.specializations.get(&cache_key) {
-            return specialized_name.clone();
+        if let Some(specialized_sym) = self.specializations.get(&cache_key) {
+            return *specialized_sym;
         }
 
         // Build substitution from type_subst
         let subst = spec_key.type_subst.to_subst();
 
         // Create new specialized name from type substitution
+        let func_name = self.symbols.get(func_sym).expect("BUG: func symbol not in table");
         let type_suffix = format_subst(&subst);
         let specialized_name = if type_suffix.is_empty() {
             func_name.to_string()
         } else {
             format!("{}${}", func_name, type_suffix)
         };
+        let specialized_sym = self.symbols.alloc(specialized_name);
 
         // Clone and specialize the function
-        let specialized_def = self.specialize_def(poly_def.clone(), &subst, &specialized_name);
+        let specialized_def = self.specialize_def(poly_def.clone(), &subst, specialized_sym);
 
         // Add to worklist to process its body
         self.worklist.push_back(WorkItem {
-            original_name: func_name.to_string(),
+            original_sym: func_sym,
             spec_key: spec_key.clone(),
             def: specialized_def,
         });
 
-        self.specializations.insert(cache_key, specialized_name.clone());
-        specialized_name
+        self.specializations.insert(cache_key, specialized_sym);
+        specialized_sym
     }
 
     /// Create a specialized version of a function by applying substitution.
-    fn specialize_def(&mut self, def: Def, subst: &Substitution, new_name: &str) -> Def {
+    fn specialize_def(&mut self, def: Def, subst: &Substitution, new_sym: SymbolId) -> Def {
         Def {
-            name: new_name.to_string(),
+            name: new_sym,
             ty: apply_subst(&def.ty, subst),
             body: self.apply_subst_term(&def.body, subst),
             meta: def.meta,
@@ -703,7 +714,7 @@ impl<'a> Monomorphizer<'a> {
     fn apply_subst_term(&mut self, term: &Term, subst: &Substitution) -> Term {
         let new_ty = apply_subst(&term.ty, subst);
         let new_kind = match &term.kind {
-            TermKind::Var(name) => TermKind::Var(name.clone()),
+            TermKind::Var(sym) => TermKind::Var(*sym),
             TermKind::IntLit(s) => TermKind::IntLit(s.clone()),
             TermKind::FloatLit(f) => TermKind::FloatLit(*f),
             TermKind::BoolLit(b) => TermKind::BoolLit(*b),

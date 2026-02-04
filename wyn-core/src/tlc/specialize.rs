@@ -4,23 +4,29 @@
 //! For example: `sign(x)` where `x: f32` becomes `f32.sign(x)`.
 
 use super::{Def, LoopKind, Program, Term, TermIdSource, TermKind};
+use crate::SymbolTable;
 use crate::ast::TypeName;
 use polytype::Type;
 
 /// Specialize polymorphic intrinsics in a TLC program.
 pub fn specialize(program: Program) -> Program {
     let mut specializer = Specializer {
+        symbols: program.symbols,
         term_ids: TermIdSource::new(),
     };
 
+    let defs = program.defs.into_iter().map(|d| specializer.specialize_def(d)).collect();
+
     Program {
-        defs: program.defs.into_iter().map(|d| specializer.specialize_def(d)).collect(),
+        defs,
         uniforms: program.uniforms,
         storage: program.storage,
+        symbols: specializer.symbols,
     }
 }
 
 struct Specializer {
+    symbols: SymbolTable,
     term_ids: TermIdSource,
 }
 
@@ -133,14 +139,16 @@ impl Specializer {
 
     fn specialize_func(&mut self, func: Term, arg: &Term) -> Term {
         match &func.kind {
-            TermKind::Var(name) => {
-                let specialized = self.specialize_name(name, &arg.ty);
-                if specialized != *name {
+            TermKind::Var(sym) => {
+                let sym = *sym;
+                let name = self.symbols.get(sym).expect("BUG: symbol not in table");
+                if let Some(specialized_name) = self.specialize_name(name, &arg.ty) {
+                    let specialized_sym = self.symbols.alloc(specialized_name);
                     Term {
                         id: self.term_ids.next_id(),
                         ty: func.ty.clone(),
                         span: func.span,
-                        kind: TermKind::Var(specialized),
+                        kind: TermKind::Var(specialized_sym),
                     }
                 } else {
                     func
@@ -154,8 +162,11 @@ impl Specializer {
                 arg: first_arg,
             } => {
                 // Check if inner_func is Var("mul")
-                let maybe_mul_name =
-                    if let TermKind::Var(name) = &inner_func.kind { Some(name.as_str()) } else { None };
+                let maybe_mul_name = if let TermKind::Var(sym) = &inner_func.kind {
+                    Some(self.symbols.get(*sym).expect("BUG: symbol not in table").as_str())
+                } else {
+                    None
+                };
 
                 if maybe_mul_name == Some("mul") {
                     // Specialize mul based on both arg types
@@ -163,11 +174,12 @@ impl Specializer {
                         // Build: App { func: Var(specialized_name), arg: first_arg }
                         // This becomes the new inner term
                         let specialized_first_arg = self.specialize_term(*first_arg.clone());
+                        let specialized_sym = self.symbols.alloc(specialized_name);
                         let specialized_var = Term {
                             id: self.term_ids.next_id(),
                             ty: inner_func.ty.clone(),
                             span: inner_func.span,
-                            kind: TermKind::Var(specialized_name),
+                            kind: TermKind::Var(specialized_sym),
                         };
                         return Term {
                             id: self.term_ids.next_id(),
@@ -195,16 +207,17 @@ impl Specializer {
 
     /// Specialize a function name based on argument type.
     /// Transforms: abs, sign, min, max, clamp → f32.abs, i32.sign, etc.
-    fn specialize_name(&self, name: &str, arg_ty: &Type<TypeName>) -> String {
+    /// Returns Some(specialized_name) if specialization is needed, None otherwise.
+    fn specialize_name(&self, name: &str, arg_ty: &Type<TypeName>) -> Option<String> {
         match name {
             "abs" | "sign" | "min" | "max" | "clamp" => {
                 if let Some(prefix) = self.type_prefix(arg_ty) {
-                    format!("{}.{}", prefix, name)
+                    Some(format!("{}.{}", prefix, name))
                 } else {
-                    name.to_string()
+                    None
                 }
             }
-            _ => name.to_string(),
+            _ => None,
         }
     }
 

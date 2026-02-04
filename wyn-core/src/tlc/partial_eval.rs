@@ -5,9 +5,9 @@
 
 use super::{Def, Program, Term, TermIdSource, TermKind};
 use crate::ast::{BinaryOp, Span, TypeName, UnaryOp};
-use crate::scope::ScopeStack;
+use crate::{SymbolId, SymbolTable};
 use polytype::Type;
-use std::collections::HashMap; // For defs lookup
+use std::collections::HashMap;
 
 // =============================================================================
 // Values
@@ -28,7 +28,7 @@ pub enum Value {
 
     /// Partial application: function waiting for more args
     Partial {
-        name: String,
+        sym: SymbolId,
         args: Vec<Value>,
         remaining: usize,
     },
@@ -48,20 +48,23 @@ impl Value {
 // =============================================================================
 
 pub struct PartialEvaluator {
+    /// Symbol table for name lookup
+    symbols: SymbolTable,
     /// Function definitions with their arities
-    defs: HashMap<String, Def>,
+    defs: HashMap<SymbolId, Def>,
     /// Term ID source for generating new terms
     term_ids: TermIdSource,
-    /// Scope stack for variable bindings
-    env: ScopeStack<Value>,
+    /// Environment: symbol -> Value
+    env: HashMap<SymbolId, Value>,
 }
 
 impl PartialEvaluator {
     pub fn partial_eval(program: Program) -> Program {
         let mut eval = Self {
-            defs: program.defs.iter().map(|d| (d.name.clone(), d.clone())).collect(),
+            symbols: program.symbols,
+            defs: program.defs.iter().map(|d| (d.name, d.clone())).collect(),
             term_ids: TermIdSource::new(),
-            env: ScopeStack::new(),
+            env: HashMap::new(),
         };
 
         let defs = program
@@ -78,6 +81,7 @@ impl PartialEvaluator {
             defs,
             uniforms: program.uniforms,
             storage: program.storage,
+            symbols: eval.symbols,
         }
     }
 
@@ -93,17 +97,18 @@ impl PartialEvaluator {
             TermKind::StringLit(_) => Value::Unknown(term.clone()),
 
             // Variable lookup
-            TermKind::Var(name) => {
-                if let Some(val) = self.env.lookup(name) {
+            TermKind::Var(sym) => {
+                let sym = *sym;
+                if let Some(val) = self.env.get(&sym) {
                     val.clone()
-                } else if let Some(def) = self.defs.get(name).cloned() {
+                } else if let Some(def) = self.defs.get(&sym).cloned() {
                     if def.arity == 0 {
                         // Constant - evaluate it
                         self.eval(&def.body)
                     } else {
                         // Function - create partial application with 0 args applied
                         Value::Partial {
-                            name: name.clone(),
+                            sym,
                             args: vec![],
                             remaining: def.arity,
                         }
@@ -117,11 +122,8 @@ impl PartialEvaluator {
             // Let binding
             TermKind::Let { name, rhs, body, .. } => {
                 let rhs_val = self.eval(rhs);
-                self.env.push_scope();
-                self.env.insert(name.clone(), rhs_val);
-                let result = self.eval(body);
-                self.env.pop_scope();
-                result
+                self.env.insert(*name, rhs_val);
+                self.eval(body)
             }
 
             // If expression
@@ -198,7 +200,7 @@ impl PartialEvaluator {
                 }
             }
 
-            TermKind::Var(name) => self.apply_var(name, args, original),
+            TermKind::Var(sym) => self.apply_var(*sym, args, original),
 
             _ => {
                 // Higher-order or computed function - can't evaluate
@@ -208,40 +210,41 @@ impl PartialEvaluator {
     }
 
     /// Apply a named function to arguments.
-    fn apply_var(&mut self, name: &str, args: Vec<Value>, original: &Term) -> Value {
-        // Check for intrinsics first
-        if let Some(val) = self.try_intrinsic(name, &args, original) {
+    fn apply_var(&mut self, sym: SymbolId, args: Vec<Value>, original: &Term) -> Value {
+        // Check for intrinsics first (clone name to avoid borrow conflict)
+        let name = self.symbols.get(sym).expect("BUG: symbol not in table").clone();
+        if let Some(val) = self.try_intrinsic(&name, &args, original) {
             return val;
         }
 
         // Check if this is a let-bound variable aliasing a function.
         // This handles cases like `let f = g in f x` where g is a known function.
         if let Some(Value::Partial {
-            name: real_name,
+            sym: real_sym,
             args: partial_args,
             ..
-        }) = self.env.lookup(name).cloned()
+        }) = self.env.get(&sym).cloned()
         {
             // Combine the partial application's args with the new args
             let mut combined_args = partial_args;
             combined_args.extend(args);
             // Apply to the real function (recursive to handle chains like let h = f in let g = h in g x)
-            return self.apply_var(&real_name, combined_args, original);
+            return self.apply_var(real_sym, combined_args, original);
         }
 
         // Check if this is a let-bound variable aliasing a function name
         // (intrinsic, builtin, or top-level def). Handles `let f = f32.sin in f x`.
         if let Some(Value::Unknown(Term {
-            kind: TermKind::Var(real_name),
+            kind: TermKind::Var(real_sym),
             ..
-        })) = self.env.lookup(name)
+        })) = self.env.get(&sym)
         {
-            let real_name = real_name.clone();
-            return self.apply_var(&real_name, args, original);
+            let real_sym = *real_sym;
+            return self.apply_var(real_sym, args, original);
         }
 
         // Check for known function
-        if let Some(def) = self.defs.get(name).cloned() {
+        if let Some(def) = self.defs.get(&sym).cloned() {
             let args_len = args.len();
             let all_known = args.iter().all(|a| a.is_known());
             if args_len >= def.arity && def.arity > 0 && all_known {
@@ -250,17 +253,17 @@ impl PartialEvaluator {
             } else if args_len < def.arity {
                 // Partial application
                 Value::Partial {
-                    name: name.to_string(),
+                    sym,
                     args,
                     remaining: def.arity - args_len,
                 }
             } else {
                 // Some unknown args or zero-arity - residualize
-                self.reify_call(name, args, original)
+                self.reify_call(sym, args, original)
             }
         } else {
             // Unknown function - residualize
-            self.reify_call(name, args, original)
+            self.reify_call(sym, args, original)
         }
     }
 
@@ -294,8 +297,6 @@ impl PartialEvaluator {
 
     /// Inline a function call.
     fn inline(&mut self, def: &Def, args: Vec<Value>) -> Value {
-        // Push scope and bind parameters
-        self.env.push_scope();
         let mut body = &def.body;
 
         for arg in args {
@@ -303,16 +304,14 @@ impl PartialEvaluator {
                 param, body: inner, ..
             } = &body.kind
             {
-                self.env.insert(param.clone(), arg);
+                self.env.insert(*param, arg);
                 body = inner;
             } else {
                 break;
             }
         }
 
-        let result = self.eval(body);
-        self.env.pop_scope();
-        result
+        self.eval(body)
     }
 
     /// Evaluate binary operation.
@@ -372,14 +371,15 @@ impl PartialEvaluator {
             Value::Tuple(elems) => self.reify_tuple(elems, ty, span),
             Value::Array(elems) => self.reify_array(elems, ty, span),
             Value::Vector(elems) => self.reify_vector(elems, ty, span),
-            Value::Partial { name, args, .. } => self.reify_partial(&name, args, ty, span),
+            Value::Partial { sym, args, .. } => self.reify_partial(sym, args, ty, span),
         }
     }
 
     fn reify_tuple(&mut self, elems: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
         // Build: _w_tuple elem0 elem1 ...
         let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
-        let mut result = self.mk_term(ty.clone(), span, TermKind::Var("_w_tuple".to_string()));
+        let tuple_sym = self.symbols.alloc("_w_tuple".to_string());
+        let mut result = self.mk_term(ty.clone(), span, TermKind::Var(tuple_sym));
 
         for elem in elems {
             let elem_term = self.reify(elem, &unit_ty, span);
@@ -397,7 +397,8 @@ impl PartialEvaluator {
 
     fn reify_array(&mut self, elems: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
         let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
-        let mut result = self.mk_term(ty.clone(), span, TermKind::Var("_w_array_lit".to_string()));
+        let array_sym = self.symbols.alloc("_w_array_lit".to_string());
+        let mut result = self.mk_term(ty.clone(), span, TermKind::Var(array_sym));
 
         for elem in elems {
             let elem_term = self.reify(elem, &unit_ty, span);
@@ -415,7 +416,8 @@ impl PartialEvaluator {
 
     fn reify_vector(&mut self, elems: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
         let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
-        let mut result = self.mk_term(ty.clone(), span, TermKind::Var("_w_vec_lit".to_string()));
+        let vec_sym = self.symbols.alloc("_w_vec_lit".to_string());
+        let mut result = self.mk_term(ty.clone(), span, TermKind::Var(vec_sym));
 
         for elem in elems {
             let elem_term = self.reify(elem, &unit_ty, span);
@@ -431,9 +433,9 @@ impl PartialEvaluator {
         result
     }
 
-    fn reify_partial(&mut self, name: &str, args: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
+    fn reify_partial(&mut self, sym: SymbolId, args: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
         let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
-        let mut result = self.mk_term(ty.clone(), span, TermKind::Var(name.to_string()));
+        let mut result = self.mk_term(ty.clone(), span, TermKind::Var(sym));
 
         for arg in args {
             let arg_term = self.reify(arg, &unit_ty, span);
@@ -449,13 +451,9 @@ impl PartialEvaluator {
         result
     }
 
-    fn reify_call(&mut self, name: &str, args: Vec<Value>, original: &Term) -> Value {
+    fn reify_call(&mut self, sym: SymbolId, args: Vec<Value>, original: &Term) -> Value {
         let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
-        let mut result = self.mk_term(
-            original.ty.clone(),
-            original.span,
-            TermKind::Var(name.to_string()),
-        );
+        let mut result = self.mk_term(original.ty.clone(), original.span, TermKind::Var(sym));
 
         for arg in args {
             let arg_term = self.reify(arg, &unit_ty, original.span);

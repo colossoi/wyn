@@ -3,14 +3,37 @@
 use crate::ast::{BinaryOp, Span, TypeName};
 use crate::tlc::to_ssa::*;
 use crate::tlc::{Def as TlcDef, DefMeta, Program as TlcProgram, Term, TermIdSource, TermKind};
+use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 
-fn make_span(line: usize, col: usize) -> Span {
-    Span {
-        start_line: line,
-        start_col: col,
-        end_line: line,
-        end_col: col + 1,
+/// Test helper that manages symbol table and term ID generation.
+struct TestBuilder {
+    symbols: SymbolTable,
+    ids: TermIdSource,
+}
+
+impl TestBuilder {
+    fn new() -> Self {
+        TestBuilder {
+            symbols: SymbolTable::new(),
+            ids: TermIdSource::new(),
+        }
+    }
+
+    fn sym(&mut self, name: &str) -> SymbolId {
+        self.symbols.alloc(name.to_string())
+    }
+
+    fn next_id(&mut self) -> super::TermId {
+        self.ids.next_id()
+    }
+
+    fn span(&self) -> Span {
+        Span::dummy()
+    }
+
+    fn finish(self) -> SymbolTable {
+        self.symbols
     }
 }
 
@@ -20,22 +43,26 @@ fn i32_ty() -> Type<TypeName> {
 
 #[test]
 fn test_convert_simple_function() {
-    let mut ids = TermIdSource::new();
-    let span = make_span(1, 1);
+    let mut b = TestBuilder::new();
+    let span = b.span();
+
+    let x_sym = b.sym("x");
+    let y_sym = b.sym("y");
+    let add_sym = b.sym("add");
 
     // def add(x, y) = x + y
     let x_var = Term {
-        id: ids.next_id(),
+        id: b.next_id(),
         ty: i32_ty(),
         span,
-        kind: TermKind::Var("x".to_string()),
+        kind: TermKind::Var(x_sym),
     };
 
     let y_var = Term {
-        id: ids.next_id(),
+        id: b.next_id(),
         ty: i32_ty(),
         span,
-        kind: TermKind::Var("y".to_string()),
+        kind: TermKind::Var(y_sym),
     };
 
     let binop_ty = Type::Constructed(
@@ -46,14 +73,14 @@ fn test_convert_simple_function() {
         ],
     );
     let binop_term = Term {
-        id: ids.next_id(),
+        id: b.next_id(),
         ty: binop_ty,
         span,
         kind: TermKind::BinOp(BinaryOp { op: "+".to_string() }),
     };
 
     let binop_x = Term {
-        id: ids.next_id(),
+        id: b.next_id(),
         ty: Type::Constructed(TypeName::Arrow, vec![i32_ty(), i32_ty()]),
         span,
         kind: TermKind::App {
@@ -63,7 +90,7 @@ fn test_convert_simple_function() {
     };
 
     let add_body = Term {
-        id: ids.next_id(),
+        id: b.next_id(),
         ty: i32_ty(),
         span,
         kind: TermKind::App {
@@ -73,18 +100,18 @@ fn test_convert_simple_function() {
     };
 
     let lam_y = Term {
-        id: ids.next_id(),
+        id: b.next_id(),
         ty: Type::Constructed(TypeName::Arrow, vec![i32_ty(), i32_ty()]),
         span,
         kind: TermKind::Lam {
-            param: "y".to_string(),
+            param: y_sym,
             param_ty: i32_ty(),
             body: Box::new(add_body),
         },
     };
 
     let lam_x = Term {
-        id: ids.next_id(),
+        id: b.next_id(),
         ty: Type::Constructed(
             TypeName::Arrow,
             vec![
@@ -94,15 +121,17 @@ fn test_convert_simple_function() {
         ),
         span,
         kind: TermKind::Lam {
-            param: "x".to_string(),
+            param: x_sym,
             param_ty: i32_ty(),
             body: Box::new(lam_y),
         },
     };
 
+    let symbols = b.finish();
+
     let program = TlcProgram {
         defs: vec![TlcDef {
-            name: "add".to_string(),
+            name: add_sym,
             ty: lam_x.ty.clone(),
             body: lam_x,
             meta: DefMeta::Function,
@@ -110,6 +139,7 @@ fn test_convert_simple_function() {
         }],
         uniforms: vec![],
         storage: vec![],
+        symbols,
     };
 
     let ssa_program = convert_program(&program).unwrap();

@@ -19,10 +19,10 @@ pub mod to_ssa;
 #[cfg(test)]
 mod to_ssa_tests;
 
-use crate::TypeTable;
 use crate::ast::{self, NodeId, Span, TypeName};
+use crate::{SymbolId, SymbolTable, TypeTable};
 use polytype::Type;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// Mapping from user-facing SOAC names to their internal intrinsic names.
 /// These are registered as builtins in the type checker and renamed here during TLC transformation.
@@ -91,7 +91,7 @@ pub struct Term {
 #[derive(Debug, Clone)]
 pub enum TermKind {
     /// Variable reference.
-    Var(String),
+    Var(SymbolId),
 
     /// Binary operator as a value: +, -, *, /, ==, etc.
     BinOp(ast::BinaryOp),
@@ -101,7 +101,7 @@ pub enum TermKind {
 
     /// Lambda abstraction: λ(x:T). body
     Lam {
-        param: String,
+        param: SymbolId,
         param_ty: Type<TypeName>,
         body: Box<Term>,
     },
@@ -114,7 +114,7 @@ pub enum TermKind {
 
     /// Let binding: let x:T = rhs in body
     Let {
-        name: String,
+        name: SymbolId,
         name_ty: Type<TypeName>,
         rhs: Box<Term>,
         body: Box<Term>,
@@ -147,14 +147,14 @@ pub enum TermKind {
     /// Loop construct (mirrors MIR::Loop).
     Loop {
         /// The loop accumulator variable name.
-        loop_var: String,
+        loop_var: SymbolId,
         /// Type of the loop variable.
         loop_var_ty: Type<TypeName>,
         /// Initial value for the accumulator.
         init: Box<Term>,
         /// Bindings that extract from loop_var (e.g., for tuple destructuring).
         /// Each is (name, type, extraction_expr).
-        init_bindings: Vec<(String, Type<TypeName>, Term)>,
+        init_bindings: Vec<(SymbolId, Type<TypeName>, Term)>,
         /// The kind of loop.
         kind: LoopKind,
         /// Loop body expression.
@@ -167,13 +167,13 @@ pub enum TermKind {
 pub enum LoopKind {
     /// For loop over an array: `for x in arr`.
     For {
-        var: String,
+        var: SymbolId,
         var_ty: Type<TypeName>,
         iter: Box<Term>,
     },
     /// For loop with range bound: `for i < n`.
     ForRange {
-        var: String,
+        var: SymbolId,
         var_ty: Type<TypeName>,
         bound: Box<Term>,
     },
@@ -199,7 +199,7 @@ pub enum DefMeta {
 /// A top-level definition in TLC.
 #[derive(Debug, Clone)]
 pub struct Def {
-    pub name: String,
+    pub name: SymbolId,
     pub ty: Type<TypeName>,
     pub body: Term,
     pub meta: DefMeta,
@@ -215,6 +215,8 @@ pub struct Program {
     pub uniforms: Vec<ast::UniformDecl>,
     /// Storage buffer declarations (no bodies, just metadata).
     pub storage: Vec<ast::StorageDecl>,
+    /// Symbol table: maps SymbolId to original name (for errors/debugging).
+    pub symbols: SymbolTable,
 }
 
 // =============================================================================
@@ -224,7 +226,7 @@ pub struct Program {
 /// A pending let-binding to be applied after all lambdas are created.
 #[derive(Debug, Clone)]
 struct PendingBinding {
-    name: String,
+    name: SymbolId,
     ty: Type<TypeName>,
     expr: Term,
 }
@@ -233,34 +235,112 @@ struct PendingBinding {
 pub struct Transformer<'a> {
     type_table: &'a TypeTable,
     term_ids: TermIdSource,
+    /// Shared symbol table: maps SymbolId to original name (for errors/debugging).
+    symbols: &'a mut SymbolTable,
+    /// Current scope for name resolution: maps string name to SymbolId.
+    scope: HashMap<String, SymbolId>,
+    /// Top-level symbols that persist across function transformations.
+    /// This ensures function references use the same SymbolId as the Def.
+    /// Shared across all transformers via mutable reference.
+    top_level_symbols: &'a mut HashMap<String, SymbolId>,
     /// Optional namespace prefix for definition names (e.g., "f32" -> "f32.pi")
     namespace: Option<String>,
-    /// Track locally bound names to prevent renaming shadowed SOAC identifiers
-    bound_names: HashSet<String>,
 }
 
 impl<'a> Transformer<'a> {
-    pub fn new(type_table: &'a TypeTable) -> Self {
+    pub fn new(
+        type_table: &'a TypeTable,
+        symbols: &'a mut SymbolTable,
+        top_level_symbols: &'a mut HashMap<String, SymbolId>,
+    ) -> Self {
         Self {
             type_table,
             term_ids: TermIdSource::new(),
+            symbols,
+            scope: HashMap::new(),
+            top_level_symbols,
             namespace: None,
-            bound_names: HashSet::new(),
         }
     }
 
     /// Create a transformer with a namespace prefix for definition names.
-    pub fn with_namespace(type_table: &'a TypeTable, namespace: &str) -> Self {
+    pub fn with_namespace(
+        type_table: &'a TypeTable,
+        symbols: &'a mut SymbolTable,
+        top_level_symbols: &'a mut HashMap<String, SymbolId>,
+        namespace: &str,
+    ) -> Self {
         Self {
             type_table,
             term_ids: TermIdSource::new(),
+            symbols,
+            scope: HashMap::new(),
+            top_level_symbols,
             namespace: Some(namespace.to_string()),
-            bound_names: HashSet::new(),
         }
+    }
+
+    /// Define a new symbol, returning its unique ID.
+    /// This adds the name to the symbol table and current scope.
+    fn define(&mut self, name: &str) -> SymbolId {
+        let id = self.symbols.alloc(name.to_string());
+        self.scope.insert(name.to_string(), id);
+        id
+    }
+
+    /// Resolve a name to its SymbolId in current scope.
+    /// Returns None for unbound names (e.g., intrinsics, top-level functions).
+    fn resolve(&self, name: &str) -> Option<SymbolId> {
+        self.scope.get(name).copied()
+    }
+
+    /// Define or resolve a name that's used as a variable reference.
+    /// Checks local scope first, then top-level symbols, then creates a new symbol.
+    fn resolve_or_define(&mut self, name: &str) -> SymbolId {
+        if let Some(id) = self.resolve(name) {
+            id
+        } else if let Some(&id) = self.top_level_symbols.get(name) {
+            // Found in top-level symbols (function names registered in first pass)
+            id
+        } else {
+            // Not in scope - this is a reference to an intrinsic or external function.
+            // Create a symbol for it.
+            self.symbols.alloc(name.to_string())
+        }
+    }
+
+    /// Check if a name is locally bound (for SOAC renaming check).
+    fn is_locally_bound(&self, name: &str) -> bool {
+        self.scope.contains_key(name)
     }
 
     /// Transform an AST program to TLC.
     pub fn transform_program(&mut self, program: &ast::Program) -> Program {
+        // First pass: register all top-level function names so that references
+        // within function bodies use the same SymbolId as the Def.
+        for decl in &program.declarations {
+            match decl {
+                ast::Declaration::Decl(d) => {
+                    let name_str = match &self.namespace {
+                        Some(ns) => format!("{}.{}", ns, d.name),
+                        None => d.name.clone(),
+                    };
+                    let sym = self.symbols.alloc(name_str.clone());
+                    self.top_level_symbols.insert(name_str, sym);
+                }
+                ast::Declaration::Entry(e) => {
+                    let sym = self.symbols.alloc(e.name.clone());
+                    self.top_level_symbols.insert(e.name.clone(), sym);
+                }
+                ast::Declaration::Extern(e) => {
+                    let sym = self.symbols.alloc(e.name.clone());
+                    self.top_level_symbols.insert(e.name.clone(), sym);
+                }
+                _ => {}
+            }
+        }
+
+        // Second pass: transform function bodies (now resolve_or_define can find top-level symbols)
         let mut defs = Vec::new();
         let mut uniforms = Vec::new();
         let mut storage = Vec::new();
@@ -284,12 +364,13 @@ impl<'a> Transformer<'a> {
                     storage.push(s.clone());
                 }
                 ast::Declaration::Extern(e) => {
-                    // Create a forward declaration for linked SPIR-V function
+                    // Use the pre-registered symbol
+                    let name_sym =
+                        *self.top_level_symbols.get(&e.name).expect("BUG: extern not pre-registered");
                     let body = self.mk_term(e.ty.clone(), e.span, TermKind::Extern(e.linkage_name.clone()));
-                    // Compute arity by counting arrows in the function type
                     let arity = count_function_arity(&e.ty);
                     defs.push(Def {
-                        name: e.name.clone(),
+                        name: name_sym,
                         ty: e.ty.clone(),
                         body,
                         meta: DefMeta::Function,
@@ -305,28 +386,41 @@ impl<'a> Transformer<'a> {
             }
         }
 
+        // Note: symbols are in the shared SymbolTable reference.
+        // The caller is responsible for putting the final symbol table into the Program.
         Program {
             defs,
             uniforms,
             storage,
+            symbols: SymbolTable::new(), // Placeholder - caller fills in the real one
         }
     }
 
     pub fn transform_decl(&mut self, decl: &ast::Decl) -> Option<Def> {
-        // Clear bound names for each definition to ensure fresh scope
-        self.bound_names.clear();
+        // Clear scope for each definition to ensure fresh scope
+        self.scope.clear();
         let body_ty = self.lookup_type(decl.body.h.id)?;
         let full_ty = self.build_function_type(&decl.params, &body_ty);
         let body = self.transform_with_params(&decl.params, &decl.body, full_ty.clone());
 
         // Apply namespace prefix if set (e.g., "f32" + "pi" -> "f32.pi")
-        let name = match &self.namespace {
+        let name_str = match &self.namespace {
             Some(ns) => format!("{}.{}", ns, decl.name),
             None => decl.name.clone(),
         };
 
+        // Use pre-registered symbol if available, otherwise allocate and register a new one.
+        // Always ensure the symbol is in top_level_symbols for later transformers.
+        let name_sym = if let Some(&sym) = self.top_level_symbols.get(&name_str) {
+            sym
+        } else {
+            let sym = self.symbols.alloc(name_str.clone());
+            self.top_level_symbols.insert(name_str, sym);
+            sym
+        };
+
         Some(Def {
-            name,
+            name: name_sym,
             ty: full_ty,
             body,
             meta: DefMeta::Function,
@@ -335,14 +429,23 @@ impl<'a> Transformer<'a> {
     }
 
     fn transform_entry(&mut self, entry: &ast::EntryDecl) -> Option<Def> {
-        // Clear bound names for each entry to ensure fresh scope
-        self.bound_names.clear();
+        // Clear scope for each entry to ensure fresh scope
+        self.scope.clear();
         let body_ty = self.lookup_type(entry.body.h.id)?;
         let full_ty = self.build_function_type(&entry.params, &body_ty);
         let body = self.transform_with_params(&entry.params, &entry.body, full_ty.clone());
 
+        // Use pre-registered symbol if available, otherwise allocate and register a new one.
+        let name_sym = if let Some(&sym) = self.top_level_symbols.get(&entry.name) {
+            sym
+        } else {
+            let sym = self.symbols.alloc(entry.name.clone());
+            self.top_level_symbols.insert(entry.name.clone(), sym);
+            sym
+        };
+
         Some(Def {
-            name: entry.name.clone(),
+            name: name_sym,
             ty: full_ty,
             body,
             meta: DefMeta::EntryPoint(Box::new(entry.clone())),
@@ -396,8 +499,12 @@ impl<'a> Transformer<'a> {
         }
 
         // Collect all lambda parameters and their pending bindings
-        let mut lambda_info: Vec<(String, Type<TypeName>, Vec<PendingBinding>)> = Vec::new();
+        // compute_pattern_bindings already creates SymbolIds via define()
+        let mut lambda_info: Vec<(SymbolId, Type<TypeName>, Vec<PendingBinding>)> = Vec::new();
         let mut current_ty = full_ty;
+
+        // Use a placeholder symbol for the scrutinee in compute_pattern_bindings
+        let placeholder_sym = self.symbols.alloc("_placeholder".to_string());
 
         for param in params {
             let param_ty = self.get_param_type(&current_ty);
@@ -405,27 +512,18 @@ impl<'a> Transformer<'a> {
             // Use a placeholder scrutinee - we need to call compute_pattern_bindings to get
             // the param name and projection bindings, but the actual lambda param value
             // won't exist until runtime
-            let placeholder =
-                self.mk_term(param_ty.clone(), span, TermKind::Var("_placeholder".to_string()));
-            let (param_name, mut bindings) = self.compute_pattern_bindings(param, placeholder, span);
+            let placeholder = self.mk_term(param_ty.clone(), span, TermKind::Var(placeholder_sym));
+            let (param_sym, mut bindings) = self.compute_pattern_bindings(param, placeholder, span);
 
             // For complex patterns (Tuple/Record), compute_pattern_bindings returns bindings that
             // include the top-level binding (fresh = scrutinee). For lambdas, we don't want this
             // since the lambda param IS the fresh name. Skip the first binding if it matches.
-            if !bindings.is_empty() && bindings[0].name == param_name {
+            if !bindings.is_empty() && bindings[0].name == param_sym {
                 bindings.remove(0);
             }
 
-            lambda_info.push((param_name, param_ty.clone(), bindings));
+            lambda_info.push((param_sym, param_ty.clone(), bindings));
             current_ty = self.get_body_type(&current_ty);
-        }
-
-        // Add all lambda param names and binding names to bound_names before transforming body
-        for (param_name, _, bindings) in &lambda_info {
-            self.bound_names.insert(param_name.clone());
-            for binding in bindings {
-                self.bound_names.insert(binding.name.clone());
-            }
         }
 
         // Transform the body expression
@@ -438,7 +536,7 @@ impl<'a> Transformer<'a> {
                     result.ty.clone(),
                     span,
                     TermKind::Let {
-                        name: binding.name.clone(),
+                        name: binding.name,
                         name_ty: binding.ty.clone(),
                         rhs: Box::new(binding.expr.clone()),
                         body: Box::new(result),
@@ -448,13 +546,13 @@ impl<'a> Transformer<'a> {
         }
 
         // Build nested lambdas from inside-out
-        for (param_name, param_ty, _) in lambda_info.into_iter().rev() {
+        for (param_sym, param_ty, _) in lambda_info.into_iter().rev() {
             let lam_ty = Type::Constructed(TypeName::Arrow, vec![param_ty.clone(), result.ty.clone()]);
             result = self.mk_term(
                 lam_ty,
                 span,
                 TermKind::Lam {
-                    param: param_name,
+                    param: param_sym,
                     param_ty,
                     body: Box::new(result),
                 },
@@ -465,11 +563,11 @@ impl<'a> Transformer<'a> {
     }
 
     /// Compute bindings for a pattern matched against a scrutinee variable.
-    /// Returns (bound_name, list_of_pending_bindings).
+    /// Returns (bound_symbol, list_of_pending_bindings).
     ///
-    /// The bound_name is either:
-    /// - The pattern's name (for simple Name patterns)
-    /// - A fresh variable name (for complex patterns like Tuple/Record)
+    /// The bound_symbol is either:
+    /// - A symbol for the pattern's name (for simple Name patterns)
+    /// - A fresh symbol (for complex patterns like Tuple/Record)
     ///
     /// For Name/Wildcard patterns, no bindings are returned - the caller is responsible
     /// for creating the top-level binding if needed (e.g., for let-in).
@@ -484,7 +582,7 @@ impl<'a> Transformer<'a> {
         pattern: &ast::Pattern,
         scrutinee: Term,
         span: Span,
-    ) -> (String, Vec<PendingBinding>) {
+    ) -> (SymbolId, Vec<PendingBinding>) {
         self.compute_pattern_bindings_inner(pattern, scrutinee, span, true)
     }
 
@@ -497,37 +595,39 @@ impl<'a> Transformer<'a> {
         scrutinee: Term,
         span: Span,
         is_top_level: bool,
-    ) -> (String, Vec<PendingBinding>) {
+    ) -> (SymbolId, Vec<PendingBinding>) {
         match &pattern.kind {
             ast::PatternKind::Name(name) => {
+                let sym = self.define(name);
                 if is_top_level {
                     // Top-level Name: no binding needed, caller will use scrutinee directly
                     // or wrap with Let as appropriate
-                    (name.clone(), vec![])
+                    (sym, vec![])
                 } else {
                     // Nested Name (e.g., inside tuple): need binding for projection result
                     let binding = PendingBinding {
-                        name: name.clone(),
+                        name: sym,
                         ty: scrutinee.ty.clone(),
                         expr: scrutinee,
                     };
-                    (name.clone(), vec![binding])
+                    (sym, vec![binding])
                 }
             }
 
             ast::PatternKind::Wildcard => {
-                let fresh = format!("_wild_{}", self.term_ids.next_id().0);
+                let fresh_name = format!("_wild_{}", self.term_ids.next_id().0);
+                let sym = self.define(&fresh_name);
                 if is_top_level {
                     // Top-level Wildcard: no binding needed
-                    (fresh, vec![])
+                    (sym, vec![])
                 } else {
                     // Nested Wildcard: need binding to evaluate projection
                     let binding = PendingBinding {
-                        name: fresh.clone(),
+                        name: sym,
                         ty: scrutinee.ty.clone(),
                         expr: scrutinee,
                     };
-                    (fresh, vec![binding])
+                    (sym, vec![binding])
                 }
             }
 
@@ -536,13 +636,14 @@ impl<'a> Transformer<'a> {
             }
 
             ast::PatternKind::Tuple(patterns) => {
-                let fresh = format!("_tup_{}", self.term_ids.next_id().0);
+                let fresh_name = format!("_tup_{}", self.term_ids.next_id().0);
+                let fresh_sym = self.define(&fresh_name);
                 let tuple_ty = scrutinee.ty.clone();
                 let component_types = self.extract_tuple_types(&tuple_ty, patterns.len());
 
                 // First bind the scrutinee to the fresh name
                 let mut bindings = vec![PendingBinding {
-                    name: fresh.clone(),
+                    name: fresh_sym,
                     ty: tuple_ty.clone(),
                     expr: scrutinee,
                 }];
@@ -554,23 +655,24 @@ impl<'a> Transformer<'a> {
                         .cloned()
                         .expect("BUG: Tuple pattern has more elements than tuple type");
 
-                    let proj = self.build_tuple_projection(&fresh, &tuple_ty, i, comp_ty, span);
+                    let proj = self.build_tuple_projection(fresh_sym, &tuple_ty, i, comp_ty, span);
                     let (_, sub_bindings) =
                         self.compute_pattern_bindings_inner(sub_pattern, proj, span, false);
                     bindings.extend(sub_bindings);
                 }
 
-                (fresh, bindings)
+                (fresh_sym, bindings)
             }
 
             ast::PatternKind::Record(fields) => {
-                let fresh = format!("_rec_{}", self.term_ids.next_id().0);
+                let fresh_name = format!("_rec_{}", self.term_ids.next_id().0);
+                let fresh_sym = self.define(&fresh_name);
                 let record_ty = scrutinee.ty.clone();
                 let field_types = self.extract_record_types(&record_ty);
 
                 // First bind the scrutinee to the fresh name
                 let mut bindings = vec![PendingBinding {
-                    name: fresh.clone(),
+                    name: fresh_sym,
                     ty: record_ty.clone(),
                     expr: scrutinee,
                 }];
@@ -586,23 +688,29 @@ impl<'a> Transformer<'a> {
                         .resolve_field_index(&record_ty, &field.field)
                         .unwrap_or_else(|| panic!("BUG: field '{}' not in record type", field.field));
 
-                    let field_access =
-                        self.build_tuple_projection(&fresh, &record_ty, field_idx, field_ty.clone(), span);
+                    let field_access = self.build_tuple_projection(
+                        fresh_sym,
+                        &record_ty,
+                        field_idx,
+                        field_ty.clone(),
+                        span,
+                    );
 
                     if let Some(pat) = &field.pattern {
                         let (_, sub_bindings) =
                             self.compute_pattern_bindings_inner(pat, field_access, span, false);
                         bindings.extend(sub_bindings);
                     } else {
+                        let field_sym = self.define(&field.field);
                         bindings.push(PendingBinding {
-                            name: field.field.clone(),
+                            name: field_sym,
                             ty: field_ty,
                             expr: field_access,
                         });
                     }
                 }
 
-                (fresh, bindings)
+                (fresh_sym, bindings)
             }
 
             ast::PatternKind::Unit => {
@@ -622,13 +730,13 @@ impl<'a> Transformer<'a> {
     /// Build a tuple projection: _w_tuple_proj(var, index)
     fn build_tuple_projection(
         &mut self,
-        var_name: &str,
+        var_sym: SymbolId,
         var_ty: &Type<TypeName>,
         index: usize,
         result_ty: Type<TypeName>,
         span: Span,
     ) -> Term {
-        let var_term = self.mk_term(var_ty.clone(), span, TermKind::Var(var_name.to_string()));
+        let var_term = self.mk_term(var_ty.clone(), span, TermKind::Var(var_sym));
         let index_lit = self.mk_term(
             Type::Constructed(TypeName::Int(32), vec![]),
             span,
@@ -727,9 +835,9 @@ impl<'a> Transformer<'a> {
             }
 
             ast::ExprKind::Identifier(qualifiers, name) => {
-                let full_name = if qualifiers.is_empty() {
+                let resolved_name = if qualifiers.is_empty() {
                     // Check if this is a fundamental SOAC not shadowed by a local binding
-                    if !self.bound_names.contains(name) {
+                    if !self.is_locally_bound(name) {
                         if let Some((_, intrinsic)) = FUNDAMENTAL_SOACS.iter().find(|(s, _)| *s == name) {
                             intrinsic.to_string()
                         } else {
@@ -741,7 +849,8 @@ impl<'a> Transformer<'a> {
                 } else {
                     format!("{}.{}", qualifiers.join("."), name)
                 };
-                self.mk_term(ty, span, TermKind::Var(full_name))
+                let sym = self.resolve_or_define(&resolved_name);
+                self.mk_term(ty, span, TermKind::Var(sym))
             }
 
             ast::ExprKind::ArrayLiteral(elements) => {
@@ -814,22 +923,19 @@ impl<'a> Transformer<'a> {
 
             ast::ExprKind::LetIn(let_in) => {
                 // Check pattern kind to avoid redundant transforms for simple patterns
-                let simple_name = match self.simple_pattern_name(&let_in.pattern) {
-                    Some(name) => Some(name),
-                    None => None,
-                };
+                let simple_name = self.simple_pattern_name(&let_in.pattern);
 
-                if let Some(bound_name) = simple_name {
+                if let Some(name_str) = simple_name {
                     // Simple Name/Wildcard pattern - single Let binding
                     let rhs = self.transform_expr(&let_in.value);
-                    // Track bound name before transforming body
-                    self.bound_names.insert(bound_name.clone());
+                    // Define the name (adds to scope) before transforming body
+                    let name_sym = self.define(&name_str);
                     let body = self.transform_expr(&let_in.body);
                     self.mk_term(
                         body.ty.clone(),
                         span,
                         TermKind::Let {
-                            name: bound_name,
+                            name: name_sym,
                             name_ty: rhs.ty.clone(),
                             rhs: Box::new(rhs),
                             body: Box::new(body),
@@ -839,10 +945,7 @@ impl<'a> Transformer<'a> {
                     // Complex pattern - use compute_pattern_bindings
                     let rhs = self.transform_expr(&let_in.value);
                     let (_, bindings) = self.compute_pattern_bindings(&let_in.pattern, rhs, span);
-                    // Track all binding names before transforming body
-                    for binding in &bindings {
-                        self.bound_names.insert(binding.name.clone());
-                    }
+                    // Note: bindings already added names to scope via define() in compute_pattern_bindings
                     let body = self.transform_expr(&let_in.body);
                     self.apply_bindings_around(bindings, body, span)
                 }
@@ -1029,6 +1132,7 @@ impl<'a> Transformer<'a> {
             ast::LoopForm::For(idx_var, bound) => {
                 let bound_term = self.transform_expr(bound);
                 let index_ty = Type::Constructed(TypeName::Int(32), vec![]);
+                let idx_var_sym = self.define(idx_var);
 
                 self.mk_term(
                     ty,
@@ -1039,7 +1143,7 @@ impl<'a> Transformer<'a> {
                         init: Box::new(init_term),
                         init_bindings,
                         kind: LoopKind::ForRange {
-                            var: idx_var.clone(),
+                            var: idx_var_sym,
                             var_ty: index_ty,
                             bound: Box::new(bound_term),
                         },
@@ -1051,7 +1155,8 @@ impl<'a> Transformer<'a> {
             ast::LoopForm::ForIn(elem_pattern, iter) => {
                 let iter_term = self.transform_expr(iter);
                 let elem_ty = self.get_array_element_type(&iter_term.ty);
-                let elem_var = elem_pattern.simple_name().unwrap_or("_elem").to_string();
+                let elem_var_name = elem_pattern.simple_name().unwrap_or("_elem").to_string();
+                let elem_var_sym = self.define(&elem_var_name);
 
                 self.mk_term(
                     ty,
@@ -1062,7 +1167,7 @@ impl<'a> Transformer<'a> {
                         init: Box::new(init_term),
                         init_bindings,
                         kind: LoopKind::For {
-                            var: elem_var,
+                            var: elem_var_sym,
                             var_ty: elem_ty,
                             iter: Box::new(iter_term),
                         },
@@ -1098,16 +1203,18 @@ impl<'a> Transformer<'a> {
         pattern: &ast::Pattern,
         acc_ty: &Type<TypeName>,
         span: Span,
-    ) -> (String, Type<TypeName>, Vec<(String, Type<TypeName>, Term)>) {
+    ) -> (SymbolId, Type<TypeName>, Vec<(SymbolId, Type<TypeName>, Term)>) {
         use crate::pattern::binding_paths;
 
         // For a simple name pattern, use it directly
         if let ast::PatternKind::Name(name) = &pattern.kind {
-            return (name.clone(), acc_ty.clone(), vec![]);
+            let name_sym = self.define(name);
+            return (name_sym, acc_ty.clone(), vec![]);
         }
 
         // For complex patterns, create a fresh loop_var and build projections
-        let loop_var = format!("_loop_{}", self.term_ids.next_id().0);
+        let loop_var_name = format!("_loop_{}", self.term_ids.next_id().0);
+        let loop_var_sym = self.define(&loop_var_name);
         let paths = binding_paths(pattern);
 
         let init_bindings = paths
@@ -1118,13 +1225,14 @@ impl<'a> Transformer<'a> {
                     None
                 } else {
                     let binding_ty = self.type_at_path(acc_ty, &bp.path);
-                    let proj_term = self.build_projection_chain(&loop_var, acc_ty, &bp.path, span);
-                    Some((bp.name, binding_ty, proj_term))
+                    let proj_term = self.build_projection_chain(loop_var_sym, acc_ty, &bp.path, span);
+                    let binding_sym = self.define(&bp.name);
+                    Some((binding_sym, binding_ty, proj_term))
                 }
             })
             .collect();
 
-        (loop_var, acc_ty.clone(), init_bindings)
+        (loop_var_sym, acc_ty.clone(), init_bindings)
     }
 
     /// Get the type at a given projection path within a tuple/record type.
@@ -1157,13 +1265,13 @@ impl<'a> Transformer<'a> {
     /// Build a chain of tuple projections: proj[path[n-1]](...proj[path[0]](var))
     fn build_projection_chain(
         &mut self,
-        var: &str,
+        var_sym: SymbolId,
         var_ty: &Type<TypeName>,
         path: &[usize],
         span: Span,
     ) -> Term {
         let mut current_ty = var_ty.clone();
-        let mut current = self.mk_term(current_ty.clone(), span, TermKind::Var(var.to_string()));
+        let mut current = self.mk_term(current_ty.clone(), span, TermKind::Var(var_sym));
 
         for &idx in path {
             let elem_ty = self.type_at_path(&current_ty, &[idx]);
@@ -1204,7 +1312,8 @@ impl<'a> Transformer<'a> {
         span: Span,
     ) -> Term {
         if cases.is_empty() {
-            let fail_fn = self.mk_term(ty.clone(), span, TermKind::Var("_w_match_fail".to_string()));
+            let fail_sym = self.resolve_or_define("_w_match_fail");
+            let fail_fn = self.mk_term(ty.clone(), span, TermKind::Var(fail_sym));
             return fail_fn;
         }
 
@@ -1214,13 +1323,14 @@ impl<'a> Transformer<'a> {
         match &case.pattern.kind {
             ast::PatternKind::Wildcard | ast::PatternKind::Name(_) => {
                 // Simple pattern - bind scrutinee to pattern name
-                let bound_name = self.simple_pattern_name(&case.pattern).unwrap();
+                let bound_name_str = self.simple_pattern_name(&case.pattern).unwrap();
+                let bound_sym = self.define(&bound_name_str);
                 let body = self.transform_expr(&case.body);
                 self.mk_term(
                     ty,
                     span,
                     TermKind::Let {
-                        name: bound_name,
+                        name: bound_sym,
                         name_ty: scrutinee.ty.clone(),
                         rhs: Box::new(scrutinee.clone()),
                         body: Box::new(body),
@@ -1281,9 +1391,10 @@ impl<'a> Transformer<'a> {
                     let (_, bindings) = self.compute_pattern_bindings(pat, extract, span);
                     if bindings.is_empty() {
                         // Simple pattern - need to create binding manually
-                        let bound_name = self.simple_pattern_name(pat).unwrap();
+                        let bound_name_str = self.simple_pattern_name(pat).unwrap();
+                        let bound_sym = self.define(&bound_name_str);
                         all_bindings.push(PendingBinding {
-                            name: bound_name,
+                            name: bound_sym,
                             ty: field_ty,
                             expr: self.build_app1(
                                 &format!("_w_extract_{}_{}", ctor_name, i),
@@ -1360,7 +1471,8 @@ impl<'a> Transformer<'a> {
     fn build_app1(&mut self, name: &str, arg: Term, result_ty: Type<TypeName>, span: Span) -> Term {
         // Build the function type for the Var
         let func_ty = Type::Constructed(TypeName::Arrow, vec![arg.ty.clone(), result_ty.clone()]);
-        let func_term = self.mk_term(func_ty, span, TermKind::Var(name.to_string()));
+        let name_sym = self.resolve_or_define(name);
+        let func_term = self.mk_term(func_ty, span, TermKind::Var(name_sym));
         self.mk_term(
             result_ty,
             span,
@@ -1382,7 +1494,8 @@ impl<'a> Transformer<'a> {
     ) -> Term {
         let app1_result_ty = Type::Constructed(TypeName::Arrow, vec![arg2.ty.clone(), result_ty.clone()]);
         let func_ty = Type::Constructed(TypeName::Arrow, vec![arg1.ty.clone(), app1_result_ty.clone()]);
-        let func_term = self.mk_term(func_ty, span, TermKind::Var(name.to_string()));
+        let name_sym = self.resolve_or_define(name);
+        let func_term = self.mk_term(func_ty, span, TermKind::Var(name_sym));
         let app1 = self.mk_term(
             app1_result_ty,
             span,
@@ -1417,7 +1530,8 @@ impl<'a> Transformer<'a> {
         let app1_ty = Type::Constructed(TypeName::Arrow, vec![arg2.ty.clone(), app2_ty.clone()]);
         // Type of func: arg1.ty -> app1_ty
         let func_ty = Type::Constructed(TypeName::Arrow, vec![arg1.ty.clone(), app1_ty.clone()]);
-        let func_term = self.mk_term(func_ty, span, TermKind::Var(name.to_string()));
+        let name_sym = self.resolve_or_define(name);
+        let func_term = self.mk_term(func_ty, span, TermKind::Var(name_sym));
         let app1 = self.mk_term(
             app1_ty,
             span,
@@ -1459,7 +1573,8 @@ impl<'a> Transformer<'a> {
         let app2_ty = Type::Constructed(TypeName::Arrow, vec![arg3.ty.clone(), app3_ty.clone()]);
         let app1_ty = Type::Constructed(TypeName::Arrow, vec![arg2.ty.clone(), app2_ty.clone()]);
         let func_ty = Type::Constructed(TypeName::Arrow, vec![arg1.ty.clone(), app1_ty.clone()]);
-        let func_term = self.mk_term(func_ty, span, TermKind::Var(name.to_string()));
+        let name_sym = self.resolve_or_define(name);
+        let func_term = self.mk_term(func_ty, span, TermKind::Var(name_sym));
         let app1 = self.mk_term(
             app1_ty,
             span,
@@ -1549,8 +1664,9 @@ impl<'a> Transformer<'a> {
         result_ty: Type<TypeName>,
         span: Span,
     ) -> Term {
+        let func_sym = self.resolve_or_define(func_name);
         if args.is_empty() {
-            return self.mk_term(result_ty, span, TermKind::Var(func_name.to_string()));
+            return self.mk_term(result_ty, span, TermKind::Var(func_sym));
         }
 
         // Compute intermediate types working backwards from result_ty
@@ -1568,7 +1684,7 @@ impl<'a> Transformer<'a> {
             TypeName::Arrow,
             vec![args[0].ty.clone(), intermediate_types[0].clone()],
         );
-        let func_term = self.mk_term(func_ty, span, TermKind::Var(func_name.to_string()));
+        let func_term = self.mk_term(func_ty, span, TermKind::Var(func_sym));
         let mut result = self.mk_term(
             intermediate_types[0].clone(),
             span,
@@ -1659,6 +1775,10 @@ impl<'a> Transformer<'a> {
 
 /// Transform an AST program to TLC.
 pub fn transform(program: &ast::Program, type_table: &TypeTable) -> Program {
-    let mut transformer = Transformer::new(type_table);
-    transformer.transform_program(program)
+    let mut symbols = SymbolTable::new();
+    let mut top_level_symbols = HashMap::new();
+    let mut transformer = Transformer::new(type_table, &mut symbols, &mut top_level_symbols);
+    let mut result = transformer.transform_program(program);
+    result.symbols = symbols;
+    result
 }

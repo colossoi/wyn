@@ -84,6 +84,31 @@ impl<Id: From<u32>> Default for IdSource<Id> {
     }
 }
 
+// =============================================================================
+// Symbol Table for TLC
+// =============================================================================
+
+/// Unique identifier for a symbol (variable, function, parameter).
+/// After AST → TLC conversion, all variable references use SymbolIds
+/// instead of strings, eliminating name resolution from later passes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SymbolId(pub u32);
+
+impl From<u32> for SymbolId {
+    fn from(v: u32) -> Self {
+        SymbolId(v)
+    }
+}
+
+impl std::fmt::Display for SymbolId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "sym{}", self.0)
+    }
+}
+
+/// Symbol table: maps SymbolId to original name (for errors/debugging).
+pub type SymbolTable = IdArena<SymbolId, String>;
+
 /// Arena that allocates IDs and stores associated items.
 ///
 /// Combines ID generation with storage, ensuring each item gets a unique ID.
@@ -581,12 +606,21 @@ impl AliasChecked {
         schemes: &HashMap<String, types::TypeScheme>,
         module_manager: &module_manager::ModuleManager,
     ) -> TlcTransformed {
+        // Create shared tables for all transformations
+        let mut symbols = SymbolTable::new();
+        let mut top_level_symbols = std::collections::HashMap::new();
+
         // Transform prelude to TLC using the same type_table (consistent type variables)
         let mut prelude_tlc_defs = Vec::new();
 
         // Transform module declarations (f32.pi, rand.init, etc.)
         for (module_name, elaborated) in module_manager.get_elaborated_modules() {
-            let mut transformer = tlc::Transformer::with_namespace(&self.type_table, module_name);
+            let mut transformer = tlc::Transformer::with_namespace(
+                &self.type_table,
+                &mut symbols,
+                &mut top_level_symbols,
+                module_name,
+            );
             for item in &elaborated.items {
                 if let module_manager::ElaboratedItem::Decl(decl) = item {
                     // Transform all def declarations - wrapper functions that call intrinsics
@@ -601,7 +635,8 @@ impl AliasChecked {
 
         // Transform top-level prelude functions (zip3, map2, etc.)
         {
-            let mut transformer = tlc::Transformer::new(&self.type_table);
+            let mut transformer =
+                tlc::Transformer::new(&self.type_table, &mut symbols, &mut top_level_symbols);
             for decl in module_manager.get_prelude_function_declarations() {
                 // Transform all prelude functions - even those that wrap intrinsics
                 if let Some(def) = transformer.transform_decl(decl) {
@@ -610,8 +645,10 @@ impl AliasChecked {
             }
         }
 
-        // Transform user program to TLC
-        let mut tlc_program = tlc::transform(&self.ast, &self.type_table);
+        // Transform user program to TLC using the shared symbol table
+        let mut transformer = tlc::Transformer::new(&self.type_table, &mut symbols, &mut top_level_symbols);
+        let mut tlc_program = transformer.transform_program(&self.ast);
+        tlc_program.symbols = symbols;
 
         // Prepend prelude TLC defs
         let mut merged_defs = prelude_tlc_defs;

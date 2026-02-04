@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use crate::ast::{self, NodeId, Span, TypeName};
 use crate::mir::ssa::{FuncBody, InstKind, Terminator, ValueId};
 use crate::mir::ssa_builder::FuncBuilder;
+use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 
 use super::{Def as TlcDef, DefMeta, LoopKind as TlcLoopKind, Program as TlcProgram, Term, TermKind};
@@ -135,7 +136,8 @@ impl std::error::Error for ConvertError {}
 
 /// Convert a TLC program to SSA.
 pub fn convert_program(program: &TlcProgram) -> Result<SsaProgram, ConvertError> {
-    let top_level: HashMap<String, &TlcDef> = program.defs.iter().map(|d| (d.name.clone(), d)).collect();
+    let top_level: HashMap<SymbolId, &TlcDef> = program.defs.iter().map(|d| (d.name, d)).collect();
+    let symbols = &program.symbols;
 
     let mut functions = Vec::new();
     let mut entry_points = Vec::new();
@@ -143,11 +145,11 @@ pub fn convert_program(program: &TlcProgram) -> Result<SsaProgram, ConvertError>
     for def in &program.defs {
         match &def.meta {
             DefMeta::Function => {
-                let func = convert_function(def, &top_level)?;
+                let func = convert_function(def, &top_level, symbols)?;
                 functions.push(func);
             }
             DefMeta::EntryPoint(entry) => {
-                let ep = convert_entry_point(def, entry, &top_level)?;
+                let ep = convert_entry_point(def, entry, &top_level, symbols)?;
                 entry_points.push(ep);
             }
         }
@@ -164,8 +166,11 @@ pub fn convert_program(program: &TlcProgram) -> Result<SsaProgram, ConvertError>
 /// Convert a function definition to SSA.
 fn convert_function(
     def: &TlcDef,
-    top_level: &HashMap<String, &TlcDef>,
+    top_level: &HashMap<SymbolId, &TlcDef>,
+    symbols: &SymbolTable,
 ) -> Result<SsaFunction, ConvertError> {
+    let def_name = symbols.get(def.name).expect("BUG: symbol not in table").clone();
+
     // Check if this is an extern function
     if let TermKind::Extern(linkage_name) = &def.body.kind {
         let (param_types, ret_type) = extract_function_signature(&def.ty);
@@ -182,7 +187,7 @@ fn convert_function(
         let body = builder.finish().map_err(|e| ConvertError::BuilderError(e.to_string()))?;
 
         return Ok(SsaFunction {
-            name: def.name.clone(),
+            name: def_name,
             body,
             span: def.body.span,
             linkage_name: Some(linkage_name.clone()),
@@ -190,7 +195,7 @@ fn convert_function(
     }
 
     // Extract parameters from nested Lams
-    let (params, inner_body) = extract_params(&def.body);
+    let (params, inner_body) = extract_params(&def.body, symbols);
 
     // Build parameter list for FuncBuilder
     let param_list: Vec<(Type<TypeName>, String)> =
@@ -200,7 +205,7 @@ fn convert_function(
     let builder = FuncBuilder::new(param_list, ret_type.clone());
 
     // Create converter with variable mappings
-    let mut converter = Converter::new(builder, top_level);
+    let mut converter = Converter::new(builder, top_level, symbols);
 
     // Map parameters to their ValueIds
     for (i, (name, _, _)) in params.iter().enumerate() {
@@ -227,7 +232,7 @@ fn convert_function(
     let body = converter.finish()?;
 
     Ok(SsaFunction {
-        name: def.name.clone(),
+        name: def_name,
         body,
         span: def.body.span,
         linkage_name: None,
@@ -238,10 +243,13 @@ fn convert_function(
 fn convert_entry_point(
     def: &TlcDef,
     entry: &ast::EntryDecl,
-    top_level: &HashMap<String, &TlcDef>,
+    top_level: &HashMap<SymbolId, &TlcDef>,
+    symbols: &SymbolTable,
 ) -> Result<SsaEntryPoint, ConvertError> {
+    let def_name = symbols.get(def.name).expect("BUG: symbol not in table").clone();
+
     // Extract parameters from nested Lams
-    let (params, inner_body) = extract_params(&def.body);
+    let (params, inner_body) = extract_params(&def.body, symbols);
 
     let is_compute = matches!(entry.entry_type, ast::Attribute::Compute);
 
@@ -278,7 +286,7 @@ fn convert_entry_point(
     let builder = FuncBuilder::new(param_list, ret_type.clone());
 
     // Create converter
-    let mut converter = Converter::new(builder, top_level);
+    let mut converter = Converter::new(builder, top_level, symbols);
 
     // Map parameters
     for (i, (name, _, _)) in params.iter().enumerate() {
@@ -364,7 +372,7 @@ fn convert_entry_point(
     let body = converter.finish()?;
 
     Ok(SsaEntryPoint {
-        name: def.name.clone(),
+        name: def_name,
         body,
         execution_model,
         inputs,
@@ -374,15 +382,20 @@ fn convert_entry_point(
 }
 
 /// Extract curried parameters from nested Lams.
-fn extract_params(term: &Term) -> (Vec<(String, Type<TypeName>, Span)>, &Term) {
+/// Returns parameter names as Strings (looked up from symbol table) for SSA construction.
+fn extract_params<'a>(
+    term: &'a Term,
+    symbols: &SymbolTable,
+) -> (Vec<(String, Type<TypeName>, Span)>, &'a Term) {
     match &term.kind {
         TermKind::Lam {
             param,
             param_ty,
             body,
         } => {
-            let (mut params, inner) = extract_params(body);
-            params.insert(0, (param.clone(), param_ty.clone(), term.span));
+            let (mut params, inner) = extract_params(body, symbols);
+            let param_name = symbols.get(*param).expect("BUG: symbol not in table").clone();
+            params.insert(0, (param_name, param_ty.clone(), term.span));
             (params, inner)
         }
         _ => (vec![], term),
@@ -497,15 +510,22 @@ struct Converter<'a> {
     /// Mapping from variable names to SSA values.
     locals: HashMap<String, ValueId>,
     /// Top-level definitions for resolving function calls.
-    top_level: &'a HashMap<String, &'a TlcDef>,
+    top_level: &'a HashMap<SymbolId, &'a TlcDef>,
+    /// Symbol table for name lookup.
+    symbols: &'a SymbolTable,
 }
 
 impl<'a> Converter<'a> {
-    fn new(builder: FuncBuilder, top_level: &'a HashMap<String, &'a TlcDef>) -> Self {
+    fn new(
+        builder: FuncBuilder,
+        top_level: &'a HashMap<SymbolId, &'a TlcDef>,
+        symbols: &'a SymbolTable,
+    ) -> Self {
         Converter {
             builder,
             locals: HashMap::new(),
             top_level,
+            symbols,
         }
     }
 
@@ -521,7 +541,8 @@ impl<'a> Converter<'a> {
         let node_id = NodeId(0);
 
         match &term.kind {
-            TermKind::Var(name) => {
+            TermKind::Var(sym) => {
+                let name = self.symbols.get(*sym).expect("BUG: symbol not in table");
                 if let Some(&value) = self.locals.get(name) {
                     Ok(value)
                 } else {
@@ -553,15 +574,16 @@ impl<'a> Converter<'a> {
                 .map_err(|e| ConvertError::BuilderError(e.to_string())),
 
             TermKind::Let {
-                name,
+                name: name_sym,
                 name_ty: _,
                 rhs,
                 body,
             } => {
+                let name = self.symbols.get(*name_sym).expect("BUG: symbol not in table").clone();
                 let rhs_value = self.convert_term(rhs)?;
                 self.locals.insert(name.clone(), rhs_value);
                 let result = self.convert_term(body)?;
-                self.locals.remove(name);
+                self.locals.remove(&name);
                 Ok(result)
             }
 
@@ -580,17 +602,28 @@ impl<'a> Converter<'a> {
                 init_bindings,
                 kind,
                 body,
-            } => self.convert_loop(
-                loop_var,
-                loop_var_ty,
-                init,
-                init_bindings,
-                kind,
-                body,
-                ty,
-                span,
-                node_id,
-            ),
+            } => {
+                // Look up names from symbol table for loop variables
+                let loop_var_name = self.symbols.get(*loop_var).expect("BUG: symbol not in table");
+                let resolved_bindings: Vec<(String, Type<TypeName>, &Term)> = init_bindings
+                    .iter()
+                    .map(|(sym, ty, expr)| {
+                        let name = self.symbols.get(*sym).expect("BUG: symbol not in table").clone();
+                        (name, ty.clone(), expr)
+                    })
+                    .collect();
+                self.convert_loop(
+                    loop_var_name,
+                    loop_var_ty,
+                    init,
+                    &resolved_bindings,
+                    kind,
+                    body,
+                    ty,
+                    span,
+                    node_id,
+                )
+            }
 
             TermKind::Lam { .. } => {
                 panic!(
@@ -727,7 +760,10 @@ impl<'a> Converter<'a> {
                     .map_err(|e| ConvertError::BuilderError(e.to_string()))
             }
 
-            TermKind::Var(name) => self.convert_var_application(name, &args, ty, span, node_id),
+            TermKind::Var(sym) => {
+                let name = self.symbols.get(*sym).expect("BUG: symbol not in table");
+                self.convert_var_application(*sym, name, &args, ty, span, node_id)
+            }
 
             _ => {
                 // This shouldn't happen after defunctionalization
@@ -742,6 +778,7 @@ impl<'a> Converter<'a> {
     /// Convert a variable application (function call or intrinsic).
     fn convert_var_application(
         &mut self,
+        sym: SymbolId,
         name: &str,
         args: &[&Term],
         ty: Type<TypeName>,
@@ -845,7 +882,7 @@ impl<'a> Converter<'a> {
         }
 
         // Check if it's a known function
-        if let Some(def) = self.top_level.get(name) {
+        if let Some(def) = self.top_level.get(&sym) {
             let arity = def.arity;
             if arg_values.len() == arity {
                 return self
@@ -887,7 +924,7 @@ impl<'a> Converter<'a> {
         loop_var: &str,
         loop_var_ty: &Type<TypeName>,
         init: &Term,
-        init_bindings: &[(String, Type<TypeName>, Term)],
+        init_bindings: &[(String, Type<TypeName>, &Term)],
         kind: &TlcLoopKind,
         body: &Term,
         _result_ty: Type<TypeName>,
@@ -905,30 +942,36 @@ impl<'a> Converter<'a> {
                 span,
                 node_id,
             ),
-            TlcLoopKind::ForRange { var, var_ty, bound } => self.convert_for_range_loop(
-                loop_var,
-                loop_var_ty,
-                init,
-                init_bindings,
-                var,
-                var_ty,
-                bound,
-                body,
-                span,
-                node_id,
-            ),
-            TlcLoopKind::For { var, var_ty, iter } => self.convert_for_in_loop(
-                loop_var,
-                loop_var_ty,
-                init,
-                init_bindings,
-                var,
-                var_ty,
-                iter,
-                body,
-                span,
-                node_id,
-            ),
+            TlcLoopKind::ForRange { var, var_ty, bound } => {
+                let index_var = self.symbols.get(*var).expect("BUG: symbol not in table");
+                self.convert_for_range_loop(
+                    loop_var,
+                    loop_var_ty,
+                    init,
+                    init_bindings,
+                    index_var,
+                    var_ty,
+                    bound,
+                    body,
+                    span,
+                    node_id,
+                )
+            }
+            TlcLoopKind::For { var, var_ty, iter } => {
+                let elem_var = self.symbols.get(*var).expect("BUG: symbol not in table");
+                self.convert_for_in_loop(
+                    loop_var,
+                    loop_var_ty,
+                    init,
+                    init_bindings,
+                    elem_var,
+                    var_ty,
+                    iter,
+                    body,
+                    span,
+                    node_id,
+                )
+            }
         }
     }
 
@@ -937,7 +980,7 @@ impl<'a> Converter<'a> {
         loop_var: &str,
         loop_var_ty: &Type<TypeName>,
         init: &Term,
-        init_bindings: &[(String, Type<TypeName>, Term)],
+        init_bindings: &[(String, Type<TypeName>, &Term)],
         cond: &Term,
         body: &Term,
         _span: Span,
@@ -1012,7 +1055,7 @@ impl<'a> Converter<'a> {
         loop_var: &str,
         loop_var_ty: &Type<TypeName>,
         init: &Term,
-        init_bindings: &[(String, Type<TypeName>, Term)],
+        init_bindings: &[(String, Type<TypeName>, &Term)],
         index_var: &str,
         _index_var_ty: &Type<TypeName>,
         bound: &Term,
@@ -1110,7 +1153,7 @@ impl<'a> Converter<'a> {
         loop_var: &str,
         loop_var_ty: &Type<TypeName>,
         init: &Term,
-        init_bindings: &[(String, Type<TypeName>, Term)],
+        init_bindings: &[(String, Type<TypeName>, &Term)],
         elem_var: &str,
         elem_ty: &Type<TypeName>,
         iter: &Term,
@@ -1241,7 +1284,7 @@ impl<'a> Converter<'a> {
 
         // Get function name from op
         let op_name = match &op_term.kind {
-            TermKind::Var(name) => name.clone(),
+            TermKind::Var(sym) => self.symbols.get(*sym).expect("BUG: symbol not in table").clone(),
             _ => {
                 return Err(ConvertError::InvalidIntrinsic(
                     "_w_intrinsic_reduce: operator must be a function reference".to_string(),
@@ -1367,7 +1410,7 @@ impl<'a> Converter<'a> {
 
         // Get function name
         let f_name = match &f_term.kind {
-            TermKind::Var(name) => name.clone(),
+            TermKind::Var(sym) => self.symbols.get(*sym).expect("BUG: symbol not in table").clone(),
             _ => {
                 return Err(ConvertError::InvalidIntrinsic(
                     "_w_intrinsic_map: function must be a function reference".to_string(),
