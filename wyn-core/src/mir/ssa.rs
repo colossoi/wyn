@@ -116,6 +116,28 @@ impl From<u32> for EffectToken {
 // Basic Blocks
 // =============================================================================
 
+/// Structured control flow header information for SPIR-V lowering.
+///
+/// SPIR-V requires explicit merge/continue annotations for loops and selections.
+/// This metadata is attached to header blocks by the builder and consumed during lowering.
+#[derive(Debug, Clone)]
+pub enum ControlHeader {
+    /// This block is a loop header.
+    /// Requires `OpLoopMerge merge continue None` before the conditional branch.
+    Loop {
+        /// The block where the loop exits to (post-loop code).
+        merge: BlockId,
+        /// The block that branches back to the header (typically end of loop body).
+        continue_block: BlockId,
+    },
+    /// This block is a selection header (if-then-else).
+    /// Requires `OpSelectionMerge merge None` before the conditional branch.
+    Selection {
+        /// The block where both branches reconverge.
+        merge: BlockId,
+    },
+}
+
 /// A basic block in the CFG.
 ///
 /// Blocks have parameters (replacing phi nodes), a sequence of instructions,
@@ -131,6 +153,10 @@ pub struct Block {
 
     /// How control leaves this block.
     pub terminator: Option<Terminator>,
+
+    /// Structured control flow header info (for SPIR-V lowering).
+    /// Set by the builder when creating loops/selections.
+    pub control: Option<ControlHeader>,
 }
 
 impl Block {
@@ -140,6 +166,7 @@ impl Block {
             params: Vec::new(),
             insts: Vec::new(),
             terminator: None,
+            control: None,
         }
     }
 
@@ -149,6 +176,7 @@ impl Block {
             params,
             insts: Vec::new(),
             terminator: None,
+            control: None,
         }
     }
 }

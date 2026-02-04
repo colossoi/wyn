@@ -9,7 +9,8 @@ use crate::ast::{NodeId, Span, TypeName};
 use polytype::Type;
 
 use super::ssa::{
-    Block, BlockId, BlockParam, EffectToken, FuncBody, Inst, InstId, InstKind, Terminator, ValueId,
+    Block, BlockId, BlockParam, ControlHeader, EffectToken, FuncBody, Inst, InstId, InstKind, Terminator,
+    ValueId,
 };
 
 /// Error during function building.
@@ -663,6 +664,14 @@ impl FuncBuilder {
         let (exit, exit_params) = self.create_block_with_params(vec![acc_ty]);
         let result = exit_params[0];
 
+        // Mark header as a loop header for SPIR-V structured control flow.
+        // body is the continue block (it branches back to header).
+        // exit is the merge block (where the loop exits to).
+        self.body.blocks[header.index()].control = Some(ControlHeader::Loop {
+            merge: exit,
+            continue_block: body,
+        });
+
         WhileLoopBlocks {
             header,
             acc,
@@ -735,6 +744,12 @@ impl FuncBuilder {
         let (exit, exit_params) = self.create_block_with_params(vec![acc_ty]);
         let result = exit_params[0];
 
+        // Mark header as a loop header for SPIR-V structured control flow.
+        self.body.blocks[header.index()].control = Some(ControlHeader::Loop {
+            merge: exit,
+            continue_block: body,
+        });
+
         ForRangeLoopBlocks {
             header,
             acc,
@@ -743,6 +758,16 @@ impl FuncBuilder {
             exit,
             result,
         }
+    }
+
+    /// Mark the current block as a selection header (for if-then-else).
+    ///
+    /// Call this before emitting a CondBranch terminator for an if-then-else.
+    /// The merge block is where both branches reconverge.
+    pub fn mark_selection_header(&mut self, merge: BlockId) -> Result<(), BuilderError> {
+        let block_id = self.current_block.ok_or(BuilderError::NoCurrentBlock)?;
+        self.body.blocks[block_id.index()].control = Some(ControlHeader::Selection { merge });
+        Ok(())
     }
 }
 

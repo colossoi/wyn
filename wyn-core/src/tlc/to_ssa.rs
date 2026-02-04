@@ -606,6 +606,11 @@ impl<'a> Converter<'a> {
 
         let if_blocks = self.builder.create_if_then_else(result_ty);
 
+        // Mark current block as selection header for SPIR-V structured control flow.
+        self.builder
+            .mark_selection_header(if_blocks.merge_block)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+
         self.builder
             .terminate(Terminator::CondBranch {
                 cond: cond_value,

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use crate::ast::TypeName;
 use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
-use crate::mir::ssa::{BlockId, FuncBody, Inst, InstKind, Terminator, ValueId};
+use crate::mir::ssa::{Block, BlockId, ControlHeader, FuncBody, Inst, InstKind, Terminator, ValueId};
 use crate::tlc::to_ssa::{ExecutionModel, IoDecoration, SsaEntryPoint, SsaFunction, SsaProgram};
 use crate::types;
 use crate::{bail_spirv, err_spirv};
@@ -745,7 +745,7 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
 
             // Lower terminator
             if let Some(ref term) = block.terminator {
-                self.lower_terminator(block_id, term)?;
+                self.lower_terminator(block_id, block, term)?;
             }
         }
 
@@ -892,8 +892,9 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                         self.constructor.builder.access_chain(member_ptr_type, None, var_id, [zero])?;
                     self.constructor.builder.load(value_type, None, member_ptr, None, [])?
                 } else if let Some(&func_id) = self.constructor.functions.get(name) {
-                    // Function reference (including lambdas)
-                    func_id
+                    // Global constant function - call it with no args to get the value.
+                    // This handles `def verts: [3]vec4f32 = [...]` referenced as just `verts`.
+                    self.constructor.builder.function_call(result_ty, None, func_id, [])?
                 } else {
                     bail_spirv!("Unknown global: {}", name)
                 }
@@ -996,7 +997,11 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                 if *index < self.constructor.current_entry_outputs.len() {
                     self.constructor.current_entry_outputs[*index]
                 } else {
-                    bail_spirv!("Output index {} out of bounds (have {} outputs)", index, self.constructor.current_entry_outputs.len())
+                    bail_spirv!(
+                        "Output index {} out of bounds (have {} outputs)",
+                        index,
+                        self.constructor.current_entry_outputs.len()
+                    )
                 }
             }
         };
@@ -1009,7 +1014,7 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
         Ok(())
     }
 
-    fn lower_terminator(&mut self, _block_id: BlockId, term: &Terminator) -> Result<()> {
+    fn lower_terminator(&mut self, _block_id: BlockId, block: &Block, term: &Terminator) -> Result<()> {
         let current_block = self.constructor.current_block.unwrap();
 
         match term {
@@ -1045,9 +1050,31 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                     self.phi_inputs.push((*else_target, param_idx, arg_id, current_block));
                 }
 
-                // For structured control flow, we need merge block
-                // Find the merge point (common successor)
-                // For now, emit without selection merge (works for simple cases)
+                // Emit structured control flow merge instructions if this is a header block
+                if let Some(ref control) = block.control {
+                    match control {
+                        ControlHeader::Loop {
+                            merge,
+                            continue_block,
+                        } => {
+                            let merge_label = self.block_map[merge];
+                            let continue_label = self.block_map[continue_block];
+                            self.constructor.builder.loop_merge(
+                                merge_label,
+                                continue_label,
+                                spirv::LoopControl::NONE,
+                                [],
+                            )?;
+                        }
+                        ControlHeader::Selection { merge } => {
+                            let merge_label = self.block_map[merge];
+                            self.constructor
+                                .builder
+                                .selection_merge(merge_label, spirv::SelectionControl::NONE)?;
+                        }
+                    }
+                }
+
                 self.constructor.builder.branch_conditional(cond_id, then_label, else_label, [])?;
             }
 
@@ -2272,6 +2299,21 @@ fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &SsaEntryPoint) -
     let param_names: Vec<&str> = Vec::new();
     let param_types: Vec<spirv::Word> = Vec::new();
     constructor.begin_function(&entry.name, &param_names, &param_types, void_type)?;
+
+    // Load input values from their pointer variables.
+    // Entry point inputs are SPIR-V Input variables (pointers), but the SSA body
+    // expects loaded values. Load them now and update env with the loaded values.
+    for input in &entry.inputs {
+        // Skip storage buffers - they use different access patterns
+        if input.storage_binding.is_some() {
+            continue;
+        }
+        let input_type = constructor.polytype_to_spirv(&input.ty);
+        if let Some(&var_id) = constructor.env.get(&input.name) {
+            let loaded = constructor.builder.load(input_type, None, var_id, None, [])?;
+            constructor.env.insert(input.name.clone(), loaded);
+        }
+    }
 
     // Lower the body (stores to outputs are now explicit in SSA)
     // ReturnUnit blocks now emit ret() directly, so no extra return needed here.
