@@ -35,22 +35,25 @@ cargo run --bin wyn -- check test.wyn
 ## Architecture
 
 ### Compilation Pipeline
-1. **Lexer** (`compiler/src/lexer.rs`): Tokenizes input using nom combinators
-2. **Parser** (`compiler/src/parser.rs`): Builds AST from tokens
-3. **Type Checker** (`compiler/src/type_checker.rs`): Validates types and maintains symbol table
-4. **Code Generator** (`compiler/src/codegen.rs`): Generates SPIR-V using rspirv
+1. **Lexer** (`wyn-core/src/lexer.rs`): Tokenizes input using nom combinators
+2. **Parser** (`wyn-core/src/parser.rs`): Builds AST from tokens
+3. **Type Checker** (`wyn-core/src/types/checker.rs`): Hindley-Milner type inference
+4. **TLC** (`wyn-core/src/tlc/`): Typed Lambda Calculus IR, defunctionalization, monomorphization
+5. **SSA** (`wyn-core/src/mir/ssa.rs`): SSA form with basic blocks and block parameters
+6. **Code Generator** (`wyn-core/src/spirv/ssa_lowering.rs`): Generates SPIR-V from SSA
 
 ### Key Design Decisions
 - **Error Handling**: Uses thiserror for structured error types
 - **Parsing**: nom for combinator-based parsing (primarily for lexer)
-- **Type System**: Simple type checking without inference (polytype removed for simplicity)
+- **Type System**: Hindley-Milner inference with polytype crate
 - **SPIR-V Generation**: rspirv provides safe SPIR-V building APIs
 
 ### Adding New Features
 - Language features start in `lexer.rs` (tokens) and `ast.rs` (AST nodes)
 - Parser rules go in `parser.rs`
-- Type checking logic in `type_checker.rs`
-- SPIR-V generation in `codegen.rs`
+- Type checking logic in `types/checker.rs`
+- TLC transformation in `tlc/mod.rs`
+- SPIR-V generation in `spirv/ssa_lowering.rs`
 - All new syntax elements should have unit tests
 
 ### Visualizing SPIR-V Output

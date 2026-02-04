@@ -6,7 +6,7 @@ Wyn is a minimal functional programming language designed for GPU shader program
 
 ### Design Goals
 
-- **Shader-focused**: Designed specifically for vertex and fragment shader programming
+- **Shader-focused**: Designed specifically for vertex, fragment, and compute shader programming
 - **Array-oriented**: First-class support for multi-dimensional arrays and array operations
 - **Type-safe**: Static type checking with explicit type annotations
 - **SPIR-V target**: Direct compilation to SPIR-V for maximum compatibility
@@ -307,16 +307,18 @@ To simplify the handling of in-place updates (see In-place Updates), the value r
 
 #### Shader Entry Points
 
-Shader entry points are defined using the `entry` keyword with a `#[vertex]`, `#[fragment]`, or `#[compute(...)]` attribute:
+Shader entry points are defined using the `entry` keyword with a `#[vertex]`, `#[fragment]`, or `#[compute]` attribute:
 
 ```wyn
 #[vertex]
-entry vertex_main() [4]f32 = ...
+entry vertex_main() #[builtin(position)] vec4f32 =
+    @[0.0, 0.0, 0.0, 1.0]
 
 #[fragment]
-entry fragment_main() [4]f32 = ...
+entry fragment_main() #[location(0)] vec4f32 =
+    @[1.0, 0.0, 0.0, 1.0]
 
-#[compute(64, 1, 1)]
+#[compute]
 entry double(arr: []f32) []f32 = map(|x| x * 2.0, arr)
 ```
 
@@ -1261,12 +1263,13 @@ open import "file"
 ### Grammar
 
 ```ebnf
-attr ::= "vertex" | "fragment"
+attr ::= "vertex" | "fragment" | "compute"
          | "builtin" "(" builtin_name ")"
          | "location" "(" decimal ")"
 
-builtin_name ::= "position" | "vertex_index" | "instance_index" 
-               | "front_facing" | "frag_depth"
+builtin_name ::= "position" | "vertex_index" | "instance_index"
+               | "front_facing" | "frag_depth" | "frag_coord"
+               | "global_invocation_id" | "local_invocation_id"
 ```
 
 Wyn supports an attribute system for shader interface specification. Attributes are written as `#[attr]` and can be applied to:
@@ -1284,13 +1287,19 @@ Wyn uses attributes to define the interface between vertex and fragment shaders,
 **`#[vertex]`** - Marks an `entry` declaration as a vertex shader entry point
 ```wyn
 #[vertex]
-entry vs_main() #[builtin(position)] [4]f32 = result
+entry vs_main() #[builtin(position)] vec4f32 = result
 ```
 
 **`#[fragment]`** - Marks an `entry` declaration as a fragment shader entry point
 ```wyn
 #[fragment]
-entry fs_main() #[location(0)] [4]f32 = result
+entry fs_main() #[location(0)] vec4f32 = result
+```
+
+**`#[compute]`** - Marks an `entry` declaration as a compute shader entry point
+```wyn
+#[compute]
+entry compute_main(data: []f32) []f32 = map(|x| x * 2.0, data)
 ```
 
 #### Built-in Variables
@@ -1303,8 +1312,13 @@ entry fs_main() #[location(0)] [4]f32 = result
 - `#[builtin(position)]` - Output position (SPIR-V: `Position`)
 
 **Fragment Shader Built-ins:**
+- `#[builtin(frag_coord)]` - Fragment coordinates (SPIR-V: `FragCoord`)
 - `#[builtin(front_facing)]` - Front-facing status (SPIR-V: `FrontFacing`)
 - `#[builtin(frag_depth)]` - Fragment depth output (SPIR-V: `FragDepth`)
+
+**Compute Shader Built-ins:**
+- `#[builtin(global_invocation_id)]` - Global thread ID (SPIR-V: `GlobalInvocationId`)
+- `#[builtin(local_invocation_id)]` - Local thread ID within workgroup (SPIR-V: `LocalInvocationId`)
 
 #### Location-based Interface
 
@@ -1314,13 +1328,13 @@ entry fs_main() #[location(0)] [4]f32 = result
 #[vertex]
 entry vs(
     #[builtin(vertex_index)] vid: i32,
-    #[location(0)] pos: [3]f32
-) #[location(1)] [3]f32 = result
+    #[location(0)] pos: vec3f32
+) #[location(1)] vec3f32 = result
 
 #[fragment]
 entry fs(
-    #[location(1)] color: [3]f32
-) #[location(0)] [4]f32 = result
+    #[location(1)] color: vec3f32
+) #[location(0)] vec4f32 = result
 ```
 
 ### Attribute Examples
@@ -1331,9 +1345,9 @@ entry fs(
 entry vertex_main(
     #[builtin(vertex_index)] vertex_id: i32,
     #[builtin(instance_index)] instance_id: i32,
-    #[location(0)] position: [3]f32,
-    #[location(1)] normal: [3]f32
-) #[builtin(position)] [4]f32 =
+    #[location(0)] position: vec3f32,
+    #[location(1)] normal: vec3f32
+) #[builtin(position)] vec4f32 =
     transform_position(position, vertex_id)
 ```
 
@@ -1341,11 +1355,21 @@ entry vertex_main(
 ```wyn
 #[fragment]
 entry fragment_main(
-    #[location(0)] world_pos: [3]f32,
-    #[location(1)] normal: [3]f32,
+    #[location(0)] world_pos: vec3f32,
+    #[location(1)] normal: vec3f32,
     #[builtin(front_facing)] is_front: bool
-) #[location(0)] [4]f32 =
+) #[location(0)] vec4f32 =
     compute_color(world_pos, normal, is_front)
+```
+
+#### Complete Compute Shader Interface
+```wyn
+#[compute]
+entry process_data(
+    input: []f32,
+    factor: f32
+) []f32 =
+    map(|x| x * factor, input)
 ```
 
 ## SPIR-V Compatibility Types
@@ -1371,30 +1395,36 @@ Vector types are distinct from array types and have different semantics:
 
 Example usage:
 ```wyn
--- Vector types for graphics operations
-let position: vec3f32 = vec3 1.0f32 2.0f32 3.0f32
-let color: vec4f32 = vec4 1.0f32 0.0f32 0.0f32 1.0f32
+-- Vector types for graphics operations (using @[...] literal syntax)
+let position: vec3f32 = @[1.0, 2.0, 3.0]
+let color: vec4f32 = @[1.0, 0.0, 0.0, 1.0]
+
+-- Alternative: explicit constructor syntax
+let pos2: vec3f32 = vec3 1.0f32 2.0f32 3.0f32
 
 -- Built-in variables often require vector types
 #[vertex]
 entry vertex_main() #[builtin(position)] vec4f32 =
-  vec4 0.0f32 0.0f32 0.0f32 1.0f32
+  @[0.0, 0.0, 0.0, 1.0]
 ```
 
 ### Vector Constructors
 
-Vectors are constructed using the `vecN` constructor functions (where N is 2, 3, or 4).
-The element type is inferred from the arguments or the context:
+Vectors can be constructed in two ways:
+
+**1. Literal syntax (`@[...]`)** - Preferred for most cases:
 ```wyn
--- Scalar expansion
-let v1: vec3f32 = vec3 1.0f32  -- Creates vec3(1.0, 1.0, 1.0)
-
--- Component-wise construction
-let v2: vec4f32 = vec4 1.0f32 2.0f32 3.0f32 4.0f32
-
--- Mixed construction (swizzling)
-let v3: vec4f32 = vec4 v2.x v2.y v2.z 1.0f32
+let v1: vec3f32 = @[1.0, 2.0, 3.0]
+let v2: vec4f32 = @[1.0, 0.0, 0.0, 1.0]
 ```
+
+**2. Explicit constructor syntax (`vecN`)** - Useful when type suffix is needed:
+```wyn
+let v1: vec3f32 = vec3 1.0f32 2.0f32 3.0f32
+let v2: vec4f32 = vec4 1.0f32 2.0f32 3.0f32 4.0f32
+```
+
+The element type is inferred from the arguments or the context.
 
 ### Implementation Details
 
