@@ -102,57 +102,42 @@ fn detect_hofs(defs: &[Def]) -> HashMap<SymbolId, HofInfo> {
     hof_info
 }
 
-/// Get HOF info for intrinsic SOAC functions.
-/// These are higher-order but don't have definitions to specialize.
-fn intrinsic_hof_info() -> HashMap<String, HofInfo> {
-    let mut info = HashMap::new();
-
+/// Intrinsic SOAC names that are higher-order functions.
+/// Each entry is (name, func_param_indices).
+const INTRINSIC_HOFS: &[(&str, &[usize])] = &[
     // map : (a -> b) -> Array -> Array  -- func at index 0
-    info.insert(
-        "_w_intrinsic_map".to_string(),
-        HofInfo {
-            func_param_indices: vec![0],
-            def: None,
-        },
-    );
-
+    ("_w_intrinsic_map", &[0]),
     // reduce : (a -> a -> a) -> a -> Array -> a  -- func at index 0
-    info.insert(
-        "_w_intrinsic_reduce".to_string(),
-        HofInfo {
-            func_param_indices: vec![0],
-            def: None,
-        },
-    );
-
+    ("_w_intrinsic_reduce", &[0]),
     // filter : (a -> bool) -> Array -> Array  -- func at index 0
-    info.insert(
-        "_w_intrinsic_filter".to_string(),
-        HofInfo {
-            func_param_indices: vec![0],
-            def: None,
-        },
-    );
-
+    ("_w_intrinsic_filter", &[0]),
     // scan : (a -> a -> a) -> a -> Array -> Array  -- func at index 0
-    info.insert(
-        "_w_intrinsic_scan".to_string(),
-        HofInfo {
-            func_param_indices: vec![0],
-            def: None,
-        },
-    );
-
+    ("_w_intrinsic_scan", &[0]),
     // hist_1d : Array -> (a -> a -> a) -> a -> Array -> Array -> Array  -- func at index 1
-    info.insert(
-        "_w_intrinsic_hist_1d".to_string(),
-        HofInfo {
-            func_param_indices: vec![1],
-            def: None,
-        },
-    );
+    ("_w_intrinsic_hist_1d", &[1]),
+];
 
-    info
+/// Register intrinsic HOFs into a HOF info map.
+/// Uses existing SymbolIds from the symbol table (intrinsics not referenced in the program are skipped).
+fn register_intrinsic_hofs(symbols: &SymbolTable, hof_info: &mut HashMap<SymbolId, HofInfo>) {
+    // Build reverse lookup: name -> SymbolId
+    let name_to_sym: HashMap<&str, SymbolId> = symbols
+        .iter()
+        .map(|(&id, name)| (name.as_str(), id))
+        .collect();
+
+    for &(name, indices) in INTRINSIC_HOFS {
+        if let Some(&sym) = name_to_sym.get(name) {
+            hof_info.insert(
+                sym,
+                HofInfo {
+                    func_param_indices: indices.to_vec(),
+                    def: None,
+                },
+            );
+        }
+        // If the intrinsic isn't in the symbol table, it's not used in this program - skip it
+    }
 }
 
 // =============================================================================
@@ -459,10 +444,8 @@ pub struct Defunctionalizer<'a> {
     term_ids: TermIdSource,
     /// Environment: variable symbol -> StaticVal
     env: HashMap<SymbolId, StaticVal>,
-    /// HOF info from detection pass (keyed by SymbolId)
+    /// HOF info for both user-defined and intrinsic higher-order functions
     hof_info: HashMap<SymbolId, HofInfo>,
-    /// Intrinsic HOF info (keyed by string name since intrinsics may not have SymbolIds yet)
-    intrinsic_hof_info: HashMap<String, HofInfo>,
     /// Cache: (hof_name, lambda_name, arg_types) -> specialized_name
     /// Uses SymbolId for names, strings for type keys
     specialization_cache: HashMap<(SymbolId, SymbolId, Vec<String>), SymbolId>,
@@ -476,7 +459,9 @@ impl<'a> Defunctionalizer<'a> {
     /// Defunctionalize a program.
     pub fn defunctionalize(program: Program, known_defs: &'a HashSet<String>) -> Program {
         // Detect HOFs before defunctionalization (user-defined)
-        let hof_info = detect_hofs(&program.defs);
+        let mut hof_info = detect_hofs(&program.defs);
+        // Register intrinsic HOFs using existing SymbolIds from the symbol table
+        register_intrinsic_hofs(&program.symbols, &mut hof_info);
         let top_level: HashSet<SymbolId> = program.defs.iter().map(|d| d.name).collect();
 
         let mut defunc = Self {
@@ -488,7 +473,6 @@ impl<'a> Defunctionalizer<'a> {
             term_ids: TermIdSource::new(),
             env: HashMap::new(),
             hof_info,
-            intrinsic_hof_info: intrinsic_hof_info(),
             specialization_cache: HashMap::new(),
             specialization_counter: 0,
             lifted_lambda_captures: HashMap::new(),
@@ -869,37 +853,30 @@ impl<'a> Defunctionalizer<'a> {
                 // We specialize for ALL lambda arguments (even non-capturing ones) because
                 // SPIRV doesn't support passing functions as values - they must be called directly
 
-                // First check user-defined HOFs (keyed by SymbolId)
+                // Check HOF info (both user-defined and intrinsic)
                 if let Some(hof_info) = self.hof_info.get(&sym).cloned() {
                     for &func_param_idx in &hof_info.func_param_indices {
                         if func_param_idx < arg_results.len() {
                             if let StaticVal::Lambda { .. } = &arg_results[func_param_idx].sv {
-                                return self.handle_hof_call(
-                                    sym,
-                                    &hof_info,
-                                    func_param_idx,
-                                    &arg_results,
-                                    ty,
-                                    span,
-                                );
-                            }
-                        }
-                    }
-                }
-
-                // Then check intrinsic HOFs (keyed by string name)
-                let name_str = self.symbols.get(sym).expect("BUG: symbol not in table");
-                if let Some(hof_info) = self.intrinsic_hof_info.get(name_str).cloned() {
-                    for &func_param_idx in &hof_info.func_param_indices {
-                        if func_param_idx < arg_results.len() {
-                            if let StaticVal::Lambda { .. } = &arg_results[func_param_idx].sv {
-                                return self.handle_intrinsic_hof_call(
-                                    sym,
-                                    func_param_idx,
-                                    &arg_results,
-                                    ty,
-                                    span,
-                                );
+                                // User-defined HOFs have a def, intrinsics don't
+                                if hof_info.def.is_some() {
+                                    return self.handle_hof_call(
+                                        sym,
+                                        &hof_info,
+                                        func_param_idx,
+                                        &arg_results,
+                                        ty,
+                                        span,
+                                    );
+                                } else {
+                                    return self.handle_intrinsic_hof_call(
+                                        sym,
+                                        func_param_idx,
+                                        &arg_results,
+                                        ty,
+                                        span,
+                                    );
+                                }
                             }
                         }
                     }
