@@ -139,7 +139,6 @@ def main(arr: [4]i32) i32 =
 }
 
 #[test]
-#[ignore = "Conservative: doesn't track branch-specific state yet"]
 fn test_if_branches_independent() {
     // Consume in one branch shouldn't affect use in other branch
     // (they're mutually exclusive execution paths)

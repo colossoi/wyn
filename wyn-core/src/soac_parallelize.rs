@@ -258,7 +258,10 @@ fn create_single_thread_fallback(
         let new_rhs =
             copy_expr_tree_with_storage(&mut new_body, body, stmt.rhs, &local_map, &storage_locals);
         let new_local = *local_map.get(&stmt.local).unwrap_or(&stmt.local);
-        then_stmts.push(crate::mir::Stmt { local: new_local, rhs: new_rhs });
+        then_stmts.push(crate::mir::Stmt {
+            local: new_local,
+            rhs: new_rhs,
+        });
     }
 
     // 5. Copy body root expression with storage rewrites

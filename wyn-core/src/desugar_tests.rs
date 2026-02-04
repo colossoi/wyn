@@ -102,7 +102,6 @@ entry vertex_main() #[builtin(position)] vec4f32 =
 // =============================================================================
 
 #[test]
-#[ignore] // TODO: ArrayRange not yet handled in SSA lowering
 fn test_simple_range() {
     let source = r#"
 #[vertex]
@@ -117,7 +116,6 @@ entry vertex_main() #[builtin(position)] vec4f32 =
 }
 
 #[test]
-#[ignore] // TODO: ArrayRange not yet handled in SSA lowering
 fn test_range_with_start() {
     let source = r#"
 #[vertex]
@@ -132,7 +130,6 @@ entry vertex_main() #[builtin(position)] vec4f32 =
 }
 
 #[test]
-#[ignore] // TODO: ArrayRange not yet handled in SSA lowering
 fn test_inclusive_range() {
     let source = r#"
 #[vertex]
@@ -245,7 +242,6 @@ entry vertex_main() #[builtin(position)] vec4f32 =
 }
 
 #[test]
-#[ignore] // TODO: ArrayRange not yet handled in SSA lowering
 fn test_range_combined_with_map() {
     let source = r#"
 #[vertex]
@@ -298,7 +294,6 @@ def test: [4]i32 = map(|x| x * 2, 0..<4)
 }
 
 #[test]
-#[ignore] // TODO: ArrayRange not yet handled in SSA lowering
 fn test_map_range_with_entry_point() {
     // Test map over range inside entry point
     let source = r#"
@@ -328,7 +323,6 @@ def test: i32 =
 }
 
 #[test]
-#[ignore] // TODO: ArrayRange not yet handled in SSA lowering
 fn test_map_range_indirect_entry_point() {
     // Test map over range used in entry point (using result)
     // TODO: Non-trivial constant expressions like `map(...)` require inlining at use sites
@@ -346,7 +340,6 @@ entry vertex_main() #[builtin(position)] vec4f32 =
 }
 
 #[test]
-#[ignore] // TODO: ArrayRange not yet handled in SSA lowering
 fn test_map_with_named_function() {
     let source = r#"
 def double(x: i32) i32 = x * 2

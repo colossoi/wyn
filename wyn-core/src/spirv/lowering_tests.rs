@@ -266,7 +266,6 @@ def sum_u32(arr: [4]u32) u32 =
 }
 
 #[test]
-#[ignore] // TODO: _w_intrinsic_reduce not yet handled in SSA lowering
 fn test_reduce_with_tuple_destructuring() {
     // Test reduce with tuple pattern destructuring in the combiner.
     // This pattern from raytrace.wyn's findClosestHit was causing:

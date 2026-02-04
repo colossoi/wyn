@@ -313,6 +313,14 @@ impl<'a> Converter<'a> {
                             .push_project(base, index, ty, span, node_id)
                             .map_err(|e| ConvertError::BuilderError(e.to_string()))?
                     }
+                    "_w_intrinsic_reduce" => {
+                        // Expand reduce to a loop
+                        self.convert_reduce(&args, ty, span, node_id)?
+                    }
+                    "_w_intrinsic_map" => {
+                        // Expand map to a loop
+                        self.convert_map(&args, ty, span, node_id)?
+                    }
                     _ => {
                         // Generic intrinsic
                         let arg_values =
@@ -883,6 +891,291 @@ impl<'a> Converter<'a> {
 
         // Convert and return the result expression
         self.convert_expr(block.result)
+    }
+
+    /// Expand _w_intrinsic_reduce to an explicit loop.
+    /// reduce(op, init, arr) -> fold left: acc = init; for i < len(arr): acc = op(acc, arr[i])
+    fn convert_reduce(
+        &mut self,
+        args: &[ExprId],
+        result_ty: Type<TypeName>,
+        span: Span,
+        node_id: NodeId,
+    ) -> Result<ValueId, ConvertError> {
+        if args.len() < 3 {
+            return Err(ConvertError::BuilderError(
+                "_w_intrinsic_reduce requires 3 arguments (op, init, arr)".to_string(),
+            ));
+        }
+
+        let op_expr = args[0];
+        let init_expr = args[1];
+        let arr_expr = args[2];
+
+        // Get the function name from the op expression
+        let op_name = match self.old_body.get_expr(op_expr) {
+            Expr::Global(name) => name.clone(),
+            _ => {
+                return Err(ConvertError::BuilderError(
+                    "_w_intrinsic_reduce: operator must be a function reference".to_string(),
+                ));
+            }
+        };
+
+        let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+        let bool_ty = Type::Constructed(TypeName::Str("bool"), vec![]);
+        let acc_ty = result_ty.clone();
+
+        // Get element type from array type
+        let arr_ty = self.old_body.get_type(arr_expr);
+        let elem_ty = match arr_ty {
+            Type::Constructed(TypeName::Array, type_args) if !type_args.is_empty() => type_args[0].clone(),
+            _ => acc_ty.clone(), // Fallback
+        };
+
+        // Convert array and init
+        let arr_value = self.convert_expr(arr_expr)?;
+        let init_value = self.convert_expr(init_expr)?;
+
+        // Get array length
+        let len = self
+            .builder
+            .push_intrinsic("_w_length", vec![arr_value], i32_ty.clone(), span, node_id)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+
+        // Create loop blocks
+        let loop_blocks = self.builder.create_for_range_loop(acc_ty.clone());
+
+        // Branch to header with (init, 0)
+        let zero = self
+            .builder
+            .push_int("0", i32_ty.clone(), span, node_id)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+        self.builder
+            .terminate(Terminator::Branch {
+                target: loop_blocks.header,
+                args: vec![init_value, zero],
+            })
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+
+        // Header: check i < len
+        self.builder
+            .switch_to_block(loop_blocks.header)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+
+        let cond = self
+            .builder
+            .push_binop("<", loop_blocks.index, len, bool_ty, span, node_id)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+        self.builder
+            .terminate(Terminator::CondBranch {
+                cond,
+                then_target: loop_blocks.body,
+                then_args: vec![],
+                else_target: loop_blocks.exit,
+                else_args: vec![loop_blocks.acc],
+            })
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+
+        // Body: new_acc = op(acc, arr[i])
+        self.builder
+            .switch_to_block(loop_blocks.body)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+
+        let elem = self
+            .builder
+            .push_index(arr_value, loop_blocks.index, elem_ty, span, node_id)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+
+        let new_acc = self
+            .builder
+            .push_call(&op_name, vec![loop_blocks.acc, elem], acc_ty, span, node_id)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+
+        // Increment i and branch back
+        let one = self
+            .builder
+            .push_int("1", i32_ty, span, node_id)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+        let next_i = self
+            .builder
+            .push_binop(
+                "+",
+                loop_blocks.index,
+                one,
+                Type::Constructed(TypeName::Int(32), vec![]),
+                span,
+                node_id,
+            )
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+        self.builder
+            .terminate(Terminator::Branch {
+                target: loop_blocks.header,
+                args: vec![new_acc, next_i],
+            })
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+
+        // Exit
+        self.builder
+            .switch_to_block(loop_blocks.exit)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+
+        Ok(loop_blocks.result)
+    }
+
+    /// Expand _w_intrinsic_map to an explicit loop.
+    /// map(f, arr) -> result where for i < len(arr): result[i] = f(arr[i])
+    fn convert_map(
+        &mut self,
+        args: &[ExprId],
+        result_ty: Type<TypeName>,
+        span: Span,
+        node_id: NodeId,
+    ) -> Result<ValueId, ConvertError> {
+        if args.len() < 2 {
+            return Err(ConvertError::BuilderError(
+                "_w_intrinsic_map requires 2 arguments (f, arr)".to_string(),
+            ));
+        }
+
+        let f_expr = args[0];
+        let arr_expr = args[1];
+
+        // Get the function name from f expression
+        let f_name = match self.old_body.get_expr(f_expr) {
+            Expr::Global(name) => name.clone(),
+            _ => {
+                return Err(ConvertError::BuilderError(
+                    "_w_intrinsic_map: function must be a function reference".to_string(),
+                ));
+            }
+        };
+
+        let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+        let bool_ty = Type::Constructed(TypeName::Str("bool"), vec![]);
+
+        // Get element types from array types
+        let arr_ty = self.old_body.get_type(arr_expr);
+        let input_elem_ty = match arr_ty {
+            Type::Constructed(TypeName::Array, type_args) if !type_args.is_empty() => type_args[0].clone(),
+            _ => {
+                return Err(ConvertError::BuilderError(
+                    "_w_intrinsic_map: second argument must be an array".to_string(),
+                ));
+            }
+        };
+        let output_elem_ty = match &result_ty {
+            Type::Constructed(TypeName::Array, type_args) if !type_args.is_empty() => type_args[0].clone(),
+            _ => input_elem_ty.clone(), // Fallback
+        };
+
+        // Convert array
+        let arr_value = self.convert_expr(arr_expr)?;
+
+        // Get array length
+        let len = self
+            .builder
+            .push_intrinsic("_w_length", vec![arr_value], i32_ty.clone(), span, node_id)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+
+        // For map, we need to build up the result array element by element.
+        // Use an accumulator that is the result array being built.
+        // However, SPIR-V arrays are immutable - we need to use _w_array_with.
+        // Start with an uninitialized array and update each element.
+        let init_array = self
+            .builder
+            .push_call("_w_intrinsic_uninit", vec![], result_ty.clone(), span, node_id)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+
+        // Create loop blocks (acc is the result array)
+        let loop_blocks = self.builder.create_for_range_loop(result_ty.clone());
+
+        // Branch to header with (init_array, 0)
+        let zero = self
+            .builder
+            .push_int("0", i32_ty.clone(), span, node_id)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+        self.builder
+            .terminate(Terminator::Branch {
+                target: loop_blocks.header,
+                args: vec![init_array, zero],
+            })
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+
+        // Header: check i < len
+        self.builder
+            .switch_to_block(loop_blocks.header)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+
+        let cond = self
+            .builder
+            .push_binop("<", loop_blocks.index, len, bool_ty, span, node_id)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+        self.builder
+            .terminate(Terminator::CondBranch {
+                cond,
+                then_target: loop_blocks.body,
+                then_args: vec![],
+                else_target: loop_blocks.exit,
+                else_args: vec![loop_blocks.acc],
+            })
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+
+        // Body: elem = f(arr[i]); new_arr = arr_with(acc, i, elem)
+        self.builder
+            .switch_to_block(loop_blocks.body)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+
+        let input_elem = self
+            .builder
+            .push_index(arr_value, loop_blocks.index, input_elem_ty, span, node_id)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+
+        let output_elem = self
+            .builder
+            .push_call(&f_name, vec![input_elem], output_elem_ty, span, node_id)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+
+        let new_arr = self
+            .builder
+            .push_call(
+                "_w_intrinsic_array_with",
+                vec![loop_blocks.acc, loop_blocks.index, output_elem],
+                result_ty,
+                span,
+                node_id,
+            )
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+
+        // Increment i and branch back
+        let one = self
+            .builder
+            .push_int("1", i32_ty, span, node_id)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+        let next_i = self
+            .builder
+            .push_binop(
+                "+",
+                loop_blocks.index,
+                one,
+                Type::Constructed(TypeName::Int(32), vec![]),
+                span,
+                node_id,
+            )
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+        self.builder
+            .terminate(Terminator::Branch {
+                target: loop_blocks.header,
+                args: vec![new_arr, next_i],
+            })
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+
+        // Exit
+        self.builder
+            .switch_to_block(loop_blocks.exit)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+
+        Ok(loop_blocks.result)
     }
 }
 

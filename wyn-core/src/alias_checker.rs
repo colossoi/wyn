@@ -560,8 +560,33 @@ impl<'a> Visitor for AliasChecker<'a> {
 
     fn visit_expr_if(&mut self, id: NodeId, if_expr: &IfExpr) -> ControlFlow<Self::Break> {
         self.visit_expression(&if_expr.condition)?;
+
+        // Save store state before branches - each branch sees the pre-branch state
+        let pre_branch_stores = self.stores.clone();
+
+        // Visit then branch
         self.visit_expression(&if_expr.then_branch)?;
+        let then_stores = self.stores.clone();
+
+        // Restore pre-branch state for else branch
+        self.stores = pre_branch_stores;
+
+        // Visit else branch
         self.visit_expression(&if_expr.else_branch)?;
+        let else_stores = self.stores.clone();
+
+        // Merge: a store is consumed after the if if it was consumed in EITHER branch
+        // (conservative for code after the if-expression)
+        for (store_id, state) in then_stores {
+            if matches!(state, StoreState::Consumed { .. }) {
+                self.stores.insert(store_id, state);
+            }
+        }
+        for (store_id, state) in else_stores {
+            if matches!(state, StoreState::Consumed { .. }) {
+                self.stores.insert(store_id, state);
+            }
+        }
 
         let then_info = self.get_result(if_expr.then_branch.h.id);
         let else_info = self.get_result(if_expr.else_branch.h.id);
