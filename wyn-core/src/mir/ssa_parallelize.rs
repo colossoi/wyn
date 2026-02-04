@@ -447,6 +447,9 @@ fn create_single_thread_fallback(entry: &SsaEntryPoint, _local_size: (u32, u32, 
     let else_block = builder.create_block();
     let merge_block = builder.create_block();
 
+    // Mark this block as a selection header for SPIR-V structured control flow
+    builder.mark_selection_header(merge_block).ok()?;
+
     builder
         .terminate(Terminator::CondBranch {
             cond: is_thread_zero,
