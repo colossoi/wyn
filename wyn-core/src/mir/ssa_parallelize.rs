@@ -37,24 +37,41 @@ pub fn parallelize_soacs(mut program: SsaProgram) -> SsaProgram {
     for entry in &mut program.entry_points {
         if let ExecutionModel::Compute { local_size } = entry.execution_model {
             if let Some(entry_analysis) = analysis.by_entry.get(&entry.name) {
+                // Collect output storage buffer info before transformation
+                // We need to preserve both the binding AND the original type for storage buffer creation
+                let storage_outputs: Vec<_> =
+                    entry.outputs.iter().filter(|o| o.storage_binding.is_some()).cloned().collect();
+
                 if let Some(ref par_map) = entry_analysis.parallelizable_map {
                     // Try to parallelize
                     if let Some(new_body) = parallelize_entry(entry, par_map, local_size) {
                         entry.body = new_body;
-                        // Update outputs to unit (we write to storage directly)
-                        entry.outputs = vec![EntryOutput {
-                            ty: Type::Constructed(TypeName::Unit, vec![]),
-                            decoration: None,
-                        }];
+                        // Keep original storage buffer outputs (they still need to be created)
+                        // plus a unit output marker for the actual return value
+                        if storage_outputs.is_empty() {
+                            entry.outputs = vec![EntryOutput {
+                                ty: Type::Constructed(TypeName::Unit, vec![]),
+                                decoration: None,
+                                storage_binding: None,
+                            }];
+                        } else {
+                            // Keep the storage outputs - they need the original type for buffer creation
+                            entry.outputs = storage_outputs.clone();
+                        }
                     }
                 } else {
                     // No parallelizable map - create single-thread fallback
                     if let Some(new_body) = create_single_thread_fallback(entry, local_size) {
                         entry.body = new_body;
-                        entry.outputs = vec![EntryOutput {
-                            ty: Type::Constructed(TypeName::Unit, vec![]),
-                            decoration: None,
-                        }];
+                        if storage_outputs.is_empty() {
+                            entry.outputs = vec![EntryOutput {
+                                ty: Type::Constructed(TypeName::Unit, vec![]),
+                                decoration: None,
+                                storage_binding: None,
+                            }];
+                        } else {
+                            entry.outputs = storage_outputs.clone();
+                        }
                     }
                 }
             }
@@ -89,7 +106,8 @@ fn parallelize_entry(
         end_col: 1,
     };
     let dummy_node_id = NodeId(0);
-    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+    // Use u32 for indices and lengths (all non-negative values)
+    let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     let bool_ty = Type::Constructed(TypeName::Str("bool"), vec![]);
     let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
 
@@ -112,17 +130,17 @@ fn parallelize_entry(
     // Build preamble: storage views, thread_id, chunking
 
     // 1. Create storage view for input
-    let zero = builder.push_int("0", i32_ty.clone(), dummy_span, dummy_node_id).ok()?;
+    let zero = builder.push_int("0", u32_ty.clone(), dummy_span, dummy_node_id).ok()?;
 
     // Get storage length via intrinsic
-    let set_val = builder.push_int(&set.to_string(), i32_ty.clone(), dummy_span, dummy_node_id).ok()?;
+    let set_val = builder.push_int(&set.to_string(), u32_ty.clone(), dummy_span, dummy_node_id).ok()?;
     let binding_val =
-        builder.push_int(&binding.to_string(), i32_ty.clone(), dummy_span, dummy_node_id).ok()?;
+        builder.push_int(&binding.to_string(), u32_ty.clone(), dummy_span, dummy_node_id).ok()?;
     let storage_len = builder
         .push_intrinsic(
             "_w_storage_len",
             vec![set_val, binding_val],
-            i32_ty.clone(),
+            u32_ty.clone(),
             dummy_span,
             dummy_node_id,
         )
@@ -148,7 +166,7 @@ fn parallelize_entry(
     let output_binding_val = builder
         .push_int(
             &output_binding.to_string(),
-            i32_ty.clone(),
+            u32_ty.clone(),
             dummy_span,
             dummy_node_id,
         )
@@ -157,13 +175,13 @@ fn parallelize_entry(
         .push_intrinsic(
             "_w_storage_len",
             vec![set_val, output_binding_val],
-            i32_ty.clone(),
+            u32_ty.clone(),
             dummy_span,
             dummy_node_id,
         )
         .ok()?;
 
-    let zero2 = builder.push_int("0", i32_ty.clone(), dummy_span, dummy_node_id).ok()?;
+    let zero2 = builder.push_int("0", u32_ty.clone(), dummy_span, dummy_node_id).ok()?;
     let output_view = builder
         .push_inst(
             InstKind::StorageView {
@@ -183,7 +201,7 @@ fn parallelize_entry(
         .push_intrinsic(
             "__builtin_thread_id",
             vec![],
-            i32_ty.clone(),
+            u32_ty.clone(),
             dummy_span,
             dummy_node_id,
         )
@@ -194,7 +212,7 @@ fn parallelize_entry(
     let total_threads_val = builder
         .push_int(
             &total_threads.to_string(),
-            i32_ty.clone(),
+            u32_ty.clone(),
             dummy_span,
             dummy_node_id,
         )
@@ -202,7 +220,7 @@ fn parallelize_entry(
     let threads_minus_1 = builder
         .push_int(
             &(total_threads - 1).to_string(),
-            i32_ty.clone(),
+            u32_ty.clone(),
             dummy_span,
             dummy_node_id,
         )
@@ -212,7 +230,7 @@ fn parallelize_entry(
             "+",
             storage_len,
             threads_minus_1,
-            i32_ty.clone(),
+            u32_ty.clone(),
             dummy_span,
             dummy_node_id,
         )
@@ -222,7 +240,7 @@ fn parallelize_entry(
             "/",
             len_plus,
             total_threads_val,
-            i32_ty.clone(),
+            u32_ty.clone(),
             dummy_span,
             dummy_node_id,
         )
@@ -234,7 +252,7 @@ fn parallelize_entry(
             "*",
             thread_id,
             chunk_size,
-            i32_ty.clone(),
+            u32_ty.clone(),
             dummy_span,
             dummy_node_id,
         )
@@ -246,39 +264,43 @@ fn parallelize_entry(
             "+",
             chunk_start,
             chunk_size,
-            i32_ty.clone(),
+            u32_ty.clone(),
             dummy_span,
             dummy_node_id,
         )
         .ok()?;
     let chunk_end = builder
         .push_call(
-            "i32.min",
+            "u32.min",
             vec![start_plus_size, storage_len],
-            i32_ty.clone(),
+            u32_ty.clone(),
             dummy_span,
             dummy_node_id,
         )
         .ok()?;
 
     // 7. Create loop: for i in chunk_start..chunk_end
-    let loop_blocks = builder.create_for_range_loop(unit_ty.clone());
+    // Build loop blocks manually - just index, no accumulator (side-effect only loop)
+    let (header, header_params) = builder.create_block_with_params(vec![u32_ty.clone()]);
+    let loop_index = header_params[0];
+    let body = builder.create_block();
+    let exit = builder.create_block();
+    builder.mark_loop_header(header, exit, body).ok()?;
 
-    // Branch to header with (unit, chunk_start)
-    let unit_val = builder.push_inst(InstKind::Unit, unit_ty.clone(), dummy_span, dummy_node_id).ok()?;
+    // Branch to header with initial index
     builder
         .terminate(Terminator::Branch {
-            target: loop_blocks.header,
-            args: vec![unit_val, chunk_start],
+            target: header,
+            args: vec![chunk_start],
         })
         .ok()?;
 
     // Header: check i < chunk_end
-    builder.switch_to_block(loop_blocks.header).ok()?;
+    builder.switch_to_block(header).ok()?;
     let cond = builder
         .push_binop(
             "<",
-            loop_blocks.index,
+            loop_index,
             chunk_end,
             bool_ty.clone(),
             dummy_span,
@@ -288,22 +310,22 @@ fn parallelize_entry(
     builder
         .terminate(Terminator::CondBranch {
             cond,
-            then_target: loop_blocks.body,
+            then_target: body,
             then_args: vec![],
-            else_target: loop_blocks.exit,
-            else_args: vec![loop_blocks.acc],
+            else_target: exit,
+            else_args: vec![],
         })
         .ok()?;
 
     // Body: output[i] = f(input[i])
-    builder.switch_to_block(loop_blocks.body).ok()?;
+    builder.switch_to_block(body).ok()?;
 
     // Index into input view
     let input_ptr = builder
         .push_inst(
             InstKind::StorageViewIndex {
                 view: input_view,
-                index: loop_blocks.index,
+                index: loop_index,
             },
             elem_ty.clone(), // pointer type, simplified
             dummy_span,
@@ -343,7 +365,7 @@ fn parallelize_entry(
         .push_inst(
             InstKind::StorageViewIndex {
                 view: output_view,
-                index: loop_blocks.index,
+                index: loop_index,
             },
             elem_ty.clone(),
             dummy_span,
@@ -368,26 +390,18 @@ fn parallelize_entry(
         .ok()?;
 
     // Increment index and branch back to header
-    let one = builder.push_int("1", i32_ty.clone(), dummy_span, dummy_node_id).ok()?;
-    let next_i = builder
-        .push_binop(
-            "+",
-            loop_blocks.index,
-            one,
-            i32_ty.clone(),
-            dummy_span,
-            dummy_node_id,
-        )
-        .ok()?;
+    let one = builder.push_int("1", u32_ty.clone(), dummy_span, dummy_node_id).ok()?;
+    let next_i =
+        builder.push_binop("+", loop_index, one, u32_ty.clone(), dummy_span, dummy_node_id).ok()?;
     builder
         .terminate(Terminator::Branch {
-            target: loop_blocks.header,
-            args: vec![loop_blocks.acc, next_i],
+            target: header,
+            args: vec![next_i],
         })
         .ok()?;
 
     // Exit: return unit
-    builder.switch_to_block(loop_blocks.exit).ok()?;
+    builder.switch_to_block(exit).ok()?;
     builder.terminate(Terminator::ReturnUnit).ok()?;
 
     builder.finish().ok()

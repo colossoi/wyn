@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use crate::ast::TypeName;
 use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
+use crate::mir::layout::type_byte_size;
 use crate::mir::ssa::{Block, BlockId, ControlHeader, FuncBody, Inst, InstKind, Terminator, ValueId};
 use crate::tlc::to_ssa::{ExecutionModel, IoDecoration, SsaEntryPoint, SsaFunction, SsaProgram};
 use crate::types;
@@ -84,6 +85,10 @@ struct Constructor {
     /// Storage buffers for compute shaders: (set, binding) -> (buffer_var, elem_type_id, buffer_ptr_type)
     storage_buffers: HashMap<(u32, u32), (spirv::Word, spirv::Word, spirv::Word)>,
 
+    /// Storage view to buffer pointer type mapping: view_id -> buffer_ptr_type
+    /// Used by StorageViewIndex to know the pointer type to extract from the view struct.
+    view_buffer_ptr_types: HashMap<spirv::Word, spirv::Word>,
+
     /// GlobalInvocationId variable for compute shaders (set during entry point setup)
     global_invocation_id: Option<spirv::Word>,
 
@@ -142,6 +147,7 @@ impl Constructor {
             extract_cache: HashMap::new(),
             impl_source: ImplSource::default(),
             storage_buffers: HashMap::new(),
+            view_buffer_ptr_types: HashMap::new(),
             global_invocation_id: None,
             linked_functions: HashMap::new(),
             current_entry_outputs: Vec::new(),
@@ -431,6 +437,50 @@ impl Constructor {
         );
 
         block_struct
+    }
+
+    /// Create a storage buffer variable for compute shaders.
+    /// Returns the variable ID. Also registers it in storage_buffers for later lookup.
+    fn create_storage_buffer(
+        &mut self,
+        array_ty: &PolyType<TypeName>,
+        set: u32,
+        binding: u32,
+    ) -> spirv::Word {
+        // Extract element type from array type
+        let elem_ty = match array_ty {
+            PolyType::Constructed(TypeName::Array, args) if !args.is_empty() => args[0].clone(),
+            _ => array_ty.clone(),
+        };
+        let elem_spirv = self.polytype_to_spirv(&elem_ty);
+
+        // Calculate stride from element type size
+        let stride = type_byte_size(&elem_ty).expect("storage buffer element type must have known size");
+
+        // Create runtime array type (cached to avoid duplicate decorations)
+        let runtime_array = self.get_or_create_runtime_array_type(elem_spirv, stride);
+
+        // Create block struct (cached)
+        let block_struct = self.get_or_create_buffer_block_type(runtime_array);
+
+        let ptr_type = self.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, block_struct);
+        let var_id = self.builder.variable(ptr_type, None, spirv::StorageClass::StorageBuffer, None);
+
+        self.builder.decorate(
+            var_id,
+            spirv::Decoration::DescriptorSet,
+            [Operand::LiteralBit32(set)],
+        );
+        self.builder.decorate(
+            var_id,
+            spirv::Decoration::Binding,
+            [Operand::LiteralBit32(binding)],
+        );
+
+        // Store for later lookup (ptr_type used for StorageView struct construction)
+        self.storage_buffers.insert((set, binding), (var_id, block_struct, ptr_type));
+
+        var_id
     }
 
     /// Forward-declare a function (reserve ID without emitting body).
@@ -943,16 +993,20 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                 if let Some(&(buffer_var, _, buffer_ptr_type)) =
                     self.constructor.storage_buffers.get(&(*set, *binding))
                 {
+                    // Use u32 for offset/len (indices and lengths are non-negative)
                     let view_struct_type = self.constructor.get_or_create_struct_type(vec![
                         buffer_ptr_type,
                         self.constructor.u32_type,
                         self.constructor.u32_type,
                     ]);
-                    self.constructor.builder.composite_construct(
+                    let view_id = self.constructor.builder.composite_construct(
                         view_struct_type,
                         None,
                         [buffer_var, offset_id, len_id],
-                    )?
+                    )?;
+                    // Store the buffer pointer type for use by StorageViewIndex
+                    self.constructor.view_buffer_ptr_types.insert(view_id, buffer_ptr_type);
+                    view_id
                 } else {
                     bail_spirv!("Unknown storage buffer: set={}, binding={}", set, binding)
                 }
@@ -962,8 +1016,15 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                 let view_id = self.get_value(*view)?;
                 let index_id = self.get_value(*index)?;
 
+                // Look up the buffer pointer type from when we created the view
+                let buffer_ptr_type = self
+                    .constructor
+                    .view_buffer_ptr_types
+                    .get(&view_id)
+                    .copied()
+                    .ok_or_else(|| err_spirv!("StorageViewIndex: unknown view"))?;
+
                 // Extract buffer_ptr and offset from view struct
-                let buffer_ptr_type = result_ty; // The result is a pointer
                 let buffer_ptr =
                     self.constructor.builder.composite_extract(buffer_ptr_type, None, view_id, [0u32])?;
                 let base_offset = self.constructor.builder.composite_extract(
@@ -981,9 +1042,16 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                     index_id,
                 )?;
 
-                // Access chain into runtime array
+                // Access chain into runtime array - returns a pointer to the element
                 let zero = self.constructor.const_i32(0);
-                self.constructor.builder.access_chain(result_ty, None, buffer_ptr, [zero, actual_index])?
+                let elem_ptr_type =
+                    self.constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, result_ty);
+                self.constructor.builder.access_chain(
+                    elem_ptr_type,
+                    None,
+                    buffer_ptr,
+                    [zero, actual_index],
+                )?
             }
 
             InstKind::StorageViewLen { view } => {
@@ -1421,27 +1489,22 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
 
             "_w_storage_len" => {
                 // Get the length of a storage buffer via OpArrayLength
-                // Args: [set_id, binding_id] (as i32 constants that were lowered to SPIR-V)
+                // Args: [set_id, binding_id] (as u32 constants)
                 if args.len() != 2 {
                     bail_spirv!("_w_storage_len requires 2 arguments (set, binding)");
                 }
-                // The args are SPIR-V IDs of constants. We need to extract their values.
-                // For now, since we're generating these from known integer literals in
-                // soac_parallelize, we can look them up in the constructor's constant cache.
                 let set = self
                     .constructor
-                    .int_const_reverse
+                    .uint_const_reverse
                     .get(&args[0])
                     .copied()
-                    .ok_or_else(|| err_spirv!("_w_storage_len: set must be a constant"))?
-                    as u32;
+                    .ok_or_else(|| err_spirv!("_w_storage_len: set must be a u32 constant"))?;
                 let binding = self
                     .constructor
-                    .int_const_reverse
+                    .uint_const_reverse
                     .get(&args[1])
                     .copied()
-                    .ok_or_else(|| err_spirv!("_w_storage_len: binding must be a constant"))?
-                    as u32;
+                    .ok_or_else(|| err_spirv!("_w_storage_len: binding must be a u32 constant"))?;
 
                 let &(buffer_var, _, _) =
                     self.constructor.storage_buffers.get(&(set, binding)).ok_or_else(|| {
@@ -2193,49 +2256,7 @@ fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &SsaEntryPoint) -
                 constructor.global_invocation_id = Some(var_id);
             }
         } else if let Some((set, binding)) = input.storage_binding {
-            // Storage buffer input for compute shaders
-            let elem_ty = match &input.ty {
-                PolyType::Constructed(TypeName::Array, args) if !args.is_empty() => args[0].clone(),
-                _ => input.ty.clone(),
-            };
-            let elem_spirv = constructor.polytype_to_spirv(&elem_ty);
-
-            // Create runtime array type for storage buffer
-            let runtime_array = constructor.builder.type_runtime_array(elem_spirv);
-            constructor.builder.decorate(
-                runtime_array,
-                spirv::Decoration::ArrayStride,
-                [Operand::LiteralBit32(4)], // TODO: proper stride calculation
-            );
-
-            // Create block struct containing the runtime array
-            let block_struct = constructor.builder.type_struct([runtime_array]);
-            constructor.builder.decorate(block_struct, spirv::Decoration::Block, []);
-            constructor.builder.member_decorate(
-                block_struct,
-                0,
-                spirv::Decoration::Offset,
-                [Operand::LiteralBit32(0)],
-            );
-
-            let ptr_type =
-                constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, block_struct);
-            let var_id =
-                constructor.builder.variable(ptr_type, None, spirv::StorageClass::StorageBuffer, None);
-
-            constructor.builder.decorate(
-                var_id,
-                spirv::Decoration::DescriptorSet,
-                [Operand::LiteralBit32(set)],
-            );
-            constructor.builder.decorate(
-                var_id,
-                spirv::Decoration::Binding,
-                [Operand::LiteralBit32(binding)],
-            );
-
-            // Store for later lookup
-            constructor.storage_buffers.insert((set, binding), (var_id, block_struct, elem_spirv));
+            let var_id = constructor.create_storage_buffer(&input.ty, set, binding);
             interfaces.push(var_id);
         } else {
             // Regular input with location
@@ -2264,15 +2285,19 @@ fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &SsaEntryPoint) -
     let mut output_vars = Vec::new();
     let mut output_location = 0u32;
     for output in &entry.outputs {
-        let output_type = constructor.polytype_to_spirv(&output.ty);
-
-        if let Some(IoDecoration::BuiltIn(builtin)) = &output.decoration {
+        if let Some((set, binding)) = output.storage_binding {
+            let var_id = constructor.create_storage_buffer(&output.ty, set, binding);
+            interfaces.push(var_id);
+            // Don't add to output_vars - storage buffers are accessed differently
+        } else if let Some(IoDecoration::BuiltIn(builtin)) = &output.decoration {
+            let output_type = constructor.polytype_to_spirv(&output.ty);
             let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::Output, output_type);
             let var_id = constructor.builder.variable(ptr_type, None, spirv::StorageClass::Output, None);
             constructor.builder.decorate(var_id, spirv::Decoration::BuiltIn, [Operand::BuiltIn(*builtin)]);
             output_vars.push(var_id);
             interfaces.push(var_id);
         } else {
+            let output_type = constructor.polytype_to_spirv(&output.ty);
             let loc = output
                 .decoration
                 .as_ref()

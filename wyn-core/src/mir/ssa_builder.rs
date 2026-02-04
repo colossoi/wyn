@@ -769,6 +769,20 @@ impl FuncBuilder {
         self.body.blocks[block_id.index()].control = Some(ControlHeader::Selection { merge });
         Ok(())
     }
+
+    /// Mark a block as a loop header (for SPIR-V structured control flow).
+    pub fn mark_loop_header(
+        &mut self,
+        header: BlockId,
+        merge: BlockId,
+        continue_block: BlockId,
+    ) -> Result<(), BuilderError> {
+        self.body.blocks[header.index()].control = Some(ControlHeader::Loop {
+            merge,
+            continue_block,
+        });
+        Ok(())
+    }
 }
 
 /// Block structure for an if-then-else expression.

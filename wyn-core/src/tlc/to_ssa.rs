@@ -99,6 +99,8 @@ pub struct EntryInput {
 pub struct EntryOutput {
     pub ty: Type<TypeName>,
     pub decoration: Option<IoDecoration>,
+    /// For compute shaders with unsized array outputs: (set, binding).
+    pub storage_binding: Option<(u32, u32)>,
 }
 
 /// I/O decoration for entry point parameters.
@@ -297,8 +299,8 @@ fn convert_entry_point(
         _ => panic!("Invalid entry type attribute: {:?}", entry.entry_type),
     };
 
-    // Build outputs
-    let outputs = build_entry_outputs(entry, &inner_body.ty);
+    // Build outputs (pass binding_num so outputs continue from where inputs left off)
+    let outputs = build_entry_outputs(entry, &inner_body.ty, is_compute, binding_num);
 
     // For vertex/fragment shaders with outputs, emit explicit stores to output variables
     let is_compute = matches!(execution_model, ExecutionModel::Compute { .. });
@@ -426,12 +428,31 @@ fn extract_size_hint(pattern: &ast::Pattern) -> Option<u32> {
 }
 
 /// Build entry outputs from AST entry declaration.
-fn build_entry_outputs(entry: &ast::EntryDecl, ret_type: &Type<TypeName>) -> Vec<EntryOutput> {
+/// For compute shaders, unsized array outputs get storage bindings starting from `binding_start`.
+fn build_entry_outputs(
+    entry: &ast::EntryDecl,
+    ret_type: &Type<TypeName>,
+    is_compute: bool,
+    binding_start: u32,
+) -> Vec<EntryOutput> {
+    let mut binding_num = binding_start;
+
+    let mut storage_binding_for = |ty: &Type<TypeName>| -> Option<(u32, u32)> {
+        if is_compute && is_unsized_array(ty) {
+            let binding = (0, binding_num);
+            binding_num += 1;
+            Some(binding)
+        } else {
+            None
+        }
+    };
+
     if entry.outputs.iter().all(|o| o.attribute.is_none()) && entry.outputs.len() == 1 {
         if !matches!(ret_type, Type::Constructed(TypeName::Unit, _)) {
             vec![EntryOutput {
                 ty: ret_type.clone(),
                 decoration: None,
+                storage_binding: storage_binding_for(ret_type),
             }]
         } else {
             vec![]
@@ -444,6 +465,7 @@ fn build_entry_outputs(entry: &ast::EntryDecl, ret_type: &Type<TypeName>) -> Vec
             .map(|(output, ty)| EntryOutput {
                 ty: ty.clone(),
                 decoration: output.attribute.as_ref().and_then(|a| convert_to_io_decoration(a)),
+                storage_binding: storage_binding_for(ty),
             })
             .collect()
     } else {
@@ -454,6 +476,7 @@ fn build_entry_outputs(entry: &ast::EntryDecl, ret_type: &Type<TypeName>) -> Vec
                 .first()
                 .and_then(|o| o.attribute.as_ref())
                 .and_then(|a| convert_to_io_decoration(a)),
+            storage_binding: storage_binding_for(ret_type),
         }]
     }
 }
