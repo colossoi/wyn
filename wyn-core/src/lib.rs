@@ -647,13 +647,15 @@ impl AliasChecked {
 
         // Transform user program to TLC using the shared symbol table
         let mut transformer = tlc::Transformer::new(&self.type_table, &mut symbols, &mut top_level_symbols);
-        let mut tlc_program = transformer.transform_program(&self.ast);
-        tlc_program.symbols = symbols;
+        let mut parts = transformer.transform_program(&self.ast);
 
         // Prepend prelude TLC defs
         let mut merged_defs = prelude_tlc_defs;
-        merged_defs.extend(tlc_program.defs);
-        tlc_program.defs = merged_defs;
+        merged_defs.extend(parts.defs);
+        parts.defs = merged_defs;
+
+        // Combine parts with the symbol table to create the final Program
+        let tlc_program = parts.with_symbols(symbols);
 
         TlcTransformed {
             tlc: tlc_program,

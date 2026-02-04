@@ -219,6 +219,27 @@ pub struct Program {
     pub symbols: SymbolTable,
 }
 
+/// Parts of a TLC program, without the symbol table.
+/// Returned by `Transformer::transform_program` when the caller owns the symbol table.
+#[derive(Debug, Clone)]
+pub struct ProgramParts {
+    pub defs: Vec<Def>,
+    pub uniforms: Vec<ast::UniformDecl>,
+    pub storage: Vec<ast::StorageDecl>,
+}
+
+impl ProgramParts {
+    /// Combine with a symbol table to create a complete Program.
+    pub fn with_symbols(self, symbols: SymbolTable) -> Program {
+        Program {
+            defs: self.defs,
+            uniforms: self.uniforms,
+            storage: self.storage,
+            symbols,
+        }
+    }
+}
+
 // =============================================================================
 // AST to TLC Transformation
 // =============================================================================
@@ -322,7 +343,9 @@ impl<'a> Transformer<'a> {
     }
 
     /// Transform an AST program to TLC.
-    pub fn transform_program(&mut self, program: &ast::Program) -> Program {
+    /// Returns program parts without the symbol table - caller must combine with
+    /// their owned symbol table using `ProgramParts::with_symbols`.
+    pub fn transform_program(&mut self, program: &ast::Program) -> ProgramParts {
         // First pass: register all top-level function names so that references
         // within function bodies use the same SymbolId as the Def.
         for decl in &program.declarations {
@@ -393,13 +416,10 @@ impl<'a> Transformer<'a> {
             }
         }
 
-        // Note: symbols are in the shared SymbolTable reference.
-        // The caller is responsible for putting the final symbol table into the Program.
-        Program {
+        ProgramParts {
             defs,
             uniforms,
             storage,
-            symbols: SymbolTable::new(), // Placeholder - caller fills in the real one
         }
     }
 
@@ -1785,7 +1805,6 @@ pub fn transform(program: &ast::Program, type_table: &TypeTable) -> Program {
     let mut symbols = SymbolTable::new();
     let mut top_level_symbols = HashMap::new();
     let mut transformer = Transformer::new(type_table, &mut symbols, &mut top_level_symbols);
-    let mut result = transformer.transform_program(program);
-    result.symbols = symbols;
-    result
+    let parts = transformer.transform_program(program);
+    parts.with_symbols(symbols)
 }
