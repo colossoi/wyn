@@ -9,6 +9,7 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 use wyn_core::FrontEnd;
 use wyn_core::TypeTable;
 use wyn_core::ast::{self, NodeCounter, NodeId, Span};
+use wyn_core::lexer;
 use wyn_core::module_manager::{ModuleManager, PreElaboratedPrelude};
 use wyn_core::types::{Type, TypeName, TypeScheme, format_scheme};
 
@@ -78,6 +79,17 @@ impl LanguageServer for Backend {
                     trigger_characters: Some(vec![".".to_string()]),
                     ..Default::default()
                 }),
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
+                        legend: SemanticTokensLegend {
+                            token_types: TOKEN_TYPES.to_vec(),
+                            token_modifiers: vec![],
+                        },
+                        full: Some(SemanticTokensFullOptions::Bool(true)),
+                        range: None,
+                        ..Default::default()
+                    }),
+                ),
                 definition_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
@@ -374,6 +386,31 @@ impl LanguageServer for Backend {
         }
 
         Ok(None)
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
+        let uri = &params.text_document.uri;
+        verbose!("[wyn-analyzer] semanticTokens/full {}", uri);
+
+        let path = match uri.to_file_path() {
+            Ok(p) => p,
+            Err(_) => return Ok(None),
+        };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(_) => return Ok(None),
+        };
+
+        let tokens = compute_semantic_tokens(&text);
+        verbose!("[wyn-analyzer] semanticTokens/full {} -> {} tokens", uri, tokens.len());
+
+        Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
+            result_id: None,
+            data: tokens,
+        })))
     }
 }
 
@@ -1395,6 +1432,86 @@ fn format_check_result(uri: &Url, diagnostics: &[Diagnostic], ok: bool) -> Strin
         ),
         None => format!("[wyn-analyzer] checked {} -> 0 diagnostics, {}", uri, status),
     }
+}
+
+/// Semantic token type legend — order defines index values sent to the client.
+const TOKEN_TYPES: &[SemanticTokenType] = &[
+    SemanticTokenType::KEYWORD,   // 0
+    SemanticTokenType::NUMBER,    // 1
+    SemanticTokenType::STRING,    // 2
+    SemanticTokenType::COMMENT,   // 3
+    SemanticTokenType::OPERATOR,  // 4
+    SemanticTokenType::VARIABLE,  // 5
+    SemanticTokenType::DECORATOR, // 6
+];
+
+/// Returns the index into TOKEN_TYPES for a given lexer token.
+/// The LSP protocol encodes semantic token types as u32 indices into the legend
+/// sent during initialization, so we return the index directly.
+fn token_type_index(token: &lexer::Token) -> Option<u32> {
+    use lexer::Token::*;
+    match token {
+        Let | Def | Entry | Sig | In | If | Then | Else | Loop | For | While | Do | Match
+        | Case | Module | Functor | Open | Import | Type | Include | With | Extern | True
+        | False => Some(0), // KEYWORD
+
+        IntLiteral(_) | FloatLiteral(_) | SuffixedLiteral(_, _) => Some(1), // NUMBER
+
+        StringLiteral(_) | CharLiteral(_) => Some(2), // STRING
+
+        Comment(_) => Some(3), // COMMENT
+
+        BinOp(_) | Arrow | Assign | Pipe | PipeOp | Dot | DotDot | DotDotLt | DotDotGt
+        | Ellipsis | Star | Minus | Bang | TypeCoercion | Backslash => Some(4), // OPERATOR
+
+        Identifier(_) => Some(5), // VARIABLE
+
+        AttributeStart => Some(6), // DECORATOR
+
+        _ => None,
+    }
+}
+
+fn compute_semantic_tokens(text: &str) -> Vec<SemanticToken> {
+    let tokens = match lexer::tokenize(text) {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut result = Vec::new();
+    let mut prev_line: u32 = 0;
+    let mut prev_start: u32 = 0;
+
+    for lt in &tokens {
+        let Some(token_type) = token_type_index(&lt.token) else {
+            continue;
+        };
+
+        // Span is 1-based; LSP is 0-based
+        let line = lt.span.start_line.saturating_sub(1) as u32;
+        let start = lt.span.start_col.saturating_sub(1) as u32;
+        let length = (lt.span.end_col - lt.span.start_col) as u32;
+
+        let delta_line = line - prev_line;
+        let delta_start = if delta_line == 0 {
+            start - prev_start
+        } else {
+            start
+        };
+
+        result.push(SemanticToken {
+            delta_line,
+            delta_start,
+            length,
+            token_type,
+            token_modifiers_bitset: 0,
+        });
+
+        prev_line = line;
+        prev_start = start;
+    }
+
+    result
 }
 
 #[tokio::main]
