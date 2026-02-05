@@ -2502,15 +2502,6 @@ impl<'a> TypeChecker<'a> {
         let arg_stripped = strip_unique(arg_ty);
         let param_stripped = strip_unique(&expected_param);
 
-        // Debug: check if we're unifying borrow's param
-        let arg_str = format!("{:?}", arg_stripped);
-        let param_str = format!("{:?}", param_stripped);
-        if arg_str.contains("133") || param_str.contains("133") {
-            eprintln!("DEBUG unify_apply_arg: arg = {}", arg_str);
-            eprintln!("DEBUG unify_apply_arg: param = {}", param_str);
-            eprintln!("DEBUG unify_apply_arg: arg_ty (before strip) = {:?}", arg_ty);
-        }
-
         // Unify argument with expected param
         self.context.unify(&arg_stripped, &param_stripped).map_err(|e| {
             let error_msg = if arg.h.span.is_generated() {
