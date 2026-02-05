@@ -297,7 +297,7 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 //   - FrontEnd: holds module_manager (used by resolve, type_check, flatten)
 //   - BackEnd: holds node_counter (used by normalize)
 //
-// FrontEnd Pipeline (AST -> MIR):
+// FrontEnd Pipeline (AST):
 //   let parsed = Compiler::parse(source)?;
 //   let mut frontend = FrontEnd::new(module_manager);
 //     -> parsed.desugar(&mut node_counter)              -> Desugared
@@ -306,16 +306,16 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 //       -> .type_check(&frontend.module_manager)        -> TypeChecked
 //       -> .alias_check()                               -> AliasChecked
 //
-// TLC Pipeline (AST -> MIR):
+// TLC Pipeline (AST -> SSA):
 //       -> .to_tlc()                                    -> TlcTransformed
 //       -> .partial_eval() or .skip_partial_eval()      -> TlcTransformed (optimized)
 //       -> .defunctionalize()                           -> TlcDefunctionalized
 //       -> .monomorphize()                              -> TlcMonomorphized
-//       -> .to_mir()                                    -> Flattened
+//       -> .to_ssa()                                    -> SsaConverted
 //
-// BackEnd Pipeline (MIR -> output):
-//     -> flattened.default_address_spaces()             -> AddressSpacesDefaulted
-//       -> .filter_reachable()                          -> Reachable
+// BackEnd Pipeline (SSA -> output):
+//       -> .parallelize_soacs()                         -> SsaParallelized
+//       -> .filter_reachable()                          -> SsaReachable
 //       -> .lower()                                     -> Lowered
 
 // =============================================================================
@@ -774,6 +774,19 @@ pub struct SsaParallelized {
 }
 
 impl SsaParallelized {
+    /// Eliminate dead functions (not reachable from any entry point).
+    pub fn filter_reachable(self) -> SsaReachable {
+        let ssa = mir::reachability::eliminate_dead_functions(self.ssa);
+        SsaReachable { ssa }
+    }
+}
+
+/// SSA with dead functions eliminated
+pub struct SsaReachable {
+    pub ssa: tlc::to_ssa::SsaProgram,
+}
+
+impl SsaReachable {
     /// Lower SSA to SPIR-V.
     pub fn lower(self) -> error::Result<Lowered> {
         let spirv = spirv::lower_ssa_program(&self.ssa)?;

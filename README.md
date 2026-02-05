@@ -43,24 +43,21 @@ The compiler uses a multi-stage pipeline with typestate-driven phases. Each stag
 | Stage | Module | Description |
 |-------|--------|-------------|
 | **TlcTransformed** | `tlc::transform` | AST converted to minimal typed lambda calculus |
-| **TlcPartialEval** | `tlc::partial_eval` | Constant folding and algebraic simplifications (optional) |
+| **TlcTransformed** | `tlc::partial_eval` | Constant folding and algebraic simplifications (optional, via `partial_eval()`) |
 | **TlcDefunctionalized** | `tlc::defunctionalize` | Futhark-style defunctionalization: lambda lifting + SOAC capture flattening |
 | **TlcMonomorphized** | `tlc::specialize`, `tlc::monomorphize` | Polymorphic intrinsics specialized; user functions monomorphized |
 
-### Backend (MIR → SSA → SPIR-V)
+### Backend (SSA → SPIR-V)
 
-The backend uses two intermediate representations:
-- **MIR** (`mir/mod.rs`): Expression-based IR with locals, control flow as expressions (If/Loop)
+The backend converts TLC directly to SSA form:
 - **SSA** (`mir/ssa.rs`): CFG with basic blocks, block parameters (not phi nodes), explicit terminators
 
 | Stage | Module | Description |
 |-------|--------|-------------|
-| **Flattened** | `tlc::to_mir` | TLC to MIR conversion (all functions already monomorphic) |
-| **AddressSpacesDefaulted** | `default_address_spaces` | Unconstrained array variant variables defaulted |
-| **SoacParallelized** | `soac_parallelize` | SOACs parallelized for compute shaders |
-| **DpsApplied** | `dps_transform` | Destination-passing style for runtime-sized array returns |
-| **Reachable** | `reachability` | Dead code elimination, topological ordering |
-| **Lowered** | `spirv::lowering` | MIR → SSA (`mir/to_ssa`) → SPIR-V (`spirv/ssa_lowering`) |
+| **SsaConverted** | `tlc::to_ssa` | TLC to SSA conversion (all functions already monomorphic) |
+| **SsaParallelized** | `parallelization` | SOACs parallelized for compute shaders |
+| **SsaReachable** | `mir::reachability` | Dead function elimination |
+| **Lowered** | `spirv::ssa_lowering` | SSA to SPIR-V |
 
 ### Defunctionalization
 

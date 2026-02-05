@@ -129,6 +129,7 @@ pub fn parallelize_soacs(mut program: SsaProgram) -> SsaProgram {
                         } else {
                             entry.outputs = storage_outputs.clone();
                         }
+                    } else {
                     }
                 }
                 // Note: single-thread fallback removed - all compute shaders should be parallelizable

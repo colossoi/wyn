@@ -907,6 +907,7 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
 
                 // Check if it's a builtin function first
                 if let Some(builtin_impl) = self.constructor.impl_source.get(func) {
+                    if func.contains("array_with") {}
                     self.lower_builtin_call(builtin_impl.clone(), &arg_ids, result_ty)?
                 } else if let Some(&func_id) = self.constructor.functions.get(func) {
                     // User-defined function

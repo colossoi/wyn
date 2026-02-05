@@ -644,8 +644,11 @@ fn compile_impl(source: &str) -> CompileResult {
     // Parallelize SOACs (for compute shaders)
     let parallelized = ssa.parallelize_soacs();
 
+    // Eliminate dead functions
+    let reachable = parallelized.filter_reachable();
+
     // Lower to Shadertoy GLSL
-    match parallelized.lower_shadertoy() {
+    match reachable.lower_shadertoy() {
         Ok(glsl) => CompileResult::ok(glsl),
         Err(e) => CompileResult::err(e),
     }
@@ -732,9 +735,12 @@ fn compile_with_ir_impl(source: &str) -> CompileResultWithIR {
     // Parallelize SOACs
     let parallelized = ssa.parallelize_soacs();
 
+    // Eliminate dead functions
+    let reachable = parallelized.filter_reachable();
+
     // Lower to Shadertoy GLSL
     // Note: MIR visualization is no longer available (MIR eliminated from pipeline)
-    match parallelized.lower_shadertoy() {
+    match reachable.lower_shadertoy() {
         Ok(glsl) => CompileResultWithIR {
             success: true,
             glsl: Some(glsl),

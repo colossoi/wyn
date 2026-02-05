@@ -218,9 +218,12 @@ fn compile_file(
     // Parallelize SOACs in compute shaders
     let parallelized = time("parallelize_soacs", verbose, || ssa.parallelize_soacs());
 
+    // Eliminate dead functions
+    let reachable = time("filter_reachable", verbose, || parallelized.filter_reachable());
+
     match target {
         Target::Spirv => {
-            let lowered = time("lower", verbose, || parallelized.lower())?;
+            let lowered = time("lower", verbose, || reachable.lower())?;
 
             // Determine output path
             let output_path = output.unwrap_or_else(|| {

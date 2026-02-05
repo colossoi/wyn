@@ -520,6 +520,7 @@ entry vertex_main() #[builtin(position)] vec4f32 =
         .to_ssa()
         .expect("SSA conversion failed")
         .parallelize_soacs()
+        .filter_reachable()
         .lower();
 
     assert!(result.is_ok(), "SPIR-V compilation failed: {:?}", result.err());
@@ -558,6 +559,7 @@ entry compute_main(data: []i32) i32 =
         .to_ssa()
         .expect("SSA conversion failed")
         .parallelize_soacs()
+        .filter_reachable()
         .lower();
 
     assert!(result.is_ok(), "SPIR-V compilation failed: {:?}", result.err());
@@ -598,6 +600,7 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
         .to_ssa()
         .expect("SSA conversion failed")
         .parallelize_soacs()
+        .filter_reachable()
         .lower();
 
     assert!(result.is_ok(), "SPIR-V compilation failed: {:?}", result.err());

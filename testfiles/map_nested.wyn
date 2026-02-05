@@ -1,0 +1,6 @@
+def double(x: i32) i32 = x * 2
+
+def process(arr: []i32) []i32 = map(double, arr)
+
+#[compute]
+entry nested_map(arr: []i32) []i32 = process(arr)

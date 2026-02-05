@@ -21,7 +21,7 @@
 //!     // final array
 //! ```
 
-use crate::tlc::to_ssa::{EntryInput, ExecutionModel, SsaEntryPoint, SsaProgram};
+use crate::tlc::to_ssa::{EntryInput, ExecutionModel, SsaEntryPoint, SsaFunction, SsaProgram};
 use crate::types::is_virtual_array;
 use std::collections::{HashMap, HashSet};
 
@@ -313,7 +313,7 @@ pub fn analyze_program(program: &SsaProgram) -> SsaSoacAnalysis {
 
     for entry in &program.entry_points {
         if let ExecutionModel::Compute { local_size } = entry.execution_model {
-            let entry_analysis = analyze_compute_entry(entry, local_size);
+            let entry_analysis = analyze_compute_entry(entry, local_size, program);
             analysis.by_entry.insert(entry.name.clone(), entry_analysis);
         }
     }
@@ -321,39 +321,144 @@ pub fn analyze_program(program: &SsaProgram) -> SsaSoacAnalysis {
     analysis
 }
 
+/// Find a function by name in the program.
+fn find_function<'a>(program: &'a SsaProgram, name: &str) -> Option<&'a SsaFunction> {
+    program.functions.iter().find(|f| f.name == name)
+}
+
+/// Maximum call depth for traversing through function calls.
+const MAX_CALL_DEPTH: usize = 10;
+
 /// Analyze a single compute entry point.
-fn analyze_compute_entry(entry: &SsaEntryPoint, local_size: (u32, u32, u32)) -> ComputeEntryAnalysis {
-    let body = &entry.body;
+fn analyze_compute_entry(
+    entry: &SsaEntryPoint,
+    local_size: (u32, u32, u32),
+    program: &SsaProgram,
+) -> ComputeEntryAnalysis {
+    let par_map = find_highest_map(entry, program);
+    ComputeEntryAnalysis {
+        name: entry.name.clone(),
+        local_size,
+        parallelizable_map: par_map,
+    }
+}
 
-    // Detect loops
+/// Find the highest (closest to entry point) parallelizable map in the call tree.
+/// Uses breadth-first search: checks each level before recursing into called functions.
+fn find_highest_map(entry: &SsaEntryPoint, program: &SsaProgram) -> Option<ParallelizableMap> {
+    // Entry params map to themselves for provenance tracking
+    let initial_mapping: HashMap<usize, ValueId> =
+        entry.body.params.iter().enumerate().map(|(i, (v, _, _))| (i, *v)).collect();
+
+    find_map_in_body(entry, &entry.body, &initial_mapping, program, 0)
+}
+
+/// Search for a parallelizable map in a function body, recursing into called functions.
+fn find_map_in_body(
+    entry: &SsaEntryPoint,
+    body: &FuncBody,
+    param_to_entry_arg: &HashMap<usize, ValueId>,
+    program: &SsaProgram,
+    depth: usize,
+) -> Option<ParallelizableMap> {
+    if depth > MAX_CALL_DEPTH {
+        return None;
+    }
+
+    // Breadth-first: check for map loops at THIS level first
     let loops = detect_loops(body);
-
-    // Find the first map loop that's parallelizable
-    let mut parallelizable_map = None;
 
     for loop_info in &loops {
         if let Some(map_loop) = analyze_map_loop(body, loop_info) {
-            // Track provenance of the input array
-            let provenance = track_provenance(body, map_loop.input_array, &entry.inputs);
-
-            // Parallelize if we have storage buffer or range provenance
+            let provenance =
+                track_provenance_unified(entry, body, map_loop.input_array, param_to_entry_arg);
             if matches!(
                 provenance,
                 ArrayProvenance::EntryStorage { .. } | ArrayProvenance::Range { .. }
             ) {
-                parallelizable_map = Some(ParallelizableMap {
+                return Some(ParallelizableMap {
                     source: provenance,
                     map_function: map_loop.map_function.clone(),
                     map_loop,
                 });
-                break;
             }
         }
     }
 
-    ComputeEntryAnalysis {
-        name: entry.name.clone(),
-        local_size,
-        parallelizable_map,
+    // No map at this level - recurse into called functions
+    for inst in &body.insts {
+        if let InstKind::Call { func, args } = &inst.kind {
+            // Skip intrinsic calls
+            if func.starts_with("_w_") {
+                continue;
+            }
+
+            if let Some(called_func) = find_function(program, func) {
+                let new_mapping = build_param_mapping(body, param_to_entry_arg, args);
+
+                if let Some(par_map) =
+                    find_map_in_body(entry, &called_func.body, &new_mapping, program, depth + 1)
+                {
+                    return Some(par_map);
+                }
+            } else {
+            }
+        }
     }
+
+    None
+}
+
+/// Build a parameter mapping for a called function.
+/// Maps the called function's parameter indices to entry-level ValueIds.
+fn build_param_mapping(
+    caller_body: &FuncBody,
+    caller_param_to_entry: &HashMap<usize, ValueId>,
+    call_args: &[ValueId],
+) -> HashMap<usize, ValueId> {
+    call_args
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &arg)| {
+            // If arg is a parameter of the caller, map through to entry
+            for (caller_param_idx, (param_val, _, _)) in caller_body.params.iter().enumerate() {
+                if *param_val == arg {
+                    if let Some(&entry_val) = caller_param_to_entry.get(&caller_param_idx) {
+                        return Some((i, entry_val));
+                    }
+                }
+            }
+            // Arg is not a passthrough parameter - could be a local value
+            None
+        })
+        .collect()
+}
+
+/// Track provenance of a value, handling values at any call depth.
+/// Uses the param_to_entry_arg mapping to trace back to entry-level values.
+fn track_provenance_unified(
+    entry: &SsaEntryPoint,
+    body: &FuncBody,
+    value: ValueId,
+    param_to_entry_arg: &HashMap<usize, ValueId>,
+) -> ArrayProvenance {
+    // Check if value is a function parameter
+    for (i, (param_value, _, _)) in body.params.iter().enumerate() {
+        if *param_value == value {
+            if let Some(&entry_arg) = param_to_entry_arg.get(&i) {
+                // Map back to entry level and use existing track_provenance
+                return track_provenance(&entry.body, entry_arg, &entry.inputs);
+            }
+            return ArrayProvenance::Unknown;
+        }
+    }
+
+    // Check for local virtual arrays (ranges)
+    for inst in &body.insts {
+        if inst.result == Some(value) && is_virtual_array(&inst.result_ty) {
+            return ArrayProvenance::Range { value };
+        }
+    }
+
+    ArrayProvenance::Unknown
 }

@@ -12,6 +12,7 @@
 //! - `layout`: Type layout calculations for SPIR-V memory operations
 
 pub mod layout;
+pub mod reachability;
 pub mod ssa;
 pub mod ssa_builder;
 pub mod ssa_soac_analysis;
