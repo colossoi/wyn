@@ -830,7 +830,11 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
 
             InstKind::Bool(b) => self.constructor.const_bool(*b),
 
-            InstKind::Unit => self.constructor.const_i32(0),
+            InstKind::Unit => {
+                unreachable!(
+                    "InstKind::Unit should never reach SPIR-V codegen; unit values are not materializable"
+                )
+            }
 
             InstKind::String(s) => {
                 bail_spirv!("String literals not supported in SPIR-V: {}", s)
