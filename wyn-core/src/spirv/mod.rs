@@ -692,17 +692,17 @@ impl Constructor {
 /// - Block parameters become OpPhi nodes
 /// - Terminators become branch instructions
 fn lower_ssa_body(constructor: &mut Constructor, body: &FuncBody) -> Result<spirv::Word> {
-    let mut ctx = SsaLowerCtx::new(constructor, body);
+    let mut ctx = SsaLowerCtx::new(constructor, body, false);
     ctx.lower()
 }
 
 /// Lower an SSA function body for an entry point.
 ///
-/// Entry points are void functions that don't emit OpReturn/OpReturnValue.
-/// Instead, this returns the computed result value which the caller stores
-/// to output variables before emitting OpReturn.
+/// Entry points are void functions — OpReturnValue is invalid.
+/// SSA for entry points should use OutputPtr+Store then ReturnUnit;
+/// Return(value) will produce an error.
 fn lower_ssa_body_for_entry(constructor: &mut Constructor, body: &FuncBody) -> Result<spirv::Word> {
-    let mut ctx = SsaLowerCtx::new(constructor, body);
+    let mut ctx = SsaLowerCtx::new(constructor, body, true);
     ctx.lower()
 }
 
@@ -710,6 +710,8 @@ fn lower_ssa_body_for_entry(constructor: &mut Constructor, body: &FuncBody) -> R
 struct SsaLowerCtx<'a, 'b> {
     constructor: &'a mut Constructor,
     body: &'b FuncBody,
+    /// True when lowering an entry point (void function — OpReturnValue is invalid).
+    is_entry_point: bool,
     /// Map from SSA ValueId to SPIR-V Word.
     value_map: HashMap<ValueId, spirv::Word>,
     /// Map from SSA BlockId to SPIR-V block label.
@@ -722,10 +724,11 @@ struct SsaLowerCtx<'a, 'b> {
 }
 
 impl<'a, 'b> SsaLowerCtx<'a, 'b> {
-    fn new(constructor: &'a mut Constructor, body: &'b FuncBody) -> Self {
+    fn new(constructor: &'a mut Constructor, body: &'b FuncBody, is_entry_point: bool) -> Self {
         SsaLowerCtx {
             constructor,
             body,
+            is_entry_point,
             value_map: HashMap::new(),
             block_map: HashMap::new(),
             block_indices: HashMap::new(),
@@ -1147,9 +1150,13 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
             }
 
             Terminator::Return(value) => {
+                if self.is_entry_point {
+                    bail_spirv!(
+                        "Return(value) in entry point body — entry points are void functions \
+                         and must use OutputPtr+Store then ReturnUnit"
+                    );
+                }
                 let value_id = self.get_value(*value)?;
-                // Always emit ret_value - with OutputPtr+Store, entry points
-                // shouldn't use Return(value), but emit it anyway to avoid unterminated blocks.
                 self.constructor.builder.ret_value(value_id)?;
             }
 
