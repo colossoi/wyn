@@ -177,7 +177,8 @@ impl<'a> Parser<'a> {
 
         // Entry attributes require the 'entry' keyword, not 'def' or 'let'
         if has_entry_attr {
-            bail_parse_at!(self.current_span(), 
+            bail_parse_at!(
+                self.current_span(),
                 "Entry point attributes (#[vertex], #[fragment], #[compute]) require 'entry' keyword, not '{}'",
                 keyword
             );
@@ -186,13 +187,19 @@ impl<'a> Parser<'a> {
         if let Some((set, binding)) = uniform_attr {
             // Uniform declaration - delegate to helper
             if keyword != "def" {
-                bail_parse_at!(self.current_span(), "Uniform declarations must use 'def', not 'let'");
+                bail_parse_at!(
+                    self.current_span(),
+                    "Uniform declarations must use 'def', not 'let'"
+                );
             }
             self.parse_uniform_decl(set, binding)
         } else if let Some((set, binding, layout, access)) = storage_attr {
             // Storage buffer declaration - delegate to helper
             if keyword != "def" {
-                bail_parse_at!(self.current_span(), "Storage declarations must use 'def', not 'let'");
+                bail_parse_at!(
+                    self.current_span(),
+                    "Storage declarations must use 'def', not 'let'"
+                );
             }
             self.parse_storage_decl(set, binding, layout, access)
         } else {
@@ -210,6 +217,7 @@ impl<'a> Parser<'a> {
             } else {
                 self.expect_identifier()?
             };
+            let name_span = self.previous_span();
 
             // Rust-style generics: <[n], A, B> (optional, only for def)
             let (size_params, type_params) = if keyword == "def" && self.check_binop("<") {
@@ -229,7 +237,8 @@ impl<'a> Parser<'a> {
 
                     // Reject zero-argument functions - use constant syntax instead
                     if params.is_empty() {
-                        bail_parse_at!(self.current_span(), 
+                        bail_parse_at!(
+                            self.current_span(),
                             "Zero-argument functions are not allowed. Use constant syntax instead: `def {} = ...`",
                             name
                         );
@@ -271,6 +280,7 @@ impl<'a> Parser<'a> {
                 keyword,
                 attributes,
                 name,
+                name_span,
                 size_params,
                 type_params,
                 params,
@@ -399,6 +409,7 @@ impl<'a> Parser<'a> {
 
         self.expect(Token::Entry)?;
         let name = self.expect_identifier()?;
+        let name_span = self.previous_span();
 
         // Parse optional type parameters: <[n], [m], T>
         let (size_params, type_params) =
@@ -414,7 +425,10 @@ impl<'a> Parser<'a> {
                 if let PatternKind::Typed(inner, _) = &param.kind {
                     if let PatternKind::Attributed(attrs, _) = &inner.kind {
                         if attrs.iter().any(|a| matches!(a, Attribute::Storage { .. })) {
-                            bail_parse_at!(self.current_span(), "Compute entry parameters cannot have explicit bindings");
+                            bail_parse_at!(
+                                self.current_span(),
+                                "Compute entry parameters cannot have explicit bindings"
+                            );
                         }
                     }
                 }
@@ -431,7 +445,10 @@ impl<'a> Parser<'a> {
                 let ty = self.parse_type()?;
                 (vec![ty], vec![None])
             } else {
-                bail_parse_at!(self.current_span(), "Entry point declarations must have an explicit return type");
+                bail_parse_at!(
+                    self.current_span(),
+                    "Entry point declarations must have an explicit return type"
+                );
             };
 
         // Combine into EntryOutput structs
@@ -447,6 +464,7 @@ impl<'a> Parser<'a> {
         Ok(Declaration::Entry(EntryDecl {
             entry_type,
             name,
+            name_span,
             size_params,
             type_params,
             params,
@@ -570,7 +588,10 @@ impl<'a> Parser<'a> {
 
         // Uniforms must NOT have initializers
         if self.check(&Token::Assign) {
-            bail_parse_at!(self.current_span(), "Uniform declarations cannot have initializer values");
+            bail_parse_at!(
+                self.current_span(),
+                "Uniform declarations cannot have initializer values"
+            );
         }
 
         Ok(Declaration::Uniform(UniformDecl {
@@ -599,7 +620,10 @@ impl<'a> Parser<'a> {
 
         // Storage buffers must NOT have initializers
         if self.check(&Token::Assign) {
-            bail_parse_at!(self.current_span(), "Storage buffer declarations cannot have initializer values");
+            bail_parse_at!(
+                self.current_span(),
+                "Storage buffer declarations cannot have initializer values"
+            );
         }
 
         Ok(Declaration::Storage(StorageDecl {
@@ -650,7 +674,9 @@ impl<'a> Parser<'a> {
                         "binding" => {
                             binding = Some(self.expect_integer()?);
                         }
-                        _ => bail_parse_at!(self.current_span(), "Unknown uniform parameter: {}", param_name),
+                        _ => {
+                            bail_parse_at!(self.current_span(), "Unknown uniform parameter: {}", param_name)
+                        }
                     }
 
                     // Check for comma or end
@@ -732,7 +758,11 @@ impl<'a> Parser<'a> {
                             layout = match layout_name.as_str() {
                                 "std430" => StorageLayout::Std430,
                                 "std140" => StorageLayout::Std140,
-                                _ => bail_parse_at!(self.current_span(), "Unknown storage layout: {}", layout_name),
+                                _ => bail_parse_at!(
+                                    self.current_span(),
+                                    "Unknown storage layout: {}",
+                                    layout_name
+                                ),
                             };
                         }
                         "access" => {
@@ -741,10 +771,16 @@ impl<'a> Parser<'a> {
                                 "read" => StorageAccess::ReadOnly,
                                 "write" => StorageAccess::WriteOnly,
                                 "readwrite" => StorageAccess::ReadWrite,
-                                _ => bail_parse_at!(self.current_span(), "Unknown storage access: {}", access_name),
+                                _ => bail_parse_at!(
+                                    self.current_span(),
+                                    "Unknown storage access: {}",
+                                    access_name
+                                ),
                             };
                         }
-                        _ => bail_parse_at!(self.current_span(), "Unknown storage parameter: {}", param_name),
+                        _ => {
+                            bail_parse_at!(self.current_span(), "Unknown storage parameter: {}", param_name)
+                        }
                     }
 
                     // Check for comma or end
@@ -824,12 +860,19 @@ impl<'a> Parser<'a> {
                     // Type param: must be uppercase
                     let name = name.clone();
                     if !name.chars().next().is_some_and(|c| c.is_uppercase()) {
-                        bail_parse_at!(self.current_span(), "Type parameters must be uppercase (got '{}')", name);
+                        bail_parse_at!(
+                            self.current_span(),
+                            "Type parameters must be uppercase (got '{}')",
+                            name
+                        );
                     }
                     self.advance();
                     type_params.push(name);
                 } else {
-                    bail_parse_at!(self.current_span(), "Expected size parameter [n] or type parameter in generics");
+                    bail_parse_at!(
+                        self.current_span(),
+                        "Expected size parameter [n] or type parameter in generics"
+                    );
                 }
 
                 if !self.check(&Token::Comma) {
@@ -936,7 +979,10 @@ impl<'a> Parser<'a> {
         }
 
         if size_vars.is_empty() {
-            bail_parse_at!(self.current_span(), "Existential type must have at least one size variable");
+            bail_parse_at!(
+                self.current_span(),
+                "Existential type must have at least one size variable"
+            );
         }
 
         self.expect(Token::Dot)?;
@@ -2092,7 +2138,8 @@ impl<'a> Parser<'a> {
                 self.advance();
                 name
             } else {
-                bail_parse_at!(self.current_span(), 
+                bail_parse_at!(
+                    self.current_span(),
                     "Expected field name in record literal, got {:?} at {}",
                     self.peek(),
                     self.current_span()
@@ -2299,7 +2346,10 @@ impl<'a> Parser<'a> {
         }
 
         if cases.is_empty() {
-            bail_parse_at!(self.current_span(), "Match expression must have at least one case");
+            bail_parse_at!(
+                self.current_span(),
+                "Match expression must have at least one case"
+            );
         }
 
         let span = start_span.merge(&last_span);
@@ -2390,7 +2440,8 @@ impl<'a> Parser<'a> {
                     self.advance();
                 }
                 _ => {
-                    bail_parse_at!(self.current_span(), 
+                    bail_parse_at!(
+                        self.current_span(),
                         "Expected operator or ) in operator section at {}",
                         self.current_span()
                     );
@@ -2406,7 +2457,11 @@ impl<'a> Parser<'a> {
         const VALID_OP_CHARS: &str = "+-*/%=!><&^|";
         for ch in operator.chars() {
             if !VALID_OP_CHARS.contains(ch) {
-                bail_parse_at!(self.current_span(), "Invalid operator character '{}' in operator section", ch);
+                bail_parse_at!(
+                    self.current_span(),
+                    "Invalid operator character '{}' in operator section",
+                    ch
+                );
             }
         }
 

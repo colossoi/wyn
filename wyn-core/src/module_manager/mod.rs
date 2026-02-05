@@ -861,6 +861,7 @@ impl ModuleManager {
             keyword: decl.keyword,
             attributes: decl.attributes.clone(),
             name: decl.name.clone(),
+            name_span: decl.name_span,
             size_params: decl.size_params.clone(),
             type_params: decl.type_params.clone(),
             params: new_params,

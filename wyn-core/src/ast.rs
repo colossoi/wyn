@@ -301,6 +301,7 @@ pub struct Decl {
     pub keyword: &'static str, // Either "let" or "def"
     pub attributes: Vec<Attribute>,
     pub name: String,
+    pub name_span: Span,
     pub size_params: Vec<String>, // Size parameters: [n], [m]
     pub type_params: Vec<String>, // Type parameters: 'a, 'b
     pub params: Vec<Pattern>,     // Parameters as patterns (name, name:type, tuples, etc.)
@@ -320,6 +321,7 @@ pub struct EntryOutput {
 pub struct EntryDecl {
     pub entry_type: Attribute, // Attribute::Vertex, Attribute::Fragment, or Attribute::Compute
     pub name: String,
+    pub name_span: Span,
     pub size_params: Vec<String>,  // Size type parameters: <[n], [m]>
     pub type_params: Vec<String>,  // Regular type parameters: <T, U>
     pub params: Vec<Pattern>,      // Input parameters as patterns

@@ -936,16 +936,8 @@ fn find_all_references(ast: &ast::Program, target_name: &str, include_declaratio
     for decl in &ast.declarations {
         match decl {
             ast::Declaration::Decl(def) => {
-                // Check if this is the declaration
                 if def.name == target_name && include_declaration {
-                    // Use the body span's start line for the declaration
-                    let body_span = def.body.h.span;
-                    refs.push(Span {
-                        start_line: body_span.start_line,
-                        start_col: 1,
-                        end_line: body_span.start_line,
-                        end_col: def.name.len() + 5, // approximate
-                    });
+                    refs.push(def.name_span);
                 }
                 // Check parameters
                 for param in &def.params {
@@ -955,13 +947,7 @@ fn find_all_references(ast: &ast::Program, target_name: &str, include_declaratio
             }
             ast::Declaration::Entry(entry) => {
                 if entry.name == target_name && include_declaration {
-                    let body_span = entry.body.h.span;
-                    refs.push(Span {
-                        start_line: body_span.start_line,
-                        start_col: 1,
-                        end_line: body_span.start_line,
-                        end_col: entry.name.len() + 7,
-                    });
+                    refs.push(entry.name_span);
                 }
                 for param in &entry.params {
                     collect_refs_in_pattern(param, target_name, &mut refs);
