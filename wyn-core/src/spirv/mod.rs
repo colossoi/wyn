@@ -153,6 +153,17 @@ impl Constructor {
         }
     }
 
+    /// Resolve a pointer address-space type to a SPIR-V StorageClass.
+    fn resolve_storage_class(addrspace: &PolyType<TypeName>) -> StorageClass {
+        match addrspace {
+            PolyType::Constructed(TypeName::PointerFunction, _) => StorageClass::Function,
+            PolyType::Constructed(TypeName::PointerInput, _) => StorageClass::Input,
+            PolyType::Constructed(TypeName::PointerOutput, _) => StorageClass::Output,
+            PolyType::Constructed(TypeName::PointerStorage, _) => StorageClass::StorageBuffer,
+            _ => StorageClass::Function,
+        }
+    }
+
     /// Get or create a pointer type
     fn get_or_create_ptr_type(
         &mut self,
@@ -318,12 +329,16 @@ impl Constructor {
                         panic!("should never get here")
                     }
                     TypeName::Pointer => {
-                        // Pointer type: args[0] is pointee type
+                        // Pointer type: args[0] is pointee type, args[1] is address space
                         if args.is_empty() {
                             panic!("BUG: Pointer type requires a pointee type argument.");
                         }
                         let pointee_type = self.polytype_to_spirv(&args[0]);
-                        self.builder.type_pointer(None, StorageClass::Function, pointee_type)
+                        let sc = args
+                            .get(1)
+                            .map(Constructor::resolve_storage_class)
+                            .unwrap_or(StorageClass::Function);
+                        self.get_or_create_ptr_type(sc, pointee_type)
                     }
                     TypeName::Unique => {
                         // Unique type wrapper: strip and convert underlying type
@@ -346,12 +361,17 @@ impl Constructor {
                         // for type checking only. Map to unit type since it has no runtime representation.
                         self.void_type
                     }
-                    TypeName::ArrayVariantComposite | TypeName::ArrayVariantView => {
-                        // Address space markers are used within Array types but shouldn't appear
+                    TypeName::ArrayVariantComposite
+                    | TypeName::ArrayVariantView
+                    | TypeName::PointerFunction
+                    | TypeName::PointerInput
+                    | TypeName::PointerOutput
+                    | TypeName::PointerStorage => {
+                        // Address space markers are used within Array/Pointer types but shouldn't appear
                         // as standalone types requiring SPIR-V representation.
                         panic!(
                             "BUG: Address space marker {:?} reached polytype_to_spirv as standalone type. \
-                            This should only appear as part of Array[elem, addrspace, size]. Full type: {:?}",
+                            This should only appear as part of Array[elem, addrspace, size] or Pointer[pointee, addrspace]. Full type: {:?}",
                             name, ty
                         );
                     }
@@ -1646,10 +1666,13 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
 
         // Dispatch based on the base type
         match base_ty {
-            PolyType::Constructed(TypeName::Pointer, _) => {
+            PolyType::Constructed(TypeName::Pointer, ptr_args) => {
                 // Pointer indexing: access_chain + load
-                let elem_ptr_type =
-                    self.constructor.builder.type_pointer(None, StorageClass::Function, result_ty);
+                let sc = ptr_args
+                    .get(1)
+                    .map(Constructor::resolve_storage_class)
+                    .unwrap_or(StorageClass::Function);
+                let elem_ptr_type = self.constructor.get_or_create_ptr_type(sc, result_ty);
                 let elem_ptr =
                     self.constructor.builder.access_chain(elem_ptr_type, None, base_id, [index_id])?;
                 Ok(self.constructor.builder.load(result_ty, None, elem_ptr, None, [])?)

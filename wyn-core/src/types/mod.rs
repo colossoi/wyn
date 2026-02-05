@@ -160,6 +160,15 @@ pub enum TypeName {
     /// Pointer type - result of Materialize, used for indexing/access.
     /// Type args: [pointee_type, addrspace]
     Pointer,
+    // --- Pointer address spaces (used as args[1] in Pointer types) ---
+    /// Function-local pointer (SPIR-V StorageClass::Function).
+    PointerFunction,
+    /// Input variable pointer (SPIR-V StorageClass::Input).
+    PointerInput,
+    /// Output variable pointer (SPIR-V StorageClass::Output).
+    PointerOutput,
+    /// Storage buffer pointer (SPIR-V StorageClass::StorageBuffer).
+    PointerStorage,
 
     // --- Array variants (how the array is represented at runtime) ---
     /// View variant - {ptr, len} struct pointing into storage buffer.
@@ -229,6 +238,10 @@ impl std::fmt::Display for TypeName {
                 write!(f, "?{}.", vars.join(" "))
             }
             TypeName::Pointer => write!(f, "Ptr"),
+            TypeName::PointerFunction => write!(f, "PtrFunction"),
+            TypeName::PointerInput => write!(f, "PtrInput"),
+            TypeName::PointerOutput => write!(f, "PtrOutput"),
+            TypeName::PointerStorage => write!(f, "PtrStorage"),
             TypeName::ArrayVariantView => write!(f, "view"),
             TypeName::ArrayVariantComposite => write!(f, "composite"),
             TypeName::ArrayVariantVirtual => write!(f, "virtual"),
@@ -285,6 +298,10 @@ impl polytype::Name for TypeName {
             }
             TypeName::Existential(vars) => format!("?{}.", vars.join(" ")),
             TypeName::Pointer => "Ptr".to_string(),
+            TypeName::PointerFunction => "PtrFunction".to_string(),
+            TypeName::PointerInput => "PtrInput".to_string(),
+            TypeName::PointerOutput => "PtrOutput".to_string(),
+            TypeName::PointerStorage => "PtrStorage".to_string(),
             TypeName::ArrayVariantView => "view".to_string(),
             TypeName::ArrayVariantComposite => "composite".to_string(),
             TypeName::ArrayVariantVirtual => "virtual".to_string(),

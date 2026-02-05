@@ -141,6 +141,10 @@ fn format_constructed_type(name: &TypeName, args: &[PolyType<TypeName>]) -> Stri
             // Ptr<T>
             if args.len() == 1 { format!("Ptr<{}>", format_type(&args[0])) } else { "Ptr<?>".to_string() }
         }
+        TypeName::PointerFunction => "PtrFunction".to_string(),
+        TypeName::PointerInput => "PtrInput".to_string(),
+        TypeName::PointerOutput => "PtrOutput".to_string(),
+        TypeName::PointerStorage => "PtrStorage".to_string(),
         TypeName::ArrayVariantView => "view".to_string(),
         TypeName::ArrayVariantComposite => "composite".to_string(),
         TypeName::ArrayVariantVirtual => "virtual".to_string(),

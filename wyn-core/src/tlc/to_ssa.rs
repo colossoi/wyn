@@ -322,7 +322,13 @@ fn convert_entry_point(
 
         if outputs.len() == 1 {
             // Single output: store result directly
-            let ptr_ty = Type::Constructed(TypeName::Pointer, vec![outputs[0].ty.clone()]);
+            let ptr_ty = Type::Constructed(
+                TypeName::Pointer,
+                vec![
+                    outputs[0].ty.clone(),
+                    Type::Constructed(TypeName::PointerOutput, vec![]),
+                ],
+            );
             let ptr = converter
                 .builder
                 .push_output_ptr(0, ptr_ty, span, node_id)
@@ -338,7 +344,13 @@ fn convert_entry_point(
                     .builder
                     .push_project(result, i as u32, output.ty.clone(), span, node_id)
                     .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
-                let ptr_ty = Type::Constructed(TypeName::Pointer, vec![output.ty.clone()]);
+                let ptr_ty = Type::Constructed(
+                    TypeName::Pointer,
+                    vec![
+                        output.ty.clone(),
+                        Type::Constructed(TypeName::PointerOutput, vec![]),
+                    ],
+                );
                 let ptr = converter
                     .builder
                     .push_output_ptr(i, ptr_ty, span, node_id)
