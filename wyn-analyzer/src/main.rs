@@ -66,6 +66,7 @@ impl LanguageServer for Backend {
                     ..Default::default()
                 }),
                 definition_provider: Some(OneOf::Left(true)),
+                references_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 signature_help_provider: Some(SignatureHelpOptions {
                     trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
@@ -244,6 +245,46 @@ impl LanguageServer for Backend {
                     uri: uri.clone(),
                     range,
                 })));
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let uri = &params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
+
+        let line = pos.line as usize + 1;
+        let col = pos.character as usize + 1;
+
+        let docs = self.documents.read().ok();
+        let doc = docs.as_ref().and_then(|d| d.get(uri));
+
+        if let Some(doc) = doc {
+            // Find the name at cursor position
+            if let Some(name) = find_name_at_position(&doc.ast, line, col) {
+                let include_declaration = params.context.include_declaration;
+                let refs = find_all_references(&doc.ast, &name, include_declaration);
+                let locations: Vec<Location> = refs
+                    .into_iter()
+                    .map(|span| Location {
+                        uri: uri.clone(),
+                        range: Range {
+                            start: Position {
+                                line: span.start_line.saturating_sub(1) as u32,
+                                character: span.start_col.saturating_sub(1) as u32,
+                            },
+                            end: Position {
+                                line: span.end_line.saturating_sub(1) as u32,
+                                character: span.end_col.saturating_sub(1) as u32,
+                            },
+                        },
+                    })
+                    .collect();
+                if !locations.is_empty() {
+                    return Ok(Some(locations));
+                }
             }
         }
 
@@ -685,6 +726,337 @@ fn find_declaration_name_at(ast: &ast::Program, line: usize, col: usize) -> Opti
         }
     }
     None
+}
+
+/// Find the name at cursor position (identifier or declaration name)
+fn find_name_at_position(ast: &ast::Program, line: usize, col: usize) -> Option<String> {
+    // Check if on a declaration name first
+    if let Some((name, _)) = find_declaration_name_at(ast, line, col) {
+        return Some(name);
+    }
+
+    // Check if on an identifier in an expression
+    for decl in &ast.declarations {
+        match decl {
+            ast::Declaration::Decl(def) => {
+                // Check parameters
+                for param in &def.params {
+                    if let Some(name) = find_name_in_pattern(param, line, col) {
+                        return Some(name);
+                    }
+                }
+                if let Some(name) = find_name_in_expr(&def.body, line, col) {
+                    return Some(name);
+                }
+            }
+            ast::Declaration::Entry(entry) => {
+                for param in &entry.params {
+                    if let Some(name) = find_name_in_pattern(param, line, col) {
+                        return Some(name);
+                    }
+                }
+                if let Some(name) = find_name_in_expr(&entry.body, line, col) {
+                    return Some(name);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn find_name_in_pattern(pat: &ast::Pattern, line: usize, col: usize) -> Option<String> {
+    if !pat.h.span.contains(line, col) {
+        return None;
+    }
+    match &pat.kind {
+        ast::PatternKind::Name(name) => Some(name.clone()),
+        ast::PatternKind::Tuple(pats) => {
+            for p in pats {
+                if let Some(name) = find_name_in_pattern(p, line, col) {
+                    return Some(name);
+                }
+            }
+            None
+        }
+        ast::PatternKind::Constructor(_, pats) => {
+            for p in pats {
+                if let Some(name) = find_name_in_pattern(p, line, col) {
+                    return Some(name);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn find_name_in_expr(expr: &ast::Expression, line: usize, col: usize) -> Option<String> {
+    if !expr.h.span.contains(line, col) {
+        return None;
+    }
+
+    use ast::ExprKind::*;
+    match &expr.kind {
+        Identifier(_, name) => {
+            if expr.h.span.contains(line, col) {
+                return Some(name.clone());
+            }
+        }
+        Application(func, args) => {
+            if let Some(name) = find_name_in_expr(func, line, col) {
+                return Some(name);
+            }
+            for arg in args {
+                if let Some(name) = find_name_in_expr(arg, line, col) {
+                    return Some(name);
+                }
+            }
+        }
+        Lambda(lambda) => {
+            for param in &lambda.params {
+                if let Some(name) = find_name_in_pattern(param, line, col) {
+                    return Some(name);
+                }
+            }
+            return find_name_in_expr(&lambda.body, line, col);
+        }
+        LetIn(let_in) => {
+            if let Some(name) = find_name_in_pattern(&let_in.pattern, line, col) {
+                return Some(name);
+            }
+            if let Some(name) = find_name_in_expr(&let_in.value, line, col) {
+                return Some(name);
+            }
+            return find_name_in_expr(&let_in.body, line, col);
+        }
+        If(if_expr) => {
+            if let Some(name) = find_name_in_expr(&if_expr.condition, line, col) {
+                return Some(name);
+            }
+            if let Some(name) = find_name_in_expr(&if_expr.then_branch, line, col) {
+                return Some(name);
+            }
+            return find_name_in_expr(&if_expr.else_branch, line, col);
+        }
+        BinaryOp(_, lhs, rhs) => {
+            if let Some(name) = find_name_in_expr(lhs, line, col) {
+                return Some(name);
+            }
+            return find_name_in_expr(rhs, line, col);
+        }
+        UnaryOp(_, operand) => {
+            return find_name_in_expr(operand, line, col);
+        }
+        Tuple(elems) | ArrayLiteral(elems) | VecMatLiteral(elems) => {
+            for elem in elems {
+                if let Some(name) = find_name_in_expr(elem, line, col) {
+                    return Some(name);
+                }
+            }
+        }
+        ArrayIndex(arr, idx) => {
+            if let Some(name) = find_name_in_expr(arr, line, col) {
+                return Some(name);
+            }
+            return find_name_in_expr(idx, line, col);
+        }
+        ArrayWith { array, index, value } => {
+            if let Some(name) = find_name_in_expr(array, line, col) {
+                return Some(name);
+            }
+            if let Some(name) = find_name_in_expr(index, line, col) {
+                return Some(name);
+            }
+            return find_name_in_expr(value, line, col);
+        }
+        FieldAccess(base, _) => {
+            return find_name_in_expr(base, line, col);
+        }
+        Loop(loop_expr) => {
+            if let Some(name) = find_name_in_pattern(&loop_expr.pattern, line, col) {
+                return Some(name);
+            }
+            if let Some(init) = &loop_expr.init {
+                if let Some(name) = find_name_in_expr(init, line, col) {
+                    return Some(name);
+                }
+            }
+            return find_name_in_expr(&loop_expr.body, line, col);
+        }
+        Match(match_expr) => {
+            if let Some(name) = find_name_in_expr(&match_expr.scrutinee, line, col) {
+                return Some(name);
+            }
+            for case in &match_expr.cases {
+                if let Some(name) = find_name_in_pattern(&case.pattern, line, col) {
+                    return Some(name);
+                }
+                if let Some(name) = find_name_in_expr(&case.body, line, col) {
+                    return Some(name);
+                }
+            }
+        }
+        TypeCoercion(inner, _) | TypeAscription(inner, _) => {
+            return find_name_in_expr(inner, line, col);
+        }
+        _ => {}
+    }
+    None
+}
+
+/// Find all references to a name in the AST
+fn find_all_references(ast: &ast::Program, target_name: &str, include_declaration: bool) -> Vec<Span> {
+    let mut refs = Vec::new();
+
+    for decl in &ast.declarations {
+        match decl {
+            ast::Declaration::Decl(def) => {
+                // Check if this is the declaration
+                if def.name == target_name && include_declaration {
+                    // Use the body span's start line for the declaration
+                    let body_span = def.body.h.span;
+                    refs.push(Span {
+                        start_line: body_span.start_line,
+                        start_col: 1,
+                        end_line: body_span.start_line,
+                        end_col: def.name.len() + 5, // approximate
+                    });
+                }
+                // Check parameters
+                for param in &def.params {
+                    collect_refs_in_pattern(param, target_name, &mut refs);
+                }
+                collect_refs_in_expr(&def.body, target_name, &mut refs);
+            }
+            ast::Declaration::Entry(entry) => {
+                if entry.name == target_name && include_declaration {
+                    let body_span = entry.body.h.span;
+                    refs.push(Span {
+                        start_line: body_span.start_line,
+                        start_col: 1,
+                        end_line: body_span.start_line,
+                        end_col: entry.name.len() + 7,
+                    });
+                }
+                for param in &entry.params {
+                    collect_refs_in_pattern(param, target_name, &mut refs);
+                }
+                collect_refs_in_expr(&entry.body, target_name, &mut refs);
+            }
+            _ => {}
+        }
+    }
+
+    refs
+}
+
+fn collect_refs_in_pattern(pat: &ast::Pattern, target: &str, refs: &mut Vec<Span>) {
+    match &pat.kind {
+        ast::PatternKind::Name(name) if name == target => {
+            refs.push(pat.h.span);
+        }
+        ast::PatternKind::Tuple(pats) | ast::PatternKind::Constructor(_, pats) => {
+            for p in pats {
+                collect_refs_in_pattern(p, target, refs);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_refs_in_expr(expr: &ast::Expression, target: &str, refs: &mut Vec<Span>) {
+    use ast::ExprKind::*;
+    match &expr.kind {
+        Identifier(_, name) if name == target => {
+            refs.push(expr.h.span);
+        }
+        Application(func, args) => {
+            collect_refs_in_expr(func, target, refs);
+            for arg in args {
+                collect_refs_in_expr(arg, target, refs);
+            }
+        }
+        Lambda(lambda) => {
+            for param in &lambda.params {
+                collect_refs_in_pattern(param, target, refs);
+            }
+            collect_refs_in_expr(&lambda.body, target, refs);
+        }
+        LetIn(let_in) => {
+            collect_refs_in_pattern(&let_in.pattern, target, refs);
+            collect_refs_in_expr(&let_in.value, target, refs);
+            collect_refs_in_expr(&let_in.body, target, refs);
+        }
+        If(if_expr) => {
+            collect_refs_in_expr(&if_expr.condition, target, refs);
+            collect_refs_in_expr(&if_expr.then_branch, target, refs);
+            collect_refs_in_expr(&if_expr.else_branch, target, refs);
+        }
+        BinaryOp(_, lhs, rhs) => {
+            collect_refs_in_expr(lhs, target, refs);
+            collect_refs_in_expr(rhs, target, refs);
+        }
+        UnaryOp(_, operand) => {
+            collect_refs_in_expr(operand, target, refs);
+        }
+        Tuple(elems) | ArrayLiteral(elems) | VecMatLiteral(elems) => {
+            for elem in elems {
+                collect_refs_in_expr(elem, target, refs);
+            }
+        }
+        ArrayIndex(arr, idx) => {
+            collect_refs_in_expr(arr, target, refs);
+            collect_refs_in_expr(idx, target, refs);
+        }
+        ArrayWith { array, index, value } => {
+            collect_refs_in_expr(array, target, refs);
+            collect_refs_in_expr(index, target, refs);
+            collect_refs_in_expr(value, target, refs);
+        }
+        FieldAccess(base, _) => {
+            collect_refs_in_expr(base, target, refs);
+        }
+        Loop(loop_expr) => {
+            collect_refs_in_pattern(&loop_expr.pattern, target, refs);
+            if let Some(init) = &loop_expr.init {
+                collect_refs_in_expr(init, target, refs);
+            }
+            collect_refs_in_expr(&loop_expr.body, target, refs);
+        }
+        RecordLiteral(fields) => {
+            for (_, value) in fields {
+                collect_refs_in_expr(value, target, refs);
+            }
+        }
+        Match(match_expr) => {
+            collect_refs_in_expr(&match_expr.scrutinee, target, refs);
+            for case in &match_expr.cases {
+                collect_refs_in_pattern(&case.pattern, target, refs);
+                collect_refs_in_expr(&case.body, target, refs);
+            }
+        }
+        TypeCoercion(inner, _) | TypeAscription(inner, _) => {
+            collect_refs_in_expr(inner, target, refs);
+        }
+        Range(range_expr) => {
+            collect_refs_in_expr(&range_expr.start, target, refs);
+            if let Some(step) = &range_expr.step {
+                collect_refs_in_expr(step, target, refs);
+            }
+            collect_refs_in_expr(&range_expr.end, target, refs);
+        }
+        Slice(slice_expr) => {
+            collect_refs_in_expr(&slice_expr.array, target, refs);
+            if let Some(start) = &slice_expr.start {
+                collect_refs_in_expr(start, target, refs);
+            }
+            if let Some(end) = &slice_expr.end {
+                collect_refs_in_expr(end, target, refs);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Find the definition site of an identifier at the given position
