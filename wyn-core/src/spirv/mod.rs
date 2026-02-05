@@ -587,7 +587,7 @@ impl Constructor {
 
     /// Declare a variable in the function's variables block
     fn declare_variable(&mut self, _name: &str, value_type: spirv::Word) -> Result<spirv::Word> {
-        let ptr_type = self.builder.type_pointer(None, StorageClass::Function, value_type);
+        let ptr_type = self.get_or_create_ptr_type(StorageClass::Function, value_type);
 
         // Save current block
         let current_idx = self.builder.selected_block();
