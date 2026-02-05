@@ -1411,14 +1411,42 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
             "reflect" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 71, operands)?),
 
             "_w_intrinsic_length" => {
-                // Array length - extract from struct
                 if args.len() != 1 {
                     bail_spirv!("_w_intrinsic_length requires 1 argument");
                 }
-                // For virtual arrays (ranges), length is at index 2 of struct {start, step, len}
-                // For view arrays, length is at index 1 of struct {ptr, len}
-                // TODO: dispatch based on array type
-                Ok(self.constructor.builder.composite_extract(result_ty, None, args[0], [2u32])?)
+
+                let arr_ty = self.body.get_value_type(ssa_args[0]);
+                match arr_ty {
+                    PolyType::Constructed(TypeName::Array, arr_args) if arr_args.len() >= 2 => {
+                        match &arr_args[1] {
+                            // View: struct {buffer_ptr, offset, len} — len at index 2
+                            PolyType::Constructed(TypeName::ArrayVariantView, _) => Ok(self
+                                .constructor
+                                .builder
+                                .composite_extract(result_ty, None, args[0], [2u32])?),
+                            // Virtual (range): struct {start, step, len} — len at index 2
+                            PolyType::Constructed(TypeName::ArrayVariantVirtual, _) => Ok(self
+                                .constructor
+                                .builder
+                                .composite_extract(result_ty, None, args[0], [2u32])?),
+                            // Composite: sized SPIR-V array — length is known from the type
+                            PolyType::Constructed(TypeName::ArrayVariantComposite, _) => {
+                                match &arr_args[2] {
+                                    PolyType::Constructed(TypeName::Size(n), _) => {
+                                        Ok(self.constructor.const_i32(*n as i32))
+                                    }
+                                    _ => {
+                                        bail_spirv!("_w_intrinsic_length: composite array has unknown size")
+                                    }
+                                }
+                            }
+                            _ => {
+                                bail_spirv!("_w_intrinsic_length: unknown array variant: {:?}", arr_args[1])
+                            }
+                        }
+                    }
+                    _ => bail_spirv!("_w_intrinsic_length: expected array type, got {:?}", arr_ty),
+                }
             }
 
             "_w_slice" => {
