@@ -75,6 +75,10 @@ struct Constructor {
     uniform_variables: HashMap<String, spirv::Word>,
     uniform_types: HashMap<String, spirv::Word>, // uniform name -> SPIR-V type ID
     uniform_load_cache: HashMap<String, spirv::Word>, // cached OpLoad results per function
+
+    // Storage buffer name maps (for program.storage declarations)
+    storage_variables: HashMap<String, spirv::Word>, // name -> var_id
+    storage_elem_types: HashMap<String, spirv::Word>, // name -> element SPIR-V type
     extract_cache: HashMap<(spirv::Word, u32), spirv::Word>, // CSE for OpCompositeExtract
 
     // Builtin function registry
@@ -138,6 +142,8 @@ impl Constructor {
             uniform_variables: HashMap::new(),
             uniform_types: HashMap::new(),
             uniform_load_cache: HashMap::new(),
+            storage_variables: HashMap::new(),
+            storage_elem_types: HashMap::new(),
             extract_cache: HashMap::new(),
             impl_source: ImplSource::default(),
             storage_buffers: HashMap::new(),
@@ -938,6 +944,11 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                     let member_ptr =
                         self.constructor.builder.access_chain(member_ptr_type, None, var_id, [zero])?;
                     self.constructor.builder.load(value_type, None, member_ptr, None, [])?
+                } else if self.constructor.storage_variables.contains_key(name) {
+                    bail_spirv!(
+                        "Direct global access to storage buffer '{}' is invalid; use array indexing",
+                        name
+                    )
                 } else if let Some(&func_id) = self.constructor.functions.get(name) {
                     // Global constant function - call it with no args to get the value.
                     // This handles `def verts: [3]vec4f32 = [...]` referenced as just `verts`.
@@ -2209,25 +2220,16 @@ fn lower_ssa_program_impl(program: &SsaProgram) -> Result<Vec<u32>> {
         constructor.uniform_types.insert(uniform.name.clone(), value_type);
     }
 
-    // Lower storage buffers
+    // Lower storage buffers (using proper Block-decorated runtime array wrapping)
     for storage in &program.storage {
-        let storage_type = constructor.polytype_to_spirv(&storage.ty);
-        let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, storage_type);
-        let var_id = constructor.builder.variable(ptr_type, None, spirv::StorageClass::StorageBuffer, None);
-
-        constructor.builder.decorate(
-            var_id,
-            spirv::Decoration::DescriptorSet,
-            [Operand::LiteralBit32(storage.set)],
-        );
-        constructor.builder.decorate(
-            var_id,
-            spirv::Decoration::Binding,
-            [Operand::LiteralBit32(storage.binding)],
-        );
-
-        constructor.uniform_variables.insert(storage.name.clone(), var_id);
-        constructor.uniform_types.insert(storage.name.clone(), storage_type);
+        let var_id = constructor.create_storage_buffer(&storage.ty, storage.set, storage.binding);
+        let elem_ty = match &storage.ty {
+            PolyType::Constructed(TypeName::Array, args) if !args.is_empty() => &args[0],
+            _ => &storage.ty,
+        };
+        let elem_spirv = constructor.polytype_to_spirv(elem_ty);
+        constructor.storage_variables.insert(storage.name.clone(), var_id);
+        constructor.storage_elem_types.insert(storage.name.clone(), elem_spirv);
     }
 
     // Forward-declare all functions first (so they can call each other in any order)
@@ -2273,6 +2275,13 @@ fn lower_ssa_program_impl(program: &SsaProgram) -> Result<Vec<u32>> {
             for &uniform_var in constructor.uniform_variables.values() {
                 if !interfaces.contains(&uniform_var) {
                     interfaces.push(uniform_var);
+                }
+            }
+
+            // Add all storage buffer variables to the interface
+            for &storage_var in constructor.storage_variables.values() {
+                if !interfaces.contains(&storage_var) {
+                    interfaces.push(storage_var);
                 }
             }
 
