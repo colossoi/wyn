@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use tower_lsp::jsonrpc::Result;
@@ -9,6 +11,16 @@ use wyn_core::TypeTable;
 use wyn_core::ast::{self, NodeCounter, NodeId, Span};
 use wyn_core::module_manager::{ModuleManager, PreElaboratedPrelude};
 use wyn_core::types::{Type, TypeName, TypeScheme, format_scheme};
+
+static VERBOSE: AtomicBool = AtomicBool::new(false);
+
+macro_rules! verbose {
+    ($($arg:tt)*) => {
+        if VERBOSE.load(Ordering::Relaxed) {
+            let _ = writeln!(std::io::stderr(), $($arg)*);
+        }
+    };
+}
 
 /// Cached prelude data AND the node counter state after parsing it
 static PRELUDE_CACHE: OnceLock<(PreElaboratedPrelude, NodeCounter)> = OnceLock::new();
@@ -51,7 +63,8 @@ impl Backend {
 
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
-    async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
+    async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        verbose!("[wyn-analyzer] initialize request from {:?}", params.root_uri);
         Ok(InitializeResult {
             server_info: Some(ServerInfo {
                 name: "wyn-analyzer".to_string(),
@@ -79,14 +92,17 @@ impl LanguageServer for Backend {
     }
 
     async fn initialized(&self, _: InitializedParams) {
+        verbose!("[wyn-analyzer] initialized");
         self.client.log_message(MessageType::INFO, "wyn-analyzer initialized").await;
     }
 
     async fn shutdown(&self) -> Result<()> {
+        verbose!("[wyn-analyzer] shutdown");
         Ok(())
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
+        verbose!("[wyn-analyzer] didOpen {}", params.text_document.uri);
         self.on_change(TextDocumentItem {
             uri: params.text_document.uri,
             language_id: params.text_document.language_id,
@@ -97,6 +113,7 @@ impl LanguageServer for Backend {
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        verbose!("[wyn-analyzer] didChange {}", params.text_document.uri);
         if let Some(change) = params.content_changes.into_iter().next() {
             self.on_change(TextDocumentItem {
                 uri: params.text_document.uri,
@@ -109,7 +126,7 @@ impl LanguageServer for Backend {
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
-        // Remove document from cache when closed
+        verbose!("[wyn-analyzer] didClose {}", params.text_document.uri);
         if let Ok(mut docs) = self.documents.write() {
             docs.remove(&params.text_document.uri);
         }
@@ -118,6 +135,7 @@ impl LanguageServer for Backend {
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
+        verbose!("[wyn-analyzer] hover {}:{}", pos.line, pos.character);
 
         // Convert 0-based LSP position to 1-based internal
         let line = pos.line as usize + 1;
@@ -171,6 +189,7 @@ impl LanguageServer for Backend {
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let uri = &params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
+        verbose!("[wyn-analyzer] completion {}:{}", pos.line, pos.character);
 
         // Check if triggered by '.'
         let is_dot_trigger = params
@@ -222,6 +241,7 @@ impl LanguageServer for Backend {
     ) -> Result<Option<GotoDefinitionResponse>> {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
+        verbose!("[wyn-analyzer] gotoDefinition {}:{}", pos.line, pos.character);
 
         let line = pos.line as usize + 1;
         let col = pos.character as usize + 1;
@@ -254,6 +274,7 @@ impl LanguageServer for Backend {
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
         let uri = &params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
+        verbose!("[wyn-analyzer] references {}:{}", pos.line, pos.character);
 
         let line = pos.line as usize + 1;
         let col = pos.character as usize + 1;
@@ -296,6 +317,7 @@ impl LanguageServer for Backend {
         params: DocumentSymbolParams,
     ) -> Result<Option<DocumentSymbolResponse>> {
         let uri = &params.text_document.uri;
+        verbose!("[wyn-analyzer] documentSymbol {}", uri);
         let docs = self.documents.read().ok();
         let doc = docs.as_ref().and_then(|d| d.get(uri));
 
@@ -311,6 +333,7 @@ impl LanguageServer for Backend {
     async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
+        verbose!("[wyn-analyzer] signatureHelp {}:{}", pos.line, pos.character);
 
         let line = pos.line as usize + 1;
         let col = pos.character as usize + 1;
@@ -357,6 +380,7 @@ impl LanguageServer for Backend {
 impl Backend {
     async fn on_change(&self, doc: TextDocumentItem) {
         let (diagnostics, state) = self.check_document(&doc.text);
+        verbose!("{}", format_check_result(&doc.uri, &diagnostics, state.is_some()));
 
         if let Some(state) = state {
             if let Ok(mut docs) = self.documents.write() {
@@ -1370,11 +1394,34 @@ fn declaration_to_symbol(decl: &ast::Declaration) -> Option<DocumentSymbol> {
     }
 }
 
+fn format_check_result(uri: &Url, diagnostics: &[Diagnostic], ok: bool) -> String {
+    let status = if ok { "ok" } else { "failed" };
+    let count = diagnostics.len();
+    match diagnostics.first() {
+        Some(d) => format!(
+            "[wyn-analyzer] checked {} -> {} diagnostics ({}:{}: {}), {}",
+            uri,
+            count,
+            d.range.start.line + 1,
+            d.range.start.character + 1,
+            d.message,
+            status,
+        ),
+        None => format!("[wyn-analyzer] checked {} -> 0 diagnostics, {}", uri, status),
+    }
+}
+
 #[tokio::main]
 async fn main() {
+    if std::env::args().any(|a| a == "--verbose" || a == "-v") {
+        VERBOSE.store(true, Ordering::Relaxed);
+        let _ = writeln!(std::io::stderr(), "[wyn-analyzer] verbose mode enabled");
+    }
+
     // Pre-initialize the prelude cache before starting the server
     // so any errors are caught early
     let _ = get_prelude();
+    verbose!("[wyn-analyzer] prelude cached");
 
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
