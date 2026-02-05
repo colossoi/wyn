@@ -277,7 +277,7 @@ impl<'a> Transformer<'a> {
         symbols: &'a mut SymbolTable,
         top_level_symbols: &'a mut HashMap<String, SymbolId>,
     ) -> Self {
-        let placeholder_sym = symbols.alloc("_placeholder".to_string());
+        let placeholder_sym = symbols.alloc("_w_placeholder".to_string());
         Self {
             type_table,
             term_ids: TermIdSource::new(),
@@ -296,7 +296,7 @@ impl<'a> Transformer<'a> {
         top_level_symbols: &'a mut HashMap<String, SymbolId>,
         namespace: &str,
     ) -> Self {
-        let placeholder_sym = symbols.alloc("_placeholder".to_string());
+        let placeholder_sym = symbols.alloc("_w_placeholder".to_string());
         Self {
             type_table,
             term_ids: TermIdSource::new(),
@@ -642,7 +642,7 @@ impl<'a> Transformer<'a> {
             }
 
             ast::PatternKind::Wildcard => {
-                let fresh_name = format!("_wild_{}", self.term_ids.next_id().0);
+                let fresh_name = format!("_w_wild_{}", self.term_ids.next_id().0);
                 let sym = self.define(&fresh_name);
                 if is_top_level {
                     // Top-level Wildcard: no binding needed
@@ -663,7 +663,7 @@ impl<'a> Transformer<'a> {
             }
 
             ast::PatternKind::Tuple(patterns) => {
-                let fresh_name = format!("_tup_{}", self.term_ids.next_id().0);
+                let fresh_name = format!("_w_tup_{}", self.term_ids.next_id().0);
                 let fresh_sym = self.define(&fresh_name);
                 let tuple_ty = scrutinee.ty.clone();
                 let component_types = self.extract_tuple_types(&tuple_ty, patterns.len());
@@ -692,7 +692,7 @@ impl<'a> Transformer<'a> {
             }
 
             ast::PatternKind::Record(fields) => {
-                let fresh_name = format!("_rec_{}", self.term_ids.next_id().0);
+                let fresh_name = format!("_w_rec_{}", self.term_ids.next_id().0);
                 let fresh_sym = self.define(&fresh_name);
                 let record_ty = scrutinee.ty.clone();
                 let field_types = self.extract_record_types(&record_ty);
@@ -794,7 +794,7 @@ impl<'a> Transformer<'a> {
     fn simple_pattern_name(&mut self, pattern: &ast::Pattern) -> Option<String> {
         match &pattern.kind {
             ast::PatternKind::Name(name) => Some(name.clone()),
-            ast::PatternKind::Wildcard => Some(format!("_wild_{}", self.term_ids.next_id().0)),
+            ast::PatternKind::Wildcard => Some(format!("_w_wild_{}", self.term_ids.next_id().0)),
             ast::PatternKind::Typed(inner, _) | ast::PatternKind::Attributed(_, inner) => {
                 self.simple_pattern_name(inner)
             }
@@ -1182,7 +1182,7 @@ impl<'a> Transformer<'a> {
             ast::LoopForm::ForIn(elem_pattern, iter) => {
                 let iter_term = self.transform_expr(iter);
                 let elem_ty = self.get_array_element_type(&iter_term.ty);
-                let elem_var_name = elem_pattern.simple_name().unwrap_or("_elem").to_string();
+                let elem_var_name = elem_pattern.simple_name().unwrap_or("_w_elem").to_string();
                 let elem_var_sym = self.define(&elem_var_name);
 
                 self.mk_term(
@@ -1240,7 +1240,7 @@ impl<'a> Transformer<'a> {
         }
 
         // For complex patterns, create a fresh loop_var and build projections
-        let loop_var_name = format!("_loop_{}", self.term_ids.next_id().0);
+        let loop_var_name = format!("_w_loop_{}", self.term_ids.next_id().0);
         let loop_var_sym = self.define(&loop_var_name);
         let paths = binding_paths(pattern);
 
