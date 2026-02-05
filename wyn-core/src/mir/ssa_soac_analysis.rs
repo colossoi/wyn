@@ -22,6 +22,7 @@
 //! ```
 
 use crate::tlc::to_ssa::{EntryInput, ExecutionModel, SsaEntryPoint, SsaProgram};
+use crate::types::is_virtual_array;
 use std::collections::{HashMap, HashSet};
 
 use super::ssa::{BlockId, FuncBody, InstKind, Terminator, ValueId};
@@ -259,12 +260,9 @@ fn track_provenance(body: &FuncBody, value: ValueId, inputs: &[EntryInput]) -> A
     // Check if it's produced by an instruction
     for inst in &body.insts {
         if inst.result == Some(value) {
-            match &inst.kind {
-                InstKind::ArrayRange { .. } => {
-                    return ArrayProvenance::Range { value };
-                }
-                // Could trace through other instructions here
-                _ => {}
+            // Check if result type is a virtual array (range)
+            if is_virtual_array(&inst.result_ty) {
+                return ArrayProvenance::Range { value };
             }
         }
     }
@@ -338,8 +336,11 @@ fn analyze_compute_entry(entry: &SsaEntryPoint, local_size: (u32, u32, u32)) -> 
             // Track provenance of the input array
             let provenance = track_provenance(body, map_loop.input_array, &entry.inputs);
 
-            // Only parallelize if we have storage buffer provenance
-            if matches!(provenance, ArrayProvenance::EntryStorage { .. }) {
+            // Parallelize if we have storage buffer or range provenance
+            if matches!(
+                provenance,
+                ArrayProvenance::EntryStorage { .. } | ArrayProvenance::Range { .. }
+            ) {
                 parallelizable_map = Some(ParallelizableMap {
                     source: provenance,
                     map_function: map_loop.map_function.clone(),

@@ -1,0 +1,4 @@
+-- Simple test: map over iota to double values
+
+#[compute]
+entry double_iota() []i32 = map(|x| x * 2, iota(10))

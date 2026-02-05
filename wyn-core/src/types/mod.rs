@@ -652,6 +652,11 @@ pub fn is_array_variant(ty: &Type) -> bool {
     )
 }
 
+/// Check if a type is an array with virtual variant (computed on-the-fly, like ranges/iota).
+pub fn is_virtual_array(ty: &Type) -> bool {
+    matches!(get_array_variant(ty), Some(TypeName::ArrayVariantVirtual))
+}
+
 /// Debug assertion that a type is valid as a top-level expression/variable type.
 /// Panics if the type is a marker type that should only appear nested inside other types:
 /// - Address space markers (AddressStorage, AddressFunction, AddressPlaceholder)

@@ -23,6 +23,7 @@ pub mod lowering_common;
 pub mod tlc;
 
 pub mod glsl;
+pub mod parallelization;
 pub mod resolve_placeholders;
 pub mod spirv;
 
@@ -762,7 +763,7 @@ pub struct SsaConverted {
 impl SsaConverted {
     /// Parallelize SOACs in compute shaders.
     pub fn parallelize_soacs(self) -> SsaParallelized {
-        let ssa = mir::ssa_parallelize::parallelize_soacs(self.ssa);
+        let ssa = parallelization::parallelize_soacs(self.ssa);
         SsaParallelized { ssa }
     }
 }

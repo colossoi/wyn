@@ -7,7 +7,6 @@
 //!
 //! - `ssa`: Core SSA types (FuncBody, Inst, InstKind, Terminator, etc.)
 //! - `ssa_builder`: Builder for constructing SSA functions
-//! - `ssa_parallelize`: SOAC (Sequence of Array Combinators) parallelization
 //! - `ssa_soac_analysis`: Analysis for identifying SOAC patterns
 //! - `ssa_verify`: Verification of SSA invariants
 //! - `layout`: Type layout calculations for SPIR-V memory operations
@@ -15,7 +14,6 @@
 pub mod layout;
 pub mod ssa;
 pub mod ssa_builder;
-pub mod ssa_parallelize;
 pub mod ssa_soac_analysis;
 pub mod ssa_verify;
 
