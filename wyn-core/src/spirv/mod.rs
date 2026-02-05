@@ -1575,8 +1575,7 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                     gid,
                     [0],
                 )?;
-                // Convert to i32 (result_ty should be i32)
-                Ok(self.constructor.builder.bitcast(result_ty, None, thread_id_u32)?)
+                Ok(thread_id_u32)
             }
 
             "_w_storage_len" => {
@@ -1612,8 +1611,7 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                     0, // Member index of the runtime array in the struct
                 )?;
 
-                // Convert to i32 if needed
-                Ok(self.constructor.builder.bitcast(result_ty, None, len_u32)?)
+                Ok(len_u32)
             }
 
             _ => bail_spirv!("Unknown intrinsic: {}", name),
@@ -1691,7 +1689,9 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
         let offset_val =
             self.constructor.builder.composite_extract(self.constructor.u32_type, None, view_id, [1])?;
 
-        // Cast index to u32 if needed (index may be i32)
+        // Index may be i32 from the language; reinterpret as u32 for offset arithmetic.
+        // OpBitcast is the correct SPIR-V instruction for same-width integer reinterpretation.
+        // Negative indices are a semantic error caught earlier in the pipeline.
         let index_u32 = self.constructor.builder.bitcast(self.constructor.u32_type, None, index_id)?;
 
         // Compute final index = offset + index
