@@ -79,8 +79,8 @@ impl LanguageServer for Backend {
                     trigger_characters: Some(vec![".".to_string()]),
                     ..Default::default()
                 }),
-                semantic_tokens_provider: Some(
-                    SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
+                semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
+                    SemanticTokensOptions {
                         legend: SemanticTokensLegend {
                             token_types: TOKEN_TYPES.to_vec(),
                             token_modifiers: vec![],
@@ -88,8 +88,8 @@ impl LanguageServer for Backend {
                         full: Some(SemanticTokensFullOptions::Bool(true)),
                         range: None,
                         ..Default::default()
-                    }),
-                ),
+                    },
+                )),
                 definition_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
@@ -405,7 +405,11 @@ impl LanguageServer for Backend {
         };
 
         let tokens = compute_semantic_tokens(&text);
-        verbose!("[wyn-analyzer] semanticTokens/full {} -> {} tokens", uri, tokens.len());
+        verbose!(
+            "[wyn-analyzer] semanticTokens/full {} -> {} tokens",
+            uri,
+            tokens.len()
+        );
 
         Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
             result_id: None,
@@ -1451,9 +1455,8 @@ const TOKEN_TYPES: &[SemanticTokenType] = &[
 fn token_type_index(token: &lexer::Token) -> Option<u32> {
     use lexer::Token::*;
     match token {
-        Let | Def | Entry | Sig | In | If | Then | Else | Loop | For | While | Do | Match
-        | Case | Module | Functor | Open | Import | Type | Include | With | Extern | True
-        | False => Some(0), // KEYWORD
+        Let | Def | Entry | Sig | In | If | Then | Else | Loop | For | While | Do | Match | Case
+        | Module | Functor | Open | Import | Type | Include | With | Extern | True | False => Some(0), // KEYWORD
 
         IntLiteral(_) | FloatLiteral(_) | SuffixedLiteral(_, _) => Some(1), // NUMBER
 
@@ -1461,8 +1464,8 @@ fn token_type_index(token: &lexer::Token) -> Option<u32> {
 
         Comment(_) => Some(3), // COMMENT
 
-        BinOp(_) | Arrow | Assign | Pipe | PipeOp | Dot | DotDot | DotDotLt | DotDotGt
-        | Ellipsis | Star | Minus | Bang | TypeCoercion | Backslash => Some(4), // OPERATOR
+        BinOp(_) | Arrow | Assign | Pipe | PipeOp | Dot | DotDot | DotDotLt | DotDotGt | Ellipsis
+        | Star | Minus | Bang | TypeCoercion | Backslash => Some(4), // OPERATOR
 
         Identifier(_) => Some(5), // VARIABLE
 
@@ -1493,11 +1496,7 @@ fn compute_semantic_tokens(text: &str) -> Vec<SemanticToken> {
         let length = (lt.span.end_col - lt.span.start_col) as u32;
 
         let delta_line = line - prev_line;
-        let delta_start = if delta_line == 0 {
-            start - prev_start
-        } else {
-            start
-        };
+        let delta_start = if delta_line == 0 { start - prev_start } else { start };
 
         result.push(SemanticToken {
             delta_line,
