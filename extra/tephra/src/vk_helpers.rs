@@ -624,6 +624,14 @@ impl<'a> ComputePipeline<'a> {
 
             self.ctx.device.destroy_fence(fence, None);
 
+            // Reset pools so they can be reused on the next dispatch
+            self.ctx
+                .device
+                .reset_command_pool(self.command_pool, vk::CommandPoolResetFlags::empty())?;
+            self.ctx
+                .device
+                .reset_descriptor_pool(self.descriptor_pool, vk::DescriptorPoolResetFlags::empty())?;
+
             Ok(())
         }
     }
