@@ -3,6 +3,8 @@
 //! These traits abstract over how elements are read (input) and written (output)
 //! in parallelized compute shaders.
 
+use std::collections::HashMap;
+
 use crate::ast::TypeName;
 use crate::mir::ssa::{FuncBody, InstKind, ValueId};
 use crate::types::is_virtual_array;
@@ -184,8 +186,8 @@ fn extract_array_elem_type(ty: &Type<TypeName>) -> Option<Type<TypeName>> {
 
 impl InputStrategy for RangeInput {
     fn setup(&self, ctx: &mut ParallelizeCtx) -> Option<(ValueId, Type<TypeName>)> {
-        // Copy the length constant to the new builder
-        let new_len = copy_value_to_builder(ctx, &ctx.entry.body.clone(), self.len)?;
+        // Remap the length value (may be a computed expression) to the new builder
+        let new_len = remap_entry_value(ctx, self.len)?;
 
         // Convert to u32 for indexing
         let len_u32 = ctx.push_call("u32.i32", vec![new_len], ctx.u32_ty.clone())?;
@@ -203,13 +205,12 @@ impl InputStrategy for RangeInput {
                 Some(index_i32)
             }
             RangeKind::Explicit { start, step } => {
-                // Copy start (and step if present) to new builder
-                let body = ctx.entry.body.clone();
-                let new_start = copy_value_to_builder(ctx, &body, *start)?;
+                // Remap start (and step if present) to new builder
+                let new_start = remap_entry_value(ctx, *start)?;
 
                 // Compute: start + index * step (or start + index if step is 1)
                 let elem = if let Some(step) = step {
-                    let new_step = copy_value_to_builder(ctx, &body, *step)?;
+                    let new_step = remap_entry_value(ctx, *step)?;
                     let idx_times_step = ctx.push_binop("*", index_i32, new_step, self.elem_ty.clone())?;
                     ctx.push_binop("+", new_start, idx_times_step, self.elem_ty.clone())?
                 } else {
@@ -279,39 +280,161 @@ impl OutputStrategy for StorageOutput {
 // Helpers
 // =============================================================================
 
-/// Copy a value from the original body to the new builder.
-/// Handles constants (Int, Float) and entry point parameters.
-pub fn copy_value_to_builder(
-    ctx: &mut ParallelizeCtx,
-    original_body: &FuncBody,
+/// Recursively copy a value and its dependency cone from a source `FuncBody`
+/// into a target `FuncBuilder`. Uses a memo cache to avoid duplicating shared
+/// dependencies. Only pure (non-effectful) instructions are supported; returns
+/// `None` if an effectful instruction is encountered.
+pub fn remap_value(
+    source: &FuncBody,
     value: ValueId,
+    builder: &mut crate::mir::ssa_builder::FuncBuilder,
+    memo: &mut HashMap<ValueId, ValueId>,
+    span: crate::ast::Span,
+    node_id: crate::ast::NodeId,
 ) -> Option<ValueId> {
-    // Check if the value is an entry point parameter
-    for (i, (param_val, _, _)) in original_body.params.iter().enumerate() {
-        if *param_val == value {
-            return Some(ctx.builder.get_param(i));
-        }
+    // Check memo first
+    if let Some(&mapped) = memo.get(&value) {
+        return Some(mapped);
     }
 
-    // Check if it's a constant instruction
-    for inst in &original_body.insts {
-        if inst.result == Some(value) {
-            match &inst.kind {
-                InstKind::Int(int_val) => {
-                    return ctx
-                        .builder
-                        .push_int(int_val, inst.result_ty.clone(), ctx.span, ctx.node_id)
-                        .ok();
-                }
-                InstKind::Float(float_val) => {
-                    return ctx
-                        .builder
-                        .push_float(float_val, inst.result_ty.clone(), ctx.span, ctx.node_id)
-                        .ok();
-                }
-                _ => return None,
-            }
+    // Find the instruction that produces this value
+    let inst = source.insts.iter().find(|i| i.result == Some(value))?;
+
+    let new_val = match &inst.kind {
+        // Literals — push directly
+        InstKind::Int(v) => builder.push_int(v, inst.result_ty.clone(), span, node_id).ok()?,
+        InstKind::Float(v) => builder.push_float(v, inst.result_ty.clone(), span, node_id).ok()?,
+        InstKind::Bool(v) => builder.push_bool(*v, span, node_id).ok()?,
+        InstKind::Unit => builder.push_inst(InstKind::Unit, inst.result_ty.clone(), span, node_id).ok()?,
+        InstKind::String(v) => {
+            builder.push_inst(InstKind::String(v.clone()), inst.result_ty.clone(), span, node_id).ok()?
         }
-    }
-    None
+
+        // Binary / unary ops
+        InstKind::BinOp { op, lhs, rhs } => {
+            let new_lhs = remap_value(source, *lhs, builder, memo, span, node_id)?;
+            let new_rhs = remap_value(source, *rhs, builder, memo, span, node_id)?;
+            builder.push_binop(op, new_lhs, new_rhs, inst.result_ty.clone(), span, node_id).ok()?
+        }
+        InstKind::UnaryOp { op, operand } => {
+            let new_op = remap_value(source, *operand, builder, memo, span, node_id)?;
+            builder.push_unary(op, new_op, inst.result_ty.clone(), span, node_id).ok()?
+        }
+
+        // Aggregates
+        InstKind::Tuple(elems) => {
+            let new_elems = remap_values(source, elems, builder, memo, span, node_id)?;
+            builder.push_tuple(new_elems, inst.result_ty.clone(), span, node_id).ok()?
+        }
+        InstKind::Vector(elems) => {
+            let new_elems = remap_values(source, elems, builder, memo, span, node_id)?;
+            builder.push_inst(InstKind::Vector(new_elems), inst.result_ty.clone(), span, node_id).ok()?
+        }
+        InstKind::Matrix(rows) => {
+            let new_rows: Option<Vec<Vec<ValueId>>> = rows
+                .iter()
+                .map(|row| remap_values(source, row, builder, memo, span, node_id))
+                .collect();
+            builder
+                .push_inst(InstKind::Matrix(new_rows?), inst.result_ty.clone(), span, node_id)
+                .ok()?
+        }
+        InstKind::ArrayLit { elements } => {
+            let new_elems = remap_values(source, elements, builder, memo, span, node_id)?;
+            builder
+                .push_inst(InstKind::ArrayLit { elements: new_elems }, inst.result_ty.clone(), span, node_id)
+                .ok()?
+        }
+        InstKind::ArrayRange { start, len, step } => {
+            let new_start = remap_value(source, *start, builder, memo, span, node_id)?;
+            let new_len = remap_value(source, *len, builder, memo, span, node_id)?;
+            let new_step = match step {
+                Some(s) => Some(remap_value(source, *s, builder, memo, span, node_id)?),
+                None => None,
+            };
+            builder
+                .push_inst(
+                    InstKind::ArrayRange { start: new_start, len: new_len, step: new_step },
+                    inst.result_ty.clone(),
+                    span,
+                    node_id,
+                )
+                .ok()?
+        }
+
+        // Access
+        InstKind::Project { base, index } => {
+            let new_base = remap_value(source, *base, builder, memo, span, node_id)?;
+            builder.push_project(new_base, *index, inst.result_ty.clone(), span, node_id).ok()?
+        }
+        InstKind::Index { base, index } => {
+            let new_base = remap_value(source, *base, builder, memo, span, node_id)?;
+            let new_index = remap_value(source, *index, builder, memo, span, node_id)?;
+            builder.push_index(new_base, new_index, inst.result_ty.clone(), span, node_id).ok()?
+        }
+
+        // Calls
+        InstKind::Call { func, args } => {
+            let new_args = remap_values(source, args, builder, memo, span, node_id)?;
+            builder.push_call(func, new_args, inst.result_ty.clone(), span, node_id).ok()?
+        }
+        InstKind::Intrinsic { name, args } => {
+            let new_args = remap_values(source, args, builder, memo, span, node_id)?;
+            builder.push_intrinsic(name, new_args, inst.result_ty.clone(), span, node_id).ok()?
+        }
+
+        // References
+        InstKind::Global(name) => {
+            builder.push_global(name, inst.result_ty.clone(), span, node_id).ok()?
+        }
+        InstKind::Extern(name) => {
+            builder
+                .push_inst(InstKind::Extern(name.clone()), inst.result_ty.clone(), span, node_id)
+                .ok()?
+        }
+
+        // Effectful — cannot remap
+        InstKind::Alloca { .. }
+        | InstKind::Load { .. }
+        | InstKind::Store { .. }
+        | InstKind::StorageView { .. }
+        | InstKind::StorageViewIndex { .. }
+        | InstKind::StorageViewLen { .. }
+        | InstKind::OutputPtr { .. } => return None,
+    };
+
+    memo.insert(value, new_val);
+    Some(new_val)
+}
+
+/// Remap a slice of values, returning `None` if any cannot be remapped.
+fn remap_values(
+    source: &FuncBody,
+    values: &[ValueId],
+    builder: &mut crate::mir::ssa_builder::FuncBuilder,
+    memo: &mut HashMap<ValueId, ValueId>,
+    span: crate::ast::Span,
+    node_id: crate::ast::NodeId,
+) -> Option<Vec<ValueId>> {
+    values
+        .iter()
+        .map(|&v| remap_value(source, v, builder, memo, span, node_id))
+        .collect()
+}
+
+/// Convenience wrapper: remap a single value from the entry body using a fresh memo
+/// pre-seeded with entry param mappings.
+pub fn remap_entry_value(ctx: &mut ParallelizeCtx, value: ValueId) -> Option<ValueId> {
+    let body = ctx.entry.body.clone();
+    let span = ctx.span;
+    let node_id = ctx.node_id;
+
+    let mut memo: HashMap<ValueId, ValueId> = body
+        .params
+        .iter()
+        .enumerate()
+        .map(|(i, (src, _, _))| (*src, ctx.builder.get_param(i)))
+        .collect();
+
+    remap_value(&body, value, &mut ctx.builder, &mut memo, span, node_id)
 }

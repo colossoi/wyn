@@ -18,8 +18,10 @@ use crate::mir::ssa_soac_analysis::{ArrayProvenance, ParallelizableMap, analyze_
 use crate::tlc::to_ssa::{EntryOutput, ExecutionModel, SsaEntryPoint, SsaProgram};
 use polytype::Type;
 
+use std::collections::HashMap;
+
 pub use strategies::{
-    InputStrategy, OutputStrategy, RangeInput, StorageInput, StorageOutput, copy_value_to_builder,
+    InputStrategy, OutputStrategy, RangeInput, StorageInput, StorageOutput, remap_value,
 };
 
 /// Context passed to strategies during parallelization.
@@ -241,18 +243,30 @@ fn parallelize_entry(
 
     // Build the full argument list for the map function.
     // The original call may have captured variables (e.g. from defunctionalized lambdas)
-    // in addition to the loop element. Map each original arg to the new builder,
-    // substituting the element arg position with the new input_elem.
+    // in addition to the loop element. Remap each original arg's dependency cone into the
+    // new builder, substituting the element arg position with the new input_elem.
     let result_ty = &par_map.map_loop.map_result_ty;
     let call_args = {
-        let original_body = &entry.body;
+        // Shared memo pre-seeded with entry param → builder param mappings.
+        // Shared across all captured args to deduplicate common dependencies.
+        let mut remap_memo: HashMap<ValueId, ValueId> = entry
+            .body
+            .params
+            .iter()
+            .enumerate()
+            .map(|(i, (src, _, _))| (*src, ctx.builder.get_param(i)))
+            .collect();
+
+        let span = ctx.span;
+        let node_id = ctx.node_id;
         let mut args = Vec::new();
         for (i, &orig_arg) in par_map.map_loop.map_call_args.iter().enumerate() {
             if i == par_map.map_loop.element_arg_index {
                 args.push(input_elem);
             } else {
-                // Map the original value to the new builder (entry params)
-                let new_val = copy_value_to_builder(&mut ctx, original_body, orig_arg)?;
+                // Recursively remap the value and its dependency cone
+                let new_val =
+                    remap_value(&entry.body, orig_arg, &mut ctx.builder, &mut remap_memo, span, node_id)?;
                 args.push(new_val);
             }
         }
