@@ -201,6 +201,16 @@ impl<'a> StorageBuffer<'a> {
             Ok(output)
         }
     }
+
+    pub fn upload_u32(&mut self, data: &[u32]) -> Result<()> {
+        let as_f32: Vec<f32> = data.iter().map(|&v| f32::from_bits(v)).collect();
+        self.upload(&as_f32)
+    }
+
+    pub fn download_u32(&self) -> Result<Vec<u32>> {
+        let f32_data = self.download()?;
+        Ok(f32_data.iter().map(|v| v.to_bits()).collect())
+    }
 }
 
 impl Drop for StorageBuffer<'_> {

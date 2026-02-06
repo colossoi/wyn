@@ -39,6 +39,18 @@ struct Args {
     /// Path to pipeline configuration JSON (for multi-buffer mode)
     #[arg(short, long)]
     pipeline: Option<PathBuf>,
+
+    /// Bitcoin miner mode
+    #[arg(long)]
+    mine: bool,
+
+    /// Mining difficulty (leading zero bits in hash)
+    #[arg(long, default_value = "10")]
+    difficulty: u32,
+
+    /// Mining batch size (nonces per dispatch)
+    #[arg(long, default_value = "65536")]
+    batch_size: u32,
 }
 
 fn main() -> Result<()> {
@@ -51,6 +63,17 @@ fn main() -> Result<()> {
 
     // Simple mode: single buffer
     let shader = args.shader.expect("shader required without --pipeline");
+
+    // Mine mode: bitcoin miner
+    if args.mine {
+        return run_mine(
+            &shader,
+            &args.entry,
+            args.difficulty,
+            args.batch_size,
+            args.workgroup,
+        );
+    }
 
     // Parse input data
     let input_data: Vec<f32> = if args.input == "iota" {
@@ -187,6 +210,172 @@ fn run_pipeline(config_path: &PathBuf) -> Result<()> {
             if output.len() > 16 {
                 println!("  ... ({} total)", output.len());
             }
+        }
+    }
+
+    Ok(())
+}
+
+fn load_spirv_file(path: &std::path::Path) -> Result<Vec<u32>> {
+    let spirv_bytes = std::fs::read(path).with_context(|| format!("Failed to read shader: {:?}", path))?;
+    if spirv_bytes.len() % 4 != 0 {
+        bail!("SPIR-V file size must be a multiple of 4 bytes");
+    }
+    Ok(spirv_bytes
+        .chunks_exact(4)
+        .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect())
+}
+
+/// Count leading zero bits of a 256-bit hash in Bitcoin display order.
+/// Bitcoin displays hashes in reversed byte order: word[7] first, word[0] last,
+/// with bytes within each word also reversed.
+fn leading_zero_bits(hash: &[u32; 8]) -> u32 {
+    let mut zeros = 0u32;
+    // Bitcoin display order: word 7 down to word 0
+    for i in (0..8).rev() {
+        let word = hash[i].swap_bytes(); // reverse bytes within word
+        if word == 0 {
+            zeros += 32;
+        } else {
+            zeros += word.leading_zeros();
+            break;
+        }
+    }
+    zeros
+}
+
+fn format_hash(hash: &[u32; 8]) -> String {
+    // Bitcoin display order: reversed words, reversed bytes
+    let mut s = String::with_capacity(64);
+    for i in (0..8).rev() {
+        let bytes = hash[i].swap_bytes().to_be_bytes();
+        for b in bytes {
+            s.push_str(&format!("{:02x}", b));
+        }
+    }
+    s
+}
+
+fn run_mine(
+    shader_path: &std::path::Path,
+    entry_name: &str,
+    difficulty: u32,
+    batch_size: u32,
+    workgroup_size: u32,
+) -> Result<()> {
+    use std::time::Instant;
+
+    // Bitcoin genesis block header (80 bytes = 20 u32 words, big-endian)
+    // Version(1) + PrevHash(8) + MerkleRoot(8) + Time(1) + Bits(1) + Nonce(1)
+    // We pass the first 19 words (76 bytes) as header_base; the shader appends the nonce.
+    //
+    // Known answer: nonce = 0x1DAC2B7C (= 2083236893)
+    let header_base: [u32; 19] = [
+        0x01000000, // version
+        0x00000000, 0x00000000, 0x00000000, 0x00000000, // prev hash (all zeros for genesis)
+        0x00000000, 0x00000000, 0x00000000, 0x00000000, //
+        0x3BA3EDFD, 0x7A7B12B2, 0x7AC72C3E, 0x67768F61, // merkle root
+        0x7FC81BC3, 0x888A5132, 0x3A9FB8AA, 0x4B1E5E4A, //
+        0x29AB5F49, // time (2009-01-03 18:15:05 UTC)
+        0xFFFF001D, // bits (difficulty target)
+    ];
+
+    let spirv = load_spirv_file(shader_path)?;
+
+    eprintln!("tephra mine v0.1");
+
+    let ctx = ComputeContext::new()?;
+    eprintln!("Device: {}", ctx.device_name());
+    eprintln!("Header: Bitcoin genesis block (2009-01-03)");
+    eprintln!("Target: {} leading zero bits", difficulty);
+    eprintln!("Batch:  {} nonces/round", batch_size);
+    eprintln!();
+
+    // Output buffer: batch_size * 8 u32 values (one 8-word hash per nonce)
+    let output_len = batch_size as usize * 8;
+    let mut output_buf = StorageBuffer::new(&ctx, output_len)?;
+    output_buf.upload_u32(&vec![0u32; output_len])?;
+
+    // Push constants: 19 u32 header_base (76 bytes) + 1 i32 n (4 bytes) = 80 bytes
+    let push_constant_size = 80u32;
+    let binding_count = 1u32;
+
+    let pipeline =
+        ctx.create_compute_pipeline_multi(&spirv, entry_name, binding_count, push_constant_size)?;
+
+    let num_workgroups = (batch_size + workgroup_size - 1) / workgroup_size;
+
+    let mut best_zeros = 0u32;
+    let mut total_hashes = 0u64;
+    let start_time = Instant::now();
+
+    eprintln!("Mining...");
+
+    // Mining loop: each round tries batch_size nonces
+    for round in 0u32.. {
+        // Build push constant data: header_base (76 bytes) + batch_size as i32 (4 bytes)
+        let mut pc_bytes: Vec<u8> = Vec::with_capacity(80);
+        for &word in &header_base {
+            pc_bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        pc_bytes.extend_from_slice(&(batch_size as i32).to_le_bytes());
+
+        // Zero the output buffer
+        output_buf.upload_u32(&vec![0u32; output_len])?;
+
+        pipeline.dispatch_multi(&[&output_buf], [num_workgroups, 1, 1], &pc_bytes)?;
+
+        let output = output_buf.download_u32()?;
+        total_hashes += batch_size as u64;
+
+        let elapsed = start_time.elapsed().as_secs_f64();
+        let hashrate = total_hashes as f64 / elapsed;
+
+        // Scan hashes
+        let mut round_best_zeros = 0u32;
+        let mut round_best_nonce = 0u32;
+        let mut round_best_hash = [0u32; 8];
+
+        for i in 0..batch_size as usize {
+            let mut hash = [0u32; 8];
+            hash.copy_from_slice(&output[i * 8..(i + 1) * 8]);
+
+            let zeros = leading_zero_bits(&hash);
+            if zeros > round_best_zeros {
+                round_best_zeros = zeros;
+                round_best_nonce = i as u32;
+                round_best_hash = hash;
+            }
+        }
+
+        eprint!(
+            "\r  Round {} | {} hashes | {:.1} kH/s | best: {} bits",
+            round + 1,
+            total_hashes,
+            hashrate / 1000.0,
+            best_zeros.max(round_best_zeros),
+        );
+
+        if round_best_zeros > best_zeros {
+            best_zeros = round_best_zeros;
+            eprintln!();
+            eprintln!(
+                "  New best: {} bits | nonce {} | hash: {}",
+                best_zeros,
+                round_best_nonce,
+                format_hash(&round_best_hash),
+            );
+        }
+
+        if best_zeros >= difficulty {
+            eprintln!();
+            eprintln!("  BLOCK FOUND!");
+            eprintln!("  Nonce:  {}", round_best_nonce);
+            eprintln!("  Hash:   {}", format_hash(&round_best_hash));
+            eprintln!("  Zeros:  {} bits", best_zeros);
+            eprintln!("  Time:   {:.2}s ({:.1} kH/s)", elapsed, hashrate / 1000.0,);
+            return Ok(());
         }
     }
 

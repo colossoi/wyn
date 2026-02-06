@@ -266,8 +266,8 @@ impl Constructor {
                             // Composite variant (or placeholder): sized array value
                             match size {
                                 PolyType::Constructed(TypeName::Size(n), _) => {
-                                    // Fixed-size array
-                                    let size_const = self.const_i32(*n as i32);
+                                    // Fixed-size array (use unsigned int for array size per SPIR-V convention)
+                                    let size_const = self.const_u32(*n as u32);
                                     let arr_type = self.builder.type_array(elem_type, size_const);
                                     // Cache element type for later lookup
                                     self.array_elem_cache.insert(arr_type, elem_type);
@@ -2472,9 +2472,48 @@ fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &SsaEntryPoint) -
         interfaces.push(gid_var);
     }
 
+    // Create push constant block for compute shader broadcast inputs
+    let pc_inputs: Vec<(usize, u32)> = entry
+        .inputs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, inp)| inp.push_constant_offset.map(|off| (i, off)))
+        .collect();
+    let pc_var = if !pc_inputs.is_empty() {
+        // Build member types and apply decorations
+        let member_types: Vec<spirv::Word> =
+            pc_inputs.iter().map(|&(i, _)| constructor.polytype_to_spirv(&entry.inputs[i].ty)).collect();
+
+        let pc_struct = constructor.builder.type_struct(member_types.iter().copied());
+        constructor.builder.decorate(pc_struct, spirv::Decoration::Block, []);
+        for (member_idx, &(input_idx, offset)) in pc_inputs.iter().enumerate() {
+            constructor.builder.member_decorate(
+                pc_struct,
+                member_idx as u32,
+                spirv::Decoration::Offset,
+                [Operand::LiteralBit32(offset)],
+            );
+            // Arrays inside push constants need ArrayStride decorations
+            constructor.apply_buffer_array_strides(member_types[member_idx], &entry.inputs[input_idx].ty);
+        }
+
+        let pc_ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::PushConstant, pc_struct);
+        let var_id =
+            constructor.builder.variable(pc_ptr_type, None, spirv::StorageClass::PushConstant, None);
+        interfaces.push(var_id);
+        Some(var_id)
+    } else {
+        None
+    };
+
     // Handle inputs
     let mut location = 0u32;
     for input in &entry.inputs {
+        // Push constant inputs are handled separately above
+        if input.push_constant_offset.is_some() {
+            continue;
+        }
+
         let input_type = constructor.polytype_to_spirv(&input.ty);
 
         if let Some(IoDecoration::BuiltIn(builtin)) = &input.decoration {
@@ -2565,12 +2604,27 @@ fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &SsaEntryPoint) -
     let param_types: Vec<spirv::Word> = Vec::new();
     constructor.begin_function(&entry.name, &param_names, &param_types, void_type)?;
 
+    // Load push constant members via AccessChain from the push constant variable.
+    if let Some(pc_var_id) = pc_var {
+        for (member_idx, &(input_idx, _offset)) in pc_inputs.iter().enumerate() {
+            let input = &entry.inputs[input_idx];
+            let member_type = constructor.polytype_to_spirv(&input.ty);
+            let member_ptr_type =
+                constructor.get_or_create_ptr_type(spirv::StorageClass::PushConstant, member_type);
+            let idx_const = constructor.const_u32(member_idx as u32);
+            let access_chain =
+                constructor.builder.access_chain(member_ptr_type, None, pc_var_id, [idx_const])?;
+            let loaded = constructor.builder.load(member_type, None, access_chain, None, [])?;
+            constructor.env.insert(input.name.clone(), loaded);
+        }
+    }
+
     // Load input values from their pointer variables.
     // Entry point inputs are SPIR-V Input variables (pointers), but the SSA body
     // expects loaded values. Load them now and update env with the loaded values.
     for input in &entry.inputs {
-        // Skip storage buffers - they use different access patterns
-        if input.storage_binding.is_some() {
+        // Skip storage buffers and push constants - they use different access patterns
+        if input.storage_binding.is_some() || input.push_constant_offset.is_some() {
             continue;
         }
         let input_type = constructor.polytype_to_spirv(&input.ty);

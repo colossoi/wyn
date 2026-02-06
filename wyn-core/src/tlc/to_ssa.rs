@@ -93,6 +93,8 @@ pub struct EntryInput {
     pub decoration: Option<IoDecoration>,
     pub size_hint: Option<u32>,
     pub storage_binding: Option<(u32, u32)>,
+    /// For compute shader broadcast inputs: byte offset within the push constant block.
+    pub push_constant_offset: Option<u32>,
 }
 
 /// Output from an entry point.
@@ -256,6 +258,7 @@ fn convert_entry_point(
     // Build inputs with decorations
     let mut inputs = Vec::new();
     let mut binding_num = 0u32;
+    let mut pc_offset = 0u32;
 
     for (i, (name, ty, _span)) in params.iter().enumerate() {
         let decoration = entry.params.get(i).and_then(|p| extract_io_decoration(p));
@@ -269,12 +272,26 @@ fn convert_entry_point(
             None
         };
 
+        // Compute shader inputs that are not storage buffers and not builtins
+        // become push constants.
+        let push_constant_offset = if is_compute
+            && storage_binding.is_none()
+            && !matches!(&decoration, Some(IoDecoration::BuiltIn(_)))
+        {
+            let offset = pc_offset;
+            pc_offset += crate::mir::layout::type_byte_size(ty).unwrap_or(4);
+            Some(offset)
+        } else {
+            None
+        };
+
         inputs.push(EntryInput {
             name: name.clone(),
             ty: ty.clone(),
             decoration,
             size_hint,
             storage_binding,
+            push_constant_offset,
         });
     }
 

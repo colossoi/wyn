@@ -9,6 +9,7 @@
                OpMemoryModel Logical GLSL450
 
                OpDecorate %sha256_compress LinkageAttributes "sha256_compress" Export
+               OpDecorate %arr_8_u32 ArrayStride 4
 
 ; Types
        %void = OpTypeVoid

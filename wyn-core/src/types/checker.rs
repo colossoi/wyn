@@ -189,16 +189,33 @@ impl<'a> TypeChecker<'a> {
 
     /// Constrain the address space of an array type to Storage.
     /// Used for entry point parameters where []f32 means storage buffer.
+    /// Sized arrays (e.g. [19]u32) stay Composite — only unsized arrays become View.
     fn constrain_array_to_storage(&mut self, ty: &Type) -> Result<()> {
         let resolved = ty.apply(&self.context);
         match &resolved {
             Type::Constructed(TypeName::Array, args) => {
                 assert!(args.len() == 3);
-                // Constrain address space (args[1]) to Storage
-                let storage = Type::Constructed(TypeName::ArrayVariantView, vec![]);
-                self.context.unify(&args[1], &storage).map_err(|_| {
-                    err_type!("Entry point array parameter must have Storage address space")
-                })?;
+
+                // Check if this is a sized array (Size constant)
+                let is_sized = matches!(
+                    args[2].apply(&self.context),
+                    Type::Constructed(TypeName::Size(_), _)
+                );
+
+                if is_sized {
+                    // Sized arrays → Composite (actual data, passed as push constants)
+                    let composite = Type::Constructed(TypeName::ArrayVariantComposite, vec![]);
+                    self.context
+                        .unify(&args[1], &composite)
+                        .map_err(|_| err_type!("Sized entry point array must be Composite"))?;
+                } else {
+                    // Unsized arrays → View (storage buffer)
+                    let storage = Type::Constructed(TypeName::ArrayVariantView, vec![]);
+                    self.context.unify(&args[1], &storage).map_err(|_| {
+                        err_type!("Entry point array parameter must have Storage address space")
+                    })?;
+                }
+
                 // Recursively constrain nested arrays in element type
                 self.constrain_array_to_storage(&args[0])?;
                 Ok(())
