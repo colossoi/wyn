@@ -361,9 +361,8 @@ fn convert_entry_point(
         let node_id = NodeId(0);
 
         for (i, output) in outputs.iter().enumerate() {
-            let (set, binding) = output
-                .storage_binding
-                .expect("BUG: compute output without storage binding");
+            let (set, binding) =
+                output.storage_binding.expect("BUG: compute output without storage binding");
             let value = if outputs.len() == 1 {
                 result
             } else {

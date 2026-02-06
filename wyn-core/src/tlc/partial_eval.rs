@@ -43,6 +43,35 @@ impl Value {
     }
 }
 
+/// Extract parameter types from a curried arrow type.
+/// `A -> B -> C -> R` yields `[A, B, C]`.
+fn extract_param_types(ty: &Type<TypeName>) -> Vec<Type<TypeName>> {
+    let mut params = Vec::new();
+    let mut current = ty;
+    while let Type::Constructed(TypeName::Arrow, args) = current {
+        if args.len() == 2 {
+            params.push(args[0].clone());
+            current = &args[1];
+        } else {
+            break;
+        }
+    }
+    params
+}
+
+/// Extract argument types from an application spine term.
+/// `App(App(f, x), y)` yields `[typeof(x), typeof(y)]`.
+fn extract_arg_types_from_spine(term: &Term) -> Vec<Type<TypeName>> {
+    let mut current = term;
+    let mut arg_types = Vec::new();
+    while let TermKind::App { func, arg } = &current.kind {
+        arg_types.push(arg.ty.clone());
+        current = func;
+    }
+    arg_types.reverse();
+    arg_types
+}
+
 // =============================================================================
 // Evaluator
 // =============================================================================
@@ -377,12 +406,17 @@ impl PartialEvaluator {
 
     fn reify_tuple(&mut self, elems: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
         // Build: _w_tuple elem0 elem1 ...
+        let component_types = match ty {
+            Type::Constructed(TypeName::Tuple(_), args) => args.clone(),
+            _ => vec![],
+        };
         let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
         let tuple_sym = self.symbols.alloc("_w_tuple".to_string());
         let mut result = self.mk_term(ty.clone(), span, TermKind::Var(tuple_sym));
 
-        for elem in elems {
-            let elem_term = self.reify(elem, &unit_ty, span);
+        for (i, elem) in elems.into_iter().enumerate() {
+            let elem_ty = component_types.get(i).unwrap_or(&unit_ty);
+            let elem_term = self.reify(elem, elem_ty, span);
             result = self.mk_term(
                 ty.clone(),
                 span,
@@ -396,12 +430,15 @@ impl PartialEvaluator {
     }
 
     fn reify_array(&mut self, elems: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
-        let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
+        let elem_ty = match ty {
+            Type::Constructed(TypeName::Array, args) if !args.is_empty() => args[0].clone(),
+            _ => Type::Constructed(TypeName::Unit, vec![]),
+        };
         let array_sym = self.symbols.alloc("_w_array_lit".to_string());
         let mut result = self.mk_term(ty.clone(), span, TermKind::Var(array_sym));
 
         for elem in elems {
-            let elem_term = self.reify(elem, &unit_ty, span);
+            let elem_term = self.reify(elem, &elem_ty, span);
             result = self.mk_term(
                 ty.clone(),
                 span,
@@ -415,12 +452,15 @@ impl PartialEvaluator {
     }
 
     fn reify_vector(&mut self, elems: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
-        let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
+        let elem_ty = match ty {
+            Type::Constructed(TypeName::Vec, args) if !args.is_empty() => args[0].clone(),
+            _ => Type::Constructed(TypeName::Unit, vec![]),
+        };
         let vec_sym = self.symbols.alloc("_w_vec_lit".to_string());
         let mut result = self.mk_term(ty.clone(), span, TermKind::Var(vec_sym));
 
         for elem in elems {
-            let elem_term = self.reify(elem, &unit_ty, span);
+            let elem_term = self.reify(elem, &elem_ty, span);
             result = self.mk_term(
                 ty.clone(),
                 span,
@@ -434,11 +474,13 @@ impl PartialEvaluator {
     }
 
     fn reify_partial(&mut self, sym: SymbolId, args: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
+        let param_types = self.defs.get(&sym).map(|d| extract_param_types(&d.ty));
         let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
         let mut result = self.mk_term(ty.clone(), span, TermKind::Var(sym));
 
-        for arg in args {
-            let arg_term = self.reify(arg, &unit_ty, span);
+        for (i, arg) in args.into_iter().enumerate() {
+            let arg_ty = param_types.as_ref().and_then(|pts| pts.get(i)).unwrap_or(&unit_ty);
+            let arg_term = self.reify(arg, arg_ty, span);
             result = self.mk_term(
                 ty.clone(),
                 span,
@@ -452,11 +494,20 @@ impl PartialEvaluator {
     }
 
     fn reify_call(&mut self, sym: SymbolId, args: Vec<Value>, original: &Term) -> Value {
+        // Primary: extract arg types from the original term's application spine
+        // (works for all functions including built-ins not in self.defs).
+        // Fallback: extract param types from the function's def type.
+        let spine_types = extract_arg_types_from_spine(original);
+        let def_param_types = self.defs.get(&sym).map(|d| extract_param_types(&d.ty));
         let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
         let mut result = self.mk_term(original.ty.clone(), original.span, TermKind::Var(sym));
 
-        for arg in args {
-            let arg_term = self.reify(arg, &unit_ty, original.span);
+        for (i, arg) in args.into_iter().enumerate() {
+            let arg_ty = spine_types
+                .get(i)
+                .or_else(|| def_param_types.as_ref().and_then(|pts| pts.get(i)))
+                .unwrap_or(&unit_ty);
+            let arg_term = self.reify(arg, arg_ty, original.span);
             result = self.mk_term(
                 original.ty.clone(),
                 original.span,

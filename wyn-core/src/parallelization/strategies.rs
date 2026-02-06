@@ -68,9 +68,8 @@ impl InputStrategy for StorageInput {
             _ => return None,
         };
 
-        let _view = ctx.builder
-            .emit_storage_view(self.set, self.binding, array_ty, ctx.span, ctx.node_id)
-            .ok()?;
+        let _view =
+            ctx.builder.emit_storage_view(self.set, self.binding, array_ty, ctx.span, ctx.node_id).ok()?;
 
         // Return storage length for loop bound calculation.
         // The view is recreated in get_element (TODO: store for reuse).
@@ -90,9 +89,8 @@ impl InputStrategy for StorageInput {
         };
 
         // Recreate view (TODO: store from setup for reuse)
-        let view = ctx.builder
-            .emit_storage_view(self.set, self.binding, array_ty, ctx.span, ctx.node_id)
-            .ok()?;
+        let view =
+            ctx.builder.emit_storage_view(self.set, self.binding, array_ty, ctx.span, ctx.node_id).ok()?;
 
         // Index into view
         let ptr = ctx.push_inst(InstKind::StorageViewIndex { view, index }, elem_ty.clone())?;
@@ -250,9 +248,7 @@ impl OutputStrategy for StorageOutput {
                 Type::Constructed(TypeName::SizePlaceholder, vec![]),
             ],
         );
-        ctx.builder
-            .emit_storage_view(self.set, self.binding, array_ty, ctx.span, ctx.node_id)
-            .ok()
+        ctx.builder.emit_storage_view(self.set, self.binding, array_ty, ctx.span, ctx.node_id).ok()
     }
 
     fn store_result(
@@ -265,7 +261,15 @@ impl OutputStrategy for StorageOutput {
     ) -> Option<()> {
         let effect_in = ctx.entry_effect();
         ctx.builder
-            .emit_storage_store(output_view, index, value, elem_ty.clone(), effect_in, ctx.span, ctx.node_id)
+            .emit_storage_store(
+                output_view,
+                index,
+                value,
+                elem_ty.clone(),
+                effect_in,
+                ctx.span,
+                ctx.node_id,
+            )
             .ok()?;
         Some(())
     }

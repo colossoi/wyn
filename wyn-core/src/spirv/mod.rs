@@ -1119,9 +1119,8 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                     let buffer_id = self.constructor.get_or_assign_buffer_id(*set, *binding);
                     let buffer_id_const = self.constructor.const_u32(buffer_id);
                     let u32_ty = self.constructor.u32_type;
-                    let view_struct_type = self
-                        .constructor
-                        .get_or_create_struct_type(vec![u32_ty, u32_ty, u32_ty]);
+                    let view_struct_type =
+                        self.constructor.get_or_create_struct_type(vec![u32_ty, u32_ty, u32_ty]);
                     let result = self.constructor.builder.composite_construct(
                         view_struct_type,
                         None,
@@ -1142,16 +1141,12 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                 let index_id = self.get_value(*index)?;
 
                 // Resolve the buffer variable from the view's compile-time side table.
-                let (set, binding) = self
-                    .view_buffer_map
-                    .get(view)
-                    .copied()
-                    .ok_or_else(|| err_spirv!("StorageViewIndex: no buffer mapping for view {:?}", view))?;
-                let &(buffer_var, _, _) = self
-                    .constructor
-                    .storage_buffers
-                    .get(&(set, binding))
-                    .ok_or_else(|| {
+                let (set, binding) =
+                    self.view_buffer_map.get(view).copied().ok_or_else(|| {
+                        err_spirv!("StorageViewIndex: no buffer mapping for view {:?}", view)
+                    })?;
+                let &(buffer_var, _, _) =
+                    self.constructor.storage_buffers.get(&(set, binding)).ok_or_else(|| {
                         err_spirv!(
                             "StorageViewIndex: unknown storage buffer set={}, binding={}",
                             set,
@@ -1611,34 +1606,57 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                     };
 
                     // Resolve buffer and extract base offset from view handle
-                    let (set, binding) = self
-                        .view_buffer_map
-                        .get(&ssa_args[0])
-                        .copied()
-                        .ok_or_else(|| err_spirv!("_w_slice: no buffer mapping for view {:?}", ssa_args[0]))?;
-                    let &(buffer_var, _, _) = self
-                        .constructor
-                        .storage_buffers
-                        .get(&(set, binding))
-                        .ok_or_else(|| err_spirv!("_w_slice: unknown storage buffer set={}, binding={}", set, binding))?;
+                    let (set, binding) =
+                        self.view_buffer_map.get(&ssa_args[0]).copied().ok_or_else(|| {
+                            err_spirv!("_w_slice: no buffer mapping for view {:?}", ssa_args[0])
+                        })?;
+                    let &(buffer_var, _, _) =
+                        self.constructor.storage_buffers.get(&(set, binding)).ok_or_else(|| {
+                            err_spirv!(
+                                "_w_slice: unknown storage buffer set={}, binding={}",
+                                set,
+                                binding
+                            )
+                        })?;
                     let base_offset = self.constructor.builder.composite_extract(
-                        self.constructor.u32_type, None, arr, [1u32],
+                        self.constructor.u32_type,
+                        None,
+                        arr,
+                        [1u32],
                     )?;
 
                     // Check result type to decide materialization vs sub-view
-                    let result_is_composite = inst.result
+                    let result_is_composite = inst
+                        .result
                         .map(|v| self.body.get_value_type(v))
                         .map(|t| match t {
-                            PolyType::Constructed(TypeName::Array, ref args) =>
-                                args.len() >= 2 && types::is_array_variant_composite(&args[1]),
+                            PolyType::Constructed(TypeName::Array, ref args) => {
+                                args.len() >= 2 && types::is_array_variant_composite(&args[1])
+                            }
                             _ => false,
                         })
                         .unwrap_or(false);
 
                     if result_is_composite {
-                        self.slice_view_to_composite(arr, buffer_var, base_offset, start_id, end_id, &elem_ty, result_ty)
+                        self.slice_view_to_composite(
+                            arr,
+                            buffer_var,
+                            base_offset,
+                            start_id,
+                            end_id,
+                            &elem_ty,
+                            result_ty,
+                        )
                     } else {
-                        self.slice_view_to_view(arr, base_offset, start_id, end_id, set, binding, inst.result)
+                        self.slice_view_to_view(
+                            arr,
+                            base_offset,
+                            start_id,
+                            end_id,
+                            set,
+                            binding,
+                            inst.result,
+                        )
                     }
                 } else {
                     self.slice_composite(arr, start_id, end_id, result_ty)
@@ -1720,27 +1738,26 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
         elem_ty: &PolyType<TypeName>,
         result_ty: spirv::Word,
     ) -> Result<spirv::Word> {
-        let start = self.constructor.get_const_i32_value(start_id).ok_or_else(|| {
-            err_spirv!("slice_view_to_composite: start must be a constant")
-        })? as u32;
-        let end = self.constructor.get_const_i32_value(end_id).ok_or_else(|| {
-            err_spirv!("slice_view_to_composite: end must be a constant")
-        })? as u32;
+        let start = self
+            .constructor
+            .get_const_i32_value(start_id)
+            .ok_or_else(|| err_spirv!("slice_view_to_composite: start must be a constant"))?
+            as u32;
+        let end = self
+            .constructor
+            .get_const_i32_value(end_id)
+            .ok_or_else(|| err_spirv!("slice_view_to_composite: end must be a constant"))?
+            as u32;
 
         let elem_spirv = self.constructor.polytype_to_spirv(elem_ty);
-        let elem_ptr_type = self
-            .constructor
-            .get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_spirv);
+        let elem_ptr_type =
+            self.constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_spirv);
         let zero = self.constructor.const_i32(0);
         let mut elements = Vec::with_capacity((end - start) as usize);
         for i in start..end {
             let idx_const = self.constructor.const_u32(i);
-            let actual_index = self.constructor.builder.i_add(
-                self.constructor.u32_type,
-                None,
-                base_offset,
-                idx_const,
-            )?;
+            let actual_index =
+                self.constructor.builder.i_add(self.constructor.u32_type, None, base_offset, idx_const)?;
             let elem_ptr = self.constructor.builder.access_chain(
                 elem_ptr_type,
                 None,
@@ -1764,24 +1781,13 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
         binding: u32,
         result_value: Option<ValueId>,
     ) -> Result<spirv::Word> {
-        let new_offset = self.constructor.builder.i_add(
-            self.constructor.u32_type,
-            None,
-            base_offset,
-            start_id,
-        )?;
-        let new_len = self.constructor.builder.i_sub(
-            self.constructor.u32_type,
-            None,
-            end_id,
-            start_id,
-        )?;
+        let new_offset =
+            self.constructor.builder.i_add(self.constructor.u32_type, None, base_offset, start_id)?;
+        let new_len = self.constructor.builder.i_sub(self.constructor.u32_type, None, end_id, start_id)?;
         let buffer_id = self.constructor.get_or_assign_buffer_id(set, binding);
         let buffer_id_const = self.constructor.const_u32(buffer_id);
         let u32_ty = self.constructor.u32_type;
-        let view_struct_type = self
-            .constructor
-            .get_or_create_struct_type(vec![u32_ty, u32_ty, u32_ty]);
+        let view_struct_type = self.constructor.get_or_create_struct_type(vec![u32_ty, u32_ty, u32_ty]);
         let result = self.constructor.builder.composite_construct(
             view_struct_type,
             None,
@@ -1801,14 +1807,20 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
         end_id: spirv::Word,
         result_ty: spirv::Word,
     ) -> Result<spirv::Word> {
-        let start = self.constructor.get_const_i32_value(start_id).ok_or_else(|| {
-            err_spirv!("slice_composite: start must be a constant")
-        })? as u32;
-        let end = self.constructor.get_const_i32_value(end_id).ok_or_else(|| {
-            err_spirv!("slice_composite: end must be a constant")
-        })? as u32;
+        let start =
+            self.constructor
+                .get_const_i32_value(start_id)
+                .ok_or_else(|| err_spirv!("slice_composite: start must be a constant"))? as u32;
+        let end = self
+            .constructor
+            .get_const_i32_value(end_id)
+            .ok_or_else(|| err_spirv!("slice_composite: end must be a constant"))? as u32;
         if end <= start {
-            bail_spirv!("slice_composite: end ({}) must be greater than start ({})", end, start);
+            bail_spirv!(
+                "slice_composite: end ({}) must be greater than start ({})",
+                end,
+                start
+            );
         }
         let elem_type = self.constructor.get_array_element_type(result_ty)?;
         let mut elements = Vec::with_capacity((end - start) as usize);
@@ -1883,11 +1895,14 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
             .get(&view_ssa)
             .copied()
             .ok_or_else(|| err_spirv!("lower_view_index: no buffer mapping for view {:?}", view_ssa))?;
-        let &(buffer_var, _, _) = self
-            .constructor
-            .storage_buffers
-            .get(&(set, binding))
-            .ok_or_else(|| err_spirv!("lower_view_index: unknown storage buffer set={}, binding={}", set, binding))?;
+        let &(buffer_var, _, _) =
+            self.constructor.storage_buffers.get(&(set, binding)).ok_or_else(|| {
+                err_spirv!(
+                    "lower_view_index: unknown storage buffer set={}, binding={}",
+                    set,
+                    binding
+                )
+            })?;
 
         // Extract offset (field 1)
         let offset_val =

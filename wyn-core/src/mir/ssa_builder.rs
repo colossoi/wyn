@@ -497,11 +497,21 @@ impl FuncBuilder {
         let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
         let set_val = self.push_int(&set.to_string(), u32_ty.clone(), span, node_id)?;
         let binding_val = self.push_int(&binding.to_string(), u32_ty.clone(), span, node_id)?;
-        let storage_len =
-            self.push_intrinsic("_w_storage_len", vec![set_val, binding_val], u32_ty.clone(), span, node_id)?;
+        let storage_len = self.push_intrinsic(
+            "_w_storage_len",
+            vec![set_val, binding_val],
+            u32_ty.clone(),
+            span,
+            node_id,
+        )?;
         let zero = self.push_int("0", u32_ty, span, node_id)?;
         self.push_inst(
-            InstKind::StorageView { set, binding, offset: zero, len: storage_len },
+            InstKind::StorageView {
+                set,
+                binding,
+                offset: zero,
+                len: storage_len,
+            },
             view_ty,
             span,
             node_id,
@@ -522,12 +532,7 @@ impl FuncBuilder {
     ) -> Result<EffectToken, BuilderError> {
         // StorageViewIndex SSA type is the element type (not a pointer) —
         // SPIR-V lowering wraps it in a StorageBuffer pointer internally.
-        let ptr = self.push_inst(
-            InstKind::StorageViewIndex { view, index },
-            elem_ty,
-            span,
-            node_id,
-        )?;
+        let ptr = self.push_inst(InstKind::StorageViewIndex { view, index }, elem_ty, span, node_id)?;
         self.push_store(ptr, value, effect_in, span, node_id)
     }
 
