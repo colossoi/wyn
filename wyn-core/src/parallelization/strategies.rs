@@ -355,12 +355,21 @@ impl OutputStrategy for StorageOutput {
 // Helpers
 // =============================================================================
 
-/// Copy a constant value from the original body to the new builder.
-fn copy_value_to_builder(
+/// Copy a value from the original body to the new builder.
+/// Handles constants (Int, Float) and entry point parameters.
+pub fn copy_value_to_builder(
     ctx: &mut ParallelizeCtx,
     original_body: &FuncBody,
     value: ValueId,
 ) -> Option<ValueId> {
+    // Check if the value is an entry point parameter
+    for (i, (param_val, _, _)) in original_body.params.iter().enumerate() {
+        if *param_val == value {
+            return Some(ctx.builder.get_param(i));
+        }
+    }
+
+    // Check if it's a constant instruction
     for inst in &original_body.insts {
         if inst.result == Some(value) {
             match &inst.kind {

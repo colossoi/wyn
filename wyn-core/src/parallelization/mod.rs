@@ -18,7 +18,9 @@ use crate::mir::ssa_soac_analysis::{ArrayProvenance, ParallelizableMap, analyze_
 use crate::tlc::to_ssa::{EntryOutput, ExecutionModel, SsaEntryPoint, SsaProgram};
 use polytype::Type;
 
-pub use strategies::{InputStrategy, OutputStrategy, RangeInput, StorageInput, StorageOutput};
+pub use strategies::{
+    InputStrategy, OutputStrategy, RangeInput, StorageInput, StorageOutput, copy_value_to_builder,
+};
 
 /// Context passed to strategies during parallelization.
 /// Contains the builder and common utilities.
@@ -178,8 +180,9 @@ fn parallelize_entry(
     let mut ctx = ParallelizeCtx::new(builder, entry);
 
     // 1. Setup input and output strategies
-    let (input_len, elem_ty) = input_strategy.setup(&mut ctx)?;
-    let output_view = output_strategy.setup(&mut ctx, &elem_ty)?;
+    let (input_len, _input_elem_ty) = input_strategy.setup(&mut ctx)?;
+    let output_elem_ty = &par_map.map_loop.map_result_ty;
+    let output_view = output_strategy.setup(&mut ctx, output_elem_ty)?;
 
     // 2. Get thread ID and calculate chunk bounds
     let thread_id = ctx.push_intrinsic("__builtin_thread_id", vec![], ctx.u32_ty.clone())?;
@@ -236,11 +239,31 @@ fn parallelize_entry(
 
     let input_elem = input_strategy.get_element(&mut ctx, loop_index)?;
 
-    // Apply map function
-    let result_elem = ctx.push_call(&par_map.map_function, vec![input_elem], elem_ty.clone())?;
+    // Build the full argument list for the map function.
+    // The original call may have captured variables (e.g. from defunctionalized lambdas)
+    // in addition to the loop element. Map each original arg to the new builder,
+    // substituting the element arg position with the new input_elem.
+    let result_ty = &par_map.map_loop.map_result_ty;
+    let call_args = {
+        let original_body = &entry.body;
+        let mut args = Vec::new();
+        for (i, &orig_arg) in par_map.map_loop.map_call_args.iter().enumerate() {
+            if i == par_map.map_loop.element_arg_index {
+                args.push(input_elem);
+            } else {
+                // Map the original value to the new builder (entry params)
+                let new_val = copy_value_to_builder(&mut ctx, original_body, orig_arg)?;
+                args.push(new_val);
+            }
+        }
+        args
+    };
 
-    // Store result
-    output_strategy.store_result(&mut ctx, output_view, loop_index, result_elem, &elem_ty)?;
+    // Apply map function with the correct return type
+    let result_elem = ctx.push_call(&par_map.map_function, call_args, result_ty.clone())?;
+
+    // Store result using the map function's return type (not the input elem type)
+    output_strategy.store_result(&mut ctx, output_view, loop_index, result_elem, result_ty)?;
 
     // Increment index and branch back to header
     let one = ctx.push_int("1")?;
