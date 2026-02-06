@@ -293,6 +293,7 @@ impl<'a> ComputePipeline<'a> {
         push_constant_size: u32,
     ) -> Result<Self> {
         unsafe {
+            eprintln!("  [pipeline] creating descriptor set layout ({} bindings)...", binding_count);
             // Descriptor set layout with multiple bindings
             let bindings: Vec<vk::DescriptorSetLayoutBinding> = (0..binding_count)
                 .map(|i| {
@@ -323,6 +324,7 @@ impl<'a> ComputePipeline<'a> {
                 vec![]
             };
 
+            eprintln!("  [pipeline] creating pipeline layout (push constants: {} bytes)...", push_constant_size);
             // Pipeline layout
             let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
                 .set_layouts(std::slice::from_ref(&descriptor_set_layout))
@@ -333,6 +335,7 @@ impl<'a> ComputePipeline<'a> {
                 .create_pipeline_layout(&pipeline_layout_info, None)
                 .context("Failed to create pipeline layout")?;
 
+            eprintln!("  [pipeline] creating shader module ({} words)...", spirv.len());
             // Shader module
             let shader_info = vk::ShaderModuleCreateInfo::default().code(spirv);
 
@@ -341,6 +344,7 @@ impl<'a> ComputePipeline<'a> {
                 .create_shader_module(&shader_info, None)
                 .context("Failed to create shader module")?;
 
+            eprintln!("  [pipeline] compiling pipeline (entry '{}')...", entry_name);
             // Pipeline
             let entry_cstr = std::ffi::CString::new(entry_name)?;
             let stage_info = vk::PipelineShaderStageCreateInfo::default()
@@ -356,6 +360,7 @@ impl<'a> ComputePipeline<'a> {
                 .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
                 .map_err(|(_, e)| e)
                 .context("Failed to create compute pipeline")?;
+            eprintln!("  [pipeline] compilation done.");
 
             let pipeline = pipelines[0];
 
