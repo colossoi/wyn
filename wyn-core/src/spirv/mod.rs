@@ -4,12 +4,12 @@
 
 #[cfg(test)]
 mod lowering_tests;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::TypeName;
 use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
-use crate::mir::layout::type_byte_size;
+use crate::mir::layout::{buffer_array_strides, type_byte_size};
 use crate::mir::ssa::{Block, BlockId, ControlHeader, FuncBody, Inst, InstKind, Terminator, ValueId};
 use crate::tlc::to_ssa::{ExecutionModel, IoDecoration, SsaEntryPoint, SsaFunction, SsaProgram};
 use crate::types;
@@ -96,6 +96,9 @@ struct Constructor {
     /// Output variables for the current entry point being lowered.
     /// Set during entry point setup, cleared at end. Used by OutputPtr lowering.
     current_entry_outputs: Vec<spirv::Word>,
+
+    /// Tracks which SPIR-V types already have ArrayStride decorations for buffer layout.
+    buffer_stride_decorated: HashSet<spirv::Word>,
 }
 
 impl Constructor {
@@ -150,6 +153,7 @@ impl Constructor {
             global_invocation_id: None,
             linked_functions: HashMap::new(),
             current_entry_outputs: Vec::new(),
+            buffer_stride_decorated: HashSet::new(),
         }
     }
 
@@ -235,6 +239,7 @@ impl Constructor {
                         if let PolyType::Constructed(TypeName::ArrayVariantView, _) = variant {
                             // View variant: struct { buffer_ptr, offset, len }
                             // buffer_ptr points to the StorageBuffer block struct containing the runtime array
+                            self.apply_buffer_array_strides(elem_type, &args[0]);
                             let stride = crate::mir::layout::type_byte_size(&args[0])
                                 .expect("View element type must have computable size");
                             let runtime_array_type =
@@ -426,6 +431,33 @@ impl Constructor {
         ty
     }
 
+    /// Apply ArrayStride decorations for all nested fixed-size arrays in a type
+    /// used inside a storage buffer. Uses layout::buffer_array_strides() for the
+    /// stride values and walks nested arrays via array_elem_cache for SPIR-V IDs.
+    /// Skips types that have already been decorated.
+    fn apply_buffer_array_strides(&mut self, spirv_type: spirv::Word, poly_type: &PolyType<TypeName>) {
+        let strides = buffer_array_strides(poly_type);
+        if strides.is_empty() {
+            return;
+        }
+        let mut current = spirv_type;
+        for stride in strides {
+            if !self.buffer_stride_decorated.insert(current) {
+                break; // already decorated — nested types are too
+            }
+            self.builder.decorate(
+                current,
+                spirv::Decoration::ArrayStride,
+                [Operand::LiteralBit32(stride)],
+            );
+            if let Some(&inner) = self.array_elem_cache.get(&current) {
+                current = inner;
+            } else {
+                break;
+            }
+        }
+    }
+
     /// Get or create a Block-decorated struct wrapping a runtime array (for storage buffers)
     fn get_or_create_buffer_block_type(&mut self, runtime_array_type: spirv::Word) -> spirv::Word {
         if let Some(&ty) = self.buffer_block_cache.get(&runtime_array_type) {
@@ -476,6 +508,9 @@ impl Constructor {
         // Calculate stride from element type size
         let stride = type_byte_size(&elem_ty).expect("storage buffer element type must have known size");
 
+        // Ensure nested array types have ArrayStride for buffer layout
+        self.apply_buffer_array_strides(elem_spirv, &elem_ty);
+
         // Create runtime array type (cached to avoid duplicate decorations)
         let runtime_array = self.get_or_create_runtime_array_type(elem_spirv, stride);
 
@@ -519,6 +554,49 @@ impl Constructor {
         let func_id = self.builder.id();
 
         // Store the mapping (we'll use this ID when we actually define the function)
+        self.functions.insert(name.to_string(), func_id);
+
+        func_id
+    }
+
+    /// Forward-declare a linked (extern) function with Import linkage.
+    /// Creates a function stub with no body that will be resolved by spirv-link.
+    fn forward_declare_linked_function(
+        &mut self,
+        name: &str,
+        linkage_name: &str,
+        param_types: &[spirv::Word],
+        return_type: spirv::Word,
+    ) -> spirv::Word {
+        // Add Linkage capability
+        self.builder.capability(Capability::Linkage);
+
+        // Create function type
+        let func_type = self.builder.type_function(return_type, param_types.to_vec());
+
+        // Declare function with no body (Import linkage)
+        let func_id = self
+            .builder
+            .begin_function(return_type, None, spirv::FunctionControl::NONE, func_type)
+            .expect("BUG: failed to begin linked function");
+
+        // Add parameters (required by SPIR-V)
+        for &param_ty in param_types {
+            self.builder.function_parameter(param_ty).expect("BUG: failed to add function parameter");
+        }
+        self.builder.end_function().expect("BUG: failed to end linked function");
+
+        // Decorate with Import linkage
+        self.builder.decorate(
+            func_id,
+            spirv::Decoration::LinkageAttributes,
+            [
+                Operand::LiteralString(linkage_name.to_string()),
+                Operand::LinkageType(spirv::LinkageType::Import),
+            ],
+        );
+
+        // Register in functions map so Call instructions can find it
         self.functions.insert(name.to_string(), func_id);
 
         func_id
@@ -2269,6 +2347,23 @@ fn lower_ssa_program_impl(program: &SsaProgram) -> Result<Vec<u32>> {
             body.params.iter().map(|(_, ty, _)| constructor.polytype_to_spirv(ty)).collect();
         let return_type = constructor.polytype_to_spirv(&body.return_ty);
         constructor.forward_declare_function(&func.name, &param_types, return_type);
+    }
+
+    // Forward-declare extern (linked) functions with Import linkage
+    for func in &program.functions {
+        if let Some(linkage_name) = &func.linkage_name {
+            let body = &func.body;
+            let param_types: Vec<spirv::Word> =
+                body.params.iter().map(|(_, ty, _)| constructor.polytype_to_spirv(ty)).collect();
+            let return_type = constructor.polytype_to_spirv(&body.return_ty);
+            let func_id = constructor.forward_declare_linked_function(
+                &func.name,
+                linkage_name,
+                &param_types,
+                return_type,
+            );
+            constructor.linked_functions.insert(func.name.clone(), func_id);
+        }
     }
 
     // Now lower all function bodies

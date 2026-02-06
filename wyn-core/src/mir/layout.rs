@@ -120,3 +120,31 @@ pub fn std140_alignment(ty: &Type) -> Option<u32> {
         _ => None,
     }
 }
+
+/// Compute the ArrayStride values needed for nested fixed-size arrays
+/// when this type is used as a storage buffer element.
+/// Returns one stride per array nesting level (outermost first).
+/// E.g. `[8]u32` → [4], `[4][8]u32` → [32, 4], `u32` → [].
+pub fn buffer_array_strides(ty: &Type) -> Vec<u32> {
+    let mut strides = Vec::new();
+    collect_array_strides(ty, &mut strides);
+    strides
+}
+
+fn collect_array_strides(ty: &Type, out: &mut Vec<u32>) {
+    if let Type::Constructed(TypeName::Array, args) = ty {
+        if args.len() == 3 {
+            // Only composite arrays produce SPIR-V array types that need ArrayStride.
+            // View and virtual arrays lower to structs, not arrays.
+            let is_composite = matches!(&args[1], Type::Constructed(TypeName::ArrayVariantComposite, _));
+            if is_composite {
+                if let Type::Constructed(TypeName::Size(_), _) = &args[2] {
+                    if let Some(elem_size) = type_byte_size(&args[0]) {
+                        out.push(elem_size);
+                    }
+                    collect_array_strides(&args[0], out);
+                }
+            }
+        }
+    }
+}
