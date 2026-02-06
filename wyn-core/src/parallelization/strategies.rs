@@ -97,17 +97,11 @@ impl InputStrategy for StorageInput {
         // Index into view
         let ptr = ctx.push_inst(InstKind::StorageViewIndex { view, index }, elem_ty.clone())?;
 
-        // Load element
+        // Load element.
+        // Effect tokens are unordered markers (SPIR-V backend ignores them for ordering).
+        // We use entry_effect() for all parallel iterations since they're independent.
         let effect_in = ctx.entry_effect();
-        let effect_out = ctx.alloc_effect();
-        let elem = ctx.push_inst(
-            InstKind::Load {
-                ptr,
-                effect_in,
-                effect_out,
-            },
-            elem_ty,
-        )?;
+        let elem = ctx.builder.push_load(ptr, elem_ty, effect_in, ctx.span, ctx.node_id).ok()?;
 
         Some(elem)
     }
@@ -260,6 +254,8 @@ impl OutputStrategy for StorageOutput {
         value: ValueId,
         elem_ty: &Type<TypeName>,
     ) -> Option<()> {
+        // Effect tokens are unordered markers (SPIR-V backend ignores them for ordering).
+        // We use entry_effect() for all parallel iterations since they're independent.
         let effect_in = ctx.entry_effect();
         ctx.builder
             .emit_storage_store(

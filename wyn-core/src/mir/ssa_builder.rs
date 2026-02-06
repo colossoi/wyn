@@ -454,6 +454,29 @@ impl FuncBuilder {
         self.push_inst(InstKind::OutputPtr { index }, ty, span, node_id)
     }
 
+    /// Push a load instruction.
+    /// Effect tokens are structural markers; the SPIR-V backend does not use them for ordering.
+    pub fn push_load(
+        &mut self,
+        ptr: ValueId,
+        result_ty: Type<TypeName>,
+        effect_in: EffectToken,
+        span: Span,
+        node_id: NodeId,
+    ) -> Result<ValueId, BuilderError> {
+        let effect_out = self.alloc_effect();
+        self.push_inst(
+            InstKind::Load {
+                ptr,
+                effect_in,
+                effect_out,
+            },
+            result_ty,
+            span,
+            node_id,
+        )
+    }
+
     /// Push a store instruction.
     /// Returns the output effect token.
     pub fn push_store(
