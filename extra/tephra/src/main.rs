@@ -294,6 +294,7 @@ fn run_mine(
 
     // Output buffer: batch_size * 8 u32 values (one 8-word hash per nonce)
     let output_len = batch_size as usize * 8;
+    eprintln!("Creating output buffer ({} u32s)...", output_len);
     let mut output_buf = StorageBuffer::new(&ctx, output_len)?;
     output_buf.upload_u32(&vec![0u32; output_len])?;
 
@@ -301,8 +302,10 @@ fn run_mine(
     let push_constant_size = 80u32;
     let binding_count = 1u32;
 
+    eprintln!("Compiling shader pipeline...");
     let pipeline =
         ctx.create_compute_pipeline_multi(&spirv, entry_name, binding_count, push_constant_size)?;
+    eprintln!("Pipeline ready.");
 
     let num_workgroups = (batch_size + workgroup_size - 1) / workgroup_size;
 
