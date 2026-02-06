@@ -398,7 +398,7 @@ fn find_map_in_body(
     for loop_info in &loops {
         if let Some(map_loop) = analyze_map_loop(body, loop_info) {
             let provenance =
-                track_provenance_unified(entry, body, map_loop.input_array, param_to_entry_arg);
+                track_provenance_unified(entry, body, map_loop.input_array, param_to_entry_arg, depth == 0);
             if matches!(
                 provenance,
                 ArrayProvenance::EntryStorage { .. } | ArrayProvenance::Range { .. }
@@ -476,11 +476,16 @@ fn build_param_mapping(
 
 /// Track provenance of a value, handling values at any call depth.
 /// Uses the param_to_entry_arg mapping to trace back to entry-level values.
+///
+/// `at_entry` must be true only when `body` is the entry body itself.
+/// Ranges constructed in called functions have bounds that aren't accessible
+/// at entry level, so we only report `Range` provenance at entry depth.
 fn track_provenance_unified(
     entry: &SsaEntryPoint,
     body: &FuncBody,
     value: ValueId,
     param_to_entry_arg: &HashMap<usize, ValueId>,
+    at_entry: bool,
 ) -> ArrayProvenance {
     // Check if value is a function parameter
     for (i, (param_value, _, _)) in body.params.iter().enumerate() {
@@ -493,10 +498,13 @@ fn track_provenance_unified(
         }
     }
 
-    // Check for local virtual arrays (ranges)
-    for inst in &body.insts {
-        if inst.result == Some(value) && is_virtual_array(&inst.result_ty) {
-            return ArrayProvenance::Range { value };
+    // Only allow local range provenance at entry level — ranges constructed
+    // in called functions have bounds that aren't accessible at entry level.
+    if at_entry {
+        for inst in &body.insts {
+            if inst.result == Some(value) && is_virtual_array(&inst.result_ty) {
+                return ArrayProvenance::Range { value };
+            }
         }
     }
 

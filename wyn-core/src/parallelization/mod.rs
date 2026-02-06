@@ -95,9 +95,9 @@ impl<'a> ParallelizeCtx<'a> {
         self.builder.push_inst(kind, ty, self.span, self.node_id).ok()
     }
 
-    /// Get the entry effect token.
+    /// Get the *new* body's entry effect token (from `self.builder`, not the original entry).
     /// Effect tokens are unordered markers — the SPIR-V backend ignores them for ordering.
-    /// We use the entry effect for all parallel iterations since they're independent.
+    /// We use this single token for all parallel iterations since they're independent.
     pub fn entry_effect(&self) -> EffectToken {
         self.builder.entry_effect()
     }

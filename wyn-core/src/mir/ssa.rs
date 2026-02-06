@@ -367,7 +367,8 @@ pub enum InstKind {
         len: ValueId,
     },
 
-    /// Index into a storage view (returns a pointer).
+    /// Index into a storage view. SSA result type is the element type;
+    /// SPIR-V lowering wraps it in a StorageBuffer pointer internally.
     StorageViewIndex {
         view: ValueId,
         index: ValueId,
