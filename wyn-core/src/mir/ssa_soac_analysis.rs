@@ -27,7 +27,7 @@ use crate::types::is_virtual_array;
 use polytype::Type;
 use std::collections::HashMap;
 
-use super::ssa::{BlockId, ControlHeader, FuncBody, InstKind, ValueId};
+use super::ssa::{BlockId, ControlHeader, FuncBody, InstKind, Terminator, ValueId};
 
 // =============================================================================
 // Array Provenance
@@ -162,17 +162,59 @@ fn analyze_map_loop(body: &FuncBody, loop_info: &LoopInfo) -> Option<MapLoopInfo
     }
     let length_value = length_value?;
 
-    // Analyze the continue block (loop body) to find: arr[index], f(elem, ...), array_with(...)
+    // Analyze the continue block end-to-end:
+    //   1. Find _w_intrinsic_array_with(acc, index, result) — the accumulator update
+    //   2. Trace `result` back to a function call that consumes an indexed element
+    //   3. Verify the updated array is loop-carried back to the header
     let body_block = &body.blocks[loop_info.continue_block.index()];
 
-    let mut input_array = None;
-    let mut indexed_elem = None;
+    // Step 1: Find the array_with call and extract its arguments.
+    let mut array_with_acc = None;
+    let mut array_with_index = None;
+    let mut array_with_result_val = None;
+    let mut array_with_output = None;
+    for &inst_id in &body_block.insts {
+        let inst = &body.insts[inst_id.index()];
+        if let InstKind::Call { func, args } = &inst.kind {
+            if func == "_w_intrinsic_array_with" && args.len() == 3 {
+                array_with_acc = Some(args[0]);
+                array_with_index = Some(args[1]);
+                array_with_result_val = Some(args[2]);
+                array_with_output = inst.result;
+                break;
+            }
+        }
+    }
+    let aw_acc = array_with_acc?;
+    let aw_index = array_with_index?;
+    let aw_result = array_with_result_val?;
+    let aw_output = array_with_output?;
+
+    // The array_with must update the accumulator at the loop index.
+    if aw_acc != acc_value || aw_index != index_value {
+        return None;
+    }
+
+    // Step 2: Verify the branch carries the updated array back as the accumulator.
+    match &body_block.terminator {
+        Some(Terminator::Branch { target, args }) if *target == loop_info.header => {
+            // First branch arg is the new accumulator — must be the array_with result.
+            if args.first() != Some(&aw_output) {
+                return None;
+            }
+        }
+        _ => return None,
+    }
+
+    // Step 3: Find the map function call whose result feeds into array_with.
     let mut map_function = None;
     let mut map_call_args = Vec::new();
     let mut element_arg_index = 0;
     let mut map_result_ty: Option<Type<TypeName>> = None;
+    let mut indexed_elem = None;
 
-    // First pass: find the Index instruction to get the indexed element ValueId
+    // First, find arr[index] to know the indexed element.
+    let mut input_array = None;
     for &inst_id in &body_block.insts {
         let inst = &body.insts[inst_id.index()];
         if let InstKind::Index { base, index } = &inst.kind {
@@ -184,20 +226,19 @@ fn analyze_map_loop(body: &FuncBody, loop_info: &LoopInfo) -> Option<MapLoopInfo
         }
     }
 
-    // Second pass: find the map function call — a non-intrinsic call that uses the
-    // indexed element as one of its arguments (captures may add extra args)
+    // Then find the call whose result is aw_result and that uses the indexed element.
     for &inst_id in &body_block.insts {
         let inst = &body.insts[inst_id.index()];
+        if inst.result != Some(aw_result) {
+            continue;
+        }
         if let InstKind::Call { func, args } = &inst.kind {
-            if func == "_w_intrinsic_array_with" {
-                continue;
-            }
             if let Some(elem) = indexed_elem {
                 if let Some(pos) = args.iter().position(|a| *a == elem) {
                     map_function = Some(func.clone());
                     map_call_args = args.clone();
                     element_arg_index = pos;
-                    map_result_ty = inst.result.map(|_| inst.result_ty.clone());
+                    map_result_ty = Some(inst.result_ty.clone());
                     break;
                 }
             }
