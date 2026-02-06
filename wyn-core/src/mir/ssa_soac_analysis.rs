@@ -21,8 +21,10 @@
 //!     // final array
 //! ```
 
+use crate::ast::TypeName;
 use crate::tlc::to_ssa::{EntryInput, ExecutionModel, SsaEntryPoint, SsaFunction, SsaProgram};
 use crate::types::is_virtual_array;
+use polytype::Type;
 use std::collections::{HashMap, HashSet};
 
 use super::ssa::{BlockId, FuncBody, InstKind, Terminator, ValueId};
@@ -161,6 +163,12 @@ pub struct MapLoopInfo {
     pub input_array: ValueId,
     /// The function being called on each element.
     pub map_function: String,
+    /// All arguments to the map function call (including captured variables).
+    pub map_call_args: Vec<ValueId>,
+    /// Which argument index in `map_call_args` is the loop element.
+    pub element_arg_index: usize,
+    /// The return type of the map function call.
+    pub map_result_ty: Type<TypeName>,
     /// The index value in the header.
     pub index_value: ValueId,
     /// The accumulator value in the header.
@@ -195,32 +203,48 @@ fn analyze_map_loop(body: &FuncBody, loop_info: &LoopInfo) -> Option<MapLoopInfo
     }
     let length_value = length_value?;
 
-    // Analyze the body block to find: arr[index], f(elem), array_with(acc, index, result)
+    // Analyze the body block to find: arr[index], f(elem, ...), array_with(acc, index, result)
     if loop_info.body_blocks.is_empty() {
         return None;
     }
     let body_block = &body.blocks[loop_info.body_blocks[0].index()];
 
     let mut input_array = None;
+    let mut indexed_elem = None;
     let mut map_function = None;
+    let mut map_call_args = Vec::new();
+    let mut element_arg_index = 0;
+    let mut map_result_ty: Option<Type<TypeName>> = None;
 
+    // First pass: find the Index instruction to get the indexed element ValueId
     for &inst_id in &body_block.insts {
         let inst = &body.insts[inst_id.index()];
-        match &inst.kind {
-            InstKind::Index { base, index } if *index == index_value => {
+        if let InstKind::Index { base, index } = &inst.kind {
+            if *index == index_value {
                 input_array = Some(*base);
+                indexed_elem = inst.result;
+                break;
             }
-            InstKind::Call { func, args } => {
-                // Check if this is the map function call (takes the indexed element)
-                // or the array_with call
-                if func == "_w_intrinsic_array_with" {
-                    // This is the accumulator update, skip
-                } else if args.len() == 1 {
-                    // Single-argument call is likely the map function
+        }
+    }
+
+    // Second pass: find the map function call — a non-intrinsic call that uses the
+    // indexed element as one of its arguments (captures may add extra args)
+    for &inst_id in &body_block.insts {
+        let inst = &body.insts[inst_id.index()];
+        if let InstKind::Call { func, args } = &inst.kind {
+            if func == "_w_intrinsic_array_with" {
+                continue;
+            }
+            if let Some(elem) = indexed_elem {
+                if let Some(pos) = args.iter().position(|a| *a == elem) {
                     map_function = Some(func.clone());
+                    map_call_args = args.clone();
+                    element_arg_index = pos;
+                    map_result_ty = inst.result.map(|_| inst.result_ty.clone());
+                    break;
                 }
             }
-            _ => {}
         }
     }
 
@@ -228,6 +252,9 @@ fn analyze_map_loop(body: &FuncBody, loop_info: &LoopInfo) -> Option<MapLoopInfo
         loop_info: loop_info.clone(),
         input_array: input_array?,
         map_function: map_function?,
+        map_call_args,
+        element_arg_index,
+        map_result_ty: map_result_ty?,
         index_value,
         acc_value,
         length_value,
@@ -392,7 +419,6 @@ fn find_map_in_body(
             if func.starts_with("_w_") {
                 continue;
             }
-
             if let Some(called_func) = find_function(program, func) {
                 let new_mapping = build_param_mapping(body, param_to_entry_arg, args);
 
