@@ -25,9 +25,9 @@ use crate::ast::TypeName;
 use crate::tlc::to_ssa::{EntryInput, ExecutionModel, SsaEntryPoint, SsaFunction, SsaProgram};
 use crate::types::is_virtual_array;
 use polytype::Type;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use super::ssa::{BlockId, FuncBody, InstKind, Terminator, ValueId};
+use super::ssa::{BlockId, ControlHeader, FuncBody, InstKind, ValueId};
 
 // =============================================================================
 // Array Provenance
@@ -62,92 +62,45 @@ pub enum ArrayProvenance {
 // =============================================================================
 
 /// Information about a detected loop in the CFG.
+///
+/// Derived from `ControlHeader::Loop` metadata set by the SSA builder,
+/// not from CFG heuristics. This means we only detect loops that were
+/// explicitly created via `create_for_range_loop` / `create_while_loop`.
 #[derive(Debug, Clone)]
 pub struct LoopInfo {
-    /// The loop header block (has back-edge target).
+    /// The loop header block (tagged with `ControlHeader::Loop`).
     pub header: BlockId,
-    /// The loop body block(s).
-    pub body_blocks: Vec<BlockId>,
-    /// The loop exit block.
+    /// The continue block (branches back to header).
+    pub continue_block: BlockId,
+    /// The merge block (loop exit).
     pub exit: BlockId,
-    /// The back-edge source block.
-    pub latch: BlockId,
 }
 
-/// Detect loops in a function body by finding back-edges.
+/// Detect loops by reading `ControlHeader::Loop` metadata on blocks.
+///
+/// This relies on the SSA builder tagging loop headers during construction
+/// rather than attempting CFG analysis, so it works regardless of loop shape
+/// (rotated loops, multi-block bodies, if-structured loops, etc.).
 fn detect_loops(body: &FuncBody) -> Vec<LoopInfo> {
-    let mut loops = Vec::new();
-    let mut visited = HashSet::new();
-    let mut in_stack = HashSet::new();
-
-    // Simple DFS to find back-edges
-    fn dfs(
-        body: &FuncBody,
-        block: BlockId,
-        visited: &mut HashSet<BlockId>,
-        in_stack: &mut HashSet<BlockId>,
-        back_edges: &mut Vec<(BlockId, BlockId)>, // (from, to)
-    ) {
-        if visited.contains(&block) {
-            return;
-        }
-        visited.insert(block);
-        in_stack.insert(block);
-
-        let blk = &body.blocks[block.index()];
-        if let Some(ref term) = blk.terminator {
-            let successors = match term {
-                Terminator::Branch { target, .. } => vec![*target],
-                Terminator::CondBranch {
-                    then_target,
-                    else_target,
-                    ..
-                } => vec![*then_target, *else_target],
-                Terminator::Return(_) | Terminator::ReturnUnit | Terminator::Unreachable => vec![],
-            };
-
-            for succ in successors {
-                if in_stack.contains(&succ) {
-                    // Back-edge found
-                    back_edges.push((block, succ));
-                } else {
-                    dfs(body, succ, visited, in_stack, back_edges);
-                }
+    body.blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(i, block)| {
+            if let Some(ControlHeader::Loop {
+                merge,
+                continue_block,
+            }) = &block.control
+            {
+                Some(LoopInfo {
+                    header: BlockId(i as u32),
+                    continue_block: *continue_block,
+                    exit: *merge,
+                })
+            } else {
+                None
             }
-        }
-
-        in_stack.remove(&block);
-    }
-
-    let mut back_edges = Vec::new();
-    dfs(body, BlockId::ENTRY, &mut visited, &mut in_stack, &mut back_edges);
-
-    // For each back-edge, construct loop info
-    for (latch, header) in back_edges {
-        // Find body blocks (blocks dominated by header that reach latch)
-        // For now, simple heuristic: blocks between header and latch
-        let mut body_blocks = Vec::new();
-
-        // Simple approach: the block after header in a conditional branch is the body
-        let header_blk = &body.blocks[header.index()];
-        if let Some(Terminator::CondBranch {
-            then_target,
-            else_target,
-            ..
-        }) = &header_blk.terminator
-        {
-            // then_target is typically the body, else_target is the exit
-            body_blocks.push(*then_target);
-            loops.push(LoopInfo {
-                header,
-                body_blocks,
-                exit: *else_target,
-                latch,
-            });
-        }
-    }
-
-    loops
+        })
+        .collect()
 }
 
 // =============================================================================
@@ -203,11 +156,8 @@ fn analyze_map_loop(body: &FuncBody, loop_info: &LoopInfo) -> Option<MapLoopInfo
     }
     let length_value = length_value?;
 
-    // Analyze the body block to find: arr[index], f(elem, ...), array_with(acc, index, result)
-    if loop_info.body_blocks.is_empty() {
-        return None;
-    }
-    let body_block = &body.blocks[loop_info.body_blocks[0].index()];
+    // Analyze the continue block (loop body) to find: arr[index], f(elem, ...), array_with(...)
+    let body_block = &body.blocks[loop_info.continue_block.index()];
 
     let mut input_array = None;
     let mut indexed_elem = None;
