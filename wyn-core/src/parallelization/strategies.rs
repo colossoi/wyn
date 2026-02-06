@@ -1,7 +1,9 @@
 //! Input and output strategies for parallelization.
 //!
 //! These traits abstract over how elements are read (input) and written (output)
-//! in parallelized compute shaders.
+//! in parallelized compute shaders. Each trait uses an associated `Handle` type
+//! returned from `setup` and passed to per-element operations, so resources
+//! (storage views, remapped values) are created once rather than per iteration.
 
 use std::collections::HashMap;
 
@@ -14,27 +16,36 @@ use super::ParallelizeCtx;
 
 /// Strategy for reading input elements in a parallel loop.
 pub trait InputStrategy {
-    /// Setup resources and return (length, element_type).
-    /// Called once before the loop.
-    fn setup(&self, ctx: &mut ParallelizeCtx) -> Option<(ValueId, Type<TypeName>)>;
+    type Handle: Copy;
 
-    /// Get the element at the given index.
+    /// Setup resources and return (handle, length, element_type).
+    /// Called once before the loop.
+    fn setup(&mut self, ctx: &mut ParallelizeCtx) -> Option<(Self::Handle, ValueId, Type<TypeName>)>;
+
+    /// Get the element at the given index using the handle from setup.
     /// Called inside the loop body.
-    fn get_element(&self, ctx: &mut ParallelizeCtx, index: ValueId) -> Option<ValueId>;
+    fn get_element(
+        &self,
+        ctx: &mut ParallelizeCtx,
+        handle: Self::Handle,
+        index: ValueId,
+    ) -> Option<ValueId>;
 }
 
 /// Strategy for writing output elements in a parallel loop.
 pub trait OutputStrategy {
-    /// Setup resources and return the output view/handle.
-    /// Called once before the loop.
-    fn setup(&self, ctx: &mut ParallelizeCtx, elem_ty: &Type<TypeName>) -> Option<ValueId>;
+    type Handle: Copy;
 
-    /// Store a result at the given index.
+    /// Setup resources and return a handle for storing results.
+    /// Called once before the loop.
+    fn setup(&self, ctx: &mut ParallelizeCtx, elem_ty: &Type<TypeName>) -> Option<Self::Handle>;
+
+    /// Store a result at the given index using the handle from setup.
     /// Called inside the loop body.
     fn store_result(
         &self,
         ctx: &mut ParallelizeCtx,
-        output_view: ValueId,
+        handle: Self::Handle,
         index: ValueId,
         value: ValueId,
         elem_ty: &Type<TypeName>,
@@ -50,6 +61,8 @@ pub struct StorageInput {
     param_index: usize,
     set: u32,
     binding: u32,
+    /// Element type, populated by setup.
+    elem_ty: Option<Type<TypeName>>,
 }
 
 impl StorageInput {
@@ -58,46 +71,39 @@ impl StorageInput {
             param_index,
             set,
             binding,
+            elem_ty: None,
         }
     }
 }
 
 impl InputStrategy for StorageInput {
-    fn setup(&self, ctx: &mut ParallelizeCtx) -> Option<(ValueId, Type<TypeName>)> {
+    /// The storage buffer view created during setup.
+    type Handle = ValueId;
+
+    fn setup(&mut self, ctx: &mut ParallelizeCtx) -> Option<(ValueId, ValueId, Type<TypeName>)> {
         let array_ty = ctx.entry.inputs.get(self.param_index)?.ty.clone();
         let elem_ty = match &array_ty {
             Type::Constructed(TypeName::Array, args) if !args.is_empty() => args[0].clone(),
             _ => return None,
         };
 
-        let _view =
+        let view =
             ctx.builder.emit_storage_view(self.set, self.binding, array_ty, ctx.span, ctx.node_id).ok()?;
 
-        // Return storage length for loop bound calculation.
-        // The view is recreated in get_element (TODO: store for reuse).
         let set_val = ctx.push_int(&self.set.to_string())?;
         let binding_val = ctx.push_int(&self.binding.to_string())?;
         let storage_len =
             ctx.push_intrinsic("_w_storage_len", vec![set_val, binding_val], ctx.u32_ty.clone())?;
 
-        Some((storage_len, elem_ty))
+        self.elem_ty = Some(elem_ty.clone());
+        Some((view, storage_len, elem_ty))
     }
 
-    fn get_element(&self, ctx: &mut ParallelizeCtx, index: ValueId) -> Option<ValueId> {
-        let array_ty = ctx.entry.inputs.get(self.param_index)?.ty.clone();
-        let elem_ty = match &array_ty {
-            Type::Constructed(TypeName::Array, args) if !args.is_empty() => args[0].clone(),
-            _ => return None,
-        };
+    fn get_element(&self, ctx: &mut ParallelizeCtx, view: ValueId, index: ValueId) -> Option<ValueId> {
+        let elem_ty = self.elem_ty.as_ref()?.clone();
 
-        // Recreate view (TODO: store from setup for reuse)
-        let view =
-            ctx.builder.emit_storage_view(self.set, self.binding, array_ty, ctx.span, ctx.node_id).ok()?;
-
-        // Index into view
         let ptr = ctx.push_inst(InstKind::StorageViewIndex { view, index }, elem_ty.clone())?;
 
-        // Load element.
         // Effect tokens are unordered markers (SPIR-V backend ignores them for ordering).
         // We use entry_effect() for all parallel iterations since they're independent.
         let effect_in = ctx.entry_effect();
@@ -111,11 +117,20 @@ impl InputStrategy for StorageInput {
 // Range Input
 // =============================================================================
 
+/// Handle for range input, holding remapped start/step values.
+#[derive(Clone, Copy)]
+pub struct RangeHandle {
+    /// Remapped start value. None for iota (starts at 0).
+    start: Option<ValueId>,
+    /// Remapped step value. None when step is 1.
+    step: Option<ValueId>,
+}
+
 /// Input strategy for computing elements from a range (iota).
 pub struct RangeInput {
     /// Kind of range: either explicit ArrayRange or simple iota
     kind: RangeKind,
-    /// Length of the range
+    /// Length of the range (in the original body, before remapping)
     len: ValueId,
     /// Element type (usually i32)
     elem_ty: Type<TypeName>,
@@ -179,36 +194,58 @@ fn extract_array_elem_type(ty: &Type<TypeName>) -> Option<Type<TypeName>> {
 }
 
 impl InputStrategy for RangeInput {
-    fn setup(&self, ctx: &mut ParallelizeCtx) -> Option<(ValueId, Type<TypeName>)> {
+    type Handle = RangeHandle;
+
+    fn setup(&mut self, ctx: &mut ParallelizeCtx) -> Option<(RangeHandle, ValueId, Type<TypeName>)> {
         // Remap the length value (may be a computed expression) to the new builder
         let new_len = remap_entry_value(ctx, self.len)?;
 
         // Convert to u32 for indexing
         let len_u32 = ctx.push_call("u32.i32", vec![new_len], ctx.u32_ty.clone())?;
 
-        Some((len_u32, self.elem_ty.clone()))
+        // Remap start/step once during setup instead of per-element
+        let handle = match &self.kind {
+            RangeKind::Iota => RangeHandle {
+                start: None,
+                step: None,
+            },
+            RangeKind::Explicit { start, step } => {
+                let new_start = remap_entry_value(ctx, *start)?;
+                let new_step = match step {
+                    Some(s) => Some(remap_entry_value(ctx, *s)?),
+                    None => None,
+                };
+                RangeHandle {
+                    start: Some(new_start),
+                    step: new_step,
+                }
+            }
+        };
+
+        Some((handle, len_u32, self.elem_ty.clone()))
     }
 
-    fn get_element(&self, ctx: &mut ParallelizeCtx, index: ValueId) -> Option<ValueId> {
+    fn get_element(
+        &self,
+        ctx: &mut ParallelizeCtx,
+        handle: RangeHandle,
+        index: ValueId,
+    ) -> Option<ValueId> {
         // Convert index (u32) to element type (i32)
         let index_i32 = ctx.push_call("i32.u32", vec![index], ctx.i32_ty.clone())?;
 
-        match &self.kind {
-            RangeKind::Iota => {
+        match handle.start {
+            None => {
                 // iota(n): element at index i is just i
                 Some(index_i32)
             }
-            RangeKind::Explicit { start, step } => {
-                // Remap start (and step if present) to new builder
-                let new_start = remap_entry_value(ctx, *start)?;
-
+            Some(start) => {
                 // Compute: start + index * step (or start + index if step is 1)
-                let elem = if let Some(step) = step {
-                    let new_step = remap_entry_value(ctx, *step)?;
-                    let idx_times_step = ctx.push_binop("*", index_i32, new_step, self.elem_ty.clone())?;
-                    ctx.push_binop("+", new_start, idx_times_step, self.elem_ty.clone())?
+                let elem = if let Some(step) = handle.step {
+                    let idx_times_step = ctx.push_binop("*", index_i32, step, self.elem_ty.clone())?;
+                    ctx.push_binop("+", start, idx_times_step, self.elem_ty.clone())?
                 } else {
-                    ctx.push_binop("+", new_start, index_i32, self.elem_ty.clone())?
+                    ctx.push_binop("+", start, index_i32, self.elem_ty.clone())?
                 };
 
                 Some(elem)
@@ -234,6 +271,9 @@ impl StorageOutput {
 }
 
 impl OutputStrategy for StorageOutput {
+    /// The output storage buffer view.
+    type Handle = ValueId;
+
     fn setup(&self, ctx: &mut ParallelizeCtx, elem_ty: &Type<TypeName>) -> Option<ValueId> {
         let array_ty = Type::Constructed(
             TypeName::Array,

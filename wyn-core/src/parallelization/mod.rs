@@ -12,7 +12,7 @@
 mod strategies;
 
 use crate::ast::{NodeId, Span, TypeName};
-use crate::mir::ssa::{EffectToken, FuncBody, InstKind, Terminator, ValueId};
+use crate::mir::ssa::{EffectToken, FuncBody, Terminator, ValueId};
 use crate::mir::ssa_builder::FuncBuilder;
 use crate::mir::ssa_soac_analysis::{ArrayProvenance, ParallelizableMap, analyze_program};
 use crate::tlc::to_ssa::{EntryOutput, ExecutionModel, SsaEntryPoint, SsaProgram};
@@ -20,7 +20,9 @@ use polytype::Type;
 
 use std::collections::HashMap;
 
-pub use strategies::{InputStrategy, OutputStrategy, RangeInput, StorageInput, StorageOutput, remap_value};
+pub use strategies::{
+    InputStrategy, OutputStrategy, RangeHandle, RangeInput, StorageInput, StorageOutput, remap_value,
+};
 
 /// Context passed to strategies during parallelization.
 /// Contains the builder and common utilities.
@@ -89,7 +91,7 @@ impl<'a> ParallelizeCtx<'a> {
     }
 
     /// Push an instruction.
-    pub fn push_inst(&mut self, kind: InstKind, ty: Type<TypeName>) -> Option<ValueId> {
+    pub fn push_inst(&mut self, kind: crate::mir::ssa::InstKind, ty: Type<TypeName>) -> Option<ValueId> {
         self.builder.push_inst(kind, ty, self.span, self.node_id).ok()
     }
 
@@ -168,38 +170,48 @@ fn parallelize_entry(
         (0, next)
     });
 
-    // Create input and output strategies based on provenance
-    let (input_strategy, output_strategy): (Box<dyn InputStrategy>, Box<dyn OutputStrategy>) =
-        match &par_map.source {
-            ArrayProvenance::EntryStorage {
-                param_index,
-                storage_binding,
-                ..
-            } => {
-                let input = StorageInput::new(*param_index, *storage_binding);
-                let output = StorageOutput::new(output_binding.0, output_binding.1);
-                (Box::new(input), Box::new(output))
-            }
-            ArrayProvenance::Range { value } => {
-                let input = RangeInput::new(*value, &entry.body)?;
-                let output = StorageOutput::new(output_binding.0, output_binding.1);
-                (Box::new(input), Box::new(output))
-            }
-            ArrayProvenance::Unknown => return None,
-        };
-
     // Build the parallelized function
     let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
     let params: Vec<(Type<TypeName>, String)> =
         entry.inputs.iter().map(|i| (i.ty.clone(), i.name.clone())).collect();
     let builder = FuncBuilder::new(params, unit_ty.clone());
-
     let mut ctx = ParallelizeCtx::new(builder, entry);
 
-    // 1. Setup input and output strategies
-    let (input_len, _input_elem_ty) = input_strategy.setup(&mut ctx)?;
+    // Create strategies and build loop body based on provenance
+    match &par_map.source {
+        ArrayProvenance::EntryStorage {
+            param_index,
+            storage_binding,
+            ..
+        } => {
+            let mut input = StorageInput::new(*param_index, *storage_binding);
+            let output = StorageOutput::new(output_binding.0, output_binding.1);
+            build_parallel_body(&mut ctx, &mut input, &output, par_map, total_threads)?;
+        }
+        ArrayProvenance::Range { value } => {
+            let mut input = RangeInput::new(*value, &entry.body)?;
+            let output = StorageOutput::new(output_binding.0, output_binding.1);
+            build_parallel_body(&mut ctx, &mut input, &output, par_map, total_threads)?;
+        }
+        ArrayProvenance::Unknown => return None,
+    };
+
+    let body = ctx.finish()?;
+    Some((body, output_binding))
+}
+
+/// Build the parallel loop body: setup strategies, chunk work, loop, call map function, store.
+fn build_parallel_body<I: InputStrategy, O: OutputStrategy>(
+    ctx: &mut ParallelizeCtx,
+    input_strategy: &mut I,
+    output_strategy: &O,
+    par_map: &ParallelizableMap,
+    total_threads: u32,
+) -> Option<()> {
+    // 1. Setup input and output strategies (resources created once)
+    let (input_handle, input_len, _input_elem_ty) = input_strategy.setup(ctx)?;
     let output_elem_ty = &par_map.map_loop.map_result_ty;
-    let output_view = output_strategy.setup(&mut ctx, output_elem_ty)?;
+    let output_handle = output_strategy.setup(ctx, output_elem_ty)?;
 
     // 2. Get thread ID and calculate chunk bounds
     let thread_id = ctx.push_intrinsic("__builtin_thread_id", vec![], ctx.u32_ty.clone())?;
@@ -254,12 +266,13 @@ fn parallelize_entry(
     // 4. Loop body: get element, apply function, store result
     ctx.builder.switch_to_block(body_block).ok()?;
 
-    let input_elem = input_strategy.get_element(&mut ctx, loop_index)?;
+    let input_elem = input_strategy.get_element(ctx, input_handle, loop_index)?;
 
     // Build the full argument list for the map function.
     // The original call may have captured variables (e.g. from defunctionalized lambdas)
     // in addition to the loop element. Remap each original arg's dependency cone into the
     // new builder, substituting the element arg position with the new input_elem.
+    let entry = ctx.entry;
     let result_ty = &par_map.map_loop.map_result_ty;
     let call_args = {
         // Shared memo pre-seeded with entry param → builder param mappings.
@@ -298,7 +311,7 @@ fn parallelize_entry(
     let result_elem = ctx.push_call(&par_map.map_function, call_args, result_ty.clone())?;
 
     // Store result using the map function's return type (not the input elem type)
-    output_strategy.store_result(&mut ctx, output_view, loop_index, result_elem, result_ty)?;
+    output_strategy.store_result(ctx, output_handle, loop_index, result_elem, result_ty)?;
 
     // Increment index and branch back to header
     let one = ctx.push_int("1")?;
@@ -314,6 +327,5 @@ fn parallelize_entry(
     ctx.builder.switch_to_block(exit_block).ok()?;
     ctx.builder.terminate(Terminator::ReturnUnit).ok()?;
 
-    let body = ctx.finish()?;
-    Some((body, output_binding))
+    Some(())
 }
