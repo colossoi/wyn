@@ -118,14 +118,13 @@ const INTRINSIC_HOFS: &[(&str, &[usize])] = &[
 ];
 
 /// Register intrinsic HOFs into a HOF info map.
-/// Uses existing SymbolIds from the symbol table (intrinsics not referenced in the program are skipped).
+/// Registers ALL SymbolIds that match intrinsic HOF names (the symbol table can have
+/// multiple SymbolIds for the same name from different call sites).
 fn register_intrinsic_hofs(symbols: &SymbolTable, hof_info: &mut HashMap<SymbolId, HofInfo>) {
-    // Build reverse lookup: name -> SymbolId
-    let name_to_sym: HashMap<&str, SymbolId> =
-        symbols.iter().map(|(&id, name)| (name.as_str(), id)).collect();
+    let intrinsic_map: HashMap<&str, &[usize]> = INTRINSIC_HOFS.iter().copied().collect();
 
-    for &(name, indices) in INTRINSIC_HOFS {
-        if let Some(&sym) = name_to_sym.get(name) {
+    for (&sym, name) in symbols.iter() {
+        if let Some(&indices) = intrinsic_map.get(name.as_str()) {
             hof_info.insert(
                 sym,
                 HofInfo {
@@ -134,7 +133,6 @@ fn register_intrinsic_hofs(symbols: &SymbolTable, hof_info: &mut HashMap<SymbolI
                 },
             );
         }
-        // If the intrinsic isn't in the symbol table, it's not used in this program - skip it
     }
 }
 

@@ -500,13 +500,9 @@ impl<'a> Visitor for AliasChecker<'a> {
     ) -> ControlFlow<Self::Break> {
         self.visit_expression(array)?;
         self.visit_expression(index)?;
-        // Element type determines if copy or not
-        if self.node_is_copy_type(id) {
-            self.set_result(id, AliasInfo::copy());
-        } else {
-            // Non-copy elements should track aliasing with the array
-            unimplemented!("alias tracking for non-copy array elements");
-        }
+        // In GPU/SPIR-V context, all values are copied - no heap or references.
+        // Array indexing always produces a fresh copy of the element.
+        self.set_result(id, AliasInfo::copy());
         ControlFlow::Continue(())
     }
 

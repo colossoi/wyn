@@ -1,0 +1,92 @@
+-- Bitcoin miner: compute double-SHA256 for block headers
+--
+-- Maps over the nonce space. The header (minus nonce) is provided once,
+-- and each thread tries a different nonce value, computing sha256d.
+
+------------------------------------------------------------
+-- Linked external function: SHA256 compression
+------------------------------------------------------------
+#[linked("sha256_compress")]
+extern sha256_compress(state: [8]u32, block: [16]u32) [8]u32
+
+------------------------------------------------------------
+-- SHA256 Initial Hash Values (first 32 bits of fractional
+-- parts of square roots of first 8 primes)
+------------------------------------------------------------
+def SHA256_IV: [8]u32 = [
+    0x6a09e667u32, 0xbb67ae85u32, 0x3c6ef372u32, 0xa54ff53au32,
+    0x510e527fu32, 0x9b05688cu32, 0x1f83d9abu32, 0x5be0cd19u32
+]
+
+------------------------------------------------------------
+-- sha256_80: Hash an 80-byte message (20 u32s)
+-- Requires 2 compression rounds:
+--   Block 1: bytes 0-63 (words 0-15)
+--   Block 2: bytes 64-79 (words 16-19) + padding + length
+------------------------------------------------------------
+def sha256_80(msg: [20]u32) [8]u32 =
+    -- First block: words 0-15 of the message
+    let block1: [16]u32 = [
+        msg[0],  msg[1],  msg[2],  msg[3],
+        msg[4],  msg[5],  msg[6],  msg[7],
+        msg[8],  msg[9],  msg[10], msg[11],
+        msg[12], msg[13], msg[14], msg[15]
+    ] in
+
+    -- Second block: words 16-19 + padding
+    -- Padding: 0x80000000, then zeros, then 64-bit length (640 bits = 0x280)
+    let block2: [16]u32 = [
+        msg[16], msg[17], msg[18], msg[19],
+        0x80000000u32,  -- padding start (index 4)
+        0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32,  -- zeros (indices 5-13)
+        0x00000000u32,  -- high 32 bits of length (index 14)
+        0x00000280u32   -- low 32 bits of length (index 15)
+    ] in
+
+    -- Compress both blocks
+    let state1 = sha256_compress(SHA256_IV, block1) in
+    sha256_compress(state1, block2)
+
+------------------------------------------------------------
+-- sha256_32: Hash a 32-byte message (8 u32s)
+-- Single compression round with padding
+------------------------------------------------------------
+def sha256_32(msg: [8]u32) [8]u32 =
+    -- Build padded block: 8 words + padding + length (256 bits = 0x100)
+    let block: [16]u32 = [
+        msg[0], msg[1], msg[2], msg[3],
+        msg[4], msg[5], msg[6], msg[7],
+        0x80000000u32,  -- padding start
+        0u32, 0u32, 0u32, 0u32, 0u32,  -- zeros (indices 9-13)
+        0x00000000u32,  -- high 32 bits of length
+        0x00000100u32   -- low 32 bits of length (256 bits)
+    ] in
+    sha256_compress(SHA256_IV, block)
+
+------------------------------------------------------------
+-- sha256d_80: Double SHA256 of 80-byte message
+-- This is what Bitcoin uses for block header hashing
+------------------------------------------------------------
+def sha256d_80(header: [20]u32) [8]u32 =
+    sha256_32(sha256_80(header))
+
+------------------------------------------------------------
+-- mine_nonce: Hash header with a specific nonce
+------------------------------------------------------------
+def mine_nonce(header_base: [19]u32, nonce: i32) [8]u32 =
+    let header: [20]u32 = [
+        header_base[0],  header_base[1],  header_base[2],  header_base[3],
+        header_base[4],  header_base[5],  header_base[6],  header_base[7],
+        header_base[8],  header_base[9],  header_base[10], header_base[11],
+        header_base[12], header_base[13], header_base[14], header_base[15],
+        header_base[16], header_base[17], header_base[18], u32.i32(nonce)
+    ] in
+    sha256d_80(header)
+
+------------------------------------------------------------
+-- Compute shader entry point
+-- Maps over nonce space using iota
+------------------------------------------------------------
+#[compute]
+entry mine(header_base: [19]u32, n: i32) [][8]u32 =
+    map(|nonce| mine_nonce(header_base, nonce), iota(n))
