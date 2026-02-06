@@ -160,6 +160,9 @@ fn parallelize_entry(
     local_size: (u32, u32, u32),
 ) -> Option<(FuncBody, (u32, u32))> {
     let total_threads = local_size.0 * local_size.1 * local_size.2;
+    if total_threads == 0 {
+        return None;
+    }
 
     // Derive output storage binding from entry's declared outputs (assigned by to_ssa).
     // Fall back to counting storage inputs if no output binding exists yet (synthesis).
