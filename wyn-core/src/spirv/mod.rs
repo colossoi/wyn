@@ -2415,7 +2415,6 @@ fn lower_ssa_program_impl(program: &SsaProgram) -> Result<Vec<u32>> {
                     constructor.builder.execution_mode(func_id, spirv::ExecutionMode::OriginUpperLeft, []);
                 }
                 spirv::ExecutionModel::GLCompute => {
-                    constructor.builder.capability(Capability::VariablePointersStorageBuffer);
                     if let Some((x, y, z)) = local_size {
                         constructor.builder.execution_mode(
                             func_id,

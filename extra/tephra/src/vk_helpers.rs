@@ -4,6 +4,43 @@ use anyhow::{Context, Result, anyhow};
 use ash::vk;
 use std::ffi::CStr;
 
+unsafe extern "system" fn vulkan_debug_callback(
+    message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
+    message_type: vk::DebugUtilsMessageTypeFlagsEXT,
+    p_callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT<'_>,
+    _user_data: *mut std::ffi::c_void,
+) -> vk::Bool32 {
+    let severity = if message_severity.contains(vk::DebugUtilsMessageSeverityFlagsEXT::ERROR) {
+        "ERROR"
+    } else if message_severity.contains(vk::DebugUtilsMessageSeverityFlagsEXT::WARNING) {
+        "WARN"
+    } else {
+        "INFO"
+    };
+
+    let kind = if message_type.contains(vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION) {
+        "VALIDATION"
+    } else if message_type.contains(vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE) {
+        "PERFORMANCE"
+    } else {
+        "GENERAL"
+    };
+
+    let message = if p_callback_data.is_null() {
+        "(no message)".to_string()
+    } else {
+        let data = &*p_callback_data;
+        if data.p_message.is_null() {
+            "(null message)".to_string()
+        } else {
+            CStr::from_ptr(data.p_message).to_string_lossy().into_owned()
+        }
+    };
+
+    eprintln!("[Vulkan {}][{}] {}", severity, kind, message);
+    vk::FALSE
+}
+
 /// Vulkan compute context - instance, device, queue
 pub struct ComputeContext {
     _entry: ash::Entry,
@@ -13,6 +50,8 @@ pub struct ComputeContext {
     queue: vk::Queue,
     queue_family_index: u32,
     device_name: String,
+    _debug_utils: Option<ash::ext::debug_utils::Instance>,
+    _debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
 }
 
 impl ComputeContext {
@@ -27,10 +66,57 @@ impl ComputeContext {
                 .engine_version(vk::make_api_version(0, 1, 0, 0))
                 .api_version(vk::API_VERSION_1_2);
 
-            let create_info = vk::InstanceCreateInfo::default().application_info(&app_info);
+            // Try to enable validation layer + debug utils
+            let validation_layer = CStr::from_bytes_with_nul(b"VK_LAYER_KHRONOS_validation\0").unwrap();
+            let available_layers = entry.enumerate_instance_layer_properties().unwrap_or_default();
+            let has_validation = available_layers.iter().any(|layer| {
+                CStr::from_ptr(layer.layer_name.as_ptr()) == validation_layer
+            });
+
+            let layer_names: Vec<*const i8> = if has_validation {
+                eprintln!("  Validation layer enabled");
+                vec![validation_layer.as_ptr()]
+            } else {
+                eprintln!("  Validation layer not available");
+                vec![]
+            };
+
+            let ext_names: Vec<*const i8> = if has_validation {
+                vec![ash::ext::debug_utils::NAME.as_ptr()]
+            } else {
+                vec![]
+            };
+
+            let create_info = vk::InstanceCreateInfo::default()
+                .application_info(&app_info)
+                .enabled_layer_names(&layer_names)
+                .enabled_extension_names(&ext_names);
 
             let instance =
                 entry.create_instance(&create_info, None).context("Failed to create Vulkan instance")?;
+
+            // Set up debug messenger
+            let (debug_utils, debug_messenger) = if has_validation {
+                let debug_utils = ash::ext::debug_utils::Instance::new(&entry, &instance);
+                let messenger_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
+                    .message_severity(
+                        vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
+                            | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
+                            | vk::DebugUtilsMessageSeverityFlagsEXT::INFO,
+                    )
+                    .message_type(
+                        vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
+                            | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
+                            | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
+                    )
+                    .pfn_user_callback(Some(vulkan_debug_callback));
+                let messenger = debug_utils
+                    .create_debug_utils_messenger(&messenger_info, None)
+                    .ok();
+                (Some(debug_utils), messenger)
+            } else {
+                (None, None)
+            };
 
             let (physical_device, queue_family_index, device_name) = select_compute_device(&instance)?;
 
@@ -45,6 +131,8 @@ impl ComputeContext {
                 queue,
                 queue_family_index,
                 device_name,
+                _debug_utils: debug_utils,
+                _debug_messenger: debug_messenger,
             })
         }
     }
@@ -81,6 +169,11 @@ impl Drop for ComputeContext {
     fn drop(&mut self) {
         unsafe {
             self.device.destroy_device(None);
+            if let (Some(ref debug_utils), Some(messenger)) =
+                (&self._debug_utils, self._debug_messenger)
+            {
+                debug_utils.destroy_debug_utils_messenger(messenger, None);
+            }
             self.instance.destroy_instance(None);
         }
     }
