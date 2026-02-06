@@ -53,6 +53,15 @@ impl ComputeContext {
         &self.device_name
     }
 
+    pub fn max_push_constants_size(&self) -> u32 {
+        unsafe {
+            self.instance
+                .get_physical_device_properties(self.physical_device)
+                .limits
+                .max_push_constants_size
+        }
+    }
+
     pub fn create_compute_pipeline(&self, spirv: &[u32], entry_name: &str) -> Result<ComputePipeline<'_>> {
         ComputePipeline::new(self, spirv, entry_name, 1, 0)
     }
@@ -100,6 +109,17 @@ unsafe fn select_compute_device(instance: &ash::Instance) -> Result<(vk::Physica
     Err(anyhow!("No compute-capable device found"))
 }
 
+/// Check whether a physical device supports variablePointersStorageBuffer.
+unsafe fn check_variable_pointers_support(
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+) -> bool {
+    let mut vp_features = vk::PhysicalDeviceVariablePointersFeatures::default();
+    let mut features2 = vk::PhysicalDeviceFeatures2::default().push_next(&mut vp_features);
+    instance.get_physical_device_features2(physical_device, &mut features2);
+    vp_features.variable_pointers_storage_buffer == vk::TRUE
+}
+
 /// Create a logical device with a single compute queue
 unsafe fn create_logical_device(
     instance: &ash::Instance,
@@ -111,8 +131,21 @@ unsafe fn create_logical_device(
         .queue_family_index(queue_family_index)
         .queue_priorities(&queue_priorities);
 
-    let device_create_info =
-        vk::DeviceCreateInfo::default().queue_create_infos(std::slice::from_ref(&queue_create_info));
+    // Enable VariablePointersStorageBuffer if supported (required by compiled Wyn shaders)
+    let has_vp = check_variable_pointers_support(instance, physical_device);
+    let mut variable_pointers =
+        vk::PhysicalDeviceVariablePointersFeatures::default().variable_pointers_storage_buffer(has_vp);
+
+    if !has_vp {
+        eprintln!(
+            "Warning: device does not support variablePointersStorageBuffer; \
+             some shaders may fail to compile"
+        );
+    }
+
+    let device_create_info = vk::DeviceCreateInfo::default()
+        .queue_create_infos(std::slice::from_ref(&queue_create_info))
+        .push_next(&mut variable_pointers);
 
     instance
         .create_device(physical_device, &device_create_info, None)
