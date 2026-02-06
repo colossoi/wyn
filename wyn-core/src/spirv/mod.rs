@@ -99,6 +99,9 @@ struct Constructor {
 
     /// Tracks which SPIR-V types already have ArrayStride decorations for buffer layout.
     buffer_stride_decorated: HashSet<spirv::Word>,
+
+    /// Maps (set, binding) -> sequential buffer_id for handle-based view structs
+    buffer_id_map: HashMap<(u32, u32), u32>,
 }
 
 impl Constructor {
@@ -154,7 +157,14 @@ impl Constructor {
             linked_functions: HashMap::new(),
             current_entry_outputs: Vec::new(),
             buffer_stride_decorated: HashSet::new(),
+            buffer_id_map: HashMap::new(),
         }
+    }
+
+    /// Get or assign a sequential buffer_id for a (set, binding) pair.
+    fn get_or_assign_buffer_id(&mut self, set: u32, binding: u32) -> u32 {
+        let next_id = self.buffer_id_map.len() as u32;
+        *self.buffer_id_map.entry((set, binding)).or_insert(next_id)
     }
 
     /// Resolve a pointer address-space type to a SPIR-V StorageClass.
@@ -825,6 +835,8 @@ struct SsaLowerCtx<'a, 'b> {
     /// Phi node info: (target_block, param_idx, value, source_block)
     /// Collected during terminator lowering, inserted after all blocks processed.
     phi_inputs: Vec<(BlockId, usize, spirv::Word, spirv::Word)>,
+    /// Maps SSA ValueId of a StorageView -> (set, binding) for resolving buffer identity.
+    view_buffer_map: HashMap<ValueId, (u32, u32)>,
 }
 
 impl<'a, 'b> SsaLowerCtx<'a, 'b> {
@@ -837,6 +849,7 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
             block_map: HashMap::new(),
             block_indices: HashMap::new(),
             phi_inputs: Vec::new(),
+            view_buffer_map: HashMap::new(),
         }
     }
 
@@ -1100,20 +1113,25 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                 let offset_id = self.get_value(*offset)?;
                 let len_id = self.get_value(*len)?;
 
-                if let Some(&(buffer_var, _, buffer_ptr_type)) =
-                    self.constructor.storage_buffers.get(&(*set, *binding))
-                {
-                    // Use u32 for offset/len (indices and lengths are non-negative)
-                    let view_struct_type = self.constructor.get_or_create_struct_type(vec![
-                        buffer_ptr_type,
-                        self.constructor.u32_type,
-                        self.constructor.u32_type,
-                    ]);
-                    self.constructor.builder.composite_construct(
+                if self.constructor.storage_buffers.contains_key(&(*set, *binding)) {
+                    // Handle-based view: {buffer_id: u32, offset: u32, len: u32}
+                    // No pointers in the struct — avoids VariablePointersStorageBuffer requirement.
+                    let buffer_id = self.constructor.get_or_assign_buffer_id(*set, *binding);
+                    let buffer_id_const = self.constructor.const_u32(buffer_id);
+                    let u32_ty = self.constructor.u32_type;
+                    let view_struct_type = self
+                        .constructor
+                        .get_or_create_struct_type(vec![u32_ty, u32_ty, u32_ty]);
+                    let result = self.constructor.builder.composite_construct(
                         view_struct_type,
                         None,
-                        [buffer_var, offset_id, len_id],
-                    )?
+                        [buffer_id_const, offset_id, len_id],
+                    )?;
+                    // Record (set, binding) for this view so StorageViewIndex can resolve the buffer.
+                    if let Some(result_value) = inst.result {
+                        self.view_buffer_map.insert(result_value, (*set, *binding));
+                    }
+                    result
                 } else {
                     bail_spirv!("Unknown storage buffer: set={}, binding={}", set, binding)
                 }
@@ -1123,26 +1141,25 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                 let view_id = self.get_value(*view)?;
                 let index_id = self.get_value(*index)?;
 
-                // Derive the buffer pointer type from the view's SSA type.
-                // The view's type is an array type (e.g., []i32). From that we can compute:
-                // elem_type -> runtime_array -> buffer_block -> ptr_to_buffer_block
-                let view_ty = self.body.get_value_type(*view);
-                let elem_ty = match view_ty {
-                    PolyType::Constructed(TypeName::Array, args) if !args.is_empty() => &args[0],
-                    _ => bail_spirv!("StorageViewIndex: view must have array type, got {:?}", view_ty),
-                };
-                let elem_spirv = self.constructor.polytype_to_spirv(elem_ty);
-                let stride = type_byte_size(elem_ty)
-                    .ok_or_else(|| err_spirv!("StorageViewIndex: element type must have known size"))?;
-                let runtime_array = self.constructor.get_or_create_runtime_array_type(elem_spirv, stride);
-                let block_struct = self.constructor.get_or_create_buffer_block_type(runtime_array);
-                let buffer_ptr_type = self
+                // Resolve the buffer variable from the view's compile-time side table.
+                let (set, binding) = self
+                    .view_buffer_map
+                    .get(view)
+                    .copied()
+                    .ok_or_else(|| err_spirv!("StorageViewIndex: no buffer mapping for view {:?}", view))?;
+                let &(buffer_var, _, _) = self
                     .constructor
-                    .get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, block_struct);
+                    .storage_buffers
+                    .get(&(set, binding))
+                    .ok_or_else(|| {
+                        err_spirv!(
+                            "StorageViewIndex: unknown storage buffer set={}, binding={}",
+                            set,
+                            binding
+                        )
+                    })?;
 
-                // Extract buffer_ptr and offset from view struct
-                let buffer_ptr =
-                    self.constructor.builder.composite_extract(buffer_ptr_type, None, view_id, [0u32])?;
+                // Extract offset from view struct (index 1, u32)
                 let base_offset = self.constructor.builder.composite_extract(
                     self.constructor.u32_type,
                     None,
@@ -1158,14 +1175,14 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                     index_id,
                 )?;
 
-                // Access chain into runtime array - returns a pointer to the element
+                // Access chain directly on the buffer variable
                 let zero = self.constructor.const_i32(0);
                 let elem_ptr_type =
                     self.constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, result_ty);
                 self.constructor.builder.access_chain(
                     elem_ptr_type,
                     None,
-                    buffer_ptr,
+                    buffer_var,
                     [zero, actual_index],
                 )?
             }
@@ -2415,7 +2432,6 @@ fn lower_ssa_program_impl(program: &SsaProgram) -> Result<Vec<u32>> {
                     constructor.builder.execution_mode(func_id, spirv::ExecutionMode::OriginUpperLeft, []);
                 }
                 spirv::ExecutionModel::GLCompute => {
-                    constructor.builder.capability(Capability::VariablePointersStorageBuffer);
                     if let Some((x, y, z)) = local_size {
                         constructor.builder.execution_mode(
                             func_id,
