@@ -149,8 +149,13 @@ enum RangeKind {
 
 impl RangeInput {
     /// Create a RangeInput by extracting range parameters from the original body.
+    ///
+    /// Only handles ranges produced by instructions (ArrayRange, iota calls).
+    /// Values defined by block parameters (loop-carried ranges, phi-like merges)
+    /// are not recognized and return `None`, conservatively skipping parallelization.
     pub fn new(range_value: ValueId, original_body: &FuncBody) -> Option<Self> {
-        // Find the instruction that produces the range value
+        // Find the instruction that produces the range value.
+        // Note: block-param-defined values won't be found here — that's intentional.
         for inst in &original_body.insts {
             if inst.result == Some(range_value) {
                 match &inst.kind {
@@ -193,6 +198,19 @@ fn extract_array_elem_type(ty: &Type<TypeName>) -> Option<Type<TypeName>> {
     None
 }
 
+/// Return the scalar type name string (e.g. "i32", "u32", "f32") for a primitive type.
+fn scalar_name(ty: &Type<TypeName>) -> Option<&'static str> {
+    match ty {
+        Type::Constructed(TypeName::Int(32), _) => Some("i32"),
+        Type::Constructed(TypeName::Int(64), _) => Some("i64"),
+        Type::Constructed(TypeName::UInt(32), _) => Some("u32"),
+        Type::Constructed(TypeName::UInt(64), _) => Some("u64"),
+        Type::Constructed(TypeName::Float(32), _) => Some("f32"),
+        Type::Constructed(TypeName::Float(64), _) => Some("f64"),
+        _ => None,
+    }
+}
+
 impl InputStrategy for RangeInput {
     type Handle = RangeHandle;
 
@@ -200,8 +218,13 @@ impl InputStrategy for RangeInput {
         // Remap the length value (may be a computed expression) to the new builder
         let new_len = remap_entry_value(ctx, self.len)?;
 
-        // Convert to u32 for indexing
-        let len_u32 = ctx.push_call("u32.i32", vec![new_len], ctx.u32_ty.clone())?;
+        // Convert length to u32 for indexing (GPU invocation indices are u32)
+        let elem_name = scalar_name(&self.elem_ty)?;
+        let len_u32 = if elem_name == "u32" {
+            new_len
+        } else {
+            ctx.push_call(&format!("u32.{elem_name}"), vec![new_len], ctx.u32_ty.clone())?
+        };
 
         // Remap start/step once during setup instead of per-element
         let handle = match &self.kind {
@@ -231,21 +254,26 @@ impl InputStrategy for RangeInput {
         handle: RangeHandle,
         index: ValueId,
     ) -> Option<ValueId> {
-        // Convert index (u32) to element type (i32)
-        let index_i32 = ctx.push_call("i32.u32", vec![index], ctx.i32_ty.clone())?;
+        // Convert index (u32) to element type for arithmetic
+        let elem_name = scalar_name(&self.elem_ty)?;
+        let index_elem = if elem_name == "u32" {
+            index
+        } else {
+            ctx.push_call(&format!("{elem_name}.u32"), vec![index], self.elem_ty.clone())?
+        };
 
         match handle.start {
             None => {
                 // iota(n): element at index i is just i
-                Some(index_i32)
+                Some(index_elem)
             }
             Some(start) => {
                 // Compute: start + index * step (or start + index if step is 1)
                 let elem = if let Some(step) = handle.step {
-                    let idx_times_step = ctx.push_binop("*", index_i32, step, self.elem_ty.clone())?;
+                    let idx_times_step = ctx.push_binop("*", index_elem, step, self.elem_ty.clone())?;
                     ctx.push_binop("+", start, idx_times_step, self.elem_ty.clone())?
                 } else {
-                    ctx.push_binop("+", start, index_i32, self.elem_ty.clone())?
+                    ctx.push_binop("+", start, index_elem, self.elem_ty.clone())?
                 };
 
                 Some(elem)
@@ -333,7 +361,8 @@ pub fn remap_value(
         return Some(mapped);
     }
 
-    // Find the instruction that produces this value
+    // Find the instruction that produces this value.
+    // Block-param-defined values won't be found — returns None (cannot remap).
     let inst = source.insts.iter().find(|i| i.result == Some(value))?;
 
     let new_val = match &inst.kind {
