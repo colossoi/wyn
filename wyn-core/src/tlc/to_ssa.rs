@@ -311,6 +311,23 @@ fn convert_entry_point(
         converter.locals.insert(name.clone(), value);
     }
 
+    // Wrap storage buffer parameters in whole-buffer views so that any direct
+    // use of the parameter (e.g. slicing) sees a StorageView rather than a raw
+    // ValueId that has no SPIR-V representation. The parallelizer replaces the
+    // entire body when it applies, so these views are harmless in that case.
+    let span = inner_body.span;
+    let node_id = NodeId(0);
+    let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
+    for input in &inputs {
+        if let Some((set, binding)) = input.storage_binding {
+            let view = converter
+                .builder
+                .emit_storage_view(set, binding, input.ty.clone(), span, node_id)
+                .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+            converter.locals.insert(input.name.clone(), view);
+        }
+    }
+
     // Convert the body
     let result = converter.convert_term(inner_body)?;
 
@@ -331,11 +348,55 @@ fn convert_entry_point(
     let is_compute = matches!(execution_model, ExecutionModel::Compute { .. });
     let is_unit_return = matches!(ret_type, Type::Constructed(TypeName::Unit, _));
 
-    if !is_compute && !is_unit_return && !outputs.is_empty() {
-        // Get effect token for stores
+    if is_unit_return {
+        converter
+            .builder
+            .terminate(Terminator::ReturnUnit)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+    } else if is_compute && !outputs.is_empty() {
+        // Compute shader with non-unit return: write result to output storage buffer
+        // using the same StorageView + StorageViewIndex + Store helpers as the parallelizer.
         let mut effect = converter.builder.entry_effect();
         let span = inner_body.span;
-        let node_id = NodeId(0); // Dummy node ID for generated code
+        let node_id = NodeId(0);
+
+        for (i, output) in outputs.iter().enumerate() {
+            let (set, binding) = output
+                .storage_binding
+                .expect("BUG: compute output without storage binding");
+            let value = if outputs.len() == 1 {
+                result
+            } else {
+                converter
+                    .builder
+                    .push_project(result, i as u32, output.ty.clone(), span, node_id)
+                    .map_err(|e| ConvertError::BuilderError(e.to_string()))?
+            };
+
+            let view = converter
+                .builder
+                .emit_storage_view(set, binding, output.ty.clone(), span, node_id)
+                .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+            let idx_zero = converter
+                .builder
+                .push_int("0", u32_ty.clone(), span, node_id)
+                .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+            effect = converter
+                .builder
+                .emit_storage_store(view, idx_zero, value, output.ty.clone(), effect, span, node_id)
+                .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+        }
+        let _ = effect;
+
+        converter
+            .builder
+            .terminate(Terminator::ReturnUnit)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+    } else if !is_compute && !is_unit_return && !outputs.is_empty() {
+        // Vertex/fragment shader with outputs: emit OutputPtr + Store
+        let mut effect = converter.builder.entry_effect();
+        let span = inner_body.span;
+        let node_id = NodeId(0);
 
         if outputs.len() == 1 {
             // Single output: store result directly
@@ -378,20 +439,14 @@ fn convert_entry_point(
                     .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
             }
         }
-        let _ = effect; // Silence unused warning
+        let _ = effect;
 
-        // End with ReturnUnit since stores are explicit
-        converter
-            .builder
-            .terminate(Terminator::ReturnUnit)
-            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
-    } else if is_unit_return {
         converter
             .builder
             .terminate(Terminator::ReturnUnit)
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
     } else {
-        // Compute shaders or other cases: use Return
+        // Non-entry or no outputs: use Return
         converter
             .builder
             .terminate(Terminator::Return(result))
@@ -470,7 +525,7 @@ fn extract_size_hint(pattern: &ast::Pattern) -> Option<u32> {
 }
 
 /// Build entry outputs from AST entry declaration.
-/// For compute shaders, unsized array outputs get storage bindings starting from `binding_start`.
+/// For compute shaders, all non-unit outputs get storage bindings starting from `binding_start`.
 fn build_entry_outputs(
     entry: &ast::EntryDecl,
     ret_type: &Type<TypeName>,
@@ -479,8 +534,8 @@ fn build_entry_outputs(
 ) -> Vec<EntryOutput> {
     let mut binding_num = binding_start;
 
-    let mut storage_binding_for = |ty: &Type<TypeName>| -> Option<(u32, u32)> {
-        if is_compute && is_unsized_array(ty) {
+    let mut storage_binding_for = |ty: &Type<TypeName>, is_compute: bool| -> Option<(u32, u32)> {
+        if is_compute && !matches!(ty, Type::Constructed(TypeName::Unit, _)) {
             let binding = (0, binding_num);
             binding_num += 1;
             Some(binding)
@@ -494,7 +549,7 @@ fn build_entry_outputs(
             vec![EntryOutput {
                 ty: ret_type.clone(),
                 decoration: None,
-                storage_binding: storage_binding_for(ret_type),
+                storage_binding: storage_binding_for(ret_type, is_compute),
             }]
         } else {
             vec![]
@@ -507,7 +562,7 @@ fn build_entry_outputs(
             .map(|(output, ty)| EntryOutput {
                 ty: ty.clone(),
                 decoration: output.attribute.as_ref().and_then(|a| convert_to_io_decoration(a)),
-                storage_binding: storage_binding_for(ty),
+                storage_binding: storage_binding_for(ty, is_compute),
             })
             .collect()
     } else {
@@ -518,7 +573,7 @@ fn build_entry_outputs(
                 .first()
                 .and_then(|o| o.attribute.as_ref())
                 .and_then(|a| convert_to_io_decoration(a)),
-            storage_binding: storage_binding_for(ret_type),
+            storage_binding: storage_binding_for(ret_type, is_compute),
         }]
     }
 }

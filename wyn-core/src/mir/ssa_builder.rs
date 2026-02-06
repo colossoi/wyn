@@ -481,6 +481,57 @@ impl FuncBuilder {
     }
 
     // =========================================================================
+    // Storage Buffer Helpers
+    // =========================================================================
+
+    /// Create a StorageView referencing a whole storage buffer at (set, binding).
+    /// Returns the view ValueId.
+    pub fn emit_storage_view(
+        &mut self,
+        set: u32,
+        binding: u32,
+        view_ty: Type<TypeName>,
+        span: Span,
+        node_id: NodeId,
+    ) -> Result<ValueId, BuilderError> {
+        let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+        let set_val = self.push_int(&set.to_string(), u32_ty.clone(), span, node_id)?;
+        let binding_val = self.push_int(&binding.to_string(), u32_ty.clone(), span, node_id)?;
+        let storage_len =
+            self.push_intrinsic("_w_storage_len", vec![set_val, binding_val], u32_ty.clone(), span, node_id)?;
+        let zero = self.push_int("0", u32_ty, span, node_id)?;
+        self.push_inst(
+            InstKind::StorageView { set, binding, offset: zero, len: storage_len },
+            view_ty,
+            span,
+            node_id,
+        )
+    }
+
+    /// Store a value into a storage view at the given index.
+    /// Emits StorageViewIndex + Store. Returns the output effect token.
+    pub fn emit_storage_store(
+        &mut self,
+        view: ValueId,
+        index: ValueId,
+        value: ValueId,
+        elem_ty: Type<TypeName>,
+        effect_in: EffectToken,
+        span: Span,
+        node_id: NodeId,
+    ) -> Result<EffectToken, BuilderError> {
+        // StorageViewIndex SSA type is the element type (not a pointer) —
+        // SPIR-V lowering wraps it in a StorageBuffer pointer internally.
+        let ptr = self.push_inst(
+            InstKind::StorageViewIndex { view, index },
+            elem_ty,
+            span,
+            node_id,
+        )?;
+        self.push_store(ptr, value, effect_in, span, node_id)
+    }
+
+    // =========================================================================
     // Control Flow Pattern Helpers
     // =========================================================================
     //

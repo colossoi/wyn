@@ -2394,10 +2394,18 @@ impl<'a> TypeChecker<'a> {
                     None => self.context.new_variable(),
                 };
 
-                // Slice result preserves element type and address space
+                // Slice result: if the source is a view but the result has known size,
+                // the elements will be materialized into a composite array.
                 let elem_type = elem_var.apply(&self.context);
                 let addrspace = addrspace_var.apply(&self.context);
-                Ok(Type::Constructed(TypeName::Array, vec![elem_type, addrspace, result_size]))
+                let result_variant = if super::is_array_variant_view(&addrspace)
+                    && matches!(result_size, Type::Constructed(TypeName::Size(_), _))
+                {
+                    super::array_variant_composite()
+                } else {
+                    addrspace
+                };
+                Ok(Type::Constructed(TypeName::Array, vec![elem_type, result_variant, result_size]))
             }
 
             ExprKind::TypeAscription(expr, ascribed_ty) => {

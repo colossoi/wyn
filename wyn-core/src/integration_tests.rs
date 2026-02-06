@@ -612,8 +612,8 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
 
 #[test]
 fn test_array_variant_monomorphization() {
-    // A function taking [4]i32 should be monomorphized separately for View vs Composite.
-    // When called with data[0..4] (View) and [1,2,3,4] (Composite), we expect two versions.
+    // Slicing a view with constant bounds produces a Composite array (materialized at
+    // the call site), so both call sites use the same Composite variant of sum_first_two.
     let ssa = compile_to_ssa(
         r#"
 def sum_first_two(arr: [4]i32) i32 =
@@ -627,14 +627,14 @@ entry compute_main(data: []i32) i32 =
 "#,
     );
 
-    // Check that two versions of sum_first_two were created
+    // Both call sites produce Composite arrays, so only one monomorphized version
     let sum_versions: Vec<_> =
         ssa.functions.iter().filter(|f| f.name.starts_with("sum_first_two")).collect();
 
     assert_eq!(
         sum_versions.len(),
-        2,
-        "Expected 2 monomorphized versions of sum_first_two (View and Composite), got: {:?}",
+        1,
+        "Expected 1 monomorphized version of sum_first_two (Composite only), got: {:?}",
         sum_versions.iter().map(|f| &f.name).collect::<Vec<_>>()
     );
 }

@@ -1082,7 +1082,7 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
 
             InstKind::Intrinsic { name, args } => {
                 let arg_ids: Vec<_> = args.iter().map(|&v| self.get_value(v)).collect::<Result<_>>()?;
-                self.lower_intrinsic(name, args, &arg_ids, result_ty)?
+                self.lower_intrinsic(name, args, &arg_ids, result_ty, inst)?
             }
 
             // Effectful operations - for now, just handle the simple cases
@@ -1514,6 +1514,7 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
         ssa_args: &[ValueId],
         args: &[spirv::Word],
         result_ty: spirv::Word,
+        inst: &Inst,
     ) -> Result<spirv::Word> {
         // Common GLSL intrinsics
         let glsl = self.constructor.glsl_ext_inst_id;
@@ -1595,93 +1596,52 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                 let start_id = args[1];
                 let end_id = args[2];
 
-                // Check if input is a storage view by examining SSA type
+                // Dispatch based on input array variant
                 let arr_ty = self.body.get_value_type(ssa_args[0]);
                 let is_view = matches!(
                     arr_ty,
-                    PolyType::Constructed(TypeName::Array, arr_args)
+                    PolyType::Constructed(TypeName::Array, ref arr_args)
                         if arr_args.len() >= 2 && matches!(&arr_args[1], PolyType::Constructed(TypeName::ArrayVariantView, _))
                 );
 
                 if is_view {
-                    // Slicing a view produces a new view with adjusted offset/len
-                    // View struct is {buffer_ptr, offset, len}
                     let elem_ty = match arr_ty {
-                        PolyType::Constructed(TypeName::Array, arr_args) => &arr_args[0],
+                        PolyType::Constructed(TypeName::Array, ref arr_args) => arr_args[0].clone(),
                         _ => unreachable!(),
                     };
 
-                    // Get buffer_ptr type for the view struct
-                    let elem_spirv = self.constructor.polytype_to_spirv(elem_ty);
-                    let stride = type_byte_size(elem_ty)
-                        .ok_or_else(|| err_spirv!("_w_slice: view element must have known size"))?;
-                    let runtime_array =
-                        self.constructor.get_or_create_runtime_array_type(elem_spirv, stride);
-                    let block_struct = self.constructor.get_or_create_buffer_block_type(runtime_array);
-                    let buffer_ptr_type = self
+                    // Resolve buffer and extract base offset from view handle
+                    let (set, binding) = self
+                        .view_buffer_map
+                        .get(&ssa_args[0])
+                        .copied()
+                        .ok_or_else(|| err_spirv!("_w_slice: no buffer mapping for view {:?}", ssa_args[0]))?;
+                    let &(buffer_var, _, _) = self
                         .constructor
-                        .get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, block_struct);
-
-                    // Extract components from input view
-                    let buffer_ptr =
-                        self.constructor.builder.composite_extract(buffer_ptr_type, None, arr, [0u32])?;
+                        .storage_buffers
+                        .get(&(set, binding))
+                        .ok_or_else(|| err_spirv!("_w_slice: unknown storage buffer set={}, binding={}", set, binding))?;
                     let base_offset = self.constructor.builder.composite_extract(
-                        self.constructor.u32_type,
-                        None,
-                        arr,
-                        [1u32],
+                        self.constructor.u32_type, None, arr, [1u32],
                     )?;
 
-                    // Compute new offset = base_offset + start
-                    let new_offset = self.constructor.builder.i_add(
-                        self.constructor.u32_type,
-                        None,
-                        base_offset,
-                        start_id,
-                    )?;
+                    // Check result type to decide materialization vs sub-view
+                    let result_is_composite = inst.result
+                        .map(|v| self.body.get_value_type(v))
+                        .map(|t| match t {
+                            PolyType::Constructed(TypeName::Array, ref args) =>
+                                args.len() >= 2 && types::is_array_variant_composite(&args[1]),
+                            _ => false,
+                        })
+                        .unwrap_or(false);
 
-                    // Compute new len = end - start
-                    let new_len = self.constructor.builder.i_sub(
-                        self.constructor.u32_type,
-                        None,
-                        end_id,
-                        start_id,
-                    )?;
-
-                    // Construct new view struct
-                    let view_struct_type = self.constructor.get_or_create_struct_type(vec![
-                        buffer_ptr_type,
-                        self.constructor.u32_type,
-                        self.constructor.u32_type,
-                    ]);
-                    Ok(self.constructor.builder.composite_construct(
-                        view_struct_type,
-                        None,
-                        [buffer_ptr, new_offset, new_len],
-                    )?)
+                    if result_is_composite {
+                        self.slice_view_to_composite(arr, buffer_var, base_offset, start_id, end_id, &elem_ty, result_ty)
+                    } else {
+                        self.slice_view_to_view(arr, base_offset, start_id, end_id, set, binding, inst.result)
+                    }
                 } else {
-                    // Value array: extract elements and construct new array
-                    let start =
-                        self.constructor.get_const_i32_value(start_id).ok_or_else(|| {
-                            err_spirv!("_w_slice: start must be a constant for value arrays")
-                        })? as u32;
-                    let end =
-                        self.constructor.get_const_i32_value(end_id).ok_or_else(|| {
-                            err_spirv!("_w_slice: end must be a constant for value arrays")
-                        })? as u32;
-
-                    if end <= start {
-                        bail_spirv!("_w_slice: end ({}) must be greater than start ({})", end, start);
-                    }
-
-                    let elem_type = self.constructor.get_array_element_type(result_ty)?;
-                    let mut elements = Vec::with_capacity((end - start) as usize);
-                    for i in start..end {
-                        let elem = self.constructor.builder.composite_extract(elem_type, None, arr, [i])?;
-                        elements.push(elem);
-                    }
-
-                    Ok(self.constructor.builder.composite_construct(result_ty, None, elements)?)
+                    self.slice_composite(arr, start_id, end_id, result_ty)
                 }
             }
 
@@ -1748,6 +1708,117 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
         }
     }
 
+    /// Slice a storage view, materializing into a composite array.
+    /// Loads each element from the buffer via AccessChain+Load.
+    fn slice_view_to_composite(
+        &mut self,
+        _view_id: spirv::Word,
+        buffer_var: spirv::Word,
+        base_offset: spirv::Word,
+        start_id: spirv::Word,
+        end_id: spirv::Word,
+        elem_ty: &PolyType<TypeName>,
+        result_ty: spirv::Word,
+    ) -> Result<spirv::Word> {
+        let start = self.constructor.get_const_i32_value(start_id).ok_or_else(|| {
+            err_spirv!("slice_view_to_composite: start must be a constant")
+        })? as u32;
+        let end = self.constructor.get_const_i32_value(end_id).ok_or_else(|| {
+            err_spirv!("slice_view_to_composite: end must be a constant")
+        })? as u32;
+
+        let elem_spirv = self.constructor.polytype_to_spirv(elem_ty);
+        let elem_ptr_type = self
+            .constructor
+            .get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_spirv);
+        let zero = self.constructor.const_i32(0);
+        let mut elements = Vec::with_capacity((end - start) as usize);
+        for i in start..end {
+            let idx_const = self.constructor.const_u32(i);
+            let actual_index = self.constructor.builder.i_add(
+                self.constructor.u32_type,
+                None,
+                base_offset,
+                idx_const,
+            )?;
+            let elem_ptr = self.constructor.builder.access_chain(
+                elem_ptr_type,
+                None,
+                buffer_var,
+                [zero, actual_index],
+            )?;
+            let elem = self.constructor.builder.load(elem_spirv, None, elem_ptr, None, [])?;
+            elements.push(elem);
+        }
+        Ok(self.constructor.builder.composite_construct(result_ty, None, elements)?)
+    }
+
+    /// Slice a storage view, producing a new handle-based view with adjusted offset/len.
+    fn slice_view_to_view(
+        &mut self,
+        _view_id: spirv::Word,
+        base_offset: spirv::Word,
+        start_id: spirv::Word,
+        end_id: spirv::Word,
+        set: u32,
+        binding: u32,
+        result_value: Option<ValueId>,
+    ) -> Result<spirv::Word> {
+        let new_offset = self.constructor.builder.i_add(
+            self.constructor.u32_type,
+            None,
+            base_offset,
+            start_id,
+        )?;
+        let new_len = self.constructor.builder.i_sub(
+            self.constructor.u32_type,
+            None,
+            end_id,
+            start_id,
+        )?;
+        let buffer_id = self.constructor.get_or_assign_buffer_id(set, binding);
+        let buffer_id_const = self.constructor.const_u32(buffer_id);
+        let u32_ty = self.constructor.u32_type;
+        let view_struct_type = self
+            .constructor
+            .get_or_create_struct_type(vec![u32_ty, u32_ty, u32_ty]);
+        let result = self.constructor.builder.composite_construct(
+            view_struct_type,
+            None,
+            [buffer_id_const, new_offset, new_len],
+        )?;
+        if let Some(result_value) = result_value {
+            self.view_buffer_map.insert(result_value, (set, binding));
+        }
+        Ok(result)
+    }
+
+    /// Slice a value (composite) array by extracting elements and constructing a new array.
+    fn slice_composite(
+        &mut self,
+        arr: spirv::Word,
+        start_id: spirv::Word,
+        end_id: spirv::Word,
+        result_ty: spirv::Word,
+    ) -> Result<spirv::Word> {
+        let start = self.constructor.get_const_i32_value(start_id).ok_or_else(|| {
+            err_spirv!("slice_composite: start must be a constant")
+        })? as u32;
+        let end = self.constructor.get_const_i32_value(end_id).ok_or_else(|| {
+            err_spirv!("slice_composite: end must be a constant")
+        })? as u32;
+        if end <= start {
+            bail_spirv!("slice_composite: end ({}) must be greater than start ({})", end, start);
+        }
+        let elem_type = self.constructor.get_array_element_type(result_ty)?;
+        let mut elements = Vec::with_capacity((end - start) as usize);
+        for i in start..end {
+            let elem = self.constructor.builder.composite_extract(elem_type, None, arr, [i])?;
+            elements.push(elem);
+        }
+        Ok(self.constructor.builder.composite_construct(result_ty, None, elements)?)
+    }
+
     /// Lower an index operation, dispatching based on the array variant.
     fn lower_index(
         &mut self,
@@ -1777,8 +1848,8 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                 let variant = &type_args[1];
 
                 if types::is_array_variant_view(variant) {
-                    // View variant: {ptr, offset, len} struct
-                    self.lower_view_index(base_id, index_id, result_ty, &type_args[0])
+                    // View variant: {buffer_id, offset, len} struct
+                    self.lower_view_index(base, base_id, index_id, result_ty, &type_args[0])
                 } else if types::is_array_variant_virtual(variant) {
                     // Virtual variant: {start, step, len} - computed array
                     self.lower_virtual_index(base_id, index_id, result_ty)
@@ -1797,48 +1868,45 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
         }
     }
 
-    /// Lower indexing into a View array ({buffer_ptr, offset, len} struct).
+    /// Lower indexing into a View array ({buffer_id, offset, len} handle-based struct).
     fn lower_view_index(
         &mut self,
+        view_ssa: ValueId,
         view_id: spirv::Word,
         index_id: spirv::Word,
         result_ty: spirv::Word,
         elem_ty: &PolyType<TypeName>,
     ) -> Result<spirv::Word> {
-        // View struct is {buffer_ptr, offset, len} where buffer_ptr points to buffer block.
-        // Derive buffer_ptr_type from elem_ty (same logic as _w_slice).
-        let elem_spirv = self.constructor.polytype_to_spirv(elem_ty);
-        let stride = type_byte_size(elem_ty)
-            .ok_or_else(|| err_spirv!("lower_view_index: element type must have known size"))?;
-        let runtime_array = self.constructor.get_or_create_runtime_array_type(elem_spirv, stride);
-        let block_struct = self.constructor.get_or_create_buffer_block_type(runtime_array);
-        let buffer_ptr_type =
-            self.constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, block_struct);
-
-        // Extract buffer_ptr (field 0)
-        let buffer_ptr = self.constructor.builder.composite_extract(buffer_ptr_type, None, view_id, [0])?;
+        // Resolve buffer variable from the view's compile-time side table.
+        let (set, binding) = self
+            .view_buffer_map
+            .get(&view_ssa)
+            .copied()
+            .ok_or_else(|| err_spirv!("lower_view_index: no buffer mapping for view {:?}", view_ssa))?;
+        let &(buffer_var, _, _) = self
+            .constructor
+            .storage_buffers
+            .get(&(set, binding))
+            .ok_or_else(|| err_spirv!("lower_view_index: unknown storage buffer set={}, binding={}", set, binding))?;
 
         // Extract offset (field 1)
         let offset_val =
             self.constructor.builder.composite_extract(self.constructor.u32_type, None, view_id, [1])?;
 
         // Index may be i32 from the language; reinterpret as u32 for offset arithmetic.
-        // OpBitcast is the correct SPIR-V instruction for same-width integer reinterpretation.
-        // Negative indices are a semantic error caught earlier in the pipeline.
         let index_u32 = self.constructor.builder.bitcast(self.constructor.u32_type, None, index_id)?;
 
         // Compute final index = offset + index
         let final_index =
             self.constructor.builder.i_add(self.constructor.u32_type, None, offset_val, index_u32)?;
 
-        // Get element pointer type for access chain result
+        // Access chain directly on the buffer variable
+        let elem_spirv = self.constructor.polytype_to_spirv(elem_ty);
         let elem_ptr_type =
-            self.constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, result_ty);
-
-        // OpAccessChain buffer_ptr[0][final_index] - [0] indexes into runtime array member
+            self.constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_spirv);
         let zero = self.constructor.const_u32(0);
         let elem_ptr =
-            self.constructor.builder.access_chain(elem_ptr_type, None, buffer_ptr, [zero, final_index])?;
+            self.constructor.builder.access_chain(elem_ptr_type, None, buffer_var, [zero, final_index])?;
         Ok(self.constructor.builder.load(result_ty, None, elem_ptr, None, [])?)
     }
 
