@@ -22,7 +22,7 @@ entry vertex_main(#[builtin(vertex_index)] vertex_id:i32) #[builtin(position)] v
 def pow(x:f32, n:f32) f32 = x ** n
 
 -- mix3v: vector mix with scalar interpolant (GLSL FMix expects vector interpolant)
-def mi x3v(a:vec3f32, b:vec3f32, t:f32) vec3f32 =
+def mix3v(a:vec3f32, b:vec3f32, t:f32) vec3f32 =
   @[mix(a.x, b.x, t), mix(a.y, b.y, t), mix(a.z, b.z, t)]
 
 

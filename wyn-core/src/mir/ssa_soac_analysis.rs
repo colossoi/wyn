@@ -420,14 +420,13 @@ fn find_map_in_body(
                 continue;
             }
             if let Some(called_func) = find_function(program, func) {
-                let new_mapping = build_param_mapping(body, param_to_entry_arg, args);
+                let new_mapping = build_param_mapping(body, param_to_entry_arg, args, entry);
 
                 if let Some(par_map) =
                     find_map_in_body(entry, &called_func.body, &new_mapping, program, depth + 1)
                 {
                     return Some(par_map);
                 }
-            } else {
             }
         }
     }
@@ -441,6 +440,7 @@ fn build_param_mapping(
     caller_body: &FuncBody,
     caller_param_to_entry: &HashMap<usize, ValueId>,
     call_args: &[ValueId],
+    entry: &SsaEntryPoint,
 ) -> HashMap<usize, ValueId> {
     call_args
         .iter()
@@ -454,7 +454,21 @@ fn build_param_mapping(
                     }
                 }
             }
-            // Arg is not a passthrough parameter - could be a local value
+            // If arg is a StorageView, match by (set, binding) to an entry input.
+            // to_ssa wraps entry inputs in StorageView instructions, so the call arg
+            // may be a view derived from a param rather than the param itself.
+            for inst in &caller_body.insts {
+                if inst.result == Some(arg) {
+                    if let InstKind::StorageView { set, binding, .. } = &inst.kind {
+                        for (input_idx, input) in entry.inputs.iter().enumerate() {
+                            if input.storage_binding == Some((*set, *binding)) {
+                                let entry_val = entry.body.params[input_idx].0;
+                                return Some((i, entry_val));
+                            }
+                        }
+                    }
+                }
+            }
             None
         })
         .collect()
