@@ -287,6 +287,18 @@ fn run_mine(
 
     let ctx = ComputeContext::new()?;
     eprintln!("Device: {}", ctx.device_name());
+
+    // Push constants: 19 u32 header_base (76 bytes) + 1 i32 n (4 bytes) = 80 bytes
+    let push_constant_size = 80u32;
+    let max_pc = ctx.max_push_constants_size();
+    if push_constant_size > max_pc {
+        bail!(
+            "Shader requires {} bytes of push constants but device supports at most {}",
+            push_constant_size,
+            max_pc
+        );
+    }
+
     eprintln!("Header: Bitcoin genesis block (2009-01-03)");
     eprintln!("Target: {} leading zero bits", difficulty);
     eprintln!("Batch:  {} nonces/round", batch_size);
@@ -298,8 +310,6 @@ fn run_mine(
     let mut output_buf = StorageBuffer::new(&ctx, output_len)?;
     output_buf.upload_u32(&vec![0u32; output_len])?;
 
-    // Push constants: 19 u32 header_base (76 bytes) + 1 i32 n (4 bytes) = 80 bytes
-    let push_constant_size = 80u32;
     let binding_count = 1u32;
 
     eprintln!("Compiling shader pipeline...");
