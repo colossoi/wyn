@@ -20,9 +20,7 @@ use polytype::Type;
 
 use std::collections::HashMap;
 
-pub use strategies::{
-    InputStrategy, OutputStrategy, RangeInput, StorageInput, StorageOutput, remap_value,
-};
+pub use strategies::{InputStrategy, OutputStrategy, RangeInput, StorageInput, StorageOutput, remap_value};
 
 /// Context passed to strategies during parallelization.
 /// Contains the builder and common utilities.
@@ -122,18 +120,28 @@ pub fn parallelize_soacs(mut program: SsaProgram) -> SsaProgram {
                     entry.outputs.iter().filter(|o| o.storage_binding.is_some()).cloned().collect();
 
                 if let Some(ref par_map) = entry_analysis.parallelizable_map {
-                    if let Some(new_body) = parallelize_entry(entry, par_map, local_size) {
+                    if let Some((new_body, output_binding)) = parallelize_entry(entry, par_map, local_size)
+                    {
                         entry.body = new_body;
-                        if storage_outputs.is_empty() {
-                            entry.outputs = vec![EntryOutput {
-                                ty: Type::Constructed(TypeName::Unit, vec![]),
-                                decoration: None,
-                                storage_binding: None,
-                            }];
-                        } else {
+                        if !storage_outputs.is_empty() {
                             entry.outputs = storage_outputs.clone();
+                        } else {
+                            // Synthesize an EntryOutput with the correct storage_binding
+                            let output_elem_ty = &par_map.map_loop.map_result_ty;
+                            let array_ty = Type::Constructed(
+                                TypeName::Array,
+                                vec![
+                                    output_elem_ty.clone(),
+                                    Type::Constructed(TypeName::ArrayVariantView, vec![]),
+                                    Type::Constructed(TypeName::SizePlaceholder, vec![]),
+                                ],
+                            );
+                            entry.outputs = vec![EntryOutput {
+                                ty: array_ty,
+                                decoration: None,
+                                storage_binding: Some(output_binding),
+                            }];
                         }
-                    } else {
                     }
                 }
                 // Note: single-thread fallback removed - all compute shaders should be parallelizable
@@ -145,12 +153,20 @@ pub fn parallelize_soacs(mut program: SsaProgram) -> SsaProgram {
 }
 
 /// Create a parallelized version of a compute entry point.
+/// Returns the new body and the (set, binding) used for the output storage buffer.
 fn parallelize_entry(
     entry: &SsaEntryPoint,
     par_map: &ParallelizableMap,
     local_size: (u32, u32, u32),
-) -> Option<FuncBody> {
+) -> Option<(FuncBody, (u32, u32))> {
     let total_threads = local_size.0 * local_size.1 * local_size.2;
+
+    // Derive output storage binding from entry's declared outputs (assigned by to_ssa).
+    // Fall back to counting storage inputs if no output binding exists yet (synthesis).
+    let output_binding = entry.outputs.iter().find_map(|o| o.storage_binding).unwrap_or_else(|| {
+        let next = entry.inputs.iter().filter(|i| i.storage_binding.is_some()).count() as u32;
+        (0, next)
+    });
 
     // Create input and output strategies based on provenance
     let (input_strategy, output_strategy): (Box<dyn InputStrategy>, Box<dyn OutputStrategy>) =
@@ -161,13 +177,12 @@ fn parallelize_entry(
                 ..
             } => {
                 let input = StorageInput::new(*param_index, *storage_binding);
-                let output_binding = entry.inputs.len() as u32;
-                let output = StorageOutput::new(0, output_binding);
+                let output = StorageOutput::new(output_binding.0, output_binding.1);
                 (Box::new(input), Box::new(output))
             }
             ArrayProvenance::Range { value } => {
                 let input = RangeInput::new(*value, &entry.body)?;
-                let output = StorageOutput::new(0, 0); // binding 0 for range-only maps
+                let output = StorageOutput::new(output_binding.0, output_binding.1);
                 (Box::new(input), Box::new(output))
             }
             ArrayProvenance::Unknown => return None,
@@ -265,8 +280,14 @@ fn parallelize_entry(
                 args.push(input_elem);
             } else {
                 // Recursively remap the value and its dependency cone
-                let new_val =
-                    remap_value(&entry.body, orig_arg, &mut ctx.builder, &mut remap_memo, span, node_id)?;
+                let new_val = remap_value(
+                    &entry.body,
+                    orig_arg,
+                    &mut ctx.builder,
+                    &mut remap_memo,
+                    span,
+                    node_id,
+                )?;
                 args.push(new_val);
             }
         }
@@ -293,5 +314,6 @@ fn parallelize_entry(
     ctx.builder.switch_to_block(exit_block).ok()?;
     ctx.builder.terminate(Terminator::ReturnUnit).ok()?;
 
-    ctx.finish()
+    let body = ctx.finish()?;
+    Some((body, output_binding))
 }

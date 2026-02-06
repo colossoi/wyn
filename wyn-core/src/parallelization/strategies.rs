@@ -331,18 +331,19 @@ pub fn remap_value(
             builder.push_inst(InstKind::Vector(new_elems), inst.result_ty.clone(), span, node_id).ok()?
         }
         InstKind::Matrix(rows) => {
-            let new_rows: Option<Vec<Vec<ValueId>>> = rows
-                .iter()
-                .map(|row| remap_values(source, row, builder, memo, span, node_id))
-                .collect();
-            builder
-                .push_inst(InstKind::Matrix(new_rows?), inst.result_ty.clone(), span, node_id)
-                .ok()?
+            let new_rows: Option<Vec<Vec<ValueId>>> =
+                rows.iter().map(|row| remap_values(source, row, builder, memo, span, node_id)).collect();
+            builder.push_inst(InstKind::Matrix(new_rows?), inst.result_ty.clone(), span, node_id).ok()?
         }
         InstKind::ArrayLit { elements } => {
             let new_elems = remap_values(source, elements, builder, memo, span, node_id)?;
             builder
-                .push_inst(InstKind::ArrayLit { elements: new_elems }, inst.result_ty.clone(), span, node_id)
+                .push_inst(
+                    InstKind::ArrayLit { elements: new_elems },
+                    inst.result_ty.clone(),
+                    span,
+                    node_id,
+                )
                 .ok()?
         }
         InstKind::ArrayRange { start, len, step } => {
@@ -354,7 +355,11 @@ pub fn remap_value(
             };
             builder
                 .push_inst(
-                    InstKind::ArrayRange { start: new_start, len: new_len, step: new_step },
+                    InstKind::ArrayRange {
+                        start: new_start,
+                        len: new_len,
+                        step: new_step,
+                    },
                     inst.result_ty.clone(),
                     span,
                     node_id,
@@ -384,14 +389,15 @@ pub fn remap_value(
         }
 
         // References
-        InstKind::Global(name) => {
-            builder.push_global(name, inst.result_ty.clone(), span, node_id).ok()?
-        }
-        InstKind::Extern(name) => {
-            builder
-                .push_inst(InstKind::Extern(name.clone()), inst.result_ty.clone(), span, node_id)
-                .ok()?
-        }
+        InstKind::Global(name) => builder.push_global(name, inst.result_ty.clone(), span, node_id).ok()?,
+        InstKind::Extern(name) => builder
+            .push_inst(
+                InstKind::Extern(name.clone()),
+                inst.result_ty.clone(),
+                span,
+                node_id,
+            )
+            .ok()?,
 
         // Effectful — cannot remap
         InstKind::Alloca { .. }
@@ -416,10 +422,7 @@ fn remap_values(
     span: crate::ast::Span,
     node_id: crate::ast::NodeId,
 ) -> Option<Vec<ValueId>> {
-    values
-        .iter()
-        .map(|&v| remap_value(source, v, builder, memo, span, node_id))
-        .collect()
+    values.iter().map(|&v| remap_value(source, v, builder, memo, span, node_id)).collect()
 }
 
 /// Convenience wrapper: remap a single value from the entry body using a fresh memo
@@ -429,12 +432,8 @@ pub fn remap_entry_value(ctx: &mut ParallelizeCtx, value: ValueId) -> Option<Val
     let span = ctx.span;
     let node_id = ctx.node_id;
 
-    let mut memo: HashMap<ValueId, ValueId> = body
-        .params
-        .iter()
-        .enumerate()
-        .map(|(i, (src, _, _))| (*src, ctx.builder.get_param(i)))
-        .collect();
+    let mut memo: HashMap<ValueId, ValueId> =
+        body.params.iter().enumerate().map(|(i, (src, _, _))| (*src, ctx.builder.get_param(i))).collect();
 
     remap_value(&body, value, &mut ctx.builder, &mut memo, span, node_id)
 }
