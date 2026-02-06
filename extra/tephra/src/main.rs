@@ -288,8 +288,8 @@ fn run_mine(
     let ctx = ComputeContext::new()?;
     eprintln!("Device: {}", ctx.device_name());
 
-    // Push constants: 19 u32 header_base (76 bytes) + 1 i32 n (4 bytes) = 80 bytes
-    let push_constant_size = 80u32;
+    // Push constants: 19 u32 header_base (76 bytes) + 1 i32 n (4 bytes) + 1 i32 nonce_offset (4 bytes) = 84 bytes
+    let push_constant_size = 84u32;
     let max_pc = ctx.max_push_constants_size();
     if push_constant_size > max_pc {
         bail!(
@@ -324,12 +324,14 @@ fn run_mine(
 
     // Mining loop: each round tries batch_size nonces
     for round in 0u32.. {
-        // Build push constant data: header_base (76 bytes) + batch_size as i32 (4 bytes)
-        let mut pc_bytes: Vec<u8> = Vec::with_capacity(80);
+        // Build push constant data: header_base (76 bytes) + n (4 bytes) + nonce_offset (4 bytes)
+        let nonce_offset = round * batch_size;
+        let mut pc_bytes: Vec<u8> = Vec::with_capacity(84);
         for &word in &header_base {
             pc_bytes.extend_from_slice(&word.to_le_bytes());
         }
         pc_bytes.extend_from_slice(&(batch_size as i32).to_le_bytes());
+        pc_bytes.extend_from_slice(&(nonce_offset as i32).to_le_bytes());
 
         // Zero the output buffer
         output_buf.upload_u32(&vec![0u32; output_len])?;
@@ -373,7 +375,7 @@ fn run_mine(
             eprintln!(
                 "  New best: {} bits | nonce {} | hash: {}",
                 best_zeros,
-                round_best_nonce,
+                nonce_offset + round_best_nonce,
                 format_hash(&round_best_hash),
             );
         }
@@ -381,7 +383,7 @@ fn run_mine(
         if best_zeros >= difficulty {
             eprintln!();
             eprintln!("  BLOCK FOUND!");
-            eprintln!("  Nonce:  {}", round_best_nonce);
+            eprintln!("  Nonce:  {}", nonce_offset + round_best_nonce);
             eprintln!("  Hash:   {}", format_hash(&round_best_hash));
             eprintln!("  Zeros:  {} bits", best_zeros);
             eprintln!("  Time:   {:.2}s ({:.1} kH/s)", elapsed, hashrate / 1000.0,);

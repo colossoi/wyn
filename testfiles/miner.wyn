@@ -88,5 +88,5 @@ def mine_nonce(header_base: [19]u32, nonce: i32) [8]u32 =
 -- Maps over nonce space using iota
 ------------------------------------------------------------
 #[compute]
-entry mine(header_base: [19]u32, n: i32) [][8]u32 =
-    map(|nonce| mine_nonce(header_base, nonce), iota(n))
+entry mine(header_base: [19]u32, n: i32, nonce_offset: i32) [][8]u32 =
+    map(|nonce| mine_nonce(header_base, nonce + nonce_offset), iota(n))
