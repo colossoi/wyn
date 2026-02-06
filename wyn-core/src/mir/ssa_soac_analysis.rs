@@ -130,11 +130,17 @@ pub struct MapLoopInfo {
     pub length_value: ValueId,
 }
 
-/// Check if a loop matches the map pattern and extract info.
+/// Check if a loop matches the canonical map pattern from `create_for_range_loop`.
+///
+/// Expects the canonical form emitted by `to_ssa`:
+/// - Header has exactly 2 params: `(acc, index)`
+/// - Header contains a single `index < length` comparison
+/// - Continue block contains: `arr[index]`, `f(elem, ...)`, `array_with(...)`
+///
+/// Returns `None` for loops that don't match this shape.
 fn analyze_map_loop(body: &FuncBody, loop_info: &LoopInfo) -> Option<MapLoopInfo> {
     let header = &body.blocks[loop_info.header.index()];
 
-    // Header should have 2 params: accumulator and index
     if header.params.len() != 2 {
         return None;
     }
@@ -142,8 +148,8 @@ fn analyze_map_loop(body: &FuncBody, loop_info: &LoopInfo) -> Option<MapLoopInfo
     let acc_value = header.params[0].value;
     let index_value = header.params[1].value;
 
-    // Header should have a comparison instruction and conditional branch
-    // Find the comparison: index < length
+    // Find the canonical `index < length` comparison in the header.
+    // to_ssa always emits this as: push_binop("<", index, len, bool_ty)
     let mut length_value = None;
     for &inst_id in &header.insts {
         let inst = &body.insts[inst_id.index()];
