@@ -24,19 +24,15 @@ use crate::{SymbolId, SymbolTable, TypeTable};
 use polytype::Type;
 use std::collections::HashMap;
 
-/// Mapping from user-facing SOAC names to their internal intrinsic names.
-/// These are registered as builtins in the type checker and renamed here during TLC transformation.
-const FUNDAMENTAL_SOACS: &[(&str, &str)] = &[
-    ("map", "_w_intrinsic_map"),
-    ("reduce", "_w_intrinsic_reduce"),
-    ("scan", "_w_intrinsic_scan"),
-    ("filter", "_w_intrinsic_filter"),
-    ("scatter", "_w_intrinsic_scatter"),
-    ("zip", "_w_intrinsic_zip"),
+/// Non-SOAC builtins that still need intrinsic renaming.
+const INTRINSIC_RENAMES: &[(&str, &str)] = &[
     ("length", "_w_intrinsic_length"),
     ("replicate", "_w_intrinsic_replicate"),
-    ("reduce_by_index", "_w_intrinsic_hist_1d"),
 ];
+
+/// SOAC names that are intercepted in transform_application and turned into
+/// first-class SOAC nodes rather than intrinsic calls.
+const SOAC_NAMES: &[&str] = &["map", "reduce", "scan", "filter", "zip", "reduce_by_index"];
 
 // =============================================================================
 // Helper functions
@@ -1011,9 +1007,10 @@ impl<'a> Transformer<'a> {
 
             ast::ExprKind::Identifier(qualifiers, name) => {
                 let resolved_name = if qualifiers.is_empty() {
-                    // Check if this is a fundamental SOAC not shadowed by a local binding
+                    // Check if this is an intrinsic rename not shadowed by a local binding
+                    // (SOAC names like map/reduce are now handled in transform_application)
                     if !self.is_locally_bound(name) {
-                        if let Some((_, intrinsic)) = FUNDAMENTAL_SOACS.iter().find(|(s, _)| *s == name) {
+                        if let Some((_, intrinsic)) = INTRINSIC_RENAMES.iter().find(|(s, _)| *s == name) {
                             intrinsic.to_string()
                         } else {
                             name.clone()
@@ -1254,6 +1251,11 @@ impl<'a> Transformer<'a> {
         ty: Type<TypeName>,
         span: Span,
     ) -> Term {
+        // Check if func is a bare SOAC name (not locally bound)
+        if let Some(soac_name) = self.resolve_soac_name(func) {
+            return self.transform_soac_call(&soac_name, args, ty, span);
+        }
+
         let func_term = self.transform_expr(func);
 
         if args.is_empty() {
@@ -1286,6 +1288,234 @@ impl<'a> Transformer<'a> {
         }
 
         Term { ty, ..result }
+    }
+
+    /// Check if an expression is a bare SOAC name (not locally bound).
+    fn resolve_soac_name(&self, func: &ast::Expression) -> Option<String> {
+        if let ast::ExprKind::Identifier(qualifiers, name) = &func.kind {
+            if qualifiers.is_empty()
+                && !self.is_locally_bound(name)
+                && SOAC_NAMES.contains(&name.as_str())
+            {
+                return Some(name.clone());
+            }
+        }
+        None
+    }
+
+    /// Dispatch SOAC call by name.
+    fn transform_soac_call(
+        &mut self,
+        name: &str,
+        args: &[ast::Expression],
+        ty: Type<TypeName>,
+        span: Span,
+    ) -> Term {
+        match name {
+            "map" => self.transform_soac_map(args, ty, span),
+            "reduce" => self.transform_soac_reduce(args, ty, span),
+            "scan" => self.transform_soac_scan(args, ty, span),
+            "filter" => self.transform_soac_filter(args, ty, span),
+            "zip" => self.transform_soac_zip(args, ty, span),
+            "reduce_by_index" => self.transform_soac_reduce_by_index(args, ty, span),
+            _ => unreachable!("Unknown SOAC: {}", name),
+        }
+    }
+
+    /// Transform `map(f, arr)` → `Soac(Map { lam, inputs })`.
+    fn transform_soac_map(
+        &mut self,
+        args: &[ast::Expression],
+        ty: Type<TypeName>,
+        span: Span,
+    ) -> Term {
+        assert!(args.len() >= 2, "map requires at least 2 arguments");
+        let func_term = self.transform_expr(&args[0]);
+        let arr_term = self.transform_expr(&args[1]);
+
+        let lam = self.term_to_lambda(func_term);
+
+        // Absorb zip: if arr_term is ArrayExpr(Zip(...)), flatten into inputs
+        let inputs = match arr_term.kind {
+            TermKind::ArrayExpr(ArrayExpr::Zip(exprs)) => exprs,
+            _ => vec![ArrayExpr::Ref(Box::new(arr_term))],
+        };
+
+        self.mk_term(ty, span, TermKind::Soac(SoacOp::Map { lam, inputs }))
+    }
+
+    /// Transform `reduce(op, ne, arr)` → `Soac(Reduce { op, ne, input, props })`.
+    fn transform_soac_reduce(
+        &mut self,
+        args: &[ast::Expression],
+        ty: Type<TypeName>,
+        span: Span,
+    ) -> Term {
+        assert!(args.len() >= 3, "reduce requires 3 arguments");
+        let op_term = self.transform_expr(&args[0]);
+        let ne_term = self.transform_expr(&args[1]);
+        let arr_term = self.transform_expr(&args[2]);
+
+        let op = self.term_to_lambda(op_term);
+
+        self.mk_term(
+            ty,
+            span,
+            TermKind::Soac(SoacOp::Reduce {
+                op,
+                ne: Box::new(ne_term),
+                input: ArrayExpr::Ref(Box::new(arr_term)),
+                props: ReduceProps::default(),
+            }),
+        )
+    }
+
+    /// Transform `scan(op, ne, arr)` → `Soac(Scan { op, ne, input })`.
+    fn transform_soac_scan(
+        &mut self,
+        args: &[ast::Expression],
+        ty: Type<TypeName>,
+        span: Span,
+    ) -> Term {
+        assert!(args.len() >= 3, "scan requires 3 arguments");
+        let op_term = self.transform_expr(&args[0]);
+        let ne_term = self.transform_expr(&args[1]);
+        let arr_term = self.transform_expr(&args[2]);
+
+        let op = self.term_to_lambda(op_term);
+
+        self.mk_term(
+            ty,
+            span,
+            TermKind::Soac(SoacOp::Scan {
+                op,
+                ne: Box::new(ne_term),
+                input: ArrayExpr::Ref(Box::new(arr_term)),
+            }),
+        )
+    }
+
+    /// Transform `filter(pred, arr)` → `Soac(Filter { pred, input })`.
+    fn transform_soac_filter(
+        &mut self,
+        args: &[ast::Expression],
+        ty: Type<TypeName>,
+        span: Span,
+    ) -> Term {
+        assert!(args.len() >= 2, "filter requires 2 arguments");
+        let pred_term = self.transform_expr(&args[0]);
+        let arr_term = self.transform_expr(&args[1]);
+
+        let pred = self.term_to_lambda(pred_term);
+
+        self.mk_term(
+            ty,
+            span,
+            TermKind::Soac(SoacOp::Filter {
+                pred,
+                input: ArrayExpr::Ref(Box::new(arr_term)),
+            }),
+        )
+    }
+
+    /// Transform `zip(a, b, ...)` → `ArrayExpr(Zip(...))`.
+    fn transform_soac_zip(
+        &mut self,
+        args: &[ast::Expression],
+        ty: Type<TypeName>,
+        span: Span,
+    ) -> Term {
+        let exprs: Vec<ArrayExpr> = args
+            .iter()
+            .map(|a| ArrayExpr::Ref(Box::new(self.transform_expr(a))))
+            .collect();
+        self.mk_term(ty, span, TermKind::ArrayExpr(ArrayExpr::Zip(exprs)))
+    }
+
+    /// Transform `reduce_by_index(dest, op, ne, indices, values)`.
+    fn transform_soac_reduce_by_index(
+        &mut self,
+        args: &[ast::Expression],
+        ty: Type<TypeName>,
+        span: Span,
+    ) -> Term {
+        assert!(
+            args.len() >= 5,
+            "reduce_by_index requires 5 arguments"
+        );
+        let dest_term = self.transform_expr(&args[0]);
+        let op_term = self.transform_expr(&args[1]);
+        let ne_term = self.transform_expr(&args[2]);
+        let indices_term = self.transform_expr(&args[3]);
+        let values_term = self.transform_expr(&args[4]);
+
+        let op = self.term_to_lambda(op_term);
+
+        // Build a Place from dest_term
+        let dest_elem_ty = self.get_array_element_type(&dest_term.ty);
+        let dest = Place::LocalArray {
+            id: match &dest_term.kind {
+                TermKind::Var(sym) => *sym,
+                _ => {
+                    // Bind dest to a fresh name
+                    let fresh = self.define("_w_rbi_dest");
+                    fresh
+                }
+            },
+            shape: Shape(vec![]),
+            elem_ty: dest_elem_ty,
+        };
+
+        self.mk_term(
+            ty,
+            span,
+            TermKind::Soac(SoacOp::ReduceByIndex {
+                dest,
+                op,
+                ne: Box::new(ne_term),
+                indices: ArrayExpr::Ref(Box::new(indices_term)),
+                values: ArrayExpr::Ref(Box::new(values_term)),
+                props: ReduceProps::default(),
+            }),
+        )
+    }
+
+    /// Convert a term to a Lambda. If it's already a Lambda, extract it.
+    /// Otherwise, eta-expand: `f` → `|x| f(x)`.
+    fn term_to_lambda(&mut self, term: Term) -> Lambda {
+        match term.kind {
+            TermKind::Lambda(lam) => lam,
+            _ => {
+                // Eta-expand: |x| f(x)
+                let (param_ty, ret_ty) = self.decompose_arrow(&term.ty);
+                let param_sym = self.define("_soac_arg");
+                let param_var = self.mk_term(param_ty.clone(), term.span, TermKind::Var(param_sym));
+                let body = self.mk_term(
+                    ret_ty.clone(),
+                    term.span,
+                    TermKind::App {
+                        func: Box::new(term),
+                        arg: Box::new(param_var),
+                    },
+                );
+                Lambda {
+                    params: vec![(param_sym, param_ty)],
+                    body: Box::new(body),
+                    ret_ty,
+                    captures: vec![],
+                }
+            }
+        }
+    }
+
+    /// Decompose an arrow type `A -> B` into `(A, B)`.
+    fn decompose_arrow(&self, ty: &Type<TypeName>) -> (Type<TypeName>, Type<TypeName>) {
+        match ty {
+            Type::Constructed(TypeName::Arrow, args) if args.len() == 2 => {
+                (args[0].clone(), args[1].clone())
+            }
+            _ => panic!("BUG: Expected arrow type for SOAC function arg, got {:?}", ty),
+        }
     }
 
     fn transform_loop(&mut self, loop_expr: &ast::LoopExpr, ty: Type<TypeName>, span: Span) -> Term {

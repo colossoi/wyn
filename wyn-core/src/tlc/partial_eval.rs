@@ -193,8 +193,13 @@ impl PartialEvaluator {
             // Extern declarations - residualize (linked at SPIR-V level)
             TermKind::Extern(_) => Value::Unknown(term.clone()),
 
-            TermKind::Soac(_) | TermKind::ArrayExpr(_) | TermKind::Force(_) | TermKind::Pack { .. } | TermKind::Unpack { .. } => {
-                unreachable!("SOAC nodes not yet produced at this phase")
+            // SOAC nodes are opaque to partial evaluation — residualize
+            TermKind::Soac(_) | TermKind::ArrayExpr(_) | TermKind::Force(_) => {
+                Value::Unknown(term.clone())
+            }
+
+            TermKind::Pack { .. } | TermKind::Unpack { .. } => {
+                unreachable!("Pack/Unpack nodes not yet produced at this phase")
             }
         }
     }

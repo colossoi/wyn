@@ -12,7 +12,7 @@
 //! When called with [4]f32, creates:
 //!   def sum$n4 (arr:[4]f32) : f32 = ...
 
-use super::{Def, DefMeta, Lambda, LoopKind, Program, Term, TermIdSource, TermKind};
+use super::{ArrayExpr, Def, DefMeta, Lambda, LoopKind, Program, SoacOp, Term, TermIdSource, TermKind};
 use crate::ast::TypeName;
 use crate::types::TypeScheme;
 use crate::{SymbolId, SymbolTable};
@@ -520,8 +520,14 @@ impl<'a> Monomorphizer<'a> {
             | TermKind::UnOp(_)
             | TermKind::Extern(_)) => k.clone(),
 
-            TermKind::Soac(_) | TermKind::ArrayExpr(_) | TermKind::Force(_) | TermKind::Pack { .. } | TermKind::Unpack { .. } => {
-                unreachable!("SOAC nodes not yet produced at this phase")
+            TermKind::Soac(ref soac) => TermKind::Soac(self.process_soac(soac)),
+
+            TermKind::ArrayExpr(ref ae) => TermKind::ArrayExpr(self.process_array_expr(ae)),
+
+            TermKind::Force(ref inner) => TermKind::Force(Box::new(self.process_term(inner))),
+
+            TermKind::Pack { .. } | TermKind::Unpack { .. } => {
+                unreachable!("Pack/Unpack nodes not yet produced at this phase")
             }
         };
 
@@ -530,6 +536,70 @@ impl<'a> Monomorphizer<'a> {
             ty: term.ty.clone(),
             span: term.span,
             kind,
+        }
+    }
+
+    fn process_lambda(&mut self, lam: &Lambda) -> Lambda {
+        Lambda {
+            params: lam.params.clone(),
+            body: Box::new(self.process_term(&lam.body)),
+            ret_ty: lam.ret_ty.clone(),
+            captures: lam.captures.iter().map(|(s, ty, t)| (*s, ty.clone(), self.process_term(t))).collect(),
+        }
+    }
+
+    fn process_soac(&mut self, soac: &SoacOp) -> SoacOp {
+        match soac {
+            SoacOp::Map { lam, inputs } => SoacOp::Map {
+                lam: self.process_lambda(lam),
+                inputs: inputs.iter().map(|ae| self.process_array_expr(ae)).collect(),
+            },
+            SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
+                op: self.process_lambda(op),
+                ne: Box::new(self.process_term(ne)),
+                input: self.process_array_expr(input),
+                props: props.clone(),
+            },
+            SoacOp::Scan { op, ne, input } => SoacOp::Scan {
+                op: self.process_lambda(op),
+                ne: Box::new(self.process_term(ne)),
+                input: self.process_array_expr(input),
+            },
+            SoacOp::Filter { pred, input } => SoacOp::Filter {
+                pred: self.process_lambda(pred),
+                input: self.process_array_expr(input),
+            },
+            SoacOp::Scatter { dest, indices, values } => SoacOp::Scatter {
+                dest: dest.clone(),
+                indices: self.process_array_expr(indices),
+                values: self.process_array_expr(values),
+            },
+            SoacOp::ReduceByIndex { dest, op, ne, indices, values, props } => SoacOp::ReduceByIndex {
+                dest: dest.clone(),
+                op: self.process_lambda(op),
+                ne: Box::new(self.process_term(ne)),
+                indices: self.process_array_expr(indices),
+                values: self.process_array_expr(values),
+                props: props.clone(),
+            },
+        }
+    }
+
+    fn process_array_expr(&mut self, ae: &ArrayExpr) -> ArrayExpr {
+        match ae {
+            ArrayExpr::Ref(t) => ArrayExpr::Ref(Box::new(self.process_term(t))),
+            ArrayExpr::Zip(exprs) => ArrayExpr::Zip(exprs.iter().map(|e| self.process_array_expr(e)).collect()),
+            ArrayExpr::Soac(op) => ArrayExpr::Soac(Box::new(self.process_soac(op))),
+            ArrayExpr::Generate { shape, index_fn, elem_ty } => ArrayExpr::Generate {
+                shape: shape.clone(),
+                index_fn: self.process_lambda(index_fn),
+                elem_ty: elem_ty.clone(),
+            },
+            ArrayExpr::Literal(terms) => ArrayExpr::Literal(terms.iter().map(|t| self.process_term(t)).collect()),
+            ArrayExpr::Range { start, len } => ArrayExpr::Range {
+                start: Box::new(self.process_term(start)),
+                len: Box::new(self.process_term(len)),
+            },
         }
     }
 
@@ -722,8 +792,14 @@ impl<'a> Monomorphizer<'a> {
             TermKind::UnOp(op) => TermKind::UnOp(op.clone()),
             TermKind::Extern(s) => TermKind::Extern(s.clone()),
 
-            TermKind::Soac(_) | TermKind::ArrayExpr(_) | TermKind::Force(_) | TermKind::Pack { .. } | TermKind::Unpack { .. } => {
-                unreachable!("SOAC nodes not yet produced at this phase")
+            TermKind::Soac(ref soac) => TermKind::Soac(self.apply_subst_soac(soac, subst)),
+
+            TermKind::ArrayExpr(ref ae) => TermKind::ArrayExpr(self.apply_subst_array_expr(ae, subst)),
+
+            TermKind::Force(ref inner) => TermKind::Force(Box::new(self.apply_subst_term(inner, subst))),
+
+            TermKind::Pack { .. } | TermKind::Unpack { .. } => {
+                unreachable!("Pack/Unpack nodes not yet produced at this phase")
             }
 
             TermKind::Lambda(Lambda { params, body, ret_ty, captures }) => TermKind::Lambda(Lambda {
@@ -809,6 +885,70 @@ impl<'a> Monomorphizer<'a> {
             ty: new_ty,
             span: term.span,
             kind: new_kind,
+        }
+    }
+
+    fn apply_subst_lambda(&mut self, lam: &Lambda, subst: &Substitution) -> Lambda {
+        Lambda {
+            params: lam.params.iter().map(|(p, ty)| (*p, apply_subst(ty, subst))).collect(),
+            body: Box::new(self.apply_subst_term(&lam.body, subst)),
+            ret_ty: apply_subst(&lam.ret_ty, subst),
+            captures: lam.captures.iter().map(|(s, ty, t)| (*s, apply_subst(ty, subst), self.apply_subst_term(t, subst))).collect(),
+        }
+    }
+
+    fn apply_subst_soac(&mut self, soac: &SoacOp, subst: &Substitution) -> SoacOp {
+        match soac {
+            SoacOp::Map { lam, inputs } => SoacOp::Map {
+                lam: self.apply_subst_lambda(lam, subst),
+                inputs: inputs.iter().map(|ae| self.apply_subst_array_expr(ae, subst)).collect(),
+            },
+            SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
+                op: self.apply_subst_lambda(op, subst),
+                ne: Box::new(self.apply_subst_term(ne, subst)),
+                input: self.apply_subst_array_expr(input, subst),
+                props: props.clone(),
+            },
+            SoacOp::Scan { op, ne, input } => SoacOp::Scan {
+                op: self.apply_subst_lambda(op, subst),
+                ne: Box::new(self.apply_subst_term(ne, subst)),
+                input: self.apply_subst_array_expr(input, subst),
+            },
+            SoacOp::Filter { pred, input } => SoacOp::Filter {
+                pred: self.apply_subst_lambda(pred, subst),
+                input: self.apply_subst_array_expr(input, subst),
+            },
+            SoacOp::Scatter { dest, indices, values } => SoacOp::Scatter {
+                dest: dest.clone(),
+                indices: self.apply_subst_array_expr(indices, subst),
+                values: self.apply_subst_array_expr(values, subst),
+            },
+            SoacOp::ReduceByIndex { dest, op, ne, indices, values, props } => SoacOp::ReduceByIndex {
+                dest: dest.clone(),
+                op: self.apply_subst_lambda(op, subst),
+                ne: Box::new(self.apply_subst_term(ne, subst)),
+                indices: self.apply_subst_array_expr(indices, subst),
+                values: self.apply_subst_array_expr(values, subst),
+                props: props.clone(),
+            },
+        }
+    }
+
+    fn apply_subst_array_expr(&mut self, ae: &ArrayExpr, subst: &Substitution) -> ArrayExpr {
+        match ae {
+            ArrayExpr::Ref(t) => ArrayExpr::Ref(Box::new(self.apply_subst_term(t, subst))),
+            ArrayExpr::Zip(exprs) => ArrayExpr::Zip(exprs.iter().map(|e| self.apply_subst_array_expr(e, subst)).collect()),
+            ArrayExpr::Soac(op) => ArrayExpr::Soac(Box::new(self.apply_subst_soac(op, subst))),
+            ArrayExpr::Generate { shape, index_fn, elem_ty } => ArrayExpr::Generate {
+                shape: shape.clone(),
+                index_fn: self.apply_subst_lambda(index_fn, subst),
+                elem_ty: apply_subst(elem_ty, subst),
+            },
+            ArrayExpr::Literal(terms) => ArrayExpr::Literal(terms.iter().map(|t| self.apply_subst_term(t, subst)).collect()),
+            ArrayExpr::Range { start, len } => ArrayExpr::Range {
+                start: Box::new(self.apply_subst_term(start, subst)),
+                len: Box::new(self.apply_subst_term(len, subst)),
+            },
         }
     }
 }

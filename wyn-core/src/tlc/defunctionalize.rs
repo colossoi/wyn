@@ -14,7 +14,7 @@
 //!
 //! The lifted lambda is: _w_lambda_0 = |x| |y| x + y  (captures at end)
 
-use super::{Def, DefMeta, Lambda, LoopKind, Program, Term, TermIdSource, TermKind};
+use super::{ArrayExpr, Def, DefMeta, Lambda, LoopKind, Place, Program, SoacOp, Term, TermIdSource, TermKind};
 use crate::ast::{Span, TypeName};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
@@ -102,39 +102,6 @@ fn detect_hofs(defs: &[Def]) -> HashMap<SymbolId, HofInfo> {
     hof_info
 }
 
-/// Intrinsic SOAC names that are higher-order functions.
-/// Each entry is (name, func_param_indices).
-const INTRINSIC_HOFS: &[(&str, &[usize])] = &[
-    // map : (a -> b) -> Array -> Array  -- func at index 0
-    ("_w_intrinsic_map", &[0]),
-    // reduce : (a -> a -> a) -> a -> Array -> a  -- func at index 0
-    ("_w_intrinsic_reduce", &[0]),
-    // filter : (a -> bool) -> Array -> Array  -- func at index 0
-    ("_w_intrinsic_filter", &[0]),
-    // scan : (a -> a -> a) -> a -> Array -> Array  -- func at index 0
-    ("_w_intrinsic_scan", &[0]),
-    // hist_1d : Array -> (a -> a -> a) -> a -> Array -> Array -> Array  -- func at index 1
-    ("_w_intrinsic_hist_1d", &[1]),
-];
-
-/// Register intrinsic HOFs into a HOF info map.
-/// Registers ALL SymbolIds that match intrinsic HOF names (the symbol table can have
-/// multiple SymbolIds for the same name from different call sites).
-fn register_intrinsic_hofs(symbols: &SymbolTable, hof_info: &mut HashMap<SymbolId, HofInfo>) {
-    let intrinsic_map: HashMap<&str, &[usize]> = INTRINSIC_HOFS.iter().copied().collect();
-
-    for (&sym, name) in symbols.iter() {
-        if let Some(&indices) = intrinsic_map.get(name.as_str()) {
-            hof_info.insert(
-                sym,
-                HofInfo {
-                    func_param_indices: indices.to_vec(),
-                    def: None,
-                },
-            );
-        }
-    }
-}
 
 // =============================================================================
 // Type Substitution for HOF Specialization
@@ -280,8 +247,17 @@ fn apply_type_subst_to_term(term: &Term, subst: &TypeSubst, term_ids: &mut TermI
                 body: Box::new(apply_type_subst_to_term(body, subst, term_ids)),
             }
         }
-        TermKind::Soac(_) | TermKind::ArrayExpr(_) | TermKind::Force(_) | TermKind::Pack { .. } | TermKind::Unpack { .. } => {
-            unreachable!("SOAC nodes not yet produced at this phase")
+        TermKind::Soac(ref soac) => {
+            TermKind::Soac(apply_type_subst_to_soac(soac, subst, term_ids))
+        }
+        TermKind::ArrayExpr(ref ae) => {
+            TermKind::ArrayExpr(apply_type_subst_to_array_expr(ae, subst, term_ids))
+        }
+        TermKind::Force(ref inner) => {
+            TermKind::Force(Box::new(apply_type_subst_to_term(inner, subst, term_ids)))
+        }
+        TermKind::Pack { .. } | TermKind::Unpack { .. } => {
+            unreachable!("Pack/Unpack nodes not yet produced at this phase")
         }
     };
     Term {
@@ -289,6 +265,86 @@ fn apply_type_subst_to_term(term: &Term, subst: &TypeSubst, term_ids: &mut TermI
         ty: new_ty,
         span: term.span,
         kind: new_kind,
+    }
+}
+
+fn apply_type_subst_to_lambda(lam: &Lambda, subst: &TypeSubst, term_ids: &mut TermIdSource) -> Lambda {
+    Lambda {
+        params: lam.params.iter().map(|(p, ty)| (*p, apply_type_subst(ty, subst))).collect(),
+        body: Box::new(apply_type_subst_to_term(&lam.body, subst, term_ids)),
+        ret_ty: apply_type_subst(&lam.ret_ty, subst),
+        captures: lam.captures.iter().map(|(s, ty, t)| (*s, apply_type_subst(ty, subst), apply_type_subst_to_term(t, subst, term_ids))).collect(),
+    }
+}
+
+fn apply_type_subst_to_soac(soac: &SoacOp, subst: &TypeSubst, term_ids: &mut TermIdSource) -> SoacOp {
+    match soac {
+        SoacOp::Map { lam, inputs } => SoacOp::Map {
+            lam: apply_type_subst_to_lambda(lam, subst, term_ids),
+            inputs: inputs.iter().map(|ae| apply_type_subst_to_array_expr(ae, subst, term_ids)).collect(),
+        },
+        SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
+            op: apply_type_subst_to_lambda(op, subst, term_ids),
+            ne: Box::new(apply_type_subst_to_term(ne, subst, term_ids)),
+            input: apply_type_subst_to_array_expr(input, subst, term_ids),
+            props: props.clone(),
+        },
+        SoacOp::Scan { op, ne, input } => SoacOp::Scan {
+            op: apply_type_subst_to_lambda(op, subst, term_ids),
+            ne: Box::new(apply_type_subst_to_term(ne, subst, term_ids)),
+            input: apply_type_subst_to_array_expr(input, subst, term_ids),
+        },
+        SoacOp::Filter { pred, input } => SoacOp::Filter {
+            pred: apply_type_subst_to_lambda(pred, subst, term_ids),
+            input: apply_type_subst_to_array_expr(input, subst, term_ids),
+        },
+        SoacOp::Scatter { dest, indices, values } => SoacOp::Scatter {
+            dest: apply_type_subst_to_place(dest, subst, term_ids),
+            indices: apply_type_subst_to_array_expr(indices, subst, term_ids),
+            values: apply_type_subst_to_array_expr(values, subst, term_ids),
+        },
+        SoacOp::ReduceByIndex { dest, op, ne, indices, values, props } => SoacOp::ReduceByIndex {
+            dest: apply_type_subst_to_place(dest, subst, term_ids),
+            op: apply_type_subst_to_lambda(op, subst, term_ids),
+            ne: Box::new(apply_type_subst_to_term(ne, subst, term_ids)),
+            indices: apply_type_subst_to_array_expr(indices, subst, term_ids),
+            values: apply_type_subst_to_array_expr(values, subst, term_ids),
+            props: props.clone(),
+        },
+    }
+}
+
+fn apply_type_subst_to_array_expr(ae: &ArrayExpr, subst: &TypeSubst, term_ids: &mut TermIdSource) -> ArrayExpr {
+    match ae {
+        ArrayExpr::Ref(t) => ArrayExpr::Ref(Box::new(apply_type_subst_to_term(t, subst, term_ids))),
+        ArrayExpr::Zip(exprs) => ArrayExpr::Zip(exprs.iter().map(|e| apply_type_subst_to_array_expr(e, subst, term_ids)).collect()),
+        ArrayExpr::Soac(op) => ArrayExpr::Soac(Box::new(apply_type_subst_to_soac(op, subst, term_ids))),
+        ArrayExpr::Generate { shape, index_fn, elem_ty } => ArrayExpr::Generate {
+            shape: shape.clone(),
+            index_fn: apply_type_subst_to_lambda(index_fn, subst, term_ids),
+            elem_ty: apply_type_subst(elem_ty, subst),
+        },
+        ArrayExpr::Literal(terms) => ArrayExpr::Literal(terms.iter().map(|t| apply_type_subst_to_term(t, subst, term_ids)).collect()),
+        ArrayExpr::Range { start, len } => ArrayExpr::Range {
+            start: Box::new(apply_type_subst_to_term(start, subst, term_ids)),
+            len: Box::new(apply_type_subst_to_term(len, subst, term_ids)),
+        },
+    }
+}
+
+fn apply_type_subst_to_place(place: &Place, subst: &TypeSubst, _term_ids: &mut TermIdSource) -> Place {
+    match place {
+        Place::BufferSlice { base, offset, shape, elem_ty } => Place::BufferSlice {
+            base: Box::new(apply_type_subst_to_term(base, subst, _term_ids)),
+            offset: Box::new(apply_type_subst_to_term(offset, subst, _term_ids)),
+            shape: shape.clone(),
+            elem_ty: apply_type_subst(elem_ty, subst),
+        },
+        Place::LocalArray { id, shape, elem_ty } => Place::LocalArray {
+            id: *id,
+            shape: shape.clone(),
+            elem_ty: apply_type_subst(elem_ty, subst),
+        },
     }
 }
 
@@ -413,8 +469,111 @@ fn collect_free_vars(
         | TermKind::BinOp(_)
         | TermKind::UnOp(_)
         | TermKind::Extern(_) => {}
-        TermKind::Soac(_) | TermKind::ArrayExpr(_) | TermKind::Force(_) | TermKind::Pack { .. } | TermKind::Unpack { .. } => {
-            unreachable!("SOAC nodes not yet produced at this phase")
+        TermKind::Soac(ref soac) => {
+            collect_free_vars_soac(soac, bound, top_level, known_defs, symbols, free, seen);
+        }
+        TermKind::ArrayExpr(ref ae) => {
+            collect_free_vars_array_expr(ae, bound, top_level, known_defs, symbols, free, seen);
+        }
+        TermKind::Force(ref inner) => {
+            collect_free_vars(inner, bound, top_level, known_defs, symbols, free, seen);
+        }
+        TermKind::Pack { .. } | TermKind::Unpack { .. } => {
+            unreachable!("Pack/Unpack nodes not yet produced at this phase")
+        }
+    }
+}
+
+fn collect_free_vars_lambda(
+    lam: &Lambda,
+    bound: &HashSet<SymbolId>,
+    top_level: &HashSet<SymbolId>,
+    known_defs: &HashSet<String>,
+    symbols: &SymbolTable,
+    free: &mut Vec<Term>,
+    seen: &mut HashSet<SymbolId>,
+) {
+    let mut inner_bound = bound.clone();
+    for (p, _) in &lam.params {
+        inner_bound.insert(*p);
+    }
+    collect_free_vars(&lam.body, &inner_bound, top_level, known_defs, symbols, free, seen);
+    for (_, _, cap_term) in &lam.captures {
+        collect_free_vars(cap_term, bound, top_level, known_defs, symbols, free, seen);
+    }
+}
+
+fn collect_free_vars_soac(
+    soac: &SoacOp,
+    bound: &HashSet<SymbolId>,
+    top_level: &HashSet<SymbolId>,
+    known_defs: &HashSet<String>,
+    symbols: &SymbolTable,
+    free: &mut Vec<Term>,
+    seen: &mut HashSet<SymbolId>,
+) {
+    match soac {
+        SoacOp::Map { lam, inputs } => {
+            collect_free_vars_lambda(lam, bound, top_level, known_defs, symbols, free, seen);
+            for input in inputs {
+                collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
+            }
+        }
+        SoacOp::Reduce { op, ne, input, .. } => {
+            collect_free_vars_lambda(op, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars(ne, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
+        }
+        SoacOp::Scan { op, ne, input } => {
+            collect_free_vars_lambda(op, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars(ne, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
+        }
+        SoacOp::Filter { pred, input } => {
+            collect_free_vars_lambda(pred, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
+        }
+        SoacOp::Scatter { indices, values, .. } => {
+            collect_free_vars_array_expr(indices, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars_array_expr(values, bound, top_level, known_defs, symbols, free, seen);
+        }
+        SoacOp::ReduceByIndex { op, ne, indices, values, .. } => {
+            collect_free_vars_lambda(op, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars(ne, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars_array_expr(indices, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars_array_expr(values, bound, top_level, known_defs, symbols, free, seen);
+        }
+    }
+}
+
+fn collect_free_vars_array_expr(
+    ae: &ArrayExpr,
+    bound: &HashSet<SymbolId>,
+    top_level: &HashSet<SymbolId>,
+    known_defs: &HashSet<String>,
+    symbols: &SymbolTable,
+    free: &mut Vec<Term>,
+    seen: &mut HashSet<SymbolId>,
+) {
+    match ae {
+        ArrayExpr::Ref(t) => collect_free_vars(t, bound, top_level, known_defs, symbols, free, seen),
+        ArrayExpr::Zip(exprs) => {
+            for e in exprs {
+                collect_free_vars_array_expr(e, bound, top_level, known_defs, symbols, free, seen);
+            }
+        }
+        ArrayExpr::Soac(op) => collect_free_vars_soac(op, bound, top_level, known_defs, symbols, free, seen),
+        ArrayExpr::Generate { index_fn, .. } => {
+            collect_free_vars_lambda(index_fn, bound, top_level, known_defs, symbols, free, seen);
+        }
+        ArrayExpr::Literal(terms) => {
+            for t in terms {
+                collect_free_vars(t, bound, top_level, known_defs, symbols, free, seen);
+            }
+        }
+        ArrayExpr::Range { start, len } => {
+            collect_free_vars(start, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars(len, bound, top_level, known_defs, symbols, free, seen);
         }
     }
 }
@@ -459,10 +618,9 @@ pub struct Defunctionalizer<'a> {
 impl<'a> Defunctionalizer<'a> {
     /// Defunctionalize a program.
     pub fn defunctionalize(program: Program, known_defs: &'a HashSet<String>) -> Program {
-        // Detect HOFs before defunctionalization (user-defined)
-        let mut hof_info = detect_hofs(&program.defs);
-        // Register intrinsic HOFs using existing SymbolIds from the symbol table
-        register_intrinsic_hofs(&program.symbols, &mut hof_info);
+        // Detect HOFs before defunctionalization (user-defined only;
+        // intrinsic SOACs are now first-class SOAC nodes, not HOF calls)
+        let hof_info = detect_hofs(&program.defs);
         let top_level: HashSet<SymbolId> = program.defs.iter().map(|d| d.name).collect();
 
         let mut defunc = Self {
@@ -718,8 +876,25 @@ impl<'a> Defunctionalizer<'a> {
                 sv: StaticVal::Dynamic,
             },
 
-            TermKind::Soac(_) | TermKind::ArrayExpr(_) | TermKind::Force(_) | TermKind::Pack { .. } | TermKind::Unpack { .. } => {
-                unreachable!("SOAC nodes not yet produced at this phase")
+            TermKind::Soac(soac) => self.defunc_soac(soac, ty, span),
+
+            TermKind::ArrayExpr(ae) => self.defunc_array_expr_term(ae, ty, span),
+
+            TermKind::Force(inner) => {
+                let result = self.defunc_term(*inner);
+                DefuncResult {
+                    term: Term {
+                        id: self.term_ids.next_id(),
+                        ty,
+                        span,
+                        kind: TermKind::Force(Box::new(result.term)),
+                    },
+                    sv: StaticVal::Dynamic,
+                }
+            }
+
+            TermKind::Pack { .. } | TermKind::Unpack { .. } => {
+                unreachable!("Pack/Unpack nodes not yet produced at this phase")
             }
         }
     }
@@ -818,6 +993,195 @@ impl<'a> Defunctionalizer<'a> {
         }
     }
 
+    /// Defunctionalize a SOAC node: lift lambdas inside, resolve captures.
+    fn defunc_soac(&mut self, soac: SoacOp, ty: Type<TypeName>, span: Span) -> DefuncResult {
+        let new_soac = match soac {
+            SoacOp::Map { lam, inputs } => {
+                let lam = self.defunc_lambda_in_soac(lam, span);
+                let inputs = inputs.into_iter().map(|ae| self.defunc_array_expr(ae)).collect();
+                SoacOp::Map { lam, inputs }
+            }
+            SoacOp::Reduce { op, ne, input, props } => {
+                let op = self.defunc_lambda_in_soac(op, span);
+                let ne = Box::new(self.defunc_term(*ne).term);
+                let input = self.defunc_array_expr(input);
+                SoacOp::Reduce { op, ne, input, props }
+            }
+            SoacOp::Scan { op, ne, input } => {
+                let op = self.defunc_lambda_in_soac(op, span);
+                let ne = Box::new(self.defunc_term(*ne).term);
+                let input = self.defunc_array_expr(input);
+                SoacOp::Scan { op, ne, input }
+            }
+            SoacOp::Filter { pred, input } => {
+                let pred = self.defunc_lambda_in_soac(pred, span);
+                let input = self.defunc_array_expr(input);
+                SoacOp::Filter { pred, input }
+            }
+            SoacOp::Scatter { dest, indices, values } => {
+                let indices = self.defunc_array_expr(indices);
+                let values = self.defunc_array_expr(values);
+                SoacOp::Scatter { dest, indices, values }
+            }
+            SoacOp::ReduceByIndex { dest, op, ne, indices, values, props } => {
+                let op = self.defunc_lambda_in_soac(op, span);
+                let ne = Box::new(self.defunc_term(*ne).term);
+                let indices = self.defunc_array_expr(indices);
+                let values = self.defunc_array_expr(values);
+                SoacOp::ReduceByIndex { dest, op, ne, indices, values, props }
+            }
+        };
+        DefuncResult {
+            term: Term {
+                id: self.term_ids.next_id(),
+                ty,
+                span,
+                kind: TermKind::Soac(new_soac),
+            },
+            sv: StaticVal::Dynamic,
+        }
+    }
+
+    /// Defunctionalize a lambda within a SOAC node.
+    ///
+    /// This lifts the lambda body to a top-level Def (same mechanism as defunc_lambda)
+    /// and fills `Lambda.captures` with the resolved capture terms. The resulting Lambda
+    /// has its body replaced with a reference to the lifted function and captures populated.
+    fn defunc_lambda_in_soac(&mut self, lam: Lambda, span: Span) -> Lambda {
+        // Build a term from the lambda so we can use defunc_lambda
+        let lam_ty = if lam.params.len() == 1 {
+            Type::Constructed(
+                TypeName::Arrow,
+                vec![lam.params[0].1.clone(), lam.ret_ty.clone()],
+            )
+        } else {
+            // Multi-param: build nested arrow
+            let mut ty = lam.ret_ty.clone();
+            for (_, param_ty) in lam.params.iter().rev() {
+                ty = Type::Constructed(TypeName::Arrow, vec![param_ty.clone(), ty]);
+            }
+            ty
+        };
+
+        let lam_term = Term {
+            id: self.term_ids.next_id(),
+            ty: lam_ty,
+            span,
+            kind: TermKind::Lambda(lam),
+        };
+
+        let result = self.defunc_lambda(lam_term);
+
+        // Extract the lifted function name and captures from the StaticVal
+        let (lifted_name, capture_terms) = match &result.sv {
+            StaticVal::Lambda { lifted_name, captures } => (*lifted_name, captures.clone()),
+            _ => {
+                // This shouldn't happen for a lambda, but be safe
+                match &result.term.kind {
+                    TermKind::Var(sym) => (*sym, vec![]),
+                    _ => panic!("BUG: defunc_lambda didn't produce a Var or Lambda StaticVal"),
+                }
+            }
+        };
+
+        // Build the captures list: (sym, ty, term) triples
+        let captures: Vec<(SymbolId, Type<TypeName>, Term)> = capture_terms
+            .into_iter()
+            .map(|t| {
+                let sym = match &t.kind {
+                    TermKind::Var(s) => *s,
+                    _ => panic!("BUG: capture is not a Var: {:?}", t.kind),
+                };
+                let ty = t.ty.clone();
+                (sym, ty, t)
+            })
+            .collect();
+
+        // Retrieve the lifted def to get the body
+        // The lifted lambda body is a reference to the lifted function
+        let body = Term {
+            id: self.term_ids.next_id(),
+            ty: result.term.ty.clone(),
+            span,
+            kind: TermKind::Var(lifted_name),
+        };
+
+        // Get the params from the lifted def
+        let lifted_def = self.lifted_defs.iter().find(|d| d.name == lifted_name);
+        let params = if let Some(def) = lifted_def {
+            // Extract original params (not captures) from the lifted def
+            let (all_params, _) = self.extract_lambda_params(def.body.clone());
+            // Original params are the first N params, captures are trailing
+            let n_captures = captures.len();
+            let n_orig = all_params.len().saturating_sub(n_captures);
+            all_params[..n_orig].to_vec()
+        } else {
+            // Fallback — shouldn't happen
+            vec![]
+        };
+
+        let ret_ty = if let Some(def) = self.lifted_defs.iter().find(|d| d.name == lifted_name) {
+            // Walk the def type to get the final return type after all params
+            let mut ty = &def.ty;
+            for _ in 0..params.len() + captures.len() {
+                if let Type::Constructed(TypeName::Arrow, args) = ty {
+                    ty = &args[1];
+                } else {
+                    break;
+                }
+            }
+            ty.clone()
+        } else {
+            Type::Constructed(TypeName::Unit, vec![])
+        };
+
+        Lambda {
+            params,
+            body: Box::new(body),
+            ret_ty,
+            captures,
+        }
+    }
+
+    /// Defunctionalize an ArrayExpr (returns transformed ArrayExpr).
+    fn defunc_array_expr(&mut self, ae: ArrayExpr) -> ArrayExpr {
+        match ae {
+            ArrayExpr::Ref(t) => ArrayExpr::Ref(Box::new(self.defunc_term(*t).term)),
+            ArrayExpr::Zip(exprs) => ArrayExpr::Zip(exprs.into_iter().map(|e| self.defunc_array_expr(e)).collect()),
+            ArrayExpr::Soac(op) => {
+                // Create a dummy type/span for the recursive call
+                let result = self.defunc_soac(*op, Type::Constructed(TypeName::Unit, vec![]), Span::new(0, 0, 0, 0));
+                match result.term.kind {
+                    TermKind::Soac(s) => ArrayExpr::Soac(Box::new(s)),
+                    _ => unreachable!(),
+                }
+            }
+            ArrayExpr::Generate { shape, index_fn, elem_ty } => {
+                let index_fn = self.defunc_lambda_in_soac(index_fn, Span::new(0, 0, 0, 0));
+                ArrayExpr::Generate { shape, index_fn, elem_ty }
+            }
+            ArrayExpr::Literal(terms) => ArrayExpr::Literal(terms.into_iter().map(|t| self.defunc_term(t).term).collect()),
+            ArrayExpr::Range { start, len } => ArrayExpr::Range {
+                start: Box::new(self.defunc_term(*start).term),
+                len: Box::new(self.defunc_term(*len).term),
+            },
+        }
+    }
+
+    /// Defunctionalize an ArrayExpr wrapped in a term.
+    fn defunc_array_expr_term(&mut self, ae: ArrayExpr, ty: Type<TypeName>, span: Span) -> DefuncResult {
+        let new_ae = self.defunc_array_expr(ae);
+        DefuncResult {
+            term: Term {
+                id: self.term_ids.next_id(),
+                ty,
+                span,
+                kind: TermKind::ArrayExpr(new_ae),
+            },
+            sv: StaticVal::Dynamic,
+        }
+    }
+
     /// Handle application: collect spine, flatten captures.
     fn defunc_app(&mut self, func: Term, arg: Term, ty: Type<TypeName>, span: Span) -> DefuncResult {
         // Collect the application spine: f a1 a2 ... an
@@ -857,24 +1221,15 @@ impl<'a> Defunctionalizer<'a> {
                 // We specialize for ALL lambda arguments (even non-capturing ones) because
                 // SPIRV doesn't support passing functions as values - they must be called directly
 
-                // Check HOF info (both user-defined and intrinsic)
+                // Check HOF info (user-defined only; intrinsic SOACs are now SOAC nodes)
                 if let Some(hof_info) = self.hof_info.get(&sym).cloned() {
                     for &func_param_idx in &hof_info.func_param_indices {
                         if func_param_idx < arg_results.len() {
                             if let StaticVal::Lambda { .. } = &arg_results[func_param_idx].sv {
-                                // User-defined HOFs have a def, intrinsics don't
                                 if hof_info.def.is_some() {
                                     return self.handle_hof_call(
                                         sym,
                                         &hof_info,
-                                        func_param_idx,
-                                        &arg_results,
-                                        ty,
-                                        span,
-                                    );
-                                } else {
-                                    return self.handle_intrinsic_hof_call(
-                                        sym,
                                         func_param_idx,
                                         &arg_results,
                                         ty,
@@ -1192,73 +1547,6 @@ impl<'a> Defunctionalizer<'a> {
         )
     }
 
-    /// Handle an intrinsic HOF call with a lambda argument.
-    /// Intrinsic HOFs just get captures appended to the call.
-    fn handle_intrinsic_hof_call(
-        &mut self,
-        hof_sym: SymbolId,
-        func_param_idx: usize,
-        arg_results: &[DefuncResult],
-        ty: Type<TypeName>,
-        span: Span,
-    ) -> DefuncResult {
-        // Extract lambda info from function argument
-        let (lambda_sym, captures) = match &arg_results[func_param_idx].sv {
-            StaticVal::Lambda {
-                lifted_name,
-                captures,
-            } => (*lifted_name, captures.clone()),
-            _ => unreachable!("handle_intrinsic_hof_call called without Lambda StaticVal"),
-        };
-
-        self.build_intrinsic_hof_call(
-            hof_sym,
-            func_param_idx,
-            lambda_sym,
-            &captures,
-            arg_results,
-            ty,
-            span,
-        )
-    }
-
-    /// Handle intrinsic HOF call by appending captures.
-    fn build_intrinsic_hof_call(
-        &mut self,
-        hof_sym: SymbolId,
-        func_param_idx: usize,
-        lambda_sym: SymbolId,
-        captures: &[Term],
-        arg_results: &[DefuncResult],
-        ty: Type<TypeName>,
-        span: Span,
-    ) -> DefuncResult {
-        // Build args: replace lambda arg with lifted name, keep others, append captures
-        let mut call_args = Vec::new();
-
-        for (i, ar) in arg_results.iter().enumerate() {
-            if i == func_param_idx {
-                // Replace lambda with reference to lifted function
-                call_args.push(Term {
-                    id: self.term_ids.next_id(),
-                    ty: ar.term.ty.clone(),
-                    span,
-                    kind: TermKind::Var(lambda_sym),
-                });
-            } else {
-                call_args.push(ar.term.clone());
-            }
-        }
-
-        // Append captures at the end (they're already Terms)
-        call_args.extend(captures.iter().cloned());
-
-        let result_term = self.build_curried_app(hof_sym, call_args, ty, span);
-        DefuncResult {
-            term: result_term,
-            sv: StaticVal::Dynamic,
-        }
-    }
 
     /// Specialize a user-defined HOF call by cloning, substituting, and defunctionalizing.
     ///
@@ -1530,9 +1818,104 @@ impl<'a> Defunctionalizer<'a> {
                 }
             }
 
-            TermKind::Soac(_) | TermKind::ArrayExpr(_) | TermKind::Force(_) | TermKind::Pack { .. } | TermKind::Unpack { .. } => {
-                unreachable!("SOAC nodes not yet produced at this phase")
+            TermKind::Soac(ref soac) => {
+                let new_soac = self.substitute_var_soac(soac, old_sym, new_sym);
+                Term {
+                    id: self.term_ids.next_id(),
+                    ty: term.ty.clone(),
+                    span: term.span,
+                    kind: TermKind::Soac(new_soac),
+                }
             }
+
+            TermKind::ArrayExpr(ref ae) => {
+                let new_ae = self.substitute_var_array_expr(ae, old_sym, new_sym);
+                Term {
+                    id: self.term_ids.next_id(),
+                    ty: term.ty.clone(),
+                    span: term.span,
+                    kind: TermKind::ArrayExpr(new_ae),
+                }
+            }
+
+            TermKind::Force(ref inner) => Term {
+                id: self.term_ids.next_id(),
+                ty: term.ty.clone(),
+                span: term.span,
+                kind: TermKind::Force(Box::new(self.substitute_var(inner, old_sym, new_sym))),
+            },
+
+            TermKind::Pack { .. } | TermKind::Unpack { .. } => {
+                unreachable!("Pack/Unpack nodes not yet produced at this phase")
+            }
+        }
+    }
+
+    fn substitute_var_lambda(&mut self, lam: &Lambda, old_sym: SymbolId, new_sym: SymbolId) -> Lambda {
+        if lam.params.iter().any(|(p, _)| *p == old_sym) {
+            lam.clone()
+        } else {
+            Lambda {
+                params: lam.params.clone(),
+                body: Box::new(self.substitute_var(&lam.body, old_sym, new_sym)),
+                ret_ty: lam.ret_ty.clone(),
+                captures: lam.captures.iter().map(|(s, ty, t)| (*s, ty.clone(), self.substitute_var(t, old_sym, new_sym))).collect(),
+            }
+        }
+    }
+
+    fn substitute_var_soac(&mut self, soac: &SoacOp, old_sym: SymbolId, new_sym: SymbolId) -> SoacOp {
+        match soac {
+            SoacOp::Map { lam, inputs } => SoacOp::Map {
+                lam: self.substitute_var_lambda(lam, old_sym, new_sym),
+                inputs: inputs.iter().map(|ae| self.substitute_var_array_expr(ae, old_sym, new_sym)).collect(),
+            },
+            SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
+                op: self.substitute_var_lambda(op, old_sym, new_sym),
+                ne: Box::new(self.substitute_var(ne, old_sym, new_sym)),
+                input: self.substitute_var_array_expr(input, old_sym, new_sym),
+                props: props.clone(),
+            },
+            SoacOp::Scan { op, ne, input } => SoacOp::Scan {
+                op: self.substitute_var_lambda(op, old_sym, new_sym),
+                ne: Box::new(self.substitute_var(ne, old_sym, new_sym)),
+                input: self.substitute_var_array_expr(input, old_sym, new_sym),
+            },
+            SoacOp::Filter { pred, input } => SoacOp::Filter {
+                pred: self.substitute_var_lambda(pred, old_sym, new_sym),
+                input: self.substitute_var_array_expr(input, old_sym, new_sym),
+            },
+            SoacOp::Scatter { dest, indices, values } => SoacOp::Scatter {
+                dest: dest.clone(),
+                indices: self.substitute_var_array_expr(indices, old_sym, new_sym),
+                values: self.substitute_var_array_expr(values, old_sym, new_sym),
+            },
+            SoacOp::ReduceByIndex { dest, op, ne, indices, values, props } => SoacOp::ReduceByIndex {
+                dest: dest.clone(),
+                op: self.substitute_var_lambda(op, old_sym, new_sym),
+                ne: Box::new(self.substitute_var(ne, old_sym, new_sym)),
+                indices: self.substitute_var_array_expr(indices, old_sym, new_sym),
+                values: self.substitute_var_array_expr(values, old_sym, new_sym),
+                props: props.clone(),
+            },
+        }
+    }
+
+    fn substitute_var_array_expr(&mut self, ae: &ArrayExpr, old_sym: SymbolId, new_sym: SymbolId) -> ArrayExpr {
+        match ae {
+            ArrayExpr::Ref(t) => ArrayExpr::Ref(Box::new(self.substitute_var(t, old_sym, new_sym))),
+            ArrayExpr::Zip(exprs) => ArrayExpr::Zip(exprs.iter().map(|e| self.substitute_var_array_expr(e, old_sym, new_sym)).collect()),
+            ArrayExpr::Soac(op) => ArrayExpr::Soac(Box::new(self.substitute_var_soac(op, old_sym, new_sym))),
+            ArrayExpr::Generate { shape, index_fn, elem_ty } => ArrayExpr::Generate {
+                shape: shape.clone(),
+                index_fn: self.substitute_var_lambda(index_fn, old_sym, new_sym),
+                elem_ty: elem_ty.clone(),
+            },
+            ArrayExpr::Literal(terms) => ArrayExpr::Literal(terms.iter().map(|t| self.substitute_var(t, old_sym, new_sym)).collect()),
+            ArrayExpr::Range { start, len } => ArrayExpr::Range {
+                start: Box::new(self.substitute_var(start, old_sym, new_sym)),
+                len: Box::new(self.substitute_var(len, old_sym, new_sym)),
+            },
         }
     }
 

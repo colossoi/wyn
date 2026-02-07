@@ -11,7 +11,7 @@ use crate::mir::ssa_builder::FuncBuilder;
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 
-use super::{Def as TlcDef, DefMeta, Lambda, LoopKind as TlcLoopKind, Program as TlcProgram, Term, TermKind};
+use super::{ArrayExpr, Def as TlcDef, DefMeta, Lambda, LoopKind as TlcLoopKind, Program as TlcProgram, SoacOp, Term, TermKind};
 
 /// Extract parameter types and return type from a curried function type.
 /// For `A -> B -> C`, returns `([A, B], C)`.
@@ -728,8 +728,14 @@ impl<'a> Converter<'a> {
                 .push_inst(InstKind::Extern(linkage_name.clone()), ty, span, node_id)
                 .map_err(|e| ConvertError::BuilderError(e.to_string())),
 
-            TermKind::Soac(_) | TermKind::ArrayExpr(_) | TermKind::Force(_) | TermKind::Pack { .. } | TermKind::Unpack { .. } => {
-                unreachable!("SOAC nodes not yet lowered to SSA")
+            TermKind::Soac(ref soac) => self.convert_soac(soac, ty, span, node_id),
+
+            TermKind::ArrayExpr(ref ae) => self.convert_array_expr(ae, ty, span, node_id),
+
+            TermKind::Force(ref inner) => self.convert_term(inner),
+
+            TermKind::Pack { .. } | TermKind::Unpack { .. } => {
+                unreachable!("Pack/Unpack nodes not yet lowered to SSA")
             }
         }
     }
@@ -871,17 +877,6 @@ impl<'a> Converter<'a> {
         span: Span,
         node_id: NodeId,
     ) -> Result<ValueId, ConvertError> {
-        // Handle HOF intrinsics BEFORE converting args (they handle function args specially)
-        match name {
-            "_w_intrinsic_reduce" => {
-                return self.convert_reduce(args, ty, span, node_id);
-            }
-            "_w_intrinsic_map" => {
-                return self.convert_map(args, ty, span, node_id);
-            }
-            _ => {}
-        }
-
         let arg_values: Vec<ValueId> =
             args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
 
@@ -1350,47 +1345,289 @@ impl<'a> Converter<'a> {
         Ok(loop_blocks.result)
     }
 
-    /// Expand _w_intrinsic_reduce to an explicit loop.
-    fn convert_reduce(
+    // =========================================================================
+    // SOAC / ArrayExpr lowering
+    // =========================================================================
+
+    /// Dispatch SOAC node to the appropriate lowering.
+    fn convert_soac(
         &mut self,
-        args: &[&Term],
+        soac: &SoacOp,
+        ty: Type<TypeName>,
+        span: Span,
+        node_id: NodeId,
+    ) -> Result<ValueId, ConvertError> {
+        match soac {
+            SoacOp::Map { lam, inputs } => self.convert_soac_map(lam, inputs, ty, span, node_id),
+            SoacOp::Reduce { op, ne, input, .. } => self.convert_soac_reduce(op, ne, input, ty, span, node_id),
+            SoacOp::Scan { .. } => todo!("SOAC scan lowering"),
+            SoacOp::Filter { pred, input } => self.convert_soac_filter(pred, input, ty, span, node_id),
+            SoacOp::Scatter { .. } => todo!("SOAC scatter lowering"),
+            SoacOp::ReduceByIndex { .. } => todo!("SOAC reduce_by_index lowering"),
+        }
+    }
+
+    /// Convert an ArrayExpr to SSA.
+    fn convert_array_expr(
+        &mut self,
+        ae: &ArrayExpr,
+        ty: Type<TypeName>,
+        span: Span,
+        node_id: NodeId,
+    ) -> Result<ValueId, ConvertError> {
+        match ae {
+            ArrayExpr::Ref(term) => self.convert_term(term),
+            ArrayExpr::Zip(_) => {
+                // Standalone zip (not absorbed by map) — materialize as array of tuples
+                todo!("standalone zip materialization")
+            }
+            ArrayExpr::Soac(op) => self.convert_soac(op, ty, span, node_id),
+            ArrayExpr::Generate { .. } => todo!("ArrayExpr::Generate lowering"),
+            ArrayExpr::Literal(terms) => {
+                let values: Vec<ValueId> = terms.iter().map(|t| self.convert_term(t)).collect::<Result<_, _>>()?;
+                self.builder
+                    .push_inst(InstKind::ArrayLit { elements: values }, ty, span, node_id)
+                    .map_err(|e| ConvertError::BuilderError(e.to_string()))
+            }
+            ArrayExpr::Range { start, len } => {
+                let start_val = self.convert_term(start)?;
+                let len_val = self.convert_term(len)?;
+                self.builder
+                    .push_inst(
+                        InstKind::ArrayRange {
+                            start: start_val,
+                            len: len_val,
+                            step: None,
+                        },
+                        ty,
+                        span,
+                        node_id,
+                    )
+                    .map_err(|e| ConvertError::BuilderError(e.to_string()))
+            }
+        }
+    }
+
+    /// Get the function name from a Lambda's body (post-defunctionalization).
+    /// After defunc, the lambda body is either:
+    /// - A Var referencing the lifted function, or
+    /// - An App chain of the lifted function applied to args
+    fn lambda_fn_name(&self, lam: &Lambda) -> Result<String, ConvertError> {
+        match &lam.body.kind {
+            TermKind::Var(sym) => Ok(self.symbols.get(*sym).expect("BUG: symbol not in table").clone()),
+            _ => Err(ConvertError::BuilderError(
+                "SOAC lambda body should be a function reference post-defunc".to_string(),
+            )),
+        }
+    }
+
+    /// Lower `Soac(Map { lam, inputs })` to an explicit loop.
+    fn convert_soac_map(
+        &mut self,
+        lam: &Lambda,
+        inputs: &[ArrayExpr],
         result_ty: Type<TypeName>,
         span: Span,
         node_id: NodeId,
     ) -> Result<ValueId, ConvertError> {
-        if args.len() < 3 {
-            return Err(ConvertError::InvalidIntrinsic(
-                "_w_intrinsic_reduce requires 3 arguments (op, init, arr)".to_string(),
-            ));
-        }
+        let f_name = self.lambda_fn_name(lam)?;
 
-        let op_term = args[0];
-        let init_term = args[1];
-        let arr_term = args[2];
+        // Convert captures to SSA values
+        let capture_values: Vec<ValueId> = lam
+            .captures
+            .iter()
+            .map(|(_, _, t)| self.convert_term(t))
+            .collect::<Result<_, _>>()?;
 
-        // Get function name from op
-        let op_name = match &op_term.kind {
-            TermKind::Var(sym) => self.symbols.get(*sym).expect("BUG: symbol not in table").clone(),
+        let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+        let bool_ty = Type::Constructed(TypeName::Str("bool"), vec![]);
+
+        // Convert all input arrays to SSA values and extract their types
+        let input_values: Vec<ValueId> = inputs
+            .iter()
+            .map(|ae| self.convert_array_expr_value(ae))
+            .collect::<Result<_, _>>()?;
+
+        // Extract element types from input array types
+        let input_elem_types: Vec<Type<TypeName>> = inputs
+            .iter()
+            .map(|ae| self.array_expr_elem_type(ae))
+            .collect();
+
+        // Get output element type
+        let output_elem_ty = match &result_ty {
+            Type::Constructed(TypeName::Array, type_args) if !type_args.is_empty() => type_args[0].clone(),
             _ => {
-                return Err(ConvertError::InvalidIntrinsic(
-                    "_w_intrinsic_reduce: operator must be a function reference".to_string(),
-                ));
+                // If single input, use its elem type as fallback
+                if !input_elem_types.is_empty() {
+                    input_elem_types[0].clone()
+                } else {
+                    return Err(ConvertError::BuilderError(
+                        "map: cannot determine output element type".to_string(),
+                    ));
+                }
             }
         };
+
+        // Get length from first input - use compile-time size for fixed arrays
+        let first_input_ty = self.array_expr_type(inputs.first().unwrap());
+        let array_size = match &first_input_ty {
+            Type::Constructed(TypeName::Array, type_args) if type_args.len() >= 3 => {
+                match &type_args[2] {
+                    Type::Constructed(TypeName::Size(n), _) => Some(*n),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+
+        let len = match array_size {
+            Some(n) => self
+                .builder
+                .push_int(&n.to_string(), i32_ty.clone(), span, node_id)
+                .map_err(|e| ConvertError::BuilderError(e.to_string()))?,
+            None => self
+                .builder
+                .push_intrinsic(
+                    "_w_intrinsic_length",
+                    vec![input_values[0]],
+                    i32_ty.clone(),
+                    span,
+                    node_id,
+                )
+                .map_err(|e| ConvertError::BuilderError(e.to_string()))?,
+        };
+
+        // Create uninitialized result array
+        let init_array = self
+            .builder
+            .push_call("_w_intrinsic_uninit", vec![], result_ty.clone(), span, node_id)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+
+        // Create loop
+        let loop_blocks = self.builder.create_for_range_loop(result_ty.clone());
+
+        // Branch to header
+        let zero = self
+            .builder
+            .push_int("0", i32_ty.clone(), span, node_id)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+        self.builder
+            .terminate(Terminator::Branch {
+                target: loop_blocks.header,
+                args: vec![init_array, zero],
+            })
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+
+        // Header
+        self.builder
+            .switch_to_block(loop_blocks.header)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+
+        let cond = self
+            .builder
+            .push_binop("<", loop_blocks.index, len, bool_ty, span, node_id)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+        self.builder
+            .terminate(Terminator::CondBranch {
+                cond,
+                then_target: loop_blocks.body,
+                then_args: vec![],
+                else_target: loop_blocks.exit,
+                else_args: vec![loop_blocks.acc],
+            })
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+
+        // Body
+        self.builder
+            .switch_to_block(loop_blocks.body)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+
+        // Index each input array at loop position
+        let input_elems: Vec<ValueId> = input_values
+            .iter()
+            .zip(input_elem_types.iter())
+            .map(|(&arr, elem_ty)| {
+                self.builder
+                    .push_index(arr, loop_blocks.index, elem_ty.clone(), span, node_id)
+                    .map_err(|e| ConvertError::BuilderError(e.to_string()))
+            })
+            .collect::<Result<_, _>>()?;
+
+        // Build function call args:
+        // For single input: [elem, captures...]
+        // For multiple inputs (zip-fused): [elem0, elem1, ..., captures...]
+        let mut call_args: Vec<ValueId> = input_elems;
+        call_args.extend(capture_values.iter().copied());
+
+        let output_elem = self
+            .builder
+            .push_call(&f_name, call_args, output_elem_ty, span, node_id)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+
+        let new_arr = self
+            .builder
+            .push_call(
+                "_w_intrinsic_array_with",
+                vec![loop_blocks.acc, loop_blocks.index, output_elem],
+                result_ty,
+                span,
+                node_id,
+            )
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+
+        let one = self
+            .builder
+            .push_int("1", i32_ty.clone(), span, node_id)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+        let next_i = self
+            .builder
+            .push_binop("+", loop_blocks.index, one, i32_ty, span, node_id)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+        self.builder
+            .terminate(Terminator::Branch {
+                target: loop_blocks.header,
+                args: vec![new_arr, next_i],
+            })
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+
+        // Exit
+        self.builder
+            .switch_to_block(loop_blocks.exit)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+
+        Ok(loop_blocks.result)
+    }
+
+    /// Lower `Soac(Reduce { op, ne, input })` to an explicit loop.
+    fn convert_soac_reduce(
+        &mut self,
+        op: &Lambda,
+        ne: &Term,
+        input: &ArrayExpr,
+        result_ty: Type<TypeName>,
+        span: Span,
+        node_id: NodeId,
+    ) -> Result<ValueId, ConvertError> {
+        let op_name = self.lambda_fn_name(op)?;
+
+        // Convert captures
+        let capture_values: Vec<ValueId> = op
+            .captures
+            .iter()
+            .map(|(_, _, t)| self.convert_term(t))
+            .collect::<Result<_, _>>()?;
 
         let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
         let bool_ty = Type::Constructed(TypeName::Str("bool"), vec![]);
         let acc_ty = result_ty.clone();
 
         // Get element type
-        let elem_ty = match &arr_term.ty {
-            Type::Constructed(TypeName::Array, type_args) if !type_args.is_empty() => type_args[0].clone(),
-            _ => acc_ty.clone(),
-        };
+        let elem_ty = self.array_expr_elem_type(input);
 
         // Convert array and init
-        let arr_value = self.convert_term(arr_term)?;
-        let init_value = self.convert_term(init_term)?;
+        let arr_value = self.convert_array_expr_value(input)?;
+        let init_value = self.convert_term(ne)?;
 
         // Get length
         let len = self
@@ -1448,9 +1685,11 @@ impl<'a> Converter<'a> {
             .push_index(arr_value, loop_blocks.index, elem_ty, span, node_id)
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
 
+        let mut call_args = vec![loop_blocks.acc, elem];
+        call_args.extend(capture_values.iter().copied());
         let new_acc = self
             .builder
-            .push_call(&op_name, vec![loop_blocks.acc, elem], acc_ty, span, node_id)
+            .push_call(&op_name, call_args, acc_ty, span, node_id)
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
 
         let one = self
@@ -1476,172 +1715,92 @@ impl<'a> Converter<'a> {
         Ok(loop_blocks.result)
     }
 
-    /// Expand _w_intrinsic_map to an explicit loop.
-    fn convert_map(
+    /// Lower `Soac(Filter { pred, input })` to a call to `_w_intrinsic_filter`.
+    /// Filter produces a dynamically-sized output so we emit it as an opaque intrinsic call
+    /// rather than an explicit loop.
+    fn convert_soac_filter(
         &mut self,
-        args: &[&Term],
+        pred: &Lambda,
+        input: &ArrayExpr,
         result_ty: Type<TypeName>,
         span: Span,
         node_id: NodeId,
     ) -> Result<ValueId, ConvertError> {
-        if args.len() < 2 {
-            return Err(ConvertError::InvalidIntrinsic(
-                "_w_intrinsic_map requires 2 arguments (f, arr)".to_string(),
-            ));
+        let pred_name = self.lambda_fn_name(pred)?;
+
+        // Convert captures to SSA values
+        let capture_values: Vec<ValueId> = pred
+            .captures
+            .iter()
+            .map(|(_, _, t)| self.convert_term(t))
+            .collect::<Result<_, _>>()?;
+
+        // Convert input array
+        let arr_value = self.convert_array_expr_value(input)?;
+
+        // Build args: pred function as a global ref, array, then captures
+        let fn_ty = Type::Constructed(TypeName::Unit, vec![]); // type doesn't matter for global refs
+        let pred_ref = self
+            .builder
+            .push_global(&pred_name, fn_ty, span, node_id)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+
+        let mut args = vec![pred_ref, arr_value];
+        args.extend(capture_values);
+
+        self.builder
+            .push_intrinsic("_w_intrinsic_filter", args, result_ty, span, node_id)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))
+    }
+
+    // =========================================================================
+    // ArrayExpr helpers
+    // =========================================================================
+
+    /// Convert an ArrayExpr to its SSA value (just the array, not wrapping in a term).
+    fn convert_array_expr_value(&mut self, ae: &ArrayExpr) -> Result<ValueId, ConvertError> {
+        match ae {
+            ArrayExpr::Ref(term) => self.convert_term(term),
+            _ => {
+                // For non-Ref ArrayExprs, use convert_array_expr with a dummy type
+                let ty = self.array_expr_type(ae);
+                let span = Span::new(0, 0, 0, 0);
+                let node_id = NodeId(0);
+                self.convert_array_expr(ae, ty, span, node_id)
+            }
         }
+    }
 
-        let f_term = args[0];
-        let arr_term = args[1];
-        let capture_terms = &args[2..]; // Captured variables from defunctionalization
+    /// Get the type of an ArrayExpr.
+    fn array_expr_type(&self, ae: &ArrayExpr) -> Type<TypeName> {
+        match ae {
+            ArrayExpr::Ref(t) => t.ty.clone(),
+            ArrayExpr::Zip(_) => Type::Constructed(TypeName::Unit, vec![]),  // placeholder
+            ArrayExpr::Soac(_) => Type::Constructed(TypeName::Unit, vec![]), // placeholder
+            ArrayExpr::Generate { elem_ty, .. } => elem_ty.clone(),
+            ArrayExpr::Literal(_) => Type::Constructed(TypeName::Unit, vec![]),
+            ArrayExpr::Range { start, .. } => start.ty.clone(),
+        }
+    }
 
-        // Get function name
-        let f_name = match &f_term.kind {
-            TermKind::Var(sym) => self.symbols.get(*sym).expect("BUG: symbol not in table").clone(),
-            _ => {
-                return Err(ConvertError::InvalidIntrinsic(
-                    "_w_intrinsic_map: function must be a function reference".to_string(),
-                ));
+    /// Extract the element type from an ArrayExpr.
+    fn array_expr_elem_type(&self, ae: &ArrayExpr) -> Type<TypeName> {
+        match ae {
+            ArrayExpr::Ref(t) => match &t.ty {
+                Type::Constructed(TypeName::Array, args) if !args.is_empty() => args[0].clone(),
+                _ => t.ty.clone(),
+            },
+            ArrayExpr::Zip(_) => Type::Constructed(TypeName::Unit, vec![]), // placeholder
+            ArrayExpr::Soac(_) => Type::Constructed(TypeName::Unit, vec![]),
+            ArrayExpr::Generate { elem_ty, .. } => elem_ty.clone(),
+            ArrayExpr::Literal(terms) => {
+                if let Some(first) = terms.first() {
+                    first.ty.clone()
+                } else {
+                    Type::Constructed(TypeName::Unit, vec![])
+                }
             }
-        };
-
-        // Convert captures to SSA values (these are passed as extra args to the lifted function)
-        let capture_values: Vec<ValueId> =
-            capture_terms.iter().map(|t| self.convert_term(t)).collect::<Result<_, _>>()?;
-
-        let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
-        let bool_ty = Type::Constructed(TypeName::Str("bool"), vec![]);
-
-        // Get element types and array size from the type
-        let (input_elem_ty, array_size) = match &arr_term.ty {
-            Type::Constructed(TypeName::Array, type_args) if type_args.len() >= 3 => {
-                let elem = type_args[0].clone();
-                let size = match &type_args[2] {
-                    Type::Constructed(TypeName::Size(n), _) => Some(*n),
-                    _ => None,
-                };
-                (elem, size)
-            }
-            _ => {
-                return Err(ConvertError::InvalidIntrinsic(
-                    "_w_intrinsic_map: second argument must be an array".to_string(),
-                ));
-            }
-        };
-        let output_elem_ty = match &result_ty {
-            Type::Constructed(TypeName::Array, type_args) if !type_args.is_empty() => type_args[0].clone(),
-            _ => input_elem_ty.clone(),
-        };
-
-        // Convert array
-        let arr_value = self.convert_term(arr_term)?;
-
-        // Get length - use compile-time size for fixed arrays
-        let len = match array_size {
-            Some(n) => self
-                .builder
-                .push_int(&n.to_string(), i32_ty.clone(), span, node_id)
-                .map_err(|e| ConvertError::BuilderError(e.to_string()))?,
-            None => self
-                .builder
-                .push_intrinsic(
-                    "_w_intrinsic_length",
-                    vec![arr_value],
-                    i32_ty.clone(),
-                    span,
-                    node_id,
-                )
-                .map_err(|e| ConvertError::BuilderError(e.to_string()))?,
-        };
-
-        // Create uninitialized result array
-        let init_array = self
-            .builder
-            .push_call("_w_intrinsic_uninit", vec![], result_ty.clone(), span, node_id)
-            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
-
-        // Create loop
-        let loop_blocks = self.builder.create_for_range_loop(result_ty.clone());
-
-        // Branch to header
-        let zero = self
-            .builder
-            .push_int("0", i32_ty.clone(), span, node_id)
-            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
-        self.builder
-            .terminate(Terminator::Branch {
-                target: loop_blocks.header,
-                args: vec![init_array, zero],
-            })
-            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
-
-        // Header
-        self.builder
-            .switch_to_block(loop_blocks.header)
-            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
-
-        let cond = self
-            .builder
-            .push_binop("<", loop_blocks.index, len, bool_ty, span, node_id)
-            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
-        self.builder
-            .terminate(Terminator::CondBranch {
-                cond,
-                then_target: loop_blocks.body,
-                then_args: vec![],
-                else_target: loop_blocks.exit,
-                else_args: vec![loop_blocks.acc],
-            })
-            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
-
-        // Body
-        self.builder
-            .switch_to_block(loop_blocks.body)
-            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
-
-        let input_elem = self
-            .builder
-            .push_index(arr_value, loop_blocks.index, input_elem_ty, span, node_id)
-            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
-
-        // Call function with element + captures
-        let mut call_args = vec![input_elem];
-        call_args.extend(capture_values.iter().copied());
-        let output_elem = self
-            .builder
-            .push_call(&f_name, call_args, output_elem_ty, span, node_id)
-            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
-
-        let new_arr = self
-            .builder
-            .push_call(
-                "_w_intrinsic_array_with",
-                vec![loop_blocks.acc, loop_blocks.index, output_elem],
-                result_ty,
-                span,
-                node_id,
-            )
-            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
-
-        let one = self
-            .builder
-            .push_int("1", i32_ty.clone(), span, node_id)
-            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
-        let next_i = self
-            .builder
-            .push_binop("+", loop_blocks.index, one, i32_ty, span, node_id)
-            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
-        self.builder
-            .terminate(Terminator::Branch {
-                target: loop_blocks.header,
-                args: vec![new_arr, next_i],
-            })
-            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
-
-        // Exit
-        self.builder
-            .switch_to_block(loop_blocks.exit)
-            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
-
-        Ok(loop_blocks.result)
+            ArrayExpr::Range { start, .. } => start.ty.clone(),
+        }
     }
 }

@@ -3,7 +3,7 @@
 //! Specializes polymorphic intrinsic names based on argument types.
 //! For example: `sign(x)` where `x: f32` becomes `f32.sign(x)`.
 
-use super::{Def, Lambda, LoopKind, Program, Term, TermIdSource, TermKind};
+use super::{ArrayExpr, Def, Lambda, LoopKind, Program, SoacOp, Term, TermIdSource, TermKind};
 use crate::SymbolTable;
 use crate::ast::TypeName;
 use polytype::Type;
@@ -125,8 +125,14 @@ impl Specializer {
             | TermKind::UnOp(_)
             | TermKind::Extern(_)) => k,
 
-            TermKind::Soac(_) | TermKind::ArrayExpr(_) | TermKind::Force(_) | TermKind::Pack { .. } | TermKind::Unpack { .. } => {
-                unreachable!("SOAC nodes not yet produced at this phase")
+            TermKind::Soac(soac) => TermKind::Soac(self.specialize_soac(soac)),
+
+            TermKind::ArrayExpr(ae) => TermKind::ArrayExpr(self.specialize_array_expr(ae)),
+
+            TermKind::Force(inner) => TermKind::Force(Box::new(self.specialize_term(*inner))),
+
+            TermKind::Pack { .. } | TermKind::Unpack { .. } => {
+                unreachable!("Pack/Unpack nodes not yet produced at this phase")
             }
         };
 
@@ -135,6 +141,70 @@ impl Specializer {
             ty: term.ty,
             span: term.span,
             kind,
+        }
+    }
+
+    fn specialize_lambda(&mut self, lam: Lambda) -> Lambda {
+        Lambda {
+            params: lam.params,
+            body: Box::new(self.specialize_term(*lam.body)),
+            ret_ty: lam.ret_ty,
+            captures: lam.captures.into_iter().map(|(s, ty, t)| (s, ty, self.specialize_term(t))).collect(),
+        }
+    }
+
+    fn specialize_soac(&mut self, soac: SoacOp) -> SoacOp {
+        match soac {
+            SoacOp::Map { lam, inputs } => SoacOp::Map {
+                lam: self.specialize_lambda(lam),
+                inputs: inputs.into_iter().map(|ae| self.specialize_array_expr(ae)).collect(),
+            },
+            SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
+                op: self.specialize_lambda(op),
+                ne: Box::new(self.specialize_term(*ne)),
+                input: self.specialize_array_expr(input),
+                props,
+            },
+            SoacOp::Scan { op, ne, input } => SoacOp::Scan {
+                op: self.specialize_lambda(op),
+                ne: Box::new(self.specialize_term(*ne)),
+                input: self.specialize_array_expr(input),
+            },
+            SoacOp::Filter { pred, input } => SoacOp::Filter {
+                pred: self.specialize_lambda(pred),
+                input: self.specialize_array_expr(input),
+            },
+            SoacOp::Scatter { dest, indices, values } => SoacOp::Scatter {
+                dest,
+                indices: self.specialize_array_expr(indices),
+                values: self.specialize_array_expr(values),
+            },
+            SoacOp::ReduceByIndex { dest, op, ne, indices, values, props } => SoacOp::ReduceByIndex {
+                dest,
+                op: self.specialize_lambda(op),
+                ne: Box::new(self.specialize_term(*ne)),
+                indices: self.specialize_array_expr(indices),
+                values: self.specialize_array_expr(values),
+                props,
+            },
+        }
+    }
+
+    fn specialize_array_expr(&mut self, ae: ArrayExpr) -> ArrayExpr {
+        match ae {
+            ArrayExpr::Ref(t) => ArrayExpr::Ref(Box::new(self.specialize_term(*t))),
+            ArrayExpr::Zip(exprs) => ArrayExpr::Zip(exprs.into_iter().map(|e| self.specialize_array_expr(e)).collect()),
+            ArrayExpr::Soac(op) => ArrayExpr::Soac(Box::new(self.specialize_soac(*op))),
+            ArrayExpr::Generate { shape, index_fn, elem_ty } => ArrayExpr::Generate {
+                shape,
+                index_fn: self.specialize_lambda(index_fn),
+                elem_ty,
+            },
+            ArrayExpr::Literal(terms) => ArrayExpr::Literal(terms.into_iter().map(|t| self.specialize_term(t)).collect()),
+            ArrayExpr::Range { start, len } => ArrayExpr::Range {
+                start: Box::new(self.specialize_term(*start)),
+                len: Box::new(self.specialize_term(*len)),
+            },
         }
     }
 
