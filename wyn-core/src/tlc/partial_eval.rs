@@ -194,9 +194,7 @@ impl PartialEvaluator {
             TermKind::Extern(_) => Value::Unknown(term.clone()),
 
             // SOAC nodes are opaque to partial evaluation — residualize
-            TermKind::Soac(_) | TermKind::ArrayExpr(_) | TermKind::Force(_) => {
-                Value::Unknown(term.clone())
-            }
+            TermKind::Soac(_) | TermKind::ArrayExpr(_) | TermKind::Force(_) => Value::Unknown(term.clone()),
 
             TermKind::Pack { .. } | TermKind::Unpack { .. } => {
                 unreachable!("Pack/Unpack nodes not yet produced at this phase")
@@ -339,7 +337,10 @@ impl PartialEvaluator {
         let mut args_iter = args.into_iter();
 
         loop {
-            if let TermKind::Lambda(Lambda { params, body: inner, .. }) = &body.kind {
+            if let TermKind::Lambda(Lambda {
+                params, body: inner, ..
+            }) = &body.kind
+            {
                 // Bind as many args as this lambda has params
                 let mut consumed = 0;
                 for (param, _) in params {

@@ -645,6 +645,7 @@ fn compile_impl(source: &str) -> CompileResult {
         .partial_eval()
         .defunctionalize()
         .monomorphize()
+        .soa_transform()
         .to_ssa()
     {
         Ok(s) => s,
@@ -736,6 +737,7 @@ fn compile_with_ir_impl(source: &str) -> CompileResultWithIR {
     let ssa = match tlc_after_partial_eval
         .defunctionalize()
         .monomorphize()
+        .soa_transform()
         .to_ssa()
     {
         Ok(s) => s,

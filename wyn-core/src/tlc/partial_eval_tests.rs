@@ -356,7 +356,13 @@ fn test_function_inlining() {
 
     let foo_body = Term {
         id: b.next_id(),
-        ty: Type::Constructed(TypeName::Arrow, vec![int_ty.clone(), Type::Constructed(TypeName::Arrow, vec![int_ty.clone(), int_ty.clone()])]),
+        ty: Type::Constructed(
+            TypeName::Arrow,
+            vec![
+                int_ty.clone(),
+                Type::Constructed(TypeName::Arrow, vec![int_ty.clone(), int_ty.clone()]),
+            ],
+        ),
         span: b.span(),
         kind: TermKind::Lambda(Lambda {
             params: vec![(a_sym, int_ty.clone()), (b_sym, int_ty.clone())],

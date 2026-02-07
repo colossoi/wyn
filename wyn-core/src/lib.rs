@@ -311,6 +311,7 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 //       -> .partial_eval() or .skip_partial_eval()      -> TlcTransformed (optimized)
 //       -> .defunctionalize()                           -> TlcDefunctionalized
 //       -> .monomorphize()                              -> TlcMonomorphized
+//       -> .soa_transform()                             -> TlcSoaTransformed
 //       -> .to_ssa()                                    -> SsaConverted
 //
 // BackEnd Pipeline (SSA -> output):
@@ -748,6 +749,24 @@ pub struct TlcMonomorphized {
 }
 
 impl TlcMonomorphized {
+    /// Apply SoA (Structure-of-Arrays) transform.
+    /// Rewrites `[n](A,B)` to `([n]A, [n]B)` so arrays never contain tuples.
+    pub fn soa_transform(self) -> TlcSoaTransformed {
+        let transformed = tlc::soa_transform::soa_transform(self.tlc);
+        TlcSoaTransformed {
+            tlc: transformed,
+            type_table: self.type_table,
+        }
+    }
+}
+
+/// TLC after SoA transform (arrays never contain tuples)
+pub struct TlcSoaTransformed {
+    pub tlc: tlc::Program,
+    pub type_table: TypeTable,
+}
+
+impl TlcSoaTransformed {
     /// Transform TLC directly to SSA.
     pub fn to_ssa(self) -> std::result::Result<SsaConverted, tlc::to_ssa::ConvertError> {
         let ssa = tlc::to_ssa::convert_program(&self.tlc)?;

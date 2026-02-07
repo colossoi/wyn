@@ -14,7 +14,9 @@
 //!
 //! The lifted lambda is: _w_lambda_0 = |x| |y| x + y  (captures at end)
 
-use super::{ArrayExpr, Def, DefMeta, Lambda, LoopKind, Place, Program, SoacOp, Term, TermIdSource, TermKind};
+use super::{
+    ArrayExpr, Def, DefMeta, Lambda, LoopKind, Place, Program, SoacOp, Term, TermIdSource, TermKind,
+};
 use crate::ast::{Span, TypeName};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
@@ -102,7 +104,6 @@ fn detect_hofs(defs: &[Def]) -> HashMap<SymbolId, HofInfo> {
     hof_info
 }
 
-
 // =============================================================================
 // Type Substitution for HOF Specialization
 // =============================================================================
@@ -179,11 +180,25 @@ fn apply_type_subst_to_term(term: &Term, subst: &TypeSubst, term_ids: &mut TermI
             func: Box::new(apply_type_subst_to_term(func, subst, term_ids)),
             arg: Box::new(apply_type_subst_to_term(arg, subst, term_ids)),
         },
-        TermKind::Lambda(Lambda { params, body, ret_ty, captures }) => TermKind::Lambda(Lambda {
+        TermKind::Lambda(Lambda {
+            params,
+            body,
+            ret_ty,
+            captures,
+        }) => TermKind::Lambda(Lambda {
             params: params.iter().map(|(p, ty)| (p.clone(), apply_type_subst(ty, subst))).collect(),
             body: Box::new(apply_type_subst_to_term(body, subst, term_ids)),
             ret_ty: apply_type_subst(ret_ty, subst),
-            captures: captures.iter().map(|(s, ty, t)| (s.clone(), apply_type_subst(ty, subst), apply_type_subst_to_term(t, subst, term_ids))).collect(),
+            captures: captures
+                .iter()
+                .map(|(s, ty, t)| {
+                    (
+                        s.clone(),
+                        apply_type_subst(ty, subst),
+                        apply_type_subst_to_term(t, subst, term_ids),
+                    )
+                })
+                .collect(),
         }),
         TermKind::Let {
             name,
@@ -247,9 +262,7 @@ fn apply_type_subst_to_term(term: &Term, subst: &TypeSubst, term_ids: &mut TermI
                 body: Box::new(apply_type_subst_to_term(body, subst, term_ids)),
             }
         }
-        TermKind::Soac(ref soac) => {
-            TermKind::Soac(apply_type_subst_to_soac(soac, subst, term_ids))
-        }
+        TermKind::Soac(ref soac) => TermKind::Soac(apply_type_subst_to_soac(soac, subst, term_ids)),
         TermKind::ArrayExpr(ref ae) => {
             TermKind::ArrayExpr(apply_type_subst_to_array_expr(ae, subst, term_ids))
         }
@@ -273,7 +286,17 @@ fn apply_type_subst_to_lambda(lam: &Lambda, subst: &TypeSubst, term_ids: &mut Te
         params: lam.params.iter().map(|(p, ty)| (*p, apply_type_subst(ty, subst))).collect(),
         body: Box::new(apply_type_subst_to_term(&lam.body, subst, term_ids)),
         ret_ty: apply_type_subst(&lam.ret_ty, subst),
-        captures: lam.captures.iter().map(|(s, ty, t)| (*s, apply_type_subst(ty, subst), apply_type_subst_to_term(t, subst, term_ids))).collect(),
+        captures: lam
+            .captures
+            .iter()
+            .map(|(s, ty, t)| {
+                (
+                    *s,
+                    apply_type_subst(ty, subst),
+                    apply_type_subst_to_term(t, subst, term_ids),
+                )
+            })
+            .collect(),
     }
 }
 
@@ -298,12 +321,23 @@ fn apply_type_subst_to_soac(soac: &SoacOp, subst: &TypeSubst, term_ids: &mut Ter
             pred: apply_type_subst_to_lambda(pred, subst, term_ids),
             input: apply_type_subst_to_array_expr(input, subst, term_ids),
         },
-        SoacOp::Scatter { dest, indices, values } => SoacOp::Scatter {
+        SoacOp::Scatter {
+            dest,
+            indices,
+            values,
+        } => SoacOp::Scatter {
             dest: apply_type_subst_to_place(dest, subst, term_ids),
             indices: apply_type_subst_to_array_expr(indices, subst, term_ids),
             values: apply_type_subst_to_array_expr(values, subst, term_ids),
         },
-        SoacOp::ReduceByIndex { dest, op, ne, indices, values, props } => SoacOp::ReduceByIndex {
+        SoacOp::ReduceByIndex {
+            dest,
+            op,
+            ne,
+            indices,
+            values,
+            props,
+        } => SoacOp::ReduceByIndex {
             dest: apply_type_subst_to_place(dest, subst, term_ids),
             op: apply_type_subst_to_lambda(op, subst, term_ids),
             ne: Box::new(apply_type_subst_to_term(ne, subst, term_ids)),
@@ -314,17 +348,29 @@ fn apply_type_subst_to_soac(soac: &SoacOp, subst: &TypeSubst, term_ids: &mut Ter
     }
 }
 
-fn apply_type_subst_to_array_expr(ae: &ArrayExpr, subst: &TypeSubst, term_ids: &mut TermIdSource) -> ArrayExpr {
+fn apply_type_subst_to_array_expr(
+    ae: &ArrayExpr,
+    subst: &TypeSubst,
+    term_ids: &mut TermIdSource,
+) -> ArrayExpr {
     match ae {
         ArrayExpr::Ref(t) => ArrayExpr::Ref(Box::new(apply_type_subst_to_term(t, subst, term_ids))),
-        ArrayExpr::Zip(exprs) => ArrayExpr::Zip(exprs.iter().map(|e| apply_type_subst_to_array_expr(e, subst, term_ids)).collect()),
+        ArrayExpr::Zip(exprs) => ArrayExpr::Zip(
+            exprs.iter().map(|e| apply_type_subst_to_array_expr(e, subst, term_ids)).collect(),
+        ),
         ArrayExpr::Soac(op) => ArrayExpr::Soac(Box::new(apply_type_subst_to_soac(op, subst, term_ids))),
-        ArrayExpr::Generate { shape, index_fn, elem_ty } => ArrayExpr::Generate {
+        ArrayExpr::Generate {
+            shape,
+            index_fn,
+            elem_ty,
+        } => ArrayExpr::Generate {
             shape: shape.clone(),
             index_fn: apply_type_subst_to_lambda(index_fn, subst, term_ids),
             elem_ty: apply_type_subst(elem_ty, subst),
         },
-        ArrayExpr::Literal(terms) => ArrayExpr::Literal(terms.iter().map(|t| apply_type_subst_to_term(t, subst, term_ids)).collect()),
+        ArrayExpr::Literal(terms) => {
+            ArrayExpr::Literal(terms.iter().map(|t| apply_type_subst_to_term(t, subst, term_ids)).collect())
+        }
         ArrayExpr::Range { start, len } => ArrayExpr::Range {
             start: Box::new(apply_type_subst_to_term(start, subst, term_ids)),
             len: Box::new(apply_type_subst_to_term(len, subst, term_ids)),
@@ -334,7 +380,12 @@ fn apply_type_subst_to_array_expr(ae: &ArrayExpr, subst: &TypeSubst, term_ids: &
 
 fn apply_type_subst_to_place(place: &Place, subst: &TypeSubst, _term_ids: &mut TermIdSource) -> Place {
     match place {
-        Place::BufferSlice { base, offset, shape, elem_ty } => Place::BufferSlice {
+        Place::BufferSlice {
+            base,
+            offset,
+            shape,
+            elem_ty,
+        } => Place::BufferSlice {
             base: Box::new(apply_type_subst_to_term(base, subst, _term_ids)),
             offset: Box::new(apply_type_subst_to_term(offset, subst, _term_ids)),
             shape: shape.clone(),
@@ -497,7 +548,15 @@ fn collect_free_vars_lambda(
     for (p, _) in &lam.params {
         inner_bound.insert(*p);
     }
-    collect_free_vars(&lam.body, &inner_bound, top_level, known_defs, symbols, free, seen);
+    collect_free_vars(
+        &lam.body,
+        &inner_bound,
+        top_level,
+        known_defs,
+        symbols,
+        free,
+        seen,
+    );
     for (_, _, cap_term) in &lam.captures {
         collect_free_vars(cap_term, bound, top_level, known_defs, symbols, free, seen);
     }
@@ -537,7 +596,13 @@ fn collect_free_vars_soac(
             collect_free_vars_array_expr(indices, bound, top_level, known_defs, symbols, free, seen);
             collect_free_vars_array_expr(values, bound, top_level, known_defs, symbols, free, seen);
         }
-        SoacOp::ReduceByIndex { op, ne, indices, values, .. } => {
+        SoacOp::ReduceByIndex {
+            op,
+            ne,
+            indices,
+            values,
+            ..
+        } => {
             collect_free_vars_lambda(op, bound, top_level, known_defs, symbols, free, seen);
             collect_free_vars(ne, bound, top_level, known_defs, symbols, free, seen);
             collect_free_vars_array_expr(indices, bound, top_level, known_defs, symbols, free, seen);
@@ -562,7 +627,9 @@ fn collect_free_vars_array_expr(
                 collect_free_vars_array_expr(e, bound, top_level, known_defs, symbols, free, seen);
             }
         }
-        ArrayExpr::Soac(op) => collect_free_vars_soac(op, bound, top_level, known_defs, symbols, free, seen),
+        ArrayExpr::Soac(op) => {
+            collect_free_vars_soac(op, bound, top_level, known_defs, symbols, free, seen)
+        }
         ArrayExpr::Generate { index_fn, .. } => {
             collect_free_vars_lambda(index_fn, bound, top_level, known_defs, symbols, free, seen);
         }
@@ -665,7 +732,12 @@ impl<'a> Defunctionalizer<'a> {
     /// Defunctionalize but preserve outermost parameter lambdas (for entry points).
     fn defunc_preserving_params(&mut self, term: Term) -> Term {
         match term.kind {
-            TermKind::Lambda(Lambda { params, body, ret_ty, captures }) => {
+            TermKind::Lambda(Lambda {
+                params,
+                body,
+                ret_ty,
+                captures,
+            }) => {
                 // Keep this lambda, but recursively process its body
                 // These are single-param lambdas from build_lambda_chain
                 let (param, param_ty) = params.into_iter().next().expect("BUG: Lambda with empty params");
@@ -1018,17 +1090,39 @@ impl<'a> Defunctionalizer<'a> {
                 let input = self.defunc_array_expr(input);
                 SoacOp::Filter { pred, input }
             }
-            SoacOp::Scatter { dest, indices, values } => {
+            SoacOp::Scatter {
+                dest,
+                indices,
+                values,
+            } => {
                 let indices = self.defunc_array_expr(indices);
                 let values = self.defunc_array_expr(values);
-                SoacOp::Scatter { dest, indices, values }
+                SoacOp::Scatter {
+                    dest,
+                    indices,
+                    values,
+                }
             }
-            SoacOp::ReduceByIndex { dest, op, ne, indices, values, props } => {
+            SoacOp::ReduceByIndex {
+                dest,
+                op,
+                ne,
+                indices,
+                values,
+                props,
+            } => {
                 let op = self.defunc_lambda_in_soac(op, span);
                 let ne = Box::new(self.defunc_term(*ne).term);
                 let indices = self.defunc_array_expr(indices);
                 let values = self.defunc_array_expr(values);
-                SoacOp::ReduceByIndex { dest, op, ne, indices, values, props }
+                SoacOp::ReduceByIndex {
+                    dest,
+                    op,
+                    ne,
+                    indices,
+                    values,
+                    props,
+                }
             }
         };
         DefuncResult {
@@ -1050,10 +1144,7 @@ impl<'a> Defunctionalizer<'a> {
     fn defunc_lambda_in_soac(&mut self, lam: Lambda, span: Span) -> Lambda {
         // Build a term from the lambda so we can use defunc_lambda
         let lam_ty = if lam.params.len() == 1 {
-            Type::Constructed(
-                TypeName::Arrow,
-                vec![lam.params[0].1.clone(), lam.ret_ty.clone()],
-            )
+            Type::Constructed(TypeName::Arrow, vec![lam.params[0].1.clone(), lam.ret_ty.clone()])
         } else {
             // Multi-param: build nested arrow
             let mut ty = lam.ret_ty.clone();
@@ -1074,7 +1165,10 @@ impl<'a> Defunctionalizer<'a> {
 
         // Extract the lifted function name and captures from the StaticVal
         let (lifted_name, capture_terms) = match &result.sv {
-            StaticVal::Lambda { lifted_name, captures } => (*lifted_name, captures.clone()),
+            StaticVal::Lambda {
+                lifted_name,
+                captures,
+            } => (*lifted_name, captures.clone()),
             _ => {
                 // This shouldn't happen for a lambda, but be safe
                 match &result.term.kind {
@@ -1147,20 +1241,36 @@ impl<'a> Defunctionalizer<'a> {
     fn defunc_array_expr(&mut self, ae: ArrayExpr) -> ArrayExpr {
         match ae {
             ArrayExpr::Ref(t) => ArrayExpr::Ref(Box::new(self.defunc_term(*t).term)),
-            ArrayExpr::Zip(exprs) => ArrayExpr::Zip(exprs.into_iter().map(|e| self.defunc_array_expr(e)).collect()),
+            ArrayExpr::Zip(exprs) => {
+                ArrayExpr::Zip(exprs.into_iter().map(|e| self.defunc_array_expr(e)).collect())
+            }
             ArrayExpr::Soac(op) => {
                 // Create a dummy type/span for the recursive call
-                let result = self.defunc_soac(*op, Type::Constructed(TypeName::Unit, vec![]), Span::new(0, 0, 0, 0));
+                let result = self.defunc_soac(
+                    *op,
+                    Type::Constructed(TypeName::Unit, vec![]),
+                    Span::new(0, 0, 0, 0),
+                );
                 match result.term.kind {
                     TermKind::Soac(s) => ArrayExpr::Soac(Box::new(s)),
                     _ => unreachable!(),
                 }
             }
-            ArrayExpr::Generate { shape, index_fn, elem_ty } => {
+            ArrayExpr::Generate {
+                shape,
+                index_fn,
+                elem_ty,
+            } => {
                 let index_fn = self.defunc_lambda_in_soac(index_fn, Span::new(0, 0, 0, 0));
-                ArrayExpr::Generate { shape, index_fn, elem_ty }
+                ArrayExpr::Generate {
+                    shape,
+                    index_fn,
+                    elem_ty,
+                }
             }
-            ArrayExpr::Literal(terms) => ArrayExpr::Literal(terms.into_iter().map(|t| self.defunc_term(t).term).collect()),
+            ArrayExpr::Literal(terms) => {
+                ArrayExpr::Literal(terms.into_iter().map(|t| self.defunc_term(t).term).collect())
+            }
             ArrayExpr::Range { start, len } => ArrayExpr::Range {
                 start: Box::new(self.defunc_term(*start).term),
                 len: Box::new(self.defunc_term(*len).term),
@@ -1418,7 +1528,11 @@ impl<'a> Defunctionalizer<'a> {
 
         loop {
             match current.kind {
-                TermKind::Lambda(Lambda { params: lam_params, body, .. }) => {
+                TermKind::Lambda(Lambda {
+                    params: lam_params,
+                    body,
+                    ..
+                }) => {
                     params.extend(lam_params);
                     current = *body;
                 }
@@ -1546,7 +1660,6 @@ impl<'a> Defunctionalizer<'a> {
             span,
         )
     }
-
 
     /// Specialize a user-defined HOF call by cloning, substituting, and defunctionalizing.
     ///
@@ -1691,7 +1804,12 @@ impl<'a> Defunctionalizer<'a> {
                 },
             },
 
-            TermKind::Lambda(Lambda { params, body, ret_ty, captures }) => {
+            TermKind::Lambda(Lambda {
+                params,
+                body,
+                ret_ty,
+                captures,
+            }) => {
                 // Don't substitute if any param shadows old_sym
                 if params.iter().any(|(p, _)| *p == old_sym) {
                     term.clone()
@@ -1859,7 +1977,11 @@ impl<'a> Defunctionalizer<'a> {
                 params: lam.params.clone(),
                 body: Box::new(self.substitute_var(&lam.body, old_sym, new_sym)),
                 ret_ty: lam.ret_ty.clone(),
-                captures: lam.captures.iter().map(|(s, ty, t)| (*s, ty.clone(), self.substitute_var(t, old_sym, new_sym))).collect(),
+                captures: lam
+                    .captures
+                    .iter()
+                    .map(|(s, ty, t)| (*s, ty.clone(), self.substitute_var(t, old_sym, new_sym)))
+                    .collect(),
             }
         }
     }
@@ -1868,7 +1990,10 @@ impl<'a> Defunctionalizer<'a> {
         match soac {
             SoacOp::Map { lam, inputs } => SoacOp::Map {
                 lam: self.substitute_var_lambda(lam, old_sym, new_sym),
-                inputs: inputs.iter().map(|ae| self.substitute_var_array_expr(ae, old_sym, new_sym)).collect(),
+                inputs: inputs
+                    .iter()
+                    .map(|ae| self.substitute_var_array_expr(ae, old_sym, new_sym))
+                    .collect(),
             },
             SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
                 op: self.substitute_var_lambda(op, old_sym, new_sym),
@@ -1885,12 +2010,23 @@ impl<'a> Defunctionalizer<'a> {
                 pred: self.substitute_var_lambda(pred, old_sym, new_sym),
                 input: self.substitute_var_array_expr(input, old_sym, new_sym),
             },
-            SoacOp::Scatter { dest, indices, values } => SoacOp::Scatter {
+            SoacOp::Scatter {
+                dest,
+                indices,
+                values,
+            } => SoacOp::Scatter {
                 dest: dest.clone(),
                 indices: self.substitute_var_array_expr(indices, old_sym, new_sym),
                 values: self.substitute_var_array_expr(values, old_sym, new_sym),
             },
-            SoacOp::ReduceByIndex { dest, op, ne, indices, values, props } => SoacOp::ReduceByIndex {
+            SoacOp::ReduceByIndex {
+                dest,
+                op,
+                ne,
+                indices,
+                values,
+                props,
+            } => SoacOp::ReduceByIndex {
                 dest: dest.clone(),
                 op: self.substitute_var_lambda(op, old_sym, new_sym),
                 ne: Box::new(self.substitute_var(ne, old_sym, new_sym)),
@@ -1901,17 +2037,32 @@ impl<'a> Defunctionalizer<'a> {
         }
     }
 
-    fn substitute_var_array_expr(&mut self, ae: &ArrayExpr, old_sym: SymbolId, new_sym: SymbolId) -> ArrayExpr {
+    fn substitute_var_array_expr(
+        &mut self,
+        ae: &ArrayExpr,
+        old_sym: SymbolId,
+        new_sym: SymbolId,
+    ) -> ArrayExpr {
         match ae {
             ArrayExpr::Ref(t) => ArrayExpr::Ref(Box::new(self.substitute_var(t, old_sym, new_sym))),
-            ArrayExpr::Zip(exprs) => ArrayExpr::Zip(exprs.iter().map(|e| self.substitute_var_array_expr(e, old_sym, new_sym)).collect()),
-            ArrayExpr::Soac(op) => ArrayExpr::Soac(Box::new(self.substitute_var_soac(op, old_sym, new_sym))),
-            ArrayExpr::Generate { shape, index_fn, elem_ty } => ArrayExpr::Generate {
+            ArrayExpr::Zip(exprs) => ArrayExpr::Zip(
+                exprs.iter().map(|e| self.substitute_var_array_expr(e, old_sym, new_sym)).collect(),
+            ),
+            ArrayExpr::Soac(op) => {
+                ArrayExpr::Soac(Box::new(self.substitute_var_soac(op, old_sym, new_sym)))
+            }
+            ArrayExpr::Generate {
+                shape,
+                index_fn,
+                elem_ty,
+            } => ArrayExpr::Generate {
                 shape: shape.clone(),
                 index_fn: self.substitute_var_lambda(index_fn, old_sym, new_sym),
                 elem_ty: elem_ty.clone(),
             },
-            ArrayExpr::Literal(terms) => ArrayExpr::Literal(terms.iter().map(|t| self.substitute_var(t, old_sym, new_sym)).collect()),
+            ArrayExpr::Literal(terms) => {
+                ArrayExpr::Literal(terms.iter().map(|t| self.substitute_var(t, old_sym, new_sym)).collect())
+            }
             ArrayExpr::Range { start, len } => ArrayExpr::Range {
                 start: Box::new(self.substitute_var(start, old_sym, new_sym)),
                 len: Box::new(self.substitute_var(len, old_sym, new_sym)),
@@ -1923,7 +2074,10 @@ impl<'a> Defunctionalizer<'a> {
     fn get_func_param_sym(&self, def: &Def, param_idx: usize) -> SymbolId {
         let mut body = &def.body;
         let mut idx = 0;
-        while let TermKind::Lambda(Lambda { params, body: inner, .. }) = &body.kind {
+        while let TermKind::Lambda(Lambda {
+            params, body: inner, ..
+        }) = &body.kind
+        {
             for (param, _) in params {
                 if idx == param_idx {
                     return *param;

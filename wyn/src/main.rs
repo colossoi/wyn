@@ -212,8 +212,11 @@ fn compile_file(
     // Monomorphize polymorphic functions at TLC level
     let tlc_mono = time("tlc_monomorphize", verbose, || tlc_defunc.monomorphize());
 
+    // SoA transform: [n](A,B) → ([n]A, [n]B)
+    let tlc_soa = time("soa_transform", verbose, || tlc_mono.soa_transform());
+
     // Transform TLC to SSA
-    let ssa = time("to_ssa", verbose, || tlc_mono.to_ssa())?;
+    let ssa = time("to_ssa", verbose, || tlc_soa.to_ssa())?;
 
     // Parallelize SOACs in compute shaders
     let parallelized = time("parallelize_soacs", verbose, || ssa.parallelize_soacs());

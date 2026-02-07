@@ -49,7 +49,12 @@ impl Specializer {
                 }
             }
 
-            TermKind::Lambda(Lambda { params, body, ret_ty, captures }) => TermKind::Lambda(Lambda {
+            TermKind::Lambda(Lambda {
+                params,
+                body,
+                ret_ty,
+                captures,
+            }) => TermKind::Lambda(Lambda {
                 params,
                 body: Box::new(self.specialize_term(*body)),
                 ret_ty,
@@ -174,12 +179,23 @@ impl Specializer {
                 pred: self.specialize_lambda(pred),
                 input: self.specialize_array_expr(input),
             },
-            SoacOp::Scatter { dest, indices, values } => SoacOp::Scatter {
+            SoacOp::Scatter {
+                dest,
+                indices,
+                values,
+            } => SoacOp::Scatter {
                 dest,
                 indices: self.specialize_array_expr(indices),
                 values: self.specialize_array_expr(values),
             },
-            SoacOp::ReduceByIndex { dest, op, ne, indices, values, props } => SoacOp::ReduceByIndex {
+            SoacOp::ReduceByIndex {
+                dest,
+                op,
+                ne,
+                indices,
+                values,
+                props,
+            } => SoacOp::ReduceByIndex {
                 dest,
                 op: self.specialize_lambda(op),
                 ne: Box::new(self.specialize_term(*ne)),
@@ -193,14 +209,22 @@ impl Specializer {
     fn specialize_array_expr(&mut self, ae: ArrayExpr) -> ArrayExpr {
         match ae {
             ArrayExpr::Ref(t) => ArrayExpr::Ref(Box::new(self.specialize_term(*t))),
-            ArrayExpr::Zip(exprs) => ArrayExpr::Zip(exprs.into_iter().map(|e| self.specialize_array_expr(e)).collect()),
+            ArrayExpr::Zip(exprs) => {
+                ArrayExpr::Zip(exprs.into_iter().map(|e| self.specialize_array_expr(e)).collect())
+            }
             ArrayExpr::Soac(op) => ArrayExpr::Soac(Box::new(self.specialize_soac(*op))),
-            ArrayExpr::Generate { shape, index_fn, elem_ty } => ArrayExpr::Generate {
+            ArrayExpr::Generate {
+                shape,
+                index_fn,
+                elem_ty,
+            } => ArrayExpr::Generate {
                 shape,
                 index_fn: self.specialize_lambda(index_fn),
                 elem_ty,
             },
-            ArrayExpr::Literal(terms) => ArrayExpr::Literal(terms.into_iter().map(|t| self.specialize_term(t)).collect()),
+            ArrayExpr::Literal(terms) => {
+                ArrayExpr::Literal(terms.into_iter().map(|t| self.specialize_term(t)).collect())
+            }
             ArrayExpr::Range { start, len } => ArrayExpr::Range {
                 start: Box::new(self.specialize_term(*start)),
                 len: Box::new(self.specialize_term(*len)),

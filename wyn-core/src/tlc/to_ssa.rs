@@ -11,7 +11,10 @@ use crate::mir::ssa_builder::FuncBuilder;
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 
-use super::{ArrayExpr, Def as TlcDef, DefMeta, Lambda, LoopKind as TlcLoopKind, Program as TlcProgram, SoacOp, Term, TermKind};
+use super::{
+    ArrayExpr, Def as TlcDef, DefMeta, Lambda, LoopKind as TlcLoopKind, Program as TlcProgram, SoacOp,
+    Term, TermKind,
+};
 
 /// Extract parameter types and return type from a curried function type.
 /// For `A -> B -> C`, returns `([A, B], C)`.
@@ -38,6 +41,51 @@ fn is_unsized_array(ty: &Type<TypeName>) -> bool {
             matches!(&args[2], Type::Variable(_))
         }
         _ => false,
+    }
+}
+
+/// Check if a type is an SoA tuple-of-arrays (result of SoA transform on `[n](A,B)` → `([n]A, [n]B)`).
+/// Returns the component array types if so.
+fn is_soa_tuple(ty: &Type<TypeName>) -> Option<&[Type<TypeName>]> {
+    match ty {
+        Type::Constructed(TypeName::Tuple(_), component_types) if !component_types.is_empty() => {
+            let all_arrays = component_types
+                .iter()
+                .all(|ct| matches!(ct, Type::Constructed(TypeName::Array, args) if args.len() == 3));
+            if all_arrays { Some(component_types) } else { None }
+        }
+        _ => None,
+    }
+}
+
+/// Given an SoA tuple type `([n]A, [n]B)`, return the element tuple type `(A, B)`.
+fn soa_elem_type(soa_ty: &Type<TypeName>) -> Type<TypeName> {
+    match soa_ty {
+        Type::Constructed(TypeName::Tuple(n), component_types) => {
+            let elem_types: Vec<Type<TypeName>> = component_types
+                .iter()
+                .map(|ct| match ct {
+                    Type::Constructed(TypeName::Array, args) if !args.is_empty() => args[0].clone(),
+                    _ => ct.clone(),
+                })
+                .collect();
+            Type::Constructed(TypeName::Tuple(*n), elem_types)
+        }
+        _ => panic!("BUG: soa_elem_type called on non-SoA type: {:?}", soa_ty),
+    }
+}
+
+/// Extract compile-time array size from a type (handles both plain arrays and SoA tuples).
+fn extract_array_size(ty: &Type<TypeName>) -> Option<usize> {
+    match ty {
+        Type::Constructed(TypeName::Array, type_args) if type_args.len() >= 3 => match &type_args[2] {
+            Type::Constructed(TypeName::Size(n), _) => Some(*n),
+            _ => None,
+        },
+        Type::Constructed(TypeName::Tuple(_), components) if !components.is_empty() => {
+            extract_array_size(&components[0])
+        }
+        _ => None,
     }
 }
 
@@ -471,7 +519,11 @@ fn extract_params<'a>(
     symbols: &SymbolTable,
 ) -> (Vec<(String, Type<TypeName>, Span)>, &'a Term) {
     match &term.kind {
-        TermKind::Lambda(Lambda { params: lam_params, body, .. }) => {
+        TermKind::Lambda(Lambda {
+            params: lam_params,
+            body,
+            ..
+        }) => {
             let (mut params, inner) = extract_params(body, symbols);
             // Insert in reverse order so first param ends up first
             for (p, ty) in lam_params.iter().rev() {
@@ -1250,19 +1302,11 @@ impl<'a> Converter<'a> {
 
         // Convert initial value and iterator
         let init_value = self.convert_term(init)?;
+        let iter_ty = iter.ty.clone();
         let iter_value = self.convert_term(iter)?;
 
-        // Get length
-        let len = self
-            .builder
-            .push_intrinsic(
-                "_w_intrinsic_length",
-                vec![iter_value],
-                i32_ty.clone(),
-                span,
-                node_id,
-            )
-            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+        // Get length (SoA-aware)
+        let len = self.soa_length(iter_value, &iter_ty, span, node_id)?;
 
         // Branch to header with (init, 0)
         let zero = self
@@ -1282,11 +1326,8 @@ impl<'a> Converter<'a> {
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
         self.locals.insert(loop_var.to_string(), loop_blocks.acc);
 
-        // Get element at index
-        let elem = self
-            .builder
-            .push_index(iter_value, loop_blocks.index, elem_ty.clone(), span, node_id)
-            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+        // Get element at index (SoA-aware)
+        let elem = self.soa_index(iter_value, loop_blocks.index, &iter_ty, elem_ty, span, node_id)?;
         self.locals.insert(elem_var.to_string(), elem);
 
         // Process init_bindings
@@ -1346,6 +1387,155 @@ impl<'a> Converter<'a> {
     }
 
     // =========================================================================
+    // SoA-aware array operation helpers
+    // =========================================================================
+    // These methods abstract over plain arrays vs SoA tuple-of-arrays,
+    // so the rest of the lowering code doesn't need to know about SoA.
+
+    /// Emit length of an array-like value (plain array or SoA tuple-of-arrays).
+    fn soa_length(
+        &mut self,
+        arr: ValueId,
+        arr_ty: &Type<TypeName>,
+        span: Span,
+        node_id: NodeId,
+    ) -> Result<ValueId, ConvertError> {
+        let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+        if let Some(components) = is_soa_tuple(arr_ty) {
+            let first = self
+                .builder
+                .push_project(arr, 0, components[0].clone(), span, node_id)
+                .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+            self.builder
+                .push_intrinsic("_w_intrinsic_length", vec![first], i32_ty, span, node_id)
+                .map_err(|e| ConvertError::BuilderError(e.to_string()))
+        } else {
+            self.builder
+                .push_intrinsic("_w_intrinsic_length", vec![arr], i32_ty, span, node_id)
+                .map_err(|e| ConvertError::BuilderError(e.to_string()))
+        }
+    }
+
+    /// Emit index into an array-like value.
+    /// For SoA tuple-of-arrays: project each component, index each, repack as element tuple.
+    fn soa_index(
+        &mut self,
+        arr: ValueId,
+        index: ValueId,
+        arr_ty: &Type<TypeName>,
+        elem_ty: &Type<TypeName>,
+        span: Span,
+        node_id: NodeId,
+    ) -> Result<ValueId, ConvertError> {
+        if let Some(components) = is_soa_tuple(arr_ty) {
+            let mut elem_values = Vec::with_capacity(components.len());
+            for (i, comp_ty) in components.iter().enumerate() {
+                let comp_arr = self
+                    .builder
+                    .push_project(arr, i as u32, comp_ty.clone(), span, node_id)
+                    .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+                let comp_elem_ty = match comp_ty {
+                    Type::Constructed(TypeName::Array, args) if !args.is_empty() => args[0].clone(),
+                    _ => comp_ty.clone(),
+                };
+                let elem = self
+                    .builder
+                    .push_index(comp_arr, index, comp_elem_ty, span, node_id)
+                    .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+                elem_values.push(elem);
+            }
+            self.builder
+                .push_tuple(elem_values, elem_ty.clone(), span, node_id)
+                .map_err(|e| ConvertError::BuilderError(e.to_string()))
+        } else {
+            self.builder
+                .push_index(arr, index, elem_ty.clone(), span, node_id)
+                .map_err(|e| ConvertError::BuilderError(e.to_string()))
+        }
+    }
+
+    /// Emit array update on an array-like value.
+    /// For SoA tuple-of-arrays: project each component array and element, array_with each, repack.
+    fn soa_array_with(
+        &mut self,
+        arr: ValueId,
+        index: ValueId,
+        elem: ValueId,
+        arr_ty: &Type<TypeName>,
+        span: Span,
+        node_id: NodeId,
+    ) -> Result<ValueId, ConvertError> {
+        if let Some(components) = is_soa_tuple(arr_ty) {
+            let mut new_components = Vec::with_capacity(components.len());
+            for (i, comp_ty) in components.iter().enumerate() {
+                let comp_arr = self
+                    .builder
+                    .push_project(arr, i as u32, comp_ty.clone(), span, node_id)
+                    .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+                let comp_elem_ty = match comp_ty {
+                    Type::Constructed(TypeName::Array, args) if !args.is_empty() => args[0].clone(),
+                    _ => comp_ty.clone(),
+                };
+                let comp_elem = self
+                    .builder
+                    .push_project(elem, i as u32, comp_elem_ty, span, node_id)
+                    .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+                let new_comp = self
+                    .builder
+                    .push_call(
+                        "_w_intrinsic_array_with",
+                        vec![comp_arr, index, comp_elem],
+                        comp_ty.clone(),
+                        span,
+                        node_id,
+                    )
+                    .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+                new_components.push(new_comp);
+            }
+            self.builder
+                .push_tuple(new_components, arr_ty.clone(), span, node_id)
+                .map_err(|e| ConvertError::BuilderError(e.to_string()))
+        } else {
+            self.builder
+                .push_call(
+                    "_w_intrinsic_array_with",
+                    vec![arr, index, elem],
+                    arr_ty.clone(),
+                    span,
+                    node_id,
+                )
+                .map_err(|e| ConvertError::BuilderError(e.to_string()))
+        }
+    }
+
+    /// Emit uninitialized array-like value.
+    /// For SoA tuple-of-arrays: create one uninit per component array, pack as tuple.
+    fn soa_uninit(
+        &mut self,
+        ty: &Type<TypeName>,
+        span: Span,
+        node_id: NodeId,
+    ) -> Result<ValueId, ConvertError> {
+        if let Some(components) = is_soa_tuple(ty) {
+            let mut uninit_components = Vec::with_capacity(components.len());
+            for comp_ty in components {
+                let uninit = self
+                    .builder
+                    .push_call("_w_intrinsic_uninit", vec![], comp_ty.clone(), span, node_id)
+                    .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+                uninit_components.push(uninit);
+            }
+            self.builder
+                .push_tuple(uninit_components, ty.clone(), span, node_id)
+                .map_err(|e| ConvertError::BuilderError(e.to_string()))
+        } else {
+            self.builder
+                .push_call("_w_intrinsic_uninit", vec![], ty.clone(), span, node_id)
+                .map_err(|e| ConvertError::BuilderError(e.to_string()))
+        }
+    }
+
+    // =========================================================================
     // SOAC / ArrayExpr lowering
     // =========================================================================
 
@@ -1359,7 +1549,9 @@ impl<'a> Converter<'a> {
     ) -> Result<ValueId, ConvertError> {
         match soac {
             SoacOp::Map { lam, inputs } => self.convert_soac_map(lam, inputs, ty, span, node_id),
-            SoacOp::Reduce { op, ne, input, .. } => self.convert_soac_reduce(op, ne, input, ty, span, node_id),
+            SoacOp::Reduce { op, ne, input, .. } => {
+                self.convert_soac_reduce(op, ne, input, ty, span, node_id)
+            }
             SoacOp::Scan { .. } => todo!("SOAC scan lowering"),
             SoacOp::Filter { pred, input } => self.convert_soac_filter(pred, input, ty, span, node_id),
             SoacOp::Scatter { .. } => todo!("SOAC scatter lowering"),
@@ -1384,7 +1576,8 @@ impl<'a> Converter<'a> {
             ArrayExpr::Soac(op) => self.convert_soac(op, ty, span, node_id),
             ArrayExpr::Generate { .. } => todo!("ArrayExpr::Generate lowering"),
             ArrayExpr::Literal(terms) => {
-                let values: Vec<ValueId> = terms.iter().map(|t| self.convert_term(t)).collect::<Result<_, _>>()?;
+                let values: Vec<ValueId> =
+                    terms.iter().map(|t| self.convert_term(t)).collect::<Result<_, _>>()?;
                 self.builder
                     .push_inst(InstKind::ArrayLit { elements: values }, ty, span, node_id)
                     .map_err(|e| ConvertError::BuilderError(e.to_string()))
@@ -1433,30 +1626,28 @@ impl<'a> Converter<'a> {
         let f_name = self.lambda_fn_name(lam)?;
 
         // Convert captures to SSA values
-        let capture_values: Vec<ValueId> = lam
-            .captures
-            .iter()
-            .map(|(_, _, t)| self.convert_term(t))
-            .collect::<Result<_, _>>()?;
+        let capture_values: Vec<ValueId> =
+            lam.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
 
         let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
         let bool_ty = Type::Constructed(TypeName::Str("bool"), vec![]);
 
-        // Convert all input arrays to SSA values and extract their types
-        let input_values: Vec<ValueId> = inputs
-            .iter()
-            .map(|ae| self.convert_array_expr_value(ae))
-            .collect::<Result<_, _>>()?;
+        // Collect input array types before converting (needed for SoA-aware ops)
+        let input_arr_types: Vec<Type<TypeName>> =
+            inputs.iter().map(|ae| self.array_expr_type(ae)).collect();
 
-        // Extract element types from input array types
-        let input_elem_types: Vec<Type<TypeName>> = inputs
-            .iter()
-            .map(|ae| self.array_expr_elem_type(ae))
-            .collect();
+        // Convert all input arrays to SSA values
+        let input_values: Vec<ValueId> =
+            inputs.iter().map(|ae| self.convert_array_expr_value(ae)).collect::<Result<_, _>>()?;
 
-        // Get output element type
+        // Extract element types from input array types (SoA-aware)
+        let input_elem_types: Vec<Type<TypeName>> =
+            inputs.iter().map(|ae| self.array_expr_elem_type(ae)).collect();
+
+        // Get output element type (SoA-aware)
         let output_elem_ty = match &result_ty {
             Type::Constructed(TypeName::Array, type_args) if !type_args.is_empty() => type_args[0].clone(),
+            ty if is_soa_tuple(ty).is_some() => soa_elem_type(ty),
             _ => {
                 // If single input, use its elem type as fallback
                 if !input_elem_types.is_empty() {
@@ -1469,40 +1660,20 @@ impl<'a> Converter<'a> {
             }
         };
 
-        // Get length from first input - use compile-time size for fixed arrays
-        let first_input_ty = self.array_expr_type(inputs.first().unwrap());
-        let array_size = match &first_input_ty {
-            Type::Constructed(TypeName::Array, type_args) if type_args.len() >= 3 => {
-                match &type_args[2] {
-                    Type::Constructed(TypeName::Size(n), _) => Some(*n),
-                    _ => None,
-                }
-            }
-            _ => None,
-        };
+        // Get length from first input - use compile-time size for fixed arrays (SoA-aware)
+        let first_input_ty = &input_arr_types[0];
+        let array_size = extract_array_size(first_input_ty);
 
         let len = match array_size {
             Some(n) => self
                 .builder
                 .push_int(&n.to_string(), i32_ty.clone(), span, node_id)
                 .map_err(|e| ConvertError::BuilderError(e.to_string()))?,
-            None => self
-                .builder
-                .push_intrinsic(
-                    "_w_intrinsic_length",
-                    vec![input_values[0]],
-                    i32_ty.clone(),
-                    span,
-                    node_id,
-                )
-                .map_err(|e| ConvertError::BuilderError(e.to_string()))?,
+            None => self.soa_length(input_values[0], first_input_ty, span, node_id)?,
         };
 
-        // Create uninitialized result array
-        let init_array = self
-            .builder
-            .push_call("_w_intrinsic_uninit", vec![], result_ty.clone(), span, node_id)
-            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+        // Create uninitialized result array (SoA-aware)
+        let init_array = self.soa_uninit(&result_ty, span, node_id)?;
 
         // Create loop
         let loop_blocks = self.builder.create_for_range_loop(result_ty.clone());
@@ -1543,16 +1714,19 @@ impl<'a> Converter<'a> {
             .switch_to_block(loop_blocks.body)
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
 
-        // Index each input array at loop position
-        let input_elems: Vec<ValueId> = input_values
-            .iter()
-            .zip(input_elem_types.iter())
-            .map(|(&arr, elem_ty)| {
-                self.builder
-                    .push_index(arr, loop_blocks.index, elem_ty.clone(), span, node_id)
-                    .map_err(|e| ConvertError::BuilderError(e.to_string()))
-            })
-            .collect::<Result<_, _>>()?;
+        // Index each input array at loop position (SoA-aware)
+        let mut input_elems: Vec<ValueId> = Vec::with_capacity(input_values.len());
+        for (i, &arr) in input_values.iter().enumerate() {
+            let elem = self.soa_index(
+                arr,
+                loop_blocks.index,
+                &input_arr_types[i],
+                &input_elem_types[i],
+                span,
+                node_id,
+            )?;
+            input_elems.push(elem);
+        }
 
         // Build function call args:
         // For single input: [elem, captures...]
@@ -1565,16 +1739,15 @@ impl<'a> Converter<'a> {
             .push_call(&f_name, call_args, output_elem_ty, span, node_id)
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
 
-        let new_arr = self
-            .builder
-            .push_call(
-                "_w_intrinsic_array_with",
-                vec![loop_blocks.acc, loop_blocks.index, output_elem],
-                result_ty,
-                span,
-                node_id,
-            )
-            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+        // Update accumulator array (SoA-aware)
+        let new_arr = self.soa_array_with(
+            loop_blocks.acc,
+            loop_blocks.index,
+            output_elem,
+            &result_ty,
+            span,
+            node_id,
+        )?;
 
         let one = self
             .builder
@@ -1612,34 +1785,23 @@ impl<'a> Converter<'a> {
         let op_name = self.lambda_fn_name(op)?;
 
         // Convert captures
-        let capture_values: Vec<ValueId> = op
-            .captures
-            .iter()
-            .map(|(_, _, t)| self.convert_term(t))
-            .collect::<Result<_, _>>()?;
+        let capture_values: Vec<ValueId> =
+            op.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
 
         let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
         let bool_ty = Type::Constructed(TypeName::Str("bool"), vec![]);
         let acc_ty = result_ty.clone();
 
-        // Get element type
+        // Get element type and array type (SoA-aware)
         let elem_ty = self.array_expr_elem_type(input);
+        let arr_ty = self.array_expr_type(input);
 
         // Convert array and init
         let arr_value = self.convert_array_expr_value(input)?;
         let init_value = self.convert_term(ne)?;
 
-        // Get length
-        let len = self
-            .builder
-            .push_intrinsic(
-                "_w_intrinsic_length",
-                vec![arr_value],
-                i32_ty.clone(),
-                span,
-                node_id,
-            )
-            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+        // Get length (SoA-aware)
+        let len = self.soa_length(arr_value, &arr_ty, span, node_id)?;
 
         // Create loop
         let loop_blocks = self.builder.create_for_range_loop(acc_ty.clone());
@@ -1680,10 +1842,8 @@ impl<'a> Converter<'a> {
             .switch_to_block(loop_blocks.body)
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
 
-        let elem = self
-            .builder
-            .push_index(arr_value, loop_blocks.index, elem_ty, span, node_id)
-            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+        // Index array element (SoA-aware)
+        let elem = self.soa_index(arr_value, loop_blocks.index, &arr_ty, &elem_ty, span, node_id)?;
 
         let mut call_args = vec![loop_blocks.acc, elem];
         call_args.extend(capture_values.iter().copied());
@@ -1729,11 +1889,8 @@ impl<'a> Converter<'a> {
         let pred_name = self.lambda_fn_name(pred)?;
 
         // Convert captures to SSA values
-        let capture_values: Vec<ValueId> = pred
-            .captures
-            .iter()
-            .map(|(_, _, t)| self.convert_term(t))
-            .collect::<Result<_, _>>()?;
+        let capture_values: Vec<ValueId> =
+            pred.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
 
         // Convert input array
         let arr_value = self.convert_array_expr_value(input)?;
@@ -1775,7 +1932,7 @@ impl<'a> Converter<'a> {
     fn array_expr_type(&self, ae: &ArrayExpr) -> Type<TypeName> {
         match ae {
             ArrayExpr::Ref(t) => t.ty.clone(),
-            ArrayExpr::Zip(_) => Type::Constructed(TypeName::Unit, vec![]),  // placeholder
+            ArrayExpr::Zip(_) => Type::Constructed(TypeName::Unit, vec![]), // placeholder
             ArrayExpr::Soac(_) => Type::Constructed(TypeName::Unit, vec![]), // placeholder
             ArrayExpr::Generate { elem_ty, .. } => elem_ty.clone(),
             ArrayExpr::Literal(_) => Type::Constructed(TypeName::Unit, vec![]),
@@ -1788,6 +1945,7 @@ impl<'a> Converter<'a> {
         match ae {
             ArrayExpr::Ref(t) => match &t.ty {
                 Type::Constructed(TypeName::Array, args) if !args.is_empty() => args[0].clone(),
+                ty if is_soa_tuple(ty).is_some() => soa_elem_type(ty),
                 _ => t.ty.clone(),
             },
             ArrayExpr::Zip(_) => Type::Constructed(TypeName::Unit, vec![]), // placeholder

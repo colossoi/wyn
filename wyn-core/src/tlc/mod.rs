@@ -12,6 +12,7 @@ mod monomorphize_tests;
 pub mod partial_eval;
 #[cfg(test)]
 mod partial_eval_tests;
+pub mod soa_transform;
 pub mod specialize;
 #[cfg(test)]
 mod specialize_tests;
@@ -1293,9 +1294,7 @@ impl<'a> Transformer<'a> {
     /// Check if an expression is a bare SOAC name (not locally bound).
     fn resolve_soac_name(&self, func: &ast::Expression) -> Option<String> {
         if let ast::ExprKind::Identifier(qualifiers, name) = &func.kind {
-            if qualifiers.is_empty()
-                && !self.is_locally_bound(name)
-                && SOAC_NAMES.contains(&name.as_str())
+            if qualifiers.is_empty() && !self.is_locally_bound(name) && SOAC_NAMES.contains(&name.as_str())
             {
                 return Some(name.clone());
             }
@@ -1323,12 +1322,7 @@ impl<'a> Transformer<'a> {
     }
 
     /// Transform `map(f, arr)` → `Soac(Map { lam, inputs })`.
-    fn transform_soac_map(
-        &mut self,
-        args: &[ast::Expression],
-        ty: Type<TypeName>,
-        span: Span,
-    ) -> Term {
+    fn transform_soac_map(&mut self, args: &[ast::Expression], ty: Type<TypeName>, span: Span) -> Term {
         assert!(args.len() >= 2, "map requires at least 2 arguments");
         let func_term = self.transform_expr(&args[0]);
         let arr_term = self.transform_expr(&args[1]);
@@ -1345,12 +1339,7 @@ impl<'a> Transformer<'a> {
     }
 
     /// Transform `reduce(op, ne, arr)` → `Soac(Reduce { op, ne, input, props })`.
-    fn transform_soac_reduce(
-        &mut self,
-        args: &[ast::Expression],
-        ty: Type<TypeName>,
-        span: Span,
-    ) -> Term {
+    fn transform_soac_reduce(&mut self, args: &[ast::Expression], ty: Type<TypeName>, span: Span) -> Term {
         assert!(args.len() >= 3, "reduce requires 3 arguments");
         let op_term = self.transform_expr(&args[0]);
         let ne_term = self.transform_expr(&args[1]);
@@ -1371,12 +1360,7 @@ impl<'a> Transformer<'a> {
     }
 
     /// Transform `scan(op, ne, arr)` → `Soac(Scan { op, ne, input })`.
-    fn transform_soac_scan(
-        &mut self,
-        args: &[ast::Expression],
-        ty: Type<TypeName>,
-        span: Span,
-    ) -> Term {
+    fn transform_soac_scan(&mut self, args: &[ast::Expression], ty: Type<TypeName>, span: Span) -> Term {
         assert!(args.len() >= 3, "scan requires 3 arguments");
         let op_term = self.transform_expr(&args[0]);
         let ne_term = self.transform_expr(&args[1]);
@@ -1396,12 +1380,7 @@ impl<'a> Transformer<'a> {
     }
 
     /// Transform `filter(pred, arr)` → `Soac(Filter { pred, input })`.
-    fn transform_soac_filter(
-        &mut self,
-        args: &[ast::Expression],
-        ty: Type<TypeName>,
-        span: Span,
-    ) -> Term {
+    fn transform_soac_filter(&mut self, args: &[ast::Expression], ty: Type<TypeName>, span: Span) -> Term {
         assert!(args.len() >= 2, "filter requires 2 arguments");
         let pred_term = self.transform_expr(&args[0]);
         let arr_term = self.transform_expr(&args[1]);
@@ -1419,16 +1398,9 @@ impl<'a> Transformer<'a> {
     }
 
     /// Transform `zip(a, b, ...)` → `ArrayExpr(Zip(...))`.
-    fn transform_soac_zip(
-        &mut self,
-        args: &[ast::Expression],
-        ty: Type<TypeName>,
-        span: Span,
-    ) -> Term {
-        let exprs: Vec<ArrayExpr> = args
-            .iter()
-            .map(|a| ArrayExpr::Ref(Box::new(self.transform_expr(a))))
-            .collect();
+    fn transform_soac_zip(&mut self, args: &[ast::Expression], ty: Type<TypeName>, span: Span) -> Term {
+        let exprs: Vec<ArrayExpr> =
+            args.iter().map(|a| ArrayExpr::Ref(Box::new(self.transform_expr(a)))).collect();
         self.mk_term(ty, span, TermKind::ArrayExpr(ArrayExpr::Zip(exprs)))
     }
 
@@ -1439,10 +1411,7 @@ impl<'a> Transformer<'a> {
         ty: Type<TypeName>,
         span: Span,
     ) -> Term {
-        assert!(
-            args.len() >= 5,
-            "reduce_by_index requires 5 arguments"
-        );
+        assert!(args.len() >= 5, "reduce_by_index requires 5 arguments");
         let dest_term = self.transform_expr(&args[0]);
         let op_term = self.transform_expr(&args[1]);
         let ne_term = self.transform_expr(&args[2]);

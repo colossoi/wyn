@@ -445,11 +445,19 @@ impl<'a> Monomorphizer<'a> {
                 TermKind::Var(sym)
             }
 
-            TermKind::Lambda(Lambda { params, body, ret_ty, captures }) => TermKind::Lambda(Lambda {
+            TermKind::Lambda(Lambda {
+                params,
+                body,
+                ret_ty,
+                captures,
+            }) => TermKind::Lambda(Lambda {
                 params: params.clone(),
                 body: Box::new(self.process_term(body)),
                 ret_ty: ret_ty.clone(),
-                captures: captures.iter().map(|(s, ty, t)| (*s, ty.clone(), self.process_term(t))).collect(),
+                captures: captures
+                    .iter()
+                    .map(|(s, ty, t)| (*s, ty.clone(), self.process_term(t)))
+                    .collect(),
             }),
 
             TermKind::Let {
@@ -544,7 +552,11 @@ impl<'a> Monomorphizer<'a> {
             params: lam.params.clone(),
             body: Box::new(self.process_term(&lam.body)),
             ret_ty: lam.ret_ty.clone(),
-            captures: lam.captures.iter().map(|(s, ty, t)| (*s, ty.clone(), self.process_term(t))).collect(),
+            captures: lam
+                .captures
+                .iter()
+                .map(|(s, ty, t)| (*s, ty.clone(), self.process_term(t)))
+                .collect(),
         }
     }
 
@@ -569,12 +581,23 @@ impl<'a> Monomorphizer<'a> {
                 pred: self.process_lambda(pred),
                 input: self.process_array_expr(input),
             },
-            SoacOp::Scatter { dest, indices, values } => SoacOp::Scatter {
+            SoacOp::Scatter {
+                dest,
+                indices,
+                values,
+            } => SoacOp::Scatter {
                 dest: dest.clone(),
                 indices: self.process_array_expr(indices),
                 values: self.process_array_expr(values),
             },
-            SoacOp::ReduceByIndex { dest, op, ne, indices, values, props } => SoacOp::ReduceByIndex {
+            SoacOp::ReduceByIndex {
+                dest,
+                op,
+                ne,
+                indices,
+                values,
+                props,
+            } => SoacOp::ReduceByIndex {
                 dest: dest.clone(),
                 op: self.process_lambda(op),
                 ne: Box::new(self.process_term(ne)),
@@ -588,14 +611,22 @@ impl<'a> Monomorphizer<'a> {
     fn process_array_expr(&mut self, ae: &ArrayExpr) -> ArrayExpr {
         match ae {
             ArrayExpr::Ref(t) => ArrayExpr::Ref(Box::new(self.process_term(t))),
-            ArrayExpr::Zip(exprs) => ArrayExpr::Zip(exprs.iter().map(|e| self.process_array_expr(e)).collect()),
+            ArrayExpr::Zip(exprs) => {
+                ArrayExpr::Zip(exprs.iter().map(|e| self.process_array_expr(e)).collect())
+            }
             ArrayExpr::Soac(op) => ArrayExpr::Soac(Box::new(self.process_soac(op))),
-            ArrayExpr::Generate { shape, index_fn, elem_ty } => ArrayExpr::Generate {
+            ArrayExpr::Generate {
+                shape,
+                index_fn,
+                elem_ty,
+            } => ArrayExpr::Generate {
                 shape: shape.clone(),
                 index_fn: self.process_lambda(index_fn),
                 elem_ty: elem_ty.clone(),
             },
-            ArrayExpr::Literal(terms) => ArrayExpr::Literal(terms.iter().map(|t| self.process_term(t)).collect()),
+            ArrayExpr::Literal(terms) => {
+                ArrayExpr::Literal(terms.iter().map(|t| self.process_term(t)).collect())
+            }
             ArrayExpr::Range { start, len } => ArrayExpr::Range {
                 start: Box::new(self.process_term(start)),
                 len: Box::new(self.process_term(len)),
@@ -802,11 +833,19 @@ impl<'a> Monomorphizer<'a> {
                 unreachable!("Pack/Unpack nodes not yet produced at this phase")
             }
 
-            TermKind::Lambda(Lambda { params, body, ret_ty, captures }) => TermKind::Lambda(Lambda {
+            TermKind::Lambda(Lambda {
+                params,
+                body,
+                ret_ty,
+                captures,
+            }) => TermKind::Lambda(Lambda {
                 params: params.iter().map(|(p, ty)| (*p, apply_subst(ty, subst))).collect(),
                 body: Box::new(self.apply_subst_term(body, subst)),
                 ret_ty: apply_subst(ret_ty, subst),
-                captures: captures.iter().map(|(s, ty, t)| (*s, apply_subst(ty, subst), self.apply_subst_term(t, subst))).collect(),
+                captures: captures
+                    .iter()
+                    .map(|(s, ty, t)| (*s, apply_subst(ty, subst), self.apply_subst_term(t, subst)))
+                    .collect(),
             }),
 
             TermKind::App { func, arg } => TermKind::App {
@@ -893,7 +932,11 @@ impl<'a> Monomorphizer<'a> {
             params: lam.params.iter().map(|(p, ty)| (*p, apply_subst(ty, subst))).collect(),
             body: Box::new(self.apply_subst_term(&lam.body, subst)),
             ret_ty: apply_subst(&lam.ret_ty, subst),
-            captures: lam.captures.iter().map(|(s, ty, t)| (*s, apply_subst(ty, subst), self.apply_subst_term(t, subst))).collect(),
+            captures: lam
+                .captures
+                .iter()
+                .map(|(s, ty, t)| (*s, apply_subst(ty, subst), self.apply_subst_term(t, subst)))
+                .collect(),
         }
     }
 
@@ -918,12 +961,23 @@ impl<'a> Monomorphizer<'a> {
                 pred: self.apply_subst_lambda(pred, subst),
                 input: self.apply_subst_array_expr(input, subst),
             },
-            SoacOp::Scatter { dest, indices, values } => SoacOp::Scatter {
+            SoacOp::Scatter {
+                dest,
+                indices,
+                values,
+            } => SoacOp::Scatter {
                 dest: dest.clone(),
                 indices: self.apply_subst_array_expr(indices, subst),
                 values: self.apply_subst_array_expr(values, subst),
             },
-            SoacOp::ReduceByIndex { dest, op, ne, indices, values, props } => SoacOp::ReduceByIndex {
+            SoacOp::ReduceByIndex {
+                dest,
+                op,
+                ne,
+                indices,
+                values,
+                props,
+            } => SoacOp::ReduceByIndex {
                 dest: dest.clone(),
                 op: self.apply_subst_lambda(op, subst),
                 ne: Box::new(self.apply_subst_term(ne, subst)),
@@ -937,14 +991,22 @@ impl<'a> Monomorphizer<'a> {
     fn apply_subst_array_expr(&mut self, ae: &ArrayExpr, subst: &Substitution) -> ArrayExpr {
         match ae {
             ArrayExpr::Ref(t) => ArrayExpr::Ref(Box::new(self.apply_subst_term(t, subst))),
-            ArrayExpr::Zip(exprs) => ArrayExpr::Zip(exprs.iter().map(|e| self.apply_subst_array_expr(e, subst)).collect()),
+            ArrayExpr::Zip(exprs) => {
+                ArrayExpr::Zip(exprs.iter().map(|e| self.apply_subst_array_expr(e, subst)).collect())
+            }
             ArrayExpr::Soac(op) => ArrayExpr::Soac(Box::new(self.apply_subst_soac(op, subst))),
-            ArrayExpr::Generate { shape, index_fn, elem_ty } => ArrayExpr::Generate {
+            ArrayExpr::Generate {
+                shape,
+                index_fn,
+                elem_ty,
+            } => ArrayExpr::Generate {
                 shape: shape.clone(),
                 index_fn: self.apply_subst_lambda(index_fn, subst),
                 elem_ty: apply_subst(elem_ty, subst),
             },
-            ArrayExpr::Literal(terms) => ArrayExpr::Literal(terms.iter().map(|t| self.apply_subst_term(t, subst)).collect()),
+            ArrayExpr::Literal(terms) => {
+                ArrayExpr::Literal(terms.iter().map(|t| self.apply_subst_term(t, subst)).collect())
+            }
             ArrayExpr::Range { start, len } => ArrayExpr::Range {
                 start: Box::new(self.apply_subst_term(start, subst)),
                 len: Box::new(self.apply_subst_term(len, subst)),

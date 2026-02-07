@@ -25,6 +25,7 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .skip_partial_eval()
         .defunctionalize()
         .monomorphize()
+        .soa_transform()
         .to_ssa()
         .map_err(|e| crate::err_spirv!("{}", e))?
         .parallelize_soacs()
@@ -50,6 +51,7 @@ fn compile_through_ssa(input: &str) -> Result<SsaProgram, CompilerError> {
         .skip_partial_eval()
         .defunctionalize()
         .monomorphize()
+        .soa_transform()
         .to_ssa()
         .map_err(|e| crate::err_spirv!("{}", e))?;
     Ok(ssa.ssa)
