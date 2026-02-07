@@ -1450,40 +1450,67 @@ impl<'a> Transformer<'a> {
     }
 
     /// Convert a term to a Lambda. If it's already a Lambda, extract it.
-    /// Otherwise, eta-expand: `f` → `|x| f(x)`.
+    /// Otherwise, eta-expand all parameters: `f : A -> B -> C` → `|a, b| f(a)(b)`.
     fn term_to_lambda(&mut self, term: Term) -> Lambda {
         match term.kind {
             TermKind::Lambda(lam) => lam,
             _ => {
-                // Eta-expand: |x| f(x)
-                let (param_ty, ret_ty) = self.decompose_arrow(&term.ty);
-                let param_sym = self.define("_soac_arg");
-                let param_var = self.mk_term(param_ty.clone(), term.span, TermKind::Var(param_sym));
-                let body = self.mk_term(
-                    ret_ty.clone(),
-                    term.span,
-                    TermKind::App {
-                        func: Box::new(term),
-                        arg: Box::new(param_var),
-                    },
+                // Decompose the full arrow chain: A -> B -> C gives ([A, B], C)
+                let mut param_tys = Vec::new();
+                let mut current = term.ty.clone();
+                while let Type::Constructed(TypeName::Arrow, ref args) = current {
+                    if args.len() == 2 {
+                        param_tys.push(args[0].clone());
+                        current = args[1].clone();
+                    } else {
+                        break;
+                    }
+                }
+                assert!(
+                    !param_tys.is_empty(),
+                    "BUG: Expected arrow type for SOAC function arg, got {:?}",
+                    term.ty
                 );
+                let ret_ty = current;
+
+                // Create parameter symbols
+                let params: Vec<(SymbolId, Type<TypeName>)> =
+                    param_tys.iter().map(|ty| (self.define("_soac_arg"), ty.clone())).collect();
+
+                // Build nested App chain: App(App(f, a), b)
+                // Each application peels one arrow, so intermediate types are the arrow tails.
+                let span = term.span;
+                let mut body = term;
+                for (i, (sym, ty)) in params.iter().enumerate() {
+                    let arg = self.mk_term(ty.clone(), span, TermKind::Var(*sym));
+                    // Type after applying arg i: param[i+1] -> ... -> ret_ty
+                    let result_ty = if i + 1 < params.len() {
+                        // Still more params to apply — rebuild arrow from remaining params
+                        let mut ty = ret_ty.clone();
+                        for (_, pt) in params.iter().rev().take(params.len() - i - 1) {
+                            ty = Type::Constructed(TypeName::Arrow, vec![pt.clone(), ty]);
+                        }
+                        ty
+                    } else {
+                        ret_ty.clone()
+                    };
+                    body = self.mk_term(
+                        result_ty,
+                        span,
+                        TermKind::App {
+                            func: Box::new(body),
+                            arg: Box::new(arg),
+                        },
+                    );
+                }
+
                 Lambda {
-                    params: vec![(param_sym, param_ty)],
+                    params,
                     body: Box::new(body),
                     ret_ty,
                     captures: vec![],
                 }
             }
-        }
-    }
-
-    /// Decompose an arrow type `A -> B` into `(A, B)`.
-    fn decompose_arrow(&self, ty: &Type<TypeName>) -> (Type<TypeName>, Type<TypeName>) {
-        match ty {
-            Type::Constructed(TypeName::Arrow, args) if args.len() == 2 => {
-                (args[0].clone(), args[1].clone())
-            }
-            _ => panic!("BUG: Expected arrow type for SOAC function arg, got {:?}", ty),
         }
     }
 
