@@ -3,7 +3,7 @@
 //! Specializes polymorphic intrinsic names based on argument types.
 //! For example: `sign(x)` where `x: f32` becomes `f32.sign(x)`.
 
-use super::{Def, LoopKind, Program, Term, TermIdSource, TermKind};
+use super::{Def, Lambda, LoopKind, Program, Term, TermIdSource, TermKind};
 use crate::SymbolTable;
 use crate::ast::TypeName;
 use polytype::Type;
@@ -49,15 +49,12 @@ impl Specializer {
                 }
             }
 
-            TermKind::Lam {
-                param,
-                param_ty,
-                body,
-            } => TermKind::Lam {
-                param,
-                param_ty,
+            TermKind::Lambda(Lambda { params, body, ret_ty, captures }) => TermKind::Lambda(Lambda {
+                params,
                 body: Box::new(self.specialize_term(*body)),
-            },
+                ret_ty,
+                captures: captures.into_iter().map(|(s, ty, t)| (s, ty, self.specialize_term(t))).collect(),
+            }),
 
             TermKind::Let {
                 name,
@@ -127,6 +124,10 @@ impl Specializer {
             | TermKind::BinOp(_)
             | TermKind::UnOp(_)
             | TermKind::Extern(_)) => k,
+
+            TermKind::Soac(_) | TermKind::ArrayExpr(_) | TermKind::Force(_) | TermKind::Pack { .. } | TermKind::Unpack { .. } => {
+                unreachable!("SOAC nodes not yet produced at this phase")
+            }
         };
 
         Term {

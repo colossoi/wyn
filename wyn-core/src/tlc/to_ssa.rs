@@ -11,7 +11,7 @@ use crate::mir::ssa_builder::FuncBuilder;
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 
-use super::{Def as TlcDef, DefMeta, LoopKind as TlcLoopKind, Program as TlcProgram, Term, TermKind};
+use super::{Def as TlcDef, DefMeta, Lambda, LoopKind as TlcLoopKind, Program as TlcProgram, Term, TermKind};
 
 /// Extract parameter types and return type from a curried function type.
 /// For `A -> B -> C`, returns `([A, B], C)`.
@@ -471,14 +471,13 @@ fn extract_params<'a>(
     symbols: &SymbolTable,
 ) -> (Vec<(String, Type<TypeName>, Span)>, &'a Term) {
     match &term.kind {
-        TermKind::Lam {
-            param,
-            param_ty,
-            body,
-        } => {
+        TermKind::Lambda(Lambda { params: lam_params, body, .. }) => {
             let (mut params, inner) = extract_params(body, symbols);
-            let param_name = symbols.get(*param).expect("BUG: symbol not in table").clone();
-            params.insert(0, (param_name, param_ty.clone(), term.span));
+            // Insert in reverse order so first param ends up first
+            for (p, ty) in lam_params.iter().rev() {
+                let param_name = symbols.get(*p).expect("BUG: symbol not in table").clone();
+                params.insert(0, (param_name, ty.clone(), term.span));
+            }
             (params, inner)
         }
         _ => (vec![], term),
@@ -708,7 +707,7 @@ impl<'a> Converter<'a> {
                 )
             }
 
-            TermKind::Lam { .. } => {
+            TermKind::Lambda(..) => {
                 panic!(
                     "Unexpected lambda in TLC to SSA conversion at {:?}. \
                      All lambdas should have been lifted to top-level.",
@@ -728,6 +727,10 @@ impl<'a> Converter<'a> {
                 .builder
                 .push_inst(InstKind::Extern(linkage_name.clone()), ty, span, node_id)
                 .map_err(|e| ConvertError::BuilderError(e.to_string())),
+
+            TermKind::Soac(_) | TermKind::ArrayExpr(_) | TermKind::Force(_) | TermKind::Pack { .. } | TermKind::Unpack { .. } => {
+                unreachable!("SOAC nodes not yet lowered to SSA")
+            }
         }
     }
 

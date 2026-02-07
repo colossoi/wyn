@@ -1,5 +1,5 @@
 use super::defunctionalize::defunctionalize;
-use super::{Def, DefMeta, LoopKind, Program, Term, TermIdSource, TermKind};
+use super::{Def, DefMeta, Lambda, LoopKind, Program, Term, TermIdSource, TermKind};
 use crate::ast::{BinaryOp, Span, TypeName};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
@@ -67,9 +67,9 @@ fn print_term(term: &Term, symbols: &SymbolTable, indent: usize) -> String {
         TermKind::FloatLit(f) => format!("{}Float({})", pad, f),
         TermKind::BoolLit(b) => format!("{}Bool({})", pad, b),
         TermKind::StringLit(s) => format!("{}String({})", pad, s),
-        TermKind::Lam { param, body, .. } => {
-            let name = symbols.get(*param).unwrap_or(&unknown);
-            format!("{}Lam({})\n{}", pad, name, print_term(body, symbols, indent + 1))
+        TermKind::Lambda(Lambda { params, body, .. }) => {
+            let names: Vec<&str> = params.iter().map(|(p, _)| symbols.get(*p).unwrap_or(&unknown).as_str()).collect();
+            format!("{}Lambda({})\n{}", pad, names.join(", "), print_term(body, symbols, indent + 1))
         }
         TermKind::App { func, arg } => {
             format!(
@@ -139,6 +139,7 @@ fn print_term(term: &Term, symbols: &SymbolTable, indent: usize) -> String {
             )
         }
         TermKind::Extern(linkage) => format!("{}Extern(\"{}\")", pad, linkage),
+        _ => format!("{}<??>", pad),
     }
 }
 
@@ -168,16 +169,17 @@ fn test_defunc_simple_lambda_no_capture() {
         id: b.next_id(),
         ty: arrow(i32_ty(), i32_ty()),
         span: b.span(),
-        kind: TermKind::Lam {
-            param: x_sym,
-            param_ty: i32_ty(),
+        kind: TermKind::Lambda(Lambda {
+            params: vec![(x_sym, i32_ty())],
             body: Box::new(Term {
                 id: b.next_id(),
                 ty: i32_ty(),
                 span: b.span(),
                 kind: TermKind::Var(x_sym),
             }),
-        },
+            ret_ty: i32_ty(),
+            captures: vec![],
+        }),
     };
 
     let program = Program {
@@ -198,7 +200,7 @@ fn test_defunc_simple_lambda_no_capture() {
 
     // Should preserve the parameter lambda (not lift it)
     assert_eq!(result.defs.len(), 1);
-    assert!(matches!(result.defs[0].body.kind, TermKind::Lam { .. }));
+    assert!(matches!(result.defs[0].body.kind, TermKind::Lambda(..)));
 }
 
 #[test]
@@ -217,9 +219,8 @@ fn test_defunc_lambda_with_capture() {
         id: b.next_id(),
         ty: arrow(i32_ty(), i32_ty()),
         span: b.span(),
-        kind: TermKind::Lam {
-            param: x_sym,
-            param_ty: i32_ty(),
+        kind: TermKind::Lambda(Lambda {
+            params: vec![(x_sym, i32_ty())],
             body: Box::new(Term {
                 id: b.next_id(),
                 ty: i32_ty(),
@@ -239,7 +240,9 @@ fn test_defunc_lambda_with_capture() {
                     }),
                 },
             }),
-        },
+            ret_ty: i32_ty(),
+            captures: vec![],
+        }),
     };
 
     // let g = inner_lam in g
@@ -265,11 +268,12 @@ fn test_defunc_lambda_with_capture() {
         id: b.next_id(),
         ty: arrow(i32_ty(), arrow(i32_ty(), i32_ty())),
         span: b.span(),
-        kind: TermKind::Lam {
-            param: y_sym,
-            param_ty: i32_ty(),
+        kind: TermKind::Lambda(Lambda {
+            params: vec![(y_sym, i32_ty())],
             body: Box::new(let_expr),
-        },
+            ret_ty: arrow(i32_ty(), i32_ty()),
+            captures: vec![],
+        }),
     };
 
     let symbols = b.finish();
@@ -356,20 +360,12 @@ fn test_nested_hof_passthrough() {
         id: b.next_id(),
         ty: arrow(arrow(i32_ty(), i32_ty()), arrow(i32_ty(), i32_ty())),
         span,
-        kind: TermKind::Lam {
-            param: f_sym,
-            param_ty: arrow(i32_ty(), i32_ty()),
-            body: Box::new(Term {
-                id: b.next_id(),
-                ty: arrow(i32_ty(), i32_ty()),
-                span,
-                kind: TermKind::Lam {
-                    param: x_sym,
-                    param_ty: i32_ty(),
-                    body: Box::new(hof_inner_body),
-                },
-            }),
-        },
+        kind: TermKind::Lambda(Lambda {
+            params: vec![(f_sym, arrow(i32_ty(), i32_ty())), (x_sym, i32_ty())],
+            body: Box::new(hof_inner_body),
+            ret_ty: i32_ty(),
+            captures: vec![],
+        }),
     };
 
     // hof_outer = |g| |y| hof_inner g y
@@ -411,20 +407,12 @@ fn test_nested_hof_passthrough() {
         id: b.next_id(),
         ty: arrow(arrow(i32_ty(), i32_ty()), arrow(i32_ty(), i32_ty())),
         span,
-        kind: TermKind::Lam {
-            param: g_sym,
-            param_ty: arrow(i32_ty(), i32_ty()),
-            body: Box::new(Term {
-                id: b.next_id(),
-                ty: arrow(i32_ty(), i32_ty()),
-                span,
-                kind: TermKind::Lam {
-                    param: y_sym,
-                    param_ty: i32_ty(),
-                    body: Box::new(hof_inner_call),
-                },
-            }),
-        },
+        kind: TermKind::Lambda(Lambda {
+            params: vec![(g_sym, arrow(i32_ty(), i32_ty())), (y_sym, i32_ty())],
+            body: Box::new(hof_inner_call),
+            ret_ty: i32_ty(),
+            captures: vec![],
+        }),
     };
 
     // main = |cap| hof_outer (|a| a + cap) 5
@@ -465,11 +453,12 @@ fn test_nested_hof_passthrough() {
         id: b.next_id(),
         ty: arrow(i32_ty(), i32_ty()),
         span,
-        kind: TermKind::Lam {
-            param: a_sym,
-            param_ty: i32_ty(),
+        kind: TermKind::Lambda(Lambda {
+            params: vec![(a_sym, i32_ty())],
             body: Box::new(a_plus_cap),
-        },
+            ret_ty: i32_ty(),
+            captures: vec![],
+        }),
     };
 
     let main_body = Term {
@@ -504,11 +493,12 @@ fn test_nested_hof_passthrough() {
         id: b.next_id(),
         ty: arrow(i32_ty(), i32_ty()),
         span,
-        kind: TermKind::Lam {
-            param: cap_sym,
-            param_ty: i32_ty(),
+        kind: TermKind::Lambda(Lambda {
+            params: vec![(cap_sym, i32_ty())],
             body: Box::new(main_body),
-        },
+            ret_ty: i32_ty(),
+            captures: vec![],
+        }),
     };
 
     let symbols = b.finish();

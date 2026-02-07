@@ -79,9 +79,12 @@ mod tlc_tree {
             TermKind::Var(name) => TreeNode::leaf(format!("Var({}) : {}", name, ty)),
             TermKind::BinOp(op) => TreeNode::leaf(format!("BinOp({:?}) : {}", op, ty)),
             TermKind::UnOp(op) => TreeNode::leaf(format!("UnOp({:?}) : {}", op, ty)),
-            TermKind::Lam { param, param_ty, body } => {
-                let label = format!("Lam({}: {}) : {}", param, fmt_ty(param_ty), ty);
-                TreeNode::branch(label, vec![term_to_tree(body)])
+            TermKind::Lambda(ref lam) => {
+                let params_str: Vec<String> = lam.params.iter()
+                    .map(|(p, ty)| format!("{}: {}", p, fmt_ty(ty)))
+                    .collect();
+                let label = format!("Lambda({}) : {}", params_str.join(", "), ty);
+                TreeNode::branch(label, vec![term_to_tree(&lam.body)])
             }
             TermKind::App { func, arg } => {
                 TreeNode::branch(format!("App : {}", ty), vec![
@@ -121,6 +124,13 @@ mod tlc_tree {
                 children.push(loop_kind_to_tree(kind));
                 children.push(TreeNode::branch("body", vec![term_to_tree(body)]));
                 TreeNode::branch(label, children)
+            }
+            TermKind::Soac(_)
+            | TermKind::ArrayExpr(_)
+            | TermKind::Force(_)
+            | TermKind::Pack { .. }
+            | TermKind::Unpack { .. } => {
+                TreeNode::leaf(format!("<soac> : {}", ty))
             }
         }
     }

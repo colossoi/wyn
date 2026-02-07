@@ -1,7 +1,7 @@
 //! Tests for TLC partial evaluation.
 
 use super::partial_eval::PartialEvaluator;
-use super::{Def, DefMeta, Program, Term, TermIdSource, TermKind};
+use super::{Def, DefMeta, Lambda, Program, Term, TermIdSource, TermKind};
 use crate::ast::{BinaryOp, Span, TypeName};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
@@ -354,26 +354,16 @@ fn test_function_inlining() {
     };
     let a_plus_b = make_binop(&mut b.ids, "+", a_var, b_var);
 
-    let inner_lam = Term {
-        id: b.next_id(),
-        ty: Type::Constructed(TypeName::Arrow, vec![int_ty.clone(), int_ty.clone()]),
-        span: b.span(),
-        kind: TermKind::Lam {
-            param: b_sym,
-            param_ty: int_ty.clone(),
-            body: Box::new(a_plus_b),
-        },
-    };
-
     let foo_body = Term {
         id: b.next_id(),
-        ty: Type::Constructed(TypeName::Arrow, vec![int_ty.clone(), inner_lam.ty.clone()]),
+        ty: Type::Constructed(TypeName::Arrow, vec![int_ty.clone(), Type::Constructed(TypeName::Arrow, vec![int_ty.clone(), int_ty.clone()])]),
         span: b.span(),
-        kind: TermKind::Lam {
-            param: a_sym,
-            param_ty: int_ty.clone(),
-            body: Box::new(inner_lam),
-        },
+        kind: TermKind::Lambda(Lambda {
+            params: vec![(a_sym, int_ty.clone()), (b_sym, int_ty.clone())],
+            body: Box::new(a_plus_b),
+            ret_ty: int_ty.clone(),
+            captures: vec![],
+        }),
     };
 
     // Build bar: foo 8 9
@@ -470,16 +460,17 @@ fn test_function_alias_inlining() {
         id: b.next_id(),
         ty: arrow_ty(int_ty(), int_ty()),
         span,
-        kind: TermKind::Lam {
-            param: y_sym,
-            param_ty: int_ty(),
+        kind: TermKind::Lambda(Lambda {
+            params: vec![(y_sym, int_ty())],
             body: Box::new(Term {
                 id: b.next_id(),
                 ty: int_ty(),
                 span,
                 kind: TermKind::Var(y_sym),
             }),
-        },
+            ret_ty: int_ty(),
+            captures: vec![],
+        }),
     };
 
     // Build: def main = let f = g in f 42
@@ -578,25 +569,17 @@ fn test_function_alias_partial_application() {
         id: b.next_id(),
         ty: arrow_ty(int_ty(), arrow_ty(int_ty(), int_ty())),
         span,
-        kind: TermKind::Lam {
-            param: x_sym,
-            param_ty: int_ty(),
+        kind: TermKind::Lambda(Lambda {
+            params: vec![(x_sym, int_ty()), (y_sym, int_ty())],
             body: Box::new(Term {
                 id: b.next_id(),
-                ty: arrow_ty(int_ty(), int_ty()),
+                ty: int_ty(),
                 span,
-                kind: TermKind::Lam {
-                    param: y_sym,
-                    param_ty: int_ty(),
-                    body: Box::new(Term {
-                        id: b.next_id(),
-                        ty: int_ty(),
-                        span,
-                        kind: TermKind::Var(x_sym),
-                    }),
-                },
+                kind: TermKind::Var(x_sym),
             }),
-        },
+            ret_ty: int_ty(),
+            captures: vec![],
+        }),
     };
 
     // Build: def main = let f = g in f 1 2

@@ -702,16 +702,14 @@ impl tlc::Term {
         match &self.kind {
             tlc::TermKind::Var(name) => write!(f, "{}", name),
 
-            tlc::TermKind::Lam {
-                param,
-                param_ty,
-                body,
-            } => {
+            tlc::TermKind::Lambda(ref lam) => {
                 if prec > 0 {
                     write!(f, "(")?;
                 }
-                write!(f, "λ({}: {}). ", param, format_type(param_ty))?;
-                body.fmt_prec(f, 0)?;
+                for (param, param_ty) in &lam.params {
+                    write!(f, "λ({}: {}). ", param, format_type(param_ty))?;
+                }
+                lam.body.fmt_prec(f, 0)?;
                 if prec > 0 {
                     write!(f, ")")?;
                 }
@@ -811,6 +809,14 @@ impl tlc::Term {
 
             tlc::TermKind::Extern(linkage_name) => {
                 write!(f, "extern \"{}\"", linkage_name)
+            }
+
+            tlc::TermKind::Soac(_)
+            | tlc::TermKind::ArrayExpr(_)
+            | tlc::TermKind::Force(_)
+            | tlc::TermKind::Pack { .. }
+            | tlc::TermKind::Unpack { .. } => {
+                write!(f, "<soac>")
             }
         }
     }

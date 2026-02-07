@@ -3,7 +3,7 @@
 //! Simpler than NBE-style: collect application spines, evaluate args,
 //! apply when we have enough arguments (using arity metadata).
 
-use super::{Def, Program, Term, TermIdSource, TermKind};
+use super::{Def, Lambda, Program, Term, TermIdSource, TermKind};
 use crate::ast::{BinaryOp, Span, TypeName, UnaryOp};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
@@ -182,7 +182,7 @@ impl PartialEvaluator {
             }
 
             // Lambda - residualize (should be handled at def level)
-            TermKind::Lam { .. } => Value::Unknown(term.clone()),
+            TermKind::Lambda(..) => Value::Unknown(term.clone()),
 
             // Loop - residualize (not evaluating loops at compile time)
             TermKind::Loop { .. } => Value::Unknown(term.clone()),
@@ -192,6 +192,10 @@ impl PartialEvaluator {
 
             // Extern declarations - residualize (linked at SPIR-V level)
             TermKind::Extern(_) => Value::Unknown(term.clone()),
+
+            TermKind::Soac(_) | TermKind::ArrayExpr(_) | TermKind::Force(_) | TermKind::Pack { .. } | TermKind::Unpack { .. } => {
+                unreachable!("SOAC nodes not yet produced at this phase")
+            }
         }
     }
 
@@ -327,14 +331,24 @@ impl PartialEvaluator {
     /// Inline a function call.
     fn inline(&mut self, def: &Def, args: Vec<Value>) -> Value {
         let mut body = &def.body;
+        let mut args_iter = args.into_iter();
 
-        for arg in args {
-            if let TermKind::Lam {
-                param, body: inner, ..
-            } = &body.kind
-            {
-                self.env.insert(*param, arg);
+        loop {
+            if let TermKind::Lambda(Lambda { params, body: inner, .. }) = &body.kind {
+                // Bind as many args as this lambda has params
+                let mut consumed = 0;
+                for (param, _) in params {
+                    if let Some(arg) = args_iter.next() {
+                        self.env.insert(*param, arg);
+                        consumed += 1;
+                    } else {
+                        break;
+                    }
+                }
                 body = inner;
+                if consumed == 0 || args_iter.len() == 0 {
+                    break;
+                }
             } else {
                 break;
             }

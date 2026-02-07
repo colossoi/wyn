@@ -12,7 +12,7 @@
 //! When called with [4]f32, creates:
 //!   def sum$n4 (arr:[4]f32) : f32 = ...
 
-use super::{Def, DefMeta, LoopKind, Program, Term, TermIdSource, TermKind};
+use super::{Def, DefMeta, Lambda, LoopKind, Program, Term, TermIdSource, TermKind};
 use crate::ast::TypeName;
 use crate::types::TypeScheme;
 use crate::{SymbolId, SymbolTable};
@@ -445,15 +445,12 @@ impl<'a> Monomorphizer<'a> {
                 TermKind::Var(sym)
             }
 
-            TermKind::Lam {
-                param,
-                param_ty,
-                body,
-            } => TermKind::Lam {
-                param: param.clone(),
-                param_ty: param_ty.clone(),
+            TermKind::Lambda(Lambda { params, body, ret_ty, captures }) => TermKind::Lambda(Lambda {
+                params: params.clone(),
                 body: Box::new(self.process_term(body)),
-            },
+                ret_ty: ret_ty.clone(),
+                captures: captures.iter().map(|(s, ty, t)| (*s, ty.clone(), self.process_term(t))).collect(),
+            }),
 
             TermKind::Let {
                 name,
@@ -522,6 +519,10 @@ impl<'a> Monomorphizer<'a> {
             | TermKind::BinOp(_)
             | TermKind::UnOp(_)
             | TermKind::Extern(_)) => k.clone(),
+
+            TermKind::Soac(_) | TermKind::ArrayExpr(_) | TermKind::Force(_) | TermKind::Pack { .. } | TermKind::Unpack { .. } => {
+                unreachable!("SOAC nodes not yet produced at this phase")
+            }
         };
 
         Term {
@@ -721,15 +722,16 @@ impl<'a> Monomorphizer<'a> {
             TermKind::UnOp(op) => TermKind::UnOp(op.clone()),
             TermKind::Extern(s) => TermKind::Extern(s.clone()),
 
-            TermKind::Lam {
-                param,
-                param_ty,
-                body,
-            } => TermKind::Lam {
-                param: param.clone(),
-                param_ty: apply_subst(param_ty, subst),
+            TermKind::Soac(_) | TermKind::ArrayExpr(_) | TermKind::Force(_) | TermKind::Pack { .. } | TermKind::Unpack { .. } => {
+                unreachable!("SOAC nodes not yet produced at this phase")
+            }
+
+            TermKind::Lambda(Lambda { params, body, ret_ty, captures }) => TermKind::Lambda(Lambda {
+                params: params.iter().map(|(p, ty)| (*p, apply_subst(ty, subst))).collect(),
                 body: Box::new(self.apply_subst_term(body, subst)),
-            },
+                ret_ty: apply_subst(ret_ty, subst),
+                captures: captures.iter().map(|(s, ty, t)| (*s, apply_subst(ty, subst), self.apply_subst_term(t, subst))).collect(),
+            }),
 
             TermKind::App { func, arg } => TermKind::App {
                 func: Box::new(self.apply_subst_term(func, subst)),

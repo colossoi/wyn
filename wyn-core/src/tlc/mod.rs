@@ -99,12 +99,8 @@ pub enum TermKind {
     /// Unary operator as a value: -, !
     UnOp(ast::UnaryOp),
 
-    /// Lambda abstraction: λ(x:T). body
-    Lam {
-        param: SymbolId,
-        param_ty: Type<TypeName>,
-        body: Box<Term>,
-    },
+    /// Lambda abstraction (structured).
+    Lambda(Lambda),
 
     /// Application: f x
     App {
@@ -160,6 +156,30 @@ pub enum TermKind {
         /// Loop body expression.
         body: Box<Term>,
     },
+
+    /// First-class SOAC (second-order array combinator).
+    Soac(SoacOp),
+
+    /// Array producer expression.
+    ArrayExpr(ArrayExpr),
+
+    /// Materialization barrier — forces an array expression to be computed.
+    Force(Box<Term>),
+
+    /// Existential introduction (pack a value with hidden dimension).
+    Pack {
+        exists_ty: Type<TypeName>,
+        dims: Vec<Dim>,
+        value: Box<Term>,
+    },
+
+    /// Existential elimination (unpack hidden dimensions from a value).
+    Unpack {
+        scrut: Box<Term>,
+        dim_binders: Vec<DimVarId>,
+        value_binder: SymbolId,
+        body: Box<Term>,
+    },
 }
 
 /// The kind of loop (mirrors MIR::LoopKind).
@@ -181,6 +201,133 @@ pub enum LoopKind {
     While {
         cond: Box<Term>,
     },
+}
+
+// =============================================================================
+// SOAC Types
+// =============================================================================
+
+/// A structured lambda with explicit parameters, return type, and captures.
+#[derive(Debug, Clone)]
+pub struct Lambda {
+    pub params: Vec<(SymbolId, Type<TypeName>)>,
+    pub body: Box<Term>,
+    pub ret_ty: Type<TypeName>,
+    /// Captured variables. Empty before defunctionalization; filled after.
+    pub captures: Vec<(SymbolId, Type<TypeName>, Term)>,
+}
+
+/// A symbolic dimension expression.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Dim {
+    Const(i64),
+    Var(DimVarId),
+    Add(Box<Dim>, Box<Dim>),
+    Sub(Box<Dim>, Box<Dim>),
+}
+
+/// A dimension variable identifier.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct DimVarId(pub u32);
+
+/// A shape is a list of dimensions.
+#[derive(Clone, Debug)]
+pub struct Shape(pub Vec<Dim>);
+
+/// An array-producing expression.
+#[derive(Debug, Clone)]
+pub enum ArrayExpr {
+    /// A TLC term producing an array value.
+    Ref(Box<Term>),
+    /// Logical zip — not materialized, consumed by enclosing Map.
+    Zip(Vec<ArrayExpr>),
+    /// SOAC producing an array.
+    Soac(Box<SoacOp>),
+    /// Generator: `elem = index_fn(i)` for `i` in `0..shape`.
+    Generate {
+        shape: Shape,
+        index_fn: Lambda,
+        elem_ty: Type<TypeName>,
+    },
+    /// Literal small array.
+    Literal(Vec<Term>),
+    /// Range / iota.
+    Range {
+        start: Box<Term>,
+        len: Box<Term>,
+    },
+}
+
+/// A second-order array combinator (SOAC) operation.
+#[derive(Debug, Clone)]
+pub enum SoacOp {
+    Map {
+        lam: Lambda,
+        /// Parallel inputs. `inputs.len() == lam.params.len()`.
+        inputs: Vec<ArrayExpr>,
+    },
+    Reduce {
+        op: Lambda,
+        ne: Box<Term>,
+        input: ArrayExpr,
+        props: ReduceProps,
+    },
+    Scan {
+        op: Lambda,
+        ne: Box<Term>,
+        input: ArrayExpr,
+    },
+    Filter {
+        pred: Lambda,
+        input: ArrayExpr,
+    },
+    Scatter {
+        dest: Place,
+        indices: ArrayExpr,
+        values: ArrayExpr,
+    },
+    ReduceByIndex {
+        dest: Place,
+        op: Lambda,
+        ne: Box<Term>,
+        indices: ArrayExpr,
+        values: ArrayExpr,
+        props: ReduceProps,
+    },
+}
+
+/// Destination-passing for scatter / reduce_by_index.
+#[derive(Debug, Clone)]
+pub enum Place {
+    BufferSlice {
+        base: Box<Term>,
+        offset: Box<Term>,
+        shape: Shape,
+        elem_ty: Type<TypeName>,
+    },
+    LocalArray {
+        id: SymbolId,
+        shape: Shape,
+        elem_ty: Type<TypeName>,
+    },
+}
+
+/// Properties of a reduction operator.
+#[derive(Debug, Clone)]
+pub struct ReduceProps {
+    pub commutative: bool,
+    pub associative: bool,
+    pub requires_atomic: bool,
+}
+
+impl Default for ReduceProps {
+    fn default() -> Self {
+        Self {
+            commutative: false,
+            associative: false,
+            requires_atomic: false,
+        }
+    }
 }
 
 // =============================================================================
@@ -578,11 +725,12 @@ impl<'a> Transformer<'a> {
             result = self.mk_term(
                 lam_ty,
                 span,
-                TermKind::Lam {
-                    param: param_sym,
-                    param_ty,
+                TermKind::Lambda(Lambda {
+                    params: vec![(param_sym, param_ty)],
+                    ret_ty: result.ty.clone(),
                     body: Box::new(result),
-                },
+                    captures: vec![],
+                }),
             );
         }
 

@@ -2,7 +2,7 @@
 
 use crate::ast::{BinaryOp, Span, TypeName};
 use crate::tlc::to_ssa::*;
-use crate::tlc::{Def as TlcDef, DefMeta, Program as TlcProgram, Term, TermIdSource, TermKind};
+use crate::tlc::{Def as TlcDef, DefMeta, Lambda, Program as TlcProgram, Term, TermIdSource, TermKind};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 
@@ -99,17 +99,6 @@ fn test_convert_simple_function() {
         },
     };
 
-    let lam_y = Term {
-        id: b.next_id(),
-        ty: Type::Constructed(TypeName::Arrow, vec![i32_ty(), i32_ty()]),
-        span,
-        kind: TermKind::Lam {
-            param: y_sym,
-            param_ty: i32_ty(),
-            body: Box::new(add_body),
-        },
-    };
-
     let lam_x = Term {
         id: b.next_id(),
         ty: Type::Constructed(
@@ -120,11 +109,12 @@ fn test_convert_simple_function() {
             ],
         ),
         span,
-        kind: TermKind::Lam {
-            param: x_sym,
-            param_ty: i32_ty(),
-            body: Box::new(lam_y),
-        },
+        kind: TermKind::Lambda(Lambda {
+            params: vec![(x_sym, i32_ty()), (y_sym, i32_ty())],
+            body: Box::new(add_body),
+            ret_ty: i32_ty(),
+            captures: vec![],
+        }),
     };
 
     let symbols = b.finish();

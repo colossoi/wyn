@@ -14,7 +14,7 @@
 //!
 //! The lifted lambda is: _w_lambda_0 = |x| |y| x + y  (captures at end)
 
-use super::{Def, DefMeta, LoopKind, Program, Term, TermIdSource, TermKind};
+use super::{Def, DefMeta, Lambda, LoopKind, Program, Term, TermIdSource, TermKind};
 use crate::ast::{Span, TypeName};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
@@ -212,15 +212,12 @@ fn apply_type_subst_to_term(term: &Term, subst: &TypeSubst, term_ids: &mut TermI
             func: Box::new(apply_type_subst_to_term(func, subst, term_ids)),
             arg: Box::new(apply_type_subst_to_term(arg, subst, term_ids)),
         },
-        TermKind::Lam {
-            param,
-            param_ty,
-            body,
-        } => TermKind::Lam {
-            param: param.clone(),
-            param_ty: apply_type_subst(param_ty, subst),
+        TermKind::Lambda(Lambda { params, body, ret_ty, captures }) => TermKind::Lambda(Lambda {
+            params: params.iter().map(|(p, ty)| (p.clone(), apply_type_subst(ty, subst))).collect(),
             body: Box::new(apply_type_subst_to_term(body, subst, term_ids)),
-        },
+            ret_ty: apply_type_subst(ret_ty, subst),
+            captures: captures.iter().map(|(s, ty, t)| (s.clone(), apply_type_subst(ty, subst), apply_type_subst_to_term(t, subst, term_ids))).collect(),
+        }),
         TermKind::Let {
             name,
             name_ty,
@@ -283,6 +280,9 @@ fn apply_type_subst_to_term(term: &Term, subst: &TypeSubst, term_ids: &mut TermI
                 body: Box::new(apply_type_subst_to_term(body, subst, term_ids)),
             }
         }
+        TermKind::Soac(_) | TermKind::ArrayExpr(_) | TermKind::Force(_) | TermKind::Pack { .. } | TermKind::Unpack { .. } => {
+            unreachable!("SOAC nodes not yet produced at this phase")
+        }
     };
     Term {
         id: term_ids.next_id(),
@@ -340,9 +340,11 @@ fn collect_free_vars(
             inner_bound.insert(*name);
             collect_free_vars(body, &inner_bound, top_level, known_defs, symbols, free, seen);
         }
-        TermKind::Lam { param, body, .. } => {
+        TermKind::Lambda(Lambda { params, body, .. }) => {
             let mut inner_bound = bound.clone();
-            inner_bound.insert(*param);
+            for (p, _) in params {
+                inner_bound.insert(*p);
+            }
             collect_free_vars(body, &inner_bound, top_level, known_defs, symbols, free, seen);
         }
         TermKind::App { func, arg } => {
@@ -411,6 +413,9 @@ fn collect_free_vars(
         | TermKind::BinOp(_)
         | TermKind::UnOp(_)
         | TermKind::Extern(_) => {}
+        TermKind::Soac(_) | TermKind::ArrayExpr(_) | TermKind::Force(_) | TermKind::Pack { .. } | TermKind::Unpack { .. } => {
+            unreachable!("SOAC nodes not yet produced at this phase")
+        }
     }
 }
 
@@ -502,12 +507,10 @@ impl<'a> Defunctionalizer<'a> {
     /// Defunctionalize but preserve outermost parameter lambdas (for entry points).
     fn defunc_preserving_params(&mut self, term: Term) -> Term {
         match term.kind {
-            TermKind::Lam {
-                param,
-                param_ty,
-                body,
-            } => {
+            TermKind::Lambda(Lambda { params, body, ret_ty, captures }) => {
                 // Keep this lambda, but recursively process its body
+                // These are single-param lambdas from build_lambda_chain
+                let (param, param_ty) = params.into_iter().next().expect("BUG: Lambda with empty params");
                 // Mark param as Dynamic in env
                 self.env.insert(param, StaticVal::Dynamic);
                 let defunc_body = self.defunc_preserving_params(*body);
@@ -517,11 +520,12 @@ impl<'a> Defunctionalizer<'a> {
                     id: self.term_ids.next_id(),
                     ty: term.ty,
                     span: term.span,
-                    kind: TermKind::Lam {
-                        param,
-                        param_ty,
+                    kind: TermKind::Lambda(Lambda {
+                        params: vec![(param, param_ty)],
                         body: Box::new(defunc_body),
-                    },
+                        ret_ty,
+                        captures,
+                    }),
                 }
             }
             // Once we hit a non-lambda, defunc normally
@@ -558,7 +562,7 @@ impl<'a> Defunctionalizer<'a> {
                 DefuncResult { term, sv }
             }
 
-            TermKind::Lam { .. } => self.defunc_lambda(term),
+            TermKind::Lambda(..) => self.defunc_lambda(term),
 
             TermKind::App { func, arg } => self.defunc_app(*func, *arg, ty, span),
 
@@ -713,6 +717,10 @@ impl<'a> Defunctionalizer<'a> {
                 term,
                 sv: StaticVal::Dynamic,
             },
+
+            TermKind::Soac(_) | TermKind::ArrayExpr(_) | TermKind::Force(_) | TermKind::Pack { .. } | TermKind::Unpack { .. } => {
+                unreachable!("SOAC nodes not yet produced at this phase")
+            }
         }
     }
 
@@ -1053,14 +1061,14 @@ impl<'a> Defunctionalizer<'a> {
         let mut params = Vec::new();
         let mut current = term;
 
-        while let TermKind::Lam {
-            param,
-            param_ty,
-            body,
-        } = current.kind
-        {
-            params.push((param, param_ty));
-            current = *body;
+        loop {
+            match current.kind {
+                TermKind::Lambda(Lambda { params: lam_params, body, .. }) => {
+                    params.extend(lam_params);
+                    current = *body;
+                }
+                _ => break,
+            }
         }
 
         (params, current)
@@ -1079,11 +1087,12 @@ impl<'a> Defunctionalizer<'a> {
                 id: self.term_ids.next_id(),
                 ty: lam_ty,
                 span,
-                kind: TermKind::Lam {
-                    param: *param,
-                    param_ty: param_ty.clone(),
-                    body: Box::new(acc),
-                },
+                kind: TermKind::Lambda(Lambda {
+                    params: vec![(*param, param_ty.clone())],
+                    body: Box::new(acc.clone()),
+                    ret_ty: acc.ty.clone(),
+                    captures: vec![],
+                }),
             }
         })
     }
@@ -1094,14 +1103,12 @@ impl<'a> Defunctionalizer<'a> {
         // Find the innermost body (unwrap all lambdas)
         fn extract_inner(term: Term) -> (Vec<(SymbolId, Type<TypeName>, Type<TypeName>)>, Term) {
             match term.kind {
-                TermKind::Lam {
-                    param,
-                    param_ty,
-                    body,
-                } => {
-                    let (mut params, inner) = extract_inner(*body);
-                    params.insert(0, (param, param_ty, term.ty));
-                    (params, inner)
+                TermKind::Lambda(Lambda { params, body, .. }) => {
+                    let (mut rest_params, inner) = extract_inner(*body);
+                    for (p, ty) in params.into_iter().rev() {
+                        rest_params.insert(0, (p, ty, term.ty.clone()));
+                    }
+                    (rest_params, inner)
                 }
                 _ => (vec![], term),
             }
@@ -1122,11 +1129,12 @@ impl<'a> Defunctionalizer<'a> {
                 id: self.term_ids.next_id(),
                 ty: result_ty,
                 span,
-                kind: TermKind::Lam {
-                    param: cap_sym,
-                    param_ty: cap_ty.clone(),
-                    body: Box::new(acc),
-                },
+                kind: TermKind::Lambda(Lambda {
+                    params: vec![(cap_sym, cap_ty.clone())],
+                    body: Box::new(acc.clone()),
+                    ret_ty: acc.ty.clone(),
+                    captures: vec![],
+                }),
             }
         });
 
@@ -1137,11 +1145,12 @@ impl<'a> Defunctionalizer<'a> {
                 id: self.term_ids.next_id(),
                 ty: result_ty,
                 span,
-                kind: TermKind::Lam {
-                    param,
-                    param_ty,
-                    body: Box::new(acc),
-                },
+                kind: TermKind::Lambda(Lambda {
+                    params: vec![(param, param_ty)],
+                    body: Box::new(acc.clone()),
+                    ret_ty: acc.ty.clone(),
+                    captures: vec![],
+                }),
             }
         })
     }
@@ -1394,24 +1403,21 @@ impl<'a> Defunctionalizer<'a> {
                 },
             },
 
-            TermKind::Lam {
-                param,
-                param_ty,
-                body,
-            } => {
-                // Don't substitute if the param shadows old_sym
-                if *param == old_sym {
+            TermKind::Lambda(Lambda { params, body, ret_ty, captures }) => {
+                // Don't substitute if any param shadows old_sym
+                if params.iter().any(|(p, _)| *p == old_sym) {
                     term.clone()
                 } else {
                     Term {
                         id: self.term_ids.next_id(),
                         ty: term.ty.clone(),
                         span: term.span,
-                        kind: TermKind::Lam {
-                            param: *param,
-                            param_ty: param_ty.clone(),
+                        kind: TermKind::Lambda(Lambda {
+                            params: params.clone(),
                             body: Box::new(self.substitute_var(body, old_sym, new_sym)),
-                        },
+                            ret_ty: ret_ty.clone(),
+                            captures: captures.clone(),
+                        }),
                     }
                 }
             }
@@ -1523,6 +1529,10 @@ impl<'a> Defunctionalizer<'a> {
                     },
                 }
             }
+
+            TermKind::Soac(_) | TermKind::ArrayExpr(_) | TermKind::Force(_) | TermKind::Pack { .. } | TermKind::Unpack { .. } => {
+                unreachable!("SOAC nodes not yet produced at this phase")
+            }
         }
     }
 
@@ -1530,14 +1540,13 @@ impl<'a> Defunctionalizer<'a> {
     fn get_func_param_sym(&self, def: &Def, param_idx: usize) -> SymbolId {
         let mut body = &def.body;
         let mut idx = 0;
-        while let TermKind::Lam {
-            param, body: inner, ..
-        } = &body.kind
-        {
-            if idx == param_idx {
-                return *param;
+        while let TermKind::Lambda(Lambda { params, body: inner, .. }) = &body.kind {
+            for (param, _) in params {
+                if idx == param_idx {
+                    return *param;
+                }
+                idx += 1;
             }
-            idx += 1;
             body = inner;
         }
         panic!(
