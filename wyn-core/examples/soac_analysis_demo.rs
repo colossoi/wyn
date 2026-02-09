@@ -43,7 +43,7 @@ entry compute_main(
     let tlc_transformed = alias_checked.to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager);
 
     // Continue through TLC transformations
-    let defunctionalized = tlc_transformed.defunctionalize();
+    let defunctionalized = tlc_transformed.fuse_maps().defunctionalize();
     let monomorphized = defunctionalized.monomorphize();
 
     // Convert to SSA using the new direct path

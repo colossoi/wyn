@@ -206,8 +206,11 @@ fn compile_file(
         tlc_transformed.skip_partial_eval()
     };
 
+    // Fuse consecutive map operations
+    let tlc_fused = time("fuse_maps", verbose, || tlc_optimized.fuse_maps());
+
     // Defunctionalize: lift lambdas and flatten SOAC captures
-    let tlc_defunc = time("defunctionalize", verbose, || tlc_optimized.defunctionalize());
+    let tlc_defunc = time("defunctionalize", verbose, || tlc_fused.defunctionalize());
 
     // Monomorphize polymorphic functions at TLC level
     let tlc_mono = time("tlc_monomorphize", verbose, || tlc_defunc.monomorphize());

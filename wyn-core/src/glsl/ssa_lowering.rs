@@ -54,8 +54,6 @@ struct LowerCtx<'a> {
     tuple_counter: usize,
     /// Cache from tuple type signature to struct name
     tuple_type_cache: HashMap<String, String>,
-    /// Counter for generating unique temporary names
-    temp_counter: usize,
 }
 
 impl<'a> LowerCtx<'a> {
@@ -74,14 +72,7 @@ impl<'a> LowerCtx<'a> {
             tuple_structs: HashMap::new(),
             tuple_counter: 0,
             tuple_type_cache: HashMap::new(),
-            temp_counter: 0,
         }
-    }
-
-    fn fresh_id(&mut self) -> usize {
-        let id = self.temp_counter;
-        self.temp_counter += 1;
-        id
     }
 
     fn lower_program(&mut self) -> Result<GlslOutput> {
@@ -874,7 +865,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         }
     }
 
-    fn lower_inst(&mut self, inst: &Inst, output: &mut String) -> Result<String> {
+    fn lower_inst(&mut self, inst: &Inst, _output: &mut String) -> Result<String> {
         match &inst.kind {
             InstKind::Int(s) => Ok(s.clone()),
             InstKind::Float(s) => {

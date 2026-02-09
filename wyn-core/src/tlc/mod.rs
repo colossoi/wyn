@@ -6,6 +6,7 @@
 pub mod defunctionalize;
 #[cfg(test)]
 mod defunctionalize_tests;
+pub mod fusion;
 pub mod monomorphize;
 #[cfg(test)]
 mod monomorphize_tests;

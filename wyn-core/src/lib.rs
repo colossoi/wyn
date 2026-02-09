@@ -309,6 +309,7 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 // TLC Pipeline (AST -> SSA):
 //       -> .to_tlc()                                    -> TlcTransformed
 //       -> .partial_eval() or .skip_partial_eval()      -> TlcTransformed (optimized)
+//       -> .fuse_maps()                                 -> TlcTransformed (fused)
 //       -> .defunctionalize()                           -> TlcDefunctionalized
 //       -> .monomorphize()                              -> TlcMonomorphized
 //       -> .soa_transform()                             -> TlcSoaTransformed
@@ -697,6 +698,17 @@ impl TlcTransformed {
     /// Skip partial evaluation
     pub fn skip_partial_eval(self) -> TlcTransformed {
         self
+    }
+
+    /// Fuse consecutive map operations to eliminate intermediate arrays.
+    pub fn fuse_maps(self) -> TlcTransformed {
+        let fused = tlc::fusion::fuse_maps(self.tlc);
+        TlcTransformed {
+            tlc: fused,
+            type_table: self.type_table,
+            known_defs: self.known_defs,
+            schemes: self.schemes,
+        }
     }
 
     /// Defunctionalize: lift lambdas and flatten SOAC closure captures.

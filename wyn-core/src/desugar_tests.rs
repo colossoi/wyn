@@ -23,6 +23,7 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
     alias_checked
         .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
         .skip_partial_eval()
+        .fuse_maps()
         .defunctionalize()
         .monomorphize()
         .soa_transform()
@@ -49,6 +50,7 @@ fn compile_through_ssa(input: &str) -> Result<SsaProgram, CompilerError> {
     let ssa = alias_checked
         .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
         .skip_partial_eval()
+        .fuse_maps()
         .defunctionalize()
         .monomorphize()
         .soa_transform()

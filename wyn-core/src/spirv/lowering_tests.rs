@@ -19,6 +19,7 @@ fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
     let ssa = alias_checked
         .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
         .skip_partial_eval()
+        .fuse_maps()
         .defunctionalize()
         .monomorphize()
         .soa_transform()
@@ -343,6 +344,7 @@ fn compile_to_spirv_with_partial_eval(source: &str) -> Result<Vec<u32>> {
     let ssa = alias_checked
         .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
         .partial_eval()
+        .fuse_maps()
         .defunctionalize()
         .monomorphize()
         .soa_transform()

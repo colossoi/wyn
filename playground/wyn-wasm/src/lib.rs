@@ -643,6 +643,7 @@ fn compile_impl(source: &str) -> CompileResult {
     let ssa = match alias_checked
         .to_tlc(builtins, &frontend.schemes, &frontend.module_manager)
         .partial_eval()
+        .fuse_maps()
         .defunctionalize()
         .monomorphize()
         .soa_transform()
@@ -733,8 +734,9 @@ fn compile_with_ir_impl(source: &str) -> CompileResultWithIR {
     let tlc_after_partial_eval = tlc_program.partial_eval();
     let tlc_tree = tlc_tree::program_to_tree(&tlc_after_partial_eval.tlc);
 
-    // Continue pipeline: defunctionalize, monomorphize, then to SSA
+    // Continue pipeline: fuse maps, defunctionalize, monomorphize, then to SSA
     let ssa = match tlc_after_partial_eval
+        .fuse_maps()
         .defunctionalize()
         .monomorphize()
         .soa_transform()

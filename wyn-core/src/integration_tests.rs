@@ -27,6 +27,7 @@ fn compile_to_ssa(input: &str) -> SsaProgram {
     alias_checked
         .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
         .skip_partial_eval()
+        .fuse_maps()
         .defunctionalize()
         .monomorphize()
         .soa_transform()
@@ -516,6 +517,7 @@ entry vertex_main() #[builtin(position)] vec4f32 =
     let result = alias_checked
         .to_tlc(builtins, &frontend.schemes, &mut frontend.module_manager)
         .skip_partial_eval()
+        .fuse_maps()
         .defunctionalize()
         .monomorphize()
         .soa_transform()
@@ -556,6 +558,7 @@ entry compute_main(data: []i32) i32 =
     let result = alias_checked
         .to_tlc(builtins, &frontend.schemes, &mut frontend.module_manager)
         .skip_partial_eval()
+        .fuse_maps()
         .defunctionalize()
         .monomorphize()
         .soa_transform()
@@ -598,6 +601,7 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     let result = alias_checked
         .to_tlc(builtins, &frontend.schemes, &mut frontend.module_manager)
         .skip_partial_eval()
+        .fuse_maps()
         .defunctionalize()
         .monomorphize()
         .soa_transform()
