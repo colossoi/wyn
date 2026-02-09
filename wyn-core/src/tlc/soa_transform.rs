@@ -30,11 +30,16 @@ pub fn soa_type(ty: &Type<TypeName>) -> Type<TypeName> {
             let size = args[2].clone();
 
             // If the element type is a tuple, distribute the array into each component.
+            // Recursively apply soa_type to each distributed array, so nested
+            // array-of-tuples like [n](int, vec3) get further distributed.
             if let Type::Constructed(TypeName::Tuple(n), ref component_types) = elem {
                 let distributed: Vec<Type<TypeName>> = component_types
                     .iter()
                     .map(|ct| {
-                        Type::Constructed(TypeName::Array, vec![ct.clone(), variant.clone(), size.clone()])
+                        soa_type(&Type::Constructed(
+                            TypeName::Array,
+                            vec![ct.clone(), variant.clone(), size.clone()],
+                        ))
                     })
                     .collect();
                 Type::Constructed(TypeName::Tuple(n), distributed)
@@ -387,10 +392,12 @@ impl SoaTransformer {
     ) -> Term {
         let components: Vec<Term> = (0..n)
             .map(|i| {
-                let comp_arr_ty = Type::Constructed(
+                // Recursively soa_type the constructed array so nested array-of-tuples
+                // like [8](int, vec3) are further distributed to ([8]int, [8]vec3).
+                let comp_arr_ty = soa_type(&Type::Constructed(
                     TypeName::Array,
                     vec![soa_type(&comp_tys[i]), variant.clone(), size.clone()],
-                );
+                ));
                 let proj = self.mk_tuple_proj(arr.clone(), i, comp_arr_ty, span);
                 let elem_ty = soa_type(&comp_tys[i]);
                 self.mk_index(proj, idx.clone(), elem_ty, span)
@@ -418,10 +425,10 @@ impl SoaTransformer {
         let components: Vec<Term> = (0..n)
             .map(|i| {
                 let soa_comp_ty = soa_type(&comp_tys[i]);
-                let comp_arr_ty = Type::Constructed(
+                let comp_arr_ty = soa_type(&Type::Constructed(
                     TypeName::Array,
                     vec![soa_comp_ty.clone(), variant.clone(), size.clone()],
-                );
+                ));
                 let arr_proj = self.mk_tuple_proj(arr.clone(), i, comp_arr_ty.clone(), span);
                 let val_proj = self.mk_tuple_proj(val.clone(), i, soa_comp_ty, span);
                 self.mk_array_with(arr_proj, idx.clone(), val_proj, comp_arr_ty, span)
@@ -432,10 +439,10 @@ impl SoaTransformer {
             TypeName::Tuple(n),
             (0..n)
                 .map(|i| {
-                    Type::Constructed(
+                    soa_type(&Type::Constructed(
                         TypeName::Array,
                         vec![soa_type(&comp_tys[i]), variant.clone(), size.clone()],
-                    )
+                    ))
                 })
                 .collect(),
         );
@@ -460,8 +467,10 @@ impl SoaTransformer {
                     .iter()
                     .map(|e| self.mk_tuple_proj(e.clone(), i, soa_comp_ty.clone(), span))
                     .collect();
-                let arr_ty =
-                    Type::Constructed(TypeName::Array, vec![soa_comp_ty, variant.clone(), size.clone()]);
+                let arr_ty = soa_type(&Type::Constructed(
+                    TypeName::Array,
+                    vec![soa_comp_ty, variant.clone(), size.clone()],
+                ));
                 self.mk_array_lit(projected_elems, arr_ty, span)
             })
             .collect();
@@ -470,10 +479,10 @@ impl SoaTransformer {
             TypeName::Tuple(n),
             (0..n)
                 .map(|i| {
-                    Type::Constructed(
+                    soa_type(&Type::Constructed(
                         TypeName::Array,
                         vec![soa_type(&comp_tys[i]), variant.clone(), size.clone()],
-                    )
+                    ))
                 })
                 .collect(),
         );

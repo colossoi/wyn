@@ -45,20 +45,23 @@ fn is_unsized_array(ty: &Type<TypeName>) -> bool {
 }
 
 /// Check if a type is an SoA tuple-of-arrays (result of SoA transform on `[n](A,B)` → `([n]A, [n]B)`).
-/// Returns the component array types if so.
+/// Returns the component types if so.
+/// Components can be plain arrays or nested SoA tuples (for nested array-of-tuples).
 fn is_soa_tuple(ty: &Type<TypeName>) -> Option<&[Type<TypeName>]> {
     match ty {
         Type::Constructed(TypeName::Tuple(_), component_types) if !component_types.is_empty() => {
-            let all_arrays = component_types
-                .iter()
-                .all(|ct| matches!(ct, Type::Constructed(TypeName::Array, args) if args.len() == 3));
-            if all_arrays { Some(component_types) } else { None }
+            let all_soa = component_types.iter().all(|ct| {
+                matches!(ct, Type::Constructed(TypeName::Array, args) if args.len() == 3)
+                    || is_soa_tuple(ct).is_some()
+            });
+            if all_soa { Some(component_types) } else { None }
         }
         _ => None,
     }
 }
 
 /// Given an SoA tuple type `([n]A, [n]B)`, return the element tuple type `(A, B)`.
+/// Handles nested SoA: `(([n]A, [n]B), [n]C)` → `((A, B), C)`.
 fn soa_elem_type(soa_ty: &Type<TypeName>) -> Type<TypeName> {
     match soa_ty {
         Type::Constructed(TypeName::Tuple(n), component_types) => {
@@ -66,6 +69,7 @@ fn soa_elem_type(soa_ty: &Type<TypeName>) -> Type<TypeName> {
                 .iter()
                 .map(|ct| match ct {
                     Type::Constructed(TypeName::Array, args) if !args.is_empty() => args[0].clone(),
+                    ty if is_soa_tuple(ty).is_some() => soa_elem_type(ty),
                     _ => ct.clone(),
                 })
                 .collect();
@@ -985,10 +989,9 @@ impl<'a> Converter<'a> {
                     .map_err(|e| ConvertError::BuilderError(e.to_string()));
             }
             "_w_index" if arg_values.len() == 2 => {
-                return self
-                    .builder
-                    .push_index(arg_values[0], arg_values[1], ty, span, node_id)
-                    .map_err(|e| ConvertError::BuilderError(e.to_string()));
+                // SoA-aware: if the array is a tuple-of-arrays, distribute the index
+                let arr_ty = &args[0].ty;
+                return self.soa_index(arg_values[0], arg_values[1], arr_ty, &ty, span, node_id);
             }
             "_w_tuple_proj" if args.len() == 2 => {
                 // The second argument must be a constant integer literal
@@ -1402,13 +1405,12 @@ impl<'a> Converter<'a> {
     ) -> Result<ValueId, ConvertError> {
         let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
         if let Some(components) = is_soa_tuple(arr_ty) {
+            // Recurse: first component might itself be an SoA tuple
             let first = self
                 .builder
                 .push_project(arr, 0, components[0].clone(), span, node_id)
                 .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
-            self.builder
-                .push_intrinsic("_w_intrinsic_length", vec![first], i32_ty, span, node_id)
-                .map_err(|e| ConvertError::BuilderError(e.to_string()))
+            self.soa_length(first, &components[0], span, node_id)
         } else {
             self.builder
                 .push_intrinsic("_w_intrinsic_length", vec![arr], i32_ty, span, node_id)
@@ -1436,12 +1438,11 @@ impl<'a> Converter<'a> {
                     .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
                 let comp_elem_ty = match comp_ty {
                     Type::Constructed(TypeName::Array, args) if !args.is_empty() => args[0].clone(),
+                    ty if is_soa_tuple(ty).is_some() => soa_elem_type(ty),
                     _ => comp_ty.clone(),
                 };
-                let elem = self
-                    .builder
-                    .push_index(comp_arr, index, comp_elem_ty, span, node_id)
-                    .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+                // Recurse: component might itself be an SoA tuple (nested array-of-tuples)
+                let elem = self.soa_index(comp_arr, index, comp_ty, &comp_elem_ty, span, node_id)?;
                 elem_values.push(elem);
             }
             self.builder
@@ -1474,22 +1475,15 @@ impl<'a> Converter<'a> {
                     .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
                 let comp_elem_ty = match comp_ty {
                     Type::Constructed(TypeName::Array, args) if !args.is_empty() => args[0].clone(),
+                    ty if is_soa_tuple(ty).is_some() => soa_elem_type(ty),
                     _ => comp_ty.clone(),
                 };
                 let comp_elem = self
                     .builder
                     .push_project(elem, i as u32, comp_elem_ty, span, node_id)
                     .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
-                let new_comp = self
-                    .builder
-                    .push_call(
-                        "_w_intrinsic_array_with",
-                        vec![comp_arr, index, comp_elem],
-                        comp_ty.clone(),
-                        span,
-                        node_id,
-                    )
-                    .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+                // Recurse: component might itself be an SoA tuple
+                let new_comp = self.soa_array_with(comp_arr, index, comp_elem, comp_ty, span, node_id)?;
                 new_components.push(new_comp);
             }
             self.builder
@@ -1519,10 +1513,8 @@ impl<'a> Converter<'a> {
         if let Some(components) = is_soa_tuple(ty) {
             let mut uninit_components = Vec::with_capacity(components.len());
             for comp_ty in components {
-                let uninit = self
-                    .builder
-                    .push_call("_w_intrinsic_uninit", vec![], comp_ty.clone(), span, node_id)
-                    .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+                // Recurse: component might itself be an SoA tuple
+                let uninit = self.soa_uninit(comp_ty, span, node_id)?;
                 uninit_components.push(uninit);
             }
             self.builder
@@ -1728,10 +1720,20 @@ impl<'a> Converter<'a> {
             input_elems.push(elem);
         }
 
-        // Build function call args:
-        // For single input: [elem, captures...]
-        // For multiple inputs (zip-fused): [elem0, elem1, ..., captures...]
-        let mut call_args: Vec<ValueId> = input_elems;
+        // Build function call args.
+        // For zip-fused maps (multiple inputs), the lambda still expects a single
+        // zipped tuple parameter — zip is a no-op after SoA, so just pack the
+        // indexed elements into a tuple.
+        let mut call_args: Vec<ValueId> = if input_elems.len() > 1 {
+            let zipped_ty = lam.params[0].1.clone();
+            let zipped = self
+                .builder
+                .push_tuple(input_elems, zipped_ty, span, node_id)
+                .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+            vec![zipped]
+        } else {
+            input_elems
+        };
         call_args.extend(capture_values.iter().copied());
 
         let output_elem = self
