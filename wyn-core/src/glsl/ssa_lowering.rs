@@ -10,6 +10,7 @@ use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
 use crate::lowering_common::ShaderStage;
 use crate::mir::ssa::{BlockId, FuncBody, Inst, InstKind, Terminator, ValueId};
 use crate::tlc::to_ssa::{ExecutionModel, IoDecoration, SsaEntryPoint, SsaFunction, SsaProgram};
+use crate::types::TypeExt;
 use polytype::Type as PolyType;
 use rspirv::spirv;
 use std::collections::{HashMap, HashSet};
@@ -488,12 +489,9 @@ impl<'a> LowerCtx<'a> {
 
                     struct_name
                 }
-                TypeName::Vec if args.len() >= 2 => {
-                    let n = match &args[0] {
-                        PolyType::Constructed(TypeName::Size(n), _) => *n,
-                        _ => 4,
-                    };
-                    let elem = self.type_to_glsl(&args[1]);
+                TypeName::Vec => {
+                    let n = ty.vec_size().unwrap_or(4);
+                    let elem = self.type_to_glsl(ty.elem_type().expect("Vec has elem"));
                     match elem.as_str() {
                         "float" => format!("vec{}", n),
                         "double" => format!("dvec{}", n),
@@ -503,16 +501,10 @@ impl<'a> LowerCtx<'a> {
                         _ => format!("vec{}", n),
                     }
                 }
-                TypeName::Mat if args.len() >= 3 => {
-                    let cols = match &args[0] {
-                        PolyType::Constructed(TypeName::Size(n), _) => *n,
-                        _ => 4,
-                    };
-                    let rows = match &args[1] {
-                        PolyType::Constructed(TypeName::Size(n), _) => *n,
-                        _ => 4,
-                    };
-                    let elem = self.type_to_glsl(&args[2]);
+                TypeName::Mat => {
+                    let cols = ty.mat_cols().unwrap_or(4);
+                    let rows = ty.mat_rows().unwrap_or(4);
+                    let elem = self.type_to_glsl(ty.elem_type().expect("Mat has elem"));
                     match elem.as_str() {
                         "float" => {
                             if rows == cols {
@@ -532,8 +524,7 @@ impl<'a> LowerCtx<'a> {
                     }
                 }
                 TypeName::Array => {
-                    assert!(args.len() == 3);
-                    format!("{}[]", self.type_to_glsl(&args[0]))
+                    format!("{}[]", self.type_to_glsl(ty.elem_type().expect("Array has elem")))
                 }
                 TypeName::Record(fields) => {
                     panic!("BUG: Record type reached GLSL lowering. Fields: {:?}", fields);

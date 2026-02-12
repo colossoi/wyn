@@ -192,36 +192,34 @@ impl<'a> TypeChecker<'a> {
     /// Sized arrays (e.g. [19]u32) stay Composite — only unsized arrays become View.
     fn constrain_array_to_storage(&mut self, ty: &Type) -> Result<()> {
         let resolved = ty.apply(&self.context);
-        match &resolved {
-            Type::Constructed(TypeName::Array, args) => {
-                assert!(args.len() == 3);
-
-                // Check if this is a sized array (Size constant)
-                let is_sized = matches!(
-                    args[2].apply(&self.context),
-                    Type::Constructed(TypeName::Size(_), _)
-                );
-
-                if is_sized {
-                    // Sized arrays → Composite (actual data, passed as push constants)
-                    let composite = Type::Constructed(TypeName::ArrayVariantComposite, vec![]);
-                    self.context
-                        .unify(&args[1], &composite)
-                        .map_err(|_| err_type!("Sized entry point array must be Composite"))?;
-                } else {
-                    // Unsized arrays → View (storage buffer)
-                    let storage = Type::Constructed(TypeName::ArrayVariantView, vec![]);
-                    self.context.unify(&args[1], &storage).map_err(|_| {
-                        err_type!("Entry point array parameter must have Storage address space")
-                    })?;
-                }
-
-                // Recursively constrain nested arrays in element type
-                self.constrain_array_to_storage(&args[0])?;
-                Ok(())
-            }
-            _ => Ok(()), // Not an array type, nothing to constrain
+        if !resolved.is_array() {
+            return Ok(());
         }
+
+        let size = resolved.array_size().expect("Array has size");
+        let variant = resolved.array_variant().expect("Array has variant");
+        let elem = resolved.elem_type().expect("Array has elem");
+
+        // Check if this is a sized array (Size constant)
+        let is_sized = matches!(size.apply(&self.context), Type::Constructed(TypeName::Size(_), _));
+
+        if is_sized {
+            // Sized arrays → Composite (actual data, passed as push constants)
+            let composite = Type::Constructed(TypeName::ArrayVariantComposite, vec![]);
+            self.context
+                .unify(variant, &composite)
+                .map_err(|_| err_type!("Sized entry point array must be Composite"))?;
+        } else {
+            // Unsized arrays → View (storage buffer)
+            let storage = Type::Constructed(TypeName::ArrayVariantView, vec![]);
+            self.context
+                .unify(variant, &storage)
+                .map_err(|_| err_type!("Entry point array parameter must have Storage address space"))?;
+        }
+
+        // Recursively constrain nested arrays in element type
+        self.constrain_array_to_storage(elem)?;
+        Ok(())
     }
 
     /// Format a type for error messages by applying current substitution
@@ -280,7 +278,7 @@ impl<'a> TypeChecker<'a> {
             Type::Constructed(TypeName::UInt(_), _) => Some(true),
             Type::Constructed(TypeName::Float(_), _) => Some(true),
             // Vec types are numeric if their element type is numeric
-            Type::Constructed(TypeName::Vec, args) if args.len() == 2 => Self::is_numeric_type(&args[1]),
+            _ if ty.is_vec() => Self::is_numeric_type(ty.elem_type().expect("Vec has elem")),
             Type::Variable(_) => None,
             _ => Some(false),
         }
@@ -906,14 +904,14 @@ impl<'a> TypeChecker<'a> {
         })
     }
 
-    /// Build an array type: Array[elem, addrspace, size]
+    /// Build an array type: Array[elem, size, variant]
     fn array_ty(elem: Type, addrspace: polytype::Variable, size: polytype::Variable) -> Type {
-        Type::Constructed(TypeName::Array, vec![elem, Self::var(addrspace), Self::var(size)])
+        Type::Constructed(TypeName::Array, vec![elem, Self::var(size), Self::var(addrspace)])
     }
 
-    /// Build a Vec type: Vec(n, elem)
+    /// Build a Vec type: Vec[elem, size]
     fn vec_ty(n: polytype::Variable, elem: Type) -> Type {
-        Type::Constructed(TypeName::Vec, vec![Self::var(n), elem])
+        Type::Constructed(TypeName::Vec, vec![elem, Self::var(n)])
     }
 
     /// Type a lambda expression, optionally with an expected type for bidirectional checking.
@@ -1061,7 +1059,7 @@ impl<'a> TypeChecker<'a> {
         // Existential return type: ?k. Array[a, s, k]
         let k = "k".to_string();
         let k_var = Type::Constructed(TypeName::SizeVar(k.clone()), vec![]);
-        let result_array = Type::Constructed(TypeName::Array, vec![Self::var(a), Self::var(s), k_var]);
+        let result_array = Type::Constructed(TypeName::Array, vec![Self::var(a), k_var, Self::var(s)]);
         let existential_result = Type::Constructed(TypeName::Existential(vec![k]), vec![result_array]);
         let body = Self::arrow_chain(&[pred_ty, array_a], existential_result);
         self.scope_stack.insert("filter".to_string(), Self::forall(&[a, n, s], body));
@@ -1764,13 +1762,12 @@ impl<'a> TypeChecker<'a> {
 
                 if is_matrix {
                     // Matrix: extract row size and element type from the array type
-                    // Array[elem_type, addrspace, size] - elem_type at 0, size at 2
+                    // Array[elem_type, size, variant]
                     let resolved = first_type.apply(&self.context);
-                    if let Type::Constructed(TypeName::Array, args) = resolved {
-                        assert!(args.len() == 3);
-                        if let Type::Constructed(TypeName::Size(cols), _) = &args[2] {
+                    if resolved.is_array() {
+                        if let Type::Constructed(TypeName::Size(cols), _) = resolved.array_size().expect("Array has size") {
                             let rows = elements.len();
-                            let elem_type = args[0].clone();
+                            let elem_type = resolved.elem_type().expect("Array has elem").clone();
                             Ok(mat(rows, *cols, elem_type))
                         } else {
                             Err(err_type_at!(
@@ -1906,47 +1903,47 @@ impl<'a> TypeChecker<'a> {
                         // Matrix multiplication (only for "*")
                         let mat_result = if op.op == "*" {
                             match (&left_resolved, &right_resolved) {
-                                // Mat[n,m,a] * Mat[m',p,a'] → unify m=m', a=a' → Mat[n,p,a]
-                                (Type::Constructed(TypeName::Mat, l_args), Type::Constructed(TypeName::Mat, r_args)) => {
-                                    self.context.unify(&l_args[1], &r_args[0]).map_err(|_| {
-                                        err_type_at!(expr.h.span, "Matrix multiply inner dimensions must match, got {} and {}", self.format_type(&l_args[1]), self.format_type(&r_args[0]))
+                                // Mat * Mat → unify inner dims + elem → Mat
+                                (l, r) if l.is_mat() && r.is_mat() => {
+                                    self.context.unify(l.mat_rows_type().expect("Mat has rows"), r.mat_cols_type().expect("Mat has cols")).map_err(|_| {
+                                        err_type_at!(expr.h.span, "Matrix multiply inner dimensions must match, got {} and {}", self.format_type(l.mat_rows_type().expect("Mat has rows")), self.format_type(r.mat_cols_type().expect("Mat has cols")))
                                     })?;
-                                    self.context.unify(&l_args[2], &r_args[2]).map_err(|_| {
-                                        err_type_at!(expr.h.span, "Matrix multiply element types must match, got {} and {}", self.format_type(&l_args[2]), self.format_type(&r_args[2]))
+                                    self.context.unify(l.elem_type().expect("Mat has elem"), r.elem_type().expect("Mat has elem")).map_err(|_| {
+                                        err_type_at!(expr.h.span, "Matrix multiply element types must match, got {} and {}", self.format_type(l.elem_type().expect("Mat has elem")), self.format_type(r.elem_type().expect("Mat has elem")))
                                     })?;
-                                    Some(Type::Constructed(TypeName::Mat, vec![l_args[0].clone(), r_args[1].clone(), l_args[2].clone()]))
+                                    Some(Type::Constructed(TypeName::Mat, vec![l.elem_type().expect("Mat has elem").clone(), l.mat_cols_type().expect("Mat has cols").clone(), r.mat_rows_type().expect("Mat has rows").clone()]))
                                 }
-                                // Mat[n,m,a] * Vec[m',a'] → unify m=m', a=a' → Vec[n,a]
-                                (Type::Constructed(TypeName::Mat, l_args), Type::Constructed(TypeName::Vec, r_args)) => {
-                                    self.context.unify(&l_args[1], &r_args[0]).map_err(|_| {
-                                        err_type_at!(expr.h.span, "Matrix-vector multiply: matrix columns must match vector size, got {} and {}", self.format_type(&l_args[1]), self.format_type(&r_args[0]))
+                                // Mat * Vec → unify mat rows = vec size, elem → Vec
+                                (l, r) if l.is_mat() && r.is_vec() => {
+                                    self.context.unify(l.mat_rows_type().expect("Mat has rows"), r.vec_size_type().expect("Vec has size")).map_err(|_| {
+                                        err_type_at!(expr.h.span, "Matrix-vector multiply: matrix columns must match vector size, got {} and {}", self.format_type(l.mat_rows_type().expect("Mat has rows")), self.format_type(r.vec_size_type().expect("Vec has size")))
                                     })?;
-                                    self.context.unify(&l_args[2], &r_args[1]).map_err(|_| {
-                                        err_type_at!(expr.h.span, "Matrix-vector multiply element types must match, got {} and {}", self.format_type(&l_args[2]), self.format_type(&r_args[1]))
+                                    self.context.unify(l.elem_type().expect("Mat has elem"), r.elem_type().expect("Vec has elem")).map_err(|_| {
+                                        err_type_at!(expr.h.span, "Matrix-vector multiply element types must match, got {} and {}", self.format_type(l.elem_type().expect("Mat has elem")), self.format_type(r.elem_type().expect("Vec has elem")))
                                     })?;
-                                    Some(Type::Constructed(TypeName::Vec, vec![l_args[0].clone(), l_args[2].clone()]))
+                                    Some(Type::Constructed(TypeName::Vec, vec![l.elem_type().expect("Mat has elem").clone(), l.mat_cols_type().expect("Mat has cols").clone()]))
                                 }
-                                // Vec[n,a] * Mat[n',m,a'] → unify n=n', a=a' → Vec[m,a]
-                                (Type::Constructed(TypeName::Vec, l_args), Type::Constructed(TypeName::Mat, r_args)) => {
-                                    self.context.unify(&l_args[0], &r_args[0]).map_err(|_| {
-                                        err_type_at!(expr.h.span, "Vector-matrix multiply: vector size must match matrix rows, got {} and {}", self.format_type(&l_args[0]), self.format_type(&r_args[0]))
+                                // Vec * Mat → unify vec size = mat cols, elem → Vec
+                                (l, r) if l.is_vec() && r.is_mat() => {
+                                    self.context.unify(l.vec_size_type().expect("Vec has size"), r.mat_cols_type().expect("Mat has cols")).map_err(|_| {
+                                        err_type_at!(expr.h.span, "Vector-matrix multiply: vector size must match matrix rows, got {} and {}", self.format_type(l.vec_size_type().expect("Vec has size")), self.format_type(r.mat_cols_type().expect("Mat has cols")))
                                     })?;
-                                    self.context.unify(&l_args[1], &r_args[2]).map_err(|_| {
-                                        err_type_at!(expr.h.span, "Vector-matrix multiply element types must match, got {} and {}", self.format_type(&l_args[1]), self.format_type(&r_args[2]))
+                                    self.context.unify(l.elem_type().expect("Vec has elem"), r.elem_type().expect("Mat has elem")).map_err(|_| {
+                                        err_type_at!(expr.h.span, "Vector-matrix multiply element types must match, got {} and {}", self.format_type(l.elem_type().expect("Vec has elem")), self.format_type(r.elem_type().expect("Mat has elem")))
                                     })?;
-                                    Some(Type::Constructed(TypeName::Vec, vec![r_args[1].clone(), l_args[1].clone()]))
+                                    Some(Type::Constructed(TypeName::Vec, vec![l.elem_type().expect("Vec has elem").clone(), r.mat_rows_type().expect("Mat has rows").clone()]))
                                 }
-                                // Mat[n,m,a] * scalar → unify a=scalar → Mat[n,m,a]
-                                (Type::Constructed(TypeName::Mat, l_args), _) => {
-                                    self.context.unify(&l_args[2], &right_resolved).map_err(|_| {
-                                        err_type_at!(expr.h.span, "Matrix-scalar multiply: element type must match scalar, got {} and {}", self.format_type(&l_args[2]), self.format_type(&right_resolved))
+                                // Mat * scalar → unify elem = scalar → Mat
+                                (l, _) if l.is_mat() => {
+                                    self.context.unify(l.elem_type().expect("Mat has elem"), &right_resolved).map_err(|_| {
+                                        err_type_at!(expr.h.span, "Matrix-scalar multiply: element type must match scalar, got {} and {}", self.format_type(l.elem_type().expect("Mat has elem")), self.format_type(&right_resolved))
                                     })?;
                                     Some(left_resolved.clone())
                                 }
-                                // scalar * Mat[n,m,a] → unify scalar=a → Mat[n,m,a]
-                                (_, Type::Constructed(TypeName::Mat, r_args)) => {
-                                    self.context.unify(&left_resolved, &r_args[2]).map_err(|_| {
-                                        err_type_at!(expr.h.span, "Scalar-matrix multiply: scalar must match element type, got {} and {}", self.format_type(&left_resolved), self.format_type(&r_args[2]))
+                                // scalar * Mat → unify scalar = elem → Mat
+                                (_, r) if r.is_mat() => {
+                                    self.context.unify(&left_resolved, r.elem_type().expect("Mat has elem")).map_err(|_| {
+                                        err_type_at!(expr.h.span, "Scalar-matrix multiply: scalar must match element type, got {} and {}", self.format_type(&left_resolved), self.format_type(r.elem_type().expect("Mat has elem")))
                                     })?;
                                     Some(right_resolved.clone())
                                 }
@@ -1961,7 +1958,7 @@ impl<'a> TypeChecker<'a> {
                         } else {
                             // Check for vec-scalar or scalar-vec operations
                             let (vec_type, scalar_type, is_vec_op) = match (&left_resolved, &right_resolved) {
-                                (Type::Constructed(TypeName::Vec, left_args), Type::Constructed(TypeName::Vec, _)) => {
+                                (l, r) if l.is_vec() && r.is_vec() => {
                                     // vec op vec - unify types and return vec
                                     self.context.unify(&left_type, &right_type).map_err(|_| {
                                         err_type_at!(
@@ -1971,34 +1968,32 @@ impl<'a> TypeChecker<'a> {
                                             self.format_type(&right_resolved)
                                         )
                                     })?;
-                                    (left_resolved.clone(), left_args.get(1).cloned(), true)
+                                    (left_resolved.clone(), l.elem_type().cloned(), true)
                                 }
-                                (Type::Constructed(TypeName::Vec, args), scalar) => {
+                                (l, scalar) if l.is_vec() => {
                                     // vec op scalar - result is vec type
-                                    if let Some(elem_type) = args.get(1) {
-                                        self.context.unify(elem_type, scalar).map_err(|_| {
-                                            err_type_at!(
-                                                expr.h.span,
-                                                "Vector-scalar operation requires matching element type, got {} and {}",
-                                                self.format_type(elem_type),
-                                                self.format_type(scalar)
-                                            )
-                                        })?;
-                                    }
+                                    let elem = l.elem_type().expect("Vec has elem type");
+                                    self.context.unify(elem, scalar).map_err(|_| {
+                                        err_type_at!(
+                                            expr.h.span,
+                                            "Vector-scalar operation requires matching element type, got {} and {}",
+                                            self.format_type(elem),
+                                            self.format_type(scalar)
+                                        )
+                                    })?;
                                     (left_resolved.clone(), Some(right_resolved.clone()), true)
                                 }
-                                (scalar, Type::Constructed(TypeName::Vec, args)) => {
+                                (scalar, r) if r.is_vec() => {
                                     // scalar op vec - result is vec type
-                                    if let Some(elem_type) = args.get(1) {
-                                        self.context.unify(scalar, elem_type).map_err(|_| {
-                                            err_type_at!(
-                                                expr.h.span,
-                                                "Scalar-vector operation requires matching element type, got {} and {}",
-                                                self.format_type(scalar),
-                                                self.format_type(elem_type)
-                                            )
-                                        })?;
-                                    }
+                                    let elem = r.elem_type().expect("Vec has elem type");
+                                    self.context.unify(scalar, elem).map_err(|_| {
+                                        err_type_at!(
+                                            expr.h.span,
+                                            "Scalar-vector operation requires matching element type, got {} and {}",
+                                            self.format_type(scalar),
+                                            self.format_type(elem)
+                                        )
+                                    })?;
                                     (right_resolved.clone(), Some(left_resolved.clone()), true)
                                 }
                                 _ => {
@@ -2402,7 +2397,7 @@ impl<'a> TypeChecker<'a> {
                 let elem_type = start_type.apply(&self.context);
                 // Range literals produce virtual arrays (struct {start, step, len})
                 let addrspace = Type::Constructed(TypeName::ArrayVariantVirtual, vec![]);
-                Ok(Type::Constructed(TypeName::Array, vec![elem_type, addrspace, size_type]))
+                Ok(Type::Constructed(TypeName::Array, vec![elem_type, size_type, addrspace]))
             }
 
             ExprKind::Slice(slice) => {
@@ -2462,7 +2457,7 @@ impl<'a> TypeChecker<'a> {
                 } else {
                     addrspace
                 };
-                Ok(Type::Constructed(TypeName::Array, vec![elem_type, result_variant, result_size]))
+                Ok(Type::Constructed(TypeName::Array, vec![elem_type, result_size, result_variant]))
             }
 
             ExprKind::TypeAscription(expr, ascribed_ty) => {
@@ -2625,7 +2620,7 @@ impl<'a> TypeChecker<'a> {
         let size_var = self.context.new_variable();
         let want_array = Type::Constructed(
             TypeName::Array,
-            vec![elem_var.clone(), addrspace_var.clone(), size_var.clone()],
+            vec![elem_var.clone(), size_var.clone(), addrspace_var.clone()],
         );
 
         self.context.unify(array_ty, &want_array).map_err(|_| {
@@ -2689,16 +2684,16 @@ impl<'a> TypeChecker<'a> {
         // 3. Vec swizzle (x/y/z/w)
         if matches!(field, "x" | "y" | "z" | "w") {
             // If already a Vec, extract element type
-            if let Type::Constructed(TypeName::Vec, args) = base_ty {
-                if args.len() == 2 {
-                    return Ok(args[1].clone()); // element type
+            if let Some(elem) = base_ty.elem_type() {
+                if base_ty.is_vec() {
+                    return Ok(elem.clone());
                 }
             }
 
             // Otherwise, constrain to Vec and return element type
-            let size_var = self.context.new_variable();
             let elem_var = self.context.new_variable();
-            let want_vec = Type::Constructed(TypeName::Vec, vec![size_var, elem_var.clone()]);
+            let size_var = self.context.new_variable();
+            let want_vec = Type::Constructed(TypeName::Vec, vec![elem_var.clone(), size_var]);
 
             self.context.unify(base_ty, &want_vec).map_err(|_| {
                 err_type_at!(

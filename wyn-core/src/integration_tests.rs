@@ -476,8 +476,8 @@ def cube_corners: [8]vec3f32 =
 def main_image(res: vec2f32, time: f32, fragCoord: vec2f32) vec4f32 =
     let cam = translation(@[0.0, 0.0, 10.0]) in
     let rot = rotation_y(time) in
-    let mat = mul(rot, cam) in
-    let v4s = map(|v: vec3f32| mul(@[v.x, v.y, v.z, 1.0], mat), cube_corners) in
+    let mat = rot * cam in
+    let v4s = map(|v: vec3f32| @[v.x, v.y, v.z, 1.0] * mat, cube_corners) in
     v4s[0]
 
 #[fragment]

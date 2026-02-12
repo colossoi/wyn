@@ -23,6 +23,7 @@ pub mod to_ssa;
 mod to_ssa_tests;
 
 use crate::ast::{self, NodeId, Span, TypeName};
+use crate::types::TypeExt;
 use crate::{SymbolId, SymbolTable, TypeTable};
 use polytype::Type;
 use std::collections::HashMap;
@@ -1215,11 +1216,10 @@ impl<'a> Transformer<'a> {
             ast::ExprKind::VecMatLiteral(elements) => {
                 // For matrices, columns are vectors not arrays
                 // Check if result type is Mat and transform columns accordingly
-                if let Type::Constructed(TypeName::Mat, args) = &ty {
-                    // Mat<rows, cols, elem_ty> - column type is Vec<rows, elem_ty>
-                    if args.len() >= 3 {
-                        let col_ty =
-                            Type::Constructed(TypeName::Vec, vec![args[0].clone(), args[2].clone()]);
+                if ty.is_mat() {
+                    // Mat[elem, cols, rows] - column type is Vec[elem, rows]
+                    if let (Some(elem), Some(rows_ty)) = (ty.elem_type(), ty.mat_rows_type()) {
+                        let col_ty = Type::Constructed(TypeName::Vec, vec![elem.clone(), rows_ty.clone()]);
                         // Transform elements, treating ArrayLiterals as vectors
                         let col_terms: Vec<Term> =
                             elements.iter().map(|e| self.transform_as_vector(e, col_ty.clone())).collect();
@@ -1870,10 +1870,10 @@ impl<'a> Transformer<'a> {
     }
 
     fn get_array_element_type(&self, ty: &Type<TypeName>) -> Type<TypeName> {
-        match ty {
-            Type::Constructed(TypeName::Array, args) if !args.is_empty() => args[0].clone(),
-            _ => panic!("BUG: Expected array type, got {:?}", ty),
-        }
+        ty.elem_type()
+            .filter(|_| ty.is_array())
+            .cloned()
+            .unwrap_or_else(|| panic!("BUG: Expected array type, got {:?}", ty))
     }
 
     fn transform_match(&mut self, match_expr: &ast::MatchExpr, ty: Type<TypeName>, span: Span) -> Term {

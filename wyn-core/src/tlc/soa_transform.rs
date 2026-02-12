@@ -12,6 +12,7 @@
 use super::{ArrayExpr, Def, Lambda, LoopKind, Place, Program, SoacOp, Term, TermIdSource, TermKind};
 use crate::SymbolTable;
 use crate::ast::{Span, TypeName};
+use crate::types::TypeExt;
 use polytype::Type;
 
 // =============================================================================
@@ -24,10 +25,10 @@ use polytype::Type;
 /// Other types are rewritten recursively but their top-level structure is preserved.
 pub fn soa_type(ty: &Type<TypeName>) -> Type<TypeName> {
     match ty {
-        Type::Constructed(TypeName::Array, args) if args.len() == 3 => {
-            let elem = soa_type(&args[0]);
-            let variant = args[1].clone();
-            let size = args[2].clone();
+        _ if ty.is_array() => {
+            let elem = soa_type(ty.elem_type().expect("Array has elem"));
+            let size = ty.array_size().expect("Array has size").clone();
+            let variant = ty.array_variant().expect("Array has variant").clone();
 
             // If the element type is a tuple, distribute the array into each component.
             // Recursively apply soa_type to each distributed array, so nested
@@ -38,13 +39,13 @@ pub fn soa_type(ty: &Type<TypeName>) -> Type<TypeName> {
                     .map(|ct| {
                         soa_type(&Type::Constructed(
                             TypeName::Array,
-                            vec![ct.clone(), variant.clone(), size.clone()],
+                            vec![ct.clone(), size.clone(), variant.clone()],
                         ))
                     })
                     .collect();
                 Type::Constructed(TypeName::Tuple(n), distributed)
             } else {
-                Type::Constructed(TypeName::Array, vec![elem, variant, size])
+                Type::Constructed(TypeName::Array, vec![elem, size, variant])
             }
         }
         Type::Constructed(TypeName::Tuple(n), args) => {
@@ -66,19 +67,20 @@ pub fn soa_type(ty: &Type<TypeName>) -> Type<TypeName> {
 /// Check if a type was an array-of-tuple before SoA transformation.
 /// Returns Some(n) where n is the tuple arity if it was.
 fn is_array_of_tuple(ty: &Type<TypeName>) -> Option<usize> {
-    match ty {
-        Type::Constructed(TypeName::Array, args) if args.len() == 3 => match &args[0] {
-            Type::Constructed(TypeName::Tuple(n), _) => Some(*n),
-            // Check recursively: the element might become a tuple after soa_type
-            _ => {
-                let elem_soa = soa_type(&args[0]);
-                match elem_soa {
-                    Type::Constructed(TypeName::Tuple(n), _) => Some(n),
-                    _ => None,
-                }
+    let elem = ty.elem_type()?;
+    if !ty.is_array() {
+        return None;
+    }
+    match elem {
+        Type::Constructed(TypeName::Tuple(n), _) => Some(*n),
+        // Check recursively: the element might become a tuple after soa_type
+        _ => {
+            let elem_soa = soa_type(elem);
+            match elem_soa {
+                Type::Constructed(TypeName::Tuple(n), _) => Some(n),
+                _ => None,
             }
-        },
-        _ => None,
+        }
     }
 }
 
@@ -87,13 +89,15 @@ fn is_array_of_tuple(ty: &Type<TypeName>) -> Option<usize> {
 fn array_of_tuple_parts(
     ty: &Type<TypeName>,
 ) -> Option<(Vec<Type<TypeName>>, Type<TypeName>, Type<TypeName>)> {
-    match ty {
-        Type::Constructed(TypeName::Array, args) if args.len() == 3 => match &args[0] {
-            Type::Constructed(TypeName::Tuple(_), components) => {
-                Some((components.clone(), args[1].clone(), args[2].clone()))
-            }
-            _ => None,
-        },
+    if !ty.is_array() {
+        return None;
+    }
+    match ty.elem_type()? {
+        Type::Constructed(TypeName::Tuple(_), components) => {
+            let variant = ty.array_variant().expect("Array has variant").clone();
+            let size = ty.array_size().expect("Array has size").clone();
+            Some((components.clone(), variant, size))
+        }
         _ => None,
     }
 }
@@ -396,7 +400,7 @@ impl SoaTransformer {
                 // like [8](int, vec3) are further distributed to ([8]int, [8]vec3).
                 let comp_arr_ty = soa_type(&Type::Constructed(
                     TypeName::Array,
-                    vec![soa_type(&comp_tys[i]), variant.clone(), size.clone()],
+                    vec![soa_type(&comp_tys[i]), size.clone(), variant.clone()],
                 ));
                 let proj = self.mk_tuple_proj(arr.clone(), i, comp_arr_ty, span);
                 let elem_ty = soa_type(&comp_tys[i]);
@@ -427,7 +431,7 @@ impl SoaTransformer {
                 let soa_comp_ty = soa_type(&comp_tys[i]);
                 let comp_arr_ty = soa_type(&Type::Constructed(
                     TypeName::Array,
-                    vec![soa_comp_ty.clone(), variant.clone(), size.clone()],
+                    vec![soa_comp_ty.clone(), size.clone(), variant.clone()],
                 ));
                 let arr_proj = self.mk_tuple_proj(arr.clone(), i, comp_arr_ty.clone(), span);
                 let val_proj = self.mk_tuple_proj(val.clone(), i, soa_comp_ty, span);
@@ -441,7 +445,7 @@ impl SoaTransformer {
                 .map(|i| {
                     soa_type(&Type::Constructed(
                         TypeName::Array,
-                        vec![soa_type(&comp_tys[i]), variant.clone(), size.clone()],
+                        vec![soa_type(&comp_tys[i]), size.clone(), variant.clone()],
                     ))
                 })
                 .collect(),
@@ -469,7 +473,7 @@ impl SoaTransformer {
                     .collect();
                 let arr_ty = soa_type(&Type::Constructed(
                     TypeName::Array,
-                    vec![soa_comp_ty, variant.clone(), size.clone()],
+                    vec![soa_comp_ty, size.clone(), variant.clone()],
                 ));
                 self.mk_array_lit(projected_elems, arr_ty, span)
             })
@@ -481,7 +485,7 @@ impl SoaTransformer {
                 .map(|i| {
                     soa_type(&Type::Constructed(
                         TypeName::Array,
-                        vec![soa_type(&comp_tys[i]), variant.clone(), size.clone()],
+                        vec![soa_type(&comp_tys[i]), size.clone(), variant.clone()],
                     ))
                 })
                 .collect(),
@@ -1050,7 +1054,7 @@ mod tests {
     }
 
     fn array_ty(elem: Type<TypeName>, size: usize) -> Type<TypeName> {
-        Type::Constructed(TypeName::Array, vec![elem, composite_variant(), size_ty(size)])
+        Type::Constructed(TypeName::Array, vec![elem, size_ty(size), composite_variant()])
     }
 
     fn tuple_ty(args: Vec<Type<TypeName>>) -> Type<TypeName> {

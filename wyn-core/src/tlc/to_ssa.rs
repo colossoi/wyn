@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use crate::ast::{self, NodeId, Span, TypeName};
 use crate::mir::ssa::{FuncBody, InstKind, Terminator, ValueId};
 use crate::mir::ssa_builder::FuncBuilder;
+use crate::types::TypeExt;
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 
@@ -36,12 +37,7 @@ fn extract_function_signature(ty: &Type<TypeName>) -> (Vec<Type<TypeName>>, Type
 
 /// Check if a type is an unsized array (runtime-sized storage buffer).
 fn is_unsized_array(ty: &Type<TypeName>) -> bool {
-    match ty {
-        Type::Constructed(TypeName::Array, args) if args.len() == 3 => {
-            matches!(&args[2], Type::Variable(_))
-        }
-        _ => false,
-    }
+    ty.array_size().map(|s| matches!(s, Type::Variable(_))).unwrap_or(false)
 }
 
 /// Check if a type is an SoA tuple-of-arrays (result of SoA transform on `[n](A,B)` → `([n]A, [n]B)`).
@@ -68,7 +64,7 @@ fn soa_elem_type(soa_ty: &Type<TypeName>) -> Type<TypeName> {
             let elem_types: Vec<Type<TypeName>> = component_types
                 .iter()
                 .map(|ct| match ct {
-                    Type::Constructed(TypeName::Array, args) if !args.is_empty() => args[0].clone(),
+                    ty if ty.is_array() => ty.elem_type().expect("Array has elem").clone(),
                     ty if is_soa_tuple(ty).is_some() => soa_elem_type(ty),
                     _ => ct.clone(),
                 })
@@ -82,7 +78,7 @@ fn soa_elem_type(soa_ty: &Type<TypeName>) -> Type<TypeName> {
 /// Extract compile-time array size from a type (handles both plain arrays and SoA tuples).
 fn extract_array_size(ty: &Type<TypeName>) -> Option<usize> {
     match ty {
-        Type::Constructed(TypeName::Array, type_args) if type_args.len() >= 3 => match &type_args[2] {
+        _ if ty.is_array() => match ty.array_size().expect("Array has size") {
             Type::Constructed(TypeName::Size(n), _) => Some(*n),
             _ => None,
         },
@@ -1437,7 +1433,7 @@ impl<'a> Converter<'a> {
                     .push_project(arr, i as u32, comp_ty.clone(), span, node_id)
                     .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
                 let comp_elem_ty = match comp_ty {
-                    Type::Constructed(TypeName::Array, args) if !args.is_empty() => args[0].clone(),
+                    ty if ty.is_array() => ty.elem_type().expect("Array has elem").clone(),
                     ty if is_soa_tuple(ty).is_some() => soa_elem_type(ty),
                     _ => comp_ty.clone(),
                 };
@@ -1474,7 +1470,7 @@ impl<'a> Converter<'a> {
                     .push_project(arr, i as u32, comp_ty.clone(), span, node_id)
                     .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
                 let comp_elem_ty = match comp_ty {
-                    Type::Constructed(TypeName::Array, args) if !args.is_empty() => args[0].clone(),
+                    ty if ty.is_array() => ty.elem_type().expect("Array has elem").clone(),
                     ty if is_soa_tuple(ty).is_some() => soa_elem_type(ty),
                     _ => comp_ty.clone(),
                 };
@@ -1638,7 +1634,7 @@ impl<'a> Converter<'a> {
 
         // Get output element type (SoA-aware)
         let output_elem_ty = match &result_ty {
-            Type::Constructed(TypeName::Array, type_args) if !type_args.is_empty() => type_args[0].clone(),
+            ty if ty.is_array() => ty.elem_type().expect("Array has elem").clone(),
             ty if is_soa_tuple(ty).is_some() => soa_elem_type(ty),
             _ => {
                 // If single input, use its elem type as fallback

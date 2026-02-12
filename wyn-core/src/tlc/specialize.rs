@@ -6,6 +6,7 @@
 use super::{ArrayExpr, Def, Lambda, LoopKind, Program, SoacOp, Term, TermIdSource, TermKind};
 use crate::SymbolTable;
 use crate::ast::TypeName;
+use crate::types::TypeExt;
 use polytype::Type;
 
 /// Specialize polymorphic intrinsics in a TLC program.
@@ -314,10 +315,7 @@ impl Specializer {
     /// Get the type prefix for specialization (f32, i32, u32, etc.)
     fn type_prefix(&self, ty: &Type<TypeName>) -> Option<String> {
         // Extract element type for vectors
-        let elem_ty = match ty {
-            Type::Constructed(TypeName::Vec, args) if args.len() >= 2 => &args[1],
-            _ => ty,
-        };
+        let elem_ty = ty.elem_type().filter(|_| ty.is_vec()).unwrap_or(ty);
 
         match elem_ty {
             Type::Constructed(TypeName::Float(bits), _) => Some(format!("f{}", bits)),

@@ -131,8 +131,8 @@ pub fn parallelize_soacs(mut program: SsaProgram) -> SsaProgram {
                                 TypeName::Array,
                                 vec![
                                     output_elem_ty.clone(),
-                                    Type::Constructed(TypeName::ArrayVariantView, vec![]),
                                     Type::Constructed(TypeName::SizePlaceholder, vec![]),
+                                    Type::Constructed(TypeName::ArrayVariantView, vec![]),
                                 ],
                             );
                             entry.outputs = vec![EntryOutput {

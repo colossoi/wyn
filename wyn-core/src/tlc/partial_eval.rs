@@ -5,6 +5,7 @@
 
 use super::{Def, Lambda, Program, Term, TermIdSource, TermKind};
 use crate::ast::{BinaryOp, Span, TypeName, UnaryOp};
+use crate::types::TypeExt;
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 use std::collections::HashMap;
@@ -450,10 +451,11 @@ impl PartialEvaluator {
     }
 
     fn reify_array(&mut self, elems: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
-        let elem_ty = match ty {
-            Type::Constructed(TypeName::Array, args) if !args.is_empty() => args[0].clone(),
-            _ => Type::Constructed(TypeName::Unit, vec![]),
-        };
+        let elem_ty = ty
+            .elem_type()
+            .filter(|_| ty.is_array())
+            .cloned()
+            .unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![]));
         let array_sym = self.symbols.alloc("_w_array_lit".to_string());
         let mut result = self.mk_term(ty.clone(), span, TermKind::Var(array_sym));
 
@@ -472,10 +474,7 @@ impl PartialEvaluator {
     }
 
     fn reify_vector(&mut self, elems: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
-        let elem_ty = match ty {
-            Type::Constructed(TypeName::Vec, args) if !args.is_empty() => args[0].clone(),
-            _ => Type::Constructed(TypeName::Unit, vec![]),
-        };
+        let elem_ty = ty.elem_type().cloned().unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![]));
         let vec_sym = self.symbols.alloc("_w_vec_lit".to_string());
         let mut result = self.mk_term(ty.clone(), span, TermKind::Var(vec_sym));
 

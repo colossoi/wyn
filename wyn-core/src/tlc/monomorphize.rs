@@ -14,6 +14,7 @@
 
 use super::{ArrayExpr, Def, DefMeta, Lambda, LoopKind, Program, SoacOp, Term, TermIdSource, TermKind};
 use crate::ast::TypeName;
+use crate::types::TypeExt;
 use crate::types::TypeScheme;
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
@@ -1064,22 +1065,22 @@ pub(crate) fn format_type_compact(ty: &Type<TypeName>) -> String {
             let args_str = args.iter().map(format_type_compact).collect::<Vec<_>>().join("_");
             format!("{}_{}", s, args_str)
         }
-        Type::Constructed(TypeName::Array, args) => {
-            assert!(args.len() == 3);
+        _ if ty.is_array() => {
             format!(
                 "arr{}_{}{}",
-                format_type_compact(&args[0]),
-                format_type_compact(&args[1]),
-                format_type_compact(&args[2])
+                format_type_compact(ty.elem_type().expect("Array has elem")),
+                format_type_compact(ty.array_size().expect("Array has size")),
+                format_type_compact(ty.array_variant().expect("Array has variant"))
             )
         }
         Type::Constructed(TypeName::Tuple(arity), args) => {
             let args_str = args.iter().map(format_type_compact).collect::<Vec<_>>().join("_");
             format!("tup{}_{}", arity, args_str)
         }
-        Type::Constructed(TypeName::Vec, args) => {
-            let args_str = args.iter().map(format_type_compact).collect::<Vec<_>>().join("_");
-            format!("vec_{}", args_str)
+        _ if ty.is_vec() => {
+            let elem = format_type_compact(ty.elem_type().expect("Vec has elem"));
+            let size = format_type_compact(ty.vec_size_type().expect("Vec has size"));
+            format!("vec_{}_{}", elem, size)
         }
         Type::Constructed(TypeName::Float(bits), _) => format!("f{}", bits),
         Type::Constructed(TypeName::Int(bits), _) => format!("i{}", bits),

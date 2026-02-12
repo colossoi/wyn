@@ -11,7 +11,7 @@ fn test_resolve_size_placeholder() {
     // Should have replaced SizePlaceholder with a variable
     match &resolved {
         Type::Constructed(TypeName::Array, args) => {
-            assert!(matches!(&args[2], Type::Variable(_)));
+            assert!(matches!(&args[1], Type::Variable(_)));
         }
         _ => panic!("Expected array type"),
     }
@@ -25,8 +25,8 @@ fn test_resolve_address_placeholder() {
         TypeName::Array,
         vec![
             types::f32(),
-            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
             Type::Constructed(TypeName::Size(10), vec![]),
+            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
         ],
     );
     let resolved = resolver.resolve_type(&ty);
@@ -34,7 +34,7 @@ fn test_resolve_address_placeholder() {
     // Should have replaced AddressPlaceholder with a variable
     match &resolved {
         Type::Constructed(TypeName::Array, args) => {
-            assert!(matches!(&args[1], Type::Variable(_)));
+            assert!(matches!(&args[2], Type::Variable(_)));
         }
         _ => panic!("Expected array type"),
     }

@@ -1105,8 +1105,8 @@ mod tests {
             TypeName::Array,
             vec![
                 elem,
-                Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
                 Type::Variable(0), // size
+                Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             ],
         )
     }

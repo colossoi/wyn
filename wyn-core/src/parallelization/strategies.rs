@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use crate::ast::TypeName;
 use crate::mir::ssa::{FuncBody, InstKind, ValueId};
-use crate::types::is_virtual_array;
+use crate::types::{TypeExt, is_virtual_array};
 use polytype::Type;
 
 use super::ParallelizeCtx;
@@ -82,10 +82,7 @@ impl InputStrategy for StorageInput {
 
     fn setup(&mut self, ctx: &mut ParallelizeCtx) -> Option<(ValueId, ValueId, Type<TypeName>)> {
         let array_ty = ctx.entry.inputs.get(self.param_index)?.ty.clone();
-        let elem_ty = match &array_ty {
-            Type::Constructed(TypeName::Array, args) if !args.is_empty() => args[0].clone(),
-            _ => return None,
-        };
+        let elem_ty = array_ty.elem_type()?.clone();
 
         let view =
             ctx.builder.emit_storage_view(self.set, self.binding, array_ty, ctx.span, ctx.node_id).ok()?;
@@ -190,12 +187,7 @@ impl RangeInput {
 
 /// Extract element type from an array type.
 fn extract_array_elem_type(ty: &Type<TypeName>) -> Option<Type<TypeName>> {
-    if let Type::Constructed(TypeName::Array, args) = ty {
-        if !args.is_empty() {
-            return Some(args[0].clone());
-        }
-    }
-    None
+    ty.elem_type().filter(|_| ty.is_array()).cloned()
 }
 
 /// Return the scalar type name string (e.g. "i32", "u32", "f32") for a primitive type.
@@ -307,8 +299,8 @@ impl OutputStrategy for StorageOutput {
             TypeName::Array,
             vec![
                 elem_ty.clone(),
-                Type::Constructed(TypeName::ArrayVariantView, vec![]),
                 Type::Constructed(TypeName::SizePlaceholder, vec![]),
+                Type::Constructed(TypeName::ArrayVariantView, vec![]),
             ],
         );
         ctx.builder.emit_storage_view(self.set, self.binding, array_ty, ctx.span, ctx.node_id).ok()

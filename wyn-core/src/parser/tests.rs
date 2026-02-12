@@ -194,8 +194,8 @@ fn test_parse_entry_point_decl() {
             TypeName::Array,
             vec![
                 crate::types::f32(),
-                Type::Constructed(TypeName::AddressPlaceholder, vec![]),
                 Type::Constructed(TypeName::Size(4), vec![]),
+                Type::Constructed(TypeName::AddressPlaceholder, vec![]),
             ],
         )
     );

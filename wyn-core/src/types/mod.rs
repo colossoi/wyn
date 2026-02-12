@@ -326,6 +326,14 @@ impl From<&'static str> for TypeName {
 ///
 /// Centralizes type queries so passes don't need to pattern-match
 /// on TypeName variants directly.
+///
+/// ## Constructed type argument layouts
+///
+/// | Type    | args[0]       | args[1]          | args[2]      |
+/// |---------|---------------|------------------|--------------|
+/// | `Vec`   | elem_type     | Size(n)          | —            |
+/// | `Mat`   | elem_type     | Size(cols)       | Size(rows)   |
+/// | `Array` | elem_type     | size             | variant      |
 pub trait TypeExt {
     /// Create a unique (consuming/alias-free) type: *T
     fn unique(inner: Type) -> Type;
@@ -341,6 +349,42 @@ pub trait TypeExt {
 
     /// Check if this type is an array type
     fn is_array(&self) -> bool;
+
+    /// Check if this type is a matrix type
+    fn is_mat(&self) -> bool;
+
+    /// Check if this type is a vector type
+    fn is_vec(&self) -> bool;
+
+    /// Check if this type is a scalar numeric type (float, int, or uint)
+    fn is_scalar(&self) -> bool;
+
+    /// Get the element type (args[0]) of a Vec, Mat, or Array.
+    fn elem_type(&self) -> Option<&Type>;
+
+    /// Get the vector component count, or None if not a Vec with concrete size.
+    fn vec_size(&self) -> Option<usize>;
+
+    /// Get the vector size as a raw type (args[1]).
+    fn vec_size_type(&self) -> Option<&Type>;
+
+    /// Get the matrix column count, or None if not a Mat with concrete size.
+    fn mat_cols(&self) -> Option<usize>;
+
+    /// Get the matrix row count, or None if not a Mat with concrete size.
+    fn mat_rows(&self) -> Option<usize>;
+
+    /// Get the matrix cols as a raw type (args[1]).
+    fn mat_cols_type(&self) -> Option<&Type>;
+
+    /// Get the matrix rows as a raw type (args[2]).
+    fn mat_rows_type(&self) -> Option<&Type>;
+
+    /// Get the array size type (args[1]), or None if not an Array.
+    fn array_size(&self) -> Option<&Type>;
+
+    /// Get the array variant type (args[2]), or None if not an Array.
+    fn array_variant(&self) -> Option<&Type>;
 }
 
 impl TypeExt for Type {
@@ -367,6 +411,217 @@ impl TypeExt for Type {
 
     fn is_array(&self) -> bool {
         matches!(self, Type::Constructed(TypeName::Array, _))
+    }
+
+    fn is_mat(&self) -> bool {
+        matches!(self, Type::Constructed(TypeName::Mat, _))
+    }
+
+    fn is_vec(&self) -> bool {
+        matches!(self, Type::Constructed(TypeName::Vec, _))
+    }
+
+    fn is_scalar(&self) -> bool {
+        matches!(
+            self,
+            Type::Constructed(TypeName::Float(_) | TypeName::Int(_) | TypeName::UInt(_), _)
+        )
+    }
+
+    fn elem_type(&self) -> Option<&Type> {
+        match self {
+            // All three have elem_type at args[0]
+            Type::Constructed(TypeName::Vec, args) => {
+                debug_assert_eq!(
+                    args.len(),
+                    2,
+                    "Vec must have exactly 2 args [elem, size], got {:?}",
+                    args
+                );
+                debug_assert!(
+                    !matches!(&args[0], Type::Constructed(TypeName::Size(_), _)),
+                    "Vec args[0] looks like a Size, expected elem type: {:?}",
+                    args
+                );
+                args.first()
+            }
+            Type::Constructed(TypeName::Mat, args) => {
+                debug_assert_eq!(
+                    args.len(),
+                    3,
+                    "Mat must have exactly 3 args [elem, cols, rows], got {:?}",
+                    args
+                );
+                debug_assert!(
+                    !matches!(&args[0], Type::Constructed(TypeName::Size(_), _)),
+                    "Mat args[0] looks like a Size, expected elem type: {:?}",
+                    args
+                );
+                args.first()
+            }
+            Type::Constructed(TypeName::Array, args) => {
+                debug_assert!(
+                    args.len() >= 1 && args.len() <= 3,
+                    "Array must have 1-3 args [elem, size, variant], got {:?}",
+                    args
+                );
+                args.first()
+            }
+            _ => None,
+        }
+    }
+
+    fn vec_size(&self) -> Option<usize> {
+        if let Type::Constructed(TypeName::Vec, args) = self {
+            debug_assert_eq!(
+                args.len(),
+                2,
+                "Vec must have exactly 2 args [elem, size], got {:?}",
+                args
+            );
+            if let Type::Constructed(TypeName::Size(n), _) = &args[1] {
+                return Some(*n);
+            }
+        }
+        None
+    }
+
+    fn vec_size_type(&self) -> Option<&Type> {
+        if let Type::Constructed(TypeName::Vec, args) = self {
+            debug_assert_eq!(
+                args.len(),
+                2,
+                "Vec must have exactly 2 args [elem, size], got {:?}",
+                args
+            );
+            return Some(&args[1]);
+        }
+        None
+    }
+
+    fn mat_cols(&self) -> Option<usize> {
+        if let Type::Constructed(TypeName::Mat, args) = self {
+            debug_assert_eq!(
+                args.len(),
+                3,
+                "Mat must have exactly 3 args [elem, cols, rows], got {:?}",
+                args
+            );
+            debug_assert!(
+                matches!(
+                    &args[1],
+                    Type::Constructed(TypeName::Size(_), _) | Type::Variable(_)
+                ),
+                "Mat args[1] should be Size or Variable (cols), got {:?}",
+                args[1]
+            );
+            if let Type::Constructed(TypeName::Size(n), _) = &args[1] {
+                return Some(*n);
+            }
+        }
+        None
+    }
+
+    fn mat_rows(&self) -> Option<usize> {
+        if let Type::Constructed(TypeName::Mat, args) = self {
+            debug_assert_eq!(
+                args.len(),
+                3,
+                "Mat must have exactly 3 args [elem, cols, rows], got {:?}",
+                args
+            );
+            debug_assert!(
+                matches!(
+                    &args[2],
+                    Type::Constructed(TypeName::Size(_), _) | Type::Variable(_)
+                ),
+                "Mat args[2] should be Size or Variable (rows), got {:?}",
+                args[2]
+            );
+            if let Type::Constructed(TypeName::Size(n), _) = &args[2] {
+                return Some(*n);
+            }
+        }
+        None
+    }
+
+    fn mat_cols_type(&self) -> Option<&Type> {
+        if let Type::Constructed(TypeName::Mat, args) = self {
+            debug_assert_eq!(
+                args.len(),
+                3,
+                "Mat must have exactly 3 args [elem, cols, rows], got {:?}",
+                args
+            );
+            return Some(&args[1]);
+        }
+        None
+    }
+
+    fn mat_rows_type(&self) -> Option<&Type> {
+        if let Type::Constructed(TypeName::Mat, args) = self {
+            debug_assert_eq!(
+                args.len(),
+                3,
+                "Mat must have exactly 3 args [elem, cols, rows], got {:?}",
+                args
+            );
+            return Some(&args[2]);
+        }
+        None
+    }
+
+    fn array_size(&self) -> Option<&Type> {
+        if let Type::Constructed(TypeName::Array, args) = self {
+            debug_assert!(
+                args.len() >= 2,
+                "Array must have at least 2 args [elem, size, ...], got {:?}",
+                args
+            );
+            debug_assert!(
+                matches!(
+                    &args[1],
+                    Type::Constructed(
+                        TypeName::Size(_)
+                            | TypeName::SizeVar(_)
+                            | TypeName::SizePlaceholder
+                            | TypeName::Skolem(_),
+                        _
+                    ) | Type::Variable(_)
+                ),
+                "Array args[1] should be Size/SizeVar/SizePlaceholder/Skolem/Variable, got {:?}",
+                args[1]
+            );
+            return Some(&args[1]);
+        }
+        None
+    }
+
+    fn array_variant(&self) -> Option<&Type> {
+        if let Type::Constructed(TypeName::Array, args) = self {
+            debug_assert_eq!(
+                args.len(),
+                3,
+                "Array must have exactly 3 args [elem, size, variant], got {:?}",
+                args
+            );
+            debug_assert!(
+                matches!(
+                    &args[2],
+                    Type::Constructed(
+                        TypeName::ArrayVariantComposite
+                            | TypeName::ArrayVariantView
+                            | TypeName::ArrayVariantVirtual
+                            | TypeName::AddressPlaceholder,
+                        _
+                    ) | Type::Variable(_)
+                ),
+                "Array args[2] should be a variant/placeholder/variable, got {:?}",
+                args[2]
+            );
+            return Some(&args[2]);
+        }
+        None
     }
 }
 
@@ -418,7 +673,7 @@ fn spirv_element_types() -> Vec<(&'static str, Type)> {
 pub fn vec(size: usize, element_type: Type) -> Type {
     Type::Constructed(
         TypeName::Vec,
-        vec![Type::Constructed(TypeName::Size(size), vec![]), element_type],
+        vec![element_type, Type::Constructed(TypeName::Size(size), vec![])],
     )
 }
 
@@ -438,8 +693,8 @@ pub fn vector_type_constructors() -> HashMap<String, Type> {
             let vec_type = Type::Constructed(
                 TypeName::Vec,
                 vec![
-                    Type::Constructed(TypeName::Size(*size), vec![]),
                     elem_type.clone(),
+                    Type::Constructed(TypeName::Size(*size), vec![]),
                 ],
             );
             (name, vec_type)
@@ -453,9 +708,9 @@ pub fn mat(rows: usize, cols: usize, elem_type: Type) -> Type {
     Type::Constructed(
         TypeName::Mat,
         vec![
-            Type::Constructed(TypeName::Size(rows), vec![]),
-            Type::Constructed(TypeName::Size(cols), vec![]),
             elem_type,
+            Type::Constructed(TypeName::Size(cols), vec![]),
+            Type::Constructed(TypeName::Size(rows), vec![]),
         ],
     )
 }
@@ -475,9 +730,9 @@ pub fn matrix_type_constructors() -> HashMap<String, Type> {
             let matrix_type = Type::Constructed(
                 TypeName::Mat,
                 vec![
-                    Type::Constructed(TypeName::Size(*rows), vec![]),
-                    Type::Constructed(TypeName::Size(*cols), vec![]),
                     elem_type.clone(),
+                    Type::Constructed(TypeName::Size(*cols), vec![]),
+                    Type::Constructed(TypeName::Size(*rows), vec![]),
                 ],
             );
 
@@ -495,28 +750,28 @@ pub fn matrix_type_constructors() -> HashMap<String, Type> {
         .collect()
 }
 
-/// Create a sized array: Array[elem, Function, Size(n)]
-/// Defaults to Function address space for local/value arrays.
+/// Create a sized array: Array[elem, Size(n), Composite]
+/// Defaults to Composite variant for local/value arrays.
 pub fn sized_array(size: usize, elem_type: Type) -> Type {
     Type::Constructed(
         TypeName::Array,
         vec![
             elem_type,
-            Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Constructed(TypeName::Size(size), vec![]),
+            Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
         ],
     )
 }
 
-/// Create a sized array with placeholder address space: Array[elem, Placeholder, Size(n)]
+/// Create a sized array with placeholder address space: Array[elem, Size(n), Placeholder]
 /// Used for parser tests where address space hasn't been resolved yet.
 pub fn sized_array_placeholder(size: usize, elem_type: Type) -> Type {
     Type::Constructed(
         TypeName::Array,
         vec![
             elem_type,
-            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
             Type::Constructed(TypeName::Size(size), vec![]),
+            Type::Constructed(TypeName::AddressPlaceholder, vec![]),
         ],
     )
 }
@@ -642,13 +897,10 @@ pub fn is_array_variant_virtual(ty: &Type) -> bool {
     matches!(ty, Type::Constructed(TypeName::ArrayVariantVirtual, _))
 }
 
-/// Get the array variant from an array type (returns the second type argument)
+/// Get the array variant from an array type (returns the variant type argument)
 pub fn get_array_variant(ty: &Type) -> Option<&TypeName> {
-    match ty {
-        Type::Constructed(TypeName::Array, args) if args.len() >= 2 => match &args[1] {
-            Type::Constructed(name, _) => Some(name),
-            _ => None,
-        },
+    match ty.array_variant()? {
+        Type::Constructed(name, _) => Some(name),
         _ => None,
     }
 }
@@ -686,11 +938,11 @@ pub fn debug_assert_top_level_type(ty: &Type, context: &str) {
 
     match ty {
         Type::Constructed(name, _) => match name {
-            // Address space markers - only valid inside Array[elem, addrspace, size]
+            // Address space markers - only valid inside Array[elem, size, variant]
             TypeName::ArrayVariantView | TypeName::ArrayVariantComposite | TypeName::AddressPlaceholder => {
                 panic!(
                     "BUG: Address space type {:?} used as top-level type in {}. \
-                     Address space markers should only appear inside Array[elem, addrspace, size].",
+                     Address space markers should only appear inside Array[elem, size, variant].",
                     ty, context
                 );
             }
@@ -737,68 +989,57 @@ pub fn pointer_addrspace(ty: &Type) -> Option<&Type> {
 }
 
 // --- Array type helpers ---
-// Array[elem, addrspace, size] is the unified array type.
+// Array[elem, size, variant] is the unified array type.
 
-/// Create an unsized array (slice): Array[elem, addrspace, SizePlaceholder]
+/// Create an unsized array (slice): Array[elem, SizePlaceholder, addrspace]
 pub fn unsized_array(elem: Type, addrspace: Type) -> Type {
     Type::Constructed(
         TypeName::Array,
         vec![
             elem,
-            addrspace,
             Type::Constructed(TypeName::SizePlaceholder, vec![]),
+            addrspace,
         ],
     )
 }
 
 /// Check if a type is an unsized array (has SizePlaceholder as size arg)
 pub fn is_unsized_array(ty: &Type) -> bool {
-    let Type::Constructed(TypeName::Array, args) = ty else {
-        return false;
-    };
-    assert!(args.len() == 3);
-    matches!(&args[2], Type::Constructed(TypeName::SizePlaceholder, _))
+    ty.array_size()
+        .map(|s| matches!(s, Type::Constructed(TypeName::SizePlaceholder, _)))
+        .unwrap_or(false)
 }
 
 /// Get the element type from an Array, or None if not an Array
 pub fn array_elem(ty: &Type) -> Option<&Type> {
-    let Type::Constructed(TypeName::Array, args) = ty else {
-        return None;
-    };
-    assert!(args.len() == 3);
-    Some(&args[0])
+    ty.elem_type().filter(|_| ty.is_array())
 }
 
-/// Get the address space from an Array, or None if not an Array
+/// Get the address space (variant) from an Array, or None if not an Array
 pub fn array_addrspace(ty: &Type) -> Option<&Type> {
-    let Type::Constructed(TypeName::Array, args) = ty else {
-        return None;
-    };
-    assert!(args.len() == 3);
-    Some(&args[1])
+    ty.array_variant()
 }
 
 /// Get the size from an Array, or None if not an Array
 pub fn array_size(ty: &Type) -> Option<&Type> {
-    let Type::Constructed(TypeName::Array, args) = ty else {
-        return None;
-    };
-    assert!(args.len() == 3);
-    Some(&args[2])
+    ty.array_size()
 }
 
 /// Check if a type is a storage array that requires BoundSlice-style access.
 /// Storage arrays with unsized length need pointer-based indexing at runtime.
 pub fn is_bound_slice_access(ty: &Type) -> bool {
-    match ty {
-        Type::Constructed(TypeName::Array, args) if args.len() >= 3 => {
-            assert!(args.len() == 3);
-            let is_storage = matches!(&args[1], Type::Constructed(TypeName::ArrayVariantView, _));
-            let is_unsized = matches!(&args[2], Type::Constructed(TypeName::SizePlaceholder, _));
-            is_storage && is_unsized
-        }
-        _ => false,
+    if !ty.is_array() {
+        return false;
     }
+    let is_storage = matches!(
+        ty.array_variant().expect("Array has variant"),
+        Type::Constructed(TypeName::ArrayVariantView, _)
+    );
+    let is_unsized = matches!(
+        ty.array_size().expect("Array has size"),
+        Type::Constructed(TypeName::SizePlaceholder, _)
+    );
+    is_storage && is_unsized
 }
 
 /// Format a type for display (standalone, without TypeChecker context)
@@ -811,38 +1052,42 @@ pub fn format_type(ty: &Type) -> String {
             let arg_strs: Vec<String> = args.iter().map(format_type).collect();
             format!("({})", arg_strs.join(", "))
         }
-        // Array[elem, addrspace, size] -> display based on size
-        Type::Constructed(TypeName::Array, args) if args.len() == 3 => {
-            let elem = format_type(&args[0]);
-            let size = &args[2];
+        // Array[elem, size, variant]
+        _ if ty.is_array() => {
+            let elem = format_type(ty.elem_type().expect("Array has elem"));
+            let size = ty.array_size().expect("Array has size");
             match size {
                 Type::Constructed(TypeName::Size(n), _) => format!("[{}]{}", n, elem),
                 Type::Constructed(TypeName::SizePlaceholder, _) => format!("[]{}", elem),
                 _ => format!("[{}]{}", format_type(size), elem),
             }
         }
-        // Vec[Size(n), elem] -> vecNelem (e.g., vec3f32)
-        Type::Constructed(TypeName::Vec, args) if args.len() == 2 => {
-            if let Type::Constructed(TypeName::Size(n), _) = &args[0] {
-                format!("vec{}{}", n, format_type(&args[1]))
+        // Vec[elem, Size(n)] -> vecNelem (e.g., vec3f32)
+        _ if ty.is_vec() => {
+            let elem = format_type(ty.elem_type().expect("Vec has elem"));
+            if let Some(n) = ty.vec_size() {
+                format!("vec{}{}", n, elem)
             } else {
-                format!("vec{}{}", format_type(&args[0]), format_type(&args[1]))
-            }
-        }
-        // Mat[Size(cols), Size(rows), elem] -> matCxRelem (e.g., mat4x4f32)
-        Type::Constructed(TypeName::Mat, args) if args.len() == 3 => match (&args[0], &args[1]) {
-            (Type::Constructed(TypeName::Size(cols), _), Type::Constructed(TypeName::Size(rows), _)) => {
-                format!("mat{}x{}{}", cols, rows, format_type(&args[2]))
-            }
-            _ => {
                 format!(
-                    "mat{}x{}{}",
-                    format_type(&args[0]),
-                    format_type(&args[1]),
-                    format_type(&args[2])
+                    "vec{}{}",
+                    format_type(ty.vec_size_type().expect("Vec has size")),
+                    elem
                 )
             }
-        },
+        }
+        // Mat[elem, Size(cols), Size(rows)] -> matCxRelem (e.g., mat4x4f32)
+        _ if ty.is_mat() => {
+            let elem = format_type(ty.elem_type().expect("Mat has elem"));
+            match (ty.mat_cols(), ty.mat_rows()) {
+                (Some(cols), Some(rows)) => format!("mat{}x{}{}", cols, rows, elem),
+                _ => format!(
+                    "mat{}x{}{}",
+                    format_type(ty.mat_cols_type().expect("Mat has cols")),
+                    format_type(ty.mat_rows_type().expect("Mat has rows")),
+                    elem
+                ),
+            }
+        }
         Type::Constructed(name, args) if args.is_empty() => format!("{}", name),
         Type::Constructed(name, args) => {
             let arg_strs: Vec<String> = args.iter().map(format_type).collect();

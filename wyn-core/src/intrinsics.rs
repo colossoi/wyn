@@ -229,27 +229,27 @@ impl IntrinsicSource {
         // magnitude : ∀n a. vec<n,a> -> a
         let n = ctx.new_variable();
         let a = ctx.new_variable();
-        let vec_n_a = Type::Constructed(TypeName::Vec, vec![n, a.clone()]);
+        let vec_n_a = Type::Constructed(TypeName::Vec, vec![a.clone(), n]);
         self.register_poly("magnitude", vec![vec_n_a], a);
 
         // normalize : ∀n a. vec<n,a> -> vec<n,a>
         let n = ctx.new_variable();
         let a = ctx.new_variable();
-        let vec_n_a = Type::Constructed(TypeName::Vec, vec![n, a]);
+        let vec_n_a = Type::Constructed(TypeName::Vec, vec![a, n]);
         self.register_poly("normalize", vec![vec_n_a.clone()], vec_n_a);
 
         // dot : ∀n a. vec<n,a> -> vec<n,a> -> a
         let n = ctx.new_variable();
         let a = ctx.new_variable();
-        let vec_n_a = Type::Constructed(TypeName::Vec, vec![n, a.clone()]);
+        let vec_n_a = Type::Constructed(TypeName::Vec, vec![a.clone(), n]);
         self.register_poly("dot", vec![vec_n_a.clone(), vec_n_a], a);
 
         // cross : vec<3,f32> -> vec<3,f32> -> vec<3,f32>
         let vec3f32 = Type::Constructed(
             TypeName::Vec,
             vec![
-                Type::Constructed(TypeName::Size(3), vec![]),
                 Type::Constructed(TypeName::Float(32), vec![]),
+                Type::Constructed(TypeName::Size(3), vec![]),
             ],
         );
         self.register_poly("cross", vec![vec3f32.clone(), vec3f32.clone()], vec3f32);
@@ -257,19 +257,19 @@ impl IntrinsicSource {
         // distance : ∀n a. vec<n,a> -> vec<n,a> -> a
         let n = ctx.new_variable();
         let a = ctx.new_variable();
-        let vec_n_a = Type::Constructed(TypeName::Vec, vec![n, a.clone()]);
+        let vec_n_a = Type::Constructed(TypeName::Vec, vec![a.clone(), n]);
         self.register_poly("distance", vec![vec_n_a.clone(), vec_n_a], a);
 
         // reflect : ∀n a. vec<n,a> -> vec<n,a> -> vec<n,a>
         let n = ctx.new_variable();
         let a = ctx.new_variable();
-        let vec_n_a = Type::Constructed(TypeName::Vec, vec![n, a]);
+        let vec_n_a = Type::Constructed(TypeName::Vec, vec![a, n]);
         self.register_poly("reflect", vec![vec_n_a.clone(), vec_n_a.clone()], vec_n_a);
 
         // refract : ∀n a. vec<n,a> -> vec<n,a> -> a -> vec<n,a>
         let n = ctx.new_variable();
         let a = ctx.new_variable();
-        let vec_n_a = Type::Constructed(TypeName::Vec, vec![n, a.clone()]);
+        let vec_n_a = Type::Constructed(TypeName::Vec, vec![a.clone(), n]);
         self.register_poly("refract", vec![vec_n_a.clone(), vec_n_a.clone(), a], vec_n_a);
 
         // floor, ceil, fract : a -> a (scalar)
@@ -284,7 +284,7 @@ impl IntrinsicSource {
         // clamp : ∀n a. a -> a -> vec<n,a> -> vec<n,a> (scalar lo/hi, vector x)
         let n = ctx.new_variable();
         let a = ctx.new_variable();
-        let vec_n_a = Type::Constructed(TypeName::Vec, vec![n, a.clone()]);
+        let vec_n_a = Type::Constructed(TypeName::Vec, vec![a.clone(), n]);
         self.register_poly("clamp", vec![a.clone(), a, vec_n_a.clone()], vec_n_a);
 
         // mix : a -> a -> a -> a (scalar)
@@ -293,7 +293,7 @@ impl IntrinsicSource {
         // mix : ∀n a. vec<n,a> -> vec<n,a> -> a -> vec<n,a> (vector x/y, scalar interpolant)
         let n = ctx.new_variable();
         let a = ctx.new_variable();
-        let vec_n_a = Type::Constructed(TypeName::Vec, vec![n, a.clone()]);
+        let vec_n_a = Type::Constructed(TypeName::Vec, vec![a.clone(), n]);
         self.register_poly("mix", vec![vec_n_a.clone(), vec_n_a.clone(), a], vec_n_a);
 
         // smoothstep : a -> a -> a -> a (scalar)
@@ -302,7 +302,7 @@ impl IntrinsicSource {
         // smoothstep : ∀n a. a -> a -> vec<n,a> -> vec<n,a> (scalar edges, vector x)
         let n = ctx.new_variable();
         let a = ctx.new_variable();
-        let vec_n_a = Type::Constructed(TypeName::Vec, vec![n, a.clone()]);
+        let vec_n_a = Type::Constructed(TypeName::Vec, vec![a.clone(), n]);
         self.register_poly("smoothstep", vec![a.clone(), a, vec_n_a.clone()], vec_n_a);
     }
 
@@ -311,22 +311,22 @@ impl IntrinsicSource {
         // determinant : ∀n a. mat<n,n,a> -> a (square matrix only)
         let n = ctx.new_variable();
         let a = ctx.new_variable();
-        let mat_n_n_a = Type::Constructed(TypeName::Mat, vec![n, a.clone(), a.clone()]);
+        let mat_n_n_a = Type::Constructed(TypeName::Mat, vec![a.clone(), n.clone(), n]);
         self.register_poly("determinant", vec![mat_n_n_a], a);
 
         // inverse : ∀n a. mat<n,n,a> -> mat<n,n,a> (square matrix only)
         let n = ctx.new_variable();
         let a = ctx.new_variable();
-        let mat_n_n_a = Type::Constructed(TypeName::Mat, vec![n, a.clone(), a]);
+        let mat_n_n_a = Type::Constructed(TypeName::Mat, vec![a, n.clone(), n]);
         self.register_poly("inverse", vec![mat_n_n_a.clone()], mat_n_n_a);
 
         // outer : ∀n m a. vec<n,a> -> vec<m,a> -> mat<n,m,a>
         let n = ctx.new_variable();
         let m = ctx.new_variable();
         let a = ctx.new_variable();
-        let vec_n_a = Type::Constructed(TypeName::Vec, vec![n.clone(), a.clone()]);
-        let vec_m_a = Type::Constructed(TypeName::Vec, vec![m.clone(), a.clone()]);
-        let mat_n_m_a = Type::Constructed(TypeName::Mat, vec![n, m, a]);
+        let vec_n_a = Type::Constructed(TypeName::Vec, vec![a.clone(), n.clone()]);
+        let vec_m_a = Type::Constructed(TypeName::Vec, vec![a.clone(), m.clone()]);
+        let mat_n_m_a = Type::Constructed(TypeName::Mat, vec![a, n, m]);
         self.register_poly("outer", vec![vec_n_a, vec_m_a], mat_n_m_a);
 
         // mul overloads - dispatch based on argument types in lowering
@@ -335,33 +335,33 @@ impl IntrinsicSource {
         let m = ctx.new_variable();
         let p = ctx.new_variable();
         let a = ctx.new_variable();
-        let mat_n_m_a = Type::Constructed(TypeName::Mat, vec![n.clone(), m.clone(), a.clone()]);
-        let mat_m_p_a = Type::Constructed(TypeName::Mat, vec![m, p.clone(), a.clone()]);
-        let mat_n_p_a = Type::Constructed(TypeName::Mat, vec![n, p, a]);
+        let mat_n_m_a = Type::Constructed(TypeName::Mat, vec![a.clone(), n.clone(), m.clone()]);
+        let mat_m_p_a = Type::Constructed(TypeName::Mat, vec![a.clone(), m, p.clone()]);
+        let mat_n_p_a = Type::Constructed(TypeName::Mat, vec![a, n, p]);
         self.register_poly("mul", vec![mat_n_m_a, mat_m_p_a], mat_n_p_a);
 
         // mul : ∀n m a. mat<n,m,a> -> vec<m,a> -> vec<n,a>
         let n = ctx.new_variable();
         let m = ctx.new_variable();
         let a = ctx.new_variable();
-        let vec_m_a = Type::Constructed(TypeName::Vec, vec![m.clone(), a.clone()]);
-        let vec_n_a = Type::Constructed(TypeName::Vec, vec![n.clone(), a.clone()]);
-        let mat_n_m = Type::Constructed(TypeName::Mat, vec![n, m, a]);
+        let vec_m_a = Type::Constructed(TypeName::Vec, vec![a.clone(), m.clone()]);
+        let vec_n_a = Type::Constructed(TypeName::Vec, vec![a.clone(), n.clone()]);
+        let mat_n_m = Type::Constructed(TypeName::Mat, vec![a, n, m]);
         self.register_poly("mul", vec![mat_n_m, vec_m_a], vec_n_a);
 
         // mul : ∀n m a. vec<n,a> -> mat<n,m,a> -> vec<m,a>
         let n = ctx.new_variable();
         let m = ctx.new_variable();
         let a = ctx.new_variable();
-        let vec_n_a = Type::Constructed(TypeName::Vec, vec![n.clone(), a.clone()]);
-        let vec_m_a = Type::Constructed(TypeName::Vec, vec![m.clone(), a.clone()]);
-        let mat_n_m = Type::Constructed(TypeName::Mat, vec![n, m, a]);
+        let vec_n_a = Type::Constructed(TypeName::Vec, vec![a.clone(), n.clone()]);
+        let vec_m_a = Type::Constructed(TypeName::Vec, vec![a.clone(), m.clone()]);
+        let mat_n_m = Type::Constructed(TypeName::Mat, vec![a, n, m]);
         self.register_poly("mul", vec![vec_n_a, mat_n_m], vec_m_a);
     }
 
-    /// Helper to construct an array type: Array[elem, addrspace, size]
+    /// Helper to construct an array type: Array[elem, size, variant]
     fn array_type(elem: Type, addrspace: Type, size: Type) -> Type {
-        Type::Constructed(TypeName::Array, vec![elem, addrspace, size])
+        Type::Constructed(TypeName::Array, vec![elem, size, addrspace])
     }
 
     /// Register higher-order functions like map

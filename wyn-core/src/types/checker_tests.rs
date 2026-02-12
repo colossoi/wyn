@@ -880,7 +880,7 @@ fn test_mul_mat_vec_application() {
     typecheck_program(
         r#"
 def test(mat: mat4f32) vec4f32 =
-    mul(mat, @[1.0f32, 2.0f32, 3.0f32, 4.0f32])
+    mat * @[1.0f32, 2.0f32, 3.0f32, 4.0f32]
 "#,
     );
 }
@@ -891,7 +891,7 @@ fn test_mul_mat_vec_in_lambda() {
     typecheck_program(
         r#"
 def test(mat: mat4f32, verts: [3]vec3f32) [3]vec4f32 =
-    map((|v| mul(mat, @[v.x, v.y, v.z, 1.0f32])), verts)
+    map((|v| mat * @[v.x, v.y, v.z, 1.0f32]), verts)
 "#,
     );
 }
@@ -1055,7 +1055,7 @@ fn test_vector_literal_in_expression() {
     typecheck_program(
         r#"
         def add_vectors(a: vec3f32, b: vec3f32) vec3f32 =
-            @[(a.x + b.x), (a.y + b.y), (a.z + b.z)]
+            a + b
 
         def test: vec3f32 = add_vectors(@[1.0f32, 0.0f32, 0.0f32], @[0.0f32, 1.0f32, 0.0f32])
         "#,

@@ -13,6 +13,7 @@ use crate::mir::layout::{buffer_array_strides, type_byte_size};
 use crate::mir::ssa::{Block, BlockId, ControlHeader, FuncBody, Inst, InstKind, Terminator, ValueId};
 use crate::tlc::to_ssa::{ExecutionModel, IoDecoration, SsaEntryPoint, SsaFunction, SsaProgram};
 use crate::types;
+use crate::types::TypeExt;
 use crate::{bail_spirv, err_spirv};
 use polytype::Type as PolyType;
 use rspirv::binary::Assemble;
@@ -241,18 +242,18 @@ impl Constructor {
                         self.get_or_create_struct_type(field_types)
                     }
                     TypeName::Array => {
-                        // Array[elem, variant, size]
-                        assert!(args.len() == 3);
-                        let elem_type = self.polytype_to_spirv(&args[0]);
-                        let variant = &args[1];
-                        let size = &args[2];
+                        // Array[elem, size, variant]
+                        let elem = ty.elem_type().expect("Array has elem");
+                        let elem_type = self.polytype_to_spirv(elem);
+                        let size = ty.array_size().expect("Array has size");
+                        let variant = ty.array_variant().expect("Array has variant");
 
                         // Dispatch on variant first - View arrays are always {buffer_ptr, offset, len} structs
                         if let PolyType::Constructed(TypeName::ArrayVariantView, _) = variant {
                             // View variant: struct { buffer_ptr, offset, len }
                             // buffer_ptr points to the StorageBuffer block struct containing the runtime array
-                            self.apply_buffer_array_strides(elem_type, &args[0]);
-                            let stride = crate::mir::layout::type_byte_size(&args[0])
+                            self.apply_buffer_array_strides(elem_type, elem);
+                            let stride = crate::mir::layout::type_byte_size(elem)
                                 .expect("View element type must have computable size");
                             let runtime_array_type =
                                 self.get_or_create_runtime_array_type(elem_type, stride);
@@ -302,43 +303,18 @@ impl Constructor {
                         }
                     }
                     TypeName::Vec => {
-                        // Vec type with args: args[0] is size, args[1] is element type
-                        if args.len() < 2 {
-                            panic!(
-                                "BUG: Vec type requires 2 arguments (size, element_type), got {}.",
-                                args.len()
-                            );
-                        }
-                        let size = match &args[0] {
-                            PolyType::Constructed(TypeName::Size(n), _) => *n as u32,
-                            _ => {
-                                panic!("BUG: Vec type has invalid size argument: {:?}.", args[0]);
-                            }
-                        };
-                        let elem_type = self.polytype_to_spirv(&args[1]);
+                        // Vec[elem, Size(n)]
+                        let elem = ty.elem_type().expect("Vec has elem");
+                        let elem_type = self.polytype_to_spirv(elem);
+                        let size = ty.vec_size().expect("Vec has concrete size") as u32;
                         self.get_or_create_vec_type(elem_type, size)
                     }
                     TypeName::Mat => {
-                        // Mat type with args: args[0] is cols, args[1] is rows, args[2] is element type
-                        if args.len() < 3 {
-                            panic!(
-                                "BUG: Mat type requires 3 arguments (cols, rows, element_type), got {}.",
-                                args.len()
-                            );
-                        }
-                        let cols = match &args[0] {
-                            PolyType::Constructed(TypeName::Size(n), _) => *n as u32,
-                            _ => {
-                                panic!("BUG: Mat type has invalid cols argument: {:?}.", args[0]);
-                            }
-                        };
-                        let rows = match &args[1] {
-                            PolyType::Constructed(TypeName::Size(n), _) => *n as u32,
-                            _ => {
-                                panic!("BUG: Mat type has invalid rows argument: {:?}.", args[1]);
-                            }
-                        };
-                        let elem_type = self.polytype_to_spirv(&args[2]);
+                        // Mat[elem, Size(cols), Size(rows)]
+                        let elem = ty.elem_type().expect("Mat has elem");
+                        let elem_type = self.polytype_to_spirv(elem);
+                        let cols = ty.mat_cols().expect("Mat has concrete cols") as u32;
+                        let rows = ty.mat_rows().expect("Mat has concrete rows") as u32;
                         let col_vec_type = self.get_or_create_vec_type(elem_type, rows);
                         self.builder.type_matrix(col_vec_type, cols)
                     }
@@ -511,10 +487,11 @@ impl Constructor {
         binding: u32,
     ) -> spirv::Word {
         // Extract element type from array type
-        let elem_ty = match array_ty {
-            PolyType::Constructed(TypeName::Array, args) if !args.is_empty() => args[0].clone(),
-            _ => array_ty.clone(),
-        };
+        let elem_ty = array_ty
+            .elem_type()
+            .filter(|_| array_ty.is_array())
+            .cloned()
+            .unwrap_or_else(|| array_ty.clone());
         let elem_spirv = self.polytype_to_spirv(&elem_ty);
 
         // Calculate stride from element type size
@@ -1511,9 +1488,9 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
             }
 
             // Vector operations: dispatch based on element type
-            (_, Constructed(Vec, args), _) => {
-                let elem_ty = args
-                    .get(1)
+            (_, Constructed(Vec, _), _) => {
+                let elem_ty = lhs_ty
+                    .elem_type()
                     .ok_or_else(|| crate::err_spirv!("Vec type missing element type: {:?}", lhs_ty))?;
                 match (op, elem_ty) {
                     ("+", Constructed(Float(_), _)) => {
@@ -1598,9 +1575,9 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                 Ok(self.constructor.builder.logical_not(result_ty, None, operand)?)
             }
             // Vector unary operations
-            ("-", Constructed(Vec, args)) => {
-                let elem_ty = args
-                    .get(1)
+            ("-", Constructed(Vec, _)) => {
+                let elem_ty = operand_ty
+                    .elem_type()
                     .ok_or_else(|| crate::err_spirv!("Vec type missing element type: {:?}", operand_ty))?;
                 match elem_ty {
                     Constructed(Float(_), _) => {
@@ -1666,36 +1643,32 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                 }
 
                 let arr_ty = self.body.get_value_type(ssa_args[0]);
-                match arr_ty {
-                    PolyType::Constructed(TypeName::Array, arr_args) if arr_args.len() >= 2 => {
-                        match &arr_args[1] {
-                            // View: struct {buffer_ptr, offset, len} — len at index 2
-                            PolyType::Constructed(TypeName::ArrayVariantView, _) => Ok(self
-                                .constructor
-                                .builder
-                                .composite_extract(result_ty, None, args[0], [2u32])?),
-                            // Virtual (range): struct {start, step, len} — len at index 2
-                            PolyType::Constructed(TypeName::ArrayVariantVirtual, _) => Ok(self
-                                .constructor
-                                .builder
-                                .composite_extract(result_ty, None, args[0], [2u32])?),
-                            // Composite: sized SPIR-V array — length is known from the type
-                            PolyType::Constructed(TypeName::ArrayVariantComposite, _) => {
-                                match &arr_args[2] {
-                                    PolyType::Constructed(TypeName::Size(n), _) => {
-                                        Ok(self.constructor.const_i32(*n as i32))
-                                    }
-                                    _ => {
-                                        bail_spirv!("_w_intrinsic_length: composite array has unknown size")
-                                    }
-                                }
+                let variant = arr_ty.array_variant().ok_or_else(|| {
+                    err_spirv!("_w_intrinsic_length: expected array type, got {:?}", arr_ty)
+                })?;
+                match variant {
+                    // View: struct {buffer_ptr, offset, len} — len at index 2
+                    PolyType::Constructed(TypeName::ArrayVariantView, _) => {
+                        Ok(self.constructor.builder.composite_extract(result_ty, None, args[0], [2u32])?)
+                    }
+                    // Virtual (range): struct {start, step, len} — len at index 2
+                    PolyType::Constructed(TypeName::ArrayVariantVirtual, _) => {
+                        Ok(self.constructor.builder.composite_extract(result_ty, None, args[0], [2u32])?)
+                    }
+                    // Composite: sized SPIR-V array — length is known from the type
+                    PolyType::Constructed(TypeName::ArrayVariantComposite, _) => {
+                        match arr_ty.array_size().expect("Array has size") {
+                            PolyType::Constructed(TypeName::Size(n), _) => {
+                                Ok(self.constructor.const_i32(*n as i32))
                             }
                             _ => {
-                                bail_spirv!("_w_intrinsic_length: unknown array variant: {:?}", arr_args[1])
+                                bail_spirv!("_w_intrinsic_length: composite array has unknown size")
                             }
                         }
                     }
-                    _ => bail_spirv!("_w_intrinsic_length: expected array type, got {:?}", arr_ty),
+                    _ => {
+                        bail_spirv!("_w_intrinsic_length: unknown array variant: {:?}", variant)
+                    }
                 }
             }
 
@@ -1710,17 +1683,13 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
 
                 // Dispatch based on input array variant
                 let arr_ty = self.body.get_value_type(ssa_args[0]);
-                let is_view = matches!(
-                    arr_ty,
-                    PolyType::Constructed(TypeName::Array, ref arr_args)
-                        if arr_args.len() >= 2 && matches!(&arr_args[1], PolyType::Constructed(TypeName::ArrayVariantView, _))
-                );
+                let is_view = arr_ty
+                    .array_variant()
+                    .map(|v| matches!(v, PolyType::Constructed(TypeName::ArrayVariantView, _)))
+                    .unwrap_or(false);
 
                 if is_view {
-                    let elem_ty = match arr_ty {
-                        PolyType::Constructed(TypeName::Array, ref arr_args) => arr_args[0].clone(),
-                        _ => unreachable!(),
-                    };
+                    let elem_ty = arr_ty.elem_type().expect("Array has elem").clone();
 
                     // Resolve buffer and extract base offset from view handle
                     let (set, binding) =
@@ -1746,11 +1715,8 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                     let result_is_composite = inst
                         .result
                         .map(|v| self.body.get_value_type(v))
-                        .map(|t| match t {
-                            PolyType::Constructed(TypeName::Array, ref args) => {
-                                args.len() >= 2 && types::is_array_variant_composite(&args[1])
-                            }
-                            _ => false,
+                        .map(|t| {
+                            t.array_variant().map(|v| types::is_array_variant_composite(v)).unwrap_or(false)
                         })
                         .unwrap_or(false);
 
@@ -1973,12 +1939,13 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                 Ok(self.constructor.builder.load(result_ty, None, elem_ptr, None, [])?)
             }
 
-            PolyType::Constructed(TypeName::Array, type_args) if type_args.len() == 3 => {
-                let variant = &type_args[1];
+            _ if base_ty.is_array() => {
+                let variant = base_ty.array_variant().expect("Array has variant");
+                let elem = base_ty.elem_type().expect("Array has elem");
 
                 if types::is_array_variant_view(variant) {
                     // View variant: {buffer_id, offset, len} struct
-                    self.lower_view_index(base, base_id, index_id, result_ty, &type_args[0])
+                    self.lower_view_index(base, base_id, index_id, result_ty, elem)
                 } else if types::is_array_variant_virtual(variant) {
                     // Virtual variant: {start, step, len} - computed array
                     self.lower_virtual_index(base_id, index_id, result_ty)
@@ -2548,10 +2515,7 @@ fn lower_ssa_program_impl(program: &SsaProgram) -> Result<Vec<u32>> {
     // Lower storage buffers (using proper Block-decorated runtime array wrapping)
     for storage in &program.storage {
         let var_id = constructor.create_storage_buffer(&storage.ty, storage.set, storage.binding);
-        let elem_ty = match &storage.ty {
-            PolyType::Constructed(TypeName::Array, args) if !args.is_empty() => &args[0],
-            _ => &storage.ty,
-        };
+        let elem_ty = storage.ty.elem_type().filter(|_| storage.ty.is_array()).unwrap_or(&storage.ty);
         let elem_spirv = constructor.polytype_to_spirv(elem_ty);
         constructor.storage_variables.insert(storage.name.clone(), var_id);
         constructor.storage_elem_types.insert(storage.name.clone(), elem_spirv);

@@ -55,33 +55,38 @@ fn format_constructed_type(name: &TypeName, args: &[PolyType<TypeName>]) -> Stri
         TypeName::SizeVar(s) => s.clone(),
         TypeName::SizePlaceholder => "?".to_string(),
         TypeName::Array => {
-            // Array[elem, addrspace, size] - unified array type
-            assert!(args.len() == 3);
-            let elem = format_type(&args[0]);
-            let size = format_type(&args[2]);
-            // Show size and elem, omit addrspace for brevity in common case
-            format!("[{}]{}", size, elem)
+            // Array[elem, size, variant]
+            let ty = &PolyType::Constructed(name.clone(), args.to_vec());
+            let elem = format_type(ty.elem_type().expect("Array has elem"));
+            let size = ty.array_size().expect("Array has size");
+            format!("[{}]{}", format_type(size), elem)
         }
         TypeName::Vec => {
-            // vec<size>elem_type
-            if args.len() == 2 {
-                let size = format_type(&args[0]);
-                let elem = format_type(&args[1]);
-                format!("vec{}{}", size, elem)
+            // Vec[elem, Size(n)]
+            let ty = &PolyType::Constructed(name.clone(), args.to_vec());
+            let elem = format_type(ty.elem_type().expect("Vec has elem"));
+            if let Some(n) = ty.vec_size() {
+                format!("vec{}{}", n, elem)
             } else {
-                "vec?".to_string()
+                format!(
+                    "vec{}{}",
+                    format_type(ty.vec_size_type().expect("Vec has size")),
+                    elem
+                )
             }
         }
         TypeName::Mat => {
-            // mat<rows x cols>elem
-            // Args are typically [rows, cols, elem_type]
-            if args.len() == 3 {
-                let rows = format_type(&args[0]);
-                let cols = format_type(&args[1]);
-                let elem = format_type(&args[2]);
-                format!("mat{}x{}{}", rows, cols, elem)
-            } else {
-                "mat?".to_string()
+            // Mat[elem, Size(cols), Size(rows)]
+            let ty = &PolyType::Constructed(name.clone(), args.to_vec());
+            let elem = format_type(ty.elem_type().expect("Mat has elem"));
+            match (ty.mat_cols(), ty.mat_rows()) {
+                (Some(cols), Some(rows)) => format!("mat{}x{}{}", cols, rows, elem),
+                _ => format!(
+                    "mat{}x{}{}",
+                    format_type(ty.mat_cols_type().expect("Mat has cols")),
+                    format_type(ty.mat_rows_type().expect("Mat has rows")),
+                    elem,
+                ),
             }
         }
         TypeName::Record(fields) => {
