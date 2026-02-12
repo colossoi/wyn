@@ -262,6 +262,27 @@ fn analyze_map_loop(body: &FuncBody, loop_info: &LoopInfo) -> Option<MapLoopInfo
 // Provenance Tracking
 // =============================================================================
 
+/// If `value` is produced by a `StorageView` instruction in `body`,
+/// return the matching entry input's (param_index, storage_binding).
+fn resolve_storage_view(
+    body: &FuncBody,
+    value: ValueId,
+    entry: &SsaEntryPoint,
+) -> Option<(usize, (u32, u32))> {
+    for inst in &body.insts {
+        if inst.result == Some(value) {
+            if let InstKind::StorageView { set, binding, .. } = &inst.kind {
+                for (i, input) in entry.inputs.iter().enumerate() {
+                    if input.storage_binding == Some((*set, *binding)) {
+                        return Some((i, (*set, *binding)));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Track the provenance of a value back to its source.
 fn track_provenance(body: &FuncBody, value: ValueId, inputs: &[EntryInput]) -> ArrayProvenance {
     // Check if it's a parameter
@@ -454,17 +475,9 @@ fn build_param_mapping(
             // If arg is a StorageView, match by (set, binding) to an entry input.
             // to_ssa wraps entry inputs in StorageView instructions, so the call arg
             // may be a view derived from a param rather than the param itself.
-            for inst in &caller_body.insts {
-                if inst.result == Some(arg) {
-                    if let InstKind::StorageView { set, binding, .. } = &inst.kind {
-                        for (input_idx, input) in entry.inputs.iter().enumerate() {
-                            if input.storage_binding == Some((*set, *binding)) {
-                                let entry_val = entry.body.params[input_idx].0;
-                                return Some((i, entry_val));
-                            }
-                        }
-                    }
-                }
+            if let Some((input_idx, _)) = resolve_storage_view(caller_body, arg, entry) {
+                let entry_val = entry.body.params[input_idx].0;
+                return Some((i, entry_val));
             }
             None
         })
@@ -493,6 +506,15 @@ fn track_provenance_unified(
             }
             return ArrayProvenance::Unknown;
         }
+    }
+
+    // Check if value is a StorageView — trace to entry input
+    if let Some((param_index, storage_binding)) = resolve_storage_view(body, value, entry) {
+        return ArrayProvenance::EntryStorage {
+            name: entry.inputs[param_index].name.clone(),
+            param_index,
+            storage_binding,
+        };
     }
 
     // Only allow local range provenance at entry level — ranges constructed

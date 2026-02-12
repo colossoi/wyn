@@ -2020,11 +2020,14 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
 
                             // Get element type from array type.
                             // This will fail for virtual arrays (ranges) which can't be modified.
-                            let elem_ty = self.constructor.get_array_element_type(result_ty)
-                                .map_err(|_| crate::err_spirv!(
-                                    "ArrayWith requires a concrete array type, not a virtual array (range). \
-                                     Map over ranges produces virtual results; consider using a fixed-size array instead."
-                                ))?;
+                            let elem_ty =
+                                self.constructor.get_array_element_type(result_ty).map_err(|_| {
+                                    crate::err_spirv!(
+                                        "ArrayWith: element type not found for array type ID {}. \
+                                     Unsized or view arrays may not support indexed writes.",
+                                        result_ty
+                                    )
+                                })?;
                             let elem_ptr_ty = self.constructor.builder.type_pointer(
                                 None,
                                 spirv::StorageClass::Function,
