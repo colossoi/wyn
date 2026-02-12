@@ -26,6 +26,7 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .fuse_maps()
         .defunctionalize()
         .monomorphize()
+        .inline()
         .soa_transform()
         .to_ssa()
         .map_err(|e| crate::err_spirv!("{}", e))?
@@ -53,6 +54,7 @@ fn compile_through_ssa(input: &str) -> Result<SsaProgram, CompilerError> {
         .fuse_maps()
         .defunctionalize()
         .monomorphize()
+        .inline()
         .soa_transform()
         .to_ssa()
         .map_err(|e| crate::err_spirv!("{}", e))?;

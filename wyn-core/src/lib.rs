@@ -312,6 +312,7 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 //       -> .fuse_maps()                                 -> TlcTransformed (fused)
 //       -> .defunctionalize()                           -> TlcDefunctionalized
 //       -> .monomorphize()                              -> TlcMonomorphized
+//       -> .inline()                                    -> TlcInlined
 //       -> .soa_transform()                             -> TlcSoaTransformed
 //       -> .to_ssa()                                    -> SsaConverted
 //
@@ -761,6 +762,24 @@ pub struct TlcMonomorphized {
 }
 
 impl TlcMonomorphized {
+    /// Inline compiler-generated `_w_lambda_*` defs back at their call sites,
+    /// then remove unreferenced defs (DCE).
+    pub fn inline(self) -> TlcInlined {
+        let inlined = tlc::inline::inline(self.tlc);
+        TlcInlined {
+            tlc: inlined,
+            type_table: self.type_table,
+        }
+    }
+}
+
+/// TLC after inlining compiler-generated lambda defs and DCE
+pub struct TlcInlined {
+    pub tlc: tlc::Program,
+    pub type_table: TypeTable,
+}
+
+impl TlcInlined {
     /// Apply SoA (Structure-of-Arrays) transform.
     /// Rewrites `[n](A,B)` to `([n]A, [n]B)` so arrays never contain tuples.
     pub fn soa_transform(self) -> TlcSoaTransformed {

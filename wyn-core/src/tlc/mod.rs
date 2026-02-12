@@ -7,6 +7,7 @@ pub mod defunctionalize;
 #[cfg(test)]
 mod defunctionalize_tests;
 pub mod fusion;
+pub mod inline;
 pub mod monomorphize;
 #[cfg(test)]
 mod monomorphize_tests;
@@ -47,6 +48,185 @@ fn count_function_arity(ty: &Type<TypeName>) -> usize {
     match ty {
         Type::Constructed(TypeName::Arrow, args) if args.len() == 2 => 1 + count_function_arity(&args[1]),
         _ => 0,
+    }
+}
+
+/// Extract all nested lambda parameters from a term, flattening curried lambdas.
+/// Returns (accumulated params, innermost non-lambda body).
+pub fn extract_lambda_params(term: &Term) -> (Vec<(SymbolId, Type<TypeName>)>, Term) {
+    let mut params = Vec::new();
+    let mut current = term.clone();
+    loop {
+        match current.kind {
+            TermKind::Lambda(Lambda {
+                params: lam_params,
+                body,
+                ..
+            }) => {
+                params.extend(lam_params);
+                current = *body;
+            }
+            _ => break,
+        }
+    }
+    (params, current)
+}
+
+/// Collect all `TermKind::Var(sym)` SymbolIds referenced anywhere in a term tree.
+/// This is a raw collection with no scope tracking — used for DCE reachability.
+pub fn collect_var_refs(term: &Term) -> Vec<SymbolId> {
+    let mut refs = Vec::new();
+    collect_var_refs_inner(term, &mut refs);
+    refs
+}
+
+fn collect_var_refs_inner(term: &Term, refs: &mut Vec<SymbolId>) {
+    match &term.kind {
+        TermKind::Var(sym) => refs.push(*sym),
+        TermKind::Lambda(lam) => collect_var_refs_lambda(lam, refs),
+        TermKind::App { func, arg } => {
+            collect_var_refs_inner(func, refs);
+            collect_var_refs_inner(arg, refs);
+        }
+        TermKind::Let { rhs, body, .. } => {
+            collect_var_refs_inner(rhs, refs);
+            collect_var_refs_inner(body, refs);
+        }
+        TermKind::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_var_refs_inner(cond, refs);
+            collect_var_refs_inner(then_branch, refs);
+            collect_var_refs_inner(else_branch, refs);
+        }
+        TermKind::Loop {
+            init,
+            init_bindings,
+            kind,
+            body,
+            ..
+        } => {
+            collect_var_refs_inner(init, refs);
+            for (_, _, e) in init_bindings {
+                collect_var_refs_inner(e, refs);
+            }
+            collect_var_refs_loop_kind(kind, refs);
+            collect_var_refs_inner(body, refs);
+        }
+        TermKind::Soac(soac) => collect_var_refs_soac(soac, refs),
+        TermKind::ArrayExpr(ae) => collect_var_refs_array_expr(ae, refs),
+        TermKind::Force(inner) => collect_var_refs_inner(inner, refs),
+        TermKind::Pack { value, .. } => collect_var_refs_inner(value, refs),
+        TermKind::Unpack { scrut, body, .. } => {
+            collect_var_refs_inner(scrut, refs);
+            collect_var_refs_inner(body, refs);
+        }
+        TermKind::BinOp(_)
+        | TermKind::UnOp(_)
+        | TermKind::IntLit(_)
+        | TermKind::FloatLit(_)
+        | TermKind::BoolLit(_)
+        | TermKind::StringLit(_)
+        | TermKind::Extern(_) => {}
+    }
+}
+
+fn collect_var_refs_lambda(lam: &Lambda, refs: &mut Vec<SymbolId>) {
+    collect_var_refs_inner(&lam.body, refs);
+    for (_, _, e) in &lam.captures {
+        collect_var_refs_inner(e, refs);
+    }
+}
+
+fn collect_var_refs_soac(soac: &SoacOp, refs: &mut Vec<SymbolId>) {
+    match soac {
+        SoacOp::Map { lam, inputs } => {
+            collect_var_refs_lambda(lam, refs);
+            for ae in inputs {
+                collect_var_refs_array_expr(ae, refs);
+            }
+        }
+        SoacOp::Reduce { op, ne, input, .. } => {
+            collect_var_refs_lambda(op, refs);
+            collect_var_refs_inner(ne, refs);
+            collect_var_refs_array_expr(input, refs);
+        }
+        SoacOp::Scan { op, ne, input } => {
+            collect_var_refs_lambda(op, refs);
+            collect_var_refs_inner(ne, refs);
+            collect_var_refs_array_expr(input, refs);
+        }
+        SoacOp::Filter { pred, input } => {
+            collect_var_refs_lambda(pred, refs);
+            collect_var_refs_array_expr(input, refs);
+        }
+        SoacOp::Scatter {
+            dest,
+            indices,
+            values,
+        } => {
+            collect_var_refs_place(dest, refs);
+            collect_var_refs_array_expr(indices, refs);
+            collect_var_refs_array_expr(values, refs);
+        }
+        SoacOp::ReduceByIndex {
+            dest,
+            op,
+            ne,
+            indices,
+            values,
+            ..
+        } => {
+            collect_var_refs_place(dest, refs);
+            collect_var_refs_lambda(op, refs);
+            collect_var_refs_inner(ne, refs);
+            collect_var_refs_array_expr(indices, refs);
+            collect_var_refs_array_expr(values, refs);
+        }
+    }
+}
+
+fn collect_var_refs_array_expr(ae: &ArrayExpr, refs: &mut Vec<SymbolId>) {
+    match ae {
+        ArrayExpr::Ref(t) => collect_var_refs_inner(t, refs),
+        ArrayExpr::Zip(aes) => {
+            for ae in aes {
+                collect_var_refs_array_expr(ae, refs);
+            }
+        }
+        ArrayExpr::Soac(op) => collect_var_refs_soac(op, refs),
+        ArrayExpr::Generate { index_fn, .. } => collect_var_refs_lambda(index_fn, refs),
+        ArrayExpr::Literal(terms) => {
+            for t in terms {
+                collect_var_refs_inner(t, refs);
+            }
+        }
+        ArrayExpr::Range { start, len } => {
+            collect_var_refs_inner(start, refs);
+            collect_var_refs_inner(len, refs);
+        }
+    }
+}
+
+fn collect_var_refs_loop_kind(kind: &LoopKind, refs: &mut Vec<SymbolId>) {
+    match kind {
+        LoopKind::For { iter, .. } => collect_var_refs_inner(iter, refs),
+        LoopKind::ForRange { bound, .. } => collect_var_refs_inner(bound, refs),
+        LoopKind::While { cond } => collect_var_refs_inner(cond, refs),
+    }
+}
+
+fn collect_var_refs_place(place: &Place, refs: &mut Vec<SymbolId>) {
+    match place {
+        Place::BufferSlice { base, offset, .. } => {
+            collect_var_refs_inner(base, refs);
+            collect_var_refs_inner(offset, refs);
+        }
+        Place::LocalArray { id, .. } => {
+            refs.push(*id);
+        }
     }
 }
 

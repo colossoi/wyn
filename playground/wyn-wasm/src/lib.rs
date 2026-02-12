@@ -646,6 +646,7 @@ fn compile_impl(source: &str) -> CompileResult {
         .fuse_maps()
         .defunctionalize()
         .monomorphize()
+        .inline()
         .soa_transform()
         .to_ssa()
     {
@@ -739,6 +740,7 @@ fn compile_with_ir_impl(source: &str) -> CompileResultWithIR {
         .fuse_maps()
         .defunctionalize()
         .monomorphize()
+        .inline()
         .soa_transform()
         .to_ssa()
     {

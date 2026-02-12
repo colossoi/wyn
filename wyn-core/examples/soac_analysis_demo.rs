@@ -47,7 +47,7 @@ entry compute_main(
     let monomorphized = defunctionalized.monomorphize();
 
     // Convert to SSA using the new direct path
-    let ssa_converted = monomorphized.soa_transform().to_ssa().expect("SSA conversion failed");
+    let ssa_converted = monomorphized.inline().soa_transform().to_ssa().expect("SSA conversion failed");
 
     // Run SSA SOAC analysis
     let analysis = mir::ssa_soac_analysis::analyze_program(&ssa_converted.ssa);

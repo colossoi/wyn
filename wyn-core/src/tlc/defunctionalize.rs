@@ -1523,24 +1523,7 @@ impl<'a> Defunctionalizer<'a> {
 
     /// Extract all nested lambda parameters from a term.
     fn extract_lambda_params(&self, term: Term) -> (Vec<(SymbolId, Type<TypeName>)>, Term) {
-        let mut params = Vec::new();
-        let mut current = term;
-
-        loop {
-            match current.kind {
-                TermKind::Lambda(Lambda {
-                    params: lam_params,
-                    body,
-                    ..
-                }) => {
-                    params.extend(lam_params);
-                    current = *body;
-                }
-                _ => break,
-            }
-        }
-
-        (params, current)
+        super::extract_lambda_params(&term)
     }
 
     /// Rebuild nested lambdas from params and body.
