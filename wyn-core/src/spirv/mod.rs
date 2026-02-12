@@ -1483,6 +1483,65 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                 Ok(self.constructor.builder.logical_not_equal(bool_type, None, lhs, rhs)?)
             }
 
+            // Vector operations: dispatch based on element type
+            (_, Constructed(Vec, args)) => {
+                let elem_ty = args
+                    .get(1)
+                    .ok_or_else(|| crate::err_spirv!("Vec type missing element type: {:?}", lhs_ty))?;
+                match (op, elem_ty) {
+                    ("+", Constructed(Float(_), _)) => {
+                        Ok(self.constructor.builder.f_add(result_ty, None, lhs, rhs)?)
+                    }
+                    ("-", Constructed(Float(_), _)) => {
+                        Ok(self.constructor.builder.f_sub(result_ty, None, lhs, rhs)?)
+                    }
+                    ("*", Constructed(Float(_), _)) => {
+                        Ok(self.constructor.builder.f_mul(result_ty, None, lhs, rhs)?)
+                    }
+                    ("/", Constructed(Float(_), _)) => {
+                        Ok(self.constructor.builder.f_div(result_ty, None, lhs, rhs)?)
+                    }
+                    ("%", Constructed(Float(_), _)) => {
+                        Ok(self.constructor.builder.f_rem(result_ty, None, lhs, rhs)?)
+                    }
+                    ("+", Constructed(Int(_), _)) => {
+                        Ok(self.constructor.builder.i_add(result_ty, None, lhs, rhs)?)
+                    }
+                    ("-", Constructed(Int(_), _)) => {
+                        Ok(self.constructor.builder.i_sub(result_ty, None, lhs, rhs)?)
+                    }
+                    ("*", Constructed(Int(_), _)) => {
+                        Ok(self.constructor.builder.i_mul(result_ty, None, lhs, rhs)?)
+                    }
+                    ("/", Constructed(Int(_), _)) => {
+                        Ok(self.constructor.builder.s_div(result_ty, None, lhs, rhs)?)
+                    }
+                    ("%", Constructed(Int(_), _)) => {
+                        Ok(self.constructor.builder.s_rem(result_ty, None, lhs, rhs)?)
+                    }
+                    ("+", Constructed(UInt(_), _)) => {
+                        Ok(self.constructor.builder.i_add(result_ty, None, lhs, rhs)?)
+                    }
+                    ("-", Constructed(UInt(_), _)) => {
+                        Ok(self.constructor.builder.i_sub(result_ty, None, lhs, rhs)?)
+                    }
+                    ("*", Constructed(UInt(_), _)) => {
+                        Ok(self.constructor.builder.i_mul(result_ty, None, lhs, rhs)?)
+                    }
+                    ("/", Constructed(UInt(_), _)) => {
+                        Ok(self.constructor.builder.u_div(result_ty, None, lhs, rhs)?)
+                    }
+                    ("%", Constructed(UInt(_), _)) => {
+                        Ok(self.constructor.builder.u_mod(result_ty, None, lhs, rhs)?)
+                    }
+                    _ => bail_spirv!(
+                        "Unsupported vector binary operation: {} on element {:?}",
+                        op,
+                        elem_ty
+                    ),
+                }
+            }
+
             _ => bail_spirv!("Unsupported binary operation: {} on {:?}", op, lhs_ty),
         }
     }
@@ -1510,6 +1569,25 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
             }
             ("!", Constructed(Str("bool"), _)) => {
                 Ok(self.constructor.builder.logical_not(result_ty, None, operand)?)
+            }
+            // Vector unary operations
+            ("-", Constructed(Vec, args)) => {
+                let elem_ty = args
+                    .get(1)
+                    .ok_or_else(|| crate::err_spirv!("Vec type missing element type: {:?}", operand_ty))?;
+                match elem_ty {
+                    Constructed(Float(_), _) => {
+                        Ok(self.constructor.builder.f_negate(result_ty, None, operand)?)
+                    }
+                    Constructed(Int(_), _) => {
+                        Ok(self.constructor.builder.s_negate(result_ty, None, operand)?)
+                    }
+                    _ => bail_spirv!(
+                        "Unsupported vector unary operation: {} on element {:?}",
+                        op,
+                        elem_ty
+                    ),
+                }
             }
             _ => bail_spirv!("Unsupported unary operation: {} on {:?}", op, operand_ty),
         }

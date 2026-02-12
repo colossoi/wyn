@@ -59,9 +59,9 @@ def sdBoxFrame(p:vec3f32, b:vec3f32, e:f32) f32 =
   f32.min(f32.min(d1, d2), d3)
 
 def sdEllipsoid(p:vec3f32, r:vec3f32) f32 =
-  let pr = @[p.x/r.x, p.y/r.y, p.z/r.z] in
-  let rr = @[r.x*r.x, r.y*r.y, r.z*r.z] in
-  let prr = @[p.x/rr.x, p.y/rr.y, p.z/rr.z] in
+  let pr = p / r in
+  let rr = r * r in
+  let prr = p / rr in
   let k0 = magnitude(pr) in
   let k1 = magnitude(prr) in
   k0 * (k0 - 1.0) / k1
@@ -78,8 +78,8 @@ def sdCappedTorus(p:vec3f32, sc:vec2f32, ra:f32, rb:f32) f32 =
   f32.sqrt(dot2(p) + ra*ra - 2.0*ra*k) - rb
 
 def sdCapsule(p:vec3f32, a:vec3f32, b:vec3f32, r:f32) f32 =
-  let pa = @[p.x - a.x, p.y - a.y, p.z - a.z] in
-  let ba = @[b.x - a.x, b.y - a.y, b.z - a.z] in
+  let pa = p - a in
+  let ba = b - a in
   let h = clamp(dot(pa, ba) / dot2(ba), 0.0, 1.0) in
   magnitude(@[pa.x - ba.x*h, pa.y - ba.y*h, pa.z - ba.z*h]) - r
 
@@ -88,8 +88,8 @@ def sdVerticalCylinder(p:vec3f32, h:vec2f32) f32 =
   f32.min(f32.max(d.x, d.y), 0.0) + magnitude(max(d, @[0.0, 0.0]))
 
 def sdCylinder(p:vec3f32, a:vec3f32, b:vec3f32, r:f32) f32 =
-  let pa = @[p.x - a.x, p.y - a.y, p.z - a.z] in
-  let ba = @[b.x - a.x, b.y - a.y, b.z - a.z] in
+  let pa = p - a in
+  let ba = b - a in
   let baba = dot2(ba) in
   let paba = dot(pa, ba) in
   let x = magnitude(@[pa.x*baba - ba.x*paba, pa.y*baba - ba.y*paba, pa.z*baba - ba.z*paba]) - r*baba in
@@ -118,7 +118,7 @@ def sdCappedCone(p:vec3f32, h:f32, r1:f32, r2:f32) f32 =
   let k1 = @[r2, h] in
   let k2 = @[r2 - r1, 2.0*h] in
   let ca = @[q.x - f32.min(q.x, if q.y < 0.0 then r1 else r2), f32.abs(q.y) - h] in
-  let cb_t = clamp(dot(@[k1.x - q.x, k1.y - q.y], k2) / dot2(k2), 0.0, 1.0) in
+  let cb_t = clamp(dot(k1 - q, k2) / dot2(k2), 0.0, 1.0) in
   let cb = @[q.x - k1.x + k2.x*cb_t, q.y - k1.y + k2.y*cb_t] in
   let s = if cb.x < 0.0 then (if ca.y < 0.0 then 0.0 - 1.0 else 1.0) else 1.0 in
   s * f32.sqrt(f32.min(dot2(ca), dot2(cb)))
@@ -231,10 +231,10 @@ def sdfScene(pos:vec3f32) vec2f32 =
 
 def iBox(ro:vec3f32, rd:vec3f32, rad:vec3f32) vec2f32 =
   let m = @[1.0/rd.x, 1.0/rd.y, 1.0/rd.z] in
-  let n = @[m.x*ro.x, m.y*ro.y, m.z*ro.z] in
+  let n = m * ro in
   let k = @[f32.abs(m.x) * rad.x, f32.abs(m.y) * rad.y, f32.abs(m.z) * rad.z] in
-  let t1 = @[0.0 - n.x - k.x, 0.0 - n.y - k.y, 0.0 - n.z - k.z] in
-  let t2 = @[0.0 - n.x + k.x, 0.0 - n.y + k.y, 0.0 - n.z + k.z] in
+  let t1 = -n - k in
+  let t2 = -n + k in
   @[f32.max(f32.max(t1.x, t1.y), t1.z), f32.min(f32.min(t2.x, t2.y), t2.z)]
 
 ------------------------------------------------------------
@@ -361,7 +361,7 @@ def render(ro:vec3f32, rd:vec3f32, rdx:vec3f32, rdy:vec3f32) vec3f32 =
 
     -- sun
     let lig = normalize(@[0.0 - 0.5, 0.4, 0.0 - 0.6]) in
-    let hal = normalize(@[lig.x - rd.x, lig.y - rd.y, lig.z - rd.z]) in
+    let hal = normalize(lig - rd) in
     let dif_raw = clamp(dot(nor, lig), 0.0, 1.0) in
     let dif = dif_raw * calcSoftshadow(pos, lig, 0.02, 2.5) in
     let spe_raw = pow(clamp(dot(nor, hal), 0.0, 1.0), 16.0) in
@@ -400,7 +400,7 @@ def render(ro:vec3f32, rd:vec3f32, rdx:vec3f32, rdy:vec3f32) vec3f32 =
 ------------------------------------------------------------
 
 def setCamera(ro:vec3f32, ta:vec3f32, cr:f32) mat3f32 =
-  let cw = normalize(@[ta.x - ro.x, ta.y - ro.y, ta.z - ro.z]) in
+  let cw = normalize(ta - ro) in
   let cp = @[f32.sin(cr), f32.cos(cr), 0.0] in
   let cu = normalize(cross(cw, cp)) in
   let cv = cross(cu, cw) in

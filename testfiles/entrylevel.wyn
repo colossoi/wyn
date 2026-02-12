@@ -170,11 +170,11 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4
 
   -- Add texture from iChannel0 (triplanar)
   let tex0 = sampleChannel0(w) in
-  let diff1 = @[diff_base.x + tex0.x, diff_base.y + tex0.y, diff_base.z + tex0.z] in
+  let diff1 = diff_base + tex0 in
 
   -- Add reflection from iChannel1 (cubemap)
   let tex1 = sampleChannel1(ref) in
-  let diff2 = @[diff1.x + tex1.x, diff1.y + tex1.y, diff1.z + tex1.z] in
+  let diff2 = diff1 + tex1 in
 
   -- Mix with white based on normal.y
   let abs_sn_y = f32.abs(sn.y) in

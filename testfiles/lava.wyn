@@ -41,7 +41,7 @@ def sdfScene(p: vec3f32) f32 =
     let offset = @[f32.sin((time + fi * 52.5126)) * 2.0,
                    f32.sin((time + fi * 64.62744)) * 2.0,
                    f32.sin((time + fi * 632.25)) * 0.8] in
-    let sphere_p = @[p.x + offset.x, p.y + offset.y, p.z + offset.z] in
+    let sphere_p = p + offset in
     let radius = mix(0.5, 1.0, fract((fi * 412.531 + 0.5124))) in
     let d2 = opSmoothUnion(sdSphere(sphere_p, radius), d, 0.4) in
     (i + 1, d2)

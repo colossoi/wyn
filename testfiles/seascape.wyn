@@ -205,7 +205,7 @@ def getPixel(coord: vec2f32, time: f32) vec3f32 =
 
   -- Tracing
   let (_, p) = heightMapTracing(ori, dir, time) in
-  let dist = @[p.x - ori.x, p.y - ori.y, p.z - ori.z] in
+  let dist = p - ori in
   let eps_nrm = 0.1 / iResolution.x in
   let n = getNormal(p, dot(dist, dist) * eps_nrm, time) in
   let light = normalize(@[0.0, 1.0, 0.8]) in
