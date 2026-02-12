@@ -1337,12 +1337,16 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
         let bool_type = self.constructor.bool_type;
 
         match (op, lhs_ty, rhs_ty) {
-            // Scalar-left mixed-type multiplication (must precede scalar float catch-all)
+            // Scalar-left mixed-type ops (must precede scalar catch-alls)
             ("*", Constructed(Float(_), _), Constructed(Vec, _)) => {
                 Ok(self.constructor.builder.vector_times_scalar(result_ty, None, rhs, lhs)?)
             }
             ("*", Constructed(Float(_), _), Constructed(Mat, _)) => {
                 Ok(self.constructor.builder.matrix_times_scalar(result_ty, None, rhs, lhs)?)
+            }
+            ("+" | "-" | "/" | "%", Constructed(Float(_) | Int(_) | UInt(_), _), Constructed(Vec, _)) => {
+                let splat = self.splat_scalar(lhs, rhs_ty, result_ty)?;
+                self.lower_binop(op, splat, rhs, rhs_ty, rhs_ty, result_ty)
             }
 
             // Float operations
@@ -1489,6 +1493,13 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
 
             // Vector operations: dispatch based on element type
             (_, Constructed(Vec, _), _) => {
+                // If rhs is scalar (not vec/mat), splat it to match lhs vec
+                let rhs = if matches!(rhs_ty, Constructed(Float(_) | Int(_) | UInt(_), _)) {
+                    self.splat_scalar(rhs, lhs_ty, result_ty)?
+                } else {
+                    rhs
+                };
+
                 let elem_ty = lhs_ty
                     .elem_type()
                     .ok_or_else(|| crate::err_spirv!("Vec type missing element type: {:?}", lhs_ty))?;
@@ -1548,6 +1559,20 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
 
             _ => bail_spirv!("Unsupported binary operation: {} on {:?}", op, lhs_ty),
         }
+    }
+
+    /// Splat a scalar SPIR-V value into a vector matching `vec_ty`.
+    fn splat_scalar(
+        &mut self,
+        scalar: spirv::Word,
+        vec_ty: &PolyType<TypeName>,
+        vec_spirv_ty: spirv::Word,
+    ) -> Result<spirv::Word> {
+        let n = vec_ty.vec_size().ok_or_else(|| {
+            crate::err_spirv!("Cannot splat: vec type has no concrete size: {:?}", vec_ty)
+        })?;
+        let components = vec![scalar; n];
+        Ok(self.constructor.builder.composite_construct(vec_spirv_ty, None, components)?)
     }
 
     fn lower_unaryop(
@@ -1622,6 +1647,9 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
             "min" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 37, operands)?),
             "max" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 40, operands)?),
             "clamp" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 43, operands)?),
+            // TODO: support mix(vec, vec, scalar) by splatting the scalar t argument.
+            // GLSL and SPIR-V both define this overload, but FMix requires all operands
+            // to match the result type. Splat scalar t to vec before emitting.
             "mix" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 46, operands)?),
             "pow" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 26, operands)?),
             "exp" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 27, operands)?),

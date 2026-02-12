@@ -230,7 +230,7 @@ def sdfScene(pos:vec3f32) vec2f32 =
 ------------------------------------------------------------
 
 def iBox(ro:vec3f32, rd:vec3f32, rad:vec3f32) vec2f32 =
-  let m = @[1.0/rd.x, 1.0/rd.y, 1.0/rd.z] in
+  let m = 1.0 / rd in
   let n = m * ro in
   let k = @[f32.abs(m.x) * rad.x, f32.abs(m.y) * rad.y, f32.abs(m.z) * rad.z] in
   let t1 = -n - k in
@@ -260,7 +260,7 @@ def raycast(ro:vec3f32, rd:vec3f32) vec2f32 =
         let tmax = f32.min(tb.y, tmax) in
         let (_, _, res2) = loop (i, t, r) = (0, tmin2, res) while i < 70 do
           if t < tmax then
-            let h = sdfScene(@[ro.x + rd.x*t, ro.y + rd.y*t, ro.z + rd.z*t]) in
+            let h = sdfScene(ro + rd * t) in
             if f32.abs(h.x) < 0.0001 * t then (70, t, @[t, h.y])
             else (i + 1, t + h.x, r)
           else (70, t, r)
@@ -280,9 +280,9 @@ def calcNormal(pos:vec3f32) vec3f32 =
       (if (i/2) % 2 == 1 then 1.0 else -1.0),
       (if i % 2 == 1 then 1.0 else -1.0)
     ] in
-    let e = @[0.5773 * e_base.x, 0.5773 * e_base.y, 0.5773 * e_base.z] in
-    let m = (sdfScene(@[pos.x + 0.0005*e.x, pos.y + 0.0005*e.y, pos.z + 0.0005*e.z])).x in
-    (i + 1, @[acc.x + e.x*m, acc.y + e.y*m, acc.z + e.z*m])
+    let e = e_base * 0.5773 in
+    let m = (sdfScene(pos + e * 0.0005)).x in
+    (i + 1, acc + e * m)
   in normalize(n)
 
 ------------------------------------------------------------
@@ -292,7 +292,7 @@ def calcNormal(pos:vec3f32) vec3f32 =
 def calcAO(pos:vec3f32, nor:vec3f32) f32 =
   let (_, occ, _) = loop (i, occ, sca) = (0, 0.0, 1.0) while i < 5 do
     let h = 0.01 + 0.12 * (f32.i32(i)) / 4.0 in
-    let d = (sdfScene(@[pos.x + h*nor.x, pos.y + h*nor.y, pos.z + h*nor.z])).x in
+    let d = (sdfScene(pos + nor * h)).x in
     let occ2 = occ + (h - d) * sca in
     let sca2 = sca * 0.95 in
     if occ2 > 0.35 then (5, occ2, sca2) else (i + 1, occ2, sca2)
@@ -306,7 +306,7 @@ def calcSoftshadow(ro:vec3f32, rd:vec3f32, mint:f32, tmax_in:f32) f32 =
   let tp = (0.8 - ro.y) / rd.y in
   let tmax = if tp > 0.0 then f32.min(tmax_in, tp) else tmax_in in
   let (_, res, _) = loop (i, res, t) = (0, 1.0, mint) while i < 24 do
-    let h = (sdfScene(@[ro.x + rd.x*t, ro.y + rd.y*t, ro.z + rd.z*t])).x in
+    let h = (sdfScene(ro + rd * t)).x in
     let s = clamp(8.0*h/t, 0.0, 1.0) in
     let res2 = f32.min(res, s) in
     let t2 = t + clamp(h, 0.01, 0.2) in
@@ -342,7 +342,7 @@ def render(ro:vec3f32, rd:vec3f32, rdx:vec3f32, rdy:vec3f32) vec3f32 =
   let m = res.y in
 
   if m > 0.0 - 0.5 then
-    let pos = @[ro.x + t*rd.x, ro.y + t*rd.y, ro.z + t*rd.z] in
+    let pos = ro + rd * t in
     let nor = if m < 1.5 then @[0.0, 1.0, 0.0] else calcNormal(pos) in
     let ref = reflect(rd, nor) in
 

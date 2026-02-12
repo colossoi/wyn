@@ -69,7 +69,7 @@ def calcNormal(p: vec3f32) vec3f32 =
 
 def raymarch(rayOri: vec3f32, rayDir: vec3f32) (f32, vec3f32) =
   let (_, depth, p) = loop (i, depth, p) = (0, 0.0, rayOri) while i < 64 do
-    let p2 = @[rayOri.x + rayDir.x * depth, rayOri.y + rayDir.y * depth, rayOri.z + rayDir.z * depth] in
+    let p2 = rayOri + rayDir * depth in
     let dist = sdfScene(p2) in
     if dist < 1e-6 then (64, depth, p2)  -- break
     else (i + 1, depth + dist, p2)
@@ -83,7 +83,7 @@ def raymarch(rayOri: vec3f32, rayDir: vec3f32) (f32, vec3f32) =
 entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
   -- Flip Y for Vulkan
   let coord = @[fragCoord.x, iResolution.y - fragCoord.y] in
-  let uv = @[coord.x / iResolution.x, coord.y / iResolution.y] in
+  let uv = coord / iResolution in
 
   -- Screen size is 6m x 6m
   let aspect = iResolution.x / iResolution.y in

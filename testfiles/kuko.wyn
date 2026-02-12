@@ -52,7 +52,7 @@ def camPath(t: f32) vec2f32 =
 -- Foil gyroid distance function
 ------------------------------------------------------------
 def foilGyroid(p: vec3f32, t: f32) f32 =
-  let ps = @[p.x * 0.6, p.y * 0.6, p.z * 0.6] in
+  let ps = p * 0.6 in
   let sinp = @[f32.sin(ps.x + t), f32.sin(ps.y + t), f32.sin(ps.z + t)] in
   let cosp = @[f32.cos(ps.y + t), f32.cos(ps.z + t), f32.cos(ps.x + t)] in
   let gyroid = dot(sinp, cosp) in
@@ -72,7 +72,7 @@ def raymarch(fragCoord: vec2f32, res: vec2f32, rotX: mat2f32, rotY: mat2f32, chr
     let rd_xy = @[(fragCoord.x + fragCoord.x - res.x) / res.y, (fragCoord.y + fragCoord.y - res.y) / res.y] in
     let rd_raw = @[rd_xy.x, rd_xy.y, 1.0] in
     let rd_len = magnitude(rd_raw) in
-    let rd = @[rd_raw.x / rd_len, rd_raw.y / rd_len, rd_raw.z / rd_len] in
+    let rd = rd_raw / rd_len in
 
     -- Apply rotation to ray direction based on mouse
     let rd2 = if use_mouse > 0.5 then
@@ -84,7 +84,7 @@ def raymarch(fragCoord: vec2f32, res: vec2f32, rotX: mat2f32, rotY: mat2f32, chr
     in
 
     -- Ray position
-    let p = @[ro.x + rd2.x * dt, ro.y + rd2.y * dt, ro.z + rd2.z * dt] in
+    let p = ro + rd2 * dt in
 
     if f32.abs(p.x) > 9.0 then (FAR, dt, acc)
     else

@@ -96,7 +96,7 @@ def calcNormal(p: vec3f32) vec3f32 =
 
 def trace(o: vec3f32, r: vec3f32) f32 =
   let (_, t_final) = loop (i, t) = (0, 0.0) while i < 64 do
-    let p = @[o.x + r.x * t, o.y + r.y * t, o.z + r.z * t] in
+    let p = o + r * t in
     let d = (sdfMap(p)).x in
     (i + 1, t + d * 0.3)
   in t_final
@@ -119,9 +119,7 @@ def sampleChannel0(p: vec3f32) vec3f32 =
   let tc = @[0.5 + 0.5 * f32.sin(p.x * 10.0),
              0.5 + 0.5 * f32.sin(p.y * 10.0),
              0.5 + 0.5 * f32.sin((p.x + p.y) * 5.0)] in
-  @[(ta.x + tb.x + tc.x) / 3.0,
-    (ta.y + tb.y + tc.y) / 3.0,
-    (ta.z + tb.z + tc.z) / 3.0]
+  (ta + tb + tc) / 3.0
 
 -- Cubemap reflection lookup from iChannel1
 -- TODO: Replace with actual texture sampling: texture(iChannel1, ref)
@@ -138,8 +136,8 @@ def sampleChannel1(ref: vec3f32) vec3f32 =
 entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
   -- Flip Y for Vulkan
   let coord = @[fragCoord.x, iResolution.y - fragCoord.y] in
-  let uv = @[coord.x / iResolution.x, coord.y / iResolution.y] in
-  let uv2 = @[uv.x * 2.0 - 1.0, uv.y * 2.0 - 1.0] in
+  let uv = coord / iResolution in
+  let uv2 = uv * 2.0 - 1.0 in
   let uv3 = @[uv2.x * iResolution.x / iResolution.y, uv2.y] in
 
   -- Ray direction with fisheye-like distortion
@@ -157,7 +155,7 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4
 
   -- Trace
   let t = trace(o, r) in
-  let w = @[o.x + r.x * t, o.y + r.y * t, o.z + r.z * t] in
+  let w = o + r * t in
   let sn = calcNormal(w) in
   let fd = sdfMap(w) in
   let ref = reflect(r, sn) in
@@ -183,13 +181,13 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4
   let diff4 = @[mix(0.8, diff3.x, abs_sn_y), mix(0.0, diff3.y, abs_sn_y), mix(0.0, diff3.z, abs_sn_y)] in
 
   -- Lighting
-  let neg_r = @[0.0 - r.x, 0.0 - r.y, 0.0 - r.z] in
+  let neg_r = -r in
   let prod = f32.max(dot(sn, neg_r), 0.0) in
-  let diff5 = @[diff4.x * prod, diff4.y * prod, diff4.z * prod] in
+  let diff5 = diff4 * prod in
 
   -- Fog
   let fog = 1.0 / (1.0 + t * t * 0.1 + fd.x * 100.0) in
-  let fc = @[diff5.x * fog, diff5.y * fog, diff5.z * fog] in
+  let fc = diff5 * fog in
 
   -- Gamma (sqrt)
   @[f32.sqrt(fc.x), f32.sqrt(fc.y), f32.sqrt(fc.z), 1.0]

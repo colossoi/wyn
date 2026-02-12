@@ -220,23 +220,23 @@ def clamp(x:f32, min:f32, max:f32) f32 =
   if x < min then min else if x > max then max else x
 
 def mix3v(a:vec3f32, b:vec3f32, t:f32) vec3f32 =
-  @[(a.x + (b.x - a.x) * t), (a.y + (b.y - a.y) * t), (a.z + (b.z - a.z) * t)]
+  a + (b - a) * t
 
 -- Rasterize helpers
 def line(weight:f32, p:vec2f32, p0:vec2f32, p1:vec2f32, w:f32) f32 =
-  let d = @[(p1.x-p0.x), (p1.y-p0.y)] in
+  let d = p1 - p0 in
   let denom = dot(d, d) in
-  let dp = @[(p.x-p0.x), (p.y-p0.y)] in
+  let dp = p - p0 in
   let t_raw = if denom == 0.0 then 0.0 else (dot(d, dp) / denom) in
   let t = clamp(t_raw, 0.0, 1.0) in
-  let proj = @[(p0.x + d.x*t), (p0.y + d.y*t)] in
-  let pdiff = @[(p.x-proj.x), (p.y-proj.y)] in
+  let proj = p0 + d * t in
+  let pdiff = p - proj in
   let dist = magnitude(pdiff) in
   let s = (if dist == 0.0 then 0.0 else (1.0 / dist)) * weight * w in
   f32.min(s*s, 1.0)
 
 def circle(weight:f32, p:vec2f32, c:vec2f32, r:f32, w:f32) f32 =
-  let diff = @[(p.x-c.x), (p.y-c.y)] in
+  let diff = p - c in
   let dist = f32.abs(magnitude(diff)) + r in
   let s = (if dist == 0.0 then 0.0 else (1.0 / dist)) * weight * w in
   f32.min(s*s, 1.0)
@@ -261,7 +261,7 @@ def fragment(p:vec3f32, iTime:f32) vec3f32 =
   let t = f32.sin(p.x*0.8 + iTime*0.5)*0.5 + 0.5 in
   let fog = f32.min(p.z*p.z*p.z*400.0, 1.0) in
   let col = mix3(red, green, blue, t) in
-  @[(col.x * fog), (col.y * fog), (col.z * fog)]
+  col * fog
 
 def cube_corners: [8]vec3f32 =
     [ @[-1.0, -1.0, 1.0],
@@ -322,7 +322,7 @@ def main_image(iResolution:vec2f32, iTime:f32, fragCoord:vec2f32) vec4f32 =
 
   -- Normalized, centered UV with aspect correction
   let uv0 : vec2f32 = @[(fragCoord.x / iResolution.x), (fragCoord.y / iResolution.y)] in
-  let uv1 : vec2f32 = @[(uv0.x*2.0 - 1.0), (uv0.y*2.0 - 1.0)] in
+  let uv1 : vec2f32 = uv0 * 2.0 - 1.0 in
   let uv  : vec2f32 = @[(uv1.x * (iResolution.x/iResolution.y)), uv1.y] in
 
   let line_width = 0.4 in
@@ -344,7 +344,7 @@ def main_image(iResolution:vec2f32, iTime:f32, fragCoord:vec2f32) vec4f32 =
   let c_box_result =
     loop (idx, acc) = (0i32, base_col) while idx < 18 do
       let inst = instances_a[idx] in
-      let pos  = translation(@[(inst.x * 4.0), (inst.y * 4.0), (inst.z * 4.0)]) in
+      let pos  = translation(inst * 4.0) in
       let mat  : mat4f32 = pos * rot_cam in
 
       -- Transform & perspective
@@ -359,8 +359,8 @@ def main_image(iResolution:vec2f32, iTime:f32, fragCoord:vec2f32) vec4f32 =
 
       let shade = fragment(verts1[0], iTime) in
       let intensity = f32.min(i_sum, 1.0) in
-      let shade_scaled = @[(shade.x * intensity), (shade.y * intensity), (shade.z * intensity)] in
-      let acc' = @[(acc.x + shade_scaled.x), (acc.y + shade_scaled.y), (acc.z + shade_scaled.z)] in
+      let shade_scaled = shade * intensity in
+      let acc' = acc + shade_scaled in
       (idx + 1, acc') in
   let (dummy1, c_box) = c_box_result in
 
@@ -368,15 +368,15 @@ def main_image(iResolution:vec2f32, iTime:f32, fragCoord:vec2f32) vec4f32 =
   let c_final_result =
     loop (idx, acc) = (0i32, c_box) while idx < 8 do
       let inst = instances_b[idx] in
-      let pos = translation(@[(inst.x * 4.0), (inst.y * 4.0), (inst.z * 4.0)]) in
+      let pos = translation(inst * 4.0) in
       let mat : mat4f32 = pos * rot_cam in
       let v4  : vec4f32 = @[0.0, 0.0, 0.0, 1.0] * mat in
       let zinv = 1.0 / v4.z in
       let vert : vec3f32 = @[(v4.x*zinv), (v4.y*zinv), zinv] in
       let sh  = fragment(vert, iTime) in
       let cov = circle(weight, uv, @[vert.x, vert.y], -vert.z, line_width) in
-      let sh_scaled = @[(sh.x * cov), (sh.y * cov), (sh.z * cov)] in
-      let acc' = @[(acc.x + sh_scaled.x), (acc.y + sh_scaled.y), (acc.z + sh_scaled.z)] in
+      let sh_scaled = sh * cov in
+      let acc' = acc + sh_scaled in
       (idx + 1, acc') in
   let (dummy2, c_final) = c_final_result in
 
