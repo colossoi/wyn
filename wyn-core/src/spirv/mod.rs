@@ -43,6 +43,7 @@ struct Constructor {
     uint_const_cache: HashMap<u32, spirv::Word>,
     uint_const_reverse: HashMap<spirv::Word, u32>, // reverse lookup: ID -> value
     float_const_cache: HashMap<u32, spirv::Word>,  // bits as u32
+    float_const_reverse: HashMap<spirv::Word, u32>, // reverse lookup: ID -> bits
     bool_const_cache: HashMap<bool, spirv::Word>,
 
     // Current function state
@@ -130,6 +131,7 @@ impl Constructor {
             uint_const_cache: HashMap::new(),
             uint_const_reverse: HashMap::new(),
             float_const_cache: HashMap::new(),
+            float_const_reverse: HashMap::new(),
             bool_const_cache: HashMap::new(),
             current_block: None,
             variables_block: None,
@@ -768,7 +770,13 @@ impl Constructor {
         }
         let id = self.builder.constant_bit32(self.f32_type, bits);
         self.float_const_cache.insert(bits, id);
+        self.float_const_reverse.insert(id, bits);
         id
+    }
+
+    /// Get the literal f32 value from a constant ID (reverse lookup)
+    fn get_const_f32_value(&self, id: spirv::Word) -> Option<f32> {
+        self.float_const_reverse.get(&id).copied().map(f32::from_bits)
     }
 
     /// Get or create a bool constant
@@ -1491,6 +1499,10 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
 
         match (op, operand_ty) {
             ("-", Constructed(Float(_), _)) => {
+                // Constant fold: if operand is a known f32 constant, emit -value directly
+                if let Some(val) = self.constructor.get_const_f32_value(operand) {
+                    return Ok(self.constructor.const_f32(-val));
+                }
                 Ok(self.constructor.builder.f_negate(result_ty, None, operand)?)
             }
             ("-", Constructed(Int(_), _)) => {
