@@ -337,7 +337,7 @@ def main_image(iResolution:vec2f32, iTime:f32, fragCoord:vec2f32) vec4f32 =
 
   -- Precompute rot * cam (loop invariant)
   -- Using row-vector convention (v * M), same as GLSL/DirectX
-  let rot_cam : mat4f32 = mul(rot, cam) in
+  let rot_cam : mat4f32 = rot * cam in
 
 
   -- Accumulate color
@@ -345,10 +345,10 @@ def main_image(iResolution:vec2f32, iTime:f32, fragCoord:vec2f32) vec4f32 =
     loop (idx, acc) = (0i32, base_col) while idx < 18 do
       let inst = instances_a[idx] in
       let pos  = translation(@[(inst.x * 4.0), (inst.y * 4.0), (inst.z * 4.0)]) in
-      let mat  : mat4f32 = mul(pos, rot_cam) in
+      let mat  : mat4f32 = pos * rot_cam in
 
       -- Transform & perspective
-      let v4s : [8]vec4f32 = map(|v:vec3f32| mul(@[v.x, v.y, v.z, 1.0], mat), cube_corners) in
+      let v4s : [8]vec4f32 = map(|v:vec3f32| @[v.x, v.y, v.z, 1.0] * mat, cube_corners) in
       let verts1 : [8]vec3f32 =
         map(|q:vec4f32|
                   let zinv = 1.0 / q.z in
@@ -369,8 +369,8 @@ def main_image(iResolution:vec2f32, iTime:f32, fragCoord:vec2f32) vec4f32 =
     loop (idx, acc) = (0i32, c_box) while idx < 8 do
       let inst = instances_b[idx] in
       let pos = translation(@[(inst.x * 4.0), (inst.y * 4.0), (inst.z * 4.0)]) in
-      let mat : mat4f32 = mul(pos, rot_cam) in
-      let v4  : vec4f32 = mul(@[0.0, 0.0, 0.0, 1.0], mat) in
+      let mat : mat4f32 = pos * rot_cam in
+      let v4  : vec4f32 = @[0.0, 0.0, 0.0, 1.0] * mat in
       let zinv = 1.0 / v4.z in
       let vert : vec3f32 = @[(v4.x*zinv), (v4.y*zinv), zinv] in
       let sh  = fragment(vert, iTime) in

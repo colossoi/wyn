@@ -116,7 +116,7 @@ def heightMap(p: vec3f32, time: f32) f32 =
     let d1 = sea_octave(@[(uv.x + sea_t) * freq, (uv.y + sea_t) * freq], choppy) in
     let d2 = sea_octave(@[(uv.x - sea_t) * freq, (uv.y - sea_t) * freq], choppy) in
     let h2 = h + (d1 + d2) * amp in
-    let uv2 = mul(uv, octave_m) in
+    let uv2 = uv * octave_m in
     (i + 1, uv2, h2, freq * 1.9, amp * 0.22, mix(choppy, 1.0, 0.2))
   in p.y - h
 
@@ -128,7 +128,7 @@ def map_detailed(p: vec3f32, time: f32) f32 =
     let d1 = sea_octave(@[(uv.x + sea_t) * freq, (uv.y + sea_t) * freq], choppy) in
     let d2 = sea_octave(@[(uv.x - sea_t) * freq, (uv.y - sea_t) * freq], choppy) in
     let h2 = h + (d1 + d2) * amp in
-    let uv2 = mul(uv, octave_m) in
+    let uv2 = uv * octave_m in
     (i + 1, uv2, h2, freq * 1.9, amp * 0.22, mix(choppy, 1.0, 0.2))
   in p.y - h
 
@@ -201,7 +201,7 @@ def getPixel(coord: vec2f32, time: f32) vec3f32 =
   let dir_z_adj = @[dir_base.x, dir_base.y, dir_base.z + magnitude(@[uv3.x, uv3.y]) * 0.14] in
   let dir_norm = normalize(dir_z_adj) in
   let rot = fromEuler(ang) in
-  let dir = mul(dir_norm, rot) in
+  let dir = dir_norm * rot in
 
   -- Tracing
   let (_, p) = heightMapTracing(ori, dir, time) in

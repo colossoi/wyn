@@ -963,7 +963,8 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                 let lhs_id = self.get_value(*lhs)?;
                 let rhs_id = self.get_value(*rhs)?;
                 let lhs_ty = self.body.get_value_type(*lhs);
-                self.lower_binop(op, lhs_id, rhs_id, lhs_ty, result_ty)?
+                let rhs_ty = self.body.get_value_type(*rhs);
+                self.lower_binop(op, lhs_id, rhs_id, lhs_ty, rhs_ty, result_ty)?
             }
 
             InstKind::UnaryOp { op, operand } => {
@@ -1350,6 +1351,7 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
         lhs: spirv::Word,
         rhs: spirv::Word,
         lhs_ty: &PolyType<TypeName>,
+        rhs_ty: &PolyType<TypeName>,
         result_ty: spirv::Word,
     ) -> Result<spirv::Word> {
         use PolyType::*;
@@ -1357,42 +1359,50 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
 
         let bool_type = self.constructor.bool_type;
 
-        match (op, lhs_ty) {
+        match (op, lhs_ty, rhs_ty) {
+            // Scalar-left mixed-type multiplication (must precede scalar float catch-all)
+            ("*", Constructed(Float(_), _), Constructed(Vec, _)) => {
+                Ok(self.constructor.builder.vector_times_scalar(result_ty, None, rhs, lhs)?)
+            }
+            ("*", Constructed(Float(_), _), Constructed(Mat, _)) => {
+                Ok(self.constructor.builder.matrix_times_scalar(result_ty, None, rhs, lhs)?)
+            }
+
             // Float operations
-            ("+", Constructed(Float(_), _)) => {
+            ("+", Constructed(Float(_), _), _) => {
                 Ok(self.constructor.builder.f_add(result_ty, None, lhs, rhs)?)
             }
-            ("-", Constructed(Float(_), _)) => {
+            ("-", Constructed(Float(_), _), _) => {
                 Ok(self.constructor.builder.f_sub(result_ty, None, lhs, rhs)?)
             }
-            ("*", Constructed(Float(_), _)) => {
+            ("*", Constructed(Float(_), _), _) => {
                 Ok(self.constructor.builder.f_mul(result_ty, None, lhs, rhs)?)
             }
-            ("/", Constructed(Float(_), _)) => {
+            ("/", Constructed(Float(_), _), _) => {
                 Ok(self.constructor.builder.f_div(result_ty, None, lhs, rhs)?)
             }
-            ("%", Constructed(Float(_), _)) => {
+            ("%", Constructed(Float(_), _), _) => {
                 Ok(self.constructor.builder.f_rem(result_ty, None, lhs, rhs)?)
             }
-            ("<", Constructed(Float(_), _)) => {
+            ("<", Constructed(Float(_), _), _) => {
                 Ok(self.constructor.builder.f_ord_less_than(bool_type, None, lhs, rhs)?)
             }
-            ("<=", Constructed(Float(_), _)) => {
+            ("<=", Constructed(Float(_), _), _) => {
                 Ok(self.constructor.builder.f_ord_less_than_equal(bool_type, None, lhs, rhs)?)
             }
-            (">", Constructed(Float(_), _)) => {
+            (">", Constructed(Float(_), _), _) => {
                 Ok(self.constructor.builder.f_ord_greater_than(bool_type, None, lhs, rhs)?)
             }
-            (">=", Constructed(Float(_), _)) => {
+            (">=", Constructed(Float(_), _), _) => {
                 Ok(self.constructor.builder.f_ord_greater_than_equal(bool_type, None, lhs, rhs)?)
             }
-            ("==", Constructed(Float(_), _)) => {
+            ("==", Constructed(Float(_), _), _) => {
                 Ok(self.constructor.builder.f_ord_equal(bool_type, None, lhs, rhs)?)
             }
-            ("!=", Constructed(Float(_), _)) => {
+            ("!=", Constructed(Float(_), _), _) => {
                 Ok(self.constructor.builder.f_ord_not_equal(bool_type, None, lhs, rhs)?)
             }
-            ("**", Constructed(Float(_), _)) => {
+            ("**", Constructed(Float(_), _), _) => {
                 // Power operator using GLSL pow (opcode 26)
                 let glsl = self.constructor.glsl_ext_inst_id;
                 let operands = vec![Operand::IdRef(lhs), Operand::IdRef(rhs)];
@@ -1400,91 +1410,108 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
             }
 
             // Integer operations (signed)
-            ("+", Constructed(Int(_), _)) => {
+            ("+", Constructed(Int(_), _), _) => {
                 Ok(self.constructor.builder.i_add(result_ty, None, lhs, rhs)?)
             }
-            ("-", Constructed(Int(_), _)) => {
+            ("-", Constructed(Int(_), _), _) => {
                 Ok(self.constructor.builder.i_sub(result_ty, None, lhs, rhs)?)
             }
-            ("*", Constructed(Int(_), _)) => {
+            ("*", Constructed(Int(_), _), _) => {
                 Ok(self.constructor.builder.i_mul(result_ty, None, lhs, rhs)?)
             }
-            ("/", Constructed(Int(_), _)) => {
+            ("/", Constructed(Int(_), _), _) => {
                 Ok(self.constructor.builder.s_div(result_ty, None, lhs, rhs)?)
             }
-            ("%", Constructed(Int(_), _)) => {
+            ("%", Constructed(Int(_), _), _) => {
                 Ok(self.constructor.builder.s_rem(result_ty, None, lhs, rhs)?)
             }
-            ("<", Constructed(Int(_), _)) => {
+            ("<", Constructed(Int(_), _), _) => {
                 Ok(self.constructor.builder.s_less_than(bool_type, None, lhs, rhs)?)
             }
-            ("<=", Constructed(Int(_), _)) => {
+            ("<=", Constructed(Int(_), _), _) => {
                 Ok(self.constructor.builder.s_less_than_equal(bool_type, None, lhs, rhs)?)
             }
-            (">", Constructed(Int(_), _)) => {
+            (">", Constructed(Int(_), _), _) => {
                 Ok(self.constructor.builder.s_greater_than(bool_type, None, lhs, rhs)?)
             }
-            (">=", Constructed(Int(_), _)) => {
+            (">=", Constructed(Int(_), _), _) => {
                 Ok(self.constructor.builder.s_greater_than_equal(bool_type, None, lhs, rhs)?)
             }
-            ("==", Constructed(Int(_), _)) => {
+            ("==", Constructed(Int(_), _), _) => {
                 Ok(self.constructor.builder.i_equal(bool_type, None, lhs, rhs)?)
             }
-            ("!=", Constructed(Int(_), _)) => {
+            ("!=", Constructed(Int(_), _), _) => {
                 Ok(self.constructor.builder.i_not_equal(bool_type, None, lhs, rhs)?)
             }
 
             // Unsigned integer operations
-            ("+", Constructed(UInt(_), _)) => {
+            ("+", Constructed(UInt(_), _), _) => {
                 Ok(self.constructor.builder.i_add(result_ty, None, lhs, rhs)?)
             }
-            ("-", Constructed(UInt(_), _)) => {
+            ("-", Constructed(UInt(_), _), _) => {
                 Ok(self.constructor.builder.i_sub(result_ty, None, lhs, rhs)?)
             }
-            ("*", Constructed(UInt(_), _)) => {
+            ("*", Constructed(UInt(_), _), _) => {
                 Ok(self.constructor.builder.i_mul(result_ty, None, lhs, rhs)?)
             }
-            ("/", Constructed(UInt(_), _)) => {
+            ("/", Constructed(UInt(_), _), _) => {
                 Ok(self.constructor.builder.u_div(result_ty, None, lhs, rhs)?)
             }
-            ("%", Constructed(UInt(_), _)) => {
+            ("%", Constructed(UInt(_), _), _) => {
                 Ok(self.constructor.builder.u_mod(result_ty, None, lhs, rhs)?)
             }
-            ("<", Constructed(UInt(_), _)) => {
+            ("<", Constructed(UInt(_), _), _) => {
                 Ok(self.constructor.builder.u_less_than(bool_type, None, lhs, rhs)?)
             }
-            ("<=", Constructed(UInt(_), _)) => {
+            ("<=", Constructed(UInt(_), _), _) => {
                 Ok(self.constructor.builder.u_less_than_equal(bool_type, None, lhs, rhs)?)
             }
-            (">", Constructed(UInt(_), _)) => {
+            (">", Constructed(UInt(_), _), _) => {
                 Ok(self.constructor.builder.u_greater_than(bool_type, None, lhs, rhs)?)
             }
-            (">=", Constructed(UInt(_), _)) => {
+            (">=", Constructed(UInt(_), _), _) => {
                 Ok(self.constructor.builder.u_greater_than_equal(bool_type, None, lhs, rhs)?)
             }
-            ("==", Constructed(UInt(_), _)) => {
+            ("==", Constructed(UInt(_), _), _) => {
                 Ok(self.constructor.builder.i_equal(bool_type, None, lhs, rhs)?)
             }
-            ("!=", Constructed(UInt(_), _)) => {
+            ("!=", Constructed(UInt(_), _), _) => {
                 Ok(self.constructor.builder.i_not_equal(bool_type, None, lhs, rhs)?)
             }
 
             // Boolean operations
-            ("&&", Constructed(Str("bool"), _)) => {
+            ("&&", Constructed(Str("bool"), _), _) => {
                 Ok(self.constructor.builder.logical_and(bool_type, None, lhs, rhs)?)
             }
-            ("||", Constructed(Str("bool"), _)) => {
+            ("||", Constructed(Str("bool"), _), _) => {
                 Ok(self.constructor.builder.logical_or(bool_type, None, lhs, rhs)?)
             }
-            ("==", Constructed(Str("bool"), _)) => {
+            ("==", Constructed(Str("bool"), _), _) => {
                 Ok(self.constructor.builder.logical_equal(bool_type, None, lhs, rhs)?)
             }
-            ("!=", Constructed(Str("bool"), _)) => {
+            ("!=", Constructed(Str("bool"), _), _) => {
                 Ok(self.constructor.builder.logical_not_equal(bool_type, None, lhs, rhs)?)
             }
 
+            // Mixed-type multiplication: mat*mat, mat*vec, vec*mat, vec*scalar, mat*scalar
+            ("*", Constructed(Mat, _), Constructed(Mat, _)) => {
+                Ok(self.constructor.builder.matrix_times_matrix(result_ty, None, lhs, rhs)?)
+            }
+            ("*", Constructed(Mat, _), Constructed(Vec, _)) => {
+                Ok(self.constructor.builder.matrix_times_vector(result_ty, None, lhs, rhs)?)
+            }
+            ("*", Constructed(Vec, _), Constructed(Mat, _)) => {
+                Ok(self.constructor.builder.vector_times_matrix(result_ty, None, lhs, rhs)?)
+            }
+            ("*", Constructed(Vec, _), Constructed(Float(_), _)) => {
+                Ok(self.constructor.builder.vector_times_scalar(result_ty, None, lhs, rhs)?)
+            }
+            ("*", Constructed(Mat, _), Constructed(Float(_), _)) => {
+                Ok(self.constructor.builder.matrix_times_scalar(result_ty, None, lhs, rhs)?)
+            }
+
             // Vector operations: dispatch based on element type
-            (_, Constructed(Vec, args)) => {
+            (_, Constructed(Vec, args), _) => {
                 let elem_ty = args
                     .get(1)
                     .ok_or_else(|| crate::err_spirv!("Vec type missing element type: {:?}", lhs_ty))?;

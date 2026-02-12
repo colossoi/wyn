@@ -433,7 +433,7 @@ entry fragment_main(#[builtin(position)] fragCoord:vec4f32) #[location(0)] vec4f
 
   -- ray direction (mat3 * vec3)
   let rd_local = normalize(@[p.x, p.y, fl]) in
-  let rd = mul(rd_local, ca) in
+  let rd = rd_local * ca in
 
   -- ray differentials (with Y flip)
   let px = @[(2.0*(fragCoord.x + 1.0) - iResolution.x) / iResolution.y,
@@ -442,8 +442,8 @@ entry fragment_main(#[builtin(position)] fragCoord:vec4f32) #[location(0)] vec4f
              -((2.0*(fragCoord.y + 1.0) - iResolution.y) / iResolution.y)] in
   let rdx_local = normalize(@[px.x, px.y, fl]) in
   let rdy_local = normalize(@[py.x, py.y, fl]) in
-  let rdx = mul(rdx_local, ca) in
-  let rdy = mul(rdy_local, ca) in
+  let rdx = rdx_local * ca in
+  let rdy = rdy_local * ca in
 
   -- render
   let col = render(ro, rd, rdx, rdy) in

@@ -1,0 +1,88 @@
+-- Test: exercises all mixed-type * operator paths in SPIR-V lowering
+-- Cases: mat*mat, mat*vec, vec*mat, vec*scalar, scalar*vec, mat*scalar, scalar*mat
+
+#[uniform(set=1, binding=0)] def iResolution: vec2f32
+#[uniform(set=1, binding=1)] def iTime: f32
+
+def verts: [3]vec4f32 =
+  [@[-1.0, -1.0, 0.0, 1.0],
+   @[3.0, -1.0, 0.0, 1.0],
+   @[-1.0, 3.0, 0.0, 1.0]]
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 = verts[vertex_id]
+
+-- Helper: build a 2x2 rotation matrix
+def rot2(a: f32) mat2f32 =
+  let c = f32.cos(a) in
+  let s = f32.sin(a) in
+  @[[c, 0.0 - s], [s, c]]
+
+-- Helper: build a 3x3 rotation matrix around Z axis
+def rot3z(a: f32) mat3f32 =
+  let c = f32.cos(a) in
+  let s = f32.sin(a) in
+  @[[c, 0.0 - s, 0.0],
+    [s, c, 0.0],
+    [0.0, 0.0, 1.0]]
+
+#[fragment]
+entry fragment_main(#[builtin(frag_coord)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+  let uv = @[(fragCoord.x / iResolution.x) * 2.0 - 1.0,
+             (fragCoord.y / iResolution.y) * 2.0 - 1.0] in
+  let t = iTime in
+
+  -- Case 1: mat2 * mat2 (OpMatrixTimesMatrix)
+  let r1 = rot2(t) in
+  let r2 = rot2(t * 0.5) in
+  let mm : mat2f32 = r1 * r2 in
+
+  -- Case 2: mat2 * vec2 (OpMatrixTimesVector)
+  let mv : vec2f32 = mm * uv in
+
+  -- Case 3: vec2 * mat2 (OpVectorTimesMatrix)
+  let vm : vec2f32 = uv * mm in
+
+  -- Case 4: vec2 * scalar (OpVectorTimesScalar)
+  let vs : vec2f32 = uv * 2.0 in
+
+  -- Case 5: scalar * vec2 (OpVectorTimesScalar, swapped)
+  let sv : vec2f32 = 0.5 * uv in
+
+  -- Case 6: mat2 * scalar (OpMatrixTimesScalar)
+  let ms : mat2f32 = mm * 3.0 in
+
+  -- Case 7: scalar * mat2 (OpMatrixTimesScalar, swapped)
+  let sm : mat2f32 = 0.25 * mm in
+
+  -- Also exercise mat3 paths
+  let rz = rot3z(t) in
+  let p3 = @[uv.x, uv.y, 0.0] in
+
+  -- mat3 * vec3
+  let mv3 : vec3f32 = rz * p3 in
+
+  -- vec3 * mat3
+  let vm3 : vec3f32 = p3 * rz in
+
+  -- mat3 * mat3
+  let rz2 = rot3z(t * 0.3) in
+  let mm3 : mat3f32 = rz * rz2 in
+
+  -- mat3 * scalar
+  let ms3 : mat3f32 = mm3 * 2.0 in
+
+  -- scalar * mat3
+  let sm3 : mat3f32 = 0.5 * mm3 in
+
+  -- Combine all results into output color to prevent dead-code elimination
+  -- Use mat*vec to extract values from matrix results
+  let ms_v = ms * uv in
+  let sm_v = sm * uv in
+  let ms3_v = ms3 * p3 in
+  let sm3_v = sm3 * p3 in
+  let c1 = mv.x + vm.y + vs.x + sv.y in
+  let c2 = mv3.x + vm3.y in
+  let c3 = ms_v.x + sm_v.x in
+  let c4 = ms3_v.x + sm3_v.x in
+  @[c1, c2, c3 + c4, 1.0]

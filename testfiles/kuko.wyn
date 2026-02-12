@@ -76,10 +76,10 @@ def raymarch(fragCoord: vec2f32, res: vec2f32, rotX: mat2f32, rotY: mat2f32, chr
 
     -- Apply rotation to ray direction based on mouse
     let rd2 = if use_mouse > 0.5 then
-      let yz = mul(@[rd.y, rd.z], rotY) in
+      let yz = @[rd.y, rd.z] * rotY in
       @[rd.x, yz.x, yz.y]
     else
-      let xy = mul(@[rd.x, rd.y], rotX) in
+      let xy = @[rd.x, rd.y] * rotX in
       @[xy.x, xy.y, rd.z]
     in
 

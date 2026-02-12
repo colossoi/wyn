@@ -60,7 +60,7 @@ def sdfMap(p_in: vec3f32) vec2f32 =
   -- p.x += sin(p.z)
   let p1 = @[p_in.x + f32.sin(p_in.z), p_in.y, p_in.z] in
   -- p *= zrot(p.z)
-  let p = mul(p1, zrot(p1.z)) in
+  let p = p1 * zrot(p1.z) in
 
   let q_init = @[fract(p.x) * 2.0 - 1.0, fract(p.y) * 2.0 - 1.0, fract(p.z) * 2.0 - 1.0] in
 
@@ -147,8 +147,8 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4
   -- r *= zrot(iTime * 0.25) * yrot(-sin(iTime))
   let rot1 = zrot(iTime * 0.25) in
   let rot2 = yrot(0.0 - f32.sin(iTime)) in
-  let r1 = mul(r_base, rot1) in
-  let r = mul(r1, rot2) in
+  let r1 = r_base * rot1 in
+  let r = r1 * rot2 in
 
   -- Camera origin
   let oz = iTime in

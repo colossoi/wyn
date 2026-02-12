@@ -749,11 +749,6 @@ impl ImplSource {
         self.register("determinant", BuiltinImpl::PrimOp(PrimOp::GlslExt(33)));
         self.register("inverse", BuiltinImpl::PrimOp(PrimOp::GlslExt(34)));
         self.register("outer", BuiltinImpl::PrimOp(PrimOp::OuterProduct));
-
-        // mul dispatch happens in lowering based on argument types
-        self.register("mul_mat_mat", BuiltinImpl::PrimOp(PrimOp::MatrixTimesMatrix));
-        self.register("mul_mat_vec", BuiltinImpl::PrimOp(PrimOp::MatrixTimesVector));
-        self.register("mul_vec_mat", BuiltinImpl::PrimOp(PrimOp::VectorTimesMatrix));
     }
 
     fn register_linked_spirv(&mut self) {}
