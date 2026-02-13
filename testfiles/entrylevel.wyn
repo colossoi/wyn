@@ -176,9 +176,9 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4
 
   -- Mix with white based on normal.y
   let abs_sn_y = f32.abs(sn.y) in
-  let diff3 = @[mix(diff2.x, 1.0, abs_sn_y), mix(diff2.y, 1.0, abs_sn_y), mix(diff2.z, 1.0, abs_sn_y)] in
+  let diff3 = mix(diff2, @[1.0, 1.0, 1.0], abs_sn_y) in
   -- Mix with red based on normal.y
-  let diff4 = @[mix(0.8, diff3.x, abs_sn_y), mix(0.0, diff3.y, abs_sn_y), mix(0.0, diff3.z, abs_sn_y)] in
+  let diff4 = mix(@[0.8, 0.0, 0.0], diff3, abs_sn_y) in
 
   -- Lighting
   let neg_r = -r in

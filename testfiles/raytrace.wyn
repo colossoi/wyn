@@ -119,9 +119,7 @@ def brdf(n: vec3f32, v: vec3f32, l: vec3f32, albedo: vec3f32, metallic: f32, rou
   let nDotH = f32.max(dot(n, h), 0.0) in
   let hDotV = f32.max(dot(h, v), 0.0) in
 
-  let f0 = @[mix(0.04, albedo.x, metallic),
-             mix(0.04, albedo.y, metallic),
-             mix(0.04, albedo.z, metallic)] in
+  let f0 = mix(@[0.04, 0.04, 0.04], albedo, metallic) in
 
   let d = pbrDistributionGGX(nDotH, roughness) in
   let g = pbrGeometrySmith(nDotV, nDotL, roughness) in
@@ -262,7 +260,7 @@ def getMaterial(matId: i32, hitPoint: vec3f32) (vec3f32, f32, f32, f32, i32, f32
 
 def getSkyColor(rd: vec3f32) vec3f32 =
   let t = 0.5 * (rd.y + 1.0) in
-  @[mix(1.0, 0.5, t), mix(1.0, 0.7, t), mix(1.0, 1.0, t)]
+  mix(@[1.0, 1.0, 1.0], @[0.5, 0.7, 1.0], t)
 
 ------------------------------------------------------------
 -- Shadow Check
@@ -330,9 +328,7 @@ def trace(ro: vec3f32, rd: vec3f32, maxBounces: i32) vec3f32 =
           let newRayO = hitPoint + normal * epsilon * 10.0 * offsetSign in
 
           -- Glass is mostly transparent, slight tint from albedo
-          let glassTint = @[mix(1.0, albedo.x, 0.1),
-                            mix(1.0, albedo.y, 0.1),
-                            mix(1.0, albedo.z, 0.1)] in
+          let glassTint = mix(@[1.0, 1.0, 1.0], albedo, 0.1) in
           let newTint = tint * glassTint in
 
           (color, newRayO, newDir, newTint, bounce + 1)

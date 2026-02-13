@@ -219,8 +219,7 @@ def rotation_euler(a: vec3f32) mat4f32 =
 def clamp(x:f32, min:f32, max:f32) f32 =
   if x < min then min else if x > max then max else x
 
-def mix3v(a:vec3f32, b:vec3f32, t:f32) vec3f32 =
-  a + (b - a) * t
+def mix3v(a:vec3f32, b:vec3f32, t:f32) vec3f32 = mix(a, b, t)
 
 -- Rasterize helpers
 def line(weight:f32, p:vec2f32, p0:vec2f32, p1:vec2f32, w:f32) f32 =

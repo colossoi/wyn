@@ -140,9 +140,7 @@ def getSeaColor(p: vec3f32, n: vec3f32, l: vec3f32, eye: vec3f32, dist: vec3f32)
   let diff = diffuse(n, l, 80.0) in
   let refracted = SEA_BASE + diff * SEA_WATER_COLOR * 0.12 in
 
-  let color = @[mix(refracted.x, reflected.x, fresnel),
-                mix(refracted.y, reflected.y, fresnel),
-                mix(refracted.z, reflected.z, fresnel)] in
+  let color = mix(refracted, reflected, fresnel) in
 
   let atten = f32.max(1.0 - dot(dist, dist) * 0.001, 0.0) in
   let color2 = color + SEA_WATER_COLOR * (p.y - SEA_HEIGHT) * 0.18 * atten in
@@ -210,7 +208,7 @@ def getPixel(coord: vec2f32, time: f32) vec3f32 =
   let sky = getSkyColor(dir) in
   let sea = getSeaColor(p, n, light, dir, dist) in
   let blend = (smoothstep(0.0, 0.0 - 0.02, dir.y)) ** 0.2 in
-  @[mix(sky.x, sea.x, blend), mix(sky.y, sea.y, blend), mix(sky.z, sea.z, blend)]
+  mix(sky, sea, blend)
 
 ------------------------------------------------------------
 -- Fragment shader
