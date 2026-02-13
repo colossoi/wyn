@@ -1038,12 +1038,13 @@ impl<'a> Converter<'a> {
             }
         }
 
-        // Intrinsic or unknown
-        if name.starts_with("_w_") {
+        // Builtins and internal intrinsics → InstKind::Intrinsic
+        if name.starts_with("_w_intrinsic_") {
             self.builder
                 .push_intrinsic(name, arg_values, ty, span, node_id)
                 .map_err(|e| ConvertError::BuilderError(e.to_string()))
         } else {
+            // Method-dispatched builtins (f32.sin, etc.) go through Call → impl_source
             self.builder
                 .push_call(name, arg_values, ty, span, node_id)
                 .map_err(|e| ConvertError::BuilderError(e.to_string()))

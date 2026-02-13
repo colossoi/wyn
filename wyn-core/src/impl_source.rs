@@ -132,8 +132,6 @@ impl ImplSource {
         source.register_real_modules();
         source.register_float_modules();
         source.register_vector_operations();
-        source.register_matrix_operations();
-        source.register_linked_spirv();
 
         source
     }
@@ -719,39 +717,13 @@ impl ImplSource {
         self.register("_w_intrinsic_f64_to_bits", BuiltinImpl::PrimOp(PrimOp::Bitcast));
     }
 
-    /// Register vector operations (implementations only, types in intrinsics)
     fn register_vector_operations(&mut self) {
         self.register("_w_intrinsic_uninit", BuiltinImpl::Intrinsic(Intrinsic::Uninit));
         self.register(
             "_w_intrinsic_array_with",
             BuiltinImpl::Intrinsic(Intrinsic::ArrayWith),
         );
-
-        // Vector operations
-        self.register("magnitude", BuiltinImpl::PrimOp(PrimOp::GlslExt(66)));
-        self.register("normalize", BuiltinImpl::PrimOp(PrimOp::GlslExt(69)));
-        self.register("dot", BuiltinImpl::PrimOp(PrimOp::Dot));
-        self.register("cross", BuiltinImpl::PrimOp(PrimOp::GlslExt(68)));
-        self.register("distance", BuiltinImpl::PrimOp(PrimOp::GlslExt(67)));
-        self.register("reflect", BuiltinImpl::PrimOp(PrimOp::GlslExt(71)));
-        self.register("refract", BuiltinImpl::PrimOp(PrimOp::GlslExt(72)));
-
-        // Float operations
-        self.register("floor", BuiltinImpl::PrimOp(PrimOp::GlslExt(8)));
-        self.register("ceil", BuiltinImpl::PrimOp(PrimOp::GlslExt(9)));
-        self.register("fract", BuiltinImpl::PrimOp(PrimOp::GlslExt(10)));
-        self.register("mix", BuiltinImpl::PrimOp(PrimOp::GlslExt(46))); // FMix
-        self.register("smoothstep", BuiltinImpl::PrimOp(PrimOp::GlslExt(49)));
     }
-
-    /// Register matrix operations (implementations only, types in intrinsics)
-    fn register_matrix_operations(&mut self) {
-        self.register("determinant", BuiltinImpl::PrimOp(PrimOp::GlslExt(33)));
-        self.register("inverse", BuiltinImpl::PrimOp(PrimOp::GlslExt(34)));
-        self.register("outer", BuiltinImpl::PrimOp(PrimOp::OuterProduct));
-    }
-
-    fn register_linked_spirv(&mut self) {}
 }
 
 impl Default for ImplSource {

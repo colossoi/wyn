@@ -521,7 +521,7 @@ impl FuncBuilder {
         let set_val = self.push_int(&set.to_string(), u32_ty.clone(), span, node_id)?;
         let binding_val = self.push_int(&binding.to_string(), u32_ty.clone(), span, node_id)?;
         let storage_len = self.push_intrinsic(
-            "_w_storage_len",
+            "_w_intrinsic_storage_len",
             vec![set_val, binding_val],
             u32_ty.clone(),
             span,

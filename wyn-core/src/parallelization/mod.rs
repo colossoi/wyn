@@ -214,7 +214,7 @@ fn build_parallel_body<I: InputStrategy, O: OutputStrategy>(
     let output_handle = output_strategy.setup(ctx, output_elem_ty)?;
 
     // 2. Get thread ID and calculate chunk bounds
-    let thread_id = ctx.push_intrinsic("__builtin_thread_id", vec![], ctx.u32_ty.clone())?;
+    let thread_id = ctx.push_intrinsic("_w_intrinsic_thread_id", vec![], ctx.u32_ty.clone())?;
 
     let total_threads_val = ctx.push_int(&total_threads.to_string())?;
     let threads_minus_1 = ctx.push_int(&(total_threads - 1).to_string())?;

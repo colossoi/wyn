@@ -1642,7 +1642,10 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
         // Convert args to Operands for ext_inst
         let operands: Vec<Operand> = args.iter().map(|&id| Operand::IdRef(id)).collect();
 
-        match name {
+        // Strip _w_intrinsic_ prefix for builtin dispatch
+        let base_name = name.strip_prefix("_w_intrinsic_").unwrap_or(name);
+
+        match base_name {
             "sin" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 13, operands)?),
             "cos" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 14, operands)?),
             "tan" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 15, operands)?),
@@ -1653,10 +1656,26 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
             "min" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 37, operands)?),
             "max" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 40, operands)?),
             "clamp" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 43, operands)?),
-            // TODO: support mix(vec, vec, scalar) by splatting the scalar t argument.
-            // GLSL and SPIR-V both define this overload, but FMix requires all operands
-            // to match the result type. Splat scalar t to vec before emitting.
-            "mix" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 46, operands)?),
+            "mix" => {
+                // FMix requires all operands to match the result type.
+                // When mix(vec, vec, scalar), splat the scalar t to a vec.
+                if args.len() == 3 && inst.result_ty.is_vec() {
+                    let t_ty = self.body.get_value_type(ssa_args[2]);
+                    if t_ty.is_scalar() {
+                        let splatted = self.splat_scalar(args[2], &inst.result_ty, result_ty)?;
+                        let operands = vec![
+                            Operand::IdRef(args[0]),
+                            Operand::IdRef(args[1]),
+                            Operand::IdRef(splatted),
+                        ];
+                        return Ok(self
+                            .constructor
+                            .builder
+                            .ext_inst(result_ty, None, glsl, 46, operands)?);
+                    }
+                }
+                Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 46, operands)?)
+            }
             "pow" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 26, operands)?),
             "exp" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 27, operands)?),
             "log" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 28, operands)?),
@@ -1667,19 +1686,31 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                 Ok(self.constructor.builder.dot(result_ty, None, args[0], args[1])?)
             }
             "normalize" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 69, operands)?),
-            "length" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 66, operands)?),
+            "magnitude" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 66, operands)?),
             "cross" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 68, operands)?),
             "reflect" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 71, operands)?),
+            "smoothstep" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 49, operands)?),
+            "distance" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 67, operands)?),
+            "refract" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 72, operands)?),
+            "fract" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 10, operands)?),
+            "determinant" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 33, operands)?),
+            "inverse" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 34, operands)?),
+            "outer" => {
+                if args.len() != 2 {
+                    bail_spirv!("outer requires 2 arguments");
+                }
+                Ok(self.constructor.builder.outer_product(result_ty, None, args[0], args[1])?)
+            }
 
-            "_w_intrinsic_length" => {
+            "length" => {
                 if args.len() != 1 {
-                    bail_spirv!("_w_intrinsic_length requires 1 argument");
+                    bail_spirv!("length requires 1 argument");
                 }
 
                 let arr_ty = self.body.get_value_type(ssa_args[0]);
-                let variant = arr_ty.array_variant().ok_or_else(|| {
-                    err_spirv!("_w_intrinsic_length: expected array type, got {:?}", arr_ty)
-                })?;
+                let variant = arr_ty
+                    .array_variant()
+                    .ok_or_else(|| err_spirv!("length: expected array type, got {:?}", arr_ty))?;
                 match variant {
                     // View: struct {buffer_ptr, offset, len} — len at index 2
                     PolyType::Constructed(TypeName::ArrayVariantView, _) => {
@@ -1696,17 +1727,17 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                                 Ok(self.constructor.const_i32(*n as i32))
                             }
                             _ => {
-                                bail_spirv!("_w_intrinsic_length: composite array has unknown size")
+                                bail_spirv!("length: composite array has unknown size")
                             }
                         }
                     }
                     _ => {
-                        bail_spirv!("_w_intrinsic_length: unknown array variant: {:?}", variant)
+                        bail_spirv!("length: unknown array variant: {:?}", variant)
                     }
                 }
             }
 
-            "_w_slice" => {
+            "slice" => {
                 // Slice an array: _w_slice(arr, start, end) -> new array or view
                 if args.len() != 3 {
                     bail_spirv!("_w_slice requires 3 arguments (arr, start, end)");
@@ -1780,12 +1811,12 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                 }
             }
 
-            "_w_slice_storage_view" => {
+            "slice_storage_view" => {
                 // Slicing storage views is not yet implemented
                 bail_spirv!("_w_slice_storage_view is not yet implemented");
             }
 
-            "__builtin_thread_id" => {
+            "thread_id" => {
                 // Load GlobalInvocationId.x as the thread ID
                 let gid_var = self
                     .constructor
@@ -1803,7 +1834,7 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                 Ok(thread_id_u32)
             }
 
-            "_w_storage_len" => {
+            "storage_len" => {
                 // Get the length of a storage buffer via OpArrayLength
                 // Args: [set_id, binding_id] (as u32 constants)
                 if args.len() != 2 {

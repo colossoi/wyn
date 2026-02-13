@@ -89,8 +89,11 @@ impl InputStrategy for StorageInput {
 
         let set_val = ctx.push_int(&self.set.to_string())?;
         let binding_val = ctx.push_int(&self.binding.to_string())?;
-        let storage_len =
-            ctx.push_intrinsic("_w_storage_len", vec![set_val, binding_val], ctx.u32_ty.clone())?;
+        let storage_len = ctx.push_intrinsic(
+            "_w_intrinsic_storage_len",
+            vec![set_val, binding_val],
+            ctx.u32_ty.clone(),
+        )?;
 
         self.elem_ty = Some(elem_ty.clone());
         Some((view, storage_len, elem_ty))

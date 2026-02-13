@@ -32,6 +32,21 @@ use std::collections::HashMap;
 const INTRINSIC_RENAMES: &[(&str, &str)] = &[
     ("length", "_w_intrinsic_length"),
     ("replicate", "_w_intrinsic_replicate"),
+    ("magnitude", "_w_intrinsic_magnitude"),
+    ("normalize", "_w_intrinsic_normalize"),
+    ("dot", "_w_intrinsic_dot"),
+    ("cross", "_w_intrinsic_cross"),
+    ("distance", "_w_intrinsic_distance"),
+    ("reflect", "_w_intrinsic_reflect"),
+    ("refract", "_w_intrinsic_refract"),
+    ("floor", "_w_intrinsic_floor"),
+    ("ceil", "_w_intrinsic_ceil"),
+    ("fract", "_w_intrinsic_fract"),
+    ("mix", "_w_intrinsic_mix"),
+    ("smoothstep", "_w_intrinsic_smoothstep"),
+    ("determinant", "_w_intrinsic_determinant"),
+    ("inverse", "_w_intrinsic_inverse"),
+    ("outer", "_w_intrinsic_outer"),
 ];
 
 /// SOAC names that are intercepted in transform_application and turned into
@@ -1386,7 +1401,7 @@ impl<'a> Transformer<'a> {
                     .map(|e| self.transform_expr(e))
                     .expect("Slice without end not yet supported");
 
-                self.build_app3("_w_slice", arr, start, end, ty, span)
+                self.build_app3("_w_intrinsic_slice", arr, start, end, ty, span)
             }
 
             ast::ExprKind::TypeAscription(inner, _) => self.transform_expr(inner),
