@@ -32,6 +32,7 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .map_err(|e| crate::err_spirv!("{}", e))?
         .parallelize_soacs()
         .filter_reachable()
+        .optimize()
         .lower()?;
     Ok(())
 }
