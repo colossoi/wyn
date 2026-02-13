@@ -230,9 +230,12 @@ fn compile_file(
     // Eliminate dead functions
     let reachable = time("filter_reachable", verbose, || parallelized.filter_reachable());
 
+    // SSA peephole optimizations
+    let optimized = time("ssa_opt", verbose, || reachable.optimize());
+
     match target {
         Target::Spirv => {
-            let lowered = time("lower", verbose, || reachable.lower())?;
+            let lowered = time("lower", verbose, || optimized.lower())?;
 
             // Determine output path
             let output_path = output.unwrap_or_else(|| {

@@ -847,7 +847,10 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
         }
 
         // Create all SPIR-V blocks first
-        for (block_idx, _) in self.body.blocks.iter().enumerate() {
+        for (block_idx, block) in self.body.blocks.iter().enumerate() {
+            if block.is_dead() {
+                continue;
+            }
             let block_id = BlockId(block_idx as u32);
             if block_idx == 0 {
                 // Entry block is already created by begin_function
@@ -861,6 +864,9 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
 
         // Lower each block
         for (block_idx, block) in self.body.blocks.iter().enumerate() {
+            if block.is_dead() {
+                continue;
+            }
             let block_id = BlockId(block_idx as u32);
 
             // Start block (skip entry which is already started)

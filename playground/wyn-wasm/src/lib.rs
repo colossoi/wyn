@@ -660,8 +660,11 @@ fn compile_impl(source: &str) -> CompileResult {
     // Eliminate dead functions
     let reachable = parallelized.filter_reachable();
 
+    // SSA peephole optimizations
+    let optimized = reachable.optimize();
+
     // Lower to Shadertoy GLSL
-    match reachable.lower_shadertoy() {
+    match optimized.lower_shadertoy() {
         Ok(glsl) => CompileResult::ok(glsl),
         Err(e) => CompileResult::err(e),
     }

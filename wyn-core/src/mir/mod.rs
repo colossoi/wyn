@@ -15,6 +15,7 @@ pub mod layout;
 pub mod reachability;
 pub mod ssa;
 pub mod ssa_builder;
+pub mod ssa_opt;
 pub mod ssa_soac_analysis;
 pub mod ssa_verify;
 

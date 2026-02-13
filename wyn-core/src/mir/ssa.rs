@@ -179,6 +179,12 @@ impl Block {
             control: None,
         }
     }
+
+    /// A dead block was eliminated by the optimizer but remains in the Vec
+    /// to preserve BlockId indices.
+    pub fn is_dead(&self) -> bool {
+        self.insts.is_empty() && matches!(self.terminator, Some(Terminator::Unreachable))
+    }
 }
 
 impl Default for Block {

@@ -319,6 +319,7 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 // BackEnd Pipeline (SSA -> output):
 //       -> .parallelize_soacs()                         -> SsaParallelized
 //       -> .filter_reachable()                          -> SsaReachable
+//       -> .optimize()                                  -> SsaOptimized
 //       -> .lower()                                     -> Lowered
 
 // =============================================================================
@@ -837,6 +838,19 @@ pub struct SsaReachable {
 }
 
 impl SsaReachable {
+    /// Run SSA peephole optimizations (param forwarding, empty block elimination).
+    pub fn optimize(self) -> SsaOptimized {
+        let ssa = mir::ssa_opt::optimize(self.ssa);
+        SsaOptimized { ssa }
+    }
+}
+
+/// SSA after peephole optimizations
+pub struct SsaOptimized {
+    pub ssa: tlc::to_ssa::SsaProgram,
+}
+
+impl SsaOptimized {
     /// Lower SSA to SPIR-V.
     pub fn lower(self) -> error::Result<Lowered> {
         let spirv = spirv::lower_ssa_program(&self.ssa)?;
