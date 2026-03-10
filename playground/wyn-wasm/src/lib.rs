@@ -664,8 +664,11 @@ fn compile_impl(source: &str) -> CompileResult {
     // SSA peephole optimizations
     let optimized = reachable.optimize();
 
+    // Lower SOAC instructions to explicit loops
+    let soac_lowered = optimized.lower_soacs();
+
     // Lower to Shadertoy GLSL
-    match optimized.lower_shadertoy() {
+    match soac_lowered.lower_shadertoy() {
         Ok(glsl) => CompileResult::ok(glsl),
         Err(e) => CompileResult::err(e),
     }
@@ -758,10 +761,12 @@ fn compile_with_ir_impl(source: &str) -> CompileResultWithIR {
 
     // Eliminate dead functions
     let reachable = parallelized.filter_reachable();
+    let optimized = reachable.optimize();
+    let soac_lowered = optimized.lower_soacs();
 
     // Lower to Shadertoy GLSL
     // Note: MIR visualization is no longer available (MIR eliminated from pipeline)
-    match reachable.lower_shadertoy() {
+    match soac_lowered.lower_shadertoy() {
         Ok(glsl) => CompileResultWithIR {
             success: true,
             glsl: Some(glsl),

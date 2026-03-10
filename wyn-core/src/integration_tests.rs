@@ -530,6 +530,7 @@ entry vertex_main() #[builtin(position)] vec4f32 =
         .parallelize_soacs()
         .filter_reachable()
         .optimize()
+        .lower_soacs()
         .lower();
 
     assert!(result.is_ok(), "SPIR-V compilation failed: {:?}", result.err());
@@ -574,6 +575,7 @@ entry compute_main(data: []i32) i32 =
         .parallelize_soacs()
         .filter_reachable()
         .optimize()
+        .lower_soacs()
         .lower();
 
     assert!(result.is_ok(), "SPIR-V compilation failed: {:?}", result.err());
@@ -620,6 +622,7 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
         .parallelize_soacs()
         .filter_reachable()
         .optimize()
+        .lower_soacs()
         .lower();
 
     assert!(result.is_ok(), "SPIR-V compilation failed: {:?}", result.err());

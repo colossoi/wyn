@@ -459,14 +459,15 @@ pub fn remap_value(
             )
             .ok()?,
 
-        // Effectful — cannot remap
+        // Effectful / opaque — cannot remap
         InstKind::Alloca { .. }
         | InstKind::Load { .. }
         | InstKind::Store { .. }
         | InstKind::StorageView { .. }
         | InstKind::StorageViewIndex { .. }
         | InstKind::StorageViewLen { .. }
-        | InstKind::OutputPtr { .. } => return None,
+        | InstKind::OutputPtr { .. }
+        | InstKind::Soac(_) => return None,
     };
 
     memo.insert(value, new_val);

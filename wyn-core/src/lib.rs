@@ -321,6 +321,7 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 //       -> .parallelize_soacs()                         -> SsaParallelized
 //       -> .filter_reachable()                          -> SsaReachable
 //       -> .optimize()                                  -> SsaOptimized
+//       -> .lower_soacs()                               -> SsaSoacLowered
 //       -> .lower()                                     -> Lowered
 
 // =============================================================================
@@ -870,6 +871,19 @@ pub struct SsaOptimized {
 }
 
 impl SsaOptimized {
+    /// Lower first-class SOAC instructions to explicit loops.
+    pub fn lower_soacs(self) -> SsaSoacLowered {
+        let ssa = mir::ssa_soac_lower::lower_soacs(self.ssa);
+        SsaSoacLowered { ssa }
+    }
+}
+
+/// SSA after SOAC instructions have been lowered to explicit loops
+pub struct SsaSoacLowered {
+    pub ssa: tlc::to_ssa::SsaProgram,
+}
+
+impl SsaSoacLowered {
     /// Lower SSA to SPIR-V.
     pub fn lower(self) -> error::Result<Lowered> {
         let spirv = spirv::lower_ssa_program(&self.ssa)?;

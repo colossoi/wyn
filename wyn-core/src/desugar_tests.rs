@@ -34,6 +34,7 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .parallelize_soacs()
         .filter_reachable()
         .optimize()
+        .lower_soacs()
         .lower()?;
     Ok(())
 }
@@ -505,6 +506,9 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     let ssa = ssa.optimize();
     eprintln!("=== optimize OK ===");
 
+    let ssa = ssa.lower_soacs();
+    eprintln!("=== lower_soacs OK ===");
+
     let _lowered = ssa.lower().expect("lower");
     eprintln!("=== lower OK ===");
 }
@@ -568,6 +572,9 @@ entry main(data: []i32) []i32 = [first(data)]
 
     let ssa = ssa.optimize();
     eprintln!("=== optimize OK ===");
+
+    let ssa = ssa.lower_soacs();
+    eprintln!("=== lower_soacs OK ===");
 
     let _lowered = ssa.lower().expect("lower");
     eprintln!("=== lower OK ===");

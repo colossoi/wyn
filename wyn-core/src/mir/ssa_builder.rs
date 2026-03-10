@@ -884,6 +884,11 @@ impl FuncBuilder {
         });
         Ok(())
     }
+
+    /// Set the control header on an arbitrary block (used during function rebuilds).
+    pub fn set_control_header(&mut self, block: BlockId, control: ControlHeader) {
+        self.body.blocks[block.index()].control = Some(control);
+    }
 }
 
 /// Block structure for an if-then-else expression.

@@ -984,6 +984,10 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             InstKind::OutputPtr { .. } => {
                 bail_glsl!("OutputPtr not supported in GLSL (use different entry point handling)")
             }
+
+            InstKind::Soac(_) => {
+                panic!("internal compiler error: Soac instruction reached GLSL backend; soac_lower pass was not run")
+            }
         }
     }
 

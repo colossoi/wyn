@@ -132,7 +132,7 @@ fn resolve_substitutions(subs: &HashMap<ValueId, ValueId>) -> HashMap<ValueId, V
 
 /// Rewrite every ValueId reference in instructions and terminators.
 fn apply_substitutions(body: &mut FuncBody, subs: &HashMap<ValueId, ValueId>) {
-    let sub = |v: &mut ValueId| {
+    let mut sub = |v: &mut ValueId| {
         if let Some(&r) = subs.get(v) {
             *v = r;
         }
@@ -188,6 +188,10 @@ fn apply_substitutions(body: &mut FuncBody, subs: &HashMap<ValueId, ValueId>) {
                 sub(index);
             }
             InstKind::StorageViewLen { view } => sub(view),
+            // SOAC instructions are opaque to peephole optimization — just remap uses
+            InstKind::Soac(soac) => {
+                soac.substitute_uses(&mut sub);
+            }
             // No ValueId references in these variants
             InstKind::Int(_)
             | InstKind::Float(_)

@@ -66,7 +66,8 @@ entry compute_main(
             println!("  Parallelizable map found!");
             println!("    Map function: {}", par_map.map_function);
             println!("    Source: {:?}", par_map.source);
-            println!("    Loop header block: {:?}", par_map.map_loop.loop_info.header);
+            println!("    Captures: {:?}", par_map.captures);
+            println!("    Output elem type: {:?}", par_map.output_elem_type);
         } else {
             println!("  No parallelizable map found");
         }

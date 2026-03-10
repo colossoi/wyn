@@ -1235,6 +1235,10 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                     )
                 }
             }
+
+            InstKind::Soac(_) => {
+                panic!("internal compiler error: Soac instruction reached SPIR-V backend; soac_lower pass was not run")
+            }
         };
 
         // Map the result

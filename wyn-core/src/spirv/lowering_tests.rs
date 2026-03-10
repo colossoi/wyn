@@ -31,7 +31,7 @@ fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
         .filter_reachable()
         .optimize();
 
-    ssa.lower().map(|l| l.spirv)
+    ssa.lower_soacs().lower().map(|l| l.spirv)
 }
 
 #[test]
@@ -359,7 +359,7 @@ fn compile_to_spirv_with_partial_eval(source: &str) -> Result<Vec<u32>> {
         .filter_reachable()
         .optimize();
 
-    ssa.lower().map(|l| l.spirv)
+    ssa.lower_soacs().lower().map(|l| l.spirv)
 }
 
 #[test]

@@ -343,6 +343,7 @@ impl<'a> Verifier<'a> {
             InstKind::StorageViewIndex { view, index } => vec![*view, *index],
             InstKind::StorageViewLen { view } => vec![*view],
             InstKind::OutputPtr { .. } => vec![],
+            InstKind::Soac(soac) => soac.uses(),
         }
     }
 

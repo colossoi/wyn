@@ -126,7 +126,7 @@ pub fn parallelize_soacs(mut program: SsaProgram) -> SsaProgram {
                             entry.outputs = storage_outputs.clone();
                         } else {
                             // Synthesize an EntryOutput with the correct storage_binding
-                            let output_elem_ty = &par_map.map_loop.map_result_ty;
+                            let output_elem_ty = &par_map.output_elem_type;
                             let array_ty = Type::Constructed(
                                 TypeName::Array,
                                 vec![
@@ -210,7 +210,7 @@ fn build_parallel_body<I: InputStrategy, O: OutputStrategy>(
 ) -> Option<()> {
     // 1. Setup input and output strategies (resources created once)
     let (input_handle, input_len, _input_elem_ty) = input_strategy.setup(ctx)?;
-    let output_elem_ty = &par_map.map_loop.map_result_ty;
+    let output_elem_ty = &par_map.output_elem_type;
     let output_handle = output_strategy.setup(ctx, output_elem_ty)?;
 
     // 2. Get thread ID and calculate chunk bounds
@@ -269,14 +269,11 @@ fn build_parallel_body<I: InputStrategy, O: OutputStrategy>(
     let input_elem = input_strategy.get_element(ctx, input_handle, loop_index)?;
 
     // Build the full argument list for the map function.
-    // The original call may have captured variables (e.g. from defunctionalized lambdas)
-    // in addition to the loop element. Remap each original arg's dependency cone into the
-    // new builder, substituting the element arg position with the new input_elem.
+    // After defunctionalization, the map function takes captures first, then the element.
     let entry = ctx.entry;
-    let result_ty = &par_map.map_loop.map_result_ty;
+    let result_ty = &par_map.output_elem_type;
     let call_args = {
         // Shared memo pre-seeded with entry param → builder param mappings.
-        // Shared across all captured args to deduplicate common dependencies.
         let mut remap_memo: HashMap<ValueId, ValueId> = entry
             .body
             .params
@@ -288,21 +285,19 @@ fn build_parallel_body<I: InputStrategy, O: OutputStrategy>(
         let span = ctx.span;
         let node_id = ctx.node_id;
         let mut args = Vec::new();
-        for (i, &orig_arg) in par_map.map_loop.map_call_args.iter().enumerate() {
-            if i == par_map.map_loop.element_arg_index {
-                args.push(input_elem);
-            } else {
-                // Recursively remap the value and its dependency cone
-                let new_val = remap_value(
-                    &entry.body,
-                    orig_arg,
-                    &mut ctx.builder,
-                    &mut remap_memo,
-                    span,
-                    node_id,
-                )?;
-                args.push(new_val);
-            }
+        // Element comes first (original lambda parameter)
+        args.push(input_elem);
+        // Then captures (appended by defunctionalization)
+        for &capture in &par_map.captures {
+            let new_val = remap_value(
+                &entry.body,
+                capture,
+                &mut ctx.builder,
+                &mut remap_memo,
+                span,
+                node_id,
+            )?;
+            args.push(new_val);
         }
         args
     };

@@ -32,12 +32,13 @@ pub fn eliminate_dead_functions(mut program: SsaProgram) -> SsaProgram {
 /// Collect function references (calls and globals) from a function body.
 fn collect_references(body: &FuncBody, live: &mut HashSet<String>, worklist: &mut Vec<String>) {
     for inst in &body.insts {
-        let name = match &inst.kind {
-            InstKind::Call { func, .. } => Some(func.clone()),
-            InstKind::Global(name) => Some(name.clone()),
-            _ => None,
+        let names: Vec<String> = match &inst.kind {
+            InstKind::Call { func, .. } => vec![func.clone()],
+            InstKind::Global(name) => vec![name.clone()],
+            InstKind::Soac(soac) => vec![soac.func_name().to_string()],
+            _ => vec![],
         };
-        if let Some(name) = name {
+        for name in names {
             if live.insert(name.clone()) {
                 worklist.push(name);
             }

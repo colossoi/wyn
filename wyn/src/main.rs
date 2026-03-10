@@ -248,9 +248,12 @@ fn compile_file(
     // SSA peephole optimizations
     let optimized = time("ssa_opt", verbose, || reachable.optimize());
 
+    // Lower first-class SOAC instructions to explicit loops
+    let soac_lowered = time("soac_lower", verbose, || optimized.lower_soacs());
+
     match target {
         Target::Spirv => {
-            let lowered = time("lower", verbose, || optimized.lower())?;
+            let lowered = time("lower", verbose, || soac_lowered.lower())?;
 
             // Determine output path
             let output_path = output.unwrap_or_else(|| {

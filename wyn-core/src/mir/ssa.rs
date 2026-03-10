@@ -393,6 +393,123 @@ pub enum InstKind {
         /// Index of the output (0 for single output, 0..n for tuple outputs).
         index: usize,
     },
+
+    // =========================================================================
+    // First-class SOAC operations (lowered to loops by ssa_soac_lower)
+    // =========================================================================
+    /// A first-class SOAC (Second-Order Array Combinator) operation.
+    /// These are preserved through optimization passes and lowered to explicit
+    /// loops by the `ssa_soac_lower` pass right before backend lowering.
+    Soac(SsaSoac),
+}
+
+/// First-class SOAC (Second-Order Array Combinator) operations in SSA.
+///
+/// After defunctionalization, lambda bodies are just function references,
+/// so we store the function name (like `Call`) rather than nested regions.
+#[derive(Debug, Clone)]
+pub enum SsaSoac {
+    /// `map f inputs` — apply `f` to each element, producing an output array.
+    Map {
+        /// Name of the map function (post-defunctionalization).
+        func: String,
+        /// Input arrays (one for single-input map, multiple for zip-fused map).
+        inputs: Vec<ValueId>,
+        /// Captured variables passed as extra arguments to `func`.
+        captures: Vec<ValueId>,
+        /// Whether inputs were zip-fused (multiple inputs packed into tuple arg).
+        zipped: bool,
+        /// Types of each input array (for SoA-aware length/indexing).
+        input_array_types: Vec<Type<TypeName>>,
+        /// Element types of each input array (for SoA-aware indexing).
+        input_elem_types: Vec<Type<TypeName>>,
+        /// Element type of the output array (for SoA-aware array_with).
+        output_elem_type: Type<TypeName>,
+        /// Type of the zipped parameter (when `zipped` is true).
+        zipped_param_type: Option<Type<TypeName>>,
+    },
+    /// `reduce f init input` — fold `f` over elements with initial value `init`.
+    Reduce {
+        /// Name of the reduce operator function.
+        func: String,
+        /// The input array to reduce over.
+        input: ValueId,
+        /// The initial accumulator value.
+        init: ValueId,
+        /// Captured variables passed as extra arguments to `func`.
+        captures: Vec<ValueId>,
+        /// Type of the input array (for SoA-aware operations).
+        input_array_type: Type<TypeName>,
+        /// Element type of the input array (for SoA-aware indexing).
+        input_elem_type: Type<TypeName>,
+    },
+    /// `scan f init input` — like reduce but produces array of intermediate results.
+    Scan {
+        /// Name of the scan operator function.
+        func: String,
+        /// The input array to scan over.
+        input: ValueId,
+        /// The initial accumulator value.
+        init: ValueId,
+        /// Captured variables passed as extra arguments to `func`.
+        captures: Vec<ValueId>,
+        /// Type of the input array (for SoA-aware operations).
+        input_array_type: Type<TypeName>,
+        /// Element type of the input array (for SoA-aware indexing).
+        input_elem_type: Type<TypeName>,
+    },
+}
+
+impl SsaSoac {
+    /// Return all ValueIds referenced by this SOAC operation.
+    pub fn uses(&self) -> Vec<ValueId> {
+        match self {
+            SsaSoac::Map { inputs, captures, .. } => {
+                let mut uses = inputs.clone();
+                uses.extend(captures.iter().copied());
+                uses
+            }
+            SsaSoac::Reduce { input, init, captures, .. } => {
+                let mut uses = vec![*input, *init];
+                uses.extend(captures.iter().copied());
+                uses
+            }
+            SsaSoac::Scan { input, init, captures, .. } => {
+                let mut uses = vec![*input, *init];
+                uses.extend(captures.iter().copied());
+                uses
+            }
+        }
+    }
+
+    /// Apply a substitution function to all ValueId references in this SOAC.
+    pub fn substitute_uses(&mut self, sub: &mut impl FnMut(&mut ValueId)) {
+        match self {
+            SsaSoac::Map { inputs, captures, .. } => {
+                for v in inputs.iter_mut() { sub(v); }
+                for v in captures.iter_mut() { sub(v); }
+            }
+            SsaSoac::Reduce { input, init, captures, .. } => {
+                sub(input);
+                sub(init);
+                for v in captures.iter_mut() { sub(v); }
+            }
+            SsaSoac::Scan { input, init, captures, .. } => {
+                sub(input);
+                sub(init);
+                for v in captures.iter_mut() { sub(v); }
+            }
+        }
+    }
+
+    /// Return the name of the function applied by this SOAC.
+    pub fn func_name(&self) -> &str {
+        match self {
+            SsaSoac::Map { func, .. } => func,
+            SsaSoac::Reduce { func, .. } => func,
+            SsaSoac::Scan { func, .. } => func,
+        }
+    }
 }
 
 /// Where a view array gets its data from.
