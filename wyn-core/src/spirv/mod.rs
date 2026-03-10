@@ -10,7 +10,7 @@ use crate::ast::TypeName;
 use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
 use crate::mir::layout::{buffer_array_strides, type_byte_size};
-use crate::mir::ssa::{Block, BlockId, ControlHeader, FuncBody, Inst, InstKind, Terminator, ValueId};
+use crate::mir::ssa::{Block, BlockId, ControlHeader, FuncBody, Inst, InstKind, Terminator, ValueId, ViewSource};
 use crate::tlc::to_ssa::{ExecutionModel, IoDecoration, SsaEntryPoint, SsaFunction, SsaProgram};
 use crate::types;
 use crate::types::TypeExt;
@@ -102,7 +102,9 @@ struct Constructor {
     /// Tracks which SPIR-V types already have ArrayStride decorations for buffer layout.
     buffer_stride_decorated: HashSet<spirv::Word>,
 
-    /// Maps (set, binding) -> sequential buffer_id for handle-based view structs
+    /// buffer_id → (buffer_var, elem_spirv_type). Indexed by the u32 constant in view struct field 0.
+    buffer_vars: Vec<(spirv::Word, spirv::Word)>,
+    /// (set, binding) → buffer_id, for deduplication in get_or_assign_buffer_id.
     buffer_id_map: HashMap<(u32, u32), u32>,
 }
 
@@ -160,14 +162,31 @@ impl Constructor {
             linked_functions: HashMap::new(),
             current_entry_outputs: Vec::new(),
             buffer_stride_decorated: HashSet::new(),
+            buffer_vars: Vec::new(),
             buffer_id_map: HashMap::new(),
         }
     }
 
     /// Get or assign a sequential buffer_id for a (set, binding) pair.
+    /// Also registers the buffer_var in buffer_vars for later lookup.
     fn get_or_assign_buffer_id(&mut self, set: u32, binding: u32) -> u32 {
-        let next_id = self.buffer_id_map.len() as u32;
-        *self.buffer_id_map.entry((set, binding)).or_insert(next_id)
+        if let Some(&id) = self.buffer_id_map.get(&(set, binding)) {
+            return id;
+        }
+        let id = self.buffer_vars.len() as u32;
+        let &(buffer_var, elem_ty, _) = self.storage_buffers.get(&(set, binding))
+            .expect("get_or_assign_buffer_id: storage buffer must exist");
+        self.buffer_vars.push((buffer_var, elem_ty));
+        self.buffer_id_map.insert((set, binding), id);
+        id
+    }
+
+    /// Resolve a buffer_id (u32 SPIR-V constant) to (buffer_var, elem_type).
+    fn resolve_buffer_by_id(&self, buffer_id_spirv: spirv::Word) -> Result<(spirv::Word, spirv::Word)> {
+        let buffer_id = self.uint_const_reverse.get(&buffer_id_spirv).copied()
+            .ok_or_else(|| err_spirv!("resolve_buffer_by_id: not a u32 constant"))?;
+        self.buffer_vars.get(buffer_id as usize).copied()
+            .ok_or_else(|| err_spirv!("resolve_buffer_by_id: unknown buffer_id {}", buffer_id))
     }
 
     /// Resolve a pointer address-space type to a SPIR-V StorageClass.
@@ -480,12 +499,17 @@ impl Constructor {
 
     /// Create a storage buffer variable for compute shaders.
     /// Returns the variable ID. Also registers it in storage_buffers for later lookup.
+    /// Idempotent: returns existing variable if already created for this (set, binding).
     fn create_storage_buffer(
         &mut self,
         array_ty: &PolyType<TypeName>,
         set: u32,
         binding: u32,
     ) -> spirv::Word {
+        // Return existing if already created
+        if let Some(&(var_id, _, _)) = self.storage_buffers.get(&(set, binding)) {
+            return var_id;
+        }
         // Extract element type from array type
         let elem_ty = array_ty
             .elem_type()
@@ -820,8 +844,10 @@ struct SsaLowerCtx<'a, 'b> {
     /// Phi node info: (target_block, param_idx, value, source_block)
     /// Collected during terminator lowering, inserted after all blocks processed.
     phi_inputs: Vec<(BlockId, usize, spirv::Word, spirv::Word)>,
-    /// Maps SSA ValueId of a StorageView -> (set, binding) for resolving buffer identity.
-    view_buffer_map: HashMap<ValueId, (u32, u32)>,
+    /// Map from SSA view ValueId to its buffer_id (u32 index into buffer_vars).
+    /// Populated when lowering StorageView instructions so StorageViewIndex can
+    /// resolve the buffer without relying on SPIR-V constant reverse lookups.
+    view_buffer_id: HashMap<ValueId, u32>,
 }
 
 impl<'a, 'b> SsaLowerCtx<'a, 'b> {
@@ -834,7 +860,7 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
             block_map: HashMap::new(),
             block_indices: HashMap::new(),
             phi_inputs: Vec::new(),
-            view_buffer_map: HashMap::new(),
+            view_buffer_id: HashMap::new(),
         }
     }
 
@@ -1097,72 +1123,89 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
             }
 
             InstKind::StorageView {
-                set,
-                binding,
+                source,
                 offset,
                 len,
             } => {
                 let offset_id = self.get_value(*offset)?;
                 let len_id = self.get_value(*len)?;
 
-                if self.constructor.storage_buffers.contains_key(&(*set, *binding)) {
-                    // Handle-based view: {buffer_id: u32, offset: u32, len: u32}
-                    // No pointers in the struct — avoids VariablePointersStorageBuffer requirement.
-                    let buffer_id = self.constructor.get_or_assign_buffer_id(*set, *binding);
-                    let buffer_id_const = self.constructor.const_u32(buffer_id);
-                    let u32_ty = self.constructor.u32_type;
-                    let view_struct_type =
-                        self.constructor.get_or_create_struct_type(vec![u32_ty, u32_ty, u32_ty]);
-                    let result = self.constructor.builder.composite_construct(
-                        view_struct_type,
-                        None,
-                        [buffer_id_const, offset_id, len_id],
-                    )?;
-                    // Record (set, binding) for this view so StorageViewIndex can resolve the buffer.
-                    if let Some(result_value) = inst.result {
-                        self.view_buffer_map.insert(result_value, (*set, *binding));
+                match source {
+                    ViewSource::Storage { set, binding } => {
+                        if self.constructor.storage_buffers.contains_key(&(*set, *binding)) {
+                            let buffer_id = self.constructor.get_or_assign_buffer_id(*set, *binding);
+                            // Record the buffer_id for this view (if we have an SSA result)
+                            if let Some(result) = inst.result {
+                                self.view_buffer_id.insert(result, buffer_id);
+                            }
+                            let buffer_id_const = self.constructor.const_u32(buffer_id);
+                            let u32_ty = self.constructor.u32_type;
+                            let view_struct_type =
+                                self.constructor.get_or_create_struct_type(vec![u32_ty, u32_ty, u32_ty]);
+                            self.constructor.builder.composite_construct(
+                                view_struct_type,
+                                None,
+                                [buffer_id_const, offset_id, len_id],
+                            )?
+                        } else {
+                            bail_spirv!("Unknown storage buffer: set={}, binding={}", set, binding)
+                        }
                     }
-                    result
-                } else {
-                    bail_spirv!("Unknown storage buffer: set={}, binding={}", set, binding)
+                    ViewSource::Inherited { parent } => {
+                        // Propagate buffer_id from parent view
+                        if let (Some(result), Some(&parent_buf_id)) =
+                            (inst.result, self.view_buffer_id.get(parent))
+                        {
+                            self.view_buffer_id.insert(result, parent_buf_id);
+                        }
+                        let parent_id = self.get_value(*parent)?;
+                        let u32_ty = self.constructor.u32_type;
+                        let view_struct_type =
+                            self.constructor.get_or_create_struct_type(vec![u32_ty, u32_ty, u32_ty]);
+
+                        // Extract buffer_id (field 0) and parent_offset (field 1) from parent view
+                        let buffer_id = self.constructor.builder.composite_extract(
+                            u32_ty, None, parent_id, [0],
+                        )?;
+                        let parent_offset = self.constructor.builder.composite_extract(
+                            u32_ty, None, parent_id, [1],
+                        )?;
+
+                        // new_offset = parent_offset + offset
+                        let new_offset = self.constructor.builder.i_add(
+                            u32_ty, None, parent_offset, offset_id,
+                        )?;
+
+                        self.constructor.builder.composite_construct(
+                            view_struct_type,
+                            None,
+                            [buffer_id, new_offset, len_id],
+                        )?
+                    }
                 }
             }
 
             InstKind::StorageViewIndex { view, index } => {
                 let view_id = self.get_value(*view)?;
                 let index_id = self.get_value(*index)?;
+                let u32_ty = self.constructor.u32_type;
 
-                // Resolve the buffer variable from the view's compile-time side table.
-                let (set, binding) =
-                    self.view_buffer_map.get(view).copied().ok_or_else(|| {
-                        err_spirv!("StorageViewIndex: no buffer mapping for view {:?}", view)
-                    })?;
-                let &(buffer_var, _, _) =
-                    self.constructor.storage_buffers.get(&(set, binding)).ok_or_else(|| {
-                        err_spirv!(
-                            "StorageViewIndex: unknown storage buffer set={}, binding={}",
-                            set,
-                            binding
-                        )
-                    })?;
+                // Extract buffer_id (field 0) and offset (field 1) from view struct
+                let buffer_id_val = self.constructor.builder.composite_extract(u32_ty, None, view_id, [0u32])?;
+                let base_offset = self.constructor.builder.composite_extract(u32_ty, None, view_id, [1u32])?;
 
-                // Extract offset from view struct (index 1, u32)
-                let base_offset = self.constructor.builder.composite_extract(
-                    self.constructor.u32_type,
-                    None,
-                    view_id,
-                    [1u32],
-                )?;
+                // Try the SSA-level view_buffer_id map first (reliable), fall back to
+                // SPIR-V constant reverse lookup (works when buffer_id is directly
+                // extractable as a constant, e.g. in the same entry point scope).
+                let (buffer_var, _) = if let Some(&buf_id) = self.view_buffer_id.get(view) {
+                    self.constructor.buffer_vars.get(buf_id as usize).copied()
+                        .ok_or_else(|| err_spirv!("view_buffer_id: unknown buffer_id {}", buf_id))?
+                } else {
+                    self.constructor.resolve_buffer_by_id(buffer_id_val)?
+                };
 
-                // Compute actual index: base_offset + index
-                let actual_index = self.constructor.builder.i_add(
-                    self.constructor.u32_type,
-                    None,
-                    base_offset,
-                    index_id,
-                )?;
+                let actual_index = self.constructor.builder.i_add(u32_ty, None, base_offset, index_id)?;
 
-                // Access chain directly on the buffer variable
                 let zero = self.constructor.const_i32(0);
                 let elem_ptr_type =
                     self.constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, result_ty);
@@ -1755,26 +1798,11 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
 
                 if is_view {
                     let elem_ty = arr_ty.elem_type().expect("Array has elem").clone();
+                    let u32_ty = self.constructor.u32_type;
 
-                    // Resolve buffer and extract base offset from view handle
-                    let (set, binding) =
-                        self.view_buffer_map.get(&ssa_args[0]).copied().ok_or_else(|| {
-                            err_spirv!("_w_slice: no buffer mapping for view {:?}", ssa_args[0])
-                        })?;
-                    let &(buffer_var, _, _) =
-                        self.constructor.storage_buffers.get(&(set, binding)).ok_or_else(|| {
-                            err_spirv!(
-                                "_w_slice: unknown storage buffer set={}, binding={}",
-                                set,
-                                binding
-                            )
-                        })?;
-                    let base_offset = self.constructor.builder.composite_extract(
-                        self.constructor.u32_type,
-                        None,
-                        arr,
-                        [1u32],
-                    )?;
+                    // Extract buffer_id and base_offset from view struct
+                    let buffer_id_val = self.constructor.builder.composite_extract(u32_ty, None, arr, [0u32])?;
+                    let base_offset = self.constructor.builder.composite_extract(u32_ty, None, arr, [1u32])?;
 
                     // Check result type to decide materialization vs sub-view
                     let result_is_composite = inst
@@ -1786,6 +1814,7 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                         .unwrap_or(false);
 
                     if result_is_composite {
+                        let (buffer_var, _) = self.constructor.resolve_buffer_by_id(buffer_id_val)?;
                         self.slice_view_to_composite(
                             arr,
                             buffer_var,
@@ -1798,12 +1827,10 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                     } else {
                         self.slice_view_to_view(
                             arr,
+                            buffer_id_val,
                             base_offset,
                             start_id,
                             end_id,
-                            set,
-                            binding,
-                            inst.result,
                         )
                     }
                 } else {
@@ -1870,6 +1897,15 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                 Ok(len_u32)
             }
 
+            "view_len" => {
+                // Get the length of a view: extract field 2 from {buffer_id, offset, len}
+                if args.len() != 1 {
+                    bail_spirv!("_w_intrinsic_view_len requires 1 argument (view)");
+                }
+                let u32_ty = self.constructor.u32_type;
+                Ok(self.constructor.builder.composite_extract(u32_ty, None, args[0], [2u32])?)
+            }
+
             _ => bail_spirv!("Unknown intrinsic: {}", name),
         }
     }
@@ -1922,29 +1958,20 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
     fn slice_view_to_view(
         &mut self,
         _view_id: spirv::Word,
+        buffer_id_val: spirv::Word,
         base_offset: spirv::Word,
         start_id: spirv::Word,
         end_id: spirv::Word,
-        set: u32,
-        binding: u32,
-        result_value: Option<ValueId>,
     ) -> Result<spirv::Word> {
-        let new_offset =
-            self.constructor.builder.i_add(self.constructor.u32_type, None, base_offset, start_id)?;
-        let new_len = self.constructor.builder.i_sub(self.constructor.u32_type, None, end_id, start_id)?;
-        let buffer_id = self.constructor.get_or_assign_buffer_id(set, binding);
-        let buffer_id_const = self.constructor.const_u32(buffer_id);
         let u32_ty = self.constructor.u32_type;
+        let new_offset = self.constructor.builder.i_add(u32_ty, None, base_offset, start_id)?;
+        let new_len = self.constructor.builder.i_sub(u32_ty, None, end_id, start_id)?;
         let view_struct_type = self.constructor.get_or_create_struct_type(vec![u32_ty, u32_ty, u32_ty]);
-        let result = self.constructor.builder.composite_construct(
+        Ok(self.constructor.builder.composite_construct(
             view_struct_type,
             None,
-            [buffer_id_const, new_offset, new_len],
-        )?;
-        if let Some(result_value) = result_value {
-            self.view_buffer_map.insert(result_value, (set, binding));
-        }
-        Ok(result)
+            [buffer_id_val, new_offset, new_len],
+        )?)
     }
 
     /// Slice a value (composite) array by extracting elements and constructing a new array.
@@ -2038,24 +2065,12 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
         result_ty: spirv::Word,
         elem_ty: &PolyType<TypeName>,
     ) -> Result<spirv::Word> {
-        // Resolve buffer variable from the view's compile-time side table.
-        let (set, binding) = self
-            .view_buffer_map
-            .get(&view_ssa)
-            .copied()
-            .ok_or_else(|| err_spirv!("lower_view_index: no buffer mapping for view {:?}", view_ssa))?;
-        let &(buffer_var, _, _) =
-            self.constructor.storage_buffers.get(&(set, binding)).ok_or_else(|| {
-                err_spirv!(
-                    "lower_view_index: unknown storage buffer set={}, binding={}",
-                    set,
-                    binding
-                )
-            })?;
+        let u32_ty = self.constructor.u32_type;
 
-        // Extract offset (field 1)
-        let offset_val =
-            self.constructor.builder.composite_extract(self.constructor.u32_type, None, view_id, [1])?;
+        // Extract buffer_id (field 0) and offset (field 1) from view struct
+        let buffer_id_val = self.constructor.builder.composite_extract(u32_ty, None, view_id, [0u32])?;
+        let (buffer_var, _) = self.constructor.resolve_buffer_by_id(buffer_id_val)?;
+        let offset_val = self.constructor.builder.composite_extract(u32_ty, None, view_id, [1u32])?;
 
         // Index may be i32 from the language; reinterpret as u32 for offset arithmetic.
         let index_u32 = self.constructor.builder.bitcast(self.constructor.u32_type, None, index_id)?;
@@ -2612,6 +2627,26 @@ fn lower_ssa_program_impl(program: &SsaProgram) -> Result<Vec<u32>> {
                 return_type,
             );
             constructor.linked_functions.insert(func.name.clone(), func_id);
+        }
+    }
+
+    // Pre-create storage buffers for all entry point bindings so that
+    // buffer-specialized functions (which reference set/binding directly) can
+    // resolve them during lowering, even though they're lowered before entry points.
+    for entry in &program.entry_points {
+        for input in &entry.inputs {
+            if let Some((set, binding)) = input.storage_binding {
+                if !constructor.storage_buffers.contains_key(&(set, binding)) {
+                    constructor.create_storage_buffer(&input.ty, set, binding);
+                }
+            }
+        }
+        for output in &entry.outputs {
+            if let Some((set, binding)) = output.storage_binding {
+                if !constructor.storage_buffers.contains_key(&(set, binding)) {
+                    constructor.create_storage_buffer(&output.ty, set, binding);
+                }
+            }
         }
     }
 

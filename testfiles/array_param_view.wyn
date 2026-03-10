@@ -1,0 +1,5 @@
+-- Minimal test: regular function indexes a view-array parameter
+def first(arr: []i32) i32 = arr[0]
+
+#[compute]
+entry main(data: []i32) []i32 = [first(data)]

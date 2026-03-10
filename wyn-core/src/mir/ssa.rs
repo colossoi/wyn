@@ -367,8 +367,7 @@ pub enum InstKind {
 
     /// Create a storage buffer view.
     StorageView {
-        set: u32,
-        binding: u32,
+        source: ViewSource,
         offset: ValueId,
         len: ValueId,
     },
@@ -394,6 +393,16 @@ pub enum InstKind {
         /// Index of the output (0 for single output, 0..n for tuple outputs).
         index: usize,
     },
+}
+
+/// Where a view array gets its data from.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ViewSource {
+    /// Backed by a storage buffer at (set, binding).
+    Storage { set: u32, binding: u32 },
+    /// Inherited from another view value (e.g. a function parameter or a slice).
+    /// The SPIR-V backend follows this chain to find the underlying Storage source.
+    Inherited { parent: ValueId },
 }
 
 // =============================================================================

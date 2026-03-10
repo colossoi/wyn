@@ -263,6 +263,43 @@ fn convert_function(
         converter.locals.insert(name.clone(), value);
     }
 
+    // Wrap view-array parameters in inherited StorageView instructions so
+    // the SPIR-V backend can resolve buffer identity by walking the chain
+    // back to the caller's StorageView.
+    let span = inner_body.span;
+    let node_id = NodeId(0);
+    let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
+    for (i, (name, ty, _)) in params.iter().enumerate() {
+        let is_view = ty
+            .array_variant()
+            .map(|v| matches!(v, Type::Constructed(TypeName::ArrayVariantView, _)))
+            .unwrap_or(false);
+        if is_view {
+            let param_val = converter.builder.get_param(i);
+            // The param is an opaque view struct; create an inherited view that
+            // references it so the backend can chase the chain.
+            let zero = converter
+                .builder
+                .push_int("0", u32_ty.clone(), span, node_id)
+                .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+            let view_len = converter
+                .builder
+                .push_intrinsic(
+                    "_w_intrinsic_view_len",
+                    vec![param_val],
+                    u32_ty.clone(),
+                    span,
+                    node_id,
+                )
+                .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+            let view = converter
+                .builder
+                .emit_inherited_view(param_val, zero, view_len, ty.clone(), span, node_id)
+                .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+            converter.locals.insert(name.clone(), view);
+        }
+    }
+
     // Convert the body
     let result = converter.convert_term(inner_body)?;
 
@@ -1036,6 +1073,52 @@ impl<'a> Converter<'a> {
                     arg_values.len()
                 );
             }
+        }
+
+        // _w_intrinsic_storage_index(set_const, binding_const, index) → element value
+        // Emitted by the buffer_specialize pass for functions that index into buffers.
+        if name == "_w_intrinsic_storage_index" && args.len() == 3 {
+            let set = match &args[0].kind {
+                TermKind::IntLit(s) => s.parse::<u32>().map_err(|_| {
+                    ConvertError::InvalidIntrinsic("_w_intrinsic_storage_index: set is not u32".into())
+                })?,
+                _ => {
+                    return Err(ConvertError::InvalidIntrinsic(
+                        "_w_intrinsic_storage_index: set must be int literal".into(),
+                    ));
+                }
+            };
+            let binding = match &args[1].kind {
+                TermKind::IntLit(s) => s.parse::<u32>().map_err(|_| {
+                    ConvertError::InvalidIntrinsic(
+                        "_w_intrinsic_storage_index: binding is not u32".into(),
+                    )
+                })?,
+                _ => {
+                    return Err(ConvertError::InvalidIntrinsic(
+                        "_w_intrinsic_storage_index: binding must be int literal".into(),
+                    ));
+                }
+            };
+            // Build a storage view for this buffer, then index into it
+            let view_ty = ty.clone(); // approximate — just need something array-like
+            let view = self
+                .builder
+                .emit_storage_view(set, binding, view_ty, span, node_id)
+                .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+            let index = arg_values[2]; // already converted
+            // StorageViewIndex produces a pointer (SPIR-V OpAccessChain),
+            // then we load the value from it.
+            let ptr = self
+                .builder
+                .push_inst(InstKind::StorageViewIndex { view, index }, ty.clone(), span, node_id)
+                .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+            // Load the element from the pointer
+            let effect_in = self.builder.entry_effect();
+            return self
+                .builder
+                .push_load(ptr, ty, effect_in, span, node_id)
+                .map_err(|e| ConvertError::BuilderError(e.to_string()));
         }
 
         // Builtins and internal intrinsics → InstKind::Intrinsic

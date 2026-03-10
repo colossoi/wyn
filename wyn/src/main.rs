@@ -103,6 +103,18 @@ fn main() -> Result<(), DriverError> {
     env_logger::init();
     let cli = Cli::parse();
 
+    // Spawn on a thread with a larger stack to avoid stack overflow
+    // on deeply recursive type/SSA operations.
+    let result = std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024) // 16 MB
+        .spawn(move || run(cli))
+        .expect("Failed to spawn compiler thread")
+        .join()
+        .expect("Compiler thread panicked");
+    result
+}
+
+fn run(cli: Cli) -> Result<(), DriverError> {
     match cli.command {
         Commands::Compile {
             input,
@@ -216,7 +228,10 @@ fn compile_file(
     let tlc_mono = time("tlc_monomorphize", verbose, || tlc_defunc.monomorphize());
 
     // Inline compiler-generated lambda defs + DCE
-    let tlc_inlined = time("inline", verbose, || tlc_mono.inline());
+    // Buffer-specialize view-array params per-buffer
+    let tlc_buf = time("buffer_specialize", verbose, || tlc_mono.buffer_specialize());
+
+    let tlc_inlined = time("inline", verbose, || tlc_buf.inline());
 
     // SoA transform: [n](A,B) → ([n]A, [n]B)
     let tlc_soa = time("soa_transform", verbose, || tlc_inlined.soa_transform());

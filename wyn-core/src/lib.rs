@@ -312,6 +312,7 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 //       -> .fuse_maps()                                 -> TlcTransformed (fused)
 //       -> .defunctionalize()                           -> TlcDefunctionalized
 //       -> .monomorphize()                              -> TlcMonomorphized
+//       -> .buffer_specialize()                         -> TlcBufferSpecialized
 //       -> .inline()                                    -> TlcInlined
 //       -> .soa_transform()                             -> TlcSoaTransformed
 //       -> .to_ssa()                                    -> SsaConverted
@@ -763,6 +764,24 @@ pub struct TlcMonomorphized {
 }
 
 impl TlcMonomorphized {
+    /// Specialize functions that take view-array parameters per-buffer.
+    /// After this pass, no `DefMeta::Function` has view-array parameters.
+    pub fn buffer_specialize(self) -> TlcBufferSpecialized {
+        let specialized = tlc::buffer_specialize::buffer_specialize(self.tlc);
+        TlcBufferSpecialized {
+            tlc: specialized,
+            type_table: self.type_table,
+        }
+    }
+}
+
+/// TLC after buffer specialization (no functions have view-array params)
+pub struct TlcBufferSpecialized {
+    pub tlc: tlc::Program,
+    pub type_table: TypeTable,
+}
+
+impl TlcBufferSpecialized {
     /// Inline compiler-generated `_w_lambda_*` defs back at their call sites,
     /// then remove unreferenced defs (DCE).
     pub fn inline(self) -> TlcInlined {

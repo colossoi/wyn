@@ -27,7 +27,7 @@ use crate::types::is_virtual_array;
 use polytype::Type;
 use std::collections::HashMap;
 
-use super::ssa::{BlockId, ControlHeader, FuncBody, InstKind, Terminator, ValueId};
+use super::ssa::{BlockId, ControlHeader, FuncBody, InstKind, Terminator, ValueId, ViewSource};
 
 // =============================================================================
 // Array Provenance
@@ -271,7 +271,7 @@ fn resolve_storage_view(
 ) -> Option<(usize, (u32, u32))> {
     for inst in &body.insts {
         if inst.result == Some(value) {
-            if let InstKind::StorageView { set, binding, .. } = &inst.kind {
+            if let InstKind::StorageView { source: ViewSource::Storage { set, binding }, .. } = &inst.kind {
                 for (i, input) in entry.inputs.iter().enumerate() {
                     if input.storage_binding == Some((*set, *binding)) {
                         return Some((i, (*set, *binding)));

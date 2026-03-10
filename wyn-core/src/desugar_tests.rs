@@ -26,6 +26,7 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .fuse_maps()
         .defunctionalize()
         .monomorphize()
+        .buffer_specialize()
         .inline()
         .soa_transform()
         .to_ssa()
@@ -55,6 +56,7 @@ fn compile_through_ssa(input: &str) -> Result<SsaProgram, CompilerError> {
         .fuse_maps()
         .defunctionalize()
         .monomorphize()
+        .buffer_specialize()
         .inline()
         .soa_transform()
         .to_ssa()
@@ -437,4 +439,136 @@ def range_test: [5]i32 =
         "Complex range should compile: {:?}",
         flattened.err()
     );
+}
+
+#[test]
+fn test_array_param_stack_overflow() {
+    // Minimal test: a regular function that indexes an array parameter.
+    // This stack-overflows somewhere in the pipeline.
+    // Run each stage separately to isolate where.
+    let source = r#"
+def first(arr: [4]i32) i32 = arr[0]
+
+#[fragment]
+entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
+    let x = first([1, 2, 3, 4]) in
+    @[f32.i32(x), 0.0f32, 0.0f32, 1.0f32]
+"#;
+    let mut frontend = crate::cached_frontend();
+    let parsed = crate::Compiler::parse(source, &mut frontend.node_counter)
+        .expect("parse");
+    eprintln!("=== parse OK ===");
+
+    let alias_checked = parsed
+        .desugar(&mut frontend.node_counter).expect("desugar")
+        .resolve(&mut frontend.module_manager).expect("resolve")
+        .fold_ast_constants()
+        .type_check(&mut frontend.module_manager, &mut frontend.schemes).expect("typecheck")
+        .alias_check().expect("alias_check");
+    eprintln!("=== frontend OK ===");
+
+    let known_defs = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
+    let tlc = alias_checked
+        .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager);
+    eprintln!("=== to_tlc OK ===");
+
+    let tlc = tlc.skip_partial_eval();
+    eprintln!("=== skip_partial_eval OK ===");
+
+    let tlc = tlc.fuse_maps();
+    eprintln!("=== fuse_maps OK ===");
+
+    let tlc = tlc.defunctionalize();
+    eprintln!("=== defunctionalize OK ===");
+
+    let tlc = tlc.monomorphize();
+    eprintln!("=== monomorphize OK ===");
+
+    let tlc = tlc.buffer_specialize();
+    eprintln!("=== buffer_specialize OK ===");
+
+    let tlc = tlc.inline();
+    eprintln!("=== inline OK ===");
+
+    let tlc = tlc.soa_transform();
+    eprintln!("=== soa_transform OK ===");
+
+    let ssa = tlc.to_ssa().expect("to_ssa");
+    eprintln!("=== to_ssa OK ===");
+
+    let ssa = ssa.parallelize_soacs();
+    eprintln!("=== parallelize_soacs OK ===");
+
+    let ssa = ssa.filter_reachable();
+    eprintln!("=== filter_reachable OK ===");
+
+    let ssa = ssa.optimize();
+    eprintln!("=== optimize OK ===");
+
+    let _lowered = ssa.lower().expect("lower");
+    eprintln!("=== lower OK ===");
+}
+
+#[test]
+fn test_view_array_param_stack_overflow() {
+    // Unsized (view) array parameter in a regular function, called from compute entry.
+    let source = r#"
+def first(arr: []i32) i32 = arr[0]
+
+#[compute]
+entry main(data: []i32) []i32 = [first(data)]
+"#;
+    let mut frontend = crate::cached_frontend();
+    let parsed = crate::Compiler::parse(source, &mut frontend.node_counter)
+        .expect("parse");
+    eprintln!("=== parse OK ===");
+
+    let alias_checked = parsed
+        .desugar(&mut frontend.node_counter).expect("desugar")
+        .resolve(&mut frontend.module_manager).expect("resolve")
+        .fold_ast_constants()
+        .type_check(&mut frontend.module_manager, &mut frontend.schemes).expect("typecheck")
+        .alias_check().expect("alias_check");
+    eprintln!("=== frontend OK ===");
+
+    let known_defs = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
+    let tlc = alias_checked
+        .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager);
+    eprintln!("=== to_tlc OK ===");
+
+    let tlc = tlc.skip_partial_eval();
+    eprintln!("=== skip_partial_eval OK ===");
+
+    let tlc = tlc.fuse_maps();
+    eprintln!("=== fuse_maps OK ===");
+
+    let tlc = tlc.defunctionalize();
+    eprintln!("=== defunctionalize OK ===");
+
+    let tlc = tlc.monomorphize();
+    eprintln!("=== monomorphize OK ===");
+
+    let tlc = tlc.buffer_specialize();
+    eprintln!("=== buffer_specialize OK ===");
+
+    let tlc = tlc.inline();
+    eprintln!("=== inline OK ===");
+
+    let tlc = tlc.soa_transform();
+    eprintln!("=== soa_transform OK ===");
+
+    let ssa = tlc.to_ssa().expect("to_ssa");
+    eprintln!("=== to_ssa OK ===");
+
+    let ssa = ssa.parallelize_soacs();
+    eprintln!("=== parallelize_soacs OK ===");
+
+    let ssa = ssa.filter_reachable();
+    eprintln!("=== filter_reachable OK ===");
+
+    let ssa = ssa.optimize();
+    eprintln!("=== optimize OK ===");
+
+    let _lowered = ssa.lower().expect("lower");
+    eprintln!("=== lower OK ===");
 }

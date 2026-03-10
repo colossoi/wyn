@@ -185,6 +185,7 @@ impl TypeKey {
                     TypeName::Pointer => "ptr".to_string(),
                     TypeName::ArrayVariantComposite => "array_composite".to_string(),
                     TypeName::ArrayVariantView => "array_view".to_string(),
+                    TypeName::ArrayVariantVirtual => "array_virtual".to_string(),
                     TypeName::AddressPlaceholder => {
                         panic!("AddressPlaceholder should be resolved before monomorphization")
                     }
@@ -238,6 +239,7 @@ impl TypeKey {
                     "unique" => TypeName::Unique,
                     "array_view" => TypeName::ArrayVariantView,
                     "array_composite" => TypeName::ArrayVariantComposite,
+                    "array_virtual" => TypeName::ArrayVariantVirtual,
                     s if s.starts_with("tuple") => {
                         let n: usize = s[5..]
                             .parse()

@@ -10,7 +10,7 @@ use polytype::Type;
 
 use super::ssa::{
     Block, BlockId, BlockParam, ControlHeader, EffectToken, FuncBody, Inst, InstId, InstKind, Terminator,
-    ValueId,
+    ValueId, ViewSource,
 };
 
 /// Error during function building.
@@ -530,10 +530,32 @@ impl FuncBuilder {
         let zero = self.push_int("0", u32_ty, span, node_id)?;
         self.push_inst(
             InstKind::StorageView {
-                set,
-                binding,
+                source: ViewSource::Storage { set, binding },
                 offset: zero,
                 len: storage_len,
+            },
+            view_ty,
+            span,
+            node_id,
+        )
+    }
+
+    /// Create a StorageView that inherits its buffer identity from a parent view value.
+    /// Used for function parameters and slices.
+    pub fn emit_inherited_view(
+        &mut self,
+        parent: ValueId,
+        offset: ValueId,
+        len: ValueId,
+        view_ty: Type<TypeName>,
+        span: Span,
+        node_id: NodeId,
+    ) -> Result<ValueId, BuilderError> {
+        self.push_inst(
+            InstKind::StorageView {
+                source: ViewSource::Inherited { parent },
+                offset,
+                len,
             },
             view_ty,
             span,
