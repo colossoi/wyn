@@ -457,18 +457,47 @@ fn convert_entry_point(
                     .map_err(|e| ConvertError::BuilderError(e.to_string()))?
             };
 
-            let view = converter
-                .builder
-                .emit_storage_view(set, binding, output.ty.clone(), span, node_id)
-                .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
-            let idx_zero = converter
-                .builder
-                .push_int("0", u32_ty.clone(), span, node_id)
-                .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
-            effect = converter
-                .builder
-                .emit_storage_store(view, idx_zero, value, output.ty.clone(), effect, span, node_id)
-                .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+            // Check if the output is a fixed-size array — if so, store elements individually
+            let fixed_size = output.ty.array_size().and_then(|s| {
+                if let Type::Constructed(TypeName::Size(n), _) = s { Some(*n) } else { None }
+            });
+            let elem_ty = output.ty.elem_type().cloned();
+
+            if let (Some(n), Some(et)) = (fixed_size, elem_ty) {
+                // Fixed-size array: unpack and store each element
+                let view = converter
+                    .builder
+                    .emit_storage_view(set, binding, et.clone(), span, node_id)
+                    .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+                for j in 0..n {
+                    let elem = converter
+                        .builder
+                        .push_project(value, j as u32, et.clone(), span, node_id)
+                        .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+                    let idx = converter
+                        .builder
+                        .push_int(&j.to_string(), u32_ty.clone(), span, node_id)
+                        .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+                    effect = converter
+                        .builder
+                        .emit_storage_store(view, idx, elem, et.clone(), effect, span, node_id)
+                        .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+                }
+            } else {
+                // Scalar or other: store directly at index 0
+                let view = converter
+                    .builder
+                    .emit_storage_view(set, binding, output.ty.clone(), span, node_id)
+                    .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+                let idx_zero = converter
+                    .builder
+                    .push_int("0", u32_ty.clone(), span, node_id)
+                    .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+                effect = converter
+                    .builder
+                    .emit_storage_store(view, idx_zero, value, output.ty.clone(), effect, span, node_id)
+                    .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+            }
         }
         let _ = effect;
 
