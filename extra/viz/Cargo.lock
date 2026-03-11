@@ -1792,6 +1792,7 @@ dependencies = [
  "clap",
  "pollster",
  "rspirv",
+ "serde",
  "serde_json",
  "wgpu",
  "winit",

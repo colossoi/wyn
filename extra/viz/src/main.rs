@@ -1,6 +1,7 @@
 // src/main.rs
 //#![windows_subsystem = "windows"]
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -107,6 +108,24 @@ enum Command {
         /// Type: i32, u32, f32. Repeat for multiple buffers.
         #[arg(long = "storage", value_name = "SPEC")]
         storage_buffers: Vec<String>,
+        /// Print verbose output
+        #[arg(short, long)]
+        verbose: bool,
+    },
+    /// Run a pipeline described by a JSON pipeline descriptor
+    #[command(name = "run")]
+    Run {
+        /// Path to the SPIR-V module
+        path: PathBuf,
+        /// Path to the pipeline descriptor JSON
+        #[arg(long, short)]
+        pipeline: PathBuf,
+        /// Input data: name:file.json (repeatable)
+        #[arg(long = "input", value_name = "NAME:FILE")]
+        inputs: Vec<String>,
+        /// Output file: name:file.json (repeatable, omit to print to stdout)
+        #[arg(long = "output", value_name = "NAME:FILE")]
+        outputs: Vec<String>,
         /// Print verbose output
         #[arg(short, long)]
         verbose: bool,
@@ -556,6 +575,575 @@ fn print_storage_buffer(spec: &StorageBufferSpec, data: &[u8]) {
         );
     }
     println!();
+}
+
+// --- Pipeline descriptor types (mirrors wyn-core/src/pipeline_descriptor.rs) --
+
+mod pipeline_desc {
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize)]
+    pub struct PipelineDescriptor {
+        pub pipelines: Vec<Pipeline>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(tag = "kind", rename_all = "snake_case")]
+    pub enum Pipeline {
+        Compute(ComputePipeline),
+        MultiCompute(MultiComputePipeline),
+        Graphics(GraphicsPipeline),
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct ComputePipeline {
+        pub entry_point: String,
+        pub workgroup_size: (u32, u32, u32),
+        pub dispatch_size: DispatchSize,
+        pub bindings: Vec<Binding>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct MultiComputePipeline {
+        pub bindings: Vec<Binding>,
+        pub stages: Vec<ComputeStage>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct ComputeStage {
+        pub entry_point: String,
+        pub workgroup_size: (u32, u32, u32),
+        pub dispatch_size: DispatchSize,
+        pub reads: Vec<usize>,
+        pub writes: Vec<usize>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct GraphicsPipeline {
+        pub stages: Vec<GraphicsStage>,
+        pub bindings: Vec<Binding>,
+        pub vertex_inputs: Vec<VertexAttribute>,
+        pub fragment_outputs: Vec<FragmentOutput>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct GraphicsStage {
+        pub entry_point: String,
+        pub stage: ShaderStage,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum ShaderStage {
+        Vertex,
+        Fragment,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(tag = "kind", rename_all = "snake_case")]
+    pub enum DispatchSize {
+        Fixed { x: u32, y: u32, z: u32 },
+        DerivedFromInputLength { workgroup_size: u32 },
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    pub enum Binding {
+        StorageBuffer {
+            set: u32,
+            binding: u32,
+            access: Access,
+            usage: BufferUsage,
+            name: String,
+        },
+        Uniform {
+            set: u32,
+            binding: u32,
+            name: String,
+        },
+        PushConstant {
+            offset: u32,
+            size: u32,
+            name: String,
+        },
+    }
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum Access {
+        ReadOnly,
+        WriteOnly,
+        ReadWrite,
+    }
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum BufferUsage {
+        Input,
+        Output,
+        Intermediate,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct VertexAttribute {
+        pub location: u32,
+        pub name: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct FragmentOutput {
+        pub location: u32,
+        pub name: String,
+    }
+
+    impl Binding {
+        pub fn name(&self) -> &str {
+            match self {
+                Binding::StorageBuffer { name, .. } => name,
+                Binding::Uniform { name, .. } => name,
+                Binding::PushConstant { name, .. } => name,
+            }
+        }
+
+        pub fn wgpu_binding(&self) -> u32 {
+            match self {
+                Binding::StorageBuffer { binding, .. } => *binding,
+                Binding::Uniform { binding, .. } => *binding,
+                Binding::PushConstant { .. } => panic!("PushConstant has no binding number"),
+            }
+        }
+
+        pub fn is_storage(&self) -> bool {
+            matches!(self, Binding::StorageBuffer { .. })
+        }
+
+        pub fn is_input(&self) -> bool {
+            matches!(self, Binding::StorageBuffer { usage: BufferUsage::Input, .. })
+        }
+
+        pub fn is_output(&self) -> bool {
+            matches!(self, Binding::StorageBuffer { usage: BufferUsage::Output, .. })
+        }
+
+        pub fn is_read_only(&self) -> bool {
+            matches!(self, Binding::StorageBuffer { access: Access::ReadOnly, .. })
+        }
+    }
+}
+
+// --- Pipeline-descriptor-driven execution ------------------------------------
+
+/// Load a JSON array of f32 values from a file.
+fn load_f32_json(path: &Path) -> Result<Vec<f32>> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read: {}", path.display()))?;
+    let json: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse JSON: {}", path.display()))?;
+    let array = json.as_array()
+        .ok_or_else(|| anyhow!("JSON input must be an array"))?;
+    array.iter().enumerate().map(|(i, v)| {
+        v.as_f64()
+            .map(|f| f as f32)
+            .ok_or_else(|| anyhow!("Element {} is not a number", i))
+    }).collect()
+}
+
+/// Write f32 data as a JSON array to a file.
+fn write_f32_json(path: &Path, data: &[f32]) -> Result<()> {
+    let json = serde_json::to_string_pretty(
+        &data.iter().map(|&f| serde_json::json!(f)).collect::<Vec<_>>()
+    )?;
+    fs::write(path, json)
+        .with_context(|| format!("Failed to write: {}", path.display()))
+}
+
+/// Print f32 data to stdout.
+fn print_f32_data(name: &str, data: &[f32]) {
+    println!("\n=== {} ({} elements) ===", name, data.len());
+    let show = data.len().min(64);
+    for (i, chunk) in data[..show].chunks(8).enumerate() {
+        print!("  [{:3}]: ", i * 8);
+        for val in chunk {
+            print!("{:8.3} ", val);
+        }
+        println!();
+    }
+    if data.len() > show {
+        println!("  ... ({} more elements)", data.len() - show);
+    }
+    println!();
+}
+
+/// Run a pipeline from a descriptor + SPIR-V module.
+async fn run_pipeline(
+    spv_path: PathBuf,
+    pipeline_path: PathBuf,
+    inputs: HashMap<String, PathBuf>,
+    outputs: HashMap<String, PathBuf>,
+    verbose: bool,
+) -> Result<()> {
+    let desc_json = fs::read_to_string(&pipeline_path)
+        .with_context(|| format!("Failed to read pipeline descriptor: {}", pipeline_path.display()))?;
+    let desc: pipeline_desc::PipelineDescriptor = serde_json::from_str(&desc_json)
+        .with_context(|| "Failed to parse pipeline descriptor JSON")?;
+
+    if desc.pipelines.is_empty() {
+        return Err(anyhow!("Pipeline descriptor has no pipelines"));
+    }
+
+    let (device, queue) = create_headless_device(verbose).await?;
+    let module = load_spirv_module(&device, &spv_path)?;
+
+    for (pi, pipeline) in desc.pipelines.iter().enumerate() {
+        match pipeline {
+            pipeline_desc::Pipeline::Compute(cp) => {
+                run_single_compute(&device, &queue, &module, cp, &inputs, &outputs, verbose)
+                    .with_context(|| format!("Pipeline {} (compute) failed", pi))?;
+            }
+            pipeline_desc::Pipeline::MultiCompute(mp) => {
+                run_multi_compute(&device, &queue, &module, mp, &inputs, &outputs, verbose)
+                    .with_context(|| format!("Pipeline {} (multi_compute) failed", pi))?;
+            }
+            pipeline_desc::Pipeline::Graphics(_) => {
+                eprintln!("Pipeline {} is a graphics pipeline (not yet supported by `run`)", pi);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Create wgpu buffers for a set of bindings. Returns a map from binding number
+/// to (gpu_buffer, byte_size).
+fn create_binding_buffers(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    bindings: &[pipeline_desc::Binding],
+    inputs: &HashMap<String, PathBuf>,
+    verbose: bool,
+) -> Result<HashMap<u32, (wgpu::Buffer, u64)>> {
+    let mut buffers = HashMap::new();
+
+    for b in bindings {
+        if let pipeline_desc::Binding::StorageBuffer { binding, name, usage, .. } = b {
+            let (data_bytes, element_count) = if let Some(path) = inputs.get(name.as_str()) {
+                let data = load_f32_json(path)?;
+                let count = data.len();
+                let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
+                if verbose {
+                    println!("Loaded {} elements for '{}' from {}", count, name, path.display());
+                }
+                (bytes, count)
+            } else if *usage == pipeline_desc::BufferUsage::Input {
+                return Err(anyhow!(
+                    "No input file provided for '{}'. Use --input {}:<file.json>", name, name
+                ));
+            } else {
+                // Intermediate/output buffers: allocate a reasonable size.
+                // For intermediate buffers in multi-compute, the runtime needs to
+                // allocate based on the pipeline's needs. Use 1024 elements as default.
+                let count = 1024usize;
+                if verbose {
+                    println!("Allocated {} zero elements for '{}'", count, name);
+                }
+                (vec![0u8; count * 4], count)
+            };
+
+            let byte_size = data_bytes.len() as u64;
+            let buffer = device.create_buffer(&BufferDescriptor {
+                label: Some(name),
+                size: byte_size,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            queue.write_buffer(&buffer, 0, &data_bytes);
+
+            buffers.insert(*binding, (buffer, byte_size));
+            let _ = element_count; // used in verbose output above
+        }
+    }
+
+    Ok(buffers)
+}
+
+/// Build a bind group layout + bind group from binding descriptors.
+fn build_bind_group(
+    device: &wgpu::Device,
+    bindings: &[pipeline_desc::Binding],
+    buffers: &HashMap<u32, (wgpu::Buffer, u64)>,
+) -> Result<(wgpu::BindGroupLayout, BindGroup)> {
+    let mut layout_entries = Vec::new();
+    let mut group_entries = Vec::new();
+
+    for b in bindings {
+        if let pipeline_desc::Binding::StorageBuffer { binding, access, .. } = b {
+            let read_only = *access == pipeline_desc::Access::ReadOnly;
+            layout_entries.push(BindGroupLayoutEntry {
+                binding: *binding,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Storage { read_only },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            });
+
+            let (buf, _) = buffers.get(binding)
+                .ok_or_else(|| anyhow!("No buffer for binding {}", binding))?;
+            group_entries.push(BindGroupEntry {
+                binding: *binding,
+                resource: BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: buf,
+                    offset: 0,
+                    size: None,
+                }),
+            });
+        }
+    }
+
+    let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some("pipeline_bind_group_layout"),
+        entries: &layout_entries,
+    });
+
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("pipeline_bind_group"),
+        layout: &layout,
+        entries: &group_entries,
+    });
+
+    Ok((layout, bind_group))
+}
+
+/// Compute dispatch dimensions from a DispatchSize spec.
+fn resolve_dispatch_size(
+    dispatch: &pipeline_desc::DispatchSize,
+    buffers: &HashMap<u32, (wgpu::Buffer, u64)>,
+    bindings: &[pipeline_desc::Binding],
+    reads: Option<&[usize]>,
+) -> (u32, u32, u32) {
+    match dispatch {
+        pipeline_desc::DispatchSize::Fixed { x, y, z } => (*x, *y, *z),
+        pipeline_desc::DispatchSize::DerivedFromInputLength { workgroup_size } => {
+            // Find the first input binding to derive length from
+            let input_binding = reads
+                .and_then(|r| r.first())
+                .and_then(|&idx| bindings.get(idx))
+                .or_else(|| bindings.iter().find(|b| b.is_input()));
+
+            let elements = input_binding
+                .map(|b| {
+                    let binding_num = b.wgpu_binding();
+                    buffers.get(&binding_num)
+                        .map(|(_, size)| (*size / 4) as u32)
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0);
+
+            let wg = *workgroup_size;
+            let groups = (elements + wg - 1) / wg;
+            (groups, 1, 1)
+        }
+    }
+}
+
+/// Read back a GPU buffer to CPU as f32 data.
+fn readback_buffer(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    buffer: &wgpu::Buffer,
+    byte_size: u64,
+) -> Result<Vec<f32>> {
+    let staging = device.create_buffer(&BufferDescriptor {
+        label: Some("readback_staging"),
+        size: byte_size,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("readback_encoder"),
+    });
+    encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, byte_size);
+    queue.submit(Some(encoder.finish()));
+    let _ = device.poll(wgpu::PollType::Wait);
+
+    let slice = staging.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        tx.send(result).unwrap();
+    });
+    let _ = device.poll(wgpu::PollType::Wait);
+    rx.recv().unwrap()?;
+
+    let data = slice.get_mapped_range();
+    let u32_data: &[u32] = bytemuck::cast_slice(&data);
+    let f32_data: Vec<f32> = u32_data.iter().map(|&x| f32::from_bits(x)).collect();
+    drop(data);
+    staging.unmap();
+
+    Ok(f32_data)
+}
+
+/// Run a single-dispatch compute pipeline.
+fn run_single_compute(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    module: &wgpu::ShaderModule,
+    cp: &pipeline_desc::ComputePipeline,
+    inputs: &HashMap<String, PathBuf>,
+    outputs: &HashMap<String, PathBuf>,
+    verbose: bool,
+) -> Result<()> {
+    if verbose {
+        println!("Running compute pipeline: {}", cp.entry_point);
+    }
+
+    let buffers = create_binding_buffers(device, queue, &cp.bindings, inputs, verbose)?;
+    let (layout, bind_group) = build_bind_group(device, &cp.bindings, &buffers)?;
+
+    let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: Some("compute_layout"),
+        bind_group_layouts: &[&layout],
+        push_constant_ranges: &[],
+    });
+
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("compute_pipeline"),
+        layout: Some(&pipeline_layout),
+        module,
+        entry_point: Some(&cp.entry_point),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+
+    let dispatch = resolve_dispatch_size(&cp.dispatch_size, &buffers, &cp.bindings, None);
+    if verbose {
+        println!("Dispatch: {} x {} x {}", dispatch.0, dispatch.1, dispatch.2);
+    }
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("compute_encoder"),
+    });
+    {
+        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("compute_pass"),
+            timestamp_writes: None,
+        });
+        cpass.set_pipeline(&pipeline);
+        cpass.set_bind_group(0, &bind_group, &[]);
+        cpass.dispatch_workgroups(dispatch.0, dispatch.1, dispatch.2);
+    }
+    queue.submit(Some(encoder.finish()));
+    let _ = device.poll(wgpu::PollType::Wait);
+
+    // Read back and output results
+    output_results(device, queue, &cp.bindings, &buffers, outputs)?;
+
+    Ok(())
+}
+
+/// Run a multi-dispatch compute pipeline (e.g. reduce with phase1 + phase2).
+fn run_multi_compute(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    module: &wgpu::ShaderModule,
+    mp: &pipeline_desc::MultiComputePipeline,
+    inputs: &HashMap<String, PathBuf>,
+    outputs: &HashMap<String, PathBuf>,
+    verbose: bool,
+) -> Result<()> {
+    if verbose {
+        println!("Running multi-compute pipeline ({} stages)", mp.stages.len());
+        for (i, stage) in mp.stages.iter().enumerate() {
+            println!("  Stage {}: {} (reads {:?}, writes {:?})",
+                i, stage.entry_point, stage.reads, stage.writes);
+        }
+    }
+
+    let buffers = create_binding_buffers(device, queue, &mp.bindings, inputs, verbose)?;
+    let (layout, bind_group) = build_bind_group(device, &mp.bindings, &buffers)?;
+
+    let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: Some("multi_compute_layout"),
+        bind_group_layouts: &[&layout],
+        push_constant_ranges: &[],
+    });
+
+    // Execute stages in order
+    for (si, stage) in mp.stages.iter().enumerate() {
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some(&format!("stage_{}", stage.entry_point)),
+            layout: Some(&pipeline_layout),
+            module,
+            entry_point: Some(&stage.entry_point),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let dispatch = resolve_dispatch_size(
+            &stage.dispatch_size, &buffers, &mp.bindings, Some(&stage.reads),
+        );
+        if verbose {
+            println!("Stage {} ({}): dispatch {} x {} x {}",
+                si, stage.entry_point, dispatch.0, dispatch.1, dispatch.2);
+        }
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some(&format!("stage_{}_encoder", si)),
+        });
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some(&format!("stage_{}", si)),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&pipeline);
+            cpass.set_bind_group(0, &bind_group, &[]);
+            cpass.dispatch_workgroups(dispatch.0, dispatch.1, dispatch.2);
+        }
+        queue.submit(Some(encoder.finish()));
+        let _ = device.poll(wgpu::PollType::Wait);
+    }
+
+    // Read back and output results
+    output_results(device, queue, &mp.bindings, &buffers, outputs)?;
+
+    Ok(())
+}
+
+/// Read back output/intermediate buffers and write/print results.
+fn output_results(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    bindings: &[pipeline_desc::Binding],
+    buffers: &HashMap<u32, (wgpu::Buffer, u64)>,
+    outputs: &HashMap<String, PathBuf>,
+) -> Result<()> {
+    for b in bindings {
+        if let pipeline_desc::Binding::StorageBuffer { binding, name, usage, .. } = b {
+            // Only read back output and intermediate buffers (skip inputs unless
+            // explicitly requested via --output)
+            let should_output = *usage != pipeline_desc::BufferUsage::Input
+                || outputs.contains_key(name.as_str());
+
+            if !should_output {
+                continue;
+            }
+
+            if let Some((buf, size)) = buffers.get(binding) {
+                let data = readback_buffer(device, queue, buf, *size)?;
+
+                if let Some(path) = outputs.get(name.as_str()) {
+                    write_f32_json(path, &data)?;
+                    println!("Wrote {} elements to {}", data.len(), path.display());
+                } else {
+                    print_f32_data(name, &data);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Run a compute shader headlessly (no window)
@@ -1680,6 +2268,20 @@ fn main() -> Result<()> {
                 storage_specs,
                 verbose,
             ))?;
+        }
+        Command::Run { path, pipeline, inputs, outputs, verbose } => {
+            // Parse name:file pairs
+            let parse_pairs = |pairs: &[String]| -> Result<HashMap<String, PathBuf>> {
+                pairs.iter().map(|s| {
+                    let (name, file) = s.split_once(':')
+                        .ok_or_else(|| anyhow!("Invalid format '{}'. Expected name:file.json", s))?;
+                    Ok((name.to_string(), PathBuf::from(file)))
+                }).collect()
+            };
+            let input_map = parse_pairs(&inputs)?;
+            let output_map = parse_pairs(&outputs)?;
+
+            pollster::block_on(run_pipeline(path, pipeline, input_map, output_map, verbose))?;
         }
         Command::TestPattern { max_frames, verbose } => {
             eprintln!("[viz] Test pattern mode - built-in WGSL shader");
