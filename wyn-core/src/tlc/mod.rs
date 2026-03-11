@@ -224,6 +224,10 @@ fn collect_var_refs_array_expr(ae: &ArrayExpr, refs: &mut Vec<SymbolId>) {
             collect_var_refs_inner(start, refs);
             collect_var_refs_inner(len, refs);
         }
+        ArrayExpr::StorageBuffer { offset, len, .. } => {
+            collect_var_refs_inner(offset, refs);
+            collect_var_refs_inner(len, refs);
+        }
     }
 }
 
@@ -450,6 +454,16 @@ pub enum ArrayExpr {
     Range {
         start: Box<Term>,
         len: Box<Term>,
+    },
+    /// Storage buffer reference (introduced by buffer_specialize).
+    /// Represents elements from a storage buffer at (set, binding),
+    /// starting at `offset` for `len` elements.
+    StorageBuffer {
+        set: u32,
+        binding: u32,
+        offset: Box<Term>,
+        len: Box<Term>,
+        elem_ty: Type<TypeName>,
     },
 }
 

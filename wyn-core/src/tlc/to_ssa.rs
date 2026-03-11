@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use crate::ast::{self, NodeId, Span, TypeName};
-use crate::mir::ssa::{FuncBody, InstKind, SsaSoac, Terminator, ValueId};
+use crate::mir::ssa::{FuncBody, InstKind, SsaSoac, Terminator, ValueId, ViewSource};
 use crate::mir::ssa_builder::FuncBuilder;
 use crate::types::TypeExt;
 use crate::{SymbolId, SymbolTable};
@@ -1617,6 +1617,30 @@ impl<'a> Converter<'a> {
                     )
                     .map_err(|e| ConvertError::BuilderError(e.to_string()))
             }
+            ArrayExpr::StorageBuffer { set, binding, offset, len, elem_ty } => {
+                let offset_val = self.convert_term(offset)?;
+                let len_val = self.convert_term(len)?;
+                let array_ty = Type::Constructed(
+                    TypeName::Array,
+                    vec![
+                        elem_ty.clone(),
+                        Type::Constructed(TypeName::SizePlaceholder, vec![]),
+                        Type::Constructed(TypeName::ArrayVariantView, vec![]),
+                    ],
+                );
+                self.builder
+                    .push_inst(
+                        InstKind::StorageView {
+                            source: ViewSource::Storage { set: *set, binding: *binding },
+                            offset: offset_val,
+                            len: len_val,
+                        },
+                        array_ty,
+                        span,
+                        node_id,
+                    )
+                    .map_err(|e| ConvertError::BuilderError(e.to_string()))
+            }
         }
     }
 
@@ -1806,6 +1830,14 @@ impl<'a> Converter<'a> {
             ArrayExpr::Generate { elem_ty, .. } => elem_ty.clone(),
             ArrayExpr::Literal(_) => Type::Constructed(TypeName::Unit, vec![]),
             ArrayExpr::Range { start, .. } => start.ty.clone(),
+            ArrayExpr::StorageBuffer { elem_ty, .. } => Type::Constructed(
+                TypeName::Array,
+                vec![
+                    elem_ty.clone(),
+                    Type::Constructed(TypeName::SizePlaceholder, vec![]),
+                    Type::Constructed(TypeName::ArrayVariantView, vec![]),
+                ],
+            ),
         }
     }
 
@@ -1828,6 +1860,7 @@ impl<'a> Converter<'a> {
                 }
             }
             ArrayExpr::Range { start, .. } => start.ty.clone(),
+            ArrayExpr::StorageBuffer { elem_ty, .. } => elem_ty.clone(),
         }
     }
 }

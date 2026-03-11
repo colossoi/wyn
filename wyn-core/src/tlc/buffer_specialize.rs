@@ -511,6 +511,13 @@ impl BufferSpecializer {
                 start: Box::new(self.rewrite_term(start)),
                 len: Box::new(self.rewrite_term(len)),
             },
+            ArrayExpr::StorageBuffer { set, binding, offset, len, elem_ty } => ArrayExpr::StorageBuffer {
+                set: *set,
+                binding: *binding,
+                offset: Box::new(self.rewrite_term(offset)),
+                len: Box::new(self.rewrite_term(len)),
+                elem_ty: elem_ty.clone(),
+            },
         }
     }
 
@@ -1151,6 +1158,29 @@ impl BufferSpecializer {
     ) -> ArrayExpr {
         match ae {
             ArrayExpr::Ref(t) => {
+                // If the ref is a bare Var pointing to a view param, emit StorageBuffer
+                if let TermKind::Var(sym) = &t.kind {
+                    if let Some((offset_sym, len_sym, set, binding, elem_ty)) = view_params.get(sym) {
+                        let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
+                        return ArrayExpr::StorageBuffer {
+                            set: *set,
+                            binding: *binding,
+                            offset: Box::new(Term {
+                                id: self.term_ids.next_id(),
+                                ty: u32_ty.clone(),
+                                span: t.span,
+                                kind: TermKind::Var(*offset_sym),
+                            }),
+                            len: Box::new(Term {
+                                id: self.term_ids.next_id(),
+                                ty: u32_ty,
+                                span: t.span,
+                                kind: TermKind::Var(*len_sym),
+                            }),
+                            elem_ty: elem_ty.clone(),
+                        };
+                    }
+                }
                 ArrayExpr::Ref(Box::new(self.rewrite_specialized_body(t, view_params)))
             }
             ArrayExpr::Zip(aes) => ArrayExpr::Zip(
@@ -1179,6 +1209,13 @@ impl BufferSpecializer {
             ArrayExpr::Range { start, len } => ArrayExpr::Range {
                 start: Box::new(self.rewrite_specialized_body(start, view_params)),
                 len: Box::new(self.rewrite_specialized_body(len, view_params)),
+            },
+            ArrayExpr::StorageBuffer { set, binding, offset, len, elem_ty } => ArrayExpr::StorageBuffer {
+                set: *set,
+                binding: *binding,
+                offset: Box::new(self.rewrite_specialized_body(offset, view_params)),
+                len: Box::new(self.rewrite_specialized_body(len, view_params)),
+                elem_ty: elem_ty.clone(),
             },
         }
     }

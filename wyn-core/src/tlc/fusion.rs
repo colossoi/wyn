@@ -254,6 +254,7 @@ fn transform_array_expr(
             start: Box::new(transform_term(*start, symbols, term_ids)),
             len: Box::new(transform_term(*len, symbols, term_ids)),
         },
+        ArrayExpr::StorageBuffer { .. } => unreachable!("StorageBuffer introduced after fusion"),
     }
 }
 
@@ -770,6 +771,7 @@ fn count_uses_array_expr(ae: &ArrayExpr, sym: SymbolId) -> usize {
         ArrayExpr::Generate { index_fn, .. } => count_uses_lambda(index_fn, sym),
         ArrayExpr::Literal(terms) => terms.iter().map(|t| count_uses(t, sym)).sum(),
         ArrayExpr::Range { start, len } => count_uses(start, sym) + count_uses(len, sym),
+        ArrayExpr::StorageBuffer { .. } => unreachable!("StorageBuffer introduced after fusion"),
     }
 }
 
@@ -1067,6 +1069,7 @@ fn substitute_sym_array_expr(
             start: Box::new(substitute_sym(*start, old, new, term_ids)),
             len: Box::new(substitute_sym(*len, old, new, term_ids)),
         },
+        ArrayExpr::StorageBuffer { .. } => unreachable!("StorageBuffer introduced after fusion"),
     }
 }
 

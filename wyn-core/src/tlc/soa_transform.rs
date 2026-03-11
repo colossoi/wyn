@@ -687,6 +687,13 @@ impl SoaTransformer {
                 start: Box::new(self.transform_term(start)),
                 len: Box::new(self.transform_term(len)),
             },
+            ArrayExpr::StorageBuffer { set, binding, offset, len, elem_ty } => ArrayExpr::StorageBuffer {
+                set: *set,
+                binding: *binding,
+                offset: Box::new(self.transform_term(offset)),
+                len: Box::new(self.transform_term(len)),
+                elem_ty: soa_type(elem_ty),
+            },
         }
     }
 
@@ -738,6 +745,7 @@ impl SoaTransformer {
                 }
             }
             ArrayExpr::Range { start, .. } => start.ty.clone(),
+            ArrayExpr::StorageBuffer { elem_ty, .. } => elem_ty.clone(),
         }
     }
 

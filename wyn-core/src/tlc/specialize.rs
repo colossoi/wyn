@@ -230,6 +230,7 @@ impl Specializer {
                 start: Box::new(self.specialize_term(*start)),
                 len: Box::new(self.specialize_term(*len)),
             },
+            ArrayExpr::StorageBuffer { .. } => unreachable!("StorageBuffer introduced after specialize"),
         }
     }
 
