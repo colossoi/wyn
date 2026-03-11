@@ -12,11 +12,14 @@
 mod strategies;
 
 use crate::ast::{NodeId, Span, TypeName};
-use crate::mir::ssa::{EffectToken, FuncBody, Terminator, ValueId};
+use crate::mir::ssa::{EffectToken, FuncBody, InstKind, Terminator, ValueId};
 use crate::mir::ssa_builder::FuncBuilder;
 use crate::mir::ssa_soac_analysis::{ArrayProvenance, ParallelizableSoac, analyze_program};
-use crate::runtime_manifest::{BufferDecl, BufferUsage, Dispatch, DispatchSize, RuntimeManifest};
-use crate::tlc::to_ssa::{EntryOutput, ExecutionModel, SsaEntryPoint, SsaProgram};
+use crate::pipeline_descriptor::{
+    Access, Binding, BufferUsage, ComputePipeline, ComputeStage, DispatchSize,
+    MultiComputePipeline, Pipeline, PipelineDescriptor,
+};
+use crate::tlc::to_ssa::{EntryInput, EntryOutput, ExecutionModel, SsaEntryPoint, SsaProgram};
 use polytype::Type;
 
 use std::collections::HashMap;
@@ -168,15 +171,19 @@ impl<'a> ParallelizeCtx<'a> {
 pub struct ParallelizationResult {
     /// The (possibly modified) SSA program, which may contain additional entry points.
     pub program: SsaProgram,
-    /// Runtime manifest describing the dispatch plan for the host.
-    pub manifest: RuntimeManifest,
+    /// Pipeline descriptor describing how to execute the program.
+    pub pipeline: PipelineDescriptor,
 }
 
 /// Parallelize SOACs in an SSA program.
-/// Returns the modified program and a runtime manifest for the host.
+/// Returns the modified program and a pipeline descriptor for the host.
 pub fn parallelize_soacs(mut program: SsaProgram) -> ParallelizationResult {
     let analysis = analyze_program(&program);
-    let mut manifest = RuntimeManifest::default();
+    let mut descriptor = PipelineDescriptor::default();
+    // New entry points to add (from multi-dispatch SOACs like reduce).
+    // These replace the original entry point.
+    let mut new_entries: Vec<SsaEntryPoint> = Vec::new();
+    let mut entries_to_remove: Vec<String> = Vec::new();
 
     for entry in &mut program.entry_points {
         if let ExecutionModel::Compute { local_size } = entry.execution_model {
@@ -209,12 +216,17 @@ pub fn parallelize_soacs(mut program: SsaProgram) -> ParallelizationResult {
                                     }];
                                 }
 
-                                // Build manifest for this single-dispatch map
-                                build_map_manifest(&mut manifest, entry, output_binding, local_size);
+                                descriptor.pipelines.push(build_map_pipeline(entry, output_binding, local_size));
                             }
                         }
-                        ParallelizableSoac::Reduce { .. } => {
-                            // TODO: Phase 1 — multi-entry reduce parallelization
+                        ParallelizableSoac::Reduce { source, reduce_function, init, captures, elem_type } => {
+                            if let Some((reduce_entries, pipeline)) =
+                                parallelize_reduce_entry(entry, source, reduce_function, *init, captures, elem_type, local_size)
+                            {
+                                entries_to_remove.push(entry.name.clone());
+                                new_entries.extend(reduce_entries);
+                                descriptor.pipelines.push(pipeline);
+                            }
                         }
                         ParallelizableSoac::Scan { .. } => {
                             // TODO: Phase 3 — multi-entry scan parallelization
@@ -225,43 +237,49 @@ pub fn parallelize_soacs(mut program: SsaProgram) -> ParallelizationResult {
         }
     }
 
-    ParallelizationResult { program, manifest }
+    // Replace original entries with multi-dispatch entries
+    if !entries_to_remove.is_empty() {
+        program.entry_points.retain(|e| !entries_to_remove.contains(&e.name));
+        program.entry_points.extend(new_entries);
+    }
+
+    ParallelizationResult { program, pipeline: descriptor }
 }
 
-/// Build a runtime manifest entry for a single-dispatch map.
-fn build_map_manifest(
-    manifest: &mut RuntimeManifest,
+/// Build a single-dispatch compute pipeline descriptor for a map.
+fn build_map_pipeline(
     entry: &SsaEntryPoint,
     output_binding: (u32, u32),
     local_size: (u32, u32, u32),
-) {
-    // Add input buffers
+) -> Pipeline {
+    let mut bindings = Vec::new();
+
     for input in &entry.inputs {
         if let Some((set, binding)) = input.storage_binding {
-            manifest.buffers.push(BufferDecl {
+            bindings.push(Binding::StorageBuffer {
                 set,
                 binding,
+                access: Access::ReadOnly,
                 usage: BufferUsage::Input,
                 name: input.name.clone(),
             });
         }
     }
 
-    // Add output buffer
-    manifest.buffers.push(BufferDecl {
+    bindings.push(Binding::StorageBuffer {
         set: output_binding.0,
         binding: output_binding.1,
+        access: Access::WriteOnly,
         usage: BufferUsage::Output,
         name: format!("{}_output", entry.name),
     });
 
-    // Single dispatch
-    let workgroup_size = local_size.0;
-    manifest.dispatches.push(Dispatch {
+    Pipeline::Compute(ComputePipeline {
         entry_point: entry.name.clone(),
         workgroup_size: local_size,
-        dispatch_size: DispatchSize::DerivedFromInputLength { workgroup_size },
-    });
+        dispatch_size: DispatchSize::DerivedFromInputLength { workgroup_size: local_size.0 },
+        bindings,
+    })
 }
 
 /// Create a parallelized map version of a compute entry point.
@@ -397,4 +415,422 @@ fn build_map_body<I: InputStrategy, O: OutputStrategy>(
     ctx.builder.terminate(Terminator::ReturnUnit).ok()?;
 
     Some(())
+}
+
+// =============================================================================
+// Reduce Parallelization (2 dispatches)
+// =============================================================================
+
+/// Parallelize a reduce SOAC into two entry points:
+/// 1. `{name}_phase1_chunks` — each thread reduces its chunk → partials[thread_id]
+/// 2. `{name}_phase2_combine` — single thread combines partials → result[0]
+///
+/// Returns the two new entry points (replacing the original).
+fn parallelize_reduce_entry(
+    entry: &SsaEntryPoint,
+    source: &ArrayProvenance,
+    reduce_function: &str,
+    init: ValueId,
+    captures: &[ValueId],
+    elem_type: &Type<TypeName>,
+    local_size: (u32, u32, u32),
+) -> Option<(Vec<SsaEntryPoint>, Pipeline)> {
+    let total_threads = local_size.0 * local_size.1 * local_size.2;
+    if total_threads == 0 {
+        return None;
+    }
+
+    // Allocate bindings for intermediate (partials) and output (result) buffers.
+    // Input bindings come from the entry's storage inputs.
+    let next_binding = entry
+        .inputs
+        .iter()
+        .filter_map(|i| i.storage_binding)
+        .chain(entry.outputs.iter().filter_map(|o| o.storage_binding))
+        .map(|(_, b)| b + 1)
+        .max()
+        .unwrap_or(0);
+    let partials_binding = (0u32, next_binding);
+    let result_binding = (0u32, next_binding + 1);
+
+    // --- Phase 1: each thread reduces its chunk ---
+    let phase1 = build_reduce_phase1(
+        entry,
+        source,
+        reduce_function,
+        init,
+        captures,
+        elem_type,
+        total_threads,
+        partials_binding,
+        local_size,
+    )?;
+
+    // --- Phase 2: thread 0 combines partial results ---
+    let phase2 = build_reduce_phase2(
+        entry,
+        reduce_function,
+        init,
+        captures,
+        elem_type,
+        total_threads,
+        partials_binding,
+        result_binding,
+    )?;
+
+    // Build pipeline descriptor
+    let mut bindings = Vec::new();
+
+    // Input storage buffers
+    let mut input_binding_indices = Vec::new();
+    for input in &entry.inputs {
+        if let Some((set, binding)) = input.storage_binding {
+            input_binding_indices.push(bindings.len());
+            bindings.push(Binding::StorageBuffer {
+                set,
+                binding,
+                access: Access::ReadOnly,
+                usage: BufferUsage::Input,
+                name: input.name.clone(),
+            });
+        }
+    }
+
+    // Intermediate partials buffer
+    let partials_idx = bindings.len();
+    bindings.push(Binding::StorageBuffer {
+        set: partials_binding.0,
+        binding: partials_binding.1,
+        access: Access::ReadWrite,
+        usage: BufferUsage::Intermediate,
+        name: format!("{}_partials", entry.name),
+    });
+
+    // Output result buffer
+    let result_idx = bindings.len();
+    bindings.push(Binding::StorageBuffer {
+        set: result_binding.0,
+        binding: result_binding.1,
+        access: Access::WriteOnly,
+        usage: BufferUsage::Output,
+        name: format!("{}_result", entry.name),
+    });
+
+    let workgroup_size = local_size.0;
+    let pipeline = Pipeline::MultiCompute(MultiComputePipeline {
+        bindings,
+        stages: vec![
+            ComputeStage {
+                entry_point: phase1.name.clone(),
+                workgroup_size: local_size,
+                dispatch_size: DispatchSize::DerivedFromInputLength { workgroup_size },
+                reads: input_binding_indices,
+                writes: vec![partials_idx],
+            },
+            ComputeStage {
+                entry_point: phase2.name.clone(),
+                workgroup_size: (1, 1, 1),
+                dispatch_size: DispatchSize::Fixed { x: 1, y: 1, z: 1 },
+                reads: vec![partials_idx],
+                writes: vec![result_idx],
+            },
+        ],
+    });
+
+    Some((vec![phase1, phase2], pipeline))
+}
+
+/// Build Phase 1 of reduce: each thread reduces its chunk and writes to partials buffer.
+fn build_reduce_phase1(
+    entry: &SsaEntryPoint,
+    source: &ArrayProvenance,
+    reduce_function: &str,
+    init: ValueId,
+    captures: &[ValueId],
+    elem_type: &Type<TypeName>,
+    total_threads: u32,
+    partials_binding: (u32, u32),
+    local_size: (u32, u32, u32),
+) -> Option<SsaEntryPoint> {
+    let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
+    let params: Vec<(Type<TypeName>, String)> =
+        entry.inputs.iter().map(|i| (i.ty.clone(), i.name.clone())).collect();
+    let builder = FuncBuilder::new(params, unit_ty.clone());
+    let mut ctx = ParallelizeCtx::new(builder, entry);
+
+    // Setup input based on provenance
+    let (input_len, input_strategy_data) = match source {
+        ArrayProvenance::EntryStorage { param_index, storage_binding, .. } => {
+            let mut input = StorageInput::new(*param_index, *storage_binding);
+            let (handle, len, _elem_ty) = input.setup(&mut ctx)?;
+            (len, ReduceInputData::Storage { input, handle })
+        }
+        ArrayProvenance::Range { value } => {
+            let mut input = RangeInput::new(*value, &entry.body)?;
+            let (handle, len, _elem_ty) = input.setup(&mut ctx)?;
+            (len, ReduceInputData::Range { input, handle })
+        }
+        ArrayProvenance::Unknown => return None,
+    };
+
+    // Setup partials output buffer
+    let partials_output = StorageOutput::new(partials_binding.0, partials_binding.1);
+    let partials_view = partials_output.setup(&mut ctx, elem_type)?;
+
+    // Get thread ID and chunk bounds
+    let (thread_id, chunk_start, chunk_end) = ctx.compute_thread_chunk(input_len, total_threads)?;
+
+    // Remap init value and captures from original entry body
+    let remapped_init = strategies::remap_entry_value(&mut ctx, init)?;
+    let remapped_captures = ctx.remap_captures(captures)?;
+
+    // Build reduction loop: acc = init; for i in chunk_start..chunk_end: acc = f(acc, elem)
+    let u32_ty = ctx.u32_ty.clone();
+    let bool_ty = ctx.bool_ty.clone();
+    let span = ctx.span;
+    let node_id = ctx.node_id;
+
+    let (header, header_params) =
+        ctx.builder.create_block_with_params(vec![elem_type.clone(), u32_ty.clone()]);
+    let acc = header_params[0];
+    let loop_index = header_params[1];
+    let body_block = ctx.builder.create_block();
+    let (exit_block, exit_params) =
+        ctx.builder.create_block_with_params(vec![elem_type.clone()]);
+    let final_acc = exit_params[0];
+    ctx.builder.mark_loop_header(header, exit_block, body_block).ok()?;
+
+    // Branch to header with (init, chunk_start)
+    ctx.builder
+        .terminate(Terminator::Branch {
+            target: header,
+            args: vec![remapped_init, chunk_start],
+        })
+        .ok()?;
+
+    // Header: check i < chunk_end
+    ctx.builder.switch_to_block(header).ok()?;
+    let cond = ctx.builder.push_binop("<", loop_index, chunk_end, bool_ty, span, node_id).ok()?;
+    ctx.builder
+        .terminate(Terminator::CondBranch {
+            cond,
+            then_target: body_block,
+            then_args: vec![],
+            else_target: exit_block,
+            else_args: vec![acc],
+        })
+        .ok()?;
+
+    // Body: get element, call reduce function
+    ctx.builder.switch_to_block(body_block).ok()?;
+
+    let input_elem = match &input_strategy_data {
+        ReduceInputData::Storage { input, handle } => {
+            input.get_element(&mut ctx, *handle, loop_index)?
+        }
+        ReduceInputData::Range { input, handle } => {
+            input.get_element(&mut ctx, *handle, loop_index)?
+        }
+    };
+
+    // call_args: (acc, elem, captures...)
+    let mut call_args = vec![acc, input_elem];
+    call_args.extend(remapped_captures.iter().copied());
+    let new_acc = ctx.push_call(reduce_function, call_args, elem_type.clone())?;
+
+    let one = ctx.push_int("1")?;
+    let next_i = ctx.push_binop("+", loop_index, one, u32_ty.clone())?;
+    ctx.builder
+        .terminate(Terminator::Branch {
+            target: header,
+            args: vec![new_acc, next_i],
+        })
+        .ok()?;
+
+    // Exit: store final_acc to partials[thread_id]
+    ctx.builder.switch_to_block(exit_block).ok()?;
+    partials_output.store_result(&mut ctx, partials_view, thread_id, final_acc, elem_type)?;
+    ctx.builder.terminate(Terminator::ReturnUnit).ok()?;
+
+    let body = ctx.finish()?;
+
+    // Build the partials output entry output
+    let array_view_ty = Type::Constructed(
+        TypeName::Array,
+        vec![
+            elem_type.clone(),
+            Type::Constructed(TypeName::SizePlaceholder, vec![]),
+            Type::Constructed(TypeName::ArrayVariantView, vec![]),
+        ],
+    );
+
+    Some(SsaEntryPoint {
+        name: format!("{}_phase1_chunks", entry.name),
+        body,
+        execution_model: ExecutionModel::Compute { local_size },
+        inputs: entry.inputs.clone(),
+        outputs: vec![EntryOutput {
+            ty: array_view_ty,
+            decoration: None,
+            storage_binding: Some(partials_binding),
+        }],
+        span: entry.span,
+    })
+}
+
+/// Build Phase 2 of reduce: single thread combines partial results.
+fn build_reduce_phase2(
+    entry: &SsaEntryPoint,
+    reduce_function: &str,
+    init: ValueId,
+    captures: &[ValueId],
+    elem_type: &Type<TypeName>,
+    total_threads: u32,
+    partials_binding: (u32, u32),
+    result_binding: (u32, u32),
+) -> Option<SsaEntryPoint> {
+    let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
+    let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+    let bool_ty = Type::Constructed(TypeName::Str("bool"), vec![]);
+    let span = entry.span;
+    let node_id = NodeId(0);
+
+    // Phase 2 has no entry-level params (it reads from partials buffer directly).
+    // But we need the function referenced by reduce_function to exist in the program,
+    // and we need to remap captures. Captures may reference entry params, so
+    // Phase 2 needs the same input params as the original entry.
+    let params: Vec<(Type<TypeName>, String)> =
+        entry.inputs.iter().map(|i| (i.ty.clone(), i.name.clone())).collect();
+    let builder = FuncBuilder::new(params, unit_ty.clone());
+    let mut ctx = ParallelizeCtx::new(builder, entry);
+
+    // Remap init and captures
+    let remapped_init = strategies::remap_entry_value(&mut ctx, init)?;
+    let remapped_captures = ctx.remap_captures(captures)?;
+
+    // Setup partials input buffer (read from) — emit storage view directly
+    let partials_view_ty = Type::Constructed(
+        TypeName::Array,
+        vec![
+            elem_type.clone(),
+            Type::Constructed(TypeName::SizePlaceholder, vec![]),
+            Type::Constructed(TypeName::ArrayVariantView, vec![]),
+        ],
+    );
+    let partials_view = ctx.builder.emit_storage_view(
+        partials_binding.0, partials_binding.1, partials_view_ty.clone(), span, node_id,
+    ).ok()?;
+
+    // Setup result output buffer
+    let result_output = StorageOutput::new(result_binding.0, result_binding.1);
+    let result_view = result_output.setup(&mut ctx, elem_type)?;
+
+    // Loop: acc = init; for t in 0..total_threads: acc = f(acc, partials[t])
+    let total = ctx.push_int(&total_threads.to_string())?;
+    let zero = ctx.push_int("0")?;
+
+    let (header, header_params) =
+        ctx.builder.create_block_with_params(vec![elem_type.clone(), u32_ty.clone()]);
+    let acc = header_params[0];
+    let loop_index = header_params[1];
+    let body_block = ctx.builder.create_block();
+    let (exit_block, exit_params) =
+        ctx.builder.create_block_with_params(vec![elem_type.clone()]);
+    let final_acc = exit_params[0];
+    ctx.builder.mark_loop_header(header, exit_block, body_block).ok()?;
+
+    ctx.builder
+        .terminate(Terminator::Branch {
+            target: header,
+            args: vec![remapped_init, zero],
+        })
+        .ok()?;
+
+    // Header: check t < total_threads
+    ctx.builder.switch_to_block(header).ok()?;
+    let cond = ctx.builder.push_binop("<", loop_index, total, bool_ty, span, node_id).ok()?;
+    ctx.builder
+        .terminate(Terminator::CondBranch {
+            cond,
+            then_target: body_block,
+            then_args: vec![],
+            else_target: exit_block,
+            else_args: vec![acc],
+        })
+        .ok()?;
+
+    // Body: load partials[t], acc = f(acc, elem)
+    ctx.builder.switch_to_block(body_block).ok()?;
+
+    let ptr = ctx.push_inst(InstKind::StorageViewIndex { view: partials_view, index: loop_index }, elem_type.clone())?;
+    let effect_in = ctx.entry_effect();
+    let partial_elem = ctx.builder.push_load(ptr, elem_type.clone(), effect_in, span, node_id).ok()?;
+
+    let mut call_args = vec![acc, partial_elem];
+    call_args.extend(remapped_captures.iter().copied());
+    let new_acc = ctx.push_call(reduce_function, call_args, elem_type.clone())?;
+
+    let one = ctx.push_int("1")?;
+    let next_t = ctx.push_binop("+", loop_index, one, u32_ty.clone())?;
+    ctx.builder
+        .terminate(Terminator::Branch {
+            target: header,
+            args: vec![new_acc, next_t],
+        })
+        .ok()?;
+
+    // Exit: store final acc to result[0]
+    ctx.builder.switch_to_block(exit_block).ok()?;
+    let zero_idx = ctx.push_int("0")?;
+    result_output.store_result(&mut ctx, result_view, zero_idx, final_acc, elem_type)?;
+    ctx.builder.terminate(Terminator::ReturnUnit).ok()?;
+
+    let body = ctx.finish()?;
+
+    let result_array_ty = Type::Constructed(
+        TypeName::Array,
+        vec![
+            elem_type.clone(),
+            Type::Constructed(TypeName::SizePlaceholder, vec![]),
+            Type::Constructed(TypeName::ArrayVariantView, vec![]),
+        ],
+    );
+
+    // Phase 2 inputs: partials buffer + any push-constant inputs from the
+    // original entry that captures/init might reference.
+    let mut phase2_inputs = Vec::new();
+    // Add the partials buffer as a storage input
+    phase2_inputs.push(EntryInput {
+        name: format!("{}_partials", entry.name),
+        ty: partials_view_ty.clone(),
+        decoration: None,
+        size_hint: None,
+        storage_binding: Some(partials_binding),
+        push_constant_offset: None,
+    });
+    // Carry forward push-constant inputs (captures may reference them)
+    for input in &entry.inputs {
+        if input.push_constant_offset.is_some() {
+            phase2_inputs.push(input.clone());
+        }
+    }
+
+    Some(SsaEntryPoint {
+        name: format!("{}_phase2_combine", entry.name),
+        body,
+        execution_model: ExecutionModel::Compute { local_size: (1, 1, 1) },
+        inputs: phase2_inputs,
+        outputs: vec![EntryOutput {
+            ty: result_array_ty,
+            decoration: None,
+            storage_binding: Some(result_binding),
+        }],
+        span: entry.span,
+    })
+}
+
+/// Helper enum to hold input strategy data after setup (avoids trait object boxing).
+enum ReduceInputData {
+    Storage { input: StorageInput, handle: ValueId },
+    Range { input: RangeInput, handle: RangeHandle },
 }

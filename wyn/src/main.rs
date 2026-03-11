@@ -269,18 +269,18 @@ fn compile_file(
                 file.write_all(&word.to_le_bytes())?;
             }
 
-            // Write runtime manifest if there are any dispatches
-            if !lowered.manifest.dispatches.is_empty() {
-                let manifest_path = {
+            // Write pipeline descriptor if there are any pipelines
+            if !lowered.pipeline.pipelines.is_empty() {
+                let descriptor_path = {
                     let mut p = output_path.clone();
                     p.set_extension("json");
                     p
                 };
-                let json = serde_json::to_string_pretty(&lowered.manifest)
-                    .map_err(|e| wyn_core::err_spirv!("Failed to serialize manifest: {}", e))?;
-                fs::write(&manifest_path, json)?;
+                let json = serde_json::to_string_pretty(&lowered.pipeline)
+                    .map_err(|e| wyn_core::err_spirv!("Failed to serialize pipeline descriptor: {}", e))?;
+                fs::write(&descriptor_path, json)?;
                 if verbose {
-                    info!("Wrote runtime manifest to {}", manifest_path.display());
+                    info!("Wrote pipeline descriptor to {}", descriptor_path.display());
                 }
             }
 

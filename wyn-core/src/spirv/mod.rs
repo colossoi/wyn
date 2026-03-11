@@ -2688,12 +2688,32 @@ fn lower_ssa_program_impl(program: &SsaProgram) -> Result<Vec<u32>> {
                 }
             }
 
-            // Add all storage buffer variables to the interface
-            for &storage_var in constructor.storage_variables.values() {
-                if !interfaces.contains(&storage_var) {
-                    interfaces.push(storage_var);
+            // Add storage buffer variables that this entry point declares
+            // (via its inputs/outputs). Don't add ALL storage vars — other
+            // entry points may have buffers this one doesn't reference.
+            if let Some(entry) = program.entry_points.iter().find(|e| e.name == *name) {
+                for input in &entry.inputs {
+                    if let Some((set, binding)) = input.storage_binding {
+                        if let Some(&(var_id, _, _)) = constructor.storage_buffers.get(&(set, binding)) {
+                            if !interfaces.contains(&var_id) {
+                                interfaces.push(var_id);
+                            }
+                        }
+                    }
+                }
+                for output in &entry.outputs {
+                    if let Some((set, binding)) = output.storage_binding {
+                        if let Some(&(var_id, _, _)) = constructor.storage_buffers.get(&(set, binding)) {
+                            if !interfaces.contains(&var_id) {
+                                interfaces.push(var_id);
+                            }
+                        }
+                    }
                 }
             }
+            // Named storage variables (from program.storage) are already
+            // covered by the per-entry input/output scan above — each entry
+            // point declares exactly the bindings it uses.
 
             constructor.builder.entry_point(*model, func_id, name, interfaces);
 
