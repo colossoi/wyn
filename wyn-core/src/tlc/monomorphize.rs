@@ -1101,7 +1101,7 @@ pub(crate) fn format_type_compact(ty: &Type<TypeName>) -> String {
         }
         Type::Constructed(TypeName::ArrayVariantView, _) => "array_view".to_string(),
         Type::Constructed(TypeName::ArrayVariantComposite, _) => "array_composite".to_string(),
-        Type::Constructed(TypeName::ArrayVariantVirtual, _) => todo!(),
+        Type::Constructed(TypeName::ArrayVariantVirtual, _) => "array_virtual".to_string(),
         Type::Constructed(name, args) => {
             // Fallback for other constructed types
             let args_str = args.iter().map(format_type_compact).collect::<Vec<_>>().join("_");
