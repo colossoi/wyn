@@ -267,23 +267,13 @@ impl Constructor {
                         let size = ty.array_size().expect("Array has size");
                         let variant = ty.array_variant().expect("Array has variant");
 
-                        // Dispatch on variant first - View arrays are always {buffer_ptr, offset, len} structs
+                        // Dispatch on variant first - View arrays are always {buffer_id, offset, len} structs
                         if let PolyType::Constructed(TypeName::ArrayVariantView, _) = variant {
-                            // View variant: struct { buffer_ptr, offset, len }
-                            // buffer_ptr points to the StorageBuffer block struct containing the runtime array
-                            self.apply_buffer_array_strides(elem_type, elem);
-                            let stride = crate::mir::layout::type_byte_size(elem)
-                                .expect("View element type must have computable size");
-                            let runtime_array_type =
-                                self.get_or_create_runtime_array_type(elem_type, stride);
-                            let buffer_struct_type =
-                                self.get_or_create_buffer_block_type(runtime_array_type);
-                            let buffer_ptr_type = self.get_or_create_ptr_type(
-                                spirv::StorageClass::StorageBuffer,
-                                buffer_struct_type,
-                            );
+                            // View variant: struct { buffer_id: u32, offset: u32, len: u32 }
+                            // Matches what StorageView lowering actually emits (buffer_id is an
+                            // index, not a pointer).
                             self.get_or_create_struct_type(vec![
-                                buffer_ptr_type,
+                                self.u32_type,
                                 self.u32_type,
                                 self.u32_type,
                             ])
@@ -2837,6 +2827,13 @@ fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &SsaEntryPoint) -
             }
         } else if let Some((set, binding)) = input.storage_binding {
             let var_id = constructor.create_storage_buffer(&input.ty, set, binding);
+            // Mark input storage buffers as non-writable so naga/wgpu
+            // sees them as read-only (LOAD access only).
+            constructor.builder.decorate(
+                var_id,
+                spirv::Decoration::NonWritable,
+                std::iter::empty::<Operand>(),
+            );
             interfaces.push(var_id);
         } else {
             // Regular input with location
