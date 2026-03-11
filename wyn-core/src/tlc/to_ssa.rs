@@ -75,8 +75,6 @@ fn soa_elem_type(soa_ty: &Type<TypeName>) -> Type<TypeName> {
     }
 }
 
-
-
 /// Result of converting a TLC program to SSA.
 #[derive(Debug, Clone)]
 pub struct SsaProgram {
@@ -907,6 +905,75 @@ impl<'a> Converter<'a> {
         Ok(if_blocks.result)
     }
 
+    /// Convert an array literal by building it incrementally.
+    ///
+    /// Instead of converting all elements first and emitting one ArrayLit,
+    /// we start with an uninit array and insert each element one at a time.
+    /// This is necessary because element conversion may introduce control flow
+    /// (if/else) that changes the current block. Each insert is emitted in
+    /// whatever block is current after converting that element, so all value
+    /// references stay within their defining block's dominance frontier.
+    fn convert_array_lit_incremental(
+        &mut self,
+        elements: &[&Term],
+        arr_ty: Type<TypeName>,
+        span: Span,
+        node_id: NodeId,
+    ) -> Result<ValueId, ConvertError> {
+        // If no elements could introduce control flow, use the fast path
+        if elements.iter().all(|e| !Self::term_may_branch(e)) {
+            let values: Vec<ValueId> =
+                elements.iter().map(|t| self.convert_term(t)).collect::<Result<_, _>>()?;
+            return self
+                .builder
+                .push_inst(InstKind::ArrayLit { elements: values }, arr_ty, span, node_id)
+                .map_err(|e| ConvertError::BuilderError(e.to_string()));
+        }
+
+        // Slow path: build incrementally with uninit + array_with chain
+        let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+
+        let mut arr = self
+            .builder
+            .push_call("_w_intrinsic_uninit", vec![], arr_ty.clone(), span, node_id)
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+
+        for (i, elem) in elements.iter().enumerate() {
+            let val = self.convert_term(elem)?;
+            let idx = self
+                .builder
+                .push_inst(InstKind::Int(i.to_string()), i32_ty.clone(), span, node_id)
+                .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+            arr = self
+                .builder
+                .push_call(
+                    "_w_intrinsic_array_with",
+                    vec![arr, idx, val],
+                    arr_ty.clone(),
+                    span,
+                    node_id,
+                )
+                .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+        }
+
+        Ok(arr)
+    }
+
+    /// Check whether a term might introduce control flow (if/else, loops, let with CFG body).
+    fn term_may_branch(term: &Term) -> bool {
+        match &term.kind {
+            TermKind::If { .. } | TermKind::Loop { .. } => true,
+            TermKind::Let { rhs, body, .. } => Self::term_may_branch(rhs) || Self::term_may_branch(body),
+            TermKind::App { func, arg } => Self::term_may_branch(func) || Self::term_may_branch(arg),
+            TermKind::ArrayExpr(ae) => match ae {
+                ArrayExpr::Literal(terms) => terms.iter().any(|t| Self::term_may_branch(t)),
+                ArrayExpr::Ref(t) => Self::term_may_branch(t),
+                _ => true, // conservative for SOACs etc.
+            },
+            _ => false,
+        }
+    }
+
     /// Collect the spine of a nested application chain.
     fn collect_application_spine<'t>(func: &'t Term, arg: &'t Term) -> (&'t Term, Vec<&'t Term>) {
         let mut args = vec![arg];
@@ -983,6 +1050,14 @@ impl<'a> Converter<'a> {
         span: Span,
         node_id: NodeId,
     ) -> Result<ValueId, ConvertError> {
+        // Handle _w_array_lit before converting args, since element conversion
+        // may introduce control flow (if/else) that changes the current block.
+        // We build the array incrementally so each element insert happens in
+        // whatever block is current after that element is converted.
+        if name == "_w_array_lit" {
+            return self.convert_array_lit_incremental(args, ty, span, node_id);
+        }
+
         let arg_values: Vec<ValueId> =
             args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
 
@@ -992,12 +1067,6 @@ impl<'a> Converter<'a> {
                 return self
                     .builder
                     .push_inst(InstKind::Vector(arg_values), ty, span, node_id)
-                    .map_err(|e| ConvertError::BuilderError(e.to_string()));
-            }
-            "_w_array_lit" => {
-                return self
-                    .builder
-                    .push_inst(InstKind::ArrayLit { elements: arg_values }, ty, span, node_id)
                     .map_err(|e| ConvertError::BuilderError(e.to_string()));
             }
             "_w_tuple" => {
@@ -1107,9 +1176,7 @@ impl<'a> Converter<'a> {
             };
             let binding = match &args[1].kind {
                 TermKind::IntLit(s) => s.parse::<u32>().map_err(|_| {
-                    ConvertError::InvalidIntrinsic(
-                        "_w_intrinsic_storage_index: binding is not u32".into(),
-                    )
+                    ConvertError::InvalidIntrinsic("_w_intrinsic_storage_index: binding is not u32".into())
                 })?,
                 _ => {
                     return Err(ConvertError::InvalidIntrinsic(
@@ -1128,7 +1195,12 @@ impl<'a> Converter<'a> {
             // then we load the value from it.
             let ptr = self
                 .builder
-                .push_inst(InstKind::StorageViewIndex { view, index }, ty.clone(), span, node_id)
+                .push_inst(
+                    InstKind::StorageViewIndex { view, index },
+                    ty.clone(),
+                    span,
+                    node_id,
+                )
                 .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
             // Load the element from the pointer
             let effect_in = self.builder.entry_effect();
@@ -1552,8 +1624,6 @@ impl<'a> Converter<'a> {
         }
     }
 
-
-
     // =========================================================================
     // SOAC / ArrayExpr lowering
     // =========================================================================
@@ -1595,11 +1665,8 @@ impl<'a> Converter<'a> {
             ArrayExpr::Soac(op) => self.convert_soac(op, ty, span, node_id),
             ArrayExpr::Generate { .. } => todo!("ArrayExpr::Generate lowering"),
             ArrayExpr::Literal(terms) => {
-                let values: Vec<ValueId> =
-                    terms.iter().map(|t| self.convert_term(t)).collect::<Result<_, _>>()?;
-                self.builder
-                    .push_inst(InstKind::ArrayLit { elements: values }, ty, span, node_id)
-                    .map_err(|e| ConvertError::BuilderError(e.to_string()))
+                let term_refs: Vec<&Term> = terms.iter().collect();
+                self.convert_array_lit_incremental(&term_refs, ty, span, node_id)
             }
             ArrayExpr::Range { start, len } => {
                 let start_val = self.convert_term(start)?;
@@ -1617,7 +1684,13 @@ impl<'a> Converter<'a> {
                     )
                     .map_err(|e| ConvertError::BuilderError(e.to_string()))
             }
-            ArrayExpr::StorageBuffer { set, binding, offset, len, elem_ty } => {
+            ArrayExpr::StorageBuffer {
+                set,
+                binding,
+                offset,
+                len,
+                elem_ty,
+            } => {
                 let offset_val = self.convert_term(offset)?;
                 let len_val = self.convert_term(len)?;
                 let array_ty = Type::Constructed(
@@ -1631,7 +1704,10 @@ impl<'a> Converter<'a> {
                 self.builder
                     .push_inst(
                         InstKind::StorageView {
-                            source: ViewSource::Storage { set: *set, binding: *binding },
+                            source: ViewSource::Storage {
+                                set: *set,
+                                binding: *binding,
+                            },
                             offset: offset_val,
                             len: len_val,
                         },
@@ -1701,11 +1777,7 @@ impl<'a> Converter<'a> {
         };
 
         let zipped = input_values.len() > 1;
-        let zipped_param_type = if zipped {
-            Some(lam.params[0].1.clone())
-        } else {
-            None
-        };
+        let zipped_param_type = if zipped { Some(lam.params[0].1.clone()) } else { None };
 
         self.builder
             .push_inst(

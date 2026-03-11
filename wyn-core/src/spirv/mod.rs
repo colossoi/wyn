@@ -10,7 +10,9 @@ use crate::ast::TypeName;
 use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
 use crate::mir::layout::{buffer_array_strides, type_byte_size};
-use crate::mir::ssa::{Block, BlockId, ControlHeader, FuncBody, Inst, InstKind, Terminator, ValueId, ViewSource};
+use crate::mir::ssa::{
+    Block, BlockId, ControlHeader, FuncBody, Inst, InstKind, Terminator, ValueId, ViewSource,
+};
 use crate::tlc::to_ssa::{ExecutionModel, IoDecoration, SsaEntryPoint, SsaFunction, SsaProgram};
 use crate::types;
 use crate::types::TypeExt;
@@ -174,7 +176,9 @@ impl Constructor {
             return id;
         }
         let id = self.buffer_vars.len() as u32;
-        let &(buffer_var, elem_ty, _) = self.storage_buffers.get(&(set, binding))
+        let &(buffer_var, elem_ty, _) = self
+            .storage_buffers
+            .get(&(set, binding))
             .expect("get_or_assign_buffer_id: storage buffer must exist");
         self.buffer_vars.push((buffer_var, elem_ty));
         self.buffer_id_map.insert((set, binding), id);
@@ -182,10 +186,19 @@ impl Constructor {
     }
 
     /// Resolve a buffer_id (u32 SPIR-V constant) to (buffer_var, elem_type).
-    fn resolve_buffer_by_id(&self, buffer_id_spirv: spirv::Word, context: &str) -> Result<(spirv::Word, spirv::Word)> {
-        let buffer_id = self.uint_const_reverse.get(&buffer_id_spirv).copied()
+    fn resolve_buffer_by_id(
+        &self,
+        buffer_id_spirv: spirv::Word,
+        context: &str,
+    ) -> Result<(spirv::Word, spirv::Word)> {
+        let buffer_id = self
+            .uint_const_reverse
+            .get(&buffer_id_spirv)
+            .copied()
             .ok_or_else(|| err_spirv!("resolve_buffer_by_id: not a u32 constant (in {})", context))?;
-        self.buffer_vars.get(buffer_id as usize).copied()
+        self.buffer_vars
+            .get(buffer_id as usize)
+            .copied()
             .ok_or_else(|| err_spirv!("resolve_buffer_by_id: unknown buffer_id {}", buffer_id))
     }
 
@@ -862,7 +875,10 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
             }
         }
 
-        // Create all SPIR-V blocks first
+        // Create all SPIR-V blocks and pre-allocate phi IDs for all block params.
+        // Phi IDs must be allocated up front because SSA values from one block's
+        // params may be referenced by instructions in other blocks (e.g., an if/else
+        // result used in an array literal that spans multiple merge blocks).
         for (block_idx, block) in self.body.blocks.iter().enumerate() {
             if block.is_dead() {
                 continue;
@@ -876,13 +892,23 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                 let spirv_block = self.constructor.builder.id();
                 self.block_map.insert(block_id, spirv_block);
             }
+
+            // Allocate phi IDs for block parameters (actual phi instructions
+            // are inserted by insert_phi_nodes() after all blocks are processed)
+            for param in &block.params {
+                let phi_id = self.constructor.builder.id();
+                self.value_map.insert(param.value, phi_id);
+            }
         }
 
-        // Lower each block
-        for (block_idx, block) in self.body.blocks.iter().enumerate() {
-            if block.is_dead() {
-                continue;
-            }
+        // Compute reverse post-order so we emit blocks in dominance-friendly order.
+        // This ensures that every value definition is emitted before its uses,
+        // regardless of block numbering in the SSA.
+        let rpo = self.compute_rpo();
+
+        // Lower each block in RPO
+        for &block_idx in &rpo {
+            let block = &self.body.blocks[block_idx];
             let block_id = BlockId(block_idx as u32);
 
             // Start block (skip entry which is already started)
@@ -896,21 +922,10 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                 self.block_indices.insert(block_id, idx);
             }
 
-            // Allocate phi IDs for block parameters (but don't insert yet)
-            for (param_idx, param) in block.params.iter().enumerate() {
-                let param_ty = self.constructor.polytype_to_spirv(&param.ty);
-                let phi_id = self.constructor.builder.id();
-                self.value_map.insert(param.value, phi_id);
-
-                // Store type info for later phi insertion
-                // (We'll need this when we actually insert the phi)
-                let _ = (param_idx, param_ty); // Used below
-            }
-
             // Lower instructions
             for &inst_id in &block.insts {
                 let inst = self.body.get_inst(inst_id);
-                self.lower_inst(inst)?;
+                self.lower_inst(inst).map_err(|e| err_spirv!("Block({}): {}", block_idx, e))?;
             }
 
             // Lower terminator
@@ -924,6 +939,49 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
 
         // Return placeholder - actual return handled by terminators in SSA
         Ok(self.constructor.const_i32(0))
+    }
+
+    /// Compute reverse post-order of the CFG for dominance-friendly block emission.
+    fn compute_rpo(&self) -> Vec<usize> {
+        let num_blocks = self.body.blocks.len();
+        let mut visited = vec![false; num_blocks];
+        let mut post_order = Vec::with_capacity(num_blocks);
+
+        fn dfs(
+            blocks: &[crate::mir::ssa::Block],
+            idx: usize,
+            visited: &mut [bool],
+            post_order: &mut Vec<usize>,
+        ) {
+            if idx >= blocks.len() || visited[idx] || blocks[idx].is_dead() {
+                return;
+            }
+            visited[idx] = true;
+
+            // Visit successors
+            if let Some(ref term) = blocks[idx].terminator {
+                match term {
+                    Terminator::Branch { target, .. } => {
+                        dfs(blocks, target.index(), visited, post_order);
+                    }
+                    Terminator::CondBranch {
+                        then_target,
+                        else_target,
+                        ..
+                    } => {
+                        dfs(blocks, then_target.index(), visited, post_order);
+                        dfs(blocks, else_target.index(), visited, post_order);
+                    }
+                    Terminator::Return(_) | Terminator::ReturnUnit | Terminator::Unreachable => {}
+                }
+            }
+
+            post_order.push(idx);
+        }
+
+        dfs(&self.body.blocks, 0, &mut visited, &mut post_order);
+        post_order.reverse();
+        post_order
     }
 
     fn lower_inst(&mut self, inst: &Inst) -> Result<()> {
@@ -1112,11 +1170,7 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                 self.constructor.const_i32(0)
             }
 
-            InstKind::StorageView {
-                source,
-                offset,
-                len,
-            } => {
+            InstKind::StorageView { source, offset, len } => {
                 let offset_id = self.get_value(*offset)?;
                 let len_id = self.get_value(*len)?;
 
@@ -1154,17 +1208,14 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                             self.constructor.get_or_create_struct_type(vec![u32_ty, u32_ty, u32_ty]);
 
                         // Extract buffer_id (field 0) and parent_offset (field 1) from parent view
-                        let buffer_id = self.constructor.builder.composite_extract(
-                            u32_ty, None, parent_id, [0],
-                        )?;
-                        let parent_offset = self.constructor.builder.composite_extract(
-                            u32_ty, None, parent_id, [1],
-                        )?;
+                        let buffer_id =
+                            self.constructor.builder.composite_extract(u32_ty, None, parent_id, [0])?;
+                        let parent_offset =
+                            self.constructor.builder.composite_extract(u32_ty, None, parent_id, [1])?;
 
                         // new_offset = parent_offset + offset
-                        let new_offset = self.constructor.builder.i_add(
-                            u32_ty, None, parent_offset, offset_id,
-                        )?;
+                        let new_offset =
+                            self.constructor.builder.i_add(u32_ty, None, parent_offset, offset_id)?;
 
                         self.constructor.builder.composite_construct(
                             view_struct_type,
@@ -1181,14 +1232,19 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                 let u32_ty = self.constructor.u32_type;
 
                 // Extract buffer_id (field 0) and offset (field 1) from view struct
-                let buffer_id_val = self.constructor.builder.composite_extract(u32_ty, None, view_id, [0u32])?;
-                let base_offset = self.constructor.builder.composite_extract(u32_ty, None, view_id, [1u32])?;
+                let buffer_id_val =
+                    self.constructor.builder.composite_extract(u32_ty, None, view_id, [0u32])?;
+                let base_offset =
+                    self.constructor.builder.composite_extract(u32_ty, None, view_id, [1u32])?;
 
                 // Try the SSA-level view_buffer_id map first (reliable), fall back to
                 // SPIR-V constant reverse lookup (works when buffer_id is directly
                 // extractable as a constant, e.g. in the same entry point scope).
                 let (buffer_var, _) = if let Some(&buf_id) = self.view_buffer_id.get(view) {
-                    self.constructor.buffer_vars.get(buf_id as usize).copied()
+                    self.constructor
+                        .buffer_vars
+                        .get(buf_id as usize)
+                        .copied()
                         .ok_or_else(|| err_spirv!("view_buffer_id: unknown buffer_id {}", buf_id))?
                 } else {
                     self.constructor.resolve_buffer_by_id(buffer_id_val, "StorageViewIndex")?
@@ -1227,7 +1283,9 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
             }
 
             InstKind::Soac(_) => {
-                panic!("internal compiler error: Soac instruction reached SPIR-V backend; soac_lower pass was not run")
+                panic!(
+                    "internal compiler error: Soac instruction reached SPIR-V backend; soac_lower pass was not run"
+                )
             }
         };
 
@@ -1362,7 +1420,26 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
     }
 
     fn get_value(&self, value: ValueId) -> Result<spirv::Word> {
-        self.value_map.get(&value).copied().ok_or_else(|| err_spirv!("Unknown SSA value: {:?}", value))
+        self.value_map.get(&value).copied().ok_or_else(|| {
+            // Build diagnostic info to help debug SSA/lowering issues
+            let producer_block =
+                self.body.insts.iter().enumerate().find(|(_, i)| i.result == Some(value)).and_then(
+                    |(idx, _)| {
+                        let iid = crate::mir::ssa::InstId(idx as u32);
+                        self.body
+                            .blocks
+                            .iter()
+                            .enumerate()
+                            .find(|(_, b)| b.insts.contains(&iid))
+                            .map(|(bidx, _)| format!("produced in Block({})", bidx))
+                    },
+                );
+            let block_param = self.body.blocks.iter().enumerate().find_map(|(idx, b)| {
+                b.params.iter().any(|p| p.value == value).then(|| format!("block param of Block({})", idx))
+            });
+            let origin = producer_block.or(block_param).unwrap_or_else(|| "not found in body".to_string());
+            err_spirv!("Unknown SSA value: {:?} ({})", value, origin)
+        })
     }
 
     fn lower_binop(
@@ -1795,8 +1872,10 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                     let u32_ty = self.constructor.u32_type;
 
                     // Extract buffer_id and base_offset from view struct
-                    let buffer_id_val = self.constructor.builder.composite_extract(u32_ty, None, arr, [0u32])?;
-                    let base_offset = self.constructor.builder.composite_extract(u32_ty, None, arr, [1u32])?;
+                    let buffer_id_val =
+                        self.constructor.builder.composite_extract(u32_ty, None, arr, [0u32])?;
+                    let base_offset =
+                        self.constructor.builder.composite_extract(u32_ty, None, arr, [1u32])?;
 
                     // Check result type to decide materialization vs sub-view
                     let result_is_composite = inst
@@ -1809,8 +1888,9 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
 
                     if result_is_composite {
                         let (buffer_var, _) = if let Some(&buf_id) = self.view_buffer_id.get(&ssa_args[0]) {
-                            self.constructor.buffer_vars.get(buf_id as usize).copied()
-                                .ok_or_else(|| err_spirv!("slice_to_composite: unknown buffer_id {}", buf_id))?
+                            self.constructor.buffer_vars.get(buf_id as usize).copied().ok_or_else(|| {
+                                err_spirv!("slice_to_composite: unknown buffer_id {}", buf_id)
+                            })?
                         } else {
                             self.constructor.resolve_buffer_by_id(buffer_id_val, "slice_to_composite")?
                         };
@@ -1824,13 +1904,7 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                             result_ty,
                         )
                     } else {
-                        self.slice_view_to_view(
-                            arr,
-                            buffer_id_val,
-                            base_offset,
-                            start_id,
-                            end_id,
-                        )
+                        self.slice_view_to_view(arr, buffer_id_val, base_offset, start_id, end_id)
                     }
                 } else {
                     self.slice_composite(arr, start_id, end_id, result_ty)
@@ -2746,7 +2820,7 @@ fn lower_ssa_function(constructor: &mut Constructor, func: &SsaFunction) -> Resu
     let return_type = constructor.polytype_to_spirv(&body.return_ty);
 
     constructor.begin_function(&func.name, &param_names, &param_types, return_type)?;
-    lower_ssa_body(constructor, body)?;
+    lower_ssa_body(constructor, body).map_err(|e| err_spirv!("in function '{}': {}", func.name, e))?;
     constructor.end_function()?;
 
     Ok(())

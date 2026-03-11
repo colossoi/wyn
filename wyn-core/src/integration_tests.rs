@@ -664,13 +664,22 @@ entry compute_main(data: []i32) i32 =
         for inst in &f.body.insts {
             match &inst.kind {
                 crate::mir::ssa::InstKind::Index { .. } => {
-                    eprintln!("    inst {:?}: Index, result_ty: {:?}", inst.result, inst.result_ty);
+                    eprintln!(
+                        "    inst {:?}: Index, result_ty: {:?}",
+                        inst.result, inst.result_ty
+                    );
                 }
                 crate::mir::ssa::InstKind::StorageView { .. } => {
-                    eprintln!("    inst {:?}: StorageView, result_ty: {:?}", inst.result, inst.result_ty);
+                    eprintln!(
+                        "    inst {:?}: StorageView, result_ty: {:?}",
+                        inst.result, inst.result_ty
+                    );
                 }
                 crate::mir::ssa::InstKind::StorageViewIndex { .. } => {
-                    eprintln!("    inst {:?}: StorageViewIndex, result_ty: {:?}", inst.result, inst.result_ty);
+                    eprintln!(
+                        "    inst {:?}: StorageViewIndex, result_ty: {:?}",
+                        inst.result, inst.result_ty
+                    );
                 }
                 _ => {}
             }
@@ -679,19 +688,218 @@ entry compute_main(data: []i32) i32 =
 
     // The composite version should NOT use StorageView/StorageViewIndex
     let composite_fn = sum_versions.iter().find(|f| !f.name.contains("_b0s0b"));
-    assert!(composite_fn.is_some(), "Expected a non-specialized sum_first_two, got: {:?}",
-        sum_versions.iter().map(|f| &f.name).collect::<Vec<_>>());
+    assert!(
+        composite_fn.is_some(),
+        "Expected a non-specialized sum_first_two, got: {:?}",
+        sum_versions.iter().map(|f| &f.name).collect::<Vec<_>>()
+    );
     let composite_fn = composite_fn.unwrap();
 
     let has_storage_view = composite_fn.body.insts.iter().any(|i| {
-        matches!(&i.kind,
-            crate::mir::ssa::InstKind::StorageView { .. } |
-            crate::mir::ssa::InstKind::StorageViewIndex { .. }
+        matches!(
+            &i.kind,
+            crate::mir::ssa::InstKind::StorageView { .. }
+                | crate::mir::ssa::InstKind::StorageViewIndex { .. }
         )
     });
     assert!(
         !has_storage_view,
         "Composite-variant sum_first_two should not use StorageView instructions, \
          but it does. This means array variant types are incorrect."
+    );
+}
+
+// =============================================================================
+// SPIR-V Block Param / Phi Node Tests
+// =============================================================================
+
+/// Compile source all the way through SPIR-V and return Ok/Err.
+fn compile_to_spirv(input: &str) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
+    let mut frontend = crate::cached_frontend();
+    let alias_checked = crate::Compiler::parse(input, &mut frontend.node_counter)?
+        .elaborate_modules(&mut frontend.module_manager)?
+        .desugar(&mut frontend.node_counter)?
+        .resolve(&mut frontend.module_manager)?
+        .fold_ast_constants()
+        .type_check(&mut frontend.module_manager, &mut frontend.schemes)?
+        .alias_check()?;
+
+    let builtins = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
+    let result = alias_checked
+        .to_tlc(builtins, &frontend.schemes, &mut frontend.module_manager)
+        .skip_partial_eval()
+        .fuse_maps()
+        .defunctionalize()
+        .monomorphize()
+        .buffer_specialize()
+        .inline()
+        .soa_transform()
+        .to_ssa()?
+        .parallelize_soacs()
+        .filter_reachable()
+        .optimize()
+        .lower_soacs()
+        .lower()?;
+
+    Ok(result.spirv)
+}
+
+/// Helper: compile source that may have modules (like raytrace.wyn)
+fn compile_to_ssa_with_modules(input: &str) -> SsaProgram {
+    let mut frontend = crate::cached_frontend();
+    let parsed = crate::Compiler::parse(input, &mut frontend.node_counter).expect("Parse failed");
+    let parsed = parsed.elaborate_modules(&mut frontend.module_manager).expect("Module elaboration failed");
+    let alias_checked = parsed
+        .desugar(&mut frontend.node_counter)
+        .expect("Desugar failed")
+        .resolve(&mut frontend.module_manager)
+        .expect("Resolve failed")
+        .fold_ast_constants()
+        .type_check(&mut frontend.module_manager, &mut frontend.schemes)
+        .expect("Type check failed")
+        .alias_check()
+        .expect("Alias check failed");
+
+    let known_defs = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
+    alias_checked
+        .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
+        .skip_partial_eval()
+        .fuse_maps()
+        .defunctionalize()
+        .monomorphize()
+        .buffer_specialize()
+        .inline()
+        .soa_transform()
+        .to_ssa()
+        .expect("SSA conversion failed")
+        .ssa
+}
+
+/// Verify that nested if/else chains compile to SPIR-V.
+#[test]
+fn test_spirv_nested_if_else_block_params() {
+    let source = r#"
+def choose(a: f32, b: f32, c: f32, sel1: i32, sel2: i32) f32 =
+    let x = if sel1 == 0 then a
+            else if sel1 == 1 then b
+            else c in
+    let y = if sel2 == 0 then a
+            else if sel2 == 1 then c
+            else b in
+    x + y
+
+#[fragment]
+entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
+    let r = choose(pos.x, pos.y, pos.z, 1, 2) in
+    @[r, 0.0, 0.0, 1.0]
+"#;
+    compile_to_spirv(source).expect("Nested if/else should compile to SPIR-V");
+}
+
+/// Verify many conditional branches producing block params compile to SPIR-V.
+#[test]
+fn test_spirv_many_conditional_block_params() {
+    let source = r#"
+def process(a: f32, b: f32, c: f32, d: f32, flag: i32) (f32, f32, f32, f32) =
+    let x = if flag == 0 then a + b else a - b in
+    let y = if flag == 1 then b + c else b * c in
+    let z = if flag == 2 then c + d else c - d in
+    let w = if flag == 0 then d * a else d + a in
+    (x, y, z, w)
+
+def combine(t: (f32, f32, f32, f32)) f32 =
+    let (a, b, c, d) = t in
+    a + b + c + d
+
+#[fragment]
+entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
+    let result = process(pos.x, pos.y, pos.z, pos.w, 1) in
+    let s = combine(result) in
+    @[s, 0.0, 0.0, 1.0]
+"#;
+    compile_to_spirv(source).expect("Many conditionals should compile to SPIR-V");
+}
+
+/// Verify maps over small arrays with nested conditionals compile to SPIR-V.
+#[test]
+fn test_spirv_map_with_nested_conditionals() {
+    let source = r#"
+def selectValue(x: f32, flag: i32) f32 =
+    if flag == 0 then x * 2.0
+    else if flag == 1 then x + 1.0
+    else x - 1.0
+
+#[compute]
+entry compute_main(data: [8]f32) [8]f32 =
+    map(|x| selectValue(x, 1), data)
+"#;
+    compile_to_spirv(source).expect("Map with nested conditionals should compile to SPIR-V");
+}
+
+/// Verify multiple maps followed by a reduce compile to SPIR-V.
+#[test]
+fn test_spirv_multiple_maps_and_reduce() {
+    let source = r#"
+#[compute]
+entry compute_main(data: [8](f32, f32)) [8]f32 =
+    let first = map(|t| let (a, _) = t in a, data) in
+    let second = map(|t| let (_, b) = t in b, data) in
+    let combined = map(|(a, b): (f32, f32)| a + b, zip(first, second)) in
+    let total = reduce(|a: f32, b: f32| a + b, 0.0, combined) in
+    map(|x| x + total, combined)
+"#;
+    compile_to_spirv(source).expect("Multiple maps + reduce should compile to SPIR-V");
+}
+
+/// Verify conditional array element selection compiles to SPIR-V
+/// (the finalOrigins/finalDirs pattern from raytrace.wyn).
+#[test]
+fn test_spirv_conditional_array_construction() {
+    let source = r#"
+def build(a: [4]f32, b: [4]f32, flags: [4]i32) [4]f32 =
+    [
+        if flags[0] == 1 then b[0] else a[0],
+        if flags[1] == 1 then b[1] else a[1],
+        if flags[2] == 1 then b[2] else a[2],
+        if flags[3] == 1 then b[3] else a[3]
+    ]
+
+#[compute]
+entry compute_main(data: [4]f32) [4]f32 =
+    let doubled = map(|x| x * 2.0, data) in
+    let flags = [1, 0, 1, 0] in
+    build(data, doubled, flags)
+"#;
+    compile_to_spirv(source).expect("Conditional array construction should compile to SPIR-V");
+}
+
+/// Test the specific raytrace.wyn file compiles to SPIR-V.
+#[test]
+fn test_spirv_raytrace() {
+    let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../testfiles/raytrace.wyn"))
+        .expect("Could not read testfiles/raytrace.wyn");
+    compile_to_spirv(&source).expect("raytrace.wyn should compile to SPIR-V");
+}
+
+/// Verify raytrace.wyn compiles through SSA to SPIR-V without errors.
+/// This exercises the RPO block emission and incremental array literal
+/// lowering that were needed for complex cross-block value references.
+/// (test_spirv_raytrace covers this; this test verifies the SSA is well-formed
+/// enough that compile_to_ssa_with_modules succeeds.)
+#[test]
+fn test_ssa_raytrace_well_formed() {
+    let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../testfiles/raytrace.wyn"))
+        .expect("Could not read testfiles/raytrace.wyn");
+
+    let ssa = compile_to_ssa_with_modules(&source);
+
+    // Verify key functions exist
+    assert!(
+        ssa.functions.iter().any(|f| f.name == "processBounce"),
+        "processBounce should be in SSA output"
+    );
+    assert!(
+        ssa.functions.iter().any(|f| f.name == "processOneRay"),
+        "processOneRay should be in SSA output"
     );
 }
