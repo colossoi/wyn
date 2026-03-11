@@ -469,12 +469,22 @@ impl SsaSoac {
                 uses.extend(captures.iter().copied());
                 uses
             }
-            SsaSoac::Reduce { input, init, captures, .. } => {
+            SsaSoac::Reduce {
+                input,
+                init,
+                captures,
+                ..
+            } => {
                 let mut uses = vec![*input, *init];
                 uses.extend(captures.iter().copied());
                 uses
             }
-            SsaSoac::Scan { input, init, captures, .. } => {
+            SsaSoac::Scan {
+                input,
+                init,
+                captures,
+                ..
+            } => {
                 let mut uses = vec![*input, *init];
                 uses.extend(captures.iter().copied());
                 uses
@@ -486,18 +496,36 @@ impl SsaSoac {
     pub fn substitute_uses(&mut self, sub: &mut impl FnMut(&mut ValueId)) {
         match self {
             SsaSoac::Map { inputs, captures, .. } => {
-                for v in inputs.iter_mut() { sub(v); }
-                for v in captures.iter_mut() { sub(v); }
+                for v in inputs.iter_mut() {
+                    sub(v);
+                }
+                for v in captures.iter_mut() {
+                    sub(v);
+                }
             }
-            SsaSoac::Reduce { input, init, captures, .. } => {
+            SsaSoac::Reduce {
+                input,
+                init,
+                captures,
+                ..
+            } => {
                 sub(input);
                 sub(init);
-                for v in captures.iter_mut() { sub(v); }
+                for v in captures.iter_mut() {
+                    sub(v);
+                }
             }
-            SsaSoac::Scan { input, init, captures, .. } => {
+            SsaSoac::Scan {
+                input,
+                init,
+                captures,
+                ..
+            } => {
                 sub(input);
                 sub(init);
-                for v in captures.iter_mut() { sub(v); }
+                for v in captures.iter_mut() {
+                    sub(v);
+                }
             }
         }
     }
@@ -516,10 +544,15 @@ impl SsaSoac {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ViewSource {
     /// Backed by a storage buffer at (set, binding).
-    Storage { set: u32, binding: u32 },
+    Storage {
+        set: u32,
+        binding: u32,
+    },
     /// Inherited from another view value (e.g. a function parameter or a slice).
     /// The SPIR-V backend follows this chain to find the underlying Storage source.
-    Inherited { parent: ValueId },
+    Inherited {
+        parent: ValueId,
+    },
 }
 
 // =============================================================================

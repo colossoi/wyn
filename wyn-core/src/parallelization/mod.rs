@@ -16,8 +16,8 @@ use crate::mir::ssa::{EffectToken, FuncBody, InstKind, Terminator, ValueId};
 use crate::mir::ssa_builder::FuncBuilder;
 use crate::mir::ssa_soac_analysis::{ArrayProvenance, ParallelizableSoac, analyze_program};
 use crate::pipeline_descriptor::{
-    Access, Binding, BufferUsage, ComputePipeline, ComputeStage, DispatchSize,
-    MultiComputePipeline, Pipeline, PipelineDescriptor,
+    Access, Binding, BufferUsage, ComputePipeline, ComputeStage, DispatchSize, MultiComputePipeline,
+    Pipeline, PipelineDescriptor,
 };
 use crate::tlc::to_ssa::{EntryInput, EntryOutput, ExecutionModel, SsaEntryPoint, SsaProgram};
 use polytype::Type;
@@ -131,8 +131,7 @@ impl<'a> ParallelizeCtx<'a> {
 
         // chunk_end = min(chunk_start + chunk_size, len)
         let start_plus_size = self.push_binop("+", chunk_start, chunk_size, self.u32_ty.clone())?;
-        let chunk_end =
-            self.push_call("u32.min", vec![start_plus_size, input_len], self.u32_ty.clone())?;
+        let chunk_end = self.push_call("u32.min", vec![start_plus_size, input_len], self.u32_ty.clone())?;
 
         Some((thread_id, chunk_start, chunk_end))
     }
@@ -190,13 +189,27 @@ pub fn parallelize_soacs(mut program: SsaProgram) -> ParallelizationResult {
             if let Some(entry_analysis) = analysis.by_entry.get(&entry.name) {
                 if let Some(ref par_soac) = entry_analysis.parallelizable_soac {
                     match par_soac {
-                        ParallelizableSoac::Map { source, map_function, captures, output_elem_type } => {
-                            let storage_outputs: Vec<_> =
-                                entry.outputs.iter().filter(|o| o.storage_binding.is_some()).cloned().collect();
+                        ParallelizableSoac::Map {
+                            source,
+                            map_function,
+                            captures,
+                            output_elem_type,
+                        } => {
+                            let storage_outputs: Vec<_> = entry
+                                .outputs
+                                .iter()
+                                .filter(|o| o.storage_binding.is_some())
+                                .cloned()
+                                .collect();
 
-                            if let Some((new_body, output_binding)) =
-                                parallelize_map_entry(entry, source, map_function, captures, output_elem_type, local_size)
-                            {
+                            if let Some((new_body, output_binding)) = parallelize_map_entry(
+                                entry,
+                                source,
+                                map_function,
+                                captures,
+                                output_elem_type,
+                                local_size,
+                            ) {
                                 entry.body = new_body;
                                 if !storage_outputs.is_empty() {
                                     entry.outputs = storage_outputs.clone();
@@ -216,13 +229,29 @@ pub fn parallelize_soacs(mut program: SsaProgram) -> ParallelizationResult {
                                     }];
                                 }
 
-                                descriptor.pipelines.push(build_map_pipeline(entry, output_binding, local_size));
+                                descriptor.pipelines.push(build_map_pipeline(
+                                    entry,
+                                    output_binding,
+                                    local_size,
+                                ));
                             }
                         }
-                        ParallelizableSoac::Reduce { source, reduce_function, init, captures, elem_type } => {
-                            if let Some((reduce_entries, pipeline)) =
-                                parallelize_reduce_entry(entry, source, reduce_function, *init, captures, elem_type, local_size)
-                            {
+                        ParallelizableSoac::Reduce {
+                            source,
+                            reduce_function,
+                            init,
+                            captures,
+                            elem_type,
+                        } => {
+                            if let Some((reduce_entries, pipeline)) = parallelize_reduce_entry(
+                                entry,
+                                source,
+                                reduce_function,
+                                *init,
+                                captures,
+                                elem_type,
+                                local_size,
+                            ) {
                                 entries_to_remove.push(entry.name.clone());
                                 new_entries.extend(reduce_entries);
                                 descriptor.pipelines.push(pipeline);
@@ -243,7 +272,10 @@ pub fn parallelize_soacs(mut program: SsaProgram) -> ParallelizationResult {
         program.entry_points.extend(new_entries);
     }
 
-    ParallelizationResult { program, pipeline: descriptor }
+    ParallelizationResult {
+        program,
+        pipeline: descriptor,
+    }
 }
 
 /// Build a single-dispatch compute pipeline descriptor for a map.
@@ -277,7 +309,9 @@ fn build_map_pipeline(
     Pipeline::Compute(ComputePipeline {
         entry_point: entry.name.clone(),
         workgroup_size: local_size,
-        dispatch_size: DispatchSize::DerivedFromInputLength { workgroup_size: local_size.0 },
+        dispatch_size: DispatchSize::DerivedFromInputLength {
+            workgroup_size: local_size.0,
+        },
         bindings,
     })
 }
@@ -320,12 +354,28 @@ fn parallelize_map_entry(
         } => {
             let mut input = StorageInput::new(*param_index, *storage_binding);
             let output = StorageOutput::new(output_binding.0, output_binding.1);
-            build_map_body(&mut ctx, &mut input, &output, map_function, captures, output_elem_type, total_threads)?;
+            build_map_body(
+                &mut ctx,
+                &mut input,
+                &output,
+                map_function,
+                captures,
+                output_elem_type,
+                total_threads,
+            )?;
         }
         ArrayProvenance::Range { value } => {
             let mut input = RangeInput::new(*value, &entry.body)?;
             let output = StorageOutput::new(output_binding.0, output_binding.1);
-            build_map_body(&mut ctx, &mut input, &output, map_function, captures, output_elem_type, total_threads)?;
+            build_map_body(
+                &mut ctx,
+                &mut input,
+                &output,
+                map_function,
+                captures,
+                output_elem_type,
+                total_threads,
+            )?;
         }
         ArrayProvenance::Unknown => return None,
     };
@@ -560,7 +610,11 @@ fn build_reduce_phase1(
 
     // Setup input based on provenance
     let (input_len, input_strategy_data) = match source {
-        ArrayProvenance::EntryStorage { param_index, storage_binding, .. } => {
+        ArrayProvenance::EntryStorage {
+            param_index,
+            storage_binding,
+            ..
+        } => {
             let mut input = StorageInput::new(*param_index, *storage_binding);
             let (handle, len, _elem_ty) = input.setup(&mut ctx)?;
             (len, ReduceInputData::Storage { input, handle })
@@ -595,8 +649,7 @@ fn build_reduce_phase1(
     let acc = header_params[0];
     let loop_index = header_params[1];
     let body_block = ctx.builder.create_block();
-    let (exit_block, exit_params) =
-        ctx.builder.create_block_with_params(vec![elem_type.clone()]);
+    let (exit_block, exit_params) = ctx.builder.create_block_with_params(vec![elem_type.clone()]);
     let final_acc = exit_params[0];
     ctx.builder.mark_loop_header(header, exit_block, body_block).ok()?;
 
@@ -625,12 +678,8 @@ fn build_reduce_phase1(
     ctx.builder.switch_to_block(body_block).ok()?;
 
     let input_elem = match &input_strategy_data {
-        ReduceInputData::Storage { input, handle } => {
-            input.get_element(&mut ctx, *handle, loop_index)?
-        }
-        ReduceInputData::Range { input, handle } => {
-            input.get_element(&mut ctx, *handle, loop_index)?
-        }
+        ReduceInputData::Storage { input, handle } => input.get_element(&mut ctx, *handle, loop_index)?,
+        ReduceInputData::Range { input, handle } => input.get_element(&mut ctx, *handle, loop_index)?,
     };
 
     // call_args: (acc, elem, captures...)
@@ -717,9 +766,16 @@ fn build_reduce_phase2(
             Type::Constructed(TypeName::ArrayVariantView, vec![]),
         ],
     );
-    let partials_view = ctx.builder.emit_storage_view(
-        partials_binding.0, partials_binding.1, partials_view_ty.clone(), span, node_id,
-    ).ok()?;
+    let partials_view = ctx
+        .builder
+        .emit_storage_view(
+            partials_binding.0,
+            partials_binding.1,
+            partials_view_ty.clone(),
+            span,
+            node_id,
+        )
+        .ok()?;
 
     // Setup result output buffer
     let result_output = StorageOutput::new(result_binding.0, result_binding.1);
@@ -734,8 +790,7 @@ fn build_reduce_phase2(
     let acc = header_params[0];
     let loop_index = header_params[1];
     let body_block = ctx.builder.create_block();
-    let (exit_block, exit_params) =
-        ctx.builder.create_block_with_params(vec![elem_type.clone()]);
+    let (exit_block, exit_params) = ctx.builder.create_block_with_params(vec![elem_type.clone()]);
     let final_acc = exit_params[0];
     ctx.builder.mark_loop_header(header, exit_block, body_block).ok()?;
 
@@ -762,7 +817,13 @@ fn build_reduce_phase2(
     // Body: load partials[t], acc = f(acc, elem)
     ctx.builder.switch_to_block(body_block).ok()?;
 
-    let ptr = ctx.push_inst(InstKind::StorageViewIndex { view: partials_view, index: loop_index }, elem_type.clone())?;
+    let ptr = ctx.push_inst(
+        InstKind::StorageViewIndex {
+            view: partials_view,
+            index: loop_index,
+        },
+        elem_type.clone(),
+    )?;
     let effect_in = ctx.entry_effect();
     let partial_elem = ctx.builder.push_load(ptr, elem_type.clone(), effect_in, span, node_id).ok()?;
 
@@ -818,7 +879,9 @@ fn build_reduce_phase2(
     Some(SsaEntryPoint {
         name: format!("{}_phase2_combine", entry.name),
         body,
-        execution_model: ExecutionModel::Compute { local_size: (1, 1, 1) },
+        execution_model: ExecutionModel::Compute {
+            local_size: (1, 1, 1),
+        },
         inputs: phase2_inputs,
         outputs: vec![EntryOutput {
             ty: result_array_ty,
@@ -831,6 +894,12 @@ fn build_reduce_phase2(
 
 /// Helper enum to hold input strategy data after setup (avoids trait object boxing).
 enum ReduceInputData {
-    Storage { input: StorageInput, handle: ValueId },
-    Range { input: RangeInput, handle: RangeHandle },
+    Storage {
+        input: StorageInput,
+        handle: ValueId,
+    },
+    Range {
+        input: RangeInput,
+        handle: RangeHandle,
+    },
 }

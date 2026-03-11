@@ -375,7 +375,9 @@ fn apply_type_subst_to_array_expr(
             start: Box::new(apply_type_subst_to_term(start, subst, term_ids)),
             len: Box::new(apply_type_subst_to_term(len, subst, term_ids)),
         },
-        ArrayExpr::StorageBuffer { .. } => unreachable!("StorageBuffer introduced after defunctionalization"),
+        ArrayExpr::StorageBuffer { .. } => {
+            unreachable!("StorageBuffer introduced after defunctionalization")
+        }
     }
 }
 
@@ -643,7 +645,9 @@ fn collect_free_vars_array_expr(
             collect_free_vars(start, bound, top_level, known_defs, symbols, free, seen);
             collect_free_vars(len, bound, top_level, known_defs, symbols, free, seen);
         }
-        ArrayExpr::StorageBuffer { .. } => unreachable!("StorageBuffer introduced after defunctionalization"),
+        ArrayExpr::StorageBuffer { .. } => {
+            unreachable!("StorageBuffer introduced after defunctionalization")
+        }
     }
 }
 
@@ -1277,7 +1281,9 @@ impl<'a> Defunctionalizer<'a> {
                 start: Box::new(self.defunc_term(*start).term),
                 len: Box::new(self.defunc_term(*len).term),
             },
-            ArrayExpr::StorageBuffer { .. } => unreachable!("StorageBuffer introduced after defunctionalization"),
+            ArrayExpr::StorageBuffer { .. } => {
+                unreachable!("StorageBuffer introduced after defunctionalization")
+            }
         }
     }
 
@@ -2053,7 +2059,9 @@ impl<'a> Defunctionalizer<'a> {
                 start: Box::new(self.substitute_var(start, old_sym, new_sym)),
                 len: Box::new(self.substitute_var(len, old_sym, new_sym)),
             },
-            ArrayExpr::StorageBuffer { .. } => unreachable!("StorageBuffer introduced after defunctionalization"),
+            ArrayExpr::StorageBuffer { .. } => {
+                unreachable!("StorageBuffer introduced after defunctionalization")
+            }
         }
     }
 

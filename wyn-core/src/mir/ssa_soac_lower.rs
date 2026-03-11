@@ -11,8 +11,7 @@ use std::collections::HashMap;
 use crate::ast::{NodeId, Span, TypeName};
 use crate::mir::soa_helpers::{extract_array_size, soa_array_with, soa_index, soa_length, soa_uninit};
 use crate::mir::ssa::{
-    BlockId, ControlHeader, EffectToken, FuncBody, InstKind,
-    SsaSoac, Terminator, ValueId, ViewSource,
+    BlockId, ControlHeader, EffectToken, FuncBody, InstKind, SsaSoac, Terminator, ValueId, ViewSource,
 };
 use crate::mir::ssa_builder::FuncBuilder;
 use crate::tlc::to_ssa::SsaProgram;
@@ -40,11 +39,8 @@ fn has_soac_instructions(body: &FuncBody) -> bool {
 
 /// Rebuild a function body, expanding SOAC instructions into loops.
 fn lower_func_body(old_body: &FuncBody) -> FuncBody {
-    let params: Vec<(Type<TypeName>, String)> = old_body
-        .params
-        .iter()
-        .map(|(_, ty, name)| (ty.clone(), name.clone()))
-        .collect();
+    let params: Vec<(Type<TypeName>, String)> =
+        old_body.params.iter().map(|(_, ty, name)| (ty.clone(), name.clone())).collect();
 
     let mut builder = FuncBuilder::new(params, old_body.return_ty.clone());
 
@@ -121,14 +117,7 @@ fn lower_func_body(old_body: &FuncBody) -> FuncBody {
                     let result_ty = inst.result_ty.clone();
                     let span = inst.span;
                     let node_id = inst.node_id;
-                    let new_val = expand_soac(
-                        &mut builder,
-                        soac,
-                        result_ty,
-                        span,
-                        node_id,
-                        &value_map,
-                    );
+                    let new_val = expand_soac(&mut builder, soac, result_ty, span, node_id, &value_map);
                     if let (Some(old_result), Some(new_result)) = (inst.result, new_val) {
                         value_map.insert(old_result, new_result);
                     }
@@ -250,9 +239,7 @@ fn expand_map(
     let array_size = extract_array_size(first_input_ty);
 
     let len = match array_size {
-        Some(n) => builder
-            .push_int(&n.to_string(), i32_ty.clone(), span, node_id)
-            .ok()?,
+        Some(n) => builder.push_int(&n.to_string(), i32_ty.clone(), span, node_id).ok()?,
         None => soa_length(builder, inputs[0], first_input_ty, span, node_id).ok()?,
     };
 
@@ -273,9 +260,7 @@ fn expand_map(
 
     // Header
     builder.switch_to_block(loop_blocks.header).ok()?;
-    let cond = builder
-        .push_binop("<", loop_blocks.index, len, bool_ty, span, node_id)
-        .ok()?;
+    let cond = builder.push_binop("<", loop_blocks.index, len, bool_ty, span, node_id).ok()?;
     builder
         .terminate(Terminator::CondBranch {
             cond,
@@ -315,9 +300,7 @@ fn expand_map(
     };
     call_args.extend(captures.iter().copied());
 
-    let output_elem = builder
-        .push_call(func, call_args, output_elem_type.clone(), span, node_id)
-        .ok()?;
+    let output_elem = builder.push_call(func, call_args, output_elem_type.clone(), span, node_id).ok()?;
 
     // Update accumulator array (SoA-aware)
     let new_arr = soa_array_with(
@@ -332,9 +315,7 @@ fn expand_map(
     .ok()?;
 
     let one = builder.push_int("1", i32_ty.clone(), span, node_id).ok()?;
-    let next_i = builder
-        .push_binop("+", loop_blocks.index, one, i32_ty, span, node_id)
-        .ok()?;
+    let next_i = builder.push_binop("+", loop_blocks.index, one, i32_ty, span, node_id).ok()?;
     builder
         .terminate(Terminator::Branch {
             target: loop_blocks.header,
@@ -382,9 +363,7 @@ fn expand_reduce(
 
     // Header
     builder.switch_to_block(loop_blocks.header).ok()?;
-    let cond = builder
-        .push_binop("<", loop_blocks.index, len, bool_ty, span, node_id)
-        .ok()?;
+    let cond = builder.push_binop("<", loop_blocks.index, len, bool_ty, span, node_id).ok()?;
     builder
         .terminate(Terminator::CondBranch {
             cond,
@@ -415,9 +394,7 @@ fn expand_reduce(
     let new_acc = builder.push_call(func, call_args, acc_ty, span, node_id).ok()?;
 
     let one = builder.push_int("1", i32_ty.clone(), span, node_id).ok()?;
-    let next_i = builder
-        .push_binop("+", loop_blocks.index, one, i32_ty, span, node_id)
-        .ok()?;
+    let next_i = builder.push_binop("+", loop_blocks.index, one, i32_ty, span, node_id).ok()?;
     builder
         .terminate(Terminator::Branch {
             target: loop_blocks.header,
@@ -498,9 +475,7 @@ fn remap_inst_kind(
             args: args.iter().map(rv).collect(),
         },
         InstKind::Alloca {
-            elem_ty,
-            effect_in,
-            ..
+            elem_ty, effect_in, ..
         } => {
             let new_in = remap_effect(effect_in, em, builder);
             let new_out = builder.alloc_effect();
@@ -510,11 +485,7 @@ fn remap_inst_kind(
                 effect_out: new_out,
             }
         }
-        InstKind::Load {
-            ptr,
-            effect_in,
-            ..
-        } => {
+        InstKind::Load { ptr, effect_in, .. } => {
             let new_in = remap_effect(effect_in, em, builder);
             let new_out = builder.alloc_effect();
             InstKind::Load {
@@ -618,7 +589,10 @@ fn remap_terminator(
 
 fn remap_control_header(ctrl: &ControlHeader, bm: &HashMap<BlockId, BlockId>) -> ControlHeader {
     match ctrl {
-        ControlHeader::Loop { merge, continue_block } => ControlHeader::Loop {
+        ControlHeader::Loop {
+            merge,
+            continue_block,
+        } => ControlHeader::Loop {
             merge: bm[merge],
             continue_block: bm[continue_block],
         },

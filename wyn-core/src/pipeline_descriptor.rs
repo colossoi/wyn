@@ -88,9 +88,15 @@ pub enum ShaderStage {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DispatchSize {
     /// Fixed dispatch grid.
-    Fixed { x: u32, y: u32, z: u32 },
+    Fixed {
+        x: u32,
+        y: u32,
+        z: u32,
+    },
     /// Derive from input array length: ceil(input_length / workgroup_size).
-    DerivedFromInputLength { workgroup_size: u32 },
+    DerivedFromInputLength {
+        workgroup_size: u32,
+    },
 }
 
 /// A GPU resource binding used by the pipeline.

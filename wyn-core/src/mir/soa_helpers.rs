@@ -5,8 +5,8 @@
 //! Used by both `to_ssa.rs` (for non-SOAC array ops) and `ssa_soac_lower.rs`.
 
 use crate::ast::{NodeId, Span, TypeName};
-use crate::mir::ssa_builder::FuncBuilder;
 use crate::mir::ssa::ValueId;
+use crate::mir::ssa_builder::FuncBuilder;
 use crate::types::TypeExt;
 use polytype::Type;
 
@@ -103,13 +103,9 @@ pub fn soa_index(
             let elem = soa_index(builder, comp_arr, index, comp_ty, &comp_elem_ty, span, node_id)?;
             elem_values.push(elem);
         }
-        builder
-            .push_tuple(elem_values, elem_ty.clone(), span, node_id)
-            .map_err(|e| e.to_string())
+        builder.push_tuple(elem_values, elem_ty.clone(), span, node_id).map_err(|e| e.to_string())
     } else {
-        builder
-            .push_index(arr, index, elem_ty.clone(), span, node_id)
-            .map_err(|e| e.to_string())
+        builder.push_index(arr, index, elem_ty.clone(), span, node_id).map_err(|e| e.to_string())
     }
 }
 
@@ -141,9 +137,7 @@ pub fn soa_array_with(
             let new_comp = soa_array_with(builder, comp_arr, index, comp_elem, comp_ty, span, node_id)?;
             new_components.push(new_comp);
         }
-        builder
-            .push_tuple(new_components, arr_ty.clone(), span, node_id)
-            .map_err(|e| e.to_string())
+        builder.push_tuple(new_components, arr_ty.clone(), span, node_id).map_err(|e| e.to_string())
     } else {
         builder
             .push_call(
@@ -171,9 +165,7 @@ pub fn soa_uninit(
             let uninit = soa_uninit(builder, comp_ty, span, node_id)?;
             uninit_components.push(uninit);
         }
-        builder
-            .push_tuple(uninit_components, ty.clone(), span, node_id)
-            .map_err(|e| e.to_string())
+        builder.push_tuple(uninit_components, ty.clone(), span, node_id).map_err(|e| e.to_string())
     } else {
         builder
             .push_call("_w_intrinsic_uninit", vec![], ty.clone(), span, node_id)

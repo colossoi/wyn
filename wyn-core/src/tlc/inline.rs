@@ -363,7 +363,13 @@ fn inline_array_expr(
             start: Box::new(inline_term(*start, candidates, ids)),
             len: Box::new(inline_term(*len, candidates, ids)),
         },
-        ArrayExpr::StorageBuffer { set, binding, offset, len, elem_ty } => ArrayExpr::StorageBuffer {
+        ArrayExpr::StorageBuffer {
+            set,
+            binding,
+            offset,
+            len,
+            elem_ty,
+        } => ArrayExpr::StorageBuffer {
             set,
             binding,
             offset: Box::new(inline_term(*offset, candidates, ids)),

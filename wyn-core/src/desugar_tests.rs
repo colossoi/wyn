@@ -456,21 +456,23 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     @[f32.i32(x), 0.0f32, 0.0f32, 1.0f32]
 "#;
     let mut frontend = crate::cached_frontend();
-    let parsed = crate::Compiler::parse(source, &mut frontend.node_counter)
-        .expect("parse");
+    let parsed = crate::Compiler::parse(source, &mut frontend.node_counter).expect("parse");
     eprintln!("=== parse OK ===");
 
     let alias_checked = parsed
-        .desugar(&mut frontend.node_counter).expect("desugar")
-        .resolve(&mut frontend.module_manager).expect("resolve")
+        .desugar(&mut frontend.node_counter)
+        .expect("desugar")
+        .resolve(&mut frontend.module_manager)
+        .expect("resolve")
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager, &mut frontend.schemes).expect("typecheck")
-        .alias_check().expect("alias_check");
+        .type_check(&mut frontend.module_manager, &mut frontend.schemes)
+        .expect("typecheck")
+        .alias_check()
+        .expect("alias_check");
     eprintln!("=== frontend OK ===");
 
     let known_defs = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
-    let tlc = alias_checked
-        .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager);
+    let tlc = alias_checked.to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager);
     eprintln!("=== to_tlc OK ===");
 
     let tlc = tlc.skip_partial_eval();
@@ -523,21 +525,23 @@ def first(arr: []i32) i32 = arr[0]
 entry main(data: []i32) []i32 = [first(data)]
 "#;
     let mut frontend = crate::cached_frontend();
-    let parsed = crate::Compiler::parse(source, &mut frontend.node_counter)
-        .expect("parse");
+    let parsed = crate::Compiler::parse(source, &mut frontend.node_counter).expect("parse");
     eprintln!("=== parse OK ===");
 
     let alias_checked = parsed
-        .desugar(&mut frontend.node_counter).expect("desugar")
-        .resolve(&mut frontend.module_manager).expect("resolve")
+        .desugar(&mut frontend.node_counter)
+        .expect("desugar")
+        .resolve(&mut frontend.module_manager)
+        .expect("resolve")
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager, &mut frontend.schemes).expect("typecheck")
-        .alias_check().expect("alias_check");
+        .type_check(&mut frontend.module_manager, &mut frontend.schemes)
+        .expect("typecheck")
+        .alias_check()
+        .expect("alias_check");
     eprintln!("=== frontend OK ===");
 
     let known_defs = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
-    let tlc = alias_checked
-        .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager);
+    let tlc = alias_checked.to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager);
     eprintln!("=== to_tlc OK ===");
 
     let tlc = tlc.skip_partial_eval();

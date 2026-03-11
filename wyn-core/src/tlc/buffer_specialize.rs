@@ -14,8 +14,7 @@
 //! ```
 
 use super::{
-    ArrayExpr, Def, DefMeta, Lambda, LoopKind, Place, Program, SoacOp, Term, TermIdSource,
-    TermKind,
+    ArrayExpr, Def, DefMeta, Lambda, LoopKind, Place, Program, SoacOp, Term, TermIdSource, TermKind,
 };
 use crate::ast::{self, Span, TypeName};
 use crate::types::TypeExt;
@@ -69,10 +68,7 @@ fn is_view_array(ty: &Type<TypeName>) -> bool {
         .array_variant()
         .map(|v| matches!(v, Type::Constructed(TypeName::ArrayVariantView, _)))
         .unwrap_or(false);
-    let is_unsized = ty
-        .array_size()
-        .map(|s| matches!(s, Type::Variable(_)))
-        .unwrap_or(false);
+    let is_unsized = ty.array_size().map(|s| matches!(s, Type::Variable(_))).unwrap_or(false);
     is_view && is_unsized
 }
 
@@ -180,11 +176,8 @@ impl BufferSpecializer {
         match &term.kind {
             TermKind::Lambda(lam) => {
                 let new_body = self.rewrite_term(&lam.body);
-                let new_captures: Vec<_> = lam
-                    .captures
-                    .iter()
-                    .map(|(s, t, e)| (*s, t.clone(), self.rewrite_term(e)))
-                    .collect();
+                let new_captures: Vec<_> =
+                    lam.captures.iter().map(|(s, t, e)| (*s, t.clone(), self.rewrite_term(e))).collect();
                 Term {
                     kind: TermKind::Lambda(Lambda {
                         params: lam.params.clone(),
@@ -318,10 +311,8 @@ impl BufferSpecializer {
                 body,
             } => {
                 let new_init = self.rewrite_term(init);
-                let new_bindings: Vec<_> = init_bindings
-                    .iter()
-                    .map(|(s, t, e)| (*s, t.clone(), self.rewrite_term(e)))
-                    .collect();
+                let new_bindings: Vec<_> =
+                    init_bindings.iter().map(|(s, t, e)| (*s, t.clone(), self.rewrite_term(e))).collect();
                 let new_kind = self.rewrite_loop_kind(kind);
                 let new_body = self.rewrite_term(body);
                 Term {
@@ -361,7 +352,11 @@ impl BufferSpecializer {
                 }
             }
 
-            TermKind::Pack { exists_ty, dims, value } => {
+            TermKind::Pack {
+                exists_ty,
+                dims,
+                value,
+            } => {
                 let new_value = self.rewrite_term(value);
                 Term {
                     kind: TermKind::Pack {
@@ -428,12 +423,7 @@ impl BufferSpecializer {
                 lam: self.rewrite_lambda(lam),
                 inputs: inputs.iter().map(|ae| self.rewrite_array_expr(ae)).collect(),
             },
-            SoacOp::Reduce {
-                op,
-                ne,
-                input,
-                props,
-            } => SoacOp::Reduce {
+            SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
                 op: self.rewrite_lambda(op),
                 ne: Box::new(self.rewrite_term(ne)),
                 input: self.rewrite_array_expr(input),
@@ -480,20 +470,14 @@ impl BufferSpecializer {
             params: lam.params.clone(),
             body: Box::new(self.rewrite_term(&lam.body)),
             ret_ty: lam.ret_ty.clone(),
-            captures: lam
-                .captures
-                .iter()
-                .map(|(s, t, e)| (*s, t.clone(), self.rewrite_term(e)))
-                .collect(),
+            captures: lam.captures.iter().map(|(s, t, e)| (*s, t.clone(), self.rewrite_term(e))).collect(),
         }
     }
 
     fn rewrite_array_expr(&mut self, ae: &ArrayExpr) -> ArrayExpr {
         match ae {
             ArrayExpr::Ref(t) => ArrayExpr::Ref(Box::new(self.rewrite_term(t))),
-            ArrayExpr::Zip(aes) => {
-                ArrayExpr::Zip(aes.iter().map(|a| self.rewrite_array_expr(a)).collect())
-            }
+            ArrayExpr::Zip(aes) => ArrayExpr::Zip(aes.iter().map(|a| self.rewrite_array_expr(a)).collect()),
             ArrayExpr::Soac(op) => ArrayExpr::Soac(Box::new(self.rewrite_soac(op))),
             ArrayExpr::Generate {
                 shape,
@@ -511,7 +495,13 @@ impl BufferSpecializer {
                 start: Box::new(self.rewrite_term(start)),
                 len: Box::new(self.rewrite_term(len)),
             },
-            ArrayExpr::StorageBuffer { set, binding, offset, len, elem_ty } => ArrayExpr::StorageBuffer {
+            ArrayExpr::StorageBuffer {
+                set,
+                binding,
+                offset,
+                len,
+                elem_ty,
+            } => ArrayExpr::StorageBuffer {
                 set: *set,
                 binding: *binding,
                 offset: Box::new(self.rewrite_term(offset)),
@@ -555,10 +545,8 @@ impl BufferSpecializer {
         let span = original_term.span;
 
         // Build specialization key
-        let spec_key: SpecKey = buffer_args
-            .iter()
-            .map(|b| b.as_ref().map(|bb| (bb.set, bb.binding)))
-            .collect();
+        let spec_key: SpecKey =
+            buffer_args.iter().map(|b| b.as_ref().map(|bb| (bb.set, bb.binding))).collect();
 
         // Check if we already have this specialization
         let spec_sym = if let Some(&sym) = self.specializations.get(&(func_sym, spec_key.clone())) {
@@ -566,8 +554,7 @@ impl BufferSpecializer {
         } else {
             // Create the specialized function
             let spec_sym = self.create_specialized_def(func_sym, target_def, buffer_args, span);
-            self.specializations
-                .insert((func_sym, spec_key), spec_sym);
+            self.specializations.insert((func_sym, spec_key), spec_sym);
             spec_sym
         };
 
@@ -580,8 +567,7 @@ impl BufferSpecializer {
                 // Replace with (0, _w_intrinsic_storage_len(set, binding))
                 let zero = self.make_int_lit("0", u32_ty.clone(), span);
                 let set_lit = self.make_int_lit(&binding.set.to_string(), u32_ty.clone(), span);
-                let binding_lit =
-                    self.make_int_lit(&binding.binding.to_string(), u32_ty.clone(), span);
+                let binding_lit = self.make_int_lit(&binding.binding.to_string(), u32_ty.clone(), span);
                 let storage_len = self.make_app(
                     "_w_intrinsic_storage_len",
                     vec![set_lit, binding_lit],
@@ -629,11 +615,7 @@ impl BufferSpecializer {
         buffer_args: &[Option<BufferBinding>],
         _span: Span,
     ) -> SymbolId {
-        let orig_name = self
-            .symbols
-            .get(target_def.name)
-            .expect("BUG: symbol not in table")
-            .clone();
+        let orig_name = self.symbols.get(target_def.name).expect("BUG: symbol not in table").clone();
 
         // Build suffix from buffer bindings
         let suffix: String = buffer_args
@@ -658,14 +640,8 @@ impl BufferSpecializer {
         for (i, (sym, ty)) in orig_params.iter().enumerate() {
             if let Some(Some(binding)) = buffer_args.get(i) {
                 // Replace view param with offset + len
-                let offset_sym = self.symbols.alloc(format!(
-                    "{}_offset",
-                    self.symbols.get(*sym).unwrap()
-                ));
-                let len_sym = self.symbols.alloc(format!(
-                    "{}_len",
-                    self.symbols.get(*sym).unwrap()
-                ));
+                let offset_sym = self.symbols.alloc(format!("{}_offset", self.symbols.get(*sym).unwrap()));
+                let len_sym = self.symbols.alloc(format!("{}_len", self.symbols.get(*sym).unwrap()));
                 new_params.push((offset_sym, u32_ty.clone()));
                 new_params.push((len_sym, u32_ty.clone()));
                 view_param_map.insert(
@@ -719,18 +695,14 @@ impl BufferSpecializer {
 
                         // _w_index(arr_expr, i) where arr_expr resolves to a view
                         if name == "_w_index" && args.len() == 2 {
-                            if let Some(view) =
-                                self.try_resolve_view_expr(args[0], view_params)
-                            {
+                            if let Some(view) = self.try_resolve_view_expr(args[0], view_params) {
                                 let span = term.span;
-                                let u32_ty: Type<TypeName> =
-                                    Type::Constructed(TypeName::UInt(32), vec![]);
-                                let idx =
-                                    self.rewrite_specialized_body(&args[1], view_params);
+                                let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
+                                let idx = self.rewrite_specialized_body(&args[1], view_params);
                                 let set_lit =
                                     self.make_int_lit(&view.set.to_string(), u32_ty.clone(), span);
-                                let binding_lit = self
-                                    .make_int_lit(&view.binding.to_string(), u32_ty.clone(), span);
+                                let binding_lit =
+                                    self.make_int_lit(&view.binding.to_string(), u32_ty.clone(), span);
                                 let add_result = self.make_binop_app(
                                     ast::BinaryOp { op: "+".to_string() },
                                     view.offset,
@@ -749,9 +721,7 @@ impl BufferSpecializer {
 
                         // _w_intrinsic_length(arr_expr) where arr_expr resolves to a view
                         if name == "_w_intrinsic_length" && args.len() == 1 {
-                            if let Some(view) =
-                                self.try_resolve_view_expr(args[0], view_params)
-                            {
+                            if let Some(view) = self.try_resolve_view_expr(args[0], view_params) {
                                 return view.len;
                             }
                         }
@@ -795,8 +765,7 @@ impl BufferSpecializer {
                                         .iter()
                                         .map(|a| self.rewrite_specialized_body(a, view_params))
                                         .collect();
-                                    let rewritten_refs: Vec<&Term> =
-                                        rewritten_args.iter().collect();
+                                    let rewritten_refs: Vec<&Term> = rewritten_args.iter().collect();
                                     return self.specialize_call(
                                         *sym,
                                         &target_def,
@@ -809,10 +778,8 @@ impl BufferSpecializer {
                         }
 
                         // Default: recurse into func and arg
-                        let new_func =
-                            self.rewrite_specialized_body(func, view_params);
-                        let new_arg =
-                            self.rewrite_specialized_body(arg, view_params);
+                        let new_func = self.rewrite_specialized_body(func, view_params);
+                        let new_arg = self.rewrite_specialized_body(arg, view_params);
                         Term {
                             kind: TermKind::App {
                                 func: Box::new(new_func),
@@ -822,10 +789,8 @@ impl BufferSpecializer {
                         }
                     }
                     _ => {
-                        let new_func =
-                            self.rewrite_specialized_body(func, view_params);
-                        let new_arg =
-                            self.rewrite_specialized_body(arg, view_params);
+                        let new_func = self.rewrite_specialized_body(func, view_params);
+                        let new_arg = self.rewrite_specialized_body(arg, view_params);
                         Term {
                             kind: TermKind::App {
                                 func: Box::new(new_func),
@@ -997,7 +962,11 @@ impl BufferSpecializer {
                 }
             }
 
-            TermKind::Pack { exists_ty, dims, value } => {
+            TermKind::Pack {
+                exists_ty,
+                dims,
+                value,
+            } => {
                 let new_value = self.rewrite_specialized_body(value, view_params);
                 Term {
                     kind: TermKind::Pack {
@@ -1081,12 +1050,7 @@ impl BufferSpecializer {
                     .map(|ae| self.rewrite_specialized_array_expr(ae, view_params))
                     .collect(),
             },
-            SoacOp::Reduce {
-                op,
-                ne,
-                input,
-                props,
-            } => SoacOp::Reduce {
+            SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
                 op: self.rewrite_specialized_lambda(op, view_params),
                 ne: Box::new(self.rewrite_specialized_body(ne, view_params)),
                 input: self.rewrite_specialized_array_expr(input, view_params),
@@ -1140,13 +1104,7 @@ impl BufferSpecializer {
             captures: lam
                 .captures
                 .iter()
-                .map(|(s, t, e)| {
-                    (
-                        *s,
-                        t.clone(),
-                        self.rewrite_specialized_body(e, view_params),
-                    )
-                })
+                .map(|(s, t, e)| (*s, t.clone(), self.rewrite_specialized_body(e, view_params)))
                 .collect(),
         }
     }
@@ -1184,9 +1142,7 @@ impl BufferSpecializer {
                 ArrayExpr::Ref(Box::new(self.rewrite_specialized_body(t, view_params)))
             }
             ArrayExpr::Zip(aes) => ArrayExpr::Zip(
-                aes.iter()
-                    .map(|a| self.rewrite_specialized_array_expr(a, view_params))
-                    .collect(),
+                aes.iter().map(|a| self.rewrite_specialized_array_expr(a, view_params)).collect(),
             ),
             ArrayExpr::Soac(op) => {
                 ArrayExpr::Soac(Box::new(self.rewrite_specialized_soac(op, view_params)))
@@ -1201,16 +1157,19 @@ impl BufferSpecializer {
                 elem_ty: elem_ty.clone(),
             },
             ArrayExpr::Literal(terms) => ArrayExpr::Literal(
-                terms
-                    .iter()
-                    .map(|t| self.rewrite_specialized_body(t, view_params))
-                    .collect(),
+                terms.iter().map(|t| self.rewrite_specialized_body(t, view_params)).collect(),
             ),
             ArrayExpr::Range { start, len } => ArrayExpr::Range {
                 start: Box::new(self.rewrite_specialized_body(start, view_params)),
                 len: Box::new(self.rewrite_specialized_body(len, view_params)),
             },
-            ArrayExpr::StorageBuffer { set, binding, offset, len, elem_ty } => ArrayExpr::StorageBuffer {
+            ArrayExpr::StorageBuffer {
+                set,
+                binding,
+                offset,
+                len,
+                elem_ty,
+            } => ArrayExpr::StorageBuffer {
                 set: *set,
                 binding: *binding,
                 offset: Box::new(self.rewrite_specialized_body(offset, view_params)),
@@ -1290,8 +1249,7 @@ impl BufferSpecializer {
                     if name == "_w_intrinsic_slice" && args.len() == 3 {
                         let parent = self.try_resolve_view_expr(args[0], view_params)?;
                         let span = term.span;
-                        let u32_ty: Type<TypeName> =
-                            Type::Constructed(TypeName::UInt(32), vec![]);
+                        let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
 
                         // Rewrite start and end so any nested view refs are resolved
                         let start = self.rewrite_specialized_body(args[1], view_params);
@@ -1432,10 +1390,7 @@ fn wrap_in_lambdas(body: Term, params: &[(SymbolId, Type<TypeName>)], term_ids: 
     for (sym, ty) in params.iter().rev() {
         result = Term {
             id: term_ids.next_id(),
-            ty: Type::Constructed(
-                TypeName::Arrow,
-                vec![ty.clone(), result.ty.clone()],
-            ),
+            ty: Type::Constructed(TypeName::Arrow, vec![ty.clone(), result.ty.clone()]),
             span: result.span,
             kind: TermKind::Lambda(Lambda {
                 params: vec![(*sym, ty.clone())],

@@ -986,7 +986,9 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             }
 
             InstKind::Soac(_) => {
-                panic!("internal compiler error: Soac instruction reached GLSL backend; soac_lower pass was not run")
+                panic!(
+                    "internal compiler error: Soac instruction reached GLSL backend; soac_lower pass was not run"
+                )
             }
         }
     }

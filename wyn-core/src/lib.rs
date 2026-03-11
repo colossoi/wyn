@@ -853,7 +853,10 @@ impl SsaParallelized {
     /// Eliminate dead functions (not reachable from any entry point).
     pub fn filter_reachable(self) -> SsaReachable {
         let ssa = mir::reachability::eliminate_dead_functions(self.ssa);
-        SsaReachable { ssa, pipeline: self.pipeline }
+        SsaReachable {
+            ssa,
+            pipeline: self.pipeline,
+        }
     }
 }
 
@@ -867,7 +870,10 @@ impl SsaReachable {
     /// Run SSA peephole optimizations (param forwarding, empty block elimination).
     pub fn optimize(self) -> SsaOptimized {
         let ssa = mir::ssa_opt::optimize(self.ssa);
-        SsaOptimized { ssa, pipeline: self.pipeline }
+        SsaOptimized {
+            ssa,
+            pipeline: self.pipeline,
+        }
     }
 }
 
@@ -881,7 +887,10 @@ impl SsaOptimized {
     /// Lower first-class SOAC instructions to explicit loops.
     pub fn lower_soacs(self) -> SsaSoacLowered {
         let ssa = mir::ssa_soac_lower::lower_soacs(self.ssa);
-        SsaSoacLowered { ssa, pipeline: self.pipeline }
+        SsaSoacLowered {
+            ssa,
+            pipeline: self.pipeline,
+        }
     }
 }
 
@@ -895,7 +904,10 @@ impl SsaSoacLowered {
     /// Lower SSA to SPIR-V.
     pub fn lower(self) -> error::Result<Lowered> {
         let spirv = spirv::lower_ssa_program(&self.ssa)?;
-        Ok(Lowered { spirv, pipeline: self.pipeline })
+        Ok(Lowered {
+            spirv,
+            pipeline: self.pipeline,
+        })
     }
 
     /// Lower SSA to GLSL.

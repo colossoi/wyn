@@ -53,7 +53,11 @@ fn resolve_storage_view(
 ) -> Option<(usize, (u32, u32))> {
     for inst in &body.insts {
         if inst.result == Some(value) {
-            if let InstKind::StorageView { source: ViewSource::Storage { set, binding }, .. } = &inst.kind {
+            if let InstKind::StorageView {
+                source: ViewSource::Storage { set, binding },
+                ..
+            } = &inst.kind
+            {
                 for (i, input) in entry.inputs.iter().enumerate() {
                     if input.storage_binding == Some((*set, *binding)) {
                         return Some((i, (*set, *binding)));
@@ -278,7 +282,13 @@ fn find_soac_in_body(
     // Breadth-first: check for SOAC instructions at THIS level first
     for inst in &body.insts {
         match &inst.kind {
-            InstKind::Soac(SsaSoac::Map { func, inputs, captures, output_elem_type, .. }) => {
+            InstKind::Soac(SsaSoac::Map {
+                func,
+                inputs,
+                captures,
+                output_elem_type,
+                ..
+            }) => {
                 if let Some(input_value) = inputs.first() {
                     let provenance =
                         track_provenance_unified(entry, body, *input_value, param_to_entry_arg, depth == 0);
@@ -295,7 +305,14 @@ fn find_soac_in_body(
                     }
                 }
             }
-            InstKind::Soac(SsaSoac::Reduce { func, input, init, captures, input_elem_type, .. }) => {
+            InstKind::Soac(SsaSoac::Reduce {
+                func,
+                input,
+                init,
+                captures,
+                input_elem_type,
+                ..
+            }) => {
                 let provenance =
                     track_provenance_unified(entry, body, *input, param_to_entry_arg, depth == 0);
                 if matches!(
@@ -311,7 +328,14 @@ fn find_soac_in_body(
                     });
                 }
             }
-            InstKind::Soac(SsaSoac::Scan { func, input, init, captures, input_elem_type, .. }) => {
+            InstKind::Soac(SsaSoac::Scan {
+                func,
+                input,
+                init,
+                captures,
+                input_elem_type,
+                ..
+            }) => {
                 let provenance =
                     track_provenance_unified(entry, body, *input, param_to_entry_arg, depth == 0);
                 if matches!(
