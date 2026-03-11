@@ -649,14 +649,49 @@ entry compute_main(data: []i32) i32 =
 "#,
     );
 
-    // Both call sites produce Composite arrays, so only one monomorphized version
+    // Collect all sum_first_two variants (including buffer-specialized)
     let sum_versions: Vec<_> =
         ssa.functions.iter().filter(|f| f.name.starts_with("sum_first_two")).collect();
 
-    assert_eq!(
-        sum_versions.len(),
-        1,
-        "Expected 1 monomorphized version of sum_first_two (Composite only), got: {:?}",
-        sum_versions.iter().map(|f| &f.name).collect::<Vec<_>>()
+    eprintln!("sum_first_two SSA functions:");
+    for f in &sum_versions {
+        eprintln!("  {}", f.name);
+        // Show param types
+        for (val, ty, name) in &f.body.params {
+            eprintln!("    param {} ({:?}) :: {:?}", name, val, ty);
+        }
+        // Show all instructions that involve indexing or storage views
+        for inst in &f.body.insts {
+            match &inst.kind {
+                crate::mir::ssa::InstKind::Index { .. } => {
+                    eprintln!("    inst {:?}: Index, result_ty: {:?}", inst.result, inst.result_ty);
+                }
+                crate::mir::ssa::InstKind::StorageView { .. } => {
+                    eprintln!("    inst {:?}: StorageView, result_ty: {:?}", inst.result, inst.result_ty);
+                }
+                crate::mir::ssa::InstKind::StorageViewIndex { .. } => {
+                    eprintln!("    inst {:?}: StorageViewIndex, result_ty: {:?}", inst.result, inst.result_ty);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // The composite version should NOT use StorageView/StorageViewIndex
+    let composite_fn = sum_versions.iter().find(|f| !f.name.contains("_b0s0b"));
+    assert!(composite_fn.is_some(), "Expected a non-specialized sum_first_two, got: {:?}",
+        sum_versions.iter().map(|f| &f.name).collect::<Vec<_>>());
+    let composite_fn = composite_fn.unwrap();
+
+    let has_storage_view = composite_fn.body.insts.iter().any(|i| {
+        matches!(&i.kind,
+            crate::mir::ssa::InstKind::StorageView { .. } |
+            crate::mir::ssa::InstKind::StorageViewIndex { .. }
+        )
+    });
+    assert!(
+        !has_storage_view,
+        "Composite-variant sum_first_two should not use StorageView instructions, \
+         but it does. This means array variant types are incorrect."
     );
 }

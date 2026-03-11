@@ -182,9 +182,9 @@ impl Constructor {
     }
 
     /// Resolve a buffer_id (u32 SPIR-V constant) to (buffer_var, elem_type).
-    fn resolve_buffer_by_id(&self, buffer_id_spirv: spirv::Word) -> Result<(spirv::Word, spirv::Word)> {
+    fn resolve_buffer_by_id(&self, buffer_id_spirv: spirv::Word, context: &str) -> Result<(spirv::Word, spirv::Word)> {
         let buffer_id = self.uint_const_reverse.get(&buffer_id_spirv).copied()
-            .ok_or_else(|| err_spirv!("resolve_buffer_by_id: not a u32 constant"))?;
+            .ok_or_else(|| err_spirv!("resolve_buffer_by_id: not a u32 constant (in {})", context))?;
         self.buffer_vars.get(buffer_id as usize).copied()
             .ok_or_else(|| err_spirv!("resolve_buffer_by_id: unknown buffer_id {}", buffer_id))
     }
@@ -1191,7 +1191,7 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                     self.constructor.buffer_vars.get(buf_id as usize).copied()
                         .ok_or_else(|| err_spirv!("view_buffer_id: unknown buffer_id {}", buf_id))?
                 } else {
-                    self.constructor.resolve_buffer_by_id(buffer_id_val)?
+                    self.constructor.resolve_buffer_by_id(buffer_id_val, "StorageViewIndex")?
                 };
 
                 let actual_index = self.constructor.builder.i_add(u32_ty, None, base_offset, index_id)?;
@@ -1808,7 +1808,12 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                         .unwrap_or(false);
 
                     if result_is_composite {
-                        let (buffer_var, _) = self.constructor.resolve_buffer_by_id(buffer_id_val)?;
+                        let (buffer_var, _) = if let Some(&buf_id) = self.view_buffer_id.get(&ssa_args[0]) {
+                            self.constructor.buffer_vars.get(buf_id as usize).copied()
+                                .ok_or_else(|| err_spirv!("slice_to_composite: unknown buffer_id {}", buf_id))?
+                        } else {
+                            self.constructor.resolve_buffer_by_id(buffer_id_val, "slice_to_composite")?
+                        };
                         self.slice_view_to_composite(
                             arr,
                             buffer_var,
@@ -2063,7 +2068,7 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
 
         // Extract buffer_id (field 0) and offset (field 1) from view struct
         let buffer_id_val = self.constructor.builder.composite_extract(u32_ty, None, view_id, [0u32])?;
-        let (buffer_var, _) = self.constructor.resolve_buffer_by_id(buffer_id_val)?;
+        let (buffer_var, _) = self.constructor.resolve_buffer_by_id(buffer_id_val, "lower_view_index")?;
         let offset_val = self.constructor.builder.composite_extract(u32_ty, None, view_id, [1u32])?;
 
         // Index may be i32 from the language; reinterpret as u32 for offset arithmetic.

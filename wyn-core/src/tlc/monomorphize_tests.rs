@@ -119,3 +119,4 @@ fn test_collect_application_spine() {
     assert!(matches!(&args[0].kind, TermKind::Var(sym) if *sym == a_sym));
     assert!(matches!(&args[1].kind, TermKind::Var(sym) if *sym == b_sym));
 }
+
