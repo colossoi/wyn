@@ -147,17 +147,52 @@ fn track_provenance_unified(
 // Analysis Results
 // =============================================================================
 
-/// Information about a parallelizable map in a compute shader.
+/// A parallelizable SOAC found in a compute shader.
 #[derive(Debug, Clone)]
-pub struct ParallelizableMap {
-    /// Provenance of the array being mapped over.
-    pub source: ArrayProvenance,
-    /// The function being mapped.
-    pub map_function: String,
-    /// Captured variables passed as extra arguments to the map function.
-    pub captures: Vec<ValueId>,
-    /// Element type of the output array.
-    pub output_elem_type: Type<TypeName>,
+pub enum ParallelizableSoac {
+    /// `map f inputs` — element-wise transformation, trivially parallel.
+    Map {
+        source: ArrayProvenance,
+        map_function: String,
+        captures: Vec<ValueId>,
+        output_elem_type: Type<TypeName>,
+    },
+    /// `reduce f init input` — fold with associative operator.
+    Reduce {
+        source: ArrayProvenance,
+        reduce_function: String,
+        init: ValueId,
+        captures: Vec<ValueId>,
+        elem_type: Type<TypeName>,
+    },
+    /// `scan f init input` — prefix scan with associative operator.
+    Scan {
+        source: ArrayProvenance,
+        scan_function: String,
+        init: ValueId,
+        captures: Vec<ValueId>,
+        elem_type: Type<TypeName>,
+    },
+}
+
+impl ParallelizableSoac {
+    /// The provenance of the input array.
+    pub fn source(&self) -> &ArrayProvenance {
+        match self {
+            ParallelizableSoac::Map { source, .. }
+            | ParallelizableSoac::Reduce { source, .. }
+            | ParallelizableSoac::Scan { source, .. } => source,
+        }
+    }
+
+    /// Captured variables.
+    pub fn captures(&self) -> &[ValueId] {
+        match self {
+            ParallelizableSoac::Map { captures, .. }
+            | ParallelizableSoac::Reduce { captures, .. }
+            | ParallelizableSoac::Scan { captures, .. } => captures,
+        }
+    }
 }
 
 /// Analysis results for a compute entry point.
@@ -167,8 +202,8 @@ pub struct ComputeEntryAnalysis {
     pub name: String,
     /// Local size for the compute shader.
     pub local_size: (u32, u32, u32),
-    /// The first parallelizable map found (if any).
-    pub parallelizable_map: Option<ParallelizableMap>,
+    /// The first parallelizable SOAC found (if any).
+    pub parallelizable_soac: Option<ParallelizableSoac>,
 }
 
 /// Analysis results for an SSA program.
@@ -210,59 +245,93 @@ fn analyze_compute_entry(
     local_size: (u32, u32, u32),
     program: &SsaProgram,
 ) -> ComputeEntryAnalysis {
-    let par_map = find_highest_map(entry, program);
+    let par_soac = find_highest_soac(entry, program);
     ComputeEntryAnalysis {
         name: entry.name.clone(),
         local_size,
-        parallelizable_map: par_map,
+        parallelizable_soac: par_soac,
     }
 }
 
-/// Find the highest (closest to entry point) parallelizable map in the call tree.
+/// Find the highest (closest to entry point) parallelizable SOAC in the call tree.
 /// Uses breadth-first search: checks each level before recursing into called functions.
-fn find_highest_map(entry: &SsaEntryPoint, program: &SsaProgram) -> Option<ParallelizableMap> {
+fn find_highest_soac(entry: &SsaEntryPoint, program: &SsaProgram) -> Option<ParallelizableSoac> {
     // Entry params map to themselves for provenance tracking
     let initial_mapping: HashMap<usize, ValueId> =
         entry.body.params.iter().enumerate().map(|(i, (v, _, _))| (i, *v)).collect();
 
-    find_map_in_body(entry, &entry.body, &initial_mapping, program, 0)
+    find_soac_in_body(entry, &entry.body, &initial_mapping, program, 0)
 }
 
-/// Search for a parallelizable map in a function body, recursing into called functions.
-fn find_map_in_body(
+/// Search for a parallelizable SOAC in a function body, recursing into called functions.
+fn find_soac_in_body(
     entry: &SsaEntryPoint,
     body: &FuncBody,
     param_to_entry_arg: &HashMap<usize, ValueId>,
     program: &SsaProgram,
     depth: usize,
-) -> Option<ParallelizableMap> {
+) -> Option<ParallelizableSoac> {
     if depth > MAX_CALL_DEPTH {
         return None;
     }
 
-    // Breadth-first: check for SOAC Map instructions at THIS level first
+    // Breadth-first: check for SOAC instructions at THIS level first
     for inst in &body.insts {
-        if let InstKind::Soac(SsaSoac::Map { func, inputs, captures, output_elem_type, .. }) = &inst.kind {
-            // Check provenance of the primary input array
-            if let Some(input_value) = inputs.first() {
+        match &inst.kind {
+            InstKind::Soac(SsaSoac::Map { func, inputs, captures, output_elem_type, .. }) => {
+                if let Some(input_value) = inputs.first() {
+                    let provenance =
+                        track_provenance_unified(entry, body, *input_value, param_to_entry_arg, depth == 0);
+                    if matches!(
+                        provenance,
+                        ArrayProvenance::EntryStorage { .. } | ArrayProvenance::Range { .. }
+                    ) {
+                        return Some(ParallelizableSoac::Map {
+                            source: provenance,
+                            map_function: func.clone(),
+                            captures: captures.clone(),
+                            output_elem_type: output_elem_type.clone(),
+                        });
+                    }
+                }
+            }
+            InstKind::Soac(SsaSoac::Reduce { func, input, init, captures, input_elem_type, .. }) => {
                 let provenance =
-                    track_provenance_unified(entry, body, *input_value, param_to_entry_arg, depth == 0);
+                    track_provenance_unified(entry, body, *input, param_to_entry_arg, depth == 0);
                 if matches!(
                     provenance,
                     ArrayProvenance::EntryStorage { .. } | ArrayProvenance::Range { .. }
                 ) {
-                    return Some(ParallelizableMap {
+                    return Some(ParallelizableSoac::Reduce {
                         source: provenance,
-                        map_function: func.clone(),
+                        reduce_function: func.clone(),
+                        init: *init,
                         captures: captures.clone(),
-                        output_elem_type: output_elem_type.clone(),
+                        elem_type: input_elem_type.clone(),
                     });
                 }
             }
+            InstKind::Soac(SsaSoac::Scan { func, input, init, captures, input_elem_type, .. }) => {
+                let provenance =
+                    track_provenance_unified(entry, body, *input, param_to_entry_arg, depth == 0);
+                if matches!(
+                    provenance,
+                    ArrayProvenance::EntryStorage { .. } | ArrayProvenance::Range { .. }
+                ) {
+                    return Some(ParallelizableSoac::Scan {
+                        source: provenance,
+                        scan_function: func.clone(),
+                        init: *init,
+                        captures: captures.clone(),
+                        elem_type: input_elem_type.clone(),
+                    });
+                }
+            }
+            _ => {}
         }
     }
 
-    // No map at this level - recurse into called functions
+    // No SOAC at this level - recurse into called functions
     for inst in &body.insts {
         if let InstKind::Call { func, args } = &inst.kind {
             // Skip intrinsic calls
@@ -272,10 +341,10 @@ fn find_map_in_body(
             if let Some(called_func) = find_function(program, func) {
                 let new_mapping = build_param_mapping(body, param_to_entry_arg, args, entry);
 
-                if let Some(par_map) =
-                    find_map_in_body(entry, &called_func.body, &new_mapping, program, depth + 1)
+                if let Some(par_soac) =
+                    find_soac_in_body(entry, &called_func.body, &new_mapping, program, depth + 1)
                 {
-                    return Some(par_map);
+                    return Some(par_soac);
                 }
             }
         }

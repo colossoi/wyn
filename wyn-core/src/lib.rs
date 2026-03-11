@@ -25,6 +25,7 @@ pub mod tlc;
 pub mod glsl;
 pub mod parallelization;
 pub mod resolve_placeholders;
+pub mod runtime_manifest;
 pub mod spirv;
 
 #[cfg(test)]
@@ -834,60 +835,67 @@ pub struct SsaConverted {
 impl SsaConverted {
     /// Parallelize SOACs in compute shaders.
     pub fn parallelize_soacs(self) -> SsaParallelized {
-        let ssa = parallelization::parallelize_soacs(self.ssa);
-        SsaParallelized { ssa }
+        let result = parallelization::parallelize_soacs(self.ssa);
+        SsaParallelized {
+            ssa: result.program,
+            manifest: result.manifest,
+        }
     }
 }
 
 /// SSA with parallelized SOACs for compute shaders
 pub struct SsaParallelized {
     pub ssa: tlc::to_ssa::SsaProgram,
+    pub manifest: runtime_manifest::RuntimeManifest,
 }
 
 impl SsaParallelized {
     /// Eliminate dead functions (not reachable from any entry point).
     pub fn filter_reachable(self) -> SsaReachable {
         let ssa = mir::reachability::eliminate_dead_functions(self.ssa);
-        SsaReachable { ssa }
+        SsaReachable { ssa, manifest: self.manifest }
     }
 }
 
 /// SSA with dead functions eliminated
 pub struct SsaReachable {
     pub ssa: tlc::to_ssa::SsaProgram,
+    pub manifest: runtime_manifest::RuntimeManifest,
 }
 
 impl SsaReachable {
     /// Run SSA peephole optimizations (param forwarding, empty block elimination).
     pub fn optimize(self) -> SsaOptimized {
         let ssa = mir::ssa_opt::optimize(self.ssa);
-        SsaOptimized { ssa }
+        SsaOptimized { ssa, manifest: self.manifest }
     }
 }
 
 /// SSA after peephole optimizations
 pub struct SsaOptimized {
     pub ssa: tlc::to_ssa::SsaProgram,
+    pub manifest: runtime_manifest::RuntimeManifest,
 }
 
 impl SsaOptimized {
     /// Lower first-class SOAC instructions to explicit loops.
     pub fn lower_soacs(self) -> SsaSoacLowered {
         let ssa = mir::ssa_soac_lower::lower_soacs(self.ssa);
-        SsaSoacLowered { ssa }
+        SsaSoacLowered { ssa, manifest: self.manifest }
     }
 }
 
 /// SSA after SOAC instructions have been lowered to explicit loops
 pub struct SsaSoacLowered {
     pub ssa: tlc::to_ssa::SsaProgram,
+    pub manifest: runtime_manifest::RuntimeManifest,
 }
 
 impl SsaSoacLowered {
     /// Lower SSA to SPIR-V.
     pub fn lower(self) -> error::Result<Lowered> {
         let spirv = spirv::lower_ssa_program(&self.ssa)?;
-        Ok(Lowered { spirv })
+        Ok(Lowered { spirv, manifest: self.manifest })
     }
 
     /// Lower SSA to GLSL.
@@ -904,6 +912,7 @@ impl SsaSoacLowered {
 /// Final SPIR-V output
 pub struct Lowered {
     pub spirv: Vec<u32>,
+    pub manifest: runtime_manifest::RuntimeManifest,
 }
 
 // =============================================================================

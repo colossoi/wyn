@@ -1428,6 +1428,7 @@ dependencies = [
  "clap",
  "env_logger",
  "log",
+ "serde_json",
  "thiserror",
  "wyn-core",
 ]

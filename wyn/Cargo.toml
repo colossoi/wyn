@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 wyn-core = { path = "../wyn-core" }
 clap.workspace = true
+serde_json = "1.0"
 thiserror.workspace = true
 log.workspace = true
 env_logger.workspace = true

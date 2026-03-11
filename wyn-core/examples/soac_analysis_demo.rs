@@ -62,14 +62,10 @@ entry compute_main(
         println!("{}", "-".repeat(40));
         println!("  Local size: {:?}", entry_analysis.local_size);
 
-        if let Some(ref par_map) = entry_analysis.parallelizable_map {
-            println!("  Parallelizable map found!");
-            println!("    Map function: {}", par_map.map_function);
-            println!("    Source: {:?}", par_map.source);
-            println!("    Captures: {:?}", par_map.captures);
-            println!("    Output elem type: {:?}", par_map.output_elem_type);
+        if let Some(ref par_soac) = entry_analysis.parallelizable_soac {
+            println!("  Parallelizable SOAC found: {:?}", par_soac);
         } else {
-            println!("  No parallelizable map found");
+            println!("  No parallelizable SOAC found");
         }
         println!();
     }
@@ -77,7 +73,7 @@ entry compute_main(
     // Summary
     println!("=== Summary ===");
     let parallelizable_count =
-        analysis.by_entry.values().filter(|a| a.parallelizable_map.is_some()).count();
+        analysis.by_entry.values().filter(|a| a.parallelizable_soac.is_some()).count();
     let non_parallelizable_count = analysis.by_entry.len() - parallelizable_count;
     println!("Parallelizable compute shaders: {}", parallelizable_count);
     println!("Non-parallelizable compute shaders: {}", non_parallelizable_count);

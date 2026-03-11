@@ -14,7 +14,8 @@ mod strategies;
 use crate::ast::{NodeId, Span, TypeName};
 use crate::mir::ssa::{EffectToken, FuncBody, Terminator, ValueId};
 use crate::mir::ssa_builder::FuncBuilder;
-use crate::mir::ssa_soac_analysis::{ArrayProvenance, ParallelizableMap, analyze_program};
+use crate::mir::ssa_soac_analysis::{ArrayProvenance, ParallelizableSoac, analyze_program};
+use crate::runtime_manifest::{BufferDecl, BufferUsage, Dispatch, DispatchSize, RuntimeManifest};
 use crate::tlc::to_ssa::{EntryOutput, ExecutionModel, SsaEntryPoint, SsaProgram};
 use polytype::Type;
 
@@ -106,56 +107,171 @@ impl<'a> ParallelizeCtx<'a> {
     pub fn finish(self) -> Option<FuncBody> {
         self.builder.finish().ok()
     }
+
+    /// Get thread ID and calculate chunk bounds for the current thread.
+    /// Returns (thread_id, chunk_start, chunk_end).
+    pub fn compute_thread_chunk(
+        &mut self,
+        input_len: ValueId,
+        total_threads: u32,
+    ) -> Option<(ValueId, ValueId, ValueId)> {
+        let thread_id = self.push_intrinsic("_w_intrinsic_thread_id", vec![], self.u32_ty.clone())?;
+        let total_threads_val = self.push_int(&total_threads.to_string())?;
+        let threads_minus_1 = self.push_int(&(total_threads - 1).to_string())?;
+
+        // chunk_size = ceil(len / total_threads) = (len + total_threads - 1) / total_threads
+        let len_plus = self.push_binop("+", input_len, threads_minus_1, self.u32_ty.clone())?;
+        let chunk_size = self.push_binop("/", len_plus, total_threads_val, self.u32_ty.clone())?;
+
+        // chunk_start = thread_id * chunk_size
+        let chunk_start = self.push_binop("*", thread_id, chunk_size, self.u32_ty.clone())?;
+
+        // chunk_end = min(chunk_start + chunk_size, len)
+        let start_plus_size = self.push_binop("+", chunk_start, chunk_size, self.u32_ty.clone())?;
+        let chunk_end =
+            self.push_call("u32.min", vec![start_plus_size, input_len], self.u32_ty.clone())?;
+
+        Some((thread_id, chunk_start, chunk_end))
+    }
+
+    /// Remap captured variables from the entry body into the current builder.
+    /// Returns the remapped values in the same order as `captures`.
+    pub fn remap_captures(&mut self, captures: &[ValueId]) -> Option<Vec<ValueId>> {
+        let entry = self.entry;
+        let mut remap_memo: HashMap<ValueId, ValueId> = entry
+            .body
+            .params
+            .iter()
+            .enumerate()
+            .map(|(i, (src, _, _))| (*src, self.builder.get_param(i)))
+            .collect();
+
+        let span = self.span;
+        let node_id = self.node_id;
+        let mut result = Vec::new();
+        for &capture in captures {
+            let new_val = remap_value(
+                &entry.body,
+                capture,
+                &mut self.builder,
+                &mut remap_memo,
+                span,
+                node_id,
+            )?;
+            result.push(new_val);
+        }
+        Some(result)
+    }
+}
+
+/// Result of the parallelization pass.
+pub struct ParallelizationResult {
+    /// The (possibly modified) SSA program, which may contain additional entry points.
+    pub program: SsaProgram,
+    /// Runtime manifest describing the dispatch plan for the host.
+    pub manifest: RuntimeManifest,
 }
 
 /// Parallelize SOACs in an SSA program.
-pub fn parallelize_soacs(mut program: SsaProgram) -> SsaProgram {
+/// Returns the modified program and a runtime manifest for the host.
+pub fn parallelize_soacs(mut program: SsaProgram) -> ParallelizationResult {
     let analysis = analyze_program(&program);
+    let mut manifest = RuntimeManifest::default();
 
     for entry in &mut program.entry_points {
         if let ExecutionModel::Compute { local_size } = entry.execution_model {
             if let Some(entry_analysis) = analysis.by_entry.get(&entry.name) {
-                let storage_outputs: Vec<_> =
-                    entry.outputs.iter().filter(|o| o.storage_binding.is_some()).cloned().collect();
+                if let Some(ref par_soac) = entry_analysis.parallelizable_soac {
+                    match par_soac {
+                        ParallelizableSoac::Map { source, map_function, captures, output_elem_type } => {
+                            let storage_outputs: Vec<_> =
+                                entry.outputs.iter().filter(|o| o.storage_binding.is_some()).cloned().collect();
 
-                if let Some(ref par_map) = entry_analysis.parallelizable_map {
-                    if let Some((new_body, output_binding)) = parallelize_entry(entry, par_map, local_size)
-                    {
-                        entry.body = new_body;
-                        if !storage_outputs.is_empty() {
-                            entry.outputs = storage_outputs.clone();
-                        } else {
-                            // Synthesize an EntryOutput with the correct storage_binding
-                            let output_elem_ty = &par_map.output_elem_type;
-                            let array_ty = Type::Constructed(
-                                TypeName::Array,
-                                vec![
-                                    output_elem_ty.clone(),
-                                    Type::Constructed(TypeName::SizePlaceholder, vec![]),
-                                    Type::Constructed(TypeName::ArrayVariantView, vec![]),
-                                ],
-                            );
-                            entry.outputs = vec![EntryOutput {
-                                ty: array_ty,
-                                decoration: None,
-                                storage_binding: Some(output_binding),
-                            }];
+                            if let Some((new_body, output_binding)) =
+                                parallelize_map_entry(entry, source, map_function, captures, output_elem_type, local_size)
+                            {
+                                entry.body = new_body;
+                                if !storage_outputs.is_empty() {
+                                    entry.outputs = storage_outputs.clone();
+                                } else {
+                                    let array_ty = Type::Constructed(
+                                        TypeName::Array,
+                                        vec![
+                                            output_elem_type.clone(),
+                                            Type::Constructed(TypeName::SizePlaceholder, vec![]),
+                                            Type::Constructed(TypeName::ArrayVariantView, vec![]),
+                                        ],
+                                    );
+                                    entry.outputs = vec![EntryOutput {
+                                        ty: array_ty,
+                                        decoration: None,
+                                        storage_binding: Some(output_binding),
+                                    }];
+                                }
+
+                                // Build manifest for this single-dispatch map
+                                build_map_manifest(&mut manifest, entry, output_binding, local_size);
+                            }
+                        }
+                        ParallelizableSoac::Reduce { .. } => {
+                            // TODO: Phase 1 — multi-entry reduce parallelization
+                        }
+                        ParallelizableSoac::Scan { .. } => {
+                            // TODO: Phase 3 — multi-entry scan parallelization
                         }
                     }
                 }
-                // Note: single-thread fallback removed - all compute shaders should be parallelizable
             }
         }
     }
 
-    program
+    ParallelizationResult { program, manifest }
 }
 
-/// Create a parallelized version of a compute entry point.
-/// Returns the new body and the (set, binding) used for the output storage buffer.
-fn parallelize_entry(
+/// Build a runtime manifest entry for a single-dispatch map.
+fn build_map_manifest(
+    manifest: &mut RuntimeManifest,
     entry: &SsaEntryPoint,
-    par_map: &ParallelizableMap,
+    output_binding: (u32, u32),
+    local_size: (u32, u32, u32),
+) {
+    // Add input buffers
+    for input in &entry.inputs {
+        if let Some((set, binding)) = input.storage_binding {
+            manifest.buffers.push(BufferDecl {
+                set,
+                binding,
+                usage: BufferUsage::Input,
+                name: input.name.clone(),
+            });
+        }
+    }
+
+    // Add output buffer
+    manifest.buffers.push(BufferDecl {
+        set: output_binding.0,
+        binding: output_binding.1,
+        usage: BufferUsage::Output,
+        name: format!("{}_output", entry.name),
+    });
+
+    // Single dispatch
+    let workgroup_size = local_size.0;
+    manifest.dispatches.push(Dispatch {
+        entry_point: entry.name.clone(),
+        workgroup_size: local_size,
+        dispatch_size: DispatchSize::DerivedFromInputLength { workgroup_size },
+    });
+}
+
+/// Create a parallelized map version of a compute entry point.
+/// Returns the new body and the (set, binding) used for the output storage buffer.
+fn parallelize_map_entry(
+    entry: &SsaEntryPoint,
+    source: &ArrayProvenance,
+    map_function: &str,
+    captures: &[ValueId],
+    output_elem_type: &Type<TypeName>,
     local_size: (u32, u32, u32),
 ) -> Option<(FuncBody, (u32, u32))> {
     let total_threads = local_size.0 * local_size.1 * local_size.2;
@@ -178,7 +294,7 @@ fn parallelize_entry(
     let mut ctx = ParallelizeCtx::new(builder, entry);
 
     // Create strategies and build loop body based on provenance
-    match &par_map.source {
+    match source {
         ArrayProvenance::EntryStorage {
             param_index,
             storage_binding,
@@ -186,12 +302,12 @@ fn parallelize_entry(
         } => {
             let mut input = StorageInput::new(*param_index, *storage_binding);
             let output = StorageOutput::new(output_binding.0, output_binding.1);
-            build_parallel_body(&mut ctx, &mut input, &output, par_map, total_threads)?;
+            build_map_body(&mut ctx, &mut input, &output, map_function, captures, output_elem_type, total_threads)?;
         }
         ArrayProvenance::Range { value } => {
             let mut input = RangeInput::new(*value, &entry.body)?;
             let output = StorageOutput::new(output_binding.0, output_binding.1);
-            build_parallel_body(&mut ctx, &mut input, &output, par_map, total_threads)?;
+            build_map_body(&mut ctx, &mut input, &output, map_function, captures, output_elem_type, total_threads)?;
         }
         ArrayProvenance::Unknown => return None,
     };
@@ -200,35 +316,22 @@ fn parallelize_entry(
     Some((body, output_binding))
 }
 
-/// Build the parallel loop body: setup strategies, chunk work, loop, call map function, store.
-fn build_parallel_body<I: InputStrategy, O: OutputStrategy>(
+/// Build the parallel map loop body: setup strategies, chunk work, loop, call map function, store.
+fn build_map_body<I: InputStrategy, O: OutputStrategy>(
     ctx: &mut ParallelizeCtx,
     input_strategy: &mut I,
     output_strategy: &O,
-    par_map: &ParallelizableMap,
+    map_function: &str,
+    captures: &[ValueId],
+    output_elem_type: &Type<TypeName>,
     total_threads: u32,
 ) -> Option<()> {
     // 1. Setup input and output strategies (resources created once)
     let (input_handle, input_len, _input_elem_ty) = input_strategy.setup(ctx)?;
-    let output_elem_ty = &par_map.output_elem_type;
-    let output_handle = output_strategy.setup(ctx, output_elem_ty)?;
+    let output_handle = output_strategy.setup(ctx, output_elem_type)?;
 
     // 2. Get thread ID and calculate chunk bounds
-    let thread_id = ctx.push_intrinsic("_w_intrinsic_thread_id", vec![], ctx.u32_ty.clone())?;
-
-    let total_threads_val = ctx.push_int(&total_threads.to_string())?;
-    let threads_minus_1 = ctx.push_int(&(total_threads - 1).to_string())?;
-
-    // chunk_size = ceil(len / total_threads) = (len + total_threads - 1) / total_threads
-    let len_plus = ctx.push_binop("+", input_len, threads_minus_1, ctx.u32_ty.clone())?;
-    let chunk_size = ctx.push_binop("/", len_plus, total_threads_val, ctx.u32_ty.clone())?;
-
-    // chunk_start = thread_id * chunk_size
-    let chunk_start = ctx.push_binop("*", thread_id, chunk_size, ctx.u32_ty.clone())?;
-
-    // chunk_end = min(chunk_start + chunk_size, len)
-    let start_plus_size = ctx.push_binop("+", chunk_start, chunk_size, ctx.u32_ty.clone())?;
-    let chunk_end = ctx.push_call("u32.min", vec![start_plus_size, input_len], ctx.u32_ty.clone())?;
+    let (_thread_id, chunk_start, chunk_end) = ctx.compute_thread_chunk(input_len, total_threads)?;
 
     // 3. Create loop structure
     let u32_ty = ctx.u32_ty.clone();
@@ -268,45 +371,16 @@ fn build_parallel_body<I: InputStrategy, O: OutputStrategy>(
 
     let input_elem = input_strategy.get_element(ctx, input_handle, loop_index)?;
 
-    // Build the full argument list for the map function.
-    // After defunctionalization, the map function takes captures first, then the element.
-    let entry = ctx.entry;
-    let result_ty = &par_map.output_elem_type;
-    let call_args = {
-        // Shared memo pre-seeded with entry param → builder param mappings.
-        let mut remap_memo: HashMap<ValueId, ValueId> = entry
-            .body
-            .params
-            .iter()
-            .enumerate()
-            .map(|(i, (src, _, _))| (*src, ctx.builder.get_param(i)))
-            .collect();
-
-        let span = ctx.span;
-        let node_id = ctx.node_id;
-        let mut args = Vec::new();
-        // Element comes first (original lambda parameter)
-        args.push(input_elem);
-        // Then captures (appended by defunctionalization)
-        for &capture in &par_map.captures {
-            let new_val = remap_value(
-                &entry.body,
-                capture,
-                &mut ctx.builder,
-                &mut remap_memo,
-                span,
-                node_id,
-            )?;
-            args.push(new_val);
-        }
-        args
-    };
+    // Build call args: element first, then remapped captures
+    let mut call_args = vec![input_elem];
+    let remapped_captures = ctx.remap_captures(captures)?;
+    call_args.extend(remapped_captures);
 
     // Apply map function with the correct return type
-    let result_elem = ctx.push_call(&par_map.map_function, call_args, result_ty.clone())?;
+    let result_elem = ctx.push_call(map_function, call_args, output_elem_type.clone())?;
 
-    // Store result using the map function's return type (not the input elem type)
-    output_strategy.store_result(ctx, output_handle, loop_index, result_elem, result_ty)?;
+    // Store result
+    output_strategy.store_result(ctx, output_handle, loop_index, result_elem, output_elem_type)?;
 
     // Increment index and branch back to header
     let one = ctx.push_int("1")?;
