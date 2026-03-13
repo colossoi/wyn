@@ -101,11 +101,11 @@ fn lower_func_body(old_body: &FuncBody) -> FuncBody {
             builder.switch_to_block_unchecked(new_block_id);
         }
 
-        // Copy control header
-        if let Some(ref ctrl) = block.control {
-            let new_ctrl = remap_control_header(ctrl, &block_map);
-            builder.set_control_header(new_block_id, new_ctrl);
-        }
+        // Defer control header: if the block contains a SOAC, the expansion may
+        // create new blocks and leave the builder on the loop's exit block.  The
+        // control header must be set on the block that actually carries the
+        // CondBranch terminator, not the originally-mapped block.
+        let deferred_control = block.control.as_ref().map(|ctrl| remap_control_header(ctrl, &block_map));
 
         // Process instructions
         for &inst_id in &block.insts {
@@ -139,6 +139,15 @@ fn lower_func_body(old_body: &FuncBody) -> FuncBody {
                             .expect("BUG: failed to push remapped void instruction");
                     }
                 }
+            }
+        }
+
+        // Set control header on the block that will carry the terminator.
+        // This may differ from new_block_id if a SOAC expansion changed the
+        // current block.
+        if let Some(ctrl) = deferred_control {
+            if let Some(current) = builder.current_block() {
+                builder.set_control_header(current, ctrl);
             }
         }
 
