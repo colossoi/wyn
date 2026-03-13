@@ -941,47 +941,67 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
         Ok(self.constructor.const_i32(0))
     }
 
-    /// Compute reverse post-order of the CFG for dominance-friendly block emission.
+    /// Compute a structured block ordering for SPIR-V emission.
+    ///
+    /// SPIR-V requires that all blocks in a loop/selection construct appear
+    /// between the header and the merge block. A plain RPO can violate this
+    /// (e.g. placing a loop's merge before its continue block). This traversal
+    /// defers merge blocks until after all construct-interior blocks are visited.
     fn compute_rpo(&self) -> Vec<usize> {
-        let num_blocks = self.body.blocks.len();
-        let mut visited = vec![false; num_blocks];
-        let mut post_order = Vec::with_capacity(num_blocks);
+        let mut visited = vec![false; self.body.blocks.len()];
+        let mut order = Vec::with_capacity(self.body.blocks.len());
 
-        fn dfs(
+        fn visit(
             blocks: &[crate::mir::ssa::Block],
             idx: usize,
             visited: &mut [bool],
-            post_order: &mut Vec<usize>,
+            order: &mut Vec<usize>,
         ) {
             if idx >= blocks.len() || visited[idx] || blocks[idx].is_dead() {
                 return;
             }
             visited[idx] = true;
+            order.push(idx);
 
-            // Visit successors
+            // Determine the merge block (if any) for this header so we can
+            // defer it until after all construct-interior blocks are visited.
+            let merge_idx = blocks[idx].control.as_ref().map(|ctrl| match ctrl {
+                ControlHeader::Loop { merge, .. } => merge.index(),
+                ControlHeader::Selection { merge } => merge.index(),
+            });
+
+            // Visit successors, skipping the merge block.
             if let Some(ref term) = blocks[idx].terminator {
                 match term {
                     Terminator::Branch { target, .. } => {
-                        dfs(blocks, target.index(), visited, post_order);
+                        if Some(target.index()) != merge_idx {
+                            visit(blocks, target.index(), visited, order);
+                        }
                     }
                     Terminator::CondBranch {
                         then_target,
                         else_target,
                         ..
                     } => {
-                        dfs(blocks, then_target.index(), visited, post_order);
-                        dfs(blocks, else_target.index(), visited, post_order);
+                        if Some(then_target.index()) != merge_idx {
+                            visit(blocks, then_target.index(), visited, order);
+                        }
+                        if Some(else_target.index()) != merge_idx {
+                            visit(blocks, else_target.index(), visited, order);
+                        }
                     }
                     Terminator::Return(_) | Terminator::ReturnUnit | Terminator::Unreachable => {}
                 }
             }
 
-            post_order.push(idx);
+            // Now visit the merge block (after all interior blocks).
+            if let Some(m) = merge_idx {
+                visit(blocks, m, visited, order);
+            }
         }
 
-        dfs(&self.body.blocks, 0, &mut visited, &mut post_order);
-        post_order.reverse();
-        post_order
+        visit(&self.body.blocks, 0, &mut visited, &mut order);
+        order
     }
 
     fn lower_inst(&mut self, inst: &Inst) -> Result<()> {
@@ -2227,8 +2247,10 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                         bail_spirv!("Placeholder intrinsic should not reach lowering")
                     }
                     Intrinsic::Uninit => {
-                        // Uninitialized value - return undef
-                        Ok(self.constructor.builder.undef(result_ty, None))
+                        // Zero-initialized value (OpConstantNull).
+                        // Using OpUndef would be more accurate but naga converts it to
+                        // ZeroValue and then has scoping issues with phi lowering.
+                        Ok(self.constructor.builder.constant_null(result_ty))
                     }
                     Intrinsic::ArrayWith => {
                         // _w_array_with(array, index, value) - functional array update
