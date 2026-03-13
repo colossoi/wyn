@@ -133,6 +133,15 @@ enum Command {
     /// Show device and driver information
     #[command(name = "info")]
     Info,
+    /// Validate a SPIR-V module without rendering (headless naga validation)
+    #[command(name = "validate")]
+    Validate {
+        /// Path to the SPIR-V module
+        path: PathBuf,
+        /// Print verbose output (show adapter info, entry points)
+        #[arg(short, long)]
+        verbose: bool,
+    },
     /// Render a built-in test pattern (no shader file needed, always validates)
     #[command(name = "testpattern")]
     TestPattern {
@@ -642,8 +651,14 @@ mod pipeline_desc {
     #[derive(Debug, Deserialize)]
     #[serde(tag = "kind", rename_all = "snake_case")]
     pub enum DispatchSize {
-        Fixed { x: u32, y: u32, z: u32 },
-        DerivedFromInputLength { workgroup_size: u32 },
+        Fixed {
+            x: u32,
+            y: u32,
+            z: u32,
+        },
+        DerivedFromInputLength {
+            workgroup_size: u32,
+        },
     }
 
     #[derive(Debug, Deserialize)]
@@ -718,15 +733,33 @@ mod pipeline_desc {
         }
 
         pub fn is_input(&self) -> bool {
-            matches!(self, Binding::StorageBuffer { usage: BufferUsage::Input, .. })
+            matches!(
+                self,
+                Binding::StorageBuffer {
+                    usage: BufferUsage::Input,
+                    ..
+                }
+            )
         }
 
         pub fn is_output(&self) -> bool {
-            matches!(self, Binding::StorageBuffer { usage: BufferUsage::Output, .. })
+            matches!(
+                self,
+                Binding::StorageBuffer {
+                    usage: BufferUsage::Output,
+                    ..
+                }
+            )
         }
 
         pub fn is_read_only(&self) -> bool {
-            matches!(self, Binding::StorageBuffer { access: Access::ReadOnly, .. })
+            matches!(
+                self,
+                Binding::StorageBuffer {
+                    access: Access::ReadOnly,
+                    ..
+                }
+            )
         }
     }
 }
@@ -735,26 +768,23 @@ mod pipeline_desc {
 
 /// Load a JSON array of f32 values from a file.
 fn load_f32_json(path: &Path) -> Result<Vec<f32>> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read: {}", path.display()))?;
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read: {}", path.display()))?;
     let json: serde_json::Value = serde_json::from_str(&content)
         .with_context(|| format!("Failed to parse JSON: {}", path.display()))?;
-    let array = json.as_array()
-        .ok_or_else(|| anyhow!("JSON input must be an array"))?;
-    array.iter().enumerate().map(|(i, v)| {
-        v.as_f64()
-            .map(|f| f as f32)
-            .ok_or_else(|| anyhow!("Element {} is not a number", i))
-    }).collect()
+    let array = json.as_array().ok_or_else(|| anyhow!("JSON input must be an array"))?;
+    array
+        .iter()
+        .enumerate()
+        .map(|(i, v)| v.as_f64().map(|f| f as f32).ok_or_else(|| anyhow!("Element {} is not a number", i)))
+        .collect()
 }
 
 /// Write f32 data as a JSON array to a file.
 fn write_f32_json(path: &Path, data: &[f32]) -> Result<()> {
-    let json = serde_json::to_string_pretty(
-        &data.iter().map(|&f| serde_json::json!(f)).collect::<Vec<_>>()
-    )?;
-    fs::write(path, json)
-        .with_context(|| format!("Failed to write: {}", path.display()))
+    let json =
+        serde_json::to_string_pretty(&data.iter().map(|&f| serde_json::json!(f)).collect::<Vec<_>>())?;
+    fs::write(path, json).with_context(|| format!("Failed to write: {}", path.display()))
 }
 
 /// Print f32 data to stdout.
@@ -784,8 +814,8 @@ async fn run_pipeline(
 ) -> Result<()> {
     let desc_json = fs::read_to_string(&pipeline_path)
         .with_context(|| format!("Failed to read pipeline descriptor: {}", pipeline_path.display()))?;
-    let desc: pipeline_desc::PipelineDescriptor = serde_json::from_str(&desc_json)
-        .with_context(|| "Failed to parse pipeline descriptor JSON")?;
+    let desc: pipeline_desc::PipelineDescriptor =
+        serde_json::from_str(&desc_json).with_context(|| "Failed to parse pipeline descriptor JSON")?;
 
     if desc.pipelines.is_empty() {
         return Err(anyhow!("Pipeline descriptor has no pipelines"));
@@ -805,7 +835,10 @@ async fn run_pipeline(
                     .with_context(|| format!("Pipeline {} (multi_compute) failed", pi))?;
             }
             pipeline_desc::Pipeline::Graphics(_) => {
-                eprintln!("Pipeline {} is a graphics pipeline (not yet supported by `run`)", pi);
+                eprintln!(
+                    "Pipeline {} is a graphics pipeline (not yet supported by `run`)",
+                    pi
+                );
             }
         }
     }
@@ -825,7 +858,10 @@ fn create_binding_buffers(
     let mut buffers = HashMap::new();
 
     for b in bindings {
-        if let pipeline_desc::Binding::StorageBuffer { binding, name, usage, .. } = b {
+        if let pipeline_desc::Binding::StorageBuffer {
+            binding, name, usage, ..
+        } = b
+        {
             let (data_bytes, element_count) = if let Some(path) = inputs.get(name.as_str()) {
                 let data = load_f32_json(path)?;
                 let count = data.len();
@@ -836,7 +872,9 @@ fn create_binding_buffers(
                 (bytes, count)
             } else if *usage == pipeline_desc::BufferUsage::Input {
                 return Err(anyhow!(
-                    "No input file provided for '{}'. Use --input {}:<file.json>", name, name
+                    "No input file provided for '{}'. Use --input {}:<file.json>",
+                    name,
+                    name
                 ));
             } else {
                 // Intermediate/output buffers: allocate a reasonable size.
@@ -889,8 +927,8 @@ fn build_bind_group(
                 count: None,
             });
 
-            let (buf, _) = buffers.get(binding)
-                .ok_or_else(|| anyhow!("No buffer for binding {}", binding))?;
+            let (buf, _) =
+                buffers.get(binding).ok_or_else(|| anyhow!("No buffer for binding {}", binding))?;
             group_entries.push(BindGroupEntry {
                 binding: *binding,
                 resource: BindingResource::Buffer(wgpu::BufferBinding {
@@ -935,9 +973,7 @@ fn resolve_dispatch_size(
             let elements = input_binding
                 .map(|b| {
                     let binding_num = b.wgpu_binding();
-                    buffers.get(&binding_num)
-                        .map(|(_, size)| (*size / 4) as u32)
-                        .unwrap_or(0)
+                    buffers.get(&binding_num).map(|(_, size)| (*size / 4) as u32).unwrap_or(0)
                 })
                 .unwrap_or(0);
 
@@ -1057,8 +1093,10 @@ fn run_multi_compute(
     if verbose {
         println!("Running multi-compute pipeline ({} stages)", mp.stages.len());
         for (i, stage) in mp.stages.iter().enumerate() {
-            println!("  Stage {}: {} (reads {:?}, writes {:?})",
-                i, stage.entry_point, stage.reads, stage.writes);
+            println!(
+                "  Stage {}: {} (reads {:?}, writes {:?})",
+                i, stage.entry_point, stage.reads, stage.writes
+            );
         }
     }
 
@@ -1082,12 +1120,13 @@ fn run_multi_compute(
             cache: None,
         });
 
-        let dispatch = resolve_dispatch_size(
-            &stage.dispatch_size, &buffers, &mp.bindings, Some(&stage.reads),
-        );
+        let dispatch =
+            resolve_dispatch_size(&stage.dispatch_size, &buffers, &mp.bindings, Some(&stage.reads));
         if verbose {
-            println!("Stage {} ({}): dispatch {} x {} x {}",
-                si, stage.entry_point, dispatch.0, dispatch.1, dispatch.2);
+            println!(
+                "Stage {} ({}): dispatch {} x {} x {}",
+                si, stage.entry_point, dispatch.0, dispatch.1, dispatch.2
+            );
         }
 
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
@@ -1121,11 +1160,14 @@ fn output_results(
     outputs: &HashMap<String, PathBuf>,
 ) -> Result<()> {
     for b in bindings {
-        if let pipeline_desc::Binding::StorageBuffer { binding, name, usage, .. } = b {
+        if let pipeline_desc::Binding::StorageBuffer {
+            binding, name, usage, ..
+        } = b
+        {
             // Only read back output and intermediate buffers (skip inputs unless
             // explicitly requested via --output)
-            let should_output = *usage != pipeline_desc::BufferUsage::Input
-                || outputs.contains_key(name.as_str());
+            let should_output =
+                *usage != pipeline_desc::BufferUsage::Input || outputs.contains_key(name.as_str());
 
             if !should_output {
                 continue;
@@ -1515,153 +1557,163 @@ impl State {
         //   binding 1: iTime (f32)
         //   binding 2: difficulty (i32)
         //   binding 5: iMouse (vec4)
-        let (resolution_buffer, time_buffer, mouse_buffer, difficulty_buffer, uniform_bind_group, uniform_bind_group_layout) =
-            if let PipelineSpec::VertexFragment { shadertoy: true, difficulty, .. } = spec {
-                // Binding 0: iResolution ([2]f32)
-                let resolution_buffer = device.create_buffer(&BufferDescriptor {
-                    label: Some("resolution_buffer"),
-                    size: std::mem::size_of::<ResolutionUniform>() as u64,
-                    usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                let initial_resolution = ResolutionUniform {
-                    resolution: [800.0, 600.0],
-                    _pad: [0.0, 0.0],
-                };
-                queue.write_buffer(&resolution_buffer, 0, bytemuck::cast_slice(&[initial_resolution]));
-
-                // Binding 1: iTime (f32)
-                let time_buffer = device.create_buffer(&BufferDescriptor {
-                    label: Some("time_buffer"),
-                    size: std::mem::size_of::<TimeUniform>() as u64,
-                    usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                let initial_time = TimeUniform { time: 0.0 };
-                queue.write_buffer(&time_buffer, 0, bytemuck::cast_slice(&[initial_time]));
-
-                // Binding 2: difficulty (i32)
-                let difficulty_buffer = device.create_buffer(&BufferDescriptor {
-                    label: Some("difficulty_buffer"),
-                    size: std::mem::size_of::<DifficultyUniform>() as u64,
-                    usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                let initial_difficulty = DifficultyUniform {
-                    difficulty: *difficulty,
-                    _pad: [0, 0, 0],
-                };
-                queue.write_buffer(&difficulty_buffer, 0, bytemuck::cast_slice(&[initial_difficulty]));
-
-                // Binding 5: iMouse (vec4f32)
-                let mouse_buffer = device.create_buffer(&BufferDescriptor {
-                    label: Some("mouse_buffer"),
-                    size: std::mem::size_of::<MouseUniform>() as u64,
-                    usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                let initial_mouse = MouseUniform {
-                    mouse: [0.0, 0.0, 0.0, 0.0],
-                };
-                queue.write_buffer(&mouse_buffer, 0, bytemuck::cast_slice(&[initial_mouse]));
-
-                let uniform_bind_group_layout =
-                    device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-                        label: Some("uniform_bind_group_layout"),
-                        entries: &[
-                            BindGroupLayoutEntry {
-                                binding: 0,
-                                visibility: ShaderStages::VERTEX_FRAGMENT,
-                                ty: BindingType::Buffer {
-                                    ty: BufferBindingType::Uniform,
-                                    has_dynamic_offset: false,
-                                    min_binding_size: None,
-                                },
-                                count: None,
-                            },
-                            BindGroupLayoutEntry {
-                                binding: 1,
-                                visibility: ShaderStages::VERTEX_FRAGMENT,
-                                ty: BindingType::Buffer {
-                                    ty: BufferBindingType::Uniform,
-                                    has_dynamic_offset: false,
-                                    min_binding_size: None,
-                                },
-                                count: None,
-                            },
-                            BindGroupLayoutEntry {
-                                binding: 2,
-                                visibility: ShaderStages::VERTEX_FRAGMENT,
-                                ty: BindingType::Buffer {
-                                    ty: BufferBindingType::Uniform,
-                                    has_dynamic_offset: false,
-                                    min_binding_size: None,
-                                },
-                                count: None,
-                            },
-                            BindGroupLayoutEntry {
-                                binding: 5,
-                                visibility: ShaderStages::VERTEX_FRAGMENT,
-                                ty: BindingType::Buffer {
-                                    ty: BufferBindingType::Uniform,
-                                    has_dynamic_offset: false,
-                                    min_binding_size: None,
-                                },
-                                count: None,
-                            },
-                        ],
-                    });
-
-                let uniform_bind_group = device.create_bind_group(&BindGroupDescriptor {
-                    label: Some("uniform_bind_group"),
-                    layout: &uniform_bind_group_layout,
-                    entries: &[
-                        BindGroupEntry {
-                            binding: 0,
-                            resource: BindingResource::Buffer(wgpu::BufferBinding {
-                                buffer: &resolution_buffer,
-                                offset: 0,
-                                size: None,
-                            }),
-                        },
-                        BindGroupEntry {
-                            binding: 1,
-                            resource: BindingResource::Buffer(wgpu::BufferBinding {
-                                buffer: &time_buffer,
-                                offset: 0,
-                                size: None,
-                            }),
-                        },
-                        BindGroupEntry {
-                            binding: 2,
-                            resource: BindingResource::Buffer(wgpu::BufferBinding {
-                                buffer: &difficulty_buffer,
-                                offset: 0,
-                                size: None,
-                            }),
-                        },
-                        BindGroupEntry {
-                            binding: 5,
-                            resource: BindingResource::Buffer(wgpu::BufferBinding {
-                                buffer: &mouse_buffer,
-                                offset: 0,
-                                size: None,
-                            }),
-                        },
-                    ],
-                });
-
-                (
-                    Some(resolution_buffer),
-                    Some(time_buffer),
-                    Some(mouse_buffer),
-                    Some(difficulty_buffer),
-                    Some(uniform_bind_group),
-                    Some(uniform_bind_group_layout),
-                )
-            } else {
-                (None, None, None, None, None, None)
+        let (
+            resolution_buffer,
+            time_buffer,
+            mouse_buffer,
+            difficulty_buffer,
+            uniform_bind_group,
+            uniform_bind_group_layout,
+        ) = if let PipelineSpec::VertexFragment {
+            shadertoy: true,
+            difficulty,
+            ..
+        } = spec
+        {
+            // Binding 0: iResolution ([2]f32)
+            let resolution_buffer = device.create_buffer(&BufferDescriptor {
+                label: Some("resolution_buffer"),
+                size: std::mem::size_of::<ResolutionUniform>() as u64,
+                usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let initial_resolution = ResolutionUniform {
+                resolution: [800.0, 600.0],
+                _pad: [0.0, 0.0],
             };
+            queue.write_buffer(&resolution_buffer, 0, bytemuck::cast_slice(&[initial_resolution]));
+
+            // Binding 1: iTime (f32)
+            let time_buffer = device.create_buffer(&BufferDescriptor {
+                label: Some("time_buffer"),
+                size: std::mem::size_of::<TimeUniform>() as u64,
+                usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let initial_time = TimeUniform { time: 0.0 };
+            queue.write_buffer(&time_buffer, 0, bytemuck::cast_slice(&[initial_time]));
+
+            // Binding 2: difficulty (i32)
+            let difficulty_buffer = device.create_buffer(&BufferDescriptor {
+                label: Some("difficulty_buffer"),
+                size: std::mem::size_of::<DifficultyUniform>() as u64,
+                usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let initial_difficulty = DifficultyUniform {
+                difficulty: *difficulty,
+                _pad: [0, 0, 0],
+            };
+            queue.write_buffer(&difficulty_buffer, 0, bytemuck::cast_slice(&[initial_difficulty]));
+
+            // Binding 5: iMouse (vec4f32)
+            let mouse_buffer = device.create_buffer(&BufferDescriptor {
+                label: Some("mouse_buffer"),
+                size: std::mem::size_of::<MouseUniform>() as u64,
+                usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let initial_mouse = MouseUniform {
+                mouse: [0.0, 0.0, 0.0, 0.0],
+            };
+            queue.write_buffer(&mouse_buffer, 0, bytemuck::cast_slice(&[initial_mouse]));
+
+            let uniform_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                label: Some("uniform_bind_group_layout"),
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: ShaderStages::VERTEX_FRAGMENT,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: ShaderStages::VERTEX_FRAGMENT,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: ShaderStages::VERTEX_FRAGMENT,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: ShaderStages::VERTEX_FRAGMENT,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+            let uniform_bind_group = device.create_bind_group(&BindGroupDescriptor {
+                label: Some("uniform_bind_group"),
+                layout: &uniform_bind_group_layout,
+                entries: &[
+                    BindGroupEntry {
+                        binding: 0,
+                        resource: BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &resolution_buffer,
+                            offset: 0,
+                            size: None,
+                        }),
+                    },
+                    BindGroupEntry {
+                        binding: 1,
+                        resource: BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &time_buffer,
+                            offset: 0,
+                            size: None,
+                        }),
+                    },
+                    BindGroupEntry {
+                        binding: 2,
+                        resource: BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &difficulty_buffer,
+                            offset: 0,
+                            size: None,
+                        }),
+                    },
+                    BindGroupEntry {
+                        binding: 5,
+                        resource: BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &mouse_buffer,
+                            offset: 0,
+                            size: None,
+                        }),
+                    },
+                ],
+            });
+
+            (
+                Some(resolution_buffer),
+                Some(time_buffer),
+                Some(mouse_buffer),
+                Some(difficulty_buffer),
+                Some(uniform_bind_group),
+                Some(uniform_bind_group_layout),
+            )
+        } else {
+            (None, None, None, None, None, None)
+        };
 
         // Make these mutable so TestPattern can set them
         let mut resolution_buffer = resolution_buffer;
@@ -1879,7 +1931,12 @@ impl State {
                 // click_x/click_y are negative when not pressed
                 let mouse = MouseUniform {
                     mouse: if self.mouse_pressed {
-                        [self.mouse_pos[0], self.mouse_pos[1], self.mouse_click_pos[0], self.mouse_click_pos[1]]
+                        [
+                            self.mouse_pos[0],
+                            self.mouse_pos[1],
+                            self.mouse_click_pos[0],
+                            self.mouse_click_pos[1],
+                        ]
                     } else {
                         [self.mouse_pos[0], self.mouse_pos[1], -1.0, -1.0]
                     },
@@ -2126,7 +2183,11 @@ impl ApplicationHandler for App {
                     WindowEvent::CursorMoved { position, .. } => {
                         state.mouse_pos = [position.x as f32, position.y as f32];
                     }
-                    WindowEvent::MouseInput { state: button_state, button, .. } => {
+                    WindowEvent::MouseInput {
+                        state: button_state,
+                        button,
+                        ..
+                    } => {
                         use winit::event::{ElementState, MouseButton};
                         if button == MouseButton::Left {
                             match button_state {
@@ -2150,6 +2211,73 @@ impl ApplicationHandler for App {
         if let Some(state) = &mut self.state {
             state.window.request_redraw();
         }
+    }
+}
+
+async fn validate_spirv(path: &Path, verbose: bool) -> Result<()> {
+    let instance = Instance::new(&InstanceDescriptor {
+        flags: InstanceFlags::VALIDATION,
+        ..Default::default()
+    });
+
+    let adapter = instance
+        .request_adapter(&RequestAdapterOptions {
+            power_preference: PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        })
+        .await
+        .context("No suitable GPU adapter found")?;
+
+    if verbose {
+        let info = adapter.get_info();
+        eprintln!("[validate] Adapter: {} ({:?})", info.name, info.backend);
+    }
+
+    let (device, _queue) = adapter
+        .request_device(&DeviceDescriptor {
+            label: None,
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            memory_hints: wgpu::MemoryHints::Performance,
+            trace: Trace::Off,
+        })
+        .await
+        .context("Failed to create GPU device")?;
+
+    if verbose {
+        // Show detected entry points
+        let bytes = fs::read(path)?;
+        if bytes.len() >= 20 && bytes.len() % 4 == 0 {
+            let words: Vec<u32> =
+                bytes.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+            let mut loader = Loader::new();
+            if parse_words(&words, &mut loader).is_ok() {
+                let module = loader.module();
+                for ep in &module.entry_points {
+                    let name = ep.operands.iter().find_map(|op| {
+                        if let Operand::LiteralString(s) = op { Some(s.as_str()) } else { None }
+                    });
+                    let model = ep.operands.iter().find_map(|op| {
+                        if let Operand::ExecutionModel(m) = op { Some(format!("{:?}", m)) } else { None }
+                    });
+                    eprintln!(
+                        "[validate] Entry point: {} ({})",
+                        name.unwrap_or("?"),
+                        model.as_deref().unwrap_or("?")
+                    );
+                }
+            }
+        }
+    }
+
+    eprintln!("[validate] Loading {}", path.display());
+    match load_spirv_module(&device, path) {
+        Ok(_) => {
+            eprintln!("[validate] OK — shader module created successfully");
+            Ok(())
+        }
+        Err(e) => Err(e),
     }
 }
 
@@ -2269,19 +2397,33 @@ fn main() -> Result<()> {
                 verbose,
             ))?;
         }
-        Command::Run { path, pipeline, inputs, outputs, verbose } => {
+        Command::Run {
+            path,
+            pipeline,
+            inputs,
+            outputs,
+            verbose,
+        } => {
             // Parse name:file pairs
             let parse_pairs = |pairs: &[String]| -> Result<HashMap<String, PathBuf>> {
-                pairs.iter().map(|s| {
-                    let (name, file) = s.split_once(':')
-                        .ok_or_else(|| anyhow!("Invalid format '{}'. Expected name:file.json", s))?;
-                    Ok((name.to_string(), PathBuf::from(file)))
-                }).collect()
+                pairs
+                    .iter()
+                    .map(|s| {
+                        let (name, file) = s
+                            .split_once(':')
+                            .ok_or_else(|| anyhow!("Invalid format '{}'. Expected name:file.json", s))?;
+                        Ok((name.to_string(), PathBuf::from(file)))
+                    })
+                    .collect()
             };
             let input_map = parse_pairs(&inputs)?;
             let output_map = parse_pairs(&outputs)?;
 
             pollster::block_on(run_pipeline(path, pipeline, input_map, output_map, verbose))?;
+        }
+        Command::Validate { path, verbose } => {
+            pollster::block_on(validate_spirv(&path, verbose))?;
+            return Ok(());
         }
         Command::TestPattern { max_frames, verbose } => {
             eprintln!("[viz] Test pattern mode - built-in WGSL shader");
