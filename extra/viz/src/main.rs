@@ -54,6 +54,17 @@ impl From<PresentModeArg> for PresentMode {
     }
 }
 
+fn parse_size(s: &str) -> std::result::Result<(u32, u32), String> {
+    let sep = if s.contains('x') { 'x' } else { ',' };
+    let parts: Vec<&str> = s.splitn(2, sep).collect();
+    if parts.len() != 2 {
+        return Err(format!("expected WxH or W,H, got '{s}'"));
+    }
+    let w = parts[0].parse::<u32>().map_err(|e| format!("bad width: {e}"))?;
+    let h = parts[1].parse::<u32>().map_err(|e| format!("bad height: {e}"))?;
+    Ok((w, h))
+}
+
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Use a single SPIR-V module with separate vertex & fragment entry points
@@ -85,6 +96,9 @@ enum Command {
         /// Difficulty level for shaders that use it (binding 2)
         #[arg(long, default_value = "3")]
         difficulty: i32,
+        /// Window size as WxH (e.g. --size 256x256)
+        #[arg(long, value_parser = parse_size)]
+        size: Option<(u32, u32)>,
     },
     /// Run a compute shader (headless)
     #[command(name = "compute")]
@@ -213,6 +227,7 @@ enum PipelineSpec {
         validate: bool,
         present_mode: PresentMode,
         difficulty: i32,
+        size: Option<(u32, u32)>,
     },
     TestPattern {
         max_frames: Option<u32>,
@@ -2137,7 +2152,15 @@ struct App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let window = match event_loop.create_window(WindowAttributes::default().with_title("wgpu + SPIR-V"))
+        let window_size = match &self.spec {
+            PipelineSpec::VertexFragment { size, .. } => *size,
+            PipelineSpec::TestPattern { .. } => None,
+        };
+        let mut attrs = WindowAttributes::default().with_title("wgpu + SPIR-V");
+        if let Some((w, h)) = window_size {
+            attrs = attrs.with_inner_size(PhysicalSize::new(w, h));
+        }
+        let window = match event_loop.create_window(attrs)
         {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -2346,6 +2369,7 @@ fn main() -> Result<()> {
             no_validate,
             present_mode,
             difficulty,
+            size,
         } => {
             // Resolve entry points: use provided names or auto-detect
             let (vertex_name, fragment_name) = resolve_entry_points(&path, vertex, fragment)?;
@@ -2360,6 +2384,7 @@ fn main() -> Result<()> {
                 validate: !no_validate, // validation is ON by default
                 present_mode: present_mode.into(),
                 difficulty,
+                size,
             };
 
             let event_loop = EventLoop::new().context("failed to create event loop")?;
