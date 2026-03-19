@@ -1182,6 +1182,8 @@ impl<'a> Transformer<'a> {
                 "w" => Some(3),
                 _ => None,
             },
+            // Tuple positional access: .0, .1, etc.
+            Type::Constructed(TypeName::Tuple(_), _) => field.parse::<usize>().ok(),
             _ => None,
         }
     }

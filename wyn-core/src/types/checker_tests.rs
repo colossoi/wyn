@@ -1672,3 +1672,27 @@ def test: [2]i32 =
 "#,
     );
 }
+
+// --- Tuple positional access (.0, .1) ---
+
+#[test]
+fn test_tuple_field_access_first() {
+    typecheck_program("def x(t: (i32, f32)) i32 = t.0");
+}
+
+#[test]
+fn test_tuple_field_access_second() {
+    typecheck_program("def x(t: (i32, f32)) f32 = t.1");
+}
+
+#[test]
+fn test_tuple_field_access_out_of_bounds() {
+    let result = try_typecheck_program("def x(t: (i32, f32)) i32 = t.2");
+    assert!(result.is_err(), "Expected type error for out-of-bounds tuple index");
+}
+
+#[test]
+fn test_tuple_field_access_on_non_tuple() {
+    let result = try_typecheck_program("def x(n: i32) i32 = n.0");
+    assert!(result.is_err(), "Expected type error for .0 on non-tuple type");
+}

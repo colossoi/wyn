@@ -126,6 +126,35 @@ entry vertex_main() #[builtin(position)] vec4f32 =
 }
 
 // =============================================================================
+// Tuple Positional Access
+// =============================================================================
+
+#[test]
+fn test_tuple_positional_access() {
+    // Tests: .0, .1 on tuples, chained access, in expressions
+    let _ssa = compile_to_ssa(
+        r#"
+def first(t: (i32, f32)) i32 = t.0
+
+def second(t: (i32, f32)) f32 = t.1
+
+def sum_pair(t: (i32, i32)) i32 = t.0 + t.1
+
+def nested(t: ((i32, i32), f32)) i32 =
+    let inner = t.0 in inner.0 + inner.1
+
+#[vertex]
+entry vertex_main() #[builtin(position)] vec4f32 =
+    let t = (42, 3.14) in
+    let a = first(t) in
+    let b = sum_pair((1, 2)) in
+    let c = nested(((10, 20), 1.0)) in
+    @[f32.i32(a + b + c), 0.0, 0.0, 1.0]
+"#,
+    );
+}
+
+// =============================================================================
 // Loops
 // =============================================================================
 

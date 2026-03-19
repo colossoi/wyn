@@ -1654,10 +1654,10 @@ impl<'a> Parser<'a> {
                     break;
                 }
                 Some(Token::Dot) => {
-                    // Field access (e.g., v.x, v.y, v.z, v.w)
+                    // Field access (e.g., v.x, v.y, v.z, v.w, t.0, t.1)
                     let start_span = expr.h.span;
                     self.advance();
-                    let field_name = self.expect_identifier()?;
+                    let field_name = self.expect_field_name()?;
                     let end_span = self.previous_span();
                     let span = start_span.merge(&end_span);
                     expr =
@@ -1973,10 +1973,10 @@ impl<'a> Parser<'a> {
                         .mk_node(ExprKind::ArrayIndex(Box::new(expr), Box::new(index)), span);
                 }
                 Some(Token::Dot) => {
-                    // Field access (v.x)
+                    // Field access (v.x, t.0)
                     let start_span = expr.h.span;
                     self.advance();
-                    let field_name = self.expect_identifier()?;
+                    let field_name = self.expect_field_name()?;
                     let end_span = self.previous_span();
                     let span = start_span.merge(&end_span);
                     expr =
@@ -2473,6 +2473,16 @@ impl<'a> Parser<'a> {
         match self.advance() {
             Some(Token::Identifier(name)) => Ok(name.clone()),
             _ => Err(err_parse_at!(span, "Expected identifier")),
+        }
+    }
+
+    /// Like `expect_identifier`, but also accepts integer literals for tuple field access (`.0`, `.1`, etc.)
+    fn expect_field_name(&mut self) -> Result<String> {
+        let span = self.current_span();
+        match self.advance() {
+            Some(Token::Identifier(name)) => Ok(name.clone()),
+            Some(Token::IntLiteral(n)) => Ok(n.0.clone()),
+            _ => Err(err_parse_at!(span, "Expected field name or tuple index")),
         }
     }
 

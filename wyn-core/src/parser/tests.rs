@@ -3280,10 +3280,38 @@ fn test_parse_existential_type_in_parameter_rejected() {
 }
 
 #[test]
-fn test_numeric_field_access_rejected() {
-    // Numeric field access like x.0 should be rejected
-    // (tuple indexing is not supported)
-    expect_parse_error("def x(t: (i32, i32)) i32 = t.0", |_| Ok(()));
+fn test_numeric_field_access() {
+    // Numeric field access like t.0 for tuple indexing
+    let src = "def x(t: (i32, i32)) i32 = t.0";
+    let program = parse_ok(src);
+    match &program.declarations[0] {
+        Declaration::Decl(d) => match &d.body.kind {
+            ExprKind::FieldAccess(_, field) => assert_eq!(field, "0"),
+            other => panic!("Expected FieldAccess, got {:?}", other),
+        },
+        other => panic!("Expected Decl, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_chained_numeric_field_access() {
+    // Chained: t.0.0
+    let src = "def x(t: ((i32, i32), f32)) (i32, i32) = t.0";
+    let _program = parse_ok(src);
+}
+
+#[test]
+fn test_numeric_field_access_in_binop() {
+    // t.0 + t.1 in a binary expression
+    let src = "def x(t: (i32, i32)) i32 = t.0 + t.1";
+    let _program = parse_ok(src);
+}
+
+#[test]
+fn test_numeric_field_access_on_literal_tuple() {
+    // (7, 8, 9).0 — field access on a tuple literal
+    let src = "def x: i32 = (7, 8, 9).0";
+    let _program = parse_ok(src);
 }
 
 #[test]
