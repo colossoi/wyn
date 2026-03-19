@@ -53,7 +53,7 @@ impl<'a> ParallelizeCtx<'a> {
             node_id,
             u32_ty: Type::Constructed(TypeName::UInt(32), vec![]),
             i32_ty: Type::Constructed(TypeName::Int(32), vec![]),
-            bool_ty: Type::Constructed(TypeName::Str("bool"), vec![]),
+            bool_ty: Type::Constructed(TypeName::Bool, vec![]),
             unit_ty: Type::Constructed(TypeName::Unit, vec![]),
         }
     }
@@ -740,7 +740,7 @@ fn build_reduce_phase2(
 ) -> Option<SsaEntryPoint> {
     let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
-    let bool_ty = Type::Constructed(TypeName::Str("bool"), vec![]);
+    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
     let span = entry.span;
     let node_id = NodeId(0);
 

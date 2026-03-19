@@ -174,7 +174,7 @@ impl ImplSource {
                     "i64" => TypeName::Int(64),
                     "u32" => TypeName::UInt(32),
                     "u64" => TypeName::UInt(64),
-                    "bool" => TypeName::Str("bool"),
+                    "bool" => TypeName::Bool,
                     other => TypeName::Named(other.to_string()),
                 };
                 return Some(Type::Constructed(elem_type_name, vec![]));

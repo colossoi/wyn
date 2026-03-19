@@ -16,7 +16,7 @@ fn format_type(ty: &Type<TypeName>) -> String {
         Type::Constructed(TypeName::Int(bits), _) => format!("i{bits}"),
         Type::Constructed(TypeName::UInt(bits), _) => format!("u{bits}"),
         Type::Constructed(TypeName::Float(bits), _) => format!("f{bits}"),
-        Type::Constructed(TypeName::Str("bool"), _) => "bool".to_string(),
+        Type::Constructed(TypeName::Bool, _) => "bool".to_string(),
         Type::Constructed(TypeName::Str(s), _) => panic!("BUG: unexpected Str type in SSA: {:?}", s),
         Type::Constructed(TypeName::Unit, _) => "()".to_string(),
         Type::Constructed(TypeName::Tuple(n), args) => {

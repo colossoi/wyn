@@ -1053,7 +1053,7 @@ impl<'a> TypeChecker<'a> {
 
         // filter: ∀a n s. (a -> bool) -> Array[a, s, n] -> ?k. Array[a, s, k]
         let (a, n, s) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
-        let bool_ty = Type::Constructed(TypeName::Str("bool"), vec![]);
+        let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
         let pred_ty = Type::arrow(Self::var(a), bool_ty);
         let array_a = Self::array_ty(Self::var(a), s, n);
         // Existential return type: ?k. Array[a, s, k]
@@ -1872,11 +1872,11 @@ impl<'a> TypeChecker<'a> {
                                 right_type
                             )
                         })?;
-                        Ok(Type::Constructed(TypeName::Str("bool"), vec![]))
+                        Ok(Type::Constructed(TypeName::Bool, vec![]))
                     }
                     "&&" | "||" => {
                         // Logical operators require boolean operands and return boolean
-                        let bool_type = Type::Constructed(TypeName::Str("bool"), vec![]);
+                        let bool_type = Type::Constructed(TypeName::Bool, vec![]);
                         self.context.unify(&left_type, &bool_type).map_err(|_| {
                             err_type_at!(
                                 expr.h.span,
@@ -2177,7 +2177,7 @@ impl<'a> TypeChecker<'a> {
             ExprKind::If(if_expr) => {
                 // Infer condition type - should be bool
                 let condition_ty = self.infer_expression(&if_expr.condition)?;
-                let bool_ty = Type::Constructed(TypeName::Str("bool"), vec![]);
+                let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
 
                 // Unify condition with bool type
                 self.context.unify(&condition_ty, &bool_ty).map_err(|_| {
@@ -2216,7 +2216,7 @@ impl<'a> TypeChecker<'a> {
 
             ExprKind::UnaryOp(op, operand) => {
                 let operand_type = self.infer_expression(operand)?;
-                let bool_ty = Type::Constructed(TypeName::Str("bool"), vec![]);
+                let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
                 match op.op.as_str() {
                     "-" => {
                         // Numeric negation - operand must be numeric

@@ -68,7 +68,7 @@ fn make_int(ids: &mut TermIdSource, n: i64) -> Term {
 fn make_bool(ids: &mut TermIdSource, b: bool) -> Term {
     Term {
         id: ids.next_id(),
-        ty: Type::Constructed(TypeName::Str("bool"), vec![]),
+        ty: Type::Constructed(TypeName::Bool, vec![]),
         span: make_span(),
         kind: TermKind::BoolLit(b),
     }

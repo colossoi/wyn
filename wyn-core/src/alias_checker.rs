@@ -745,7 +745,7 @@ fn is_copy_type(ty: &polytype::Type<TypeName>) -> bool {
             TypeName::Int(_) => true,
             TypeName::UInt(_) => true,
             TypeName::Float(_) => true,
-            TypeName::Str("bool") => true,
+            TypeName::Bool => true,
             TypeName::Str("unit") => true,
             TypeName::Array => false,
             TypeName::Vec => true, // Vectors are primitive value types

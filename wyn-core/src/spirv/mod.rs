@@ -252,7 +252,7 @@ impl Constructor {
                     TypeName::Int(bits) => self.builder.type_int(*bits as u32, 1),
                     TypeName::UInt(bits) => self.builder.type_int(*bits as u32, 0),
                     TypeName::Float(bits) => self.builder.type_float(*bits as u32),
-                    TypeName::Str(s) if *s == "bool" => self.bool_type,
+                    TypeName::Bool => self.bool_type,
                     TypeName::Unit => {
                         // Unit type - use void type
                         // Unit values are never actually constructed since they can only be assigned to _
@@ -1601,16 +1601,16 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
             }
 
             // Boolean operations
-            ("&&", Constructed(Str("bool"), _), _) => {
+            ("&&", Constructed(Bool, _), _) => {
                 Ok(self.constructor.builder.logical_and(bool_type, None, lhs, rhs)?)
             }
-            ("||", Constructed(Str("bool"), _), _) => {
+            ("||", Constructed(Bool, _), _) => {
                 Ok(self.constructor.builder.logical_or(bool_type, None, lhs, rhs)?)
             }
-            ("==", Constructed(Str("bool"), _), _) => {
+            ("==", Constructed(Bool, _), _) => {
                 Ok(self.constructor.builder.logical_equal(bool_type, None, lhs, rhs)?)
             }
-            ("!=", Constructed(Str("bool"), _), _) => {
+            ("!=", Constructed(Bool, _), _) => {
                 Ok(self.constructor.builder.logical_not_equal(bool_type, None, lhs, rhs)?)
             }
 
@@ -1736,7 +1736,7 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
             ("-", Constructed(Int(_), _)) => {
                 Ok(self.constructor.builder.s_negate(result_ty, None, operand)?)
             }
-            ("!", Constructed(Str("bool"), _)) => {
+            ("!", Constructed(Bool, _)) => {
                 Ok(self.constructor.builder.logical_not(result_ty, None, operand)?)
             }
             // Vector unary operations

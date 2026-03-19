@@ -310,7 +310,7 @@ impl FuncBuilder {
 
     /// Push a boolean literal.
     pub fn push_bool(&mut self, value: bool, span: Span, node_id: NodeId) -> Result<ValueId, BuilderError> {
-        let ty = Type::Constructed(TypeName::Str("bool"), vec![]);
+        let ty = Type::Constructed(TypeName::Bool, vec![]);
         self.push_inst(InstKind::Bool(value), ty, span, node_id)
     }
 

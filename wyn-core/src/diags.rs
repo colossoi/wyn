@@ -25,6 +25,7 @@ pub fn format_type(ty: &PolyType<TypeName>) -> String {
 
 fn format_constructed_type(name: &TypeName, args: &[PolyType<TypeName>]) -> String {
     match name {
+        TypeName::Bool => "bool".to_string(),
         TypeName::Str(s) => {
             if args.is_empty() {
                 s.to_string()

@@ -101,7 +101,7 @@ impl std::fmt::Display for SkolemId {
 ///
 /// Note on type name variants:
 /// - `Float/Int/SInt`: Numeric primitive types with bit widths (e.g., Float(32), SInt(32))
-/// - `Str`: Other primitive type names hardcoded in the compiler (e.g., "->", "bool")
+/// - `Str`: Other primitive type names hardcoded in the compiler (e.g., "->")
 ///   Uses static strings for efficiency
 /// - `Tuple`: Tuple type constructor with arity (number of fields)
 /// - `Named`: Type names parsed from user source code (e.g., "vec3", "MyType")
@@ -109,10 +109,12 @@ impl std::fmt::Display for SkolemId {
 ///   Uses owned String since the name comes from parsed input
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeName {
-    /// Primitive type names hardcoded in compiler: "->", "bool", etc.
+    /// Primitive type names hardcoded in compiler: "->", etc.
     /// Numeric types use dedicated Float/Int/SInt variants instead.
     /// Tuples use the dedicated Tuple(usize) variant.
     Str(&'static str),
+    /// Boolean type.
+    Bool,
     /// Floating point types: f16, f32, f64, etc.
     Float(usize),
     /// Unsigned integer types: u8, u16, u32, u64
@@ -196,6 +198,7 @@ impl std::fmt::Display for TypeName {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             TypeName::Str(s) => write!(f, "{}", s),
+            TypeName::Bool => write!(f, "bool"),
             TypeName::Float(bits) => write!(f, "f{}", bits),
             TypeName::UInt(bits) => write!(f, "u{}", bits),
             TypeName::Int(bits) => write!(f, "i{}", bits),
@@ -260,6 +263,7 @@ impl polytype::Name for TypeName {
     fn show(&self) -> String {
         match self {
             TypeName::Str(s) => s.to_string(),
+            TypeName::Bool => "bool".to_string(),
             TypeName::Float(bits) => format!("f{}", bits),
             TypeName::UInt(bits) => format!("u{}", bits),
             TypeName::Int(bits) => format!("i{}", bits),
@@ -638,7 +642,7 @@ pub fn f32() -> Type {
 }
 
 pub fn bool_type() -> Type {
-    Type::Constructed(TypeName::Str("bool"), vec![])
+    Type::Constructed(TypeName::Bool, vec![])
 }
 
 pub fn string() -> Type {
@@ -663,7 +667,7 @@ fn spirv_element_types() -> Vec<(&'static str, Type)> {
         ("f16", Type::Constructed(TypeName::Float(16), vec![])),
         ("f32", Type::Constructed(TypeName::Float(32), vec![])),
         ("f64", Type::Constructed(TypeName::Float(64), vec![])),
-        ("bool", Type::Constructed(TypeName::Str("bool"), vec![])),
+        ("bool", Type::Constructed(TypeName::Bool, vec![])),
     ]
 }
 

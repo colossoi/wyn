@@ -412,7 +412,7 @@ impl IntrinsicSource {
         let a = ctx.new_variable();
         let n = ctx.new_variable();
         let s = ctx.new_variable();
-        let bool_ty = Type::Constructed(TypeName::Str("bool"), vec![]);
+        let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
         let pred_type = Type::arrow(a.clone(), bool_ty); // a -> bool
         let array_a = Self::array_type(a.clone(), s.clone(), n);
         // Existential return type: ?k. Array[a, s, k]

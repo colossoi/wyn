@@ -471,7 +471,7 @@ impl<'a> LowerCtx<'a> {
                 TypeName::Int(64) => "int64_t".to_string(),
                 TypeName::UInt(32) => "uint".to_string(),
                 TypeName::UInt(64) => "uint64_t".to_string(),
-                TypeName::Str(s) if *s == "bool" => "bool".to_string(),
+                TypeName::Bool => "bool".to_string(),
                 TypeName::Unit => "void".to_string(),
                 TypeName::Tuple(_) => {
                     let elem_types: Vec<String> = args.iter().map(|a| self.type_to_glsl(a)).collect();

@@ -540,11 +540,7 @@ impl PartialEvaluator {
     }
 
     fn reify_if(&mut self, cond: Value, then_val: Value, else_val: Value, original: &Term) -> Value {
-        let cond_term = self.reify(
-            cond,
-            &Type::Constructed(TypeName::Str("bool"), vec![]),
-            original.span,
-        );
+        let cond_term = self.reify(cond, &Type::Constructed(TypeName::Bool, vec![]), original.span);
         let then_term = self.reify(then_val, &original.ty, original.span);
         let else_term = self.reify(else_val, &original.ty, original.span);
 

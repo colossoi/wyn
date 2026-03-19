@@ -1402,7 +1402,7 @@ impl<'a> Converter<'a> {
     ) -> Result<ValueId, ConvertError> {
         let acc_ty = loop_var_ty.clone();
         let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
-        let bool_ty = Type::Constructed(TypeName::Str("bool"), vec![]);
+        let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
 
         let loop_blocks = self.builder.create_for_range_loop(acc_ty);
 
@@ -1500,7 +1500,7 @@ impl<'a> Converter<'a> {
     ) -> Result<ValueId, ConvertError> {
         let acc_ty = loop_var_ty.clone();
         let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
-        let bool_ty = Type::Constructed(TypeName::Str("bool"), vec![]);
+        let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
 
         let loop_blocks = self.builder.create_for_range_loop(acc_ty);
 

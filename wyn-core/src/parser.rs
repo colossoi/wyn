@@ -1219,7 +1219,7 @@ impl<'a> Parser<'a> {
                     "u32" => TypeName::UInt(32),
                     "u64" => TypeName::UInt(64),
                     // Boolean
-                    "bool" => TypeName::Str("bool"),
+                    "bool" => TypeName::Bool,
                     // User-defined type alias or unrecognized type
                     _ => TypeName::Named(type_name),
                 };

@@ -68,7 +68,7 @@ fn test_conditional() {
             ">",
             x,
             y,
-            Type::Constructed(TypeName::Str("bool"), vec![]),
+            Type::Constructed(TypeName::Bool, vec![]),
             dummy_span(),
             dummy_node(),
         )
@@ -136,7 +136,7 @@ fn test_finish_unterminated_error() {
 // =========================================================================
 
 fn bool_ty() -> Type<TypeName> {
-    Type::Constructed(TypeName::Str("bool"), vec![])
+    Type::Constructed(TypeName::Bool, vec![])
 }
 
 #[test]

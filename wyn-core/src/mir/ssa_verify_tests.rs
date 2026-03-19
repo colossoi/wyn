@@ -107,7 +107,7 @@ fn test_valid_conditional() {
             ">",
             x,
             zero,
-            Type::Constructed(TypeName::Str("bool"), vec![]),
+            Type::Constructed(TypeName::Bool, vec![]),
             dummy_span(),
             dummy_node(),
         )

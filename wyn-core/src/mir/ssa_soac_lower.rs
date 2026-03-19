@@ -241,7 +241,7 @@ fn expand_map(
     node_id: NodeId,
 ) -> Option<ValueId> {
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
-    let bool_ty = Type::Constructed(TypeName::Str("bool"), vec![]);
+    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
 
     // Get length from first input
     let first_input_ty = &input_array_types[0];
@@ -352,7 +352,7 @@ fn expand_reduce(
     node_id: NodeId,
 ) -> Option<ValueId> {
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
-    let bool_ty = Type::Constructed(TypeName::Str("bool"), vec![]);
+    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
     let acc_ty = result_ty.clone();
 
     // Get length (SoA-aware)

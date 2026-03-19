@@ -1959,7 +1959,7 @@ impl<'a> Transformer<'a> {
                     eq_op,
                     scrutinee.clone(),
                     lit_term,
-                    Type::Constructed(TypeName::Str("bool"), vec![]),
+                    Type::Constructed(TypeName::Bool, vec![]),
                     span,
                 );
                 let then_branch = self.transform_expr(&case.body);
@@ -1987,7 +1987,7 @@ impl<'a> Transformer<'a> {
                 let is_ctor = self.build_app1(
                     &format!("_w_is_{}", ctor_name),
                     scrutinee.clone(),
-                    Type::Constructed(TypeName::Str("bool"), vec![]),
+                    Type::Constructed(TypeName::Bool, vec![]),
                     span,
                 );
 
@@ -2066,7 +2066,7 @@ impl<'a> Transformer<'a> {
                 TermKind::FloatLit(*f),
             ),
             ast::PatternLiteral::Bool(b) => self.mk_term(
-                Type::Constructed(TypeName::Str("bool"), vec![]),
+                Type::Constructed(TypeName::Bool, vec![]),
                 span,
                 TermKind::BoolLit(*b),
             ),
