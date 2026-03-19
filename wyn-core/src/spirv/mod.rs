@@ -2152,7 +2152,7 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
     /// Lower indexing into a View array ({buffer_id, offset, len} handle-based struct).
     fn lower_view_index(
         &mut self,
-        view_ssa: ValueId,
+        _view_ssa: ValueId,
         view_id: spirv::Word,
         index_id: spirv::Word,
         result_ty: spirv::Word,
