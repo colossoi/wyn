@@ -17,7 +17,6 @@ fn format_type(ty: &Type<TypeName>) -> String {
         Type::Constructed(TypeName::UInt(bits), _) => format!("u{bits}"),
         Type::Constructed(TypeName::Float(bits), _) => format!("f{bits}"),
         Type::Constructed(TypeName::Bool, _) => "bool".to_string(),
-        Type::Constructed(TypeName::Str(s), _) => panic!("BUG: unexpected Str type in SSA: {:?}", s),
         Type::Constructed(TypeName::Unit, _) => "()".to_string(),
         Type::Constructed(TypeName::Tuple(n), args) => {
             let inner: Vec<String> = args.iter().map(format_type).collect();

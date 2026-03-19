@@ -160,7 +160,7 @@ impl TypeKey {
 
                 // For other constructed types, use a string name + args
                 let name_str = match name {
-                    TypeName::Str(s) => s.to_string(),
+                    TypeName::Bool => "bool".to_string(),
                     TypeName::Float(bits) => format!("f{}", bits),
                     TypeName::UInt(bits) => format!("u{}", bits),
                     TypeName::Int(bits) => format!("i{}", bits),
@@ -1064,11 +1064,7 @@ pub(crate) fn format_type_compact(ty: &Type<TypeName>) -> String {
     match ty {
         Type::Variable(id) => format!("v{}", id),
         Type::Constructed(TypeName::Size(n), _) => format!("n{}", n),
-        Type::Constructed(TypeName::Str(s), args) if args.is_empty() => s.to_string(),
-        Type::Constructed(TypeName::Str(s), args) => {
-            let args_str = args.iter().map(format_type_compact).collect::<Vec<_>>().join("_");
-            format!("{}_{}", s, args_str)
-        }
+        Type::Constructed(TypeName::Bool, _) => "bool".to_string(),
         _ if ty.is_array() => {
             format!(
                 "arr{}_{}{}",

@@ -26,15 +26,6 @@ pub fn format_type(ty: &PolyType<TypeName>) -> String {
 fn format_constructed_type(name: &TypeName, args: &[PolyType<TypeName>]) -> String {
     match name {
         TypeName::Bool => "bool".to_string(),
-        TypeName::Str(s) => {
-            if args.is_empty() {
-                s.to_string()
-            } else {
-                // Generic type application: T<A, B>
-                let args_str: Vec<_> = args.iter().map(format_type).collect();
-                format!("{}<{}>", s, args_str.join(", "))
-            }
-        }
         TypeName::Arrow => {
             // T1 -> T2
             if args.len() == 2 {

@@ -234,10 +234,6 @@ impl<'a> TypeChecker<'a> {
                 let arg_strs: Vec<String> = args.iter().map(|a| self.format_type(a)).collect();
                 format!("({})", arg_strs.join(", "))
             }
-            Type::Constructed(TypeName::Str(s), args) if *s == "Array" && args.len() == 2 => {
-                // Special case for array types [size]elem
-                format!("[{}]{}", self.format_type(&args[0]), self.format_type(&args[1]))
-            }
             Type::Constructed(name, args) if args.is_empty() => format!("{}", name),
             Type::Constructed(name, args) => {
                 let arg_strs: Vec<String> = args.iter().map(|a| self.format_type(a)).collect();
@@ -2702,7 +2698,7 @@ impl<'a> TypeChecker<'a> {
         // 4. Known type fields via impl_source / record_field_map
         if let Type::Constructed(type_name, _) = base_ty {
             let type_name_str = match type_name {
-                TypeName::Str(s) => s.to_string(),
+                TypeName::Bool => "bool".to_string(),
                 TypeName::Float(bits) => format!("f{}", bits),
                 TypeName::UInt(bits) => format!("u{}", bits),
                 TypeName::Int(bits) => format!("i{}", bits),

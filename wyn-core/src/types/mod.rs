@@ -109,10 +109,6 @@ impl std::fmt::Display for SkolemId {
 ///   Uses owned String since the name comes from parsed input
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeName {
-    /// Primitive type names hardcoded in compiler: "->", etc.
-    /// Numeric types use dedicated Float/Int/SInt variants instead.
-    /// Tuples use the dedicated Tuple(usize) variant.
-    Str(&'static str),
     /// Boolean type.
     Bool,
     /// Floating point types: f16, f32, f64, etc.
@@ -197,7 +193,6 @@ pub enum TypeName {
 impl std::fmt::Display for TypeName {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            TypeName::Str(s) => write!(f, "{}", s),
             TypeName::Bool => write!(f, "bool"),
             TypeName::Float(bits) => write!(f, "f{}", bits),
             TypeName::UInt(bits) => write!(f, "u{}", bits),
@@ -262,7 +257,6 @@ impl polytype::Name for TypeName {
 
     fn show(&self) -> String {
         match self {
-            TypeName::Str(s) => s.to_string(),
             TypeName::Bool => "bool".to_string(),
             TypeName::Float(bits) => format!("f{}", bits),
             TypeName::UInt(bits) => format!("u{}", bits),
@@ -313,12 +307,6 @@ impl polytype::Name for TypeName {
             TypeName::Skolem(id) => format!("{}", id),
             TypeName::Ignored => "_".to_string(),
         }
-    }
-}
-
-impl From<&'static str> for TypeName {
-    fn from(s: &'static str) -> Self {
-        TypeName::Str(s)
     }
 }
 
@@ -814,12 +802,7 @@ pub fn count_arrows(ty: &Type) -> usize {
 /// Per spec: array indices may be "any unsigned integer type",
 /// but we also accept signed integers for compatibility
 pub fn is_integer_type(ty: &Type) -> bool {
-    match ty {
-        Type::Constructed(TypeName::Str(name), args) if args.is_empty() => {
-            matches!(*name, "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64")
-        }
-        _ => false,
-    }
+    matches!(ty, Type::Constructed(TypeName::Int(_) | TypeName::UInt(_), _))
 }
 
 /// Create a record type: {field1: type1, field2: type2}
