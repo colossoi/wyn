@@ -108,6 +108,10 @@ struct Constructor {
     buffer_vars: Vec<(spirv::Word, spirv::Word)>,
     /// (set, binding) → buffer_id, for deduplication in get_or_assign_buffer_id.
     buffer_id_map: HashMap<(u32, u32), u32>,
+
+    /// IDs of all module-level constants (OpConstant, OpConstantTrue/False, OpConstantComposite, OpConstantNull).
+    /// Used to decide whether a composite can be emitted as OpConstantComposite.
+    constant_ids: HashSet<spirv::Word>,
 }
 
 impl Constructor {
@@ -166,6 +170,7 @@ impl Constructor {
             buffer_stride_decorated: HashSet::new(),
             buffer_vars: Vec::new(),
             buffer_id_map: HashMap::new(),
+            constant_ids: HashSet::new(),
         }
     }
 
@@ -734,6 +739,7 @@ impl Constructor {
         let id = self.builder.constant_bit32(self.i32_type, value as u32);
         self.int_const_cache.insert(value, id);
         self.int_const_reverse.insert(id, value);
+        self.constant_ids.insert(id);
         id
     }
 
@@ -750,6 +756,7 @@ impl Constructor {
         let id = self.builder.constant_bit32(self.u32_type, value);
         self.uint_const_cache.insert(value, id);
         self.uint_const_reverse.insert(id, value);
+        self.constant_ids.insert(id);
         id
     }
 
@@ -775,6 +782,7 @@ impl Constructor {
         let id = self.builder.constant_bit32(self.f32_type, bits);
         self.float_const_cache.insert(bits, id);
         self.float_const_reverse.insert(id, bits);
+        self.constant_ids.insert(id);
         id
     }
 
@@ -794,7 +802,28 @@ impl Constructor {
             self.builder.constant_false(self.bool_type)
         };
         self.bool_const_cache.insert(value, id);
+        self.constant_ids.insert(id);
         id
+    }
+
+    /// Check whether a SPIR-V ID is a module-level constant.
+    fn is_constant(&self, id: spirv::Word) -> bool {
+        self.constant_ids.contains(&id)
+    }
+
+    /// Emit OpConstantComposite if all elements are constants, otherwise OpCompositeConstruct.
+    fn composite_or_constant(
+        &mut self,
+        result_type: spirv::Word,
+        elem_ids: Vec<spirv::Word>,
+    ) -> Result<spirv::Word> {
+        if elem_ids.iter().all(|&id| self.is_constant(id)) {
+            let id = self.builder.constant_composite(result_type, elem_ids);
+            self.constant_ids.insert(id);
+            Ok(id)
+        } else {
+            Ok(self.builder.composite_construct(result_type, None, elem_ids)?)
+        }
     }
 
     /// Begin a block (must be called before emitting instructions into it)
@@ -1052,13 +1081,13 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
 
             InstKind::Tuple(elems) => {
                 let elem_ids: Vec<_> = elems.iter().map(|&v| self.get_value(v)).collect::<Result<_>>()?;
-                self.constructor.builder.composite_construct(result_ty, None, elem_ids)?
+                self.constructor.composite_or_constant(result_ty, elem_ids)?
             }
 
             InstKind::ArrayLit { elements } => {
                 let elem_ids: Vec<_> =
                     elements.iter().map(|&v| self.get_value(v)).collect::<Result<_>>()?;
-                self.constructor.builder.composite_construct(result_ty, None, elem_ids)?
+                self.constructor.composite_or_constant(result_ty, elem_ids)?
             }
 
             InstKind::ArrayRange { start, len, step } => {
@@ -1081,7 +1110,7 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
 
             InstKind::Vector(elems) => {
                 let elem_ids: Vec<_> = elems.iter().map(|&v| self.get_value(v)).collect::<Result<_>>()?;
-                self.constructor.builder.composite_construct(result_ty, None, elem_ids)?
+                self.constructor.composite_or_constant(result_ty, elem_ids)?
             }
 
             InstKind::Matrix(rows) => {
@@ -1089,7 +1118,7 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                 // For now, flatten and construct
                 let all_elems: Vec<_> =
                     rows.iter().flatten().map(|&v| self.get_value(v)).collect::<Result<_>>()?;
-                self.constructor.builder.composite_construct(result_ty, None, all_elems)?
+                self.constructor.composite_or_constant(result_ty, all_elems)?
             }
 
             InstKind::Project { base, index } => {
@@ -2250,7 +2279,9 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
                         // Zero-initialized value (OpConstantNull).
                         // Using OpUndef would be more accurate but naga converts it to
                         // ZeroValue and then has scoping issues with phi lowering.
-                        Ok(self.constructor.builder.constant_null(result_ty))
+                        let id = self.constructor.builder.constant_null(result_ty);
+                        self.constructor.constant_ids.insert(id);
+                        Ok(id)
                     }
                     Intrinsic::ArrayWith => {
                         // _w_array_with(array, index, value) - functional array update
