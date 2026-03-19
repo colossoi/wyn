@@ -175,17 +175,26 @@ pub fn convert_program(program: &TlcProgram) -> Result<SsaProgram, ConvertError>
     let top_level: HashMap<SymbolId, &TlcDef> = program.defs.iter().map(|d| (d.name, d)).collect();
     let symbols = &program.symbols;
 
+    // Build name-indexed map for arity-0 defs so we can inline constants even
+    // when the reference uses a different SymbolId (e.g. after specialize).
+    let constants_by_name: HashMap<String, SymbolId> = program
+        .defs
+        .iter()
+        .filter(|d| d.arity == 0 && matches!(&d.meta, DefMeta::Function))
+        .filter_map(|d| symbols.get(d.name).map(|n| (n.clone(), d.name)))
+        .collect();
+
     let mut functions = Vec::new();
     let mut entry_points = Vec::new();
 
     for def in &program.defs {
         match &def.meta {
             DefMeta::Function => {
-                let func = convert_function(def, &top_level, symbols)?;
+                let func = convert_function(def, &top_level, &constants_by_name, symbols)?;
                 functions.push(func);
             }
             DefMeta::EntryPoint(entry) => {
-                let ep = convert_entry_point(def, entry, &top_level, symbols)?;
+                let ep = convert_entry_point(def, entry, &top_level, &constants_by_name, symbols)?;
                 entry_points.push(ep);
             }
         }
@@ -203,6 +212,7 @@ pub fn convert_program(program: &TlcProgram) -> Result<SsaProgram, ConvertError>
 fn convert_function(
     def: &TlcDef,
     top_level: &HashMap<SymbolId, &TlcDef>,
+    constants_by_name: &HashMap<String, SymbolId>,
     symbols: &SymbolTable,
 ) -> Result<SsaFunction, ConvertError> {
     let def_name = symbols.get(def.name).expect("BUG: symbol not in table").clone();
@@ -241,7 +251,7 @@ fn convert_function(
     let builder = FuncBuilder::new(param_list, ret_type.clone());
 
     // Create converter with variable mappings
-    let mut converter = Converter::new(builder, top_level, symbols);
+    let mut converter = Converter::new(builder, top_level, constants_by_name, symbols);
 
     // Map parameters to their ValueIds
     for (i, (name, _, _)) in params.iter().enumerate() {
@@ -317,6 +327,7 @@ fn convert_entry_point(
     def: &TlcDef,
     entry: &ast::EntryDecl,
     top_level: &HashMap<SymbolId, &TlcDef>,
+    constants_by_name: &HashMap<String, SymbolId>,
     symbols: &SymbolTable,
 ) -> Result<SsaEntryPoint, ConvertError> {
     let def_name = symbols.get(def.name).expect("BUG: symbol not in table").clone();
@@ -374,7 +385,7 @@ fn convert_entry_point(
     let builder = FuncBuilder::new(param_list, ret_type.clone());
 
     // Create converter
-    let mut converter = Converter::new(builder, top_level, symbols);
+    let mut converter = Converter::new(builder, top_level, constants_by_name, symbols);
 
     // Map parameters
     for (i, (name, _, _)) in params.iter().enumerate() {
@@ -697,21 +708,28 @@ struct Converter<'a> {
     locals: HashMap<String, ValueId>,
     /// Top-level definitions for resolving function calls.
     top_level: &'a HashMap<SymbolId, &'a TlcDef>,
+    /// Arity-0 defs indexed by name (for cross-SymbolId lookup after specialize).
+    constants_by_name: &'a HashMap<String, SymbolId>,
     /// Symbol table for name lookup.
     symbols: &'a SymbolTable,
+    /// Cache for inlined constant defs, keyed by name for cross-SymbolId hits.
+    inlined_constants: HashMap<String, ValueId>,
 }
 
 impl<'a> Converter<'a> {
     fn new(
         builder: FuncBuilder,
         top_level: &'a HashMap<SymbolId, &'a TlcDef>,
+        constants_by_name: &'a HashMap<String, SymbolId>,
         symbols: &'a SymbolTable,
     ) -> Self {
         Converter {
             builder,
             locals: HashMap::new(),
             top_level,
+            constants_by_name,
             symbols,
+            inlined_constants: HashMap::new(),
         }
     }
 
@@ -731,11 +749,31 @@ impl<'a> Converter<'a> {
                 let name = self.symbols.get(*sym).expect("BUG: symbol not in table");
                 if let Some(&value) = self.locals.get(name) {
                     Ok(value)
+                } else if let Some(&cached) = self.inlined_constants.get(name) {
+                    Ok(cached)
                 } else {
-                    // Global reference
-                    self.builder
-                        .push_global(name, ty, span, node_id)
-                        .map_err(|e| ConvertError::BuilderError(e.to_string()))
+                    // Check if this is an arity-0 constant def (by SymbolId or by name).
+                    let const_def = self
+                        .top_level
+                        .get(sym)
+                        .filter(|d| d.arity == 0)
+                        .or_else(|| {
+                            self.constants_by_name
+                                .get(name)
+                                .and_then(|def_sym| self.top_level.get(def_sym))
+                        });
+                    if let Some(def) = const_def {
+                        let body = def.body.clone();
+                        let value = self.convert_term(&body)?;
+                        let name = self.symbols.get(*sym).expect("BUG").clone();
+                        self.inlined_constants.insert(name, value);
+                        Ok(value)
+                    } else {
+                        // Global reference
+                        self.builder
+                            .push_global(name, ty, span, node_id)
+                            .map_err(|e| ConvertError::BuilderError(e.to_string()))
+                    }
                 }
             }
 
