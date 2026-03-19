@@ -276,7 +276,10 @@ def inShadow(hitPoint: vec3f32, lightDir: vec3f32) f32 =
 ------------------------------------------------------------
 
 def shade(hitPoint: vec3f32, normal: vec3f32, viewDir: vec3f32, matId: i32) vec3f32 =
-  let (albedo, metallic, roughness, _, _, _) = getMaterial(matId, hitPoint) in
+  let mat = getMaterial(matId, hitPoint) in
+  let albedo = mat.0 in
+  let metallic = mat.1 in
+  let roughness = mat.2 in
   let brdfResult = materials.brdf(normal, viewDir, lightDir, albedo, metallic, roughness) in
   let shadow = inShadow(hitPoint, lightDir) in
   let lightColor = @[2.0, 1.9, 1.8] in
@@ -288,7 +291,7 @@ def shade(hitPoint: vec3f32, normal: vec3f32, viewDir: vec3f32, matId: i32) vec3
 ------------------------------------------------------------
 
 def trace(ro: vec3f32, rd: vec3f32, maxBounces: i32) vec3f32 =
-  let (finalColor, _, _, _, _) =
+  let traceResult =
     loop (color, rayO, rayD, tint, bounce) = (@[0.0, 0.0, 0.0], ro, rd, @[1.0, 1.0, 1.0], 0) while bounce <= maxBounces do
       let (t, matId, normal) = intersectScene(rayO, rayD) in
       if matId == 0 then
@@ -300,7 +303,11 @@ def trace(ro: vec3f32, rd: vec3f32, maxBounces: i32) vec3f32 =
       else
         let hitPoint = rayO + rayD * t in
         let viewDir = -rayD in
-        let (albedo, _, _, reflectivity, isGlass, ior) = getMaterial(matId, hitPoint) in
+        let mat = getMaterial(matId, hitPoint) in
+        let albedo = mat.0 in
+        let reflectivity = mat.3 in
+        let isGlass = mat.4 in
+        let ior = mat.5 in
 
         if isGlass == 1 then
           -- Glass material: probabilistically choose reflect or refract
@@ -346,7 +353,7 @@ def trace(ro: vec3f32, rd: vec3f32, maxBounces: i32) vec3f32 =
           let newRayO = hitPoint + normal * epsilon * 10.0 in
 
           (newColor, newRayO, reflDir, newTint, bounce + 1)
-  in finalColor
+  in traceResult.0
 
 ------------------------------------------------------------
 -- Full Ray Splitting Trace (Deterministic Glass)
@@ -368,7 +375,11 @@ def processOneRay(idx: i32, ro: vec3f32, rd: vec3f32, weight: vec3f32, active: i
       (ro, rd, zero, contrib, zero, zero, zero, 0, 0)
     else
       let hitPoint = ro + rd * t in
-      let (albedo, _, _, reflectivity, isGlass, ior) = getMaterial(matId, hitPoint) in
+      let mat = getMaterial(matId, hitPoint) in
+      let albedo = mat.0 in
+      let reflectivity = mat.3 in
+      let isGlass = mat.4 in
+      let ior = mat.5 in
       if isGlass == 1 then
         -- Glass: split into reflect + refract
         let entering = dot(rd, normal) < 0.0 in
@@ -417,22 +428,22 @@ def processBounce(
       processOneRay(i, ro, rd, w, a),
     zip5(indices, origins, dirs, weights, active)) in
 
-  -- Extract updated ray states using destructuring
-  let newOrigins = map(|r| let (o, _, _, _, _, _, _, _, _) = r in o, results) in
-  let newDirs = map(|r| let (_, d, _, _, _, _, _, _, _) = r in d, results) in
-  let newWeights = map(|r| let (_, _, w, _, _, _, _, _, _) = r in w, results) in
-  let newActive = map(|r| let (_, _, _, _, _, _, _, a, _) = r in a, results) in
+  -- Extract updated ray states using tuple projection
+  let newOrigins = map(|r| r.0, results) in
+  let newDirs = map(|r| r.1, results) in
+  let newWeights = map(|r| r.2, results) in
+  let newActive = map(|r| r.7, results) in
 
   -- Accumulate color contributions
-  let contribs = map(|r| let (_, _, _, c, _, _, _, _, _) = r in c, results) in
+  let contribs = map(|r| r.3, results) in
   let totalContrib = reduce(vecAdd, @[0.0, 0.0, 0.0], contribs) in
   let newAccum = accumColor + totalContrib in
 
   -- Extract refracted ray data from slots 0-3
-  let refrOrigins = map(|r| let (_, _, _, _, ro, _, _, _, _) = r in ro, results) in
-  let refrDirs = map(|r| let (_, _, _, _, _, rd, _, _, _) = r in rd, results) in
-  let refrWeights = map(|r| let (_, _, _, _, _, _, rw, _, _) = r in rw, results) in
-  let hasRefract = map(|r| let (_, _, _, _, _, _, _, _, h) = r in h, results) in
+  let refrOrigins = map(|r| r.4, results) in
+  let refrDirs = map(|r| r.5, results) in
+  let refrWeights = map(|r| r.6, results) in
+  let hasRefract = map(|r| r.8, results) in
 
   -- Conditionally update slots 4-7 only when a new refract ray spawns
   -- (otherwise keep existing ray in that slot)
@@ -477,12 +488,12 @@ def traceWithSplitting(ro: vec3f32, rd: vec3f32, maxBounces: i32) vec3f32 =
   let active: [8]i32 = [1, 0, 0, 0, 0, 0, 0, 0] in
 
   -- Bounce loop
-  let (_, _, _, _, _, finalColor) =
+  let bounceResult =
     loop (o, d, w, a, bounce, c) = (origins, dirs, weights, active, 0, zero)
     while bounce <= maxBounces do
       let (o2, d2, w2, a2, c2) = processBounce(o, d, w, a, c) in
       (o2, d2, w2, a2, bounce + 1, c2)
-  in finalColor
+  in bounceResult.5
 
 ------------------------------------------------------------
 -- Camera Setup

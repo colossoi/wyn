@@ -62,7 +62,7 @@ def foilGyroid(p: vec3f32, t: f32) f32 =
 -- Main raymarching function with chromatic offset
 ------------------------------------------------------------
 def raymarch(fragCoord: vec2f32, res: vec2f32, rotX: mat2f32, rotY: mat2f32, chromatic: f32, use_mouse: f32) f32 =
-  let (_, _, colorAccum) = loop (i, dt, acc) = (0.0, 0.0, 0.0) while i < FAR do
+  let marchResult = loop (i, dt, acc) = (0.0, 0.0, 0.0) while i < FAR do
     -- Ray origin with camera path
     let ro_z = iTime * 0.5 in
     let cam = camPath(ro_z) in
@@ -122,7 +122,7 @@ def raymarch(fragCoord: vec2f32, res: vec2f32, rotX: mat2f32, rotY: mat2f32, chr
                     sparkBright * sparkGlowClamped in
 
       (i + 1.0, dt2, acc + contrib)
-  in colorAccum
+  in marchResult.2
 
 ------------------------------------------------------------
 -- Fragment shader

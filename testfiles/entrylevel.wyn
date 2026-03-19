@@ -64,7 +64,7 @@ def sdfMap(p_in: vec3f32) vec2f32 =
 
   let q_init = @[fract(p.x) * 2.0 - 1.0, fract(p.y) * 2.0 - 1.0, fract(p.z) * 2.0 - 1.0] in
 
-  let (_, d_final, idx_final, _) = loop (i, d, idx, q) = (0, 1000.0, 0.0, q_init) while i < 3 do
+  let sdfResult = loop (i, d, idx, q) = (0, 1000.0, 0.0, q_init) while i < 3 do
     -- q = sign(q) * (1.0 - 1.0 / (1.0 + abs(q) * 0.8))
     let q2 = @[sign(q.x) * (1.0 - 1.0 / (1.0 + f32.abs(q.x) * 0.8)),
                sign(q.y) * (1.0 - 1.0 / (1.0 + f32.abs(q.y) * 0.8)),
@@ -77,7 +77,7 @@ def sdfMap(p_in: vec3f32) vec2f32 =
 
     if md2 < d then (i + 1, md2, f32.i32(i), q2)
     else (i + 1, d, idx, q2)
-  in @[d_final, idx_final]
+  in @[sdfResult.1, sdfResult.2]
 
 ------------------------------------------------------------
 -- Normal calculation
@@ -95,11 +95,11 @@ def calcNormal(p: vec3f32) vec3f32 =
 ------------------------------------------------------------
 
 def trace(o: vec3f32, r: vec3f32) f32 =
-  let (_, t_final) = loop (i, t) = (0, 0.0) while i < 64 do
+  let traceResult = loop (i, t) = (0, 0.0) while i < 64 do
     let p = o + r * t in
     let d = (sdfMap(p)).x in
     (i + 1, t + d * 0.3)
-  in t_final
+  in traceResult.1
 
 ------------------------------------------------------------
 -- Texture sampling (placeholder until texture support added)

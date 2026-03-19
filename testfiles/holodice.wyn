@@ -39,7 +39,7 @@ def traceSimple(fragCoord: vec2f32, mx: f32, my: f32, z_offset: f32, use_mouse: 
   let r = iResolution in
   let rx = rotMat(mx) in
   let ry = rotMat(my) in
-  let (_, _, accum) = loop (i, d, accum) = (0, 0.0, 0.0) while i < 80 do
+  let marchResult = loop (i, d, accum) = (0, 0.0, 0.0) while i < 80 do
     let fi = f32.i32(i) in
 
     let p_x = (fragCoord.x + fragCoord.x - r.x) / r.y * d in
@@ -73,7 +73,7 @@ def traceSimple(fragCoord: vec2f32, mx: f32, my: f32, z_offset: f32, use_mouse: 
       let a = fract((f32.sin((dot(g, @[43.7, 78.2, 123.4]))) * 127.1)) * 6.28 in
 
       -- Menger fractal
-      let (_, e_final, _) = loop (k, e, sc) = (0, 1.0, 2.0) while k < 3 do
+      let mengerResult = loop (k, e, sc) = (0, 1.0, 2.0) while k < 3 do
         let gk = @[f32.abs((fract((p3_x * sc)) * 2.0 - 1.0)),
                    f32.abs((fract((p3_y * sc)) * 2.0 - 1.0)),
                    f32.abs((fract((p3_z * sc)) * 2.0 - 1.0))] in
@@ -84,13 +84,13 @@ def traceSimple(fragCoord: vec2f32, mx: f32, my: f32, z_offset: f32, use_mouse: 
       let c = f32.max(f32.max(f32.max(f32.abs(p3_x), f32.abs(p3_y)), f32.abs(p3_z)),
                       (dot(@[f32.abs(p3_x), f32.abs(p3_y), f32.abs(p3_z)], @[0.577, 0.577, 0.577]) * 0.9)) - 3.0 in
 
-      let s = 0.01 + 0.15 * f32.abs((f32.max(f32.max(c, (e_final - 0.1)), (f32.abs(f32.sin(c)) - 0.3)) + z_offset * 0.02 - fi / 130.0)) in
+      let s = 0.01 + 0.15 * f32.abs((f32.max(f32.max(c, (mengerResult.1 - 0.1)), (f32.abs(f32.sin(c)) - 0.3)) + z_offset * 0.02 - fi / 130.0)) in
       let sf = smoothstep(0.02, 0.01, s) in
 
       let contrib = 1.6 / s * (0.5 + 0.5 * f32.sin((fi * 0.3 + z_offset * 5.0)) + sf * 4.0 * h * f32.sin((a + fi * 0.4 + z_offset * 5.0))) in
 
       (i + 1, d + s, accum + contrib)
-  in accum
+  in marchResult.2
 
 ------------------------------------------------------------
 -- Fragment shader

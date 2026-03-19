@@ -112,25 +112,25 @@ def sea_octave(uv: vec2f32, choppy: f32) f32 =
 def heightMap(p: vec3f32, time: f32) f32 =
   let sea_t = sea_time(time) in
   let uv_init = @[p.x * 0.75, p.z] in
-  let (_, _, h, _, _, _) = loop (i, uv, h, freq, amp, choppy) = (0, uv_init, 0.0, SEA_FREQ, SEA_HEIGHT, SEA_CHOPPY) while i < ITER_GEOMETRY do
+  let hResult = loop (i, uv, h, freq, amp, choppy) = (0, uv_init, 0.0, SEA_FREQ, SEA_HEIGHT, SEA_CHOPPY) while i < ITER_GEOMETRY do
     let d1 = sea_octave((uv + sea_t) * freq, choppy) in
     let d2 = sea_octave((uv - sea_t) * freq, choppy) in
     let h2 = h + (d1 + d2) * amp in
     let uv2 = uv * octave_m in
     (i + 1, uv2, h2, freq * 1.9, amp * 0.22, mix(choppy, 1.0, 0.2))
-  in p.y - h
+  in p.y - hResult.2
 
 -- Map function for detailed normals (more iterations)
 def map_detailed(p: vec3f32, time: f32) f32 =
   let sea_t = sea_time(time) in
   let uv_init = @[p.x * 0.75, p.z] in
-  let (_, _, h, _, _, _) = loop (i, uv, h, freq, amp, choppy) = (0, uv_init, 0.0, SEA_FREQ, SEA_HEIGHT, SEA_CHOPPY) while i < ITER_FRAGMENT do
+  let hResult = loop (i, uv, h, freq, amp, choppy) = (0, uv_init, 0.0, SEA_FREQ, SEA_HEIGHT, SEA_CHOPPY) while i < ITER_FRAGMENT do
     let d1 = sea_octave((uv + sea_t) * freq, choppy) in
     let d2 = sea_octave((uv - sea_t) * freq, choppy) in
     let h2 = h + (d1 + d2) * amp in
     let uv2 = uv * octave_m in
     (i + 1, uv2, h2, freq * 1.9, amp * 0.22, mix(choppy, 1.0, 0.2))
-  in p.y - h
+  in p.y - hResult.2
 
 def getSeaColor(p: vec3f32, n: vec3f32, l: vec3f32, eye: vec3f32, dist: vec3f32) vec3f32 =
   let fresnel_raw = clamp(1.0 - dot(n, -eye), 0.0, 1.0) in
@@ -166,7 +166,7 @@ def heightMapTracing(ori: vec3f32, dir: vec3f32, time: f32) (f32, vec3f32) =
   if hx > 0.0 then (tx, p_far)
   else
     let hm = heightMap(ori, time) in
-    let (_, tm_final, tx_final, hm_final, hx_final, p_final) =
+    let stepResult =
       loop (i, tm, tx, hm, hx, p) = (0, 0.0, tx, hm, hx, ori) while i < NUM_STEPS do
         let tmid = mix(tm, tx, hm / (hm - hx)) in
         let p_mid = ori + dir * tmid in
@@ -175,7 +175,7 @@ def heightMapTracing(ori: vec3f32, dir: vec3f32, time: f32) (f32, vec3f32) =
         else if hmid < 0.0 then (i + 1, tm, tmid, hm, hmid, p_mid)
         else (i + 1, tmid, tx, hmid, hx, p_mid)
     in
-    let t_final = mix(tm_final, tx_final, hm_final / (hm_final - hx_final)) in
+    let t_final = mix(stepResult.1, stepResult.2, stepResult.3 / (stepResult.3 - stepResult.4)) in
     let p_result = ori + dir * t_final in
     (t_final, p_result)
 
