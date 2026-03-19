@@ -645,10 +645,6 @@ pub fn bool_type() -> Type {
     Type::Constructed(TypeName::Bool, vec![])
 }
 
-pub fn string() -> Type {
-    Type::Constructed(TypeName::Str("string"), vec![])
-}
-
 pub fn unit() -> Type {
     Type::Constructed(TypeName::Unit, vec![])
 }

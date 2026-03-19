@@ -9,8 +9,7 @@ use std::collections::{BTreeSet, HashMap};
 
 // Import type helper functions from parent module
 use super::{
-    as_arrow, bool_type, f32, function, i32, mat, record, sized_array, string, strip_unique, tuple, unit,
-    vec,
+    as_arrow, bool_type, f32, function, i32, mat, record, sized_array, strip_unique, tuple, unit, vec,
 };
 
 /// Trait for generating fresh type variables
@@ -1671,7 +1670,7 @@ impl<'a> TypeChecker<'a> {
             ExprKind::IntLiteral(_) => Ok(i32()),
             ExprKind::FloatLiteral(_) => Ok(f32()),
             ExprKind::BoolLiteral(_) => Ok(bool_type()),
-            ExprKind::StringLiteral(_) => Ok(string()),
+            ExprKind::StringLiteral(_) => Ok(unit()),
             ExprKind::Unit => Ok(unit()),
             ExprKind::Identifier(quals, name) => {
                 let full_name = if quals.is_empty() {
@@ -2158,13 +2157,6 @@ impl<'a> TypeChecker<'a> {
 
                 // Infer base expression type
                 let base_type = self.infer_expression(inner_expr)?;
-
-                // Special case: _w_lambda_name for closure dispatch
-                if field == "_w_lambda_name" {
-                    let ty = Type::Constructed(TypeName::Str("string"), vec![]);
-                    self.type_table.insert(expr.h.id, TypeScheme::Monotype(ty.clone()));
-                    return Ok(ty);
-                }
 
                 // Apply context and strip uniqueness
                 let base_type = base_type.apply(&self.context).strip_unique().clone();
