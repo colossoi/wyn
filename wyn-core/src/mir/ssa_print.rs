@@ -21,28 +21,16 @@ fn format_type(ty: &Type<TypeName>) -> String {
         Type::Constructed(TypeName::Unit, _) => "()".to_string(),
         Type::Constructed(TypeName::Tuple(n), args) => {
             let inner: Vec<String> = args.iter().map(format_type).collect();
-            if *n == 1 {
-                format!("({},)", inner.join(", "))
-            } else {
-                format!("({})", inner.join(", "))
-            }
+            if *n == 1 { format!("({},)", inner.join(", ")) } else { format!("({})", inner.join(", ")) }
         }
         Type::Constructed(TypeName::Array, args) if args.len() >= 2 => {
             let elem = format_type(&args[0]);
-            let size = if args.len() >= 3 {
-                format_array_size(&args[1])
-            } else {
-                "?".to_string()
-            };
+            let size = if args.len() >= 3 { format_array_size(&args[1]) } else { "?".to_string() };
             format!("[{size}]{elem}")
         }
         Type::Constructed(TypeName::Vec, args) if !args.is_empty() => {
             let elem = format_type(&args[0]);
-            let size = if args.len() >= 2 {
-                format_array_size(&args[1])
-            } else {
-                "?".to_string()
-            };
+            let size = if args.len() >= 2 { format_array_size(&args[1]) } else { "?".to_string() };
             format!("vec{size}{elem}")
         }
         Type::Constructed(TypeName::Mat, args) if args.len() >= 3 => {
@@ -70,10 +58,7 @@ fn format_array_size(size_ty: &Type<TypeName>) -> String {
 
 /// Format a list of value IDs as comma-separated.
 fn format_values(vals: &[ValueId]) -> String {
-    vals.iter()
-        .map(|v| format!("%{}", v.0))
-        .collect::<Vec<_>>()
-        .join(", ")
+    vals.iter().map(|v| format!("%{}", v.0)).collect::<Vec<_>>().join(", ")
 }
 
 /// Format an `SsaProgram` as a readable text representation.
@@ -93,7 +78,10 @@ pub fn format_program(program: &SsaProgram) -> String {
         };
         let local_size_suffix = match &ep.execution_model {
             ExecutionModel::Compute { local_size } => {
-                format!(" local_size({}, {}, {})", local_size.0, local_size.1, local_size.2)
+                format!(
+                    " local_size({}, {}, {})",
+                    local_size.0, local_size.1, local_size.2
+                )
             }
             _ => String::new(),
         };
@@ -113,11 +101,8 @@ pub fn format_program(program: &SsaProgram) -> String {
 /// Format a single function body.
 fn format_function(out: &mut String, name: &str, body: &FuncBody) {
     // Function signature
-    let params: Vec<String> = body
-        .params
-        .iter()
-        .map(|(val, ty, _name)| format!("%{}: {}", val.0, format_type(ty)))
-        .collect();
+    let params: Vec<String> =
+        body.params.iter().map(|(val, ty, _name)| format!("%{}: {}", val.0, format_type(ty))).collect();
     let ret = format_type(&body.return_ty);
     let _ = writeln!(out, "func @{name}({}) -> {ret} {{", params.join(", "));
 
@@ -132,11 +117,8 @@ fn format_function(out: &mut String, name: &str, body: &FuncBody) {
         if block.params.is_empty() {
             let _ = writeln!(out, "  {block_id}:");
         } else {
-            let params: Vec<String> = block
-                .params
-                .iter()
-                .map(|p| format!("%{}: {}", p.value.0, format_type(&p.ty)))
-                .collect();
+            let params: Vec<String> =
+                block.params.iter().map(|p| format!("%{}: {}", p.value.0, format_type(&p.ty))).collect();
             let _ = writeln!(out, "  {block_id}({}):", params.join(", "));
         }
 
@@ -256,11 +238,7 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
         InstKind::Store { ptr, value, .. } => {
             let _ = write!(out, "store %{}, %{}", ptr.0, value.0);
         }
-        InstKind::StorageView {
-            source,
-            offset,
-            len,
-        } => {
+        InstKind::StorageView { source, offset, len } => {
             let src = match source {
                 ViewSource::Storage { set, binding } => format!("storage({set}, {binding})"),
                 ViewSource::Inherited { parent } => format!("%{}", parent.0),

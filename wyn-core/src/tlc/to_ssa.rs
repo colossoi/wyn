@@ -753,15 +753,9 @@ impl<'a> Converter<'a> {
                     Ok(cached)
                 } else {
                     // Check if this is an arity-0 constant def (by SymbolId or by name).
-                    let const_def = self
-                        .top_level
-                        .get(sym)
-                        .filter(|d| d.arity == 0)
-                        .or_else(|| {
-                            self.constants_by_name
-                                .get(name)
-                                .and_then(|def_sym| self.top_level.get(def_sym))
-                        });
+                    let const_def = self.top_level.get(sym).filter(|d| d.arity == 0).or_else(|| {
+                        self.constants_by_name.get(name).and_then(|def_sym| self.top_level.get(def_sym))
+                    });
                     if let Some(def) = const_def {
                         let body = def.body.clone();
                         let value = self.convert_term(&body)?;

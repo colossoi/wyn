@@ -1688,7 +1688,10 @@ fn test_tuple_field_access_second() {
 #[test]
 fn test_tuple_field_access_out_of_bounds() {
     let result = try_typecheck_program("def x(t: (i32, f32)) i32 = t.2");
-    assert!(result.is_err(), "Expected type error for out-of-bounds tuple index");
+    assert!(
+        result.is_err(),
+        "Expected type error for out-of-bounds tuple index"
+    );
 }
 
 #[test]
