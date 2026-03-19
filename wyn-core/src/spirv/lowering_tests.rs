@@ -18,7 +18,7 @@ fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
     let known_defs = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
     let ssa = alias_checked
         .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
-        .skip_partial_eval()
+        .partial_eval()
         .fuse_maps()
         .defunctionalize()
         .monomorphize()

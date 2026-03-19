@@ -62,9 +62,13 @@ enum Commands {
         #[arg(long, value_name = "FILE")]
         output_tlc: Option<PathBuf>,
 
-        /// Enable partial evaluation (compile-time function inlining and loop unrolling)
-        #[arg(long)]
-        partial_eval: bool,
+        /// Output initial SSA (right after conversion from TLC, before optimization)
+        #[arg(long, value_name = "FILE")]
+        output_init_ssa: Option<PathBuf>,
+
+        /// Output optimized SSA (after optimization, before SOAC lowering)
+        #[arg(long, value_name = "FILE")]
+        output_opt_ssa: Option<PathBuf>,
 
         /// Print verbose output
         #[arg(short, long)]
@@ -122,7 +126,8 @@ fn run(cli: Cli) -> Result<(), DriverError> {
             target,
             output_annotated,
             output_tlc,
-            partial_eval,
+            output_init_ssa,
+            output_opt_ssa,
             verbose,
         } => {
             compile_file(
@@ -131,7 +136,8 @@ fn run(cli: Cli) -> Result<(), DriverError> {
                 target,
                 output_annotated,
                 output_tlc,
-                partial_eval,
+                output_init_ssa,
+                output_opt_ssa,
                 verbose,
             )?;
         }
@@ -153,7 +159,8 @@ fn compile_file(
     target: Target,
     output_annotated: Option<PathBuf>,
     output_tlc: Option<PathBuf>,
-    partial_eval: bool,
+    output_init_ssa: Option<PathBuf>,
+    output_opt_ssa: Option<PathBuf>,
     verbose: bool,
 ) -> Result<(), DriverError> {
     if verbose {
@@ -211,12 +218,7 @@ fn compile_file(
         }
     }
 
-    // Apply TLC partial evaluation if enabled
-    let tlc_optimized = if partial_eval {
-        time("tlc_partial_eval", verbose, || tlc_transformed.partial_eval())
-    } else {
-        tlc_transformed.skip_partial_eval()
-    };
+    let tlc_optimized = time("tlc_partial_eval", verbose, || tlc_transformed.partial_eval());
 
     // Fuse consecutive map operations
     let tlc_fused = time("fuse_maps", verbose, || tlc_optimized.fuse_maps());
@@ -239,6 +241,14 @@ fn compile_file(
     // Transform TLC to SSA
     let ssa = time("to_ssa", verbose, || tlc_soa.to_ssa())?;
 
+    // Dump initial SSA if requested
+    if let Some(ref path) = output_init_ssa {
+        fs::write(path, wyn_core::mir::ssa_print::format_program(&ssa.ssa))?;
+        if verbose {
+            info!("Wrote initial SSA to {}", path.display());
+        }
+    }
+
     // Parallelize SOACs in compute shaders
     let parallelized = time("parallelize_soacs", verbose, || ssa.parallelize_soacs());
 
@@ -247,6 +257,14 @@ fn compile_file(
 
     // SSA peephole optimizations
     let optimized = time("ssa_opt", verbose, || reachable.optimize());
+
+    // Dump optimized SSA if requested
+    if let Some(ref path) = output_opt_ssa {
+        fs::write(path, wyn_core::mir::ssa_print::format_program(&optimized.ssa))?;
+        if verbose {
+            info!("Wrote optimized SSA to {}", path.display());
+        }
+    }
 
     // Lower first-class SOAC instructions to explicit loops
     let soac_lowered = time("soac_lower", verbose, || optimized.lower_soacs());

@@ -22,7 +22,7 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
     let known_defs = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
     alias_checked
         .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
-        .skip_partial_eval()
+        .partial_eval()
         .fuse_maps()
         .defunctionalize()
         .monomorphize()
@@ -53,7 +53,7 @@ fn compile_through_ssa(input: &str) -> Result<SsaProgram, CompilerError> {
     let known_defs = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
     let ssa = alias_checked
         .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
-        .skip_partial_eval()
+        .partial_eval()
         .fuse_maps()
         .defunctionalize()
         .monomorphize()
@@ -475,8 +475,8 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     let tlc = alias_checked.to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager);
     eprintln!("=== to_tlc OK ===");
 
-    let tlc = tlc.skip_partial_eval();
-    eprintln!("=== skip_partial_eval OK ===");
+    let tlc = tlc.partial_eval();
+    eprintln!("=== partial_eval OK ===");
 
     let tlc = tlc.fuse_maps();
     eprintln!("=== fuse_maps OK ===");
@@ -544,8 +544,8 @@ entry main(data: []i32) []i32 = [first(data)]
     let tlc = alias_checked.to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager);
     eprintln!("=== to_tlc OK ===");
 
-    let tlc = tlc.skip_partial_eval();
-    eprintln!("=== skip_partial_eval OK ===");
+    let tlc = tlc.partial_eval();
+    eprintln!("=== partial_eval OK ===");
 
     let tlc = tlc.fuse_maps();
     eprintln!("=== fuse_maps OK ===");

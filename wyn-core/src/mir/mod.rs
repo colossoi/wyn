@@ -17,6 +17,7 @@ pub mod soa_helpers;
 pub mod ssa;
 pub mod ssa_builder;
 pub mod ssa_opt;
+pub mod ssa_print;
 pub mod ssa_soac_analysis;
 pub mod ssa_soac_lower;
 pub mod ssa_verify;
