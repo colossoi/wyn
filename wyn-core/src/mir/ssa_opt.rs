@@ -10,8 +10,10 @@
 //!   The entry block (BlockId(0)) is never eliminated.
 //!   Iterates to fixpoint for chained empty blocks.
 
+use crate::ast::TypeName;
 use crate::mir::ssa::{BlockId, ControlHeader, FuncBody, InstKind, Terminator, ValueId};
 use crate::tlc::to_ssa::SsaProgram;
+use polytype::Type;
 use std::collections::{HashMap, HashSet};
 
 /// Run SSA peephole optimizations on the entire program.
@@ -27,6 +29,9 @@ pub fn optimize(mut program: SsaProgram) -> SsaProgram {
 
 fn optimize_func(body: &mut FuncBody) {
     forward_params(body);
+    project_fold(body);
+    local_cse(body);
+    dce(body);
     eliminate_empty_blocks(body);
 }
 
@@ -235,7 +240,215 @@ fn apply_substitutions(body: &mut FuncBody, subs: &HashMap<ValueId, ValueId>) {
 }
 
 // =============================================================================
-// Pass 2: Empty block elimination
+// Pass 2: Project folding — copy propagation through composites
+// =============================================================================
+
+fn project_fold(body: &mut FuncBody) {
+    // Build def map: result ValueId -> index in body.insts
+    let mut def_map: HashMap<ValueId, usize> = HashMap::new();
+    for (idx, inst) in body.insts.iter().enumerate() {
+        if let Some(result) = inst.result {
+            def_map.insert(result, idx);
+        }
+    }
+
+    let mut substitutions: HashMap<ValueId, ValueId> = HashMap::new();
+
+    for inst in body.insts.iter() {
+        if let InstKind::Project { base, index } = &inst.kind {
+            // Resolve base through existing substitutions (handles chained projects)
+            let mut resolved_base = *base;
+            while let Some(&next) = substitutions.get(&resolved_base) {
+                resolved_base = next;
+            }
+
+            if let Some(&def_idx) = def_map.get(&resolved_base) {
+                let elems = match &body.insts[def_idx].kind {
+                    InstKind::Tuple(elems)
+                    | InstKind::Vector(elems)
+                    | InstKind::ArrayLit { elements: elems } => Some(elems),
+                    _ => None,
+                };
+                if let Some(elems) = elems {
+                    if let Some(&elem) = elems.get(*index as usize) {
+                        if let Some(result) = inst.result {
+                            substitutions.insert(result, elem);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if substitutions.is_empty() {
+        return;
+    }
+
+    let resolved = resolve_substitutions(&substitutions);
+    apply_substitutions(body, &resolved);
+}
+
+// =============================================================================
+// Pass 3: Local CSE — per-block common subexpression elimination
+// =============================================================================
+
+fn local_cse(body: &mut FuncBody) {
+    #[derive(Hash, Eq, PartialEq)]
+    enum CseKey {
+        Int(String, Type<TypeName>),
+        Float(String, Type<TypeName>),
+        Bool(bool),
+        Global(String),
+        Extern(String),
+    }
+
+    let mut substitutions: HashMap<ValueId, ValueId> = HashMap::new();
+
+    for block in &body.blocks {
+        let mut seen: HashMap<CseKey, ValueId> = HashMap::new();
+
+        for &inst_id in &block.insts {
+            let inst = &body.insts[inst_id.index()];
+            let key = match &inst.kind {
+                InstKind::Int(v) => Some(CseKey::Int(v.clone(), inst.result_ty.clone())),
+                InstKind::Float(v) => Some(CseKey::Float(v.clone(), inst.result_ty.clone())),
+                InstKind::Bool(v) => Some(CseKey::Bool(*v)),
+                InstKind::Global(name) => Some(CseKey::Global(name.clone())),
+                InstKind::Extern(name) => Some(CseKey::Extern(name.clone())),
+                _ => None,
+            };
+
+            if let (Some(key), Some(result)) = (key, inst.result) {
+                match seen.entry(key) {
+                    std::collections::hash_map::Entry::Occupied(e) => {
+                        substitutions.insert(result, *e.get());
+                    }
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        e.insert(result);
+                    }
+                }
+            }
+        }
+    }
+
+    if substitutions.is_empty() {
+        return;
+    }
+
+    let resolved = resolve_substitutions(&substitutions);
+    apply_substitutions(body, &resolved);
+}
+
+// =============================================================================
+// Pass 4: Dead code elimination
+// =============================================================================
+
+fn dce(body: &mut FuncBody) {
+    // Collect all used ValueIds from instructions and terminators
+    let mut used: HashSet<ValueId> = HashSet::new();
+
+    for inst in body.insts.iter() {
+        for v in collect_inst_uses(&inst.kind) {
+            used.insert(v);
+        }
+    }
+
+    for block in &body.blocks {
+        if let Some(ref term) = block.terminator {
+            match term {
+                Terminator::Branch { args, .. } => {
+                    for a in args {
+                        used.insert(*a);
+                    }
+                }
+                Terminator::CondBranch {
+                    cond,
+                    then_args,
+                    else_args,
+                    ..
+                } => {
+                    used.insert(*cond);
+                    for a in then_args {
+                        used.insert(*a);
+                    }
+                    for a in else_args {
+                        used.insert(*a);
+                    }
+                }
+                Terminator::Return(v) => {
+                    used.insert(*v);
+                }
+                Terminator::ReturnUnit | Terminator::Unreachable => {}
+            }
+        }
+    }
+
+    // Retain instructions that are side-effecting or whose result is used
+    for block in &mut body.blocks {
+        block.insts.retain(|&inst_id| {
+            let inst = &body.insts[inst_id.index()];
+            if is_side_effecting(&inst.kind) {
+                return true;
+            }
+            match inst.result {
+                Some(result) => used.contains(&result),
+                None => true,
+            }
+        });
+    }
+}
+
+fn is_side_effecting(kind: &InstKind) -> bool {
+    matches!(
+        kind,
+        InstKind::Call { .. }
+            | InstKind::Intrinsic { .. }
+            | InstKind::Alloca { .. }
+            | InstKind::Load { .. }
+            | InstKind::Store { .. }
+            | InstKind::OutputPtr { .. }
+            | InstKind::Soac(_)
+    )
+}
+
+fn collect_inst_uses(kind: &InstKind) -> Vec<ValueId> {
+    match kind {
+        InstKind::Int(_)
+        | InstKind::Float(_)
+        | InstKind::Bool(_)
+        | InstKind::Unit
+        | InstKind::String(_)
+        | InstKind::Global(_)
+        | InstKind::Extern(_) => vec![],
+
+        InstKind::BinOp { lhs, rhs, .. } => vec![*lhs, *rhs],
+        InstKind::UnaryOp { operand, .. } => vec![*operand],
+        InstKind::Tuple(elems) | InstKind::Vector(elems) | InstKind::ArrayLit { elements: elems } => {
+            elems.clone()
+        }
+        InstKind::ArrayRange { start, len, step } => {
+            let mut uses = vec![*start, *len];
+            if let Some(s) = step {
+                uses.push(*s);
+            }
+            uses
+        }
+        InstKind::Matrix(rows) => rows.iter().flatten().copied().collect(),
+        InstKind::Project { base, .. } => vec![*base],
+        InstKind::Index { base, index } => vec![*base, *index],
+        InstKind::Call { args, .. } | InstKind::Intrinsic { args, .. } => args.clone(),
+        InstKind::Alloca { .. } | InstKind::OutputPtr { .. } => vec![],
+        InstKind::Load { ptr, .. } => vec![*ptr],
+        InstKind::Store { ptr, value, .. } => vec![*ptr, *value],
+        InstKind::StorageView { offset, len, .. } => vec![*offset, *len],
+        InstKind::StorageViewIndex { view, index } => vec![*view, *index],
+        InstKind::StorageViewLen { view } => vec![*view],
+        InstKind::Soac(soac) => soac.uses(),
+    }
+}
+
+// =============================================================================
+// Pass 5: Empty block elimination
 // =============================================================================
 
 fn eliminate_empty_blocks(body: &mut FuncBody) {
