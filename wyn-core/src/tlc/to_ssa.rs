@@ -3,7 +3,7 @@
 //! This module converts a lifted TLC program directly to SSA form,
 //! bypassing the intermediate MIR representation.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::{self, NodeId, Span, TypeName};
 use crate::ssa::builder::FuncBuilder;
@@ -76,7 +76,7 @@ fn soa_elem_type(soa_ty: &Type<TypeName>) -> Type<TypeName> {
 }
 
 use crate::ssa::types::{
-    EntryInput, EntryOutput, EntryPoint, ExecutionModel, Function, IoDecoration, Program,
+    Constant, EntryInput, EntryOutput, EntryPoint, ExecutionModel, Function, IoDecoration, Program,
 };
 
 /// Error during TLC to SSA conversion.
@@ -116,17 +116,76 @@ pub fn convert_program(program: &TlcProgram) -> Result<Program, ConvertError> {
         .filter_map(|d| symbols.get(d.name).map(|n| (n.clone(), d.name)))
         .collect();
 
+    // Phase 1: Identify which arity-0 defs are purely constant by converting
+    // their bodies and checking the resulting SSA.
+    let mut pure_constant_names: HashSet<String> = HashSet::new();
+    let mut constants: Vec<Constant> = Vec::new();
+
+    for def in &program.defs {
+        if def.arity != 0 || !matches!(&def.meta, DefMeta::Function) {
+            continue;
+        }
+        if matches!(&def.body.kind, TermKind::Extern(_)) {
+            continue;
+        }
+        let def_name = symbols.get(def.name).expect("BUG: symbol not in table").clone();
+
+        // Convert the body in isolation to check if it's purely constant.
+        // Pass current pure_constants so chained constant defs emit Global refs.
+        let ret_type = def.body.ty.clone();
+        let builder = FuncBuilder::new(vec![], ret_type.clone());
+        let mut converter = Converter::new(
+            builder,
+            &top_level,
+            &constants_by_name,
+            symbols,
+            pure_constant_names.clone(),
+        );
+        if let Ok(result_val) = converter.convert_term(&def.body) {
+            if let Ok(()) = converter
+                .builder
+                .terminate(Terminator::Return(result_val))
+                .map_err(|e| ConvertError::BuilderError(e.to_string()))
+            {
+                if let Ok(body) = converter.finish() {
+                    if is_purely_constant_body(&body) {
+                        pure_constant_names.insert(def_name.clone());
+                        constants.push(Constant {
+                            name: def_name,
+                            body,
+                            result_ty: ret_type,
+                        });
+                        continue;
+                    }
+                }
+            }
+        }
+    }
+
+    // Phase 2: Convert functions and entry points with hoisted constant refs.
     let mut functions = Vec::new();
     let mut entry_points = Vec::new();
 
     for def in &program.defs {
         match &def.meta {
             DefMeta::Function => {
-                let func = convert_function(def, &top_level, &constants_by_name, symbols)?;
+                let def_name = symbols.get(def.name).expect("BUG: symbol not in table");
+                if pure_constant_names.contains(def_name) {
+                    continue; // already emitted as Constant
+                }
+                let func =
+                    convert_function(def, &top_level, &constants_by_name, symbols, &pure_constant_names)?;
                 functions.push(func);
             }
             DefMeta::EntryPoint(entry) => {
-                let ep = convert_entry_point(def, entry, &top_level, &constants_by_name, symbols)?;
+                let ep = convert_entry_point(
+                    def,
+                    entry,
+                    &top_level,
+                    &constants_by_name,
+                    symbols,
+                    &pure_constant_names,
+                )?;
                 entry_points.push(ep);
             }
         }
@@ -135,8 +194,28 @@ pub fn convert_program(program: &TlcProgram) -> Result<Program, ConvertError> {
     Ok(Program {
         functions,
         entry_points,
+        constants,
         uniforms: program.uniforms.clone(),
         storage: program.storage.clone(),
+    })
+}
+
+/// Check whether an SSA function body contains only pure constant instructions.
+fn is_purely_constant_body(body: &FuncBody) -> bool {
+    body.insts.iter().all(|inst| {
+        matches!(
+            &inst.kind,
+            InstKind::Int(_)
+                | InstKind::Float(_)
+                | InstKind::Bool(_)
+                | InstKind::Unit
+                | InstKind::String(_)
+                | InstKind::Tuple(_)
+                | InstKind::Vector(_)
+                | InstKind::Matrix(_)
+                | InstKind::ArrayLit { .. }
+                | InstKind::Global(_)
+        )
     })
 }
 
@@ -146,6 +225,7 @@ fn convert_function(
     top_level: &HashMap<SymbolId, &TlcDef>,
     constants_by_name: &HashMap<String, SymbolId>,
     symbols: &SymbolTable,
+    pure_constants: &HashSet<String>,
 ) -> Result<Function, ConvertError> {
     let def_name = symbols.get(def.name).expect("BUG: symbol not in table").clone();
 
@@ -183,7 +263,13 @@ fn convert_function(
     let builder = FuncBuilder::new(param_list, ret_type.clone());
 
     // Create converter with variable mappings
-    let mut converter = Converter::new(builder, top_level, constants_by_name, symbols);
+    let mut converter = Converter::new(
+        builder,
+        top_level,
+        constants_by_name,
+        symbols,
+        pure_constants.clone(),
+    );
 
     // Map parameters to their ValueIds
     for (i, (name, _, _)) in params.iter().enumerate() {
@@ -261,6 +347,7 @@ fn convert_entry_point(
     top_level: &HashMap<SymbolId, &TlcDef>,
     constants_by_name: &HashMap<String, SymbolId>,
     symbols: &SymbolTable,
+    pure_constants: &HashSet<String>,
 ) -> Result<EntryPoint, ConvertError> {
     let def_name = symbols.get(def.name).expect("BUG: symbol not in table").clone();
 
@@ -317,7 +404,13 @@ fn convert_entry_point(
     let builder = FuncBuilder::new(param_list, ret_type.clone());
 
     // Create converter
-    let mut converter = Converter::new(builder, top_level, constants_by_name, symbols);
+    let mut converter = Converter::new(
+        builder,
+        top_level,
+        constants_by_name,
+        symbols,
+        pure_constants.clone(),
+    );
 
     // Map parameters
     for (i, (name, _, _)) in params.iter().enumerate() {
@@ -646,6 +739,9 @@ struct Converter<'a> {
     symbols: &'a SymbolTable,
     /// Cache for inlined constant defs, keyed by name for cross-SymbolId hits.
     inlined_constants: HashMap<String, ValueId>,
+    /// Names of pure constant defs hoisted to program scope.
+    /// References emit `Global(name)` instead of inlining the body.
+    pure_constants: HashSet<String>,
 }
 
 impl<'a> Converter<'a> {
@@ -654,6 +750,7 @@ impl<'a> Converter<'a> {
         top_level: &'a HashMap<SymbolId, &'a TlcDef>,
         constants_by_name: &'a HashMap<String, SymbolId>,
         symbols: &'a SymbolTable,
+        pure_constants: HashSet<String>,
     ) -> Self {
         Converter {
             builder,
@@ -662,6 +759,7 @@ impl<'a> Converter<'a> {
             constants_by_name,
             symbols,
             inlined_constants: HashMap::new(),
+            pure_constants,
         }
     }
 
@@ -683,6 +781,11 @@ impl<'a> Converter<'a> {
                     Ok(value)
                 } else if let Some(&cached) = self.inlined_constants.get(name) {
                     Ok(cached)
+                } else if self.pure_constants.contains(name) {
+                    // Hoisted constant — emit a Global reference instead of inlining
+                    self.builder
+                        .push_global(name, ty, span, node_id)
+                        .map_err(|e| ConvertError::BuilderError(e.to_string()))
                 } else {
                     // Check if this is an arity-0 constant def (by SymbolId or by name).
                     let const_def = self.top_level.get(sym).filter(|d| d.arity == 0).or_else(|| {

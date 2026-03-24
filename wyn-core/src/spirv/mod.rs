@@ -840,6 +840,69 @@ impl Constructor {
 // SSA to SPIR-V Lowering
 // =============================================================================
 
+/// Lower a constant definition body to module-level SPIR-V constants.
+///
+/// Walks instructions in order, emitting OpConstant/OpConstantComposite.
+/// Returns the SPIR-V Word for the final result value.
+fn lower_constant_body(constructor: &mut Constructor, body: &FuncBody) -> Result<spirv::Word> {
+    use crate::ssa::types::InstKind;
+
+    let mut value_map: HashMap<ValueId, spirv::Word> = HashMap::new();
+
+    for inst in &body.insts {
+        let result_ty = constructor.polytype_to_spirv(&inst.result_ty);
+        let spirv_id = match &inst.kind {
+            InstKind::Int(s) => match &inst.result_ty {
+                PolyType::Constructed(TypeName::UInt(32), _) => {
+                    let val: u32 = s.parse().map_err(|_| err_spirv!("Invalid u32 in constant: {}", s))?;
+                    constructor.const_u32(val)
+                }
+                _ => {
+                    let val: i32 = s.parse().map_err(|_| err_spirv!("Invalid i32 in constant: {}", s))?;
+                    constructor.const_i32(val)
+                }
+            },
+            InstKind::Float(s) => {
+                let val: f32 = s.parse().map_err(|_| err_spirv!("Invalid f32 in constant: {}", s))?;
+                constructor.const_f32(val)
+            }
+            InstKind::Bool(b) => constructor.const_bool(*b),
+            InstKind::Tuple(elems) | InstKind::Vector(elems) | InstKind::ArrayLit { elements: elems } => {
+                let elem_ids: Vec<_> = elems.iter().map(|v| value_map[v]).collect();
+                constructor.composite_or_constant(result_ty, elem_ids)?
+            }
+            InstKind::Matrix(rows) => {
+                let elem_ids: Vec<_> = rows.iter().flatten().map(|v| value_map[v]).collect();
+                constructor.composite_or_constant(result_ty, elem_ids)?
+            }
+            InstKind::Global(name) => {
+                // Reference to another hoisted constant
+                *constructor
+                    .global_constants
+                    .get(name)
+                    .ok_or_else(|| err_spirv!("Unknown constant in constant body: {}", name))?
+            }
+            other => {
+                bail_spirv!(
+                    "Non-constant instruction in constant body: {:?}",
+                    std::mem::discriminant(other)
+                );
+            }
+        };
+
+        if let Some(result) = inst.result {
+            value_map.insert(result, spirv_id);
+        }
+    }
+
+    // The return value is in the terminator
+    let entry = &body.blocks[0];
+    match &entry.terminator {
+        Some(Terminator::Return(v)) => Ok(value_map[v]),
+        _ => bail_spirv!("Constant body has no Return terminator"),
+    }
+}
+
 /// Lower an SSA function body to SPIR-V.
 ///
 /// This creates a SPIR-V function from the SSA representation:
@@ -2774,6 +2837,12 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
                 }
             }
         }
+    }
+
+    // Lower program-level constants to module-scope OpConstant/OpConstantComposite.
+    for constant in &program.constants {
+        let result_id = lower_constant_body(&mut constructor, &constant.body)?;
+        constructor.global_constants.insert(constant.name.clone(), result_id);
     }
 
     // Now lower all function bodies

@@ -1026,10 +1026,21 @@ pub struct Program {
     pub functions: Vec<Function>,
     /// Entry point definitions.
     pub entry_points: Vec<EntryPoint>,
+    /// Program-level constant definitions (zero-arg defs with purely constant bodies).
+    /// Emitted once at module scope; functions reference them via `InstKind::Global`.
+    pub constants: Vec<Constant>,
     /// Uniform declarations.
     pub uniforms: Vec<ast::UniformDecl>,
     /// Storage buffer declarations.
     pub storage: Vec<ast::StorageDecl>,
+}
+
+/// A program-level constant definition.
+#[derive(Debug, Clone)]
+pub struct Constant {
+    pub name: String,
+    pub body: FuncBody,
+    pub result_ty: Type<TypeName>,
 }
 
 /// A function definition.
