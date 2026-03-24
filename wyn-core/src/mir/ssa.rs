@@ -232,6 +232,101 @@ pub enum Terminator {
     Unreachable,
 }
 
+impl Terminator {
+    /// Return all ValueIds referenced by this terminator.
+    pub fn value_uses(&self) -> Vec<ValueId> {
+        match self {
+            Terminator::Branch { args, .. } => args.clone(),
+            Terminator::CondBranch {
+                cond,
+                then_args,
+                else_args,
+                ..
+            } => {
+                let mut u = vec![*cond];
+                u.extend_from_slice(then_args);
+                u.extend_from_slice(else_args);
+                u
+            }
+            Terminator::Return(v) => vec![*v],
+            Terminator::ReturnUnit | Terminator::Unreachable => vec![],
+        }
+    }
+
+    /// Apply a substitution function to all ValueId references in place.
+    pub fn substitute_values(&mut self, sub: &mut impl FnMut(&mut ValueId)) {
+        match self {
+            Terminator::Branch { args, .. } => {
+                for a in args {
+                    sub(a);
+                }
+            }
+            Terminator::CondBranch {
+                cond,
+                then_args,
+                else_args,
+                ..
+            } => {
+                sub(cond);
+                for a in then_args {
+                    sub(a);
+                }
+                for a in else_args {
+                    sub(a);
+                }
+            }
+            Terminator::Return(v) => sub(v),
+            Terminator::ReturnUnit | Terminator::Unreachable => {}
+        }
+    }
+
+    /// Create a new Terminator with all ValueIds and BlockIds remapped.
+    pub fn remap(
+        &self,
+        rv: &impl Fn(&ValueId) -> ValueId,
+        rb: &impl Fn(&BlockId) -> BlockId,
+    ) -> Terminator {
+        match self {
+            Terminator::Branch { target, args } => Terminator::Branch {
+                target: rb(target),
+                args: args.iter().map(rv).collect(),
+            },
+            Terminator::CondBranch {
+                cond,
+                then_target,
+                then_args,
+                else_target,
+                else_args,
+            } => Terminator::CondBranch {
+                cond: rv(cond),
+                then_target: rb(then_target),
+                then_args: then_args.iter().map(rv).collect(),
+                else_target: rb(else_target),
+                else_args: else_args.iter().map(rv).collect(),
+            },
+            Terminator::Return(v) => Terminator::Return(rv(v)),
+            Terminator::ReturnUnit => Terminator::ReturnUnit,
+            Terminator::Unreachable => Terminator::Unreachable,
+        }
+    }
+}
+
+impl ControlHeader {
+    /// Create a new ControlHeader with all BlockIds remapped.
+    pub fn remap(&self, rb: &impl Fn(&BlockId) -> BlockId) -> ControlHeader {
+        match self {
+            ControlHeader::Loop {
+                merge,
+                continue_block,
+            } => ControlHeader::Loop {
+                merge: rb(merge),
+                continue_block: rb(continue_block),
+            },
+            ControlHeader::Selection { merge } => ControlHeader::Selection { merge: rb(merge) },
+        }
+    }
+}
+
 // =============================================================================
 // Instructions
 // =============================================================================
@@ -401,6 +496,224 @@ pub enum InstKind {
     /// These are preserved through optimization passes and lowered to explicit
     /// loops by the `ssa_soac_lower` pass right before backend lowering.
     Soac(SsaSoac),
+}
+
+impl InstKind {
+    /// Return all ValueIds referenced by this instruction (read-only).
+    pub fn value_uses(&self) -> Vec<ValueId> {
+        match self {
+            InstKind::Int(_)
+            | InstKind::Float(_)
+            | InstKind::Bool(_)
+            | InstKind::Unit
+            | InstKind::String(_)
+            | InstKind::Global(_)
+            | InstKind::Extern(_)
+            | InstKind::Alloca { .. }
+            | InstKind::OutputPtr { .. } => vec![],
+
+            InstKind::BinOp { lhs, rhs, .. } => vec![*lhs, *rhs],
+            InstKind::UnaryOp { operand, .. } => vec![*operand],
+            InstKind::Tuple(elems) | InstKind::Vector(elems) | InstKind::ArrayLit { elements: elems } => {
+                elems.clone()
+            }
+            InstKind::ArrayRange { start, len, step } => {
+                let mut u = vec![*start, *len];
+                if let Some(s) = step {
+                    u.push(*s);
+                }
+                u
+            }
+            InstKind::Matrix(rows) => rows.iter().flatten().copied().collect(),
+            InstKind::Project { base, .. } => vec![*base],
+            InstKind::Index { base, index } => vec![*base, *index],
+            InstKind::Call { args, .. } | InstKind::Intrinsic { args, .. } => args.clone(),
+            InstKind::Load { ptr, .. } => vec![*ptr],
+            InstKind::Store { ptr, value, .. } => vec![*ptr, *value],
+            InstKind::StorageView { source, offset, len } => {
+                let mut u = vec![*offset, *len];
+                if let ViewSource::Inherited { parent } = source {
+                    u.push(*parent);
+                }
+                u
+            }
+            InstKind::StorageViewIndex { view, index } => vec![*view, *index],
+            InstKind::StorageViewLen { view } => vec![*view],
+            InstKind::Soac(soac) => soac.uses(),
+        }
+    }
+
+    /// Apply a substitution function to all ValueId references in place.
+    pub fn substitute_values(&mut self, sub: &mut impl FnMut(&mut ValueId)) {
+        match self {
+            InstKind::BinOp { lhs, rhs, .. } => {
+                sub(lhs);
+                sub(rhs);
+            }
+            InstKind::UnaryOp { operand, .. } => sub(operand),
+            InstKind::Tuple(elems) | InstKind::Vector(elems) | InstKind::ArrayLit { elements: elems } => {
+                for e in elems {
+                    sub(e);
+                }
+            }
+            InstKind::Matrix(rows) => {
+                for row in rows {
+                    for e in row {
+                        sub(e);
+                    }
+                }
+            }
+            InstKind::Project { base, .. } => sub(base),
+            InstKind::Index { base, index } => {
+                sub(base);
+                sub(index);
+            }
+            InstKind::Call { args, .. } | InstKind::Intrinsic { args, .. } => {
+                for a in args {
+                    sub(a);
+                }
+            }
+            InstKind::Load { ptr, .. } => sub(ptr),
+            InstKind::Store { ptr, value, .. } => {
+                sub(ptr);
+                sub(value);
+            }
+            InstKind::ArrayRange { start, len, step } => {
+                sub(start);
+                sub(len);
+                if let Some(s) = step {
+                    sub(s);
+                }
+            }
+            InstKind::StorageView { source, offset, len } => {
+                if let ViewSource::Inherited { parent } = source {
+                    sub(parent);
+                }
+                sub(offset);
+                sub(len);
+            }
+            InstKind::StorageViewIndex { view, index } => {
+                sub(view);
+                sub(index);
+            }
+            InstKind::StorageViewLen { view } => sub(view),
+            InstKind::Soac(soac) => soac.substitute_uses(sub),
+            InstKind::Int(_)
+            | InstKind::Float(_)
+            | InstKind::Bool(_)
+            | InstKind::Unit
+            | InstKind::String(_)
+            | InstKind::Global(_)
+            | InstKind::Extern(_)
+            | InstKind::Alloca { .. }
+            | InstKind::OutputPtr { .. } => {}
+        }
+    }
+
+    /// Create a new InstKind with all ValueIds and EffectTokens remapped.
+    ///
+    /// `rv`: maps source ValueId → target ValueId
+    /// `re_in`: maps source effect_in → target effect_in
+    /// `alloc_effect`: allocates fresh effect_out tokens for Alloca/Load/Store
+    ///
+    /// Panics on `Soac` — SOAC lowering expands those rather than remapping.
+    pub fn remap(
+        &self,
+        rv: &impl Fn(&ValueId) -> ValueId,
+        re_in: &impl Fn(&EffectToken) -> EffectToken,
+        alloc_effect: &mut impl FnMut() -> EffectToken,
+    ) -> InstKind {
+        match self {
+            InstKind::Int(s) => InstKind::Int(s.clone()),
+            InstKind::Float(s) => InstKind::Float(s.clone()),
+            InstKind::Bool(b) => InstKind::Bool(*b),
+            InstKind::Unit => InstKind::Unit,
+            InstKind::String(s) => InstKind::String(s.clone()),
+            InstKind::BinOp { op, lhs, rhs } => InstKind::BinOp {
+                op: op.clone(),
+                lhs: rv(lhs),
+                rhs: rv(rhs),
+            },
+            InstKind::UnaryOp { op, operand } => InstKind::UnaryOp {
+                op: op.clone(),
+                operand: rv(operand),
+            },
+            InstKind::Tuple(elems) => InstKind::Tuple(elems.iter().map(rv).collect()),
+            InstKind::ArrayLit { elements } => InstKind::ArrayLit {
+                elements: elements.iter().map(rv).collect(),
+            },
+            InstKind::ArrayRange { start, len, step } => InstKind::ArrayRange {
+                start: rv(start),
+                len: rv(len),
+                step: step.as_ref().map(rv),
+            },
+            InstKind::Vector(elems) => InstKind::Vector(elems.iter().map(rv).collect()),
+            InstKind::Matrix(rows) => {
+                InstKind::Matrix(rows.iter().map(|row| row.iter().map(rv).collect()).collect())
+            }
+            InstKind::Project { base, index } => InstKind::Project {
+                base: rv(base),
+                index: *index,
+            },
+            InstKind::Index { base, index } => InstKind::Index {
+                base: rv(base),
+                index: rv(index),
+            },
+            InstKind::Call { func, args } => InstKind::Call {
+                func: func.clone(),
+                args: args.iter().map(rv).collect(),
+            },
+            InstKind::Global(name) => InstKind::Global(name.clone()),
+            InstKind::Extern(name) => InstKind::Extern(name.clone()),
+            InstKind::Intrinsic { name, args } => InstKind::Intrinsic {
+                name: name.clone(),
+                args: args.iter().map(rv).collect(),
+            },
+            InstKind::Alloca {
+                elem_ty, effect_in, ..
+            } => InstKind::Alloca {
+                elem_ty: elem_ty.clone(),
+                effect_in: re_in(effect_in),
+                effect_out: alloc_effect(),
+            },
+            InstKind::Load { ptr, effect_in, .. } => InstKind::Load {
+                ptr: rv(ptr),
+                effect_in: re_in(effect_in),
+                effect_out: alloc_effect(),
+            },
+            InstKind::Store {
+                ptr,
+                value,
+                effect_in,
+                ..
+            } => InstKind::Store {
+                ptr: rv(ptr),
+                value: rv(value),
+                effect_in: re_in(effect_in),
+                effect_out: alloc_effect(),
+            },
+            InstKind::StorageView { source, offset, len } => InstKind::StorageView {
+                source: match source {
+                    ViewSource::Storage { set, binding } => ViewSource::Storage {
+                        set: *set,
+                        binding: *binding,
+                    },
+                    ViewSource::Inherited { parent } => ViewSource::Inherited { parent: rv(parent) },
+                },
+                offset: rv(offset),
+                len: rv(len),
+            },
+            InstKind::StorageViewIndex { view, index } => InstKind::StorageViewIndex {
+                view: rv(view),
+                index: rv(index),
+            },
+            InstKind::StorageViewLen { view } => InstKind::StorageViewLen { view: rv(view) },
+            InstKind::OutputPtr { index } => InstKind::OutputPtr { index: *index },
+            InstKind::Soac(_) => {
+                panic!("ICE: Soac in InstKind::remap — lower SOACs before remapping")
+            }
+        }
+    }
 }
 
 /// First-class SOAC (Second-Order Array Combinator) operations in SSA.

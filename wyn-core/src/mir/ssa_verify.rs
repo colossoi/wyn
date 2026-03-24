@@ -206,8 +206,7 @@ impl<'a> Verifier<'a> {
     }
 
     fn verify_inst_uses(&mut self, block_id: BlockId, inst_idx: usize, kind: &InstKind) {
-        let uses = self.collect_value_uses(kind);
-        for value in uses {
+        for value in kind.value_uses() {
             self.check_value_defined(value, block_id, Some(inst_idx));
         }
     }
@@ -306,44 +305,6 @@ impl<'a> Verifier<'a> {
                 self.check_value_defined(*value, block_id, None);
             }
             Terminator::ReturnUnit | Terminator::Unreachable => {}
-        }
-    }
-
-    fn collect_value_uses(&self, kind: &InstKind) -> Vec<ValueId> {
-        match kind {
-            InstKind::Int(_)
-            | InstKind::Float(_)
-            | InstKind::Bool(_)
-            | InstKind::Unit
-            | InstKind::String(_)
-            | InstKind::Global(_)
-            | InstKind::Extern(_) => vec![],
-
-            InstKind::BinOp { lhs, rhs, .. } => vec![*lhs, *rhs],
-            InstKind::UnaryOp { operand, .. } => vec![*operand],
-            InstKind::Tuple(elems) => elems.clone(),
-            InstKind::ArrayLit { elements } => elements.clone(),
-            InstKind::ArrayRange { start, len, step } => {
-                let mut uses = vec![*start, *len];
-                if let Some(s) = step {
-                    uses.push(*s);
-                }
-                uses
-            }
-            InstKind::Vector(elems) => elems.clone(),
-            InstKind::Matrix(rows) => rows.iter().flatten().copied().collect(),
-            InstKind::Project { base, .. } => vec![*base],
-            InstKind::Index { base, index } => vec![*base, *index],
-            InstKind::Call { args, .. } => args.clone(),
-            InstKind::Intrinsic { args, .. } => args.clone(),
-            InstKind::Alloca { .. } => vec![],
-            InstKind::Load { ptr, .. } => vec![*ptr],
-            InstKind::Store { ptr, value, .. } => vec![*ptr, *value],
-            InstKind::StorageView { offset, len, .. } => vec![*offset, *len],
-            InstKind::StorageViewIndex { view, index } => vec![*view, *index],
-            InstKind::StorageViewLen { view } => vec![*view],
-            InstKind::OutputPtr { .. } => vec![],
-            InstKind::Soac(soac) => soac.uses(),
         }
     }
 

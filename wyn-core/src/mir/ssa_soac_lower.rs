@@ -10,9 +10,7 @@ use std::collections::HashMap;
 
 use crate::ast::{NodeId, Span, TypeName};
 use crate::mir::soa_helpers::{extract_array_size, soa_array_with, soa_index, soa_length, soa_uninit};
-use crate::mir::ssa::{
-    BlockId, ControlHeader, EffectToken, FuncBody, InstKind, SsaSoac, Terminator, ValueId, ViewSource,
-};
+use crate::mir::ssa::{BlockId, EffectToken, FuncBody, InstKind, SsaSoac, Terminator, ValueId};
 use crate::mir::ssa_builder::FuncBuilder;
 use crate::tlc::to_ssa::SsaProgram;
 use polytype::Type;
@@ -105,7 +103,7 @@ fn lower_func_body(old_body: &FuncBody) -> FuncBody {
         // create new blocks and leave the builder on the loop's exit block.  The
         // control header must be set on the block that actually carries the
         // CondBranch terminator, not the originally-mapped block.
-        let deferred_control = block.control.as_ref().map(|ctrl| remap_control_header(ctrl, &block_map));
+        let deferred_control = block.control.as_ref().map(|ctrl| ctrl.remap(&|b| block_map[b]));
 
         // Process instructions
         for &inst_id in &block.insts {
@@ -124,7 +122,11 @@ fn lower_func_body(old_body: &FuncBody) -> FuncBody {
                 }
                 _ => {
                     // Re-emit the instruction with remapped values
-                    let new_kind = remap_inst_kind(&inst.kind, &value_map, &effect_map, &mut builder);
+                    let new_kind = inst.kind.remap(
+                        &|v| value_map[v],
+                        &|e| *effect_map.get(e).unwrap_or(e),
+                        &mut || builder.alloc_effect(),
+                    );
                     // Track new effect tokens
                     register_new_effects(&inst.kind, &new_kind, &mut effect_map);
 
@@ -153,7 +155,7 @@ fn lower_func_body(old_body: &FuncBody) -> FuncBody {
 
         // Remap and set terminator
         if let Some(ref term) = block.terminator {
-            let new_term = remap_terminator(term, &value_map, &block_map);
+            let new_term = term.remap(&|v| value_map[v], &|b| block_map[b]);
             builder.terminate(new_term).ok();
         }
     }
@@ -418,131 +420,11 @@ fn expand_reduce(
 }
 
 // =============================================================================
-// Value / effect / block remapping helpers
+// Value / effect remapping helpers
 // =============================================================================
 
-fn remap_effect(
-    e: &EffectToken,
-    em: &HashMap<EffectToken, EffectToken>,
-    builder: &mut FuncBuilder,
-) -> EffectToken {
-    em.get(e).copied().unwrap_or_else(|| builder.alloc_effect())
-}
-
-fn remap_inst_kind(
-    kind: &InstKind,
-    vm: &HashMap<ValueId, ValueId>,
-    em: &HashMap<EffectToken, EffectToken>,
-    builder: &mut FuncBuilder,
-) -> InstKind {
-    let rv = |v: &ValueId| -> ValueId { vm[v] };
-
-    match kind {
-        InstKind::Int(s) => InstKind::Int(s.clone()),
-        InstKind::Float(s) => InstKind::Float(s.clone()),
-        InstKind::Bool(b) => InstKind::Bool(*b),
-        InstKind::Unit => InstKind::Unit,
-        InstKind::String(s) => InstKind::String(s.clone()),
-        InstKind::BinOp { op, lhs, rhs } => InstKind::BinOp {
-            op: op.clone(),
-            lhs: rv(lhs),
-            rhs: rv(rhs),
-        },
-        InstKind::UnaryOp { op, operand } => InstKind::UnaryOp {
-            op: op.clone(),
-            operand: rv(operand),
-        },
-        InstKind::Tuple(elems) => InstKind::Tuple(elems.iter().map(rv).collect()),
-        InstKind::ArrayLit { elements } => InstKind::ArrayLit {
-            elements: elements.iter().map(rv).collect(),
-        },
-        InstKind::ArrayRange { start, len, step } => InstKind::ArrayRange {
-            start: rv(start),
-            len: rv(len),
-            step: step.as_ref().map(rv),
-        },
-        InstKind::Vector(elems) => InstKind::Vector(elems.iter().map(rv).collect()),
-        InstKind::Matrix(rows) => {
-            InstKind::Matrix(rows.iter().map(|row| row.iter().map(rv).collect()).collect())
-        }
-        InstKind::Project { base, index } => InstKind::Project {
-            base: rv(base),
-            index: *index,
-        },
-        InstKind::Index { base, index } => InstKind::Index {
-            base: rv(base),
-            index: rv(index),
-        },
-        InstKind::Call { func, args } => InstKind::Call {
-            func: func.clone(),
-            args: args.iter().map(rv).collect(),
-        },
-        InstKind::Global(name) => InstKind::Global(name.clone()),
-        InstKind::Extern(name) => InstKind::Extern(name.clone()),
-        InstKind::Intrinsic { name, args } => InstKind::Intrinsic {
-            name: name.clone(),
-            args: args.iter().map(rv).collect(),
-        },
-        InstKind::Alloca {
-            elem_ty, effect_in, ..
-        } => {
-            let new_in = remap_effect(effect_in, em, builder);
-            let new_out = builder.alloc_effect();
-            InstKind::Alloca {
-                elem_ty: elem_ty.clone(),
-                effect_in: new_in,
-                effect_out: new_out,
-            }
-        }
-        InstKind::Load { ptr, effect_in, .. } => {
-            let new_in = remap_effect(effect_in, em, builder);
-            let new_out = builder.alloc_effect();
-            InstKind::Load {
-                ptr: rv(ptr),
-                effect_in: new_in,
-                effect_out: new_out,
-            }
-        }
-        InstKind::Store {
-            ptr,
-            value,
-            effect_in,
-            ..
-        } => {
-            let new_in = remap_effect(effect_in, em, builder);
-            let new_out = builder.alloc_effect();
-            InstKind::Store {
-                ptr: rv(ptr),
-                value: rv(value),
-                effect_in: new_in,
-                effect_out: new_out,
-            }
-        }
-        InstKind::StorageView { source, offset, len } => InstKind::StorageView {
-            source: match source {
-                ViewSource::Storage { set, binding } => ViewSource::Storage {
-                    set: *set,
-                    binding: *binding,
-                },
-                ViewSource::Inherited { parent } => ViewSource::Inherited { parent: rv(parent) },
-            },
-            offset: rv(offset),
-            len: rv(len),
-        },
-        InstKind::StorageViewIndex { view, index } => InstKind::StorageViewIndex {
-            view: rv(view),
-            index: rv(index),
-        },
-        InstKind::StorageViewLen { view } => InstKind::StorageViewLen { view: rv(view) },
-        InstKind::OutputPtr { index } => InstKind::OutputPtr { index: *index },
-        InstKind::Soac(_) => {
-            panic!("internal compiler error: nested Soac in remap_inst_kind")
-        }
-    }
-}
-
 /// After remapping an effectful instruction, register the new effect_out in the map.
-fn register_new_effects(
+pub fn register_new_effects(
     old_kind: &InstKind,
     new_kind: &InstKind,
     effect_map: &mut HashMap<EffectToken, EffectToken>,
@@ -561,50 +443,5 @@ fn register_new_effects(
     };
     if let (Some(old), Some(new)) = (old_out, new_out) {
         effect_map.insert(old, new);
-    }
-}
-
-fn remap_terminator(
-    term: &Terminator,
-    vm: &HashMap<ValueId, ValueId>,
-    bm: &HashMap<BlockId, BlockId>,
-) -> Terminator {
-    let rv = |v: &ValueId| -> ValueId { vm[v] };
-    let rb = |b: &BlockId| -> BlockId { bm[b] };
-
-    match term {
-        Terminator::Branch { target, args } => Terminator::Branch {
-            target: rb(target),
-            args: args.iter().map(rv).collect(),
-        },
-        Terminator::CondBranch {
-            cond,
-            then_target,
-            then_args,
-            else_target,
-            else_args,
-        } => Terminator::CondBranch {
-            cond: rv(cond),
-            then_target: rb(then_target),
-            then_args: then_args.iter().map(rv).collect(),
-            else_target: rb(else_target),
-            else_args: else_args.iter().map(rv).collect(),
-        },
-        Terminator::Return(v) => Terminator::Return(rv(v)),
-        Terminator::ReturnUnit => Terminator::ReturnUnit,
-        Terminator::Unreachable => Terminator::Unreachable,
-    }
-}
-
-fn remap_control_header(ctrl: &ControlHeader, bm: &HashMap<BlockId, BlockId>) -> ControlHeader {
-    match ctrl {
-        ControlHeader::Loop {
-            merge,
-            continue_block,
-        } => ControlHeader::Loop {
-            merge: bm[merge],
-            continue_block: bm[continue_block],
-        },
-        ControlHeader::Selection { merge } => ControlHeader::Selection { merge: bm[merge] },
     }
 }

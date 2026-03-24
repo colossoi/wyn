@@ -144,97 +144,12 @@ fn apply_substitutions(body: &mut FuncBody, subs: &HashMap<ValueId, ValueId>) {
     };
 
     for inst in &mut body.insts {
-        match &mut inst.kind {
-            InstKind::BinOp { lhs, rhs, .. } => {
-                sub(lhs);
-                sub(rhs);
-            }
-            InstKind::UnaryOp { operand, .. } => sub(operand),
-            InstKind::Tuple(elems) | InstKind::Vector(elems) | InstKind::ArrayLit { elements: elems } => {
-                for e in elems {
-                    sub(e);
-                }
-            }
-            InstKind::Matrix(rows) => {
-                for row in rows {
-                    for e in row {
-                        sub(e);
-                    }
-                }
-            }
-            InstKind::Project { base, .. } => sub(base),
-            InstKind::Index { base, index } => {
-                sub(base);
-                sub(index);
-            }
-            InstKind::Call { args, .. } | InstKind::Intrinsic { args, .. } => {
-                for a in args {
-                    sub(a);
-                }
-            }
-            InstKind::Load { ptr, .. } => sub(ptr),
-            InstKind::Store { ptr, value, .. } => {
-                sub(ptr);
-                sub(value);
-            }
-            InstKind::ArrayRange { start, len, step } => {
-                sub(start);
-                sub(len);
-                if let Some(s) = step {
-                    sub(s);
-                }
-            }
-            InstKind::StorageView { offset, len, .. } => {
-                sub(offset);
-                sub(len);
-            }
-            InstKind::StorageViewIndex { view, index } => {
-                sub(view);
-                sub(index);
-            }
-            InstKind::StorageViewLen { view } => sub(view),
-            // SOAC instructions are opaque to peephole optimization — just remap uses
-            InstKind::Soac(soac) => {
-                soac.substitute_uses(&mut sub);
-            }
-            // No ValueId references in these variants
-            InstKind::Int(_)
-            | InstKind::Float(_)
-            | InstKind::Bool(_)
-            | InstKind::Unit
-            | InstKind::String(_)
-            | InstKind::Global(_)
-            | InstKind::Extern(_)
-            | InstKind::Alloca { .. }
-            | InstKind::OutputPtr { .. } => {}
-        }
+        inst.kind.substitute_values(&mut sub);
     }
 
     for block in &mut body.blocks {
         if let Some(ref mut term) = block.terminator {
-            match term {
-                Terminator::Branch { args, .. } => {
-                    for a in args {
-                        sub(a);
-                    }
-                }
-                Terminator::CondBranch {
-                    cond,
-                    then_args,
-                    else_args,
-                    ..
-                } => {
-                    sub(cond);
-                    for a in then_args {
-                        sub(a);
-                    }
-                    for a in else_args {
-                        sub(a);
-                    }
-                }
-                Terminator::Return(v) => sub(v),
-                Terminator::ReturnUnit | Terminator::Unreachable => {}
-            }
+            term.substitute_values(&mut sub);
         }
     }
 }
@@ -348,37 +263,15 @@ fn dce(body: &mut FuncBody) {
     let mut used: HashSet<ValueId> = HashSet::new();
 
     for inst in body.insts.iter() {
-        for v in collect_inst_uses(&inst.kind) {
+        for v in inst.kind.value_uses() {
             used.insert(v);
         }
     }
 
     for block in &body.blocks {
         if let Some(ref term) = block.terminator {
-            match term {
-                Terminator::Branch { args, .. } => {
-                    for a in args {
-                        used.insert(*a);
-                    }
-                }
-                Terminator::CondBranch {
-                    cond,
-                    then_args,
-                    else_args,
-                    ..
-                } => {
-                    used.insert(*cond);
-                    for a in then_args {
-                        used.insert(*a);
-                    }
-                    for a in else_args {
-                        used.insert(*a);
-                    }
-                }
-                Terminator::Return(v) => {
-                    used.insert(*v);
-                }
-                Terminator::ReturnUnit | Terminator::Unreachable => {}
+            for v in term.value_uses() {
+                used.insert(v);
             }
         }
     }
@@ -409,42 +302,6 @@ fn is_side_effecting(kind: &InstKind) -> bool {
             | InstKind::OutputPtr { .. }
             | InstKind::Soac(_)
     )
-}
-
-fn collect_inst_uses(kind: &InstKind) -> Vec<ValueId> {
-    match kind {
-        InstKind::Int(_)
-        | InstKind::Float(_)
-        | InstKind::Bool(_)
-        | InstKind::Unit
-        | InstKind::String(_)
-        | InstKind::Global(_)
-        | InstKind::Extern(_) => vec![],
-
-        InstKind::BinOp { lhs, rhs, .. } => vec![*lhs, *rhs],
-        InstKind::UnaryOp { operand, .. } => vec![*operand],
-        InstKind::Tuple(elems) | InstKind::Vector(elems) | InstKind::ArrayLit { elements: elems } => {
-            elems.clone()
-        }
-        InstKind::ArrayRange { start, len, step } => {
-            let mut uses = vec![*start, *len];
-            if let Some(s) = step {
-                uses.push(*s);
-            }
-            uses
-        }
-        InstKind::Matrix(rows) => rows.iter().flatten().copied().collect(),
-        InstKind::Project { base, .. } => vec![*base],
-        InstKind::Index { base, index } => vec![*base, *index],
-        InstKind::Call { args, .. } | InstKind::Intrinsic { args, .. } => args.clone(),
-        InstKind::Alloca { .. } | InstKind::OutputPtr { .. } => vec![],
-        InstKind::Load { ptr, .. } => vec![*ptr],
-        InstKind::Store { ptr, value, .. } => vec![*ptr, *value],
-        InstKind::StorageView { offset, len, .. } => vec![*offset, *len],
-        InstKind::StorageViewIndex { view, index } => vec![*view, *index],
-        InstKind::StorageViewLen { view } => vec![*view],
-        InstKind::Soac(soac) => soac.uses(),
-    }
 }
 
 // =============================================================================
