@@ -6,10 +6,10 @@
 //!
 //! All tests include entry points to ensure monomorphization can find reachable code.
 
-use crate::tlc::to_ssa::SsaProgram;
+use crate::ssa::types::Program;
 
 /// Run source through the pipeline up to SSA.
-fn compile_to_ssa(input: &str) -> SsaProgram {
+fn compile_to_ssa(input: &str) -> Program {
     let mut frontend = crate::cached_frontend();
     let parsed = crate::Compiler::parse(input, &mut frontend.node_counter).expect("Parsing failed");
     let alias_checked = parsed
@@ -50,7 +50,7 @@ fn should_fail_type_check(input: &str) -> bool {
 }
 
 /// Check that a function with the given name exists in the SSA program.
-fn has_function(ssa: &SsaProgram, name: &str) -> bool {
+fn has_function(ssa: &Program, name: &str) -> bool {
     ssa.functions.iter().any(|f| f.name == name)
 }
 
@@ -688,19 +688,19 @@ entry compute_main(data: []i32) i32 =
         // Show all instructions that involve indexing or storage views
         for inst in &f.body.insts {
             match &inst.kind {
-                crate::mir::ssa::InstKind::Index { .. } => {
+                crate::ssa::types::InstKind::Index { .. } => {
                     eprintln!(
                         "    inst {:?}: Index, result_ty: {:?}",
                         inst.result, inst.result_ty
                     );
                 }
-                crate::mir::ssa::InstKind::StorageView { .. } => {
+                crate::ssa::types::InstKind::StorageView { .. } => {
                     eprintln!(
                         "    inst {:?}: StorageView, result_ty: {:?}",
                         inst.result, inst.result_ty
                     );
                 }
-                crate::mir::ssa::InstKind::StorageViewIndex { .. } => {
+                crate::ssa::types::InstKind::StorageViewIndex { .. } => {
                     eprintln!(
                         "    inst {:?}: StorageViewIndex, result_ty: {:?}",
                         inst.result, inst.result_ty
@@ -723,8 +723,8 @@ entry compute_main(data: []i32) i32 =
     let has_storage_view = composite_fn.body.insts.iter().any(|i| {
         matches!(
             &i.kind,
-            crate::mir::ssa::InstKind::StorageView { .. }
-                | crate::mir::ssa::InstKind::StorageViewIndex { .. }
+            crate::ssa::types::InstKind::StorageView { .. }
+                | crate::ssa::types::InstKind::StorageViewIndex { .. }
         )
     });
     assert!(
@@ -770,7 +770,7 @@ fn compile_to_spirv(input: &str) -> Result<Vec<u32>, Box<dyn std::error::Error>>
 }
 
 /// Helper: compile source that may have modules (like raytrace.wyn)
-fn compile_to_ssa_with_modules(input: &str) -> SsaProgram {
+fn compile_to_ssa_with_modules(input: &str) -> Program {
     let mut frontend = crate::cached_frontend();
     let parsed = crate::Compiler::parse(input, &mut frontend.node_counter).expect("Parse failed");
     let parsed = parsed.elaborate_modules(&mut frontend.module_manager).expect("Module elaboration failed");
@@ -935,7 +935,7 @@ fn test_ssa_raytrace_well_formed() {
 #[test]
 #[ignore] // Known bug: SoA transform doesn't eliminate extraction maps after zip-map
 fn test_soa_eliminates_extraction_maps() {
-    use crate::mir::ssa::{InstKind, SsaSoac};
+    use crate::ssa::types::{InstKind, Soac};
 
     let ssa = compile_to_ssa(
         r#"
@@ -976,20 +976,14 @@ entry vertex_main() #[builtin(position)] vec4f32 =
     let body = if let Some(f) = func {
         &f.body
     } else {
-        &ssa.entry_points
-            .iter()
-            .find(|e| e.name == "vertex_main")
-            .expect("vertex_main")
-            .body
+        &ssa.entry_points.iter().find(|e| e.name == "vertex_main").expect("vertex_main").body
     };
 
     let soac_map_count: usize = body
         .blocks
         .iter()
         .flat_map(|b| b.insts.iter())
-        .filter(|&&inst_id| {
-            matches!(body.get_inst(inst_id).kind, InstKind::Soac(SsaSoac::Map { .. }))
-        })
+        .filter(|&&inst_id| matches!(body.get_inst(inst_id).kind, InstKind::Soac(Soac::Map { .. })))
         .count();
 
     // The processOne map should remain (real work), but the 4 extraction maps

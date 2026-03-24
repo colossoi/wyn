@@ -6,9 +6,9 @@
 
 use std::collections::HashMap;
 
-use crate::mir::ssa::{BlockId, EffectToken, FuncBody, Terminator, ValueId};
-use crate::mir::ssa_builder::FuncBuilder;
-use crate::mir::ssa_soac_lower::register_new_effects;
+use crate::ssa::builder::FuncBuilder;
+use crate::ssa::soac_lower::register_new_effects;
+use crate::ssa::types::{BlockId, EffectToken, FuncBody, Terminator, ValueId};
 
 /// Result of merging a source FuncBody into a target FuncBuilder.
 pub struct MergeResult {

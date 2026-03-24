@@ -1,7 +1,7 @@
 // SOAC Analysis Demo
 // Demonstrates SSA-level SOAC analysis for compute shader parallelization
 
-use wyn_core::{Compiler, FrontEnd, mir};
+use wyn_core::{Compiler, FrontEnd, ssa};
 
 fn main() {
     let source = r#"
@@ -51,7 +51,7 @@ entry compute_main(
         monomorphized.buffer_specialize().inline().soa_transform().to_ssa().expect("SSA conversion failed");
 
     // Run SSA SOAC analysis
-    let analysis = mir::ssa_soac_analysis::analyze_program(&ssa_converted.ssa);
+    let analysis = ssa::soac_analysis::analyze_program(&ssa_converted.ssa);
 
     // Print results
     println!("=== Analysis Results ===\n");

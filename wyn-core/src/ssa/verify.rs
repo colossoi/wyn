@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::ssa::{BlockId, EffectToken, FuncBody, InstKind, Terminator, ValueId};
+use super::types::{BlockId, EffectToken, FuncBody, InstKind, Terminator, ValueId};
 
 /// Verification error.
 #[derive(Debug, Clone)]
@@ -172,7 +172,7 @@ impl<'a> Verifier<'a> {
         }
     }
 
-    fn verify_block(&mut self, block_id: BlockId, block: &super::ssa::Block) {
+    fn verify_block(&mut self, block_id: BlockId, block: &super::types::Block) {
         // Register block parameters as defined
         for (i, param) in block.params.iter().enumerate() {
             self.define_value(param.value, DefLocation::BlockParam(block_id, i));

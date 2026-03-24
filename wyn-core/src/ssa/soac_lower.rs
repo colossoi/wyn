@@ -9,14 +9,14 @@
 use std::collections::HashMap;
 
 use crate::ast::{NodeId, Span, TypeName};
-use crate::mir::soa_helpers::{extract_array_size, soa_array_with, soa_index, soa_length, soa_uninit};
-use crate::mir::ssa::{BlockId, EffectToken, FuncBody, InstKind, SsaSoac, Terminator, ValueId};
-use crate::mir::ssa_builder::FuncBuilder;
-use crate::tlc::to_ssa::SsaProgram;
+use crate::ssa::builder::FuncBuilder;
+use crate::ssa::soa_helpers::{extract_array_size, soa_array_with, soa_index, soa_length, soa_uninit};
+use crate::ssa::types::Program;
+use crate::ssa::types::{BlockId, EffectToken, FuncBody, InstKind, Soac, Terminator, ValueId};
 use polytype::Type;
 
 /// Lower all SOAC instructions in the program to explicit loops.
-pub fn lower_soacs(mut program: SsaProgram) -> SsaProgram {
+pub fn lower_soacs(mut program: Program) -> Program {
     for func in &mut program.functions {
         if has_soac_instructions(&func.body) {
             func.body = lower_func_body(&func.body);
@@ -167,14 +167,14 @@ fn lower_func_body(old_body: &FuncBody) -> FuncBody {
 /// Returns the result ValueId of the expansion.
 fn expand_soac(
     builder: &mut FuncBuilder,
-    soac: &SsaSoac,
+    soac: &Soac,
     result_ty: Type<TypeName>,
     span: Span,
     node_id: NodeId,
     value_map: &HashMap<ValueId, ValueId>,
 ) -> Option<ValueId> {
     match soac {
-        SsaSoac::Map {
+        Soac::Map {
             func,
             inputs,
             captures,
@@ -197,7 +197,7 @@ fn expand_soac(
             span,
             node_id,
         ),
-        SsaSoac::Reduce {
+        Soac::Reduce {
             func,
             input,
             init,
@@ -216,7 +216,7 @@ fn expand_soac(
             span,
             node_id,
         ),
-        SsaSoac::Scan { .. } => {
+        Soac::Scan { .. } => {
             panic!("internal compiler error: Scan SOAC lowering not yet implemented")
         }
     }

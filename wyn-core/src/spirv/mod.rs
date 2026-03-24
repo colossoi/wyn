@@ -9,11 +9,11 @@ use std::collections::{HashMap, HashSet};
 use crate::ast::TypeName;
 use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
-use crate::mir::layout::{buffer_array_strides, type_byte_size};
-use crate::mir::ssa::{
+use crate::ssa::layout::{buffer_array_strides, type_byte_size};
+use crate::ssa::types::{
     Block, BlockId, ControlHeader, FuncBody, Inst, InstKind, Terminator, ValueId, ViewSource,
 };
-use crate::tlc::to_ssa::{ExecutionModel, IoDecoration, SsaEntryPoint, SsaFunction, SsaProgram};
+use crate::ssa::types::{EntryPoint, ExecutionModel, Function, IoDecoration, Program};
 use crate::types;
 use crate::types::TypeExt;
 use crate::{bail_spirv, err_spirv};
@@ -847,7 +847,7 @@ impl Constructor {
 /// - Block parameters become OpPhi nodes
 /// - Terminators become branch instructions
 fn lower_ssa_body(constructor: &mut Constructor, body: &FuncBody) -> Result<spirv::Word> {
-    let mut ctx = SsaLowerCtx::new(constructor, body, false);
+    let mut ctx = LowerCtx::new(constructor, body, false);
     ctx.lower()
 }
 
@@ -857,12 +857,12 @@ fn lower_ssa_body(constructor: &mut Constructor, body: &FuncBody) -> Result<spir
 /// SSA for entry points should use OutputPtr+Store then ReturnUnit;
 /// Return(value) will produce an error.
 fn lower_ssa_body_for_entry(constructor: &mut Constructor, body: &FuncBody) -> Result<spirv::Word> {
-    let mut ctx = SsaLowerCtx::new(constructor, body, true);
+    let mut ctx = LowerCtx::new(constructor, body, true);
     ctx.lower()
 }
 
 /// Context for lowering SSA to SPIR-V.
-struct SsaLowerCtx<'a, 'b> {
+struct LowerCtx<'a, 'b> {
     constructor: &'a mut Constructor,
     body: &'b FuncBody,
     /// True when lowering an entry point (void function — OpReturnValue is invalid).
@@ -882,9 +882,9 @@ struct SsaLowerCtx<'a, 'b> {
     view_buffer_id: HashMap<ValueId, u32>,
 }
 
-impl<'a, 'b> SsaLowerCtx<'a, 'b> {
+impl<'a, 'b> LowerCtx<'a, 'b> {
     fn new(constructor: &'a mut Constructor, body: &'b FuncBody, is_entry_point: bool) -> Self {
-        SsaLowerCtx {
+        LowerCtx {
             constructor,
             body,
             is_entry_point,
@@ -981,7 +981,7 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
         let mut order = Vec::with_capacity(self.body.blocks.len());
 
         fn visit(
-            blocks: &[crate::mir::ssa::Block],
+            blocks: &[crate::ssa::types::Block],
             idx: usize,
             visited: &mut [bool],
             order: &mut Vec<usize>,
@@ -1474,7 +1474,7 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
             let producer_block =
                 self.body.insts.iter().enumerate().find(|(_, i)| i.result == Some(value)).and_then(
                     |(idx, _)| {
-                        let iid = crate::mir::ssa::InstId(idx as u32);
+                        let iid = crate::ssa::types::InstId(idx as u32);
                         self.body
                             .blocks
                             .iter()
@@ -2676,7 +2676,7 @@ impl<'a, 'b> SsaLowerCtx<'a, 'b> {
 /// Lower an SSA program directly to SPIR-V.
 ///
 /// This is the new direct path: TLC → SSA → SPIR-V, bypassing MIR.
-pub fn lower_ssa_program(program: &SsaProgram) -> Result<Vec<u32>> {
+pub fn lower_ssa_program(program: &Program) -> Result<Vec<u32>> {
     // Use a thread with larger stack size for complex shaders
     const STACK_SIZE: usize = 16 * 1024 * 1024; // 16MB
 
@@ -2690,7 +2690,7 @@ pub fn lower_ssa_program(program: &SsaProgram) -> Result<Vec<u32>> {
     handle.join().expect("Lowering thread panicked")
 }
 
-fn lower_ssa_program_impl(program: &SsaProgram) -> Result<Vec<u32>> {
+fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
     let mut constructor = Constructor::new();
 
     // Collect entry point info for later
@@ -2862,7 +2862,7 @@ fn lower_ssa_program_impl(program: &SsaProgram) -> Result<Vec<u32>> {
 }
 
 /// Lower an SSA function to SPIR-V.
-fn lower_ssa_function(constructor: &mut Constructor, func: &SsaFunction) -> Result<()> {
+fn lower_ssa_function(constructor: &mut Constructor, func: &Function) -> Result<()> {
     let body = &func.body;
 
     // Extract parameter types and names, converting types to SPIR-V
@@ -2880,7 +2880,7 @@ fn lower_ssa_function(constructor: &mut Constructor, func: &SsaFunction) -> Resu
 }
 
 /// Lower an SSA entry point to SPIR-V.
-fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &SsaEntryPoint) -> Result<()> {
+fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &EntryPoint) -> Result<()> {
     let body = &entry.body;
     let is_compute = matches!(entry.execution_model, ExecutionModel::Compute { .. });
 

@@ -5,12 +5,12 @@
 //! and tracks array provenance to determine if they can be chunked across threads.
 
 use crate::ast::TypeName;
-use crate::tlc::to_ssa::{EntryInput, ExecutionModel, SsaEntryPoint, SsaFunction, SsaProgram};
+use crate::ssa::types::{EntryInput, EntryPoint, ExecutionModel, Function, Program};
 use crate::types::is_virtual_array;
 use polytype::Type;
 use std::collections::HashMap;
 
-use super::ssa::{FuncBody, InstKind, SsaSoac, ValueId, ViewSource};
+use super::types::{FuncBody, InstKind, Soac, ValueId, ViewSource};
 
 // =============================================================================
 // Array Provenance
@@ -49,7 +49,7 @@ pub enum ArrayProvenance {
 fn resolve_storage_view(
     body: &FuncBody,
     value: ValueId,
-    entry: &SsaEntryPoint,
+    entry: &EntryPoint,
 ) -> Option<(usize, (u32, u32))> {
     for inst in &body.insts {
         if inst.result == Some(value) {
@@ -108,7 +108,7 @@ fn track_provenance(body: &FuncBody, value: ValueId, inputs: &[EntryInput]) -> A
 /// Ranges constructed in called functions have bounds that aren't accessible
 /// at entry level, so we only report `Range` provenance at entry depth.
 fn track_provenance_unified(
-    entry: &SsaEntryPoint,
+    entry: &EntryPoint,
     body: &FuncBody,
     value: ValueId,
     param_to_entry_arg: &HashMap<usize, ValueId>,
@@ -212,7 +212,7 @@ pub struct ComputeEntryAnalysis {
 
 /// Analysis results for an SSA program.
 #[derive(Debug, Default)]
-pub struct SsaSoacAnalysis {
+pub struct SoacAnalysis {
     /// Analysis for each compute entry point.
     pub by_entry: HashMap<String, ComputeEntryAnalysis>,
 }
@@ -222,8 +222,8 @@ pub struct SsaSoacAnalysis {
 // =============================================================================
 
 /// Analyze an SSA program for parallelizable SOAC patterns.
-pub fn analyze_program(program: &SsaProgram) -> SsaSoacAnalysis {
-    let mut analysis = SsaSoacAnalysis::default();
+pub fn analyze_program(program: &Program) -> SoacAnalysis {
+    let mut analysis = SoacAnalysis::default();
 
     for entry in &program.entry_points {
         if let ExecutionModel::Compute { local_size } = entry.execution_model {
@@ -236,7 +236,7 @@ pub fn analyze_program(program: &SsaProgram) -> SsaSoacAnalysis {
 }
 
 /// Find a function by name in the program.
-fn find_function<'a>(program: &'a SsaProgram, name: &str) -> Option<&'a SsaFunction> {
+fn find_function<'a>(program: &'a Program, name: &str) -> Option<&'a Function> {
     program.functions.iter().find(|f| f.name == name)
 }
 
@@ -245,9 +245,9 @@ const MAX_CALL_DEPTH: usize = 10;
 
 /// Analyze a single compute entry point.
 fn analyze_compute_entry(
-    entry: &SsaEntryPoint,
+    entry: &EntryPoint,
     local_size: (u32, u32, u32),
-    program: &SsaProgram,
+    program: &Program,
 ) -> ComputeEntryAnalysis {
     let par_soac = find_highest_soac(entry, program);
     ComputeEntryAnalysis {
@@ -259,7 +259,7 @@ fn analyze_compute_entry(
 
 /// Find the highest (closest to entry point) parallelizable SOAC in the call tree.
 /// Uses breadth-first search: checks each level before recursing into called functions.
-fn find_highest_soac(entry: &SsaEntryPoint, program: &SsaProgram) -> Option<ParallelizableSoac> {
+fn find_highest_soac(entry: &EntryPoint, program: &Program) -> Option<ParallelizableSoac> {
     // Entry params map to themselves for provenance tracking
     let initial_mapping: HashMap<usize, ValueId> =
         entry.body.params.iter().enumerate().map(|(i, (v, _, _))| (i, *v)).collect();
@@ -269,10 +269,10 @@ fn find_highest_soac(entry: &SsaEntryPoint, program: &SsaProgram) -> Option<Para
 
 /// Search for a parallelizable SOAC in a function body, recursing into called functions.
 fn find_soac_in_body(
-    entry: &SsaEntryPoint,
+    entry: &EntryPoint,
     body: &FuncBody,
     param_to_entry_arg: &HashMap<usize, ValueId>,
-    program: &SsaProgram,
+    program: &Program,
     depth: usize,
 ) -> Option<ParallelizableSoac> {
     if depth > MAX_CALL_DEPTH {
@@ -282,7 +282,7 @@ fn find_soac_in_body(
     // Breadth-first: check for SOAC instructions at THIS level first
     for inst in &body.insts {
         match &inst.kind {
-            InstKind::Soac(SsaSoac::Map {
+            InstKind::Soac(Soac::Map {
                 func,
                 inputs,
                 captures,
@@ -305,7 +305,7 @@ fn find_soac_in_body(
                     }
                 }
             }
-            InstKind::Soac(SsaSoac::Reduce {
+            InstKind::Soac(Soac::Reduce {
                 func,
                 input,
                 init,
@@ -328,7 +328,7 @@ fn find_soac_in_body(
                     });
                 }
             }
-            InstKind::Soac(SsaSoac::Scan {
+            InstKind::Soac(Soac::Scan {
                 func,
                 input,
                 init,
@@ -383,7 +383,7 @@ fn build_param_mapping(
     caller_body: &FuncBody,
     caller_param_to_entry: &HashMap<usize, ValueId>,
     call_args: &[ValueId],
-    entry: &SsaEntryPoint,
+    entry: &EntryPoint,
 ) -> HashMap<usize, ValueId> {
     call_args
         .iter()

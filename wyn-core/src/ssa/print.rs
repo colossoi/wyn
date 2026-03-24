@@ -1,14 +1,14 @@
 //! Pretty-printer for SSA programs.
 //!
-//! Formats an `SsaProgram` as a human-readable text representation suitable for
+//! Formats an `Program` as a human-readable text representation suitable for
 //! debugging and inspection.
 
 use crate::ast::TypeName;
-use crate::tlc::to_ssa::{ExecutionModel, SsaProgram};
+use crate::ssa::types::{ExecutionModel, Program};
 use polytype::Type;
 use std::fmt::Write;
 
-use super::ssa::*;
+use super::types::*;
 
 /// Format a type concisely.
 fn format_type(ty: &Type<TypeName>) -> String {
@@ -60,8 +60,8 @@ fn format_values(vals: &[ValueId]) -> String {
     vals.iter().map(|v| format!("%{}", v.0)).collect::<Vec<_>>().join(", ")
 }
 
-/// Format an `SsaProgram` as a readable text representation.
-pub fn format_program(program: &SsaProgram) -> String {
+/// Format an `Program` as a readable text representation.
+pub fn format_program(program: &Program) -> String {
     let mut out = String::new();
 
     for func in &program.functions {
@@ -260,9 +260,9 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
 }
 
 /// Format a SOAC instruction.
-fn format_soac(out: &mut String, soac: &SsaSoac) {
+fn format_soac(out: &mut String, soac: &Soac) {
     match soac {
-        SsaSoac::Map {
+        Soac::Map {
             func,
             inputs,
             captures,
@@ -273,7 +273,7 @@ fn format_soac(out: &mut String, soac: &SsaSoac) {
                 let _ = write!(out, " captures=[{}]", format_values(captures));
             }
         }
-        SsaSoac::Reduce {
+        Soac::Reduce {
             func,
             input,
             init,
@@ -285,7 +285,7 @@ fn format_soac(out: &mut String, soac: &SsaSoac) {
                 let _ = write!(out, " captures=[{}]", format_values(captures));
             }
         }
-        SsaSoac::Scan {
+        Soac::Scan {
             func,
             input,
             init,

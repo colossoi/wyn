@@ -1,8 +1,8 @@
 #![cfg(test)]
 
 use crate::ast::{NodeId, Span, TypeName};
-use crate::mir::ssa::Terminator;
-use crate::mir::ssa_builder::*;
+use crate::ssa::builder::*;
+use crate::ssa::types::Terminator;
 use polytype::Type;
 
 fn dummy_span() -> Span {
@@ -192,7 +192,7 @@ fn test_if_then_else_pattern() {
     assert_eq!(body.get_block(if_blocks.merge_block).params.len(), 1);
 
     // Verify with verifier
-    let verify_result = crate::mir::ssa_verify::verify_func(&body);
+    let verify_result = crate::ssa::verify::verify_func(&body);
     assert!(
         verify_result.is_ok(),
         "Verification failed: {:?}",
@@ -257,7 +257,7 @@ fn test_while_loop_pattern() {
     assert_eq!(body.get_block(loop_blocks.exit).params.len(), 1); // result
 
     // Verify with verifier
-    let verify_result = crate::mir::ssa_verify::verify_func(&body);
+    let verify_result = crate::ssa::verify::verify_func(&body);
     assert!(
         verify_result.is_ok(),
         "Verification failed: {:?}",
@@ -333,7 +333,7 @@ fn test_for_range_loop_pattern() {
     assert_eq!(body.get_block(loop_blocks.exit).params.len(), 1); // result
 
     // Verify with verifier
-    let verify_result = crate::mir::ssa_verify::verify_func(&body);
+    let verify_result = crate::ssa::verify::verify_func(&body);
     assert!(
         verify_result.is_ok(),
         "Verification failed: {:?}",
@@ -463,7 +463,7 @@ fn test_nested_if_in_loop() {
     assert_eq!(body.num_blocks(), 7);
 
     // Verify with verifier
-    let verify_result = crate::mir::ssa_verify::verify_func(&body);
+    let verify_result = crate::ssa::verify::verify_func(&body);
     assert!(
         verify_result.is_ok(),
         "Verification failed: {:?}",

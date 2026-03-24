@@ -8,7 +8,7 @@
 use crate::ast::{NodeId, Span, TypeName};
 use polytype::Type;
 
-use super::ssa::{
+use super::types::{
     Block, BlockId, BlockParam, ControlHeader, EffectToken, FuncBody, Inst, InstId, InstKind, Terminator,
     ValueId, ViewSource,
 };

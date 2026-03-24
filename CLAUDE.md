@@ -39,8 +39,8 @@ cargo run --bin wyn -- check test.wyn
 2. **Parser** (`wyn-core/src/parser.rs`): Builds AST from tokens
 3. **Type Checker** (`wyn-core/src/types/checker.rs`): Hindley-Milner type inference
 4. **TLC** (`wyn-core/src/tlc/`): Typed Lambda Calculus IR, defunctionalization, monomorphization
-5. **SSA** (`wyn-core/src/mir/ssa.rs`): SSA form with basic blocks and block parameters
-6. **Code Generator** (`wyn-core/src/spirv/ssa_lowering.rs`): Generates SPIR-V from SSA
+5. **SSA** (`wyn-core/src/ssa/types.rs`): SSA form with basic blocks and block parameters
+6. **Code Generator** (`wyn-core/src/spirv/mod.rs`): Generates SPIR-V from SSA
 
 ### Key Design Decisions
 - **Error Handling**: Uses thiserror for structured error types
@@ -53,7 +53,7 @@ cargo run --bin wyn -- check test.wyn
 - Parser rules go in `parser.rs`
 - Type checking logic in `types/checker.rs`
 - TLC transformation in `tlc/mod.rs`
-- SPIR-V generation in `spirv/ssa_lowering.rs`
+- SPIR-V generation in `spirv/mod.rs`
 - All new syntax elements should have unit tests
 
 ### Visualizing SPIR-V Output

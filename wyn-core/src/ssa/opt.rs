@@ -11,13 +11,13 @@
 //!   Iterates to fixpoint for chained empty blocks.
 
 use crate::ast::TypeName;
-use crate::mir::ssa::{BlockId, ControlHeader, FuncBody, InstKind, Terminator, ValueId};
-use crate::tlc::to_ssa::SsaProgram;
+use crate::ssa::types::Program;
+use crate::ssa::types::{BlockId, ControlHeader, FuncBody, InstKind, Terminator, ValueId};
 use polytype::Type;
 use std::collections::{HashMap, HashSet};
 
 /// Run SSA peephole optimizations on the entire program.
-pub fn optimize(mut program: SsaProgram) -> SsaProgram {
+pub fn optimize(mut program: Program) -> Program {
     for func in &mut program.functions {
         optimize_func(&mut func.body);
     }

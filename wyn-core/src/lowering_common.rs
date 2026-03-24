@@ -1,7 +1,7 @@
 //! Common utilities shared between lowering backends (SPIR-V, GLSL, etc.)
 
 use crate::ast::TypeName;
-use crate::tlc::to_ssa::ExecutionModel;
+use crate::ssa::types::ExecutionModel;
 use polytype::Type as PolyType;
 
 /// Shader stage for entry points

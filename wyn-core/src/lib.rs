@@ -4,12 +4,12 @@ pub mod error;
 pub mod impl_source;
 pub mod intrinsics;
 pub mod lexer;
-pub mod mir;
 pub mod module_manager;
 pub mod name_resolution;
 pub mod parser;
 pub mod pattern;
 pub mod scope;
+pub mod ssa;
 pub mod types;
 pub mod visitor;
 
@@ -824,7 +824,7 @@ impl TlcSoaTransformed {
 
 /// TLC has been converted directly to SSA
 pub struct SsaConverted {
-    pub ssa: tlc::to_ssa::SsaProgram,
+    pub ssa: ssa::types::Program,
 }
 
 impl SsaConverted {
@@ -840,14 +840,14 @@ impl SsaConverted {
 
 /// SSA with parallelized SOACs for compute shaders
 pub struct SsaParallelized {
-    pub ssa: tlc::to_ssa::SsaProgram,
+    pub ssa: ssa::types::Program,
     pub pipeline: pipeline_descriptor::PipelineDescriptor,
 }
 
 impl SsaParallelized {
     /// Eliminate dead functions (not reachable from any entry point).
     pub fn filter_reachable(self) -> SsaReachable {
-        let ssa = mir::reachability::eliminate_dead_functions(self.ssa);
+        let ssa = ssa::reachability::eliminate_dead_functions(self.ssa);
         SsaReachable {
             ssa,
             pipeline: self.pipeline,
@@ -857,14 +857,14 @@ impl SsaParallelized {
 
 /// SSA with dead functions eliminated
 pub struct SsaReachable {
-    pub ssa: tlc::to_ssa::SsaProgram,
+    pub ssa: ssa::types::Program,
     pub pipeline: pipeline_descriptor::PipelineDescriptor,
 }
 
 impl SsaReachable {
     /// Run SSA peephole optimizations (param forwarding, empty block elimination).
     pub fn optimize(self) -> SsaOptimized {
-        let ssa = mir::ssa_opt::optimize(self.ssa);
+        let ssa = ssa::opt::optimize(self.ssa);
         SsaOptimized {
             ssa,
             pipeline: self.pipeline,
@@ -874,14 +874,14 @@ impl SsaReachable {
 
 /// SSA after peephole optimizations
 pub struct SsaOptimized {
-    pub ssa: tlc::to_ssa::SsaProgram,
+    pub ssa: ssa::types::Program,
     pub pipeline: pipeline_descriptor::PipelineDescriptor,
 }
 
 impl SsaOptimized {
     /// Lower first-class SOAC instructions to explicit loops.
     pub fn lower_soacs(self) -> SsaSoacLowered {
-        let ssa = mir::ssa_soac_lower::lower_soacs(self.ssa);
+        let ssa = ssa::soac_lower::lower_soacs(self.ssa);
         SsaSoacLowered {
             ssa,
             pipeline: self.pipeline,
@@ -891,7 +891,7 @@ impl SsaOptimized {
 
 /// SSA after SOAC instructions have been lowered to explicit loops
 pub struct SsaSoacLowered {
-    pub ssa: tlc::to_ssa::SsaProgram,
+    pub ssa: ssa::types::Program,
     pub pipeline: pipeline_descriptor::PipelineDescriptor,
 }
 

@@ -6,7 +6,7 @@
 //! 3. Constant folding in slice indices works correctly
 
 use crate::error::CompilerError;
-use crate::tlc::to_ssa::SsaProgram;
+use crate::ssa::types::Program;
 
 /// Helper to run full pipeline through lowering, including desugar step
 fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
@@ -40,7 +40,7 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
 }
 
 /// Helper to run pipeline through SSA (checks desugar correctness)
-fn compile_through_ssa(input: &str) -> Result<SsaProgram, CompilerError> {
+fn compile_through_ssa(input: &str) -> Result<Program, CompilerError> {
     let mut frontend = crate::cached_frontend();
     let parsed = crate::Compiler::parse(input, &mut frontend.node_counter)?;
     let alias_checked = parsed

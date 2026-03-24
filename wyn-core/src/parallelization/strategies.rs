@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use crate::ast::TypeName;
-use crate::mir::ssa::{FuncBody, InstKind, ValueId};
+use crate::ssa::types::{FuncBody, InstKind, ValueId};
 use crate::types::{TypeExt, is_virtual_array};
 use polytype::Type;
 
@@ -346,7 +346,7 @@ impl OutputStrategy for StorageOutput {
 pub fn remap_value(
     source: &FuncBody,
     value: ValueId,
-    builder: &mut crate::mir::ssa_builder::FuncBuilder,
+    builder: &mut crate::ssa::builder::FuncBuilder,
     memo: &mut HashMap<ValueId, ValueId>,
     span: crate::ast::Span,
     node_id: crate::ast::NodeId,
@@ -478,7 +478,7 @@ pub fn remap_value(
 fn remap_values(
     source: &FuncBody,
     values: &[ValueId],
-    builder: &mut crate::mir::ssa_builder::FuncBuilder,
+    builder: &mut crate::ssa::builder::FuncBuilder,
     memo: &mut HashMap<ValueId, ValueId>,
     span: crate::ast::Span,
     node_id: crate::ast::NodeId,

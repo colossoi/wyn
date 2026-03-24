@@ -5,8 +5,8 @@
 //! Used by both `to_ssa.rs` (for non-SOAC array ops) and `ssa_soac_lower.rs`.
 
 use crate::ast::{NodeId, Span, TypeName};
-use crate::mir::ssa::ValueId;
-use crate::mir::ssa_builder::FuncBuilder;
+use crate::ssa::builder::FuncBuilder;
+use crate::ssa::types::ValueId;
 use crate::types::TypeExt;
 use polytype::Type;
 

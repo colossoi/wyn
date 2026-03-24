@@ -243,7 +243,7 @@ fn compile_file(
 
     // Dump initial SSA if requested
     if let Some(ref path) = output_init_ssa {
-        fs::write(path, wyn_core::mir::ssa_print::format_program(&ssa.ssa))?;
+        fs::write(path, wyn_core::ssa::print::format_program(&ssa.ssa))?;
         if verbose {
             info!("Wrote initial SSA to {}", path.display());
         }
@@ -260,7 +260,7 @@ fn compile_file(
 
     // Dump optimized SSA if requested
     if let Some(ref path) = output_opt_ssa {
-        fs::write(path, wyn_core::mir::ssa_print::format_program(&optimized.ssa))?;
+        fs::write(path, wyn_core::ssa::print::format_program(&optimized.ssa))?;
         if verbose {
             info!("Wrote optimized SSA to {}", path.display());
         }

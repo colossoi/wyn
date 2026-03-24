@@ -12,14 +12,14 @@
 mod strategies;
 
 use crate::ast::{NodeId, Span, TypeName};
-use crate::mir::ssa::{EffectToken, FuncBody, InstKind, Terminator, ValueId};
-use crate::mir::ssa_builder::FuncBuilder;
-use crate::mir::ssa_soac_analysis::{ArrayProvenance, ParallelizableSoac, analyze_program};
 use crate::pipeline_descriptor::{
     Access, Binding, BufferUsage, ComputePipeline, ComputeStage, DispatchSize, MultiComputePipeline,
     Pipeline, PipelineDescriptor,
 };
-use crate::tlc::to_ssa::{EntryInput, EntryOutput, ExecutionModel, SsaEntryPoint, SsaProgram};
+use crate::ssa::builder::FuncBuilder;
+use crate::ssa::soac_analysis::{ArrayProvenance, ParallelizableSoac, analyze_program};
+use crate::ssa::types::{EffectToken, FuncBody, InstKind, Terminator, ValueId};
+use crate::ssa::types::{EntryInput, EntryOutput, EntryPoint, ExecutionModel, Program};
 use polytype::Type;
 
 use std::collections::HashMap;
@@ -32,7 +32,7 @@ pub use strategies::{
 /// Contains the builder and common utilities.
 pub struct ParallelizeCtx<'a> {
     pub builder: FuncBuilder,
-    pub entry: &'a SsaEntryPoint,
+    pub entry: &'a EntryPoint,
     pub span: Span,
     pub node_id: NodeId,
     // Common types
@@ -43,7 +43,7 @@ pub struct ParallelizeCtx<'a> {
 }
 
 impl<'a> ParallelizeCtx<'a> {
-    pub fn new(builder: FuncBuilder, entry: &'a SsaEntryPoint) -> Self {
+    pub fn new(builder: FuncBuilder, entry: &'a EntryPoint) -> Self {
         let span = entry.span;
         let node_id = NodeId(0); // Dummy node ID for generated code
         Self {
@@ -95,7 +95,7 @@ impl<'a> ParallelizeCtx<'a> {
     }
 
     /// Push an instruction.
-    pub fn push_inst(&mut self, kind: crate::mir::ssa::InstKind, ty: Type<TypeName>) -> Option<ValueId> {
+    pub fn push_inst(&mut self, kind: crate::ssa::types::InstKind, ty: Type<TypeName>) -> Option<ValueId> {
         self.builder.push_inst(kind, ty, self.span, self.node_id).ok()
     }
 
@@ -169,19 +169,19 @@ impl<'a> ParallelizeCtx<'a> {
 /// Result of the parallelization pass.
 pub struct ParallelizationResult {
     /// The (possibly modified) SSA program, which may contain additional entry points.
-    pub program: SsaProgram,
+    pub program: Program,
     /// Pipeline descriptor describing how to execute the program.
     pub pipeline: PipelineDescriptor,
 }
 
 /// Parallelize SOACs in an SSA program.
 /// Returns the modified program and a pipeline descriptor for the host.
-pub fn parallelize_soacs(mut program: SsaProgram) -> ParallelizationResult {
+pub fn parallelize_soacs(mut program: Program) -> ParallelizationResult {
     let analysis = analyze_program(&program);
     let mut descriptor = PipelineDescriptor::default();
     // New entry points to add (from multi-dispatch SOACs like reduce).
     // These replace the original entry point.
-    let mut new_entries: Vec<SsaEntryPoint> = Vec::new();
+    let mut new_entries: Vec<EntryPoint> = Vec::new();
     let mut entries_to_remove: Vec<String> = Vec::new();
 
     for entry in &mut program.entry_points {
@@ -280,7 +280,7 @@ pub fn parallelize_soacs(mut program: SsaProgram) -> ParallelizationResult {
 
 /// Build a single-dispatch compute pipeline descriptor for a map.
 fn build_map_pipeline(
-    entry: &SsaEntryPoint,
+    entry: &EntryPoint,
     output_binding: (u32, u32),
     local_size: (u32, u32, u32),
 ) -> Pipeline {
@@ -319,7 +319,7 @@ fn build_map_pipeline(
 /// Create a parallelized map version of a compute entry point.
 /// Returns the new body and the (set, binding) used for the output storage buffer.
 fn parallelize_map_entry(
-    entry: &SsaEntryPoint,
+    entry: &EntryPoint,
     source: &ArrayProvenance,
     map_function: &str,
     captures: &[ValueId],
@@ -477,14 +477,14 @@ fn build_map_body<I: InputStrategy, O: OutputStrategy>(
 ///
 /// Returns the two new entry points (replacing the original).
 fn parallelize_reduce_entry(
-    entry: &SsaEntryPoint,
+    entry: &EntryPoint,
     source: &ArrayProvenance,
     reduce_function: &str,
     init: ValueId,
     captures: &[ValueId],
     elem_type: &Type<TypeName>,
     local_size: (u32, u32, u32),
-) -> Option<(Vec<SsaEntryPoint>, Pipeline)> {
+) -> Option<(Vec<EntryPoint>, Pipeline)> {
     let total_threads = local_size.0 * local_size.1 * local_size.2;
     if total_threads == 0 {
         return None;
@@ -592,7 +592,7 @@ fn parallelize_reduce_entry(
 
 /// Build Phase 1 of reduce: each thread reduces its chunk and writes to partials buffer.
 fn build_reduce_phase1(
-    entry: &SsaEntryPoint,
+    entry: &EntryPoint,
     source: &ArrayProvenance,
     reduce_function: &str,
     init: ValueId,
@@ -601,7 +601,7 @@ fn build_reduce_phase1(
     total_threads: u32,
     partials_binding: (u32, u32),
     local_size: (u32, u32, u32),
-) -> Option<SsaEntryPoint> {
+) -> Option<EntryPoint> {
     let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
     let params: Vec<(Type<TypeName>, String)> =
         entry.inputs.iter().map(|i| (i.ty.clone(), i.name.clone())).collect();
@@ -713,7 +713,7 @@ fn build_reduce_phase1(
         ],
     );
 
-    Some(SsaEntryPoint {
+    Some(EntryPoint {
         name: format!("{}_phase1_chunks", entry.name),
         body,
         execution_model: ExecutionModel::Compute { local_size },
@@ -729,7 +729,7 @@ fn build_reduce_phase1(
 
 /// Build Phase 2 of reduce: single thread combines partial results.
 fn build_reduce_phase2(
-    entry: &SsaEntryPoint,
+    entry: &EntryPoint,
     reduce_function: &str,
     init: ValueId,
     captures: &[ValueId],
@@ -737,7 +737,7 @@ fn build_reduce_phase2(
     total_threads: u32,
     partials_binding: (u32, u32),
     result_binding: (u32, u32),
-) -> Option<SsaEntryPoint> {
+) -> Option<EntryPoint> {
     let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
@@ -876,7 +876,7 @@ fn build_reduce_phase2(
         }
     }
 
-    Some(SsaEntryPoint {
+    Some(EntryPoint {
         name: format!("{}_phase2_combine", entry.name),
         body,
         execution_model: ExecutionModel::Compute {

@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 
 use crate::ast::{self, NodeId, Span, TypeName};
-use crate::mir::ssa::{FuncBody, InstKind, SsaSoac, Terminator, ValueId, ViewSource};
-use crate::mir::ssa_builder::FuncBuilder;
+use crate::ssa::builder::FuncBuilder;
+use crate::ssa::types::{FuncBody, InstKind, Soac, Terminator, ValueId, ViewSource};
 use crate::types::TypeExt;
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
@@ -75,77 +75,9 @@ fn soa_elem_type(soa_ty: &Type<TypeName>) -> Type<TypeName> {
     }
 }
 
-/// Result of converting a TLC program to SSA.
-#[derive(Debug, Clone)]
-pub struct SsaProgram {
-    /// Function definitions with their SSA bodies.
-    pub functions: Vec<SsaFunction>,
-    /// Entry point definitions.
-    pub entry_points: Vec<SsaEntryPoint>,
-    /// Uniform declarations.
-    pub uniforms: Vec<ast::UniformDecl>,
-    /// Storage buffer declarations.
-    pub storage: Vec<ast::StorageDecl>,
-}
-
-/// A converted function.
-#[derive(Debug, Clone)]
-pub struct SsaFunction {
-    pub name: String,
-    pub body: FuncBody,
-    pub span: Span,
-    /// For extern functions, the linkage name.
-    pub linkage_name: Option<String>,
-}
-
-/// A converted entry point.
-#[derive(Debug, Clone)]
-pub struct SsaEntryPoint {
-    pub name: String,
-    pub body: FuncBody,
-    pub execution_model: ExecutionModel,
-    pub inputs: Vec<EntryInput>,
-    pub outputs: Vec<EntryOutput>,
-    pub span: Span,
-}
-
-/// Execution model for entry points.
-#[derive(Debug, Clone)]
-pub enum ExecutionModel {
-    Vertex,
-    Fragment,
-    Compute {
-        local_size: (u32, u32, u32),
-    },
-}
-
-/// Input to an entry point.
-#[derive(Debug, Clone)]
-pub struct EntryInput {
-    pub name: String,
-    pub ty: Type<TypeName>,
-    pub decoration: Option<IoDecoration>,
-    pub size_hint: Option<u32>,
-    pub storage_binding: Option<(u32, u32)>,
-    /// For compute shader broadcast inputs: byte offset within the push constant block.
-    pub push_constant_offset: Option<u32>,
-}
-
-/// Output from an entry point.
-#[derive(Debug, Clone)]
-pub struct EntryOutput {
-    pub ty: Type<TypeName>,
-    pub decoration: Option<IoDecoration>,
-    /// For compute shaders with unsized array outputs: (set, binding).
-    pub storage_binding: Option<(u32, u32)>,
-}
-
-/// I/O decoration for entry point parameters.
-#[derive(Debug, Clone)]
-pub enum IoDecoration {
-    BuiltIn(spirv::BuiltIn),
-    Location(u32),
-}
+use crate::ssa::types::{
+    EntryInput, EntryOutput, EntryPoint, ExecutionModel, Function, IoDecoration, Program,
+};
 
 /// Error during TLC to SSA conversion.
 #[derive(Debug, Clone)]
@@ -171,7 +103,7 @@ impl std::fmt::Display for ConvertError {
 impl std::error::Error for ConvertError {}
 
 /// Convert a TLC program to SSA.
-pub fn convert_program(program: &TlcProgram) -> Result<SsaProgram, ConvertError> {
+pub fn convert_program(program: &TlcProgram) -> Result<Program, ConvertError> {
     let top_level: HashMap<SymbolId, &TlcDef> = program.defs.iter().map(|d| (d.name, d)).collect();
     let symbols = &program.symbols;
 
@@ -200,7 +132,7 @@ pub fn convert_program(program: &TlcProgram) -> Result<SsaProgram, ConvertError>
         }
     }
 
-    Ok(SsaProgram {
+    Ok(Program {
         functions,
         entry_points,
         uniforms: program.uniforms.clone(),
@@ -214,7 +146,7 @@ fn convert_function(
     top_level: &HashMap<SymbolId, &TlcDef>,
     constants_by_name: &HashMap<String, SymbolId>,
     symbols: &SymbolTable,
-) -> Result<SsaFunction, ConvertError> {
+) -> Result<Function, ConvertError> {
     let def_name = symbols.get(def.name).expect("BUG: symbol not in table").clone();
 
     // Check if this is an extern function
@@ -232,7 +164,7 @@ fn convert_function(
 
         let body = builder.finish().map_err(|e| ConvertError::BuilderError(e.to_string()))?;
 
-        return Ok(SsaFunction {
+        return Ok(Function {
             name: def_name,
             body,
             span: def.body.span,
@@ -314,7 +246,7 @@ fn convert_function(
 
     let body = converter.finish()?;
 
-    Ok(SsaFunction {
+    Ok(Function {
         name: def_name,
         body,
         span: def.body.span,
@@ -329,7 +261,7 @@ fn convert_entry_point(
     top_level: &HashMap<SymbolId, &TlcDef>,
     constants_by_name: &HashMap<String, SymbolId>,
     symbols: &SymbolTable,
-) -> Result<SsaEntryPoint, ConvertError> {
+) -> Result<EntryPoint, ConvertError> {
     let def_name = symbols.get(def.name).expect("BUG: symbol not in table").clone();
 
     // Extract parameters from nested Lams
@@ -361,7 +293,7 @@ fn convert_entry_point(
             && !matches!(&decoration, Some(IoDecoration::BuiltIn(_)))
         {
             let offset = pc_offset;
-            pc_offset += crate::mir::layout::type_byte_size(ty).unwrap_or(4);
+            pc_offset += crate::ssa::layout::type_byte_size(ty).unwrap_or(4);
             Some(offset)
         } else {
             None
@@ -565,7 +497,7 @@ fn convert_entry_point(
 
     let body = converter.finish()?;
 
-    Ok(SsaEntryPoint {
+    Ok(EntryPoint {
         name: def_name,
         body,
         execution_model,
@@ -1813,7 +1745,7 @@ impl<'a> Converter<'a> {
 
         self.builder
             .push_inst(
-                InstKind::Soac(SsaSoac::Map {
+                InstKind::Soac(Soac::Map {
                     func: f_name,
                     inputs: input_values,
                     captures: capture_values,
@@ -1857,7 +1789,7 @@ impl<'a> Converter<'a> {
 
         self.builder
             .push_inst(
-                InstKind::Soac(SsaSoac::Reduce {
+                InstKind::Soac(Soac::Reduce {
                     func: op_name,
                     input: arr_value,
                     init: init_value,

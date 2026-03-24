@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use crate::ast::TypeName;
-use crate::mir::ssa::*;
+use crate::ssa::types::*;
 use polytype::Type;
 
 #[test]

@@ -2,12 +2,12 @@
 //!
 //! Removes functions that are not reachable from any entry point.
 
-use crate::mir::ssa::{FuncBody, InstKind};
-use crate::tlc::to_ssa::SsaProgram;
+use crate::ssa::types::Program;
+use crate::ssa::types::{FuncBody, InstKind};
 use std::collections::HashSet;
 
 /// Eliminate functions that are not reachable from any entry point.
-pub fn eliminate_dead_functions(mut program: SsaProgram) -> SsaProgram {
+pub fn eliminate_dead_functions(mut program: Program) -> Program {
     let mut live: HashSet<String> = HashSet::new();
     let mut worklist: Vec<String> = Vec::new();
 

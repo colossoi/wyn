@@ -1,9 +1,9 @@
 #![cfg(test)]
 
 use crate::ast::{NodeId, Span, TypeName};
-use crate::mir::ssa::{Terminator, ValueId};
-use crate::mir::ssa_builder::FuncBuilder;
-use crate::mir::ssa_verify::*;
+use crate::ssa::builder::FuncBuilder;
+use crate::ssa::types::{Terminator, ValueId};
+use crate::ssa::verify::*;
 use polytype::Type;
 
 fn dummy_span() -> Span {

@@ -27,8 +27,9 @@
 //! This makes the data flow explicit at branch sites rather than requiring
 //! inspection of phi nodes to understand where values come from.
 
-use crate::ast::{NodeId, Span, TypeName};
+use crate::ast::{self, NodeId, Span, TypeName};
 use polytype::Type;
+use rspirv::spirv;
 
 // =============================================================================
 // ID Types
@@ -495,7 +496,7 @@ pub enum InstKind {
     /// A first-class SOAC (Second-Order Array Combinator) operation.
     /// These are preserved through optimization passes and lowered to explicit
     /// loops by the `ssa_soac_lower` pass right before backend lowering.
-    Soac(SsaSoac),
+    Soac(Soac),
 }
 
 impl InstKind {
@@ -721,7 +722,7 @@ impl InstKind {
 /// After defunctionalization, lambda bodies are just function references,
 /// so we store the function name (like `Call`) rather than nested regions.
 #[derive(Debug, Clone)]
-pub enum SsaSoac {
+pub enum Soac {
     /// `map f inputs` — apply `f` to each element, producing an output array.
     Map {
         /// Name of the map function (post-defunctionalization).
@@ -773,16 +774,16 @@ pub enum SsaSoac {
     },
 }
 
-impl SsaSoac {
+impl Soac {
     /// Return all ValueIds referenced by this SOAC operation.
     pub fn uses(&self) -> Vec<ValueId> {
         match self {
-            SsaSoac::Map { inputs, captures, .. } => {
+            Soac::Map { inputs, captures, .. } => {
                 let mut uses = inputs.clone();
                 uses.extend(captures.iter().copied());
                 uses
             }
-            SsaSoac::Reduce {
+            Soac::Reduce {
                 input,
                 init,
                 captures,
@@ -792,7 +793,7 @@ impl SsaSoac {
                 uses.extend(captures.iter().copied());
                 uses
             }
-            SsaSoac::Scan {
+            Soac::Scan {
                 input,
                 init,
                 captures,
@@ -808,7 +809,7 @@ impl SsaSoac {
     /// Apply a substitution function to all ValueId references in this SOAC.
     pub fn substitute_uses(&mut self, sub: &mut impl FnMut(&mut ValueId)) {
         match self {
-            SsaSoac::Map { inputs, captures, .. } => {
+            Soac::Map { inputs, captures, .. } => {
                 for v in inputs.iter_mut() {
                     sub(v);
                 }
@@ -816,7 +817,7 @@ impl SsaSoac {
                     sub(v);
                 }
             }
-            SsaSoac::Reduce {
+            Soac::Reduce {
                 input,
                 init,
                 captures,
@@ -828,7 +829,7 @@ impl SsaSoac {
                     sub(v);
                 }
             }
-            SsaSoac::Scan {
+            Soac::Scan {
                 input,
                 init,
                 captures,
@@ -846,9 +847,9 @@ impl SsaSoac {
     /// Return the name of the function applied by this SOAC.
     pub fn func_name(&self) -> &str {
         match self {
-            SsaSoac::Map { func, .. } => func,
-            SsaSoac::Reduce { func, .. } => func,
-            SsaSoac::Scan { func, .. } => func,
+            Soac::Map { func, .. } => func,
+            Soac::Reduce { func, .. } => func,
+            Soac::Scan { func, .. } => func,
         }
     }
 }
@@ -1012,4 +1013,80 @@ impl std::fmt::Display for EffectToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "!{}", self.0)
     }
+}
+
+// =============================================================================
+// Program-Level Types
+// =============================================================================
+
+/// An SSA program — the result of converting TLC to SSA.
+#[derive(Debug, Clone)]
+pub struct Program {
+    /// Function definitions with their SSA bodies.
+    pub functions: Vec<Function>,
+    /// Entry point definitions.
+    pub entry_points: Vec<EntryPoint>,
+    /// Uniform declarations.
+    pub uniforms: Vec<ast::UniformDecl>,
+    /// Storage buffer declarations.
+    pub storage: Vec<ast::StorageDecl>,
+}
+
+/// A function definition.
+#[derive(Debug, Clone)]
+pub struct Function {
+    pub name: String,
+    pub body: FuncBody,
+    pub span: Span,
+    /// For extern functions, the linkage name.
+    pub linkage_name: Option<String>,
+}
+
+/// An entry point definition.
+#[derive(Debug, Clone)]
+pub struct EntryPoint {
+    pub name: String,
+    pub body: FuncBody,
+    pub execution_model: ExecutionModel,
+    pub inputs: Vec<EntryInput>,
+    pub outputs: Vec<EntryOutput>,
+    pub span: Span,
+}
+
+/// Execution model for entry points.
+#[derive(Debug, Clone)]
+pub enum ExecutionModel {
+    Vertex,
+    Fragment,
+    Compute {
+        local_size: (u32, u32, u32),
+    },
+}
+
+/// Input to an entry point.
+#[derive(Debug, Clone)]
+pub struct EntryInput {
+    pub name: String,
+    pub ty: Type<TypeName>,
+    pub decoration: Option<IoDecoration>,
+    pub size_hint: Option<u32>,
+    pub storage_binding: Option<(u32, u32)>,
+    /// For compute shader broadcast inputs: byte offset within the push constant block.
+    pub push_constant_offset: Option<u32>,
+}
+
+/// Output from an entry point.
+#[derive(Debug, Clone)]
+pub struct EntryOutput {
+    pub ty: Type<TypeName>,
+    pub decoration: Option<IoDecoration>,
+    /// For compute shaders with unsized array outputs: (set, binding).
+    pub storage_binding: Option<(u32, u32)>,
+}
+
+/// I/O decoration for entry point parameters.
+#[derive(Debug, Clone)]
+pub enum IoDecoration {
+    BuiltIn(spirv::BuiltIn),
+    Location(u32),
 }

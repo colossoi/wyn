@@ -8,8 +8,8 @@ use crate::bail_glsl;
 use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
 use crate::lowering_common::ShaderStage;
-use crate::mir::ssa::{BlockId, FuncBody, Inst, InstKind, Terminator, ValueId};
-use crate::tlc::to_ssa::{ExecutionModel, IoDecoration, SsaEntryPoint, SsaFunction, SsaProgram};
+use crate::ssa::types::{BlockId, FuncBody, Inst, InstKind, Terminator, ValueId};
+use crate::ssa::types::{EntryPoint, ExecutionModel, Function, IoDecoration, Program};
 use crate::types::TypeExt;
 use polytype::Type as PolyType;
 use rspirv::spirv;
@@ -26,21 +26,21 @@ pub struct GlslOutput {
 }
 
 /// Lower an SSA program to GLSL
-pub fn lower(program: &SsaProgram) -> Result<GlslOutput> {
+pub fn lower(program: &Program) -> Result<GlslOutput> {
     let mut ctx = LowerCtx::new(program);
     ctx.lower_program()
 }
 
 /// Lower an SSA program to Shadertoy-compatible GLSL
 /// Returns just the fragment shader with mainImage entry point
-pub fn lower_shadertoy(program: &SsaProgram) -> Result<String> {
+pub fn lower_shadertoy(program: &Program) -> Result<String> {
     let mut ctx = LowerCtx::new(program);
     ctx.lower_shadertoy()
 }
 
 /// Context for lowering SSA to GLSL
 struct LowerCtx<'a> {
-    program: &'a SsaProgram,
+    program: &'a Program,
     /// Functions by name
     func_index: HashMap<String, usize>,
     /// Functions that have been lowered
@@ -58,7 +58,7 @@ struct LowerCtx<'a> {
 }
 
 impl<'a> LowerCtx<'a> {
-    fn new(program: &'a SsaProgram) -> Self {
+    fn new(program: &'a Program) -> Self {
         let mut func_index = HashMap::new();
         for (i, func) in program.functions.iter().enumerate() {
             func_index.insert(func.name.clone(), i);
@@ -153,7 +153,7 @@ impl<'a> LowerCtx<'a> {
         Ok(output)
     }
 
-    fn lower_shadertoy_entry_point(&mut self, entry: &SsaEntryPoint, output: &mut String) -> Result<()> {
+    fn lower_shadertoy_entry_point(&mut self, entry: &EntryPoint, output: &mut String) -> Result<()> {
         // Find the fragCoord parameter
         let mut frag_coord_name = None;
         for input in &entry.inputs {
@@ -308,7 +308,7 @@ impl<'a> LowerCtx<'a> {
         Ok(())
     }
 
-    fn lower_function(&mut self, func: &SsaFunction, output: &mut String) -> Result<()> {
+    fn lower_function(&mut self, func: &Function, output: &mut String) -> Result<()> {
         if func.linkage_name.is_some() {
             // Skip extern functions
             return Ok(());
@@ -341,7 +341,7 @@ impl<'a> LowerCtx<'a> {
 
     fn lower_entry_point(
         &mut self,
-        entry: &SsaEntryPoint,
+        entry: &EntryPoint,
         stage: ShaderStage,
         output: &mut String,
     ) -> Result<()> {
