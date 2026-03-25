@@ -1,0 +1,19 @@
+Remaining work to port wyn-core SSA to wyn-ssa:
+
+1. Type tracking — The existing IR has types on every value, block param, and
+   instruction. wyn-ssa would need to be generic over a type parameter T, with
+   Function<I, E, T> storing a map from ValueId -> T.
+
+2. Void instructions — wyn-core has instructions that produce no value (e.g.,
+   Store). Currently wyn-ssa's append_inst always creates a ValueId. Need a
+   push_void_inst variant or make result optional.
+
+3. ControlHeader — SPIR-V needs structured control flow annotations
+   (loop/selection merge blocks). Blocks need an optional ControlHeader field,
+   or this gets layered on top in wyn-core.
+
+4. Source location — Span and NodeId on instructions. Could be generic or
+   stored in a side-table.
+
+5. Block params need types — Currently just Vec<ValueId>; the existing IR
+   stores (ValueId, Type, Option<String>).

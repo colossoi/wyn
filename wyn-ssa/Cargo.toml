@@ -1,0 +1,8 @@
+[package]
+name = "wyn-ssa"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+slotmap = "1.0"
+smallvec = "1.13"
