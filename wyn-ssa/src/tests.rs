@@ -424,3 +424,101 @@ fn forward_single_pred_params_skips_multi_predecessor_blocks() {
     // join still has its param — two predecessors, can't forward
     assert_eq!(f.blocks[join].params.len(), 1);
 }
+
+#[test]
+fn eliminate_empty_blocks_redirects_predecessors() {
+    // entry -> empty -> target (with instruction + return)
+    let mut f = TestFunc::new();
+
+    let empty = f.create_block();
+    let target = f.create_block();
+
+    f.blocks[f.entry].term = Terminator::Jump {
+        target: empty,
+        args: vec![],
+    };
+    f.blocks[empty].term = Terminator::Jump {
+        target: target,
+        args: vec![],
+    };
+
+    let v = f.append_inst(target, TestInst::Int(42), TY, None);
+    f.blocks[target].term = Terminator::Return(Some(v));
+
+    eliminate_empty_blocks(&mut f);
+
+    // entry should now jump directly to target
+    match &f.blocks[f.entry].term {
+        Terminator::Jump { target: t, .. } => assert_eq!(*t, target),
+        _ => panic!("expected jump"),
+    }
+
+    // empty block should be unreachable
+    assert!(matches!(f.blocks[empty].term, Terminator::Unreachable));
+}
+
+#[test]
+fn eliminate_empty_blocks_preserves_blocks_with_instructions() {
+    // entry -> nonempty -> target
+    // nonempty has an instruction, so it should NOT be eliminated.
+    let mut f = TestFunc::new();
+
+    let nonempty = f.create_block();
+    let target = f.create_block();
+
+    f.blocks[f.entry].term = Terminator::Jump {
+        target: nonempty,
+        args: vec![],
+    };
+
+    f.append_inst(nonempty, TestInst::Int(99), TY, None);
+    f.blocks[nonempty].term = Terminator::Jump {
+        target: target,
+        args: vec![],
+    };
+
+    let v = f.append_inst(target, TestInst::Int(42), TY, None);
+    f.blocks[target].term = Terminator::Return(Some(v));
+
+    eliminate_empty_blocks(&mut f);
+
+    // entry still jumps to nonempty — it was preserved
+    match &f.blocks[f.entry].term {
+        Terminator::Jump { target: t, .. } => assert_eq!(*t, nonempty),
+        _ => panic!("expected jump"),
+    }
+}
+
+#[test]
+fn eliminate_empty_blocks_chains() {
+    // entry -> empty1 -> empty2 -> target
+    let mut f = TestFunc::new();
+
+    let empty1 = f.create_block();
+    let empty2 = f.create_block();
+    let target = f.create_block();
+
+    f.blocks[f.entry].term = Terminator::Jump {
+        target: empty1,
+        args: vec![],
+    };
+    f.blocks[empty1].term = Terminator::Jump {
+        target: empty2,
+        args: vec![],
+    };
+    f.blocks[empty2].term = Terminator::Jump {
+        target: target,
+        args: vec![],
+    };
+
+    let v = f.append_inst(target, TestInst::Int(1), TY, None);
+    f.blocks[target].term = Terminator::Return(Some(v));
+
+    eliminate_empty_blocks(&mut f);
+
+    // entry should jump directly to target after fixpoint
+    match &f.blocks[f.entry].term {
+        Terminator::Jump { target: t, .. } => assert_eq!(*t, target),
+        _ => panic!("expected jump"),
+    }
+}

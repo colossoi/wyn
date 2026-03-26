@@ -674,5 +674,102 @@ pub fn forward_single_pred_params<I: Instr, E: Copy + Eq + Hash + Debug, T: Clon
     }
 }
 
+/// Eliminate empty blocks that unconditionally jump to another block.
+///
+/// A block is eliminated when it has no instructions, no parameters, and its
+/// terminator is an unconditional jump (with no arguments) to a target block.
+/// All predecessors are redirected to the target, and the empty block's
+/// terminator is set to `Unreachable`.
+///
+/// The entry block is never eliminated.
+///
+/// To preserve a block that would otherwise be empty (e.g. SPIR-V merge or
+/// continue targets), place a placeholder instruction in it. Blocks with any
+/// instructions are never candidates for elimination.
+///
+/// Runs to fixpoint to handle chains of empty blocks.
+pub fn eliminate_empty_blocks<I, E, T: Clone + Debug>(func: &mut Function<I, E, T>) {
+    loop {
+        let mut redirects: Vec<(BlockId, BlockId)> = Vec::new();
+
+        for (bid, block) in &func.blocks {
+            if bid == func.entry {
+                continue;
+            }
+            if !block.insts.is_empty() || !block.params.is_empty() {
+                continue;
+            }
+            let target = match &block.term {
+                Terminator::Jump { target, args } if args.is_empty() => *target,
+                _ => continue,
+            };
+            redirects.push((bid, target));
+        }
+
+        if redirects.is_empty() {
+            break;
+        }
+
+        // Resolve transitive chains: empty1→empty2→target becomes empty1→target.
+        let raw_map: HashMap<BlockId, BlockId> = redirects.iter().copied().collect();
+        let redirect_map: HashMap<BlockId, BlockId> = redirects
+            .iter()
+            .map(|&(from, mut to)| {
+                while let Some(&next) = raw_map.get(&to) {
+                    if next == to {
+                        break;
+                    }
+                    to = next;
+                }
+                (from, to)
+            })
+            .collect();
+
+        // Rewrite all terminators that target eliminated blocks.
+        let all_blocks: Vec<BlockId> = func.blocks.keys().collect();
+        for bid in all_blocks {
+            let rewritten = match &func.blocks[bid].term {
+                Terminator::Jump { target, args } => {
+                    let new_target = redirect_map.get(target).copied().unwrap_or(*target);
+                    if new_target == *target {
+                        continue;
+                    }
+                    Terminator::Jump {
+                        target: new_target,
+                        args: args.clone(),
+                    }
+                }
+                Terminator::Branch {
+                    cond,
+                    then_block,
+                    then_args,
+                    else_block,
+                    else_args,
+                } => {
+                    let new_then = redirect_map.get(then_block).copied().unwrap_or(*then_block);
+                    let new_else = redirect_map.get(else_block).copied().unwrap_or(*else_block);
+                    if new_then == *then_block && new_else == *else_block {
+                        continue;
+                    }
+                    Terminator::Branch {
+                        cond: *cond,
+                        then_block: new_then,
+                        then_args: then_args.clone(),
+                        else_block: new_else,
+                        else_args: else_args.clone(),
+                    }
+                }
+                _ => continue,
+            };
+            func.blocks[bid].term = rewritten;
+        }
+
+        // Mark eliminated blocks as unreachable.
+        for (bid, _) in &redirects {
+            func.blocks[*bid].term = Terminator::Unreachable;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;
