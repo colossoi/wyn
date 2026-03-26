@@ -32,7 +32,7 @@ pub struct BasicBlock {
 #[derive(Clone, Debug)]
 pub struct InstNode<I, E> {
     pub data: I,
-    pub result: ValueId,
+    pub result: Option<ValueId>,
     pub parent: BlockId,
     pub effects: Option<(E, E)>,
 }
@@ -229,7 +229,7 @@ impl<I, E, T: Clone + Debug> Function<I, E, T> {
         });
         let inst = self.insts.insert(InstNode {
             data,
-            result: value,
+            result: Some(value),
             parent: block,
             effects,
         });
@@ -252,7 +252,7 @@ impl<I, E, T: Clone + Debug> Function<I, E, T> {
         });
         let inst = self.insts.insert(InstNode {
             data,
-            result: value,
+            result: Some(value),
             parent: block,
             effects,
         });
@@ -312,7 +312,9 @@ impl<I, E: Copy + Eq + Hash + Debug, T: Clone + Debug> Function<I, E, T> {
         if let Some(pos) = self.blocks[block].insts.iter().position(|&x| x == inst) {
             self.blocks[block].insts.remove(pos);
         }
-        self.values.remove(node.result);
+        if let Some(result) = node.result {
+            self.values.remove(result);
+        }
 
         // Splice the effect chain: downstream consumers of our effect_out
         // now consume our effect_in instead.
@@ -501,11 +503,13 @@ pub fn lift_and_merge<I: ValueLike, E: Copy + Eq + Hash + Debug, T: Clone + Debu
     let candidates: Vec<InstId> = func
         .insts
         .iter()
-        .filter_map(
-            |(id, node)| {
-                if node.effects.is_none() && node.data.is_hoistable() { Some(id) } else { None }
-            },
-        )
+        .filter_map(|(id, node)| {
+            if node.result.is_some() && node.effects.is_none() && node.data.is_hoistable() {
+                Some(id)
+            } else {
+                None
+            }
+        })
         .collect();
 
     let mut classes: Vec<Vec<InstId>> = Vec::new();
@@ -540,7 +544,10 @@ pub fn lift_and_merge<I: ValueLike, E: Copy + Eq + Hash + Debug, T: Clone + Debu
 
         let rep = live[0];
         let rep_data = func.insts[rep].data.clone();
-        let rep_ty = func.values[func.insts[rep].result].ty.clone();
+        let Some(rep_result) = func.insts[rep].result else {
+            continue;
+        };
+        let rep_ty = func.values[rep_result].ty.clone();
 
         let insert_index = block_top_insert_index_after_operands(func, target_block, &rep_data);
 
@@ -556,14 +563,19 @@ pub fn lift_and_merge<I: ValueLike, E: Copy + Eq + Hash + Debug, T: Clone + Debu
         let canonical_value = if needs_new_canonical {
             func.insert_inst_at_index(target_block, insert_index, rep_data, rep_ty, None)
         } else {
-            func.insts[func.blocks[target_block].insts[insert_index]].result
+            let Some(v) = func.insts[func.blocks[target_block].insts[insert_index]].result else {
+                continue;
+            };
+            v
         };
 
         for inst in live {
             if !func.insts.contains_key(inst) {
                 continue;
             }
-            let old_value = func.insts[inst].result;
+            let Some(old_value) = func.insts[inst].result else {
+                continue;
+            };
             if old_value != canonical_value {
                 func.replace_all_uses(old_value, canonical_value);
                 func.remove_inst(inst);

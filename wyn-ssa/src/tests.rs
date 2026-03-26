@@ -200,10 +200,7 @@ fn effectful_inst_creation_and_query() {
     assert!(f.is_effectful(f.inst_of_value(eff_val).unwrap()));
 
     let eff_inst = f.inst_of_value(eff_val).unwrap();
-    assert_eq!(
-        f.insts[eff_inst].effects,
-        Some((TestEffect(0), TestEffect(1)))
-    );
+    assert_eq!(f.insts[eff_inst].effects, Some((TestEffect(0), TestEffect(1))));
 }
 
 #[test]
@@ -231,10 +228,7 @@ fn remove_effectful_inst_splices_chain() {
     f.remove_inst(a_inst);
 
     let b_inst = f.inst_of_value(b).unwrap();
-    assert_eq!(
-        f.insts[b_inst].effects,
-        Some((TestEffect(0), TestEffect(2)))
-    );
+    assert_eq!(f.insts[b_inst].effects, Some((TestEffect(0), TestEffect(2))));
 }
 
 #[test]
@@ -252,10 +246,7 @@ fn replace_effect_works() {
     assert!(f.replace_effect(TestEffect(5), TestEffect(99)));
 
     let inst = f.inst_of_value(v).unwrap();
-    assert_eq!(
-        f.insts[inst].effects,
-        Some((TestEffect(99), TestEffect(6)))
-    );
+    assert_eq!(f.insts[inst].effects, Some((TestEffect(99), TestEffect(6))));
 }
 
 #[test]
