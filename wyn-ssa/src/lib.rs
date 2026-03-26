@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::Hash;
 
-use dominators::{block_top_insert_index_after_operands, Dominators};
+use dominators::{Dominators, block_top_insert_index_after_operands};
 
 new_key_type! {
     pub struct BlockId;
@@ -15,11 +15,11 @@ new_key_type! {
 }
 
 #[derive(Clone, Debug)]
-pub struct Function<I, E> {
+pub struct Function<I, E, T> {
     pub entry: BlockId,
     pub blocks: SlotMap<BlockId, BasicBlock>,
     pub insts: SlotMap<InstId, InstNode<I, E>>,
-    pub values: SlotMap<ValueId, ValueDef>,
+    pub values: SlotMap<ValueId, ValueInfo<T>>,
 }
 
 #[derive(Clone, Debug)]
@@ -37,10 +37,21 @@ pub struct InstNode<I, E> {
     pub effects: Option<(E, E)>,
 }
 
+#[derive(Clone, Debug)]
+pub struct ValueInfo<T> {
+    pub def: ValueDef,
+    pub ty: T,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValueDef {
-    Param { block: BlockId, index: usize },
-    Inst { inst: InstId },
+    Param {
+        block: BlockId,
+        index: usize,
+    },
+    Inst {
+        inst: InstId,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -79,7 +90,10 @@ pub enum InlineArgError {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EffectVerifyError<E> {
-    DoubleConsume { effect: E, inst: InstId },
+    DoubleConsume {
+        effect: E,
+        inst: InstId,
+    },
 }
 
 impl Terminator {
@@ -152,7 +166,7 @@ impl Terminator {
 
 pub type Successors = SmallVec<[BlockId; 2]>;
 
-impl<I, E> Function<I, E> {
+impl<I, E, T: Clone + Debug> Function<I, E, T> {
     pub fn new() -> Self {
         let mut blocks = SlotMap::with_key();
         let entry = blocks.insert(BasicBlock {
@@ -176,45 +190,50 @@ impl<I, E> Function<I, E> {
         })
     }
 
-    pub fn add_block_param(&mut self, block: BlockId) -> ValueId {
+    pub fn add_block_param(&mut self, block: BlockId, ty: T) -> ValueId {
         let index = self.blocks[block].params.len();
-        let value = self.values.insert(ValueDef::Param { block, index });
+        let value = self.values.insert(ValueInfo {
+            def: ValueDef::Param { block, index },
+            ty,
+        });
         self.blocks[block].params.push(value);
         value
     }
 
     pub fn value_def(&self, v: ValueId) -> ValueDef {
-        self.values[v]
+        self.values[v].def
+    }
+
+    pub fn value_type(&self, v: ValueId) -> &T {
+        &self.values[v].ty
     }
 
     pub fn block_of_value(&self, v: ValueId) -> BlockId {
-        match self.values[v] {
+        match self.values[v].def {
             ValueDef::Param { block, .. } => block,
             ValueDef::Inst { inst } => self.insts[inst].parent,
         }
     }
 
     pub fn inst_of_value(&self, v: ValueId) -> Option<InstId> {
-        match self.values[v] {
+        match self.values[v].def {
             ValueDef::Param { .. } => None,
             ValueDef::Inst { inst } => Some(inst),
         }
     }
 
-    pub fn append_inst(
-        &mut self,
-        block: BlockId,
-        data: I,
-        effects: Option<(E, E)>,
-    ) -> ValueId {
-        let value = self.values.insert(ValueDef::Param { block, index: 0 });
+    pub fn append_inst(&mut self, block: BlockId, data: I, ty: T, effects: Option<(E, E)>) -> ValueId {
+        let value = self.values.insert(ValueInfo {
+            def: ValueDef::Param { block, index: 0 },
+            ty,
+        });
         let inst = self.insts.insert(InstNode {
             data,
             result: value,
             parent: block,
             effects,
         });
-        self.values[value] = ValueDef::Inst { inst };
+        self.values[value].def = ValueDef::Inst { inst };
         self.blocks[block].insts.push(inst);
         value
     }
@@ -224,16 +243,20 @@ impl<I, E> Function<I, E> {
         block: BlockId,
         index: usize,
         data: I,
+        ty: T,
         effects: Option<(E, E)>,
     ) -> ValueId {
-        let value = self.values.insert(ValueDef::Param { block, index: 0 });
+        let value = self.values.insert(ValueInfo {
+            def: ValueDef::Param { block, index: 0 },
+            ty,
+        });
         let inst = self.insts.insert(InstNode {
             data,
             result: value,
             parent: block,
             effects,
         });
-        self.values[value] = ValueDef::Inst { inst };
+        self.values[value].def = ValueDef::Inst { inst };
         self.blocks[block].insts.insert(index, inst);
         value
     }
@@ -265,7 +288,7 @@ impl<I, E> Function<I, E> {
     }
 }
 
-impl<I, E: Copy + Eq + Hash + Debug> Function<I, E> {
+impl<I, E: Copy + Eq + Hash + Debug, T: Clone + Debug> Function<I, E, T> {
     pub fn replace_effect(&mut self, old: E, new: E) -> bool {
         if old == new {
             return false;
@@ -307,22 +330,21 @@ impl<I, E: Copy + Eq + Hash + Debug> Function<I, E> {
         for (id, node) in &self.insts {
             if let Some((ein, _)) = node.effects {
                 if let Some(&_prev_inst) = consumed.get(&ein) {
-                    errors.push(EffectVerifyError::DoubleConsume { effect: ein, inst: id });
+                    errors.push(EffectVerifyError::DoubleConsume {
+                        effect: ein,
+                        inst: id,
+                    });
                 } else {
                     consumed.insert(ein, id);
                 }
             }
         }
 
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors)
-        }
+        if errors.is_empty() { Ok(()) } else { Err(errors) }
     }
 }
 
-impl<I: Instr, E: Copy + Eq + Hash + Debug> Function<I, E> {
+impl<I: Instr, E: Copy + Eq + Hash + Debug, T: Clone + Debug> Function<I, E, T> {
     pub fn replace_all_uses(&mut self, old: ValueId, new: ValueId) -> usize {
         if old == new {
             return 0;
@@ -366,10 +388,11 @@ impl<I: Instr, E: Copy + Eq + Hash + Debug> Function<I, E> {
     }
 }
 
-pub fn inline_entry_param<I: ValueLike, E: Copy + Eq + Hash + Debug>(
-    func: &mut Function<I, E>,
+pub fn inline_entry_param<I: ValueLike, E: Copy + Eq + Hash + Debug, T: Clone + Debug>(
+    func: &mut Function<I, E, T>,
     param_index: usize,
     replacement: I,
+    ty: T,
 ) -> Result<(), InlineArgError> {
     if !replacement.is_closed() {
         return Err(InlineArgError::ReplacementNotClosed);
@@ -383,14 +406,14 @@ pub fn inline_entry_param<I: ValueLike, E: Copy + Eq + Hash + Debug>(
     let old_param = func.blocks[entry].params[param_index];
 
     let insert_index = block_top_insert_index_after_operands(func, entry, &replacement);
-    let new_value = func.insert_inst_at_index(entry, insert_index, replacement, None);
+    let new_value = func.insert_inst_at_index(entry, insert_index, replacement, ty, None);
     func.replace_all_uses(old_param, new_value);
 
     func.blocks[entry].params.remove(param_index);
     func.values.remove(old_param);
 
     for (i, &param) in func.blocks[entry].params.iter().enumerate() {
-        func.values[param] = ValueDef::Param {
+        func.values[param].def = ValueDef::Param {
             block: entry,
             index: i,
         };
@@ -399,14 +422,15 @@ pub fn inline_entry_param<I: ValueLike, E: Copy + Eq + Hash + Debug>(
     Ok(())
 }
 
-pub fn inline_block_param<I: ValueLike, E: Copy + Eq + Hash + Debug>(
-    func: &mut Function<I, E>,
+pub fn inline_block_param<I: ValueLike, E: Copy + Eq + Hash + Debug, T: Clone + Debug>(
+    func: &mut Function<I, E, T>,
     block: BlockId,
     param_index: usize,
     replacement: I,
+    ty: T,
 ) -> Result<(), InlineArgError> {
     if block == func.entry {
-        return inline_entry_param(func, param_index, replacement);
+        return inline_entry_param(func, param_index, replacement, ty);
     }
 
     if !replacement.is_closed() {
@@ -420,14 +444,14 @@ pub fn inline_block_param<I: ValueLike, E: Copy + Eq + Hash + Debug>(
     let old_param = func.blocks[block].params[param_index];
 
     let insert_index = block_top_insert_index_after_operands(func, block, &replacement);
-    let new_value = func.insert_inst_at_index(block, insert_index, replacement, None);
+    let new_value = func.insert_inst_at_index(block, insert_index, replacement, ty, None);
     func.replace_all_uses(old_param, new_value);
 
     func.blocks[block].params.remove(param_index);
     func.values.remove(old_param);
 
     for (i, &param) in func.blocks[block].params.iter().enumerate() {
-        func.values[param] = ValueDef::Param { block, index: i };
+        func.values[param].def = ValueDef::Param { block, index: i };
     }
 
     // Remove the corresponding incoming argument at each predecessor edge.
@@ -469,21 +493,19 @@ pub fn inline_block_param<I: ValueLike, E: Copy + Eq + Hash + Debug>(
     Ok(())
 }
 
-pub fn lift_and_merge<I: ValueLike, E: Copy + Eq + Hash + Debug>(
-    func: &mut Function<I, E>,
+pub fn lift_and_merge<I: ValueLike, E: Copy + Eq + Hash + Debug, T: Clone + Debug>(
+    func: &mut Function<I, E, T>,
 ) {
     let dom = Dominators::compute(func);
 
     let candidates: Vec<InstId> = func
         .insts
         .iter()
-        .filter_map(|(id, node)| {
-            if node.effects.is_none() && node.data.is_hoistable() {
-                Some(id)
-            } else {
-                None
-            }
-        })
+        .filter_map(
+            |(id, node)| {
+                if node.effects.is_none() && node.data.is_hoistable() { Some(id) } else { None }
+            },
+        )
         .collect();
 
     let mut classes: Vec<Vec<InstId>> = Vec::new();
@@ -506,10 +528,7 @@ pub fn lift_and_merge<I: ValueLike, E: Copy + Eq + Hash + Debug>(
     }
 
     for class in classes {
-        let live: Vec<InstId> = class
-            .into_iter()
-            .filter(|id| func.insts.contains_key(*id))
-            .collect();
+        let live: Vec<InstId> = class.into_iter().filter(|id| func.insts.contains_key(*id)).collect();
 
         if live.len() < 2 {
             continue;
@@ -519,7 +538,9 @@ pub fn lift_and_merge<I: ValueLike, E: Copy + Eq + Hash + Debug>(
             .nearest_common_dominator_many(live.iter().map(|&id| func.insts[id].parent))
             .unwrap_or(func.entry);
 
-        let rep_data = func.insts[live[0]].data.clone();
+        let rep = live[0];
+        let rep_data = func.insts[rep].data.clone();
+        let rep_ty = func.values[func.insts[rep].result].ty.clone();
 
         let insert_index = block_top_insert_index_after_operands(func, target_block, &rep_data);
 
@@ -533,7 +554,7 @@ pub fn lift_and_merge<I: ValueLike, E: Copy + Eq + Hash + Debug>(
         };
 
         let canonical_value = if needs_new_canonical {
-            func.insert_inst_at_index(target_block, insert_index, rep_data, None)
+            func.insert_inst_at_index(target_block, insert_index, rep_data, rep_ty, None)
         } else {
             func.insts[func.blocks[target_block].insts[insert_index]].result
         };
@@ -557,6 +578,9 @@ mod tests {
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     struct TestEffect(u32);
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct TestType;
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     enum TestInst {
@@ -602,17 +626,19 @@ mod tests {
         }
     }
 
-    type TestFunc = Function<TestInst, TestEffect>;
+    type TestFunc = Function<TestInst, TestEffect, TestType>;
+
+    const TY: TestType = TestType;
 
     #[test]
     fn inline_entry_param_replaces_uses_and_removes_param() {
         let mut f = TestFunc::new();
-        let p0 = f.add_block_param(f.entry);
+        let p0 = f.add_block_param(f.entry, TY);
 
-        let pair = f.append_inst(f.entry, TestInst::Pair(p0, p0), None);
+        let pair = f.append_inst(f.entry, TestInst::Pair(p0, p0), TY, None);
         f.blocks[f.entry].term = Terminator::Return(Some(pair));
 
-        inline_entry_param(&mut f, 0, TestInst::Int(42)).unwrap();
+        inline_entry_param(&mut f, 0, TestInst::Int(42), TY).unwrap();
         assert!(f.blocks[f.entry].params.is_empty());
 
         let mut saw_pair = false;
@@ -632,9 +658,9 @@ mod tests {
     fn lift_and_merge_merges_duplicate_closed_values() {
         let mut f = TestFunc::new();
 
-        let c1 = f.append_inst(f.entry, TestInst::Int(7), None);
-        let c2 = f.append_inst(f.entry, TestInst::Int(7), None);
-        let pair = f.append_inst(f.entry, TestInst::Pair(c1, c2), None);
+        let c1 = f.append_inst(f.entry, TestInst::Int(7), TY, None);
+        let c2 = f.append_inst(f.entry, TestInst::Int(7), TY, None);
+        let pair = f.append_inst(f.entry, TestInst::Pair(c1, c2), TY, None);
         f.blocks[f.entry].term = Terminator::Return(Some(pair));
 
         let before = f.insts.len();
@@ -657,12 +683,12 @@ mod tests {
     #[test]
     fn lift_and_merge_merges_duplicate_non_closed_values() {
         let mut f = TestFunc::new();
-        let p0 = f.add_block_param(f.entry);
-        let p1 = f.add_block_param(f.entry);
+        let p0 = f.add_block_param(f.entry, TY);
+        let p1 = f.add_block_param(f.entry, TY);
 
-        let x1 = f.append_inst(f.entry, TestInst::Add(p0, p1), None);
-        let x2 = f.append_inst(f.entry, TestInst::Add(p0, p1), None);
-        let pair = f.append_inst(f.entry, TestInst::Pair(x1, x2), None);
+        let x1 = f.append_inst(f.entry, TestInst::Add(p0, p1), TY, None);
+        let x2 = f.append_inst(f.entry, TestInst::Add(p0, p1), TY, None);
+        let pair = f.append_inst(f.entry, TestInst::Pair(x1, x2), TY, None);
         f.blocks[f.entry].term = Terminator::Return(Some(pair));
 
         let before = f.insts.len();
@@ -683,21 +709,21 @@ mod tests {
     #[test]
     fn inline_non_entry_block_param_updates_predecessor_edge_args() {
         let mut f = TestFunc::new();
-        let cond = f.add_block_param(f.entry);
+        let cond = f.add_block_param(f.entry, TY);
 
         let join = f.create_block();
-        let jp = f.add_block_param(join);
+        let jp = f.add_block_param(join, TY);
 
         let t = f.create_block();
         let e = f.create_block();
 
-        let c1 = f.append_inst(t, TestInst::Int(1), None);
+        let c1 = f.append_inst(t, TestInst::Int(1), TY, None);
         f.blocks[t].term = Terminator::Jump {
             target: join,
             args: vec![c1],
         };
 
-        let c2 = f.append_inst(e, TestInst::Int(1), None);
+        let c2 = f.append_inst(e, TestInst::Int(1), TY, None);
         f.blocks[e].term = Terminator::Jump {
             target: join,
             args: vec![c2],
@@ -711,10 +737,10 @@ mod tests {
             else_args: vec![],
         };
 
-        let out = f.append_inst(join, TestInst::Pair(jp, jp), None);
+        let out = f.append_inst(join, TestInst::Pair(jp, jp), TY, None);
         f.blocks[join].term = Terminator::Return(Some(out));
 
-        inline_block_param(&mut f, join, 0, TestInst::Int(9)).unwrap();
+        inline_block_param(&mut f, join, 0, TestInst::Int(9), TY).unwrap();
 
         match &f.blocks[t].term {
             Terminator::Jump { target, args } => {
@@ -736,12 +762,13 @@ mod tests {
     #[test]
     fn effectful_inst_creation_and_query() {
         let mut f = TestFunc::new();
-        let p0 = f.add_block_param(f.entry);
+        let p0 = f.add_block_param(f.entry, TY);
 
-        let pure_val = f.append_inst(f.entry, TestInst::Int(1), None);
+        let pure_val = f.append_inst(f.entry, TestInst::Int(1), TY, None);
         let eff_val = f.append_inst(
             f.entry,
             TestInst::SideEffect(p0),
+            TY,
             Some((TestEffect(0), TestEffect(1))),
         );
 
@@ -755,11 +782,21 @@ mod tests {
     #[test]
     fn remove_effectful_inst_splices_chain() {
         let mut f = TestFunc::new();
-        let p0 = f.add_block_param(f.entry);
+        let p0 = f.add_block_param(f.entry, TY);
 
         // Chain: e0 -> inst_a -> e1 -> inst_b -> e2
-        f.append_inst(f.entry, TestInst::SideEffect(p0), Some((TestEffect(0), TestEffect(1))));
-        let b = f.append_inst(f.entry, TestInst::SideEffect(p0), Some((TestEffect(1), TestEffect(2))));
+        f.append_inst(
+            f.entry,
+            TestInst::SideEffect(p0),
+            TY,
+            Some((TestEffect(0), TestEffect(1))),
+        );
+        let b = f.append_inst(
+            f.entry,
+            TestInst::SideEffect(p0),
+            TY,
+            Some((TestEffect(1), TestEffect(2))),
+        );
 
         // Remove inst_a (consumes e0, produces e1)
         // inst_b should now consume e0 instead of e1
@@ -773,9 +810,14 @@ mod tests {
     #[test]
     fn replace_effect_works() {
         let mut f = TestFunc::new();
-        let p0 = f.add_block_param(f.entry);
+        let p0 = f.add_block_param(f.entry, TY);
 
-        let v = f.append_inst(f.entry, TestInst::SideEffect(p0), Some((TestEffect(5), TestEffect(6))));
+        let v = f.append_inst(
+            f.entry,
+            TestInst::SideEffect(p0),
+            TY,
+            Some((TestEffect(5), TestEffect(6))),
+        );
 
         assert!(f.replace_effect(TestEffect(5), TestEffect(99)));
 
@@ -786,11 +828,21 @@ mod tests {
     #[test]
     fn verify_effects_ok_for_valid_chain() {
         let mut f = TestFunc::new();
-        let p0 = f.add_block_param(f.entry);
+        let p0 = f.add_block_param(f.entry, TY);
 
-        f.append_inst(f.entry, TestInst::SideEffect(p0), Some((TestEffect(0), TestEffect(1))));
-        f.append_inst(f.entry, TestInst::SideEffect(p0), Some((TestEffect(1), TestEffect(2))));
-        f.append_inst(f.entry, TestInst::Int(42), None);
+        f.append_inst(
+            f.entry,
+            TestInst::SideEffect(p0),
+            TY,
+            Some((TestEffect(0), TestEffect(1))),
+        );
+        f.append_inst(
+            f.entry,
+            TestInst::SideEffect(p0),
+            TY,
+            Some((TestEffect(1), TestEffect(2))),
+        );
+        f.append_inst(f.entry, TestInst::Int(42), TY, None);
 
         assert!(f.verify_effects().is_ok());
     }
@@ -798,25 +850,51 @@ mod tests {
     #[test]
     fn verify_effects_catches_double_consume() {
         let mut f = TestFunc::new();
-        let p0 = f.add_block_param(f.entry);
+        let p0 = f.add_block_param(f.entry, TY);
 
         // Both instructions consume TestEffect(0) — invalid
-        f.append_inst(f.entry, TestInst::SideEffect(p0), Some((TestEffect(0), TestEffect(1))));
-        f.append_inst(f.entry, TestInst::SideEffect(p0), Some((TestEffect(0), TestEffect(2))));
+        f.append_inst(
+            f.entry,
+            TestInst::SideEffect(p0),
+            TY,
+            Some((TestEffect(0), TestEffect(1))),
+        );
+        f.append_inst(
+            f.entry,
+            TestInst::SideEffect(p0),
+            TY,
+            Some((TestEffect(0), TestEffect(2))),
+        );
 
         let errs = f.verify_effects().unwrap_err();
-        assert!(errs.iter().any(|e| matches!(e, EffectVerifyError::DoubleConsume { effect: TestEffect(0), .. })));
+        assert!(errs.iter().any(|e| matches!(
+            e,
+            EffectVerifyError::DoubleConsume {
+                effect: TestEffect(0),
+                ..
+            }
+        )));
     }
 
     #[test]
     fn lift_and_merge_skips_effectful_instructions() {
         let mut f = TestFunc::new();
-        let p0 = f.add_block_param(f.entry);
+        let p0 = f.add_block_param(f.entry, TY);
 
         // Two identical effectful instructions — should NOT be merged
-        let a = f.append_inst(f.entry, TestInst::SideEffect(p0), Some((TestEffect(0), TestEffect(1))));
-        let b = f.append_inst(f.entry, TestInst::SideEffect(p0), Some((TestEffect(1), TestEffect(2))));
-        let pair = f.append_inst(f.entry, TestInst::Pair(a, b), None);
+        let a = f.append_inst(
+            f.entry,
+            TestInst::SideEffect(p0),
+            TY,
+            Some((TestEffect(0), TestEffect(1))),
+        );
+        let b = f.append_inst(
+            f.entry,
+            TestInst::SideEffect(p0),
+            TY,
+            Some((TestEffect(1), TestEffect(2))),
+        );
+        let pair = f.append_inst(f.entry, TestInst::Pair(a, b), TY, None);
         f.blocks[f.entry].term = Terminator::Return(Some(pair));
 
         lift_and_merge(&mut f);
@@ -824,5 +902,17 @@ mod tests {
         // Both instructions should still exist
         assert!(f.inst_of_value(a).is_some());
         assert!(f.inst_of_value(b).is_some());
+    }
+
+    #[test]
+    fn value_type_tracks_types() {
+        let mut f = Function::<TestInst, TestEffect, &str>::new();
+        let p0 = f.add_block_param(f.entry, "int");
+        let v = f.append_inst(f.entry, TestInst::Int(42), "int", None);
+        let pair = f.append_inst(f.entry, TestInst::Pair(p0, v), "pair", None);
+
+        assert_eq!(*f.value_type(p0), "int");
+        assert_eq!(*f.value_type(v), "int");
+        assert_eq!(*f.value_type(pair), "pair");
     }
 }

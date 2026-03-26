@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
+use std::fmt::Debug;
+
 use crate::{BlockId, Function, Instr};
 
 pub(crate) struct Dominators {
@@ -9,7 +11,7 @@ pub(crate) struct Dominators {
 }
 
 impl Dominators {
-    pub(crate) fn compute<I, E>(func: &Function<I, E>) -> Self {
+    pub(crate) fn compute<I, E, T: Clone + Debug>(func: &Function<I, E, T>) -> Self {
         let blocks: Vec<BlockId> = func.blocks.keys().collect();
         let all: HashSet<BlockId> = blocks.iter().copied().collect();
         let preds = func.predecessors();
@@ -83,15 +85,12 @@ impl Dominators {
         let db = &self.doms[&b];
         let common: Vec<BlockId> = da.intersection(db).copied().collect();
 
-        common
-            .into_iter()
-            .max_by_key(|&cand| self.doms[&cand].len())
-            .unwrap_or(self.entry)
+        common.into_iter().max_by_key(|&cand| self.doms[&cand].len()).unwrap_or(self.entry)
     }
 }
 
-pub(crate) fn block_top_insert_index_after_operands<I: Instr, E>(
-    func: &Function<I, E>,
+pub(crate) fn block_top_insert_index_after_operands<I: Instr, E, T: Clone + Debug>(
+    func: &Function<I, E, T>,
     target_block: BlockId,
     data: &I,
 ) -> usize {
