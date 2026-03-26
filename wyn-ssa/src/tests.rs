@@ -339,3 +339,88 @@ fn value_type_tracks_types() {
     assert_eq!(*f.value_type(v), "int");
     assert_eq!(*f.value_type(pair), "pair");
 }
+
+#[test]
+fn forward_single_pred_params_substitutes_and_clears() {
+    // entry -> block0(%x, %y) -> block1
+    // block0 has one predecessor (entry), so %a=%x, %b=%y should be forwarded.
+    let mut f = TestFunc::new();
+    let x = f.add_block_param(f.entry, TY);
+    let y = f.add_block_param(f.entry, TY);
+
+    let block0 = f.create_block();
+    let a = f.add_block_param(block0, TY);
+    let b = f.add_block_param(block0, TY);
+
+    // entry jumps to block0 with (x, y)
+    f.blocks[f.entry].term = Terminator::Jump {
+        target: block0,
+        args: vec![x, y],
+    };
+
+    // block0 uses %a and %b
+    let sum = f.append_inst(block0, TestInst::Add(a, b), TY, None);
+    f.blocks[block0].term = Terminator::Return(Some(sum));
+
+    forward_single_pred_params(&mut f);
+
+    // block0 params should be cleared
+    assert!(f.blocks[block0].params.is_empty());
+
+    // entry's jump args should be cleared
+    match &f.blocks[f.entry].term {
+        Terminator::Jump { args, .. } => assert!(args.is_empty()),
+        _ => panic!("expected jump"),
+    }
+
+    // The Add instruction should now reference x and y directly
+    let add_inst = f.inst_of_value(sum).unwrap();
+    match &f.insts[add_inst].data {
+        TestInst::Add(lhs, rhs) => {
+            assert_eq!(*lhs, x);
+            assert_eq!(*rhs, y);
+        }
+        _ => panic!("expected Add"),
+    }
+}
+
+#[test]
+fn forward_single_pred_params_skips_multi_predecessor_blocks() {
+    // Two predecessors jump to the same block — should NOT forward.
+    let mut f = TestFunc::new();
+    let cond = f.add_block_param(f.entry, TY);
+
+    let join = f.create_block();
+    let jp = f.add_block_param(join, TY);
+
+    let t = f.create_block();
+    let e = f.create_block();
+
+    let c1 = f.append_inst(t, TestInst::Int(1), TY, None);
+    f.blocks[t].term = Terminator::Jump {
+        target: join,
+        args: vec![c1],
+    };
+
+    let c2 = f.append_inst(e, TestInst::Int(2), TY, None);
+    f.blocks[e].term = Terminator::Jump {
+        target: join,
+        args: vec![c2],
+    };
+
+    f.blocks[f.entry].term = Terminator::Branch {
+        cond,
+        then_block: t,
+        then_args: vec![],
+        else_block: e,
+        else_args: vec![],
+    };
+
+    let out = f.append_inst(join, TestInst::Pair(jp, jp), TY, None);
+    f.blocks[join].term = Terminator::Return(Some(out));
+
+    forward_single_pred_params(&mut f);
+
+    // join still has its param — two predecessors, can't forward
+    assert_eq!(f.blocks[join].params.len(), 1);
+}

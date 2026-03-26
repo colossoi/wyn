@@ -592,5 +592,87 @@ pub fn lift_and_merge<I: ValueLike, E: Copy + Eq + Hash + Debug, T: Clone + Debu
     }
 }
 
+/// Forward block parameters through single-predecessor edges.
+///
+/// When a block has exactly one predecessor that reaches it via an unconditional
+/// jump, the block's parameters are always equal to the jump's arguments. This
+/// pass replaces all uses of such parameters with the corresponding arguments,
+/// then clears both. Runs to fixpoint to resolve transitive chains.
+pub fn forward_single_pred_params<I: Instr, E: Copy + Eq + Hash + Debug, T: Clone + Debug>(
+    func: &mut Function<I, E, T>,
+) {
+    loop {
+        let preds = func.predecessors();
+        let mut substitutions: Vec<(ValueId, ValueId)> = Vec::new();
+
+        for (bid, pred_list) in &preds {
+            if *bid == func.entry {
+                continue;
+            }
+            if pred_list.len() != 1 {
+                continue;
+            }
+            let pred = pred_list[0];
+            let args = match &func.blocks[pred].term {
+                Terminator::Jump { target, args } if *target == *bid => args,
+                _ => continue,
+            };
+            let params = &func.blocks[*bid].params;
+            if params.len() != args.len() {
+                continue;
+            }
+            for (i, &param) in params.iter().enumerate() {
+                substitutions.push((param, args[i]));
+            }
+        }
+
+        if substitutions.is_empty() {
+            break;
+        }
+
+        // Resolve transitive chains: if a→b and b→c, resolve a→c.
+        let sub_map: HashMap<ValueId, ValueId> = substitutions.iter().copied().collect();
+        let resolved: Vec<(ValueId, ValueId)> = substitutions
+            .iter()
+            .map(|&(old, mut new)| {
+                while let Some(&next) = sub_map.get(&new) {
+                    if next == new {
+                        break;
+                    }
+                    new = next;
+                }
+                (old, new)
+            })
+            .collect();
+
+        for &(old, new) in &resolved {
+            func.replace_all_uses(old, new);
+        }
+
+        // Clear the params and jump args for blocks we forwarded.
+        for (bid, pred_list) in &preds {
+            if *bid == func.entry || pred_list.len() != 1 {
+                continue;
+            }
+            let pred = pred_list[0];
+            let is_jump_to_bid = matches!(
+                &func.blocks[pred].term,
+                Terminator::Jump { target, .. } if *target == *bid
+            );
+            if !is_jump_to_bid || func.blocks[*bid].params.is_empty() {
+                continue;
+            }
+            // Remove the param ValueIds from the value map.
+            for &param in &func.blocks[*bid].params {
+                func.values.remove(param);
+            }
+            func.blocks[*bid].params.clear();
+            if let Terminator::Jump { ref mut args, .. } = func.blocks[pred].term {
+                args.clear();
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;
