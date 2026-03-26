@@ -183,11 +183,19 @@ impl<I, E, T: Clone + Debug> Function<I, E, T> {
     }
 
     pub fn create_block(&mut self) -> BlockId {
-        self.blocks.insert(BasicBlock {
+        let block = self.blocks.insert(BasicBlock {
             params: Vec::new(),
             insts: Vec::new(),
             term: Terminator::Unreachable,
-        })
+        });
+        // First user block: entry jumps to it automatically.
+        if let Terminator::Unreachable = self.blocks[self.entry].term {
+            self.blocks[self.entry].term = Terminator::Jump {
+                target: block,
+                args: vec![],
+            };
+        }
+        block
     }
 
     pub fn add_block_param(&mut self, block: BlockId, ty: T) -> ValueId {
