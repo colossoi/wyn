@@ -1,5 +1,5 @@
 [workspace]
-members = ["wyn-core", "wyn", "wyn-analyzer"]
+members = ["wyn-core", "wyn", "wyn-analyzer", "wyn-ssa"]
 resolver = "2"
 exclude = ["extra", "playground"]
 
