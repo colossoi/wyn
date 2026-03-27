@@ -51,12 +51,12 @@ fn resolve_storage_view(
     value: ValueId,
     entry: &EntryPoint,
 ) -> Option<(usize, (u32, u32))> {
-    for inst in &body.insts {
+    for (_id, inst) in &body.inner.insts {
         if inst.result == Some(value) {
             if let InstKind::StorageView {
                 source: ViewSource::Storage { set, binding },
                 ..
-            } = &inst.kind
+            } = &inst.data
             {
                 for (i, input) in entry.inputs.iter().enumerate() {
                     if input.storage_binding == Some((*set, *binding)) {
@@ -89,10 +89,10 @@ fn track_provenance(body: &FuncBody, value: ValueId, inputs: &[EntryInput]) -> A
     }
 
     // Check if it's produced by an instruction
-    for inst in &body.insts {
+    for (_id, inst) in &body.inner.insts {
         if inst.result == Some(value) {
             // Check if result type is a virtual array (range)
-            if is_virtual_array(&inst.result_ty) {
+            if is_virtual_array(body.inner.value_type(inst.result.unwrap())) {
                 return ArrayProvenance::Range { value };
             }
         }
@@ -137,8 +137,8 @@ fn track_provenance_unified(
     // Only allow local range provenance at entry level — ranges constructed
     // in called functions have bounds that aren't accessible at entry level.
     if at_entry {
-        for inst in &body.insts {
-            if inst.result == Some(value) && is_virtual_array(&inst.result_ty) {
+        for (_id, inst) in &body.inner.insts {
+            if inst.result == Some(value) && is_virtual_array(body.inner.value_type(inst.result.unwrap())) {
                 return ArrayProvenance::Range { value };
             }
         }
@@ -280,8 +280,8 @@ fn find_soac_in_body(
     }
 
     // Breadth-first: check for SOAC instructions at THIS level first
-    for inst in &body.insts {
-        match &inst.kind {
+    for (_id, inst) in &body.inner.insts {
+        match &inst.data {
             InstKind::Soac(Soac::Map {
                 func,
                 inputs,
@@ -356,8 +356,8 @@ fn find_soac_in_body(
     }
 
     // No SOAC at this level - recurse into called functions
-    for inst in &body.insts {
-        if let InstKind::Call { func, args } = &inst.kind {
+    for (_id, inst) in &body.inner.insts {
+        if let InstKind::Call { func, args } = &inst.data {
             // Skip intrinsic calls
             if func.starts_with("_w_") {
                 continue;

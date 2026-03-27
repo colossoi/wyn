@@ -8,7 +8,7 @@ use crate::bail_glsl;
 use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
 use crate::lowering_common::ShaderStage;
-use crate::ssa::types::{BlockId, FuncBody, Inst, InstKind, Terminator, ValueId};
+use crate::ssa::types::{BlockId, FuncBody, InstKind, Terminator, ValueId, WynInstNode};
 use crate::ssa::types::{EntryPoint, ExecutionModel, Function, IoDecoration, Program};
 use crate::types::TypeExt;
 use polytype::Type as PolyType;
@@ -295,10 +295,10 @@ impl<'a> LowerCtx<'a> {
         deps: &mut Vec<String>,
         visited: &mut HashSet<String>,
     ) -> Result<()> {
-        for block in &body.blocks {
+        for (_bid, block) in &body.inner.blocks {
             for &inst_id in &block.insts {
                 let inst = body.get_inst(inst_id);
-                if let InstKind::Call { func, .. } = &inst.kind {
+                if let InstKind::Call { func, .. } = &inst.data {
                     if self.func_index.contains_key(func) && self.impl_source.get(func).is_none() {
                         self.collect_deps_recursive(func, deps, visited)?;
                     }
@@ -568,7 +568,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         }
 
         // For simple single-block functions, just lower the instructions
-        if self.body.blocks.len() == 1 {
+        if self.body.inner.blocks.len() == 1 {
             return self.lower_single_block(output);
         }
 
@@ -578,7 +578,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
 
     /// Lower a single-block function (no control flow)
     fn lower_single_block(&mut self, output: &mut String) -> Result<String> {
-        let block = &self.body.blocks[0];
+        let block = &self.body.inner.blocks[self.body.inner.entry];
 
         // Lower each instruction
         for &inst_id in &block.insts {
@@ -587,8 +587,8 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
 
             if let Some(result) = inst.result {
                 // Emit as variable declaration
-                let var_name = format!("_v{}", result.0);
-                let ty = self.ctx.type_to_glsl(&inst.result_ty);
+                let var_name = format!("_v{:?}", result);
+                let ty = self.ctx.type_to_glsl(self.body.inner.value_type(result));
                 writeln!(output, "{}{} {} = {};", self.ctx.indent_str(), ty, var_name, expr).unwrap();
                 self.value_map.insert(result, var_name.clone());
                 self.declared.insert(var_name);
@@ -596,9 +596,9 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         }
 
         // Get the return value from terminator
-        match &block.terminator {
-            Some(Terminator::Return(val)) => self.get_value(*val),
-            Some(Terminator::ReturnUnit) => Ok("".to_string()),
+        match &block.term {
+            Terminator::Return(Some(val)) => self.get_value(*val),
+            Terminator::Return(None) => Ok("".to_string()),
             _ => bail_glsl!("Unexpected terminator in single-block function"),
         }
     }
@@ -611,23 +611,23 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         // Detect the CFG pattern and lower accordingly
         // For now, implement a simple linear walk that handles basic patterns
 
-        let mut current_block = BlockId::ENTRY;
+        let mut current_block = self.body.entry_block();
         let mut result_var = String::new();
 
         loop {
-            let block = &self.body.blocks[current_block.index()];
+            let block = &self.body.inner.blocks[current_block];
 
             // Lower block parameters (these come from branch arguments)
             // Skip for entry block (handled by function params)
-            if current_block != BlockId::ENTRY {
+            if current_block != self.body.entry_block() {
                 for param in &block.params {
                     // The value should already be in value_map from the branch
-                    if !self.value_map.contains_key(&param.value) {
+                    if !self.value_map.contains_key(&*param) {
                         // Declare variable for block param
-                        let var_name = format!("_v{}", param.value.0);
-                        let ty = self.ctx.type_to_glsl(&param.ty);
+                        let var_name = format!("_v{:?}", param);
+                        let ty = self.ctx.type_to_glsl(&self.body.inner.value_type(*param));
                         writeln!(output, "{}{} {};", self.ctx.indent_str(), ty, var_name).unwrap();
-                        self.value_map.insert(param.value, var_name.clone());
+                        self.value_map.insert(*param, var_name.clone());
                         self.declared.insert(var_name);
                     }
                 }
@@ -639,8 +639,8 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 let expr = self.lower_inst(inst, output)?;
 
                 if let Some(result) = inst.result {
-                    let var_name = format!("_v{}", result.0);
-                    let ty = self.ctx.type_to_glsl(&inst.result_ty);
+                    let var_name = format!("_v{:?}", result);
+                    let ty = self.ctx.type_to_glsl(self.body.inner.value_type(result));
                     writeln!(output, "{}{} {} = {};", self.ctx.indent_str(), ty, var_name, expr).unwrap();
                     self.value_map.insert(result, var_name.clone());
                     self.declared.insert(var_name);
@@ -648,26 +648,26 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             }
 
             // Handle terminator
-            match &block.terminator {
-                Some(Terminator::Return(val)) => {
+            match &block.term {
+                Terminator::Return(Some(val)) => {
                     result_var = self.get_value(*val)?;
                     break;
                 }
-                Some(Terminator::ReturnUnit) => {
+                Terminator::Return(None) => {
                     result_var = "".to_string();
                     break;
                 }
-                Some(Terminator::Branch { target, args }) => {
+                Terminator::Branch { target, args } => {
                     // Pass arguments to target block params
-                    let target_block = &self.body.blocks[target.index()];
-                    for (param, arg) in target_block.params.iter().zip(args.iter()) {
+                    let target_block = &self.body.inner.blocks[*target];
+                    for (&param, arg) in target_block.params.iter().zip(args.iter()) {
                         let arg_val = self.get_value(*arg)?;
-                        let var_name = format!("_v{}", param.value.0);
+                        let var_name = format!("_v{:?}", param);
                         if self.declared.contains(&var_name) {
                             writeln!(output, "{}{} = {};", self.ctx.indent_str(), var_name, arg_val)
                                 .unwrap();
                         } else {
-                            let ty = self.ctx.type_to_glsl(&param.ty);
+                            let ty = self.ctx.type_to_glsl(self.body.inner.value_type(param));
                             writeln!(
                                 output,
                                 "{}{} {} = {};",
@@ -679,17 +679,17 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             .unwrap();
                             self.declared.insert(var_name.clone());
                         }
-                        self.value_map.insert(param.value, var_name);
+                        self.value_map.insert(param, var_name);
                     }
                     current_block = *target;
                 }
-                Some(Terminator::CondBranch {
+                Terminator::CondBranch {
                     cond,
                     then_target,
                     then_args,
                     else_target,
                     else_args,
-                }) => {
+                } => {
                     // Check if this is an if-then-else that merges
                     let merge_block = self.find_merge_block(*then_target, *else_target);
 
@@ -707,11 +707,8 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         current_block = merge;
 
                         // If merge block is a return, we're done
-                        let merge_blk = &self.body.blocks[merge.index()];
-                        if matches!(
-                            merge_blk.terminator,
-                            Some(Terminator::Return(_)) | Some(Terminator::ReturnUnit)
-                        ) {
+                        let merge_blk = &self.body.inner.blocks[merge];
+                        if matches!(merge_blk.term, Terminator::Return(_)) {
                             // Continue to process merge block
                             continue;
                         }
@@ -720,11 +717,8 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         bail_glsl!("Unstructured control flow not supported in GLSL");
                     }
                 }
-                Some(Terminator::Unreachable) => {
+                Terminator::Unreachable => {
                     bail_glsl!("Unreachable terminator encountered");
-                }
-                None => {
-                    bail_glsl!("Block without terminator");
                 }
             }
         }
@@ -735,11 +729,11 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
     /// Find the merge block for an if-then-else.
     fn find_merge_block(&self, then_block: BlockId, else_block: BlockId) -> Option<BlockId> {
         // Simple heuristic: if both branches go to the same block, that's the merge
-        let then_blk = &self.body.blocks[then_block.index()];
-        let else_blk = &self.body.blocks[else_block.index()];
+        let then_blk = &self.body.inner.blocks[then_block];
+        let else_blk = &self.body.inner.blocks[else_block];
 
-        match (&then_blk.terminator, &else_blk.terminator) {
-            (Some(Terminator::Branch { target: t1, .. }), Some(Terminator::Branch { target: t2, .. })) => {
+        match (&then_blk.term, &else_blk.term) {
+            (Terminator::Branch { target: t1, .. }, Terminator::Branch { target: t2, .. }) => {
                 if t1 == t2 {
                     Some(*t1)
                 } else {
@@ -747,7 +741,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 }
             }
             // Both return - no merge needed, treat as structured
-            (Some(Terminator::Return(_)), Some(Terminator::Return(_))) => None,
+            (Terminator::Return(Some(_)), Terminator::Return(Some(_))) => None,
             _ => None,
         }
     }
@@ -764,16 +758,16 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         output: &mut String,
     ) -> Result<String> {
         let cond_val = self.get_value(cond)?;
-        let merge_block = &self.body.blocks[merge.index()];
+        let merge_block = &self.body.inner.blocks[merge];
 
         // Declare result variable if merge block has params
         let result_var = if !merge_block.params.is_empty() {
             let param = &merge_block.params[0];
-            let var_name = format!("_v{}", param.value.0);
-            let ty = self.ctx.type_to_glsl(&param.ty);
+            let var_name = format!("_v{:?}", param);
+            let ty = self.ctx.type_to_glsl(&self.body.inner.value_type(*param));
             writeln!(output, "{}{} {};", self.ctx.indent_str(), ty, var_name).unwrap();
             self.declared.insert(var_name.clone());
-            self.value_map.insert(param.value, var_name.clone());
+            self.value_map.insert(*param, var_name.clone());
             var_name
         } else {
             String::new()
@@ -826,12 +820,12 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         args: &[ValueId],
         output: &mut String,
     ) -> Result<String> {
-        let block = &self.body.blocks[block_id.index()];
+        let block = &self.body.inner.blocks[block_id];
 
         // Set up block params from args
         for (param, arg) in block.params.iter().zip(args.iter()) {
             let arg_val = self.get_value(*arg)?;
-            self.value_map.insert(param.value, arg_val);
+            self.value_map.insert(*param, arg_val);
         }
 
         // Lower instructions
@@ -840,8 +834,8 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             let expr = self.lower_inst(inst, output)?;
 
             if let Some(result) = inst.result {
-                let var_name = format!("_v{}", result.0);
-                let ty = self.ctx.type_to_glsl(&inst.result_ty);
+                let var_name = format!("_v{:?}", result);
+                let ty = self.ctx.type_to_glsl(self.body.inner.value_type(result));
                 writeln!(output, "{}{} {} = {};", self.ctx.indent_str(), ty, var_name, expr).unwrap();
                 self.value_map.insert(result, var_name.clone());
                 self.declared.insert(var_name);
@@ -849,15 +843,16 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         }
 
         // Return the branch argument for the merge block
-        match &block.terminator {
-            Some(Terminator::Branch { args, .. }) if !args.is_empty() => self.get_value(args[0]),
-            Some(Terminator::Return(val)) => self.get_value(*val),
+        match &block.term {
+            Terminator::Branch { args, .. } if !args.is_empty() => self.get_value(args[0]),
+            Terminator::Return(Some(val)) => self.get_value(*val),
             _ => Ok(String::new()),
         }
     }
 
-    fn lower_inst(&mut self, inst: &Inst, _output: &mut String) -> Result<String> {
-        match &inst.kind {
+    fn lower_inst(&mut self, inst: &WynInstNode, _output: &mut String) -> Result<String> {
+        let result_ty = inst.result.map(|r| self.body.inner.value_type(r));
+        match &inst.data {
             InstKind::Int(s) => Ok(s.clone()),
             InstKind::Float(s) => {
                 if s.contains('.') || s.contains('e') || s.contains('E') {
@@ -893,19 +888,19 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     bail_glsl!("Empty tuple in GLSL lowering");
                 }
                 let parts: Result<Vec<_>> = elems.iter().map(|e| self.get_value(*e)).collect();
-                let struct_name = self.ctx.type_to_glsl(&inst.result_ty);
+                let struct_name = self.ctx.type_to_glsl(result_ty.expect("Tuple must have result"));
                 Ok(format!("{}({})", struct_name, parts?.join(", ")))
             }
 
             InstKind::ArrayLit { elements } => {
                 let parts: Result<Vec<_>> = elements.iter().map(|e| self.get_value(*e)).collect();
-                let ty = self.ctx.type_to_glsl(&inst.result_ty);
+                let ty = self.ctx.type_to_glsl(result_ty.expect("ArrayLit must have result"));
                 Ok(format!("{}[]({})", ty, parts?.join(", ")))
             }
 
             InstKind::Vector(elems) => {
                 let parts: Result<Vec<_>> = elems.iter().map(|e| self.get_value(*e)).collect();
-                let ty = self.ctx.type_to_glsl(&inst.result_ty);
+                let ty = self.ctx.type_to_glsl(result_ty.expect("Vector must have result"));
                 Ok(format!("{}({})", ty, parts?.join(", ")))
             }
 
@@ -941,7 +936,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
 
                 // Check if it's a builtin
                 if let Some(impl_) = self.ctx.impl_source.get(func) {
-                    self.lower_builtin_call(impl_, &arg_strs, &inst.result_ty)
+                    self.lower_builtin_call(impl_, &arg_strs, result_ty.expect("Call must have result"))
                 } else {
                     Ok(format!("{}({})", func, arg_strs.join(", ")))
                 }
@@ -949,7 +944,12 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
 
             InstKind::Intrinsic { name, args } => {
                 let arg_strs: Result<Vec<_>> = args.iter().map(|a| self.get_value(*a)).collect();
-                self.lower_intrinsic(name, &arg_strs?, args, &inst.result_ty)
+                self.lower_intrinsic(
+                    name,
+                    &arg_strs?,
+                    args,
+                    result_ty.expect("Intrinsic must have result"),
+                )
             }
 
             InstKind::ArrayRange { start, step, len } => {

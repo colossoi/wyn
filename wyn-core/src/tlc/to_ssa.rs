@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::{self, NodeId, Span, TypeName};
+use crate::ast::{self, TypeName};
 use crate::ssa::builder::FuncBuilder;
 use crate::ssa::types::{FuncBody, InstKind, Soac, Terminator, ValueId, ViewSource};
 use crate::types::TypeExt;
@@ -144,7 +144,7 @@ pub fn convert_program(program: &TlcProgram) -> Result<Program, ConvertError> {
         if let Ok(result_val) = converter.convert_term(&def.body) {
             if let Ok(()) = converter
                 .builder
-                .terminate(Terminator::Return(result_val))
+                .terminate(Terminator::Return(Some(result_val)))
                 .map_err(|e| ConvertError::BuilderError(e.to_string()))
             {
                 if let Ok(body) = converter.finish() {
@@ -202,9 +202,9 @@ pub fn convert_program(program: &TlcProgram) -> Result<Program, ConvertError> {
 
 /// Check whether an SSA function body contains only pure constant instructions.
 fn is_purely_constant_body(body: &FuncBody) -> bool {
-    body.insts.iter().all(|inst| {
+    body.inner.insts.values().all(|inst| {
         matches!(
-            &inst.kind,
+            &inst.data,
             InstKind::Int(_)
                 | InstKind::Float(_)
                 | InstKind::Bool(_)
@@ -257,7 +257,7 @@ fn convert_function(
 
     // Build parameter list for FuncBuilder
     let param_list: Vec<(Type<TypeName>, String)> =
-        params.iter().map(|(name, ty, _)| (ty.clone(), name.clone())).collect();
+        params.iter().map(|(name, ty)| (ty.clone(), name.clone())).collect();
 
     let ret_type = inner_body.ty.clone();
     let builder = FuncBuilder::new(param_list, ret_type.clone());
@@ -272,7 +272,7 @@ fn convert_function(
     );
 
     // Map parameters to their ValueIds
-    for (i, (name, _, _)) in params.iter().enumerate() {
+    for (i, (name, _)) in params.iter().enumerate() {
         let value = converter.builder.get_param(i);
         converter.locals.insert(name.clone(), value);
     }
@@ -280,10 +280,9 @@ fn convert_function(
     // Wrap view-array parameters in inherited StorageView instructions so
     // the SPIR-V backend can resolve buffer identity by walking the chain
     // back to the caller's StorageView.
-    let span = inner_body.span;
-    let node_id = NodeId(0);
+
     let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
-    for (i, (name, ty, _)) in params.iter().enumerate() {
+    for (i, (name, ty)) in params.iter().enumerate() {
         let is_view = ty
             .array_variant()
             .map(|v| matches!(v, Type::Constructed(TypeName::ArrayVariantView, _)))
@@ -294,21 +293,15 @@ fn convert_function(
             // references it so the backend can chase the chain.
             let zero = converter
                 .builder
-                .push_int("0", u32_ty.clone(), span, node_id)
+                .push_int("0", u32_ty.clone())
                 .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
             let view_len = converter
                 .builder
-                .push_intrinsic(
-                    "_w_intrinsic_view_len",
-                    vec![param_val],
-                    u32_ty.clone(),
-                    span,
-                    node_id,
-                )
+                .push_intrinsic("_w_intrinsic_view_len", vec![param_val], u32_ty.clone())
                 .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
             let view = converter
                 .builder
-                .emit_inherited_view(param_val, zero, view_len, ty.clone(), span, node_id)
+                .emit_inherited_view(param_val, zero, view_len, ty.clone())
                 .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
             converter.locals.insert(name.clone(), view);
         }
@@ -321,12 +314,12 @@ fn convert_function(
     if matches!(ret_type, Type::Constructed(TypeName::Unit, _)) {
         converter
             .builder
-            .terminate(Terminator::ReturnUnit)
+            .terminate(Terminator::Return(None))
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
     } else {
         converter
             .builder
-            .terminate(Terminator::Return(result))
+            .terminate(Terminator::Return(Some(result)))
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
     }
 
@@ -361,7 +354,7 @@ fn convert_entry_point(
     let mut binding_num = 0u32;
     let mut pc_offset = 0u32;
 
-    for (i, (name, ty, _span)) in params.iter().enumerate() {
+    for (i, (name, ty)) in params.iter().enumerate() {
         let decoration = entry.params.get(i).and_then(|p| extract_io_decoration(p));
         let size_hint = entry.params.get(i).and_then(|p| extract_size_hint(p));
 
@@ -398,7 +391,7 @@ fn convert_entry_point(
 
     // Build parameter list for FuncBuilder
     let param_list: Vec<(Type<TypeName>, String)> =
-        params.iter().map(|(name, ty, _)| (ty.clone(), name.clone())).collect();
+        params.iter().map(|(name, ty)| (ty.clone(), name.clone())).collect();
 
     let ret_type = inner_body.ty.clone();
     let builder = FuncBuilder::new(param_list, ret_type.clone());
@@ -413,7 +406,7 @@ fn convert_entry_point(
     );
 
     // Map parameters
-    for (i, (name, _, _)) in params.iter().enumerate() {
+    for (i, (name, _)) in params.iter().enumerate() {
         let value = converter.builder.get_param(i);
         converter.locals.insert(name.clone(), value);
     }
@@ -422,14 +415,12 @@ fn convert_entry_point(
     // use of the parameter (e.g. slicing) sees a StorageView rather than a raw
     // ValueId that has no SPIR-V representation. The parallelizer replaces the
     // entire body when it applies, so these views are harmless in that case.
-    let span = inner_body.span;
-    let node_id = NodeId(0);
     let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
     for input in &inputs {
         if let Some((set, binding)) = input.storage_binding {
             let view = converter
                 .builder
-                .emit_storage_view(set, binding, input.ty.clone(), span, node_id)
+                .emit_storage_view(set, binding, input.ty.clone())
                 .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
             converter.locals.insert(input.name.clone(), view);
         }
@@ -458,14 +449,12 @@ fn convert_entry_point(
     if is_unit_return {
         converter
             .builder
-            .terminate(Terminator::ReturnUnit)
+            .terminate(Terminator::Return(None))
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
     } else if is_compute && !outputs.is_empty() {
         // Compute shader with non-unit return: write result to output storage buffer
         // using the same StorageView + StorageViewIndex + Store helpers as the parallelizer.
         let mut effect = converter.builder.entry_effect();
-        let span = inner_body.span;
-        let node_id = NodeId(0);
 
         for (i, output) in outputs.iter().enumerate() {
             let (set, binding) =
@@ -475,7 +464,7 @@ fn convert_entry_point(
             } else {
                 converter
                     .builder
-                    .push_project(result, i as u32, output.ty.clone(), span, node_id)
+                    .push_project(result, i as u32, output.ty.clone())
                     .map_err(|e| ConvertError::BuilderError(e.to_string()))?
             };
 
@@ -489,35 +478,35 @@ fn convert_entry_point(
                 // Fixed-size array: unpack and store each element
                 let view = converter
                     .builder
-                    .emit_storage_view(set, binding, et.clone(), span, node_id)
+                    .emit_storage_view(set, binding, et.clone())
                     .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
                 for j in 0..n {
                     let elem = converter
                         .builder
-                        .push_project(value, j as u32, et.clone(), span, node_id)
+                        .push_project(value, j as u32, et.clone())
                         .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
                     let idx = converter
                         .builder
-                        .push_int(&j.to_string(), u32_ty.clone(), span, node_id)
+                        .push_int(&j.to_string(), u32_ty.clone())
                         .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
                     effect = converter
                         .builder
-                        .emit_storage_store(view, idx, elem, et.clone(), effect, span, node_id)
+                        .emit_storage_store(view, idx, elem, et.clone(), effect)
                         .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
                 }
             } else {
                 // Scalar or other: store directly at index 0
                 let view = converter
                     .builder
-                    .emit_storage_view(set, binding, output.ty.clone(), span, node_id)
+                    .emit_storage_view(set, binding, output.ty.clone())
                     .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
                 let idx_zero = converter
                     .builder
-                    .push_int("0", u32_ty.clone(), span, node_id)
+                    .push_int("0", u32_ty.clone())
                     .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
                 effect = converter
                     .builder
-                    .emit_storage_store(view, idx_zero, value, output.ty.clone(), effect, span, node_id)
+                    .emit_storage_store(view, idx_zero, value, output.ty.clone(), effect)
                     .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
             }
         }
@@ -525,13 +514,11 @@ fn convert_entry_point(
 
         converter
             .builder
-            .terminate(Terminator::ReturnUnit)
+            .terminate(Terminator::Return(None))
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
     } else if !is_compute && !is_unit_return && !outputs.is_empty() {
         // Vertex/fragment shader with outputs: emit OutputPtr + Store
         let mut effect = converter.builder.entry_effect();
-        let span = inner_body.span;
-        let node_id = NodeId(0);
 
         if outputs.len() == 1 {
             // Single output: store result directly
@@ -544,18 +531,18 @@ fn convert_entry_point(
             );
             let ptr = converter
                 .builder
-                .push_output_ptr(0, ptr_ty, span, node_id)
+                .push_output_ptr(0, ptr_ty)
                 .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
             effect = converter
                 .builder
-                .push_store(ptr, result, effect, span, node_id)
+                .push_store(ptr, result, effect)
                 .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
         } else {
             // Tuple output: extract and store each component
             for (i, output) in outputs.iter().enumerate() {
                 let component = converter
                     .builder
-                    .push_project(result, i as u32, output.ty.clone(), span, node_id)
+                    .push_project(result, i as u32, output.ty.clone())
                     .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
                 let ptr_ty = Type::Constructed(
                     TypeName::Pointer,
@@ -566,11 +553,11 @@ fn convert_entry_point(
                 );
                 let ptr = converter
                     .builder
-                    .push_output_ptr(i, ptr_ty, span, node_id)
+                    .push_output_ptr(i, ptr_ty)
                     .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
                 effect = converter
                     .builder
-                    .push_store(ptr, component, effect, span, node_id)
+                    .push_store(ptr, component, effect)
                     .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
             }
         }
@@ -578,13 +565,13 @@ fn convert_entry_point(
 
         converter
             .builder
-            .terminate(Terminator::ReturnUnit)
+            .terminate(Terminator::Return(None))
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
     } else {
         // Non-entry or no outputs: use Return
         converter
             .builder
-            .terminate(Terminator::Return(result))
+            .terminate(Terminator::Return(Some(result)))
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
     }
 
@@ -602,10 +589,7 @@ fn convert_entry_point(
 
 /// Extract curried parameters from nested Lams.
 /// Returns parameter names as Strings (looked up from symbol table) for SSA construction.
-fn extract_params<'a>(
-    term: &'a Term,
-    symbols: &SymbolTable,
-) -> (Vec<(String, Type<TypeName>, Span)>, &'a Term) {
+fn extract_params<'a>(term: &'a Term, symbols: &SymbolTable) -> (Vec<(String, Type<TypeName>)>, &'a Term) {
     match &term.kind {
         TermKind::Lambda(Lambda {
             params: lam_params,
@@ -616,7 +600,7 @@ fn extract_params<'a>(
             // Insert in reverse order so first param ends up first
             for (p, ty) in lam_params.iter().rev() {
                 let param_name = symbols.get(*p).expect("BUG: symbol not in table").clone();
-                params.insert(0, (param_name, ty.clone(), term.span));
+                params.insert(0, (param_name, ty.clone()));
             }
             (params, inner)
         }
@@ -771,8 +755,6 @@ impl<'a> Converter<'a> {
     /// Convert a TLC term to SSA, returning the result ValueId.
     fn convert_term(&mut self, term: &Term) -> Result<ValueId, ConvertError> {
         let ty = term.ty.clone();
-        let span = term.span;
-        let node_id = NodeId(0);
 
         match &term.kind {
             TermKind::Var(sym) => {
@@ -784,7 +766,7 @@ impl<'a> Converter<'a> {
                 } else if self.pure_constants.contains(name) {
                     // Hoisted constant — emit a Global reference instead of inlining
                     self.builder
-                        .push_global(name, ty, span, node_id)
+                        .push_global(name, ty)
                         .map_err(|e| ConvertError::BuilderError(e.to_string()))
                 } else {
                     // Check if this is an arity-0 constant def (by SymbolId or by name).
@@ -800,30 +782,28 @@ impl<'a> Converter<'a> {
                     } else {
                         // Global reference
                         self.builder
-                            .push_global(name, ty, span, node_id)
+                            .push_global(name, ty)
                             .map_err(|e| ConvertError::BuilderError(e.to_string()))
                     }
                 }
             }
 
-            TermKind::IntLit(s) => self
-                .builder
-                .push_int(s, ty, span, node_id)
-                .map_err(|e| ConvertError::BuilderError(e.to_string())),
+            TermKind::IntLit(s) => {
+                self.builder.push_int(s, ty).map_err(|e| ConvertError::BuilderError(e.to_string()))
+            }
 
             TermKind::FloatLit(f) => self
                 .builder
-                .push_float(&f.to_string(), ty, span, node_id)
+                .push_float(&f.to_string(), ty)
                 .map_err(|e| ConvertError::BuilderError(e.to_string())),
 
-            TermKind::BoolLit(b) => self
-                .builder
-                .push_bool(*b, span, node_id)
-                .map_err(|e| ConvertError::BuilderError(e.to_string())),
+            TermKind::BoolLit(b) => {
+                self.builder.push_bool(*b).map_err(|e| ConvertError::BuilderError(e.to_string()))
+            }
 
             TermKind::StringLit(s) => self
                 .builder
-                .push_inst(InstKind::String(s.clone()), ty, span, node_id)
+                .push_inst(InstKind::String(s.clone()), ty)
                 .map_err(|e| ConvertError::BuilderError(e.to_string())),
 
             TermKind::Let {
@@ -844,9 +824,9 @@ impl<'a> Converter<'a> {
                 cond,
                 then_branch,
                 else_branch,
-            } => self.convert_if(cond, then_branch, else_branch, ty, span, node_id),
+            } => self.convert_if(cond, then_branch, else_branch, ty),
 
-            TermKind::App { func, arg } => self.convert_app(func, arg, ty, span, node_id),
+            TermKind::App { func, arg } => self.convert_app(func, arg, ty),
 
             TermKind::Loop {
                 loop_var,
@@ -873,35 +853,31 @@ impl<'a> Converter<'a> {
                     kind,
                     body,
                     ty,
-                    span,
-                    node_id,
                 )
             }
 
             TermKind::Lambda(..) => {
                 panic!(
-                    "Unexpected lambda in TLC to SSA conversion at {:?}. \
+                    "Unexpected lambda in TLC to SSA conversion. \
                      All lambdas should have been lifted to top-level.",
-                    span
                 )
             }
 
             TermKind::BinOp(_) | TermKind::UnOp(_) => {
                 panic!(
-                    "Unexpected bare operator in TLC to SSA conversion at {:?}. \
+                    "Unexpected bare operator in TLC to SSA conversion. \
                      Operators should always be applied to arguments.",
-                    span
                 )
             }
 
             TermKind::Extern(linkage_name) => self
                 .builder
-                .push_inst(InstKind::Extern(linkage_name.clone()), ty, span, node_id)
+                .push_inst(InstKind::Extern(linkage_name.clone()), ty)
                 .map_err(|e| ConvertError::BuilderError(e.to_string())),
 
-            TermKind::Soac(ref soac) => self.convert_soac(soac, ty, span, node_id),
+            TermKind::Soac(ref soac) => self.convert_soac(soac, ty),
 
-            TermKind::ArrayExpr(ref ae) => self.convert_array_expr(ae, ty, span, node_id),
+            TermKind::ArrayExpr(ref ae) => self.convert_array_expr(ae, ty),
 
             TermKind::Force(ref inner) => self.convert_term(inner),
 
@@ -918,8 +894,6 @@ impl<'a> Converter<'a> {
         then_branch: &Term,
         else_branch: &Term,
         result_ty: Type<TypeName>,
-        _span: Span,
-        _node_id: NodeId,
     ) -> Result<ValueId, ConvertError> {
         let cond_value = self.convert_term(cond)?;
 
@@ -984,8 +958,6 @@ impl<'a> Converter<'a> {
         &mut self,
         elements: &[&Term],
         arr_ty: Type<TypeName>,
-        span: Span,
-        node_id: NodeId,
     ) -> Result<ValueId, ConvertError> {
         // If no elements could introduce control flow, use the fast path
         if elements.iter().all(|e| !Self::term_may_branch(e)) {
@@ -993,7 +965,7 @@ impl<'a> Converter<'a> {
                 elements.iter().map(|t| self.convert_term(t)).collect::<Result<_, _>>()?;
             return self
                 .builder
-                .push_inst(InstKind::ArrayLit { elements: values }, arr_ty, span, node_id)
+                .push_inst(InstKind::ArrayLit { elements: values }, arr_ty)
                 .map_err(|e| ConvertError::BuilderError(e.to_string()));
         }
 
@@ -1002,24 +974,18 @@ impl<'a> Converter<'a> {
 
         let mut arr = self
             .builder
-            .push_call("_w_intrinsic_uninit", vec![], arr_ty.clone(), span, node_id)
+            .push_call("_w_intrinsic_uninit", vec![], arr_ty.clone())
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
 
         for (i, elem) in elements.iter().enumerate() {
             let val = self.convert_term(elem)?;
             let idx = self
                 .builder
-                .push_inst(InstKind::Int(i.to_string()), i32_ty.clone(), span, node_id)
+                .push_inst(InstKind::Int(i.to_string()), i32_ty.clone())
                 .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
             arr = self
                 .builder
-                .push_call(
-                    "_w_intrinsic_array_with",
-                    vec![arr, idx, val],
-                    arr_ty.clone(),
-                    span,
-                    node_id,
-                )
+                .push_call("_w_intrinsic_array_with", vec![arr, idx, val], arr_ty.clone())
                 .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
         }
 
@@ -1069,8 +1035,6 @@ impl<'a> Converter<'a> {
         func: &Term,
         arg: &Term,
         ty: Type<TypeName>,
-        span: Span,
-        node_id: NodeId,
     ) -> Result<ValueId, ConvertError> {
         let (base_term, args) = Self::collect_application_spine(func, arg);
 
@@ -1080,7 +1044,7 @@ impl<'a> Converter<'a> {
                 let lhs = self.convert_term(args[0])?;
                 let rhs = self.convert_term(args[1])?;
                 self.builder
-                    .push_binop(&op.op, lhs, rhs, ty, span, node_id)
+                    .push_binop(&op.op, lhs, rhs, ty)
                     .map_err(|e| ConvertError::BuilderError(e.to_string()))
             }
 
@@ -1088,13 +1052,13 @@ impl<'a> Converter<'a> {
                 assert!(args.len() == 1, "UnOp requires exactly 1 argument");
                 let operand = self.convert_term(args[0])?;
                 self.builder
-                    .push_unary(&op.op, operand, ty, span, node_id)
+                    .push_unary(&op.op, operand, ty)
                     .map_err(|e| ConvertError::BuilderError(e.to_string()))
             }
 
             TermKind::Var(sym) => {
                 let name = self.symbols.get(*sym).expect("BUG: symbol not in table");
-                self.convert_var_application(*sym, name, &args, ty, span, node_id)
+                self.convert_var_application(*sym, name, &args, ty)
             }
 
             _ => {
@@ -1114,15 +1078,13 @@ impl<'a> Converter<'a> {
         name: &str,
         args: &[&Term],
         ty: Type<TypeName>,
-        span: Span,
-        node_id: NodeId,
     ) -> Result<ValueId, ConvertError> {
         // Handle _w_array_lit before converting args, since element conversion
         // may introduce control flow (if/else) that changes the current block.
         // We build the array incrementally so each element insert happens in
         // whatever block is current after that element is converted.
         if name == "_w_array_lit" {
-            return self.convert_array_lit_incremental(args, ty, span, node_id);
+            return self.convert_array_lit_incremental(args, ty);
         }
 
         let arg_values: Vec<ValueId> =
@@ -1133,13 +1095,13 @@ impl<'a> Converter<'a> {
             "_w_vec_lit" => {
                 return self
                     .builder
-                    .push_inst(InstKind::Vector(arg_values), ty, span, node_id)
+                    .push_inst(InstKind::Vector(arg_values), ty)
                     .map_err(|e| ConvertError::BuilderError(e.to_string()));
             }
             "_w_tuple" => {
                 return self
                     .builder
-                    .push_tuple(arg_values, ty, span, node_id)
+                    .push_tuple(arg_values, ty)
                     .map_err(|e| ConvertError::BuilderError(e.to_string()));
             }
             "_w_range" if arg_values.len() == 3 => {
@@ -1153,8 +1115,6 @@ impl<'a> Converter<'a> {
                             step: None,
                         },
                         ty,
-                        span,
-                        node_id,
                     )
                     .map_err(|e| ConvertError::BuilderError(e.to_string()));
             }
@@ -1169,15 +1129,13 @@ impl<'a> Converter<'a> {
                             step: Some(arg_values[1]),
                         },
                         ty,
-                        span,
-                        node_id,
                     )
                     .map_err(|e| ConvertError::BuilderError(e.to_string()));
             }
             "_w_index" if arg_values.len() == 2 => {
                 // SoA-aware: if the array is a tuple-of-arrays, distribute the index
                 let arr_ty = &args[0].ty;
-                return self.soa_index(arg_values[0], arg_values[1], arr_ty, &ty, span, node_id);
+                return self.soa_index(arg_values[0], arg_values[1], arr_ty, &ty);
             }
             "_w_tuple_proj" if args.len() == 2 => {
                 // The second argument must be a constant integer literal
@@ -1197,7 +1155,7 @@ impl<'a> Converter<'a> {
                 };
                 return self
                     .builder
-                    .push_project(base, index, ty, span, node_id)
+                    .push_project(base, index, ty)
                     .map_err(|e| ConvertError::BuilderError(e.to_string()));
             }
             _ => {}
@@ -1209,7 +1167,7 @@ impl<'a> Converter<'a> {
             if arg_values.len() == arity {
                 return self
                     .builder
-                    .push_call(name, arg_values, ty, span, node_id)
+                    .push_call(name, arg_values, ty)
                     .map_err(|e| ConvertError::BuilderError(e.to_string()));
             } else if arg_values.len() < arity {
                 panic!(
@@ -1255,37 +1213,32 @@ impl<'a> Converter<'a> {
             let view_ty = ty.clone(); // approximate — just need something array-like
             let view = self
                 .builder
-                .emit_storage_view(set, binding, view_ty, span, node_id)
+                .emit_storage_view(set, binding, view_ty)
                 .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
             let index = arg_values[2]; // already converted
             // StorageViewIndex produces a pointer (SPIR-V OpAccessChain),
             // then we load the value from it.
             let ptr = self
                 .builder
-                .push_inst(
-                    InstKind::StorageViewIndex { view, index },
-                    ty.clone(),
-                    span,
-                    node_id,
-                )
+                .push_inst(InstKind::StorageViewIndex { view, index }, ty.clone())
                 .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
             // Load the element from the pointer
             let effect_in = self.builder.entry_effect();
             return self
                 .builder
-                .push_load(ptr, ty, effect_in, span, node_id)
+                .push_load(ptr, ty, effect_in)
                 .map_err(|e| ConvertError::BuilderError(e.to_string()));
         }
 
         // Builtins and internal intrinsics → InstKind::Intrinsic
         if name.starts_with("_w_intrinsic_") {
             self.builder
-                .push_intrinsic(name, arg_values, ty, span, node_id)
+                .push_intrinsic(name, arg_values, ty)
                 .map_err(|e| ConvertError::BuilderError(e.to_string()))
         } else {
             // Method-dispatched builtins (f32.sin, etc.) go through Call → impl_source
             self.builder
-                .push_call(name, arg_values, ty, span, node_id)
+                .push_call(name, arg_values, ty)
                 .map_err(|e| ConvertError::BuilderError(e.to_string()))
         }
     }
@@ -1300,20 +1253,11 @@ impl<'a> Converter<'a> {
         kind: &TlcLoopKind,
         body: &Term,
         _result_ty: Type<TypeName>,
-        span: Span,
-        node_id: NodeId,
     ) -> Result<ValueId, ConvertError> {
         match kind {
-            TlcLoopKind::While { cond } => self.convert_while_loop(
-                loop_var,
-                loop_var_ty,
-                init,
-                init_bindings,
-                cond,
-                body,
-                span,
-                node_id,
-            ),
+            TlcLoopKind::While { cond } => {
+                self.convert_while_loop(loop_var, loop_var_ty, init, init_bindings, cond, body)
+            }
             TlcLoopKind::ForRange { var, var_ty, bound } => {
                 let index_var = self.symbols.get(*var).expect("BUG: symbol not in table");
                 self.convert_for_range_loop(
@@ -1325,8 +1269,6 @@ impl<'a> Converter<'a> {
                     var_ty,
                     bound,
                     body,
-                    span,
-                    node_id,
                 )
             }
             TlcLoopKind::For { var, var_ty, iter } => {
@@ -1340,8 +1282,6 @@ impl<'a> Converter<'a> {
                     var_ty,
                     iter,
                     body,
-                    span,
-                    node_id,
                 )
             }
         }
@@ -1355,8 +1295,6 @@ impl<'a> Converter<'a> {
         init_bindings: &[(String, Type<TypeName>, &Term)],
         cond: &Term,
         body: &Term,
-        _span: Span,
-        _node_id: NodeId,
     ) -> Result<ValueId, ConvertError> {
         let acc_ty = loop_var_ty.clone();
 
@@ -1432,8 +1370,6 @@ impl<'a> Converter<'a> {
         _index_var_ty: &Type<TypeName>,
         bound: &Term,
         body: &Term,
-        span: Span,
-        node_id: NodeId,
     ) -> Result<ValueId, ConvertError> {
         let acc_ty = loop_var_ty.clone();
         let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
@@ -1448,7 +1384,7 @@ impl<'a> Converter<'a> {
         // Branch to header with (init, 0)
         let zero = self
             .builder
-            .push_int("0", i32_ty.clone(), span, node_id)
+            .push_int("0", i32_ty.clone())
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
         self.builder
             .terminate(Terminator::Branch {
@@ -1473,7 +1409,7 @@ impl<'a> Converter<'a> {
         // Check i < bound
         let cond = self
             .builder
-            .push_binop("<", loop_blocks.index, bound_value, bool_ty, span, node_id)
+            .push_binop("<", loop_blocks.index, bound_value, bool_ty)
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
         self.builder
             .terminate(Terminator::CondBranch {
@@ -1492,11 +1428,11 @@ impl<'a> Converter<'a> {
         let new_acc = self.convert_term(body)?;
         let one = self
             .builder
-            .push_int("1", i32_ty.clone(), span, node_id)
+            .push_int("1", i32_ty.clone())
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
         let next_i = self
             .builder
-            .push_binop("+", loop_blocks.index, one, i32_ty, span, node_id)
+            .push_binop("+", loop_blocks.index, one, i32_ty)
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
         self.builder
             .terminate(Terminator::Branch {
@@ -1530,8 +1466,6 @@ impl<'a> Converter<'a> {
         elem_ty: &Type<TypeName>,
         iter: &Term,
         body: &Term,
-        span: Span,
-        node_id: NodeId,
     ) -> Result<ValueId, ConvertError> {
         let acc_ty = loop_var_ty.clone();
         let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
@@ -1545,12 +1479,12 @@ impl<'a> Converter<'a> {
         let iter_value = self.convert_term(iter)?;
 
         // Get length (SoA-aware)
-        let len = self.soa_length(iter_value, &iter_ty, span, node_id)?;
+        let len = self.soa_length(iter_value, &iter_ty)?;
 
         // Branch to header with (init, 0)
         let zero = self
             .builder
-            .push_int("0", i32_ty.clone(), span, node_id)
+            .push_int("0", i32_ty.clone())
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
         self.builder
             .terminate(Terminator::Branch {
@@ -1566,7 +1500,7 @@ impl<'a> Converter<'a> {
         self.locals.insert(loop_var.to_string(), loop_blocks.acc);
 
         // Get element at index (SoA-aware)
-        let elem = self.soa_index(iter_value, loop_blocks.index, &iter_ty, elem_ty, span, node_id)?;
+        let elem = self.soa_index(iter_value, loop_blocks.index, &iter_ty, elem_ty)?;
         self.locals.insert(elem_var.to_string(), elem);
 
         // Process init_bindings
@@ -1578,7 +1512,7 @@ impl<'a> Converter<'a> {
         // Check i < len
         let cond = self
             .builder
-            .push_binop("<", loop_blocks.index, len, bool_ty, span, node_id)
+            .push_binop("<", loop_blocks.index, len, bool_ty)
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
         self.builder
             .terminate(Terminator::CondBranch {
@@ -1597,11 +1531,11 @@ impl<'a> Converter<'a> {
         let new_acc = self.convert_term(body)?;
         let one = self
             .builder
-            .push_int("1", i32_ty.clone(), span, node_id)
+            .push_int("1", i32_ty.clone())
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
         let next_i = self
             .builder
-            .push_binop("+", loop_blocks.index, one, i32_ty, span, node_id)
+            .push_binop("+", loop_blocks.index, one, i32_ty)
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
         self.builder
             .terminate(Terminator::Branch {
@@ -1632,24 +1566,18 @@ impl<'a> Converter<'a> {
     // so the rest of the lowering code doesn't need to know about SoA.
 
     /// Emit length of an array-like value (plain array or SoA tuple-of-arrays).
-    fn soa_length(
-        &mut self,
-        arr: ValueId,
-        arr_ty: &Type<TypeName>,
-        span: Span,
-        node_id: NodeId,
-    ) -> Result<ValueId, ConvertError> {
+    fn soa_length(&mut self, arr: ValueId, arr_ty: &Type<TypeName>) -> Result<ValueId, ConvertError> {
         let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
         if let Some(components) = is_soa_tuple(arr_ty) {
             // Recurse: first component might itself be an SoA tuple
             let first = self
                 .builder
-                .push_project(arr, 0, components[0].clone(), span, node_id)
+                .push_project(arr, 0, components[0].clone())
                 .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
-            self.soa_length(first, &components[0], span, node_id)
+            self.soa_length(first, &components[0])
         } else {
             self.builder
-                .push_intrinsic("_w_intrinsic_length", vec![arr], i32_ty, span, node_id)
+                .push_intrinsic("_w_intrinsic_length", vec![arr], i32_ty)
                 .map_err(|e| ConvertError::BuilderError(e.to_string()))
         }
     }
@@ -1662,15 +1590,13 @@ impl<'a> Converter<'a> {
         index: ValueId,
         arr_ty: &Type<TypeName>,
         elem_ty: &Type<TypeName>,
-        span: Span,
-        node_id: NodeId,
     ) -> Result<ValueId, ConvertError> {
         if let Some(components) = is_soa_tuple(arr_ty) {
             let mut elem_values = Vec::with_capacity(components.len());
             for (i, comp_ty) in components.iter().enumerate() {
                 let comp_arr = self
                     .builder
-                    .push_project(arr, i as u32, comp_ty.clone(), span, node_id)
+                    .push_project(arr, i as u32, comp_ty.clone())
                     .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
                 let comp_elem_ty = match comp_ty {
                     ty if ty.is_array() => ty.elem_type().expect("Array has elem").clone(),
@@ -1678,15 +1604,15 @@ impl<'a> Converter<'a> {
                     _ => comp_ty.clone(),
                 };
                 // Recurse: component might itself be an SoA tuple (nested array-of-tuples)
-                let elem = self.soa_index(comp_arr, index, comp_ty, &comp_elem_ty, span, node_id)?;
+                let elem = self.soa_index(comp_arr, index, comp_ty, &comp_elem_ty)?;
                 elem_values.push(elem);
             }
             self.builder
-                .push_tuple(elem_values, elem_ty.clone(), span, node_id)
+                .push_tuple(elem_values, elem_ty.clone())
                 .map_err(|e| ConvertError::BuilderError(e.to_string()))
         } else {
             self.builder
-                .push_index(arr, index, elem_ty.clone(), span, node_id)
+                .push_index(arr, index, elem_ty.clone())
                 .map_err(|e| ConvertError::BuilderError(e.to_string()))
         }
     }
@@ -1696,44 +1622,30 @@ impl<'a> Converter<'a> {
     // =========================================================================
 
     /// Dispatch SOAC node to the appropriate lowering.
-    fn convert_soac(
-        &mut self,
-        soac: &SoacOp,
-        ty: Type<TypeName>,
-        span: Span,
-        node_id: NodeId,
-    ) -> Result<ValueId, ConvertError> {
+    fn convert_soac(&mut self, soac: &SoacOp, ty: Type<TypeName>) -> Result<ValueId, ConvertError> {
         match soac {
-            SoacOp::Map { lam, inputs } => self.convert_soac_map(lam, inputs, ty, span, node_id),
-            SoacOp::Reduce { op, ne, input, .. } => {
-                self.convert_soac_reduce(op, ne, input, ty, span, node_id)
-            }
+            SoacOp::Map { lam, inputs } => self.convert_soac_map(lam, inputs, ty),
+            SoacOp::Reduce { op, ne, input, .. } => self.convert_soac_reduce(op, ne, input, ty),
             SoacOp::Scan { .. } => todo!("SOAC scan lowering"),
-            SoacOp::Filter { pred, input } => self.convert_soac_filter(pred, input, ty, span, node_id),
+            SoacOp::Filter { pred, input } => self.convert_soac_filter(pred, input, ty),
             SoacOp::Scatter { .. } => todo!("SOAC scatter lowering"),
             SoacOp::ReduceByIndex { .. } => todo!("SOAC reduce_by_index lowering"),
         }
     }
 
     /// Convert an ArrayExpr to SSA.
-    fn convert_array_expr(
-        &mut self,
-        ae: &ArrayExpr,
-        ty: Type<TypeName>,
-        span: Span,
-        node_id: NodeId,
-    ) -> Result<ValueId, ConvertError> {
+    fn convert_array_expr(&mut self, ae: &ArrayExpr, ty: Type<TypeName>) -> Result<ValueId, ConvertError> {
         match ae {
             ArrayExpr::Ref(term) => self.convert_term(term),
             ArrayExpr::Zip(_) => {
                 // Standalone zip (not absorbed by map) — materialize as array of tuples
                 todo!("standalone zip materialization")
             }
-            ArrayExpr::Soac(op) => self.convert_soac(op, ty, span, node_id),
+            ArrayExpr::Soac(op) => self.convert_soac(op, ty),
             ArrayExpr::Generate { .. } => todo!("ArrayExpr::Generate lowering"),
             ArrayExpr::Literal(terms) => {
                 let term_refs: Vec<&Term> = terms.iter().collect();
-                self.convert_array_lit_incremental(&term_refs, ty, span, node_id)
+                self.convert_array_lit_incremental(&term_refs, ty)
             }
             ArrayExpr::Range { start, len } => {
                 let start_val = self.convert_term(start)?;
@@ -1746,8 +1658,6 @@ impl<'a> Converter<'a> {
                             step: None,
                         },
                         ty,
-                        span,
-                        node_id,
                     )
                     .map_err(|e| ConvertError::BuilderError(e.to_string()))
             }
@@ -1779,8 +1689,6 @@ impl<'a> Converter<'a> {
                             len: len_val,
                         },
                         array_ty,
-                        span,
-                        node_id,
                     )
                     .map_err(|e| ConvertError::BuilderError(e.to_string()))
             }
@@ -1807,8 +1715,6 @@ impl<'a> Converter<'a> {
         lam: &Lambda,
         inputs: &[ArrayExpr],
         result_ty: Type<TypeName>,
-        span: Span,
-        node_id: NodeId,
     ) -> Result<ValueId, ConvertError> {
         let f_name = self.lambda_fn_name(lam)?;
 
@@ -1859,8 +1765,6 @@ impl<'a> Converter<'a> {
                     zipped_param_type,
                 }),
                 result_ty,
-                span,
-                node_id,
             )
             .map_err(|e| ConvertError::BuilderError(e.to_string()))
     }
@@ -1873,8 +1777,6 @@ impl<'a> Converter<'a> {
         ne: &Term,
         input: &ArrayExpr,
         result_ty: Type<TypeName>,
-        span: Span,
-        node_id: NodeId,
     ) -> Result<ValueId, ConvertError> {
         let op_name = self.lambda_fn_name(op)?;
 
@@ -1901,8 +1803,6 @@ impl<'a> Converter<'a> {
                     input_elem_type: elem_ty,
                 }),
                 result_ty,
-                span,
-                node_id,
             )
             .map_err(|e| ConvertError::BuilderError(e.to_string()))
     }
@@ -1915,8 +1815,6 @@ impl<'a> Converter<'a> {
         pred: &Lambda,
         input: &ArrayExpr,
         result_ty: Type<TypeName>,
-        span: Span,
-        node_id: NodeId,
     ) -> Result<ValueId, ConvertError> {
         let pred_name = self.lambda_fn_name(pred)?;
 
@@ -1931,14 +1829,14 @@ impl<'a> Converter<'a> {
         let fn_ty = Type::Constructed(TypeName::Unit, vec![]); // type doesn't matter for global refs
         let pred_ref = self
             .builder
-            .push_global(&pred_name, fn_ty, span, node_id)
+            .push_global(&pred_name, fn_ty)
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
 
         let mut args = vec![pred_ref, arr_value];
         args.extend(capture_values);
 
         self.builder
-            .push_intrinsic("_w_intrinsic_filter", args, result_ty, span, node_id)
+            .push_intrinsic("_w_intrinsic_filter", args, result_ty)
             .map_err(|e| ConvertError::BuilderError(e.to_string()))
     }
 
@@ -1953,9 +1851,7 @@ impl<'a> Converter<'a> {
             _ => {
                 // For non-Ref ArrayExprs, use convert_array_expr with a dummy type
                 let ty = self.array_expr_type(ae);
-                let span = Span::new(0, 0, 0, 0);
-                let node_id = NodeId(0);
-                self.convert_array_expr(ae, ty, span, node_id)
+                self.convert_array_expr(ae, ty)
             }
         }
     }

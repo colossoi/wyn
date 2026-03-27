@@ -7,16 +7,12 @@
 use std::collections::HashMap;
 
 use crate::ssa::builder::FuncBuilder;
-use crate::ssa::soac_lower::register_new_effects;
-use crate::ssa::types::{BlockId, EffectToken, FuncBody, Terminator, ValueId};
+use crate::ssa::types::{BlockId, EffectToken, FuncBody, Terminator, TerminatorExt, ValueId};
 
 /// Result of merging a source FuncBody into a target FuncBuilder.
 pub struct MergeResult {
-    /// Maps source ValueIds to target ValueIds.
     pub value_map: HashMap<ValueId, ValueId>,
-    /// Maps source BlockIds to target BlockIds.
     pub block_map: HashMap<BlockId, BlockId>,
-    /// Maps source EffectTokens to target EffectTokens.
     pub effect_map: HashMap<EffectToken, EffectToken>,
 }
 
@@ -25,11 +21,6 @@ pub struct MergeResult {
 /// Does NOT copy the terminator — the caller provides continuation context.
 /// Returns the final value/effect maps and the remapped result ValueId of the
 /// source body's `Return` terminator (if any).
-///
-/// This is the constant-hoisting primitive: splice a constant definition's
-/// instructions into the caller at the current insertion point.
-///
-/// Panics if the source has more than one block or contains `Soac` instructions.
 pub fn merge_instructions(
     source: &FuncBody,
     builder: &mut FuncBuilder,
@@ -37,41 +28,48 @@ pub fn merge_instructions(
     seed_effects: HashMap<EffectToken, EffectToken>,
 ) -> (MergeResult, Option<ValueId>) {
     assert_eq!(
-        source.blocks.len(),
+        source.inner.blocks.len(),
         1,
         "merge_instructions requires single-block source"
     );
 
-    let block = &source.blocks[0];
+    let entry = source.entry_block();
+    let block = &source.inner.blocks[entry];
     let mut value_map = seed_values;
     let mut effect_map = seed_effects;
     let mut last_result = None;
 
     for &inst_id in &block.insts {
-        let inst = &source.insts[inst_id.index()];
-        let new_kind = inst.kind.remap(
-            &|v| value_map[v],
-            &|e| *effect_map.get(e).unwrap_or(e),
-            &mut || builder.alloc_effect(),
-        );
-        register_new_effects(&inst.kind, &new_kind, &mut effect_map);
+        let inst = &source.inner.insts[inst_id];
+        let new_kind = inst.data.remap(&|v| value_map[&v]);
 
-        if inst.result.is_some() {
+        // Remap effects from InstNode.effects
+        let new_effects = inst.effects.map(|(ein, _eout)| {
+            let mapped_in = *effect_map.get(&ein).unwrap_or(&ein);
+            let mapped_out = builder.alloc_effect();
+            (mapped_in, mapped_out)
+        });
+        if let (Some((_, old_out)), Some((_, new_out))) = (inst.effects, new_effects) {
+            effect_map.insert(old_out, new_out);
+        }
+
+        if let Some(result) = inst.result {
+            let result_ty = source.inner.value_type(result).clone();
             let new_val = builder
-                .push_inst(new_kind, inst.result_ty.clone(), inst.span, inst.node_id)
+                .push_inst_with_effects(new_kind, result_ty, new_effects)
                 .expect("BUG: failed to push merged instruction");
-            value_map.insert(inst.result.unwrap(), new_val);
+            value_map.insert(result, new_val);
             last_result = Some(new_val);
         } else {
             builder
-                .push_void_inst(new_kind, inst.span, inst.node_id)
+                .push_void_inst_with_effects(new_kind, new_effects)
                 .expect("BUG: failed to push merged void instruction");
         }
     }
 
     // Extract the return value from the terminator, if present
-    let return_val = match &block.terminator {
-        Some(Terminator::Return(v)) => Some(value_map[v]),
+    let return_val = match &block.term {
+        Terminator::Return(Some(v)) => Some(value_map[v]),
         _ => last_result,
     };
 
@@ -88,11 +86,6 @@ pub fn merge_instructions(
 /// Creates new blocks for all non-entry source blocks. The entry block's
 /// instructions are spliced into the builder's current block.
 /// Copies terminators and control headers with remapping.
-///
-/// `seed_values` provides initial ValueId mappings (e.g., source params → target values).
-/// `seed_effects` provides initial EffectToken mappings.
-///
-/// Panics if a source instruction is `Soac`.
 pub fn merge_body(
     source: &FuncBody,
     builder: &mut FuncBuilder,
@@ -103,75 +96,84 @@ pub fn merge_body(
     let mut effect_map = seed_effects;
     let mut block_map: HashMap<BlockId, BlockId> = HashMap::new();
 
+    let source_entry = source.entry_block();
+
     // Entry block merges into the builder's current block.
     let current = builder.current_block().expect("no current block");
-    block_map.insert(BlockId::ENTRY, current);
+    block_map.insert(source_entry, current);
 
     // Register entry block params
-    for param in &source.blocks[0].params {
-        let new_val = builder.alloc_value(param.ty.clone());
-        value_map.insert(param.value, new_val);
+    let entry_block = &source.inner.blocks[source_entry];
+    for &param in &entry_block.params {
+        let ty = source.inner.value_type(param).clone();
+        let new_val = builder.add_block_param(current, ty);
+        value_map.insert(param, new_val);
     }
 
     // Pre-create all non-entry blocks with their parameters
-    for (idx, block) in source.blocks.iter().enumerate() {
-        if idx == 0 {
+    for (bid, block) in &source.inner.blocks {
+        if bid == source_entry {
             continue;
         }
-        let param_types: Vec<_> = block.params.iter().map(|p| p.ty.clone()).collect();
+        let param_types: Vec<_> =
+            block.params.iter().map(|&p| source.inner.value_type(p).clone()).collect();
         let (new_block_id, new_param_vals) = builder.create_block_with_params(param_types);
-        block_map.insert(BlockId(idx as u32), new_block_id);
-        for (old_param, &new_val) in block.params.iter().zip(new_param_vals.iter()) {
-            value_map.insert(old_param.value, new_val);
+        block_map.insert(bid, new_block_id);
+        for (&old_param, &new_val) in block.params.iter().zip(new_param_vals.iter()) {
+            value_map.insert(old_param, new_val);
         }
     }
 
     // Process each block
-    for (idx, block) in source.blocks.iter().enumerate() {
-        if block.is_dead() {
+    for (bid, block) in &source.inner.blocks {
+        // Skip dead blocks
+        if block.insts.is_empty() && matches!(block.term, Terminator::Unreachable) {
             continue;
         }
 
         // Switch to the target block (entry block is already current)
-        if idx != 0 {
-            let new_block_id = block_map[&BlockId(idx as u32)];
+        if bid != source_entry {
+            let new_block_id = block_map[&bid];
             builder.switch_to_block(new_block_id).expect("BUG: failed to switch block during merge");
         }
 
         // Set control header
-        if let Some(ref ctrl) = block.control {
-            let target_block = block_map[&BlockId(idx as u32)];
-            let new_ctrl = ctrl.remap(&|b| block_map[b]);
+        if let Some(ctrl) = source.control_headers.get(&bid) {
+            let target_block = block_map[&bid];
+            let new_ctrl = ctrl.remap(&|b| block_map[&b]);
             builder.set_control_header(target_block, new_ctrl);
         }
 
         // Re-emit instructions
         for &inst_id in &block.insts {
-            let inst = &source.insts[inst_id.index()];
-            let new_kind = inst.kind.remap(
-                &|v| value_map[v],
-                &|e| *effect_map.get(e).unwrap_or(e),
-                &mut || builder.alloc_effect(),
-            );
-            register_new_effects(&inst.kind, &new_kind, &mut effect_map);
+            let inst = &source.inner.insts[inst_id];
+            let new_kind = inst.data.remap(&|v| value_map[&v]);
 
-            if inst.result.is_some() {
+            let new_effects = inst.effects.map(|(ein, _eout)| {
+                let mapped_in = *effect_map.get(&ein).unwrap_or(&ein);
+                let mapped_out = builder.alloc_effect();
+                (mapped_in, mapped_out)
+            });
+            if let (Some((_, old_out)), Some((_, new_out))) = (inst.effects, new_effects) {
+                effect_map.insert(old_out, new_out);
+            }
+
+            if let Some(result) = inst.result {
+                let result_ty = source.inner.value_type(result).clone();
                 let new_val = builder
-                    .push_inst(new_kind, inst.result_ty.clone(), inst.span, inst.node_id)
+                    .push_inst_with_effects(new_kind, result_ty, new_effects)
                     .expect("BUG: failed to push merged instruction");
-                value_map.insert(inst.result.unwrap(), new_val);
+                value_map.insert(result, new_val);
             } else {
                 builder
-                    .push_void_inst(new_kind, inst.span, inst.node_id)
+                    .push_void_inst_with_effects(new_kind, new_effects)
                     .expect("BUG: failed to push merged void instruction");
             }
         }
 
         // Remap and set terminator
-        if let Some(ref term) = block.terminator {
-            let new_term = term.remap(&|v| value_map[v], &|b| block_map[b]);
-            builder.terminate(new_term).ok();
-        }
+        let new_term = block.term.remap(&|v| value_map[&v], &|b| block_map[&b]);
+        builder.terminate(new_term).ok();
     }
 
     MergeResult {

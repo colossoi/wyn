@@ -11,7 +11,7 @@
 
 mod strategies;
 
-use crate::ast::{NodeId, Span, TypeName};
+use crate::ast::TypeName;
 use crate::pipeline_descriptor::{
     Access, Binding, BufferUsage, ComputePipeline, ComputeStage, DispatchSize, MultiComputePipeline,
     Pipeline, PipelineDescriptor,
@@ -33,8 +33,6 @@ pub use strategies::{
 pub struct ParallelizeCtx<'a> {
     pub builder: FuncBuilder,
     pub entry: &'a EntryPoint,
-    pub span: Span,
-    pub node_id: NodeId,
     // Common types
     pub u32_ty: Type<TypeName>,
     pub i32_ty: Type<TypeName>,
@@ -44,13 +42,9 @@ pub struct ParallelizeCtx<'a> {
 
 impl<'a> ParallelizeCtx<'a> {
     pub fn new(builder: FuncBuilder, entry: &'a EntryPoint) -> Self {
-        let span = entry.span;
-        let node_id = NodeId(0); // Dummy node ID for generated code
         Self {
             builder,
             entry,
-            span,
-            node_id,
             u32_ty: Type::Constructed(TypeName::UInt(32), vec![]),
             i32_ty: Type::Constructed(TypeName::Int(32), vec![]),
             bool_ty: Type::Constructed(TypeName::Bool, vec![]),
@@ -58,17 +52,14 @@ impl<'a> ParallelizeCtx<'a> {
         }
     }
 
-    /// Push an integer constant.
     pub fn push_int(&mut self, value: &str) -> Option<ValueId> {
-        self.builder.push_int(value, self.u32_ty.clone(), self.span, self.node_id).ok()
+        self.builder.push_int(value, self.u32_ty.clone()).ok()
     }
 
-    /// Push an i32 integer constant.
     pub fn push_i32(&mut self, value: &str) -> Option<ValueId> {
-        self.builder.push_int(value, self.i32_ty.clone(), self.span, self.node_id).ok()
+        self.builder.push_int(value, self.i32_ty.clone()).ok()
     }
 
-    /// Push a binary operation.
     pub fn push_binop(
         &mut self,
         op: &str,
@@ -76,27 +67,24 @@ impl<'a> ParallelizeCtx<'a> {
         rhs: ValueId,
         ty: Type<TypeName>,
     ) -> Option<ValueId> {
-        self.builder.push_binop(op, lhs, rhs, ty, self.span, self.node_id).ok()
+        self.builder.push_binop(op, lhs, rhs, ty).ok()
     }
 
-    /// Push an intrinsic call.
     pub fn push_intrinsic(
         &mut self,
         name: &str,
         args: Vec<ValueId>,
         ty: Type<TypeName>,
     ) -> Option<ValueId> {
-        self.builder.push_intrinsic(name, args, ty, self.span, self.node_id).ok()
+        self.builder.push_intrinsic(name, args, ty).ok()
     }
 
-    /// Push a function call.
     pub fn push_call(&mut self, func: &str, args: Vec<ValueId>, ty: Type<TypeName>) -> Option<ValueId> {
-        self.builder.push_call(func, args, ty, self.span, self.node_id).ok()
+        self.builder.push_call(func, args, ty).ok()
     }
 
-    /// Push an instruction.
     pub fn push_inst(&mut self, kind: crate::ssa::types::InstKind, ty: Type<TypeName>) -> Option<ValueId> {
-        self.builder.push_inst(kind, ty, self.span, self.node_id).ok()
+        self.builder.push_inst(kind, ty).ok()
     }
 
     /// Get the *new* body's entry effect token (from `self.builder`, not the original entry).
@@ -148,18 +136,9 @@ impl<'a> ParallelizeCtx<'a> {
             .map(|(i, (src, _, _))| (*src, self.builder.get_param(i)))
             .collect();
 
-        let span = self.span;
-        let node_id = self.node_id;
         let mut result = Vec::new();
         for &capture in captures {
-            let new_val = remap_value(
-                &entry.body,
-                capture,
-                &mut self.builder,
-                &mut remap_memo,
-                span,
-                node_id,
-            )?;
+            let new_val = remap_value(&entry.body, capture, &mut self.builder, &mut remap_memo)?;
             result.push(new_val);
         }
         Some(result)
@@ -404,8 +383,6 @@ fn build_map_body<I: InputStrategy, O: OutputStrategy>(
     // 3. Create loop structure
     let u32_ty = ctx.u32_ty.clone();
     let bool_ty = ctx.bool_ty.clone();
-    let span = ctx.span;
-    let node_id = ctx.node_id;
 
     let (header, header_params) = ctx.builder.create_block_with_params(vec![u32_ty.clone()]);
     let loop_index = header_params[0];
@@ -423,7 +400,7 @@ fn build_map_body<I: InputStrategy, O: OutputStrategy>(
 
     // Header: check i < chunk_end
     ctx.builder.switch_to_block(header).ok()?;
-    let cond = ctx.builder.push_binop("<", loop_index, chunk_end, bool_ty.clone(), span, node_id).ok()?;
+    let cond = ctx.builder.push_binop("<", loop_index, chunk_end, bool_ty.clone()).ok()?;
     ctx.builder
         .terminate(Terminator::CondBranch {
             cond,
@@ -462,7 +439,7 @@ fn build_map_body<I: InputStrategy, O: OutputStrategy>(
 
     // 5. Exit: return unit
     ctx.builder.switch_to_block(exit_block).ok()?;
-    ctx.builder.terminate(Terminator::ReturnUnit).ok()?;
+    ctx.builder.terminate(Terminator::Return(None)).ok()?;
 
     Some(())
 }
@@ -641,8 +618,6 @@ fn build_reduce_phase1(
     // Build reduction loop: acc = init; for i in chunk_start..chunk_end: acc = f(acc, elem)
     let u32_ty = ctx.u32_ty.clone();
     let bool_ty = ctx.bool_ty.clone();
-    let span = ctx.span;
-    let node_id = ctx.node_id;
 
     let (header, header_params) =
         ctx.builder.create_block_with_params(vec![elem_type.clone(), u32_ty.clone()]);
@@ -663,7 +638,7 @@ fn build_reduce_phase1(
 
     // Header: check i < chunk_end
     ctx.builder.switch_to_block(header).ok()?;
-    let cond = ctx.builder.push_binop("<", loop_index, chunk_end, bool_ty, span, node_id).ok()?;
+    let cond = ctx.builder.push_binop("<", loop_index, chunk_end, bool_ty).ok()?;
     ctx.builder
         .terminate(Terminator::CondBranch {
             cond,
@@ -699,7 +674,7 @@ fn build_reduce_phase1(
     // Exit: store final_acc to partials[thread_id]
     ctx.builder.switch_to_block(exit_block).ok()?;
     partials_output.store_result(&mut ctx, partials_view, thread_id, final_acc, elem_type)?;
-    ctx.builder.terminate(Terminator::ReturnUnit).ok()?;
+    ctx.builder.terminate(Terminator::Return(None)).ok()?;
 
     let body = ctx.finish()?;
 
@@ -741,8 +716,6 @@ fn build_reduce_phase2(
     let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
-    let span = entry.span;
-    let node_id = NodeId(0);
 
     // Phase 2 has no entry-level params (it reads from partials buffer directly).
     // But we need the function referenced by reduce_function to exist in the program,
@@ -768,13 +741,7 @@ fn build_reduce_phase2(
     );
     let partials_view = ctx
         .builder
-        .emit_storage_view(
-            partials_binding.0,
-            partials_binding.1,
-            partials_view_ty.clone(),
-            span,
-            node_id,
-        )
+        .emit_storage_view(partials_binding.0, partials_binding.1, partials_view_ty.clone())
         .ok()?;
 
     // Setup result output buffer
@@ -803,7 +770,7 @@ fn build_reduce_phase2(
 
     // Header: check t < total_threads
     ctx.builder.switch_to_block(header).ok()?;
-    let cond = ctx.builder.push_binop("<", loop_index, total, bool_ty, span, node_id).ok()?;
+    let cond = ctx.builder.push_binop("<", loop_index, total, bool_ty).ok()?;
     ctx.builder
         .terminate(Terminator::CondBranch {
             cond,
@@ -825,7 +792,7 @@ fn build_reduce_phase2(
         elem_type.clone(),
     )?;
     let effect_in = ctx.entry_effect();
-    let partial_elem = ctx.builder.push_load(ptr, elem_type.clone(), effect_in, span, node_id).ok()?;
+    let partial_elem = ctx.builder.push_load(ptr, elem_type.clone(), effect_in).ok()?;
 
     let mut call_args = vec![acc, partial_elem];
     call_args.extend(remapped_captures.iter().copied());
@@ -844,7 +811,7 @@ fn build_reduce_phase2(
     ctx.builder.switch_to_block(exit_block).ok()?;
     let zero_idx = ctx.push_int("0")?;
     result_output.store_result(&mut ctx, result_view, zero_idx, final_acc, elem_type)?;
-    ctx.builder.terminate(Terminator::ReturnUnit).ok()?;
+    ctx.builder.terminate(Terminator::Return(None)).ok()?;
 
     let body = ctx.finish()?;
 

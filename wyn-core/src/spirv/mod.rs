@@ -11,7 +11,7 @@ use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
 use crate::ssa::layout::{buffer_array_strides, type_byte_size};
 use crate::ssa::types::{
-    Block, BlockId, ControlHeader, FuncBody, Inst, InstKind, Terminator, ValueId, ViewSource,
+    BlockId, ControlHeader, FuncBody, InstKind, Terminator, ValueId, ViewSource, WynInstNode,
 };
 use crate::ssa::types::{EntryPoint, ExecutionModel, Function, IoDecoration, Program};
 use crate::types;
@@ -849,10 +849,11 @@ fn lower_constant_body(constructor: &mut Constructor, body: &FuncBody) -> Result
 
     let mut value_map: HashMap<ValueId, spirv::Word> = HashMap::new();
 
-    for inst in &body.insts {
-        let result_ty = constructor.polytype_to_spirv(&inst.result_ty);
-        let spirv_id = match &inst.kind {
-            InstKind::Int(s) => match &inst.result_ty {
+    for (_iid, inst) in &body.inner.insts {
+        let val_ty = inst.result.map(|r| body.inner.value_type(r));
+        let result_ty = val_ty.map(|t| constructor.polytype_to_spirv(t)).unwrap_or(0);
+        let spirv_id = match &inst.data {
+            InstKind::Int(s) => match val_ty.expect("Int must have result type") {
                 PolyType::Constructed(TypeName::UInt(32), _) => {
                     let val: u32 = s.parse().map_err(|_| err_spirv!("Invalid u32 in constant: {}", s))?;
                     constructor.const_u32(val)
@@ -896,9 +897,9 @@ fn lower_constant_body(constructor: &mut Constructor, body: &FuncBody) -> Result
     }
 
     // The return value is in the terminator
-    let entry = &body.blocks[0];
-    match &entry.terminator {
-        Some(Terminator::Return(v)) => Ok(value_map[v]),
+    let entry = &body.inner.blocks[body.inner.entry];
+    match &entry.term {
+        Terminator::Return(Some(v)) => Ok(value_map[v]),
         _ => bail_spirv!("Constant body has no Return terminator"),
     }
 }
@@ -971,13 +972,12 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         // Phi IDs must be allocated up front because SSA values from one block's
         // params may be referenced by instructions in other blocks (e.g., an if/else
         // result used in an array literal that spans multiple merge blocks).
-        for (block_idx, block) in self.body.blocks.iter().enumerate() {
-            if block.is_dead() {
+        let entry_block = self.body.entry_block();
+        for (block_id, block) in &self.body.inner.blocks {
+            if block.insts.is_empty() && matches!(block.term, Terminator::Unreachable) {
                 continue;
             }
-            let block_id = BlockId(block_idx as u32);
-            if block_idx == 0 {
-                // Entry block is already created by begin_function
+            if block_id == entry_block {
                 let current = self.constructor.current_block.unwrap();
                 self.block_map.insert(block_id, current);
             } else {
@@ -985,26 +985,18 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 self.block_map.insert(block_id, spirv_block);
             }
 
-            // Allocate phi IDs for block parameters (actual phi instructions
-            // are inserted by insert_phi_nodes() after all blocks are processed)
-            for param in &block.params {
+            for &param in &block.params {
                 let phi_id = self.constructor.builder.id();
-                self.value_map.insert(param.value, phi_id);
+                self.value_map.insert(param, phi_id);
             }
         }
 
-        // Compute reverse post-order so we emit blocks in dominance-friendly order.
-        // This ensures that every value definition is emitted before its uses,
-        // regardless of block numbering in the SSA.
         let rpo = self.compute_rpo();
 
-        // Lower each block in RPO
-        for &block_idx in &rpo {
-            let block = &self.body.blocks[block_idx];
-            let block_id = BlockId(block_idx as u32);
+        for &block_id in &rpo {
+            let block = &self.body.inner.blocks[block_id];
 
-            // Start block (skip entry which is already started)
-            if block_idx != 0 {
+            if block_id != entry_block {
                 let spirv_block = self.block_map[&block_id];
                 self.constructor.begin_block(spirv_block)?;
             }
@@ -1017,13 +1009,11 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             // Lower instructions
             for &inst_id in &block.insts {
                 let inst = self.body.get_inst(inst_id);
-                self.lower_inst(inst).map_err(|e| err_spirv!("Block({}): {}", block_idx, e))?;
+                self.lower_inst(inst).map_err(|e| err_spirv!("Block({:?}): {}", block_id, e))?;
             }
 
             // Lower terminator
-            if let Some(ref term) = block.terminator {
-                self.lower_terminator(block_id, block, term)?;
-            }
+            self.lower_terminator(block_id, block, &block.term)?;
         }
 
         // Insert phi nodes for all block parameters
@@ -1039,69 +1029,68 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
     /// between the header and the merge block. A plain RPO can violate this
     /// (e.g. placing a loop's merge before its continue block). This traversal
     /// defers merge blocks until after all construct-interior blocks are visited.
-    fn compute_rpo(&self) -> Vec<usize> {
-        let mut visited = vec![false; self.body.blocks.len()];
-        let mut order = Vec::with_capacity(self.body.blocks.len());
+    fn compute_rpo(&self) -> Vec<BlockId> {
+        let mut visited: HashSet<BlockId> = HashSet::new();
+        let mut order = Vec::with_capacity(self.body.inner.blocks.len());
 
         fn visit(
-            blocks: &[crate::ssa::types::Block],
-            idx: usize,
-            visited: &mut [bool],
-            order: &mut Vec<usize>,
+            body: &FuncBody,
+            bid: BlockId,
+            visited: &mut HashSet<BlockId>,
+            order: &mut Vec<BlockId>,
         ) {
-            if idx >= blocks.len() || visited[idx] || blocks[idx].is_dead() {
+            if visited.contains(&bid) {
                 return;
             }
-            visited[idx] = true;
-            order.push(idx);
+            let block = &body.inner.blocks[bid];
+            if block.insts.is_empty() && matches!(block.term, Terminator::Unreachable) {
+                return;
+            }
+            visited.insert(bid);
+            order.push(bid);
 
-            // Determine the merge block (if any) for this header so we can
-            // defer it until after all construct-interior blocks are visited.
-            let merge_idx = blocks[idx].control.as_ref().map(|ctrl| match ctrl {
-                ControlHeader::Loop { merge, .. } => merge.index(),
-                ControlHeader::Selection { merge } => merge.index(),
+            let merge_bid = body.control_headers.get(&bid).map(|ctrl| match ctrl {
+                ControlHeader::Loop { merge, .. } => *merge,
+                ControlHeader::Selection { merge } => *merge,
             });
 
-            // Visit successors, skipping the merge block.
-            if let Some(ref term) = blocks[idx].terminator {
-                match term {
-                    Terminator::Branch { target, .. } => {
-                        if Some(target.index()) != merge_idx {
-                            visit(blocks, target.index(), visited, order);
-                        }
+            match &block.term {
+                Terminator::Branch { target, .. } => {
+                    if Some(*target) != merge_bid {
+                        visit(body, *target, visited, order);
                     }
-                    Terminator::CondBranch {
-                        then_target,
-                        else_target,
-                        ..
-                    } => {
-                        if Some(then_target.index()) != merge_idx {
-                            visit(blocks, then_target.index(), visited, order);
-                        }
-                        if Some(else_target.index()) != merge_idx {
-                            visit(blocks, else_target.index(), visited, order);
-                        }
-                    }
-                    Terminator::Return(_) | Terminator::ReturnUnit | Terminator::Unreachable => {}
                 }
+                Terminator::CondBranch {
+                    then_target,
+                    else_target,
+                    ..
+                } => {
+                    if Some(*then_target) != merge_bid {
+                        visit(body, *then_target, visited, order);
+                    }
+                    if Some(*else_target) != merge_bid {
+                        visit(body, *else_target, visited, order);
+                    }
+                }
+                _ => {}
             }
 
-            // Now visit the merge block (after all interior blocks).
-            if let Some(m) = merge_idx {
-                visit(blocks, m, visited, order);
+            if let Some(m) = merge_bid {
+                visit(body, m, visited, order);
             }
         }
 
-        visit(&self.body.blocks, 0, &mut visited, &mut order);
+        visit(self.body, self.body.entry_block(), &mut visited, &mut order);
         order
     }
 
-    fn lower_inst(&mut self, inst: &Inst) -> Result<()> {
-        let result_ty = self.constructor.polytype_to_spirv(&inst.result_ty);
+    fn lower_inst(&mut self, inst: &WynInstNode) -> Result<()> {
+        let ssa_result_ty = inst.result.map(|r| self.body.inner.value_type(r).clone());
+        let result_ty = ssa_result_ty.as_ref().map(|t| self.constructor.polytype_to_spirv(t)).unwrap_or(0);
 
-        let spirv_result = match &inst.kind {
-            InstKind::Int(s) => match &inst.result_ty {
-                PolyType::Constructed(TypeName::UInt(32), _) => {
+        let spirv_result = match &inst.data {
+            InstKind::Int(s) => match ssa_result_ty.as_ref() {
+                Some(PolyType::Constructed(TypeName::UInt(32), _)) => {
                     let val: u32 = s.parse().map_err(|_| err_spirv!("Invalid u32: {}", s))?;
                     self.constructor.const_u32(val)
                 }
@@ -1401,7 +1390,6 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             }
         };
 
-        // Map the result
         if let Some(result_value) = inst.result {
             self.value_map.insert(result_value, spirv_result);
         }
@@ -1409,12 +1397,11 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         Ok(())
     }
 
-    fn lower_terminator(&mut self, _block_id: BlockId, block: &Block, term: &Terminator) -> Result<()> {
+    fn lower_terminator(&mut self, _block_id: BlockId, _block: &wyn_ssa::BasicBlock, term: &Terminator) -> Result<()> {
         let current_block = self.constructor.current_block.unwrap();
 
         match term {
             Terminator::Branch { target, args } => {
-                // Record phi inputs for target block parameters
                 for (param_idx, &arg) in args.iter().enumerate() {
                     let arg_id = self.get_value(arg)?;
                     self.phi_inputs.push((*target, param_idx, arg_id, current_block));
@@ -1435,7 +1422,6 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 let then_label = self.block_map[then_target];
                 let else_label = self.block_map[else_target];
 
-                // Record phi inputs for both targets
                 for (param_idx, &arg) in then_args.iter().enumerate() {
                     let arg_id = self.get_value(arg)?;
                     self.phi_inputs.push((*then_target, param_idx, arg_id, current_block));
@@ -1446,7 +1432,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 }
 
                 // Emit structured control flow merge instructions if this is a header block
-                if let Some(ref control) = block.control {
+                if let Some(control) = self.body.control_headers.get(&_block_id) {
                     match control {
                         ControlHeader::Loop {
                             merge,
@@ -1473,7 +1459,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 self.constructor.builder.branch_conditional(cond_id, then_label, else_label, [])?;
             }
 
-            Terminator::Return(value) => {
+            Terminator::Return(Some(value)) => {
                 if self.is_entry_point {
                     bail_spirv!(
                         "Return(value) in entry point body — entry points are void functions \
@@ -1484,9 +1470,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 self.constructor.builder.ret_value(value_id)?;
             }
 
-            Terminator::ReturnUnit => {
-                // Always emit ret() - with OutputPtr+Store, entry points handle
-                // outputs explicitly in SSA, so no special case needed here.
+            Terminator::Return(None) => {
                 self.constructor.builder.ret()?;
             }
 
@@ -1508,12 +1492,11 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
 
         // Insert phi nodes
         for ((block_id, param_idx), incoming) in phi_map {
-            let block = &self.body.blocks[block_id.index()];
-            let param = &block.params[param_idx];
-            let param_ty = self.constructor.polytype_to_spirv(&param.ty);
+            let block = &self.body.inner.blocks[block_id];
+            let param = block.params[param_idx];
+            let param_ty = self.constructor.polytype_to_spirv(self.body.inner.value_type(param));
 
-            // Get the pre-allocated phi ID
-            let phi_id = self.value_map[&param.value];
+            let phi_id = self.value_map[&param];
 
             // Get block index for insertion
             if let Some(&block_idx) = self.block_indices.get(&block_id) {
@@ -1534,20 +1517,11 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
     fn get_value(&self, value: ValueId) -> Result<spirv::Word> {
         self.value_map.get(&value).copied().ok_or_else(|| {
             // Build diagnostic info to help debug SSA/lowering issues
-            let producer_block =
-                self.body.insts.iter().enumerate().find(|(_, i)| i.result == Some(value)).and_then(
-                    |(idx, _)| {
-                        let iid = crate::ssa::types::InstId(idx as u32);
-                        self.body
-                            .blocks
-                            .iter()
-                            .enumerate()
-                            .find(|(_, b)| b.insts.contains(&iid))
-                            .map(|(bidx, _)| format!("produced in Block({})", bidx))
-                    },
-                );
-            let block_param = self.body.blocks.iter().enumerate().find_map(|(idx, b)| {
-                b.params.iter().any(|p| p.value == value).then(|| format!("block param of Block({})", idx))
+            let producer_block = self.body.inner.insts.values()
+                .find(|i| i.result == Some(value))
+                .map(|i| format!("produced in Block({:?})", i.parent));
+            let block_param = self.body.inner.blocks.iter().find_map(|(bid, b)| {
+                b.params.contains(&value).then(|| format!("block param of Block({:?})", bid))
             });
             let origin = producer_block.or(block_param).unwrap_or_else(|| "not found in body".to_string());
             err_spirv!("Unknown SSA value: {:?} ({})", value, origin)
@@ -1860,9 +1834,9 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         ssa_args: &[ValueId],
         args: &[spirv::Word],
         result_ty: spirv::Word,
-        inst: &Inst,
+        inst: &WynInstNode,
     ) -> Result<spirv::Word> {
-        // Common GLSL intrinsics
+        let ssa_rty = inst.result.map(|r| self.body.inner.value_type(r).clone());
         let glsl = self.constructor.glsl_ext_inst_id;
 
         // Convert args to Operands for ext_inst
@@ -1885,10 +1859,10 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             "mix" => {
                 // FMix requires all operands to match the result type.
                 // When mix(vec, vec, scalar), splat the scalar t to a vec.
-                if args.len() == 3 && inst.result_ty.is_vec() {
+                if args.len() == 3 && ssa_rty.as_ref().is_some_and(|t| t.is_vec()) {
                     let t_ty = self.body.get_value_type(ssa_args[2]);
                     if t_ty.is_scalar() {
-                        let splatted = self.splat_scalar(args[2], &inst.result_ty, result_ty)?;
+                        let splatted = self.splat_scalar(args[2], ssa_rty.as_ref().expect("mix intrinsic must have result type"), result_ty)?;
                         let operands = vec![
                             Operand::IdRef(args[0]),
                             Operand::IdRef(args[1]),

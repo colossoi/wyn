@@ -45,10 +45,16 @@ pub struct ValueInfo<T> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValueDef {
+    /// Block parameter (appears in block's param list, lowered to OpPhi in SPIR-V).
     Param {
         block: BlockId,
         index: usize,
     },
+    /// Function parameter (NOT a block param, lowered to OpFunctionParameter in SPIR-V).
+    FunctionParam {
+        index: usize,
+    },
+    /// Produced by an instruction.
     Inst {
         inst: InstId,
     },
@@ -57,7 +63,6 @@ pub enum ValueDef {
 #[derive(Clone, Debug)]
 pub enum Terminator {
     Return(Option<ValueId>),
-    ReturnUnit,
     Branch {
         target: BlockId,
         args: Vec<ValueId>,
@@ -100,7 +105,7 @@ pub enum EffectVerifyError<E> {
 impl Terminator {
     pub fn successors(&self) -> Successors {
         match self {
-            Terminator::Return(_) | Terminator::ReturnUnit | Terminator::Unreachable => SmallVec::new(),
+            Terminator::Return(_) | Terminator::Unreachable => SmallVec::new(),
             Terminator::Branch { target, .. } => smallvec::smallvec![*target],
             Terminator::CondBranch {
                 then_target,
@@ -136,14 +141,13 @@ impl Terminator {
                     f(v);
                 }
             }
-            Terminator::ReturnUnit | Terminator::Unreachable => {}
+            Terminator::Unreachable => {}
         }
     }
 
     pub fn map_values(&self, mut f: impl FnMut(ValueId) -> ValueId) -> Self {
         match self {
             Terminator::Return(v) => Terminator::Return(v.map(&mut f)),
-            Terminator::ReturnUnit => Terminator::ReturnUnit,
             Terminator::Branch { target, args } => Terminator::Branch {
                 target: *target,
                 args: args.iter().copied().map(&mut f).collect(),
@@ -185,19 +189,18 @@ impl<I, E, T: Clone + Debug> Function<I, E, T> {
     }
 
     pub fn create_block(&mut self) -> BlockId {
-        let block = self.blocks.insert(BasicBlock {
+        self.blocks.insert(BasicBlock {
             params: Vec::new(),
             insts: Vec::new(),
             term: Terminator::Unreachable,
-        });
-        // First user block: entry jumps to it automatically.
-        if let Terminator::Unreachable = self.blocks[self.entry].term {
-            self.blocks[self.entry].term = Terminator::Branch {
-                target: block,
-                args: vec![],
-            };
-        }
-        block
+        })
+    }
+
+    pub fn add_function_param(&mut self, index: usize, ty: T) -> ValueId {
+        self.values.insert(ValueInfo {
+            def: ValueDef::FunctionParam { index },
+            ty,
+        })
     }
 
     pub fn add_block_param(&mut self, block: BlockId, ty: T) -> ValueId {
@@ -221,13 +224,14 @@ impl<I, E, T: Clone + Debug> Function<I, E, T> {
     pub fn block_of_value(&self, v: ValueId) -> BlockId {
         match self.values[v].def {
             ValueDef::Param { block, .. } => block,
+            ValueDef::FunctionParam { .. } => self.entry,
             ValueDef::Inst { inst } => self.insts[inst].parent,
         }
     }
 
     pub fn inst_of_value(&self, v: ValueId) -> Option<InstId> {
         match self.values[v].def {
-            ValueDef::Param { .. } => None,
+            ValueDef::Param { .. } | ValueDef::FunctionParam { .. } => None,
             ValueDef::Inst { inst } => Some(inst),
         }
     }
@@ -422,6 +426,20 @@ pub enum BuilderError {
     UnterminatedBlock(BlockId),
 }
 
+impl std::fmt::Display for BuilderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BuilderError::NoCurrentBlock => write!(f, "No current block selected"),
+            BuilderError::BlockAlreadyTerminated(id) => {
+                write!(f, "Block {:?} already terminated", id)
+            }
+            BuilderError::UnterminatedBlock(id) => write!(f, "Block {:?} has no terminator", id),
+        }
+    }
+}
+
+impl std::error::Error for BuilderError {}
+
 #[derive(Clone, Debug)]
 pub struct FuncBuilder<I, E, T> {
     func: Function<I, E, T>,
@@ -515,6 +533,11 @@ impl<I, E, T: Clone + Debug> FuncBuilder<I, E, T> {
             }
         }
         Ok(self.func)
+    }
+
+    /// Finish without checking termination.
+    pub fn finish_unchecked(self) -> Function<I, E, T> {
+        self.func
     }
 }
 

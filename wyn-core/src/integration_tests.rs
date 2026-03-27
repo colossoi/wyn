@@ -686,25 +686,16 @@ entry compute_main(data: []i32) i32 =
             eprintln!("    param {} ({:?}) :: {:?}", name, val, ty);
         }
         // Show all instructions that involve indexing or storage views
-        for inst in &f.body.insts {
-            match &inst.kind {
+        for inst in f.body.inner.insts.values() {
+            match &inst.data {
                 crate::ssa::types::InstKind::Index { .. } => {
-                    eprintln!(
-                        "    inst {:?}: Index, result_ty: {:?}",
-                        inst.result, inst.result_ty
-                    );
+                    eprintln!("    inst {:?}: Index", inst.result);
                 }
                 crate::ssa::types::InstKind::StorageView { .. } => {
-                    eprintln!(
-                        "    inst {:?}: StorageView, result_ty: {:?}",
-                        inst.result, inst.result_ty
-                    );
+                    eprintln!("    inst {:?}: StorageView", inst.result);
                 }
                 crate::ssa::types::InstKind::StorageViewIndex { .. } => {
-                    eprintln!(
-                        "    inst {:?}: StorageViewIndex, result_ty: {:?}",
-                        inst.result, inst.result_ty
-                    );
+                    eprintln!("    inst {:?}: StorageViewIndex", inst.result);
                 }
                 _ => {}
             }
@@ -720,9 +711,9 @@ entry compute_main(data: []i32) i32 =
     );
     let composite_fn = composite_fn.unwrap();
 
-    let has_storage_view = composite_fn.body.insts.iter().any(|i| {
+    let has_storage_view = composite_fn.body.inner.insts.values().any(|i| {
         matches!(
-            &i.kind,
+            &i.data,
             crate::ssa::types::InstKind::StorageView { .. }
                 | crate::ssa::types::InstKind::StorageViewIndex { .. }
         )
@@ -980,10 +971,11 @@ entry vertex_main() #[builtin(position)] vec4f32 =
     };
 
     let soac_map_count: usize = body
+        .inner
         .blocks
-        .iter()
+        .values()
         .flat_map(|b| b.insts.iter())
-        .filter(|&&inst_id| matches!(body.get_inst(inst_id).kind, InstKind::Soac(Soac::Map { .. })))
+        .filter(|&&inst_id| matches!(body.get_inst(inst_id).data, InstKind::Soac(Soac::Map { .. })))
         .count();
 
     // The processOne map should remain (real work), but the 4 extraction maps

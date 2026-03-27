@@ -1,14 +1,5 @@
-//! SSA peephole optimizations: param forwarding and empty block elimination.
-//!
-//! Pass 1 — Single-predecessor param forwarding:
-//!   When a block has exactly one predecessor that branches unconditionally to it,
-//!   replace all uses of the block's params with the branch args, then clear both.
-//!
-//! Pass 2 — Empty block elimination:
-//!   Blocks with no instructions that unconditionally branch to another block
-//!   can be bypassed. All predecessors are redirected to the target.
-//!   The entry block (BlockId(0)) is never eliminated.
-//!   Iterates to fixpoint for chained empty blocks.
+//! SSA peephole optimizations: param forwarding, project folding, CSE, DCE,
+//! and empty block elimination.
 
 use crate::ast::TypeName;
 use crate::ssa::types::Program;
@@ -40,35 +31,27 @@ fn optimize_func(body: &mut FuncBody) {
 // =============================================================================
 
 fn forward_params(body: &mut FuncBody) {
-    // Build predecessor map: target_block -> list of (source_block, branch_args).
-    // We count *all* incoming edges (unconditional and conditional) so we can
-    // identify blocks with exactly one predecessor edge.
     let mut pred_map: HashMap<BlockId, Vec<(BlockId, Vec<ValueId>)>> = HashMap::new();
 
-    for (idx, block) in body.blocks.iter().enumerate() {
-        let src = BlockId(idx as u32);
-        if let Some(ref term) = block.terminator {
-            match term {
-                Terminator::Branch { target, args } => {
-                    pred_map.entry(*target).or_default().push((src, args.clone()));
-                }
-                Terminator::CondBranch {
-                    then_target,
-                    then_args,
-                    else_target,
-                    else_args,
-                    ..
-                } => {
-                    pred_map.entry(*then_target).or_default().push((src, then_args.clone()));
-                    pred_map.entry(*else_target).or_default().push((src, else_args.clone()));
-                }
-                _ => {}
+    for (bid, block) in &body.inner.blocks {
+        match &block.term {
+            Terminator::Branch { target, args } => {
+                pred_map.entry(*target).or_default().push((bid, args.clone()));
             }
+            Terminator::CondBranch {
+                then_target,
+                then_args,
+                else_target,
+                else_args,
+                ..
+            } => {
+                pred_map.entry(*then_target).or_default().push((bid, then_args.clone()));
+                pred_map.entry(*else_target).or_default().push((bid, else_args.clone()));
+            }
+            _ => {}
         }
     }
 
-    // Collect substitutions from blocks with exactly one predecessor
-    // where that predecessor branches unconditionally.
     let mut substitutions: HashMap<ValueId, ValueId> = HashMap::new();
     let mut blocks_to_clear_params: Vec<BlockId> = Vec::new();
     let mut branches_to_clear_args: Vec<BlockId> = Vec::new();
@@ -79,23 +62,19 @@ fn forward_params(body: &mut FuncBody) {
         }
         let (pred_id, pred_args) = &preds[0];
 
-        // The predecessor must use an unconditional Branch (not CondBranch)
-        let is_unconditional = matches!(
-            body.blocks[pred_id.index()].terminator,
-            Some(Terminator::Branch { .. })
-        );
+        let is_unconditional = matches!(body.inner.blocks[*pred_id].term, Terminator::Branch { .. });
         if !is_unconditional {
             continue;
         }
 
-        let target_block = &body.blocks[target.index()];
+        let target_block = &body.inner.blocks[*target];
         if target_block.params.is_empty() {
             continue;
         }
 
-        // param_value → branch_arg
+        // params are Vec<ValueId> — each param IS the value
         for (param, arg) in target_block.params.iter().zip(pred_args.iter()) {
-            substitutions.insert(param.value, *arg);
+            substitutions.insert(*param, *arg);
         }
 
         blocks_to_clear_params.push(*target);
@@ -106,23 +85,19 @@ fn forward_params(body: &mut FuncBody) {
         return;
     }
 
-    // Clear params and branch args
     for bid in blocks_to_clear_params {
-        body.blocks[bid.index()].params.clear();
+        body.inner.blocks[bid].params.clear();
     }
     for bid in branches_to_clear_args {
-        if let Some(Terminator::Branch { args, .. }) = &mut body.blocks[bid.index()].terminator {
+        if let Terminator::Branch { args, .. } = &mut body.inner.blocks[bid].term {
             args.clear();
         }
     }
 
-    // Resolve transitive chains (a→b, b→c  ⇒  a→c)
     let resolved = resolve_substitutions(&substitutions);
-
     apply_substitutions(body, &resolved);
 }
 
-/// Chase substitution chains to a fixpoint.
 fn resolve_substitutions(subs: &HashMap<ValueId, ValueId>) -> HashMap<ValueId, ValueId> {
     let mut resolved = HashMap::new();
     for (&from, &to) in subs {
@@ -135,7 +110,6 @@ fn resolve_substitutions(subs: &HashMap<ValueId, ValueId>) -> HashMap<ValueId, V
     resolved
 }
 
-/// Rewrite every ValueId reference in instructions and terminators.
 fn apply_substitutions(body: &mut FuncBody, subs: &HashMap<ValueId, ValueId>) {
     let mut sub = |v: &mut ValueId| {
         if let Some(&r) = subs.get(v) {
@@ -143,14 +117,13 @@ fn apply_substitutions(body: &mut FuncBody, subs: &HashMap<ValueId, ValueId>) {
         }
     };
 
-    for inst in &mut body.insts {
-        inst.kind.substitute_values(&mut sub);
+    for (_iid, inst) in &mut body.inner.insts {
+        inst.data.substitute_values(&mut sub);
     }
 
-    for block in &mut body.blocks {
-        if let Some(ref mut term) = block.terminator {
-            term.substitute_values(&mut sub);
-        }
+    for (_bid, block) in &mut body.inner.blocks {
+        let rewritten = block.term.map_values(|v| if let Some(&r) = subs.get(&v) { r } else { v });
+        block.term = rewritten;
     }
 }
 
@@ -159,26 +132,24 @@ fn apply_substitutions(body: &mut FuncBody, subs: &HashMap<ValueId, ValueId>) {
 // =============================================================================
 
 fn project_fold(body: &mut FuncBody) {
-    // Build def map: result ValueId -> index in body.insts
-    let mut def_map: HashMap<ValueId, usize> = HashMap::new();
-    for (idx, inst) in body.insts.iter().enumerate() {
+    let mut def_map: HashMap<ValueId, wyn_ssa::InstId> = HashMap::new();
+    for (iid, inst) in &body.inner.insts {
         if let Some(result) = inst.result {
-            def_map.insert(result, idx);
+            def_map.insert(result, iid);
         }
     }
 
     let mut substitutions: HashMap<ValueId, ValueId> = HashMap::new();
 
-    for inst in body.insts.iter() {
-        if let InstKind::Project { base, index } = &inst.kind {
-            // Resolve base through existing substitutions (handles chained projects)
+    for (_iid, inst) in &body.inner.insts {
+        if let InstKind::Project { base, index } = &inst.data {
             let mut resolved_base = *base;
             while let Some(&next) = substitutions.get(&resolved_base) {
                 resolved_base = next;
             }
 
-            if let Some(&def_idx) = def_map.get(&resolved_base) {
-                let elems = match &body.insts[def_idx].kind {
+            if let Some(&def_iid) = def_map.get(&resolved_base) {
+                let elems = match &body.inner.insts[def_iid].data {
                     InstKind::Tuple(elems)
                     | InstKind::Vector(elems)
                     | InstKind::ArrayLit { elements: elems } => Some(elems),
@@ -219,14 +190,15 @@ fn local_cse(body: &mut FuncBody) {
 
     let mut substitutions: HashMap<ValueId, ValueId> = HashMap::new();
 
-    for block in &body.blocks {
+    for (_bid, block) in &body.inner.blocks {
         let mut seen: HashMap<CseKey, ValueId> = HashMap::new();
 
         for &inst_id in &block.insts {
-            let inst = &body.insts[inst_id.index()];
-            let key = match &inst.kind {
-                InstKind::Int(v) => Some(CseKey::Int(v.clone(), inst.result_ty.clone())),
-                InstKind::Float(v) => Some(CseKey::Float(v.clone(), inst.result_ty.clone())),
+            let inst = &body.inner.insts[inst_id];
+            let result_ty = inst.result.map(|r| body.inner.value_type(r).clone());
+            let key = match &inst.data {
+                InstKind::Int(v) => result_ty.map(|ty| CseKey::Int(v.clone(), ty)),
+                InstKind::Float(v) => result_ty.map(|ty| CseKey::Float(v.clone(), ty)),
                 InstKind::Bool(v) => Some(CseKey::Bool(*v)),
                 InstKind::Global(name) => Some(CseKey::Global(name.clone())),
                 InstKind::Extern(name) => Some(CseKey::Extern(name.clone())),
@@ -259,35 +231,41 @@ fn local_cse(body: &mut FuncBody) {
 // =============================================================================
 
 fn dce(body: &mut FuncBody) {
-    // Collect all used ValueIds from instructions and terminators
     let mut used: HashSet<ValueId> = HashSet::new();
 
-    for inst in body.insts.iter() {
-        for v in inst.kind.value_uses() {
+    for (_iid, inst) in &body.inner.insts {
+        for v in inst.data.value_uses() {
             used.insert(v);
         }
     }
 
-    for block in &body.blocks {
-        if let Some(ref term) = block.terminator {
-            for v in term.value_uses() {
-                used.insert(v);
+    for (_bid, block) in &body.inner.blocks {
+        block.term.for_each_value(|v| {
+            used.insert(v);
+        });
+    }
+
+    // Can't borrow body.inner.blocks mutably while also reading body.inner.insts,
+    // so collect inst ids to remove first.
+    let mut to_remove: Vec<(BlockId, wyn_ssa::InstId)> = Vec::new();
+    for (bid, block) in &body.inner.blocks {
+        for &inst_id in &block.insts {
+            let inst = &body.inner.insts[inst_id];
+            if is_side_effecting(&inst.data) {
+                continue;
+            }
+            match inst.result {
+                Some(result) if !used.contains(&result) => {
+                    to_remove.push((bid, inst_id));
+                }
+                None => {}
+                _ => {}
             }
         }
     }
 
-    // Retain instructions that are side-effecting or whose result is used
-    for block in &mut body.blocks {
-        block.insts.retain(|&inst_id| {
-            let inst = &body.insts[inst_id.index()];
-            if is_side_effecting(&inst.kind) {
-                return true;
-            }
-            match inst.result {
-                Some(result) => used.contains(&result),
-                None => true,
-            }
-        });
+    for (_bid, inst_id) in to_remove {
+        body.inner.remove_inst(inst_id);
     }
 }
 
@@ -309,22 +287,19 @@ fn is_side_effecting(kind: &InstKind) -> bool {
 // =============================================================================
 
 fn eliminate_empty_blocks(body: &mut FuncBody) {
-    // Collect all blocks that are merge or continue targets — these are
-    // structurally required by SPIR-V and must not be eliminated.
     let mut protected: HashSet<BlockId> = HashSet::new();
-    for block in body.blocks.iter() {
-        if let Some(ref ctrl) = block.control {
-            match ctrl {
-                ControlHeader::Loop {
-                    merge,
-                    continue_block,
-                } => {
-                    protected.insert(*merge);
-                    protected.insert(*continue_block);
-                }
-                ControlHeader::Selection { merge } => {
-                    protected.insert(*merge);
-                }
+    for (&bid, ctrl) in &body.control_headers {
+        let _ = bid;
+        match ctrl {
+            ControlHeader::Loop {
+                merge,
+                continue_block,
+            } => {
+                protected.insert(*merge);
+                protected.insert(*continue_block);
+            }
+            ControlHeader::Selection { merge } => {
+                protected.insert(*merge);
             }
         }
     }
@@ -332,58 +307,45 @@ fn eliminate_empty_blocks(body: &mut FuncBody) {
     loop {
         let mut changed = false;
 
-        // Collect redirect info for empty blocks:
-        // (empty_block, target, branch_args, param_values)
         let mut redirects: Vec<(BlockId, BlockId, Vec<ValueId>, Vec<ValueId>)> = Vec::new();
 
-        for (idx, block) in body.blocks.iter().enumerate() {
-            let bid = BlockId(idx as u32);
-            if bid == BlockId::ENTRY {
+        for (bid, block) in &body.inner.blocks {
+            if bid == body.entry_block() {
                 continue;
             }
             if !block.insts.is_empty() {
                 continue;
             }
-            if block.control.is_some() {
-                continue; // structured control-flow headers must stay
+            if body.control_headers.contains_key(&bid) {
+                continue;
             }
             if protected.contains(&bid) {
-                continue; // merge/continue targets must stay
+                continue;
             }
-            if let Some(Terminator::Branch { target, args }) = &block.terminator {
-                let param_values: Vec<ValueId> = block.params.iter().map(|p| p.value).collect();
+            if let Terminator::Branch { target, args } = &block.term {
+                let param_values: Vec<ValueId> = block.params.iter().copied().collect();
                 redirects.push((bid, *target, args.clone(), param_values));
             }
         }
 
         for (empty_id, target, branch_args, param_values) in &redirects {
-            // Check that redirecting won't create a degenerate CondBranch
-            // (both arms targeting the same block), which produces invalid
-            // SPIR-V phi nodes with duplicate parent blocks.
-            let safe = body.blocks.iter().all(|block| {
-                if let Some(ref term) = block.terminator {
-                    can_safely_redirect(term, *empty_id, *target)
-                } else {
-                    true
-                }
-            });
+            let safe = body
+                .inner
+                .blocks
+                .values()
+                .all(|block| can_safely_redirect(&block.term, *empty_id, *target));
             if !safe {
                 continue;
             }
 
-            // Rewrite every predecessor that references the empty block
-            for block in body.blocks.iter_mut() {
-                if let Some(ref mut term) = block.terminator {
-                    if rewrite_target(term, *empty_id, *target, branch_args, param_values) {
-                        changed = true;
-                    }
+            for (_bid, block) in &mut body.inner.blocks {
+                if rewrite_target(&mut block.term, *empty_id, *target, branch_args, param_values) {
+                    changed = true;
                 }
             }
 
-            // Mark eliminated block as unreachable (not None — SPIR-V lowering
-            // iterates all blocks so they need valid terminators)
-            body.blocks[empty_id.index()].terminator = Some(Terminator::Unreachable);
-            body.blocks[empty_id.index()].params.clear();
+            body.inner.blocks[*empty_id].term = Terminator::Unreachable;
+            body.inner.blocks[*empty_id].params.clear();
         }
 
         if !changed {
@@ -392,8 +354,6 @@ fn eliminate_empty_blocks(body: &mut FuncBody) {
     }
 }
 
-/// Check whether redirecting `from` → `to` would cause a CondBranch
-/// to have both arms targeting the same block (invalid in SPIR-V).
 fn can_safely_redirect(term: &Terminator, from: BlockId, to: BlockId) -> bool {
     match term {
         Terminator::CondBranch {
@@ -409,8 +369,6 @@ fn can_safely_redirect(term: &Terminator, from: BlockId, to: BlockId) -> bool {
     }
 }
 
-/// Rewrite occurrences of `from` → `to` inside a terminator,
-/// threading block params through as needed. Returns true if rewritten.
 fn rewrite_target(
     term: &mut Terminator,
     from: BlockId,
@@ -450,14 +408,6 @@ fn rewrite_target(
     changed
 }
 
-/// Map the empty block's outgoing args through its params.
-///
-/// `to_args`     — what the empty block passes to its target
-/// `from_params` — the empty block's own param values
-/// `pred_args`   — what the predecessor passes to the empty block
-///
-/// Each value in `to_args` that matches a `from_params[i]` is replaced
-/// with `pred_args[i]`; other values pass through unchanged.
 fn substitute_through(to_args: &[ValueId], from_params: &[ValueId], pred_args: &[ValueId]) -> Vec<ValueId> {
     if from_params.is_empty() {
         return to_args.to_vec();

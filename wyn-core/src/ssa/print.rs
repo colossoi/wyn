@@ -1,7 +1,4 @@
 //! Pretty-printer for SSA programs.
-//!
-//! Formats an `Program` as a human-readable text representation suitable for
-//! debugging and inspection.
 
 use crate::ast::TypeName;
 use crate::ssa::types::{ExecutionModel, Program};
@@ -10,7 +7,6 @@ use std::fmt::Write;
 
 use super::types::*;
 
-/// Format a type concisely.
 fn format_type(ty: &Type<TypeName>) -> String {
     match ty {
         Type::Constructed(TypeName::Int(bits), _) => format!("i{bits}"),
@@ -47,7 +43,6 @@ fn format_type(ty: &Type<TypeName>) -> String {
     }
 }
 
-/// Extract array/vector size as a string.
 fn format_array_size(size_ty: &Type<TypeName>) -> String {
     match size_ty {
         Type::Constructed(TypeName::Size(n), _) => n.to_string(),
@@ -55,12 +50,18 @@ fn format_array_size(size_ty: &Type<TypeName>) -> String {
     }
 }
 
-/// Format a list of value IDs as comma-separated.
-fn format_values(vals: &[ValueId]) -> String {
-    vals.iter().map(|v| format!("%{}", v.0)).collect::<Vec<_>>().join(", ")
+fn fmt_val(v: ValueId) -> String {
+    format!("%{:?}", v)
 }
 
-/// Format an `Program` as a readable text representation.
+fn format_values(vals: &[ValueId]) -> String {
+    vals.iter().map(|v| fmt_val(*v)).collect::<Vec<_>>().join(", ")
+}
+
+fn fmt_block(b: BlockId) -> String {
+    format!("{:?}", b)
+}
+
 pub fn format_program(program: &Program) -> String {
     let mut out = String::new();
 
@@ -89,7 +90,6 @@ pub fn format_program(program: &Program) -> String {
         out.push('\n');
     }
 
-    // Trim trailing newlines to a single one
     while out.ends_with("\n\n") {
         out.pop();
     }
@@ -97,41 +97,49 @@ pub fn format_program(program: &Program) -> String {
     out
 }
 
-/// Format a single function body.
 fn format_function(out: &mut String, name: &str, body: &FuncBody) {
-    // Function signature
-    let params: Vec<String> =
-        body.params.iter().map(|(val, ty, _name)| format!("%{}: {}", val.0, format_type(ty))).collect();
+    let params: Vec<String> = body
+        .params
+        .iter()
+        .map(|(val, ty, _name)| format!("{}: {}", fmt_val(*val), format_type(ty)))
+        .collect();
     let ret = format_type(&body.return_ty);
     let _ = writeln!(out, "func @{name}({}) -> {ret} {{", params.join(", "));
 
-    // Blocks
-    for (i, block) in body.blocks.iter().enumerate() {
-        let block_id = BlockId(i as u32);
-        if block.is_dead() {
+    for (bid, block) in &body.inner.blocks {
+        // Skip dead blocks
+        if block.insts.is_empty() && matches!(block.term, Terminator::Unreachable) {
             continue;
         }
 
         // Block header
         if block.params.is_empty() {
-            let _ = writeln!(out, "  {block_id}:");
+            let _ = writeln!(out, "  {}:", fmt_block(bid));
         } else {
-            let params: Vec<String> =
-                block.params.iter().map(|p| format!("%{}: {}", p.value.0, format_type(&p.ty))).collect();
-            let _ = writeln!(out, "  {block_id}({}):", params.join(", "));
+            let params: Vec<String> = block
+                .params
+                .iter()
+                .map(|&p| format!("{}: {}", fmt_val(p), format_type(body.inner.value_type(p))))
+                .collect();
+            let _ = writeln!(out, "  {}({}):", fmt_block(bid), params.join(", "));
         }
 
         // Control header as comment
-        if let Some(ref ctrl) = block.control {
+        if let Some(ctrl) = body.control_headers.get(&bid) {
             match ctrl {
                 ControlHeader::Loop {
                     merge,
                     continue_block,
                 } => {
-                    let _ = writeln!(out, "    # loop merge={merge} continue={continue_block}");
+                    let _ = writeln!(
+                        out,
+                        "    # loop merge={} continue={}",
+                        fmt_block(*merge),
+                        fmt_block(*continue_block)
+                    );
                 }
                 ControlHeader::Selection { merge } => {
-                    let _ = writeln!(out, "    # selection merge={merge}");
+                    let _ = writeln!(out, "    # selection merge={}", fmt_block(*merge));
                 }
             }
         }
@@ -141,18 +149,16 @@ fn format_function(out: &mut String, name: &str, body: &FuncBody) {
             let inst = body.get_inst(inst_id);
             let _ = write!(out, "    ");
             if let Some(result) = inst.result {
-                let _ = write!(out, "%{} = ", result.0);
+                let _ = write!(out, "{} = ", fmt_val(result));
             }
-            format_inst_kind(out, &inst.kind);
+            format_inst_kind(out, &inst.data);
             out.push('\n');
         }
 
         // Terminator
-        if let Some(ref term) = block.terminator {
-            let _ = write!(out, "    ");
-            format_terminator(out, term);
-            out.push('\n');
-        }
+        let _ = write!(out, "    ");
+        format_terminator(out, &block.term);
+        out.push('\n');
 
         out.push('\n');
     }
@@ -161,7 +167,6 @@ fn format_function(out: &mut String, name: &str, body: &FuncBody) {
     out.push('\n');
 }
 
-/// Format an instruction kind.
 fn format_inst_kind(out: &mut String, kind: &InstKind) {
     match kind {
         InstKind::Int(s) => {
@@ -180,10 +185,10 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
             let _ = write!(out, "string \"{s}\"");
         }
         InstKind::BinOp { op, lhs, rhs } => {
-            let _ = write!(out, "binop {op} %{}, %{}", lhs.0, rhs.0);
+            let _ = write!(out, "binop {op} {}, {}", fmt_val(*lhs), fmt_val(*rhs));
         }
         InstKind::UnaryOp { op, operand } => {
-            let _ = write!(out, "unaryop {op} %{}", operand.0);
+            let _ = write!(out, "unaryop {op} {}", fmt_val(*operand));
         }
         InstKind::Tuple(vals) => {
             let _ = write!(out, "tuple ({})", format_values(vals));
@@ -192,9 +197,9 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
             let _ = write!(out, "array [{}]", format_values(elements));
         }
         InstKind::ArrayRange { start, len, step } => {
-            let _ = write!(out, "range %{}..%{}", start.0, len.0);
+            let _ = write!(out, "range {}..{}", fmt_val(*start), fmt_val(*len));
             if let Some(step) = step {
-                let _ = write!(out, " step %{}", step.0);
+                let _ = write!(out, " step {}", fmt_val(*step));
             }
         }
         InstKind::Vector(vals) => {
@@ -211,10 +216,10 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
             let _ = write!(out, "]");
         }
         InstKind::Project { base, index } => {
-            let _ = write!(out, "project %{}.{index}", base.0);
+            let _ = write!(out, "project {}.{index}", fmt_val(*base));
         }
         InstKind::Index { base, index } => {
-            let _ = write!(out, "index %{}[%{}]", base.0, index.0);
+            let _ = write!(out, "index {}[{}]", fmt_val(*base), fmt_val(*index));
         }
         InstKind::Call { func, args } => {
             let _ = write!(out, "call @{func}({})", format_values(args));
@@ -228,27 +233,27 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
         InstKind::Intrinsic { name, args } => {
             let _ = write!(out, "intrinsic @{name}({})", format_values(args));
         }
-        InstKind::Alloca { elem_ty, .. } => {
+        InstKind::Alloca { elem_ty } => {
             let _ = write!(out, "alloca {}", format_type(elem_ty));
         }
-        InstKind::Load { ptr, .. } => {
-            let _ = write!(out, "load %{}", ptr.0);
+        InstKind::Load { ptr } => {
+            let _ = write!(out, "load {}", fmt_val(*ptr));
         }
-        InstKind::Store { ptr, value, .. } => {
-            let _ = write!(out, "store %{}, %{}", ptr.0, value.0);
+        InstKind::Store { ptr, value } => {
+            let _ = write!(out, "store {}, {}", fmt_val(*ptr), fmt_val(*value));
         }
         InstKind::StorageView { source, offset, len } => {
             let src = match source {
                 ViewSource::Storage { set, binding } => format!("storage({set}, {binding})"),
-                ViewSource::Inherited { parent } => format!("%{}", parent.0),
+                ViewSource::Inherited { parent } => fmt_val(*parent),
             };
-            let _ = write!(out, "storage_view {src} %{} %{}", offset.0, len.0);
+            let _ = write!(out, "storage_view {src} {} {}", fmt_val(*offset), fmt_val(*len));
         }
         InstKind::StorageViewIndex { view, index } => {
-            let _ = write!(out, "storage_view_index %{}[%{}]", view.0, index.0);
+            let _ = write!(out, "storage_view_index {}[{}]", fmt_val(*view), fmt_val(*index));
         }
         InstKind::StorageViewLen { view } => {
-            let _ = write!(out, "storage_view_len %{}", view.0);
+            let _ = write!(out, "storage_view_len {}", fmt_val(*view));
         }
         InstKind::OutputPtr { index } => {
             let _ = write!(out, "output_ptr {index}");
@@ -259,7 +264,6 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
     }
 }
 
-/// Format a SOAC instruction.
 fn format_soac(out: &mut String, soac: &Soac) {
     match soac {
         Soac::Map {
@@ -280,7 +284,12 @@ fn format_soac(out: &mut String, soac: &Soac) {
             captures,
             ..
         } => {
-            let _ = write!(out, "soac.reduce @{func}(%{}, %{})", input.0, init.0);
+            let _ = write!(
+                out,
+                "soac.reduce @{func}({}, {})",
+                fmt_val(*input),
+                fmt_val(*init)
+            );
             if !captures.is_empty() {
                 let _ = write!(out, " captures=[{}]", format_values(captures));
             }
@@ -292,7 +301,7 @@ fn format_soac(out: &mut String, soac: &Soac) {
             captures,
             ..
         } => {
-            let _ = write!(out, "soac.scan @{func}(%{}, %{})", input.0, init.0);
+            let _ = write!(out, "soac.scan @{func}({}, {})", fmt_val(*input), fmt_val(*init));
             if !captures.is_empty() {
                 let _ = write!(out, " captures=[{}]", format_values(captures));
             }
@@ -300,14 +309,13 @@ fn format_soac(out: &mut String, soac: &Soac) {
     }
 }
 
-/// Format a block terminator.
 fn format_terminator(out: &mut String, term: &Terminator) {
     match term {
         Terminator::Branch { target, args } => {
             if args.is_empty() {
-                let _ = write!(out, "br {target}");
+                let _ = write!(out, "br {}", fmt_block(*target));
             } else {
-                let _ = write!(out, "br {target}({})", format_values(args));
+                let _ = write!(out, "br {}({})", fmt_block(*target), format_values(args));
             }
         }
         Terminator::CondBranch {
@@ -329,14 +337,16 @@ fn format_terminator(out: &mut String, term: &Terminator) {
             };
             let _ = write!(
                 out,
-                "br_if %{} then {then_target}{then_args_str} else {else_target}{else_args_str}",
-                cond.0
+                "br_if {} then {}{then_args_str} else {}{else_args_str}",
+                fmt_val(*cond),
+                fmt_block(*then_target),
+                fmt_block(*else_target),
             );
         }
-        Terminator::Return(val) => {
-            let _ = write!(out, "return %{}", val.0);
+        Terminator::Return(Some(val)) => {
+            let _ = write!(out, "return {}", fmt_val(*val));
         }
-        Terminator::ReturnUnit => {
+        Terminator::Return(None) => {
             let _ = write!(out, "return ()");
         }
         Terminator::Unreachable => {
