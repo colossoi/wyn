@@ -63,6 +63,12 @@ struct Constructor {
     // GLSL extended instruction set
     glsl_ext_inst_id: spirv::Word,
 
+    // Top-level polytype → SPIR-V memoization (subsumes type + constant dedup for wyn types)
+    polytype_cache: HashMap<PolyType<TypeName>, spirv::Word>,
+
+    // Composite constant dedup: (result_type, constituents) → constant_id
+    composite_const_cache: HashMap<(spirv::Word, Vec<spirv::Word>), spirv::Word>,
+
     // Type cache: avoid recreating same types
     vec_type_cache: HashMap<(spirv::Word, u32), spirv::Word>,
     struct_type_cache: HashMap<Vec<spirv::Word>, spirv::Word>,
@@ -148,6 +154,8 @@ impl Constructor {
             env: HashMap::new(),
             functions: HashMap::new(),
             glsl_ext_inst_id,
+            polytype_cache: HashMap::new(),
+            composite_const_cache: HashMap::new(),
             vec_type_cache: HashMap::new(),
             struct_type_cache: HashMap::new(),
             ptr_type_cache: HashMap::new(),
@@ -235,6 +243,15 @@ impl Constructor {
 
     /// Convert a polytype Type to a SPIR-V type ID
     fn polytype_to_spirv(&mut self, ty: &PolyType<TypeName>) -> spirv::Word {
+        if let Some(&cached) = self.polytype_cache.get(ty) {
+            return cached;
+        }
+        let result = self.polytype_to_spirv_uncached(ty);
+        self.polytype_cache.insert(ty.clone(), result);
+        result
+    }
+
+    fn polytype_to_spirv_uncached(&mut self, ty: &PolyType<TypeName>) -> spirv::Word {
         match ty {
             PolyType::Variable(id) => {
                 panic!("BUG: Unresolved type variable Variable({}) reached lowering.", id);
@@ -818,8 +835,13 @@ impl Constructor {
         elem_ids: Vec<spirv::Word>,
     ) -> Result<spirv::Word> {
         if elem_ids.iter().all(|&id| self.is_constant(id)) {
+            let key = (result_type, elem_ids.clone());
+            if let Some(&cached) = self.composite_const_cache.get(&key) {
+                return Ok(cached);
+            }
             let id = self.builder.constant_composite(result_type, elem_ids);
             self.constant_ids.insert(id);
+            self.composite_const_cache.insert(key, id);
             Ok(id)
         } else {
             Ok(self.builder.composite_construct(result_type, None, elem_ids)?)
@@ -1033,12 +1055,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         let mut visited: HashSet<BlockId> = HashSet::new();
         let mut order = Vec::with_capacity(self.body.inner.blocks.len());
 
-        fn visit(
-            body: &FuncBody,
-            bid: BlockId,
-            visited: &mut HashSet<BlockId>,
-            order: &mut Vec<BlockId>,
-        ) {
+        fn visit(body: &FuncBody, bid: BlockId, visited: &mut HashSet<BlockId>, order: &mut Vec<BlockId>) {
             if visited.contains(&bid) {
                 return;
             }
@@ -1397,7 +1414,12 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         Ok(())
     }
 
-    fn lower_terminator(&mut self, _block_id: BlockId, _block: &wyn_ssa::BasicBlock, term: &Terminator) -> Result<()> {
+    fn lower_terminator(
+        &mut self,
+        _block_id: BlockId,
+        _block: &wyn_ssa::BasicBlock,
+        term: &Terminator,
+    ) -> Result<()> {
         let current_block = self.constructor.current_block.unwrap();
 
         match term {
@@ -1517,7 +1539,11 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
     fn get_value(&self, value: ValueId) -> Result<spirv::Word> {
         self.value_map.get(&value).copied().ok_or_else(|| {
             // Build diagnostic info to help debug SSA/lowering issues
-            let producer_block = self.body.inner.insts.values()
+            let producer_block = self
+                .body
+                .inner
+                .insts
+                .values()
                 .find(|i| i.result == Some(value))
                 .map(|i| format!("produced in Block({:?})", i.parent));
             let block_param = self.body.inner.blocks.iter().find_map(|(bid, b)| {
@@ -1862,7 +1888,11 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 if args.len() == 3 && ssa_rty.as_ref().is_some_and(|t| t.is_vec()) {
                     let t_ty = self.body.get_value_type(ssa_args[2]);
                     if t_ty.is_scalar() {
-                        let splatted = self.splat_scalar(args[2], ssa_rty.as_ref().expect("mix intrinsic must have result type"), result_ty)?;
+                        let splatted = self.splat_scalar(
+                            args[2],
+                            ssa_rty.as_ref().expect("mix intrinsic must have result type"),
+                            result_ty,
+                        )?;
                         let operands = vec![
                             Operand::IdRef(args[0]),
                             Operand::IdRef(args[1]),
