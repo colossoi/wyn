@@ -661,6 +661,18 @@ fn types_match<I, E, T: PartialEq>(func: &Function<I, E, T>, a: InstId, b: InstI
 pub fn lift_and_merge<I: ValueLike, E: Copy + Eq + Hash + Debug, T: Clone + Debug + PartialEq>(
     func: &mut Function<I, E, T>,
 ) {
+    // Phase 1: Hoist every hoistable instruction as high as its data dependencies allow.
+    hoist_all(func);
+
+    // Phase 2: Merge duplicates that landed at the same position.
+    merge_duplicates(func);
+}
+
+/// Move every pure, hoistable instruction to the earliest block where all
+/// its operands are available.
+fn hoist_all<I: ValueLike, E: Copy + Eq + Hash + Debug, T: Clone + Debug + PartialEq>(
+    func: &mut Function<I, E, T>,
+) {
     let dom = Dominators::compute(func);
 
     let candidates: Vec<InstId> = func
@@ -675,72 +687,96 @@ pub fn lift_and_merge<I: ValueLike, E: Copy + Eq + Hash + Debug, T: Clone + Debu
         })
         .collect();
 
-    let mut classes: Vec<Vec<InstId>> = Vec::new();
-
-    'outer: for inst in candidates {
-        if !func.insts.contains_key(inst) {
-            continue;
-        }
-        for class in &mut classes {
-            let rep = class[0];
-            if !func.insts.contains_key(rep) {
-                continue;
-            }
-            if func.insts[inst].data.equivalent_to(&func.insts[rep].data) && types_match(func, inst, rep) {
-                class.push(inst);
-                continue 'outer;
-            }
-        }
-        classes.push(vec![inst]);
-    }
-
-    for class in classes {
-        let live: Vec<InstId> = class.into_iter().filter(|id| func.insts.contains_key(*id)).collect();
-
-        if live.len() < 2 {
+    for inst_id in candidates {
+        if !func.insts.contains_key(inst_id) {
             continue;
         }
 
-        let target_block = dom
-            .nearest_common_dominator_many(live.iter().map(|&id| func.insts[id].parent))
-            .unwrap_or(func.entry);
+        let current_block = func.insts[inst_id].parent;
 
-        let rep = live[0];
-        let rep_data = func.insts[rep].data.clone();
-        let Some(rep_result) = func.insts[rep].result else {
-            continue;
-        };
-        let rep_ty = func.values[rep_result].ty.clone();
+        let mut operand_blocks: Vec<BlockId> = Vec::new();
+        func.insts[inst_id].data.for_each_operand(|v| {
+            operand_blocks.push(func.block_of_value(v));
+        });
 
-        let insert_index = block_top_insert_index_after_operands(func, target_block, &rep_data);
-
-        let needs_new_canonical = {
-            let block_insts = &func.blocks[target_block].insts;
-            let existing_at_spot = block_insts.get(insert_index).copied();
-            match existing_at_spot {
-                Some(inst) => !(func.insts[inst].data.equivalent_to(&rep_data)),
-                None => true,
-            }
-        };
-
-        let canonical_value = if needs_new_canonical {
-            func.insert_inst_at_index(target_block, insert_index, rep_data, rep_ty, None)
+        let target_block = if operand_blocks.is_empty() {
+            func.entry
         } else {
-            let Some(v) = func.insts[func.blocks[target_block].insts[insert_index]].result else {
-                continue;
-            };
-            v
-        };
-
-        for inst in live {
-            if !func.insts.contains_key(inst) {
+            // Find the deepest operand block. All others must dominate it,
+            // otherwise the operands are in sibling branches and we can't hoist.
+            let deepest = *operand_blocks.iter().max_by_key(|&&b| dom.dom_set_size(b)).unwrap();
+            let all_dominate_deepest = operand_blocks.iter().all(|&b| dom.dominates(b, deepest));
+            if !all_dominate_deepest {
                 continue;
             }
-            let Some(old_value) = func.insts[inst].result else {
+            deepest
+        };
+
+        // Only move if target is strictly above current position
+        if target_block == current_block {
+            continue;
+        }
+        if !dom.dominates(target_block, current_block) {
+            continue;
+        }
+
+        // Remove from current block
+        let old_pos = func.blocks[current_block].insts.iter().position(|&id| id == inst_id);
+        if let Some(pos) = old_pos {
+            func.blocks[current_block].insts.remove(pos);
+        }
+
+        // Insert at the right position in target block (after all operand definitions)
+        let insert_idx =
+            block_top_insert_index_after_operands(func, target_block, &func.insts[inst_id].data);
+        func.blocks[target_block].insts.insert(insert_idx, inst_id);
+        func.insts[inst_id].parent = target_block;
+    }
+}
+
+/// Find duplicate instructions in each block and merge them.
+fn merge_duplicates<I: ValueLike, E: Copy + Eq + Hash + Debug, T: Clone + Debug + PartialEq>(
+    func: &mut Function<I, E, T>,
+) {
+    let block_ids: Vec<BlockId> = func.blocks.keys().collect();
+
+    for bid in block_ids {
+        let insts: Vec<InstId> = func.blocks[bid].insts.clone();
+        let mut to_remove: Vec<(InstId, ValueId, ValueId)> = Vec::new();
+
+        for i in 0..insts.len() {
+            let a = insts[i];
+            if !func.insts.contains_key(a) {
+                continue;
+            }
+            let Some(a_result) = func.insts[a].result else {
                 continue;
             };
-            if old_value != canonical_value {
-                func.replace_all_uses(old_value, canonical_value);
+            if func.insts[a].effects.is_some() || !func.insts[a].data.is_hoistable() {
+                continue;
+            }
+
+            for j in (i + 1)..insts.len() {
+                let b = insts[j];
+                if !func.insts.contains_key(b) {
+                    continue;
+                }
+                let Some(b_result) = func.insts[b].result else {
+                    continue;
+                };
+                if func.insts[b].effects.is_some() || !func.insts[b].data.is_hoistable() {
+                    continue;
+                }
+
+                if func.insts[a].data.equivalent_to(&func.insts[b].data) && types_match(func, a, b) {
+                    to_remove.push((b, b_result, a_result));
+                }
+            }
+        }
+
+        for (inst, old_val, new_val) in to_remove {
+            if func.insts.contains_key(inst) {
+                func.replace_all_uses(old_val, new_val);
                 func.remove_inst(inst);
             }
         }

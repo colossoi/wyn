@@ -65,6 +65,14 @@ impl Dominators {
         }
     }
 
+    pub(crate) fn dominates(&self, a: BlockId, b: BlockId) -> bool {
+        self.doms.get(&b).is_some_and(|s| s.contains(&a))
+    }
+
+    pub(crate) fn dom_set_size(&self, block: BlockId) -> usize {
+        self.doms.get(&block).map(|s| s.len()).unwrap_or(0)
+    }
+
     pub(crate) fn nearest_common_dominator_many(
         &self,
         mut blocks: impl Iterator<Item = BlockId>,
