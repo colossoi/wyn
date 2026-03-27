@@ -73,6 +73,17 @@ impl Dominators {
         self.doms.get(&block).map(|s| s.len()).unwrap_or(0)
     }
 
+    /// Immediate dominator: the closest strict dominator of `block`.
+    pub(crate) fn idom(&self, block: BlockId) -> Option<BlockId> {
+        let dom_set = self.doms.get(&block)?;
+        // idom is the dominator (other than block itself) with the largest dom set
+        dom_set
+            .iter()
+            .filter(|&&d| d != block)
+            .max_by_key(|&&d| self.doms.get(&d).map(|s| s.len()).unwrap_or(0))
+            .copied()
+    }
+
     pub(crate) fn nearest_common_dominator_many(
         &self,
         mut blocks: impl Iterator<Item = BlockId>,

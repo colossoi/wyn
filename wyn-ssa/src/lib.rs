@@ -668,8 +668,9 @@ pub fn lift_and_merge<I: ValueLike, E: Copy + Eq + Hash + Debug, T: Clone + Debu
     merge_duplicates(func);
 }
 
-/// Move every pure, hoistable instruction to the earliest block where all
-/// its operands are available.
+/// Move every pure, hoistable instruction as high as possible, but don't
+/// cross a conditional branch unless the sibling branch has an equivalent
+/// instruction (which gets merged).
 fn hoist_all<I: ValueLike, E: Copy + Eq + Hash + Debug, T: Clone + Debug + PartialEq>(
     func: &mut Function<I, E, T>,
 ) {
@@ -694,29 +695,45 @@ fn hoist_all<I: ValueLike, E: Copy + Eq + Hash + Debug, T: Clone + Debug + Parti
 
         let current_block = func.insts[inst_id].parent;
 
+        // Find the floor: deepest operand block (can't go above any operand).
         let mut operand_blocks: Vec<BlockId> = Vec::new();
         func.insts[inst_id].data.for_each_operand(|v| {
             operand_blocks.push(func.block_of_value(v));
         });
 
-        let target_block = if operand_blocks.is_empty() {
+        let floor = if operand_blocks.is_empty() {
             func.entry
         } else {
-            // Find the deepest operand block. All others must dominate it,
-            // otherwise the operands are in sibling branches and we can't hoist.
             let deepest = *operand_blocks.iter().max_by_key(|&&b| dom.dom_set_size(b)).unwrap();
-            let all_dominate_deepest = operand_blocks.iter().all(|&b| dom.dominates(b, deepest));
-            if !all_dominate_deepest {
-                continue;
+            if !operand_blocks.iter().all(|&b| dom.dominates(b, deepest)) {
+                continue; // operands in sibling branches
             }
             deepest
         };
 
-        // Only move if target is strictly above current position
-        if target_block == current_block {
-            continue;
+        // Walk up from current block toward the floor, stopping if we'd
+        // cross a conditional branch without a matching sibling instruction.
+        let mut target = current_block;
+        loop {
+            let Some(parent) = dom.idom(target) else {
+                break; // reached entry
+            };
+
+            // Don't go above the operand floor
+            if !dom.dominates(floor, parent) && floor != parent {
+                break;
+            }
+
+            // Check if parent ends in a conditional branch
+            if matches!(func.blocks[parent].term, Terminator::CondBranch { .. }) {
+                // We're inside one branch. Don't hoist past the conditional.
+                break;
+            }
+
+            target = parent;
         }
-        if !dom.dominates(target_block, current_block) {
+
+        if target == current_block {
             continue;
         }
 
@@ -726,11 +743,10 @@ fn hoist_all<I: ValueLike, E: Copy + Eq + Hash + Debug, T: Clone + Debug + Parti
             func.blocks[current_block].insts.remove(pos);
         }
 
-        // Insert at the right position in target block (after all operand definitions)
-        let insert_idx =
-            block_top_insert_index_after_operands(func, target_block, &func.insts[inst_id].data);
-        func.blocks[target_block].insts.insert(insert_idx, inst_id);
-        func.insts[inst_id].parent = target_block;
+        // Insert at the right position in target block
+        let insert_idx = block_top_insert_index_after_operands(func, target, &func.insts[inst_id].data);
+        func.blocks[target].insts.insert(insert_idx, inst_id);
+        func.insts[inst_id].parent = target;
     }
 }
 
