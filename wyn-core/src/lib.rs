@@ -896,16 +896,21 @@ pub struct SsaSoacLowered {
 }
 
 impl SsaSoacLowered {
-    /// Lower SSA to SPIR-V.
-    pub fn lower(self) -> error::Result<Lowered> {
-        let spirv = spirv::lower_ssa_program(&self.ssa)?;
-        Ok(Lowered {
-            spirv,
+    /// Materialize dynamic array indices for SPIR-V and hoist out of loops.
+    pub fn materialize(self) -> SsaMaterialized {
+        let ssa = spirv::materialize::materialize_dynamic_indices(self.ssa);
+        SsaMaterialized {
+            ssa,
             pipeline: self.pipeline,
-        })
+        }
     }
 
-    /// Lower SSA to GLSL.
+    /// Lower SSA to SPIR-V (materializes dynamic indices automatically).
+    pub fn lower(self) -> error::Result<Lowered> {
+        self.materialize().lower()
+    }
+
+    /// Lower SSA to GLSL (skips materialization — not needed for GLSL).
     pub fn lower_glsl(self) -> error::Result<glsl::GlslOutput> {
         glsl::lower(&self.ssa)
     }
@@ -913,6 +918,23 @@ impl SsaSoacLowered {
     /// Lower SSA to Shadertoy-compatible GLSL.
     pub fn lower_shadertoy(self) -> error::Result<String> {
         glsl::lower_shadertoy(&self.ssa)
+    }
+}
+
+/// SSA after dynamic array indices have been materialized for SPIR-V
+pub struct SsaMaterialized {
+    pub ssa: ssa::types::Program,
+    pub pipeline: pipeline_descriptor::PipelineDescriptor,
+}
+
+impl SsaMaterialized {
+    /// Lower SSA to SPIR-V.
+    pub fn lower(self) -> error::Result<Lowered> {
+        let spirv = spirv::lower_ssa_program(&self.ssa)?;
+        Ok(Lowered {
+            spirv,
+            pipeline: self.pipeline,
+        })
     }
 }
 

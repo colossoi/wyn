@@ -4,6 +4,7 @@
 
 #[cfg(test)]
 mod lowering_tests;
+pub mod materialize;
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::TypeName;
@@ -1404,6 +1405,25 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 panic!(
                     "internal compiler error: Soac instruction reached SPIR-V backend; soac_lower pass was not run"
                 )
+            }
+
+            InstKind::Materialize { value } => {
+                let value_id = self.get_value(*value)?;
+                let value_ty = self.body.inner.value_type(*value);
+                let spirv_type = self.constructor.polytype_to_spirv(value_ty);
+                let var = self.constructor.declare_variable("_materialize", spirv_type)?;
+                self.constructor.builder.store(var, value_id, None, [])?;
+                var
+            }
+
+            InstKind::DynamicExtract { base, index } => {
+                let base_var = self.get_value(*base)?;
+                let index_id = self.get_value(*index)?;
+                let elem_ptr_type =
+                    self.constructor.builder.type_pointer(None, spirv::StorageClass::Function, result_ty);
+                let elem_ptr =
+                    self.constructor.builder.access_chain(elem_ptr_type, None, base_var, [index_id])?;
+                self.constructor.builder.load(result_ty, None, elem_ptr, None, [])?
             }
         };
 

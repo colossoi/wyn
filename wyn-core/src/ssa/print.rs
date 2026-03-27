@@ -261,6 +261,12 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
         InstKind::Soac(soac) => {
             format_soac(out, soac);
         }
+        InstKind::Materialize { value } => {
+            let _ = write!(out, "materialize {}", fmt_val(*value));
+        }
+        InstKind::DynamicExtract { base, index } => {
+            let _ = write!(out, "dynamic_extract {}[{}]", fmt_val(*base), fmt_val(*index));
+        }
     }
 }
 

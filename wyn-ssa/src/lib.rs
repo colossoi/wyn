@@ -650,7 +650,15 @@ pub fn inline_block_param<I: ValueLike, E: Copy + Eq + Hash + Debug, T: Clone + 
     Ok(())
 }
 
-pub fn lift_and_merge<I: ValueLike, E: Copy + Eq + Hash + Debug, T: Clone + Debug>(
+fn types_match<I, E, T: PartialEq>(func: &Function<I, E, T>, a: InstId, b: InstId) -> bool {
+    match (func.insts[a].result, func.insts[b].result) {
+        (Some(ra), Some(rb)) => func.values[ra].ty == func.values[rb].ty,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+pub fn lift_and_merge<I: ValueLike, E: Copy + Eq + Hash + Debug, T: Clone + Debug + PartialEq>(
     func: &mut Function<I, E, T>,
 ) {
     let dom = Dominators::compute(func);
@@ -678,7 +686,7 @@ pub fn lift_and_merge<I: ValueLike, E: Copy + Eq + Hash + Debug, T: Clone + Debu
             if !func.insts.contains_key(rep) {
                 continue;
             }
-            if func.insts[inst].data.equivalent_to(&func.insts[rep].data) {
+            if func.insts[inst].data.equivalent_to(&func.insts[rep].data) && types_match(func, inst, rep) {
                 class.push(inst);
                 continue 'outer;
             }

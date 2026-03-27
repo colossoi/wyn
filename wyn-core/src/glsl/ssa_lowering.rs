@@ -990,6 +990,10 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     "internal compiler error: Soac instruction reached GLSL backend; soac_lower pass was not run"
                 )
             }
+
+            InstKind::Materialize { .. } | InstKind::DynamicExtract { .. } => {
+                bail_glsl!("Materialize/DynamicExtract not supported in GLSL (SPIR-V-specific lowering)")
+            }
         }
     }
 

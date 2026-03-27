@@ -432,7 +432,9 @@ pub fn remap_value(
         | InstKind::StorageViewIndex { .. }
         | InstKind::StorageViewLen { .. }
         | InstKind::OutputPtr { .. }
-        | InstKind::Soac(_) => return None,
+        | InstKind::Soac(_)
+        | InstKind::Materialize { .. }
+        | InstKind::DynamicExtract { .. } => return None,
     };
 
     memo.insert(value, new_val);

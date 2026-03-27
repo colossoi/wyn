@@ -259,6 +259,24 @@ pub enum InstKind {
     /// These are preserved through optimization passes and lowered to explicit
     /// loops by the `ssa_soac_lower` pass right before backend lowering.
     Soac(Soac),
+
+    // =========================================================================
+    // Late lowering forms (introduced by backend-specific prep passes)
+    // =========================================================================
+    /// Produce an addressable representation of a composite value, suitable for
+    /// backends that require memory-backed access for dynamic indexing.
+    /// The result is an opaque immutable handle — never written to after creation.
+    /// Pure and hoistable: two Materialize of the same value are equivalent.
+    Materialize {
+        value: ValueId,
+    },
+
+    /// Read element at a dynamic index from a materialized composite.
+    /// `base` must be a Materialize result. `index` is a runtime integer.
+    DynamicExtract {
+        base: ValueId,
+        index: ValueId,
+    },
 }
 
 impl InstKind {
@@ -303,6 +321,8 @@ impl InstKind {
             InstKind::StorageViewIndex { view, index } => vec![*view, *index],
             InstKind::StorageViewLen { view } => vec![*view],
             InstKind::Soac(soac) => soac.uses(),
+            InstKind::Materialize { value } => vec![*value],
+            InstKind::DynamicExtract { base, index } => vec![*base, *index],
         }
     }
 
@@ -361,6 +381,11 @@ impl InstKind {
             }
             InstKind::StorageViewLen { view } => sub(view),
             InstKind::Soac(soac) => soac.substitute_uses(sub),
+            InstKind::Materialize { value } => sub(value),
+            InstKind::DynamicExtract { base, index } => {
+                sub(base);
+                sub(index);
+            }
             InstKind::Int(_)
             | InstKind::Float(_)
             | InstKind::Bool(_)
@@ -638,6 +663,43 @@ impl wyn_ssa::Instr for InstKind {
         let mut result = self.clone();
         result.substitute_values(&mut |v| *v = f(*v));
         result
+    }
+}
+
+impl wyn_ssa::ValueLike for InstKind {
+    fn is_hoistable(&self) -> bool {
+        matches!(
+            self,
+            InstKind::Int(_)
+                | InstKind::Float(_)
+                | InstKind::Bool(_)
+                | InstKind::Unit
+                | InstKind::String(_)
+                | InstKind::Global(_)
+                | InstKind::Extern(_)
+                | InstKind::BinOp { .. }
+                | InstKind::UnaryOp { .. }
+                | InstKind::Tuple(_)
+                | InstKind::Vector(_)
+                | InstKind::Matrix(_)
+                | InstKind::ArrayLit { .. }
+                | InstKind::ArrayRange { .. }
+                | InstKind::Project { .. }
+                | InstKind::Index { .. }
+                | InstKind::Materialize { .. }
+                | InstKind::DynamicExtract { .. }
+        )
+    }
+
+    fn is_closed(&self) -> bool {
+        self.value_uses().is_empty()
+    }
+
+    fn equivalent_to(&self, other: &Self) -> bool {
+        // Structural equality for CSE — only for pure value-producing instructions.
+        // We use Debug format as a quick deep-equality check.
+        // A proper implementation would compare fields directly.
+        format!("{:?}", self) == format!("{:?}", other)
     }
 }
 
