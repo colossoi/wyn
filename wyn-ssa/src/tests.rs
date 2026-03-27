@@ -142,22 +142,22 @@ fn inline_non_entry_block_param_updates_predecessor_edge_args() {
     let e = f.create_block();
 
     let c1 = f.append_inst(t, TestInst::Int(1), TY, None);
-    f.blocks[t].term = Terminator::Jump {
+    f.blocks[t].term = Terminator::Branch {
         target: join,
         args: vec![c1],
     };
 
     let c2 = f.append_inst(e, TestInst::Int(1), TY, None);
-    f.blocks[e].term = Terminator::Jump {
+    f.blocks[e].term = Terminator::Branch {
         target: join,
         args: vec![c2],
     };
 
-    f.blocks[f.entry].term = Terminator::Branch {
+    f.blocks[f.entry].term = Terminator::CondBranch {
         cond,
-        then_block: t,
+        then_target: t,
         then_args: vec![],
-        else_block: e,
+        else_target: e,
         else_args: vec![],
     };
 
@@ -167,7 +167,7 @@ fn inline_non_entry_block_param_updates_predecessor_edge_args() {
     inline_block_param(&mut f, join, 0, TestInst::Int(9), TY).unwrap();
 
     match &f.blocks[t].term {
-        Terminator::Jump { target, args } => {
+        Terminator::Branch { target, args } => {
             assert_eq!(*target, join);
             assert!(args.is_empty());
         }
@@ -175,7 +175,7 @@ fn inline_non_entry_block_param_updates_predecessor_edge_args() {
     }
 
     match &f.blocks[e].term {
-        Terminator::Jump { target, args } => {
+        Terminator::Branch { target, args } => {
             assert_eq!(*target, join);
             assert!(args.is_empty());
         }
@@ -353,7 +353,7 @@ fn forward_single_pred_params_substitutes_and_clears() {
     let b = f.add_block_param(block0, TY);
 
     // entry jumps to block0 with (x, y)
-    f.blocks[f.entry].term = Terminator::Jump {
+    f.blocks[f.entry].term = Terminator::Branch {
         target: block0,
         args: vec![x, y],
     };
@@ -369,7 +369,7 @@ fn forward_single_pred_params_substitutes_and_clears() {
 
     // entry's jump args should be cleared
     match &f.blocks[f.entry].term {
-        Terminator::Jump { args, .. } => assert!(args.is_empty()),
+        Terminator::Branch { args, .. } => assert!(args.is_empty()),
         _ => panic!("expected jump"),
     }
 
@@ -397,22 +397,22 @@ fn forward_single_pred_params_skips_multi_predecessor_blocks() {
     let e = f.create_block();
 
     let c1 = f.append_inst(t, TestInst::Int(1), TY, None);
-    f.blocks[t].term = Terminator::Jump {
+    f.blocks[t].term = Terminator::Branch {
         target: join,
         args: vec![c1],
     };
 
     let c2 = f.append_inst(e, TestInst::Int(2), TY, None);
-    f.blocks[e].term = Terminator::Jump {
+    f.blocks[e].term = Terminator::Branch {
         target: join,
         args: vec![c2],
     };
 
-    f.blocks[f.entry].term = Terminator::Branch {
+    f.blocks[f.entry].term = Terminator::CondBranch {
         cond,
-        then_block: t,
+        then_target: t,
         then_args: vec![],
-        else_block: e,
+        else_target: e,
         else_args: vec![],
     };
 
@@ -433,11 +433,11 @@ fn eliminate_empty_blocks_redirects_predecessors() {
     let empty = f.create_block();
     let target = f.create_block();
 
-    f.blocks[f.entry].term = Terminator::Jump {
+    f.blocks[f.entry].term = Terminator::Branch {
         target: empty,
         args: vec![],
     };
-    f.blocks[empty].term = Terminator::Jump {
+    f.blocks[empty].term = Terminator::Branch {
         target: target,
         args: vec![],
     };
@@ -449,7 +449,7 @@ fn eliminate_empty_blocks_redirects_predecessors() {
 
     // entry should now jump directly to target
     match &f.blocks[f.entry].term {
-        Terminator::Jump { target: t, .. } => assert_eq!(*t, target),
+        Terminator::Branch { target: t, .. } => assert_eq!(*t, target),
         _ => panic!("expected jump"),
     }
 
@@ -466,13 +466,13 @@ fn eliminate_empty_blocks_preserves_blocks_with_instructions() {
     let nonempty = f.create_block();
     let target = f.create_block();
 
-    f.blocks[f.entry].term = Terminator::Jump {
+    f.blocks[f.entry].term = Terminator::Branch {
         target: nonempty,
         args: vec![],
     };
 
     f.append_inst(nonempty, TestInst::Int(99), TY, None);
-    f.blocks[nonempty].term = Terminator::Jump {
+    f.blocks[nonempty].term = Terminator::Branch {
         target: target,
         args: vec![],
     };
@@ -484,7 +484,7 @@ fn eliminate_empty_blocks_preserves_blocks_with_instructions() {
 
     // entry still jumps to nonempty — it was preserved
     match &f.blocks[f.entry].term {
-        Terminator::Jump { target: t, .. } => assert_eq!(*t, nonempty),
+        Terminator::Branch { target: t, .. } => assert_eq!(*t, nonempty),
         _ => panic!("expected jump"),
     }
 }
@@ -498,15 +498,15 @@ fn eliminate_empty_blocks_chains() {
     let empty2 = f.create_block();
     let target = f.create_block();
 
-    f.blocks[f.entry].term = Terminator::Jump {
+    f.blocks[f.entry].term = Terminator::Branch {
         target: empty1,
         args: vec![],
     };
-    f.blocks[empty1].term = Terminator::Jump {
+    f.blocks[empty1].term = Terminator::Branch {
         target: empty2,
         args: vec![],
     };
-    f.blocks[empty2].term = Terminator::Jump {
+    f.blocks[empty2].term = Terminator::Branch {
         target: target,
         args: vec![],
     };
@@ -518,7 +518,7 @@ fn eliminate_empty_blocks_chains() {
 
     // entry should jump directly to target after fixpoint
     match &f.blocks[f.entry].term {
-        Terminator::Jump { target: t, .. } => assert_eq!(*t, target),
+        Terminator::Branch { target: t, .. } => assert_eq!(*t, target),
         _ => panic!("expected jump"),
     }
 }

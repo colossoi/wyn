@@ -57,15 +57,16 @@ pub enum ValueDef {
 #[derive(Clone, Debug)]
 pub enum Terminator {
     Return(Option<ValueId>),
-    Jump {
+    ReturnUnit,
+    Branch {
         target: BlockId,
         args: Vec<ValueId>,
     },
-    Branch {
+    CondBranch {
         cond: ValueId,
-        then_block: BlockId,
+        then_target: BlockId,
         then_args: Vec<ValueId>,
-        else_block: BlockId,
+        else_target: BlockId,
         else_args: Vec<ValueId>,
     },
     Unreachable,
@@ -99,13 +100,13 @@ pub enum EffectVerifyError<E> {
 impl Terminator {
     pub fn successors(&self) -> Successors {
         match self {
-            Terminator::Return(_) | Terminator::Unreachable => SmallVec::new(),
-            Terminator::Jump { target, .. } => smallvec::smallvec![*target],
-            Terminator::Branch {
-                then_block,
-                else_block,
+            Terminator::Return(_) | Terminator::ReturnUnit | Terminator::Unreachable => SmallVec::new(),
+            Terminator::Branch { target, .. } => smallvec::smallvec![*target],
+            Terminator::CondBranch {
+                then_target,
+                else_target,
                 ..
-            } => smallvec::smallvec![*then_block, *else_block],
+            } => smallvec::smallvec![*then_target, *else_target],
         }
     }
 
@@ -116,12 +117,12 @@ impl Terminator {
                     f(*v);
                 }
             }
-            Terminator::Jump { args, .. } => {
+            Terminator::Branch { args, .. } => {
                 for &v in args {
                     f(v);
                 }
             }
-            Terminator::Branch {
+            Terminator::CondBranch {
                 cond,
                 then_args,
                 else_args,
@@ -135,28 +136,29 @@ impl Terminator {
                     f(v);
                 }
             }
-            Terminator::Unreachable => {}
+            Terminator::ReturnUnit | Terminator::Unreachable => {}
         }
     }
 
     pub fn map_values(&self, mut f: impl FnMut(ValueId) -> ValueId) -> Self {
         match self {
             Terminator::Return(v) => Terminator::Return(v.map(&mut f)),
-            Terminator::Jump { target, args } => Terminator::Jump {
+            Terminator::ReturnUnit => Terminator::ReturnUnit,
+            Terminator::Branch { target, args } => Terminator::Branch {
                 target: *target,
                 args: args.iter().copied().map(&mut f).collect(),
             },
-            Terminator::Branch {
+            Terminator::CondBranch {
                 cond,
-                then_block,
+                then_target,
                 then_args,
-                else_block,
+                else_target,
                 else_args,
-            } => Terminator::Branch {
+            } => Terminator::CondBranch {
                 cond: f(*cond),
-                then_block: *then_block,
+                then_target: *then_target,
                 then_args: then_args.iter().copied().map(&mut f).collect(),
-                else_block: *else_block,
+                else_target: *else_target,
                 else_args: else_args.iter().copied().map(&mut f).collect(),
             },
             Terminator::Unreachable => Terminator::Unreachable,
@@ -190,7 +192,7 @@ impl<I, E, T: Clone + Debug> Function<I, E, T> {
         });
         // First user block: entry jumps to it automatically.
         if let Terminator::Unreachable = self.blocks[self.entry].term {
-            self.blocks[self.entry].term = Terminator::Jump {
+            self.blocks[self.entry].term = Terminator::Branch {
                 target: block,
                 args: vec![],
             };
@@ -244,6 +246,17 @@ impl<I, E, T: Clone + Debug> Function<I, E, T> {
         self.values[value].def = ValueDef::Inst { inst };
         self.blocks[block].insts.push(inst);
         value
+    }
+
+    pub fn append_void_inst(&mut self, block: BlockId, data: I, effects: Option<(E, E)>) -> InstId {
+        let inst = self.insts.insert(InstNode {
+            data,
+            result: None,
+            parent: block,
+            effects,
+        });
+        self.blocks[block].insts.push(inst);
+        inst
     }
 
     pub fn insert_inst_at_index(
@@ -398,6 +411,117 @@ impl<I: Instr, E: Copy + Eq + Hash + Debug, T: Clone + Debug> Function<I, E, T> 
     }
 }
 
+// =============================================================================
+// FuncBuilder
+// =============================================================================
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BuilderError {
+    NoCurrentBlock,
+    BlockAlreadyTerminated(BlockId),
+    UnterminatedBlock(BlockId),
+}
+
+#[derive(Clone, Debug)]
+pub struct FuncBuilder<I, E, T> {
+    func: Function<I, E, T>,
+    current_block: Option<BlockId>,
+}
+
+impl<I, E, T: Clone + Debug> FuncBuilder<I, E, T> {
+    pub fn new() -> Self {
+        let func = Function::new();
+        let entry = func.entry;
+        Self {
+            func,
+            current_block: Some(entry),
+        }
+    }
+
+    pub fn entry(&self) -> BlockId {
+        self.func.entry
+    }
+
+    pub fn current_block(&self) -> Option<BlockId> {
+        self.current_block
+    }
+
+    pub fn func(&self) -> &Function<I, E, T> {
+        &self.func
+    }
+
+    pub fn func_mut(&mut self) -> &mut Function<I, E, T> {
+        &mut self.func
+    }
+
+    pub fn create_block(&mut self) -> BlockId {
+        self.func.create_block()
+    }
+
+    pub fn create_block_with_params(&mut self, types: Vec<T>) -> (BlockId, Vec<ValueId>) {
+        let block = self.func.create_block();
+        let params: Vec<ValueId> =
+            types.into_iter().map(|ty| self.func.add_block_param(block, ty)).collect();
+        (block, params)
+    }
+
+    pub fn add_block_param(&mut self, block: BlockId, ty: T) -> ValueId {
+        self.func.add_block_param(block, ty)
+    }
+
+    pub fn switch_to_block(&mut self, block: BlockId) -> Result<(), BuilderError> {
+        if let Some(current) = self.current_block {
+            if matches!(self.func.blocks[current].term, Terminator::Unreachable) {
+                return Err(BuilderError::UnterminatedBlock(current));
+            }
+        }
+        self.current_block = Some(block);
+        Ok(())
+    }
+
+    pub fn switch_to_block_unchecked(&mut self, block: BlockId) {
+        self.current_block = Some(block);
+    }
+
+    pub fn push_inst(&mut self, data: I, ty: T, effects: Option<(E, E)>) -> Result<ValueId, BuilderError> {
+        let block = self.current_block.ok_or(BuilderError::NoCurrentBlock)?;
+        if !matches!(self.func.blocks[block].term, Terminator::Unreachable) {
+            return Err(BuilderError::BlockAlreadyTerminated(block));
+        }
+        Ok(self.func.append_inst(block, data, ty, effects))
+    }
+
+    pub fn push_void_inst(&mut self, data: I, effects: Option<(E, E)>) -> Result<InstId, BuilderError> {
+        let block = self.current_block.ok_or(BuilderError::NoCurrentBlock)?;
+        if !matches!(self.func.blocks[block].term, Terminator::Unreachable) {
+            return Err(BuilderError::BlockAlreadyTerminated(block));
+        }
+        Ok(self.func.append_void_inst(block, data, effects))
+    }
+
+    pub fn terminate(&mut self, term: Terminator) -> Result<(), BuilderError> {
+        let block = self.current_block.ok_or(BuilderError::NoCurrentBlock)?;
+        if !matches!(self.func.blocks[block].term, Terminator::Unreachable) {
+            return Err(BuilderError::BlockAlreadyTerminated(block));
+        }
+        self.func.blocks[block].term = term;
+        Ok(())
+    }
+
+    pub fn finish(self) -> Result<Function<I, E, T>, BuilderError> {
+        for (bid, block) in &self.func.blocks {
+            if matches!(block.term, Terminator::Unreachable) && bid != self.func.entry {
+                return Err(BuilderError::UnterminatedBlock(bid));
+            }
+        }
+        Ok(self.func)
+    }
+}
+
+// =============================================================================
+// Free-standing passes
+// =============================================================================
+
 pub fn inline_entry_param<I: ValueLike, E: Copy + Eq + Hash + Debug, T: Clone + Debug>(
     func: &mut Function<I, E, T>,
     param_index: usize,
@@ -471,28 +595,28 @@ pub fn inline_block_param<I: ValueLike, E: Copy + Eq + Hash + Debug, T: Clone + 
     for pred in preds {
         let term = func.blocks[pred].term.clone();
         func.blocks[pred].term = match term {
-            Terminator::Jump { target, mut args } if target == block => {
+            Terminator::Branch { target, mut args } if target == block => {
                 args.remove(param_index);
-                Terminator::Jump { target, args }
+                Terminator::Branch { target, args }
             }
-            Terminator::Branch {
+            Terminator::CondBranch {
                 cond,
-                then_block,
+                then_target,
                 mut then_args,
-                else_block,
+                else_target,
                 mut else_args,
             } => {
-                if then_block == block {
+                if then_target == block {
                     then_args.remove(param_index);
                 }
-                if else_block == block {
+                if else_target == block {
                     else_args.remove(param_index);
                 }
-                Terminator::Branch {
+                Terminator::CondBranch {
                     cond,
-                    then_block,
+                    then_target,
                     then_args,
-                    else_block,
+                    else_target,
                     else_args,
                 }
             }
@@ -614,7 +738,7 @@ pub fn forward_single_pred_params<I: Instr, E: Copy + Eq + Hash + Debug, T: Clon
             }
             let pred = pred_list[0];
             let args = match &func.blocks[pred].term {
-                Terminator::Jump { target, args } if *target == *bid => args,
+                Terminator::Branch { target, args } if *target == *bid => args,
                 _ => continue,
             };
             let params = &func.blocks[*bid].params;
@@ -657,7 +781,7 @@ pub fn forward_single_pred_params<I: Instr, E: Copy + Eq + Hash + Debug, T: Clon
             let pred = pred_list[0];
             let is_jump_to_bid = matches!(
                 &func.blocks[pred].term,
-                Terminator::Jump { target, .. } if *target == *bid
+                Terminator::Branch { target, .. } if *target == *bid
             );
             if !is_jump_to_bid || func.blocks[*bid].params.is_empty() {
                 continue;
@@ -667,7 +791,7 @@ pub fn forward_single_pred_params<I: Instr, E: Copy + Eq + Hash + Debug, T: Clon
                 func.values.remove(param);
             }
             func.blocks[*bid].params.clear();
-            if let Terminator::Jump { ref mut args, .. } = func.blocks[pred].term {
+            if let Terminator::Branch { ref mut args, .. } = func.blocks[pred].term {
                 args.clear();
             }
         }
@@ -700,7 +824,7 @@ pub fn eliminate_empty_blocks<I, E, T: Clone + Debug>(func: &mut Function<I, E, 
                 continue;
             }
             let target = match &block.term {
-                Terminator::Jump { target, args } if args.is_empty() => *target,
+                Terminator::Branch { target, args } if args.is_empty() => *target,
                 _ => continue,
             };
             redirects.push((bid, target));
@@ -729,33 +853,33 @@ pub fn eliminate_empty_blocks<I, E, T: Clone + Debug>(func: &mut Function<I, E, 
         let all_blocks: Vec<BlockId> = func.blocks.keys().collect();
         for bid in all_blocks {
             let rewritten = match &func.blocks[bid].term {
-                Terminator::Jump { target, args } => {
+                Terminator::Branch { target, args } => {
                     let new_target = redirect_map.get(target).copied().unwrap_or(*target);
                     if new_target == *target {
                         continue;
                     }
-                    Terminator::Jump {
+                    Terminator::Branch {
                         target: new_target,
                         args: args.clone(),
                     }
                 }
-                Terminator::Branch {
+                Terminator::CondBranch {
                     cond,
-                    then_block,
+                    then_target,
                     then_args,
-                    else_block,
+                    else_target,
                     else_args,
                 } => {
-                    let new_then = redirect_map.get(then_block).copied().unwrap_or(*then_block);
-                    let new_else = redirect_map.get(else_block).copied().unwrap_or(*else_block);
-                    if new_then == *then_block && new_else == *else_block {
+                    let new_then = redirect_map.get(then_target).copied().unwrap_or(*then_target);
+                    let new_else = redirect_map.get(else_target).copied().unwrap_or(*else_target);
+                    if new_then == *then_target && new_else == *else_target {
                         continue;
                     }
-                    Terminator::Branch {
+                    Terminator::CondBranch {
                         cond: *cond,
-                        then_block: new_then,
+                        then_target: new_then,
                         then_args: then_args.clone(),
-                        else_block: new_else,
+                        else_target: new_else,
                         else_args: else_args.clone(),
                     }
                 }
