@@ -91,6 +91,7 @@ struct Constructor {
     storage_variables: HashMap<String, spirv::Word>, // name -> var_id
     storage_elem_types: HashMap<String, spirv::Word>, // name -> element SPIR-V type
     extract_cache: HashMap<(spirv::Word, u32), spirv::Word>, // CSE for OpCompositeExtract
+    null_const_cache: HashMap<spirv::Word, spirv::Word>, // type -> OpConstantNull id
 
     // Builtin function registry
     impl_source: ImplSource,
@@ -171,6 +172,7 @@ impl Constructor {
             storage_variables: HashMap::new(),
             storage_elem_types: HashMap::new(),
             extract_cache: HashMap::new(),
+            null_const_cache: HashMap::new(),
             impl_source: ImplSource::default(),
             storage_buffers: HashMap::new(),
             global_invocation_id: None,
@@ -2363,12 +2365,15 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         bail_spirv!("Placeholder intrinsic should not reach lowering")
                     }
                     Intrinsic::Uninit => {
-                        // Zero-initialized value (OpConstantNull).
-                        // Using OpUndef would be more accurate but naga converts it to
-                        // ZeroValue and then has scoping issues with phi lowering.
-                        let id = self.constructor.builder.constant_null(result_ty);
-                        self.constructor.constant_ids.insert(id);
-                        Ok(id)
+                        // Zero-initialized value (OpConstantNull), cached by type.
+                        if let Some(&cached) = self.constructor.null_const_cache.get(&result_ty) {
+                            Ok(cached)
+                        } else {
+                            let id = self.constructor.builder.constant_null(result_ty);
+                            self.constructor.constant_ids.insert(id);
+                            self.constructor.null_const_cache.insert(result_ty, id);
+                            Ok(id)
+                        }
                     }
                     Intrinsic::ArrayWith => {
                         // _w_array_with(array, index, value) - functional array update
