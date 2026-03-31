@@ -8,7 +8,14 @@ use std::collections::HashMap;
 
 use crate::ast::TypeName;
 use crate::ssa::builder::FuncBuilder;
-use crate::ssa::soa_helpers::{extract_array_size, soa_array_with, soa_index, soa_length, soa_uninit};
+use crate::ssa::soa_helpers::{
+    extract_array_size, is_soa_tuple, soa_array_with, soa_elem_type, soa_index, soa_length, soa_uninit,
+};
+use crate::types::TypeExt;
+
+/// Maximum fixed-size array length for which map will be unrolled
+/// instead of lowered to a for-range loop.
+const MAP_UNROLL_THRESHOLD: usize = 16;
 use crate::ssa::types::Program;
 use crate::ssa::types::{
     BlockId, EffectToken, FuncBody, InstKind, Soac, Terminator, TerminatorExt, ValueId,
@@ -231,6 +238,26 @@ fn expand_map(
     let first_input_ty = &input_array_types[0];
     let array_size = extract_array_size(first_input_ty);
 
+    // For small fixed-size arrays with non-SoA results, unroll instead of a loop.
+    // SoA results need a transpose which is worse than the loop accumulator.
+    if let Some(n) = array_size {
+        if n <= MAP_UNROLL_THRESHOLD && is_soa_tuple(&result_ty).is_none() {
+            return expand_map_unrolled(
+                builder,
+                n,
+                func,
+                inputs,
+                captures,
+                zipped,
+                input_array_types,
+                input_elem_types,
+                output_elem_type,
+                zipped_param_type,
+                result_ty,
+            );
+        }
+    }
+
     let len = match array_size {
         Some(n) => builder.push_int(&n.to_string(), i32_ty.clone()).ok()?,
         None => soa_length(builder, inputs[0], first_input_ty).ok()?,
@@ -310,6 +337,103 @@ fn expand_map(
     builder.switch_to_block(loop_blocks.exit).ok()?;
 
     Some(loop_blocks.result)
+}
+
+/// Expand a Map SOAC by unrolling: emit N individual calls and construct
+/// the result directly, avoiding the loop/accumulator/array_with overhead.
+fn expand_map_unrolled(
+    builder: &mut FuncBuilder,
+    n: usize,
+    func: &str,
+    inputs: &[ValueId],
+    captures: &[ValueId],
+    zipped: bool,
+    input_array_types: &[Type<TypeName>],
+    input_elem_types: &[Type<TypeName>],
+    output_elem_type: &Type<TypeName>,
+    zipped_param_type: Option<&Type<TypeName>>,
+    result_ty: Type<TypeName>,
+) -> Option<ValueId> {
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+
+    // Phase 1: Emit N calls to the map function.
+    let mut call_results: Vec<ValueId> = Vec::with_capacity(n);
+
+    for i in 0..n {
+        let const_i = builder.push_int(&i.to_string(), i32_ty.clone()).ok()?;
+
+        // Extract input elements for this iteration
+        let mut input_elems: Vec<ValueId> = Vec::with_capacity(inputs.len());
+        for (j, &arr) in inputs.iter().enumerate() {
+            let elem =
+                soa_index(builder, arr, const_i, &input_array_types[j], &input_elem_types[j]).ok()?;
+            input_elems.push(elem);
+        }
+
+        // Build call arguments: zip if needed, then append captures
+        let mut call_args: Vec<ValueId> = if zipped {
+            let zipped_ty = zipped_param_type.expect("BUG: zipped map without param type").clone();
+            let zipped_val = builder.push_tuple(input_elems, zipped_ty).ok()?;
+            vec![zipped_val]
+        } else {
+            input_elems
+        };
+        call_args.extend(captures.iter().copied());
+
+        let result = builder.push_call(func, call_args, output_elem_type.clone()).ok()?;
+        call_results.push(result);
+    }
+
+    // Phase 2: Construct the result.
+    if is_soa_tuple(&result_ty).is_some() {
+        // SoA result: transpose N element-tuples into M component arrays
+        soa_pack_unrolled(builder, &call_results, &result_ty)
+    } else {
+        // Plain array: pack N results directly
+        builder.push_array_lit(call_results, result_ty).ok()
+    }
+}
+
+/// Transpose N element values into an SoA tuple.
+///
+/// Given N values each of element type (A, B, C) and SoA result type
+/// ([N]A, [N]B, [N]C): project field j from each value, pack into [N]Tj
+/// array, then combine arrays into the SoA tuple.
+fn soa_pack_unrolled(
+    builder: &mut FuncBuilder,
+    values: &[ValueId],
+    soa_ty: &Type<TypeName>,
+) -> Option<ValueId> {
+    let components = is_soa_tuple(soa_ty)?;
+    let mut packed: Vec<ValueId> = Vec::with_capacity(components.len());
+
+    for (field_idx, comp_ty) in components.iter().enumerate() {
+        // Determine the element type for this component
+        let field_elem_ty = match comp_ty {
+            ty if ty.is_array() => ty.elem_type().expect("Array has elem").clone(),
+            ty if is_soa_tuple(ty).is_some() => soa_elem_type(ty),
+            _ => comp_ty.clone(),
+        };
+
+        // Project this field from each of the N values
+        let mut field_values: Vec<ValueId> = Vec::with_capacity(values.len());
+        for &val in values {
+            let projected = builder.push_project(val, field_idx as u32, field_elem_ty.clone()).ok()?;
+            field_values.push(projected);
+        }
+
+        if is_soa_tuple(comp_ty).is_some() {
+            // Nested SoA: recurse
+            let nested = soa_pack_unrolled(builder, &field_values, comp_ty)?;
+            packed.push(nested);
+        } else {
+            // Plain array component
+            let arr = builder.push_array_lit(field_values, comp_ty.clone()).ok()?;
+            packed.push(arr);
+        }
+    }
+
+    builder.push_tuple(packed, soa_ty.clone()).ok()
 }
 
 /// Expand a Reduce SOAC into a for-range loop.

@@ -295,6 +295,14 @@ impl FuncBuilder {
         self.push_inst(InstKind::Index { base, index }, ty)
     }
 
+    pub fn push_array_lit(
+        &mut self,
+        elements: Vec<ValueId>,
+        ty: Type<TypeName>,
+    ) -> Result<ValueId, BuilderError> {
+        self.push_inst(InstKind::ArrayLit { elements }, ty)
+    }
+
     pub fn push_global(&mut self, name: &str, ty: Type<TypeName>) -> Result<ValueId, BuilderError> {
         self.push_inst(InstKind::Global(name.to_string()), ty)
     }
