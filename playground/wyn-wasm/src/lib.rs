@@ -400,10 +400,10 @@ fn compile_impl(source: &str) -> CompileResult {
         .partial_eval()
         .fuse_maps()
         .defunctionalize()
+        
         .monomorphize()
         .buffer_specialize()
         .inline()
-        .soa_transform()
         .to_ssa()
     {
         Ok(s) => s,
@@ -501,10 +501,10 @@ fn compile_with_ir_impl(source: &str) -> CompileResultWithIR {
     let ssa = match tlc_after_partial_eval
         .fuse_maps()
         .defunctionalize()
+        
         .monomorphize()
         .buffer_specialize()
         .inline()
-        .soa_transform()
         .to_ssa()
     {
         Ok(s) => s,
