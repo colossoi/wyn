@@ -8,7 +8,9 @@ use crate::bail_glsl;
 use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
 use crate::lowering_common::ShaderStage;
-use crate::ssa::types::{BlockId, FuncBody, InstKind, Terminator, ValueId, WynInstNode};
+use crate::ssa::types::{
+    BlockId, ConstantValue, FuncBody, InstKind, Terminator, ValueId, ValueRef, WynInstNode,
+};
 use crate::ssa::types::{EntryPoint, ExecutionModel, Function, IoDecoration, Program};
 use crate::types::TypeExt;
 use polytype::Type as PolyType;
@@ -870,8 +872,8 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             }
 
             InstKind::BinOp { op, lhs, rhs } => {
-                let l = self.get_value(*lhs)?;
-                let r = self.get_value(*rhs)?;
+                let l = self.get_value_ref(*lhs)?;
+                let r = self.get_value_ref(*rhs)?;
                 match op.as_str() {
                     "**" => Ok(format!("pow({}, {})", l, r)),
                     _ => Ok(format!("({} {} {})", l, op, r)),
@@ -879,7 +881,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             }
 
             InstKind::UnaryOp { op, operand } => {
-                let inner = self.get_value(*operand)?;
+                let inner = self.get_value_ref(*operand)?;
                 Ok(format!("({}{})", op, inner))
             }
 
@@ -887,32 +889,35 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 if elems.is_empty() {
                     bail_glsl!("Empty tuple in GLSL lowering");
                 }
-                let parts: Result<Vec<_>> = elems.iter().map(|e| self.get_value(*e)).collect();
+                let parts: Result<Vec<_>> = elems.iter().map(|e| self.get_value_ref(*e)).collect();
                 let struct_name = self.ctx.type_to_glsl(result_ty.expect("Tuple must have result"));
                 Ok(format!("{}({})", struct_name, parts?.join(", ")))
             }
 
             InstKind::ArrayLit { elements } => {
-                let parts: Result<Vec<_>> = elements.iter().map(|e| self.get_value(*e)).collect();
+                let parts: Result<Vec<_>> = elements.iter().map(|e| self.get_value_ref(*e)).collect();
                 let ty = self.ctx.type_to_glsl(result_ty.expect("ArrayLit must have result"));
                 Ok(format!("{}[]({})", ty, parts?.join(", ")))
             }
 
             InstKind::Vector(elems) => {
-                let parts: Result<Vec<_>> = elems.iter().map(|e| self.get_value(*e)).collect();
+                let parts: Result<Vec<_>> = elems.iter().map(|e| self.get_value_ref(*e)).collect();
                 let ty = self.ctx.type_to_glsl(result_ty.expect("Vector must have result"));
                 Ok(format!("{}({})", ty, parts?.join(", ")))
             }
 
             InstKind::Index { base, index } => {
-                let base_val = self.get_value(*base)?;
-                let index_val = self.get_value(*index)?;
+                let base_val = self.get_value_ref(*base)?;
+                let index_val = self.get_value_ref(*index)?;
                 Ok(format!("{}[{}]", base_val, index_val))
             }
 
             InstKind::Project { base, index } => {
-                let base_val = self.get_value(*base)?;
-                let base_ty = self.body.get_value_type(*base);
+                let base_val = self.get_value_ref(*base)?;
+                let base_ty = match base.as_ssa() {
+                    Some(id) => self.body.get_value_type(id),
+                    None => bail_glsl!("Project base must be SSA value"),
+                };
 
                 // Check if it's a vector type - use swizzle
                 if matches!(base_ty, PolyType::Constructed(TypeName::Vec, _)) {
@@ -931,7 +936,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             }
 
             InstKind::Call { func, args } => {
-                let arg_strs: Result<Vec<_>> = args.iter().map(|a| self.get_value(*a)).collect();
+                let arg_strs: Result<Vec<_>> = args.iter().map(|a| self.get_value_ref(*a)).collect();
                 let arg_strs = arg_strs?;
 
                 // Check if it's a builtin
@@ -943,22 +948,18 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             }
 
             InstKind::Intrinsic { name, args } => {
-                let arg_strs: Result<Vec<_>> = args.iter().map(|a| self.get_value(*a)).collect();
+                let arg_strs: Result<Vec<_>> = args.iter().map(|a| self.get_value_ref(*a)).collect();
+                let ssa_args: Vec<ValueId> = args.iter().filter_map(|a| a.as_ssa()).collect();
                 self.lower_intrinsic(
                     name,
                     &arg_strs?,
-                    args,
+                    &ssa_args,
                     result_ty.expect("Intrinsic must have result"),
                 )
             }
 
-            InstKind::ArrayRange { start, step, len } => {
-                bail_glsl!(
-                    "ArrayRange not supported in GLSL: start={:?}, step={:?}, len={:?}",
-                    start,
-                    step,
-                    len
-                )
+            InstKind::ArrayRange { .. } => {
+                bail_glsl!("ArrayRange not supported in GLSL")
             }
 
             InstKind::Global(name) => Ok(name.clone()),
@@ -1002,6 +1003,26 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             .get(&val)
             .cloned()
             .ok_or_else(|| crate::err_glsl!("Value {:?} not found in value_map", val))
+    }
+
+    fn get_value_ref(&self, vr: ValueRef) -> Result<String> {
+        match vr {
+            ValueRef::Ssa(id) => self.get_value(id),
+            ValueRef::Const(c) => match c {
+                ConstantValue::I32(v) => Ok(format!("{}", v)),
+                ConstantValue::U32(v) => Ok(format!("{}u", v)),
+                ConstantValue::F32(bits) => {
+                    let f = f32::from_bits(bits);
+                    let s = format!("{}", f);
+                    if s.contains('.') || s.contains('e') || s.contains('E') {
+                        Ok(s)
+                    } else {
+                        Ok(format!("{}.0", s))
+                    }
+                }
+                ConstantValue::Bool(b) => Ok(if b { "true" } else { "false" }.to_string()),
+            },
+        }
     }
 
     fn lower_builtin_call(

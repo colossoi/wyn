@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::{self, TypeName};
 use crate::ssa::builder::FuncBuilder;
-use crate::ssa::types::{FuncBody, InstKind, Soac, Terminator, ValueId, ViewSource};
+use crate::ssa::types::{FuncBody, InstKind, Soac, Terminator, ValueId, ValueRef, ViewSource};
 use crate::types::TypeExt;
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
@@ -965,7 +965,12 @@ impl<'a> Converter<'a> {
                 elements.iter().map(|t| self.convert_term(t)).collect::<Result<_, _>>()?;
             return self
                 .builder
-                .push_inst(InstKind::ArrayLit { elements: values }, arr_ty)
+                .push_inst(
+                    InstKind::ArrayLit {
+                        elements: values.into_iter().map(ValueRef::from).collect(),
+                    },
+                    arr_ty,
+                )
                 .map_err(|e| ConvertError::BuilderError(e.to_string()));
         }
 
@@ -1095,7 +1100,10 @@ impl<'a> Converter<'a> {
             "_w_vec_lit" => {
                 return self
                     .builder
-                    .push_inst(InstKind::Vector(arg_values), ty)
+                    .push_inst(
+                        InstKind::Vector(arg_values.into_iter().map(ValueRef::from).collect()),
+                        ty,
+                    )
                     .map_err(|e| ConvertError::BuilderError(e.to_string()));
             }
             "_w_tuple" => {
@@ -1110,8 +1118,8 @@ impl<'a> Converter<'a> {
                     .builder
                     .push_inst(
                         InstKind::ArrayRange {
-                            start: arg_values[0],
-                            len: arg_values[1],
+                            start: ValueRef::from(arg_values[0]),
+                            len: ValueRef::from(arg_values[1]),
                             step: None,
                         },
                         ty,
@@ -1124,9 +1132,9 @@ impl<'a> Converter<'a> {
                     .builder
                     .push_inst(
                         InstKind::ArrayRange {
-                            start: arg_values[0],
-                            len: arg_values[2],
-                            step: Some(arg_values[1]),
+                            start: ValueRef::from(arg_values[0]),
+                            len: ValueRef::from(arg_values[2]),
+                            step: Some(ValueRef::from(arg_values[1])),
                         },
                         ty,
                     )
@@ -1220,7 +1228,13 @@ impl<'a> Converter<'a> {
             // then we load the value from it.
             let ptr = self
                 .builder
-                .push_inst(InstKind::StorageViewIndex { view, index }, ty.clone())
+                .push_inst(
+                    InstKind::StorageViewIndex {
+                        view: ValueRef::from(view),
+                        index: ValueRef::from(index),
+                    },
+                    ty.clone(),
+                )
                 .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
             // Load the element from the pointer
             let effect_in = self.builder.entry_effect();
@@ -1653,8 +1667,8 @@ impl<'a> Converter<'a> {
                 self.builder
                     .push_inst(
                         InstKind::ArrayRange {
-                            start: start_val,
-                            len: len_val,
+                            start: ValueRef::from(start_val),
+                            len: ValueRef::from(len_val),
                             step: None,
                         },
                         ty,
@@ -1685,8 +1699,8 @@ impl<'a> Converter<'a> {
                                 set: *set,
                                 binding: *binding,
                             },
-                            offset: offset_val,
-                            len: len_val,
+                            offset: ValueRef::from(offset_val),
+                            len: ValueRef::from(len_val),
                         },
                         array_ty,
                     )

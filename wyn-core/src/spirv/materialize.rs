@@ -14,7 +14,7 @@
 //! After this rewrite, `lift_and_merge` can hoist Materialize out of loops
 //! since it only depends on the (loop-invariant) array value.
 
-use crate::ssa::types::{FuncBody, InstKind, Program};
+use crate::ssa::types::{FuncBody, InstKind, Program, ValueRef};
 
 /// Run the materialize pass on the entire program.
 pub fn materialize_dynamic_indices(mut program: Program) -> Program {
@@ -33,12 +33,16 @@ fn materialize_func(body: &mut FuncBody) {
 }
 
 fn rewrite_dynamic_indices(body: &mut FuncBody) {
-    let mut rewrites: Vec<(wyn_ssa::InstId, wyn_ssa::ValueId, wyn_ssa::ValueId)> = Vec::new();
+    let mut rewrites: Vec<(wyn_ssa::InstId, ValueRef, ValueRef)> = Vec::new();
 
     for (iid, inst) in &body.inner.insts {
         if let InstKind::Index { base, index } = &inst.data {
-            // Check if the index is produced by a constant instruction
-            if !is_constant_int(&body.inner, *index) {
+            // Check if the index is produced by a constant instruction or is an inline constant
+            let is_const = match index {
+                ValueRef::Const(_) => true,
+                ValueRef::Ssa(id) => is_constant_int(&body.inner, *id),
+            };
+            if !is_const {
                 if let Some(result) = inst.result {
                     rewrites.push((iid, *base, *index));
                     let _ = result; // used for identification only
@@ -60,7 +64,8 @@ fn rewrite_dynamic_indices(body: &mut FuncBody) {
         let result_ty = result.map(|r| body.inner.value_type(r).clone());
 
         // Get the type of the base (array type) — used for Materialize's result type
-        let base_ty = body.inner.value_type(base).clone();
+        let base_id = base.as_ssa().expect("Materialize base must be SSA");
+        let base_ty = body.inner.value_type(base_id).clone();
 
         // Find the position of this instruction in its block
         let pos = body.inner.blocks[parent]
@@ -80,7 +85,9 @@ fn rewrite_dynamic_indices(body: &mut FuncBody) {
         let mat_value = body.inner.insert_inst_at_index(
             parent,
             pos,
-            InstKind::Materialize { value: base },
+            InstKind::Materialize {
+                value: ValueRef::from(base_id),
+            },
             base_ty,
             None,
         );
@@ -91,7 +98,7 @@ fn rewrite_dynamic_indices(body: &mut FuncBody) {
                 parent,
                 pos + 1,
                 InstKind::DynamicExtract {
-                    base: mat_value,
+                    base: ValueRef::from(mat_value),
                     index,
                 },
                 elem_ty,

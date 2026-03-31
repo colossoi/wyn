@@ -39,6 +39,66 @@ pub use wyn_ssa::Terminator;
 // Re-export BasicBlock from wyn-ssa.
 pub use wyn_ssa::BasicBlock;
 
+/// A compile-time constant value that can be carried inline in a `ValueRef`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConstantValue {
+    I32(i32),
+    U32(u32),
+    F32(u32), // stored as bits for Eq/Hash
+    Bool(bool),
+}
+
+impl ConstantValue {
+    pub fn from_f32(v: f32) -> Self {
+        ConstantValue::F32(v.to_bits())
+    }
+    pub fn as_f32(&self) -> Option<f32> {
+        match self {
+            ConstantValue::F32(bits) => Some(f32::from_bits(*bits)),
+            _ => None,
+        }
+    }
+}
+
+/// A reference to a value: either an SSA instruction result or an inline constant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ValueRef {
+    Ssa(ValueId),
+    Const(ConstantValue),
+}
+
+impl ValueRef {
+    pub fn as_ssa(&self) -> Option<ValueId> {
+        match self {
+            ValueRef::Ssa(id) => Some(*id),
+            _ => None,
+        }
+    }
+    pub fn as_const(&self) -> Option<ConstantValue> {
+        match self {
+            ValueRef::Const(c) => Some(*c),
+            _ => None,
+        }
+    }
+    pub fn map_ssa(&self, f: impl Fn(ValueId) -> ValueId) -> ValueRef {
+        match self {
+            ValueRef::Ssa(id) => ValueRef::Ssa(f(*id)),
+            ValueRef::Const(c) => ValueRef::Const(*c),
+        }
+    }
+    pub fn substitute(&mut self, f: &mut impl FnMut(&mut ValueId)) {
+        if let ValueRef::Ssa(id) = self {
+            f(id);
+        }
+    }
+}
+
+impl From<ValueId> for ValueRef {
+    fn from(id: ValueId) -> Self {
+        ValueRef::Ssa(id)
+    }
+}
+
 /// Effect token for side effect ordering.
 ///
 /// Effect tokens form a chain that ensures effectful operations
@@ -141,55 +201,55 @@ pub enum InstKind {
     /// Binary operation.
     BinOp {
         op: String,
-        lhs: ValueId,
-        rhs: ValueId,
+        lhs: ValueRef,
+        rhs: ValueRef,
     },
 
     /// Unary operation.
     UnaryOp {
         op: String,
-        operand: ValueId,
+        operand: ValueRef,
     },
 
     /// Tuple construction.
-    Tuple(Vec<ValueId>),
+    Tuple(Vec<ValueRef>),
 
     /// Array construction with literal elements.
     ArrayLit {
-        elements: Vec<ValueId>,
+        elements: Vec<ValueRef>,
     },
 
     /// Array from range (virtual, computed on demand).
     ArrayRange {
-        start: ValueId,
+        start: ValueRef,
         /// Length of the range.
-        len: ValueId,
+        len: ValueRef,
         /// Step (None means 1).
-        step: Option<ValueId>,
+        step: Option<ValueRef>,
     },
 
     /// Vector construction (@[x, y, z]).
-    Vector(Vec<ValueId>),
+    Vector(Vec<ValueRef>),
 
     /// Matrix construction (@[[a, b], [c, d]]).
-    Matrix(Vec<Vec<ValueId>>),
+    Matrix(Vec<Vec<ValueRef>>),
 
     /// Tuple/struct field projection.
     Project {
-        base: ValueId,
+        base: ValueRef,
         index: u32,
     },
 
     /// Array/vector indexing (for fixed-size arrays).
     Index {
-        base: ValueId,
-        index: ValueId,
+        base: ValueRef,
+        index: ValueRef,
     },
 
     /// Function call.
     Call {
         func: String,
-        args: Vec<ValueId>,
+        args: Vec<ValueRef>,
     },
 
     /// Reference to a global constant or function.
@@ -201,7 +261,7 @@ pub enum InstKind {
     /// Compiler intrinsic call.
     Intrinsic {
         name: String,
-        args: Vec<ValueId>,
+        args: Vec<ValueRef>,
     },
 
     // =========================================================================
@@ -214,32 +274,32 @@ pub enum InstKind {
 
     /// Load a value from a pointer.
     Load {
-        ptr: ValueId,
+        ptr: ValueRef,
     },
 
     /// Store a value to a pointer.
     Store {
-        ptr: ValueId,
-        value: ValueId,
+        ptr: ValueRef,
+        value: ValueRef,
     },
 
     /// Create a storage buffer view.
     StorageView {
         source: ViewSource,
-        offset: ValueId,
-        len: ValueId,
+        offset: ValueRef,
+        len: ValueRef,
     },
 
     /// Index into a storage view. SSA result type is the element type;
     /// SPIR-V lowering wraps it in a StorageBuffer pointer internally.
     StorageViewIndex {
-        view: ValueId,
-        index: ValueId,
+        view: ValueRef,
+        index: ValueRef,
     },
 
     /// Get the length of a storage view.
     StorageViewLen {
-        view: ValueId,
+        view: ValueRef,
     },
 
     // =========================================================================
@@ -268,20 +328,20 @@ pub enum InstKind {
     /// The result is an opaque immutable handle — never written to after creation.
     /// Pure and hoistable: two Materialize of the same value are equivalent.
     Materialize {
-        value: ValueId,
+        value: ValueRef,
     },
 
     /// Read element at a dynamic index from a materialized composite.
     /// `base` must be a Materialize result. `index` is a runtime integer.
     DynamicExtract {
-        base: ValueId,
-        index: ValueId,
+        base: ValueRef,
+        index: ValueRef,
     },
 }
 
 impl InstKind {
-    /// Return all ValueIds referenced by this instruction (read-only).
-    pub fn value_uses(&self) -> Vec<ValueId> {
+    /// Return all ValueRefs referenced by this instruction (read-only).
+    pub fn value_uses(&self) -> Vec<ValueRef> {
         match self {
             InstKind::Int(_)
             | InstKind::Float(_)
@@ -314,20 +374,25 @@ impl InstKind {
             InstKind::StorageView { source, offset, len } => {
                 let mut u = vec![*offset, *len];
                 if let ViewSource::Inherited { parent } = source {
-                    u.push(*parent);
+                    u.push(ValueRef::Ssa(*parent));
                 }
                 u
             }
             InstKind::StorageViewIndex { view, index } => vec![*view, *index],
             InstKind::StorageViewLen { view } => vec![*view],
-            InstKind::Soac(soac) => soac.uses(),
+            InstKind::Soac(soac) => soac.uses().into_iter().map(ValueRef::from).collect(),
             InstKind::Materialize { value } => vec![*value],
             InstKind::DynamicExtract { base, index } => vec![*base, *index],
         }
     }
 
-    /// Apply a substitution function to all ValueId references in place.
-    pub fn substitute_values(&mut self, sub: &mut impl FnMut(&mut ValueId)) {
+    /// Return only the SSA ValueIds referenced by this instruction.
+    pub fn ssa_uses(&self) -> Vec<ValueId> {
+        self.value_uses().into_iter().filter_map(|r| r.as_ssa()).collect()
+    }
+
+    /// Apply a substitution function to all ValueRef references in place.
+    pub fn substitute_values(&mut self, sub: &mut impl FnMut(&mut ValueRef)) {
         match self {
             InstKind::BinOp { lhs, rhs, .. } => {
                 sub(lhs);
@@ -370,7 +435,11 @@ impl InstKind {
             }
             InstKind::StorageView { source, offset, len } => {
                 if let ViewSource::Inherited { parent } = source {
-                    sub(parent);
+                    let mut vr = ValueRef::Ssa(*parent);
+                    sub(&mut vr);
+                    if let ValueRef::Ssa(new_id) = vr {
+                        *parent = new_id;
+                    }
                 }
                 sub(offset);
                 sub(len);
@@ -380,7 +449,7 @@ impl InstKind {
                 sub(index);
             }
             InstKind::StorageViewLen { view } => sub(view),
-            InstKind::Soac(soac) => soac.substitute_uses(sub),
+            InstKind::Soac(soac) => soac.substitute_refs(sub),
             InstKind::Materialize { value } => sub(value),
             InstKind::DynamicExtract { base, index } => {
                 sub(base);
@@ -403,10 +472,10 @@ impl InstKind {
     /// Effects are tracked on InstNode, not in InstKind, so they are not remapped here.
     /// Panics on `Soac` — SOAC lowering expands those rather than remapping.
     pub fn remap(&self, rv: &impl Fn(ValueId) -> ValueId) -> InstKind {
-        // This is equivalent to map_operands from the Instr trait,
-        // but kept for compatibility with existing callers.
         let mut result = self.clone();
-        result.substitute_values(&mut |v| *v = rv(*v));
+        result.substitute_values(&mut |vr| {
+            *vr = vr.map_ssa(rv);
+        });
         result
     }
 }
@@ -538,6 +607,77 @@ impl Soac {
         }
     }
 
+    /// Apply a substitution function to all value references, bridging between
+    /// the Soac's ValueId fields and the ValueRef-based substitution interface.
+    pub fn substitute_refs(&mut self, sub: &mut impl FnMut(&mut ValueRef)) {
+        match self {
+            Soac::Map { inputs, captures, .. } => {
+                for v in inputs.iter_mut() {
+                    let mut vr = ValueRef::Ssa(*v);
+                    sub(&mut vr);
+                    if let ValueRef::Ssa(new_id) = vr {
+                        *v = new_id;
+                    }
+                }
+                for v in captures.iter_mut() {
+                    let mut vr = ValueRef::Ssa(*v);
+                    sub(&mut vr);
+                    if let ValueRef::Ssa(new_id) = vr {
+                        *v = new_id;
+                    }
+                }
+            }
+            Soac::Reduce {
+                input,
+                init,
+                captures,
+                ..
+            } => {
+                let mut vr = ValueRef::Ssa(*input);
+                sub(&mut vr);
+                if let ValueRef::Ssa(new_id) = vr {
+                    *input = new_id;
+                }
+                let mut vr = ValueRef::Ssa(*init);
+                sub(&mut vr);
+                if let ValueRef::Ssa(new_id) = vr {
+                    *init = new_id;
+                }
+                for v in captures.iter_mut() {
+                    let mut vr = ValueRef::Ssa(*v);
+                    sub(&mut vr);
+                    if let ValueRef::Ssa(new_id) = vr {
+                        *v = new_id;
+                    }
+                }
+            }
+            Soac::Scan {
+                input,
+                init,
+                captures,
+                ..
+            } => {
+                let mut vr = ValueRef::Ssa(*input);
+                sub(&mut vr);
+                if let ValueRef::Ssa(new_id) = vr {
+                    *input = new_id;
+                }
+                let mut vr = ValueRef::Ssa(*init);
+                sub(&mut vr);
+                if let ValueRef::Ssa(new_id) = vr {
+                    *init = new_id;
+                }
+                for v in captures.iter_mut() {
+                    let mut vr = ValueRef::Ssa(*v);
+                    sub(&mut vr);
+                    if let ValueRef::Ssa(new_id) = vr {
+                        *v = new_id;
+                    }
+                }
+            }
+        }
+    }
+
     /// Return the name of the function applied by this SOAC.
     pub fn func_name(&self) -> &str {
         match self {
@@ -654,15 +794,15 @@ impl FuncBody {
 
 impl wyn_ssa::Instr for InstKind {
     fn for_each_operand(&self, mut f: impl FnMut(ValueId)) {
-        for v in self.value_uses() {
+        for v in self.ssa_uses() {
             f(v);
         }
     }
 
-    fn map_operands(&self, mut f: impl FnMut(ValueId) -> ValueId) -> Self {
-        let mut result = self.clone();
-        result.substitute_values(&mut |v| *v = f(*v));
-        result
+    fn map_operands(&self, f: impl FnMut(ValueId) -> ValueId) -> Self {
+        // Wrap FnMut in a RefCell so we can call it through an &-ref closure
+        let f = std::cell::RefCell::new(f);
+        self.remap(&|v| (f.borrow_mut())(v))
     }
 }
 
@@ -692,7 +832,7 @@ impl wyn_ssa::ValueLike for InstKind {
     }
 
     fn is_closed(&self) -> bool {
-        self.value_uses().is_empty()
+        self.ssa_uses().is_empty()
     }
 
     fn equivalent_to(&self, other: &Self) -> bool {

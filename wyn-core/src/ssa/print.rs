@@ -7,6 +7,20 @@ use std::fmt::Write;
 
 use super::types::*;
 
+fn format_ref(vr: &ValueRef) -> String {
+    match vr {
+        ValueRef::Ssa(id) => format!("%{:?}", id),
+        ValueRef::Const(ConstantValue::I32(v)) => format!("{}", v),
+        ValueRef::Const(ConstantValue::U32(v)) => format!("{}u", v),
+        ValueRef::Const(ConstantValue::F32(bits)) => format!("{}", f32::from_bits(*bits)),
+        ValueRef::Const(ConstantValue::Bool(b)) => format!("{}", b),
+    }
+}
+
+fn format_refs(vals: &[ValueRef]) -> String {
+    vals.iter().map(format_ref).collect::<Vec<_>>().join(", ")
+}
+
 fn format_type(ty: &Type<TypeName>) -> String {
     match ty {
         Type::Constructed(TypeName::Int(bits), _) => format!("i{bits}"),
@@ -185,25 +199,25 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
             let _ = write!(out, "string \"{s}\"");
         }
         InstKind::BinOp { op, lhs, rhs } => {
-            let _ = write!(out, "binop {op} {}, {}", fmt_val(*lhs), fmt_val(*rhs));
+            let _ = write!(out, "binop {op} {}, {}", format_ref(lhs), format_ref(rhs));
         }
         InstKind::UnaryOp { op, operand } => {
-            let _ = write!(out, "unaryop {op} {}", fmt_val(*operand));
+            let _ = write!(out, "unaryop {op} {}", format_ref(operand));
         }
         InstKind::Tuple(vals) => {
-            let _ = write!(out, "tuple ({})", format_values(vals));
+            let _ = write!(out, "tuple ({})", format_refs(vals));
         }
         InstKind::ArrayLit { elements } => {
-            let _ = write!(out, "array [{}]", format_values(elements));
+            let _ = write!(out, "array [{}]", format_refs(elements));
         }
         InstKind::ArrayRange { start, len, step } => {
-            let _ = write!(out, "range {}..{}", fmt_val(*start), fmt_val(*len));
+            let _ = write!(out, "range {}..{}", format_ref(start), format_ref(len));
             if let Some(step) = step {
-                let _ = write!(out, " step {}", fmt_val(*step));
+                let _ = write!(out, " step {}", format_ref(step));
             }
         }
         InstKind::Vector(vals) => {
-            let _ = write!(out, "vector @[{}]", format_values(vals));
+            let _ = write!(out, "vector @[{}]", format_refs(vals));
         }
         InstKind::Matrix(rows) => {
             let _ = write!(out, "matrix @[");
@@ -211,18 +225,18 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
                 if i > 0 {
                     let _ = write!(out, ", ");
                 }
-                let _ = write!(out, "[{}]", format_values(row));
+                let _ = write!(out, "[{}]", format_refs(row));
             }
             let _ = write!(out, "]");
         }
         InstKind::Project { base, index } => {
-            let _ = write!(out, "project {}.{index}", fmt_val(*base));
+            let _ = write!(out, "project {}.{index}", format_ref(base));
         }
         InstKind::Index { base, index } => {
-            let _ = write!(out, "index {}[{}]", fmt_val(*base), fmt_val(*index));
+            let _ = write!(out, "index {}[{}]", format_ref(base), format_ref(index));
         }
         InstKind::Call { func, args } => {
-            let _ = write!(out, "call @{func}({})", format_values(args));
+            let _ = write!(out, "call @{func}({})", format_refs(args));
         }
         InstKind::Global(name) => {
             let _ = write!(out, "global @{name}");
@@ -231,29 +245,39 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
             let _ = write!(out, "extern @{name}");
         }
         InstKind::Intrinsic { name, args } => {
-            let _ = write!(out, "intrinsic @{name}({})", format_values(args));
+            let _ = write!(out, "intrinsic @{name}({})", format_refs(args));
         }
         InstKind::Alloca { elem_ty } => {
             let _ = write!(out, "alloca {}", format_type(elem_ty));
         }
         InstKind::Load { ptr } => {
-            let _ = write!(out, "load {}", fmt_val(*ptr));
+            let _ = write!(out, "load {}", format_ref(ptr));
         }
         InstKind::Store { ptr, value } => {
-            let _ = write!(out, "store {}, {}", fmt_val(*ptr), fmt_val(*value));
+            let _ = write!(out, "store {}, {}", format_ref(ptr), format_ref(value));
         }
         InstKind::StorageView { source, offset, len } => {
             let src = match source {
                 ViewSource::Storage { set, binding } => format!("storage({set}, {binding})"),
                 ViewSource::Inherited { parent } => fmt_val(*parent),
             };
-            let _ = write!(out, "storage_view {src} {} {}", fmt_val(*offset), fmt_val(*len));
+            let _ = write!(
+                out,
+                "storage_view {src} {} {}",
+                format_ref(offset),
+                format_ref(len)
+            );
         }
         InstKind::StorageViewIndex { view, index } => {
-            let _ = write!(out, "storage_view_index {}[{}]", fmt_val(*view), fmt_val(*index));
+            let _ = write!(
+                out,
+                "storage_view_index {}[{}]",
+                format_ref(view),
+                format_ref(index)
+            );
         }
         InstKind::StorageViewLen { view } => {
-            let _ = write!(out, "storage_view_len {}", fmt_val(*view));
+            let _ = write!(out, "storage_view_len {}", format_ref(view));
         }
         InstKind::OutputPtr { index } => {
             let _ = write!(out, "output_ptr {index}");
@@ -262,10 +286,10 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
             format_soac(out, soac);
         }
         InstKind::Materialize { value } => {
-            let _ = write!(out, "materialize {}", fmt_val(*value));
+            let _ = write!(out, "materialize {}", format_ref(value));
         }
         InstKind::DynamicExtract { base, index } => {
-            let _ = write!(out, "dynamic_extract {}[{}]", fmt_val(*base), fmt_val(*index));
+            let _ = write!(out, "dynamic_extract {}[{}]", format_ref(base), format_ref(index));
         }
     }
 }

@@ -12,7 +12,8 @@ use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
 use crate::ssa::layout::{buffer_array_strides, type_byte_size};
 use crate::ssa::types::{
-    BlockId, ControlHeader, FuncBody, InstKind, Terminator, ValueId, ViewSource, WynInstNode,
+    BlockId, ConstantValue, ControlHeader, FuncBody, InstKind, Terminator, ValueId, ValueRef, ViewSource,
+    WynInstNode,
 };
 use crate::ssa::types::{EntryPoint, ExecutionModel, Function, IoDecoration, Program};
 use crate::types;
@@ -870,9 +871,22 @@ impl Constructor {
 /// Walks instructions in order, emitting OpConstant/OpConstantComposite.
 /// Returns the SPIR-V Word for the final result value.
 fn lower_constant_body(constructor: &mut Constructor, body: &FuncBody) -> Result<spirv::Word> {
-    use crate::ssa::types::InstKind;
+    use crate::ssa::types::{ConstantValue, InstKind, ValueRef};
 
     let mut value_map: HashMap<ValueId, spirv::Word> = HashMap::new();
+
+    let resolve_ref =
+        |vr: &ValueRef, vm: &HashMap<ValueId, spirv::Word>, c: &mut Constructor| -> spirv::Word {
+            match vr {
+                ValueRef::Ssa(id) => vm[id],
+                ValueRef::Const(cv) => match cv {
+                    ConstantValue::I32(v) => c.const_i32(*v),
+                    ConstantValue::U32(v) => c.const_u32(*v),
+                    ConstantValue::F32(bits) => c.const_f32(f32::from_bits(*bits)),
+                    ConstantValue::Bool(b) => c.const_bool(*b),
+                },
+            }
+        };
 
     for (_iid, inst) in &body.inner.insts {
         let val_ty = inst.result.map(|r| body.inner.value_type(r));
@@ -894,11 +908,13 @@ fn lower_constant_body(constructor: &mut Constructor, body: &FuncBody) -> Result
             }
             InstKind::Bool(b) => constructor.const_bool(*b),
             InstKind::Tuple(elems) | InstKind::Vector(elems) | InstKind::ArrayLit { elements: elems } => {
-                let elem_ids: Vec<_> = elems.iter().map(|v| value_map[v]).collect();
+                let elem_ids: Vec<_> =
+                    elems.iter().map(|v| resolve_ref(v, &value_map, constructor)).collect();
                 constructor.composite_or_constant(result_ty, elem_ids)?
             }
             InstKind::Matrix(rows) => {
-                let elem_ids: Vec<_> = rows.iter().flatten().map(|v| value_map[v]).collect();
+                let elem_ids: Vec<_> =
+                    rows.iter().flatten().map(|v| resolve_ref(v, &value_map, constructor)).collect();
                 constructor.composite_or_constant(result_ty, elem_ids)?
             }
             InstKind::Global(name) => {
@@ -1138,37 +1154,38 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             }
 
             InstKind::BinOp { op, lhs, rhs } => {
-                let lhs_id = self.get_value(*lhs)?;
-                let rhs_id = self.get_value(*rhs)?;
-                let lhs_ty = self.body.get_value_type(*lhs);
-                let rhs_ty = self.body.get_value_type(*rhs);
-                self.lower_binop(op, lhs_id, rhs_id, lhs_ty, rhs_ty, result_ty)?
+                let lhs_id = self.get_value_ref(*lhs)?;
+                let rhs_id = self.get_value_ref(*rhs)?;
+                let lhs_ty = self.get_value_type_ref(*lhs);
+                let rhs_ty = self.get_value_type_ref(*rhs);
+                self.lower_binop(op, lhs_id, rhs_id, &lhs_ty, &rhs_ty, result_ty)?
             }
 
             InstKind::UnaryOp { op, operand } => {
-                let operand_id = self.get_value(*operand)?;
-                let operand_ty = self.body.get_value_type(*operand);
-                self.lower_unaryop(op, operand_id, operand_ty, result_ty)?
+                let operand_id = self.get_value_ref(*operand)?;
+                let operand_ty = self.get_value_type_ref(*operand);
+                self.lower_unaryop(op, operand_id, &operand_ty, result_ty)?
             }
 
             InstKind::Tuple(elems) => {
-                let elem_ids: Vec<_> = elems.iter().map(|&v| self.get_value(v)).collect::<Result<_>>()?;
+                let elem_ids: Vec<_> =
+                    elems.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
                 self.constructor.composite_or_constant(result_ty, elem_ids)?
             }
 
             InstKind::ArrayLit { elements } => {
                 let elem_ids: Vec<_> =
-                    elements.iter().map(|&v| self.get_value(v)).collect::<Result<_>>()?;
+                    elements.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
                 self.constructor.composite_or_constant(result_ty, elem_ids)?
             }
 
             InstKind::ArrayRange { start, len, step } => {
                 // Virtual array represented as {start, step, len} struct
                 // This matches the layout expected by lower_virtual_index
-                let start_id = self.get_value(*start)?;
-                let len_id = self.get_value(*len)?;
+                let start_id = self.get_value_ref(*start)?;
+                let len_id = self.get_value_ref(*len)?;
                 let step_id = match step {
-                    Some(s) => self.get_value(*s)?,
+                    Some(s) => self.get_value_ref(*s)?,
                     None => self.constructor.const_i32(1), // default step = 1
                 };
 
@@ -1181,7 +1198,8 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             }
 
             InstKind::Vector(elems) => {
-                let elem_ids: Vec<_> = elems.iter().map(|&v| self.get_value(v)).collect::<Result<_>>()?;
+                let elem_ids: Vec<_> =
+                    elems.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
                 self.constructor.composite_or_constant(result_ty, elem_ids)?
             }
 
@@ -1189,17 +1207,17 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 // Matrix is constructed as an array of vectors (columns)
                 // For now, flatten and construct
                 let all_elems: Vec<_> =
-                    rows.iter().flatten().map(|&v| self.get_value(v)).collect::<Result<_>>()?;
+                    rows.iter().flatten().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
                 self.constructor.composite_or_constant(result_ty, all_elems)?
             }
 
             InstKind::Project { base, index } => {
-                let base_ty = self.body.get_value_type(*base);
-                let base_id = self.get_value(*base)?;
+                let base_ty = self.get_value_type_ref(*base);
+                let base_id = self.get_value_ref(*base)?;
 
                 // If base is a pointer, load it first
-                let composite_id = if types::is_pointer(base_ty) {
-                    let pointee_ty = types::pointee(base_ty).expect("Pointer should have pointee");
+                let composite_id = if types::is_pointer(&base_ty) {
+                    let pointee_ty = types::pointee(&base_ty).expect("Pointer should have pointee");
                     let value_type = self.constructor.polytype_to_spirv(pointee_ty);
                     self.constructor.builder.load(value_type, None, base_id, None, [])?
                 } else {
@@ -1212,12 +1230,12 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             InstKind::Index { base, index } => self.lower_index(*base, *index, result_ty)?,
 
             InstKind::Call { func, args } => {
-                let arg_ids: Vec<_> = args.iter().map(|&v| self.get_value(v)).collect::<Result<_>>()?;
+                let arg_ids: Vec<_> = args.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
 
                 // Check if it's a builtin function first
                 if let Some(builtin_impl) = self.constructor.impl_source.get(func) {
                     if func.contains("array_with") {}
-                    self.lower_builtin_call(builtin_impl.clone(), &arg_ids, result_ty)?
+                    self.lower_builtin_call(builtin_impl.clone(), args, &arg_ids, result_ty)?
                 } else if let Some(&func_id) = self.constructor.functions.get(func) {
                     // User-defined function
                     self.constructor.builder.function_call(result_ty, None, func_id, arg_ids)?
@@ -1268,7 +1286,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 .ok_or_else(|| err_spirv!("Unknown extern: {}", linkage_name))?,
 
             InstKind::Intrinsic { name, args } => {
-                let arg_ids: Vec<_> = args.iter().map(|&v| self.get_value(v)).collect::<Result<_>>()?;
+                let arg_ids: Vec<_> = args.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
                 self.lower_intrinsic(name, args, &arg_ids, result_ty, inst)?
             }
 
@@ -1279,21 +1297,21 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             }
 
             InstKind::Load { ptr, .. } => {
-                let ptr_id = self.get_value(*ptr)?;
+                let ptr_id = self.get_value_ref(*ptr)?;
                 self.constructor.builder.load(result_ty, None, ptr_id, None, [])?
             }
 
             InstKind::Store { ptr, value, .. } => {
-                let ptr_id = self.get_value(*ptr)?;
-                let val_id = self.get_value(*value)?;
+                let ptr_id = self.get_value_ref(*ptr)?;
+                let val_id = self.get_value_ref(*value)?;
                 self.constructor.builder.store(ptr_id, val_id, None, [])?;
                 // Store doesn't produce a value, but we return dummy
                 self.constructor.const_i32(0)
             }
 
             InstKind::StorageView { source, offset, len } => {
-                let offset_id = self.get_value(*offset)?;
-                let len_id = self.get_value(*len)?;
+                let offset_id = self.get_value_ref(*offset)?;
+                let len_id = self.get_value_ref(*len)?;
 
                 match source {
                     ViewSource::Storage { set, binding } => {
@@ -1348,8 +1366,8 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             }
 
             InstKind::StorageViewIndex { view, index } => {
-                let view_id = self.get_value(*view)?;
-                let index_id = self.get_value(*index)?;
+                let view_id = self.get_value_ref(*view)?;
+                let index_id = self.get_value_ref(*index)?;
                 let u32_ty = self.constructor.u32_type;
 
                 // Extract buffer_id (field 0) and offset (field 1) from view struct
@@ -1361,15 +1379,16 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 // Try the SSA-level view_buffer_id map first (reliable), fall back to
                 // SPIR-V constant reverse lookup (works when buffer_id is directly
                 // extractable as a constant, e.g. in the same entry point scope).
-                let (buffer_var, _) = if let Some(&buf_id) = self.view_buffer_id.get(view) {
-                    self.constructor
-                        .buffer_vars
-                        .get(buf_id as usize)
-                        .copied()
-                        .ok_or_else(|| err_spirv!("view_buffer_id: unknown buffer_id {}", buf_id))?
-                } else {
-                    self.constructor.resolve_buffer_by_id(buffer_id_val, "StorageViewIndex")?
-                };
+                let (buffer_var, _) =
+                    if let Some(&buf_id) = view.as_ssa().and_then(|id| self.view_buffer_id.get(&id)) {
+                        self.constructor
+                            .buffer_vars
+                            .get(buf_id as usize)
+                            .copied()
+                            .ok_or_else(|| err_spirv!("view_buffer_id: unknown buffer_id {}", buf_id))?
+                    } else {
+                        self.constructor.resolve_buffer_by_id(buffer_id_val, "StorageViewIndex")?
+                    };
 
                 let actual_index = self.constructor.builder.i_add(u32_ty, None, base_offset, index_id)?;
 
@@ -1385,7 +1404,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             }
 
             InstKind::StorageViewLen { view } => {
-                let view_id = self.get_value(*view)?;
+                let view_id = self.get_value_ref(*view)?;
                 // Extract len from view struct (index 2)
                 self.constructor.builder.composite_extract(result_ty, None, view_id, [2u32])?
             }
@@ -1410,17 +1429,17 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             }
 
             InstKind::Materialize { value } => {
-                let value_id = self.get_value(*value)?;
-                let value_ty = self.body.inner.value_type(*value);
-                let spirv_type = self.constructor.polytype_to_spirv(value_ty);
+                let value_id = self.get_value_ref(*value)?;
+                let value_ty = self.get_value_type_ref(*value);
+                let spirv_type = self.constructor.polytype_to_spirv(&value_ty);
                 let var = self.constructor.declare_variable("_materialize", spirv_type)?;
                 self.constructor.builder.store(var, value_id, None, [])?;
                 var
             }
 
             InstKind::DynamicExtract { base, index } => {
-                let base_var = self.get_value(*base)?;
-                let index_id = self.get_value(*index)?;
+                let base_var = self.get_value_ref(*base)?;
+                let index_id = self.get_value_ref(*index)?;
                 let elem_ptr_type =
                     self.constructor.builder.type_pointer(None, spirv::StorageClass::Function, result_ty);
                 let elem_ptr =
@@ -1574,6 +1593,30 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             let origin = producer_block.or(block_param).unwrap_or_else(|| "not found in body".to_string());
             err_spirv!("Unknown SSA value: {:?} ({})", value, origin)
         })
+    }
+
+    fn get_value_ref(&mut self, vr: ValueRef) -> Result<spirv::Word> {
+        match vr {
+            ValueRef::Ssa(id) => self.get_value(id),
+            ValueRef::Const(c) => match c {
+                ConstantValue::I32(v) => Ok(self.constructor.const_i32(v)),
+                ConstantValue::U32(v) => Ok(self.constructor.const_u32(v)),
+                ConstantValue::F32(bits) => Ok(self.constructor.const_f32(f32::from_bits(bits))),
+                ConstantValue::Bool(b) => Ok(self.constructor.const_bool(b)),
+            },
+        }
+    }
+
+    fn get_value_type_ref(&self, vr: ValueRef) -> PolyType<TypeName> {
+        match vr {
+            ValueRef::Ssa(id) => self.body.get_value_type(id).clone(),
+            ValueRef::Const(c) => match c {
+                ConstantValue::I32(_) => PolyType::Constructed(TypeName::Int(32), vec![]),
+                ConstantValue::U32(_) => PolyType::Constructed(TypeName::UInt(32), vec![]),
+                ConstantValue::F32(_) => PolyType::Constructed(TypeName::Float(32), vec![]),
+                ConstantValue::Bool(_) => PolyType::Constructed(TypeName::Bool, vec![]),
+            },
+        }
     }
 
     fn lower_binop(
@@ -1841,10 +1884,6 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
 
         match (op, operand_ty) {
             ("-", Constructed(Float(_), _)) => {
-                // Constant fold: if operand is a known f32 constant, emit -value directly
-                if let Some(val) = self.constructor.get_const_f32_value(operand) {
-                    return Ok(self.constructor.const_f32(-val));
-                }
                 Ok(self.constructor.builder.f_negate(result_ty, None, operand)?)
             }
             ("-", Constructed(Int(_), _)) => {
@@ -1879,7 +1918,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
     fn lower_intrinsic(
         &mut self,
         name: &str,
-        ssa_args: &[ValueId],
+        value_refs: &[ValueRef],
         args: &[spirv::Word],
         result_ty: spirv::Word,
         inst: &WynInstNode,
@@ -1908,7 +1947,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 // FMix requires all operands to match the result type.
                 // When mix(vec, vec, scalar), splat the scalar t to a vec.
                 if args.len() == 3 && ssa_rty.as_ref().is_some_and(|t| t.is_vec()) {
-                    let t_ty = self.body.get_value_type(ssa_args[2]);
+                    let t_ty = self.get_value_type_ref(value_refs[2]);
                     if t_ty.is_scalar() {
                         let splatted = self.splat_scalar(
                             args[2],
@@ -1959,7 +1998,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     bail_spirv!("length requires 1 argument");
                 }
 
-                let arr_ty = self.body.get_value_type(ssa_args[0]);
+                let arr_ty = self.get_value_type_ref(value_refs[0]);
                 let variant = arr_ty
                     .array_variant()
                     .ok_or_else(|| err_spirv!("length: expected array type, got {:?}", arr_ty))?;
@@ -1999,7 +2038,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 let end_id = args[2];
 
                 // Dispatch based on input array variant
-                let arr_ty = self.body.get_value_type(ssa_args[0]);
+                let arr_ty = self.get_value_type_ref(value_refs[0]);
                 let is_view = arr_ty
                     .array_variant()
                     .map(|v| matches!(v, PolyType::Constructed(TypeName::ArrayVariantView, _)))
@@ -2025,7 +2064,9 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         .unwrap_or(false);
 
                     if result_is_composite {
-                        let (buffer_var, _) = if let Some(&buf_id) = self.view_buffer_id.get(&ssa_args[0]) {
+                        let (buffer_var, _) = if let Some(&buf_id) =
+                            value_refs[0].as_ssa().and_then(|id| self.view_buffer_id.get(&id))
+                        {
                             self.constructor.buffer_vars.get(buf_id as usize).copied().ok_or_else(|| {
                                 err_spirv!("slice_to_composite: unknown buffer_id {}", buf_id)
                             })?
@@ -2078,18 +2119,24 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 if args.len() != 2 {
                     bail_spirv!("_w_storage_len requires 2 arguments (set, binding)");
                 }
-                let set = self
-                    .constructor
-                    .uint_const_reverse
-                    .get(&args[0])
-                    .copied()
-                    .ok_or_else(|| err_spirv!("_w_storage_len: set must be a u32 constant"))?;
-                let binding = self
-                    .constructor
-                    .uint_const_reverse
-                    .get(&args[1])
-                    .copied()
-                    .ok_or_else(|| err_spirv!("_w_storage_len: binding must be a u32 constant"))?;
+                let set = match value_refs[0].as_const() {
+                    Some(ConstantValue::U32(v)) => v,
+                    _ => self
+                        .constructor
+                        .uint_const_reverse
+                        .get(&args[0])
+                        .copied()
+                        .ok_or_else(|| err_spirv!("_w_storage_len: set must be a u32 constant"))?,
+                };
+                let binding = match value_refs[1].as_const() {
+                    Some(ConstantValue::U32(v)) => v,
+                    _ => self
+                        .constructor
+                        .uint_const_reverse
+                        .get(&args[1])
+                        .copied()
+                        .ok_or_else(|| err_spirv!("_w_storage_len: binding must be a u32 constant"))?,
+                };
 
                 let &(buffer_var, _, _) =
                     self.constructor.storage_buffers.get(&(set, binding)).ok_or_else(|| {
@@ -2220,13 +2267,13 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
     /// Lower an index operation, dispatching based on the array variant.
     fn lower_index(
         &mut self,
-        base: ValueId,
-        index: ValueId,
+        base: ValueRef,
+        index: ValueRef,
         result_ty: spirv::Word,
     ) -> Result<spirv::Word> {
-        let base_ty = self.body.get_value_type(base);
-        let base_id = self.get_value(base)?;
-        let index_id = self.get_value(index)?;
+        let base_ty = self.get_value_type_ref(base);
+        let base_id = self.get_value_ref(base)?;
+        let index_id = self.get_value_ref(index)?;
 
         // Dispatch based on the base type
         match base_ty {
@@ -2248,13 +2295,31 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
 
                 if types::is_array_variant_view(variant) {
                     // View variant: {buffer_id, offset, len} struct
-                    self.lower_view_index(base, base_id, index_id, result_ty, elem)
+                    self.lower_view_index(
+                        base.as_ssa().expect("view base must be SSA"),
+                        base_id,
+                        index_id,
+                        result_ty,
+                        elem,
+                    )
                 } else if types::is_array_variant_virtual(variant) {
                     // Virtual variant: {start, step, len} - computed array
                     self.lower_virtual_index(base_id, index_id, result_ty)
                 } else {
                     // Composite variant: SPIR-V array value
-                    self.lower_composite_index(base_id, index_id, result_ty, base_ty)
+                    // Check for compile-time constant index for OpCompositeExtract
+                    if let Some(ConstantValue::U32(i)) = index.as_const() {
+                        Ok(self.constructor.builder.composite_extract(result_ty, None, base_id, [i])?)
+                    } else if let Some(ConstantValue::I32(i)) = index.as_const() {
+                        Ok(self.constructor.builder.composite_extract(
+                            result_ty,
+                            None,
+                            base_id,
+                            [i as u32],
+                        )?)
+                    } else {
+                        self.lower_composite_index(base_id, index_id, result_ty, &base_ty)
+                    }
                 }
             }
 
@@ -2344,6 +2409,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
     fn lower_builtin_call(
         &mut self,
         builtin: BuiltinImpl,
+        value_refs: &[ValueRef],
         arg_ids: &[spirv::Word],
         result_ty: spirv::Word,
     ) -> Result<spirv::Word> {
@@ -2386,7 +2452,12 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         let val = arg_ids[2];
 
                         // Try to get literal index for compile-time known indices
-                        if let Some(literal_idx) = self.constructor.get_const_i32_value(idx) {
+                        let literal_idx = match value_refs.get(1).and_then(|vr| vr.as_const()) {
+                            Some(ConstantValue::I32(v)) => Some(v as i32),
+                            Some(ConstantValue::U32(v)) => Some(v as i32),
+                            _ => self.constructor.get_const_i32_value(idx),
+                        };
+                        if let Some(literal_idx) = literal_idx {
                             Ok(self.constructor.builder.composite_insert(
                                 result_ty,
                                 None,

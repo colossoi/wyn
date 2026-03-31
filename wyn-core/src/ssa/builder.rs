@@ -7,7 +7,8 @@ use crate::ast::TypeName;
 use polytype::Type;
 
 use super::types::{
-    BlockId, ControlHeader, EffectToken, FuncBody, InstId, InstKind, Terminator, ValueId, ViewSource,
+    BlockId, ControlHeader, EffectToken, FuncBody, InstId, InstKind, Terminator, ValueId, ValueRef,
+    ViewSource,
 };
 
 /// Error during function building.
@@ -217,8 +218,8 @@ impl FuncBuilder {
         self.push_inst(
             InstKind::BinOp {
                 op: op.to_string(),
-                lhs,
-                rhs,
+                lhs: ValueRef::from(lhs),
+                rhs: ValueRef::from(rhs),
             },
             ty,
         )
@@ -233,7 +234,7 @@ impl FuncBuilder {
         self.push_inst(
             InstKind::UnaryOp {
                 op: op.to_string(),
-                operand,
+                operand: ValueRef::from(operand),
             },
             ty,
         )
@@ -248,7 +249,7 @@ impl FuncBuilder {
         self.push_inst(
             InstKind::Call {
                 func: func.to_string(),
-                args,
+                args: args.into_iter().map(ValueRef::from).collect(),
             },
             ty,
         )
@@ -263,7 +264,7 @@ impl FuncBuilder {
         self.push_inst(
             InstKind::Intrinsic {
                 name: name.to_string(),
-                args,
+                args: args.into_iter().map(ValueRef::from).collect(),
             },
             ty,
         )
@@ -274,7 +275,10 @@ impl FuncBuilder {
         elements: Vec<ValueId>,
         ty: Type<TypeName>,
     ) -> Result<ValueId, BuilderError> {
-        self.push_inst(InstKind::Tuple(elements), ty)
+        self.push_inst(
+            InstKind::Tuple(elements.into_iter().map(ValueRef::from).collect()),
+            ty,
+        )
     }
 
     pub fn push_project(
@@ -283,7 +287,13 @@ impl FuncBuilder {
         index: u32,
         ty: Type<TypeName>,
     ) -> Result<ValueId, BuilderError> {
-        self.push_inst(InstKind::Project { base, index }, ty)
+        self.push_inst(
+            InstKind::Project {
+                base: ValueRef::from(base),
+                index,
+            },
+            ty,
+        )
     }
 
     pub fn push_index(
@@ -292,7 +302,13 @@ impl FuncBuilder {
         index: ValueId,
         ty: Type<TypeName>,
     ) -> Result<ValueId, BuilderError> {
-        self.push_inst(InstKind::Index { base, index }, ty)
+        self.push_inst(
+            InstKind::Index {
+                base: ValueRef::from(base),
+                index: ValueRef::from(index),
+            },
+            ty,
+        )
     }
 
     pub fn push_array_lit(
@@ -300,7 +316,12 @@ impl FuncBuilder {
         elements: Vec<ValueId>,
         ty: Type<TypeName>,
     ) -> Result<ValueId, BuilderError> {
-        self.push_inst(InstKind::ArrayLit { elements }, ty)
+        self.push_inst(
+            InstKind::ArrayLit {
+                elements: elements.into_iter().map(ValueRef::from).collect(),
+            },
+            ty,
+        )
     }
 
     pub fn push_global(&mut self, name: &str, ty: Type<TypeName>) -> Result<ValueId, BuilderError> {
@@ -325,7 +346,9 @@ impl FuncBuilder {
         }
         Ok(self.inner.func_mut().append_inst(
             block,
-            InstKind::Load { ptr },
+            InstKind::Load {
+                ptr: ValueRef::from(ptr),
+            },
             result_ty,
             Some((effect_in, effect_out)),
         ))
@@ -345,7 +368,10 @@ impl FuncBuilder {
         }
         self.inner.func_mut().append_void_inst(
             block,
-            InstKind::Store { ptr, value },
+            InstKind::Store {
+                ptr: ValueRef::from(ptr),
+                value: ValueRef::from(value),
+            },
             Some((effect_in, effect_out)),
         );
         Ok(effect_out)
@@ -373,8 +399,8 @@ impl FuncBuilder {
         self.push_inst(
             InstKind::StorageView {
                 source: ViewSource::Storage { set, binding },
-                offset: zero,
-                len: storage_len,
+                offset: ValueRef::from(zero),
+                len: ValueRef::from(storage_len),
             },
             view_ty,
         )
@@ -390,8 +416,8 @@ impl FuncBuilder {
         self.push_inst(
             InstKind::StorageView {
                 source: ViewSource::Inherited { parent },
-                offset,
-                len,
+                offset: ValueRef::from(offset),
+                len: ValueRef::from(len),
             },
             view_ty,
         )
@@ -405,7 +431,13 @@ impl FuncBuilder {
         elem_ty: Type<TypeName>,
         effect_in: EffectToken,
     ) -> Result<EffectToken, BuilderError> {
-        let ptr = self.push_inst(InstKind::StorageViewIndex { view, index }, elem_ty)?;
+        let ptr = self.push_inst(
+            InstKind::StorageViewIndex {
+                view: ValueRef::from(view),
+                index: ValueRef::from(index),
+            },
+            elem_ty,
+        )?;
         self.push_store(ptr, value, effect_in)
     }
 

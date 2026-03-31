@@ -786,8 +786,8 @@ fn build_reduce_phase2(
 
     let ptr = ctx.push_inst(
         InstKind::StorageViewIndex {
-            view: partials_view,
-            index: loop_index,
+            view: crate::ssa::types::ValueRef::from(partials_view),
+            index: crate::ssa::types::ValueRef::from(loop_index),
         },
         elem_type.clone(),
     )?;

@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use crate::ast::TypeName;
-use crate::ssa::types::{FuncBody, InstKind, ValueId};
+use crate::ssa::types::{FuncBody, InstKind, ValueId, ValueRef};
 use crate::types::{TypeExt, is_virtual_array};
 use polytype::Type;
 
@@ -101,7 +101,13 @@ impl InputStrategy for StorageInput {
     fn get_element(&self, ctx: &mut ParallelizeCtx, view: ValueId, index: ValueId) -> Option<ValueId> {
         let elem_ty = self.elem_ty.as_ref()?.clone();
 
-        let ptr = ctx.push_inst(InstKind::StorageViewIndex { view, index }, elem_ty.clone())?;
+        let ptr = ctx.push_inst(
+            InstKind::StorageViewIndex {
+                view: ValueRef::from(view),
+                index: ValueRef::from(index),
+            },
+            elem_ty.clone(),
+        )?;
 
         // Effect tokens are unordered markers (SPIR-V backend ignores them for ordering).
         // We use entry_effect() for all parallel iterations since they're independent.
@@ -164,10 +170,10 @@ impl RangeInput {
                         let elem_ty = result_ty.and_then(extract_array_elem_type)?;
                         return Some(Self {
                             kind: RangeKind::Explicit {
-                                start: *start,
-                                step: *step,
+                                start: start.as_ssa()?,
+                                step: step.and_then(|s| s.as_ssa()),
                             },
-                            len: *len,
+                            len: len.as_ssa()?,
                             elem_ty,
                         });
                     }
@@ -178,7 +184,7 @@ impl RangeInput {
                         let elem_ty = result_ty.and_then(extract_array_elem_type)?;
                         return Some(Self {
                             kind: RangeKind::Iota,
-                            len: args[0],
+                            len: args[0].as_ssa()?,
                             elem_ty,
                         });
                     }
@@ -357,45 +363,51 @@ pub fn remap_value(
         InstKind::String(v) => builder.push_inst(InstKind::String(v.clone()), rty).ok()?,
 
         InstKind::BinOp { op, lhs, rhs } => {
-            let new_lhs = remap_value(source, *lhs, builder, memo)?;
-            let new_rhs = remap_value(source, *rhs, builder, memo)?;
+            let new_lhs = remap_ref(source, *lhs, builder, memo)?;
+            let new_rhs = remap_ref(source, *rhs, builder, memo)?;
             builder.push_binop(op, new_lhs, new_rhs, rty).ok()?
         }
         InstKind::UnaryOp { op, operand } => {
-            let new_op = remap_value(source, *operand, builder, memo)?;
+            let new_op = remap_ref(source, *operand, builder, memo)?;
             builder.push_unary(op, new_op, rty).ok()?
         }
 
         InstKind::Tuple(elems) => {
-            let new_elems = remap_values(source, elems, builder, memo)?;
+            let new_elems = remap_refs(source, elems, builder, memo)?;
             builder.push_tuple(new_elems, rty).ok()?
         }
         InstKind::Vector(elems) => {
-            let new_elems = remap_values(source, elems, builder, memo)?;
+            let new_elems: Vec<ValueRef> =
+                remap_refs(source, elems, builder, memo)?.into_iter().map(ValueRef::from).collect();
             builder.push_inst(InstKind::Vector(new_elems), rty).ok()?
         }
         InstKind::Matrix(rows) => {
-            let new_rows: Option<Vec<Vec<ValueId>>> =
-                rows.iter().map(|row| remap_values(source, row, builder, memo)).collect();
+            let new_rows: Option<Vec<Vec<ValueRef>>> = rows
+                .iter()
+                .map(|row| {
+                    remap_refs(source, row, builder, memo)
+                        .map(|vs| vs.into_iter().map(ValueRef::from).collect())
+                })
+                .collect();
             builder.push_inst(InstKind::Matrix(new_rows?), rty).ok()?
         }
         InstKind::ArrayLit { elements } => {
-            let new_elems = remap_values(source, elements, builder, memo)?;
-            builder.push_inst(InstKind::ArrayLit { elements: new_elems }, rty).ok()?
+            let new_elems = remap_refs(source, elements, builder, memo)?;
+            builder.push_array_lit(new_elems, rty).ok()?
         }
         InstKind::ArrayRange { start, len, step } => {
-            let new_start = remap_value(source, *start, builder, memo)?;
-            let new_len = remap_value(source, *len, builder, memo)?;
+            let new_start = remap_ref(source, *start, builder, memo)?;
+            let new_len = remap_ref(source, *len, builder, memo)?;
             let new_step = match step {
-                Some(s) => Some(remap_value(source, *s, builder, memo)?),
+                Some(s) => Some(remap_ref(source, *s, builder, memo)?),
                 None => None,
             };
             builder
                 .push_inst(
                     InstKind::ArrayRange {
-                        start: new_start,
-                        len: new_len,
-                        step: new_step,
+                        start: ValueRef::from(new_start),
+                        len: ValueRef::from(new_len),
+                        step: new_step.map(ValueRef::from),
                     },
                     rty,
                 )
@@ -403,21 +415,21 @@ pub fn remap_value(
         }
 
         InstKind::Project { base, index } => {
-            let new_base = remap_value(source, *base, builder, memo)?;
+            let new_base = remap_ref(source, *base, builder, memo)?;
             builder.push_project(new_base, *index, rty).ok()?
         }
         InstKind::Index { base, index } => {
-            let new_base = remap_value(source, *base, builder, memo)?;
-            let new_index = remap_value(source, *index, builder, memo)?;
+            let new_base = remap_ref(source, *base, builder, memo)?;
+            let new_index = remap_ref(source, *index, builder, memo)?;
             builder.push_index(new_base, new_index, rty).ok()?
         }
 
         InstKind::Call { func, args } => {
-            let new_args = remap_values(source, args, builder, memo)?;
+            let new_args = remap_refs(source, args, builder, memo)?;
             builder.push_call(func, new_args, rty).ok()?
         }
         InstKind::Intrinsic { name, args } => {
-            let new_args = remap_values(source, args, builder, memo)?;
+            let new_args = remap_refs(source, args, builder, memo)?;
             builder.push_intrinsic(name, new_args, rty).ok()?
         }
 
@@ -441,13 +453,45 @@ pub fn remap_value(
     Some(new_val)
 }
 
-fn remap_values(
+/// Remap a ValueRef operand: for SSA refs, recursively remap; for Const, this
+/// is a no-op (constants have no dependencies). Returns the remapped SSA ValueId.
+fn remap_ref(
     source: &FuncBody,
-    values: &[ValueId],
+    vr: ValueRef,
+    builder: &mut crate::ssa::builder::FuncBuilder,
+    memo: &mut HashMap<ValueId, ValueId>,
+) -> Option<ValueId> {
+    match vr {
+        ValueRef::Ssa(id) => remap_value(source, id, builder, memo),
+        ValueRef::Const(c) => {
+            // Materialize the constant as an SSA instruction
+            use crate::ssa::types::ConstantValue;
+            match c {
+                ConstantValue::I32(v) => {
+                    builder.push_int(&v.to_string(), Type::Constructed(TypeName::Int(32), vec![])).ok()
+                }
+                ConstantValue::U32(v) => {
+                    builder.push_int(&v.to_string(), Type::Constructed(TypeName::UInt(32), vec![])).ok()
+                }
+                ConstantValue::F32(bits) => builder
+                    .push_float(
+                        &f32::from_bits(bits).to_string(),
+                        Type::Constructed(TypeName::Float(32), vec![]),
+                    )
+                    .ok(),
+                ConstantValue::Bool(b) => builder.push_bool(b).ok(),
+            }
+        }
+    }
+}
+
+fn remap_refs(
+    source: &FuncBody,
+    values: &[ValueRef],
     builder: &mut crate::ssa::builder::FuncBuilder,
     memo: &mut HashMap<ValueId, ValueId>,
 ) -> Option<Vec<ValueId>> {
-    values.iter().map(|&v| remap_value(source, v, builder, memo)).collect()
+    values.iter().map(|v| remap_ref(source, *v, builder, memo)).collect()
 }
 
 /// Convenience wrapper: remap a single value from the entry body using a fresh memo

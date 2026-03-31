@@ -363,7 +363,8 @@ fn find_soac_in_body(
                 continue;
             }
             if let Some(called_func) = find_function(program, func) {
-                let new_mapping = build_param_mapping(body, param_to_entry_arg, args, entry);
+                let ssa_args: Vec<ValueId> = args.iter().filter_map(|vr| vr.as_ssa()).collect();
+                let new_mapping = build_param_mapping(body, param_to_entry_arg, &ssa_args, entry);
 
                 if let Some(par_soac) =
                     find_soac_in_body(entry, &called_func.body, &new_mapping, program, depth + 1)

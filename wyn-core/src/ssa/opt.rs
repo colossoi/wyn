@@ -3,7 +3,7 @@
 
 use crate::ast::TypeName;
 use crate::ssa::types::Program;
-use crate::ssa::types::{BlockId, ControlHeader, FuncBody, InstKind, Terminator, ValueId};
+use crate::ssa::types::{BlockId, ControlHeader, FuncBody, InstKind, Terminator, ValueId, ValueRef};
 use polytype::Type;
 use std::collections::{HashMap, HashSet};
 
@@ -111,9 +111,11 @@ fn resolve_substitutions(subs: &HashMap<ValueId, ValueId>) -> HashMap<ValueId, V
 }
 
 fn apply_substitutions(body: &mut FuncBody, subs: &HashMap<ValueId, ValueId>) {
-    let mut sub = |v: &mut ValueId| {
-        if let Some(&r) = subs.get(v) {
-            *v = r;
+    let mut sub = |vr: &mut ValueRef| {
+        if let ValueRef::Ssa(id) = vr {
+            if let Some(&r) = subs.get(id) {
+                *vr = ValueRef::Ssa(r);
+            }
         }
     };
 
@@ -143,22 +145,26 @@ fn project_fold(body: &mut FuncBody) {
 
     for (_iid, inst) in &body.inner.insts {
         if let InstKind::Project { base, index } = &inst.data {
-            let mut resolved_base = *base;
-            while let Some(&next) = substitutions.get(&resolved_base) {
-                resolved_base = next;
-            }
+            if let Some(base_id) = base.as_ssa() {
+                let mut resolved_base = base_id;
+                while let Some(&next) = substitutions.get(&resolved_base) {
+                    resolved_base = next;
+                }
 
-            if let Some(&def_iid) = def_map.get(&resolved_base) {
-                let elems = match &body.inner.insts[def_iid].data {
-                    InstKind::Tuple(elems)
-                    | InstKind::Vector(elems)
-                    | InstKind::ArrayLit { elements: elems } => Some(elems),
-                    _ => None,
-                };
-                if let Some(elems) = elems {
-                    if let Some(&elem) = elems.get(*index as usize) {
-                        if let Some(result) = inst.result {
-                            substitutions.insert(result, elem);
+                if let Some(&def_iid) = def_map.get(&resolved_base) {
+                    let elems = match &body.inner.insts[def_iid].data {
+                        InstKind::Tuple(elems)
+                        | InstKind::Vector(elems)
+                        | InstKind::ArrayLit { elements: elems } => Some(elems),
+                        _ => None,
+                    };
+                    if let Some(elems) = elems {
+                        if let Some(elem) = elems.get(*index as usize) {
+                            if let Some(elem_id) = elem.as_ssa() {
+                                if let Some(result) = inst.result {
+                                    substitutions.insert(result, elem_id);
+                                }
+                            }
                         }
                     }
                 }
@@ -234,7 +240,7 @@ fn dce(body: &mut FuncBody) {
     let mut used: HashSet<ValueId> = HashSet::new();
 
     for (_iid, inst) in &body.inner.insts {
-        for v in inst.data.value_uses() {
+        for v in inst.data.ssa_uses() {
             used.insert(v);
         }
     }

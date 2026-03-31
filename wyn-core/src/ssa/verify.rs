@@ -161,7 +161,7 @@ impl<'a> Verifier<'a> {
             let inst = self.body.get_inst(inst_id);
 
             // Check uses
-            for value in inst.data.value_uses() {
+            for value in inst.data.ssa_uses() {
                 self.check_value_defined(value, block_id, Some(inst_idx));
             }
 
