@@ -62,7 +62,10 @@ fn lower_func_body(old_body: &FuncBody) -> FuncBody {
     let old_entry = old_body.entry_block();
     block_map.insert(old_entry, builder.entry());
 
-    // Pre-create all non-entry blocks with their parameters
+    // Pre-create all non-entry blocks with their parameters.
+    // Skip dead blocks (empty insts + Unreachable terminator) — they can't be
+    // branched to, and Unreachable doubles as the builder's "unterminated" sentinel
+    // so finish() would reject them.
     for (bid, block) in &old_body.inner.blocks {
         if bid == old_entry {
             // Entry block params (if any)
@@ -71,6 +74,14 @@ fn lower_func_body(old_body: &FuncBody) -> FuncBody {
                 let new_val = builder.add_block_param(builder.entry(), ty);
                 value_map.insert(param, new_val);
             }
+            continue;
+        }
+
+        // Skip dead blocks entirely
+        if block.insts.is_empty()
+            && block.params.is_empty()
+            && matches!(block.term, Terminator::Unreachable)
+        {
             continue;
         }
 
@@ -86,13 +97,11 @@ fn lower_func_body(old_body: &FuncBody) -> FuncBody {
 
     // Process each block
     for (bid, block) in &old_body.inner.blocks {
-        // Skip dead blocks
-        if block.insts.is_empty() && matches!(block.term, Terminator::Unreachable) {
-            let new_block_id = block_map[&bid];
-            if new_block_id != builder.entry() {
-                builder.switch_to_block_unchecked(new_block_id);
-            }
-            builder.terminate(Terminator::Unreachable).ok();
+        // Skip dead blocks (not pre-created, nothing branches to them)
+        if block.insts.is_empty()
+            && block.params.is_empty()
+            && matches!(block.term, Terminator::Unreachable)
+        {
             continue;
         }
 

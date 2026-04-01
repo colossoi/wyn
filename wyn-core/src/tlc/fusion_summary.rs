@@ -27,6 +27,14 @@ pub enum DefSummary {
         param_idx: usize,
         props: ReduceProps,
     },
+    /// Body produces an array via map, but the input is not a parameter
+    /// (e.g., comes from globals). The callee's params are stored so the
+    /// caller can substitute them with call arguments when inlining.
+    ProducesMap {
+        lam: Lambda,
+        inputs: Vec<super::ArrayExpr>,
+        callee_params: Vec<(crate::SymbolId, polytype::Type<crate::ast::TypeName>)>,
+    },
     /// Body is not a recognizable SOAC pattern
     Unknown,
 }
@@ -51,29 +59,28 @@ pub fn summarize_def(def: &Def) -> DefSummary {
 
     let param_syms: Vec<SymbolId> = params.iter().map(|(sym, _)| *sym).collect();
 
-    extract_soac_summary(&inner_body, &param_syms).unwrap_or(DefSummary::Unknown)
+    extract_soac_summary(&inner_body, &param_syms, &params).unwrap_or(DefSummary::Unknown)
 }
 
 /// Check if a def body is essentially a single SOAC applied to one of its parameters.
 /// Strips trivial let bindings to see through administrative noise.
-fn extract_soac_summary(body: &Term, params: &[SymbolId]) -> Option<DefSummary> {
+fn extract_soac_summary(
+    body: &Term,
+    params: &[SymbolId],
+    full_params: &[(SymbolId, polytype::Type<crate::ast::TypeName>)],
+) -> Option<DefSummary> {
     match &body.kind {
-        // Direct SOAC
-        TermKind::Soac(soac) => extract_from_soac(soac, params),
+        TermKind::Soac(soac) => extract_from_soac(soac, params, full_params),
 
-        // Let binding: check if it's trivial wrapping around a SOAC tail
         TermKind::Let { rhs, body, .. } => {
-            // If the RHS is the SOAC and it's the tail of the function, use it
             if matches!(rhs.kind, TermKind::Soac(_)) {
-                // But only if the body just returns a variable (not more computation)
                 if matches!(body.kind, TermKind::Var(_)) {
                     if let TermKind::Soac(soac) = &rhs.kind {
-                        return extract_from_soac(soac, params);
+                        return extract_from_soac(soac, params, full_params);
                     }
                 }
             }
-            // Otherwise, try the body (stripping the let)
-            extract_soac_summary(body, params)
+            extract_soac_summary(body, params, full_params)
         }
 
         // Reject anything with control flow
@@ -84,17 +91,28 @@ fn extract_soac_summary(body: &Term, params: &[SymbolId]) -> Option<DefSummary> 
 }
 
 /// Extract a summary from a concrete SOAC operation.
-fn extract_from_soac(soac: &SoacOp, params: &[SymbolId]) -> Option<DefSummary> {
+fn extract_from_soac(
+    soac: &SoacOp,
+    params: &[SymbolId],
+    full_params: &[(SymbolId, polytype::Type<crate::ast::TypeName>)],
+) -> Option<DefSummary> {
     match soac {
         SoacOp::Map { lam, inputs } => {
-            // Check if the input is a single Ref to a parameter
-            if inputs.len() != 1 {
-                return None;
+            // Best case: single input is a parameter
+            if inputs.len() == 1 {
+                if let Some(param_idx) = input_param_index(&inputs[0], params) {
+                    return Some(DefSummary::Map {
+                        lam: lam.clone(),
+                        param_idx,
+                    });
+                }
             }
-            let param_idx = input_param_index(&inputs[0], params)?;
-            Some(DefSummary::Map {
+            // Fallback: function produces a map result, but input isn't a param.
+            // Still useful — caller can inline to expose the map.
+            Some(DefSummary::ProducesMap {
                 lam: lam.clone(),
-                param_idx,
+                inputs: inputs.clone(),
+                callee_params: full_params.to_vec(),
             })
         }
         SoacOp::Reduce { op, ne, input, props } => {

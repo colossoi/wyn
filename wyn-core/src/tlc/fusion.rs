@@ -85,6 +85,12 @@ fn transform_term_s(
             let body = transform_term_s(*body, symbols, term_ids, sums);
 
             // Try to fuse
+            log::debug!(
+                "try_fuse_let: name={:?}, rhs_kind={:?}, body_kind={:?}",
+                name,
+                std::mem::discriminant(&rhs.kind),
+                std::mem::discriminant(&body.kind)
+            );
             if let Some(fused) = try_fuse_let(name, &name_ty, &rhs, body.clone(), symbols, term_ids, sums) {
                 return fused;
             }
@@ -459,21 +465,46 @@ fn try_fuse_let(
     let (producer_lam, producer_inputs) = match &rhs.kind {
         TermKind::Soac(SoacOp::Map { lam, inputs }) => (lam.clone(), inputs.clone()),
 
-        // Interprocedural: function call where callee has a Map summary
+        // Interprocedural: function call where callee has a Map or ProducesMap summary
         TermKind::App { ref func, ref arg } => {
             use super::monomorphize::Monomorphizer;
             let (func_term, args) = Monomorphizer::collect_application_spine(func, arg);
             if let TermKind::Var(callee_sym) = &func_term.kind {
-                if let Some(DefSummary::Map { lam, param_idx }) = sums.get(callee_sym) {
-                    if *param_idx < args.len() {
+                match sums.get(callee_sym) {
+                    Some(DefSummary::Map { lam, param_idx }) if *param_idx < args.len() => {
                         let input_term = args[*param_idx].clone();
                         let input_expr = ArrayExpr::Ref(Box::new(input_term));
                         (lam.clone(), vec![input_expr])
-                    } else {
-                        return None;
                     }
-                } else {
-                    return None;
+                    Some(DefSummary::ProducesMap {
+                        lam,
+                        inputs,
+                        callee_params,
+                    }) => {
+                        if args.len() != callee_params.len() {
+                            return None;
+                        }
+                        // Substitute the callee's param symbols with the call args
+                        // in both the lambda body and input expressions.
+                        let mut result_lam = lam.clone();
+                        let mut result_inputs = inputs.clone();
+                        for (i, (param_sym, _)) in callee_params.iter().enumerate() {
+                            let arg_sym = match &args[i].kind {
+                                TermKind::Var(s) => *s,
+                                _ => return None, // non-trivial arg, bail
+                            };
+                            // Substitute in lambda body
+                            result_lam.body =
+                                Box::new(substitute_sym(*result_lam.body, *param_sym, arg_sym, term_ids));
+                            // Substitute in input expressions
+                            result_inputs = result_inputs
+                                .into_iter()
+                                .map(|inp| substitute_sym_array_expr(inp, *param_sym, arg_sym, term_ids))
+                                .collect();
+                        }
+                        (result_lam, result_inputs)
+                    }
+                    _ => return None,
                 }
             } else {
                 return None;
@@ -509,10 +540,13 @@ fn try_fuse_let(
             props,
             result_ty,
         } => {
-            // Phase 1 restrictions:
-            // - only fuse single-input map producers
-            // - reduce op must have exactly 2 params (acc, elem), not curried
-            if producer_inputs.len() != 1 || op.params.len() != 2 {
+            // Only fuse single-input map producers
+            if producer_inputs.len() != 1 {
+                return None;
+            }
+            // Uncurry the reduce op if needed
+            let op = uncurry_lambda(op.clone());
+            if op.params.len() != 2 {
                 return None;
             }
             let composed_op =
@@ -619,22 +653,33 @@ fn find_fusion_consumer(term: &Term, name: SymbolId, sums: &Summaries) -> Option
                         props,
                     }) if *param_idx < args.len() => {
                         if let TermKind::Var(sym) = &args[*param_idx].kind {
-                            if *sym == name && op.params.len() == 2 {
-                                return Some(ConsumerInfo {
-                                    kind: ConsumerKind::Reduce {
-                                        op: op.clone(),
-                                        ne: ne.clone(),
-                                        props: props.clone(),
-                                        result_ty: term.ty.clone(),
-                                    },
-                                });
+                            if *sym == name {
+                                // Uncurry the reduce op if needed
+                                let uncurried_op = uncurry_lambda(op.clone());
+                                if uncurried_op.params.len() >= 2 {
+                                    return Some(ConsumerInfo {
+                                        kind: ConsumerKind::Reduce {
+                                            op: uncurried_op,
+                                            ne: ne.clone(),
+                                            props: props.clone(),
+                                            result_ty: term.ty.clone(),
+                                        },
+                                    });
+                                }
                             }
                         }
                     }
                     _ => {}
                 }
             }
-            None
+            // Interprocedural check didn't match — recurse into func/arg
+            if count_uses(func, name) == 1 {
+                find_fusion_consumer(func, name, sums)
+            } else if count_uses(arg, name) == 1 {
+                find_fusion_consumer(arg, name, sums)
+            } else {
+                None
+            }
         }
 
         // The consumer might be nested in a Let body
@@ -644,7 +689,10 @@ fn find_fusion_consumer(term: &Term, name: SymbolId, sums: &Summaries) -> Option
             body,
             ..
         } => {
-            if count_uses(rhs, name) == 1 {
+            // Alias let: `let tmp = name in body` — follow the alias
+            if matches!(&rhs.kind, TermKind::Var(sym) if *sym == name) {
+                find_fusion_consumer(body, *inner_name, sums)
+            } else if count_uses(rhs, name) == 1 {
                 find_fusion_consumer(rhs, name, sums)
             } else if *inner_name != name && count_uses(body, name) == 1 {
                 find_fusion_consumer(body, name, sums)
@@ -655,6 +703,21 @@ fn find_fusion_consumer(term: &Term, name: SymbolId, sums: &Summaries) -> Option
 
         _ => None,
     }
+}
+
+/// Uncurry a lambda: flatten `|a| |b| body` into `|a, b| body`.
+fn uncurry_lambda(mut lam: Lambda) -> Lambda {
+    loop {
+        match lam.body.kind {
+            TermKind::Lambda(inner) => {
+                lam.params.extend(inner.params);
+                lam.body = inner.body;
+                lam.ret_ty = inner.ret_ty;
+            }
+            _ => break,
+        }
+    }
+    lam
 }
 
 /// Check if a single ArrayExpr is a Ref pointing to `name`.
@@ -701,10 +764,35 @@ fn replace_fusion_consumer(
             }
         }
 
-        // Interprocedural consumer: function call that uses `name` as an argument
-        TermKind::App { .. } => {
-            // If this App uses `name` somewhere in its args, it might be the consumer
-            if count_uses(term, name) == 1 { replacement } else { term.clone() }
+        // App: check if name appears here, and if so, replace the innermost
+        // App that directly uses name as an argument.
+        TermKind::App { func, arg } => {
+            // If name is directly an arg (not nested deeper), this is the consumer App
+            if matches!(&arg.kind, TermKind::Var(s) if *s == name) && count_uses(func, name) == 0 {
+                replacement
+            } else if count_uses(func, name) == 1 {
+                Term {
+                    id: term_ids.next_id(),
+                    ty: term.ty.clone(),
+                    span: term.span,
+                    kind: TermKind::App {
+                        func: Box::new(replace_fusion_consumer(func, name, replacement, term_ids)),
+                        arg: arg.clone(),
+                    },
+                }
+            } else if count_uses(arg, name) == 1 {
+                Term {
+                    id: term_ids.next_id(),
+                    ty: term.ty.clone(),
+                    span: term.span,
+                    kind: TermKind::App {
+                        func: func.clone(),
+                        arg: Box::new(replace_fusion_consumer(arg, name, replacement, term_ids)),
+                    },
+                }
+            } else {
+                term.clone()
+            }
         }
 
         TermKind::Let {
@@ -713,7 +801,11 @@ fn replace_fusion_consumer(
             rhs,
             body,
         } => {
-            if count_uses(rhs, name) == 1 {
+            // Alias let: `let tmp = name in body` — follow the alias
+            if matches!(&rhs.kind, TermKind::Var(sym) if *sym == name) {
+                // Drop the alias let entirely, replace in body with the new name
+                replace_fusion_consumer(body, *inner_name, replacement, term_ids)
+            } else if count_uses(rhs, name) == 1 {
                 // The consumer is in the rhs
                 Term {
                     id: term_ids.next_id(),
@@ -1257,7 +1349,7 @@ fn substitute_sym_soac(soac: SoacOp, old: SymbolId, new: SymbolId, term_ids: &mu
             indices,
             values,
         } => SoacOp::Scatter {
-            dest,
+            dest: substitute_sym_place(dest, old, new, term_ids),
             indices: substitute_sym_array_expr(indices, old, new, term_ids),
             values: substitute_sym_array_expr(values, old, new, term_ids),
         },
@@ -1269,13 +1361,30 @@ fn substitute_sym_soac(soac: SoacOp, old: SymbolId, new: SymbolId, term_ids: &mu
             values,
             props,
         } => SoacOp::ReduceByIndex {
-            dest,
+            dest: substitute_sym_place(dest, old, new, term_ids),
             op: substitute_sym_lambda(op, old, new, term_ids),
             ne: Box::new(substitute_sym(*ne, old, new, term_ids)),
             indices: substitute_sym_array_expr(indices, old, new, term_ids),
             values: substitute_sym_array_expr(values, old, new, term_ids),
             props,
         },
+    }
+}
+
+fn substitute_sym_place(place: Place, old: SymbolId, new: SymbolId, term_ids: &mut TermIdSource) -> Place {
+    match place {
+        Place::BufferSlice {
+            base,
+            offset,
+            shape,
+            elem_ty,
+        } => Place::BufferSlice {
+            base: Box::new(substitute_sym(*base, old, new, term_ids)),
+            offset: Box::new(substitute_sym(*offset, old, new, term_ids)),
+            shape,
+            elem_ty,
+        },
+        Place::LocalArray { id, shape, elem_ty } => Place::LocalArray { id, shape, elem_ty },
     }
 }
 

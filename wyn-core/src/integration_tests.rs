@@ -54,6 +54,134 @@ fn has_function(ssa: &Program, name: &str) -> bool {
     ssa.functions.iter().any(|f| f.name == name)
 }
 
+/// Helper to compile up through TLC fusion (stops before defunctionalization).
+fn compile_to_fused_tlc(input: &str) -> crate::tlc::Program {
+    let mut frontend = crate::cached_frontend();
+    let parsed = crate::Compiler::parse(input, &mut frontend.node_counter).expect("Parsing failed");
+    let alias_checked = parsed
+        .desugar(&mut frontend.node_counter)
+        .expect("Desugaring failed")
+        .resolve(&mut frontend.module_manager)
+        .expect("Name resolution failed")
+        .fold_ast_constants()
+        .type_check(&mut frontend.module_manager, &mut frontend.schemes)
+        .expect("Type checking failed")
+        .alias_check()
+        .expect("Borrow checking failed");
+
+    let known_defs = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
+    let tlc = alias_checked.to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager);
+    let fused = tlc.partial_eval().fuse_maps();
+    fused.tlc
+}
+
+// =============================================================================
+// SOAC Fusion Integration Tests
+// =============================================================================
+
+#[test]
+fn test_map_reduce_fusion_end_to_end() {
+    let source = r#"
+def globalArr: [4]f32 = [10.0, 20.0, 30.0, 40.0]
+
+def myMap(ro: f32, rd: f32) [4]f32 =
+  map(|x: f32| x + ro + rd, globalArr)
+
+def myReduce(hits: [4]f32) f32 =
+  reduce(|acc: f32, x: f32| if acc < x then acc else x, 999.0, hits)
+
+#[fragment]
+entry fragment_main() #[location(0)] vec4f32 =
+  let hits = myMap(1.0, 2.0) in
+  let closest = myReduce(hits) in
+  @[closest, 0.0, 0.0, 1.0]
+"#;
+
+    let tlc = compile_to_fused_tlc(source);
+
+    // After fusion, check that myMap's body is no longer a standalone map
+    // or that some def contains a fused reduce
+    let my_map_has_map = tlc.defs.iter().any(|def| {
+        let name = tlc.symbols.get(def.name).cloned().unwrap_or_default();
+        if name != "myMap" {
+            return false;
+        }
+        let (_, body) = crate::tlc::extract_lambda_params(&def.body);
+        has_soac_kind(&body, "Map")
+    });
+
+    let any_has_reduce = tlc.defs.iter().any(|def| {
+        let (_, body) = crate::tlc::extract_lambda_params(&def.body);
+        has_soac_kind(&body, "Reduce")
+    });
+
+    // Check fragment_main: does it contain a fused Reduce?
+    let fragment_main = tlc
+        .defs
+        .iter()
+        .find(|def| tlc.symbols.get(def.name).map(|s| s.as_str()) == Some("fragment_main"))
+        .expect("fragment_main not found");
+
+    let (_, frag_body) = crate::tlc::extract_lambda_params(&fragment_main.body);
+    let frag_has_reduce = has_soac_kind(&frag_body, "Reduce");
+    let frag_has_map = has_soac_kind(&frag_body, "Map");
+
+    eprintln!("fragment_main has Reduce: {}", frag_has_reduce);
+    eprintln!("fragment_main has Map: {}", frag_has_map);
+    eprintln!(
+        "fragment_main body: {:?}",
+        std::mem::discriminant(&frag_body.kind)
+    );
+
+    // Print the Let chain structure
+    fn print_term(term: &crate::tlc::Term, syms: &crate::SymbolTable, depth: usize) {
+        let indent = "  ".repeat(depth);
+        match &term.kind {
+            crate::tlc::TermKind::Let { name, rhs, body, .. } => {
+                let n = syms.get(*name).cloned().unwrap_or_else(|| format!("{:?}", name));
+                eprintln!("{indent}let {n} = ...");
+                print_term(rhs, syms, depth + 1);
+                print_term(body, syms, depth);
+            }
+            crate::tlc::TermKind::Soac(soac) => {
+                eprintln!("{indent}SOAC {:?}", std::mem::discriminant(soac));
+            }
+            crate::tlc::TermKind::App { func, arg } => {
+                eprintln!("{indent}App:");
+                print_term(func, syms, depth + 1);
+                print_term(arg, syms, depth + 1);
+            }
+            crate::tlc::TermKind::Var(s) => {
+                let n = syms.get(*s).cloned().unwrap_or_else(|| format!("{:?}", s));
+                eprintln!("{indent}Var({n})");
+            }
+            other => {
+                eprintln!("{indent}{:?}", std::mem::discriminant(other));
+            }
+        }
+    }
+    print_term(&frag_body, &tlc.symbols, 0);
+
+    // The fusion should have replaced the let chain with a fused SOAC
+    // or at minimum the fragment_main should contain a Reduce
+    assert!(
+        frag_has_reduce,
+        "Expected fragment_main to contain a fused Reduce after interprocedural fusion"
+    );
+}
+
+fn has_soac_kind(term: &crate::tlc::Term, kind: &str) -> bool {
+    use crate::tlc::{SoacOp, TermKind};
+    match &term.kind {
+        TermKind::Soac(SoacOp::Map { .. }) if kind == "Map" => true,
+        TermKind::Soac(SoacOp::Reduce { .. }) if kind == "Reduce" => true,
+        TermKind::Let { rhs, body, .. } => has_soac_kind(rhs, kind) || has_soac_kind(body, kind),
+        TermKind::Lambda(lam) => has_soac_kind(&lam.body, kind),
+        TermKind::App { func, arg } => has_soac_kind(func, kind) || has_soac_kind(arg, kind),
+        _ => false,
+    }
+}
+
 // =============================================================================
 // Basic Expressions
 // =============================================================================
@@ -895,6 +1023,36 @@ fn test_spirv_raytrace() {
     let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../testfiles/raytrace.wyn"))
         .expect("Could not read testfiles/raytrace.wyn");
     compile_to_spirv(&source).expect("raytrace.wyn should compile to SPIR-V");
+}
+
+/// Regression: if/else before interprocedural map+reduce fusion caused
+/// UnterminatedBlock in soac_lower. The if/else creates a dead Unreachable
+/// block in SSA, which soac_lower's rebuild would pre-create but finish()
+/// rejected because Unreachable doubles as the "unterminated" sentinel.
+#[test]
+fn test_interproc_fusion_if_before_fused_reduce() {
+    let source = r#"
+def maxDist: f32 = 100.0
+def globalData: [12]f32 = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
+
+def producer(x: f32) [12]f32 =
+  map(|a: f32| a * x, globalData)
+
+def consumer(arr: [12]f32) f32 =
+  reduce(|acc: f32, x: f32| if acc < x then acc else x, maxDist, arr)
+
+def scene(x: f32, y: f32) f32 =
+  let ground = if y > 0.0 then y else maxDist in
+  let hits = producer(x) in
+  let closest = consumer(hits) in
+  closest + ground
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 =
+  let r = scene(1.0, 0.5) in
+  @[r, 0.0, 0.0, 1.0]
+"#;
+    compile_to_spirv(source).expect("if-before-interproc-fusion should compile");
 }
 
 /// Verify raytrace.wyn compiles through SSA to SPIR-V without errors.
