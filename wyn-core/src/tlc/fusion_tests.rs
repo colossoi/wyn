@@ -1,4 +1,3 @@
-
 use crate::ast::Span;
 use crate::tlc::fusion::*;
 

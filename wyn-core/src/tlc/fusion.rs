@@ -22,8 +22,14 @@ use super::{
 // Public entry point
 // =============================================================================
 
-/// Fuse consecutive map operations in a TLC program.
+/// Fuse consecutive SOAC operations in a TLC program.
+///
+/// Normalizes the program first (lifts SOACs into let bindings), then
+/// fuses map-map and map-reduce chains within each function body.
 pub fn fuse_maps(program: Program) -> Program {
+    // Normalize: lift SOACs out of nested positions into let bindings
+    let program = super::normalize::normalize(program);
+
     let mut symbols = program.symbols;
     let mut term_ids = TermIdSource::new();
 

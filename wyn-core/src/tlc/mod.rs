@@ -12,6 +12,7 @@ pub mod inline;
 pub mod monomorphize;
 #[cfg(test)]
 mod monomorphize_tests;
+pub mod normalize;
 pub mod partial_eval;
 #[cfg(test)]
 mod partial_eval_tests;
