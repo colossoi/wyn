@@ -978,5 +978,70 @@ pub fn eliminate_empty_blocks<I, E, T: Clone + Debug>(func: &mut Function<I, E, 
     }
 }
 
+// =============================================================================
+// Block splitting
+// =============================================================================
+
+/// Result of splitting a block at an instruction.
+pub struct SplitResult {
+    /// The new continuation block that holds instructions after the split point.
+    pub cont_block: BlockId,
+}
+
+/// Split a block at the given instruction, removing that instruction.
+///
+/// After splitting:
+/// - `block` retains instructions before `inst` and gets `Unreachable` terminator
+///   (caller must set the real terminator)
+/// - A new continuation block is created with:
+///   - A block parameter for the removed instruction's result (if any),
+///     with all uses of the result rewritten to this parameter
+///   - The instructions that were after `inst`
+///   - The original block's terminator
+///
+/// Returns the continuation block ID. If the removed instruction had a result,
+/// the continuation block's first (and only) parameter is the replacement value.
+pub fn split_block_at<I: Instr, E: Copy + Eq + Hash + Debug, T: Clone + Debug>(
+    func: &mut Function<I, E, T>,
+    inst: InstId,
+) -> SplitResult {
+    let block = func.insts[inst].parent;
+    let inst_list = &func.blocks[block].insts;
+    let pos = inst_list
+        .iter()
+        .position(|&id| id == inst)
+        .expect("split_block_at: inst not found in its parent block");
+
+    let after_insts: Vec<InstId> = inst_list[pos + 1..].to_vec();
+    let original_term = func.blocks[block].term.clone();
+
+    // Truncate the block to just before the split instruction.
+    func.blocks[block].insts.truncate(pos);
+    func.blocks[block].term = Terminator::Unreachable;
+
+    // Create continuation block.
+    let cont_block = func.create_block();
+
+    // If the instruction produced a result, add a block param for it.
+    if let Some(result_val) = func.insts[inst].result {
+        let ty = func.values[result_val].ty.clone();
+        let cont_param = func.add_block_param(cont_block, ty);
+        func.replace_all_uses(result_val, cont_param);
+        func.values.remove(result_val);
+    }
+
+    // Remove the instruction.
+    func.insts.remove(inst);
+
+    // Move remaining instructions to continuation.
+    for &inst_id in &after_insts {
+        func.insts[inst_id].parent = cont_block;
+    }
+    func.blocks[cont_block].insts = after_insts;
+    func.blocks[cont_block].term = original_term;
+
+    SplitResult { cont_block }
+}
+
 #[cfg(test)]
 mod tests;

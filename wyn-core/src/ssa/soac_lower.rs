@@ -4,7 +4,7 @@
 //! It transforms `InstKind::Soac(Soac::Map { .. })` into for-range loops,
 //! `InstKind::Soac(Soac::Reduce { .. })` into accumulation loops, etc.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::TypeName;
 use crate::ssa::builder::FuncBuilder;
@@ -95,16 +95,11 @@ fn lower_func_body(old_body: &FuncBody) -> FuncBody {
         }
     }
 
-    // Process each block
-    for (bid, block) in &old_body.inner.blocks {
-        // Skip dead blocks (not pre-created, nothing branches to them)
-        if block.insts.is_empty()
-            && block.params.is_empty()
-            && matches!(block.term, Terminator::Unreachable)
-        {
-            continue;
-        }
-
+    // Process blocks in RPO so that values are defined before use.
+    let rpo = compute_rpo(old_body);
+    for bid in &rpo {
+        let bid = *bid;
+        let block = &old_body.inner.blocks[bid];
         let new_block_id = block_map[&bid];
         if bid != old_entry {
             builder.switch_to_block_unchecked(new_block_id);
@@ -514,4 +509,30 @@ fn expand_reduce(
     builder.switch_to_block(loop_blocks.exit).ok()?;
 
     Some(loop_blocks.result)
+}
+
+/// Compute reverse post-order of blocks reachable from the entry.
+fn compute_rpo(body: &FuncBody) -> Vec<BlockId> {
+    let entry = body.entry_block();
+    let mut visited = HashSet::new();
+    let mut post_order = Vec::new();
+    rpo_visit(body, entry, &mut visited, &mut post_order);
+    post_order.reverse();
+    post_order
+}
+
+fn rpo_visit(
+    body: &FuncBody,
+    bid: BlockId,
+    visited: &mut HashSet<BlockId>,
+    post_order: &mut Vec<BlockId>,
+) {
+    if !visited.insert(bid) {
+        return;
+    }
+    let block = &body.inner.blocks[bid];
+    for succ in block.term.successors() {
+        rpo_visit(body, succ, visited, post_order);
+    }
+    post_order.push(bid);
 }

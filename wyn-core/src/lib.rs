@@ -850,6 +850,19 @@ pub struct SsaConverted {
 }
 
 impl SsaConverted {
+    /// Inline small functions at the SSA level.
+    pub fn inline_small(self) -> SsaInlined {
+        let ssa = ssa::ssa_inline::inline_small_functions(self.ssa);
+        SsaInlined { ssa }
+    }
+}
+
+/// SSA after small function inlining
+pub struct SsaInlined {
+    pub ssa: ssa::types::Program,
+}
+
+impl SsaInlined {
     /// Parallelize SOACs in compute shaders.
     pub fn parallelize_soacs(self) -> SsaParallelized {
         let result = parallelization::parallelize_soacs(self.ssa);

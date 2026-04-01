@@ -31,6 +31,7 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .inline()
         .to_ssa()
         .map_err(|e| crate::err_spirv!("{}", e))?
+        .inline_small()
         .parallelize_soacs()
         .filter_reachable()
         .optimize()
@@ -499,6 +500,9 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     let ssa = tlc.to_ssa().expect("to_ssa");
     eprintln!("=== to_ssa OK ===");
 
+    let ssa = ssa.inline_small();
+    eprintln!("=== inline_small OK ===");
+
     let ssa = ssa.parallelize_soacs();
     eprintln!("=== parallelize_soacs OK ===");
 
@@ -567,6 +571,9 @@ entry main(data: []i32) []i32 = [first(data)]
 
     let ssa = tlc.to_ssa().expect("to_ssa");
     eprintln!("=== to_ssa OK ===");
+
+    let ssa = ssa.inline_small();
+    eprintln!("=== inline_small OK ===");
 
     let ssa = ssa.parallelize_soacs();
     eprintln!("=== parallelize_soacs OK ===");

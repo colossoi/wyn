@@ -249,6 +249,9 @@ fn compile_file(
         }
     }
 
+    // Inline small functions
+    let ssa = time("ssa_inline", verbose, || ssa.inline_small());
+
     // Parallelize SOACs in compute shaders
     let parallelized = time("parallelize_soacs", verbose, || ssa.parallelize_soacs());
 
