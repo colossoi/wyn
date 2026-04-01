@@ -309,8 +309,8 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 //
 // TLC Pipeline (AST -> SSA):
 //       -> .to_tlc()                                    -> TlcTransformed
-//       -> .partial_eval()                              -> TlcTransformed (optimized)
-//       -> .fuse_maps()                                 -> TlcTransformed (fused)
+//       -> .partial_eval()                              -> TlcPartialEvaled
+//       -> .fuse_maps()                                 -> TlcFused
 //       -> .defunctionalize()                           -> TlcDefunctionalized
 //       -> .monomorphize()                              -> TlcMonomorphized
 //       -> .soa_transform()                             -> TlcSoaTransformed
@@ -689,28 +689,48 @@ pub struct TlcTransformed {
 }
 
 impl TlcTransformed {
-    /// Apply partial evaluation (constant folding, algebraic simplifications, etc.)
-    pub fn partial_eval(self) -> TlcTransformed {
+    /// Constant folding and algebraic simplifications.
+    pub fn partial_eval(self) -> TlcPartialEvaled {
         let optimized = tlc::partial_eval::PartialEvaluator::partial_eval(self.tlc);
-        TlcTransformed {
+        TlcPartialEvaled {
             tlc: optimized,
             type_table: self.type_table,
             known_defs: self.known_defs,
             schemes: self.schemes,
         }
     }
+}
 
+/// TLC after partial evaluation
+pub struct TlcPartialEvaled {
+    pub tlc: tlc::Program,
+    pub type_table: TypeTable,
+    known_defs: std::collections::HashSet<String>,
+    schemes: HashMap<String, types::TypeScheme>,
+}
+
+impl TlcPartialEvaled {
     /// Fuse consecutive map operations to eliminate intermediate arrays.
-    pub fn fuse_maps(self) -> TlcTransformed {
+    pub fn fuse_maps(self) -> TlcFused {
         let fused = tlc::fusion::fuse_maps(self.tlc);
-        TlcTransformed {
+        TlcFused {
             tlc: fused,
             type_table: self.type_table,
             known_defs: self.known_defs,
             schemes: self.schemes,
         }
     }
+}
 
+/// TLC after map fusion
+pub struct TlcFused {
+    pub tlc: tlc::Program,
+    pub type_table: TypeTable,
+    known_defs: std::collections::HashSet<String>,
+    schemes: HashMap<String, types::TypeScheme>,
+}
+
+impl TlcFused {
     /// Defunctionalize: lift lambdas and flatten SOAC closure captures.
     pub fn defunctionalize(self) -> TlcDefunctionalized {
         let defunc = tlc::defunctionalize::defunctionalize(self.tlc, &self.known_defs);

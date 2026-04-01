@@ -43,8 +43,8 @@ The compiler uses a multi-stage pipeline with typestate-driven phases. Each stag
 | Stage | Module | Description |
 |-------|--------|-------------|
 | **TlcTransformed** | `tlc::transform` | AST converted to minimal typed lambda calculus |
-| **TlcTransformed** | `tlc::partial_eval` | Constant folding and algebraic simplifications (optional) |
-| **TlcTransformed** | `tlc::fuse_maps` | Map fusion (optional) |
+| **TlcPartialEvaled** | `tlc::partial_eval` | Constant folding and algebraic simplifications |
+| **TlcFused** | `tlc::fuse_maps` | Consecutive map operations fused to eliminate intermediate arrays |
 | **TlcDefunctionalized** | `tlc::defunctionalize` | Lambda lifting + SOAC capture flattening |
 | **TlcMonomorphized** | `tlc::specialize`, `tlc::monomorphize` | Polymorphic intrinsics specialized; user functions monomorphized |
 | **TlcSoaTransformed** | `tlc::soa_transform` | Structure-of-Arrays transform for tuple arrays |
