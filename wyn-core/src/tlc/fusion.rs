@@ -1,10 +1,10 @@
-//! Map fusion pass for TLC.
+//! SOAC fusion pass for TLC.
 //!
-//! Fuses consecutive `map` operations to eliminate intermediate arrays:
+//! Fuses consecutive SOAC operations to eliminate intermediate arrays:
 //!
 //! ```text
-//! let b = map(f, a) in map(g, b)
-//!   =>  map(g∘f, a)
+//! let b = map(f, a) in map(g, b)         =>  map(g∘f, a)
+//! let b = map(f, a) in reduce(op, ne, b) =>  reduce(op∘f, ne, a)
 //! ```
 //!
 //! Operates before defunctionalization — lambdas are full expressions
@@ -14,7 +14,9 @@ use crate::ast::{Span, TypeName};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 
-use super::{ArrayExpr, Def, Lambda, LoopKind, Place, Program, SoacOp, Term, TermIdSource, TermKind};
+use super::{
+    ArrayExpr, Def, Lambda, LoopKind, Place, Program, ReduceProps, SoacOp, Term, TermIdSource, TermKind,
+};
 
 // =============================================================================
 // Public entry point
@@ -415,51 +417,104 @@ fn try_fuse_let(
         return None;
     }
 
-    // 3. Find the consumer: the single use must be as the sole input to a Map
-    let consumer_info = find_consumer_map(&body, name)?;
+    // 3. Find the consumer: the single use must be as the sole input to a Map or Reduce
+    let consumer_info = find_fusion_consumer(&body, name)?;
 
-    // 4. Compose the lambdas: g ∘ f
-    let composed = compose_lambdas(
-        producer_lam.clone(),
-        consumer_info.consumer_lam.clone(),
-        rhs.span,
-        symbols,
-        term_ids,
-    );
-
-    // 5. Build the fused Map
-    let fused_map = SoacOp::Map {
-        lam: composed,
-        inputs: producer_inputs.clone(),
+    // 4. Build the fused SOAC based on consumer kind
+    let (fused_soac, result_ty) = match &consumer_info.kind {
+        ConsumerKind::Map { lam, result_ty } => {
+            let composed = compose_lambdas(producer_lam.clone(), lam.clone(), rhs.span, symbols, term_ids);
+            (
+                SoacOp::Map {
+                    lam: composed,
+                    inputs: producer_inputs.clone(),
+                },
+                result_ty.clone(),
+            )
+        }
+        ConsumerKind::Reduce {
+            op,
+            ne,
+            props,
+            result_ty,
+        } => {
+            // Phase 1 restrictions:
+            // - only fuse single-input map producers
+            // - reduce op must have exactly 2 params (acc, elem), not curried
+            if producer_inputs.len() != 1 || op.params.len() != 2 {
+                return None;
+            }
+            let composed_op =
+                compose_map_reduce(producer_lam.clone(), op.clone(), rhs.span, symbols, term_ids);
+            (
+                SoacOp::Reduce {
+                    op: composed_op,
+                    ne: Box::new(ne.clone()),
+                    input: producer_inputs[0].clone(),
+                    props: props.clone(),
+                },
+                result_ty.clone(),
+            )
+        }
     };
 
     let fused_term = Term {
         id: term_ids.next_id(),
-        ty: consumer_info.consumer_ty.clone(),
+        ty: result_ty,
         span: rhs.span,
-        kind: TermKind::Soac(fused_map),
+        kind: TermKind::Soac(fused_soac),
     };
 
-    // 6. Replace the consumer map in the body with the fused map
-    Some(replace_consumer_map(&body, name, fused_term, term_ids))
+    // 5. Replace the consumer in the body with the fused SOAC
+    Some(replace_fusion_consumer(&body, name, fused_term, term_ids))
 }
 
-/// Information about a consumer Map found in the body.
+/// The kind of SOAC consumer found in the body.
+enum ConsumerKind {
+    Map {
+        lam: Lambda,
+        result_ty: Type<TypeName>,
+    },
+    Reduce {
+        op: Lambda,
+        ne: Term,
+        props: ReduceProps,
+        result_ty: Type<TypeName>,
+    },
+}
+
+/// Information about a consumer SOAC found in the body.
 struct ConsumerInfo {
-    consumer_lam: Lambda,
-    consumer_ty: Type<TypeName>,
+    kind: ConsumerKind,
 }
 
-/// Find a consumer Map in the body that uses `name` as its sole input.
-/// Returns the consumer lambda and type if found.
-fn find_consumer_map(term: &Term, name: SymbolId) -> Option<ConsumerInfo> {
+/// Find a consumer SOAC (Map or Reduce) in the body that uses `name` as its sole input.
+fn find_fusion_consumer(term: &Term, name: SymbolId) -> Option<ConsumerInfo> {
     match &term.kind {
-        // Direct consumer: the body itself is a Map using `name`
+        // Map consumer
         TermKind::Soac(SoacOp::Map { lam, inputs }) => {
             if is_sole_ref_to(inputs, name) {
                 Some(ConsumerInfo {
-                    consumer_lam: lam.clone(),
-                    consumer_ty: term.ty.clone(),
+                    kind: ConsumerKind::Map {
+                        lam: lam.clone(),
+                        result_ty: term.ty.clone(),
+                    },
+                })
+            } else {
+                None
+            }
+        }
+
+        // Reduce consumer
+        TermKind::Soac(SoacOp::Reduce { op, ne, input, props }) => {
+            if is_sole_ref_to_single(input, name) {
+                Some(ConsumerInfo {
+                    kind: ConsumerKind::Reduce {
+                        op: op.clone(),
+                        ne: (**ne).clone(),
+                        props: props.clone(),
+                        result_ty: term.ty.clone(),
+                    },
                 })
             } else {
                 None
@@ -473,18 +528,24 @@ fn find_consumer_map(term: &Term, name: SymbolId) -> Option<ConsumerInfo> {
             body,
             ..
         } => {
-            // Check if the use is in the rhs
             if count_uses(rhs, name) == 1 {
-                find_consumer_map(rhs, name)
+                find_fusion_consumer(rhs, name)
             } else if *inner_name != name && count_uses(body, name) == 1 {
-                // Use is in the body (and not shadowed)
-                find_consumer_map(body, name)
+                find_fusion_consumer(body, name)
             } else {
                 None
             }
         }
 
         _ => None,
+    }
+}
+
+/// Check if a single ArrayExpr is a Ref pointing to `name`.
+fn is_sole_ref_to_single(input: &ArrayExpr, name: SymbolId) -> bool {
+    match input {
+        ArrayExpr::Ref(t) => matches!(&t.kind, TermKind::Var(sym) if *sym == name),
+        _ => false,
     }
 }
 
@@ -499,9 +560,9 @@ fn is_sole_ref_to(inputs: &[ArrayExpr], name: SymbolId) -> bool {
     }
 }
 
-/// Replace the consumer Map (which uses `name` as sole input) with `replacement`.
+/// Replace the consumer SOAC (which uses `name` as sole input) with `replacement`.
 /// This traverses the body to find and replace the exact consumer.
-fn replace_consumer_map(
+fn replace_fusion_consumer(
     term: &Term,
     name: SymbolId,
     replacement: Term,
@@ -510,7 +571,14 @@ fn replace_consumer_map(
     match &term.kind {
         TermKind::Soac(SoacOp::Map { inputs, .. }) => {
             if is_sole_ref_to(inputs, name) {
-                // This is the consumer — replace it
+                replacement
+            } else {
+                term.clone()
+            }
+        }
+
+        TermKind::Soac(SoacOp::Reduce { input, .. }) => {
+            if is_sole_ref_to_single(input, name) {
                 replacement
             } else {
                 term.clone()
@@ -532,7 +600,7 @@ fn replace_consumer_map(
                     kind: TermKind::Let {
                         name: *inner_name,
                         name_ty: name_ty.clone(),
-                        rhs: Box::new(replace_consumer_map(rhs, name, replacement, term_ids)),
+                        rhs: Box::new(replace_fusion_consumer(rhs, name, replacement, term_ids)),
                         body: body.clone(),
                     },
                 }
@@ -546,7 +614,7 @@ fn replace_consumer_map(
                         name: *inner_name,
                         name_ty: name_ty.clone(),
                         rhs: rhs.clone(),
-                        body: Box::new(replace_consumer_map(body, name, replacement, term_ids)),
+                        body: Box::new(replace_fusion_consumer(body, name, replacement, term_ids)),
                     },
                 }
             } else {
@@ -606,6 +674,54 @@ fn compose_lambdas(
         params: f.params,
         body: Box::new(composed_body),
         ret_ty: g.ret_ty,
+        captures: vec![],
+    }
+}
+
+/// Compose a map lambda with a reduce operator:
+/// `map_lam: A → B` and `reduce_op: (Acc, B) → Acc` produces `(Acc, A) → Acc`.
+///
+/// ```text
+/// Lambda {
+///     params: [reduce_op.params[0], map_lam.params[0]],
+///     body: let fresh = map_lam.body in reduce_op.body[elem → fresh],
+///     ret_ty: reduce_op.ret_ty,
+///     captures: [],
+/// }
+/// ```
+fn compose_map_reduce(
+    map_lam: Lambda,
+    reduce_op: Lambda,
+    span: Span,
+    symbols: &mut SymbolTable,
+    term_ids: &mut TermIdSource,
+) -> Lambda {
+    let fresh_sym = symbols.alloc("_fused".to_string());
+    let intermediate_ty = map_lam.ret_ty.clone();
+
+    // The reduce operator has params [acc, elem].
+    // Substitute elem with fresh in the reduce body.
+    let elem_param = reduce_op.params[1].0;
+    let op_body_substituted = substitute_sym(*reduce_op.body, elem_param, fresh_sym, term_ids);
+
+    // Build: let fresh = map_lam.body in reduce_op.body[elem → fresh]
+    let composed_body = Term {
+        id: term_ids.next_id(),
+        ty: reduce_op.ret_ty.clone(),
+        span,
+        kind: TermKind::Let {
+            name: fresh_sym,
+            name_ty: intermediate_ty,
+            rhs: map_lam.body,
+            body: Box::new(op_body_substituted),
+        },
+    };
+
+    // New params: [acc (from reduce), input_elem (from map)]
+    Lambda {
+        params: vec![reduce_op.params[0].clone(), map_lam.params[0].clone()],
+        body: Box::new(composed_body),
+        ret_ty: reduce_op.ret_ty,
         captures: vec![],
     }
 }
@@ -1076,7 +1192,6 @@ fn substitute_sym_array_expr(
 // =============================================================================
 // Tests
 // =============================================================================
-
 
 #[cfg(test)]
 #[path = "fusion_tests.rs"]

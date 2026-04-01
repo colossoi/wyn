@@ -1047,7 +1047,6 @@ pub fn soa_transform(program: Program) -> Program {
 // Tests
 // =============================================================================
 
-
 #[cfg(test)]
 #[path = "soa_transform_tests.rs"]
 mod soa_transform_tests;
