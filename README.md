@@ -1,6 +1,6 @@
 # Wyn
 
-A minimal compiler for a Futhark-like programming language that generates SPIR-V code for GPU shaders.
+A minimal compiler for a Futhark-like programming language that generates SPIR-V and GLSL code for GPU shaders.
 
 ## Features
 
@@ -8,20 +8,20 @@ A minimal compiler for a Futhark-like programming language that generates SPIR-V
 - Higher-order functions (map, reduce, zip, etc.)
 - Vector and matrix types optimized for GPU operations
 - Pattern matching
-- SPIR-V code generation for Vulkan/WebGPU shaders
-- Graphical and compute (planned) shader kernel generation
+- SPIR-V and GLSL code generation for Vulkan/WebGPU shaders
+- Vertex, fragment, and compute shader support
 - Array operations with size tracking
 - Loop constructs
-- Module system (in development)
 - Futhark-inspired functional syntax for shader programming
 
 ## Project Structure
 
 The project is organized as a Rust workspace:
 
-- **`wyn-core/`** - Compiler library (lexer, parser, type checker, TLC, MIR, code generator)
+- **`wyn-ssa/`** - Generic SSA framework library (blocks, values, instructions, terminators, optimization passes)
+- **`wyn-core/`** - Compiler library (lexer, parser, type checker, TLC, SSA, SPIR-V/GLSL backends)
 - **`wyn/`** - Command-line executable
-- **`spirv-validator/`** - SPIR-V validation tool using wgpu
+- **`wyn-analyzer/`** - Language server (in development)
 - **`viz/`** - Visualization tool for rendering SPIR-V shaders
 - **`prelude/`** - Standard library functions written in Wyn
 
@@ -43,21 +43,63 @@ The compiler uses a multi-stage pipeline with typestate-driven phases. Each stag
 | Stage | Module | Description |
 |-------|--------|-------------|
 | **TlcTransformed** | `tlc::transform` | AST converted to minimal typed lambda calculus |
-| **TlcTransformed** | `tlc::partial_eval` | Constant folding and algebraic simplifications (optional, via `partial_eval()`) |
-| **TlcDefunctionalized** | `tlc::defunctionalize` | Futhark-style defunctionalization: lambda lifting + SOAC capture flattening |
+| **TlcTransformed** | `tlc::partial_eval` | Constant folding and algebraic simplifications (optional) |
+| **TlcTransformed** | `tlc::fuse_maps` | Map fusion (optional) |
+| **TlcDefunctionalized** | `tlc::defunctionalize` | Lambda lifting + SOAC capture flattening |
 | **TlcMonomorphized** | `tlc::specialize`, `tlc::monomorphize` | Polymorphic intrinsics specialized; user functions monomorphized |
+| **TlcSoaTransformed** | `tlc::soa_transform` | Structure-of-Arrays transform for tuple arrays |
+| **TlcBufferSpecialized** | `tlc::buffer_specialize` | Storage buffer parameter specialization |
+| **TlcInlined** | `tlc::inline` | Function inlining |
 
-### Backend (SSA → SPIR-V)
+### SSA
 
-The backend converts TLC directly to SSA form:
-- **SSA** (`mir/ssa.rs`): CFG with basic blocks, block parameters (not phi nodes), explicit terminators
+The SSA IR is built on the **`wyn-ssa`** crate, a generic SSA framework parameterized over instruction type, effect token type, and value type. The concrete instantiation uses `InstKind` for instructions, `EffectToken` for effects, and `Type<TypeName>` for types.
+
+Key features of the SSA IR:
+- CFG with basic blocks and block parameters (not phi nodes)
+- Effect tokens tracked at framework level on `InstNode`, not inside instruction variants
+- `ValueDef::FunctionParam` distinct from `ValueDef::Param` (block params)
+- `ControlHeader` metadata stored in a side-map on `FuncBody`, not on blocks
 
 | Stage | Module | Description |
 |-------|--------|-------------|
-| **SsaConverted** | `tlc::to_ssa` | TLC to SSA conversion (all functions already monomorphic) |
+| **SsaConverted** | `tlc::to_ssa` | TLC to SSA conversion via `FuncBuilder` |
 | **SsaParallelized** | `parallelization` | SOACs parallelized for compute shaders |
-| **SsaReachable** | `mir::reachability` | Dead function elimination |
-| **Lowered** | `spirv::ssa_lowering` | SSA to SPIR-V |
+| **SsaReachable** | `ssa::reachability` | Dead function elimination |
+| **SsaOptimized** | `ssa::opt` | SSA peephole optimizations (see below) |
+| **SsaSoacLowered** | `ssa::soac_lower` | First-class SOAC instructions expanded to explicit loops |
+| **SsaMaterialized** | `spirv::materialize` | Dynamic array indices materialized for SPIR-V (+ LICM) |
+| **Lowered** | `spirv` | SSA to SPIR-V code generation |
+
+Alternative backend:
+| Stage | Module | Description |
+|-------|--------|-------------|
+| **GLSL** | `glsl` | SSA to GLSL source code (from `SsaSoacLowered`, no materialize needed) |
+
+### SSA Optimization Passes (`ssa::opt`)
+
+Run in order on each function body:
+
+1. **Forward params** — When a block has one unconditional predecessor, replace block params with the branch args
+2. **Project fold** — Copy propagation through tuple/vector/array construction: `project(tuple(a, b), 0)` → `a`
+3. **Local CSE** — Per-block common subexpression elimination for constants and globals
+4. **DCE** — Dead code elimination (remove unused non-effectful instructions)
+5. **Empty block elimination** — Remove blocks with no instructions that just jump elsewhere
+
+### SSA Passes in `wyn-ssa` (generic framework)
+
+- **`lift_and_merge`** — Hoist pure instructions to deepest operand block (LICM), then deduplicate equivalent instructions. Respects conditional branches (won't hoist past `CondBranch`).
+- **`forward_single_pred_params`** — Forward block parameters through single-predecessor edges
+- **`eliminate_empty_blocks`** — Remove empty unconditional-jump blocks
+- **`inline_block_param` / `inline_entry_param`** — Replace a block parameter with a constant instruction
+- **`verify_effects`** — Check effect token chain linearity
+
+### SPIR-V Backend Optimizations
+
+- **Polytype cache** — Memoizes `polytype_to_spirv` to prevent duplicate type instructions
+- **Composite constant cache** — Deduplicates `OpConstantComposite` by (type, constituents)
+- **Null constant cache** — Deduplicates `OpConstantNull` by type
+- **Materialize pass** — Rewrites dynamic `Index` into `Materialize` + `DynamicExtract`, then `lift_and_merge` hoists `Materialize` out of loops
 
 ### Defunctionalization
 
@@ -103,13 +145,18 @@ def fragment_main(): #[location(0)] vec4f32 =
 # Compile to SPIR-V
 cargo run --bin wyn -- compile input.wyn -o output.spv
 
+# Compile to GLSL
+cargo run --bin wyn -- compile input.wyn -o output.glsl -t glsl
+
+# Compile to Shadertoy GLSL
+cargo run --bin wyn -- compile input.wyn -o output.glsl -t shadertoy
+
 # Type check without generating code
 cargo run --bin wyn -- check input.wyn
 
 # Output intermediate representations
-cargo run --bin wyn -- compile input.wyn --output-tlc out.tlc    # Typed Lambda Calculus
-cargo run --bin wyn -- compile input.wyn --output-init-mir out.mir  # Initial MIR
-cargo run --bin wyn -- compile input.wyn --output-final-mir out.mir # Final MIR
+cargo run --bin wyn -- compile input.wyn --output-init-ssa out.ssa   # Initial SSA
+cargo run --bin wyn -- compile input.wyn --output-annotated out.ann  # Annotated source
 
 # Visualize a SPIR-V shader
 cd viz && cargo run vf ../shader.spv --vertex vertex_main --fragment fragment_main
@@ -122,13 +169,13 @@ cargo build --release
 cargo test
 ```
 
-All 544 tests currently pass (2 ignored for pending features).
+540 tests currently pass (8 ignored for pending features).
 
 ## Language Overview
 
 ### Types
 
-- **Primitives**: `i32`, `f32`, `bool`, etc.
+- **Primitives**: `i32`, `u32`, `f32`, `bool`
 - **Arrays**: `[N]T` for fixed size, `[]T` for inferred size
 - **Vectors**: `vec2f32`, `vec3f32`, `vec4f32` (SPIR-V types)
 - **Matrices**: `mat2f32`, `mat3f32`, `mat4f32`
@@ -174,15 +221,16 @@ def zip_arrays xs ys = zip xs ys
 ## Current Limitations
 
 - Module system is partially implemented
-- No recursion - use `loop` or higher-order functions instead
+- No recursion — use `loop` or higher-order functions instead
 - `match` expressions parsed but not fully implemented in code generation
 
 ## Dependencies
 
-- **nom** - Parser combinators
-- **polytype** - Hindley-Milner type system
-- **rspirv** - SPIR-V builder
-- **thiserror** - Error handling
-- **clap** - CLI parsing
+- **nom** — Parser combinators
+- **polytype** — Hindley-Milner type system
+- **rspirv** — SPIR-V builder
+- **slotmap** — Arena allocation for SSA IDs (via wyn-ssa)
+- **thiserror** — Error handling
+- **clap** — CLI parsing
 
 For complete language details, see [SPECIFICATION.md](SPECIFICATION.md).
