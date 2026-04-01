@@ -1,4 +1,5 @@
 use crate::ast::Span;
+use crate::tlc::ReduceProps;
 use crate::tlc::fusion::*;
 
 fn dummy_span() -> Span {
@@ -53,6 +54,91 @@ fn mk_lambda1(param: SymbolId, param_ty: Type<TypeName>, body: Term, ret_ty: Typ
         ret_ty,
         captures: vec![],
     }
+}
+
+/// Build a lambda with two parameters
+fn mk_lambda2(
+    p1: SymbolId,
+    p1_ty: Type<TypeName>,
+    p2: SymbolId,
+    p2_ty: Type<TypeName>,
+    body: Term,
+    ret_ty: Type<TypeName>,
+) -> Lambda {
+    Lambda {
+        params: vec![(p1, p1_ty), (p2, p2_ty)],
+        body: Box::new(body),
+        ret_ty,
+        captures: vec![],
+    }
+}
+
+/// Build a reduce: `reduce(op, ne, input)`
+fn mk_reduce(
+    op: Lambda,
+    ne: Term,
+    input: Term,
+    result_ty: Type<TypeName>,
+    term_ids: &mut TermIdSource,
+) -> Term {
+    mk_term(
+        TermKind::Soac(SoacOp::Reduce {
+            op,
+            ne: Box::new(ne),
+            input: ArrayExpr::Ref(Box::new(input)),
+            props: ReduceProps::default(),
+        }),
+        result_ty,
+        term_ids,
+    )
+}
+
+/// Build a function def wrapping a body in a lambda
+fn mk_func_def(
+    name: SymbolId,
+    params: Vec<(SymbolId, Type<TypeName>)>,
+    body: Term,
+    ret_ty: Type<TypeName>,
+) -> Def {
+    let lam_body = if params.is_empty() {
+        body
+    } else {
+        Term {
+            id: body.id,
+            ty: ret_ty.clone(),
+            span: body.span,
+            kind: TermKind::Lambda(Lambda {
+                params: params.clone(),
+                body: Box::new(body),
+                ret_ty: ret_ty.clone(),
+                captures: vec![],
+            }),
+        }
+    };
+    Def {
+        name,
+        ty: ret_ty,
+        body: lam_body,
+        meta: super::super::DefMeta::Function,
+        arity: params.len(),
+    }
+}
+
+/// Build a function call: `func(arg)`
+fn mk_app(func: Term, arg: Term, result_ty: Type<TypeName>, term_ids: &mut TermIdSource) -> Term {
+    mk_term(
+        TermKind::App {
+            func: Box::new(func),
+            arg: Box::new(arg),
+        },
+        result_ty,
+        term_ids,
+    )
+}
+
+/// Tuple type helper
+fn tuple_ty(fields: Vec<Type<TypeName>>) -> Type<TypeName> {
+    Type::Constructed(TypeName::Tuple(fields.len()), fields)
 }
 
 // -------------------------------------------------------------------------
@@ -815,4 +901,511 @@ fn test_map_zip_map() {
         }
         other => panic!("Expected fused Map, got {:?}", other),
     }
+}
+
+// =========================================================================
+// Progressive raytrace-like tests
+// =========================================================================
+
+// Test 1: Intraprocedural map-reduce fusion
+// let tmp = map(f, xs) in reduce(op, ne, tmp)  →  reduce(op∘f, ne, xs)
+#[test]
+fn test_raytrace_step1_local_map_reduce() {
+    let mut symbols = SymbolTable::default();
+    let mut term_ids = TermIdSource::new();
+
+    let xs_sym = symbols.alloc("xs".to_string());
+    let tmp_sym = symbols.alloc("tmp".to_string());
+    let x_sym = symbols.alloc("x".to_string());
+    let acc_sym = symbols.alloc("acc".to_string());
+    let elem_sym = symbols.alloc("elem".to_string());
+
+    let f = mk_lambda1(
+        x_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(x_sym), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+    let op = mk_lambda2(
+        acc_sym,
+        i32_ty(),
+        elem_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(acc_sym), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+
+    let xs = mk_term(TermKind::Var(xs_sym), array_ty(i32_ty()), &mut term_ids);
+    let ne = mk_term(TermKind::IntLit("0".to_string()), i32_ty(), &mut term_ids);
+    let producer = mk_map(f, xs, array_ty(i32_ty()), &mut term_ids);
+    let tmp_ref = mk_term(TermKind::Var(tmp_sym), array_ty(i32_ty()), &mut term_ids);
+    let consumer = mk_reduce(op, ne, tmp_ref, i32_ty(), &mut term_ids);
+
+    let body = mk_term(
+        TermKind::Let {
+            name: tmp_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(producer),
+            body: Box::new(consumer),
+        },
+        i32_ty(),
+        &mut term_ids,
+    );
+
+    let program = Program {
+        defs: vec![Def {
+            name: symbols.alloc("main".to_string()),
+            ty: i32_ty(),
+            body,
+            meta: super::super::DefMeta::Function,
+            arity: 0,
+        }],
+        uniforms: vec![],
+        storage: vec![],
+        symbols,
+    };
+
+    let fused = fuse_maps(program);
+    match &fused.defs[0].body.kind {
+        TermKind::Soac(SoacOp::Reduce { op, input, .. }) => {
+            match input {
+                ArrayExpr::Ref(t) => assert!(matches!(&t.kind, TermKind::Var(s) if *s == xs_sym)),
+                other => panic!("Expected Ref(xs), got {:?}", other),
+            }
+            assert_eq!(op.params.len(), 2);
+            assert_eq!(op.params[0].0, acc_sym);
+            assert_eq!(op.params[1].0, x_sym);
+        }
+        other => panic!("Expected fused Reduce, got {:?}", other),
+    }
+}
+
+// Test 2: Reduce in a separate def, consumer recognized via summary
+// def myReduce(xs) = reduce(op, ne, xs)
+// main: let tmp = map(f, arr) in myReduce(tmp)
+#[test]
+fn test_raytrace_step2_interprocedural_reduce_consumer() {
+    let mut symbols = SymbolTable::default();
+    let mut term_ids = TermIdSource::new();
+
+    let xs_sym = symbols.alloc("xs".to_string());
+    let arr_sym = symbols.alloc("arr".to_string());
+    let tmp_sym = symbols.alloc("tmp".to_string());
+    let x_sym = symbols.alloc("x".to_string());
+    let acc_sym = symbols.alloc("acc".to_string());
+    let elem_sym = symbols.alloc("elem".to_string());
+    let my_reduce_sym = symbols.alloc("myReduce".to_string());
+    let main_sym = symbols.alloc("main".to_string());
+
+    // def myReduce(xs) = reduce(op, ne, xs)
+    let op = mk_lambda2(
+        acc_sym,
+        i32_ty(),
+        elem_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(acc_sym), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+    let ne = mk_term(TermKind::IntLit("0".to_string()), i32_ty(), &mut term_ids);
+    let reduce_body = mk_reduce(
+        op,
+        ne,
+        mk_term(TermKind::Var(xs_sym), array_ty(i32_ty()), &mut term_ids),
+        i32_ty(),
+        &mut term_ids,
+    );
+    let my_reduce_def = mk_func_def(
+        my_reduce_sym,
+        vec![(xs_sym, array_ty(i32_ty()))],
+        reduce_body,
+        i32_ty(),
+    );
+
+    // main: let tmp = map(f, arr) in myReduce(tmp)
+    let f = mk_lambda1(
+        x_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(x_sym), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+    let arr = mk_term(TermKind::Var(arr_sym), array_ty(i32_ty()), &mut term_ids);
+    let producer = mk_map(f, arr, array_ty(i32_ty()), &mut term_ids);
+    let consumer_call = mk_app(
+        mk_term(TermKind::Var(my_reduce_sym), i32_ty(), &mut term_ids),
+        mk_term(TermKind::Var(tmp_sym), array_ty(i32_ty()), &mut term_ids),
+        i32_ty(),
+        &mut term_ids,
+    );
+
+    let main_body = mk_term(
+        TermKind::Let {
+            name: tmp_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(producer),
+            body: Box::new(consumer_call),
+        },
+        i32_ty(),
+        &mut term_ids,
+    );
+    let main_def = Def {
+        name: main_sym,
+        ty: i32_ty(),
+        body: main_body,
+        meta: super::super::DefMeta::Function,
+        arity: 0,
+    };
+
+    let program = Program {
+        defs: vec![my_reduce_def, main_def],
+        uniforms: vec![],
+        storage: vec![],
+        symbols,
+    };
+
+    let fused = fuse_maps(program);
+    let main = fused.defs.iter().find(|d| d.name == main_sym).unwrap();
+    match &main.body.kind {
+        TermKind::Soac(SoacOp::Reduce { op, input, .. }) => {
+            match input {
+                ArrayExpr::Ref(t) => assert!(matches!(&t.kind, TermKind::Var(s) if *s == arr_sym)),
+                other => panic!("Expected Ref(arr), got {:?}", other),
+            }
+            assert_eq!(op.params.len(), 2);
+        }
+        other => panic!("Expected fused Reduce in main, got {:?}", other),
+    }
+}
+
+// Test 3: Map in a separate def, producer recognized via summary
+// def myMap(xs) = map(f, xs)
+// main: let tmp = myMap(arr) in reduce(op, ne, tmp)
+#[test]
+fn test_raytrace_step3_interprocedural_map_producer() {
+    let mut symbols = SymbolTable::default();
+    let mut term_ids = TermIdSource::new();
+
+    let xs_sym = symbols.alloc("xs".to_string());
+    let arr_sym = symbols.alloc("arr".to_string());
+    let tmp_sym = symbols.alloc("tmp".to_string());
+    let x_sym = symbols.alloc("x".to_string());
+    let acc_sym = symbols.alloc("acc".to_string());
+    let elem_sym = symbols.alloc("elem".to_string());
+    let my_map_sym = symbols.alloc("myMap".to_string());
+    let main_sym = symbols.alloc("main".to_string());
+
+    // def myMap(xs) = map(f, xs)
+    let f = mk_lambda1(
+        x_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(x_sym), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+    let map_body = mk_map(
+        f,
+        mk_term(TermKind::Var(xs_sym), array_ty(i32_ty()), &mut term_ids),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let my_map_def = mk_func_def(
+        my_map_sym,
+        vec![(xs_sym, array_ty(i32_ty()))],
+        map_body,
+        array_ty(i32_ty()),
+    );
+
+    // main: let tmp = myMap(arr) in reduce(op, ne, tmp)
+    let producer_call = mk_app(
+        mk_term(TermKind::Var(my_map_sym), array_ty(i32_ty()), &mut term_ids),
+        mk_term(TermKind::Var(arr_sym), array_ty(i32_ty()), &mut term_ids),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let op = mk_lambda2(
+        acc_sym,
+        i32_ty(),
+        elem_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(acc_sym), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+    let ne = mk_term(TermKind::IntLit("0".to_string()), i32_ty(), &mut term_ids);
+    let consumer = mk_reduce(
+        op,
+        ne,
+        mk_term(TermKind::Var(tmp_sym), array_ty(i32_ty()), &mut term_ids),
+        i32_ty(),
+        &mut term_ids,
+    );
+
+    let main_body = mk_term(
+        TermKind::Let {
+            name: tmp_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(producer_call),
+            body: Box::new(consumer),
+        },
+        i32_ty(),
+        &mut term_ids,
+    );
+    let main_def = Def {
+        name: main_sym,
+        ty: i32_ty(),
+        body: main_body,
+        meta: super::super::DefMeta::Function,
+        arity: 0,
+    };
+
+    let program = Program {
+        defs: vec![my_map_def, main_def],
+        uniforms: vec![],
+        storage: vec![],
+        symbols,
+    };
+
+    let fused = fuse_maps(program);
+    let main = fused.defs.iter().find(|d| d.name == main_sym).unwrap();
+    match &main.body.kind {
+        TermKind::Soac(SoacOp::Reduce { op, input, .. }) => {
+            match input {
+                ArrayExpr::Ref(t) => assert!(matches!(&t.kind, TermKind::Var(s) if *s == arr_sym)),
+                other => panic!("Expected Ref(arr), got {:?}", other),
+            }
+            assert_eq!(op.params.len(), 2);
+        }
+        other => panic!("Expected fused Reduce in main, got {:?}", other),
+    }
+}
+
+// Test 4: Both map and reduce in separate defs (full interprocedural)
+// def myMap(xs) = map(f, xs)
+// def myReduce(xs) = reduce(op, ne, xs)
+// main: let tmp = myMap(arr) in myReduce(tmp)
+#[test]
+fn test_raytrace_step4_both_interprocedural() {
+    let mut symbols = SymbolTable::default();
+    let mut term_ids = TermIdSource::new();
+
+    let xs_sym = symbols.alloc("xs".to_string());
+    let xs2_sym = symbols.alloc("xs2".to_string());
+    let arr_sym = symbols.alloc("arr".to_string());
+    let tmp_sym = symbols.alloc("tmp".to_string());
+    let x_sym = symbols.alloc("x".to_string());
+    let acc_sym = symbols.alloc("acc".to_string());
+    let elem_sym = symbols.alloc("elem".to_string());
+    let my_map_sym = symbols.alloc("myMap".to_string());
+    let my_reduce_sym = symbols.alloc("myReduce".to_string());
+    let main_sym = symbols.alloc("main".to_string());
+
+    // def myMap(xs) = map(f, xs)
+    let f = mk_lambda1(
+        x_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(x_sym), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+    let map_body = mk_map(
+        f,
+        mk_term(TermKind::Var(xs_sym), array_ty(i32_ty()), &mut term_ids),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let my_map_def = mk_func_def(
+        my_map_sym,
+        vec![(xs_sym, array_ty(i32_ty()))],
+        map_body,
+        array_ty(i32_ty()),
+    );
+
+    // def myReduce(xs2) = reduce(op, ne, xs2)
+    let op = mk_lambda2(
+        acc_sym,
+        i32_ty(),
+        elem_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(acc_sym), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+    let ne = mk_term(TermKind::IntLit("0".to_string()), i32_ty(), &mut term_ids);
+    let reduce_body = mk_reduce(
+        op,
+        ne,
+        mk_term(TermKind::Var(xs2_sym), array_ty(i32_ty()), &mut term_ids),
+        i32_ty(),
+        &mut term_ids,
+    );
+    let my_reduce_def = mk_func_def(
+        my_reduce_sym,
+        vec![(xs2_sym, array_ty(i32_ty()))],
+        reduce_body,
+        i32_ty(),
+    );
+
+    // main: let tmp = myMap(arr) in myReduce(tmp)
+    let producer_call = mk_app(
+        mk_term(TermKind::Var(my_map_sym), array_ty(i32_ty()), &mut term_ids),
+        mk_term(TermKind::Var(arr_sym), array_ty(i32_ty()), &mut term_ids),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let consumer_call = mk_app(
+        mk_term(TermKind::Var(my_reduce_sym), i32_ty(), &mut term_ids),
+        mk_term(TermKind::Var(tmp_sym), array_ty(i32_ty()), &mut term_ids),
+        i32_ty(),
+        &mut term_ids,
+    );
+
+    let main_body = mk_term(
+        TermKind::Let {
+            name: tmp_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(producer_call),
+            body: Box::new(consumer_call),
+        },
+        i32_ty(),
+        &mut term_ids,
+    );
+    let main_def = Def {
+        name: main_sym,
+        ty: i32_ty(),
+        body: main_body,
+        meta: super::super::DefMeta::Function,
+        arity: 0,
+    };
+
+    let program = Program {
+        defs: vec![my_map_def, my_reduce_def, main_def],
+        uniforms: vec![],
+        storage: vec![],
+        symbols,
+    };
+
+    let fused = fuse_maps(program);
+    let main = fused.defs.iter().find(|d| d.name == main_sym).unwrap();
+    match &main.body.kind {
+        TermKind::Soac(SoacOp::Reduce { op, input, .. }) => {
+            match input {
+                ArrayExpr::Ref(t) => assert!(matches!(&t.kind, TermKind::Var(s) if *s == arr_sym)),
+                other => panic!("Expected Ref(arr), got {:?}", other),
+            }
+            assert_eq!(op.params.len(), 2);
+        }
+        other => panic!("Expected fused Reduce in main, got {:?}", other),
+    }
+}
+
+// Test 5: Raytrace pattern — map inputs from globals, not params
+// def intersectAll(ro, rd) = map(f, globalArr)  ← NOT from params
+// def findClosest(hits) = reduce(op, ne, hits)  ← from param
+// main: let tmp = intersectAll(r, d) in findClosest(tmp)
+//
+// intersectAll gets Unknown summary. This test documents the current limitation.
+#[test]
+fn test_raytrace_step5_globals_pattern_no_fusion() {
+    let mut symbols = SymbolTable::default();
+    let mut term_ids = TermIdSource::new();
+
+    let ro_sym = symbols.alloc("ro".to_string());
+    let rd_sym = symbols.alloc("rd".to_string());
+    let hits_sym = symbols.alloc("hits".to_string());
+    let tmp_sym = symbols.alloc("tmp".to_string());
+    let x_sym = symbols.alloc("x".to_string());
+    let acc_sym = symbols.alloc("acc".to_string());
+    let elem_sym = symbols.alloc("elem".to_string());
+    let global_arr_sym = symbols.alloc("globalArr".to_string());
+    let intersect_sym = symbols.alloc("intersectAll".to_string());
+    let find_closest_sym = symbols.alloc("findClosest".to_string());
+    let main_sym = symbols.alloc("main".to_string());
+
+    // def intersectAll(ro, rd) = map(f, globalArr)
+    let f = mk_lambda1(
+        x_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(x_sym), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+    let global_ref = mk_term(TermKind::Var(global_arr_sym), array_ty(i32_ty()), &mut term_ids);
+    let map_body = mk_map(f, global_ref, array_ty(i32_ty()), &mut term_ids);
+    let intersect_def = mk_func_def(
+        intersect_sym,
+        vec![(ro_sym, f32_ty()), (rd_sym, f32_ty())],
+        map_body,
+        array_ty(i32_ty()),
+    );
+
+    // def findClosest(hits) = reduce(op, ne, hits)
+    let op = mk_lambda2(
+        acc_sym,
+        i32_ty(),
+        elem_sym,
+        i32_ty(),
+        mk_term(TermKind::Var(acc_sym), i32_ty(), &mut term_ids),
+        i32_ty(),
+    );
+    let ne = mk_term(TermKind::IntLit("0".to_string()), i32_ty(), &mut term_ids);
+    let reduce_body = mk_reduce(
+        op,
+        ne,
+        mk_term(TermKind::Var(hits_sym), array_ty(i32_ty()), &mut term_ids),
+        i32_ty(),
+        &mut term_ids,
+    );
+    let find_closest_def = mk_func_def(
+        find_closest_sym,
+        vec![(hits_sym, array_ty(i32_ty()))],
+        reduce_body,
+        i32_ty(),
+    );
+
+    // main: let tmp = intersectAll(ro, rd) in findClosest(tmp)
+    let producer_call = mk_app(
+        mk_app(
+            mk_term(TermKind::Var(intersect_sym), array_ty(i32_ty()), &mut term_ids),
+            mk_term(TermKind::Var(ro_sym), f32_ty(), &mut term_ids),
+            array_ty(i32_ty()),
+            &mut term_ids,
+        ),
+        mk_term(TermKind::Var(rd_sym), f32_ty(), &mut term_ids),
+        array_ty(i32_ty()),
+        &mut term_ids,
+    );
+    let consumer_call = mk_app(
+        mk_term(TermKind::Var(find_closest_sym), i32_ty(), &mut term_ids),
+        mk_term(TermKind::Var(tmp_sym), array_ty(i32_ty()), &mut term_ids),
+        i32_ty(),
+        &mut term_ids,
+    );
+
+    let main_body = mk_term(
+        TermKind::Let {
+            name: tmp_sym,
+            name_ty: array_ty(i32_ty()),
+            rhs: Box::new(producer_call),
+            body: Box::new(consumer_call),
+        },
+        i32_ty(),
+        &mut term_ids,
+    );
+    let main_def = Def {
+        name: main_sym,
+        ty: i32_ty(),
+        body: main_body,
+        meta: super::super::DefMeta::Function,
+        arity: 0,
+    };
+
+    let program = Program {
+        defs: vec![intersect_def, find_closest_def, main_def],
+        uniforms: vec![],
+        storage: vec![],
+        symbols,
+    };
+
+    let fused = fuse_maps(program);
+    let main = fused.defs.iter().find(|d| d.name == main_sym).unwrap();
+    // Should NOT fuse: intersectAll has Unknown summary (global input)
+    assert!(
+        matches!(&main.body.kind, TermKind::Let { .. }),
+        "Expected Let (no fusion) because map input is global, got {:?}",
+        main.body.kind
+    );
 }
