@@ -398,7 +398,7 @@ fn compile_impl(source: &str) -> CompileResult {
     let ssa = match alias_checked
         .to_tlc(builtins, &frontend.schemes, &frontend.module_manager)
         .partial_eval()
-        .fuse_maps()
+        .normalize_soacs().fuse_maps()
         .defunctionalize()
         
         .monomorphize()
@@ -499,7 +499,7 @@ fn compile_with_ir_impl(source: &str) -> CompileResultWithIR {
 
     // Continue pipeline: fuse maps, defunctionalize, monomorphize, then to SSA
     let ssa = match tlc_after_partial_eval
-        .fuse_maps()
+        .normalize_soacs().fuse_maps()
         .defunctionalize()
         
         .monomorphize()

@@ -20,6 +20,7 @@ pub mod reachability;
 pub mod soa_helpers;
 pub mod soac_analysis;
 pub mod soac_lower;
+pub mod ssa_inline;
 pub mod types;
 pub mod verify;
 

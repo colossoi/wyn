@@ -19,6 +19,7 @@ fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
     let ssa = alias_checked
         .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
         .partial_eval()
+        .normalize_soacs()
         .fuse_maps()
         .defunctionalize()
         .monomorphize()
@@ -27,6 +28,7 @@ fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
         .inline()
         .to_ssa()
         .expect("SSA conversion failed")
+        .inline_small()
         .parallelize_soacs()
         .filter_reachable()
         .optimize();
@@ -197,17 +199,16 @@ def sum_scan(arr: [4]i32) [4]i32 = scan((|a, b| a + b), 0, arr)
 
 #[test]
 fn test_map_variants() {
-    // Test all map variants: map (desugars to map1), map2, map3, map4, map5
-    // map2-map5 take functions with tuple arguments: (A, B) -> C, etc.
+    // Test map with zip variants: map over zipped inputs
     let spirv = compile_to_spirv(
         r#"
 def double(x: i32) i32 = x * 2
 
 def test_map(arr: [3]i32) [3]i32 = map(double, arr)
-def test_map2(xs: [3]i32, ys: [3]i32) [3]i32 = map2(|(x, y)| x + y, xs, ys)
-def test_map3(xs: [3]i32, ys: [3]i32, zs: [3]i32) [3]i32 = map3(|(x, y, z)| x + y + z, xs, ys, zs)
-def test_map4(a: [3]i32, b: [3]i32, c: [3]i32, d: [3]i32) [3]i32 = map4(|(a, b, c, d)| a + b + c + d, a, b, c, d)
-def test_map5(a: [3]i32, b: [3]i32, c: [3]i32, d: [3]i32, e: [3]i32) [3]i32 = map5(|(a, b, c, d, e)| a + b + c + d + e, a, b, c, d, e)
+def test_map2(xs: [3]i32, ys: [3]i32) [3]i32 = map(|(x, y)| x + y, zip(xs, ys))
+def test_map3(xs: [3]i32, ys: [3]i32, zs: [3]i32) [3]i32 = map(|(x, y, z)| x + y + z, zip3(xs, ys, zs))
+def test_map4(a: [3]i32, b: [3]i32, c: [3]i32, d: [3]i32) [3]i32 = map(|(a, b, c, d)| a + b + c + d, zip4(a, b, c, d))
+def test_map5(a: [3]i32, b: [3]i32, c: [3]i32, d: [3]i32, e: [3]i32) [3]i32 = map(|(a, b, c, d, e)| a + b + c + d + e, zip5(a, b, c, d, e))
 "#,
     )
     .unwrap();
@@ -347,6 +348,7 @@ fn compile_to_spirv_with_partial_eval(source: &str) -> Result<Vec<u32>> {
     let ssa = alias_checked
         .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
         .partial_eval()
+        .normalize_soacs()
         .fuse_maps()
         .defunctionalize()
         .monomorphize()
@@ -355,6 +357,7 @@ fn compile_to_spirv_with_partial_eval(source: &str) -> Result<Vec<u32>> {
         .inline()
         .to_ssa()
         .expect("SSA conversion failed")
+        .inline_small()
         .parallelize_soacs()
         .filter_reachable()
         .optimize();

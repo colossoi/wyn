@@ -23,6 +23,7 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
     alias_checked
         .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
         .partial_eval()
+        .normalize_soacs()
         .fuse_maps()
         .defunctionalize()
         .monomorphize()
@@ -31,6 +32,7 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .inline()
         .to_ssa()
         .map_err(|e| crate::err_spirv!("{}", e))?
+        .inline_small()
         .parallelize_soacs()
         .filter_reachable()
         .optimize()
@@ -54,6 +56,7 @@ fn compile_through_ssa(input: &str) -> Result<Program, CompilerError> {
     let ssa = alias_checked
         .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
         .partial_eval()
+        .normalize_soacs()
         .fuse_maps()
         .defunctionalize()
         .monomorphize()
@@ -478,7 +481,7 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     let tlc = tlc.partial_eval();
     eprintln!("=== partial_eval OK ===");
 
-    let tlc = tlc.fuse_maps();
+    let tlc = tlc.normalize_soacs().fuse_maps();
     eprintln!("=== fuse_maps OK ===");
 
     let tlc = tlc.defunctionalize();
@@ -498,6 +501,9 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
 
     let ssa = tlc.to_ssa().expect("to_ssa");
     eprintln!("=== to_ssa OK ===");
+
+    let ssa = ssa.inline_small();
+    eprintln!("=== inline_small OK ===");
 
     let ssa = ssa.parallelize_soacs();
     eprintln!("=== parallelize_soacs OK ===");
@@ -547,7 +553,7 @@ entry main(data: []i32) []i32 = [first(data)]
     let tlc = tlc.partial_eval();
     eprintln!("=== partial_eval OK ===");
 
-    let tlc = tlc.fuse_maps();
+    let tlc = tlc.normalize_soacs().fuse_maps();
     eprintln!("=== fuse_maps OK ===");
 
     let tlc = tlc.defunctionalize();
@@ -567,6 +573,9 @@ entry main(data: []i32) []i32 = [first(data)]
 
     let ssa = tlc.to_ssa().expect("to_ssa");
     eprintln!("=== to_ssa OK ===");
+
+    let ssa = ssa.inline_small();
+    eprintln!("=== inline_small OK ===");
 
     let ssa = ssa.parallelize_soacs();
     eprintln!("=== parallelize_soacs OK ===");

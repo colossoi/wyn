@@ -904,6 +904,25 @@ impl<'a> TypeChecker<'a> {
         Type::Constructed(TypeName::Array, vec![elem, Self::var(size), Self::var(addrspace)])
     }
 
+    /// Register zipN: ∀n a1..aN s. [a1,s,n] -> ... -> [aN,s,n] -> [(a1,...,aN),s,n]
+    fn register_zip_n(&mut self, arity: usize) {
+        let n = self.fresh_var();
+        let s = self.fresh_var();
+        let elem_vars: Vec<polytype::Variable> = (0..arity).map(|_| self.fresh_var()).collect();
+
+        let params: Vec<Type> = elem_vars.iter().map(|&v| Self::array_ty(Self::var(v), s, n)).collect();
+        let tuple_ty = Type::Constructed(
+            TypeName::Tuple(arity),
+            elem_vars.iter().map(|&v| Self::var(v)).collect(),
+        );
+        let ret = Self::array_ty(tuple_ty, s, n);
+        let body = Self::arrow_chain(&params, ret);
+
+        let mut all_vars = vec![n, s];
+        all_vars.extend(&elem_vars);
+        self.scope_stack.insert(format!("zip{}", arity), Self::forall(&all_vars, body));
+    }
+
     /// Build a Vec type: Vec[elem, size]
     fn vec_ty(n: polytype::Variable, elem: Type) -> Type {
         Type::Constructed(TypeName::Vec, vec![elem, Self::var(n)])
@@ -1014,6 +1033,11 @@ impl<'a> TypeChecker<'a> {
             Self::array_ty(tuple(vec![Self::var(a), Self::var(b)]), s, n),
         );
         self.scope_stack.insert("zip".to_string(), Self::forall(&[n, a, b, s], body));
+
+        // zip3..zip5: ∀n a1..aN s. [a1,s,n] -> ... -> [aN,s,n] -> [(a1,...,aN),s,n]
+        for arity in 3..=5 {
+            self.register_zip_n(arity);
+        }
 
         // to_vec: ∀n a s. Array[a, s, n] -> Vec(n, a)
         let (n, a, s) = (self.fresh_var(), self.fresh_var(), self.fresh_var());

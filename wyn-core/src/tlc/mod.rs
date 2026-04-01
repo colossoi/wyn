@@ -14,6 +14,7 @@ pub mod monomorphize;
 #[cfg(test)]
 mod monomorphize_tests;
 pub mod normalize;
+pub mod normalize_soacs;
 pub mod partial_eval;
 #[cfg(test)]
 mod partial_eval_tests;
@@ -55,7 +56,18 @@ const INTRINSIC_RENAMES: &[(&str, &str)] = &[
 
 /// SOAC names that are intercepted in transform_application and turned into
 /// first-class SOAC nodes rather than intrinsic calls.
-const SOAC_NAMES: &[&str] = &["map", "reduce", "scan", "filter", "zip", "reduce_by_index"];
+const SOAC_NAMES: &[&str] = &[
+    "map",
+    "reduce",
+    "scan",
+    "filter",
+    "zip",
+    "zip2",
+    "zip3",
+    "zip4",
+    "zip5",
+    "reduce_by_index",
+];
 
 // =============================================================================
 // Helper functions
@@ -1874,7 +1886,7 @@ impl<'a> Transformer<'a> {
             "reduce" => self.transform_soac_reduce(args, ty, span),
             "scan" => self.transform_soac_scan(args, ty, span),
             "filter" => self.transform_soac_filter(args, ty, span),
-            "zip" => self.transform_soac_zip(args, ty, span),
+            "zip" | "zip2" | "zip3" | "zip4" | "zip5" => self.transform_soac_zip(args, ty, span),
             "reduce_by_index" => self.transform_soac_reduce_by_index(args, ty, span),
             _ => unreachable!("Unknown SOAC: {}", name),
         }
@@ -1888,7 +1900,9 @@ impl<'a> Transformer<'a> {
 
         let lam = self.term_to_lambda(func_term);
 
-        // Absorb zip: if arr_term is ArrayExpr(Zip(...)), flatten into inputs
+        // Absorb zip: if arr_term is ArrayExpr(Zip(...)), flatten into inputs.
+        // The lambda still takes a single tuple param — the normalize_soacs pass
+        // will rewrite it to take separate params.
         let inputs = match arr_term.kind {
             TermKind::ArrayExpr(ArrayExpr::Zip(exprs)) => exprs,
             _ => vec![ArrayExpr::Ref(Box::new(arr_term))],

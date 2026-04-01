@@ -85,7 +85,14 @@ fn forward_params(body: &mut FuncBody) {
         return;
     }
 
+    // Apply substitutions first (while defs still exist), then clear.
+    let resolved = resolve_substitutions(&substitutions);
+    apply_substitutions(body, &resolved);
+
     for bid in blocks_to_clear_params {
+        for &param in &body.inner.blocks[bid].params {
+            body.inner.values.remove(param);
+        }
         body.inner.blocks[bid].params.clear();
     }
     for bid in branches_to_clear_args {
@@ -93,9 +100,6 @@ fn forward_params(body: &mut FuncBody) {
             args.clear();
         }
     }
-
-    let resolved = resolve_substitutions(&substitutions);
-    apply_substitutions(body, &resolved);
 }
 
 fn resolve_substitutions(subs: &HashMap<ValueId, ValueId>) -> HashMap<ValueId, ValueId> {
@@ -315,6 +319,11 @@ fn eliminate_empty_blocks(body: &mut FuncBody) {
 
         let mut redirects: Vec<(BlockId, BlockId, Vec<ValueId>, Vec<ValueId>)> = Vec::new();
 
+        // Collect all ValueIds used by instructions (not terminators) to
+        // detect block params that are referenced outside of branch args.
+        let inst_uses: HashSet<ValueId> =
+            body.inner.insts.values().flat_map(|inst| inst.data.ssa_uses()).collect();
+
         for (bid, block) in &body.inner.blocks {
             if bid == body.entry_block() {
                 continue;
@@ -326,6 +335,12 @@ fn eliminate_empty_blocks(body: &mut FuncBody) {
                 continue;
             }
             if protected.contains(&bid) {
+                continue;
+            }
+            // Skip if any of this block's params are used by instructions
+            // (not just terminators). rewrite_target only threads through
+            // terminator args, so instruction uses would become dangling.
+            if block.params.iter().any(|p| inst_uses.contains(p)) {
                 continue;
             }
             if let Terminator::Branch { target, args } = &block.term {

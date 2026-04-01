@@ -310,6 +310,7 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 // TLC Pipeline (AST -> SSA):
 //       -> .to_tlc()                                    -> TlcTransformed
 //       -> .partial_eval()                              -> TlcPartialEvaled
+//       -> .normalize_soacs()                             -> TlcPartialEvaled (normalized)
 //       -> .fuse_maps()                                 -> TlcFused
 //       -> .defunctionalize()                           -> TlcDefunctionalized
 //       -> .monomorphize()                              -> TlcMonomorphized
@@ -712,6 +713,17 @@ pub struct TlcPartialEvaled {
 }
 
 impl TlcPartialEvaled {
+    /// Normalize SOAC inputs: flatten Map+Zip into multi-input Map.
+    pub fn normalize_soacs(self) -> TlcPartialEvaled {
+        let normalized = tlc::normalize_soacs::normalize_soacs(self.tlc);
+        TlcPartialEvaled {
+            tlc: normalized,
+            type_table: self.type_table,
+            known_defs: self.known_defs,
+            schemes: self.schemes,
+        }
+    }
+
     /// Fuse consecutive SOAC operations to eliminate intermediate arrays.
     pub fn fuse_maps(self) -> TlcFused {
         let fused = tlc::fusion::fuse(self.tlc);
@@ -858,6 +870,19 @@ pub struct SsaConverted {
 }
 
 impl SsaConverted {
+    /// Inline small functions at the SSA level.
+    pub fn inline_small(self) -> SsaInlined {
+        let ssa = ssa::ssa_inline::inline_small_functions(self.ssa);
+        SsaInlined { ssa }
+    }
+}
+
+/// SSA after small function inlining
+pub struct SsaInlined {
+    pub ssa: ssa::types::Program,
+}
+
+impl SsaInlined {
     /// Parallelize SOACs in compute shaders.
     pub fn parallelize_soacs(self) -> SsaParallelized {
         let result = parallelization::parallelize_soacs(self.ssa);

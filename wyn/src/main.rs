@@ -221,7 +221,9 @@ fn compile_file(
     let tlc_optimized = time("tlc_partial_eval", verbose, || tlc_transformed.partial_eval());
 
     // Fuse consecutive map operations
-    let tlc_fused = time("fuse_maps", verbose, || tlc_optimized.fuse_maps());
+    let tlc_fused = time("fuse_maps", verbose, || {
+        tlc_optimized.normalize_soacs().fuse_maps()
+    });
 
     // Defunctionalize: lift lambdas and flatten SOAC captures
     let tlc_defunc = time("defunctionalize", verbose, || tlc_fused.defunctionalize());
@@ -248,6 +250,9 @@ fn compile_file(
             info!("Wrote initial SSA to {}", path.display());
         }
     }
+
+    // Inline small functions
+    let ssa = time("ssa_inline", verbose, || ssa.inline_small());
 
     // Parallelize SOACs in compute shaders
     let parallelized = time("parallelize_soacs", verbose, || ssa.parallelize_soacs());
