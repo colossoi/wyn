@@ -18,7 +18,7 @@ use polytype::Type;
 
 /// What an array-producing operation does, abstractly.
 ///
-/// Inputs are stored as `ArrayExpr` (not abstract `ArraySource`) to preserve
+/// Inputs are stored as `ArrayExpr` directly to preserve
 /// type information needed for code generation after fusion.
 #[derive(Debug, Clone)]
 pub enum ArraySemantics {
@@ -89,19 +89,6 @@ pub enum ArraySemantics {
 
     /// Opaque — can't classify this operation.
     Opaque,
-}
-
-/// Where an array value comes from.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum ArraySource {
-    /// Produced by a let-bound name in the current function body.
-    Local(SymbolId),
-    /// A function parameter.
-    Param(SymbolId),
-    /// A global definition.
-    Global(SymbolId),
-    /// A variable whose provenance we haven't resolved yet.
-    Var(SymbolId),
 }
 
 /// Where a scatter/reduce_by_index destination comes from.
@@ -456,19 +443,6 @@ pub fn classify_term(term: &Term) -> ArraySemantics {
     }
 }
 
-/// Extract an ArraySource from an ArrayExpr (what array does this refer to?).
-fn classify_array_expr_source(ae: &ArrayExpr) -> ArraySource {
-    match ae {
-        ArrayExpr::Ref(term) => match &term.kind {
-            TermKind::Var(sym) => ArraySource::Var(*sym),
-            _ => ArraySource::Var(SymbolId(u32::MAX)), // non-var ref, treat as opaque
-        },
-        // Nested SOAC/Generate/etc. in an input position — these are inline producers,
-        // not references. The graph builder handles these separately.
-        _ => ArraySource::Var(SymbolId(u32::MAX)),
-    }
-}
-
 /// Classify a Place destination.
 fn classify_place(place: &Place) -> PlaceSource {
     match place {
@@ -501,8 +475,8 @@ pub struct FunctionSummary {
 #[derive(Debug, Clone)]
 pub enum ResultSemantics {
     /// The result is a SOAC applied to inputs that are (possibly) parameters.
-    /// The ArraySemantics' ArraySources use ArraySource::Param for parameter
-    /// references, so the caller can substitute its own arguments.
+    /// The ArrayExpr inputs may reference the callee's parameter symbols,
+    /// which the ProducerGraph substitutes with call arguments.
     Produces(ArraySemantics),
 
     /// The result is one of the parameters passed through unchanged.
@@ -515,12 +489,44 @@ pub enum ResultSemantics {
     Unknown,
 }
 
-/// Compute function summaries for all defs in a program.
+/// Compute function summaries for all defs in a program, with fixpoint
+/// propagation for interprocedural analysis.
 pub fn summarize_program(program: &Program) -> HashMap<SymbolId, FunctionSummary> {
-    let mut summaries = HashMap::new();
+    // Initial pass: summarize each def without interprocedural info
+    let mut summaries: HashMap<SymbolId, FunctionSummary> = HashMap::new();
     for def in &program.defs {
         summaries.insert(def.name, summarize_def(def));
     }
+
+    // Fixpoint: re-analyze defs that returned Unknown, using existing summaries
+    // to see through function calls. Repeat until stable.
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for def in &program.defs {
+            let current = summaries.get(&def.name).unwrap();
+            if !matches!(current.result, ResultSemantics::Unknown) {
+                continue; // already resolved
+            }
+
+            let (params, inner_body) = extract_lambda_params(&def.body);
+            if params.is_empty() {
+                continue;
+            }
+
+            let param_syms: Vec<SymbolId> = params.iter().map(|(s, _)| *s).collect();
+            let new_result = analyze_body_with_summaries(&inner_body, &param_syms, &summaries);
+
+            if !matches!(new_result, ResultSemantics::Unknown) {
+                summaries.insert(def.name, FunctionSummary {
+                    result: new_result,
+                    params,
+                });
+                changed = true;
+            }
+        }
+    }
+
     summaries
 }
 
@@ -568,10 +574,69 @@ fn analyze_body(body: &Term, params: &[SymbolId]) -> ResultSemantics {
             }
         }
 
-        // Function call — could be interprocedural (handled by fixpoint later)
+        // Function call — unknown without summary context
         TermKind::App { .. } => ResultSemantics::Unknown,
 
-        // Anything with control flow — bail for now
+        _ => ResultSemantics::Unknown,
+    }
+}
+
+/// Analyze a body with access to existing function summaries.
+/// This extends `analyze_body` to see through function calls.
+fn analyze_body_with_summaries(
+    body: &Term,
+    params: &[SymbolId],
+    summaries: &HashMap<SymbolId, FunctionSummary>,
+) -> ResultSemantics {
+    match &body.kind {
+        TermKind::Soac(soac) => {
+            let semantics = classify_soac_with_params(soac, params);
+            ResultSemantics::Produces(semantics)
+        }
+
+        TermKind::Let { body, .. } => analyze_body_with_summaries(body, params, summaries),
+
+        TermKind::Var(sym) => {
+            if let Some(idx) = params.iter().position(|p| p == sym) {
+                ResultSemantics::PassesThrough(idx)
+            } else {
+                ResultSemantics::Unknown
+            }
+        }
+
+        // Function call: look up callee summary
+        TermKind::App { func, args } => {
+            if let TermKind::Var(callee_sym) = &func.kind {
+                if let Some(callee_summary) = summaries.get(callee_sym) {
+                    match &callee_summary.result {
+                        ResultSemantics::Produces(semantics) => {
+                            // The callee produces an array — this call does too.
+                            // The semantics reference the callee's params;
+                            // the graph builder will substitute them with call args later.
+                            ResultSemantics::Produces(semantics.clone())
+                        }
+                        ResultSemantics::PassesThrough(idx) => {
+                            // Callee passes through one of its params — check if the
+                            // corresponding call arg is one of OUR params.
+                            if *idx < args.len() {
+                                if let TermKind::Var(arg_sym) = &args[*idx].kind {
+                                    if let Some(our_idx) = params.iter().position(|p| p == arg_sym) {
+                                        return ResultSemantics::PassesThrough(our_idx);
+                                    }
+                                }
+                            }
+                            ResultSemantics::Unknown
+                        }
+                        _ => ResultSemantics::Unknown,
+                    }
+                } else {
+                    ResultSemantics::Unknown
+                }
+            } else {
+                ResultSemantics::Unknown
+            }
+        }
+
         _ => ResultSemantics::Unknown,
     }
 }
