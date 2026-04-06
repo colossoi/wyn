@@ -17,49 +17,50 @@ use polytype::Type;
 // =============================================================================
 
 /// What an array-producing operation does, abstractly.
+///
+/// Inputs are stored as `ArrayExpr` (not abstract `ArraySource`) to preserve
+/// type information needed for code generation after fusion.
 #[derive(Debug, Clone)]
 pub enum ArraySemantics {
     /// Elementwise: output[i] = f(inputs[i]...) — shape-preserving, parallelizable.
-    /// Covers Map and multi-input Map (zip-map).
     Elementwise {
-        inputs: Vec<ArraySource>,
+        inputs: Vec<ArrayExpr>,
         body: Lambda,
     },
 
     /// Reduction: scalar = fold(op, init, input).
     Reduction {
-        input: ArraySource,
+        input: ArrayExpr,
         op: Lambda,
         init: Box<Term>,
         props: ReduceProps,
     },
 
     /// Prefix scan: output[i] = fold(op, init, input[0..=i]).
-    /// Shape-preserving but with sequential dependency.
     PrefixScan {
-        input: ArraySource,
+        input: ArrayExpr,
         op: Lambda,
         init: Box<Term>,
     },
 
     /// Filter: output = input where pred(elem) — shape-changing.
     Filter {
-        input: ArraySource,
+        input: ArrayExpr,
         pred: Lambda,
     },
 
     /// Scatter: dest[indices[i]] = values[i] — indexed writes.
     ScatterOp {
         dest: PlaceSource,
-        indices: ArraySource,
-        values: ArraySource,
+        indices: ArrayExpr,
+        values: ArrayExpr,
     },
 
     /// Histogram-style: dest[indices[i]] = op(dest[indices[i]], values[i]).
     IndexedReduction {
         dest: PlaceSource,
-        indices: ArraySource,
-        values: ArraySource,
+        indices: ArrayExpr,
+        values: ArrayExpr,
         op: Lambda,
         init: Box<Term>,
         props: ReduceProps,
@@ -147,8 +148,8 @@ impl ArraySemantics {
         )
     }
 
-    /// Get all input sources this operation reads from.
-    pub fn input_sources(&self) -> Vec<&ArraySource> {
+    /// Get all array inputs this operation reads from.
+    pub fn input_exprs(&self) -> Vec<&ArrayExpr> {
         match self {
             ArraySemantics::Elementwise { inputs, .. } => inputs.iter().collect(),
             ArraySemantics::Reduction { input, .. } => vec![input],
@@ -276,7 +277,7 @@ pub fn compose_map_into_reduce(
     let composed_op = compose_map_into_op(prod_body, cons_op, symbols, term_ids);
 
     Some(ArraySemantics::Reduction {
-        input: prod_inputs.first().cloned().unwrap_or(ArraySource::Var(SymbolId(u32::MAX))),
+        input: prod_inputs.first().cloned().unwrap_or(ArrayExpr::Literal(vec![])),
         op: composed_op,
         init: cons_init.clone(),
         props: cons_props.clone(),
@@ -302,7 +303,7 @@ pub fn compose_map_into_scan(
     let composed_op = compose_map_into_op(prod_body, cons_op, symbols, term_ids);
 
     Some(ArraySemantics::PrefixScan {
-        input: prod_inputs.first().cloned().unwrap_or(ArraySource::Var(SymbolId(u32::MAX))),
+        input: prod_inputs.first().cloned().unwrap_or(ArrayExpr::Literal(vec![])),
         op: composed_op,
         init: cons_init.clone(),
     })
@@ -382,57 +383,43 @@ fn compose_map_into_op(
 // Extraction from TLC terms
 // =============================================================================
 
-/// Extract ArraySemantics from a SoacOp.
+/// Extract ArraySemantics from a SoacOp, preserving ArrayExpr inputs with types.
 pub fn classify_soac(soac: &SoacOp) -> ArraySemantics {
     match soac {
         SoacOp::Map { lam, inputs } => ArraySemantics::Elementwise {
-            inputs: inputs.iter().map(classify_array_expr_source).collect(),
+            inputs: inputs.clone(),
             body: lam.clone(),
         },
-        SoacOp::Reduce {
-            op,
-            ne,
-            input,
-            props,
-        } => ArraySemantics::Reduction {
-            input: classify_array_expr_source(input),
+        SoacOp::Reduce { op, ne, input, props } => ArraySemantics::Reduction {
+            input: input.clone(),
             op: op.clone(),
             init: ne.clone(),
             props: props.clone(),
         },
         SoacOp::Scan { op, ne, input } => ArraySemantics::PrefixScan {
-            input: classify_array_expr_source(input),
+            input: input.clone(),
             op: op.clone(),
             init: ne.clone(),
         },
         SoacOp::Filter { pred, input } => ArraySemantics::Filter {
-            input: classify_array_expr_source(input),
+            input: input.clone(),
             pred: pred.clone(),
         },
-        SoacOp::Scatter {
-            dest,
-            indices,
-            values,
-        } => ArraySemantics::ScatterOp {
+        SoacOp::Scatter { dest, indices, values } => ArraySemantics::ScatterOp {
             dest: classify_place(dest),
-            indices: classify_array_expr_source(indices),
-            values: classify_array_expr_source(values),
+            indices: indices.clone(),
+            values: values.clone(),
         },
-        SoacOp::ReduceByIndex {
-            dest,
-            op,
-            ne,
-            indices,
-            values,
-            props,
-        } => ArraySemantics::IndexedReduction {
-            dest: classify_place(dest),
-            indices: classify_array_expr_source(indices),
-            values: classify_array_expr_source(values),
-            op: op.clone(),
-            init: ne.clone(),
-            props: props.clone(),
-        },
+        SoacOp::ReduceByIndex { dest, op, ne, indices, values, props } => {
+            ArraySemantics::IndexedReduction {
+                dest: classify_place(dest),
+                indices: indices.clone(),
+                values: values.clone(),
+                op: op.clone(),
+                init: ne.clone(),
+                props: props.clone(),
+            }
+        }
     }
 }
 
@@ -589,60 +576,8 @@ fn analyze_body(body: &Term, params: &[SymbolId]) -> ResultSemantics {
     }
 }
 
-/// Classify a SoacOp, resolving ArrayExpr inputs to parameter references
-/// where possible. This is the key difference from `classify_soac` — here
-/// we know which SymbolIds are parameters and tag them as `ArraySource::Param`.
-fn classify_soac_with_params(soac: &SoacOp, params: &[SymbolId]) -> ArraySemantics {
-    let resolve_source = |ae: &ArrayExpr| -> ArraySource {
-        match ae {
-            ArrayExpr::Ref(term) => match &term.kind {
-                TermKind::Var(sym) => {
-                    if let Some(_idx) = params.iter().position(|p| p == sym) {
-                        ArraySource::Param(*sym)
-                    } else {
-                        ArraySource::Local(*sym)
-                    }
-                }
-                _ => ArraySource::Var(SymbolId(u32::MAX)),
-            },
-            _ => ArraySource::Var(SymbolId(u32::MAX)),
-        }
-    };
-
-    match soac {
-        SoacOp::Map { lam, inputs } => ArraySemantics::Elementwise {
-            inputs: inputs.iter().map(resolve_source).collect(),
-            body: lam.clone(),
-        },
-        SoacOp::Reduce { op, ne, input, props } => ArraySemantics::Reduction {
-            input: resolve_source(input),
-            op: op.clone(),
-            init: ne.clone(),
-            props: props.clone(),
-        },
-        SoacOp::Scan { op, ne, input } => ArraySemantics::PrefixScan {
-            input: resolve_source(input),
-            op: op.clone(),
-            init: ne.clone(),
-        },
-        SoacOp::Filter { pred, input } => ArraySemantics::Filter {
-            input: resolve_source(input),
-            pred: pred.clone(),
-        },
-        SoacOp::Scatter { dest, indices, values } => ArraySemantics::ScatterOp {
-            dest: classify_place(dest),
-            indices: resolve_source(indices),
-            values: resolve_source(values),
-        },
-        SoacOp::ReduceByIndex { dest, op, ne, indices, values, props } => {
-            ArraySemantics::IndexedReduction {
-                dest: classify_place(dest),
-                indices: resolve_source(indices),
-                values: resolve_source(values),
-                op: op.clone(),
-                init: ne.clone(),
-                props: props.clone(),
-            }
-        }
-    }
+/// Classify a SoacOp for summary extraction. Same as `classify_soac` —
+/// we preserve the ArrayExpr inputs directly (they carry type info).
+fn classify_soac_with_params(soac: &SoacOp, _params: &[SymbolId]) -> ArraySemantics {
+    classify_soac(soac)
 }

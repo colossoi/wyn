@@ -713,9 +713,9 @@ pub struct TlcPartialEvaled {
 }
 
 impl TlcPartialEvaled {
-    /// Fuse consecutive map operations to eliminate intermediate arrays.
+    /// Fuse consecutive SOAC operations to eliminate intermediate arrays.
     pub fn fuse_maps(self) -> TlcFused {
-        let fused = tlc::fusion::fuse_maps(self.tlc);
+        let fused = tlc::fusion::fuse(self.tlc);
 
         TlcFused {
             tlc: fused,

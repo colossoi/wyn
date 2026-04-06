@@ -10,8 +10,11 @@
 
 use std::collections::HashMap;
 
-use super::array_semantics::{ArraySemantics, ArraySource, classify_term};
-use super::{Term, TermKind};
+use super::array_semantics::{
+    ArraySemantics, FunctionSummary, ResultSemantics, classify_term,
+};
+use super::{Term, TermIdSource, TermKind, Lambda};
+use super::fusion::substitute_sym;
 use crate::ast::TypeName;
 use crate::SymbolId;
 use polytype::Type;
@@ -101,12 +104,15 @@ impl ProducerGraph {
 pub fn build_producer_graph(
     body: &Term,
     params: &[SymbolId],
+    summaries: &HashMap<SymbolId, FunctionSummary>,
 ) -> ProducerGraph {
     let mut builder = GraphBuilder {
         nodes: Vec::new(),
         edges: Vec::new(),
         binding_map: HashMap::new(),
         param_set: params.iter().copied().collect(),
+        summaries,
+        term_ids: TermIdSource::new(),
     };
 
     builder.walk_term(body);
@@ -119,18 +125,73 @@ pub fn build_producer_graph(
     }
 }
 
-struct GraphBuilder {
+struct GraphBuilder<'a> {
     nodes: Vec<ProducerNode>,
     edges: Vec<ProducerEdge>,
     binding_map: HashMap<SymbolId, ProducerId>,
     param_set: std::collections::HashSet<SymbolId>,
+    summaries: &'a HashMap<SymbolId, FunctionSummary>,
+    term_ids: TermIdSource,
 }
 
-impl GraphBuilder {
+impl<'a> GraphBuilder<'a> {
     fn add_node(&mut self, node: ProducerNode) -> ProducerId {
         let id = ProducerId(self.nodes.len() as u32);
         self.nodes.push(node);
         id
+    }
+
+    /// Classify a term as array semantics, using function summaries for App nodes.
+    fn classify(&mut self, term: &Term) -> ArraySemantics {
+        // First try direct classification (SOACs, array exprs)
+        let direct = classify_term(term);
+        if !matches!(direct, ArraySemantics::Opaque) {
+            return direct;
+        }
+
+        // For App nodes, check if the callee has a known summary
+        if let TermKind::App { func, args } = &term.kind {
+            if let TermKind::Var(callee_sym) = &func.kind {
+                if let Some(summary) = self.summaries.get(callee_sym) {
+                    if let ResultSemantics::Produces(ref semantics) = summary.result {
+                        // Substitute the summary's parameter references with
+                        // the actual call arguments
+                        return self.substitute_summary_args(semantics, &summary.params, args);
+                    }
+                }
+            }
+        }
+
+        ArraySemantics::Opaque
+    }
+
+    /// Substitute parameter references in a summary's ArraySemantics with
+    /// the actual call arguments.
+    fn substitute_summary_args(
+        &mut self,
+        semantics: &ArraySemantics,
+        summary_params: &[(SymbolId, Type<TypeName>)],
+        call_args: &[Term],
+    ) -> ArraySemantics {
+        // Build a param_sym → arg_sym mapping
+        let param_to_arg: HashMap<SymbolId, SymbolId> = summary_params
+            .iter()
+            .zip(call_args)
+            .filter_map(|((param_sym, _), arg)| {
+                if let TermKind::Var(arg_sym) = &arg.kind {
+                    Some((*param_sym, *arg_sym))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Apply all param→arg substitutions to every ArrayExpr and Lambda in the semantics
+        let mut result = semantics.clone();
+        for (&param_sym, &arg_sym) in &param_to_arg {
+            result = subst_in_semantics(result, param_sym, arg_sym, &mut self.term_ids);
+        }
+        result
     }
 
     /// Walk a term, extracting producer nodes from Let bindings.
@@ -139,36 +200,32 @@ impl GraphBuilder {
             TermKind::Let {
                 name, rhs, body, ..
             } => {
-                // Classify the RHS
-                let semantics = classify_term(rhs);
+                let semantics = self.classify(rhs);
 
-                // Only create a node if this is actually an array producer
                 if !matches!(semantics, ArraySemantics::Opaque) {
                     let id = self.add_node(ProducerNode {
                         semantics,
                         binding: Some(*name),
                         ty: rhs.ty.clone(),
-                        use_count: 0, // computed later
+                        use_count: 0,
                     });
                     self.wire_edges(id);
                     self.binding_map.insert(*name, id);
                 }
 
-                // Continue walking the body
                 self.walk_term(body);
             }
 
-            // The tail expression might also be a SOAC (the final result)
-            TermKind::Soac(_) | TermKind::ArrayExpr(_) => {
-                let semantics = classify_term(term);
+            // Tail expression — might be a SOAC or interprocedural call
+            TermKind::Soac(_) | TermKind::ArrayExpr(_) | TermKind::App { .. } => {
+                let semantics = self.classify(term);
                 if !matches!(semantics, ArraySemantics::Opaque) {
                     let id = self.add_node(ProducerNode {
                         semantics,
-                        binding: None, // tail expression, no binding
+                        binding: None,
                         ty: term.ty.clone(),
                         use_count: 0,
                     });
-                    // Wire edges from this node's inputs to existing producers
                     self.wire_edges(id);
                 }
             }
@@ -179,23 +236,29 @@ impl GraphBuilder {
 
     /// Wire edges from a consumer node's inputs to their producer nodes.
     fn wire_edges(&mut self, consumer_id: ProducerId) {
-        let sources: Vec<(usize, ArraySource)> = self.nodes[consumer_id.0 as usize]
+        // Extract SymbolIds from ArrayExpr inputs
+        let input_syms: Vec<(usize, SymbolId)> = self.nodes[consumer_id.0 as usize]
             .semantics
-            .input_sources()
+            .input_exprs()
             .iter()
             .enumerate()
-            .map(|(i, s)| (i, (*s).clone()))
+            .filter_map(|(i, ae)| {
+                if let super::ArrayExpr::Ref(t) = ae {
+                    if let TermKind::Var(sym) = &t.kind {
+                        return Some((i, *sym));
+                    }
+                }
+                None
+            })
             .collect();
 
-        for (input_index, source) in sources {
-            if let ArraySource::Var(sym) = source {
-                if let Some(&producer_id) = self.binding_map.get(&sym) {
-                    self.edges.push(ProducerEdge {
-                        producer: producer_id,
-                        consumer: consumer_id,
-                        input_index,
-                    });
-                }
+        for (input_index, sym) in input_syms {
+            if let Some(&producer_id) = self.binding_map.get(&sym) {
+                self.edges.push(ProducerEdge {
+                    producer: producer_id,
+                    consumer: consumer_id,
+                    input_index,
+                });
             }
         }
     }
@@ -213,6 +276,54 @@ impl GraphBuilder {
         }
         // TODO: also count non-SOAC uses by walking the full term body
         // For now, edge count is a lower bound.
+    }
+}
+
+/// Substitute one param symbol → arg symbol throughout an ArraySemantics
+/// (in both ArrayExpr inputs and Lambda bodies).
+fn subst_in_semantics(
+    sem: ArraySemantics,
+    old: SymbolId,
+    new: SymbolId,
+    term_ids: &mut TermIdSource,
+) -> ArraySemantics {
+    use super::ArrayExpr;
+
+    fn sub_ae(ae: ArrayExpr, old: SymbolId, new: SymbolId, ids: &mut TermIdSource) -> ArrayExpr {
+        match ae {
+            ArrayExpr::Ref(t) => ArrayExpr::Ref(Box::new(substitute_sym(*t, old, new, ids))),
+            other => other,
+        }
+    }
+
+    fn sub_lam(lam: Lambda, old: SymbolId, new: SymbolId, ids: &mut TermIdSource) -> Lambda {
+        Lambda {
+            body: Box::new(substitute_sym(*lam.body, old, new, ids)),
+            ..lam
+        }
+    }
+
+    match sem {
+        ArraySemantics::Elementwise { inputs, body } => ArraySemantics::Elementwise {
+            inputs: inputs.into_iter().map(|ae| sub_ae(ae, old, new, term_ids)).collect(),
+            body: sub_lam(body, old, new, term_ids),
+        },
+        ArraySemantics::Reduction { input, op, init, props } => ArraySemantics::Reduction {
+            input: sub_ae(input, old, new, term_ids),
+            op: sub_lam(op, old, new, term_ids),
+            init,
+            props,
+        },
+        ArraySemantics::PrefixScan { input, op, init } => ArraySemantics::PrefixScan {
+            input: sub_ae(input, old, new, term_ids),
+            op: sub_lam(op, old, new, term_ids),
+            init,
+        },
+        ArraySemantics::Filter { input, pred } => ArraySemantics::Filter {
+            input: sub_ae(input, old, new, term_ids),
+            pred: sub_lam(pred, old, new, term_ids),
+        },
+        other => other,
     }
 }
 

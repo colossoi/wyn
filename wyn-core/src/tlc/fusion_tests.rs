@@ -198,7 +198,7 @@ fn test_simple_map_fusion() {
         symbols,
     };
 
-    let fused = fuse_maps(program);
+    let fused = fuse(program);
 
     // The result should be a single Map (no Let binding)
     match &fused.defs[0].body.kind {
@@ -313,7 +313,7 @@ fn test_chain_of_three_maps() {
         symbols,
     };
 
-    let fused = fuse_maps(program);
+    let fused = fuse(program);
 
     // Should be a single Map with a's input (all three fused)
     match &fused.defs[0].body.kind {
@@ -400,7 +400,7 @@ fn test_multi_use_no_fusion() {
         symbols,
     };
 
-    let result = fuse_maps(program);
+    let result = fuse(program);
 
     // Should still be a Let (no fusion because b is used twice)
     assert!(matches!(&result.defs[0].body.kind, TermKind::Let { .. }));
@@ -480,7 +480,7 @@ fn test_zip_fused_producer() {
         symbols,
     };
 
-    let fused = fuse_maps(program);
+    let fused = fuse(program);
 
     // Should be a Map with [a, b] inputs (producer's multi-inputs preserved)
     match &fused.defs[0].body.kind {
@@ -564,7 +564,7 @@ fn test_consumer_multi_input_no_fusion() {
         symbols,
     };
 
-    let result = fuse_maps(program);
+    let result = fuse(program);
 
     // Should NOT fuse — consumer has multiple inputs
     assert!(matches!(&result.defs[0].body.kind, TermKind::Let { .. }));
@@ -621,7 +621,7 @@ fn test_inline_map_fusion() {
         symbols,
     };
 
-    let fused = fuse_maps(program);
+    let fused = fuse(program);
 
     // Should be a single Map with a's input, param x (inner g's param)
     match &fused.defs[0].body.kind {
@@ -707,7 +707,7 @@ fn test_inline_chain_of_three() {
         symbols,
     };
 
-    let fused = fuse_maps(program);
+    let fused = fuse(program);
 
     // All three fused into one Map over a
     match &fused.defs[0].body.kind {
@@ -784,7 +784,7 @@ fn test_zip_fused_consumer_inline() {
         symbols,
     };
 
-    let fused = fuse_maps(program);
+    let fused = fuse(program);
 
     // The inner map should be fused: y1's slot replaced by g's param x,
     // input[0] is now Ref(a), input[1] is Ref(b)
@@ -880,7 +880,7 @@ fn test_map_zip_map() {
         symbols,
     };
 
-    let fused = fuse_maps(program);
+    let fused = fuse(program);
 
     match &fused.defs[0].body.kind {
         TermKind::Soac(SoacOp::Map { lam, inputs }) => {
@@ -965,7 +965,7 @@ fn test_raytrace_step1_local_map_reduce() {
         symbols,
     };
 
-    let fused = fuse_maps(program);
+    let fused = fuse(program);
     match &fused.defs[0].body.kind {
         TermKind::Soac(SoacOp::Reduce { op, input, .. }) => {
             match input {
@@ -1062,7 +1062,7 @@ fn test_raytrace_step2_interprocedural_reduce_consumer() {
         symbols,
     };
 
-    let fused = fuse_maps(program);
+    let fused = fuse(program);
     let main = fused.defs.iter().find(|d| d.name == main_sym).unwrap();
     match &main.body.kind {
         TermKind::Soac(SoacOp::Reduce { op, input, .. }) => {
@@ -1162,7 +1162,7 @@ fn test_raytrace_step3_interprocedural_map_producer() {
         symbols,
     };
 
-    let fused = fuse_maps(program);
+    let fused = fuse(program);
     let main = fused.defs.iter().find(|d| d.name == main_sym).unwrap();
     match &main.body.kind {
         TermKind::Soac(SoacOp::Reduce { op, input, .. }) => {
@@ -1279,7 +1279,7 @@ fn test_raytrace_step4_both_interprocedural() {
         symbols,
     };
 
-    let fused = fuse_maps(program);
+    let fused = fuse(program);
     let main = fused.defs.iter().find(|d| d.name == main_sym).unwrap();
     match &main.body.kind {
         TermKind::Soac(SoacOp::Reduce { op, input, .. }) => {
@@ -1400,7 +1400,7 @@ fn test_raytrace_step5_globals_pattern_fused() {
         symbols,
     };
 
-    let fused = fuse_maps(program);
+    let fused = fuse(program);
     let main = fused.defs.iter().find(|d| d.name == main_sym).unwrap();
     // Should fuse: intersectAll produces a Map (ProducesMap summary)
     match &main.body.kind {
