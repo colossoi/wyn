@@ -16,8 +16,8 @@ use crate::pipeline_descriptor::{
     Access, Binding, BufferUsage, ComputePipeline, ComputeStage, DispatchSize, MultiComputePipeline,
     Pipeline, PipelineDescriptor,
 };
-use crate::ssa::layout::type_byte_size;
 use crate::ssa::builder::FuncBuilder;
+use crate::ssa::layout::type_byte_size;
 use crate::ssa::soac_analysis::{ArrayProvenance, ParallelizableSoac, analyze_program};
 use crate::ssa::types::{EffectToken, FuncBody, InstKind, Terminator, ValueId};
 use crate::ssa::types::{EntryInput, EntryOutput, EntryPoint, ExecutionModel, Program};
