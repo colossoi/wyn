@@ -101,14 +101,13 @@ impl ProducerGraph {
 /// and edges for def-use relationships between them.
 pub fn build_producer_graph(
     body: &Term,
-    params: &[SymbolId],
+    _params: &[SymbolId],
     summaries: &HashMap<SymbolId, FunctionSummary>,
 ) -> ProducerGraph {
     let mut builder = GraphBuilder {
         nodes: Vec::new(),
         edges: Vec::new(),
         binding_map: HashMap::new(),
-        param_set: params.iter().copied().collect(),
         summaries,
         term_ids: TermIdSource::new(),
     };
@@ -127,7 +126,6 @@ struct GraphBuilder<'a> {
     nodes: Vec<ProducerNode>,
     edges: Vec<ProducerEdge>,
     binding_map: HashMap<SymbolId, ProducerId>,
-    param_set: std::collections::HashSet<SymbolId>,
     summaries: &'a HashMap<SymbolId, FunctionSummary>,
     term_ids: TermIdSource,
 }

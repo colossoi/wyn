@@ -925,15 +925,6 @@ fn parallelize_scan_entry(
     let block_sums_binding = (0u32, next_binding + 1);
     let block_offsets_binding = (0u32, next_binding + 2);
 
-    let array_view_ty = Type::Constructed(
-        TypeName::Array,
-        vec![
-            elem_type.clone(),
-            Type::Constructed(TypeName::SizePlaceholder, vec![]),
-            Type::Constructed(TypeName::ArrayVariantView, vec![]),
-        ],
-    );
-
     // --- Phase 1: local scans + block sums ---
     let phase1 = build_scan_phase1(
         entry,
@@ -1395,8 +1386,6 @@ fn build_scan_phase3(
     let offset = ctx.builder.push_load(offset_ptr, elem_type.clone(), effect_in).ok()?;
 
     // Loop: for i in chunk_start..chunk_end: output[i] = op(offset, output[i])
-    let zero = ctx.push_int("0")?;
-
     let (header, header_params) = ctx.builder.create_block_with_params(vec![u32_ty.clone()]);
     let loop_index = header_params[0];
     let body_block = ctx.builder.create_block();
