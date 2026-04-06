@@ -1059,7 +1059,7 @@ fn count_uses_place(place: &Place, sym: SymbolId) -> usize {
 
 /// Substitute all free occurrences of `old` with `Var(new)` in a term,
 /// respecting shadowing.
-fn substitute_sym(term: Term, old: SymbolId, new: SymbolId, term_ids: &mut TermIdSource) -> Term {
+pub fn substitute_sym(term: Term, old: SymbolId, new: SymbolId, term_ids: &mut TermIdSource) -> Term {
     match term.kind {
         TermKind::Var(s) if s == old => Term {
             id: term_ids.next_id(),
