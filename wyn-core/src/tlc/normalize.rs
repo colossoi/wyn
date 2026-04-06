@@ -69,10 +69,7 @@ fn normalize_term(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdSo
                 id: term_ids.next_id(),
                 ty: term.ty,
                 span,
-                kind: TermKind::App {
-                    func,
-                    args: new_args,
-                },
+                kind: TermKind::App { func, args: new_args },
             };
             for (fresh, soac_arg) in lets.into_iter().rev() {
                 let arg_ty = soac_arg.ty.clone();

@@ -415,8 +415,7 @@ impl<'a> Monomorphizer<'a> {
 
                 // Default: just process recursively
                 let processed_func = self.process_term(func);
-                let processed_args: Vec<_> =
-                    args.iter().map(|a| self.process_term(a)).collect();
+                let processed_args: Vec<_> = args.iter().map(|a| self.process_term(a)).collect();
                 TermKind::App {
                     func: Box::new(processed_func),
                     args: processed_args,
@@ -639,7 +638,6 @@ impl<'a> Monomorphizer<'a> {
             ArrayExpr::StorageBuffer { .. } => unreachable!("StorageBuffer introduced after monomorphize"),
         }
     }
-
 
     /// Infer the substitution needed for a polymorphic function call.
     fn infer_substitution(&self, poly_def: &Def, arg_types: &[Type<TypeName>]) -> Substitution {

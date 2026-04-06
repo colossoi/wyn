@@ -773,7 +773,8 @@ impl BufferSpecializer {
 
                         // Default: recurse into func and args
                         let new_func = self.rewrite_specialized_body(func, view_params);
-                        let new_args: Vec<Term> = args.iter().map(|a| self.rewrite_specialized_body(a, view_params)).collect();
+                        let new_args: Vec<Term> =
+                            args.iter().map(|a| self.rewrite_specialized_body(a, view_params)).collect();
                         Term {
                             kind: TermKind::App {
                                 func: Box::new(new_func),
@@ -784,7 +785,8 @@ impl BufferSpecializer {
                     }
                     _ => {
                         let new_func = self.rewrite_specialized_body(func, view_params);
-                        let new_args: Vec<Term> = args.iter().map(|a| self.rewrite_specialized_body(a, view_params)).collect();
+                        let new_args: Vec<Term> =
+                            args.iter().map(|a| self.rewrite_specialized_body(a, view_params)).collect();
                         Term {
                             kind: TermKind::App {
                                 func: Box::new(new_func),
@@ -1349,7 +1351,6 @@ impl BufferSpecializer {
         }
     }
 }
-
 
 /// Wrap a body term in a single flat lambda for the given parameter list.
 fn wrap_in_lambdas(body: Term, params: &[(SymbolId, Type<TypeName>)], term_ids: &mut TermIdSource) -> Term {

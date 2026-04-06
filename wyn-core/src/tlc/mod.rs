@@ -5,7 +5,6 @@
 
 pub mod array_semantics;
 pub mod buffer_specialize;
-pub mod producer_graph;
 pub mod defunctionalize;
 #[cfg(test)]
 mod defunctionalize_tests;
@@ -18,6 +17,7 @@ pub mod normalize;
 pub mod partial_eval;
 #[cfg(test)]
 mod partial_eval_tests;
+pub mod producer_graph;
 pub mod soa_transform;
 pub mod specialize;
 #[cfg(test)]
@@ -76,9 +76,7 @@ fn count_function_arity(ty: &Type<TypeName>) -> usize {
 /// If not, returns empty params and the term itself.
 pub fn extract_lambda_params(term: &Term) -> (Vec<(SymbolId, Type<TypeName>)>, Term) {
     match &term.kind {
-        TermKind::Lambda(Lambda {
-            params, body, ..
-        }) => (params.clone(), (**body).clone()),
+        TermKind::Lambda(Lambda { params, body, .. }) => (params.clone(), (**body).clone()),
         _ => (vec![], term.clone()),
     }
 }
@@ -490,7 +488,9 @@ impl Term {
                 panic!(
                     "Nested App detected in def '{}': outer has {} args, inner func has {} args. \
                      Inner func kind: {:?}",
-                    def_name, args.len(), inner_args.len(),
+                    def_name,
+                    args.len(),
+                    inner_args.len(),
                     if let TermKind::App { func: f, .. } = &func.kind {
                         format!("App(func={:?})", std::mem::discriminant(&f.kind))
                     } else {
@@ -564,10 +564,7 @@ impl Term {
                 loop_var,
                 loop_var_ty,
                 init: Box::new(f(*init)),
-                init_bindings: init_bindings
-                    .into_iter()
-                    .map(|(s, t, e)| (s, t, f(e)))
-                    .collect(),
+                init_bindings: init_bindings.into_iter().map(|(s, t, e)| (s, t, f(e))).collect(),
                 kind: map_loop_kind_children(kind, f),
                 body: Box::new(f(*body)),
             },
@@ -794,11 +791,7 @@ where
 {
     Lambda {
         body: Box::new(f(*lam.body)),
-        captures: lam
-            .captures
-            .into_iter()
-            .map(|(s, t, e)| (s, t, f(e)))
-            .collect(),
+        captures: lam.captures.into_iter().map(|(s, t, e)| (s, t, f(e))).collect(),
         ..lam
     }
 }
@@ -810,17 +803,9 @@ where
     match soac {
         SoacOp::Map { lam, inputs } => SoacOp::Map {
             lam: map_lambda_children(lam, f),
-            inputs: inputs
-                .into_iter()
-                .map(|ae| map_array_expr_children(ae, f))
-                .collect(),
+            inputs: inputs.into_iter().map(|ae| map_array_expr_children(ae, f)).collect(),
         },
-        SoacOp::Reduce {
-            op,
-            ne,
-            input,
-            props,
-        } => SoacOp::Reduce {
+        SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
             op: map_lambda_children(op, f),
             ne: Box::new(f(*ne)),
             input: map_array_expr_children(input, f),
@@ -868,11 +853,9 @@ where
 {
     match ae {
         ArrayExpr::Ref(t) => ArrayExpr::Ref(Box::new(f(*t))),
-        ArrayExpr::Zip(aes) => ArrayExpr::Zip(
-            aes.into_iter()
-                .map(|ae| map_array_expr_children(ae, f))
-                .collect(),
-        ),
+        ArrayExpr::Zip(aes) => {
+            ArrayExpr::Zip(aes.into_iter().map(|ae| map_array_expr_children(ae, f)).collect())
+        }
         ArrayExpr::Soac(op) => ArrayExpr::Soac(Box::new(map_soac_children(*op, f))),
         ArrayExpr::Generate {
             shape,
@@ -1278,10 +1261,8 @@ impl<'a> Transformer<'a> {
         }
 
         // Build a single flat lambda with all params
-        let all_params: Vec<(SymbolId, Type<TypeName>)> = lambda_info
-            .into_iter()
-            .map(|(sym, ty, _)| (sym, ty))
-            .collect();
+        let all_params: Vec<(SymbolId, Type<TypeName>)> =
+            lambda_info.into_iter().map(|(sym, ty, _)| (sym, ty)).collect();
         let ret_ty = result.ty.clone();
         let lam_ty = {
             let mut ty = ret_ty.clone();
@@ -1840,7 +1821,11 @@ impl<'a> Transformer<'a> {
         // If func_term is already an App, flatten by merging args.
         // The AST represents chained calls as nested Application nodes.
         if let TermKind::App { .. } = &func_term.kind {
-            let TermKind::App { func: inner_func, args: inner_args } = func_term.kind else {
+            let TermKind::App {
+                func: inner_func,
+                args: inner_args,
+            } = func_term.kind
+            else {
                 unreachable!()
             };
             let mut all_args = inner_args;

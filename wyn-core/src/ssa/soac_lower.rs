@@ -591,14 +591,7 @@ fn expand_scan(
     call_args.extend(captures.iter().copied());
     let new_acc = builder.push_call(func, call_args, acc_ty).ok()?;
 
-    let new_arr = soa_array_with(
-        builder,
-        loop_blocks.acc,
-        loop_blocks.index,
-        new_acc,
-        &result_ty,
-    )
-    .ok()?;
+    let new_arr = soa_array_with(builder, loop_blocks.acc, loop_blocks.index, new_acc, &result_ty).ok()?;
 
     let one = builder.push_int("1", i32_ty.clone()).ok()?;
     let next_i = builder.push_binop("+", loop_blocks.index, one, i32_ty).ok()?;

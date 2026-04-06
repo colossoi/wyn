@@ -10,13 +10,11 @@
 
 use std::collections::HashMap;
 
-use super::array_semantics::{
-    ArraySemantics, FunctionSummary, ResultSemantics, classify_term,
-};
-use super::{Term, TermIdSource, TermKind, Lambda};
+use super::array_semantics::{ArraySemantics, FunctionSummary, ResultSemantics, classify_term};
 use super::fusion::substitute_sym;
-use crate::ast::TypeName;
+use super::{Lambda, Term, TermIdSource, TermKind};
 use crate::SymbolId;
+use crate::ast::TypeName;
 use polytype::Type;
 
 // =============================================================================
@@ -178,11 +176,7 @@ impl<'a> GraphBuilder<'a> {
             .iter()
             .zip(call_args)
             .filter_map(|((param_sym, _), arg)| {
-                if let TermKind::Var(arg_sym) = &arg.kind {
-                    Some((*param_sym, *arg_sym))
-                } else {
-                    None
-                }
+                if let TermKind::Var(arg_sym) = &arg.kind { Some((*param_sym, *arg_sym)) } else { None }
             })
             .collect();
 
@@ -197,9 +191,7 @@ impl<'a> GraphBuilder<'a> {
     /// Walk a term, extracting producer nodes from Let bindings.
     fn walk_term(&mut self, term: &Term) {
         match &term.kind {
-            TermKind::Let {
-                name, rhs, body, ..
-            } => {
+            TermKind::Let { name, rhs, body, .. } => {
                 let semantics = self.classify(rhs);
 
                 if !matches!(semantics, ArraySemantics::Opaque) {
@@ -308,7 +300,12 @@ fn subst_in_semantics(
             inputs: inputs.into_iter().map(|ae| sub_ae(ae, old, new, term_ids)).collect(),
             body: sub_lam(body, old, new, term_ids),
         },
-        ArraySemantics::Reduction { input, op, init, props } => ArraySemantics::Reduction {
+        ArraySemantics::Reduction {
+            input,
+            op,
+            init,
+            props,
+        } => ArraySemantics::Reduction {
             input: sub_ae(input, old, new, term_ids),
             op: sub_lam(op, old, new, term_ids),
             init,
@@ -334,7 +331,11 @@ fn subst_in_semantics(
 impl ProducerGraph {
     /// Pretty-print the graph for debugging.
     pub fn debug_print(&self, symbols: &crate::SymbolTable) {
-        eprintln!("ProducerGraph ({} nodes, {} edges):", self.nodes.len(), self.edges.len());
+        eprintln!(
+            "ProducerGraph ({} nodes, {} edges):",
+            self.nodes.len(),
+            self.edges.len()
+        );
         for (i, node) in self.nodes.iter().enumerate() {
             let name = node
                 .binding
@@ -342,7 +343,9 @@ impl ProducerGraph {
                 .unwrap_or_else(|| format!("<tail>"));
             eprintln!(
                 "  [{}] {} : uses={}, semantics={:?}",
-                i, name, node.use_count,
+                i,
+                name,
+                node.use_count,
                 std::mem::discriminant(&node.semantics)
             );
         }

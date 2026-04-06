@@ -78,10 +78,7 @@ fn print_term(term: &Term, symbols: &SymbolTable, indent: usize) -> String {
             )
         }
         TermKind::App { func, args } => {
-            let args_str: Vec<_> = args
-                .iter()
-                .map(|a| print_term(a, symbols, indent + 2))
-                .collect();
+            let args_str: Vec<_> = args.iter().map(|a| print_term(a, symbols, indent + 2)).collect();
             format!(
                 "{}App\n{}  func:\n{}\n{}  args:\n{}",
                 pad,

@@ -936,20 +936,39 @@ fn parallelize_scan_entry(
 
     // --- Phase 1: local scans + block sums ---
     let phase1 = build_scan_phase1(
-        entry, source, scan_function, init, captures, elem_type,
-        total_threads, output_binding, block_sums_binding, local_size,
+        entry,
+        source,
+        scan_function,
+        init,
+        captures,
+        elem_type,
+        total_threads,
+        output_binding,
+        block_sums_binding,
+        local_size,
     )?;
 
     // --- Phase 2: scan block sums → block offsets ---
     let phase2 = build_scan_phase2(
-        entry, scan_function, init, captures, elem_type,
-        total_threads, block_sums_binding, block_offsets_binding,
+        entry,
+        scan_function,
+        init,
+        captures,
+        elem_type,
+        total_threads,
+        block_sums_binding,
+        block_offsets_binding,
     )?;
 
     // --- Phase 3: add offsets to output ---
     let phase3 = build_scan_phase3(
-        entry, scan_function, elem_type,
-        total_threads, output_binding, block_offsets_binding, local_size,
+        entry,
+        scan_function,
+        elem_type,
+        total_threads,
+        output_binding,
+        block_offsets_binding,
+        local_size,
     )?;
 
     // Build pipeline descriptor
@@ -1053,7 +1072,11 @@ fn build_scan_phase1(
 
     // Setup input
     let (input_len, input_data) = match source {
-        ArrayProvenance::EntryStorage { param_index, storage_binding, .. } => {
+        ArrayProvenance::EntryStorage {
+            param_index,
+            storage_binding,
+            ..
+        } => {
             let mut input = StorageInput::new(*param_index, *storage_binding);
             let (handle, len, _) = input.setup(&mut ctx)?;
             (len, ReduceInputData::Storage { input, handle })
@@ -1206,10 +1229,8 @@ fn build_scan_phase2(
             Type::Constructed(TypeName::ArrayVariantView, vec![]),
         ],
     );
-    let block_sums_view = ctx
-        .builder
-        .emit_storage_view(block_sums_binding.0, block_sums_binding.1, view_ty.clone())
-        .ok()?;
+    let block_sums_view =
+        ctx.builder.emit_storage_view(block_sums_binding.0, block_sums_binding.1, view_ty.clone()).ok()?;
 
     // Setup block_offsets output
     let offsets_output = StorageOutput::new(block_offsets_binding.0, block_offsets_binding.1);
@@ -1301,7 +1322,9 @@ fn build_scan_phase2(
     Some(EntryPoint {
         name: format!("{}_phase2_scan_sums", entry.name),
         body,
-        execution_model: ExecutionModel::Compute { local_size: (1, 1, 1) },
+        execution_model: ExecutionModel::Compute {
+            local_size: (1, 1, 1),
+        },
         inputs: phase2_inputs,
         outputs: vec![EntryOutput {
             ty: view_ty,
@@ -1343,10 +1366,8 @@ fn build_scan_phase3(
     );
 
     // Setup output (read-write) and offsets (read) buffers
-    let output_view = ctx
-        .builder
-        .emit_storage_view(output_binding.0, output_binding.1, view_ty.clone())
-        .ok()?;
+    let output_view =
+        ctx.builder.emit_storage_view(output_binding.0, output_binding.1, view_ty.clone()).ok()?;
     let offsets_view = ctx
         .builder
         .emit_storage_view(block_offsets_binding.0, block_offsets_binding.1, view_ty.clone())
@@ -1376,8 +1397,7 @@ fn build_scan_phase3(
     // Loop: for i in chunk_start..chunk_end: output[i] = op(offset, output[i])
     let zero = ctx.push_int("0")?;
 
-    let (header, header_params) =
-        ctx.builder.create_block_with_params(vec![u32_ty.clone()]);
+    let (header, header_params) = ctx.builder.create_block_with_params(vec![u32_ty.clone()]);
     let loop_index = header_params[0];
     let body_block = ctx.builder.create_block();
     let exit_block = ctx.builder.create_block();

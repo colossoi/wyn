@@ -1359,7 +1359,11 @@ fn test_raytrace_step5_globals_pattern_fused() {
     // main: let tmp = intersectAll(ro, rd) in findClosest(tmp)
     let producer_call = mk_term(
         TermKind::App {
-            func: Box::new(mk_term(TermKind::Var(intersect_sym), array_ty(i32_ty()), &mut term_ids)),
+            func: Box::new(mk_term(
+                TermKind::Var(intersect_sym),
+                array_ty(i32_ty()),
+                &mut term_ids,
+            )),
             args: vec![
                 mk_term(TermKind::Var(ro_sym), f32_ty(), &mut term_ids),
                 mk_term(TermKind::Var(rd_sym), f32_ty(), &mut term_ids),

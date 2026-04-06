@@ -55,9 +55,7 @@ fn specialize_term(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdS
                     id: term_ids.next_id(),
                     ty: func.ty.clone(),
                     span: func.span,
-                    kind: TermKind::BinOp(crate::ast::BinaryOp {
-                        op: "*".to_string(),
-                    }),
+                    kind: TermKind::BinOp(crate::ast::BinaryOp { op: "*".to_string() }),
                 };
                 let TermKind::App { func: _, args } = term.kind else {
                     unreachable!()

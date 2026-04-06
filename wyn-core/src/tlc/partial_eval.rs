@@ -420,10 +420,14 @@ impl PartialEvaluator {
                 self.reify(elem, elem_ty, span)
             })
             .collect();
-        self.mk_term(ty.clone(), span, TermKind::App {
-            func: Box::new(func_term),
-            args: arg_terms,
-        })
+        self.mk_term(
+            ty.clone(),
+            span,
+            TermKind::App {
+                func: Box::new(func_term),
+                args: arg_terms,
+            },
+        )
     }
 
     fn reify_array(&mut self, elems: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
@@ -434,28 +438,30 @@ impl PartialEvaluator {
             .unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![]));
         let array_sym = self.symbols.alloc("_w_array_lit".to_string());
         let func_term = self.mk_term(ty.clone(), span, TermKind::Var(array_sym));
-        let arg_terms: Vec<Term> = elems
-            .into_iter()
-            .map(|elem| self.reify(elem, &elem_ty, span))
-            .collect();
-        self.mk_term(ty.clone(), span, TermKind::App {
-            func: Box::new(func_term),
-            args: arg_terms,
-        })
+        let arg_terms: Vec<Term> = elems.into_iter().map(|elem| self.reify(elem, &elem_ty, span)).collect();
+        self.mk_term(
+            ty.clone(),
+            span,
+            TermKind::App {
+                func: Box::new(func_term),
+                args: arg_terms,
+            },
+        )
     }
 
     fn reify_vector(&mut self, elems: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
         let elem_ty = ty.elem_type().cloned().unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![]));
         let vec_sym = self.symbols.alloc("_w_vec_lit".to_string());
         let func_term = self.mk_term(ty.clone(), span, TermKind::Var(vec_sym));
-        let arg_terms: Vec<Term> = elems
-            .into_iter()
-            .map(|elem| self.reify(elem, &elem_ty, span))
-            .collect();
-        self.mk_term(ty.clone(), span, TermKind::App {
-            func: Box::new(func_term),
-            args: arg_terms,
-        })
+        let arg_terms: Vec<Term> = elems.into_iter().map(|elem| self.reify(elem, &elem_ty, span)).collect();
+        self.mk_term(
+            ty.clone(),
+            span,
+            TermKind::App {
+                func: Box::new(func_term),
+                args: arg_terms,
+            },
+        )
     }
 
     fn reify_partial(&mut self, sym: SymbolId, args: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
@@ -470,10 +476,14 @@ impl PartialEvaluator {
                 self.reify(arg, arg_ty, span)
             })
             .collect();
-        self.mk_term(ty.clone(), span, TermKind::App {
-            func: Box::new(func_term),
-            args: arg_terms,
-        })
+        self.mk_term(
+            ty.clone(),
+            span,
+            TermKind::App {
+                func: Box::new(func_term),
+                args: arg_terms,
+            },
+        )
     }
 
     fn reify_call(&mut self, sym: SymbolId, args: Vec<Value>, original: &Term) -> Value {
@@ -492,10 +502,14 @@ impl PartialEvaluator {
                 self.reify(arg, arg_ty, original.span)
             })
             .collect();
-        let result = self.mk_term(original.ty.clone(), original.span, TermKind::App {
-            func: Box::new(func_term),
-            args: arg_terms,
-        });
+        let result = self.mk_term(
+            original.ty.clone(),
+            original.span,
+            TermKind::App {
+                func: Box::new(func_term),
+                args: arg_terms,
+            },
+        );
         Value::Unknown(result)
     }
 

@@ -665,7 +665,6 @@ impl AliasChecked {
         // Combine parts with the symbol table to create the final Program
         let tlc_program = parts.with_symbols(symbols);
 
-
         TlcTransformed {
             tlc: tlc_program,
             type_table: self.type_table,

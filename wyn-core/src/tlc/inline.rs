@@ -4,10 +4,7 @@
 //! Inlines small function bodies at call sites and into SOAC lambda bodies.
 //! Everything is first-order and monomorphic at this point.
 
-use super::{
-    Def, DefMeta, Program, Term, TermIdSource, TermKind,
-    collect_var_refs, extract_lambda_params,
-};
+use super::{Def, DefMeta, Program, Term, TermIdSource, TermKind, collect_var_refs, extract_lambda_params};
 use crate::ast::{Span, TypeName};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;

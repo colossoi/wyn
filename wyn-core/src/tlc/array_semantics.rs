@@ -6,8 +6,10 @@
 
 use std::collections::HashMap;
 
-use super::{ArrayExpr, Def, Lambda, Place, Program, ReduceProps, Shape, SoacOp, Term, TermKind,
-            extract_lambda_params};
+use super::{
+    ArrayExpr, Def, Lambda, Place, Program, ReduceProps, Shape, SoacOp, Term, TermKind,
+    extract_lambda_params,
+};
 use crate::SymbolId;
 use crate::ast::TypeName;
 use polytype::Type;
@@ -117,8 +119,7 @@ impl ArraySemantics {
     pub fn preserves_shape(&self) -> bool {
         matches!(
             self,
-            ArraySemantics::Elementwise { .. }
-                | ArraySemantics::PrefixScan { .. }
+            ArraySemantics::Elementwise { .. } | ArraySemantics::PrefixScan { .. }
         )
     }
 
@@ -142,12 +143,8 @@ impl ArraySemantics {
             ArraySemantics::Reduction { input, .. } => vec![input],
             ArraySemantics::PrefixScan { input, .. } => vec![input],
             ArraySemantics::Filter { input, .. } => vec![input],
-            ArraySemantics::ScatterOp {
-                indices, values, ..
-            } => vec![indices, values],
-            ArraySemantics::IndexedReduction {
-                indices, values, ..
-            } => vec![indices, values],
+            ArraySemantics::ScatterOp { indices, values, .. } => vec![indices, values],
+            ArraySemantics::IndexedReduction { indices, values, .. } => vec![indices, values],
             ArraySemantics::Literal(_)
             | ArraySemantics::Generate { .. }
             | ArraySemantics::Range { .. }
@@ -190,14 +187,10 @@ pub fn can_fuse(producer: &ArraySemantics, consumer: &ArraySemantics) -> FusionK
         }
 
         // Elementwise → Reduction: compose map into reduce body
-        (ArraySemantics::Elementwise { .. }, ArraySemantics::Reduction { .. }) => {
-            FusionKind::MapIntoReduce
-        }
+        (ArraySemantics::Elementwise { .. }, ArraySemantics::Reduction { .. }) => FusionKind::MapIntoReduce,
 
         // Elementwise → PrefixScan: compose map into scan body
-        (ArraySemantics::Elementwise { .. }, ArraySemantics::PrefixScan { .. }) => {
-            FusionKind::MapIntoScan
-        }
+        (ArraySemantics::Elementwise { .. }, ArraySemantics::PrefixScan { .. }) => FusionKind::MapIntoScan,
 
         // Generate → Elementwise: inline generator into map body
         (ArraySemantics::Generate { .. }, ArraySemantics::Elementwise { .. }) => {
@@ -205,9 +198,7 @@ pub fn can_fuse(producer: &ArraySemantics, consumer: &ArraySemantics) -> FusionK
         }
 
         // Range → Elementwise: inline range into map body
-        (ArraySemantics::Range { .. }, ArraySemantics::Elementwise { .. }) => {
-            FusionKind::RangeIntoMap
-        }
+        (ArraySemantics::Range { .. }, ArraySemantics::Elementwise { .. }) => FusionKind::RangeIntoMap,
 
         // Everything else: not fusible
         _ => FusionKind::NotFusible,
@@ -344,7 +335,8 @@ fn compose_map_into_op(
 
     // The op has params [acc, elem]. Substitute elem with fresh.
     let elem_param = op.params[1].0;
-    let op_body_substituted = super::fusion::substitute_sym(*op.body.clone(), elem_param, fresh_sym, term_ids);
+    let op_body_substituted =
+        super::fusion::substitute_sym(*op.body.clone(), elem_param, fresh_sym, term_ids);
 
     let composed_body = Term {
         id: term_ids.next_id(),
@@ -392,21 +384,30 @@ pub fn classify_soac(soac: &SoacOp) -> ArraySemantics {
             input: input.clone(),
             pred: pred.clone(),
         },
-        SoacOp::Scatter { dest, indices, values } => ArraySemantics::ScatterOp {
+        SoacOp::Scatter {
+            dest,
+            indices,
+            values,
+        } => ArraySemantics::ScatterOp {
             dest: classify_place(dest),
             indices: indices.clone(),
             values: values.clone(),
         },
-        SoacOp::ReduceByIndex { dest, op, ne, indices, values, props } => {
-            ArraySemantics::IndexedReduction {
-                dest: classify_place(dest),
-                indices: indices.clone(),
-                values: values.clone(),
-                op: op.clone(),
-                init: ne.clone(),
-                props: props.clone(),
-            }
-        }
+        SoacOp::ReduceByIndex {
+            dest,
+            op,
+            ne,
+            indices,
+            values,
+            props,
+        } => ArraySemantics::IndexedReduction {
+            dest: classify_place(dest),
+            indices: indices.clone(),
+            values: values.clone(),
+            op: op.clone(),
+            init: ne.clone(),
+            props: props.clone(),
+        },
     }
 }
 
@@ -414,11 +415,9 @@ pub fn classify_soac(soac: &SoacOp) -> ArraySemantics {
 pub fn classify_array_expr(ae: &ArrayExpr) -> ArraySemantics {
     match ae {
         ArrayExpr::Ref(_) => ArraySemantics::Opaque, // just a reference, not a producer
-        ArrayExpr::Zip(_) => ArraySemantics::Opaque,  // zip is consumed by enclosing Map
+        ArrayExpr::Zip(_) => ArraySemantics::Opaque, // zip is consumed by enclosing Map
         ArrayExpr::Soac(op) => classify_soac(op),
-        ArrayExpr::Generate {
-            shape, index_fn, ..
-        } => ArraySemantics::Generate {
+        ArrayExpr::Generate { shape, index_fn, .. } => ArraySemantics::Generate {
             shape: shape.clone(),
             index_fn: index_fn.clone(),
         },
@@ -518,10 +517,13 @@ pub fn summarize_program(program: &Program) -> HashMap<SymbolId, FunctionSummary
             let new_result = analyze_body_with_summaries(&inner_body, &param_syms, &summaries);
 
             if !matches!(new_result, ResultSemantics::Unknown) {
-                summaries.insert(def.name, FunctionSummary {
-                    result: new_result,
-                    params,
-                });
+                summaries.insert(
+                    def.name,
+                    FunctionSummary {
+                        result: new_result,
+                        params,
+                    },
+                );
                 changed = true;
             }
         }
@@ -544,10 +546,7 @@ pub fn summarize_def(def: &Def) -> FunctionSummary {
     let param_syms: Vec<SymbolId> = params.iter().map(|(s, _)| *s).collect();
     let result = analyze_body(&inner_body, &param_syms);
 
-    FunctionSummary {
-        result,
-        params,
-    }
+    FunctionSummary { result, params }
 }
 
 /// Analyze a function body to determine what it returns.

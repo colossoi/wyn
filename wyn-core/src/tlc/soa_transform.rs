@@ -901,10 +901,7 @@ impl SoaTransformer {
             return self.mk_term(result_ty, span, TermKind::Var(al_sym));
         }
 
-        let func_ty = Type::Constructed(
-            TypeName::Arrow,
-            vec![elems[0].ty.clone(), result_ty.clone()],
-        );
+        let func_ty = Type::Constructed(TypeName::Arrow, vec![elems[0].ty.clone(), result_ty.clone()]);
         let func = self.mk_term(func_ty, span, TermKind::Var(al_sym));
 
         self.mk_term(
@@ -928,7 +925,6 @@ impl SoaTransformer {
         self.symbols.alloc(name.to_string())
     }
 }
-
 
 // =============================================================================
 // Public API

@@ -15,15 +15,9 @@ use polytype::Type;
 
 use std::collections::HashMap;
 
-use super::array_semantics::{
-    ArraySemantics, FunctionSummary, FusionKind,
-    can_fuse, summarize_program,
-};
+use super::array_semantics::{ArraySemantics, FunctionSummary, FusionKind, can_fuse, summarize_program};
 use super::producer_graph::{self, ProducerEdge};
-use super::{
-    ArrayExpr, Def, Lambda, Program, SoacOp, Term, TermIdSource,
-    TermKind, extract_lambda_params,
-};
+use super::{ArrayExpr, Def, Lambda, Program, SoacOp, Term, TermIdSource, TermKind, extract_lambda_params};
 
 type Summaries = HashMap<SymbolId, FunctionSummary>;
 
@@ -56,9 +50,7 @@ pub fn fuse(program: Program) -> Program {
             .map(|def| {
                 // Bottom-up: fuse children first, then try graph-driven fusion
                 let new_body = fuse_term(def.body, &summaries, &mut symbols, &mut term_ids);
-                let (new_body, did_fuse) = fuse_def_body(
-                    new_body, &summaries, &mut symbols, &mut term_ids,
-                );
+                let (new_body, did_fuse) = fuse_def_body(new_body, &summaries, &mut symbols, &mut term_ids);
                 if did_fuse {
                     changed = true;
                 }
@@ -183,13 +175,7 @@ fn fuse_def_body(
     };
 
     // Rewrite the Let chain: remove producer, replace consumer with fused
-    if let Some(fused_inner) = rewrite_let_chain(
-        &inner,
-        prod_sym,
-        cons_sym,
-        fused_soac_term,
-        term_ids,
-    ) {
+    if let Some(fused_inner) = rewrite_let_chain(&inner, prod_sym, cons_sym, fused_soac_term, term_ids) {
         // Rebuild lambda wrapper
         let result = if params.is_empty() {
             fused_inner
@@ -304,7 +290,12 @@ fn rewrite_let_chain(
     term_ids: &mut TermIdSource,
 ) -> Option<Term> {
     match &term.kind {
-        TermKind::Let { name, name_ty, rhs, body } => {
+        TermKind::Let {
+            name,
+            name_ty,
+            rhs,
+            body,
+        } => {
             if *name == prod_sym {
                 // Skip the producer Let, replace consumer in body
                 return replace_consumer(body, cons_sym, fused, term_ids);
@@ -338,11 +329,19 @@ fn replace_consumer(
     match cons_sym {
         None => {
             // Tail expression — replace entirely, but keep the consumer's type
-            Some(Term { ty: body.ty.clone(), ..fused })
+            Some(Term {
+                ty: body.ty.clone(),
+                ..fused
+            })
         }
         Some(target) => {
             match &body.kind {
-                TermKind::Let { name, name_ty, rhs, body: inner } => {
+                TermKind::Let {
+                    name,
+                    name_ty,
+                    rhs,
+                    body: inner,
+                } => {
                     if *name == target {
                         // Replace this Let's RHS with the fused SOAC
                         Some(Term {
@@ -352,7 +351,10 @@ fn replace_consumer(
                             kind: TermKind::Let {
                                 name: *name,
                                 name_ty: name_ty.clone(),
-                                rhs: Box::new(Term { ty: rhs.ty.clone(), ..fused }),
+                                rhs: Box::new(Term {
+                                    ty: rhs.ty.clone(),
+                                    ..fused
+                                }),
                                 body: inner.clone(),
                             },
                         })
@@ -578,7 +580,12 @@ pub fn substitute_sym(term: Term, old: SymbolId, new: SymbolId, term_ids: &mut T
         TermKind::Lambda(ref lam) if lam.params.iter().any(|(p, _)| *p == old) => term,
 
         // Let: substitute in rhs, stop in body if name shadows
-        TermKind::Let { name, name_ty, rhs, body } => {
+        TermKind::Let {
+            name,
+            name_ty,
+            rhs,
+            body,
+        } => {
             let new_rhs = substitute_sym(*rhs, old, new, term_ids);
             let new_body = if name == old { *body } else { substitute_sym(*body, old, new, term_ids) };
             Term {
