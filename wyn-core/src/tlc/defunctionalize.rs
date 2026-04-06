@@ -1317,7 +1317,7 @@ impl<'a> Defunctionalizer<'a> {
         match &base_func.kind {
             TermKind::BinOp(_) | TermKind::UnOp(_) => {
                 // Operators are preserved as-is - just rebuild the application
-                let result_term = self.build_curried_app_with_term(base_func, arg_terms, ty.clone(), span);
+                let result_term = self.build_app_with_term(base_func, arg_terms, ty.clone(), span);
                 DefuncResult {
                     term: result_term,
                     sv: StaticVal::Dynamic,
@@ -1384,8 +1384,8 @@ impl<'a> Defunctionalizer<'a> {
         }
     }
 
-    /// Build a curried application with a term as the function: t a1 a2 a3 ...
-    fn build_curried_app_with_term(
+    /// Build App(term, [a1, a2, a3, ...]).
+    fn build_app_with_term(
         &mut self,
         func_term: Term,
         args: Vec<Term>,
@@ -1429,17 +1429,17 @@ impl<'a> Defunctionalizer<'a> {
                 let mut all_args = args;
                 // Captures are already Terms - just clone them
                 all_args.extend(captures.iter().cloned());
-                self.build_curried_app(*lifted_name, all_args, result_ty, span)
+                self.build_app_call(*lifted_name, all_args, result_ty, span)
             }
             _ => {
                 // No captures - call callee_term directly with args
-                self.build_curried_app_with_term(callee_term, args, result_ty, span)
+                self.build_app_with_term(callee_term, args, result_ty, span)
             }
         }
     }
 
-    /// Build a curried application: f a1 a2 a3 ...
-    fn build_curried_app(
+    /// Build App(Var(sym), [a1, a2, a3, ...]).
+    fn build_app_call(
         &mut self,
         func_sym: SymbolId,
         args: Vec<Term>,
@@ -2035,7 +2035,7 @@ impl<'a> Defunctionalizer<'a> {
         // Add captures at the end (they're already Terms)
         call_args.extend(captures.iter().cloned());
 
-        let call_term = self.build_curried_app(specialized_sym, call_args, ty, span);
+        let call_term = self.build_app_call(specialized_sym, call_args, ty, span);
         DefuncResult {
             term: call_term,
             sv: StaticVal::Dynamic,

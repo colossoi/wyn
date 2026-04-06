@@ -68,5 +68,5 @@ fn test_spec_key_with_subst() {
     assert!(key.needs_specialization());
 }
 
-// test_collect_application_spine removed: with flat App { func, args }, there is
-// no curried spine to collect.
+// test_collect_application_spine removed: with flat App { func, args },
+// spine collection is no longer needed.

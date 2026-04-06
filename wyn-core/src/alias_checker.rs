@@ -617,7 +617,7 @@ impl<'a> Visitor for AliasChecker<'a> {
         self.visit_expression(func)?;
 
         // Start with any alias info the function itself carries
-        // (important for curried calls where partial applications carry aliasing)
+        // (important for calls where the function expression itself carries aliasing)
         let func_info = self.get_result(func.h.id);
         let mut observing_stores: HashSet<BackingStoreId> = func_info.stores.clone();
 

@@ -112,7 +112,6 @@ fn test_specialize_min_i32() {
     let test_sym = b.sym("test");
 
     // Build: min(a, b) where a, b: i32
-    // In curried form: App(App(Var("min"), a), b)
     let a_var = Term {
         id: b.next_id(),
         ty: i32_ty.clone(),

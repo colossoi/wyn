@@ -271,7 +271,7 @@ fn unwrap_scheme(scheme: &TypeScheme) -> &Type<TypeName> {
 }
 
 /// Split a function type into (param_types, return_type).
-/// Handles curried function types: (A -> B -> C) becomes ([A, B], C)
+/// (A -> B -> C) becomes ([A, B], C)
 fn split_function_type(ty: &Type<TypeName>) -> (Vec<Type<TypeName>>, Type<TypeName>) {
     let mut params = Vec::new();
     let mut current = ty.clone();

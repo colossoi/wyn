@@ -185,8 +185,7 @@ pub enum TypeName {
     /// skolems only unify with themselves (same ID), enforcing opacity.
     Skolem(SkolemId),
     /// Ignored/placeholder type for intermediate values whose types are never inspected.
-    /// Used in defunctionalization for curried application intermediates that get
-    /// reformulated into multi-arg calls.
+    /// Used in defunctionalization for intermediate values whose types don't matter.
     Ignored,
 }
 

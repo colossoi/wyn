@@ -814,21 +814,11 @@ impl SoaTransformer {
             return self.mk_term(result_ty, span, TermKind::Var(tuple_sym));
         }
 
-        // Build curried application: _w_tuple(c0)(c1)...
-        let n = components.len();
-
-        // Compute intermediate arrow types working backwards
-        let mut intermediate_tys = vec![result_ty.clone()];
-        for comp in components.iter().rev().skip(1) {
-            let prev = intermediate_tys.last().unwrap().clone();
-            intermediate_tys.push(Type::Constructed(TypeName::Arrow, vec![comp.ty.clone(), prev]));
+        // Build flat application: _w_tuple(c0, c1, ...)
+        let mut func_ty = result_ty.clone();
+        for comp in components.iter().rev() {
+            func_ty = Type::Constructed(TypeName::Arrow, vec![comp.ty.clone(), func_ty]);
         }
-        intermediate_tys.reverse();
-
-        let func_ty = Type::Constructed(
-            TypeName::Arrow,
-            vec![components[0].ty.clone(), intermediate_tys[0].clone()],
-        );
         let func = self.mk_term(func_ty, span, TermKind::Var(tuple_sym));
 
         self.mk_term(

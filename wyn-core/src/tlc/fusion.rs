@@ -536,7 +536,7 @@ fn try_fuse_let(
         } => {
             // Phase 1 restrictions:
             // - only fuse single-input map producers
-            // - reduce op must have exactly 2 params (acc, elem), not curried
+            // - reduce op must have exactly 2 params (acc, elem)
             if producer_inputs.len() != 1 || op.params.len() != 2 {
                 return None;
             }
@@ -643,11 +643,10 @@ fn find_fusion_consumer(term: &Term, name: SymbolId, sums: &Summaries) -> Option
                     }) if *param_idx < args.len() => {
                         if let TermKind::Var(sym) = &args[*param_idx].kind {
                             if *sym == name {
-                                let uncurried_op = uncurry_lambda(op.clone());
-                                if uncurried_op.params.len() >= 2 {
+                                if op.params.len() >= 2 {
                                     return Some(ConsumerInfo {
                                         kind: ConsumerKind::Reduce {
-                                            op: uncurried_op,
+                                            op: op.clone(),
                                             ne: ne.clone(),
                                             props: props.clone(),
                                             result_ty: term.ty.clone(),
@@ -687,21 +686,6 @@ fn find_fusion_consumer(term: &Term, name: SymbolId, sums: &Summaries) -> Option
 
         _ => None,
     }
-}
-
-/// Flatten nested single-param lambdas: `|x| |y| body` → `|x, y| body`.
-fn uncurry_lambda(mut lam: Lambda) -> Lambda {
-    loop {
-        match lam.body.kind {
-            TermKind::Lambda(inner) => {
-                lam.params.extend(inner.params);
-                lam.body = inner.body;
-                lam.ret_ty = inner.ret_ty;
-            }
-            _ => break,
-        }
-    }
-    lam
 }
 
 /// Check if a single ArrayExpr is a Ref pointing to `name`.

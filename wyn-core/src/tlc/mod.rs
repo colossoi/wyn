@@ -70,25 +70,16 @@ fn count_function_arity(ty: &Type<TypeName>) -> usize {
     }
 }
 
-/// Extract all nested lambda parameters from a term, flattening curried lambdas.
-/// Returns (accumulated params, innermost non-lambda body).
+/// Extract lambda parameters and body from a term.
+/// If the term is a Lambda, returns its params and body.
+/// If not, returns empty params and the term itself.
 pub fn extract_lambda_params(term: &Term) -> (Vec<(SymbolId, Type<TypeName>)>, Term) {
-    let mut params = Vec::new();
-    let mut current = term.clone();
-    loop {
-        match current.kind {
-            TermKind::Lambda(Lambda {
-                params: lam_params,
-                body,
-                ..
-            }) => {
-                params.extend(lam_params);
-                current = *body;
-            }
-            _ => break,
-        }
+    match &term.kind {
+        TermKind::Lambda(Lambda {
+            params, body, ..
+        }) => (params.clone(), (**body).clone()),
+        _ => (vec![], term.clone()),
     }
-    (params, current)
 }
 
 /// Collect all `TermKind::Var(sym)` SymbolIds referenced anywhere in a term tree.
@@ -177,7 +168,7 @@ pub enum TermKind {
     /// Lambda abstraction (structured).
     Lambda(Lambda),
 
-    /// Application: f(a, b, c) — always fully applied, no currying.
+    /// Application: f(a, b, c) — always fully applied.
     App {
         func: Box<Term>,
         args: Vec<Term>,
@@ -435,7 +426,7 @@ pub struct Def {
     pub ty: Type<TypeName>,
     pub body: Term,
     pub meta: DefMeta,
-    /// Number of arguments this function expects (for uncurrying).
+    /// Number of arguments this function expects.
     pub arity: usize,
 }
 
@@ -452,7 +443,7 @@ pub struct Program {
 }
 
 impl Program {
-    /// Assert no def body contains nested single-arg Apps (leftover curried encoding).
+    /// Assert no def body contains nested Apps.
     pub fn assert_flat_apps(&self) {
         for def in &self.defs {
             let name = self.symbols.get(def.name).cloned().unwrap_or_else(|| format!("{:?}", def.name));
@@ -1846,7 +1837,7 @@ impl<'a> Transformer<'a> {
         let arg_terms: Vec<Term> = args.iter().map(|a| self.transform_expr(a)).collect();
 
         // If func_term is already an App, flatten by merging args.
-        // This handles curried AST calls like f(a)(b) → App(f, [a, b]).
+        // The AST represents chained calls as nested Application nodes.
         if let TermKind::App { .. } = &func_term.kind {
             let TermKind::App { func: inner_func, args: inner_args } = func_term.kind else {
                 unreachable!()
@@ -2502,7 +2493,7 @@ impl<'a> Transformer<'a> {
     // Helper: build flat application for variable number of args
     /// Build a flat call from a function name and already-transformed argument terms.
     /// For f(a, b, c) with result R: builds App { func: Var(f), args: [a, b, c] }
-    fn build_curried_call_terms(
+    fn build_call(
         &mut self,
         func_name: &str,
         args: &[Term],
@@ -2538,7 +2529,7 @@ impl<'a> Transformer<'a> {
         span: Span,
     ) -> Term {
         let arg_terms: Vec<Term> = args.iter().map(|a| self.transform_expr(a)).collect();
-        self.build_curried_call_terms(name, &arg_terms, result_ty, span)
+        self.build_call(name, &arg_terms, result_ty, span)
     }
 
     fn lookup_type(&self, node_id: NodeId) -> Option<Type<TypeName>> {
@@ -2586,7 +2577,7 @@ impl<'a> Transformer<'a> {
 
     /// Build a _w_vec_lit from already-transformed terms
     fn build_vec_lit_from_terms(&mut self, terms: &[Term], result_ty: Type<TypeName>, span: Span) -> Term {
-        self.build_curried_call_terms("_w_vec_lit", terms, result_ty, span)
+        self.build_call("_w_vec_lit", terms, result_ty, span)
     }
 }
 

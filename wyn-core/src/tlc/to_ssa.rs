@@ -17,7 +17,7 @@ use super::{
     Term, TermKind,
 };
 
-/// Extract parameter types and return type from a curried function type.
+/// Extract parameter types and return type from an arrow type.
 /// For `A -> B -> C`, returns `([A, B], C)`.
 fn extract_function_signature(ty: &Type<TypeName>) -> (Vec<Type<TypeName>>, Type<TypeName>) {
     let mut params = Vec::new();
@@ -587,7 +587,7 @@ fn convert_entry_point(
     })
 }
 
-/// Extract curried parameters from nested Lams.
+/// Extract parameters from a Lambda term.
 /// Returns parameter names as Strings (looked up from symbol table) for SSA construction.
 fn extract_params<'a>(term: &'a Term, symbols: &SymbolTable) -> (Vec<(String, Type<TypeName>)>, &'a Term) {
     match &term.kind {
@@ -1021,21 +1021,9 @@ impl<'a> Converter<'a> {
         args: &[Term],
         ty: Type<TypeName>,
     ) -> Result<ValueId, ConvertError> {
-        let (base_term, args) = {
-            // If the func is itself an App, flatten. Otherwise just use func + args directly.
-            let mut all_args: Vec<&Term> = args.iter().collect();
-            let mut current = func;
-            while let TermKind::App { func: inner_func, args: inner_args } = &current.kind {
-                // Prepend inner_args before all_args
-                let mut new_args: Vec<&Term> = inner_args.iter().collect();
-                new_args.extend(all_args);
-                all_args = new_args;
-                current = inner_func.as_ref();
-            }
-            (current, all_args)
-        };
+        let args: Vec<&Term> = args.iter().collect();
 
-        match &base_term.kind {
+        match &func.kind {
             TermKind::BinOp(op) => {
                 assert!(args.len() == 2, "BinOp requires exactly 2 arguments");
                 let lhs = self.convert_term(args[0])?;
@@ -1062,7 +1050,7 @@ impl<'a> Converter<'a> {
                 // This shouldn't happen after defunctionalization
                 Err(ConvertError::BuilderError(format!(
                     "Computed function application not supported: {:?}",
-                    base_term.kind
+                    func.kind
                 )))
             }
         }

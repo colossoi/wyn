@@ -44,7 +44,7 @@ impl Value {
     }
 }
 
-/// Extract parameter types from a curried arrow type.
+/// Extract parameter types from an arrow type.
 /// `A -> B -> C -> R` yields `[A, B, C]`.
 fn extract_param_types(ty: &Type<TypeName>) -> Vec<Type<TypeName>> {
     let mut params = Vec::new();
