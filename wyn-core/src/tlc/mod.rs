@@ -10,7 +10,6 @@ pub mod defunctionalize;
 #[cfg(test)]
 mod defunctionalize_tests;
 pub mod fusion;
-pub mod fusion_summary;
 pub mod inline;
 pub mod monomorphize;
 #[cfg(test)]
