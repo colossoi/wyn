@@ -3056,18 +3056,23 @@ fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &EntryPoint) -> R
     // Create I/O variables for entry point
     let mut interfaces = Vec::new();
 
-    // For compute shaders, automatically create GlobalInvocationId if not already present
-    if is_compute && constructor.global_invocation_id.is_none() {
-        let uvec3_type = constructor.get_or_create_vec_type(constructor.u32_type, 3);
-        let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::Input, uvec3_type);
-        let gid_var = constructor.builder.variable(ptr_type, None, spirv::StorageClass::Input, None);
-        constructor.builder.decorate(
-            gid_var,
-            spirv::Decoration::BuiltIn,
-            [Operand::BuiltIn(spirv::BuiltIn::GlobalInvocationId)],
-        );
-        constructor.global_invocation_id = Some(gid_var);
-        interfaces.push(gid_var);
+    // For compute shaders, ensure GlobalInvocationId is created and listed as interface
+    if is_compute {
+        if let Some(gid_var) = constructor.global_invocation_id {
+            // Already created by a previous entry point — just add to this entry's interface
+            interfaces.push(gid_var);
+        } else {
+            let uvec3_type = constructor.get_or_create_vec_type(constructor.u32_type, 3);
+            let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::Input, uvec3_type);
+            let gid_var = constructor.builder.variable(ptr_type, None, spirv::StorageClass::Input, None);
+            constructor.builder.decorate(
+                gid_var,
+                spirv::Decoration::BuiltIn,
+                [Operand::BuiltIn(spirv::BuiltIn::GlobalInvocationId)],
+            );
+            constructor.global_invocation_id = Some(gid_var);
+            interfaces.push(gid_var);
+        }
     }
 
     // Create push constant block for compute shader broadcast inputs

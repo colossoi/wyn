@@ -218,9 +218,23 @@ fn expand_soac(
             input_elem_type,
             result_ty,
         ),
-        Soac::Scan { .. } => {
-            panic!("internal compiler error: Scan SOAC lowering not yet implemented")
-        }
+        Soac::Scan {
+            func,
+            input,
+            init,
+            captures,
+            input_array_type,
+            input_elem_type,
+        } => expand_scan(
+            builder,
+            func,
+            value_map[input],
+            value_map[init],
+            &remap_values(captures, value_map),
+            input_array_type,
+            input_elem_type,
+            result_ty,
+        ),
     }
 }
 
@@ -507,6 +521,91 @@ fn expand_reduce(
         .terminate(Terminator::Branch {
             target: loop_blocks.header,
             args: vec![new_acc, next_i],
+        })
+        .ok()?;
+
+    // Exit
+    builder.switch_to_block(loop_blocks.exit).ok()?;
+
+    Some(loop_blocks.result)
+}
+
+/// Expand a Scan SOAC into a sequential loop that accumulates and stores each
+/// intermediate result. Inclusive scan: out[i] = op(out[i-1], input[i]).
+fn expand_scan(
+    builder: &mut FuncBuilder,
+    func: &str,
+    arr_value: ValueId,
+    init_value: ValueId,
+    captures: &[ValueId],
+    input_array_type: &Type<TypeName>,
+    input_elem_type: &Type<TypeName>,
+    result_ty: Type<TypeName>,
+) -> Option<ValueId> {
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+    let acc_ty = input_elem_type.clone();
+
+    let len = soa_length(builder, arr_value, input_array_type).ok()?;
+    let init_array = soa_uninit(builder, &result_ty).ok()?;
+
+    // Loop with output_array as the loop accumulator (like map),
+    // plus a scalar accumulator as an extra block param.
+    let loop_blocks = builder.create_for_range_loop(result_ty.clone());
+    let scalar_acc = builder.add_block_param(loop_blocks.header, acc_ty.clone());
+
+    let zero = builder.push_int("0", i32_ty.clone()).ok()?;
+    builder
+        .terminate(Terminator::Branch {
+            target: loop_blocks.header,
+            args: vec![init_array, zero, init_value],
+        })
+        .ok()?;
+
+    // Header
+    builder.switch_to_block(loop_blocks.header).ok()?;
+    let cond = builder.push_binop("<", loop_blocks.index, len, bool_ty).ok()?;
+    builder
+        .terminate(Terminator::CondBranch {
+            cond,
+            then_target: loop_blocks.body,
+            then_args: vec![],
+            else_target: loop_blocks.exit,
+            else_args: vec![loop_blocks.acc],
+        })
+        .ok()?;
+
+    // Body: new_acc = op(scalar_acc, elem); out[i] = new_acc
+    builder.switch_to_block(loop_blocks.body).ok()?;
+
+    let elem = soa_index(
+        builder,
+        arr_value,
+        loop_blocks.index,
+        input_array_type,
+        input_elem_type,
+    )
+    .ok()?;
+
+    let mut call_args = vec![scalar_acc, elem];
+    call_args.extend(captures.iter().copied());
+    let new_acc = builder.push_call(func, call_args, acc_ty).ok()?;
+
+    let new_arr = soa_array_with(
+        builder,
+        loop_blocks.acc,
+        loop_blocks.index,
+        new_acc,
+        &result_ty,
+    )
+    .ok()?;
+
+    let one = builder.push_int("1", i32_ty.clone()).ok()?;
+    let next_i = builder.push_binop("+", loop_blocks.index, one, i32_ty).ok()?;
+    builder
+        .terminate(Terminator::Branch {
+            target: loop_blocks.header,
+            args: vec![new_arr, next_i, new_acc],
         })
         .ok()?;
 

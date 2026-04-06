@@ -1620,7 +1620,7 @@ impl<'a> Converter<'a> {
         match soac {
             SoacOp::Map { lam, inputs } => self.convert_soac_map(lam, inputs, ty),
             SoacOp::Reduce { op, ne, input, .. } => self.convert_soac_reduce(op, ne, input, ty),
-            SoacOp::Scan { .. } => todo!("SOAC scan lowering"),
+            SoacOp::Scan { op, ne, input } => self.convert_soac_scan(op, ne, input, ty),
             SoacOp::Filter { pred, input } => self.convert_soac_filter(pred, input, ty),
             SoacOp::Scatter { .. } => todo!("SOAC scatter lowering"),
             SoacOp::ReduceByIndex { .. } => todo!("SOAC reduce_by_index lowering"),
@@ -1789,6 +1789,39 @@ impl<'a> Converter<'a> {
         self.builder
             .push_inst(
                 InstKind::Soac(Soac::Reduce {
+                    func: op_name,
+                    input: arr_value,
+                    init: init_value,
+                    captures: capture_values,
+                    input_array_type: arr_ty,
+                    input_elem_type: elem_ty,
+                }),
+                result_ty,
+            )
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))
+    }
+
+    fn convert_soac_scan(
+        &mut self,
+        op: &Lambda,
+        ne: &Term,
+        input: &ArrayExpr,
+        result_ty: Type<TypeName>,
+    ) -> Result<ValueId, ConvertError> {
+        let op_name = self.lambda_fn_name(op)?;
+
+        let capture_values: Vec<ValueId> =
+            op.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
+
+        let elem_ty = self.array_expr_elem_type(input);
+        let arr_ty = self.array_expr_type(input);
+
+        let arr_value = self.convert_array_expr_value(input)?;
+        let init_value = self.convert_term(ne)?;
+
+        self.builder
+            .push_inst(
+                InstKind::Soac(Soac::Scan {
                     func: op_name,
                     input: arr_value,
                     init: init_value,
