@@ -122,6 +122,11 @@ enum Command {
         /// Type: i32, u32, f32. Repeat for multiple buffers.
         #[arg(long = "storage", value_name = "SPEC")]
         storage_buffers: Vec<String>,
+        /// Push constant: name:type=value
+        /// Examples: "n:i32=64", "header_base:u32x19=0,0,0,..."
+        /// Type: i32, u32, f32, i32xN, u32xN, f32xN
+        #[arg(long = "push-constant", value_name = "SPEC")]
+        push_constants: Vec<String>,
         /// Print verbose output
         #[arg(short, long)]
         verbose: bool,
@@ -140,6 +145,11 @@ enum Command {
         /// Output file: name:file.json (repeatable, omit to print to stdout)
         #[arg(long = "output", value_name = "NAME:FILE")]
         outputs: Vec<String>,
+        /// Push constant: name:type=value
+        /// Examples: "n:i32=64", "header_base:u32x19=0,0,0,..."
+        /// Type: i32, u32, f32, i32xN, u32xN, f32xN
+        #[arg(long = "push-constant", value_name = "SPEC")]
+        push_constants: Vec<String>,
         /// Print verbose output
         #[arg(short, long)]
         verbose: bool,
@@ -424,12 +434,18 @@ async fn create_headless_device(verbose: bool) -> Result<(wgpu::Device, wgpu::Qu
     if spirv_passthrough_supported {
         required_features |= wgpu::Features::SPIRV_SHADER_PASSTHROUGH;
     }
+    if adapter_features.contains(wgpu::Features::PUSH_CONSTANTS) {
+        required_features |= wgpu::Features::PUSH_CONSTANTS;
+    }
+
+    let mut limits = wgpu::Limits::default();
+    limits.max_push_constant_size = adapter.limits().max_push_constant_size;
 
     adapter
         .request_device(&DeviceDescriptor {
             label: None,
             required_features,
-            required_limits: wgpu::Limits::default(),
+            required_limits: limits,
             memory_hints: wgpu::MemoryHints::Performance,
             trace: Trace::Off,
         })
@@ -546,6 +562,102 @@ impl StorageBufferSpec {
                 Ok(bytes)
             }
             None => Ok(vec![0u8; self.byte_size() as usize]),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PushConstantSpec {
+    name: String,
+    offset: u32,
+    data: Vec<u8>,
+}
+
+impl PushConstantSpec {
+    /// Parse from "name:type=value" format
+    /// Examples: "n:i32=64", "header_base:u32x19=0,0,0,..."
+    fn parse(spec: &str) -> Result<Self> {
+        let (name_type, value) =
+            spec.split_once('=').ok_or_else(|| anyhow!("Push constant spec must contain '=': {}", spec))?;
+        let (name, ty) = name_type
+            .split_once(':')
+            .ok_or_else(|| anyhow!("Push constant spec must have format name:type=value: {}", spec))?;
+
+        let data = parse_push_constant_value(ty, value)?;
+
+        Ok(Self {
+            name: name.to_string(),
+            offset: 0, // filled in later
+            data,
+        })
+    }
+
+    fn byte_size(&self) -> u32 {
+        self.data.len() as u32
+    }
+}
+
+fn parse_push_constant_value(ty: &str, value: &str) -> Result<Vec<u8>> {
+    // Check for array types like u32x19, i32x4, f32x3
+    if let Some(rest) = ty.strip_prefix("u32x") {
+        let count: usize = rest.parse().map_err(|_| anyhow!("Invalid array size: {}", rest))?;
+        let values: Vec<u32> = value
+            .split(',')
+            .map(|v| {
+                let v = v.trim();
+                if let Some(hex) = v.strip_prefix("0x").or_else(|| v.strip_prefix("0X")) {
+                    u32::from_str_radix(hex, 16).map_err(|e| anyhow!("Invalid hex u32: {}: {}", v, e))
+                } else {
+                    v.parse::<u32>().map_err(|e| anyhow!("Invalid u32: {}: {}", v, e))
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if values.len() != count {
+            return Err(anyhow!("Expected {} values for {}, got {}", count, ty, values.len()));
+        }
+        Ok(values.iter().flat_map(|v| v.to_le_bytes()).collect())
+    } else if let Some(rest) = ty.strip_prefix("i32x") {
+        let count: usize = rest.parse().map_err(|_| anyhow!("Invalid array size: {}", rest))?;
+        let values: Vec<i32> = value
+            .split(',')
+            .map(|v| v.trim().parse::<i32>().map_err(|e| anyhow!("Invalid i32: {}: {}", v, e)))
+            .collect::<Result<Vec<_>>>()?;
+        if values.len() != count {
+            return Err(anyhow!("Expected {} values for {}, got {}", count, ty, values.len()));
+        }
+        Ok(values.iter().flat_map(|v| v.to_le_bytes()).collect())
+    } else if let Some(rest) = ty.strip_prefix("f32x") {
+        let count: usize = rest.parse().map_err(|_| anyhow!("Invalid array size: {}", rest))?;
+        let values: Vec<f32> = value
+            .split(',')
+            .map(|v| v.trim().parse::<f32>().map_err(|e| anyhow!("Invalid f32: {}: {}", v, e)))
+            .collect::<Result<Vec<_>>>()?;
+        if values.len() != count {
+            return Err(anyhow!("Expected {} values for {}, got {}", count, ty, values.len()));
+        }
+        Ok(values.iter().flat_map(|v| v.to_le_bytes()).collect())
+    } else {
+        match ty {
+            "i32" => {
+                let v: i32 = value.parse().map_err(|e| anyhow!("Invalid i32 '{}': {}", value, e))?;
+                Ok(v.to_le_bytes().to_vec())
+            }
+            "u32" => {
+                let v = if let Some(hex) = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X")) {
+                    u32::from_str_radix(hex, 16).map_err(|e| anyhow!("Invalid hex u32: {}: {}", value, e))?
+                } else {
+                    value.parse::<u32>().map_err(|e| anyhow!("Invalid u32: {}: {}", value, e))?
+                };
+                Ok(v.to_le_bytes().to_vec())
+            }
+            "f32" => {
+                let v: f32 = value.parse().map_err(|e| anyhow!("Invalid f32 '{}': {}", value, e))?;
+                Ok(v.to_le_bytes().to_vec())
+            }
+            other => Err(anyhow!(
+                "Unknown push constant type: {}. Use i32, u32, f32, u32xN, i32xN, f32xN",
+                other
+            )),
         }
     }
 }
@@ -825,6 +937,7 @@ async fn run_pipeline(
     pipeline_path: PathBuf,
     inputs: HashMap<String, PathBuf>,
     outputs: HashMap<String, PathBuf>,
+    push_constants: &[String],
     verbose: bool,
 ) -> Result<()> {
     let desc_json = fs::read_to_string(&pipeline_path)
@@ -842,11 +955,11 @@ async fn run_pipeline(
     for (pi, pipeline) in desc.pipelines.iter().enumerate() {
         match pipeline {
             pipeline_desc::Pipeline::Compute(cp) => {
-                run_single_compute(&device, &queue, &module, cp, &inputs, &outputs, verbose)
+                run_single_compute(&device, &queue, &module, cp, &inputs, &outputs, push_constants, verbose)
                     .with_context(|| format!("Pipeline {} (compute) failed", pi))?;
             }
             pipeline_desc::Pipeline::MultiCompute(mp) => {
-                run_multi_compute(&device, &queue, &module, mp, &inputs, &outputs, verbose)
+                run_multi_compute(&device, &queue, &module, mp, &inputs, &outputs, push_constants, verbose)
                     .with_context(|| format!("Pipeline {} (multi_compute) failed", pi))?;
             }
             pipeline_desc::Pipeline::Graphics(_) => {
@@ -1037,6 +1150,98 @@ fn readback_buffer(
     Ok(f32_data)
 }
 
+/// Build push constant bytes from descriptor PushConstant bindings + CLI --push-constant args.
+/// The descriptor provides the layout (offsets and sizes); the CLI provides values by name.
+fn build_push_constant_bytes(
+    bindings: &[pipeline_desc::Binding],
+    push_constants: &[String],
+    verbose: bool,
+) -> Result<Vec<u8>> {
+    // Collect PushConstant bindings from the descriptor
+    let pc_bindings: Vec<_> = bindings
+        .iter()
+        .filter_map(|b| {
+            if let pipeline_desc::Binding::PushConstant { offset, size, name } = b {
+                Some((name.as_str(), *offset, *size))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if pc_bindings.is_empty() && push_constants.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // If we have CLI push constants but no descriptor bindings, use sequential layout
+    if pc_bindings.is_empty() && !push_constants.is_empty() {
+        let mut pc_specs: Vec<PushConstantSpec> = push_constants
+            .iter()
+            .map(|s| PushConstantSpec::parse(s))
+            .collect::<Result<Vec<_>>>()?;
+
+        let mut offset = 0u32;
+        for spec in &mut pc_specs {
+            spec.offset = offset;
+            offset += spec.byte_size();
+        }
+        let total = offset as usize;
+        let mut bytes = vec![0u8; total];
+        for spec in &pc_specs {
+            let start = spec.offset as usize;
+            let end = start + spec.data.len();
+            bytes[start..end].copy_from_slice(&spec.data);
+        }
+        if verbose {
+            println!("Push constants ({} bytes, sequential layout):", total);
+            for spec in &pc_specs {
+                println!("  {} @ offset {}: {} bytes", spec.name, spec.offset, spec.byte_size());
+            }
+        }
+        return Ok(bytes);
+    }
+
+    // Parse CLI push constants into a map by name
+    let cli_specs: HashMap<String, PushConstantSpec> = push_constants
+        .iter()
+        .map(|s| {
+            let spec = PushConstantSpec::parse(s)?;
+            Ok((spec.name.clone(), spec))
+        })
+        .collect::<Result<HashMap<_, _>>>()?;
+
+    // Compute total size from descriptor
+    let total_size = pc_bindings
+        .iter()
+        .map(|(_, offset, size)| offset + size)
+        .max()
+        .unwrap_or(0) as usize;
+
+    let mut bytes = vec![0u8; total_size];
+
+    for (name, offset, size) in &pc_bindings {
+        if let Some(spec) = cli_specs.get(*name) {
+            if spec.data.len() != *size as usize {
+                return Err(anyhow!(
+                    "Push constant '{}' expects {} bytes but got {} bytes from CLI",
+                    name,
+                    size,
+                    spec.data.len()
+                ));
+            }
+            let start = *offset as usize;
+            let end = start + spec.data.len();
+            bytes[start..end].copy_from_slice(&spec.data);
+            if verbose {
+                println!("Push constant '{}' @ offset {}: {} bytes", name, offset, size);
+            }
+        }
+        // If not provided via CLI, leave as zeros
+    }
+
+    Ok(bytes)
+}
+
 /// Run a single-dispatch compute pipeline.
 fn run_single_compute(
     device: &wgpu::Device,
@@ -1045,6 +1250,7 @@ fn run_single_compute(
     cp: &pipeline_desc::ComputePipeline,
     inputs: &HashMap<String, PathBuf>,
     outputs: &HashMap<String, PathBuf>,
+    push_constants: &[String],
     verbose: bool,
 ) -> Result<()> {
     if verbose {
@@ -1054,10 +1260,23 @@ fn run_single_compute(
     let buffers = create_binding_buffers(device, queue, &cp.bindings, inputs, verbose)?;
     let (layout, bind_group) = build_bind_group(device, &cp.bindings, &buffers)?;
 
+    // Build push constant data from CLI args matched against descriptor bindings
+    let pc_bytes = build_push_constant_bytes(&cp.bindings, push_constants, verbose)?;
+    let total_pc_size = pc_bytes.len() as u32;
+
+    let pc_ranges: Vec<wgpu::PushConstantRange> = if total_pc_size > 0 {
+        vec![wgpu::PushConstantRange {
+            stages: wgpu::ShaderStages::COMPUTE,
+            range: 0..total_pc_size,
+        }]
+    } else {
+        vec![]
+    };
+
     let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
         label: Some("compute_layout"),
         bind_group_layouts: &[&layout],
-        push_constant_ranges: &[],
+        push_constant_ranges: &pc_ranges,
     });
 
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -1084,6 +1303,9 @@ fn run_single_compute(
         });
         cpass.set_pipeline(&pipeline);
         cpass.set_bind_group(0, &bind_group, &[]);
+        if !pc_bytes.is_empty() {
+            cpass.set_push_constants(0, &pc_bytes);
+        }
         cpass.dispatch_workgroups(dispatch.0, dispatch.1, dispatch.2);
     }
     queue.submit(Some(encoder.finish()));
@@ -1103,6 +1325,7 @@ fn run_multi_compute(
     mp: &pipeline_desc::MultiComputePipeline,
     inputs: &HashMap<String, PathBuf>,
     outputs: &HashMap<String, PathBuf>,
+    push_constants: &[String],
     verbose: bool,
 ) -> Result<()> {
     if verbose {
@@ -1118,10 +1341,23 @@ fn run_multi_compute(
     let buffers = create_binding_buffers(device, queue, &mp.bindings, inputs, verbose)?;
     let (layout, bind_group) = build_bind_group(device, &mp.bindings, &buffers)?;
 
+    // Build push constant data from CLI args matched against descriptor bindings
+    let pc_bytes = build_push_constant_bytes(&mp.bindings, push_constants, verbose)?;
+    let total_pc_size = pc_bytes.len() as u32;
+
+    let pc_ranges: Vec<wgpu::PushConstantRange> = if total_pc_size > 0 {
+        vec![wgpu::PushConstantRange {
+            stages: wgpu::ShaderStages::COMPUTE,
+            range: 0..total_pc_size,
+        }]
+    } else {
+        vec![]
+    };
+
     let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
         label: Some("multi_compute_layout"),
         bind_group_layouts: &[&layout],
-        push_constant_ranges: &[],
+        push_constant_ranges: &pc_ranges,
     });
 
     // Execute stages in order
@@ -1154,6 +1390,9 @@ fn run_multi_compute(
             });
             cpass.set_pipeline(&pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
+            if !pc_bytes.is_empty() {
+                cpass.set_push_constants(0, &pc_bytes);
+            }
             cpass.dispatch_workgroups(dispatch.0, dispatch.1, dispatch.2);
         }
         queue.submit(Some(encoder.finish()));
@@ -1209,6 +1448,7 @@ async fn run_compute_shader(
     entry: String,
     workgroups: (u32, u32, u32),
     storage_specs: Vec<StorageBufferSpec>,
+    push_constants: &[String],
     verbose: bool,
 ) -> Result<()> {
     let (device, queue) = create_headless_device(verbose).await?;
@@ -1286,10 +1526,46 @@ async fn run_compute_shader(
 
     let module = load_spirv_module(&device, &path)?;
 
+    // Parse and layout push constants
+    let mut pc_specs: Vec<PushConstantSpec> = push_constants
+        .iter()
+        .map(|s| PushConstantSpec::parse(s))
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut offset = 0u32;
+    for spec in &mut pc_specs {
+        spec.offset = offset;
+        offset += spec.byte_size();
+    }
+    let total_pc_size = offset;
+
+    let mut pc_bytes = vec![0u8; total_pc_size as usize];
+    for spec in &pc_specs {
+        let start = spec.offset as usize;
+        let end = start + spec.data.len();
+        pc_bytes[start..end].copy_from_slice(&spec.data);
+    }
+
+    if verbose && !pc_specs.is_empty() {
+        println!("Push constants ({} bytes):", total_pc_size);
+        for spec in &pc_specs {
+            println!("  {} @ offset {}: {} bytes", spec.name, spec.offset, spec.byte_size());
+        }
+    }
+
+    let pc_ranges: Vec<wgpu::PushConstantRange> = if total_pc_size > 0 {
+        vec![wgpu::PushConstantRange {
+            stages: wgpu::ShaderStages::COMPUTE,
+            range: 0..total_pc_size,
+        }]
+    } else {
+        vec![]
+    };
+
     let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
         label: Some("compute_layout"),
         bind_group_layouts: &[&bind_group_layout],
-        push_constant_ranges: &[],
+        push_constant_ranges: &pc_ranges,
     });
 
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -1323,6 +1599,9 @@ async fn run_compute_shader(
         });
         cpass.set_pipeline(&pipeline);
         cpass.set_bind_group(0, &bind_group, &[]);
+        if !pc_bytes.is_empty() {
+            cpass.set_push_constants(0, &pc_bytes);
+        }
         cpass.dispatch_workgroups(workgroups.0, workgroups.1, workgroups.2);
     }
 
@@ -2401,6 +2680,7 @@ fn main() -> Result<()> {
             workgroups_y,
             workgroups_z,
             storage_buffers,
+            push_constants,
             verbose,
         } => {
             let entry_name = entry.unwrap_or_else(|| {
@@ -2419,6 +2699,7 @@ fn main() -> Result<()> {
                 entry_name,
                 (workgroups_x, workgroups_y, workgroups_z),
                 storage_specs,
+                &push_constants,
                 verbose,
             ))?;
         }
@@ -2427,6 +2708,7 @@ fn main() -> Result<()> {
             pipeline,
             inputs,
             outputs,
+            push_constants,
             verbose,
         } => {
             // Parse name:file pairs
@@ -2444,7 +2726,7 @@ fn main() -> Result<()> {
             let input_map = parse_pairs(&inputs)?;
             let output_map = parse_pairs(&outputs)?;
 
-            pollster::block_on(run_pipeline(path, pipeline, input_map, output_map, verbose))?;
+            pollster::block_on(run_pipeline(path, pipeline, input_map, output_map, &push_constants, verbose))?;
         }
         Command::Validate { path, verbose } => {
             pollster::block_on(validate_spirv(&path, verbose))?;

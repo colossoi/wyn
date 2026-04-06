@@ -16,6 +16,7 @@ use crate::pipeline_descriptor::{
     Access, Binding, BufferUsage, ComputePipeline, ComputeStage, DispatchSize, MultiComputePipeline,
     Pipeline, PipelineDescriptor,
 };
+use crate::ssa::layout::type_byte_size;
 use crate::ssa::builder::FuncBuilder;
 use crate::ssa::soac_analysis::{ArrayProvenance, ParallelizableSoac, analyze_program};
 use crate::ssa::types::{EffectToken, FuncBody, InstKind, Terminator, ValueId};
@@ -275,6 +276,23 @@ pub fn parallelize_soacs(mut program: Program) -> ParallelizationResult {
     }
 }
 
+/// Extract push constant bindings from entry inputs.
+fn push_constant_bindings(entry: &EntryPoint) -> Vec<Binding> {
+    entry
+        .inputs
+        .iter()
+        .filter_map(|input| {
+            let offset = input.push_constant_offset?;
+            let size = type_byte_size(&input.ty)?;
+            Some(Binding::PushConstant {
+                offset,
+                size,
+                name: input.name.clone(),
+            })
+        })
+        .collect()
+}
+
 /// Build a single-dispatch compute pipeline descriptor for a map.
 fn build_map_pipeline(
     entry: &EntryPoint,
@@ -294,6 +312,7 @@ fn build_map_pipeline(
             });
         }
     }
+    bindings.extend(push_constant_bindings(entry));
 
     bindings.push(Binding::StorageBuffer {
         set: output_binding.0,
@@ -540,6 +559,7 @@ fn parallelize_reduce_entry(
             });
         }
     }
+    bindings.extend(push_constant_bindings(entry));
 
     // Intermediate partials buffer
     let partials_idx = bindings.len();
@@ -979,6 +999,7 @@ fn parallelize_scan_entry(
             });
         }
     }
+    bindings.extend(push_constant_bindings(entry));
 
     // Output buffer (same size as input)
     let output_idx = bindings.len();
