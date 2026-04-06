@@ -599,6 +599,271 @@ impl ProgramParts {
 }
 
 // =============================================================================
+// Generic child traversal
+// =============================================================================
+
+impl Term {
+    /// Apply `f` to every immediate `Term` child, returning a new `Term` with
+    /// the same metadata but transformed children. Recurses into Lambda,
+    /// SoacOp, ArrayExpr, LoopKind, and Place sub-structures.
+    ///
+    /// This is the single place that knows the shape of TermKind — passes
+    /// that need a uniform bottom-up or top-down walk can use this instead
+    /// of hand-rolling a match over every variant.
+    pub fn map_children<F>(self, f: &mut F) -> Self
+    where
+        F: FnMut(Term) -> Term,
+    {
+        let kind = match self.kind {
+            // Leaves — no Term children
+            TermKind::Var(_)
+            | TermKind::BinOp(_)
+            | TermKind::UnOp(_)
+            | TermKind::IntLit(_)
+            | TermKind::FloatLit(_)
+            | TermKind::BoolLit(_)
+            | TermKind::StringLit(_)
+            | TermKind::Extern(_) => self.kind,
+
+            TermKind::App { func, arg } => TermKind::App {
+                func: Box::new(f(*func)),
+                arg: Box::new(f(*arg)),
+            },
+
+            TermKind::Let {
+                name,
+                name_ty,
+                rhs,
+                body,
+            } => TermKind::Let {
+                name,
+                name_ty,
+                rhs: Box::new(f(*rhs)),
+                body: Box::new(f(*body)),
+            },
+
+            TermKind::Lambda(lam) => TermKind::Lambda(map_lambda_children(lam, f)),
+
+            TermKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => TermKind::If {
+                cond: Box::new(f(*cond)),
+                then_branch: Box::new(f(*then_branch)),
+                else_branch: Box::new(f(*else_branch)),
+            },
+
+            TermKind::Loop {
+                loop_var,
+                loop_var_ty,
+                init,
+                init_bindings,
+                kind,
+                body,
+            } => TermKind::Loop {
+                loop_var,
+                loop_var_ty,
+                init: Box::new(f(*init)),
+                init_bindings: init_bindings
+                    .into_iter()
+                    .map(|(s, t, e)| (s, t, f(e)))
+                    .collect(),
+                kind: map_loop_kind_children(kind, f),
+                body: Box::new(f(*body)),
+            },
+
+            TermKind::Soac(soac) => TermKind::Soac(map_soac_children(soac, f)),
+
+            TermKind::ArrayExpr(ae) => TermKind::ArrayExpr(map_array_expr_children(ae, f)),
+
+            TermKind::Force(inner) => TermKind::Force(Box::new(f(*inner))),
+
+            TermKind::Pack {
+                exists_ty,
+                dims,
+                value,
+            } => TermKind::Pack {
+                exists_ty,
+                dims,
+                value: Box::new(f(*value)),
+            },
+
+            TermKind::Unpack {
+                scrut,
+                dim_binders,
+                value_binder,
+                body,
+            } => TermKind::Unpack {
+                scrut: Box::new(f(*scrut)),
+                dim_binders,
+                value_binder,
+                body: Box::new(f(*body)),
+            },
+        };
+
+        Term { kind, ..self }
+    }
+}
+
+fn map_lambda_children<F>(lam: Lambda, f: &mut F) -> Lambda
+where
+    F: FnMut(Term) -> Term,
+{
+    Lambda {
+        body: Box::new(f(*lam.body)),
+        captures: lam
+            .captures
+            .into_iter()
+            .map(|(s, t, e)| (s, t, f(e)))
+            .collect(),
+        ..lam
+    }
+}
+
+fn map_soac_children<F>(soac: SoacOp, f: &mut F) -> SoacOp
+where
+    F: FnMut(Term) -> Term,
+{
+    match soac {
+        SoacOp::Map { lam, inputs } => SoacOp::Map {
+            lam: map_lambda_children(lam, f),
+            inputs: inputs
+                .into_iter()
+                .map(|ae| map_array_expr_children(ae, f))
+                .collect(),
+        },
+        SoacOp::Reduce {
+            op,
+            ne,
+            input,
+            props,
+        } => SoacOp::Reduce {
+            op: map_lambda_children(op, f),
+            ne: Box::new(f(*ne)),
+            input: map_array_expr_children(input, f),
+            props,
+        },
+        SoacOp::Scan { op, ne, input } => SoacOp::Scan {
+            op: map_lambda_children(op, f),
+            ne: Box::new(f(*ne)),
+            input: map_array_expr_children(input, f),
+        },
+        SoacOp::Filter { pred, input } => SoacOp::Filter {
+            pred: map_lambda_children(pred, f),
+            input: map_array_expr_children(input, f),
+        },
+        SoacOp::Scatter {
+            dest,
+            indices,
+            values,
+        } => SoacOp::Scatter {
+            dest: map_place_children(dest, f),
+            indices: map_array_expr_children(indices, f),
+            values: map_array_expr_children(values, f),
+        },
+        SoacOp::ReduceByIndex {
+            dest,
+            op,
+            ne,
+            indices,
+            values,
+            props,
+        } => SoacOp::ReduceByIndex {
+            dest: map_place_children(dest, f),
+            op: map_lambda_children(op, f),
+            ne: Box::new(f(*ne)),
+            indices: map_array_expr_children(indices, f),
+            values: map_array_expr_children(values, f),
+            props,
+        },
+    }
+}
+
+fn map_array_expr_children<F>(ae: ArrayExpr, f: &mut F) -> ArrayExpr
+where
+    F: FnMut(Term) -> Term,
+{
+    match ae {
+        ArrayExpr::Ref(t) => ArrayExpr::Ref(Box::new(f(*t))),
+        ArrayExpr::Zip(aes) => ArrayExpr::Zip(
+            aes.into_iter()
+                .map(|ae| map_array_expr_children(ae, f))
+                .collect(),
+        ),
+        ArrayExpr::Soac(op) => ArrayExpr::Soac(Box::new(map_soac_children(*op, f))),
+        ArrayExpr::Generate {
+            shape,
+            index_fn,
+            elem_ty,
+        } => ArrayExpr::Generate {
+            shape,
+            index_fn: map_lambda_children(index_fn, f),
+            elem_ty,
+        },
+        ArrayExpr::Literal(terms) => ArrayExpr::Literal(terms.into_iter().map(f).collect()),
+        ArrayExpr::Range { start, len } => ArrayExpr::Range {
+            start: Box::new(f(*start)),
+            len: Box::new(f(*len)),
+        },
+        ArrayExpr::StorageBuffer {
+            set,
+            binding,
+            offset,
+            len,
+            elem_ty,
+        } => ArrayExpr::StorageBuffer {
+            set,
+            binding,
+            offset: Box::new(f(*offset)),
+            len: Box::new(f(*len)),
+            elem_ty,
+        },
+    }
+}
+
+fn map_loop_kind_children<F>(kind: LoopKind, f: &mut F) -> LoopKind
+where
+    F: FnMut(Term) -> Term,
+{
+    match kind {
+        LoopKind::For { var, var_ty, iter } => LoopKind::For {
+            var,
+            var_ty,
+            iter: Box::new(f(*iter)),
+        },
+        LoopKind::ForRange { var, var_ty, bound } => LoopKind::ForRange {
+            var,
+            var_ty,
+            bound: Box::new(f(*bound)),
+        },
+        LoopKind::While { cond } => LoopKind::While {
+            cond: Box::new(f(*cond)),
+        },
+    }
+}
+
+fn map_place_children<F>(place: Place, f: &mut F) -> Place
+where
+    F: FnMut(Term) -> Term,
+{
+    match place {
+        Place::BufferSlice {
+            base,
+            offset,
+            shape,
+            elem_ty,
+        } => Place::BufferSlice {
+            base: Box::new(f(*base)),
+            offset: Box::new(f(*offset)),
+            shape,
+            elem_ty,
+        },
+        Place::LocalArray { .. } => place,
+    }
+}
+
+// =============================================================================
 // AST to TLC Transformation
 // =============================================================================
 
