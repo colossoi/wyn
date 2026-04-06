@@ -3,7 +3,9 @@
 //! A minimal typed lambda calculus IR for SOAC fusion analysis.
 //! Lambdas remain as values (not yet defunctionalized).
 
+pub mod array_semantics;
 pub mod buffer_specialize;
+pub mod producer_graph;
 pub mod defunctionalize;
 #[cfg(test)]
 mod defunctionalize_tests;
