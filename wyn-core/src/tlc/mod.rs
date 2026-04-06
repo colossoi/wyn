@@ -100,154 +100,28 @@ pub fn collect_var_refs(term: &Term) -> Vec<SymbolId> {
 }
 
 fn collect_var_refs_inner(term: &Term, refs: &mut Vec<SymbolId>) {
-    match &term.kind {
-        TermKind::Var(sym) => refs.push(*sym),
-        TermKind::Lambda(lam) => collect_var_refs_lambda(lam, refs),
-        TermKind::App { func, arg } => {
-            collect_var_refs_inner(func, refs);
-            collect_var_refs_inner(arg, refs);
-        }
-        TermKind::Let { rhs, body, .. } => {
-            collect_var_refs_inner(rhs, refs);
-            collect_var_refs_inner(body, refs);
-        }
-        TermKind::If {
-            cond,
-            then_branch,
-            else_branch,
-        } => {
-            collect_var_refs_inner(cond, refs);
-            collect_var_refs_inner(then_branch, refs);
-            collect_var_refs_inner(else_branch, refs);
-        }
-        TermKind::Loop {
-            init,
-            init_bindings,
-            kind,
-            body,
-            ..
-        } => {
-            collect_var_refs_inner(init, refs);
-            for (_, _, e) in init_bindings {
-                collect_var_refs_inner(e, refs);
-            }
-            collect_var_refs_loop_kind(kind, refs);
-            collect_var_refs_inner(body, refs);
-        }
-        TermKind::Soac(soac) => collect_var_refs_soac(soac, refs),
-        TermKind::ArrayExpr(ae) => collect_var_refs_array_expr(ae, refs),
-        TermKind::Force(inner) => collect_var_refs_inner(inner, refs),
-        TermKind::Pack { value, .. } => collect_var_refs_inner(value, refs),
-        TermKind::Unpack { scrut, body, .. } => {
-            collect_var_refs_inner(scrut, refs);
-            collect_var_refs_inner(body, refs);
-        }
-        TermKind::BinOp(_)
-        | TermKind::UnOp(_)
-        | TermKind::IntLit(_)
-        | TermKind::FloatLit(_)
-        | TermKind::BoolLit(_)
-        | TermKind::StringLit(_)
-        | TermKind::Extern(_) => {}
+    // Var leaf: the only TermKind that directly contributes a ref.
+    if let TermKind::Var(sym) = &term.kind {
+        refs.push(*sym);
     }
+
+    // Place::LocalArray also contributes a non-Term SymbolId ref.
+    // for_each_child doesn't expose Place internals, so handle here.
+    collect_place_ids_in_soacs(term, refs);
+
+    // Recurse into all Term children.
+    term.for_each_child(&mut |child| collect_var_refs_inner(child, refs));
 }
 
-fn collect_var_refs_lambda(lam: &Lambda, refs: &mut Vec<SymbolId>) {
-    collect_var_refs_inner(&lam.body, refs);
-    for (_, _, e) in &lam.captures {
-        collect_var_refs_inner(e, refs);
-    }
-}
-
-fn collect_var_refs_soac(soac: &SoacOp, refs: &mut Vec<SymbolId>) {
-    match soac {
-        SoacOp::Map { lam, inputs } => {
-            collect_var_refs_lambda(lam, refs);
-            for ae in inputs {
-                collect_var_refs_array_expr(ae, refs);
-            }
-        }
-        SoacOp::Reduce { op, ne, input, .. } => {
-            collect_var_refs_lambda(op, refs);
-            collect_var_refs_inner(ne, refs);
-            collect_var_refs_array_expr(input, refs);
-        }
-        SoacOp::Scan { op, ne, input } => {
-            collect_var_refs_lambda(op, refs);
-            collect_var_refs_inner(ne, refs);
-            collect_var_refs_array_expr(input, refs);
-        }
-        SoacOp::Filter { pred, input } => {
-            collect_var_refs_lambda(pred, refs);
-            collect_var_refs_array_expr(input, refs);
-        }
-        SoacOp::Scatter {
-            dest,
-            indices,
-            values,
-        } => {
-            collect_var_refs_place(dest, refs);
-            collect_var_refs_array_expr(indices, refs);
-            collect_var_refs_array_expr(values, refs);
-        }
-        SoacOp::ReduceByIndex {
-            dest,
-            op,
-            ne,
-            indices,
-            values,
-            ..
-        } => {
-            collect_var_refs_place(dest, refs);
-            collect_var_refs_lambda(op, refs);
-            collect_var_refs_inner(ne, refs);
-            collect_var_refs_array_expr(indices, refs);
-            collect_var_refs_array_expr(values, refs);
-        }
-    }
-}
-
-fn collect_var_refs_array_expr(ae: &ArrayExpr, refs: &mut Vec<SymbolId>) {
-    match ae {
-        ArrayExpr::Ref(t) => collect_var_refs_inner(t, refs),
-        ArrayExpr::Zip(aes) => {
-            for ae in aes {
-                collect_var_refs_array_expr(ae, refs);
-            }
-        }
-        ArrayExpr::Soac(op) => collect_var_refs_soac(op, refs),
-        ArrayExpr::Generate { index_fn, .. } => collect_var_refs_lambda(index_fn, refs),
-        ArrayExpr::Literal(terms) => {
-            for t in terms {
-                collect_var_refs_inner(t, refs);
-            }
-        }
-        ArrayExpr::Range { start, len } => {
-            collect_var_refs_inner(start, refs);
-            collect_var_refs_inner(len, refs);
-        }
-        ArrayExpr::StorageBuffer { offset, len, .. } => {
-            collect_var_refs_inner(offset, refs);
-            collect_var_refs_inner(len, refs);
-        }
-    }
-}
-
-fn collect_var_refs_loop_kind(kind: &LoopKind, refs: &mut Vec<SymbolId>) {
-    match kind {
-        LoopKind::For { iter, .. } => collect_var_refs_inner(iter, refs),
-        LoopKind::ForRange { bound, .. } => collect_var_refs_inner(bound, refs),
-        LoopKind::While { cond } => collect_var_refs_inner(cond, refs),
-    }
-}
-
-fn collect_var_refs_place(place: &Place, refs: &mut Vec<SymbolId>) {
-    match place {
-        Place::BufferSlice { base, offset, .. } => {
-            collect_var_refs_inner(base, refs);
-            collect_var_refs_inner(offset, refs);
-        }
-        Place::LocalArray { id, .. } => {
+/// Collect SymbolIds from Place::LocalArray inside Scatter/ReduceByIndex SOACs.
+/// These are non-Term refs that for_each_child can't reach.
+fn collect_place_ids_in_soacs(term: &Term, refs: &mut Vec<SymbolId>) {
+    if let TermKind::Soac(soac) = &term.kind {
+        let place = match soac {
+            SoacOp::Scatter { dest, .. } | SoacOp::ReduceByIndex { dest, .. } => Some(dest),
+            _ => None,
+        };
+        if let Some(Place::LocalArray { id, .. }) = place {
             refs.push(*id);
         }
     }
@@ -703,6 +577,187 @@ impl Term {
         };
 
         Term { kind, ..self }
+    }
+
+    /// Visit every immediate `Term` child by reference. This is the by-ref
+    /// counterpart to `map_children` — use it for analysis passes that
+    /// inspect without transforming.
+    pub fn for_each_child<F>(&self, f: &mut F)
+    where
+        F: FnMut(&Term),
+    {
+        match &self.kind {
+            TermKind::Var(_)
+            | TermKind::BinOp(_)
+            | TermKind::UnOp(_)
+            | TermKind::IntLit(_)
+            | TermKind::FloatLit(_)
+            | TermKind::BoolLit(_)
+            | TermKind::StringLit(_)
+            | TermKind::Extern(_) => {}
+
+            TermKind::App { func, arg } => {
+                f(func);
+                f(arg);
+            }
+
+            TermKind::Let { rhs, body, .. } => {
+                f(rhs);
+                f(body);
+            }
+
+            TermKind::Lambda(lam) => visit_lambda_children(lam, f),
+
+            TermKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                f(cond);
+                f(then_branch);
+                f(else_branch);
+            }
+
+            TermKind::Loop {
+                init,
+                init_bindings,
+                kind,
+                body,
+                ..
+            } => {
+                f(init);
+                for (_, _, e) in init_bindings {
+                    f(e);
+                }
+                visit_loop_kind_children(kind, f);
+                f(body);
+            }
+
+            TermKind::Soac(soac) => visit_soac_children(soac, f),
+            TermKind::ArrayExpr(ae) => visit_array_expr_children(ae, f),
+            TermKind::Force(inner) => f(inner),
+
+            TermKind::Pack { value, .. } => f(value),
+
+            TermKind::Unpack { scrut, body, .. } => {
+                f(scrut);
+                f(body);
+            }
+        }
+    }
+}
+
+fn visit_lambda_children<F>(lam: &Lambda, f: &mut F)
+where
+    F: FnMut(&Term),
+{
+    f(&lam.body);
+    for (_, _, e) in &lam.captures {
+        f(e);
+    }
+}
+
+fn visit_soac_children<F>(soac: &SoacOp, f: &mut F)
+where
+    F: FnMut(&Term),
+{
+    match soac {
+        SoacOp::Map { lam, inputs } => {
+            visit_lambda_children(lam, f);
+            for ae in inputs {
+                visit_array_expr_children(ae, f);
+            }
+        }
+        SoacOp::Reduce { op, ne, input, .. } => {
+            visit_lambda_children(op, f);
+            f(ne);
+            visit_array_expr_children(input, f);
+        }
+        SoacOp::Scan { op, ne, input } => {
+            visit_lambda_children(op, f);
+            f(ne);
+            visit_array_expr_children(input, f);
+        }
+        SoacOp::Filter { pred, input } => {
+            visit_lambda_children(pred, f);
+            visit_array_expr_children(input, f);
+        }
+        SoacOp::Scatter {
+            dest,
+            indices,
+            values,
+        } => {
+            visit_place_children(dest, f);
+            visit_array_expr_children(indices, f);
+            visit_array_expr_children(values, f);
+        }
+        SoacOp::ReduceByIndex {
+            dest,
+            op,
+            ne,
+            indices,
+            values,
+            ..
+        } => {
+            visit_place_children(dest, f);
+            visit_lambda_children(op, f);
+            f(ne);
+            visit_array_expr_children(indices, f);
+            visit_array_expr_children(values, f);
+        }
+    }
+}
+
+fn visit_array_expr_children<F>(ae: &ArrayExpr, f: &mut F)
+where
+    F: FnMut(&Term),
+{
+    match ae {
+        ArrayExpr::Ref(t) => f(t),
+        ArrayExpr::Zip(aes) => {
+            for ae in aes {
+                visit_array_expr_children(ae, f);
+            }
+        }
+        ArrayExpr::Soac(op) => visit_soac_children(op, f),
+        ArrayExpr::Generate { index_fn, .. } => visit_lambda_children(index_fn, f),
+        ArrayExpr::Literal(terms) => {
+            for t in terms {
+                f(t);
+            }
+        }
+        ArrayExpr::Range { start, len } => {
+            f(start);
+            f(len);
+        }
+        ArrayExpr::StorageBuffer { offset, len, .. } => {
+            f(offset);
+            f(len);
+        }
+    }
+}
+
+fn visit_loop_kind_children<F>(kind: &LoopKind, f: &mut F)
+where
+    F: FnMut(&Term),
+{
+    match kind {
+        LoopKind::For { iter, .. } => f(iter),
+        LoopKind::ForRange { bound, .. } => f(bound),
+        LoopKind::While { cond } => f(cond),
+    }
+}
+
+fn visit_place_children<F>(place: &Place, f: &mut F)
+where
+    F: FnMut(&Term),
+{
+    match place {
+        Place::BufferSlice { base, offset, .. } => {
+            f(base);
+            f(offset);
+        }
+        Place::LocalArray { .. } => {}
     }
 }
 
