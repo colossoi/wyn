@@ -665,6 +665,7 @@ impl AliasChecked {
         // Combine parts with the symbol table to create the final Program
         let tlc_program = parts.with_symbols(symbols);
 
+
         TlcTransformed {
             tlc: tlc_program,
             type_table: self.type_table,
@@ -691,7 +692,9 @@ pub struct TlcTransformed {
 impl TlcTransformed {
     /// Constant folding and algebraic simplifications.
     pub fn partial_eval(self) -> TlcPartialEvaled {
+        self.tlc.assert_flat_apps();
         let optimized = tlc::partial_eval::PartialEvaluator::partial_eval(self.tlc);
+        optimized.assert_flat_apps();
         TlcPartialEvaled {
             tlc: optimized,
             type_table: self.type_table,
@@ -713,6 +716,7 @@ impl TlcPartialEvaled {
     /// Fuse consecutive map operations to eliminate intermediate arrays.
     pub fn fuse_maps(self) -> TlcFused {
         let fused = tlc::fusion::fuse_maps(self.tlc);
+
         TlcFused {
             tlc: fused,
             type_table: self.type_table,
@@ -734,6 +738,7 @@ impl TlcFused {
     /// Defunctionalize: lift lambdas and flatten SOAC closure captures.
     pub fn defunctionalize(self) -> TlcDefunctionalized {
         let defunc = tlc::defunctionalize::defunctionalize(self.tlc, &self.known_defs);
+        defunc.assert_flat_apps();
         TlcDefunctionalized {
             tlc: defunc,
             type_table: self.type_table,
@@ -767,6 +772,7 @@ impl TlcDefunctionalized {
 
         // Monomorphize polymorphic user functions
         let monomorphized = tlc::monomorphize::monomorphize(specialized, &schemes_by_sym);
+        monomorphized.assert_flat_apps();
         TlcMonomorphized {
             tlc: monomorphized,
             type_table: self.type_table,
@@ -787,6 +793,7 @@ impl TlcMonomorphized {
     /// see SoA types, making zip/unzip free.
     pub fn soa_transform(self) -> TlcSoaTransformed {
         let transformed = tlc::soa_transform::soa_transform(self.tlc);
+        transformed.assert_flat_apps();
         TlcSoaTransformed {
             tlc: transformed,
             type_table: self.type_table,
@@ -805,6 +812,7 @@ impl TlcSoaTransformed {
     /// After this pass, no `DefMeta::Function` has view-array parameters.
     pub fn buffer_specialize(self) -> TlcBufferSpecialized {
         let specialized = tlc::buffer_specialize::buffer_specialize(self.tlc);
+        specialized.assert_flat_apps();
         TlcBufferSpecialized {
             tlc: specialized,
             type_table: self.type_table,
@@ -823,6 +831,7 @@ impl TlcBufferSpecialized {
     /// then remove unreferenced defs (DCE).
     pub fn inline(self) -> TlcInlined {
         let inlined = tlc::inline::inline(self.tlc);
+        inlined.assert_flat_apps();
         TlcInlined {
             tlc: inlined,
             type_table: self.type_table,

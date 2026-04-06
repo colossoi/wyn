@@ -226,13 +226,11 @@ impl BufferSpecializer {
                 }
             }
 
-            TermKind::App { func, arg } => {
-                // Collect the full application spine to see if we're calling a
-                // function with buffer-backed args.
-                let (base, args) = collect_app_spine(term);
-                match &base.kind {
+            TermKind::App { func, args } => {
+                match &func.kind {
                     TermKind::Var(sym) => {
                         // Check if any arguments are buffer-backed (clone to avoid borrow)
+                        let arg_refs: Vec<&Term> = args.iter().collect();
                         let buffer_args: Vec<Option<BufferBinding>> = args
                             .iter()
                             .map(|a| {
@@ -251,7 +249,7 @@ impl BufferSpecializer {
                                     return self.specialize_call(
                                         *sym,
                                         &target_def,
-                                        &args,
+                                        &arg_refs,
                                         &buffer_args,
                                         term,
                                     );
@@ -261,22 +259,22 @@ impl BufferSpecializer {
 
                         // No buffer args or not a known function — recurse normally
                         let new_func = self.rewrite_term(func);
-                        let new_arg = self.rewrite_term(arg);
+                        let new_args: Vec<Term> = args.iter().map(|a| self.rewrite_term(a)).collect();
                         Term {
                             kind: TermKind::App {
                                 func: Box::new(new_func),
-                                arg: Box::new(new_arg),
+                                args: new_args,
                             },
                             ..term.clone()
                         }
                     }
                     _ => {
                         let new_func = self.rewrite_term(func);
-                        let new_arg = self.rewrite_term(arg);
+                        let new_args: Vec<Term> = args.iter().map(|a| self.rewrite_term(a)).collect();
                         Term {
                             kind: TermKind::App {
                                 func: Box::new(new_func),
-                                arg: Box::new(new_arg),
+                                args: new_args,
                             },
                             ..term.clone()
                         }
@@ -589,21 +587,19 @@ impl BufferSpecializer {
             kind: TermKind::Var(spec_sym),
         };
 
-        let mut result = func_ref;
-        for arg in new_args {
-            let app_ty = original_term.ty.clone(); // final app has return type
-            result = Term {
+        if new_args.is_empty() {
+            func_ref
+        } else {
+            Term {
                 id: self.term_ids.next_id(),
-                ty: app_ty,
+                ty: original_term.ty.clone(),
                 span,
                 kind: TermKind::App {
-                    func: Box::new(result),
-                    arg: Box::new(arg),
+                    func: Box::new(func_ref),
+                    args: new_args,
                 },
-            };
+            }
         }
-
-        result
     }
 
     /// Create a specialized copy of a function where view params are replaced
@@ -686,16 +682,14 @@ impl BufferSpecializer {
         view_params: &HashMap<SymbolId, (SymbolId, SymbolId, u32, u32, Type<TypeName>)>,
     ) -> Term {
         match &term.kind {
-            TermKind::App { func, arg } => {
-                // Check if this is a full application spine we need to rewrite
-                let (base, args) = collect_app_spine(term);
-                match &base.kind {
+            TermKind::App { func, args } => {
+                match &func.kind {
                     TermKind::Var(sym) => {
                         let name = self.symbols.get(*sym).cloned().unwrap_or_default();
 
                         // _w_index(arr_expr, i) where arr_expr resolves to a view
                         if name == "_w_index" && args.len() == 2 {
-                            if let Some(view) = self.try_resolve_view_expr(args[0], view_params) {
+                            if let Some(view) = self.try_resolve_view_expr(&args[0], view_params) {
                                 let span = term.span;
                                 let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
                                 let idx = self.rewrite_specialized_body(&args[1], view_params);
@@ -721,7 +715,7 @@ impl BufferSpecializer {
 
                         // _w_intrinsic_length(arr_expr) where arr_expr resolves to a view
                         if name == "_w_intrinsic_length" && args.len() == 1 {
-                            if let Some(view) = self.try_resolve_view_expr(args[0], view_params) {
+                            if let Some(view) = self.try_resolve_view_expr(&args[0], view_params) {
                                 return view.len;
                             }
                         }
@@ -777,24 +771,24 @@ impl BufferSpecializer {
                             }
                         }
 
-                        // Default: recurse into func and arg
+                        // Default: recurse into func and args
                         let new_func = self.rewrite_specialized_body(func, view_params);
-                        let new_arg = self.rewrite_specialized_body(arg, view_params);
+                        let new_args: Vec<Term> = args.iter().map(|a| self.rewrite_specialized_body(a, view_params)).collect();
                         Term {
                             kind: TermKind::App {
                                 func: Box::new(new_func),
-                                arg: Box::new(new_arg),
+                                args: new_args,
                             },
                             ..term.clone()
                         }
                     }
                     _ => {
                         let new_func = self.rewrite_specialized_body(func, view_params);
-                        let new_arg = self.rewrite_specialized_body(arg, view_params);
+                        let new_args: Vec<Term> = args.iter().map(|a| self.rewrite_specialized_body(a, view_params)).collect();
                         Term {
                             kind: TermKind::App {
                                 func: Box::new(new_func),
-                                arg: Box::new(new_arg),
+                                args: new_args,
                             },
                             ..term.clone()
                         }
@@ -1241,19 +1235,18 @@ impl BufferSpecializer {
                     elem_ty: elem_ty.clone(),
                 })
             }
-            TermKind::App { .. } => {
+            TermKind::App { func, args } => {
                 // Check for _w_intrinsic_slice(expr, start, end)
-                let (base, args) = collect_app_spine(term);
-                if let TermKind::Var(sym) = &base.kind {
+                if let TermKind::Var(sym) = &func.kind {
                     let name = self.symbols.get(*sym).cloned().unwrap_or_default();
                     if name == "_w_intrinsic_slice" && args.len() == 3 {
-                        let parent = self.try_resolve_view_expr(args[0], view_params)?;
+                        let parent = self.try_resolve_view_expr(&args[0], view_params)?;
                         let span = term.span;
                         let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
 
                         // Rewrite start and end so any nested view refs are resolved
-                        let start = self.rewrite_specialized_body(args[1], view_params);
-                        let end = self.rewrite_specialized_body(args[2], view_params);
+                        let start = self.rewrite_specialized_body(&args[1], view_params);
+                        let end = self.rewrite_specialized_body(&args[2], view_params);
 
                         // new_offset = parent.offset + start
                         let new_offset = self.make_binop_app(
@@ -1309,27 +1302,26 @@ impl BufferSpecializer {
         span: Span,
     ) -> Term {
         let func_sym = self.symbols.alloc(intrinsic_name.to_string());
-        let mut result = Term {
+        let func_term = Term {
             id: self.term_ids.next_id(),
             ty: ret_ty.clone(), // approximate
             span,
             kind: TermKind::Var(func_sym),
         };
 
-        for (i, arg) in args.into_iter().enumerate() {
-            let app_ty = if i == 0 { ret_ty.clone() } else { ret_ty.clone() }; // approximate
-            result = Term {
+        if args.is_empty() {
+            func_term
+        } else {
+            Term {
                 id: self.term_ids.next_id(),
-                ty: app_ty,
+                ty: ret_ty,
                 span,
                 kind: TermKind::App {
-                    func: Box::new(result),
-                    arg: Box::new(arg),
+                    func: Box::new(func_term),
+                    args,
                 },
-            };
+            }
         }
-
-        result
     }
 
     fn make_binop_app(
@@ -1346,60 +1338,39 @@ impl BufferSpecializer {
             span,
             kind: TermKind::BinOp(op),
         };
-        let app1 = Term {
-            id: self.term_ids.next_id(),
-            ty: ret_ty.clone(),
-            span,
-            kind: TermKind::App {
-                func: Box::new(op_term),
-                arg: Box::new(lhs),
-            },
-        };
         Term {
             id: self.term_ids.next_id(),
             ty: ret_ty,
             span,
             kind: TermKind::App {
-                func: Box::new(app1),
-                arg: Box::new(rhs),
+                func: Box::new(op_term),
+                args: vec![lhs, rhs],
             },
         }
     }
 }
 
-/// Collect the full application spine: `f(a)(b)(c)` → `(f, [a, b, c])`.
-fn collect_app_spine(term: &Term) -> (&Term, Vec<&Term>) {
-    let mut args = Vec::new();
-    let mut current = term;
-    while let TermKind::App { func, arg } = &current.kind {
-        args.push(arg.as_ref());
-        current = func.as_ref();
-    }
-    args.reverse();
-    (current, args)
-}
 
-/// Wrap a body term in nested lambdas for the given parameter list.
+/// Wrap a body term in a single flat lambda for the given parameter list.
 fn wrap_in_lambdas(body: Term, params: &[(SymbolId, Type<TypeName>)], term_ids: &mut TermIdSource) -> Term {
     if params.is_empty() {
         return body;
     }
 
-    // Build from outermost to innermost (curried style: each lambda takes one param)
-    let mut result = body;
-    for (sym, ty) in params.iter().rev() {
-        result = Term {
-            id: term_ids.next_id(),
-            ty: Type::Constructed(TypeName::Arrow, vec![ty.clone(), result.ty.clone()]),
-            span: result.span,
-            kind: TermKind::Lambda(Lambda {
-                params: vec![(*sym, ty.clone())],
-                body: Box::new(result),
-                ret_ty: Type::Constructed(TypeName::Unit, vec![]), // will be overridden
-                captures: vec![],
-            }),
-        };
+    let ret_ty = body.ty.clone();
+    let mut lam_ty = ret_ty.clone();
+    for (_, ty) in params.iter().rev() {
+        lam_ty = Type::Constructed(TypeName::Arrow, vec![ty.clone(), lam_ty]);
     }
-
-    result
+    Term {
+        id: term_ids.next_id(),
+        ty: lam_ty,
+        span: body.span,
+        kind: TermKind::Lambda(Lambda {
+            params: params.to_vec(),
+            body: Box::new(body),
+            ret_ty,
+            captures: vec![],
+        }),
+    }
 }

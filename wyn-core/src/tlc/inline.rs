@@ -5,7 +5,7 @@
 //! Everything is first-order and monomorphic at this point.
 
 use super::{
-    Def, DefMeta, Program, Term, TermId, TermIdSource, TermKind,
+    Def, DefMeta, Program, Term, TermIdSource, TermKind,
     collect_var_refs, extract_lambda_params,
 };
 use crate::ast::{Span, TypeName};
@@ -91,39 +91,34 @@ fn find_inline_candidates(defs: &[Def], symbols: &SymbolTable) -> HashMap<Symbol
 // Term inlining (via map_children)
 // =============================================================================
 
-/// Bottom-up: recurse into all children, then try to inline App spines.
+/// Bottom-up: recurse into all children, then try to inline App nodes.
 ///
 /// SOAC lambda bodies are bare Var refs to lifted defs after defunctionalization,
 /// so recursing into them via map_children is harmless — the inline rewrite only
-/// fires on fully-saturated App spines matching candidates.
+/// fires on fully-saturated App nodes matching candidates.
 fn inline_term(term: Term, candidates: &HashMap<SymbolId, InlineBody>, ids: &mut TermIdSource) -> Term {
     let term = term.map_children(&mut |child| inline_term(child, candidates, ids));
 
     // Only App nodes can be inline sites.
-    let TermKind::App { ref func, .. } = term.kind else {
+    let TermKind::App { ref func, ref args } = term.kind else {
         return term;
     };
 
-    // Collect the full application spine: f(a)(b)(c) → (f, [a, b, c])
-    // We need to destructure by value, so re-match after the ref check.
-    let ty = term.ty.clone();
-    let span = term.span;
-    let TermKind::App { func, arg } = term.kind else {
-        unreachable!()
-    };
-    let (head, args) = collect_app_spine_owned(*func, *arg);
-
     // If the head is a Var referencing an inline candidate, inline it.
-    if let TermKind::Var(sym) = &head.kind {
+    if let TermKind::Var(sym) = &func.kind {
         if let Some(ib) = candidates.get(sym) {
             if args.len() == ib.params.len() {
+                let span = term.span;
+                let TermKind::App { func: _, args } = term.kind else {
+                    unreachable!()
+                };
                 return build_inline_lets(&ib.params, &args, ib.body.clone(), span, ids);
             }
         }
     }
 
-    // Not inlineable — rebuild the App chain.
-    rebuild_app_chain(head, args, ty, span)
+    // Not inlineable — return as-is.
+    term
 }
 
 // =============================================================================
@@ -160,54 +155,6 @@ fn build_inline_lets(
                 body: Box::new(result),
             },
         );
-    }
-    result
-}
-
-/// Owning version of collect_app_spine: destructures the App chain.
-fn collect_app_spine_owned(func: Term, arg: Term) -> (Term, Vec<Term>) {
-    let mut args = vec![arg];
-    let mut current = func;
-    loop {
-        match current.kind {
-            TermKind::App { func, arg } => {
-                args.push(*arg);
-                current = *func;
-            }
-            _ => {
-                args.reverse();
-                return (current, args);
-            }
-        }
-    }
-}
-
-/// Rebuild a curried App chain from head + args.
-fn rebuild_app_chain(head: Term, args: Vec<Term>, final_ty: Type<TypeName>, span: Span) -> Term {
-    if args.is_empty() {
-        return head;
-    }
-    let n = args.len();
-    let mut result = head;
-    for (i, arg) in args.into_iter().enumerate() {
-        let ty = if i == n - 1 {
-            final_ty.clone()
-        } else {
-            // Intermediate arrow type — peel the return type.
-            match &result.ty {
-                Type::Constructed(TypeName::Arrow, ref a) if a.len() == 2 => a[1].clone(),
-                other => other.clone(),
-            }
-        };
-        result = Term {
-            id: TermId(0),
-            ty,
-            span,
-            kind: TermKind::App {
-                func: Box::new(result),
-                arg: Box::new(arg),
-            },
-        };
     }
     result
 }

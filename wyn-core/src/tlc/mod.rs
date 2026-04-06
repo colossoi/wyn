@@ -177,10 +177,10 @@ pub enum TermKind {
     /// Lambda abstraction (structured).
     Lambda(Lambda),
 
-    /// Application: f x
+    /// Application: f(a, b, c) — always fully applied, no currying.
     App {
         func: Box<Term>,
-        arg: Box<Term>,
+        args: Vec<Term>,
     },
 
     /// Let binding: let x:T = rhs in body
@@ -451,6 +451,16 @@ pub struct Program {
     pub symbols: SymbolTable,
 }
 
+impl Program {
+    /// Assert no def body contains nested single-arg Apps (leftover curried encoding).
+    pub fn assert_flat_apps(&self) {
+        for def in &self.defs {
+            let name = self.symbols.get(def.name).cloned().unwrap_or_else(|| format!("{:?}", def.name));
+            def.body.assert_flat_apps_in(&name);
+        }
+    }
+}
+
 /// Parts of a TLC program, without the symbol table.
 /// Returned by `Transformer::transform_program` when the caller owns the symbol table.
 #[derive(Debug, Clone)]
@@ -477,6 +487,29 @@ impl ProgramParts {
 // =============================================================================
 
 impl Term {
+    /// Assert that no App node in this tree has a func that is itself an App.
+    pub fn assert_flat_apps(&self) {
+        self.assert_flat_apps_in("<unknown>");
+    }
+
+    fn assert_flat_apps_in(&self, def_name: &str) {
+        if let TermKind::App { func, args } = &self.kind {
+            if let TermKind::App { args: inner_args, .. } = &func.kind {
+                panic!(
+                    "Nested App detected in def '{}': outer has {} args, inner func has {} args. \
+                     Inner func kind: {:?}",
+                    def_name, args.len(), inner_args.len(),
+                    if let TermKind::App { func: f, .. } = &func.kind {
+                        format!("App(func={:?})", std::mem::discriminant(&f.kind))
+                    } else {
+                        format!("{:?}", std::mem::discriminant(&func.kind))
+                    }
+                );
+            }
+        }
+        self.for_each_child(&mut |child| child.assert_flat_apps_in(def_name));
+    }
+
     /// Apply `f` to every immediate `Term` child, returning a new `Term` with
     /// the same metadata but transformed children. Recurses into Lambda,
     /// SoacOp, ArrayExpr, LoopKind, and Place sub-structures.
@@ -499,9 +532,9 @@ impl Term {
             | TermKind::StringLit(_)
             | TermKind::Extern(_) => self.kind,
 
-            TermKind::App { func, arg } => TermKind::App {
+            TermKind::App { func, args } => TermKind::App {
                 func: Box::new(f(*func)),
-                arg: Box::new(f(*arg)),
+                args: args.into_iter().map(&mut *f).collect(),
             },
 
             TermKind::Let {
@@ -596,9 +629,11 @@ impl Term {
             | TermKind::StringLit(_)
             | TermKind::Extern(_) => {}
 
-            TermKind::App { func, arg } => {
+            TermKind::App { func, args } => {
                 f(func);
-                f(arg);
+                for a in args {
+                    f(a);
+                }
             }
 
             TermKind::Let { rhs, body, .. } => {
@@ -1250,20 +1285,29 @@ impl<'a> Transformer<'a> {
             }
         }
 
-        // Build nested lambdas from inside-out
-        for (param_sym, param_ty, _) in lambda_info.into_iter().rev() {
-            let lam_ty = Type::Constructed(TypeName::Arrow, vec![param_ty.clone(), result.ty.clone()]);
-            result = self.mk_term(
-                lam_ty,
-                span,
-                TermKind::Lambda(Lambda {
-                    params: vec![(param_sym, param_ty)],
-                    ret_ty: result.ty.clone(),
-                    body: Box::new(result),
-                    captures: vec![],
-                }),
-            );
-        }
+        // Build a single flat lambda with all params
+        let all_params: Vec<(SymbolId, Type<TypeName>)> = lambda_info
+            .into_iter()
+            .map(|(sym, ty, _)| (sym, ty))
+            .collect();
+        let ret_ty = result.ty.clone();
+        let lam_ty = {
+            let mut ty = ret_ty.clone();
+            for (_, param_ty) in all_params.iter().rev() {
+                ty = Type::Constructed(TypeName::Arrow, vec![param_ty.clone(), ty]);
+            }
+            ty
+        };
+        result = self.mk_term(
+            lam_ty,
+            span,
+            TermKind::Lambda(Lambda {
+                params: all_params,
+                ret_ty,
+                body: Box::new(result),
+                captures: vec![],
+            }),
+        );
 
         result
     }
@@ -1448,7 +1492,7 @@ impl<'a> Transformer<'a> {
             span,
             TermKind::IntLit(index.to_string()),
         );
-        self.build_app2("_w_tuple_proj", var_term, index_lit, result_ty, span)
+        self.build_app("_w_tuple_proj", vec![var_term, index_lit], result_ty, span)
     }
 
     /// Apply a list of bindings around a body term, creating nested let expressions.
@@ -1563,7 +1607,8 @@ impl<'a> Transformer<'a> {
             }
 
             ast::ExprKind::ArrayLiteral(elements) => {
-                // array_lit(e1, e2, ...) as curried application
+                // array_lit(e1, e2, ...) as flat application
+                log::debug!("ArrayLiteral with {} elements", elements.len());
                 self.build_intrinsic_call("_w_array_lit", elements, ty, span)
             }
 
@@ -1586,14 +1631,14 @@ impl<'a> Transformer<'a> {
             ast::ExprKind::ArrayIndex(array, index) => {
                 let arr = self.transform_expr(array);
                 let idx = self.transform_expr(index);
-                self.build_app2("_w_index", arr, idx, ty, span)
+                self.build_app("_w_index", vec![arr, idx], ty, span)
             }
 
             ast::ExprKind::ArrayWith { array, index, value } => {
                 let arr = self.transform_expr(array);
                 let idx = self.transform_expr(index);
                 let val = self.transform_expr(value);
-                self.build_app3("_w_array_with", arr, idx, val, ty, span)
+                self.build_app("_w_array_with", vec![arr, idx, val], ty, span)
             }
 
             ast::ExprKind::BinaryOp(op, lhs, rhs) => {
@@ -1670,7 +1715,7 @@ impl<'a> Transformer<'a> {
                     span,
                     TermKind::IntLit(field_idx.to_string()),
                 );
-                self.build_app2("_w_tuple_proj", rec, index_lit, ty, span)
+                self.build_app("_w_tuple_proj", vec![rec, index_lit], ty, span)
             }
 
             ast::ExprKind::If(if_expr) => {
@@ -1712,11 +1757,11 @@ impl<'a> Transformer<'a> {
                     Some(step_expr) => {
                         let step = self.transform_expr(step_expr);
                         // _w_range_step start step end kind
-                        self.build_app4("_w_range_step", start, step, end, kind_lit, ty, span)
+                        self.build_app("_w_range_step", vec![start, step, end, kind_lit], ty, span)
                     }
                     None => {
                         // _w_range start end kind
-                        self.build_app3("_w_range", start, end, kind_lit, ty, span)
+                        self.build_app("_w_range", vec![start, end, kind_lit], ty, span)
                     }
                 }
             }
@@ -1740,14 +1785,14 @@ impl<'a> Transformer<'a> {
                     .map(|e| self.transform_expr(e))
                     .expect("Slice without end not yet supported");
 
-                self.build_app3("_w_intrinsic_slice", arr, start, end, ty, span)
+                self.build_app("_w_intrinsic_slice", vec![arr, start, end], ty, span)
             }
 
             ast::ExprKind::TypeAscription(inner, _) => self.transform_expr(inner),
 
             ast::ExprKind::TypeCoercion(inner, _) => {
                 let term = self.transform_expr(inner);
-                self.build_app1("_w_coerce", term, ty, span)
+                self.build_app("_w_coerce", vec![term], ty, span)
             }
 
             ast::ExprKind::TypeHole => {
@@ -1798,32 +1843,34 @@ impl<'a> Transformer<'a> {
             return func_term;
         }
 
-        // First application
-        let first_arg = self.transform_expr(&args[0]);
-        let mut result = self.mk_term(
-            self.get_body_type(&func_term.ty),
-            span,
-            TermKind::App {
-                func: Box::new(func_term),
-                arg: Box::new(first_arg),
-            },
-        );
+        let arg_terms: Vec<Term> = args.iter().map(|a| self.transform_expr(a)).collect();
 
-        // Subsequent applications chain
-        for arg in &args[1..] {
-            let arg_term = self.transform_expr(arg);
-            let app_ty = self.get_body_type(&result.ty);
-            result = self.mk_term(
-                app_ty,
+        // If func_term is already an App, flatten by merging args.
+        // This handles curried AST calls like f(a)(b) → App(f, [a, b]).
+        if let TermKind::App { .. } = &func_term.kind {
+            let TermKind::App { func: inner_func, args: inner_args } = func_term.kind else {
+                unreachable!()
+            };
+            let mut all_args = inner_args;
+            all_args.extend(arg_terms);
+            return self.mk_term(
+                ty,
                 span,
                 TermKind::App {
-                    func: Box::new(result),
-                    arg: Box::new(arg_term),
+                    func: inner_func,
+                    args: all_args,
                 },
             );
         }
 
-        Term { ty, ..result }
+        self.mk_term(
+            ty,
+            span,
+            TermKind::App {
+                func: Box::new(func_term),
+                args: arg_terms,
+            },
+        )
     }
 
     /// Check if an expression is a bare SOAC name (not locally bound).
@@ -2012,32 +2059,20 @@ impl<'a> Transformer<'a> {
                 let params: Vec<(SymbolId, Type<TypeName>)> =
                     param_tys.iter().map(|ty| (self.define("_soac_arg"), ty.clone())).collect();
 
-                // Build nested App chain: App(App(f, a), b)
-                // Each application peels one arrow, so intermediate types are the arrow tails.
+                // Build flat App(f, [a, b, ...])
                 let span = term.span;
-                let mut body = term;
-                for (i, (sym, ty)) in params.iter().enumerate() {
-                    let arg = self.mk_term(ty.clone(), span, TermKind::Var(*sym));
-                    // Type after applying arg i: param[i+1] -> ... -> ret_ty
-                    let result_ty = if i + 1 < params.len() {
-                        // Still more params to apply — rebuild arrow from remaining params
-                        let mut ty = ret_ty.clone();
-                        for (_, pt) in params.iter().rev().take(params.len() - i - 1) {
-                            ty = Type::Constructed(TypeName::Arrow, vec![pt.clone(), ty]);
-                        }
-                        ty
-                    } else {
-                        ret_ty.clone()
-                    };
-                    body = self.mk_term(
-                        result_ty,
-                        span,
-                        TermKind::App {
-                            func: Box::new(body),
-                            arg: Box::new(arg),
-                        },
-                    );
-                }
+                let arg_terms: Vec<Term> = params
+                    .iter()
+                    .map(|(sym, ty)| self.mk_term(ty.clone(), span, TermKind::Var(*sym)))
+                    .collect();
+                let body = self.mk_term(
+                    ret_ty.clone(),
+                    span,
+                    TermKind::App {
+                        func: Box::new(term),
+                        args: arg_terms,
+                    },
+                );
 
                 Lambda {
                     params,
@@ -2216,7 +2251,7 @@ impl<'a> Transformer<'a> {
                 span,
                 TermKind::IntLit(idx.to_string()),
             );
-            current = self.build_app2("_w_tuple_proj", current, index_lit, elem_ty.clone(), span);
+            current = self.build_app("_w_tuple_proj", vec![current, index_lit], elem_ty.clone(), span);
             current_ty = elem_ty;
         }
 
@@ -2306,9 +2341,9 @@ impl<'a> Transformer<'a> {
             }
 
             ast::PatternKind::Constructor(ctor_name, patterns) => {
-                let is_ctor = self.build_app1(
+                let is_ctor = self.build_app(
                     &format!("_w_is_{}", ctor_name),
-                    scrutinee.clone(),
+                    vec![scrutinee.clone()],
                     Type::Constructed(TypeName::Bool, vec![]),
                     span,
                 );
@@ -2318,9 +2353,9 @@ impl<'a> Transformer<'a> {
                 for (i, pat) in patterns.iter().enumerate() {
                     let field_ty =
                         self.lookup_type(pat.h.id).expect("BUG: Constructor field pattern must have type");
-                    let extract = self.build_app1(
+                    let extract = self.build_app(
                         &format!("_w_extract_{}_{}", ctor_name, i),
-                        scrutinee.clone(),
+                        vec![scrutinee.clone()],
                         field_ty.clone(),
                         span,
                     );
@@ -2332,9 +2367,9 @@ impl<'a> Transformer<'a> {
                         all_bindings.push(PendingBinding {
                             name: bound_sym,
                             ty: field_ty,
-                            expr: self.build_app1(
+                            expr: self.build_app(
                                 &format!("_w_extract_{}_{}", ctor_name, i),
-                                scrutinee.clone(),
+                                vec![scrutinee.clone()],
                                 self.lookup_type(pat.h.id).unwrap(),
                                 span,
                             ),
@@ -2403,10 +2438,13 @@ impl<'a> Transformer<'a> {
         }
     }
 
-    // Helper: build App(Var(name), arg)
-    fn build_app1(&mut self, name: &str, arg: Term, result_ty: Type<TypeName>, span: Span) -> Term {
-        // Build the function type for the Var
-        let func_ty = Type::Constructed(TypeName::Arrow, vec![arg.ty.clone(), result_ty.clone()]);
+    // Helper: build App(Var(name), args)
+    fn build_app(&mut self, name: &str, args: Vec<Term>, result_ty: Type<TypeName>, span: Span) -> Term {
+        // Build the function type: arg1_ty -> arg2_ty -> ... -> result_ty (right-associative)
+        let mut func_ty = result_ty.clone();
+        for arg in args.iter().rev() {
+            func_ty = Type::Constructed(TypeName::Arrow, vec![arg.ty.clone(), func_ty]);
+        }
         let name_sym = self.resolve_or_define(name);
         let func_term = self.mk_term(func_ty, span, TermKind::Var(name_sym));
         self.mk_term(
@@ -2414,133 +2452,7 @@ impl<'a> Transformer<'a> {
             span,
             TermKind::App {
                 func: Box::new(func_term),
-                arg: Box::new(arg),
-            },
-        )
-    }
-
-    // Helper: build App(App(Var(name), arg1), arg2)
-    fn build_app2(
-        &mut self,
-        name: &str,
-        arg1: Term,
-        arg2: Term,
-        result_ty: Type<TypeName>,
-        span: Span,
-    ) -> Term {
-        let app1_result_ty = Type::Constructed(TypeName::Arrow, vec![arg2.ty.clone(), result_ty.clone()]);
-        let func_ty = Type::Constructed(TypeName::Arrow, vec![arg1.ty.clone(), app1_result_ty.clone()]);
-        let name_sym = self.resolve_or_define(name);
-        let func_term = self.mk_term(func_ty, span, TermKind::Var(name_sym));
-        let app1 = self.mk_term(
-            app1_result_ty,
-            span,
-            TermKind::App {
-                func: Box::new(func_term),
-                arg: Box::new(arg1),
-            },
-        );
-        self.mk_term(
-            result_ty,
-            span,
-            TermKind::App {
-                func: Box::new(app1),
-                arg: Box::new(arg2),
-            },
-        )
-    }
-
-    // Helper: build App(App(App(Var(name), arg1), arg2), arg3)
-    fn build_app3(
-        &mut self,
-        name: &str,
-        arg1: Term,
-        arg2: Term,
-        arg3: Term,
-        result_ty: Type<TypeName>,
-        span: Span,
-    ) -> Term {
-        // Type of app2: arg3.ty -> result_ty
-        let app2_ty = Type::Constructed(TypeName::Arrow, vec![arg3.ty.clone(), result_ty.clone()]);
-        // Type of app1: arg2.ty -> app2_ty
-        let app1_ty = Type::Constructed(TypeName::Arrow, vec![arg2.ty.clone(), app2_ty.clone()]);
-        // Type of func: arg1.ty -> app1_ty
-        let func_ty = Type::Constructed(TypeName::Arrow, vec![arg1.ty.clone(), app1_ty.clone()]);
-        let name_sym = self.resolve_or_define(name);
-        let func_term = self.mk_term(func_ty, span, TermKind::Var(name_sym));
-        let app1 = self.mk_term(
-            app1_ty,
-            span,
-            TermKind::App {
-                func: Box::new(func_term),
-                arg: Box::new(arg1),
-            },
-        );
-        let app2 = self.mk_term(
-            app2_ty,
-            span,
-            TermKind::App {
-                func: Box::new(app1),
-                arg: Box::new(arg2),
-            },
-        );
-        self.mk_term(
-            result_ty,
-            span,
-            TermKind::App {
-                func: Box::new(app2),
-                arg: Box::new(arg3),
-            },
-        )
-    }
-
-    // Helper: build App(App(App(App(Var(name), arg1), arg2), arg3), arg4)
-    fn build_app4(
-        &mut self,
-        name: &str,
-        arg1: Term,
-        arg2: Term,
-        arg3: Term,
-        arg4: Term,
-        result_ty: Type<TypeName>,
-        span: Span,
-    ) -> Term {
-        let app3_ty = Type::Constructed(TypeName::Arrow, vec![arg4.ty.clone(), result_ty.clone()]);
-        let app2_ty = Type::Constructed(TypeName::Arrow, vec![arg3.ty.clone(), app3_ty.clone()]);
-        let app1_ty = Type::Constructed(TypeName::Arrow, vec![arg2.ty.clone(), app2_ty.clone()]);
-        let func_ty = Type::Constructed(TypeName::Arrow, vec![arg1.ty.clone(), app1_ty.clone()]);
-        let name_sym = self.resolve_or_define(name);
-        let func_term = self.mk_term(func_ty, span, TermKind::Var(name_sym));
-        let app1 = self.mk_term(
-            app1_ty,
-            span,
-            TermKind::App {
-                func: Box::new(func_term),
-                arg: Box::new(arg1),
-            },
-        );
-        let app2 = self.mk_term(
-            app2_ty,
-            span,
-            TermKind::App {
-                func: Box::new(app1),
-                arg: Box::new(arg2),
-            },
-        );
-        let app3 = self.mk_term(
-            app3_ty,
-            span,
-            TermKind::App {
-                func: Box::new(app2),
-                arg: Box::new(arg3),
-            },
-        );
-        self.mk_term(
-            result_ty,
-            span,
-            TermKind::App {
-                func: Box::new(app3),
-                arg: Box::new(arg4),
+                args,
             },
         )
     }
@@ -2555,23 +2467,20 @@ impl<'a> Transformer<'a> {
         span: Span,
     ) -> Term {
         // Build the binop type: lhs.ty -> rhs.ty -> result_ty
-        let app1_result_ty = Type::Constructed(TypeName::Arrow, vec![rhs.ty.clone(), result_ty.clone()]);
-        let binop_ty = Type::Constructed(TypeName::Arrow, vec![lhs.ty.clone(), app1_result_ty.clone()]);
-        let binop_term = self.mk_term(binop_ty, span, TermKind::BinOp(op));
-        let app1 = self.mk_term(
-            app1_result_ty,
-            span,
-            TermKind::App {
-                func: Box::new(binop_term),
-                arg: Box::new(lhs),
-            },
+        let binop_ty = Type::Constructed(
+            TypeName::Arrow,
+            vec![
+                lhs.ty.clone(),
+                Type::Constructed(TypeName::Arrow, vec![rhs.ty.clone(), result_ty.clone()]),
+            ],
         );
+        let binop_term = self.mk_term(binop_ty, span, TermKind::BinOp(op));
         self.mk_term(
             result_ty,
             span,
             TermKind::App {
-                func: Box::new(app1),
-                arg: Box::new(rhs),
+                func: Box::new(binop_term),
+                args: vec![lhs, rhs],
             },
         )
     }
@@ -2585,14 +2494,14 @@ impl<'a> Transformer<'a> {
             span,
             TermKind::App {
                 func: Box::new(unop_term),
-                arg: Box::new(arg),
+                args: vec![arg],
             },
         )
     }
 
-    // Helper: build curried application for variable number of args
-    /// Build a curried call from a function name and already-transformed argument terms.
-    /// For f(a, b, c) with result R: builds f(a) : B -> C -> R, then f(a)(b) : C -> R, then f(a)(b)(c) : R
+    // Helper: build flat application for variable number of args
+    /// Build a flat call from a function name and already-transformed argument terms.
+    /// For f(a, b, c) with result R: builds App { func: Var(f), args: [a, b, c] }
     fn build_curried_call_terms(
         &mut self,
         func_name: &str,
@@ -2605,44 +2514,20 @@ impl<'a> Transformer<'a> {
             return self.mk_term(result_ty, span, TermKind::Var(func_sym));
         }
 
-        // Compute intermediate types working backwards from result_ty
-        // For f(a, b, c) with result R: after f(a) we have B -> C -> R, after f(a)(b) we have C -> R
-        let mut intermediate_types = vec![result_ty.clone()];
-        for arg in args.iter().rev().skip(1) {
-            let prev_ty = intermediate_types.last().unwrap().clone();
-            let cur_ty = Type::Constructed(TypeName::Arrow, vec![arg.ty.clone(), prev_ty]);
-            intermediate_types.push(cur_ty);
+        // Build the function type: arg1_ty -> arg2_ty -> ... -> result_ty (right-associative)
+        let mut func_ty = result_ty.clone();
+        for arg in args.iter().rev() {
+            func_ty = Type::Constructed(TypeName::Arrow, vec![arg.ty.clone(), func_ty]);
         }
-        intermediate_types.reverse();
-
-        // Build curried applications
-        let func_ty = Type::Constructed(
-            TypeName::Arrow,
-            vec![args[0].ty.clone(), intermediate_types[0].clone()],
-        );
         let func_term = self.mk_term(func_ty, span, TermKind::Var(func_sym));
-        let mut result = self.mk_term(
-            intermediate_types[0].clone(),
+        self.mk_term(
+            result_ty,
             span,
             TermKind::App {
                 func: Box::new(func_term),
-                arg: Box::new(args[0].clone()),
+                args: args.to_vec(),
             },
-        );
-
-        for (i, arg) in args.iter().enumerate().skip(1) {
-            let app_ty = intermediate_types.get(i).cloned().unwrap_or_else(|| result_ty.clone());
-            result = self.mk_term(
-                app_ty,
-                span,
-                TermKind::App {
-                    func: Box::new(result),
-                    arg: Box::new(arg.clone()),
-                },
-            );
-        }
-
-        result
+        )
     }
 
     fn build_intrinsic_call(

@@ -826,7 +826,7 @@ impl<'a> Converter<'a> {
                 else_branch,
             } => self.convert_if(cond, then_branch, else_branch, ty),
 
-            TermKind::App { func, arg } => self.convert_app(func, arg, ty),
+            TermKind::App { func, args } => self.convert_app(func, args, ty),
 
             TermKind::Loop {
                 loop_var,
@@ -1002,7 +1002,9 @@ impl<'a> Converter<'a> {
         match &term.kind {
             TermKind::If { .. } | TermKind::Loop { .. } => true,
             TermKind::Let { rhs, body, .. } => Self::term_may_branch(rhs) || Self::term_may_branch(body),
-            TermKind::App { func, arg } => Self::term_may_branch(func) || Self::term_may_branch(arg),
+            TermKind::App { func, args } => {
+                Self::term_may_branch(func) || args.iter().any(|a| Self::term_may_branch(a))
+            }
             TermKind::ArrayExpr(ae) => match ae {
                 ArrayExpr::Literal(terms) => terms.iter().any(|t| Self::term_may_branch(t)),
                 ArrayExpr::Ref(t) => Self::term_may_branch(t),
@@ -1012,36 +1014,26 @@ impl<'a> Converter<'a> {
         }
     }
 
-    /// Collect the spine of a nested application chain.
-    fn collect_application_spine<'t>(func: &'t Term, arg: &'t Term) -> (&'t Term, Vec<&'t Term>) {
-        let mut args = vec![arg];
-        let mut current = func;
-
-        loop {
-            match &current.kind {
-                TermKind::App {
-                    func: inner_func,
-                    arg: inner_arg,
-                } => {
-                    args.push(inner_arg.as_ref());
-                    current = inner_func.as_ref();
-                }
-                _ => {
-                    args.reverse();
-                    return (current, args);
-                }
-            }
-        }
-    }
-
     /// Convert an application.
     fn convert_app(
         &mut self,
         func: &Term,
-        arg: &Term,
+        args: &[Term],
         ty: Type<TypeName>,
     ) -> Result<ValueId, ConvertError> {
-        let (base_term, args) = Self::collect_application_spine(func, arg);
+        let (base_term, args) = {
+            // If the func is itself an App, flatten. Otherwise just use func + args directly.
+            let mut all_args: Vec<&Term> = args.iter().collect();
+            let mut current = func;
+            while let TermKind::App { func: inner_func, args: inner_args } = &current.kind {
+                // Prepend inner_args before all_args
+                let mut new_args: Vec<&Term> = inner_args.iter().collect();
+                new_args.extend(all_args);
+                all_args = new_args;
+                current = inner_func.as_ref();
+            }
+            (current, all_args)
+        };
 
         match &base_term.kind {
             TermKind::BinOp(op) => {

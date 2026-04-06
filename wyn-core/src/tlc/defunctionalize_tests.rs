@@ -77,14 +77,18 @@ fn print_term(term: &Term, symbols: &SymbolTable, indent: usize) -> String {
                 print_term(body, symbols, indent + 1)
             )
         }
-        TermKind::App { func, arg } => {
+        TermKind::App { func, args } => {
+            let args_str: Vec<_> = args
+                .iter()
+                .map(|a| print_term(a, symbols, indent + 2))
+                .collect();
             format!(
-                "{}App\n{}  func:\n{}\n{}  arg:\n{}",
+                "{}App\n{}  func:\n{}\n{}  args:\n{}",
                 pad,
                 pad,
                 print_term(func, symbols, indent + 2),
                 pad,
-                print_term(arg, symbols, indent + 2)
+                args_str.join("\n")
             )
         }
         TermKind::BinOp(op) => format!("{}BinOp({})", pad, op.op),
@@ -238,12 +242,12 @@ fn test_defunc_lambda_with_capture() {
                         span: b.span(),
                         kind: TermKind::BinOp(BinaryOp { op: "+".to_string() }),
                     }),
-                    arg: Box::new(Term {
+                    args: vec![Term {
                         id: b.next_id(),
                         ty: i32_ty(),
                         span: b.span(),
                         kind: TermKind::Var(y_sym),
-                    }),
+                    }],
                 },
             }),
             ret_ty: i32_ty(),
@@ -353,12 +357,12 @@ fn test_nested_hof_passthrough() {
                 span,
                 kind: TermKind::Var(f_sym),
             }),
-            arg: Box::new(Term {
+            args: vec![Term {
                 id: b.next_id(),
                 ty: i32_ty(),
                 span,
                 kind: TermKind::Var(x_sym),
-            }),
+            }],
         },
     };
 
@@ -383,29 +387,24 @@ fn test_nested_hof_passthrough() {
         kind: TermKind::App {
             func: Box::new(Term {
                 id: b.next_id(),
-                ty: arrow(i32_ty(), i32_ty()),
+                ty: arrow(arrow(i32_ty(), i32_ty()), arrow(i32_ty(), i32_ty())),
                 span,
-                kind: TermKind::App {
-                    func: Box::new(Term {
-                        id: b.next_id(),
-                        ty: arrow(arrow(i32_ty(), i32_ty()), arrow(i32_ty(), i32_ty())),
-                        span,
-                        kind: TermKind::Var(hof_inner_sym),
-                    }),
-                    arg: Box::new(Term {
-                        id: b.next_id(),
-                        ty: arrow(i32_ty(), i32_ty()),
-                        span,
-                        kind: TermKind::Var(g_sym), // <-- Just passes g, no lambda
-                    }),
+                kind: TermKind::Var(hof_inner_sym),
+            }),
+            args: vec![
+                Term {
+                    id: b.next_id(),
+                    ty: arrow(i32_ty(), i32_ty()),
+                    span,
+                    kind: TermKind::Var(g_sym), // <-- Just passes g, no lambda
                 },
-            }),
-            arg: Box::new(Term {
-                id: b.next_id(),
-                ty: i32_ty(),
-                span,
-                kind: TermKind::Var(y_sym),
-            }),
+                Term {
+                    id: b.next_id(),
+                    ty: i32_ty(),
+                    span,
+                    kind: TermKind::Var(y_sym),
+                },
+            ],
         },
     };
 
@@ -429,29 +428,24 @@ fn test_nested_hof_passthrough() {
         kind: TermKind::App {
             func: Box::new(Term {
                 id: b.next_id(),
-                ty: arrow(i32_ty(), i32_ty()),
+                ty: arrow(i32_ty(), arrow(i32_ty(), i32_ty())),
                 span,
-                kind: TermKind::App {
-                    func: Box::new(Term {
-                        id: b.next_id(),
-                        ty: arrow(i32_ty(), arrow(i32_ty(), i32_ty())),
-                        span,
-                        kind: TermKind::BinOp(BinaryOp { op: "+".to_string() }),
-                    }),
-                    arg: Box::new(Term {
-                        id: b.next_id(),
-                        ty: i32_ty(),
-                        span,
-                        kind: TermKind::Var(a_sym),
-                    }),
+                kind: TermKind::BinOp(BinaryOp { op: "+".to_string() }),
+            }),
+            args: vec![
+                Term {
+                    id: b.next_id(),
+                    ty: i32_ty(),
+                    span,
+                    kind: TermKind::Var(a_sym),
                 },
-            }),
-            arg: Box::new(Term {
-                id: b.next_id(),
-                ty: i32_ty(),
-                span,
-                kind: TermKind::Var(cap_sym),
-            }),
+                Term {
+                    id: b.next_id(),
+                    ty: i32_ty(),
+                    span,
+                    kind: TermKind::Var(cap_sym),
+                },
+            ],
         },
     };
 
@@ -474,24 +468,19 @@ fn test_nested_hof_passthrough() {
         kind: TermKind::App {
             func: Box::new(Term {
                 id: b.next_id(),
-                ty: arrow(i32_ty(), i32_ty()),
+                ty: arrow(arrow(i32_ty(), i32_ty()), arrow(i32_ty(), i32_ty())),
                 span,
-                kind: TermKind::App {
-                    func: Box::new(Term {
-                        id: b.next_id(),
-                        ty: arrow(arrow(i32_ty(), i32_ty()), arrow(i32_ty(), i32_ty())),
-                        span,
-                        kind: TermKind::Var(hof_outer_sym),
-                    }),
-                    arg: Box::new(capturing_lambda),
+                kind: TermKind::Var(hof_outer_sym),
+            }),
+            args: vec![
+                capturing_lambda,
+                Term {
+                    id: b.next_id(),
+                    ty: i32_ty(),
+                    span,
+                    kind: TermKind::IntLit("5".to_string()),
                 },
-            }),
-            arg: Box::new(Term {
-                id: b.next_id(),
-                ty: i32_ty(),
-                span,
-                kind: TermKind::IntLit("5".to_string()),
-            }),
+            ],
         },
     };
 

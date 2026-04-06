@@ -79,23 +79,13 @@ fn test_convert_simple_function() {
         kind: TermKind::BinOp(BinaryOp { op: "+".to_string() }),
     };
 
-    let binop_x = Term {
-        id: b.next_id(),
-        ty: Type::Constructed(TypeName::Arrow, vec![i32_ty(), i32_ty()]),
-        span,
-        kind: TermKind::App {
-            func: Box::new(binop_term),
-            arg: Box::new(x_var),
-        },
-    };
-
     let add_body = Term {
         id: b.next_id(),
         ty: i32_ty(),
         span,
         kind: TermKind::App {
-            func: Box::new(binop_x),
-            arg: Box::new(y_var),
+            func: Box::new(binop_term),
+            args: vec![x_var, y_var],
         },
     };
 

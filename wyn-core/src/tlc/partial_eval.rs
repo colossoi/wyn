@@ -60,17 +60,12 @@ fn extract_param_types(ty: &Type<TypeName>) -> Vec<Type<TypeName>> {
     params
 }
 
-/// Extract argument types from an application spine term.
-/// `App(App(f, x), y)` yields `[typeof(x), typeof(y)]`.
-fn extract_arg_types_from_spine(term: &Term) -> Vec<Type<TypeName>> {
-    let mut current = term;
-    let mut arg_types = Vec::new();
-    while let TermKind::App { func, arg } = &current.kind {
-        arg_types.push(arg.ty.clone());
-        current = func;
+/// Extract argument types from an application term.
+fn extract_arg_types_from_app(term: &Term) -> Vec<Type<TypeName>> {
+    match &term.kind {
+        TermKind::App { args, .. } => args.iter().map(|a| a.ty.clone()).collect(),
+        _ => vec![],
     }
-    arg_types.reverse();
-    arg_types
 }
 
 // =============================================================================
@@ -175,11 +170,10 @@ impl PartialEvaluator {
                 }
             }
 
-            // Application - collect spine and apply
-            TermKind::App { .. } => {
-                let (base, args) = self.collect_spine(term);
+            // Application - evaluate args and apply
+            TermKind::App { func, args } => {
                 let arg_vals: Vec<Value> = args.iter().map(|a| self.eval(a)).collect();
-                self.apply(base, arg_vals, term)
+                self.apply(func, arg_vals, term)
             }
 
             // Lambda - residualize (should be handled at def level)
@@ -201,21 +195,6 @@ impl PartialEvaluator {
                 unreachable!("Pack/Unpack nodes not yet produced at this phase")
             }
         }
-    }
-
-    /// Collect the spine of an application: App(App(f, x), y) → (base_term, [x, y])
-    /// Returns the base term and collected arguments.
-    fn collect_spine<'a>(&self, term: &'a Term) -> (&'a Term, Vec<&'a Term>) {
-        let mut args = Vec::new();
-        let mut current = term;
-
-        while let TermKind::App { func, arg } = &current.kind {
-            args.push(arg.as_ref());
-            current = func.as_ref();
-        }
-
-        args.reverse();
-        (current, args)
     }
 
     /// Apply a function to arguments based on the base term kind.
@@ -426,28 +405,25 @@ impl PartialEvaluator {
     }
 
     fn reify_tuple(&mut self, elems: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
-        // Build: _w_tuple elem0 elem1 ...
         let component_types = match ty {
             Type::Constructed(TypeName::Tuple(_), args) => args.clone(),
             _ => vec![],
         };
         let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
         let tuple_sym = self.symbols.alloc("_w_tuple".to_string());
-        let mut result = self.mk_term(ty.clone(), span, TermKind::Var(tuple_sym));
-
-        for (i, elem) in elems.into_iter().enumerate() {
-            let elem_ty = component_types.get(i).unwrap_or(&unit_ty);
-            let elem_term = self.reify(elem, elem_ty, span);
-            result = self.mk_term(
-                ty.clone(),
-                span,
-                TermKind::App {
-                    func: Box::new(result),
-                    arg: Box::new(elem_term),
-                },
-            );
-        }
-        result
+        let func_term = self.mk_term(ty.clone(), span, TermKind::Var(tuple_sym));
+        let arg_terms: Vec<Term> = elems
+            .into_iter()
+            .enumerate()
+            .map(|(i, elem)| {
+                let elem_ty = component_types.get(i).unwrap_or(&unit_ty);
+                self.reify(elem, elem_ty, span)
+            })
+            .collect();
+        self.mk_term(ty.clone(), span, TermKind::App {
+            func: Box::new(func_term),
+            args: arg_terms,
+        })
     }
 
     fn reify_array(&mut self, elems: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
@@ -457,85 +433,69 @@ impl PartialEvaluator {
             .cloned()
             .unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![]));
         let array_sym = self.symbols.alloc("_w_array_lit".to_string());
-        let mut result = self.mk_term(ty.clone(), span, TermKind::Var(array_sym));
-
-        for elem in elems {
-            let elem_term = self.reify(elem, &elem_ty, span);
-            result = self.mk_term(
-                ty.clone(),
-                span,
-                TermKind::App {
-                    func: Box::new(result),
-                    arg: Box::new(elem_term),
-                },
-            );
-        }
-        result
+        let func_term = self.mk_term(ty.clone(), span, TermKind::Var(array_sym));
+        let arg_terms: Vec<Term> = elems
+            .into_iter()
+            .map(|elem| self.reify(elem, &elem_ty, span))
+            .collect();
+        self.mk_term(ty.clone(), span, TermKind::App {
+            func: Box::new(func_term),
+            args: arg_terms,
+        })
     }
 
     fn reify_vector(&mut self, elems: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
         let elem_ty = ty.elem_type().cloned().unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![]));
         let vec_sym = self.symbols.alloc("_w_vec_lit".to_string());
-        let mut result = self.mk_term(ty.clone(), span, TermKind::Var(vec_sym));
-
-        for elem in elems {
-            let elem_term = self.reify(elem, &elem_ty, span);
-            result = self.mk_term(
-                ty.clone(),
-                span,
-                TermKind::App {
-                    func: Box::new(result),
-                    arg: Box::new(elem_term),
-                },
-            );
-        }
-        result
+        let func_term = self.mk_term(ty.clone(), span, TermKind::Var(vec_sym));
+        let arg_terms: Vec<Term> = elems
+            .into_iter()
+            .map(|elem| self.reify(elem, &elem_ty, span))
+            .collect();
+        self.mk_term(ty.clone(), span, TermKind::App {
+            func: Box::new(func_term),
+            args: arg_terms,
+        })
     }
 
     fn reify_partial(&mut self, sym: SymbolId, args: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
         let param_types = self.defs.get(&sym).map(|d| extract_param_types(&d.ty));
         let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
-        let mut result = self.mk_term(ty.clone(), span, TermKind::Var(sym));
-
-        for (i, arg) in args.into_iter().enumerate() {
-            let arg_ty = param_types.as_ref().and_then(|pts| pts.get(i)).unwrap_or(&unit_ty);
-            let arg_term = self.reify(arg, arg_ty, span);
-            result = self.mk_term(
-                ty.clone(),
-                span,
-                TermKind::App {
-                    func: Box::new(result),
-                    arg: Box::new(arg_term),
-                },
-            );
-        }
-        result
+        let func_term = self.mk_term(ty.clone(), span, TermKind::Var(sym));
+        let arg_terms: Vec<Term> = args
+            .into_iter()
+            .enumerate()
+            .map(|(i, arg)| {
+                let arg_ty = param_types.as_ref().and_then(|pts| pts.get(i)).unwrap_or(&unit_ty);
+                self.reify(arg, arg_ty, span)
+            })
+            .collect();
+        self.mk_term(ty.clone(), span, TermKind::App {
+            func: Box::new(func_term),
+            args: arg_terms,
+        })
     }
 
     fn reify_call(&mut self, sym: SymbolId, args: Vec<Value>, original: &Term) -> Value {
-        // Primary: extract arg types from the original term's application spine
-        // (works for all functions including built-ins not in self.defs).
-        // Fallback: extract param types from the function's def type.
-        let spine_types = extract_arg_types_from_spine(original);
+        let spine_types = extract_arg_types_from_app(original);
         let def_param_types = self.defs.get(&sym).map(|d| extract_param_types(&d.ty));
         let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
-        let mut result = self.mk_term(original.ty.clone(), original.span, TermKind::Var(sym));
-
-        for (i, arg) in args.into_iter().enumerate() {
-            let arg_ty = spine_types
-                .get(i)
-                .or_else(|| def_param_types.as_ref().and_then(|pts| pts.get(i)))
-                .unwrap_or(&unit_ty);
-            let arg_term = self.reify(arg, arg_ty, original.span);
-            result = self.mk_term(
-                original.ty.clone(),
-                original.span,
-                TermKind::App {
-                    func: Box::new(result),
-                    arg: Box::new(arg_term),
-                },
-            );
-        }
+        let func_term = self.mk_term(original.ty.clone(), original.span, TermKind::Var(sym));
+        let arg_terms: Vec<Term> = args
+            .into_iter()
+            .enumerate()
+            .map(|(i, arg)| {
+                let arg_ty = spine_types
+                    .get(i)
+                    .or_else(|| def_param_types.as_ref().and_then(|pts| pts.get(i)))
+                    .unwrap_or(&unit_ty);
+                self.reify(arg, arg_ty, original.span)
+            })
+            .collect();
+        let result = self.mk_term(original.ty.clone(), original.span, TermKind::App {
+            func: Box::new(func_term),
+            args: arg_terms,
+        });
         Value::Unknown(result)
     }
 

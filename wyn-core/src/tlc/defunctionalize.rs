@@ -176,9 +176,9 @@ fn apply_type_subst_to_term(term: &Term, subst: &TypeSubst, term_ids: &mut TermI
         TermKind::BoolLit(b) => TermKind::BoolLit(*b),
         TermKind::StringLit(s) => TermKind::StringLit(s.clone()),
         TermKind::Extern(linkage) => TermKind::Extern(linkage.clone()),
-        TermKind::App { func, arg } => TermKind::App {
+        TermKind::App { func, args } => TermKind::App {
             func: Box::new(apply_type_subst_to_term(func, subst, term_ids)),
-            arg: Box::new(apply_type_subst_to_term(arg, subst, term_ids)),
+            args: args.iter().map(|a| apply_type_subst_to_term(a, subst, term_ids)).collect(),
         },
         TermKind::Lambda(Lambda {
             params,
@@ -457,9 +457,11 @@ fn collect_free_vars(
             }
             collect_free_vars(body, &inner_bound, top_level, known_defs, symbols, free, seen);
         }
-        TermKind::App { func, arg } => {
+        TermKind::App { func, args } => {
             collect_free_vars(func, bound, top_level, known_defs, symbols, free, seen);
-            collect_free_vars(arg, bound, top_level, known_defs, symbols, free, seen);
+            for arg in args {
+                collect_free_vars(arg, bound, top_level, known_defs, symbols, free, seen);
+            }
         }
         TermKind::If {
             cond,
@@ -744,20 +746,22 @@ impl<'a> Defunctionalizer<'a> {
                 ret_ty,
                 captures,
             }) => {
-                // Keep this lambda, but recursively process its body
-                // These are single-param lambdas from build_lambda_chain
-                let (param, param_ty) = params.into_iter().next().expect("BUG: Lambda with empty params");
-                // Mark param as Dynamic in env
-                self.env.insert(param, StaticVal::Dynamic);
+                // Mark all params as Dynamic in env
+                for (param, _) in &params {
+                    self.env.insert(*param, StaticVal::Dynamic);
+                }
+                // Process body — if it's also a Lambda, this handles nested lambdas too
                 let defunc_body = self.defunc_preserving_params(*body);
-                self.env.remove(&param);
+                for (param, _) in &params {
+                    self.env.remove(param);
+                }
 
                 Term {
                     id: self.term_ids.next_id(),
                     ty: term.ty,
                     span: term.span,
                     kind: TermKind::Lambda(Lambda {
-                        params: vec![(param, param_ty)],
+                        params,
                         body: Box::new(defunc_body),
                         ret_ty,
                         captures,
@@ -800,7 +804,7 @@ impl<'a> Defunctionalizer<'a> {
 
             TermKind::Lambda(..) => self.defunc_lambda(term),
 
-            TermKind::App { func, arg } => self.defunc_app(*func, *arg, ty, span),
+            TermKind::App { func, args } => self.defunc_app(*func, args, ty, span),
 
             TermKind::Let {
                 name,
@@ -1301,10 +1305,9 @@ impl<'a> Defunctionalizer<'a> {
         }
     }
 
-    /// Handle application: collect spine, flatten captures.
-    fn defunc_app(&mut self, func: Term, arg: Term, ty: Type<TypeName>, span: Span) -> DefuncResult {
-        // Collect the application spine: f a1 a2 ... an
-        let (base_func, args) = self.collect_spine(func, arg);
+    /// Handle application: flatten captures.
+    fn defunc_app(&mut self, func: Term, args: Vec<Term>, ty: Type<TypeName>, span: Span) -> DefuncResult {
+        let base_func = func;
 
         // Defunctionalize all arguments
         let arg_results: Vec<DefuncResult> = args.into_iter().map(|a| self.defunc_term(a)).collect();
@@ -1381,33 +1384,6 @@ impl<'a> Defunctionalizer<'a> {
         }
     }
 
-    /// Collect application spine: f a1 a2 ... -> (f, [a1, a2, ...])
-    fn collect_spine(&self, func: Term, arg: Term) -> (Term, Vec<Term>) {
-        let mut args = vec![arg];
-        let mut current = func;
-
-        // Walk up the spine
-        loop {
-            match current.kind {
-                TermKind::App {
-                    func: inner_func,
-                    arg: inner_arg,
-                } => {
-                    args.push(*inner_arg);
-                    current = *inner_func;
-                }
-                _ => {
-                    // Hit a non-App term - this is the base
-                    break;
-                }
-            }
-        }
-
-        // Args were collected in reverse order
-        args.reverse();
-        (current, args)
-    }
-
     /// Build a curried application with a term as the function: t a1 a2 a3 ...
     fn build_curried_app_with_term(
         &mut self,
@@ -1420,32 +1396,16 @@ impl<'a> Defunctionalizer<'a> {
             return func_term;
         }
 
-        // Build from left to right: ((t a1) a2) a3 ...
-        let mut current = Term {
+        // Build a single flat App node
+        Term {
             id: self.term_ids.next_id(),
-            ty: Type::Constructed(TypeName::Ignored, vec![]),
+            ty: result_ty,
             span,
             kind: TermKind::App {
                 func: Box::new(func_term),
-                arg: Box::new(args[0].clone()),
+                args,
             },
-        };
-
-        for arg in args.into_iter().skip(1) {
-            current = Term {
-                id: self.term_ids.next_id(),
-                ty: Type::Constructed(TypeName::Ignored, vec![]),
-                span,
-                kind: TermKind::App {
-                    func: Box::new(current),
-                    arg: Box::new(arg),
-                },
-            };
         }
-
-        // Fix the final type
-        current.ty = result_ty;
-        current
     }
 
     /// Unified function call handler.
@@ -1500,33 +1460,15 @@ impl<'a> Defunctionalizer<'a> {
             };
         }
 
-        // Build from left to right: ((f a1) a2) a3 ...
-        let mut current = Term {
+        // Build a single flat App node
+        Term {
             id: self.term_ids.next_id(),
-            ty: Type::Constructed(TypeName::Ignored, vec![]),
+            ty: result_ty,
             span,
             kind: TermKind::App {
                 func: Box::new(func_term),
-                arg: Box::new(args[0].clone()),
+                args,
             },
-        };
-
-        for arg in args.into_iter().skip(1) {
-            current = Term {
-                id: self.term_ids.next_id(),
-                ty: Type::Constructed(TypeName::Ignored, vec![]),
-                span,
-                kind: TermKind::App {
-                    func: Box::new(current),
-                    arg: Box::new(arg),
-                },
-            };
-        }
-
-        // Fix up the final type
-        Term {
-            ty: result_ty,
-            ..current
         }
     }
 
@@ -1535,85 +1477,69 @@ impl<'a> Defunctionalizer<'a> {
         super::extract_lambda_params(&term)
     }
 
-    /// Rebuild nested lambdas from params and body.
+    /// Build a single flat lambda from params and body.
     fn rebuild_nested_lam(
         &mut self,
         params: &[(SymbolId, Type<TypeName>)],
         body: Term,
         span: Span,
     ) -> Term {
-        params.iter().rev().fold(body, |acc, (param, param_ty)| {
-            let lam_ty = Type::Constructed(TypeName::Arrow, vec![param_ty.clone(), acc.ty.clone()]);
-            Term {
-                id: self.term_ids.next_id(),
-                ty: lam_ty,
-                span,
-                kind: TermKind::Lambda(Lambda {
-                    params: vec![(*param, param_ty.clone())],
-                    body: Box::new(acc.clone()),
-                    ret_ty: acc.ty.clone(),
-                    captures: vec![],
-                }),
-            }
-        })
+        let ret_ty = body.ty.clone();
+        let mut lam_ty = ret_ty.clone();
+        for (_, param_ty) in params.iter().rev() {
+            lam_ty = Type::Constructed(TypeName::Arrow, vec![param_ty.clone(), lam_ty]);
+        }
+        Term {
+            id: self.term_ids.next_id(),
+            ty: lam_ty,
+            span,
+            kind: TermKind::Lambda(Lambda {
+                params: params.to_vec(),
+                body: Box::new(body),
+                ret_ty,
+                captures: vec![],
+            }),
+        }
     }
 
     /// Append capture parameters to a lambda (captures at end).
-    /// Given `|x| |y| body` and captures [a, b], produces `|x| |y| |a| |b| body`.
+    /// Given `|x, y| body` and captures [a, b], produces `|x, y, a, b| body`.
     fn append_capture_params(&mut self, lam: Term, captures: &[Term], span: Span) -> Term {
-        // Find the innermost body (unwrap all lambdas)
-        fn extract_inner(term: Term) -> (Vec<(SymbolId, Type<TypeName>, Type<TypeName>)>, Term) {
-            match term.kind {
-                TermKind::Lambda(Lambda { params, body, .. }) => {
-                    let (mut rest_params, inner) = extract_inner(*body);
-                    for (p, ty) in params.into_iter().rev() {
-                        rest_params.insert(0, (p, ty, term.ty.clone()));
-                    }
-                    (rest_params, inner)
-                }
-                _ => (vec![], term),
-            }
+        // Extract all params from possibly nested lambdas
+        let (orig_params, inner_body) = super::extract_lambda_params(&lam);
+
+        // Build capture params
+        let cap_params: Vec<(SymbolId, Type<TypeName>)> = captures
+            .iter()
+            .map(|cap_term| {
+                let cap_sym = match &cap_term.kind {
+                    TermKind::Var(sym) => *sym,
+                    _ => panic!("BUG: capture term is not a Var: {:?}", cap_term.kind),
+                };
+                (cap_sym, cap_term.ty.clone())
+            })
+            .collect();
+
+        // Build a single flat lambda with all params + captures
+        let mut all_params = orig_params;
+        all_params.extend(cap_params);
+
+        let ret_ty = inner_body.ty.clone();
+        let mut lam_ty = ret_ty.clone();
+        for (_, param_ty) in all_params.iter().rev() {
+            lam_ty = Type::Constructed(TypeName::Arrow, vec![param_ty.clone(), lam_ty]);
         }
-
-        let (orig_params, inner_body) = extract_inner(lam);
-
-        // Wrap inner body with capture lambdas (innermost first, so reverse iterate)
-        let with_captures = captures.iter().rev().fold(inner_body, |acc, cap_term| {
-            // Extract symbol from the capture term (must be a Var)
-            let cap_sym = match &cap_term.kind {
-                TermKind::Var(sym) => *sym,
-                _ => panic!("BUG: capture term is not a Var: {:?}", cap_term.kind),
-            };
-            let cap_ty = &cap_term.ty;
-            let result_ty = Type::Constructed(TypeName::Arrow, vec![cap_ty.clone(), acc.ty.clone()]);
-            Term {
-                id: self.term_ids.next_id(),
-                ty: result_ty,
-                span,
-                kind: TermKind::Lambda(Lambda {
-                    params: vec![(cap_sym, cap_ty.clone())],
-                    body: Box::new(acc.clone()),
-                    ret_ty: acc.ty.clone(),
-                    captures: vec![],
-                }),
-            }
-        });
-
-        // Rebuild original params around it
-        orig_params.into_iter().rev().fold(with_captures, |acc, (param, param_ty, _orig_ty)| {
-            let result_ty = Type::Constructed(TypeName::Arrow, vec![param_ty.clone(), acc.ty.clone()]);
-            Term {
-                id: self.term_ids.next_id(),
-                ty: result_ty,
-                span,
-                kind: TermKind::Lambda(Lambda {
-                    params: vec![(param, param_ty)],
-                    body: Box::new(acc.clone()),
-                    ret_ty: acc.ty.clone(),
-                    captures: vec![],
-                }),
-            }
-        })
+        Term {
+            id: self.term_ids.next_id(),
+            ty: lam_ty,
+            span,
+            kind: TermKind::Lambda(Lambda {
+                params: all_params,
+                body: Box::new(inner_body),
+                ret_ty,
+                captures: vec![],
+            }),
+        }
     }
 
     // =========================================================================
@@ -1786,13 +1712,13 @@ impl<'a> Defunctionalizer<'a> {
             | TermKind::UnOp(_)
             | TermKind::Extern(_) => term.clone(),
 
-            TermKind::App { func, arg } => Term {
+            TermKind::App { func, args } => Term {
                 id: self.term_ids.next_id(),
                 ty: term.ty.clone(),
                 span: term.span,
                 kind: TermKind::App {
                     func: Box::new(self.substitute_var(func, old_sym, new_sym)),
-                    arg: Box::new(self.substitute_var(arg, old_sym, new_sym)),
+                    args: args.iter().map(|a| self.substitute_var(a, old_sym, new_sym)).collect(),
                 },
             },
 

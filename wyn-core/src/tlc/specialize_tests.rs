@@ -67,7 +67,7 @@ fn test_specialize_sign_f32() {
         span: b.span(),
         kind: TermKind::App {
             func: Box::new(sign_var),
-            arg: Box::new(x_var),
+            args: vec![x_var],
         },
     };
 
@@ -137,23 +137,13 @@ fn test_specialize_min_i32() {
         kind: TermKind::Var(min_sym),
     };
 
-    let min_a = Term {
-        id: b.next_id(),
-        ty: partial_ty,
-        span: b.span(),
-        kind: TermKind::App {
-            func: Box::new(min_var),
-            arg: Box::new(a_var),
-        },
-    };
-
     let min_a_b = Term {
         id: b.next_id(),
         ty: i32_ty.clone(),
         span: b.span(),
         kind: TermKind::App {
-            func: Box::new(min_a),
-            arg: Box::new(b_var),
+            func: Box::new(min_var),
+            args: vec![a_var, b_var],
         },
     };
 
@@ -174,18 +164,18 @@ fn test_specialize_min_i32() {
 
     let specialized = specialize(program);
 
-    // Check that min became i32.min in the inner application
+    // Check that min became i32.min in the application
     match &specialized.defs[0].body.kind {
-        TermKind::App { func, .. } => match &func.kind {
-            TermKind::App { func: inner_func, .. } => match &inner_func.kind {
+        TermKind::App { func, args } => {
+            match &func.kind {
                 TermKind::Var(sym) => {
                     let name = specialized.symbols.get(*sym).expect("BUG: symbol not in table");
                     assert_eq!(name, "i32.min");
                 }
-                _ => panic!("Expected Var, got {:?}", inner_func.kind),
-            },
-            _ => panic!("Expected inner App, got {:?}", func.kind),
-        },
+                _ => panic!("Expected Var, got {:?}", func.kind),
+            }
+            assert_eq!(args.len(), 2, "Expected 2 args in flattened App");
+        }
         _ => panic!("Expected App"),
     }
 }

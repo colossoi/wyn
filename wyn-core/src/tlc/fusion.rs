@@ -18,8 +18,7 @@ use std::collections::HashMap;
 
 use super::fusion_summary::DefSummary;
 use super::{
-    ArrayExpr, Def, Lambda, LoopKind, Place, Program, ReduceProps, SoacOp, Term, TermIdSource,
-    TermKind,
+    ArrayExpr, Def, Lambda, LoopKind, Place, Program, ReduceProps, SoacOp, Term, TermIdSource, TermKind,
 };
 
 type Summaries = HashMap<SymbolId, DefSummary>;
@@ -64,7 +63,7 @@ pub fn fuse_maps(program: Program) -> Program {
 }
 
 // =============================================================================
-// Term traversal (bottom-up via map_children)
+// Term traversal (bottom-up)
 // =============================================================================
 
 /// Recursively transform a term bottom-up, fusing maps where possible.
@@ -74,54 +73,271 @@ fn transform_term_s(
     term_ids: &mut TermIdSource,
     sums: &Summaries,
 ) -> Term {
-    // Recurse into all children first (bottom-up).
-    let term = term.map_children(&mut |child| transform_term_s(child, symbols, term_ids, sums));
-
-    // Now apply fusion rewrites to the current node.
-    match term.kind {
-        // Let binding: try to fuse producer-consumer (map→map, map→reduce, etc.)
+    let kind = match term.kind {
         TermKind::Let {
             name,
-            ref name_ty,
-            ref rhs,
-            ref body,
+            name_ty,
+            rhs,
+            body,
         } => {
-            log::debug!(
-                "try_fuse_let: name={:?}, rhs_kind={:?}, body_kind={:?}",
-                name,
-                std::mem::discriminant(&rhs.kind),
-                std::mem::discriminant(&body.kind)
-            );
-            if let Some(fused) =
-                try_fuse_let(name, name_ty, rhs, (**body).clone(), symbols, term_ids, sums)
-            {
+            // Transform children first (bottom-up)
+            let rhs = transform_term_s(*rhs, symbols, term_ids, sums);
+            let body = transform_term_s(*body, symbols, term_ids, sums);
+
+            // Try to fuse
+            if let Some(fused) = try_fuse_let(name, &name_ty, &rhs, body.clone(), symbols, term_ids, sums) {
                 return fused;
             }
-            term
-        }
 
-        // Map SOAC: try to fuse nested maps from inputs (map(f, map(g, a)) → map(f∘g, a))
-        TermKind::Soac(SoacOp::Map { .. }) => {
-            let TermKind::Soac(SoacOp::Map { lam, inputs }) = term.kind else {
-                unreachable!()
-            };
-            let has_fusible = inputs.iter().any(|input| {
-                matches!(input, ArrayExpr::Ref(t) if matches!(t.kind, TermKind::Soac(SoacOp::Map { .. })))
-            });
-            if !has_fusible {
-                return Term {
-                    kind: TermKind::Soac(SoacOp::Map { lam, inputs }),
-                    ..term
-                };
-            }
-            let fused = fuse_inline_map_inputs(lam, inputs, symbols, term_ids, sums);
-            Term {
-                kind: TermKind::Soac(fused),
-                ..term
+            TermKind::Let {
+                name,
+                name_ty,
+                rhs: Box::new(rhs),
+                body: Box::new(body),
             }
         }
 
-        _ => term,
+        TermKind::App { func, args } => TermKind::App {
+            func: Box::new(transform_term_s(*func, symbols, term_ids, sums)),
+            args: args.into_iter().map(|a| transform_term_s(a, symbols, term_ids, sums)).collect(),
+        },
+
+        TermKind::Lambda(lam) => TermKind::Lambda(transform_lambda(lam, symbols, term_ids, sums)),
+
+        TermKind::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => TermKind::If {
+            cond: Box::new(transform_term_s(*cond, symbols, term_ids, sums)),
+            then_branch: Box::new(transform_term_s(*then_branch, symbols, term_ids, sums)),
+            else_branch: Box::new(transform_term_s(*else_branch, symbols, term_ids, sums)),
+        },
+
+        TermKind::Loop {
+            loop_var,
+            loop_var_ty,
+            init,
+            init_bindings,
+            kind,
+            body,
+        } => {
+            let init = transform_term_s(*init, symbols, term_ids, sums);
+            let init_bindings = init_bindings
+                .into_iter()
+                .map(|(n, ty, e)| (n, ty, transform_term_s(e, symbols, term_ids, sums)))
+                .collect();
+            let kind = transform_loop_kind(kind, symbols, term_ids, sums);
+            let body = transform_term_s(*body, symbols, term_ids, sums);
+            TermKind::Loop {
+                loop_var,
+                loop_var_ty,
+                init: Box::new(init),
+                init_bindings,
+                kind,
+                body: Box::new(body),
+            }
+        }
+
+        TermKind::Soac(soac) => TermKind::Soac(transform_soac(soac, symbols, term_ids, sums)),
+
+        TermKind::ArrayExpr(ae) => TermKind::ArrayExpr(transform_array_expr(ae, symbols, term_ids, sums)),
+
+        TermKind::Force(inner) => {
+            TermKind::Force(Box::new(transform_term_s(*inner, symbols, term_ids, sums)))
+        }
+
+        TermKind::Pack {
+            exists_ty,
+            dims,
+            value,
+        } => TermKind::Pack {
+            exists_ty,
+            dims,
+            value: Box::new(transform_term_s(*value, symbols, term_ids, sums)),
+        },
+
+        TermKind::Unpack {
+            scrut,
+            dim_binders,
+            value_binder,
+            body,
+        } => TermKind::Unpack {
+            scrut: Box::new(transform_term_s(*scrut, symbols, term_ids, sums)),
+            dim_binders,
+            value_binder,
+            body: Box::new(transform_term_s(*body, symbols, term_ids, sums)),
+        },
+
+        // Leaves — no children to transform
+        TermKind::Var(_)
+        | TermKind::BinOp(_)
+        | TermKind::UnOp(_)
+        | TermKind::IntLit(_)
+        | TermKind::FloatLit(_)
+        | TermKind::BoolLit(_)
+        | TermKind::StringLit(_)
+        | TermKind::Extern(_) => term.kind,
+    };
+
+    Term {
+        id: term.id,
+        ty: term.ty,
+        span: term.span,
+        kind,
+    }
+}
+
+fn transform_lambda(
+    lam: Lambda,
+    symbols: &mut SymbolTable,
+    term_ids: &mut TermIdSource,
+    sums: &Summaries,
+) -> Lambda {
+    Lambda {
+        params: lam.params,
+        body: Box::new(transform_term_s(*lam.body, symbols, term_ids, sums)),
+        ret_ty: lam.ret_ty,
+        captures: lam
+            .captures
+            .into_iter()
+            .map(|(s, ty, t)| (s, ty, transform_term_s(t, symbols, term_ids, sums)))
+            .collect(),
+    }
+}
+
+fn transform_soac(
+    soac: SoacOp,
+    symbols: &mut SymbolTable,
+    term_ids: &mut TermIdSource,
+    sums: &Summaries,
+) -> SoacOp {
+    match soac {
+        SoacOp::Map { lam, inputs } => {
+            // First: recurse into children (bottom-up)
+            let lam = transform_lambda(lam, symbols, term_ids, sums);
+            let inputs: Vec<_> =
+                inputs.into_iter().map(|ae| transform_array_expr(ae, symbols, term_ids, sums)).collect();
+
+            // Then: fuse any inline nested Maps from inputs
+            fuse_inline_map_inputs(lam, inputs, symbols, term_ids, sums)
+        }
+        SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
+            op: transform_lambda(op, symbols, term_ids, sums),
+            ne: Box::new(transform_term_s(*ne, symbols, term_ids, sums)),
+            input: transform_array_expr(input, symbols, term_ids, sums),
+            props,
+        },
+        SoacOp::Scan { op, ne, input } => SoacOp::Scan {
+            op: transform_lambda(op, symbols, term_ids, sums),
+            ne: Box::new(transform_term_s(*ne, symbols, term_ids, sums)),
+            input: transform_array_expr(input, symbols, term_ids, sums),
+        },
+        SoacOp::Filter { pred, input } => SoacOp::Filter {
+            pred: transform_lambda(pred, symbols, term_ids, sums),
+            input: transform_array_expr(input, symbols, term_ids, sums),
+        },
+        SoacOp::Scatter {
+            dest,
+            indices,
+            values,
+        } => SoacOp::Scatter {
+            dest: transform_place(dest, symbols, term_ids, sums),
+            indices: transform_array_expr(indices, symbols, term_ids, sums),
+            values: transform_array_expr(values, symbols, term_ids, sums),
+        },
+        SoacOp::ReduceByIndex {
+            dest,
+            op,
+            ne,
+            indices,
+            values,
+            props,
+        } => SoacOp::ReduceByIndex {
+            dest: transform_place(dest, symbols, term_ids, sums),
+            op: transform_lambda(op, symbols, term_ids, sums),
+            ne: Box::new(transform_term_s(*ne, symbols, term_ids, sums)),
+            indices: transform_array_expr(indices, symbols, term_ids, sums),
+            values: transform_array_expr(values, symbols, term_ids, sums),
+            props,
+        },
+    }
+}
+
+fn transform_array_expr(
+    ae: ArrayExpr,
+    symbols: &mut SymbolTable,
+    term_ids: &mut TermIdSource,
+    sums: &Summaries,
+) -> ArrayExpr {
+    match ae {
+        ArrayExpr::Ref(t) => ArrayExpr::Ref(Box::new(transform_term_s(*t, symbols, term_ids, sums))),
+        ArrayExpr::Zip(exprs) => ArrayExpr::Zip(
+            exprs.into_iter().map(|e| transform_array_expr(e, symbols, term_ids, sums)).collect(),
+        ),
+        ArrayExpr::Soac(op) => ArrayExpr::Soac(Box::new(transform_soac(*op, symbols, term_ids, sums))),
+        ArrayExpr::Generate {
+            shape,
+            index_fn,
+            elem_ty,
+        } => ArrayExpr::Generate {
+            shape,
+            index_fn: transform_lambda(index_fn, symbols, term_ids, sums),
+            elem_ty,
+        },
+        ArrayExpr::Literal(terms) => ArrayExpr::Literal(
+            terms.into_iter().map(|t| transform_term_s(t, symbols, term_ids, sums)).collect(),
+        ),
+        ArrayExpr::Range { start, len } => ArrayExpr::Range {
+            start: Box::new(transform_term_s(*start, symbols, term_ids, sums)),
+            len: Box::new(transform_term_s(*len, symbols, term_ids, sums)),
+        },
+        ArrayExpr::StorageBuffer { .. } => unreachable!("StorageBuffer introduced after fusion"),
+    }
+}
+
+fn transform_loop_kind(
+    kind: LoopKind,
+    symbols: &mut SymbolTable,
+    term_ids: &mut TermIdSource,
+    sums: &Summaries,
+) -> LoopKind {
+    match kind {
+        LoopKind::For { var, var_ty, iter } => LoopKind::For {
+            var,
+            var_ty,
+            iter: Box::new(transform_term_s(*iter, symbols, term_ids, sums)),
+        },
+        LoopKind::ForRange { var, var_ty, bound } => LoopKind::ForRange {
+            var,
+            var_ty,
+            bound: Box::new(transform_term_s(*bound, symbols, term_ids, sums)),
+        },
+        LoopKind::While { cond } => LoopKind::While {
+            cond: Box::new(transform_term_s(*cond, symbols, term_ids, sums)),
+        },
+    }
+}
+
+fn transform_place(
+    place: Place,
+    symbols: &mut SymbolTable,
+    term_ids: &mut TermIdSource,
+    sums: &Summaries,
+) -> Place {
+    match place {
+        Place::BufferSlice {
+            base,
+            offset,
+            shape,
+            elem_ty,
+        } => Place::BufferSlice {
+            base: Box::new(transform_term_s(*base, symbols, term_ids, sums)),
+            offset: Box::new(transform_term_s(*offset, symbols, term_ids, sums)),
+            shape,
+            elem_ty,
+        },
+        Place::LocalArray { id, shape, elem_ty } => Place::LocalArray { id, shape, elem_ty },
     }
 }
 
@@ -244,10 +460,8 @@ fn try_fuse_let(
         TermKind::Soac(SoacOp::Map { lam, inputs }) => (lam.clone(), inputs.clone()),
 
         // Interprocedural: function call where callee has a Map or ProducesMap summary
-        TermKind::App { ref func, ref arg } => {
-            use super::monomorphize::Monomorphizer;
-            let (func_term, args) = Monomorphizer::collect_application_spine(func, arg);
-            if let TermKind::Var(callee_sym) = &func_term.kind {
+        TermKind::App { ref func, ref args } => {
+            if let TermKind::Var(callee_sym) = &func.kind {
                 match sums.get(callee_sym) {
                     Some(DefSummary::Map { lam, param_idx }) if *param_idx < args.len() => {
                         let input_term = args[*param_idx].clone();
@@ -262,22 +476,24 @@ fn try_fuse_let(
                         if args.len() != callee_params.len() {
                             return None;
                         }
-                        // Substitute the callee's param symbols with the call args
-                        // in both the lambda body and input expressions.
                         let mut result_lam = lam.clone();
                         let mut result_inputs = inputs.clone();
                         for (i, (param_sym, _)) in callee_params.iter().enumerate() {
                             let arg_sym = match &args[i].kind {
                                 TermKind::Var(s) => *s,
-                                _ => return None, // non-trivial arg, bail
+                                _ => return None,
                             };
-                            // Substitute in lambda body
-                            result_lam.body =
-                                Box::new(substitute_sym(*result_lam.body, *param_sym, arg_sym, term_ids));
-                            // Substitute in input expressions
+                            result_lam.body = Box::new(substitute_sym(
+                                *result_lam.body,
+                                *param_sym,
+                                arg_sym,
+                                term_ids,
+                            ));
                             result_inputs = result_inputs
                                 .into_iter()
-                                .map(|inp| substitute_sym_array_expr(inp, *param_sym, arg_sym, term_ids))
+                                .map(|inp| {
+                                    substitute_sym_array_expr(inp, *param_sym, arg_sym, term_ids)
+                                })
                                 .collect();
                         }
                         (result_lam, result_inputs)
@@ -318,13 +534,10 @@ fn try_fuse_let(
             props,
             result_ty,
         } => {
-            // Only fuse single-input map producers
-            if producer_inputs.len() != 1 {
-                return None;
-            }
-            // Uncurry the reduce op if needed
-            let op = uncurry_lambda(op.clone());
-            if op.params.len() != 2 {
+            // Phase 1 restrictions:
+            // - only fuse single-input map producers
+            // - reduce op must have exactly 2 params (acc, elem), not curried
+            if producer_inputs.len() != 1 || op.params.len() != 2 {
                 return None;
             }
             let composed_op =
@@ -407,10 +620,8 @@ fn find_fusion_consumer(term: &Term, name: SymbolId, sums: &Summaries) -> Option
 
         // Interprocedural: function call where callee has a Map or Reduce summary
         // and `name` is passed as the summarized parameter
-        TermKind::App { ref func, ref arg } => {
-            use super::monomorphize::Monomorphizer;
-            let (func_term, args) = Monomorphizer::collect_application_spine(func, arg);
-            if let TermKind::Var(callee_sym) = &func_term.kind {
+        TermKind::App { ref func, ref args } => {
+            if let TermKind::Var(callee_sym) = &func.kind {
                 match sums.get(callee_sym) {
                     Some(DefSummary::Map { lam, param_idx }) if *param_idx < args.len() => {
                         if let TermKind::Var(sym) = &args[*param_idx].kind {
@@ -432,7 +643,6 @@ fn find_fusion_consumer(term: &Term, name: SymbolId, sums: &Summaries) -> Option
                     }) if *param_idx < args.len() => {
                         if let TermKind::Var(sym) = &args[*param_idx].kind {
                             if *sym == name {
-                                // Uncurry the reduce op if needed
                                 let uncurried_op = uncurry_lambda(op.clone());
                                 if uncurried_op.params.len() >= 2 {
                                     return Some(ConsumerInfo {
@@ -450,14 +660,13 @@ fn find_fusion_consumer(term: &Term, name: SymbolId, sums: &Summaries) -> Option
                     _ => {}
                 }
             }
-            // Interprocedural check didn't match — recurse into func/arg
-            if count_uses(func, name) == 1 {
-                find_fusion_consumer(func, name, sums)
-            } else if count_uses(arg, name) == 1 {
-                find_fusion_consumer(arg, name, sums)
-            } else {
-                None
+            // Interprocedural check didn't match — recurse into the arg that uses name
+            for arg in args {
+                if count_uses(arg, name) == 1 {
+                    return find_fusion_consumer(arg, name, sums);
+                }
             }
+            None
         }
 
         // The consumer might be nested in a Let body
@@ -467,10 +676,7 @@ fn find_fusion_consumer(term: &Term, name: SymbolId, sums: &Summaries) -> Option
             body,
             ..
         } => {
-            // Alias let: `let tmp = name in body` — follow the alias
-            if matches!(&rhs.kind, TermKind::Var(sym) if *sym == name) {
-                find_fusion_consumer(body, *inner_name, sums)
-            } else if count_uses(rhs, name) == 1 {
+            if count_uses(rhs, name) == 1 {
                 find_fusion_consumer(rhs, name, sums)
             } else if *inner_name != name && count_uses(body, name) == 1 {
                 find_fusion_consumer(body, name, sums)
@@ -483,7 +689,7 @@ fn find_fusion_consumer(term: &Term, name: SymbolId, sums: &Summaries) -> Option
     }
 }
 
-/// Uncurry a lambda: flatten `|a| |b| body` into `|a, b| body`.
+/// Flatten nested single-param lambdas: `|x| |y| body` → `|x, y| body`.
 fn uncurry_lambda(mut lam: Lambda) -> Lambda {
     loop {
         match lam.body.kind {
@@ -542,35 +748,10 @@ fn replace_fusion_consumer(
             }
         }
 
-        // App: check if name appears here, and if so, replace the innermost
-        // App that directly uses name as an argument.
-        TermKind::App { func, arg } => {
-            // If name is directly an arg (not nested deeper), this is the consumer App
-            if matches!(&arg.kind, TermKind::Var(s) if *s == name) && count_uses(func, name) == 0 {
-                replacement
-            } else if count_uses(func, name) == 1 {
-                Term {
-                    id: term_ids.next_id(),
-                    ty: term.ty.clone(),
-                    span: term.span,
-                    kind: TermKind::App {
-                        func: Box::new(replace_fusion_consumer(func, name, replacement, term_ids)),
-                        arg: arg.clone(),
-                    },
-                }
-            } else if count_uses(arg, name) == 1 {
-                Term {
-                    id: term_ids.next_id(),
-                    ty: term.ty.clone(),
-                    span: term.span,
-                    kind: TermKind::App {
-                        func: func.clone(),
-                        arg: Box::new(replace_fusion_consumer(arg, name, replacement, term_ids)),
-                    },
-                }
-            } else {
-                term.clone()
-            }
+        // Interprocedural consumer: function call that uses `name` as an argument
+        TermKind::App { .. } => {
+            // If this App uses `name` somewhere in its args, it might be the consumer
+            if count_uses(term, name) == 1 { replacement } else { term.clone() }
         }
 
         TermKind::Let {
@@ -579,11 +760,7 @@ fn replace_fusion_consumer(
             rhs,
             body,
         } => {
-            // Alias let: `let tmp = name in body` — follow the alias
-            if matches!(&rhs.kind, TermKind::Var(sym) if *sym == name) {
-                // Drop the alias let entirely, replace in body with the new name
-                replace_fusion_consumer(body, *inner_name, replacement, term_ids)
-            } else if count_uses(rhs, name) == 1 {
+            if count_uses(rhs, name) == 1 {
                 // The consumer is in the rhs
                 Term {
                     id: term_ids.next_id(),
@@ -741,7 +918,9 @@ fn count_uses(term: &Term, sym: SymbolId) -> usize {
         | TermKind::StringLit(_)
         | TermKind::Extern(_) => 0,
 
-        TermKind::App { func, arg } => count_uses(func, sym) + count_uses(arg, sym),
+        TermKind::App { func, args } => {
+            count_uses(func, sym) + args.iter().map(|a| count_uses(a, sym)).sum::<usize>()
+        }
 
         TermKind::Lambda(lam) => {
             if lam.params.iter().any(|(p, _)| *p == sym) {
@@ -914,13 +1093,13 @@ fn substitute_sym(term: Term, old: SymbolId, new: SymbolId, term_ids: &mut TermI
         | TermKind::StringLit(_)
         | TermKind::Extern(_) => term,
 
-        TermKind::App { func, arg } => Term {
+        TermKind::App { func, args } => Term {
             id: term_ids.next_id(),
             ty: term.ty,
             span: term.span,
             kind: TermKind::App {
                 func: Box::new(substitute_sym(*func, old, new, term_ids)),
-                arg: Box::new(substitute_sym(*arg, old, new, term_ids)),
+                args: args.into_iter().map(|a| substitute_sym(a, old, new, term_ids)).collect(),
             },
         },
 
@@ -1127,7 +1306,7 @@ fn substitute_sym_soac(soac: SoacOp, old: SymbolId, new: SymbolId, term_ids: &mu
             indices,
             values,
         } => SoacOp::Scatter {
-            dest: substitute_sym_place(dest, old, new, term_ids),
+            dest,
             indices: substitute_sym_array_expr(indices, old, new, term_ids),
             values: substitute_sym_array_expr(values, old, new, term_ids),
         },
@@ -1139,30 +1318,13 @@ fn substitute_sym_soac(soac: SoacOp, old: SymbolId, new: SymbolId, term_ids: &mu
             values,
             props,
         } => SoacOp::ReduceByIndex {
-            dest: substitute_sym_place(dest, old, new, term_ids),
+            dest,
             op: substitute_sym_lambda(op, old, new, term_ids),
             ne: Box::new(substitute_sym(*ne, old, new, term_ids)),
             indices: substitute_sym_array_expr(indices, old, new, term_ids),
             values: substitute_sym_array_expr(values, old, new, term_ids),
             props,
         },
-    }
-}
-
-fn substitute_sym_place(place: Place, old: SymbolId, new: SymbolId, term_ids: &mut TermIdSource) -> Place {
-    match place {
-        Place::BufferSlice {
-            base,
-            offset,
-            shape,
-            elem_ty,
-        } => Place::BufferSlice {
-            base: Box::new(substitute_sym(*base, old, new, term_ids)),
-            offset: Box::new(substitute_sym(*offset, old, new, term_ids)),
-            shape,
-            elem_ty,
-        },
-        Place::LocalArray { id, shape, elem_ty } => Place::LocalArray { id, shape, elem_ty },
     }
 }
 

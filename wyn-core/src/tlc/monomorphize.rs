@@ -375,15 +375,9 @@ impl<'a> Monomorphizer<'a> {
     /// Process a term, rewriting calls to polymorphic functions.
     fn process_term(&mut self, term: &Term) -> Term {
         let kind = match &term.kind {
-            TermKind::App { func, arg } => {
-                // First recursively process the function and argument
-                let processed_arg = self.process_term(arg);
-
-                // Collect application spine to detect function calls
-                let (base, args) = Self::collect_application_spine(func, arg);
-
-                // Check if base is a variable referencing a known function
-                if let TermKind::Var(sym) = &base.kind {
+            TermKind::App { func, args } => {
+                // Check if func is a variable referencing a known function
+                if let TermKind::Var(sym) = &func.kind {
                     let sym = *sym;
                     if let Some(poly_def) = self.poly_functions.get(&sym).cloned() {
                         // Infer substitution from argument types
@@ -395,15 +389,21 @@ impl<'a> Monomorphizer<'a> {
                             // Get or create specialized version
                             let specialized_sym =
                                 self.get_or_create_specialization(sym, &spec_key, &poly_def);
-                            // Rebuild the application with the specialized function symbol
-                            let new_func = self.rewrite_var_sym(func, sym, specialized_sym);
+                            let new_func = Term {
+                                id: self.term_ids.next_id(),
+                                ty: func.ty.clone(),
+                                span: func.span,
+                                kind: TermKind::Var(specialized_sym),
+                            };
+                            let processed_args: Vec<_> =
+                                args.iter().map(|a| self.process_term(a)).collect();
                             return Term {
                                 id: self.term_ids.next_id(),
                                 ty: term.ty.clone(),
                                 span: term.span,
                                 kind: TermKind::App {
                                     func: Box::new(self.process_term(&new_func)),
-                                    arg: Box::new(processed_arg),
+                                    args: processed_args,
                                 },
                             };
                         } else {
@@ -415,9 +415,11 @@ impl<'a> Monomorphizer<'a> {
 
                 // Default: just process recursively
                 let processed_func = self.process_term(func);
+                let processed_args: Vec<_> =
+                    args.iter().map(|a| self.process_term(a)).collect();
                 TermKind::App {
                     func: Box::new(processed_func),
-                    arg: Box::new(processed_arg),
+                    args: processed_args,
                 }
             }
 
@@ -638,54 +640,6 @@ impl<'a> Monomorphizer<'a> {
         }
     }
 
-    /// Collect the spine of a nested application chain.
-    /// Given `App(App(App(f, a), b), c)`, returns `(f, [a, b, c])`.
-    pub(crate) fn collect_application_spine<'t>(
-        func: &'t Term,
-        arg: &'t Term,
-    ) -> (&'t Term, Vec<&'t Term>) {
-        let mut args = vec![arg];
-        let mut current = func;
-
-        loop {
-            match &current.kind {
-                TermKind::App {
-                    func: inner_func,
-                    arg: inner_arg,
-                } => {
-                    args.push(inner_arg.as_ref());
-                    current = inner_func.as_ref();
-                }
-                _ => {
-                    args.reverse();
-                    return (current, args);
-                }
-            }
-        }
-    }
-
-    /// Rewrite Var nodes that match old_sym to use new_sym.
-    /// This traverses nested App nodes to find the function symbol.
-    fn rewrite_var_sym(&mut self, term: &Term, old_sym: SymbolId, new_sym: SymbolId) -> Term {
-        match &term.kind {
-            TermKind::Var(sym) if *sym == old_sym => Term {
-                id: self.term_ids.next_id(),
-                ty: term.ty.clone(),
-                span: term.span,
-                kind: TermKind::Var(new_sym),
-            },
-            TermKind::App { func, arg } => Term {
-                id: self.term_ids.next_id(),
-                ty: term.ty.clone(),
-                span: term.span,
-                kind: TermKind::App {
-                    func: Box::new(self.rewrite_var_sym(func, old_sym, new_sym)),
-                    arg: arg.clone(),
-                },
-            },
-            _ => term.clone(),
-        }
-    }
 
     /// Infer the substitution needed for a polymorphic function call.
     fn infer_substitution(&self, poly_def: &Def, arg_types: &[Type<TypeName>]) -> Substitution {
@@ -852,9 +806,9 @@ impl<'a> Monomorphizer<'a> {
                     .collect(),
             }),
 
-            TermKind::App { func, arg } => TermKind::App {
+            TermKind::App { func, args } => TermKind::App {
                 func: Box::new(self.apply_subst_term(func, subst)),
-                arg: Box::new(self.apply_subst_term(arg, subst)),
+                args: args.iter().map(|a| self.apply_subst_term(a, subst)).collect(),
             },
 
             TermKind::Let {

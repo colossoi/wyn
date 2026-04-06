@@ -165,7 +165,7 @@ impl SoaTransformer {
                 self.mk_term(new_ty, span, TermKind::Lambda(new_lam))
             }
 
-            TermKind::App { func, arg } => self.transform_app(func, arg, orig_ty, new_ty, span),
+            TermKind::App { func, args } => self.transform_app(func, args, orig_ty, new_ty, span),
 
             TermKind::Let {
                 name,
@@ -292,13 +292,13 @@ impl SoaTransformer {
     fn transform_app(
         &mut self,
         func: &Term,
-        arg: &Term,
+        args: &[Term],
         orig_result_ty: &Type<TypeName>,
         new_result_ty: Type<TypeName>,
         span: Span,
     ) -> Term {
-        // Collect application spine to detect intrinsic patterns
-        let (base, args) = collect_app_spine(func, arg);
+        // Use func directly as the base to detect intrinsic patterns
+        let base = func;
 
         match &base.kind {
             TermKind::Var(sym) => {
@@ -309,8 +309,8 @@ impl SoaTransformer {
                         let arr_orig_ty = &args[0].ty;
                         if let Some(n) = is_array_of_tuple(arr_orig_ty) {
                             let (comp_tys, variant, size) = array_of_tuple_parts(arr_orig_ty).unwrap();
-                            let new_arr = self.transform_term(args[0]);
-                            let new_idx = self.transform_term(args[1]);
+                            let new_arr = self.transform_term(&args[0]);
+                            let new_idx = self.transform_term(&args[1]);
                             return self.rewrite_index_aot(
                                 &new_arr, &new_idx, &comp_tys, &variant, &size, n, span,
                             );
@@ -322,9 +322,9 @@ impl SoaTransformer {
                         let arr_orig_ty = &args[0].ty;
                         if let Some(n) = is_array_of_tuple(arr_orig_ty) {
                             let (comp_tys, variant, size) = array_of_tuple_parts(arr_orig_ty).unwrap();
-                            let new_arr = self.transform_term(args[0]);
-                            let new_idx = self.transform_term(args[1]);
-                            let new_val = self.transform_term(args[2]);
+                            let new_arr = self.transform_term(&args[0]);
+                            let new_idx = self.transform_term(&args[1]);
+                            let new_val = self.transform_term(&args[2]);
                             return self.rewrite_array_with_aot(
                                 &new_arr, &new_idx, &new_val, &comp_tys, &variant, &size, n, span,
                             );
@@ -354,7 +354,7 @@ impl SoaTransformer {
                     "_w_intrinsic_length" if args.len() == 1 => {
                         let arr_orig_ty = &args[0].ty;
                         if is_array_of_tuple(arr_orig_ty).is_some() {
-                            let new_arr = self.transform_term(args[0]);
+                            let new_arr = self.transform_term(&args[0]);
                             return self.rewrite_length_aot(&new_arr, *sym, new_result_ty, span);
                         }
                     }
@@ -367,13 +367,13 @@ impl SoaTransformer {
 
         // Default: recursively transform all parts
         let new_func = self.transform_term(func);
-        let new_arg = self.transform_term(arg);
+        let new_args: Vec<Term> = args.iter().map(|a| self.transform_term(a)).collect();
         self.mk_term(
             new_result_ty,
             span,
             TermKind::App {
                 func: Box::new(new_func),
-                arg: Box::new(new_arg),
+                args: new_args,
             },
         )
     }
@@ -539,7 +539,7 @@ impl SoaTransformer {
             span,
             TermKind::App {
                 func: Box::new(func),
-                arg: Box::new(first_arr),
+                args: vec![first_arr],
             },
         )
     }
@@ -831,28 +831,14 @@ impl SoaTransformer {
         );
         let func = self.mk_term(func_ty, span, TermKind::Var(tuple_sym));
 
-        let mut result = self.mk_term(
-            intermediate_tys[0].clone(),
+        self.mk_term(
+            result_ty,
             span,
             TermKind::App {
                 func: Box::new(func),
-                arg: Box::new(components[0].clone()),
+                args: components,
             },
-        );
-
-        for i in 1..n {
-            let app_ty = if i < n - 1 { intermediate_tys[i].clone() } else { result_ty.clone() };
-            result = self.mk_term(
-                app_ty,
-                span,
-                TermKind::App {
-                    func: Box::new(result),
-                    arg: Box::new(components[i].clone()),
-                },
-            );
-        }
-
-        result
+        )
     }
 
     /// Build `_w_tuple_proj(term, index)`.
@@ -866,21 +852,12 @@ impl SoaTransformer {
         let func_ty = Type::Constructed(TypeName::Arrow, vec![term.ty.clone(), inner_ty.clone()]);
         let func = self.mk_term(func_ty, span, TermKind::Var(proj_sym));
 
-        let app1 = self.mk_term(
-            inner_ty,
-            span,
-            TermKind::App {
-                func: Box::new(func),
-                arg: Box::new(term),
-            },
-        );
-
         self.mk_term(
             result_ty,
             span,
             TermKind::App {
-                func: Box::new(app1),
-                arg: Box::new(idx_term),
+                func: Box::new(func),
+                args: vec![term, idx_term],
             },
         )
     }
@@ -892,21 +869,12 @@ impl SoaTransformer {
         let func_ty = Type::Constructed(TypeName::Arrow, vec![arr.ty.clone(), inner_ty.clone()]);
         let func = self.mk_term(func_ty, span, TermKind::Var(index_sym));
 
-        let app1 = self.mk_term(
-            inner_ty,
-            span,
-            TermKind::App {
-                func: Box::new(func),
-                arg: Box::new(arr),
-            },
-        );
-
         self.mk_term(
             result_ty,
             span,
             TermKind::App {
-                func: Box::new(app1),
-                arg: Box::new(idx),
+                func: Box::new(func),
+                args: vec![arr, idx],
             },
         )
     }
@@ -926,28 +894,12 @@ impl SoaTransformer {
         let t1 = Type::Constructed(TypeName::Arrow, vec![arr.ty.clone(), t2.clone()]);
         let func = self.mk_term(t1, span, TermKind::Var(aw_sym));
 
-        let app1 = self.mk_term(
-            t2,
-            span,
-            TermKind::App {
-                func: Box::new(func),
-                arg: Box::new(arr),
-            },
-        );
-        let app2 = self.mk_term(
-            t3,
-            span,
-            TermKind::App {
-                func: Box::new(app1),
-                arg: Box::new(idx),
-            },
-        );
         self.mk_term(
             result_ty,
             span,
             TermKind::App {
-                func: Box::new(app2),
-                arg: Box::new(val),
+                func: Box::new(func),
+                args: vec![arr, idx, val],
             },
         )
     }
@@ -959,42 +911,20 @@ impl SoaTransformer {
             return self.mk_term(result_ty, span, TermKind::Var(al_sym));
         }
 
-        let n = elems.len();
-        let mut intermediate_tys = vec![result_ty.clone()];
-        for elem in elems.iter().rev().skip(1) {
-            let prev = intermediate_tys.last().unwrap().clone();
-            intermediate_tys.push(Type::Constructed(TypeName::Arrow, vec![elem.ty.clone(), prev]));
-        }
-        intermediate_tys.reverse();
-
         let func_ty = Type::Constructed(
             TypeName::Arrow,
-            vec![elems[0].ty.clone(), intermediate_tys[0].clone()],
+            vec![elems[0].ty.clone(), result_ty.clone()],
         );
         let func = self.mk_term(func_ty, span, TermKind::Var(al_sym));
 
-        let mut result = self.mk_term(
-            intermediate_tys[0].clone(),
+        self.mk_term(
+            result_ty,
             span,
             TermKind::App {
                 func: Box::new(func),
-                arg: Box::new(elems[0].clone()),
+                args: elems,
             },
-        );
-
-        for i in 1..n {
-            let app_ty = if i < n - 1 { intermediate_tys[i].clone() } else { result_ty.clone() };
-            result = self.mk_term(
-                app_ty,
-                span,
-                TermKind::App {
-                    func: Box::new(result),
-                    arg: Box::new(elems[i].clone()),
-                },
-            );
-        }
-
-        result
+        )
     }
 
     /// Resolve a symbol name or allocate a new one.
@@ -1009,27 +939,6 @@ impl SoaTransformer {
     }
 }
 
-/// Collect the spine of a curried application chain.
-/// `f(a)(b)(c)` → `(f, [a, b, c])`.
-fn collect_app_spine<'a>(func: &'a Term, arg: &'a Term) -> (&'a Term, Vec<&'a Term>) {
-    let mut args = vec![arg];
-    let mut current = func;
-    loop {
-        match &current.kind {
-            TermKind::App {
-                func: inner_func,
-                arg: inner_arg,
-            } => {
-                args.push(inner_arg.as_ref());
-                current = inner_func.as_ref();
-            }
-            _ => {
-                args.reverse();
-                return (current, args);
-            }
-        }
-    }
-}
 
 // =============================================================================
 // Public API

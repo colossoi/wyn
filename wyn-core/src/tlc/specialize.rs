@@ -36,15 +36,43 @@ fn specialize_term(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdS
     let term = term.map_children(&mut |child| specialize_term(child, symbols, term_ids));
 
     // Only App nodes need specialization.
-    let TermKind::App { ref func, ref arg } = term.kind else {
+    let TermKind::App { ref func, ref args } = term.kind else {
         return term;
     };
 
     match &func.kind {
-        // Simple application: Var("sign")(x) → Var("f32.sign")(x)
+        // Simple application: Var("sign")(x, ...) → Var("f32.sign")(x, ...)
+        // Specialize based on the first argument's type.
         TermKind::Var(sym) => {
+            if args.is_empty() {
+                return term;
+            }
             let name = symbols.get(*sym).expect("BUG: symbol not in table");
-            if let Some(specialized_name) = specialize_name(name, &arg.ty) {
+
+            // Check for "mul" → BinOp("*") rewrite
+            if name == "mul" && args.len() == 2 {
+                let binop = Term {
+                    id: term_ids.next_id(),
+                    ty: func.ty.clone(),
+                    span: func.span,
+                    kind: TermKind::BinOp(crate::ast::BinaryOp {
+                        op: "*".to_string(),
+                    }),
+                };
+                let TermKind::App { func: _, args } = term.kind else {
+                    unreachable!()
+                };
+                return Term {
+                    id: term_ids.next_id(),
+                    kind: TermKind::App {
+                        func: Box::new(binop),
+                        args,
+                    },
+                    ..term
+                };
+            }
+
+            if let Some(specialized_name) = specialize_name(name, &args[0].ty) {
                 let specialized_sym = symbols.alloc(specialized_name);
                 let new_func = Term {
                     id: term_ids.next_id(),
@@ -52,56 +80,14 @@ fn specialize_term(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdS
                     span: func.span,
                     kind: TermKind::Var(specialized_sym),
                 };
-                let TermKind::App { func: _, arg } = term.kind else {
+                let TermKind::App { func: _, args } = term.kind else {
                     unreachable!()
                 };
                 Term {
                     id: term_ids.next_id(),
                     kind: TermKind::App {
                         func: Box::new(new_func),
-                        arg,
-                    },
-                    ..term
-                }
-            } else {
-                term
-            }
-        }
-
-        // Fully-applied binary: App(App(Var("mul"), a), b) → App(BinOp("*"), a)
-        TermKind::App {
-            func: inner_func,
-            arg: first_arg,
-        } => {
-            let is_mul = matches!(&inner_func.kind, TermKind::Var(sym)
-                if symbols.get(*sym).map(|n| n.as_str()) == Some("mul"));
-
-            if is_mul {
-                let binop = Term {
-                    id: term_ids.next_id(),
-                    ty: inner_func.ty.clone(),
-                    span: inner_func.span,
-                    kind: TermKind::BinOp(crate::ast::BinaryOp {
-                        op: "*".to_string(),
-                    }),
-                };
-                let TermKind::App { func: _, arg } = term.kind else {
-                    unreachable!()
-                };
-                let inner_app = Term {
-                    id: term_ids.next_id(),
-                    ty: func.ty.clone(),
-                    span: func.span,
-                    kind: TermKind::App {
-                        func: Box::new(binop),
-                        arg: first_arg.clone(),
-                    },
-                };
-                Term {
-                    id: term_ids.next_id(),
-                    kind: TermKind::App {
-                        func: Box::new(inner_app),
-                        arg,
+                        args,
                     },
                     ..term
                 }

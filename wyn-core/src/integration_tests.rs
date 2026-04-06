@@ -146,10 +146,12 @@ entry fragment_main() #[location(0)] vec4f32 =
             crate::tlc::TermKind::Soac(soac) => {
                 eprintln!("{indent}SOAC {:?}", std::mem::discriminant(soac));
             }
-            crate::tlc::TermKind::App { func, arg } => {
+            crate::tlc::TermKind::App { func, args } => {
                 eprintln!("{indent}App:");
                 print_term(func, syms, depth + 1);
-                print_term(arg, syms, depth + 1);
+                for a in args {
+                    print_term(a, syms, depth + 1);
+                }
             }
             crate::tlc::TermKind::Var(s) => {
                 let n = syms.get(*s).cloned().unwrap_or_else(|| format!("{:?}", s));
@@ -177,7 +179,9 @@ fn has_soac_kind(term: &crate::tlc::Term, kind: &str) -> bool {
         TermKind::Soac(SoacOp::Reduce { .. }) if kind == "Reduce" => true,
         TermKind::Let { rhs, body, .. } => has_soac_kind(rhs, kind) || has_soac_kind(body, kind),
         TermKind::Lambda(lam) => has_soac_kind(&lam.body, kind),
-        TermKind::App { func, arg } => has_soac_kind(func, kind) || has_soac_kind(arg, kind),
+        TermKind::App { func, args } => {
+            has_soac_kind(func, kind) || args.iter().any(|a| has_soac_kind(a, kind))
+        }
         _ => false,
     }
 }

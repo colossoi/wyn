@@ -713,13 +713,15 @@ impl tlc::Term {
                 Ok(())
             }
 
-            tlc::TermKind::App { func, arg } => {
+            tlc::TermKind::App { func, args } => {
                 if prec > 1 {
                     write!(f, "(")?;
                 }
                 func.fmt_prec(f, 1)?;
-                write!(f, " ")?;
-                arg.fmt_prec(f, 2)?;
+                for arg in args {
+                    write!(f, " ")?;
+                    arg.fmt_prec(f, 2)?;
+                }
                 if prec > 1 {
                     write!(f, ")")?;
                 }

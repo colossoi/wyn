@@ -40,39 +40,55 @@ pub fn normalize(program: Program) -> Program {
 fn normalize_term(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdSource) -> Term {
     let term = term.map_children(&mut |child| normalize_term(child, symbols, term_ids));
 
-    // After children are normalized, check if this App has a SOAC arg to lift.
-    if let TermKind::App { ref arg, .. } = term.kind {
-        if matches!(arg.kind, TermKind::Soac(_)) {
-            let TermKind::App { func, arg } = term.kind else {
+    // After children are normalized, check if this App has any SOAC args to lift.
+    if let TermKind::App { ref args, .. } = term.kind {
+        if args.iter().any(|a| matches!(a.kind, TermKind::Soac(_))) {
+            let TermKind::App { func, args } = term.kind else {
                 unreachable!()
             };
-            let fresh = symbols.alloc("_anf".to_string());
-            let arg_ty = arg.ty.clone();
-            let span = arg.span;
-            return Term {
-                id: term_ids.next_id(),
-                ty: term.ty.clone(),
-                span: term.span,
-                kind: TermKind::Let {
-                    name: fresh,
-                    name_ty: arg_ty.clone(),
-                    rhs: arg,
-                    body: Box::new(Term {
+            // Wrap the App in let bindings for each SOAC arg (inside-out).
+            let span = term.span;
+            let mut new_args = Vec::with_capacity(args.len());
+            let mut lets: Vec<(crate::SymbolId, Term)> = Vec::new();
+            for arg in args {
+                if matches!(arg.kind, TermKind::Soac(_)) {
+                    let fresh = symbols.alloc("_anf".to_string());
+                    let arg_ty = arg.ty.clone();
+                    lets.push((fresh, arg));
+                    new_args.push(Term {
                         id: term_ids.next_id(),
-                        ty: term.ty,
+                        ty: arg_ty,
                         span,
-                        kind: TermKind::App {
-                            func,
-                            arg: Box::new(Term {
-                                id: term_ids.next_id(),
-                                ty: arg_ty,
-                                span,
-                                kind: TermKind::Var(fresh),
-                            }),
-                        },
-                    }),
+                        kind: TermKind::Var(fresh),
+                    });
+                } else {
+                    new_args.push(arg);
+                }
+            }
+            let mut result = Term {
+                id: term_ids.next_id(),
+                ty: term.ty,
+                span,
+                kind: TermKind::App {
+                    func,
+                    args: new_args,
                 },
             };
+            for (fresh, soac_arg) in lets.into_iter().rev() {
+                let arg_ty = soac_arg.ty.clone();
+                result = Term {
+                    id: term_ids.next_id(),
+                    ty: result.ty.clone(),
+                    span,
+                    kind: TermKind::Let {
+                        name: fresh,
+                        name_ty: arg_ty,
+                        rhs: Box::new(soac_arg),
+                        body: Box::new(result),
+                    },
+                };
+            }
+            return result;
         }
     }
 

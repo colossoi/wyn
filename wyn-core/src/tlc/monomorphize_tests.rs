@@ -68,54 +68,5 @@ fn test_spec_key_with_subst() {
     assert!(key.needs_specialization());
 }
 
-#[test]
-fn test_collect_application_spine() {
-    // Build: f(a, b) as App(App(Var(f), a), b)
-    let mut b = TestBuilder::new();
-    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
-
-    let f_sym = b.sym("f");
-    let a_sym = b.sym("a");
-    let b_sym = b.sym("b");
-
-    let f_var = Term {
-        id: b.next_id(),
-        ty: i32_ty.clone(),
-        span: b.span(),
-        kind: TermKind::Var(f_sym),
-    };
-
-    let a_var = Term {
-        id: b.next_id(),
-        ty: i32_ty.clone(),
-        span: b.span(),
-        kind: TermKind::Var(a_sym),
-    };
-
-    let b_var = Term {
-        id: b.next_id(),
-        ty: i32_ty.clone(),
-        span: b.span(),
-        kind: TermKind::Var(b_sym),
-    };
-
-    let app1 = Term {
-        id: b.next_id(),
-        ty: i32_ty.clone(),
-        span: b.span(),
-        kind: TermKind::App {
-            func: Box::new(f_var),
-            arg: Box::new(a_var.clone()),
-        },
-    };
-
-    let (base, args) = Monomorphizer::collect_application_spine(&app1, &b_var);
-
-    // Check base is f
-    assert!(matches!(&base.kind, TermKind::Var(sym) if *sym == f_sym));
-
-    // Check args are [a, b]
-    assert_eq!(args.len(), 2);
-    assert!(matches!(&args[0].kind, TermKind::Var(sym) if *sym == a_sym));
-    assert!(matches!(&args[1].kind, TermKind::Var(sym) if *sym == b_sym));
-}
+// test_collect_application_spine removed: with flat App { func, args }, there is
+// no curried spine to collect.
