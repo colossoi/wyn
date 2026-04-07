@@ -1752,7 +1752,9 @@ impl<'a> Converter<'a> {
             }
         };
 
-        let zipped = input_values.len() > 1;
+        // Zipped: multiple inputs but lambda takes fewer params (tuple packing needed).
+        // After normalize_soacs, inputs.len() == params.len() and zipped is false.
+        let zipped = input_values.len() > 1 && lam.params.len() == 1;
         let zipped_param_type = if zipped { Some(lam.params[0].1.clone()) } else { None };
 
         self.builder

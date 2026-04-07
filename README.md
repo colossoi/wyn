@@ -44,12 +44,13 @@ The compiler uses a multi-stage pipeline with typestate-driven phases. Each stag
 |-------|--------|-------------|
 | **TlcTransformed** | `tlc::transform` | AST converted to minimal typed lambda calculus |
 | **TlcPartialEvaled** | `tlc::partial_eval` | Constant folding and algebraic simplifications |
-| **TlcFused** | `tlc::fuse_maps` | Consecutive map operations fused to eliminate intermediate arrays |
+| *(normalized)* | `tlc::normalize_soacs` | Flatten Map+Zip into multi-input maps with split lambda params |
+| **TlcFused** | `tlc::fusion` | SOAC fusion: map-map, interprocedural producer-consumer |
 | **TlcDefunctionalized** | `tlc::defunctionalize` | Lambda lifting + SOAC capture flattening |
 | **TlcMonomorphized** | `tlc::specialize`, `tlc::monomorphize` | Polymorphic intrinsics specialized; user functions monomorphized |
 | **TlcSoaTransformed** | `tlc::soa_transform` | Structure-of-Arrays transform for tuple arrays |
 | **TlcBufferSpecialized** | `tlc::buffer_specialize` | Storage buffer parameter specialization |
-| **TlcInlined** | `tlc::inline` | Function inlining |
+| **TlcInlined** | `tlc::inline` | Compiler-generated lambda inlining + DCE |
 
 ### SSA
 
@@ -64,10 +65,11 @@ Key features of the SSA IR:
 | Stage | Module | Description |
 |-------|--------|-------------|
 | **SsaConverted** | `tlc::to_ssa` | TLC to SSA conversion via `FuncBuilder` |
+| **SsaInlined** | `ssa::ssa_inline` | Inline small single-block functions at call sites |
 | **SsaParallelized** | `parallelization` | SOACs parallelized for compute shaders |
 | **SsaReachable** | `ssa::reachability` | Dead function elimination |
 | **SsaOptimized** | `ssa::opt` | SSA peephole optimizations (see below) |
-| **SsaSoacLowered** | `ssa::soac_lower` | First-class SOAC instructions expanded to explicit loops |
+| **SsaSoacLowered** | `ssa::soac_lower` | SOAC expansion: loops, map unrolling, map-reduce fusion |
 | **SsaMaterialized** | `spirv::materialize` | Dynamic array indices materialized for SPIR-V (+ LICM) |
 | **Lowered** | `spirv` | SSA to SPIR-V code generation |
 
