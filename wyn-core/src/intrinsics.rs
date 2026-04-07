@@ -446,17 +446,6 @@ impl IntrinsicSource {
         let result_array = Self::array_type(b, s, n);
         self.register_poly("_w_intrinsic_map", vec![f_type, input_array], result_array);
 
-        // _w_intrinsic_zip : Array[a, s, n] -> Array[b, s, n] -> Array[(a, b), s, n]
-        let a = ctx.new_variable();
-        let b = ctx.new_variable();
-        let n = ctx.new_variable();
-        let s = ctx.new_variable();
-        let array_a = Self::array_type(a.clone(), s.clone(), n.clone());
-        let array_b = Self::array_type(b.clone(), s.clone(), n.clone());
-        let pair_type = Type::Constructed(TypeName::Tuple(2), vec![a, b]);
-        let result_array = Self::array_type(pair_type, s, n);
-        self.register_poly("_w_intrinsic_zip", vec![array_a, array_b], result_array);
-
         // _w_intrinsic_map_into : (a -> b) -> Array[a, s1, n] -> Array[b, s2, m] -> i32 -> ()
         // Map f over input array and write results to output buffer starting at offset.
         // Used by soac_parallelize for compute shaders with separate input/output buffers.

@@ -44,11 +44,10 @@ The compiler uses a multi-stage pipeline with typestate-driven phases. Each stag
 |-------|--------|-------------|
 | **TlcTransformed** | `tlc::transform` | AST converted to minimal typed lambda calculus |
 | **TlcPartialEvaled** | `tlc::partial_eval` | Constant folding and algebraic simplifications |
-| *(normalized)* | `tlc::normalize_soacs` | Flatten Map+Zip into multi-input maps with split lambda params |
+| **TlcSoaNormalized** | `tlc::soa` | SoA transform (`[n](A,B)` → `([n]A, [n]B)`) + Map+Zip flattening + standalone Zip elimination |
 | **TlcFused** | `tlc::fusion` | SOAC fusion: map-map, interprocedural producer-consumer |
 | **TlcDefunctionalized** | `tlc::defunctionalize` | Lambda lifting + SOAC capture flattening |
 | **TlcMonomorphized** | `tlc::specialize`, `tlc::monomorphize` | Polymorphic intrinsics specialized; user functions monomorphized |
-| **TlcSoaTransformed** | `tlc::soa_transform` | Structure-of-Arrays transform for tuple arrays |
 | **TlcBufferSpecialized** | `tlc::buffer_specialize` | Storage buffer parameter specialization |
 | **TlcInlined** | `tlc::inline` | Compiler-generated lambda inlining + DCE |
 

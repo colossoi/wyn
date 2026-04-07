@@ -310,7 +310,7 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 // TLC Pipeline (AST -> SSA):
 //       -> .to_tlc()                                    -> TlcTransformed
 //       -> .partial_eval()                              -> TlcPartialEvaled
-//       -> .normalize_soacs()                             -> TlcPartialEvaled (SoA + SOAC normalized, via soa::normalize)
+//       -> .normalize_soacs()                             -> TlcSoaNormalized
 //       -> .fuse_maps()                                 -> TlcFused
 //       -> .defunctionalize()                           -> TlcDefunctionalized
 //       -> .monomorphize()                              -> TlcMonomorphized
@@ -632,8 +632,7 @@ impl AliasChecked {
             for item in &elaborated.items {
                 if let module_manager::ElaboratedItem::Decl(decl) = item {
                     // Transform all def declarations - wrapper functions that call intrinsics
-                    // (like `zip` calling `_w_intrinsic_zip`) need to be in TLC so they can
-                    // be called by other prelude functions (like `zip3`).
+                    // need to be in TLC so they can be called by other prelude functions.
                     if let Some(def) = transformer.transform_decl(decl) {
                         prelude_tlc_defs.push(def);
                     }
@@ -641,7 +640,7 @@ impl AliasChecked {
             }
         }
 
-        // Transform top-level prelude functions (zip3, map2, etc.)
+        // Transform top-level prelude functions (unzip, all, any, etc.)
         {
             let mut transformer =
                 tlc::Transformer::new(&self.type_table, &mut symbols, &mut top_level_symbols);
@@ -714,16 +713,26 @@ pub struct TlcPartialEvaled {
 impl TlcPartialEvaled {
     /// SoA transform + SOAC normalization: rewrite array-of-tuple types,
     /// flatten Map+Zip into multi-input Map, and convert standalone Zip to tuple.
-    pub fn normalize_soacs(self) -> TlcPartialEvaled {
+    pub fn normalize_soacs(self) -> TlcSoaNormalized {
         let normalized = tlc::soa::normalize(self.tlc);
-        TlcPartialEvaled {
+        TlcSoaNormalized {
             tlc: normalized,
             type_table: self.type_table,
             known_defs: self.known_defs,
             schemes: self.schemes,
         }
     }
+}
 
+/// TLC after SoA normalization (arrays never contain tuples, zips eliminated)
+pub struct TlcSoaNormalized {
+    pub tlc: tlc::Program,
+    pub type_table: TypeTable,
+    known_defs: std::collections::HashSet<String>,
+    schemes: HashMap<String, types::TypeScheme>,
+}
+
+impl TlcSoaNormalized {
     /// Fuse consecutive SOAC operations to eliminate intermediate arrays.
     pub fn fuse_maps(self) -> TlcFused {
         let fused = tlc::fusion::fuse(self.tlc);

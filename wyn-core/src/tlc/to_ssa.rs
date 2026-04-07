@@ -1881,7 +1881,7 @@ impl<'a> Converter<'a> {
     fn array_expr_type(&self, ae: &ArrayExpr) -> Type<TypeName> {
         match ae {
             ArrayExpr::Ref(t) => t.ty.clone(),
-            ArrayExpr::Zip(_) => Type::Constructed(TypeName::Unit, vec![]), // placeholder
+            ArrayExpr::Zip(_) => unreachable!("Zip eliminated by soa::normalize"),
             ArrayExpr::Soac(_) => Type::Constructed(TypeName::Unit, vec![]), // placeholder
             ArrayExpr::Generate { elem_ty, .. } => elem_ty.clone(),
             ArrayExpr::Literal(_) => Type::Constructed(TypeName::Unit, vec![]),
@@ -1905,7 +1905,7 @@ impl<'a> Converter<'a> {
                 ty if is_soa_tuple(ty).is_some() => soa_elem_type(ty),
                 _ => t.ty.clone(),
             },
-            ArrayExpr::Zip(_) => Type::Constructed(TypeName::Unit, vec![]), // placeholder
+            ArrayExpr::Zip(_) => unreachable!("Zip eliminated by soa::normalize"),
             ArrayExpr::Soac(_) => Type::Constructed(TypeName::Unit, vec![]),
             ArrayExpr::Generate { elem_ty, .. } => elem_ty.clone(),
             ArrayExpr::Literal(terms) => {
