@@ -14,12 +14,11 @@ pub mod monomorphize;
 #[cfg(test)]
 mod monomorphize_tests;
 pub mod normalize;
-pub mod normalize_soacs;
 pub mod partial_eval;
 #[cfg(test)]
 mod partial_eval_tests;
 pub mod producer_graph;
-pub mod soa_transform;
+pub mod soa;
 pub mod specialize;
 #[cfg(test)]
 mod specialize_tests;
@@ -1901,7 +1900,7 @@ impl<'a> Transformer<'a> {
         let lam = self.term_to_lambda(func_term);
 
         // Absorb zip: if arr_term is ArrayExpr(Zip(...)), flatten into inputs.
-        // The lambda still takes a single tuple param — the normalize_soacs pass
+        // The lambda still takes a single tuple param — the soa::normalize pass
         // will rewrite it to take separate params.
         let inputs = match arr_term.kind {
             TermKind::ArrayExpr(ArrayExpr::Zip(exprs)) => exprs,

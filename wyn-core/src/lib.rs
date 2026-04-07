@@ -310,7 +310,7 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 // TLC Pipeline (AST -> SSA):
 //       -> .to_tlc()                                    -> TlcTransformed
 //       -> .partial_eval()                              -> TlcPartialEvaled
-//       -> .normalize_soacs()                             -> TlcPartialEvaled (SoA + SOAC normalized)
+//       -> .normalize_soacs()                             -> TlcPartialEvaled (SoA + SOAC normalized, via soa::normalize)
 //       -> .fuse_maps()                                 -> TlcFused
 //       -> .defunctionalize()                           -> TlcDefunctionalized
 //       -> .monomorphize()                              -> TlcMonomorphized
@@ -712,9 +712,10 @@ pub struct TlcPartialEvaled {
 }
 
 impl TlcPartialEvaled {
-    /// Normalize SOAC inputs: flatten Map+Zip into multi-input Map.
+    /// SoA transform + SOAC normalization: rewrite array-of-tuple types,
+    /// flatten Map+Zip into multi-input Map, and convert standalone Zip to tuple.
     pub fn normalize_soacs(self) -> TlcPartialEvaled {
-        let normalized = tlc::normalize_soacs::normalize_soacs(self.tlc);
+        let normalized = tlc::soa::normalize(self.tlc);
         TlcPartialEvaled {
             tlc: normalized,
             type_table: self.type_table,

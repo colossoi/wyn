@@ -1,4 +1,4 @@
-use crate::tlc::soa_transform::*;
+use crate::tlc::soa::*;
 
 fn i32_ty() -> Type<TypeName> {
     Type::Constructed(TypeName::Int(32), vec![])

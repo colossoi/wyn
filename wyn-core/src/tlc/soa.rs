@@ -1,13 +1,17 @@
-//! Structure-of-Arrays (SoA) transform for TLC.
+//! Structure-of-Arrays (SoA) transform and SOAC normalization for TLC.
 //!
-//! Transforms `[n](A,B)` (array of tuples) into `([n]A, [n]B)` (tuple of arrays).
-//! This runs after monomorphize (all types concrete) as a TLC-to-TLC pass.
+//! This pass does two things in a single recursive walk:
 //!
-//! After this pass, arrays never contain tuples — they only contain scalars or
-//! other arrays. Standalone tuples may still exist and are handled separately.
+//! 1. **SoA transform**: Rewrites `[n](A,B)` (array of tuples) into `([n]A, [n]B)`
+//!    (tuple of arrays). After this, arrays never contain tuples — they only contain
+//!    scalars or other arrays. Operations on array-of-tuple types (index, array_with,
+//!    array_lit, uninit, length) are rewritten to operate on the distributed components.
 //!
-//! The transform also rewrites standalone `zip(a, b)` calls into `_w_tuple(a, b)`,
-//! making zip free.
+//! 2. **SOAC normalization**: When a Map has multiple inputs (from an absorbed zip) but
+//!    the lambda takes a single tuple parameter, rewrites the lambda to take N separate
+//!    parameters. Also converts standalone `zip(a, b)` into `_w_tuple(a, b)`.
+//!
+//! Runs before fusion and defunctionalization.
 
 use super::{ArrayExpr, Def, Lambda, LoopKind, Place, Program, SoacOp, Term, TermIdSource, TermKind};
 use crate::SymbolTable;
@@ -103,6 +107,41 @@ fn array_of_tuple_parts(
             Some((components.clone(), variant, size))
         }
         _ => None,
+    }
+}
+
+// =============================================================================
+// SOAC normalization helpers (standalone, don't need self)
+// =============================================================================
+
+/// Count how many flat (non-tuple) types a type expands to.
+fn flat_type_count(ty: &Type<TypeName>) -> usize {
+    match ty {
+        Type::Constructed(TypeName::Tuple(_), children) if !children.is_empty() => {
+            children.iter().map(flat_type_count).sum()
+        }
+        _ => 1,
+    }
+}
+
+/// Recursively flatten nested tuple types: ((A, B), C) -> [A, B, C]
+fn flatten_tuple_types(types: &[Type<TypeName>]) -> Vec<Type<TypeName>> {
+    let mut flat = Vec::new();
+    for ty in types {
+        match ty {
+            Type::Constructed(TypeName::Tuple(_), children) if !children.is_empty() => {
+                flat.extend(flatten_tuple_types(children));
+            }
+            _ => flat.push(ty.clone()),
+        }
+    }
+    flat
+}
+
+fn has_type_variables(ty: &Type<TypeName>) -> bool {
+    match ty {
+        Type::Variable(_) => true,
+        Type::Constructed(_, args) => args.iter().any(has_type_variables),
     }
 }
 
@@ -242,6 +281,11 @@ impl SoaTransformer {
 
             TermKind::Soac(soac) => {
                 let new_soac = self.transform_soac(soac);
+                // Try to normalize Map+Zip after SoA transform
+                let new_soac = match new_soac {
+                    SoacOp::Map { lam, inputs } => self.try_normalize_map(lam, inputs),
+                    other => other,
+                };
                 self.mk_term(new_ty, span, TermKind::Soac(new_soac))
             }
 
@@ -387,7 +431,7 @@ impl SoaTransformer {
     // =========================================================================
 
     /// `_w_index(arr, i)` where arr was `[n](A,B)`, now `([n]A, [n]B)`:
-    /// → `_w_tuple(_w_index(proj(arr,0), i), _w_index(proj(arr,1), i))`
+    /// -> `_w_tuple(_w_index(proj(arr,0), i), _w_index(proj(arr,1), i))`
     fn rewrite_index_aot(
         &mut self,
         arr: &Term,
@@ -418,7 +462,7 @@ impl SoaTransformer {
     }
 
     /// `_w_array_with(arr, i, val)` where arr was `[n](A,B)`:
-    /// → `_w_tuple(array_with(proj(arr,0), i, proj(val,0)), ...)`
+    /// -> `_w_tuple(array_with(proj(arr,0), i, proj(val,0)), ...)`
     fn rewrite_array_with_aot(
         &mut self,
         arr: &Term,
@@ -458,7 +502,7 @@ impl SoaTransformer {
     }
 
     /// `_w_array_lit(e1, e2, ...)` where result was `[n](A,B)`:
-    /// → `_w_tuple(_w_array_lit(proj(e1,0), proj(e2,0), ...), ...)`
+    /// -> `_w_tuple(_w_array_lit(proj(e1,0), proj(e2,0), ...), ...)`
     fn rewrite_array_lit_aot(
         &mut self,
         elems: &[Term],
@@ -498,7 +542,7 @@ impl SoaTransformer {
     }
 
     /// `_w_intrinsic_uninit()` where result was `[n](A,B)`:
-    /// → `_w_tuple(_w_intrinsic_uninit(), _w_intrinsic_uninit())`
+    /// -> `_w_tuple(_w_intrinsic_uninit(), _w_intrinsic_uninit())`
     fn rewrite_uninit_aot(
         &mut self,
         soa_ty: &Type<TypeName>,
@@ -521,7 +565,7 @@ impl SoaTransformer {
     }
 
     /// `_w_intrinsic_length(arr)` where arr was `[n](A,B)`:
-    /// → `_w_intrinsic_length(proj(arr, 0))`
+    /// -> `_w_intrinsic_length(proj(arr, 0))`
     fn rewrite_length_aot(
         &mut self,
         arr: &Term,
@@ -663,9 +707,6 @@ impl SoaTransformer {
                 ArrayExpr::Ref(Box::new(new_term))
             }
             ArrayExpr::Zip(exprs) => {
-                // Standalone Zips are already converted to tuple construction by
-                // normalize_soacs. Any Zip reaching here is inside a SOAC input
-                // that wasn't normalized (e.g. polymorphic prelude code).
                 let new_exprs: Vec<ArrayExpr> =
                     exprs.iter().map(|e| self.transform_array_expr(e)).collect();
                 ArrayExpr::Zip(new_exprs)
@@ -708,7 +749,7 @@ impl SoaTransformer {
     }
 
     /// Transform an ArrayExpr appearing as a standalone term.
-    /// Standalone Zip is already handled by normalize_soacs (early pass).
+    /// Standalone Zip is converted to tuple construction here.
     fn transform_array_expr_term(
         &mut self,
         ae: &ArrayExpr,
@@ -716,6 +757,23 @@ impl SoaTransformer {
         new_ty: Type<TypeName>,
         span: Span,
     ) -> Term {
+        // Standalone Zip -> tuple construction: zip(a, b) becomes _w_tuple(a, b).
+        if let ArrayExpr::Zip(exprs) = ae {
+            if !exprs.is_empty() {
+                let components: Vec<Term> = exprs
+                    .iter()
+                    .map(|inner_ae| match inner_ae {
+                        ArrayExpr::Ref(t) => self.transform_term(t),
+                        _ => {
+                            let new_inner = self.transform_array_expr(inner_ae);
+                            self.mk_term(new_ty.clone(), span, TermKind::ArrayExpr(new_inner))
+                        }
+                    })
+                    .collect();
+                return self.mk_tuple(components, new_ty, span);
+            }
+        }
+
         let new_ae = self.transform_array_expr(ae);
         self.mk_term(new_ty, span, TermKind::ArrayExpr(new_ae))
     }
@@ -756,6 +814,111 @@ impl SoaTransformer {
             LoopKind::While { cond } => LoopKind::While {
                 cond: Box::new(self.transform_term(cond)),
             },
+        }
+    }
+
+    // =========================================================================
+    // SOAC normalization: Map+Zip flattening
+    // =========================================================================
+
+    /// If the Map has multiple inputs but a single tuple-typed lambda param,
+    /// split the param into N separate params and substitute.
+    fn try_normalize_map(&mut self, lam: Lambda, inputs: Vec<ArrayExpr>) -> SoacOp {
+        if inputs.len() <= 1 || lam.params.len() != 1 {
+            return SoacOp::Map { lam, inputs };
+        }
+
+        let (old_param, ref param_ty) = lam.params[0];
+
+        // Must be a concrete tuple type matching the input count.
+        let flat_types = match param_ty {
+            Type::Constructed(TypeName::Tuple(_), types) if !types.is_empty() => flatten_tuple_types(types),
+            _ => return SoacOp::Map { lam, inputs },
+        };
+
+        if flat_types.len() != inputs.len() || has_type_variables(param_ty) {
+            return SoacOp::Map { lam, inputs };
+        }
+
+        // Create N fresh params.
+        let new_params: Vec<(crate::SymbolId, Type<TypeName>)> = flat_types
+            .iter()
+            .enumerate()
+            .map(|(i, ty)| (self.symbols.alloc(format!("_sn_{}", i)), ty.clone()))
+            .collect();
+
+        // Substitute: every `Var(old_param)` -> `_w_tuple(Var(p0), ..., Var(pN))`
+        // reconstructed with the original tuple type. Downstream simplification
+        // (partial eval / project folding) will reduce proj(tuple(...), i) -> pi.
+        let span = lam.body.span;
+        let rewritten_body = self.substitute_param(*lam.body, old_param, &new_params, param_ty, span);
+
+        SoacOp::Map {
+            lam: Lambda {
+                params: new_params,
+                body: Box::new(rewritten_body),
+                ret_ty: lam.ret_ty,
+                captures: lam.captures,
+            },
+            inputs,
+        }
+    }
+
+    /// Replace every occurrence of `Var(old_sym)` with a tuple reconstruction
+    /// from the new params. Respects shadowing.
+    fn substitute_param(
+        &mut self,
+        term: Term,
+        old_sym: crate::SymbolId,
+        new_params: &[(crate::SymbolId, Type<TypeName>)],
+        tuple_ty: &Type<TypeName>,
+        span: Span,
+    ) -> Term {
+        if let TermKind::Var(sym) = &term.kind {
+            if *sym == old_sym {
+                return self.build_tuple_reconstruction(new_params, tuple_ty, span);
+            }
+        }
+
+        // Stop at shadowing.
+        match &term.kind {
+            TermKind::Let { name, .. } if *name == old_sym => return term,
+            TermKind::Lambda(lam) if lam.params.iter().any(|(s, _)| *s == old_sym) => return term,
+            _ => {}
+        }
+
+        term.map_children(&mut |child| self.substitute_param(child, old_sym, new_params, tuple_ty, span))
+    }
+
+    /// Build `Tuple(Var(p0), Var(p1), ..., Var(pN))` matching the original tuple type.
+    ///
+    /// For nested tuple types like `((A, B), C)` with flat params `[p0, p1, p2]`,
+    /// builds `Tuple(Tuple(Var(p0), Var(p1)), Var(p2))` to match the nesting.
+    fn build_tuple_reconstruction(
+        &mut self,
+        new_params: &[(crate::SymbolId, Type<TypeName>)],
+        tuple_ty: &Type<TypeName>,
+        span: Span,
+    ) -> Term {
+        match tuple_ty {
+            Type::Constructed(TypeName::Tuple(_), component_types) if !component_types.is_empty() => {
+                let mut offset = 0;
+                let mut elements = Vec::with_capacity(component_types.len());
+                for comp_ty in component_types {
+                    let count = flat_type_count(comp_ty);
+                    let sub_params = &new_params[offset..offset + count];
+                    let elem = self.build_tuple_reconstruction(sub_params, comp_ty, span);
+                    elements.push(elem);
+                    offset += count;
+                }
+                self.mk_tuple(elements, tuple_ty.clone(), span)
+            }
+            _ => {
+                // Leaf -- single param.
+                assert_eq!(new_params.len(), 1);
+                let (sym, ty) = &new_params[0];
+                self.mk_term(ty.clone(), span, TermKind::Var(*sym))
+            }
         }
     }
 
@@ -895,10 +1058,13 @@ impl SoaTransformer {
 // Public API
 // =============================================================================
 
-/// Run the SoA transform on a TLC program.
-/// This rewrites `[n](A,B)` types to `([n]A, [n]B)` and adjusts all operations
-/// that touch array-of-tuple types.
-pub fn soa_transform(program: Program) -> Program {
+/// Run the combined SoA transform and SOAC normalization on a TLC program.
+///
+/// 1. Rewrites `[n](A,B)` types to `([n]A, [n]B)` and adjusts all operations
+///    that touch array-of-tuple types.
+/// 2. Flattens Map+Zip into multi-input Map with split lambda params.
+/// 3. Converts standalone Zip to tuple construction.
+pub fn normalize(program: Program) -> Program {
     let transformer = SoaTransformer::new(program.symbols.clone());
     transformer.transform_program(program)
 }

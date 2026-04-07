@@ -1632,7 +1632,7 @@ impl<'a> Converter<'a> {
         match ae {
             ArrayExpr::Ref(term) => self.convert_term(term),
             ArrayExpr::Zip(_) => {
-                panic!("ArrayExpr::Zip should have been eliminated by normalize_soacs");
+                panic!("ArrayExpr::Zip should have been eliminated by soa::normalize");
             }
             ArrayExpr::Soac(op) => self.convert_soac(op, ty),
             ArrayExpr::Generate { .. } => todo!("ArrayExpr::Generate lowering"),
@@ -1743,7 +1743,7 @@ impl<'a> Converter<'a> {
         };
 
         // Zipped: multiple inputs but lambda takes fewer params (tuple packing needed).
-        // After normalize_soacs, inputs.len() == params.len() and zipped is false.
+        // After soa::normalize, inputs.len() == params.len() and zipped is false.
         let zipped = input_values.len() > 1 && lam.params.len() == 1;
         let zipped_param_type = if zipped { Some(lam.params[0].1.clone()) } else { None };
 
