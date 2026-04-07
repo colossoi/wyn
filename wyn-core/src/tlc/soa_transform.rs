@@ -28,7 +28,11 @@ pub fn soa_type(ty: &Type<TypeName>) -> Type<TypeName> {
         _ if ty.is_array() => {
             let elem = soa_type(ty.elem_type().expect("Array has elem"));
             let size = ty.array_size().expect("Array has size").clone();
-            let variant = ty.array_variant().expect("Array has variant").clone();
+            let variant = match ty.array_variant().expect("Array has variant") {
+                // Resolve unresolved variant variables to Composite when distributing.
+                Type::Variable(_) => Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
+                v => v.clone(),
+            };
 
             // If the element type is a tuple, distribute the array into each component.
             // Recursively apply soa_type to each distributed array, so nested

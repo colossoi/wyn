@@ -27,7 +27,6 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .fuse_maps()
         .defunctionalize()
         .monomorphize()
-        .soa_transform()
         .buffer_specialize()
         .inline()
         .to_ssa()
@@ -60,7 +59,6 @@ fn compile_through_ssa(input: &str) -> Result<Program, CompilerError> {
         .fuse_maps()
         .defunctionalize()
         .monomorphize()
-        .soa_transform()
         .buffer_specialize()
         .inline()
         .to_ssa()
@@ -490,9 +488,6 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     let tlc = tlc.monomorphize();
     eprintln!("=== monomorphize OK ===");
 
-    let tlc = tlc.soa_transform();
-    eprintln!("=== soa_transform OK ===");
-
     let tlc = tlc.buffer_specialize();
     eprintln!("=== buffer_specialize OK ===");
 
@@ -561,9 +556,6 @@ entry main(data: []i32) []i32 = [first(data)]
 
     let tlc = tlc.monomorphize();
     eprintln!("=== monomorphize OK ===");
-
-    let tlc = tlc.soa_transform();
-    eprintln!("=== soa_transform OK ===");
 
     let tlc = tlc.buffer_specialize();
     eprintln!("=== buffer_specialize OK ===");

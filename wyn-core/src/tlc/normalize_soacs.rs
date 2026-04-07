@@ -17,7 +17,14 @@ use polytype::Type;
 use super::{ArrayExpr, Def, Lambda, Program, SoacOp, Term, TermIdSource, TermKind};
 
 /// Normalize SOACs in a TLC program.
+///
+/// 1. Full SoA transform: `[n](A,B)` → `([n]A, [n]B)` + operation rewriting
+/// 2. SOAC input normalization: Map+Zip flattening, standalone Zip → tuple
 pub fn normalize_soacs(program: Program) -> Program {
+    // SoA: rewrite array-of-tuple types and operations.
+    // Runs on polymorphic code — type variables pass through unchanged.
+    let program = super::soa_transform::soa_transform(program);
+
     let mut symbols = program.symbols;
     let mut term_ids = TermIdSource::new();
 

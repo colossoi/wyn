@@ -310,11 +310,10 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 // TLC Pipeline (AST -> SSA):
 //       -> .to_tlc()                                    -> TlcTransformed
 //       -> .partial_eval()                              -> TlcPartialEvaled
-//       -> .normalize_soacs()                             -> TlcPartialEvaled (normalized)
+//       -> .normalize_soacs()                             -> TlcPartialEvaled (SoA + SOAC normalized)
 //       -> .fuse_maps()                                 -> TlcFused
 //       -> .defunctionalize()                           -> TlcDefunctionalized
 //       -> .monomorphize()                              -> TlcMonomorphized
-//       -> .soa_transform()                             -> TlcSoaTransformed
 //       -> .buffer_specialize()                         -> TlcBufferSpecialized
 //       -> .inline()                                    -> TlcInlined
 //       -> .to_ssa()                                    -> SsaConverted
@@ -798,27 +797,6 @@ pub struct TlcMonomorphized {
 }
 
 impl TlcMonomorphized {
-    /// Apply SoA (Structure-of-Arrays) transform.
-    /// Rewrites `[n](A,B)` to `([n]A, [n]B)` so arrays never contain tuples.
-    /// Runs after monomorphize so all types are concrete. All subsequent passes
-    /// see SoA types, making zip/unzip free.
-    pub fn soa_transform(self) -> TlcSoaTransformed {
-        let transformed = tlc::soa_transform::soa_transform(self.tlc);
-        transformed.assert_flat_apps();
-        TlcSoaTransformed {
-            tlc: transformed,
-            type_table: self.type_table,
-        }
-    }
-}
-
-/// TLC after SoA transform (arrays never contain tuples)
-pub struct TlcSoaTransformed {
-    pub tlc: tlc::Program,
-    pub type_table: TypeTable,
-}
-
-impl TlcSoaTransformed {
     /// Specialize functions that take view-array parameters per-buffer.
     /// After this pass, no `DefMeta::Function` has view-array parameters.
     pub fn buffer_specialize(self) -> TlcBufferSpecialized {

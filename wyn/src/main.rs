@@ -231,11 +231,8 @@ fn compile_file(
     // Monomorphize polymorphic functions at TLC level
     let tlc_mono = time("tlc_monomorphize", verbose, || tlc_defunc.monomorphize());
 
-    // SoA transform: [n](A,B) → ([n]A, [n]B)
-    let tlc_soa = time("soa_transform", verbose, || tlc_mono.soa_transform());
-
     // Buffer-specialize view-array params per-buffer
-    let tlc_buf = time("buffer_specialize", verbose, || tlc_soa.buffer_specialize());
+    let tlc_buf = time("buffer_specialize", verbose, || tlc_mono.buffer_specialize());
 
     // Inline compiler-generated lambda defs + DCE
     let tlc_inlined = time("inline", verbose, || tlc_buf.inline());
