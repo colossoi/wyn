@@ -1631,18 +1631,8 @@ impl<'a> Converter<'a> {
     fn convert_array_expr(&mut self, ae: &ArrayExpr, ty: Type<TypeName>) -> Result<ValueId, ConvertError> {
         match ae {
             ArrayExpr::Ref(term) => self.convert_term(term),
-            ArrayExpr::Zip(exprs) => {
-                // Standalone zip: materialize as a tuple of the component arrays.
-                let mut values = Vec::with_capacity(exprs.len());
-                for child in exprs {
-                    let child_ty = match child {
-                        ArrayExpr::Ref(t) => t.ty.clone(),
-                        _ => ty.clone(), // approximate for nested zips
-                    };
-                    let val = self.convert_array_expr(child, child_ty)?;
-                    values.push(val);
-                }
-                self.builder.push_tuple(values, ty).map_err(|e| ConvertError::BuilderError(e.to_string()))
+            ArrayExpr::Zip(_) => {
+                panic!("ArrayExpr::Zip should have been eliminated by normalize_soacs");
             }
             ArrayExpr::Soac(op) => self.convert_soac(op, ty),
             ArrayExpr::Generate { .. } => todo!("ArrayExpr::Generate lowering"),

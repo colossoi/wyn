@@ -41,22 +41,59 @@ pub fn normalize_soacs(program: Program) -> Program {
 fn normalize_term(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdSource) -> Term {
     let term = term.map_children(&mut |child| normalize_term(child, symbols, term_ids));
 
-    if let TermKind::Soac(SoacOp::Map { .. }) = &term.kind {
-        let (id, ty, span) = (term.id, term.ty, term.span);
-        match term.kind {
-            TermKind::Soac(SoacOp::Map { lam, inputs }) => {
-                let normalized = normalize_map(lam, inputs, symbols, term_ids);
-                Term {
-                    id,
-                    ty,
-                    span,
-                    kind: TermKind::Soac(normalized),
+    match &term.kind {
+        // Flatten Map+Zip into multi-input Map with split lambda params.
+        TermKind::Soac(SoacOp::Map { .. }) => {
+            let (id, ty, span) = (term.id, term.ty, term.span);
+            match term.kind {
+                TermKind::Soac(SoacOp::Map { lam, inputs }) => {
+                    let normalized = normalize_map(lam, inputs, symbols, term_ids);
+                    Term {
+                        id,
+                        ty,
+                        span,
+                        kind: TermKind::Soac(normalized),
+                    }
                 }
+                _ => unreachable!(),
             }
-            _ => unreachable!(),
         }
-    } else {
-        term
+
+        // Standalone Zip → tuple construction. zip(a, b) becomes _w_tuple(a, b).
+        TermKind::ArrayExpr(ArrayExpr::Zip(exprs)) if !exprs.is_empty() => {
+            let tuple_sym = get_tuple_sym(symbols);
+            let span = term.span;
+            let components: Vec<Term> = exprs
+                .iter()
+                .map(|ae| match ae {
+                    ArrayExpr::Ref(t) => (**t).clone(),
+                    // Nested zips get flattened recursively by map_children above
+                    _ => Term {
+                        id: term_ids.next_id(),
+                        ty: term.ty.clone(),
+                        span,
+                        kind: TermKind::ArrayExpr(ae.clone()),
+                    },
+                })
+                .collect();
+            let func = Term {
+                id: term_ids.next_id(),
+                ty: term.ty.clone(),
+                span,
+                kind: TermKind::Var(tuple_sym),
+            };
+            Term {
+                id: term.id,
+                ty: term.ty.clone(),
+                span,
+                kind: TermKind::App {
+                    func: Box::new(func),
+                    args: components,
+                },
+            }
+        }
+
+        _ => term,
     }
 }
 

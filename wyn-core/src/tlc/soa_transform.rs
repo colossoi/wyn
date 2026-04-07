@@ -659,9 +659,9 @@ impl SoaTransformer {
                 ArrayExpr::Ref(Box::new(new_term))
             }
             ArrayExpr::Zip(exprs) => {
-                // Zip is preserved as-is in ArrayExpr (it gets absorbed by Map).
-                // If standalone, the surrounding term will be an ArrayExpr(Zip(...))
-                // and we'll handle that in transform_array_expr_term.
+                // Standalone Zips are already converted to tuple construction by
+                // normalize_soacs. Any Zip reaching here is inside a SOAC input
+                // that wasn't normalized (e.g. polymorphic prelude code).
                 let new_exprs: Vec<ArrayExpr> =
                     exprs.iter().map(|e| self.transform_array_expr(e)).collect();
                 ArrayExpr::Zip(new_exprs)
@@ -704,7 +704,7 @@ impl SoaTransformer {
     }
 
     /// Transform an ArrayExpr appearing as a standalone term.
-    /// This is where standalone Zip gets rewritten to _w_tuple.
+    /// Standalone Zip is already handled by normalize_soacs (early pass).
     fn transform_array_expr_term(
         &mut self,
         ae: &ArrayExpr,
@@ -712,47 +712,8 @@ impl SoaTransformer {
         new_ty: Type<TypeName>,
         span: Span,
     ) -> Term {
-        match ae {
-            ArrayExpr::Zip(exprs) => {
-                // Standalone zip: `zip(a, b)` where result was `[n](A,B)`.
-                // After SoA, this is just `_w_tuple(a, b)` — zip is free!
-                let components: Vec<Term> = exprs
-                    .iter()
-                    .map(|e| match e {
-                        ArrayExpr::Ref(t) => self.transform_term(t),
-                        _ => {
-                            // Nested non-Ref array exprs — transform them
-                            let inner_ty = self.array_expr_type(e);
-                            let new_inner_ty = soa_type(&inner_ty);
-                            self.transform_array_expr_term(e, &inner_ty, new_inner_ty, span)
-                        }
-                    })
-                    .collect();
-                self.mk_tuple(components, new_ty, span)
-            }
-            _ => {
-                let new_ae = self.transform_array_expr(ae);
-                self.mk_term(new_ty, span, TermKind::ArrayExpr(new_ae))
-            }
-        }
-    }
-
-    fn array_expr_type(&self, ae: &ArrayExpr) -> Type<TypeName> {
-        match ae {
-            ArrayExpr::Ref(t) => t.ty.clone(),
-            ArrayExpr::Zip(_) => Type::Constructed(TypeName::Unit, vec![]),
-            ArrayExpr::Soac(_) => Type::Constructed(TypeName::Unit, vec![]),
-            ArrayExpr::Generate { elem_ty, .. } => elem_ty.clone(),
-            ArrayExpr::Literal(terms) => {
-                if let Some(first) = terms.first() {
-                    first.ty.clone()
-                } else {
-                    Type::Constructed(TypeName::Unit, vec![])
-                }
-            }
-            ArrayExpr::Range { start, .. } => start.ty.clone(),
-            ArrayExpr::StorageBuffer { elem_ty, .. } => elem_ty.clone(),
-        }
+        let new_ae = self.transform_array_expr(ae);
+        self.mk_term(new_ty, span, TermKind::ArrayExpr(new_ae))
     }
 
     // =========================================================================
