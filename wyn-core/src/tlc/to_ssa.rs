@@ -1742,22 +1742,15 @@ impl<'a> Converter<'a> {
             }
         };
 
-        // Zipped: multiple inputs but lambda takes fewer params (tuple packing needed).
-        // After soa::normalize, inputs.len() == params.len() and zipped is false.
-        let zipped = input_values.len() > 1 && lam.params.len() == 1;
-        let zipped_param_type = if zipped { Some(lam.params[0].1.clone()) } else { None };
-
         self.builder
             .push_inst(
                 InstKind::Soac(Soac::Map {
                     func: f_name,
                     inputs: input_values,
                     captures: capture_values,
-                    zipped,
                     input_array_types: input_arr_types,
                     input_elem_types,
                     output_elem_type: output_elem_ty,
-                    zipped_param_type,
                 }),
                 result_ty,
             )

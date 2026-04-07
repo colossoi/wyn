@@ -179,21 +179,17 @@ fn expand_soac(
             func,
             inputs,
             captures,
-            zipped,
             input_array_types,
             input_elem_types,
             output_elem_type,
-            zipped_param_type,
         } => expand_map(
             builder,
             func,
             &remap_values(inputs, value_map),
             &remap_values(captures, value_map),
-            *zipped,
             input_array_types,
             input_elem_types,
             output_elem_type,
-            zipped_param_type.as_ref(),
             result_ty,
         ),
         Soac::Reduce {
@@ -243,11 +239,9 @@ fn expand_map(
     func: &str,
     inputs: &[ValueId],
     captures: &[ValueId],
-    zipped: bool,
     input_array_types: &[Type<TypeName>],
     input_elem_types: &[Type<TypeName>],
     output_elem_type: &Type<TypeName>,
-    zipped_param_type: Option<&Type<TypeName>>,
     result_ty: Type<TypeName>,
 ) -> Option<ValueId> {
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
@@ -257,7 +251,6 @@ fn expand_map(
     let array_size = extract_array_size(first_input_ty);
 
     // For small fixed-size arrays with non-SoA results, unroll instead of a loop.
-    // SoA results need a transpose which is worse than the loop accumulator.
     if let Some(n) = array_size {
         if n <= MAP_UNROLL_THRESHOLD && is_soa_tuple(&result_ty).is_none() {
             return expand_map_unrolled(
@@ -266,11 +259,9 @@ fn expand_map(
                 func,
                 inputs,
                 captures,
-                zipped,
                 input_array_types,
                 input_elem_types,
                 output_elem_type,
-                zipped_param_type,
                 result_ty,
             );
         }
@@ -322,13 +313,7 @@ fn expand_map(
         input_elems.push(elem);
     }
 
-    let mut call_args: Vec<ValueId> = if zipped {
-        let zipped_ty = zipped_param_type.expect("BUG: zipped map without param type").clone();
-        let zipped_val = builder.push_tuple(input_elems, zipped_ty).ok()?;
-        vec![zipped_val]
-    } else {
-        input_elems
-    };
+    let mut call_args = input_elems;
     call_args.extend(captures.iter().copied());
 
     let output_elem = builder.push_call(func, call_args, output_elem_type.clone()).ok()?;
@@ -365,11 +350,9 @@ fn expand_map_unrolled(
     func: &str,
     inputs: &[ValueId],
     captures: &[ValueId],
-    zipped: bool,
     input_array_types: &[Type<TypeName>],
     input_elem_types: &[Type<TypeName>],
     output_elem_type: &Type<TypeName>,
-    zipped_param_type: Option<&Type<TypeName>>,
     result_ty: Type<TypeName>,
 ) -> Option<ValueId> {
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
@@ -388,14 +371,7 @@ fn expand_map_unrolled(
             input_elems.push(elem);
         }
 
-        // Build call arguments: zip if needed, then append captures
-        let mut call_args: Vec<ValueId> = if zipped {
-            let zipped_ty = zipped_param_type.expect("BUG: zipped map without param type").clone();
-            let zipped_val = builder.push_tuple(input_elems, zipped_ty).ok()?;
-            vec![zipped_val]
-        } else {
-            input_elems
-        };
+        let mut call_args = input_elems;
         call_args.extend(captures.iter().copied());
 
         let result = builder.push_call(func, call_args, output_elem_type.clone()).ok()?;

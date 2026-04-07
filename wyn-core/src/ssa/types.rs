@@ -490,20 +490,16 @@ pub enum Soac {
     Map {
         /// Name of the map function (post-defunctionalization).
         func: String,
-        /// Input arrays (one for single-input map, multiple for zip-fused map).
+        /// Input arrays (one per lambda parameter).
         inputs: Vec<ValueId>,
         /// Captured variables passed as extra arguments to `func`.
         captures: Vec<ValueId>,
-        /// Whether inputs were zip-fused (multiple inputs packed into tuple arg).
-        zipped: bool,
         /// Types of each input array (for SoA-aware length/indexing).
         input_array_types: Vec<Type<TypeName>>,
         /// Element types of each input array (for SoA-aware indexing).
         input_elem_types: Vec<Type<TypeName>>,
         /// Element type of the output array (for SoA-aware array_with).
         output_elem_type: Type<TypeName>,
-        /// Type of the zipped parameter (when `zipped` is true).
-        zipped_param_type: Option<Type<TypeName>>,
     },
     /// `reduce f init input` — fold `f` over elements with initial value `init`.
     Reduce {
