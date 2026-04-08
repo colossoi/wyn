@@ -73,20 +73,20 @@ def sha256d_80(header: [20]u32) [8]u32 =
 ------------------------------------------------------------
 -- mine_nonce: Hash header with a specific nonce
 ------------------------------------------------------------
-def mine_nonce(header_base: [19]u32, nonce: i32) [8]u32 =
+def mine_nonce(header_base: [19]u32, nonce: u32) [8]u32 =
     let header: [20]u32 = [
         header_base[0],  header_base[1],  header_base[2],  header_base[3],
         header_base[4],  header_base[5],  header_base[6],  header_base[7],
         header_base[8],  header_base[9],  header_base[10], header_base[11],
         header_base[12], header_base[13], header_base[14], header_base[15],
-        header_base[16], header_base[17], header_base[18], u32.i32(nonce)
+        header_base[16], header_base[17], header_base[18], nonce
     ] in
     sha256d_80(header)
 
 ------------------------------------------------------------
 -- Compute shader entry point
--- Maps over nonce space using iota
+-- Maps over nonce space using u32 range
 ------------------------------------------------------------
 #[compute]
-entry mine(header_base: [19]u32, n: i32, nonce_offset: i32) [][8]u32 =
-    map(|nonce| mine_nonce(header_base, nonce + nonce_offset), iota(n))
+entry mine(header_base: [19]u32, n: u32, nonce_offset: u32) [][8]u32 =
+    map(|nonce: u32| mine_nonce(header_base, nonce + nonce_offset), 0u32..<n)

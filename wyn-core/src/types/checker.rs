@@ -2360,14 +2360,26 @@ impl<'a> TypeChecker<'a> {
                     )
                 })?;
 
-                // Check start is an integer type (unify with i32)
-                self.context.unify(&start_type, &i32()).map_err(|_| {
-                    err_type_at!(
-                        range.start.h.span,
-                        "Range operands must be integer types, got {}",
-                        self.format_type(&start_type.apply(&self.context))
-                    )
-                })?;
+                // Check start is an integer type (i32, u32, etc.)
+                let resolved_start = start_type.apply(&self.context);
+                if !crate::types::is_integer_type(&resolved_start) {
+                    // If still a type variable, default to i32
+                    if matches!(resolved_start, Type::Variable(_)) {
+                        self.context.unify(&start_type, &i32()).map_err(|_| {
+                            err_type_at!(
+                                range.start.h.span,
+                                "Range operands must be integer types, got {}",
+                                self.format_type(&start_type.apply(&self.context))
+                            )
+                        })?;
+                    } else {
+                        return Err(err_type_at!(
+                            range.start.h.span,
+                            "Range operands must be integer types, got {}",
+                            self.format_type(&resolved_start)
+                        ));
+                    }
+                }
 
                 // Check step type if present
                 let step_val = if let Some(step) = &range.step {

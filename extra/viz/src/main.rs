@@ -182,7 +182,7 @@ enum Command {
         nonces: u32,
         /// Starting nonce offset
         #[arg(long, default_value = "0")]
-        nonce_offset: i32,
+        nonce_offset: u32,
         /// Difficulty: number of leading zero bytes required in the hash
         #[arg(long, short, default_value = "1")]
         difficulty: u32,
@@ -1474,7 +1474,7 @@ async fn run_miner(
     path: PathBuf,
     header_arg: Option<String>,
     nonces: u32,
-    nonce_offset: i32,
+    nonce_offset: u32,
     difficulty: u32,
     workgroups_override: Option<u32>,
     verbose: bool,
@@ -1631,7 +1631,7 @@ async fn run_miner(
     for i in 0..nonces as usize {
         let hash = &hash_words[i * 8..(i + 1) * 8];
         if meets_difficulty(hash, difficulty) {
-            let nonce = nonce_offset + i as i32;
+            let nonce = nonce_offset + i as u32;
             hits.push((nonce, hash.to_vec()));
         }
     }
