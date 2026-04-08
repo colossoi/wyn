@@ -44,13 +44,13 @@ The raw 76-byte header (everything except the nonce) in hex:
 0100000055bd840a78798ad0da853f68974f3d183e2bd1db6a842c1feecf222a00000000ff104ccb05421ab93e63f8c3ce5c2c2e9dbb37de2764b3a3175c8166562cac7d51b96a49ffff001d
 ```
 
-The known nonce bytes are `283e9e70` (BE u32 = 675282544).
+The known nonce bytes are `283e9e70` (BE u32 = 675192432).
 
 **Verify the known solution** (run 1 nonce at the exact offset):
 
 ```bash
 viz miner ../../testfiles/miner.spv -n 1 -d 4 \
-  --nonce-offset 675282544 \
+  --nonce-offset 675192432 \
   --header-hex 0100000055bd840a78798ad0da853f68974f3d183e2bd1db6a842c1feecf222a00000000ff104ccb05421ab93e63f8c3ce5c2c2e9dbb37de2764b3a3175c8166562cac7d51b96a49ffff001d
 ```
 
@@ -59,14 +59,14 @@ Expected output:
 ```
 Mined 1 nonces in ...
 1 hit(s) found:
-  nonce  675282544 -> 00000000...
+  nonce  675192432 -> 00000000...
 ```
 
 **Search for the solution** (scan a range around the known nonce):
 
 ```bash
 viz miner ../../testfiles/miner.spv -n 65536 -d 4 \
-  --nonce-offset 675270000 \
+  --nonce-offset 675190000 \
   --header-hex 0100000055bd840a78798ad0da853f68974f3d183e2bd1db6a842c1feecf222a00000000ff104ccb05421ab93e63f8c3ce5c2c2e9dbb37de2764b3a3175c8166562cac7d51b96a49ffff001d
 ```
 

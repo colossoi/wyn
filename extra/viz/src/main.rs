@@ -473,6 +473,9 @@ async fn create_headless_device(verbose: bool) -> Result<(wgpu::Device, wgpu::Qu
     let spirv_passthrough_supported = adapter_features.contains(wgpu::Features::SPIRV_SHADER_PASSTHROUGH);
 
     if verbose {
+        let info = adapter.get_info();
+        println!("GPU: {} ({:?})", info.name, info.backend);
+        println!("Driver: {} {}", info.driver, info.driver_info);
         println!(
             "SPIRV_SHADER_PASSTHROUGH supported: {}",
             spirv_passthrough_supported
