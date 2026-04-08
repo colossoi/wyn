@@ -1630,13 +1630,20 @@ async fn run_miner(
     let hash_words: &[u32] = bytemuck::cast_slice(&data);
 
     // Check each hash for difficulty hits.
-    // SHA256 state words h0..h7: h0 is the most significant 32 bits of the digest.
-    // Bitcoin compares hashes as big-endian 256-bit numbers, so leading zeros
-    // in the display hash correspond to leading zero bytes starting from h0.
+    // A hash of all zeros means the GPU didn't compute it (likely TDR timeout).
     let mut hits = Vec::new();
+    let mut zero_hashes = 0usize;
+    let mut first_zero = None;
     for i in 0..nonces as usize {
         let hash = &hash_words[i * 8..(i + 1) * 8];
         let nonce = nonce_offset + i as u32;
+        if hash.iter().all(|&w| w == 0) {
+            zero_hashes += 1;
+            if first_zero.is_none() {
+                first_zero = Some(i);
+            }
+            continue;
+        }
         if verbose {
             print!("  nonce {:>10} -> ", nonce);
             for word in hash {
@@ -1650,9 +1657,19 @@ async fn run_miner(
         }
     }
 
-    let hash_rate = nonces as f64 / elapsed.as_secs_f64();
+    let computed = nonces as usize - zero_hashes;
+    let hash_rate = computed as f64 / elapsed.as_secs_f64();
 
-    println!("Mined {} nonces in {:.2?} ({:.0} H/s)", nonces, elapsed, hash_rate);
+    if zero_hashes > 0 {
+        eprintln!(
+            "WARNING: {} of {} hashes were not computed (GPU timeout after nonce {}). Try fewer nonces with -n.",
+            zero_hashes,
+            nonces,
+            nonce_offset + first_zero.unwrap() as u32,
+        );
+    }
+
+    println!("Mined {} nonces in {:.2?} ({:.0} H/s)", computed, elapsed, hash_rate);
 
     if hits.is_empty() {
         println!("No hits found (difficulty: {} leading zero bytes)", difficulty);
