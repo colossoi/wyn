@@ -211,6 +211,9 @@ enum Command {
         /// Number of workgroups (each has 64 threads)
         #[arg(long)]
         workgroups: Option<u32>,
+        /// Max nonces per GPU dispatch (avoids GPU timeout). Loops through the full range in chunks.
+        #[arg(long, short = 'c', default_value = "262144")]
+        chunk_size: u32,
         /// Print verbose output
         #[arg(short, long)]
         verbose: bool,
@@ -1502,44 +1505,41 @@ async fn run_miner(
     nonce_offset: u32,
     difficulty: u32,
     workgroups_override: Option<u32>,
+    chunk_size: u32,
     verbose: bool,
 ) -> Result<()> {
     let header_base = header_hex;
-
     let workgroup_size = 64u32;
-    let num_workgroups = workgroups_override.unwrap_or_else(|| (nonces + workgroup_size - 1) / workgroup_size);
-
-    // Output buffer: n hashes, each [8]u32 = 32 bytes
-    let output_elements = nonces as u64 * 8;
-    let output_byte_size = output_elements * 4;
+    let chunk = chunk_size.max(workgroup_size); // at least one workgroup
+    let num_chunks = (nonces + chunk - 1) / chunk;
 
     if verbose {
         println!("Miner configuration:");
         println!("  Header: {:08x?}", header_base);
         println!("  Nonces: {} (offset {})", nonces, nonce_offset);
         println!("  Difficulty: {} leading zero bytes", difficulty);
-        println!("  Workgroups: {} x 1 x 1 (workgroup size {})", num_workgroups, workgroup_size);
-        println!("  Output buffer: {} bytes ({} hashes)", output_byte_size, nonces);
+        println!("  Chunk size: {} ({} chunks)", chunk, num_chunks);
     }
 
     let (device, queue) = create_headless_device(verbose).await?;
 
-    // Storage buffer for output hashes
+    // Buffers sized for one chunk
+    let chunk_byte_size = chunk as u64 * 8 * 4;
+
     let output_buffer = device.create_buffer(&BufferDescriptor {
         label: Some("miner_output"),
-        size: output_byte_size,
+        size: chunk_byte_size,
         usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
 
     let staging = device.create_buffer(&BufferDescriptor {
         label: Some("miner_staging"),
-        size: output_byte_size,
+        size: chunk_byte_size,
         usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
 
-    // Bind group
     let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
         label: Some("miner_bind_group_layout"),
         entries: &[BindGroupLayoutEntry {
@@ -1567,14 +1567,6 @@ async fn run_miner(
         }],
     });
 
-    // Push constants: header_base (76 bytes) + n (4 bytes) + nonce_offset (4 bytes) = 84 bytes
-    let mut pc_bytes = Vec::with_capacity(84);
-    for word in &header_base {
-        pc_bytes.extend_from_slice(&word.to_le_bytes());
-    }
-    pc_bytes.extend_from_slice(&nonces.to_le_bytes()); // n as i32, but same bits
-    pc_bytes.extend_from_slice(&nonce_offset.to_le_bytes());
-
     let module = load_spirv_module(&device, &path)?;
 
     let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -1596,80 +1588,114 @@ async fn run_miner(
     });
 
     let start_time = std::time::Instant::now();
+    let mut hits = Vec::new();
+    let mut total_computed = 0u64;
+    let mut timed_out = false;
 
-    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
-        label: Some("miner_encoder"),
-    });
+    for chunk_idx in 0..num_chunks {
+        let chunk_offset = nonce_offset + chunk_idx * chunk;
+        let chunk_n = chunk.min(nonces - chunk_idx * chunk);
+        let num_workgroups =
+            workgroups_override.unwrap_or_else(|| (chunk_n + workgroup_size - 1) / workgroup_size);
 
-    {
-        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("miner_pass"),
-            timestamp_writes: None,
+        // Build push constants for this chunk
+        let mut pc_bytes = Vec::with_capacity(84);
+        for word in &header_base {
+            pc_bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        pc_bytes.extend_from_slice(&chunk_n.to_le_bytes());
+        pc_bytes.extend_from_slice(&chunk_offset.to_le_bytes());
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("miner_encoder"),
         });
-        cpass.set_pipeline(&pipeline);
-        cpass.set_bind_group(0, &bind_group, &[]);
-        cpass.set_push_constants(0, &pc_bytes);
-        cpass.dispatch_workgroups(num_workgroups, 1, 1);
+
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("miner_pass"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&pipeline);
+            cpass.set_bind_group(0, &bind_group, &[]);
+            cpass.set_push_constants(0, &pc_bytes);
+            cpass.dispatch_workgroups(num_workgroups, 1, 1);
+        }
+
+        let readback_size = chunk_n as u64 * 8 * 4;
+        encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging, 0, readback_size);
+        queue.submit(Some(encoder.finish()));
+        let _ = device.poll(wgpu::PollType::Wait);
+
+        let buffer_slice = staging.slice(..readback_size);
+        let (tx, rx) = std::sync::mpsc::channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            tx.send(result).unwrap();
+        });
+        let _ = device.poll(wgpu::PollType::Wait);
+        rx.recv().unwrap()?;
+
+        let data = buffer_slice.get_mapped_range();
+        let hash_words: &[u32] = bytemuck::cast_slice(&data);
+
+        let mut chunk_zeros = 0usize;
+        for i in 0..chunk_n as usize {
+            let hash = &hash_words[i * 8..(i + 1) * 8];
+            let nonce = chunk_offset + i as u32;
+            if hash.iter().all(|&w| w == 0) {
+                chunk_zeros += 1;
+                continue;
+            }
+            if verbose {
+                print!("  nonce {:>10} -> ", nonce);
+                for word in hash {
+                    print!("{:08x}", word);
+                }
+                let lz = leading_zero_bytes(hash);
+                println!("  ({} leading zero bytes)", lz);
+            }
+            if meets_difficulty(hash, difficulty) {
+                hits.push((nonce, hash.to_vec()));
+            }
+        }
+
+        total_computed += (chunk_n as usize - chunk_zeros) as u64;
+
+        drop(data);
+        staging.unmap();
+
+        if chunk_zeros > 0 {
+            eprintln!(
+                "WARNING: GPU timeout in chunk {} (nonces {}..{}). Try a smaller --chunk-size.",
+                chunk_idx + 1,
+                chunk_offset,
+                chunk_offset + chunk_n,
+            );
+            timed_out = true;
+            break;
+        }
+
+        if verbose && num_chunks > 1 {
+            let progress = (chunk_idx + 1) as f64 / num_chunks as f64 * 100.0;
+            let elapsed = start_time.elapsed();
+            let rate = total_computed as f64 / elapsed.as_secs_f64();
+            eprint!("\r  chunk {}/{} ({:.0}%) {:.0} H/s", chunk_idx + 1, num_chunks, progress, rate);
+        }
     }
 
-    encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging, 0, output_byte_size);
-    queue.submit(Some(encoder.finish()));
-    let _ = device.poll(wgpu::PollType::Wait);
-
-    // Read back results
-    let buffer_slice = staging.slice(..);
-    let (tx, rx) = std::sync::mpsc::channel();
-    buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-        tx.send(result).unwrap();
-    });
-    let _ = device.poll(wgpu::PollType::Wait);
-    rx.recv().unwrap()?;
+    if verbose && num_chunks > 1 {
+        eprintln!(); // newline after progress
+    }
 
     let elapsed = start_time.elapsed();
-    let data = buffer_slice.get_mapped_range();
-    let hash_words: &[u32] = bytemuck::cast_slice(&data);
+    let hash_rate = total_computed as f64 / elapsed.as_secs_f64();
 
-    // Check each hash for difficulty hits.
-    // A hash of all zeros means the GPU didn't compute it (likely TDR timeout).
-    let mut hits = Vec::new();
-    let mut zero_hashes = 0usize;
-    let mut first_zero = None;
-    for i in 0..nonces as usize {
-        let hash = &hash_words[i * 8..(i + 1) * 8];
-        let nonce = nonce_offset + i as u32;
-        if hash.iter().all(|&w| w == 0) {
-            zero_hashes += 1;
-            if first_zero.is_none() {
-                first_zero = Some(i);
-            }
-            continue;
-        }
-        if verbose {
-            print!("  nonce {:>10} -> ", nonce);
-            for word in hash {
-                print!("{:08x}", word);
-            }
-            let lz = leading_zero_bytes(hash);
-            println!("  ({} leading zero bytes)", lz);
-        }
-        if meets_difficulty(hash, difficulty) {
-            hits.push((nonce, hash.to_vec()));
-        }
-    }
-
-    let computed = nonces as usize - zero_hashes;
-    let hash_rate = computed as f64 / elapsed.as_secs_f64();
-
-    if zero_hashes > 0 {
-        eprintln!(
-            "WARNING: {} of {} hashes were not computed (GPU timeout after nonce {}). Try fewer nonces with -n.",
-            zero_hashes,
-            nonces,
-            nonce_offset + first_zero.unwrap() as u32,
-        );
-    }
-
-    println!("Mined {} nonces in {:.2?} ({:.0} H/s)", computed, elapsed, hash_rate);
+    println!(
+        "Mined {} nonces in {:.2?} ({:.0} H/s){}",
+        total_computed,
+        elapsed,
+        hash_rate,
+        if timed_out { " (interrupted)" } else { "" },
+    );
 
     if hits.is_empty() {
         println!("No hits found (difficulty: {} leading zero bytes)", difficulty);
@@ -1683,9 +1709,6 @@ async fn run_miner(
             println!();
         }
     }
-
-    drop(data);
-    staging.unmap();
 
     Ok(())
 }
@@ -3001,9 +3024,10 @@ fn main() -> Result<()> {
             nonce_offset,
             difficulty,
             workgroups,
+            chunk_size,
             verbose,
         } => {
-            pollster::block_on(run_miner(path, header_hex, nonces, nonce_offset, difficulty, workgroups, verbose))?;
+            pollster::block_on(run_miner(path, header_hex, nonces, nonce_offset, difficulty, workgroups, chunk_size, verbose))?;
         }
         Command::Validate { path, verbose } => {
             pollster::block_on(validate_spirv(&path, verbose))?;
