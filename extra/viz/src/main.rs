@@ -736,7 +736,7 @@ fn print_storage_buffer(spec: &StorageBufferSpec, data: &[u8]) {
             for (i, chunk) in u32_data[..elements_to_show].chunks(8).enumerate() {
                 print!("  [{:3}]: ", i * 8);
                 for val in chunk {
-                    print!("{:8} ", val);
+                    print!("{:08x} ", val);
                 }
                 println!();
             }
@@ -1670,14 +1670,14 @@ async fn run_miner(
     Ok(())
 }
 
-/// Count leading zero bytes in a hash (8 x u32, big-endian word order: h0 is MSB).
+/// Count leading zero bytes in a hash (8 x u32, stored in reverse: h7 at [0], h0 at [7]).
 fn leading_zero_bytes(hash: &[u32]) -> u32 {
     let mut zero_bytes = 0u32;
-    for &word in hash {
-        let lz = word.leading_zeros() / 8; // full zero bytes in this word
+    for &word in hash.iter().rev() {
+        let lz = word.leading_zeros() / 8;
         zero_bytes += lz;
         if lz < 4 {
-            break; // this word has a non-zero byte, stop counting
+            break;
         }
     }
     zero_bytes
