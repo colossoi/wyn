@@ -1125,11 +1125,14 @@ impl<'a> TypeChecker<'a> {
         let body = Self::arrow_chain(&[vec.clone(), vec], Self::var(t));
         self.scope_stack.insert("dot".to_string(), Self::forall(&[n, t], body));
 
-        // Trigonometric functions: f32 -> f32
-        let trig_type = Type::arrow(f32(), f32());
-        self.scope_stack.insert("sin".to_string(), TypeScheme::Monotype(trig_type.clone()));
-        self.scope_stack.insert("cos".to_string(), TypeScheme::Monotype(trig_type.clone()));
-        self.scope_stack.insert("tan".to_string(), TypeScheme::Monotype(trig_type));
+        // Math functions: ∀t. t -> t (works on f32, vec2f32, vec3f32, vec4f32)
+        let t = self.fresh_var();
+        let math_unary = Self::forall(&[t], Type::arrow(Self::var(t), Self::var(t)));
+        for name in &[
+            "sin", "cos", "tan", "sqrt", "abs", "floor", "ceil", "fract", "exp", "log",
+        ] {
+            self.scope_stack.insert(name.to_string(), math_unary.clone());
+        }
 
         // Register vector field mappings
         self.register_vector_fields();

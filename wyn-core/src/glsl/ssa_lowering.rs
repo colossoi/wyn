@@ -9,7 +9,7 @@ use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
 use crate::lowering_common::ShaderStage;
 use crate::ssa::types::{
-    BlockId, ConstantValue, ControlHeader, FuncBody, InstKind, Terminator, ValueId, ValueRef, WynInstNode,
+    ConstantValue, FuncBody, InstKind, ValueId, ValueRef, WynInstNode,
 };
 use crate::ssa::types::{EntryPoint, ExecutionModel, Function, IoDecoration, Program};
 use crate::types::TypeExt;
@@ -615,572 +615,179 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             self.declared.insert(name.clone());
         }
 
-        // For simple single-block functions, just lower the instructions
-        if self.body.inner.blocks.len() == 1 {
-            return self.lower_single_block(output);
-        }
-
-        // For multi-block functions, we need to handle control flow
-        self.lower_cfg(output)
+        // Convert CFG to structured control flow tree, then emit
+        let nodes = super::structured::structurize(self.body);
+        self.emit_nodes(&nodes, output)
     }
 
-    /// Lower a single-block function (no control flow)
-    fn lower_single_block(&mut self, output: &mut String) -> Result<String> {
-        let block = &self.body.inner.blocks[self.body.inner.entry];
-
-        // Lower each instruction
-        for &inst_id in &block.insts {
-            let inst = self.body.get_inst(inst_id);
-            let is_side_effect = matches!(inst.data, InstKind::OutputPtr { .. } | InstKind::Store { .. });
-            let expr = self.lower_inst(inst, output)?;
-
-            if let Some(result) = inst.result {
-                if !is_side_effect {
-                    let var_name = glsl_var(result);
-                    let ty = self.ctx.type_to_glsl(self.body.inner.value_type(result));
-                    writeln!(output, "{}{} {} = {};", self.ctx.indent_str(), ty, var_name, expr).unwrap();
-                    self.value_map.insert(result, var_name.clone());
-                    self.declared.insert(var_name);
-                }
-            }
-        }
-
-        // Get the return value from terminator
-        match &block.term {
-            Terminator::Return(Some(val)) => self.get_value(*val),
-            Terminator::Return(None) => Ok("".to_string()),
-            _ => bail_glsl!("Unexpected terminator in single-block function"),
-        }
-    }
-
-    /// Lower a multi-block CFG.
-    ///
-    /// This is more complex as we need to reconstruct structured control flow.
-    /// For now, we use a simple approach that handles common patterns.
-    fn lower_cfg(&mut self, output: &mut String) -> Result<String> {
-        // Detect the CFG pattern and lower accordingly
-        // For now, implement a simple linear walk that handles basic patterns
-
-        let mut current_block = self.body.entry_block();
+    /// Emit structured control flow nodes as GLSL.
+    fn emit_nodes(&mut self, nodes: &[super::structured::Node], output: &mut String) -> Result<String> {
+        use super::structured::Node;
         let mut result_var = String::new();
 
-        loop {
-            let block = &self.body.inner.blocks[current_block];
+        for node in nodes {
+            match node {
+                Node::Inst(inst_id) => {
+                    let inst = self.body.get_inst(*inst_id);
+                    let is_side_effect =
+                        matches!(inst.data, InstKind::OutputPtr { .. } | InstKind::Store { .. });
+                    let expr = self.lower_inst(inst, output)?;
 
-            // Lower block parameters (these come from branch arguments)
-            // Skip for entry block (handled by function params)
-            if current_block != self.body.entry_block() {
-                for param in &block.params {
-                    // The value should already be in value_map from the branch
-                    if !self.value_map.contains_key(&*param) {
-                        // Declare variable for block param
-                        let var_name = glsl_var(*param);
-                        let ty = self.ctx.type_to_glsl(&self.body.inner.value_type(*param));
-                        writeln!(output, "{}{} {};", self.ctx.indent_str(), ty, var_name).unwrap();
-                        self.value_map.insert(*param, var_name.clone());
-                        self.declared.insert(var_name);
-                    }
-                }
-            }
-
-            // Lower instructions
-            for &inst_id in &block.insts {
-                let inst = self.body.get_inst(inst_id);
-                let is_side_effect =
-                    matches!(inst.data, InstKind::OutputPtr { .. } | InstKind::Store { .. });
-                let expr = self.lower_inst(inst, output)?;
-
-                if let Some(result) = inst.result {
-                    if !is_side_effect {
-                        let var_name = glsl_var(result);
-                        let ty = self.ctx.type_to_glsl(self.body.inner.value_type(result));
-                        writeln!(output, "{}{} {} = {};", self.ctx.indent_str(), ty, var_name, expr)
-                            .unwrap();
-                        self.value_map.insert(result, var_name.clone());
-                        self.declared.insert(var_name);
-                    }
-                }
-            }
-
-            // Handle terminator
-            match &block.term {
-                Terminator::Return(Some(val)) => {
-                    result_var = self.get_value(*val)?;
-                    break;
-                }
-                Terminator::Return(None) => {
-                    result_var = "".to_string();
-                    break;
-                }
-                Terminator::Branch { target, args } => {
-                    // Check if the target is a loop header
-                    if let Some(ControlHeader::Loop {
-                        merge,
-                        continue_block,
-                    }) = self.body.control_headers.get(target)
-                    {
-                        let merge = *merge;
-                        let continue_block = *continue_block;
-                        let target = *target;
-                        self.lower_loop(target, args, merge, continue_block, output)?;
-                        // Continue from the merge block
-                        current_block = merge;
-                    } else {
-                        // Pass arguments to target block params
-                        let target_block = &self.body.inner.blocks[*target];
-                        for (&param, arg) in target_block.params.iter().zip(args.iter()) {
-                            let arg_val = self.get_value(*arg)?;
-                            let var_name = glsl_var(param);
+                    if let Some(result) = inst.result {
+                        if !is_side_effect {
+                            let var_name = glsl_var(result);
                             if self.declared.contains(&var_name) {
-                                writeln!(output, "{}{} = {};", self.ctx.indent_str(), var_name, arg_val)
+                                writeln!(output, "{}{} = {};", self.ctx.indent_str(), var_name, expr)
                                     .unwrap();
                             } else {
-                                let ty = self.ctx.type_to_glsl(self.body.inner.value_type(param));
+                                let ty = self.ctx.type_to_glsl(self.body.inner.value_type(result));
                                 writeln!(
                                     output,
                                     "{}{} {} = {};",
                                     self.ctx.indent_str(),
                                     ty,
                                     var_name,
-                                    arg_val
+                                    expr
                                 )
                                 .unwrap();
                                 self.declared.insert(var_name.clone());
                             }
-                            self.value_map.insert(param, var_name);
+                            self.value_map.insert(result, var_name);
                         }
-                        current_block = *target;
                     }
                 }
-                Terminator::CondBranch {
-                    cond,
-                    then_target,
-                    then_args,
-                    else_target,
-                    else_args,
-                } => {
-                    // Check if this is an if-then-else that merges
-                    let merge_block = self.find_merge_block(*then_target, *else_target);
 
-                    if let Some(merge) = merge_block {
-                        // Structured if-then-else
-                        result_var = self.lower_if_then_else(
-                            *cond,
-                            *then_target,
-                            then_args,
-                            *else_target,
-                            else_args,
-                            merge,
-                            output,
-                        )?;
-                        current_block = merge;
-
-                        // If merge block is a return, we're done
-                        let merge_blk = &self.body.inner.blocks[merge];
-                        if matches!(merge_blk.term, Terminator::Return(_)) {
-                            // Continue to process merge block
-                            continue;
-                        }
-                    } else {
-                        // Unstructured control flow - not supported in GLSL
-                        bail_glsl!("Unstructured control flow not supported in GLSL");
-                    }
-                }
-                Terminator::Unreachable => {
-                    bail_glsl!("Unreachable terminator encountered");
-                }
-            }
-        }
-
-        Ok(result_var)
-    }
-
-    /// Find the merge block for an if-then-else.
-    /// Walks all blocks reachable from each branch and finds the first common one.
-    fn find_merge_block(&self, then_block: BlockId, else_block: BlockId) -> Option<BlockId> {
-        let then_reachable = self.reachable_from(then_block);
-        let else_reachable = self.reachable_from(else_block);
-        // BFS order from then_block — first common block is the merge
-        then_reachable.into_iter().find(|b| else_reachable.contains(b))
-    }
-
-    /// BFS all blocks reachable from a starting block.
-    fn reachable_from(&self, start: BlockId) -> Vec<BlockId> {
-        let mut visited = HashSet::new();
-        let mut queue = std::collections::VecDeque::new();
-        let mut result = Vec::new();
-        queue.push_back(start);
-        while let Some(block) = queue.pop_front() {
-            if !visited.insert(block) {
-                continue;
-            }
-            result.push(block);
-            let blk = &self.body.inner.blocks[block];
-            match &blk.term {
-                Terminator::Branch { target, .. } => queue.push_back(*target),
-                Terminator::CondBranch {
-                    then_target,
-                    else_target,
-                    ..
-                } => {
-                    queue.push_back(*then_target);
-                    queue.push_back(*else_target);
-                }
-                Terminator::Return(_) | Terminator::Unreachable => {}
-            }
-        }
-        result
-    }
-
-    /// Lower a loop construct.
-    /// header_id: the loop header block (has params = loop state)
-    /// init_args: values passed to the header on loop entry
-    /// merge_id: block after the loop
-    /// continue_id: the continue/body block
-    fn lower_loop(
-        &mut self,
-        header_id: BlockId,
-        init_args: &[ValueId],
-        merge_id: BlockId,
-        continue_id: BlockId,
-        output: &mut String,
-    ) -> Result<()> {
-        let header = &self.body.inner.blocks[header_id];
-
-        // Declare and initialize loop state variables from header params
-        for (param, arg) in header.params.iter().zip(init_args.iter()) {
-            let arg_val = self.get_value(*arg)?;
-            let var_name = glsl_var(*param);
-            let ty = self.ctx.type_to_glsl(&self.body.inner.value_type(*param));
-            writeln!(
-                output,
-                "{}{} {} = {};",
-                self.ctx.indent_str(),
-                ty,
-                var_name,
-                arg_val
-            )
-            .unwrap();
-            self.value_map.insert(*param, var_name.clone());
-            self.declared.insert(var_name);
-        }
-
-        // Determine which branch is the body vs the exit
-        let (cond_id, body_target, invert) = match &header.term {
-            Terminator::CondBranch {
-                cond,
-                then_target,
-                else_target,
-                ..
-            } => {
-                if *then_target == continue_id {
-                    (*cond, *then_target, false)
-                } else {
-                    (*cond, *else_target, true)
-                }
-            }
-            _ => bail_glsl!("Loop header must end with CondBranch"),
-        };
-
-        // Lower header instructions once before the loop (declares + initializes variables)
-        self.lower_header_insts(&header.insts, output)?;
-
-        let cond_val = self.get_value(cond_id)?;
-        let cond_expr = if invert { format!("!({})", cond_val) } else { cond_val };
-        writeln!(output, "{}while ({}) {{", self.ctx.indent_str(), cond_expr).unwrap();
-        self.ctx.indent += 1;
-
-        // Lower the body block(s)
-        self.lower_loop_body(body_target, header_id, output)?;
-
-        // Re-evaluate header instructions at end of loop body (updates condition)
-        self.lower_header_insts(&header.insts, output)?;
-
-        self.ctx.indent -= 1;
-        writeln!(output, "{}}}", self.ctx.indent_str()).unwrap();
-
-        // Map the merge block's params from the loop exit args
-        let merge_blk = &self.body.inner.blocks[merge_id];
-        if let Terminator::CondBranch {
-            else_args,
-            then_args,
-            then_target,
-            ..
-        } = &header.term
-        {
-            let exit_args = if *then_target == continue_id { else_args } else { then_args };
-            for (param, arg) in merge_blk.params.iter().zip(exit_args.iter()) {
-                let arg_val = self.get_value(*arg)?;
-                self.value_map.insert(*param, arg_val);
-            }
-        }
-
-        // Merge block instructions are lowered by the caller (lower_cfg or lower_block_inline)
-        Ok(())
-    }
-
-    /// Lower header instructions, using assignment if already declared.
-    fn lower_header_insts(&mut self, insts: &[wyn_ssa::InstId], output: &mut String) -> Result<()> {
-        for &inst_id in insts {
-            let inst = self.body.get_inst(inst_id);
-            let is_side_effect = matches!(inst.data, InstKind::OutputPtr { .. } | InstKind::Store { .. });
-            let expr = self.lower_inst(inst, output)?;
-            if let Some(result) = inst.result {
-                if !is_side_effect {
-                    let var_name = glsl_var(result);
+                Node::Assign { target, value } => {
+                    let val = self.get_value(*value)?;
+                    let var_name = glsl_var(*target);
                     if self.declared.contains(&var_name) {
-                        writeln!(output, "{}{} = {};", self.ctx.indent_str(), var_name, expr).unwrap();
+                        writeln!(output, "{}{} = {};", self.ctx.indent_str(), var_name, val).unwrap();
                     } else {
-                        let ty = self.ctx.type_to_glsl(self.body.inner.value_type(result));
-                        writeln!(output, "{}{} {} = {};", self.ctx.indent_str(), ty, var_name, expr)
+                        let ty = self.ctx.type_to_glsl(self.body.inner.value_type(*target));
+                        writeln!(output, "{}{} {} = {};", self.ctx.indent_str(), ty, var_name, val)
                             .unwrap();
                         self.declared.insert(var_name.clone());
                     }
-                    self.value_map.insert(result, var_name);
+                    self.value_map.insert(*target, var_name);
                 }
-            }
-        }
-        Ok(())
-    }
 
-    /// Lower the body of a loop — instructions that eventually branch back to the header.
-    fn lower_loop_body(
-        &mut self,
-        block_id: BlockId,
-        header_id: BlockId,
-        output: &mut String,
-    ) -> Result<()> {
-        let block = &self.body.inner.blocks[block_id];
-
-        // Lower instructions
-        for &inst_id in &block.insts {
-            let inst = self.body.get_inst(inst_id);
-            let is_side_effect = matches!(inst.data, InstKind::OutputPtr { .. } | InstKind::Store { .. });
-            let expr = self.lower_inst(inst, output)?;
-            if let Some(result) = inst.result {
-                if !is_side_effect {
-                    let var_name = glsl_var(result);
-                    let ty = self.ctx.type_to_glsl(self.body.inner.value_type(result));
-                    writeln!(output, "{}{} {} = {};", self.ctx.indent_str(), ty, var_name, expr).unwrap();
-                    self.value_map.insert(result, var_name.clone());
-                    self.declared.insert(var_name);
-                }
-            }
-        }
-
-        // Handle terminator
-        match &block.term {
-            Terminator::Branch { target, args } if *target == header_id => {
-                // Back-edge: update loop state variables
-                let header = &self.body.inner.blocks[header_id];
-                for (param, arg) in header.params.iter().zip(args.iter()) {
-                    let arg_val = self.get_value(*arg)?;
-                    let var_name = glsl_var(*param);
-                    writeln!(output, "{}{} = {};", self.ctx.indent_str(), var_name, arg_val).unwrap();
-                }
-                Ok(())
-            }
-            Terminator::Branch { target, args } => {
-                // Forward branch to another block in the body
-                let target_block = &self.body.inner.blocks[*target];
-                for (param, arg) in target_block.params.iter().zip(args.iter()) {
-                    let arg_val = self.get_value(*arg)?;
-                    self.value_map.insert(*param, arg_val);
-                }
-                self.lower_loop_body(*target, header_id, output)
-            }
-            Terminator::CondBranch {
-                cond,
-                then_target,
-                then_args,
-                else_target,
-                else_args,
-            } => {
-                // If-else inside the loop body
-                if let Some(merge) = self.find_merge_block(*then_target, *else_target) {
-                    self.lower_if_then_else(
-                        *cond,
-                        *then_target,
-                        then_args,
-                        *else_target,
-                        else_args,
-                        merge,
-                        output,
-                    )?;
-                    // Follow merge to the back-edge or next block
-                    let merge_blk = &self.body.inner.blocks[merge];
-                    match &merge_blk.term {
-                        Terminator::Branch { target, args } if *target == header_id => {
-                            let header = &self.body.inner.blocks[header_id];
-                            for (param, arg) in header.params.iter().zip(args.iter()) {
-                                let arg_val = self.get_value(*arg)?;
-                                let var_name = glsl_var(*param);
-                                writeln!(output, "{}{} = {};", self.ctx.indent_str(), var_name, arg_val)
-                                    .unwrap();
-                            }
-                            Ok(())
+                Node::If {
+                    cond,
+                    then_body,
+                    then_args,
+                    else_body,
+                    else_args,
+                    merge_params,
+                } => {
+                    // Declare merge params before the if
+                    for param in merge_params {
+                        let var_name = glsl_var(*param);
+                        if !self.declared.contains(&var_name) {
+                            let ty = self.ctx.type_to_glsl(self.body.inner.value_type(*param));
+                            writeln!(output, "{}{} {};", self.ctx.indent_str(), ty, var_name).unwrap();
+                            self.declared.insert(var_name.clone());
                         }
-                        _ => self.lower_loop_body(merge, header_id, output),
+                        self.value_map.insert(*param, var_name);
                     }
-                } else {
-                    bail_glsl!("Unstructured control flow in loop body")
+
+                    let cond_val = self.get_value(*cond)?;
+                    writeln!(output, "{}if ({}) {{", self.ctx.indent_str(), cond_val).unwrap();
+                    self.ctx.indent += 1;
+
+                    self.emit_nodes(then_body, output)?;
+                    for (param, arg) in merge_params.iter().zip(then_args.iter()) {
+                        let arg_val = self.get_value(*arg)?;
+                        let var_name = glsl_var(*param);
+                        writeln!(output, "{}{} = {};", self.ctx.indent_str(), var_name, arg_val).unwrap();
+                    }
+
+                    self.ctx.indent -= 1;
+                    writeln!(output, "{}}} else {{", self.ctx.indent_str()).unwrap();
+                    self.ctx.indent += 1;
+
+                    self.emit_nodes(else_body, output)?;
+                    for (param, arg) in merge_params.iter().zip(else_args.iter()) {
+                        let arg_val = self.get_value(*arg)?;
+                        let var_name = glsl_var(*param);
+                        writeln!(output, "{}{} = {};", self.ctx.indent_str(), var_name, arg_val).unwrap();
+                    }
+
+                    self.ctx.indent -= 1;
+                    writeln!(output, "{}}}", self.ctx.indent_str()).unwrap();
+                }
+
+                Node::Loop {
+                    state_vars,
+                    init_args,
+                    header_insts,
+                    cond,
+                    cond_is_continue,
+                    body,
+                } => {
+                    // Declare and initialize state variables
+                    for (var, init) in state_vars.iter().zip(init_args.iter()) {
+                        let init_val = self.get_value(*init)?;
+                        let var_name = glsl_var(*var);
+                        let ty = self.ctx.type_to_glsl(self.body.inner.value_type(*var));
+                        writeln!(
+                            output,
+                            "{}{} {} = {};",
+                            self.ctx.indent_str(),
+                            ty,
+                            var_name,
+                            init_val
+                        )
+                        .unwrap();
+                        self.value_map.insert(*var, var_name.clone());
+                        self.declared.insert(var_name);
+                    }
+
+                    // First evaluation of header (computes condition)
+                    self.emit_header_insts(header_insts, output)?;
+
+                    let cond_val = self.get_value(*cond)?;
+                    let cond_expr = if *cond_is_continue { cond_val } else { format!("!({})", cond_val) };
+                    writeln!(output, "{}while ({}) {{", self.ctx.indent_str(), cond_expr).unwrap();
+                    self.ctx.indent += 1;
+
+                    self.emit_nodes(body, output)?;
+
+                    // Re-evaluate header (update condition for next iteration)
+                    self.emit_header_insts(header_insts, output)?;
+
+                    self.ctx.indent -= 1;
+                    writeln!(output, "{}}}", self.ctx.indent_str()).unwrap();
+                }
+
+                Node::Return(val) => {
+                    if let Some(v) = val {
+                        result_var = self.get_value(*v)?;
+                    }
                 }
             }
-            _ => Ok(()),
         }
-    }
-
-    /// Lower an if-then-else construct.
-    fn lower_if_then_else(
-        &mut self,
-        cond: ValueId,
-        then_target: BlockId,
-        then_args: &[ValueId],
-        else_target: BlockId,
-        else_args: &[ValueId],
-        merge: BlockId,
-        output: &mut String,
-    ) -> Result<String> {
-        let cond_val = self.get_value(cond)?;
-        let merge_block = &self.body.inner.blocks[merge];
-
-        // Declare result variable if merge block has params
-        let result_var = if !merge_block.params.is_empty() {
-            let param = &merge_block.params[0];
-            let var_name = glsl_var(*param);
-            let ty = self.ctx.type_to_glsl(&self.body.inner.value_type(*param));
-            writeln!(output, "{}{} {};", self.ctx.indent_str(), ty, var_name).unwrap();
-            self.declared.insert(var_name.clone());
-            self.value_map.insert(*param, var_name.clone());
-            var_name
-        } else {
-            String::new()
-        };
-
-        // Emit if statement
-        writeln!(output, "{}if ({}) {{", self.ctx.indent_str(), cond_val).unwrap();
-        self.ctx.indent += 1;
-
-        // Lower then block
-        let then_result = self.lower_block_inline(then_target, then_args, output)?;
-        if !result_var.is_empty() {
-            writeln!(
-                output,
-                "{}{} = {};",
-                self.ctx.indent_str(),
-                result_var,
-                then_result
-            )
-            .unwrap();
-        }
-
-        self.ctx.indent -= 1;
-        writeln!(output, "{}}} else {{", self.ctx.indent_str()).unwrap();
-        self.ctx.indent += 1;
-
-        // Lower else block
-        let else_result = self.lower_block_inline(else_target, else_args, output)?;
-        if !result_var.is_empty() {
-            writeln!(
-                output,
-                "{}{} = {};",
-                self.ctx.indent_str(),
-                result_var,
-                else_result
-            )
-            .unwrap();
-        }
-
-        self.ctx.indent -= 1;
-        writeln!(output, "{}}}", self.ctx.indent_str()).unwrap();
 
         Ok(result_var)
     }
 
-    /// Lower a block inline (for use in if/else branches).
-    fn lower_block_inline(
-        &mut self,
-        block_id: BlockId,
-        args: &[ValueId],
-        output: &mut String,
-    ) -> Result<String> {
-        let block = &self.body.inner.blocks[block_id];
-
-        // Set up block params from args
-        for (param, arg) in block.params.iter().zip(args.iter()) {
-            let arg_val = self.get_value(*arg)?;
-            self.value_map.insert(*param, arg_val);
-        }
-
-        // Lower instructions
-        for &inst_id in &block.insts {
+    /// Emit header instructions, using assignment for already-declared variables.
+    fn emit_header_insts(&mut self, insts: &[wyn_ssa::InstId], output: &mut String) -> Result<()> {
+        for &inst_id in insts {
             let inst = self.body.get_inst(inst_id);
-            let is_side_effect = matches!(inst.data, InstKind::OutputPtr { .. } | InstKind::Store { .. });
             let expr = self.lower_inst(inst, output)?;
-
             if let Some(result) = inst.result {
-                if !is_side_effect {
-                    let var_name = glsl_var(result);
+                let var_name = glsl_var(result);
+                if self.declared.contains(&var_name) {
+                    writeln!(output, "{}{} = {};", self.ctx.indent_str(), var_name, expr).unwrap();
+                } else {
                     let ty = self.ctx.type_to_glsl(self.body.inner.value_type(result));
                     writeln!(output, "{}{} {} = {};", self.ctx.indent_str(), ty, var_name, expr).unwrap();
-                    self.value_map.insert(result, var_name.clone());
-                    self.declared.insert(var_name);
+                    self.declared.insert(var_name.clone());
                 }
+                self.value_map.insert(result, var_name);
             }
         }
-
-        // Handle terminator
-        match &block.term {
-            Terminator::Branch { target, args } => {
-                // Check if the target is a loop header
-                if let Some(ControlHeader::Loop {
-                    merge,
-                    continue_block,
-                }) = self.body.control_headers.get(target)
-                {
-                    let merge = *merge;
-                    let continue_block = *continue_block;
-                    let target = *target;
-                    self.lower_loop(target, args, merge, continue_block, output)?;
-                    // Lower merge block instructions and follow its terminator
-                    self.lower_block_inline(merge, &[], output)
-                } else if !args.is_empty() {
-                    self.get_value(args[0])
-                } else {
-                    Ok(String::new())
-                }
-            }
-            Terminator::Return(Some(val)) => self.get_value(*val),
-            Terminator::CondBranch {
-                cond,
-                then_target,
-                then_args,
-                else_target,
-                else_args,
-            } => {
-                // Nested if-else within a branch body
-                if let Some(merge) = self.find_merge_block(*then_target, *else_target) {
-                    let result = self.lower_if_then_else(
-                        *cond,
-                        *then_target,
-                        then_args,
-                        *else_target,
-                        else_args,
-                        merge,
-                        output,
-                    )?;
-                    // Follow the merge block to the outer merge
-                    let merge_blk = &self.body.inner.blocks[merge];
-                    match &merge_blk.term {
-                        Terminator::Branch { args, .. } if !args.is_empty() => self.get_value(args[0]),
-                        _ => Ok(result),
-                    }
-                } else {
-                    bail_glsl!("Unstructured control flow in branch body")
-                }
-            }
-            _ => Ok(String::new()),
-        }
+        Ok(())
     }
 
     fn lower_inst(&mut self, inst: &WynInstNode, _output: &mut String) -> Result<String> {

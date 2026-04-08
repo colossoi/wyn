@@ -48,9 +48,18 @@ const INTRINSIC_RENAMES: &[(&str, &str)] = &[
     ("fract", "_w_intrinsic_fract"),
     ("mix", "_w_intrinsic_mix"),
     ("smoothstep", "_w_intrinsic_smoothstep"),
+    ("clamp", "_w_intrinsic_clamp"),
     ("determinant", "_w_intrinsic_determinant"),
     ("inverse", "_w_intrinsic_inverse"),
     ("outer", "_w_intrinsic_outer"),
+    // Unary math functions (scalar and vector)
+    ("sin", "_w_intrinsic_sin"),
+    ("cos", "_w_intrinsic_cos"),
+    ("tan", "_w_intrinsic_tan"),
+    ("sqrt", "_w_intrinsic_sqrt"),
+    ("abs", "_w_intrinsic_abs"),
+    ("exp", "_w_intrinsic_exp"),
+    ("log", "_w_intrinsic_log"),
 ];
 
 /// SOAC names that are intercepted in transform_application and turned into
