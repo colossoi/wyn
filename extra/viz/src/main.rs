@@ -166,6 +166,33 @@ enum Command {
         #[arg(short, long)]
         verbose: bool,
     },
+    /// Run the Bitcoin miner shader and report hash hits
+    #[command(name = "miner")]
+    Miner {
+        /// Path to the linked miner SPIR-V module
+        #[arg(default_value = "testfiles/miner.spv")]
+        path: PathBuf,
+        /// Block header base (19 hex u32 words, comma-separated)
+        /// Example: "6a09e667,bb67ae85,...,5be0cd19"
+        /// If omitted, uses a test header of all zeros.
+        #[arg(long)]
+        header: Option<String>,
+        /// Number of nonces to try
+        #[arg(long, short, default_value = "1024")]
+        nonces: u32,
+        /// Starting nonce offset
+        #[arg(long, default_value = "0")]
+        nonce_offset: i32,
+        /// Difficulty: number of leading zero bytes required in the hash
+        #[arg(long, short, default_value = "1")]
+        difficulty: u32,
+        /// Number of workgroups (each has 64 threads)
+        #[arg(long)]
+        workgroups: Option<u32>,
+        /// Print verbose output
+        #[arg(short, long)]
+        verbose: bool,
+    },
     /// Render a built-in test pattern (no shader file needed, always validates)
     #[command(name = "testpattern")]
     TestPattern {
@@ -1442,6 +1469,209 @@ fn output_results(
     Ok(())
 }
 
+/// Run the Bitcoin miner shader and check for hash hits
+async fn run_miner(
+    path: PathBuf,
+    header_arg: Option<String>,
+    nonces: u32,
+    nonce_offset: i32,
+    difficulty: u32,
+    workgroups_override: Option<u32>,
+    verbose: bool,
+) -> Result<()> {
+    // Parse header: 19 hex u32 words, or default to zeros
+    let header_base: Vec<u32> = if let Some(ref h) = header_arg {
+        let words: Vec<u32> = h
+            .split(',')
+            .map(|w| {
+                let w = w.trim();
+                if let Some(hex) = w.strip_prefix("0x").or_else(|| w.strip_prefix("0X")) {
+                    u32::from_str_radix(hex, 16).map_err(|e| anyhow!("Invalid hex u32 '{}': {}", w, e))
+                } else {
+                    u32::from_str_radix(w, 16).map_err(|e| anyhow!("Invalid hex u32 '{}': {}", w, e))
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if words.len() != 19 {
+            return Err(anyhow!("Header must be exactly 19 u32 words, got {}", words.len()));
+        }
+        words
+    } else {
+        vec![0u32; 19]
+    };
+
+    let workgroup_size = 64u32;
+    let num_workgroups = workgroups_override.unwrap_or_else(|| (nonces + workgroup_size - 1) / workgroup_size);
+
+    // Output buffer: n hashes, each [8]u32 = 32 bytes
+    let output_elements = nonces as u64 * 8;
+    let output_byte_size = output_elements * 4;
+
+    if verbose {
+        println!("Miner configuration:");
+        println!("  Header: {:08x?}", header_base);
+        println!("  Nonces: {} (offset {})", nonces, nonce_offset);
+        println!("  Difficulty: {} leading zero bytes", difficulty);
+        println!("  Workgroups: {} x 1 x 1 (workgroup size {})", num_workgroups, workgroup_size);
+        println!("  Output buffer: {} bytes ({} hashes)", output_byte_size, nonces);
+    }
+
+    let (device, queue) = create_headless_device(verbose).await?;
+
+    // Storage buffer for output hashes
+    let output_buffer = device.create_buffer(&BufferDescriptor {
+        label: Some("miner_output"),
+        size: output_byte_size,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+
+    let staging = device.create_buffer(&BufferDescriptor {
+        label: Some("miner_staging"),
+        size: output_byte_size,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    // Bind group
+    let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some("miner_bind_group_layout"),
+        entries: &[BindGroupLayoutEntry {
+            binding: 0,
+            visibility: ShaderStages::COMPUTE,
+            ty: BindingType::Buffer {
+                ty: BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    });
+
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("miner_bind_group"),
+        layout: &bind_group_layout,
+        entries: &[BindGroupEntry {
+            binding: 0,
+            resource: BindingResource::Buffer(wgpu::BufferBinding {
+                buffer: &output_buffer,
+                offset: 0,
+                size: None,
+            }),
+        }],
+    });
+
+    // Push constants: header_base (76 bytes) + n (4 bytes) + nonce_offset (4 bytes) = 84 bytes
+    let mut pc_bytes = Vec::with_capacity(84);
+    for word in &header_base {
+        pc_bytes.extend_from_slice(&word.to_le_bytes());
+    }
+    pc_bytes.extend_from_slice(&nonces.to_le_bytes()); // n as i32, but same bits
+    pc_bytes.extend_from_slice(&nonce_offset.to_le_bytes());
+
+    let module = load_spirv_module(&device, &path)?;
+
+    let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: Some("miner_layout"),
+        bind_group_layouts: &[&bind_group_layout],
+        push_constant_ranges: &[wgpu::PushConstantRange {
+            stages: wgpu::ShaderStages::COMPUTE,
+            range: 0..84,
+        }],
+    });
+
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("miner_pipeline"),
+        layout: Some(&layout),
+        module: &module,
+        entry_point: Some("mine"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+
+    let start_time = std::time::Instant::now();
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("miner_encoder"),
+    });
+
+    {
+        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("miner_pass"),
+            timestamp_writes: None,
+        });
+        cpass.set_pipeline(&pipeline);
+        cpass.set_bind_group(0, &bind_group, &[]);
+        cpass.set_push_constants(0, &pc_bytes);
+        cpass.dispatch_workgroups(num_workgroups, 1, 1);
+    }
+
+    encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging, 0, output_byte_size);
+    queue.submit(Some(encoder.finish()));
+    let _ = device.poll(wgpu::PollType::Wait);
+
+    // Read back results
+    let buffer_slice = staging.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+        tx.send(result).unwrap();
+    });
+    let _ = device.poll(wgpu::PollType::Wait);
+    rx.recv().unwrap()?;
+
+    let elapsed = start_time.elapsed();
+    let data = buffer_slice.get_mapped_range();
+    let hash_words: &[u32] = bytemuck::cast_slice(&data);
+
+    // Check each hash for difficulty hits
+    // Bitcoin hashes are compared as 256-bit big-endian numbers.
+    // Our output is [8]u32 where word[0] is the most significant.
+    // A "hit" means enough leading zero bytes.
+    let mut hits = Vec::new();
+    for i in 0..nonces as usize {
+        let hash = &hash_words[i * 8..(i + 1) * 8];
+        if meets_difficulty(hash, difficulty) {
+            let nonce = nonce_offset + i as i32;
+            hits.push((nonce, hash.to_vec()));
+        }
+    }
+
+    let hash_rate = nonces as f64 / elapsed.as_secs_f64();
+
+    println!("Mined {} nonces in {:.2?} ({:.0} H/s)", nonces, elapsed, hash_rate);
+
+    if hits.is_empty() {
+        println!("No hits found (difficulty: {} leading zero bytes)", difficulty);
+    } else {
+        println!("{} hit(s) found:", hits.len());
+        for (nonce, hash) in &hits {
+            print!("  nonce {:>10} -> ", nonce);
+            for word in hash {
+                print!("{:08x}", word);
+            }
+            println!();
+        }
+    }
+
+    drop(data);
+    staging.unmap();
+
+    Ok(())
+}
+
+/// Check if a hash (8 x u32, big-endian word order) has at least `n` leading zero bytes.
+fn meets_difficulty(hash: &[u32], n: u32) -> bool {
+    let mut zero_bytes = 0u32;
+    for &word in hash {
+        let lz = word.leading_zeros() / 8; // full zero bytes in this word
+        zero_bytes += lz;
+        if lz < 4 {
+            break; // this word has a non-zero byte, stop counting
+        }
+    }
+    zero_bytes >= n
+}
+
 /// Run a compute shader headlessly (no window)
 async fn run_compute_shader(
     path: PathBuf,
@@ -1677,7 +1907,7 @@ struct State {
     resolution_buffer: Option<wgpu::Buffer>,
     time_buffer: Option<wgpu::Buffer>,
     mouse_buffer: Option<wgpu::Buffer>,
-    difficulty_buffer: Option<wgpu::Buffer>,
+    _difficulty_buffer: Option<wgpu::Buffer>,
     uniform_bind_group: Option<BindGroup>,
     start_time: std::time::Instant,
     // Mouse tracking
@@ -2173,7 +2403,7 @@ impl State {
             resolution_buffer,
             time_buffer,
             mouse_buffer,
-            difficulty_buffer,
+            _difficulty_buffer: difficulty_buffer,
             uniform_bind_group,
             start_time: now,
             mouse_pos: [0.0, 0.0],
@@ -2727,6 +2957,17 @@ fn main() -> Result<()> {
             let output_map = parse_pairs(&outputs)?;
 
             pollster::block_on(run_pipeline(path, pipeline, input_map, output_map, &push_constants, verbose))?;
+        }
+        Command::Miner {
+            path,
+            header,
+            nonces,
+            nonce_offset,
+            difficulty,
+            workgroups,
+            verbose,
+        } => {
+            pollster::block_on(run_miner(path, header, nonces, nonce_offset, difficulty, workgroups, verbose))?;
         }
         Command::Validate { path, verbose } => {
             pollster::block_on(validate_spirv(&path, verbose))?;
