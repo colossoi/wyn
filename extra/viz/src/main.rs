@@ -1623,15 +1623,23 @@ async fn run_miner(
     let data = buffer_slice.get_mapped_range();
     let hash_words: &[u32] = bytemuck::cast_slice(&data);
 
-    // Check each hash for difficulty hits
-    // Bitcoin hashes are compared as 256-bit big-endian numbers.
-    // Our output is [8]u32 where word[0] is the most significant.
-    // A "hit" means enough leading zero bytes.
+    // Check each hash for difficulty hits.
+    // SHA256 state words h0..h7: h0 is the most significant 32 bits of the digest.
+    // Bitcoin compares hashes as big-endian 256-bit numbers, so leading zeros
+    // in the display hash correspond to leading zero bytes starting from h0.
     let mut hits = Vec::new();
     for i in 0..nonces as usize {
         let hash = &hash_words[i * 8..(i + 1) * 8];
+        let nonce = nonce_offset + i as u32;
+        if verbose {
+            print!("  nonce {:>10} -> ", nonce);
+            for word in hash {
+                print!("{:08x}", word);
+            }
+            let lz = leading_zero_bytes(hash);
+            println!("  ({} leading zero bytes)", lz);
+        }
         if meets_difficulty(hash, difficulty) {
-            let nonce = nonce_offset + i as u32;
             hits.push((nonce, hash.to_vec()));
         }
     }
@@ -1659,8 +1667,8 @@ async fn run_miner(
     Ok(())
 }
 
-/// Check if a hash (8 x u32, big-endian word order) has at least `n` leading zero bytes.
-fn meets_difficulty(hash: &[u32], n: u32) -> bool {
+/// Count leading zero bytes in a hash (8 x u32, big-endian word order: h0 is MSB).
+fn leading_zero_bytes(hash: &[u32]) -> u32 {
     let mut zero_bytes = 0u32;
     for &word in hash {
         let lz = word.leading_zeros() / 8; // full zero bytes in this word
@@ -1669,7 +1677,12 @@ fn meets_difficulty(hash: &[u32], n: u32) -> bool {
             break; // this word has a non-zero byte, stop counting
         }
     }
-    zero_bytes >= n
+    zero_bytes
+}
+
+/// Check if a hash has at least `n` leading zero bytes.
+fn meets_difficulty(hash: &[u32], n: u32) -> bool {
+    leading_zero_bytes(hash) >= n
 }
 
 /// Run a compute shader headlessly (no window)
