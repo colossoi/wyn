@@ -156,12 +156,6 @@ fn fuse_def_body(
     let fusion_kind = can_fuse(&producer.semantics, &consumer.semantics);
 
     // Build the fused SOAC term from semantics
-    eprintln!(
-        "FUSION: building fused term for {:?} ({:?} → {:?})",
-        fusion_kind,
-        std::mem::discriminant(&producer.semantics),
-        std::mem::discriminant(&consumer.semantics)
-    );
     let fused_soac_term = build_fused_from_semantics(
         &producer.semantics,
         &consumer.semantics,

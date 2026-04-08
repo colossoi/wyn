@@ -16,7 +16,7 @@ const INLINE_INST_THRESHOLD: usize = 30;
 
 /// Inline small functions in the program.
 pub fn inline_small_functions(mut program: Program) -> Program {
-    let candidates: HashMap<String, FuncBody> = program
+    let mut candidates: HashMap<String, FuncBody> = program
         .functions
         .iter()
         .filter(|f| {
@@ -40,12 +40,26 @@ pub fn inline_small_functions(mut program: Program) -> Program {
         .map(|f| (f.name.clone(), f.body.clone()))
         .collect();
 
+    // Also include program-level constants (zero-arg defs with constant bodies).
+    for constant in &program.constants {
+        candidates.insert(constant.name.clone(), constant.body.clone());
+    }
+
     if candidates.is_empty() {
         return program;
     }
 
+    // Inline Global references (constants) into ALL functions, including lambdas.
+    let constant_names: HashSet<String> = program.constants.iter().map(|c| c.name.clone()).collect();
     for func in &mut program.functions {
-        // Don't inline into SOAC lambda bodies — they have special calling conventions.
+        inline_globals_in_body(&mut func.body, &candidates, &constant_names);
+    }
+    for entry in &mut program.entry_points {
+        inline_globals_in_body(&mut entry.body, &candidates, &constant_names);
+    }
+
+    // Inline small function calls (but not into lambda bodies).
+    for func in &mut program.functions {
         if func.name.starts_with("_w_lambda_") {
             continue;
         }
@@ -69,6 +83,27 @@ pub fn inline_small_functions(mut program: Program) -> Program {
     program
 }
 
+/// Inline Global references to constants by replacing them with the constant's body.
+fn inline_globals_in_body(
+    body: &mut FuncBody,
+    candidates: &HashMap<String, FuncBody>,
+    constant_names: &HashSet<String>,
+) {
+    loop {
+        let site = body.inner.insts.iter().find_map(|(inst_id, inst)| {
+            if let InstKind::Global(name) = &inst.data {
+                if constant_names.contains(name) && candidates.contains_key(name) {
+                    return Some((inst_id, name.clone()));
+                }
+            }
+            None
+        });
+        let Some((inst_id, name)) = site else { break };
+        let callee_body = &candidates[&name];
+        inline_call_site(body, inst_id, callee_body);
+    }
+}
+
 fn inline_calls_in_body(body: &mut FuncBody, candidates: &HashMap<String, FuncBody>) {
     loop {
         let Some((inst_id, callee_name)) = find_inline_call(body, candidates) else {
@@ -81,10 +116,14 @@ fn inline_calls_in_body(body: &mut FuncBody, candidates: &HashMap<String, FuncBo
 
 fn find_inline_call(body: &FuncBody, candidates: &HashMap<String, FuncBody>) -> Option<(InstId, String)> {
     for (inst_id, inst) in &body.inner.insts {
-        if let InstKind::Call { func, .. } = &inst.data {
-            if inst.result.is_some() && candidates.contains_key(func) {
+        match &inst.data {
+            InstKind::Call { func, .. } if inst.result.is_some() && candidates.contains_key(func) => {
                 return Some((inst_id, func.clone()));
             }
+            InstKind::Global(name) if inst.result.is_some() && candidates.contains_key(name) => {
+                return Some((inst_id, name.clone()));
+            }
+            _ => {}
         }
     }
     None
@@ -112,6 +151,7 @@ fn inline_call_site(caller: &mut FuncBody, call_inst: InstId, callee: &FuncBody)
 
     let call_args: Vec<ValueRef> = match &caller.inner.insts[call_inst].data {
         InstKind::Call { args, .. } => args.clone(),
+        InstKind::Global(_) => vec![], // zero-arg constant
         _ => unreachable!(),
     };
 

@@ -83,7 +83,6 @@ struct Constructor {
     entry_point_interfaces: HashMap<String, Vec<spirv::Word>>,
 
     // Global constants: name -> constant_id (SPIR-V OpConstant)
-    global_constants: HashMap<String, spirv::Word>,
     uniform_variables: HashMap<String, spirv::Word>,
     uniform_types: HashMap<String, spirv::Word>, // uniform name -> SPIR-V type ID
     uniform_load_cache: HashMap<String, spirv::Word>, // cached OpLoad results per function
@@ -166,7 +165,6 @@ impl Constructor {
             buffer_block_cache: HashMap::new(),
             array_elem_cache: HashMap::new(),
             entry_point_interfaces: HashMap::new(),
-            global_constants: HashMap::new(),
             uniform_variables: HashMap::new(),
             uniform_types: HashMap::new(),
             uniform_load_cache: HashMap::new(),
@@ -869,82 +867,6 @@ impl Constructor {
 /// Lower a constant definition body to module-level SPIR-V constants.
 ///
 /// Walks instructions in order, emitting OpConstant/OpConstantComposite.
-/// Returns the SPIR-V Word for the final result value.
-fn lower_constant_body(constructor: &mut Constructor, body: &FuncBody) -> Result<spirv::Word> {
-    use crate::ssa::types::{ConstantValue, InstKind, ValueRef};
-
-    let mut value_map: HashMap<ValueId, spirv::Word> = HashMap::new();
-
-    let resolve_ref =
-        |vr: &ValueRef, vm: &HashMap<ValueId, spirv::Word>, c: &mut Constructor| -> spirv::Word {
-            match vr {
-                ValueRef::Ssa(id) => vm[id],
-                ValueRef::Const(cv) => match cv {
-                    ConstantValue::I32(v) => c.const_i32(*v),
-                    ConstantValue::U32(v) => c.const_u32(*v),
-                    ConstantValue::F32(bits) => c.const_f32(f32::from_bits(*bits)),
-                    ConstantValue::Bool(b) => c.const_bool(*b),
-                },
-            }
-        };
-
-    for (_iid, inst) in &body.inner.insts {
-        let val_ty = inst.result.map(|r| body.inner.value_type(r));
-        let result_ty = val_ty.map(|t| constructor.polytype_to_spirv(t)).unwrap_or(0);
-        let spirv_id = match &inst.data {
-            InstKind::Int(s) => match val_ty.expect("Int must have result type") {
-                PolyType::Constructed(TypeName::UInt(32), _) => {
-                    let val: u32 = s.parse().map_err(|_| err_spirv!("Invalid u32 in constant: {}", s))?;
-                    constructor.const_u32(val)
-                }
-                _ => {
-                    let val: i32 = s.parse().map_err(|_| err_spirv!("Invalid i32 in constant: {}", s))?;
-                    constructor.const_i32(val)
-                }
-            },
-            InstKind::Float(s) => {
-                let val: f32 = s.parse().map_err(|_| err_spirv!("Invalid f32 in constant: {}", s))?;
-                constructor.const_f32(val)
-            }
-            InstKind::Bool(b) => constructor.const_bool(*b),
-            InstKind::Tuple(elems) | InstKind::Vector(elems) | InstKind::ArrayLit { elements: elems } => {
-                let elem_ids: Vec<_> =
-                    elems.iter().map(|v| resolve_ref(v, &value_map, constructor)).collect();
-                constructor.composite_or_constant(result_ty, elem_ids)?
-            }
-            InstKind::Matrix(rows) => {
-                let elem_ids: Vec<_> =
-                    rows.iter().flatten().map(|v| resolve_ref(v, &value_map, constructor)).collect();
-                constructor.composite_or_constant(result_ty, elem_ids)?
-            }
-            InstKind::Global(name) => {
-                // Reference to another hoisted constant
-                *constructor
-                    .global_constants
-                    .get(name)
-                    .ok_or_else(|| err_spirv!("Unknown constant in constant body: {}", name))?
-            }
-            other => {
-                bail_spirv!(
-                    "Non-constant instruction in constant body: {:?}",
-                    std::mem::discriminant(other)
-                );
-            }
-        };
-
-        if let Some(result) = inst.result {
-            value_map.insert(result, spirv_id);
-        }
-    }
-
-    // The return value is in the terminator
-    let entry = &body.inner.blocks[body.inner.entry];
-    match &entry.term {
-        Terminator::Return(Some(v)) => Ok(value_map[v]),
-        _ => bail_spirv!("Constant body has no Return terminator"),
-    }
-}
-
 /// Lower an SSA function body to SPIR-V.
 ///
 /// This creates a SPIR-V function from the SSA representation:
@@ -1245,9 +1167,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             }
 
             InstKind::Global(name) => {
-                if let Some(&const_id) = self.constructor.global_constants.get(name) {
-                    const_id
-                } else if let Some(&var_id) = self.constructor.uniform_variables.get(name) {
+                if let Some(&var_id) = self.constructor.uniform_variables.get(name) {
                     // Load uniform value
                     let value_type = self
                         .constructor
@@ -2937,12 +2857,6 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
                 }
             }
         }
-    }
-
-    // Lower program-level constants to module-scope OpConstant/OpConstantComposite.
-    for constant in &program.constants {
-        let result_id = lower_constant_body(&mut constructor, &constant.body)?;
-        constructor.global_constants.insert(constant.name.clone(), result_id);
     }
 
     // Now lower all function bodies

@@ -309,10 +309,48 @@ fn compile_file(
                 info!("Generated {} words of SPIR-V", spirv_len);
             }
         }
-        Target::Glsl | Target::Shadertoy => {
-            return Err(
-                wyn_core::err_spirv!("GLSL/Shadertoy targets not yet supported with SSA pipeline").into(),
-            );
+        Target::Glsl => {
+            let glsl_output = time("glsl_lower", verbose, || wyn_core::glsl::lower(&soac_lowered.ssa))?;
+
+            let output_path = output.unwrap_or_else(|| {
+                let mut path = input.clone();
+                path.set_extension("glsl");
+                path
+            });
+
+            let mut combined = String::new();
+            if let Some(vert) = &glsl_output.vertex {
+                combined.push_str("// === VERTEX SHADER ===\n");
+                combined.push_str(vert);
+                combined.push('\n');
+            }
+            if let Some(frag) = &glsl_output.fragment {
+                combined.push_str("// === FRAGMENT SHADER ===\n");
+                combined.push_str(frag);
+                combined.push('\n');
+            }
+            fs::write(&output_path, &combined)?;
+
+            if verbose {
+                info!("Successfully compiled to {}", output_path.display());
+            }
+        }
+        Target::Shadertoy => {
+            let glsl = time("glsl_lower_shadertoy", verbose, || {
+                wyn_core::glsl::lower_shadertoy(&soac_lowered.ssa)
+            })?;
+
+            let output_path = output.unwrap_or_else(|| {
+                let mut path = input.clone();
+                path.set_extension("glsl");
+                path
+            });
+
+            fs::write(&output_path, &glsl)?;
+
+            if verbose {
+                info!("Successfully compiled to {}", output_path.display());
+            }
         }
     }
 

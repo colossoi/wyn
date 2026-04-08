@@ -1086,6 +1086,25 @@ fn test_ssa_raytrace_well_formed() {
 }
 
 // =============================================================================
+// Constant Inlining
+// =============================================================================
+
+/// Constants that reference other constants should be fully inlined.
+#[test]
+fn test_constant_referencing_constant() {
+    let source = r#"
+def PI: f32 = 3.14159265
+def TAU: f32 = PI * 2.0
+def QUARTER_TAU: f32 = TAU / 4.0
+
+#[fragment]
+entry frag(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
+  @[QUARTER_TAU, PI, TAU, 1.0]
+"#;
+    compile_to_spirv(source).expect("constants referencing constants should compile");
+}
+
+// =============================================================================
 // SoA Extraction Map Optimization
 // =============================================================================
 

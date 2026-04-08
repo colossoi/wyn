@@ -132,6 +132,7 @@ impl ImplSource {
         source.register_real_modules();
         source.register_float_modules();
         source.register_vector_operations();
+        source.register_polymorphic_intrinsics();
 
         source
     }
@@ -723,6 +724,44 @@ impl ImplSource {
             "_w_intrinsic_array_with",
             BuiltinImpl::Intrinsic(Intrinsic::ArrayWith),
         );
+    }
+
+    /// Register polymorphic intrinsics (no type suffix) that come from
+    /// INTRINSIC_RENAMES in TLC. These are the suffix-less versions like
+    /// `_w_intrinsic_floor` (vs the typed `_w_intrinsic_floor_f32`).
+    fn register_polymorphic_intrinsics(&mut self) {
+        use PrimOp::*;
+        let intrinsics: &[(&str, BuiltinImpl)] = &[
+            ("_w_intrinsic_sin", BuiltinImpl::PrimOp(GlslExt(13))),
+            ("_w_intrinsic_cos", BuiltinImpl::PrimOp(GlslExt(14))),
+            ("_w_intrinsic_tan", BuiltinImpl::PrimOp(GlslExt(15))),
+            ("_w_intrinsic_sqrt", BuiltinImpl::PrimOp(GlslExt(31))),
+            ("_w_intrinsic_abs", BuiltinImpl::PrimOp(GlslExt(4))),
+            ("_w_intrinsic_floor", BuiltinImpl::PrimOp(GlslExt(8))),
+            ("_w_intrinsic_ceil", BuiltinImpl::PrimOp(GlslExt(9))),
+            ("_w_intrinsic_fract", BuiltinImpl::PrimOp(GlslExt(10))),
+            ("_w_intrinsic_min", BuiltinImpl::PrimOp(GlslExt(37))),
+            ("_w_intrinsic_max", BuiltinImpl::PrimOp(GlslExt(40))),
+            ("_w_intrinsic_clamp", BuiltinImpl::PrimOp(GlslExt(43))),
+            ("_w_intrinsic_mix", BuiltinImpl::PrimOp(GlslExt(46))),
+            ("_w_intrinsic_pow", BuiltinImpl::PrimOp(GlslExt(26))),
+            ("_w_intrinsic_exp", BuiltinImpl::PrimOp(GlslExt(27))),
+            ("_w_intrinsic_log", BuiltinImpl::PrimOp(GlslExt(28))),
+            ("_w_intrinsic_smoothstep", BuiltinImpl::PrimOp(GlslExt(49))),
+            ("_w_intrinsic_normalize", BuiltinImpl::PrimOp(GlslExt(69))),
+            ("_w_intrinsic_cross", BuiltinImpl::PrimOp(GlslExt(68))),
+            ("_w_intrinsic_distance", BuiltinImpl::PrimOp(GlslExt(67))),
+            ("_w_intrinsic_reflect", BuiltinImpl::PrimOp(GlslExt(71))),
+            ("_w_intrinsic_refract", BuiltinImpl::PrimOp(GlslExt(72))),
+            ("_w_intrinsic_determinant", BuiltinImpl::PrimOp(GlslExt(33))),
+            ("_w_intrinsic_inverse", BuiltinImpl::PrimOp(GlslExt(34))),
+            ("_w_intrinsic_dot", BuiltinImpl::PrimOp(Dot)),
+            ("_w_intrinsic_outer", BuiltinImpl::PrimOp(OuterProduct)),
+            ("_w_intrinsic_magnitude", BuiltinImpl::PrimOp(GlslExt(66))),
+        ];
+        for (name, impl_) in intrinsics {
+            self.register(name, impl_.clone());
+        }
     }
 }
 
