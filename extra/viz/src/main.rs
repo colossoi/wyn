@@ -205,9 +205,6 @@ enum Command {
         /// Starting nonce offset
         #[arg(long, default_value = "0")]
         nonce_offset: u32,
-        /// Difficulty: number of leading zero bytes required in the hash
-        #[arg(long, short, default_value = "1")]
-        difficulty: u32,
         /// Number of workgroups (each has 64 threads)
         #[arg(long)]
         workgroups: Option<u32>,
@@ -1503,7 +1500,6 @@ async fn run_miner(
     header_hex: [u32; 19],
     nonces: u32,
     nonce_offset: u32,
-    difficulty: u32,
     workgroups_override: Option<u32>,
     chunk_size: u32,
     verbose: bool,
@@ -1513,11 +1509,18 @@ async fn run_miner(
     let chunk = chunk_size.max(workgroup_size); // at least one workgroup
     let num_chunks = (nonces + chunk - 1) / chunk;
 
+    // Extract target from the bits field (word 18 of header).
+    // parse_header_hex reads bytes as BE u32, but bits is a LE u32 in the
+    // serialized header, so swap back to get the real compact target.
+    let bits_be = header_base[18];
+    let bits = bits_be.swap_bytes(); // back to LE interpretation
+    let target = decode_compact_target(bits);
+
     if verbose {
         println!("Miner configuration:");
         println!("  Header: {:08x?}", header_base);
         println!("  Nonces: {} (offset {})", nonces, nonce_offset);
-        println!("  Difficulty: {} leading zero bytes", difficulty);
+        println!("  Target: {}", format_u256_hex(&target));
         println!("  Chunk size: {} ({} chunks)", chunk, num_chunks);
     }
 
@@ -1650,10 +1653,9 @@ async fn run_miner(
                 for word in hash {
                     print!("{:08x}", word);
                 }
-                let lz = leading_zero_bytes(hash);
-                println!("  ({} leading zero bytes)", lz);
+                println!();
             }
-            if meets_difficulty(hash, difficulty) {
+            if hash_below_target(hash, &target) {
                 hits.push((nonce, hash.to_vec()));
             }
         }
@@ -1662,6 +1664,10 @@ async fn run_miner(
 
         drop(data);
         staging.unmap();
+
+        if !hits.is_empty() {
+            break; // found a hit, stop searching
+        }
 
         if chunk_zeros > 0 {
             eprintln!(
@@ -1698,7 +1704,7 @@ async fn run_miner(
     );
 
     if hits.is_empty() {
-        println!("No hits found (difficulty: {} leading zero bytes)", difficulty);
+        println!("No hits found");
     } else {
         println!("{} hit(s) found:", hits.len());
         for (nonce, hash) in &hits {
@@ -1713,22 +1719,54 @@ async fn run_miner(
     Ok(())
 }
 
-/// Count leading zero bytes in a hash (8 x u32, stored in reverse: h7 at [0], h0 at [7]).
-fn leading_zero_bytes(hash: &[u32]) -> u32 {
-    let mut zero_bytes = 0u32;
-    for &word in hash.iter().rev() {
-        let lz = word.leading_zeros() / 8;
-        zero_bytes += lz;
-        if lz < 4 {
-            break;
+/// Decode Bitcoin compact target format (nBits) into a 256-bit target (8 x u32, big-endian).
+/// Format: top byte = exponent, bottom 3 bytes = coefficient.
+/// target = coefficient * 2^(8*(exponent-3))
+fn decode_compact_target(bits: u32) -> [u32; 8] {
+    let exponent = (bits >> 24) as usize;
+    let coefficient = bits & 0x007fffff;
+    // The coefficient occupies 3 bytes starting at byte position (exponent - 3) from the MSB end.
+    // In a 32-byte (256-bit) big-endian number, byte 0 is the most significant.
+    let mut target_bytes = [0u8; 32];
+    if exponent >= 3 && exponent <= 32 {
+        let start = 32 - exponent; // byte index of the most significant coefficient byte
+        target_bytes[start] = ((coefficient >> 16) & 0xff) as u8;
+        if start + 1 < 32 {
+            target_bytes[start + 1] = ((coefficient >> 8) & 0xff) as u8;
+        }
+        if start + 2 < 32 {
+            target_bytes[start + 2] = (coefficient & 0xff) as u8;
         }
     }
-    zero_bytes
+    // Convert to 8 x BE u32 words
+    let mut words = [0u32; 8];
+    for (i, chunk) in target_bytes.chunks_exact(4).enumerate() {
+        words[i] = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    }
+    words
 }
 
-/// Check if a hash has at least `n` leading zero bytes.
-fn meets_difficulty(hash: &[u32], n: u32) -> bool {
-    leading_zero_bytes(hash) >= n
+/// Format a 256-bit value (8 x u32, big-endian) as hex.
+fn format_u256_hex(words: &[u32; 8]) -> String {
+    words.iter().map(|w| format!("{:08x}", w)).collect()
+}
+
+/// Check if a hash is numerically below the target.
+/// Hash is stored reversed in the buffer: [h7, h6, ..., h0].
+/// Target is in standard order: [t0, t1, ..., t7] (big-endian, t0 = MSB).
+/// Compare from most significant word (h0 = hash[7], t0 = target[0]).
+fn hash_below_target(hash: &[u32], target: &[u32; 8]) -> bool {
+    for i in 0..8 {
+        let h = hash[7 - i]; // h0 is at hash[7], h1 at hash[6], etc.
+        let t = target[i];
+        if h < t {
+            return true;
+        }
+        if h > t {
+            return false;
+        }
+    }
+    false // equal is not below
 }
 
 /// Run a compute shader headlessly (no window)
@@ -3022,12 +3060,11 @@ fn main() -> Result<()> {
             header_hex,
             nonces,
             nonce_offset,
-            difficulty,
             workgroups,
             chunk_size,
             verbose,
         } => {
-            pollster::block_on(run_miner(path, header_hex, nonces, nonce_offset, difficulty, workgroups, chunk_size, verbose))?;
+            pollster::block_on(run_miner(path, header_hex, nonces, nonce_offset, workgroups, chunk_size, verbose))?;
         }
         Command::Validate { path, verbose } => {
             pollster::block_on(validate_spirv(&path, verbose))?;
