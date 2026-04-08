@@ -9,7 +9,7 @@ use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
 use crate::lowering_common::ShaderStage;
 use crate::ssa::types::{
-    BlockId, ConstantValue, FuncBody, InstKind, Terminator, ValueId, ValueRef, WynInstNode,
+    BlockId, ConstantValue, ControlHeader, FuncBody, InstKind, Terminator, ValueId, ValueRef, WynInstNode,
 };
 use crate::ssa::types::{EntryPoint, ExecutionModel, Function, IoDecoration, Program};
 use crate::types::TypeExt;
@@ -713,30 +713,44 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     break;
                 }
                 Terminator::Branch { target, args } => {
-                    // Pass arguments to target block params
-                    let target_block = &self.body.inner.blocks[*target];
-                    for (&param, arg) in target_block.params.iter().zip(args.iter()) {
-                        let arg_val = self.get_value(*arg)?;
-                        let var_name = glsl_var(param);
-                        if self.declared.contains(&var_name) {
-                            writeln!(output, "{}{} = {};", self.ctx.indent_str(), var_name, arg_val)
+                    // Check if the target is a loop header
+                    if let Some(ControlHeader::Loop {
+                        merge,
+                        continue_block,
+                    }) = self.body.control_headers.get(target)
+                    {
+                        let merge = *merge;
+                        let continue_block = *continue_block;
+                        let target = *target;
+                        self.lower_loop(target, args, merge, continue_block, output)?;
+                        // Continue from the merge block
+                        current_block = merge;
+                    } else {
+                        // Pass arguments to target block params
+                        let target_block = &self.body.inner.blocks[*target];
+                        for (&param, arg) in target_block.params.iter().zip(args.iter()) {
+                            let arg_val = self.get_value(*arg)?;
+                            let var_name = glsl_var(param);
+                            if self.declared.contains(&var_name) {
+                                writeln!(output, "{}{} = {};", self.ctx.indent_str(), var_name, arg_val)
+                                    .unwrap();
+                            } else {
+                                let ty = self.ctx.type_to_glsl(self.body.inner.value_type(param));
+                                writeln!(
+                                    output,
+                                    "{}{} {} = {};",
+                                    self.ctx.indent_str(),
+                                    ty,
+                                    var_name,
+                                    arg_val
+                                )
                                 .unwrap();
-                        } else {
-                            let ty = self.ctx.type_to_glsl(self.body.inner.value_type(param));
-                            writeln!(
-                                output,
-                                "{}{} {} = {};",
-                                self.ctx.indent_str(),
-                                ty,
-                                var_name,
-                                arg_val
-                            )
-                            .unwrap();
-                            self.declared.insert(var_name.clone());
+                                self.declared.insert(var_name.clone());
+                            }
+                            self.value_map.insert(param, var_name);
                         }
-                        self.value_map.insert(param, var_name);
+                        current_block = *target;
                     }
-                    current_block = *target;
                 }
                 Terminator::CondBranch {
                     cond,
@@ -816,6 +830,204 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             }
         }
         result
+    }
+
+    /// Lower a loop construct.
+    /// header_id: the loop header block (has params = loop state)
+    /// init_args: values passed to the header on loop entry
+    /// merge_id: block after the loop
+    /// continue_id: the continue/body block
+    fn lower_loop(
+        &mut self,
+        header_id: BlockId,
+        init_args: &[ValueId],
+        merge_id: BlockId,
+        continue_id: BlockId,
+        output: &mut String,
+    ) -> Result<()> {
+        let header = &self.body.inner.blocks[header_id];
+
+        // Declare and initialize loop state variables from header params
+        for (param, arg) in header.params.iter().zip(init_args.iter()) {
+            let arg_val = self.get_value(*arg)?;
+            let var_name = glsl_var(*param);
+            let ty = self.ctx.type_to_glsl(&self.body.inner.value_type(*param));
+            writeln!(
+                output,
+                "{}{} {} = {};",
+                self.ctx.indent_str(),
+                ty,
+                var_name,
+                arg_val
+            )
+            .unwrap();
+            self.value_map.insert(*param, var_name.clone());
+            self.declared.insert(var_name);
+        }
+
+        // Determine which branch is the body vs the exit
+        let (cond_id, body_target, invert) = match &header.term {
+            Terminator::CondBranch {
+                cond,
+                then_target,
+                else_target,
+                ..
+            } => {
+                if *then_target == continue_id {
+                    (*cond, *then_target, false)
+                } else {
+                    (*cond, *else_target, true)
+                }
+            }
+            _ => bail_glsl!("Loop header must end with CondBranch"),
+        };
+
+        // Lower header instructions once before the loop (declares + initializes variables)
+        self.lower_header_insts(&header.insts, output)?;
+
+        let cond_val = self.get_value(cond_id)?;
+        let cond_expr = if invert { format!("!({})", cond_val) } else { cond_val };
+        writeln!(output, "{}while ({}) {{", self.ctx.indent_str(), cond_expr).unwrap();
+        self.ctx.indent += 1;
+
+        // Lower the body block(s)
+        self.lower_loop_body(body_target, header_id, output)?;
+
+        // Re-evaluate header instructions at end of loop body (updates condition)
+        self.lower_header_insts(&header.insts, output)?;
+
+        self.ctx.indent -= 1;
+        writeln!(output, "{}}}", self.ctx.indent_str()).unwrap();
+
+        // Map the merge block's params from the loop exit args
+        let merge_blk = &self.body.inner.blocks[merge_id];
+        if let Terminator::CondBranch {
+            else_args,
+            then_args,
+            then_target,
+            ..
+        } = &header.term
+        {
+            let exit_args = if *then_target == continue_id { else_args } else { then_args };
+            for (param, arg) in merge_blk.params.iter().zip(exit_args.iter()) {
+                let arg_val = self.get_value(*arg)?;
+                self.value_map.insert(*param, arg_val);
+            }
+        }
+
+        // Merge block instructions are lowered by the caller (lower_cfg or lower_block_inline)
+        Ok(())
+    }
+
+    /// Lower header instructions, using assignment if already declared.
+    fn lower_header_insts(&mut self, insts: &[wyn_ssa::InstId], output: &mut String) -> Result<()> {
+        for &inst_id in insts {
+            let inst = self.body.get_inst(inst_id);
+            let is_side_effect = matches!(inst.data, InstKind::OutputPtr { .. } | InstKind::Store { .. });
+            let expr = self.lower_inst(inst, output)?;
+            if let Some(result) = inst.result {
+                if !is_side_effect {
+                    let var_name = glsl_var(result);
+                    if self.declared.contains(&var_name) {
+                        writeln!(output, "{}{} = {};", self.ctx.indent_str(), var_name, expr).unwrap();
+                    } else {
+                        let ty = self.ctx.type_to_glsl(self.body.inner.value_type(result));
+                        writeln!(output, "{}{} {} = {};", self.ctx.indent_str(), ty, var_name, expr)
+                            .unwrap();
+                        self.declared.insert(var_name.clone());
+                    }
+                    self.value_map.insert(result, var_name);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Lower the body of a loop — instructions that eventually branch back to the header.
+    fn lower_loop_body(
+        &mut self,
+        block_id: BlockId,
+        header_id: BlockId,
+        output: &mut String,
+    ) -> Result<()> {
+        let block = &self.body.inner.blocks[block_id];
+
+        // Lower instructions
+        for &inst_id in &block.insts {
+            let inst = self.body.get_inst(inst_id);
+            let is_side_effect = matches!(inst.data, InstKind::OutputPtr { .. } | InstKind::Store { .. });
+            let expr = self.lower_inst(inst, output)?;
+            if let Some(result) = inst.result {
+                if !is_side_effect {
+                    let var_name = glsl_var(result);
+                    let ty = self.ctx.type_to_glsl(self.body.inner.value_type(result));
+                    writeln!(output, "{}{} {} = {};", self.ctx.indent_str(), ty, var_name, expr).unwrap();
+                    self.value_map.insert(result, var_name.clone());
+                    self.declared.insert(var_name);
+                }
+            }
+        }
+
+        // Handle terminator
+        match &block.term {
+            Terminator::Branch { target, args } if *target == header_id => {
+                // Back-edge: update loop state variables
+                let header = &self.body.inner.blocks[header_id];
+                for (param, arg) in header.params.iter().zip(args.iter()) {
+                    let arg_val = self.get_value(*arg)?;
+                    let var_name = glsl_var(*param);
+                    writeln!(output, "{}{} = {};", self.ctx.indent_str(), var_name, arg_val).unwrap();
+                }
+                Ok(())
+            }
+            Terminator::Branch { target, args } => {
+                // Forward branch to another block in the body
+                let target_block = &self.body.inner.blocks[*target];
+                for (param, arg) in target_block.params.iter().zip(args.iter()) {
+                    let arg_val = self.get_value(*arg)?;
+                    self.value_map.insert(*param, arg_val);
+                }
+                self.lower_loop_body(*target, header_id, output)
+            }
+            Terminator::CondBranch {
+                cond,
+                then_target,
+                then_args,
+                else_target,
+                else_args,
+            } => {
+                // If-else inside the loop body
+                if let Some(merge) = self.find_merge_block(*then_target, *else_target) {
+                    self.lower_if_then_else(
+                        *cond,
+                        *then_target,
+                        then_args,
+                        *else_target,
+                        else_args,
+                        merge,
+                        output,
+                    )?;
+                    // Follow merge to the back-edge or next block
+                    let merge_blk = &self.body.inner.blocks[merge];
+                    match &merge_blk.term {
+                        Terminator::Branch { target, args } if *target == header_id => {
+                            let header = &self.body.inner.blocks[header_id];
+                            for (param, arg) in header.params.iter().zip(args.iter()) {
+                                let arg_val = self.get_value(*arg)?;
+                                let var_name = glsl_var(*param);
+                                writeln!(output, "{}{} = {};", self.ctx.indent_str(), var_name, arg_val)
+                                    .unwrap();
+                            }
+                            Ok(())
+                        }
+                        _ => self.lower_loop_body(merge, header_id, output),
+                    }
+                } else {
+                    bail_glsl!("Unstructured control flow in loop body")
+                }
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Lower an if-then-else construct.
@@ -919,7 +1131,25 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
 
         // Handle terminator
         match &block.term {
-            Terminator::Branch { args, .. } if !args.is_empty() => self.get_value(args[0]),
+            Terminator::Branch { target, args } => {
+                // Check if the target is a loop header
+                if let Some(ControlHeader::Loop {
+                    merge,
+                    continue_block,
+                }) = self.body.control_headers.get(target)
+                {
+                    let merge = *merge;
+                    let continue_block = *continue_block;
+                    let target = *target;
+                    self.lower_loop(target, args, merge, continue_block, output)?;
+                    // Lower merge block instructions and follow its terminator
+                    self.lower_block_inline(merge, &[], output)
+                } else if !args.is_empty() {
+                    self.get_value(args[0])
+                } else {
+                    Ok(String::new())
+                }
+            }
             Terminator::Return(Some(val)) => self.get_value(*val),
             Terminator::CondBranch {
                 cond,
