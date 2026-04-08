@@ -559,9 +559,9 @@ impl<'a> LowerCtx<'a> {
                 TypeName::Record(fields) => {
                     panic!("BUG: Record type reached GLSL lowering. Fields: {:?}", fields);
                 }
-                _ => "/* unknown */".to_string(),
+                _ => panic!("BUG: unsupported type in GLSL lowering: {:?}", ty),
             },
-            _ => "/* unknown */".to_string(),
+            _ => panic!("BUG: unsupported type in GLSL lowering: {:?}", ty),
         }
     }
 
@@ -878,8 +878,8 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 let arg_strs = arg_strs?;
 
                 // Check if it's a builtin
-                if let Some(impl_) = self.ctx.impl_source.get(func) {
-                    self.lower_builtin_call(impl_, &arg_strs, result_ty.expect("Call must have result"))
+                if let Some(impl_) = self.ctx.impl_source.get(func).cloned() {
+                    self.lower_builtin_call(&impl_, &arg_strs, result_ty.expect("Call must have result"))
                 } else {
                     Ok(format!("{}({})", func, arg_strs.join(", ")))
                 }
@@ -982,7 +982,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
     }
 
     fn lower_builtin_call(
-        &self,
+        &mut self,
         impl_: &BuiltinImpl,
         args: &[String],
         ret_ty: &PolyType<TypeName>,
@@ -998,7 +998,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         }
     }
 
-    fn lower_primop(&self, op: &PrimOp, args: &[String], ret_ty: &PolyType<TypeName>) -> Result<String> {
+    fn lower_primop(&mut self, op: &PrimOp, args: &[String], ret_ty: &PolyType<TypeName>) -> Result<String> {
         use PrimOp::*;
         match op {
             GlslExt(id) => {
@@ -1036,29 +1036,44 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             FPToUI => Ok(format!("uint({})", args[0])),
             SIToFP | UIToFP => Ok(format!("float({})", args[0])),
             FPConvert => Ok(format!("float({})", args[0])),
-            SConvert | UConvert => Ok(format!("int({})", args[0])),
+            SConvert => {
+                let target = self.ctx.type_to_glsl(ret_ty);
+                Ok(format!("{}({})", target, args[0]))
+            }
+            UConvert => {
+                let target = self.ctx.type_to_glsl(ret_ty);
+                Ok(format!("{}({})", target, args[0]))
+            }
             Bitcast => {
-                let func = match ret_ty {
-                    PolyType::Constructed(TypeName::Int(32), _) => "floatBitsToInt",
-                    PolyType::Constructed(TypeName::UInt(32), _) => "floatBitsToUint",
-                    PolyType::Constructed(TypeName::Float(32), _) => "intBitsToFloat",
-                    _ => "floatBitsToInt",
-                };
-                Ok(format!("{}({})", func, args[0]))
+                match ret_ty {
+                    PolyType::Constructed(TypeName::Int(32), _) => {
+                        Ok(format!("floatBitsToInt({})", args[0]))
+                    }
+                    PolyType::Constructed(TypeName::UInt(32), _) => {
+                        Ok(format!("floatBitsToUint({})", args[0]))
+                    }
+                    PolyType::Constructed(TypeName::Float(32), _) => {
+                        Ok(format!("intBitsToFloat({})", args[0]))
+                    }
+                    _ => bail_glsl!(
+                        "Unsupported bitcast target type: {}",
+                        self.ctx.type_to_glsl(ret_ty)
+                    ),
+                }
             }
         }
     }
 
     fn lower_intrinsic(
-        &self,
+        &mut self,
         name: &str,
         args: &[String],
         _arg_ids: &[ValueId],
         ret_ty: &PolyType<TypeName>,
     ) -> Result<String> {
         // Check ImplSource first (handles _w_intrinsic_* builtins)
-        if let Some(impl_) = self.ctx.impl_source.get(name) {
-            return self.lower_builtin_call(impl_, args, ret_ty);
+        if let Some(impl_) = self.ctx.impl_source.get(name).cloned() {
+            return self.lower_builtin_call(&impl_, args, ret_ty);
         }
         bail_glsl!("Unknown intrinsic: {}", name)
     }
