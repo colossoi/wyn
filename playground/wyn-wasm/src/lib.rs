@@ -86,11 +86,12 @@ mod tlc_tree {
                 let label = format!("Lambda({}) : {}", params_str.join(", "), ty);
                 TreeNode::branch(label, vec![term_to_tree(&lam.body)])
             }
-            TermKind::App { func, arg } => {
-                TreeNode::branch(format!("App : {}", ty), vec![
-                    TreeNode::branch("func", vec![term_to_tree(func)]),
-                    TreeNode::branch("arg", vec![term_to_tree(arg)]),
-                ])
+            TermKind::App { func, args } => {
+                let mut children = vec![TreeNode::branch("func", vec![term_to_tree(func)])];
+                for (i, arg) in args.iter().enumerate() {
+                    children.push(TreeNode::branch(format!("arg{}", i), vec![term_to_tree(arg)]));
+                }
+                TreeNode::branch(format!("App : {}", ty), children)
             }
             TermKind::Let { name, name_ty, rhs, body } => {
                 let label = format!("Let({}: {})", name, fmt_ty(name_ty));
@@ -360,6 +361,12 @@ fn compile_impl(source: &str) -> CompileResult {
         Err(e) => return CompileResult::err(e),
     };
 
+    // Elaborate modules
+    let parsed = match parsed.elaborate_modules(&mut frontend.module_manager) {
+        Ok(p) => p,
+        Err(e) => return CompileResult::err(e),
+    };
+
     // Desugar
     let desugared = match parsed.desugar(&mut frontend.node_counter) {
         Ok(d) => d,
@@ -410,7 +417,8 @@ fn compile_impl(source: &str) -> CompileResult {
         Err(e) => return CompileResult::err_msg(format!("SSA conversion error: {:?}", e)),
     };
 
-    // Parallelize SOACs (for compute shaders)
+    // Inline small functions, then parallelize SOACs
+    let ssa = ssa.inline_small();
     let parallelized = ssa.parallelize_soacs();
 
     // Eliminate dead functions
@@ -452,6 +460,12 @@ fn compile_with_ir_impl(source: &str) -> CompileResultWithIR {
 
     // Parse
     let parsed = match wyn_core::Compiler::parse(source, &mut frontend.node_counter) {
+        Ok(p) => p,
+        Err(e) => return CompileResultWithIR::err(e),
+    };
+
+    // Elaborate modules
+    let parsed = match parsed.elaborate_modules(&mut frontend.module_manager) {
         Ok(p) => p,
         Err(e) => return CompileResultWithIR::err(e),
     };
@@ -511,10 +525,9 @@ fn compile_with_ir_impl(source: &str) -> CompileResultWithIR {
         Err(e) => return CompileResultWithIR::err_msg(format!("SSA conversion error: {:?}", e)),
     };
 
-    // Parallelize SOACs
+    // SSA pipeline
+    let ssa = ssa.inline_small();
     let parallelized = ssa.parallelize_soacs();
-
-    // Eliminate dead functions
     let reachable = parallelized.filter_reachable();
     let optimized = reachable.optimize();
     let soac_lowered = optimized.lower_soacs();
