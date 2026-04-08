@@ -107,6 +107,7 @@ impl PartialEvaluator {
             uniforms: program.uniforms,
             storage: program.storage,
             symbols: eval.symbols,
+            def_syms: program.def_syms,
         }
     }
 

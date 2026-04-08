@@ -28,6 +28,7 @@ pub fn specialize(program: Program) -> Program {
         uniforms: program.uniforms,
         storage: program.storage,
         symbols,
+        def_syms: program.def_syms,
     }
 }
 

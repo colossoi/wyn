@@ -5,6 +5,7 @@ use crate::tlc::specialize::specialize;
 use crate::tlc::{Def, DefMeta, Program, Term, TermIdSource, TermKind};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
+use std::collections::HashMap;
 
 /// Test helper that manages symbol table and term ID generation.
 struct TestBuilder {
@@ -84,6 +85,7 @@ fn test_specialize_sign_f32() {
         uniforms: vec![],
         storage: vec![],
         symbols,
+        def_syms: HashMap::new(),
     };
 
     let specialized = specialize(program);
@@ -159,6 +161,7 @@ fn test_specialize_min_i32() {
         uniforms: vec![],
         storage: vec![],
         symbols,
+        def_syms: HashMap::new(),
     };
 
     let specialized = specialize(program);

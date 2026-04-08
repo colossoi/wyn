@@ -408,6 +408,9 @@ pub fn classify_soac(soac: &SoacOp) -> ArraySemantics {
             init: ne.clone(),
             props: props.clone(),
         },
+        // Redomap is a fused map+reduce produced by fusion; classified as opaque
+        // because it is not analyzed further by the semantic framework.
+        SoacOp::Redomap { .. } => ArraySemantics::Opaque,
     }
 }
 
@@ -494,7 +497,8 @@ pub fn summarize_program(program: &Program) -> HashMap<SymbolId, FunctionSummary
     // Initial pass: summarize each def without interprocedural info
     let mut summaries: HashMap<SymbolId, FunctionSummary> = HashMap::new();
     for def in &program.defs {
-        summaries.insert(def.name, summarize_def(def));
+        let summary = summarize_def(def);
+        summaries.insert(def.name, summary);
     }
 
     // Fixpoint: re-analyze defs that returned Unknown, using existing summaries

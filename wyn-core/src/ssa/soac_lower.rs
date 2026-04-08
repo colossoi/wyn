@@ -226,6 +226,23 @@ fn expand_soac(
             input_elem_type,
             result_ty,
         ),
+        Soac::Redomap {
+            func,
+            inputs,
+            init,
+            captures,
+            input_array_types,
+            input_elem_types,
+        } => expand_redomap(
+            builder,
+            func,
+            &remap_values(inputs, value_map),
+            value_map[init],
+            &remap_values(captures, value_map),
+            input_array_types,
+            input_elem_types,
+            result_ty,
+        ),
     }
 }
 
@@ -570,6 +587,89 @@ fn expand_scan(
         .terminate(Terminator::Branch {
             target: loop_blocks.header,
             args: vec![new_arr, next_i, new_acc],
+        })
+        .ok()?;
+
+    // Exit
+    builder.switch_to_block(loop_blocks.exit).ok()?;
+
+    Some(loop_blocks.result)
+}
+
+/// Expand a Redomap SOAC into a single for-range reduction loop over
+/// multiple input arrays, without materializing intermediate arrays.
+///
+/// The combined operator takes `(acc, x1, ..., xn, captures...)` and returns
+/// the new accumulator.
+fn expand_redomap(
+    builder: &mut FuncBuilder,
+    func: &str,
+    inputs: &[ValueId],
+    init_value: ValueId,
+    captures: &[ValueId],
+    input_array_types: &[Type<TypeName>],
+    input_elem_types: &[Type<TypeName>],
+    result_ty: Type<TypeName>,
+) -> Option<ValueId> {
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+    let acc_ty = result_ty.clone();
+
+    // Compute length from first input array
+    let first_input_ty = &input_array_types[0];
+    let len = match extract_array_size(first_input_ty) {
+        Some(n) => builder.push_int(&n.to_string(), i32_ty.clone()).ok()?,
+        None => soa_length(builder, inputs[0], first_input_ty).ok()?,
+    };
+
+    let loop_blocks = builder.create_for_range_loop(acc_ty.clone());
+
+    let zero = builder.push_int("0", i32_ty.clone()).ok()?;
+    builder
+        .terminate(Terminator::Branch {
+            target: loop_blocks.header,
+            args: vec![init_value, zero],
+        })
+        .ok()?;
+
+    // Header
+    builder.switch_to_block(loop_blocks.header).ok()?;
+    let cond = builder.push_binop("<", loop_blocks.index, len, bool_ty).ok()?;
+    builder
+        .terminate(Terminator::CondBranch {
+            cond,
+            then_target: loop_blocks.body,
+            then_args: vec![],
+            else_target: loop_blocks.exit,
+            else_args: vec![loop_blocks.acc],
+        })
+        .ok()?;
+
+    // Body: index all input arrays, call func(acc, elem0, ..., elemN, captures...)
+    builder.switch_to_block(loop_blocks.body).ok()?;
+
+    let mut call_args = vec![loop_blocks.acc];
+    for (i, &arr) in inputs.iter().enumerate() {
+        let elem = soa_index(
+            builder,
+            arr,
+            loop_blocks.index,
+            &input_array_types[i],
+            &input_elem_types[i],
+        )
+        .ok()?;
+        call_args.push(elem);
+    }
+    call_args.extend(captures.iter().copied());
+
+    let new_acc = builder.push_call(func, call_args, acc_ty).ok()?;
+
+    let one = builder.push_int("1", i32_ty.clone()).ok()?;
+    let next_i = builder.push_binop("+", loop_blocks.index, one, i32_ty).ok()?;
+    builder
+        .terminate(Terminator::Branch {
+            target: loop_blocks.header,
+            args: vec![new_acc, next_i],
         })
         .ok()?;
 

@@ -336,6 +336,23 @@ fn format_soac(out: &mut String, soac: &Soac) {
                 let _ = write!(out, " captures=[{}]", format_values(captures));
             }
         }
+        Soac::Redomap {
+            func,
+            inputs,
+            init,
+            captures,
+            ..
+        } => {
+            let _ = write!(
+                out,
+                "soac.redomap @{func}({}, {})",
+                format_values(inputs),
+                fmt_val(*init)
+            );
+            if !captures.is_empty() {
+                let _ = write!(out, " captures=[{}]", format_values(captures));
+            }
+        }
     }
 }
 

@@ -662,7 +662,7 @@ impl AliasChecked {
         parts.defs = merged_defs;
 
         // Combine parts with the symbol table to create the final Program
-        let tlc_program = parts.with_symbols(symbols);
+        let tlc_program = parts.with_symbols(symbols, top_level_symbols);
 
         TlcTransformed {
             tlc: tlc_program,

@@ -103,12 +103,23 @@ pub fn build_producer_graph(
     body: &Term,
     _params: &[SymbolId],
     summaries: &HashMap<SymbolId, FunctionSummary>,
+    symbols: &crate::SymbolTable,
+    def_syms: &HashMap<String, SymbolId>,
 ) -> ProducerGraph {
+    // Build callee_sym → def_sym resolver
+    let mut sym_to_def: HashMap<SymbolId, SymbolId> = HashMap::new();
+    for (sym, name) in symbols.iter() {
+        if let Some(&def_sym) = def_syms.get(name) {
+            sym_to_def.insert(*sym, def_sym);
+        }
+    }
+
     let mut builder = GraphBuilder {
         nodes: Vec::new(),
         edges: Vec::new(),
         binding_map: HashMap::new(),
         summaries,
+        sym_to_def,
         term_ids: TermIdSource::new(),
     };
 
@@ -127,6 +138,8 @@ struct GraphBuilder<'a> {
     edges: Vec<ProducerEdge>,
     binding_map: HashMap<SymbolId, ProducerId>,
     summaries: &'a HashMap<SymbolId, FunctionSummary>,
+    /// Resolves call-site SymbolIds to canonical def SymbolIds for summary lookup.
+    sym_to_def: HashMap<SymbolId, SymbolId>,
     term_ids: TermIdSource,
 }
 
@@ -148,7 +161,9 @@ impl<'a> GraphBuilder<'a> {
         // For App nodes, check if the callee has a known summary
         if let TermKind::App { func, args } = &term.kind {
             if let TermKind::Var(callee_sym) = &func.kind {
-                if let Some(summary) = self.summaries.get(callee_sym) {
+                // Resolve call-site symbol to canonical def symbol
+                let def_sym = self.sym_to_def.get(callee_sym).unwrap_or(callee_sym);
+                if let Some(summary) = self.summaries.get(def_sym) {
                     if let ResultSemantics::Produces(ref semantics) = summary.result {
                         // Substitute the summary's parameter references with
                         // the actual call arguments

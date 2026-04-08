@@ -36,6 +36,7 @@ pub fn inline(program: Program) -> Program {
         uniforms: program.uniforms,
         storage: program.storage,
         symbols: program.symbols,
+        def_syms: program.def_syms,
     }
 }
 

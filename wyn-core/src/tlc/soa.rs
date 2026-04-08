@@ -171,6 +171,7 @@ impl SoaTransformer {
             uniforms: program.uniforms,
             storage: program.storage,
             symbols: self.symbols,
+            def_syms: program.def_syms,
         }
     }
 
@@ -669,6 +670,23 @@ impl SoaTransformer {
                     ne: Box::new(new_ne),
                     indices: new_indices,
                     values: new_values,
+                    props: props.clone(),
+                }
+            }
+            SoacOp::Redomap {
+                op,
+                ne,
+                inputs,
+                props,
+            } => {
+                let new_op = self.transform_lambda(op);
+                let new_ne = self.transform_term(ne);
+                let new_inputs: Vec<ArrayExpr> =
+                    inputs.iter().map(|ae| self.transform_array_expr(ae)).collect();
+                SoacOp::Redomap {
+                    op: new_op,
+                    ne: Box::new(new_ne),
+                    inputs: new_inputs,
                     props: props.clone(),
                 }
             }

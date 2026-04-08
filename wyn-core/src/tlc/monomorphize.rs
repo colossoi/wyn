@@ -53,6 +53,8 @@ pub(crate) struct Monomorphizer<'a> {
     uniforms: Vec<crate::ast::UniformDecl>,
     /// Storage declarations (passed through unchanged)
     storage: Vec<crate::ast::StorageDecl>,
+    /// Canonical function name → def SymbolId mapping (passed through unchanged)
+    def_syms: std::collections::HashMap<String, crate::SymbolId>,
 }
 
 struct WorkItem {
@@ -323,6 +325,7 @@ impl<'a> Monomorphizer<'a> {
             term_ids: TermIdSource::new(),
             uniforms: program.uniforms,
             storage: program.storage,
+            def_syms: program.def_syms,
         }
     }
 
@@ -344,6 +347,7 @@ impl<'a> Monomorphizer<'a> {
             uniforms: self.uniforms,
             storage: self.storage,
             symbols: self.symbols,
+            def_syms: self.def_syms,
         }
     }
 
@@ -607,6 +611,17 @@ impl<'a> Monomorphizer<'a> {
                 ne: Box::new(self.process_term(ne)),
                 indices: self.process_array_expr(indices),
                 values: self.process_array_expr(values),
+                props: props.clone(),
+            },
+            SoacOp::Redomap {
+                op,
+                ne,
+                inputs,
+                props,
+            } => SoacOp::Redomap {
+                op: self.process_lambda(op),
+                ne: Box::new(self.process_term(ne)),
+                inputs: inputs.iter().map(|ae| self.process_array_expr(ae)).collect(),
                 props: props.clone(),
             },
         }
@@ -939,6 +954,17 @@ impl<'a> Monomorphizer<'a> {
                 ne: Box::new(self.apply_subst_term(ne, subst)),
                 indices: self.apply_subst_array_expr(indices, subst),
                 values: self.apply_subst_array_expr(values, subst),
+                props: props.clone(),
+            },
+            SoacOp::Redomap {
+                op,
+                ne,
+                inputs,
+                props,
+            } => SoacOp::Redomap {
+                op: self.apply_subst_lambda(op, subst),
+                ne: Box::new(self.apply_subst_term(ne, subst)),
+                inputs: inputs.iter().map(|ae| self.apply_subst_array_expr(ae, subst)).collect(),
                 props: props.clone(),
             },
         }

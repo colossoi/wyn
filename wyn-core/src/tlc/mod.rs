@@ -358,6 +358,19 @@ pub enum SoacOp {
         input: ArrayExpr,
         props: ReduceProps,
     },
+    /// Fused map+reduce: `op(acc, x1, ..., xn) -> acc'` over parallel inputs.
+    /// Produced by fusion when a Map feeds directly into a Reduce.
+    /// Lowered as a single loop without materializing the intermediate array.
+    Redomap {
+        /// Combined operator: `(acc, x1, ..., xn) -> acc'`
+        /// First param is the accumulator, rest are elements from each input.
+        op: Lambda,
+        /// Initial accumulator value.
+        ne: Box<Term>,
+        /// Parallel input arrays (one per element param in op).
+        inputs: Vec<ArrayExpr>,
+        props: ReduceProps,
+    },
     Scan {
         op: Lambda,
         ne: Box<Term>,
@@ -450,6 +463,9 @@ pub struct Program {
     pub storage: Vec<ast::StorageDecl>,
     /// Symbol table: maps SymbolId to original name (for errors/debugging).
     pub symbols: SymbolTable,
+    /// Canonical function name → def SymbolId mapping.
+    /// Used by fusion to resolve call-site SymbolIds to def SymbolIds.
+    pub def_syms: HashMap<String, SymbolId>,
 }
 
 impl Program {
@@ -473,12 +489,26 @@ pub struct ProgramParts {
 
 impl ProgramParts {
     /// Combine with a symbol table to create a complete Program.
-    pub fn with_symbols(self, symbols: SymbolTable) -> Program {
+    pub fn with_symbols(self, symbols: SymbolTable, def_syms: HashMap<String, SymbolId>) -> Program {
         Program {
             defs: self.defs,
             uniforms: self.uniforms,
             storage: self.storage,
             symbols,
+            def_syms,
+        }
+    }
+}
+
+impl Program {
+    /// Rebuild a Program, carrying def_syms through.
+    pub fn rebuild(self, defs: Vec<Def>, symbols: SymbolTable) -> Program {
+        Program {
+            defs,
+            uniforms: self.uniforms,
+            storage: self.storage,
+            symbols,
+            def_syms: self.def_syms,
         }
     }
 }
@@ -740,6 +770,13 @@ where
             visit_array_expr_children(indices, f);
             visit_array_expr_children(values, f);
         }
+        SoacOp::Redomap { op, ne, inputs, .. } => {
+            visit_lambda_children(op, f);
+            f(ne);
+            for ae in inputs {
+                visit_array_expr_children(ae, f);
+            }
+        }
     }
 }
 
@@ -853,6 +890,17 @@ where
             ne: Box::new(f(*ne)),
             indices: map_array_expr_children(indices, f),
             values: map_array_expr_children(values, f),
+            props,
+        },
+        SoacOp::Redomap {
+            op,
+            ne,
+            inputs,
+            props,
+        } => SoacOp::Redomap {
+            op: map_lambda_children(op, f),
+            ne: Box::new(f(*ne)),
+            inputs: inputs.into_iter().map(|ae| map_array_expr_children(ae, f)).collect(),
             props,
         },
     }
@@ -2590,5 +2638,5 @@ pub fn transform(program: &ast::Program, type_table: &TypeTable) -> Program {
     let mut top_level_symbols = HashMap::new();
     let mut transformer = Transformer::new(type_table, &mut symbols, &mut top_level_symbols);
     let parts = transformer.transform_program(program);
-    parts.with_symbols(symbols)
+    parts.with_symbols(symbols, top_level_symbols)
 }

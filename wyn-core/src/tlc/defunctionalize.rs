@@ -345,6 +345,17 @@ fn apply_type_subst_to_soac(soac: &SoacOp, subst: &TypeSubst, term_ids: &mut Ter
             values: apply_type_subst_to_array_expr(values, subst, term_ids),
             props: props.clone(),
         },
+        SoacOp::Redomap {
+            op,
+            ne,
+            inputs,
+            props,
+        } => SoacOp::Redomap {
+            op: apply_type_subst_to_lambda(op, subst, term_ids),
+            ne: Box::new(apply_type_subst_to_term(ne, subst, term_ids)),
+            inputs: inputs.iter().map(|ae| apply_type_subst_to_array_expr(ae, subst, term_ids)).collect(),
+            props: props.clone(),
+        },
     }
 }
 
@@ -613,6 +624,13 @@ fn collect_free_vars_soac(
             collect_free_vars_array_expr(indices, bound, top_level, known_defs, symbols, free, seen);
             collect_free_vars_array_expr(values, bound, top_level, known_defs, symbols, free, seen);
         }
+        SoacOp::Redomap { op, ne, inputs, .. } => {
+            collect_free_vars_lambda(op, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars(ne, bound, top_level, known_defs, symbols, free, seen);
+            for input in inputs {
+                collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
+            }
+        }
     }
 }
 
@@ -729,6 +747,7 @@ impl<'a> Defunctionalizer<'a> {
             uniforms: program.uniforms,
             storage: program.storage,
             symbols,
+            def_syms: program.def_syms,
         }
     }
 
@@ -1131,6 +1150,22 @@ impl<'a> Defunctionalizer<'a> {
                     ne,
                     indices,
                     values,
+                    props,
+                }
+            }
+            SoacOp::Redomap {
+                op,
+                ne,
+                inputs,
+                props,
+            } => {
+                let op = self.defunc_lambda_in_soac(op, span);
+                let ne = Box::new(self.defunc_term(*ne).term);
+                let inputs = inputs.into_iter().map(|ae| self.defunc_array_expr(ae)).collect();
+                SoacOp::Redomap {
+                    op,
+                    ne,
+                    inputs,
                     props,
                 }
             }
@@ -1950,6 +1985,20 @@ impl<'a> Defunctionalizer<'a> {
                 ne: Box::new(self.substitute_var(ne, old_sym, new_sym)),
                 indices: self.substitute_var_array_expr(indices, old_sym, new_sym),
                 values: self.substitute_var_array_expr(values, old_sym, new_sym),
+                props: props.clone(),
+            },
+            SoacOp::Redomap {
+                op,
+                ne,
+                inputs,
+                props,
+            } => SoacOp::Redomap {
+                op: self.substitute_var_lambda(op, old_sym, new_sym),
+                ne: Box::new(self.substitute_var(ne, old_sym, new_sym)),
+                inputs: inputs
+                    .iter()
+                    .map(|ae| self.substitute_var_array_expr(ae, old_sym, new_sym))
+                    .collect(),
                 props: props.clone(),
             },
         }

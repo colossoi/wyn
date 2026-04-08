@@ -132,6 +132,7 @@ pub fn buffer_specialize(program: Program) -> Program {
         uniforms: program.uniforms,
         storage: program.storage,
         symbols: specializer.symbols,
+        def_syms: program.def_syms,
     }
 }
 
@@ -458,6 +459,17 @@ impl BufferSpecializer {
                 ne: Box::new(self.rewrite_term(ne)),
                 indices: self.rewrite_array_expr(indices),
                 values: self.rewrite_array_expr(values),
+                props: props.clone(),
+            },
+            SoacOp::Redomap {
+                op,
+                ne,
+                inputs,
+                props,
+            } => SoacOp::Redomap {
+                op: self.rewrite_lambda(op),
+                ne: Box::new(self.rewrite_term(ne)),
+                inputs: inputs.iter().map(|ae| self.rewrite_array_expr(ae)).collect(),
                 props: props.clone(),
             },
         }
@@ -1083,6 +1095,20 @@ impl BufferSpecializer {
                 ne: Box::new(self.rewrite_specialized_body(ne, view_params)),
                 indices: self.rewrite_specialized_array_expr(indices, view_params),
                 values: self.rewrite_specialized_array_expr(values, view_params),
+                props: props.clone(),
+            },
+            SoacOp::Redomap {
+                op,
+                ne,
+                inputs,
+                props,
+            } => SoacOp::Redomap {
+                op: self.rewrite_specialized_lambda(op, view_params),
+                ne: Box::new(self.rewrite_specialized_body(ne, view_params)),
+                inputs: inputs
+                    .iter()
+                    .map(|ae| self.rewrite_specialized_array_expr(ae, view_params))
+                    .collect(),
                 props: props.clone(),
             },
         }

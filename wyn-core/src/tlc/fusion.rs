@@ -42,6 +42,7 @@ pub fn fuse(program: Program) -> Program {
         let summaries = summarize_program(&program);
 
         let mut symbols = program.symbols;
+        let def_syms = program.def_syms;
         let mut term_ids = TermIdSource::new();
 
         let defs = program
@@ -49,8 +50,9 @@ pub fn fuse(program: Program) -> Program {
             .into_iter()
             .map(|def| {
                 // Bottom-up: fuse children first, then try graph-driven fusion
-                let new_body = fuse_term(def.body, &summaries, &mut symbols, &mut term_ids);
-                let (new_body, did_fuse) = fuse_def_body(new_body, &summaries, &mut symbols, &mut term_ids);
+                let new_body = fuse_term(def.body, &summaries, &mut symbols, &mut term_ids, &def_syms);
+                let (new_body, did_fuse) =
+                    fuse_def_body(new_body, &summaries, &mut symbols, &mut term_ids, &def_syms);
                 if did_fuse {
                     changed = true;
                 }
@@ -68,6 +70,7 @@ pub fn fuse(program: Program) -> Program {
             uniforms: program.uniforms,
             storage: program.storage,
             symbols,
+            def_syms: def_syms.clone(),
         };
     }
 
@@ -85,13 +88,12 @@ fn fuse_term(
     summaries: &Summaries,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
+    def_syms: &HashMap<String, SymbolId>,
 ) -> Term {
-    // Recurse into children first
-    let term = term.map_children(&mut |child| fuse_term(child, summaries, symbols, term_ids));
+    let term = term.map_children(&mut |child| fuse_term(child, summaries, symbols, term_ids, def_syms));
 
-    // If this sub-expression is a Let chain, try graph-driven fusion on it
     if matches!(term.kind, TermKind::Let { .. }) {
-        let (fused, _) = fuse_def_body(term, summaries, symbols, term_ids);
+        let (fused, _) = fuse_def_body(term, summaries, symbols, term_ids, def_syms);
         return fused;
     }
 
@@ -104,11 +106,12 @@ fn fuse_def_body(
     summaries: &Summaries,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
+    def_syms: &HashMap<String, SymbolId>,
 ) -> (Term, bool) {
     let (params, inner) = extract_lambda_params(&body);
     let param_syms: Vec<SymbolId> = params.iter().map(|(s, _)| *s).collect();
 
-    let graph = producer_graph::build_producer_graph(&inner, &param_syms, summaries);
+    let graph = producer_graph::build_producer_graph(&inner, &param_syms, summaries, symbols, def_syms);
 
     if graph.node_count() < 2 {
         return (body, false);
@@ -125,16 +128,9 @@ fn fuse_def_body(
             if fk == FusionKind::NotFusible {
                 return false;
             }
-            // Producer must be single-use
-            if p.use_count != 1 {
+            if p.use_count != 1 || p.binding.is_none() {
                 return false;
             }
-            // Producer must be Let-bound
-            if p.binding.is_none() {
-                return false;
-            }
-            // For elementwise→elementwise fusion, consumer must have single input
-            // (multi-input zip-fused consumers need inline fusion, handled separately)
             if fk == FusionKind::ComposeElementwise {
                 if let ArraySemantics::Elementwise { inputs, .. } = &c.semantics {
                     if inputs.len() != 1 {
@@ -160,6 +156,12 @@ fn fuse_def_body(
     let fusion_kind = can_fuse(&producer.semantics, &consumer.semantics);
 
     // Build the fused SOAC term from semantics
+    eprintln!(
+        "FUSION: building fused term for {:?} ({:?} → {:?})",
+        fusion_kind,
+        std::mem::discriminant(&producer.semantics),
+        std::mem::discriminant(&consumer.semantics)
+    );
     let fused_soac_term = build_fused_from_semantics(
         &producer.semantics,
         &consumer.semantics,
@@ -238,7 +240,7 @@ fn build_fused_from_semantics(
         }
 
         (FusionKind::MapIntoReduce, ArraySemantics::Reduction { op, init, props, .. }) => {
-            if input_exprs.len() != 1 || op.params.len() != 2 {
+            if op.params.len() != 2 {
                 return None;
             }
             let composed_op = compose_map_reduce(prod_lam.clone(), op.clone(), span, symbols, term_ids);
@@ -246,10 +248,10 @@ fn build_fused_from_semantics(
                 id: term_ids.next_id(),
                 ty: consumer_ty,
                 span,
-                kind: TermKind::Soac(SoacOp::Reduce {
+                kind: TermKind::Soac(SoacOp::Redomap {
                     op: composed_op,
                     ne: init.clone(),
-                    input: input_exprs[0].clone(),
+                    inputs: input_exprs,
                     props: props.clone(),
                 }),
             })
@@ -545,8 +547,12 @@ fn compose_map_reduce(
         },
     };
 
+    // Combined params: (acc, x1, ..., xN) where x1..xN are the map lambda's params
+    let mut params = vec![reduce_op.params[0].clone()];
+    params.extend(map_lam.params.iter().cloned());
+
     Lambda {
-        params: vec![reduce_op.params[0].clone(), map_lam.params[0].clone()],
+        params,
         body: Box::new(composed_body),
         ret_ty: reduce_op.ret_ty,
         captures: vec![],

@@ -531,6 +531,23 @@ pub enum Soac {
         /// Element type of the input array (for SoA-aware indexing).
         input_elem_type: Type<TypeName>,
     },
+    /// Fused map+reduce: `func(acc, x1, ..., xn) -> acc'` over parallel inputs.
+    /// Produced by fusion when a Map feeds directly into a Reduce.
+    /// Lowered as a single loop without materializing the intermediate array.
+    Redomap {
+        /// Combined operator: `(acc, x1, ..., xn) -> acc'`.
+        func: String,
+        /// Parallel input arrays.
+        inputs: Vec<ValueId>,
+        /// Initial accumulator value.
+        init: ValueId,
+        /// Captured variables passed as extra arguments to `func`.
+        captures: Vec<ValueId>,
+        /// Types of each input array (for SoA-aware length/indexing).
+        input_array_types: Vec<Type<TypeName>>,
+        /// Element types of each input array (for SoA-aware indexing).
+        input_elem_types: Vec<Type<TypeName>>,
+    },
 }
 
 impl Soac {
@@ -559,6 +576,17 @@ impl Soac {
                 ..
             } => {
                 let mut uses = vec![*input, *init];
+                uses.extend(captures.iter().copied());
+                uses
+            }
+            Soac::Redomap {
+                inputs,
+                init,
+                captures,
+                ..
+            } => {
+                let mut uses = inputs.clone();
+                uses.push(*init);
                 uses.extend(captures.iter().copied());
                 uses
             }
@@ -595,6 +623,20 @@ impl Soac {
                 ..
             } => {
                 sub(input);
+                sub(init);
+                for v in captures.iter_mut() {
+                    sub(v);
+                }
+            }
+            Soac::Redomap {
+                inputs,
+                init,
+                captures,
+                ..
+            } => {
+                for v in inputs.iter_mut() {
+                    sub(v);
+                }
                 sub(init);
                 for v in captures.iter_mut() {
                     sub(v);
@@ -671,6 +713,32 @@ impl Soac {
                     }
                 }
             }
+            Soac::Redomap {
+                inputs,
+                init,
+                captures,
+                ..
+            } => {
+                for v in inputs.iter_mut() {
+                    let mut vr = ValueRef::Ssa(*v);
+                    sub(&mut vr);
+                    if let ValueRef::Ssa(new_id) = vr {
+                        *v = new_id;
+                    }
+                }
+                let mut vr = ValueRef::Ssa(*init);
+                sub(&mut vr);
+                if let ValueRef::Ssa(new_id) = vr {
+                    *init = new_id;
+                }
+                for v in captures.iter_mut() {
+                    let mut vr = ValueRef::Ssa(*v);
+                    sub(&mut vr);
+                    if let ValueRef::Ssa(new_id) = vr {
+                        *v = new_id;
+                    }
+                }
+            }
         }
     }
 
@@ -680,6 +748,7 @@ impl Soac {
             Soac::Map { func, .. } => func,
             Soac::Reduce { func, .. } => func,
             Soac::Scan { func, .. } => func,
+            Soac::Redomap { func, .. } => func,
         }
     }
 }

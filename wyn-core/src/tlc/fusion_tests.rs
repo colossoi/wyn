@@ -1,6 +1,7 @@
 use crate::ast::Span;
 use crate::tlc::ReduceProps;
 use crate::tlc::fusion::*;
+use std::collections::HashMap;
 
 fn dummy_span() -> Span {
     Span::new(0, 0, 0, 0)
@@ -196,6 +197,7 @@ fn test_simple_map_fusion() {
         uniforms: vec![],
         storage: vec![],
         symbols,
+        def_syms: HashMap::new(),
     };
 
     let fused = fuse(program);
@@ -311,6 +313,7 @@ fn test_chain_of_three_maps() {
         uniforms: vec![],
         storage: vec![],
         symbols,
+        def_syms: HashMap::new(),
     };
 
     let fused = fuse(program);
@@ -398,6 +401,7 @@ fn test_multi_use_no_fusion() {
         uniforms: vec![],
         storage: vec![],
         symbols,
+        def_syms: HashMap::new(),
     };
 
     let result = fuse(program);
@@ -478,6 +482,7 @@ fn test_zip_fused_producer() {
         uniforms: vec![],
         storage: vec![],
         symbols,
+        def_syms: HashMap::new(),
     };
 
     let fused = fuse(program);
@@ -562,6 +567,7 @@ fn test_consumer_multi_input_no_fusion() {
         uniforms: vec![],
         storage: vec![],
         symbols,
+        def_syms: HashMap::new(),
     };
 
     let result = fuse(program);
@@ -619,6 +625,7 @@ fn test_inline_map_fusion() {
         uniforms: vec![],
         storage: vec![],
         symbols,
+        def_syms: HashMap::new(),
     };
 
     let fused = fuse(program);
@@ -705,6 +712,7 @@ fn test_inline_chain_of_three() {
         uniforms: vec![],
         storage: vec![],
         symbols,
+        def_syms: HashMap::new(),
     };
 
     let fused = fuse(program);
@@ -782,6 +790,7 @@ fn test_zip_fused_consumer_inline() {
         uniforms: vec![],
         storage: vec![],
         symbols,
+        def_syms: HashMap::new(),
     };
 
     let fused = fuse(program);
@@ -878,6 +887,7 @@ fn test_map_zip_map() {
         uniforms: vec![],
         storage: vec![],
         symbols,
+        def_syms: HashMap::new(),
     };
 
     let fused = fuse(program);
@@ -963,20 +973,22 @@ fn test_raytrace_step1_local_map_reduce() {
         uniforms: vec![],
         storage: vec![],
         symbols,
+        def_syms: HashMap::new(),
     };
 
     let fused = fuse(program);
     match &fused.defs[0].body.kind {
-        TermKind::Soac(SoacOp::Reduce { op, input, .. }) => {
-            match input {
+        TermKind::Soac(SoacOp::Redomap { op, inputs, .. }) => {
+            assert_eq!(inputs.len(), 1);
+            match &inputs[0] {
                 ArrayExpr::Ref(t) => assert!(matches!(&t.kind, TermKind::Var(s) if *s == xs_sym)),
                 other => panic!("Expected Ref(xs), got {:?}", other),
             }
+            // Redomap op has (acc, x) params — acc from reduce, x from map
             assert_eq!(op.params.len(), 2);
             assert_eq!(op.params[0].0, acc_sym);
-            assert_eq!(op.params[1].0, x_sym);
         }
-        other => panic!("Expected fused Reduce, got {:?}", other),
+        other => panic!("Expected fused Redomap, got {:?}", other),
     }
 }
 
@@ -1060,19 +1072,21 @@ fn test_raytrace_step2_interprocedural_reduce_consumer() {
         uniforms: vec![],
         storage: vec![],
         symbols,
+        def_syms: HashMap::new(),
     };
 
     let fused = fuse(program);
     let main = fused.defs.iter().find(|d| d.name == main_sym).unwrap();
     match &main.body.kind {
-        TermKind::Soac(SoacOp::Reduce { op, input, .. }) => {
-            match input {
+        TermKind::Soac(SoacOp::Redomap { op, inputs, .. }) => {
+            assert_eq!(inputs.len(), 1);
+            match &inputs[0] {
                 ArrayExpr::Ref(t) => assert!(matches!(&t.kind, TermKind::Var(s) if *s == arr_sym)),
                 other => panic!("Expected Ref(arr), got {:?}", other),
             }
             assert_eq!(op.params.len(), 2);
         }
-        other => panic!("Expected fused Reduce in main, got {:?}", other),
+        other => panic!("Expected fused Redomap in main, got {:?}", other),
     }
 }
 
@@ -1160,19 +1174,21 @@ fn test_raytrace_step3_interprocedural_map_producer() {
         uniforms: vec![],
         storage: vec![],
         symbols,
+        def_syms: HashMap::new(),
     };
 
     let fused = fuse(program);
     let main = fused.defs.iter().find(|d| d.name == main_sym).unwrap();
     match &main.body.kind {
-        TermKind::Soac(SoacOp::Reduce { op, input, .. }) => {
-            match input {
+        TermKind::Soac(SoacOp::Redomap { op, inputs, .. }) => {
+            assert_eq!(inputs.len(), 1);
+            match &inputs[0] {
                 ArrayExpr::Ref(t) => assert!(matches!(&t.kind, TermKind::Var(s) if *s == arr_sym)),
                 other => panic!("Expected Ref(arr), got {:?}", other),
             }
             assert_eq!(op.params.len(), 2);
         }
-        other => panic!("Expected fused Reduce in main, got {:?}", other),
+        other => panic!("Expected fused Redomap in main, got {:?}", other),
     }
 }
 
@@ -1277,19 +1293,21 @@ fn test_raytrace_step4_both_interprocedural() {
         uniforms: vec![],
         storage: vec![],
         symbols,
+        def_syms: HashMap::new(),
     };
 
     let fused = fuse(program);
     let main = fused.defs.iter().find(|d| d.name == main_sym).unwrap();
     match &main.body.kind {
-        TermKind::Soac(SoacOp::Reduce { op, input, .. }) => {
-            match input {
+        TermKind::Soac(SoacOp::Redomap { op, inputs, .. }) => {
+            assert_eq!(inputs.len(), 1);
+            match &inputs[0] {
                 ArrayExpr::Ref(t) => assert!(matches!(&t.kind, TermKind::Var(s) if *s == arr_sym)),
                 other => panic!("Expected Ref(arr), got {:?}", other),
             }
             assert_eq!(op.params.len(), 2);
         }
-        other => panic!("Expected fused Reduce in main, got {:?}", other),
+        other => panic!("Expected fused Redomap in main, got {:?}", other),
     }
 }
 
@@ -1402,15 +1420,16 @@ fn test_raytrace_step5_globals_pattern_fused() {
         uniforms: vec![],
         storage: vec![],
         symbols,
+        def_syms: HashMap::new(),
     };
 
     let fused = fuse(program);
     let main = fused.defs.iter().find(|d| d.name == main_sym).unwrap();
     // Should fuse: intersectAll produces a Map (ProducesMap summary)
     match &main.body.kind {
-        TermKind::Soac(SoacOp::Reduce { op, .. }) => {
+        TermKind::Soac(SoacOp::Redomap { op, .. }) => {
             assert_eq!(op.params.len(), 2);
         }
-        other => panic!("Expected fused Reduce, got {:?}", other),
+        other => panic!("Expected fused Redomap, got {:?}", other),
     }
 }

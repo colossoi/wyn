@@ -123,9 +123,11 @@ entry fragment_main() #[location(0)] vec4f32 =
         .expect("fragment_main not found");
 
     let (_, frag_body) = crate::tlc::extract_lambda_params(&fragment_main.body);
+    let frag_has_redomap = has_soac_kind(&frag_body, "Redomap");
     let frag_has_reduce = has_soac_kind(&frag_body, "Reduce");
     let frag_has_map = has_soac_kind(&frag_body, "Map");
 
+    eprintln!("fragment_main has Redomap: {}", frag_has_redomap);
     eprintln!("fragment_main has Reduce: {}", frag_has_reduce);
     eprintln!("fragment_main has Map: {}", frag_has_map);
     eprintln!(
@@ -167,8 +169,8 @@ entry fragment_main() #[location(0)] vec4f32 =
     // The fusion should have replaced the let chain with a fused SOAC
     // or at minimum the fragment_main should contain a Reduce
     assert!(
-        frag_has_reduce,
-        "Expected fragment_main to contain a fused Reduce after interprocedural fusion"
+        frag_has_redomap || frag_has_reduce,
+        "Expected fragment_main to contain a fused Redomap or Reduce after interprocedural fusion"
     );
 }
 
@@ -177,6 +179,7 @@ fn has_soac_kind(term: &crate::tlc::Term, kind: &str) -> bool {
     match &term.kind {
         TermKind::Soac(SoacOp::Map { .. }) if kind == "Map" => true,
         TermKind::Soac(SoacOp::Reduce { .. }) if kind == "Reduce" => true,
+        TermKind::Soac(SoacOp::Redomap { .. }) if kind == "Redomap" => true,
         TermKind::Let { rhs, body, .. } => has_soac_kind(rhs, kind) || has_soac_kind(body, kind),
         TermKind::Lambda(lam) => has_soac_kind(&lam.body, kind),
         TermKind::App { func, args } => {

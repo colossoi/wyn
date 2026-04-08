@@ -5,6 +5,7 @@ use super::{Def, DefMeta, Lambda, Program, Term, TermIdSource, TermKind};
 use crate::ast::{BinaryOp, Span, TypeName};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
+use std::collections::HashMap;
 
 /// Test helper that manages symbol table and term ID generation.
 struct TestBuilder {
@@ -53,6 +54,7 @@ fn make_program(name_sym: SymbolId, body: Term, symbols: SymbolTable) -> Program
         uniforms: vec![],
         storage: vec![],
         symbols,
+        def_syms: HashMap::new(),
     }
 }
 
@@ -406,6 +408,7 @@ fn test_function_inlining() {
         uniforms: vec![],
         storage: vec![],
         symbols,
+        def_syms: HashMap::new(),
     };
 
     let result = PartialEvaluator::partial_eval(program);
@@ -519,6 +522,7 @@ fn test_function_alias_inlining() {
         uniforms: vec![],
         storage: vec![],
         symbols,
+        def_syms: HashMap::new(),
     };
 
     let result = PartialEvaluator::partial_eval(program);
@@ -636,6 +640,7 @@ fn test_function_alias_partial_application() {
         uniforms: vec![],
         storage: vec![],
         symbols,
+        def_syms: HashMap::new(),
     };
 
     let result = PartialEvaluator::partial_eval(program);
@@ -716,6 +721,7 @@ fn test_intrinsic_alias_inlining() {
         uniforms: vec![],
         storage: vec![],
         symbols,
+        def_syms: HashMap::new(),
     };
 
     let result = PartialEvaluator::partial_eval(program);

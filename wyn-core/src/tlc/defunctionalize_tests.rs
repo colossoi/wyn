@@ -3,7 +3,7 @@ use super::{Def, DefMeta, Lambda, LoopKind, Program, Term, TermIdSource, TermKin
 use crate::ast::{BinaryOp, Span, TypeName};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Test helper that manages symbol table and term ID generation.
 struct TestBuilder {
@@ -200,6 +200,7 @@ fn test_defunc_simple_lambda_no_capture() {
         uniforms: vec![],
         storage: vec![],
         symbols: b.finish(),
+        def_syms: HashMap::new(),
     };
 
     let known_defs = HashSet::new();
@@ -296,6 +297,7 @@ fn test_defunc_lambda_with_capture() {
         uniforms: vec![],
         storage: vec![],
         symbols,
+        def_syms: HashMap::new(),
     };
 
     let known_defs = HashSet::new();
@@ -522,6 +524,7 @@ fn test_nested_hof_passthrough() {
         uniforms: vec![],
         storage: vec![],
         symbols,
+        def_syms: HashMap::new(),
     };
 
     let known_defs = HashSet::new();

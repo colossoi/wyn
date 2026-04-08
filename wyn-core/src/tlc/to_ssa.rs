@@ -1620,6 +1620,7 @@ impl<'a> Converter<'a> {
         match soac {
             SoacOp::Map { lam, inputs } => self.convert_soac_map(lam, inputs, ty),
             SoacOp::Reduce { op, ne, input, .. } => self.convert_soac_reduce(op, ne, input, ty),
+            SoacOp::Redomap { op, ne, inputs, .. } => self.convert_soac_redomap(op, ne, inputs, ty),
             SoacOp::Scan { op, ne, input } => self.convert_soac_scan(op, ne, input, ty),
             SoacOp::Filter { pred, input } => self.convert_soac_filter(pred, input, ty),
             SoacOp::Scatter { .. } => todo!("SOAC scatter lowering"),
@@ -1789,6 +1790,51 @@ impl<'a> Converter<'a> {
                     captures: capture_values,
                     input_array_type: arr_ty,
                     input_elem_type: elem_ty,
+                }),
+                result_ty,
+            )
+            .map_err(|e| ConvertError::BuilderError(e.to_string()))
+    }
+
+    /// Emit a first-class `Soac(Redomap { ... })` instruction.
+    /// The actual loop expansion is deferred to the `ssa_soac_lower` pass.
+    fn convert_soac_redomap(
+        &mut self,
+        op: &Lambda,
+        ne: &Term,
+        inputs: &[ArrayExpr],
+        result_ty: Type<TypeName>,
+    ) -> Result<ValueId, ConvertError> {
+        let op_name = self.lambda_fn_name(op)?;
+
+        // Convert captures
+        let capture_values: Vec<ValueId> =
+            op.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
+
+        // Collect input array types before converting (needed for SoA-aware ops)
+        let input_arr_types: Vec<Type<TypeName>> =
+            inputs.iter().map(|ae| self.array_expr_type(ae)).collect();
+
+        // Convert all input arrays to SSA values
+        let input_values: Vec<ValueId> =
+            inputs.iter().map(|ae| self.convert_array_expr_value(ae)).collect::<Result<_, _>>()?;
+
+        // Extract element types from input array types (SoA-aware)
+        let input_elem_types: Vec<Type<TypeName>> =
+            inputs.iter().map(|ae| self.array_expr_elem_type(ae)).collect();
+
+        // Convert init value
+        let init_value = self.convert_term(ne)?;
+
+        self.builder
+            .push_inst(
+                InstKind::Soac(Soac::Redomap {
+                    func: op_name,
+                    inputs: input_values,
+                    init: init_value,
+                    captures: capture_values,
+                    input_array_types: input_arr_types,
+                    input_elem_types,
                 }),
                 result_ty,
             )

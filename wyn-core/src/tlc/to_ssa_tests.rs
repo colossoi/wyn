@@ -5,6 +5,7 @@ use crate::tlc::to_ssa::*;
 use crate::tlc::{Def as TlcDef, DefMeta, Lambda, Program as TlcProgram, Term, TermIdSource, TermKind};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
+use std::collections::HashMap;
 
 /// Test helper that manages symbol table and term ID generation.
 struct TestBuilder {
@@ -120,6 +121,7 @@ fn test_convert_simple_function() {
         uniforms: vec![],
         storage: vec![],
         symbols,
+        def_syms: HashMap::new(),
     };
 
     let ssa_program = convert_program(&program).unwrap();
