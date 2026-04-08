@@ -8,9 +8,7 @@ use crate::bail_glsl;
 use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
 use crate::lowering_common::ShaderStage;
-use crate::ssa::types::{
-    ConstantValue, FuncBody, InstKind, ValueId, ValueRef, WynInstNode,
-};
+use crate::ssa::types::{ConstantValue, FuncBody, InstKind, ValueId, ValueRef, WynInstNode};
 use crate::ssa::types::{EntryPoint, ExecutionModel, Function, IoDecoration, Program};
 use crate::types::TypeExt;
 use polytype::Type as PolyType;
@@ -148,7 +146,7 @@ impl<'a> LowerCtx<'a> {
             for (struct_name, field_types) in &self.tuple_structs {
                 writeln!(output, "struct {} {{", struct_name).unwrap();
                 for (i, field_type) in field_types.iter().enumerate() {
-                    writeln!(output, "    {} _{};", field_type, i).unwrap();
+                    writeln!(output, "    {} f{};", field_type, i).unwrap();
                 }
                 writeln!(output, "}};").unwrap();
             }
@@ -168,18 +166,14 @@ impl<'a> LowerCtx<'a> {
             }
         }
 
-        writeln!(
-            output,
-            "void mainImage(out vec4 fragColor, in vec2 _st_fragCoord) {{"
-        )
-        .unwrap();
+        writeln!(output, "void mainImage(out vec4 fragColor, in vec2 fc) {{").unwrap();
         self.indent += 1;
 
         // If the shader expects vec4 fragCoord, convert from vec2
         if let Some(ref name) = frag_coord_name {
             writeln!(
                 output,
-                "{}vec4 {} = vec4(_st_fragCoord.x, iResolution.y - _st_fragCoord.y, 0.0, 1.0);",
+                "{}vec4 {} = vec4(fc.x, iResolution.y - fc.y, 0.0, 1.0);",
                 self.indent_str(),
                 name
             )
@@ -255,7 +249,7 @@ impl<'a> LowerCtx<'a> {
             for (struct_name, field_types) in structs {
                 writeln!(output, "struct {} {{", struct_name).unwrap();
                 for (i, field_type) in field_types.iter().enumerate() {
-                    writeln!(output, "    {} _{};", field_type, i).unwrap();
+                    writeln!(output, "    {} f{};", field_type, i).unwrap();
                 }
                 writeln!(output, "}};").unwrap();
             }
@@ -407,7 +401,7 @@ impl<'a> LowerCtx<'a> {
             if let Some(IoDecoration::Location(loc)) = &out.decoration {
                 writeln!(
                     output,
-                    "layout(location = {}) out {} _out{};",
+                    "layout(location = {}) out {} o{};",
                     loc,
                     self.type_to_glsl(&out.ty),
                     i
@@ -423,7 +417,7 @@ impl<'a> LowerCtx<'a> {
             if let Some(IoDecoration::BuiltIn(spirv::BuiltIn::Position)) = &out.decoration {
                 output_names.insert(i, "gl_Position".to_string());
             } else if let Some(IoDecoration::Location(_)) = &out.decoration {
-                output_names.insert(i, format!("_out{}", i));
+                output_names.insert(i, format!("o{}", i));
             }
         }
 
@@ -450,7 +444,7 @@ impl<'a> LowerCtx<'a> {
                 if is_tuple_return {
                     writeln!(
                         output,
-                        "{}_out{} = {}._{};",
+                        "{}o{} = {}.f{};",
                         self.indent_str(),
                         tuple_idx,
                         result,
@@ -466,7 +460,7 @@ impl<'a> LowerCtx<'a> {
                 for (i, out) in entry.outputs.iter().enumerate() {
                     if let Some(IoDecoration::BuiltIn(spirv::BuiltIn::Position)) = &out.decoration {
                         if is_tuple_return {
-                            writeln!(output, "{}gl_Position = {}._{};", self.indent_str(), result, i)
+                            writeln!(output, "{}gl_Position = {}.f{};", self.indent_str(), result, i)
                                 .unwrap();
                         } else {
                             writeln!(output, "{}gl_Position = {};", self.indent_str(), result).unwrap();
@@ -511,7 +505,7 @@ impl<'a> LowerCtx<'a> {
                         return name.clone();
                     }
 
-                    let struct_name = format!("_Tuple{}", self.tuple_counter);
+                    let struct_name = format!("T{}", self.tuple_counter);
                     self.tuple_counter += 1;
 
                     self.tuple_structs.insert(struct_name.clone(), elem_types);
@@ -570,13 +564,13 @@ impl<'a> LowerCtx<'a> {
     }
 }
 
-/// Format a ValueId as a valid GLSL identifier.
+/// Format a ValueId as a short, valid GLSL identifier.
 fn glsl_var(id: ValueId) -> String {
-    // ValueId Debug is like "ValueId(2v1)" — extract the inner key
-    let s = format!("{:?}", id);
-    // Replace non-alphanumeric chars with underscores
-    let clean: String = s.chars().map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' }).collect();
-    format!("_v{}", clean)
+    use wyn_ssa::Key;
+    let ffi = id.data().as_ffi();
+    let idx = ffi & 0xFFFFFFFF;
+    let ver = ffi >> 32;
+    format!("v{}_{}", idx, ver)
 }
 
 /// Context for lowering a single function body.
@@ -869,7 +863,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     Ok(format!("{}.{}", base_val, swizzle))
                 } else {
                     // Struct field access
-                    Ok(format!("{}._{}", base_val, index))
+                    Ok(format!("{}.f{}", base_val, index))
                 }
             }
 
@@ -998,7 +992,12 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         }
     }
 
-    fn lower_primop(&mut self, op: &PrimOp, args: &[String], ret_ty: &PolyType<TypeName>) -> Result<String> {
+    fn lower_primop(
+        &mut self,
+        op: &PrimOp,
+        args: &[String],
+        ret_ty: &PolyType<TypeName>,
+    ) -> Result<String> {
         use PrimOp::*;
         match op {
             GlslExt(id) => {
@@ -1044,23 +1043,15 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 let target = self.ctx.type_to_glsl(ret_ty);
                 Ok(format!("{}({})", target, args[0]))
             }
-            Bitcast => {
-                match ret_ty {
-                    PolyType::Constructed(TypeName::Int(32), _) => {
-                        Ok(format!("floatBitsToInt({})", args[0]))
-                    }
-                    PolyType::Constructed(TypeName::UInt(32), _) => {
-                        Ok(format!("floatBitsToUint({})", args[0]))
-                    }
-                    PolyType::Constructed(TypeName::Float(32), _) => {
-                        Ok(format!("intBitsToFloat({})", args[0]))
-                    }
-                    _ => bail_glsl!(
-                        "Unsupported bitcast target type: {}",
-                        self.ctx.type_to_glsl(ret_ty)
-                    ),
-                }
-            }
+            Bitcast => match ret_ty {
+                PolyType::Constructed(TypeName::Int(32), _) => Ok(format!("floatBitsToInt({})", args[0])),
+                PolyType::Constructed(TypeName::UInt(32), _) => Ok(format!("floatBitsToUint({})", args[0])),
+                PolyType::Constructed(TypeName::Float(32), _) => Ok(format!("intBitsToFloat({})", args[0])),
+                _ => bail_glsl!(
+                    "Unsupported bitcast target type: {}",
+                    self.ctx.type_to_glsl(ret_ty)
+                ),
+            },
         }
     }
 

@@ -1,3 +1,4 @@
 target/
 testfiles/miner.spv
 testfiles/miner.json
+*.glsl

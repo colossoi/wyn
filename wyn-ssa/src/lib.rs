@@ -1,5 +1,6 @@
 mod dominators;
 
+pub use slotmap::Key;
 use slotmap::{SlotMap, new_key_type};
 use smallvec::SmallVec;
 use std::collections::HashMap;
