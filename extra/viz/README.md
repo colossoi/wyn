@@ -23,12 +23,12 @@ shader) and reports nonces whose hashes meet a given difficulty target.
 viz miner [OPTIONS] [PATH]
 
 Options:
-  --header <HEX>         19 comma-separated hex u32 words (default: zeros)
+  --header-hex <HEX>     76-byte raw header hex (152 chars, everything except nonce)
   -n, --nonces <N>       Number of nonces to try [default: 1024]
-  --nonce-offset <N>     Starting nonce [default: 0]
+  --nonce-offset <N>     Starting nonce offset (BE u32) [default: 0]
   -d, --difficulty <N>   Leading zero bytes required [default: 1]
   --workgroups <N>       Override workgroup count (default: nonces/64)
-  -v, --verbose          Print details
+  -v, --verbose          Print all hashes
 ```
 
 ### Example: verify Bitcoin block 170
@@ -38,21 +38,20 @@ to Hal Finney, 2009-01-12). Its header hashes to
 `00000000d1145790a8694403d4063f323d499e655c83426834d4ce2f8dd4a2ee`
 (4 leading zero bytes).
 
-The 76-byte header base (everything except the nonce) as 19 little-endian
-u32 words:
+The raw 76-byte header (everything except the nonce) in hex:
 
 ```
-00000001,0a84bd55,d08a7978,683f85da,183d4f97,dbd12b3e,1f2c846a,2a22cfee,00000000,cb4c10ff,b91a4205,c3f8633e,2e2c5cce,de37bb9d,a3b36427,66815c17,7dac2c56,496ab951,1d00ffff
+0100000055bd840a78798ad0da853f68974f3d183e2bd1db6a842c1feecf222a00000000ff104ccb05421ab93e63f8c3ce5c2c2e9dbb37de2764b3a3175c8166562cac7d51b96a49ffff001d
 ```
 
-The known nonce is 1889418792 (`0x709e3e28`).
+The known nonce bytes are `283e9e70` (BE u32 = 675282544).
 
 **Verify the known solution** (run 1 nonce at the exact offset):
 
 ```bash
 viz miner ../../testfiles/miner.spv -n 1 -d 4 \
-  --nonce-offset 1889418792 \
-  --header 00000001,0a84bd55,d08a7978,683f85da,183d4f97,dbd12b3e,1f2c846a,2a22cfee,00000000,cb4c10ff,b91a4205,c3f8633e,2e2c5cce,de37bb9d,a3b36427,66815c17,7dac2c56,496ab951,1d00ffff
+  --nonce-offset 675282544 \
+  --header-hex 0100000055bd840a78798ad0da853f68974f3d183e2bd1db6a842c1feecf222a00000000ff104ccb05421ab93e63f8c3ce5c2c2e9dbb37de2764b3a3175c8166562cac7d51b96a49ffff001d
 ```
 
 Expected output:
@@ -60,15 +59,15 @@ Expected output:
 ```
 Mined 1 nonces in ...
 1 hit(s) found:
-  nonce 1889418792 -> 00000000...
+  nonce  675282544 -> 00000000...
 ```
 
 **Search for the solution** (scan a range around the known nonce):
 
 ```bash
 viz miner ../../testfiles/miner.spv -n 65536 -d 4 \
-  --nonce-offset 1889400000 \
-  --header 00000001,0a84bd55,d08a7978,683f85da,183d4f97,dbd12b3e,1f2c846a,2a22cfee,00000000,cb4c10ff,b91a4205,c3f8633e,2e2c5cce,de37bb9d,a3b36427,66815c17,7dac2c56,496ab951,1d00ffff
+  --nonce-offset 675270000 \
+  --header-hex 0100000055bd840a78798ad0da853f68974f3d183e2bd1db6a842c1feecf222a00000000ff104ccb05421ab93e63f8c3ce5c2c2e9dbb37de2764b3a3175c8166562cac7d51b96a49ffff001d
 ```
 
 ### Building the miner shader

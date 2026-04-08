@@ -54,6 +54,29 @@ impl From<PresentModeArg> for PresentMode {
     }
 }
 
+/// Parse 76-byte raw header hex into 19 big-endian u32 words for SHA256.
+fn parse_header_hex(s: &str) -> std::result::Result<[u32; 19], String> {
+    let s = s.trim();
+    if s.len() != 152 {
+        return Err(format!(
+            "expected 152 hex chars (76 bytes), got {} chars",
+            s.len()
+        ));
+    }
+    let mut words = [0u32; 19];
+    for (i, word) in words.iter_mut().enumerate() {
+        let hex = &s[i * 8..(i + 1) * 8];
+        let bytes: [u8; 4] = [
+            u8::from_str_radix(&hex[0..2], 16).map_err(|e| format!("bad hex at byte {}: {}", i * 4, e))?,
+            u8::from_str_radix(&hex[2..4], 16).map_err(|e| format!("bad hex at byte {}: {}", i * 4 + 1, e))?,
+            u8::from_str_radix(&hex[4..6], 16).map_err(|e| format!("bad hex at byte {}: {}", i * 4 + 2, e))?,
+            u8::from_str_radix(&hex[6..8], 16).map_err(|e| format!("bad hex at byte {}: {}", i * 4 + 3, e))?,
+        ];
+        *word = u32::from_be_bytes(bytes);
+    }
+    Ok(words)
+}
+
 fn parse_size(s: &str) -> std::result::Result<(u32, u32), String> {
     let sep = if s.contains('x') { 'x' } else { ',' };
     let parts: Vec<&str> = s.splitn(2, sep).collect();
@@ -172,11 +195,10 @@ enum Command {
         /// Path to the linked miner SPIR-V module
         #[arg(default_value = "testfiles/miner.spv")]
         path: PathBuf,
-        /// Block header base (19 hex u32 words, comma-separated)
-        /// Example: "6a09e667,bb67ae85,...,5be0cd19"
-        /// If omitted, uses a test header of all zeros.
-        #[arg(long)]
-        header: Option<String>,
+        /// Raw block header hex (76 bytes = 152 hex chars, everything except the nonce).
+        /// Bytes are converted to big-endian u32 words for SHA256.
+        #[arg(long, value_parser = parse_header_hex)]
+        header_hex: [u32; 19],
         /// Number of nonces to try
         #[arg(long, short, default_value = "1024")]
         nonces: u32,
@@ -1472,33 +1494,14 @@ fn output_results(
 /// Run the Bitcoin miner shader and check for hash hits
 async fn run_miner(
     path: PathBuf,
-    header_arg: Option<String>,
+    header_hex: [u32; 19],
     nonces: u32,
     nonce_offset: u32,
     difficulty: u32,
     workgroups_override: Option<u32>,
     verbose: bool,
 ) -> Result<()> {
-    // Parse header: 19 hex u32 words, or default to zeros
-    let header_base: Vec<u32> = if let Some(ref h) = header_arg {
-        let words: Vec<u32> = h
-            .split(',')
-            .map(|w| {
-                let w = w.trim();
-                if let Some(hex) = w.strip_prefix("0x").or_else(|| w.strip_prefix("0X")) {
-                    u32::from_str_radix(hex, 16).map_err(|e| anyhow!("Invalid hex u32 '{}': {}", w, e))
-                } else {
-                    u32::from_str_radix(w, 16).map_err(|e| anyhow!("Invalid hex u32 '{}': {}", w, e))
-                }
-            })
-            .collect::<Result<Vec<_>>>()?;
-        if words.len() != 19 {
-            return Err(anyhow!("Header must be exactly 19 u32 words, got {}", words.len()));
-        }
-        words
-    } else {
-        vec![0u32; 19]
-    };
+    let header_base = header_hex;
 
     let workgroup_size = 64u32;
     let num_workgroups = workgroups_override.unwrap_or_else(|| (nonces + workgroup_size - 1) / workgroup_size);
@@ -2973,14 +2976,14 @@ fn main() -> Result<()> {
         }
         Command::Miner {
             path,
-            header,
+            header_hex,
             nonces,
             nonce_offset,
             difficulty,
             workgroups,
             verbose,
         } => {
-            pollster::block_on(run_miner(path, header, nonces, nonce_offset, difficulty, workgroups, verbose))?;
+            pollster::block_on(run_miner(path, header_hex, nonces, nonce_offset, difficulty, workgroups, verbose))?;
         }
         Command::Validate { path, verbose } => {
             pollster::block_on(validate_spirv(&path, verbose))?;
