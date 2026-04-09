@@ -237,8 +237,7 @@ def inShadow(hitPoint: vec3f32, lightDir: vec3f32) f32 =
 -- Shading
 ------------------------------------------------------------
 
-def shade(hitPoint: vec3f32, normal: vec3f32, viewDir: vec3f32, matId: i32) vec3f32 =
-  let (albedo, metallic, roughness, _) = getMaterial(matId, hitPoint) in
+def shade(hitPoint: vec3f32, normal: vec3f32, viewDir: vec3f32, albedo: vec3f32, metallic: f32, roughness: f32) vec3f32 =
   let brdfResult = materials.brdf(normal, viewDir, lightDir, albedo, metallic, roughness) in
   let shadow = inShadow(hitPoint, lightDir) in
   let lightColor = @[2.0, 1.9, 1.8] in
@@ -262,10 +261,10 @@ def trace(ro: vec3f32, rd: vec3f32, maxBounces: i32) vec3f32 =
       else
         let hitPoint = rayO + rayD * t in
         let viewDir = -rayD in
-        let (albedo, _, _, reflectivity) = getMaterial(matId, hitPoint) in
+        let (albedo, metallic, roughness, reflectivity) = getMaterial(matId, hitPoint) in
 
         -- PBR shading + reflection
-        let surfaceColor = shade(hitPoint, normal, viewDir, matId) in
+        let surfaceColor = shade(hitPoint, normal, viewDir, albedo, metallic, roughness) in
         let contribution = 1.0 - reflectivity in
         let tintedSurface = surfaceColor * tint * contribution in
         let newColor = color + tintedSurface in
