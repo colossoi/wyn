@@ -1668,7 +1668,7 @@ async fn run_miner(
         mapped_at_creation: false,
     });
 
-    // Find the result buffer binding
+    // Find buffer bindings
     let result_binding = mp.bindings.iter().find_map(|b| {
         if let pipeline_desc::Binding::StorageBuffer { binding, usage: pipeline_desc::BufferUsage::Output, .. } = b {
             Some(*binding)
@@ -1676,6 +1676,21 @@ async fn run_miner(
             None
         }
     }).ok_or_else(|| anyhow!("No output binding in pipeline descriptor"))?;
+    let partials_binding = mp.bindings.iter().find_map(|b| {
+        if let pipeline_desc::Binding::StorageBuffer { binding, usage: pipeline_desc::BufferUsage::Intermediate, .. } = b {
+            Some(*binding)
+        } else {
+            None
+        }
+    }).ok_or_else(|| anyhow!("No intermediate binding in pipeline descriptor"))?;
+
+    // Staging buffer for partials readback (debug)
+    let partials_staging = device.create_buffer(&BufferDescriptor {
+        label: Some("partials_staging"),
+        size: partials_size,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
 
     let start_time = std::time::Instant::now();
     let mut hit: Option<(u32, Vec<u32>)> = None;
@@ -1711,6 +1726,42 @@ async fn run_miner(
             cpass.set_bind_group(0, &bind_group, &[]);
             cpass.set_push_constants(0, &pc_bytes);
             cpass.dispatch_workgroups(num_workgroups, 1, 1);
+        }
+
+        // Debug: dump partials after phase 1
+        if verbose {
+            let (partials_buf, partials_buf_size) = &buffers[&partials_binding];
+            let read_size = (num_workgroups as u64 * workgroup_size as u64 * result_size).min(*partials_buf_size);
+            encoder.copy_buffer_to_buffer(partials_buf, 0, &partials_staging, 0, read_size);
+            queue.submit(Some(encoder.finish()));
+            let _ = device.poll(wgpu::PollType::Wait);
+
+            let slice = partials_staging.slice(..read_size);
+            let (tx, rx) = std::sync::mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |r| { tx.send(r).unwrap(); });
+            let _ = device.poll(wgpu::PollType::Wait);
+            rx.recv().unwrap()?;
+            let data = slice.get_mapped_range();
+            let words: &[u32] = bytemuck::cast_slice(&data);
+            let num_entries = words.len() / 9; // each entry: 1 nonce + 8 hash words
+            let entries_to_show = num_entries.min(8);
+            println!("  Partials (first {} of {}):", entries_to_show, num_entries);
+            for i in 0..entries_to_show {
+                let base = i * 9;
+                let nonce = words[base];
+                print!("    [{}] nonce {:>10} -> ", i, nonce);
+                for j in 1..9 {
+                    print!("{:08x}", words[base + j]);
+                }
+                println!();
+            }
+            drop(data);
+            partials_staging.unmap();
+
+            // Need a new encoder since we submitted the old one
+            encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+                label: Some("miner_encoder_phase2"),
+            });
         }
 
         // Phase 2: single thread combines partials → result
