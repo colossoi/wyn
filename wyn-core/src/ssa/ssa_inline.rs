@@ -295,7 +295,12 @@ fn collect_called_functions(body: &FuncBody, out: &mut Vec<String>) {
                 Soac::Map { func, .. } => out.push(func.clone()),
                 Soac::Reduce { func, .. } => out.push(func.clone()),
                 Soac::Scan { func, .. } => out.push(func.clone()),
-                Soac::Redomap { func, .. } => out.push(func.clone()),
+                Soac::Redomap {
+                    func, reduce_func, ..
+                } => {
+                    out.push(func.clone());
+                    out.push(reduce_func.clone());
+                }
             },
             _ => {}
         }

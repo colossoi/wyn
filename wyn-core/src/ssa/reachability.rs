@@ -35,7 +35,13 @@ fn collect_references(body: &FuncBody, live: &mut HashSet<String>, worklist: &mu
         let names: Vec<String> = match &inst.data {
             InstKind::Call { func, .. } => vec![func.clone()],
             InstKind::Global(name) => vec![name.clone()],
-            InstKind::Soac(soac) => vec![soac.func_name().to_string()],
+            InstKind::Soac(soac) => {
+                let mut names = vec![soac.func_name().to_string()];
+                if let crate::ssa::types::Soac::Redomap { reduce_func, .. } = soac {
+                    names.push(reduce_func.clone());
+                }
+                names
+            }
             _ => vec![],
         };
         for name in names {

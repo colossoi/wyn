@@ -83,10 +83,42 @@ def mine_nonce(header_base: [19]u32, nonce: u32) [8]u32 =
     ] in
     sha256d_80(header)
 
+def hash_below_target(hash: [8]u32, target: [8]u32) bool =
+    if hash[0] < target[0] then true
+    else if hash[0] > target[0] then false
+    else if hash[1] < target[1] then true
+    else if hash[1] > target[1] then false
+    else if hash[2] < target[2] then true
+    else if hash[2] > target[2] then false
+    else if hash[3] < target[3] then true
+    else if hash[3] > target[3] then false
+    else if hash[4] < target[4] then true
+    else if hash[4] > target[4] then false
+    else if hash[5] < target[5] then true
+    else if hash[5] > target[5] then false
+    else if hash[6] < target[6] then true
+    else if hash[6] > target[6] then false
+    else if hash[7] < target[7] then true
+    else false
+
+def NO_HIT: (u32, [8]u32) =
+    (0xFFFFFFFFu32, [0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32,
+                     0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32])
+
+def pick_better(a: (u32, [8]u32), b: (u32, [8]u32)) (u32, [8]u32) =
+    if a.0 == 0xFFFFFFFFu32 then b
+    else a
+
 ------------------------------------------------------------
 -- Compute shader entry point
--- Maps over nonce space using u32 range
+-- Reduces over nonce space: hash + check target on GPU,
+-- only propagate hits through the reduce.
 ------------------------------------------------------------
 #[compute]
-entry mine(header_base: [19]u32, n: u32, nonce_offset: u32) [][8]u32 =
-    map(|nonce: u32| mine_nonce(header_base, nonce + nonce_offset), 0u32..<n)
+entry mine(header_base: [19]u32, target: [8]u32, n: u32, nonce_offset: u32) (u32, [8]u32) =
+    let candidates = map(|nonce: u32|
+        let hash = mine_nonce(header_base, nonce + nonce_offset) in
+        if hash_below_target(hash, target) then (nonce + nonce_offset, hash)
+        else NO_HIT,
+    0u32..<n) in
+    reduce(pick_better, NO_HIT, candidates)

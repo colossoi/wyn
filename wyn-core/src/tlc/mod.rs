@@ -374,6 +374,8 @@ pub enum SoacOp {
         /// Combined operator: `(acc, x1, ..., xn) -> acc'`
         /// First param is the accumulator, rest are elements from each input.
         op: Lambda,
+        /// Pure reduce combiner: `(acc, acc) -> acc` for parallel phase 2.
+        reduce_op: Lambda,
         /// Initial accumulator value.
         ne: Box<Term>,
         /// Parallel input arrays (one per element param in op).
@@ -779,8 +781,15 @@ where
             visit_array_expr_children(indices, f);
             visit_array_expr_children(values, f);
         }
-        SoacOp::Redomap { op, ne, inputs, .. } => {
+        SoacOp::Redomap {
+            op,
+            reduce_op,
+            ne,
+            inputs,
+            ..
+        } => {
             visit_lambda_children(op, f);
+            visit_lambda_children(reduce_op, f);
             f(ne);
             for ae in inputs {
                 visit_array_expr_children(ae, f);
@@ -903,11 +912,13 @@ where
         },
         SoacOp::Redomap {
             op,
+            reduce_op,
             ne,
             inputs,
             props,
         } => SoacOp::Redomap {
             op: map_lambda_children(op, f),
+            reduce_op: map_lambda_children(reduce_op, f),
             ne: Box::new(f(*ne)),
             inputs: inputs.into_iter().map(|ae| map_array_expr_children(ae, f)).collect(),
             props,

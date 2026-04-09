@@ -537,12 +537,16 @@ pub enum Soac {
     Redomap {
         /// Combined operator: `(acc, x1, ..., xn) -> acc'`.
         func: String,
+        /// Pure reduce combiner: `(acc, acc) -> acc` for parallel phase 2.
+        reduce_func: String,
         /// Parallel input arrays.
         inputs: Vec<ValueId>,
         /// Initial accumulator value.
         init: ValueId,
         /// Captured variables passed as extra arguments to `func`.
         captures: Vec<ValueId>,
+        /// Captured variables for `reduce_func`.
+        reduce_captures: Vec<ValueId>,
         /// Types of each input array (for SoA-aware length/indexing).
         input_array_types: Vec<Type<TypeName>>,
         /// Element types of each input array (for SoA-aware indexing).
@@ -583,11 +587,13 @@ impl Soac {
                 inputs,
                 init,
                 captures,
+                reduce_captures,
                 ..
             } => {
                 let mut uses = inputs.clone();
                 uses.push(*init);
                 uses.extend(captures.iter().copied());
+                uses.extend(reduce_captures.iter().copied());
                 uses
             }
         }
@@ -632,6 +638,7 @@ impl Soac {
                 inputs,
                 init,
                 captures,
+                reduce_captures,
                 ..
             } => {
                 for v in inputs.iter_mut() {
@@ -639,6 +646,9 @@ impl Soac {
                 }
                 sub(init);
                 for v in captures.iter_mut() {
+                    sub(v);
+                }
+                for v in reduce_captures.iter_mut() {
                     sub(v);
                 }
             }
@@ -717,6 +727,7 @@ impl Soac {
                 inputs,
                 init,
                 captures,
+                reduce_captures,
                 ..
             } => {
                 for v in inputs.iter_mut() {
@@ -732,6 +743,13 @@ impl Soac {
                     *init = new_id;
                 }
                 for v in captures.iter_mut() {
+                    let mut vr = ValueRef::Ssa(*v);
+                    sub(&mut vr);
+                    if let ValueRef::Ssa(new_id) = vr {
+                        *v = new_id;
+                    }
+                }
+                for v in reduce_captures.iter_mut() {
                     let mut vr = ValueRef::Ssa(*v);
                     sub(&mut vr);
                     if let ValueRef::Ssa(new_id) = vr {

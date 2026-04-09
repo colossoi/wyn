@@ -347,11 +347,13 @@ fn apply_type_subst_to_soac(soac: &SoacOp, subst: &TypeSubst, term_ids: &mut Ter
         },
         SoacOp::Redomap {
             op,
+            reduce_op,
             ne,
             inputs,
             props,
         } => SoacOp::Redomap {
             op: apply_type_subst_to_lambda(op, subst, term_ids),
+            reduce_op: apply_type_subst_to_lambda(reduce_op, subst, term_ids),
             ne: Box::new(apply_type_subst_to_term(ne, subst, term_ids)),
             inputs: inputs.iter().map(|ae| apply_type_subst_to_array_expr(ae, subst, term_ids)).collect(),
             props: props.clone(),
@@ -1155,15 +1157,18 @@ impl<'a> Defunctionalizer<'a> {
             }
             SoacOp::Redomap {
                 op,
+                reduce_op,
                 ne,
                 inputs,
                 props,
             } => {
                 let op = self.defunc_lambda_in_soac(op, span);
+                let reduce_op = self.defunc_lambda_in_soac(reduce_op, span);
                 let ne = Box::new(self.defunc_term(*ne).term);
                 let inputs = inputs.into_iter().map(|ae| self.defunc_array_expr(ae)).collect();
                 SoacOp::Redomap {
                     op,
+                    reduce_op,
                     ne,
                     inputs,
                     props,
@@ -1989,11 +1994,13 @@ impl<'a> Defunctionalizer<'a> {
             },
             SoacOp::Redomap {
                 op,
+                reduce_op,
                 ne,
                 inputs,
                 props,
             } => SoacOp::Redomap {
                 op: self.substitute_var_lambda(op, old_sym, new_sym),
+                reduce_op: self.substitute_var_lambda(reduce_op, old_sym, new_sym),
                 ne: Box::new(self.substitute_var(ne, old_sym, new_sym)),
                 inputs: inputs
                     .iter()

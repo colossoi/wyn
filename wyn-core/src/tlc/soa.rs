@@ -675,16 +675,19 @@ impl SoaTransformer {
             }
             SoacOp::Redomap {
                 op,
+                reduce_op,
                 ne,
                 inputs,
                 props,
             } => {
                 let new_op = self.transform_lambda(op);
+                let new_reduce_op = self.transform_lambda(reduce_op);
                 let new_ne = self.transform_term(ne);
                 let new_inputs: Vec<ArrayExpr> =
                     inputs.iter().map(|ae| self.transform_array_expr(ae)).collect();
                 SoacOp::Redomap {
                     op: new_op,
+                    reduce_op: new_reduce_op,
                     ne: Box::new(new_ne),
                     inputs: new_inputs,
                     props: props.clone(),

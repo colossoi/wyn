@@ -615,11 +615,13 @@ impl<'a> Monomorphizer<'a> {
             },
             SoacOp::Redomap {
                 op,
+                reduce_op,
                 ne,
                 inputs,
                 props,
             } => SoacOp::Redomap {
                 op: self.process_lambda(op),
+                reduce_op: self.process_lambda(reduce_op),
                 ne: Box::new(self.process_term(ne)),
                 inputs: inputs.iter().map(|ae| self.process_array_expr(ae)).collect(),
                 props: props.clone(),
@@ -958,11 +960,13 @@ impl<'a> Monomorphizer<'a> {
             },
             SoacOp::Redomap {
                 op,
+                reduce_op,
                 ne,
                 inputs,
                 props,
             } => SoacOp::Redomap {
                 op: self.apply_subst_lambda(op, subst),
+                reduce_op: self.apply_subst_lambda(reduce_op, subst),
                 ne: Box::new(self.apply_subst_term(ne, subst)),
                 inputs: inputs.iter().map(|ae| self.apply_subst_array_expr(ae, subst)).collect(),
                 props: props.clone(),

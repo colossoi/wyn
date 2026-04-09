@@ -244,6 +244,7 @@ fn build_fused_from_semantics(
                 span,
                 kind: TermKind::Soac(SoacOp::Redomap {
                     op: composed_op,
+                    reduce_op: op.clone(),
                     ne: init.clone(),
                     inputs: input_exprs,
                     props: props.clone(),

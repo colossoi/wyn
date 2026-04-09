@@ -177,6 +177,18 @@ pub enum ParallelizableSoac {
         captures: Vec<ValueId>,
         elem_type: Type<TypeName>,
     },
+    /// `redomap f reduce_f init inputs` — fused map+reduce.
+    /// Phase 1 uses `redomap_function`, phase 2 uses `reduce_function`.
+    Redomap {
+        source: ArrayProvenance,
+        redomap_function: String,
+        reduce_function: String,
+        init: ValueId,
+        captures: Vec<ValueId>,
+        reduce_captures: Vec<ValueId>,
+        input_elem_types: Vec<Type<TypeName>>,
+        acc_type: Type<TypeName>,
+    },
 }
 
 impl ParallelizableSoac {
@@ -185,7 +197,8 @@ impl ParallelizableSoac {
         match self {
             ParallelizableSoac::Map { source, .. }
             | ParallelizableSoac::Reduce { source, .. }
-            | ParallelizableSoac::Scan { source, .. } => source,
+            | ParallelizableSoac::Scan { source, .. }
+            | ParallelizableSoac::Redomap { source, .. } => source,
         }
     }
 
@@ -194,7 +207,8 @@ impl ParallelizableSoac {
         match self {
             ParallelizableSoac::Map { captures, .. }
             | ParallelizableSoac::Reduce { captures, .. }
-            | ParallelizableSoac::Scan { captures, .. } => captures,
+            | ParallelizableSoac::Scan { captures, .. }
+            | ParallelizableSoac::Redomap { captures, .. } => captures,
         }
     }
 }
@@ -349,6 +363,40 @@ fn find_soac_in_body(
                         captures: captures.clone(),
                         elem_type: input_elem_type.clone(),
                     });
+                }
+            }
+            InstKind::Soac(Soac::Redomap {
+                func,
+                reduce_func,
+                inputs,
+                init,
+                captures,
+                reduce_captures,
+                input_elem_types,
+                ..
+            }) => {
+                if let Some(first_input) = inputs.first() {
+                    let provenance =
+                        track_provenance_unified(entry, body, *first_input, param_to_entry_arg, depth == 0);
+                    if matches!(
+                        provenance,
+                        ArrayProvenance::EntryStorage { .. } | ArrayProvenance::Range { .. }
+                    ) {
+                        let acc_type = inst
+                            .result
+                            .map(|r| body.inner.value_type(r).clone())
+                            .unwrap_or_else(|| input_elem_types[0].clone());
+                        return Some(ParallelizableSoac::Redomap {
+                            source: provenance,
+                            redomap_function: func.clone(),
+                            reduce_function: reduce_func.clone(),
+                            init: *init,
+                            captures: captures.clone(),
+                            reduce_captures: reduce_captures.clone(),
+                            input_elem_types: input_elem_types.clone(),
+                            acc_type,
+                        });
+                    }
                 }
             }
             _ => {}

@@ -233,6 +233,7 @@ fn expand_soac(
             captures,
             input_array_types,
             input_elem_types,
+            ..
         } => expand_redomap(
             builder,
             func,

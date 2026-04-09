@@ -237,6 +237,34 @@ pub fn parallelize_soacs(mut program: Program) -> ParallelizationResult {
                                 descriptor.pipelines.push(pipeline);
                             }
                         }
+                        ParallelizableSoac::Redomap {
+                            source,
+                            redomap_function,
+                            reduce_function,
+                            init,
+                            captures,
+                            reduce_captures,
+                            input_elem_types,
+                            acc_type,
+                        } => {
+                            let result = parallelize_redomap_entry(
+                                entry,
+                                source,
+                                &redomap_function,
+                                &reduce_function,
+                                *init,
+                                captures,
+                                reduce_captures,
+                                &input_elem_types,
+                                &acc_type,
+                                local_size,
+                            );
+                            if let Some((redomap_entries, pipeline)) = result {
+                                entries_to_remove.push(entry.name.clone());
+                                new_entries.extend(redomap_entries);
+                                descriptor.pipelines.push(pipeline);
+                            }
+                        }
                         ParallelizableSoac::Scan {
                             source,
                             scan_function,
@@ -907,6 +935,254 @@ enum ReduceInputData {
         input: RangeInput,
         handle: RangeHandle,
     },
+}
+
+// =============================================================================
+// Redomap parallelization — 2 phases (like reduce but with fused map+reduce)
+// =============================================================================
+
+/// Parallelize a redomap (fused map+reduce) into two entry points.
+/// Phase 1: each thread runs the fused op over its chunk → partials[thread_id]
+/// Phase 2: single thread combines partials with the pure reduce combiner → result[0]
+fn parallelize_redomap_entry(
+    entry: &EntryPoint,
+    source: &ArrayProvenance,
+    redomap_function: &str,
+    reduce_function: &str,
+    init: ValueId,
+    captures: &[ValueId],
+    reduce_captures: &[ValueId],
+    _input_elem_types: &[Type<TypeName>],
+    acc_type: &Type<TypeName>,
+    local_size: (u32, u32, u32),
+) -> Option<(Vec<EntryPoint>, Pipeline)> {
+    let total_threads = local_size.0 * local_size.1 * local_size.2;
+    if total_threads == 0 {
+        return None;
+    }
+
+    let next_binding = entry
+        .inputs
+        .iter()
+        .filter_map(|i| i.storage_binding)
+        .chain(entry.outputs.iter().filter_map(|o| o.storage_binding))
+        .map(|(_, b)| b + 1)
+        .max()
+        .unwrap_or(0);
+    let partials_binding = (0u32, next_binding);
+    let result_binding = (0u32, next_binding + 1);
+
+    // Phase 1: fused map+reduce per chunk using redomap_function
+    let phase1 = build_redomap_phase1(
+        entry,
+        source,
+        redomap_function,
+        init,
+        captures,
+        acc_type,
+        total_threads,
+        partials_binding,
+        local_size,
+    )?;
+
+    // Phase 2: combine partials using pure reduce_function
+    let phase2 = build_reduce_phase2(
+        entry,
+        reduce_function,
+        init,
+        reduce_captures,
+        acc_type,
+        total_threads,
+        partials_binding,
+        result_binding,
+    )?;
+
+    // Build pipeline descriptor
+    let mut bindings = Vec::new();
+    let mut input_binding_indices = Vec::new();
+    for input in &entry.inputs {
+        if let Some((set, binding)) = input.storage_binding {
+            input_binding_indices.push(bindings.len());
+            bindings.push(Binding::StorageBuffer {
+                set,
+                binding,
+                access: Access::ReadOnly,
+                usage: BufferUsage::Input,
+                name: input.name.clone(),
+            });
+        }
+    }
+    bindings.extend(push_constant_bindings(entry));
+
+    let partials_idx = bindings.len();
+    bindings.push(Binding::StorageBuffer {
+        set: partials_binding.0,
+        binding: partials_binding.1,
+        access: Access::ReadWrite,
+        usage: BufferUsage::Intermediate,
+        name: format!("{}_partials", entry.name),
+    });
+
+    let result_idx = bindings.len();
+    bindings.push(Binding::StorageBuffer {
+        set: result_binding.0,
+        binding: result_binding.1,
+        access: Access::WriteOnly,
+        usage: BufferUsage::Output,
+        name: format!("{}_result", entry.name),
+    });
+
+    let workgroup_size = local_size.0;
+    let pipeline = Pipeline::MultiCompute(MultiComputePipeline {
+        bindings,
+        stages: vec![
+            ComputeStage {
+                entry_point: phase1.name.clone(),
+                workgroup_size: local_size,
+                dispatch_size: DispatchSize::DerivedFromInputLength { workgroup_size },
+                reads: input_binding_indices,
+                writes: vec![partials_idx],
+            },
+            ComputeStage {
+                entry_point: phase2.name.clone(),
+                workgroup_size: (1, 1, 1),
+                dispatch_size: DispatchSize::Fixed { x: 1, y: 1, z: 1 },
+                reads: vec![partials_idx],
+                writes: vec![result_idx],
+            },
+        ],
+    });
+
+    Some((vec![phase1, phase2], pipeline))
+}
+
+/// Build Phase 1 of redomap: each thread runs the fused op over its chunk.
+/// The accumulator type (acc_type) may differ from the input element type.
+fn build_redomap_phase1(
+    entry: &EntryPoint,
+    source: &ArrayProvenance,
+    redomap_function: &str,
+    init: ValueId,
+    captures: &[ValueId],
+    acc_type: &Type<TypeName>,
+    total_threads: u32,
+    partials_binding: (u32, u32),
+    local_size: (u32, u32, u32),
+) -> Option<EntryPoint> {
+    let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
+    let params: Vec<(Type<TypeName>, String)> =
+        entry.inputs.iter().map(|i| (i.ty.clone(), i.name.clone())).collect();
+    let builder = FuncBuilder::new(params, unit_ty.clone());
+    let mut ctx = ParallelizeCtx::new(builder, entry);
+
+    let (input_len, input_strategy_data) = match source {
+        ArrayProvenance::EntryStorage {
+            param_index,
+            storage_binding,
+            ..
+        } => {
+            let mut input = StorageInput::new(*param_index, *storage_binding);
+            let (handle, len, _elem_ty) = input.setup(&mut ctx)?;
+            (len, ReduceInputData::Storage { input, handle })
+        }
+        ArrayProvenance::Range { value } => {
+            let mut input = RangeInput::new(*value, &entry.body)?;
+            let (handle, len, _elem_ty) = input.setup(&mut ctx)?;
+            (len, ReduceInputData::Range { input, handle })
+        }
+        _ => return None,
+    };
+
+    // Thread chunking (same as reduce)
+    let (thread_id, chunk_start, chunk_end) = ctx.compute_thread_chunk(input_len, total_threads)?;
+
+    // Setup partials output buffer
+    let partials_output = StorageOutput::new(partials_binding.0, partials_binding.1);
+    let partials_view = partials_output.setup(&mut ctx, acc_type)?;
+
+    let remapped_init = strategies::remap_entry_value(&mut ctx, init)?;
+    let remapped_captures = ctx.remap_captures(captures)?;
+
+    // Build reduction loop: acc = init; for i in chunk_start..chunk_end: acc = redomap_f(acc, elem, captures...)
+    let u32_ty = ctx.u32_ty.clone();
+    let bool_ty = ctx.bool_ty.clone();
+
+    let (header, header_params) =
+        ctx.builder.create_block_with_params(vec![acc_type.clone(), u32_ty.clone()]);
+    let acc = header_params[0];
+    let loop_index = header_params[1];
+    let body_block = ctx.builder.create_block();
+    let (exit_block, exit_params) = ctx.builder.create_block_with_params(vec![acc_type.clone()]);
+    let final_acc = exit_params[0];
+    ctx.builder.mark_loop_header(header, exit_block, body_block).ok()?;
+
+    ctx.builder
+        .terminate(Terminator::Branch {
+            target: header,
+            args: vec![remapped_init, chunk_start],
+        })
+        .ok()?;
+
+    ctx.builder.switch_to_block(header).ok()?;
+    let cond = ctx.builder.push_binop("<", loop_index, chunk_end, bool_ty).ok()?;
+    ctx.builder
+        .terminate(Terminator::CondBranch {
+            cond,
+            then_target: body_block,
+            then_args: vec![],
+            else_target: exit_block,
+            else_args: vec![acc],
+        })
+        .ok()?;
+
+    ctx.builder.switch_to_block(body_block).ok()?;
+
+    let input_elem = match &input_strategy_data {
+        ReduceInputData::Storage { input, handle } => input.get_element(&mut ctx, *handle, loop_index)?,
+        ReduceInputData::Range { input, handle } => input.get_element(&mut ctx, *handle, loop_index)?,
+    };
+
+    // call: redomap_func(acc, elem, captures...)
+    let mut call_args = vec![acc, input_elem];
+    call_args.extend(remapped_captures.iter().copied());
+    let new_acc = ctx.push_call(redomap_function, call_args, acc_type.clone())?;
+
+    let one = ctx.push_int("1")?;
+    let next_i = ctx.push_binop("+", loop_index, one, u32_ty.clone())?;
+    ctx.builder
+        .terminate(Terminator::Branch {
+            target: header,
+            args: vec![new_acc, next_i],
+        })
+        .ok()?;
+
+    ctx.builder.switch_to_block(exit_block).ok()?;
+    partials_output.store_result(&mut ctx, partials_view, thread_id, final_acc, acc_type)?;
+    ctx.builder.terminate(Terminator::Return(None)).ok()?;
+
+    let body = ctx.finish()?;
+
+    let array_view_ty = Type::Constructed(
+        TypeName::Array,
+        vec![
+            acc_type.clone(),
+            Type::Constructed(TypeName::SizePlaceholder, vec![]),
+            Type::Constructed(TypeName::ArrayVariantView, vec![]),
+        ],
+    );
+
+    Some(EntryPoint {
+        name: format!("{}_phase1_chunks", entry.name),
+        body,
+        execution_model: ExecutionModel::Compute { local_size },
+        inputs: entry.inputs.clone(),
+        outputs: vec![EntryOutput {
+            ty: array_view_ty,
+            decoration: None,
+            storage_binding: Some(partials_binding),
+        }],
+        span: entry.span,
+    })
 }
 
 // =============================================================================

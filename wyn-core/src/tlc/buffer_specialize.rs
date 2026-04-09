@@ -463,11 +463,13 @@ impl BufferSpecializer {
             },
             SoacOp::Redomap {
                 op,
+                reduce_op,
                 ne,
                 inputs,
                 props,
             } => SoacOp::Redomap {
                 op: self.rewrite_lambda(op),
+                reduce_op: self.rewrite_lambda(reduce_op),
                 ne: Box::new(self.rewrite_term(ne)),
                 inputs: inputs.iter().map(|ae| self.rewrite_array_expr(ae)).collect(),
                 props: props.clone(),
@@ -1099,11 +1101,13 @@ impl BufferSpecializer {
             },
             SoacOp::Redomap {
                 op,
+                reduce_op,
                 ne,
                 inputs,
                 props,
             } => SoacOp::Redomap {
                 op: self.rewrite_specialized_lambda(op, view_params),
+                reduce_op: self.rewrite_specialized_lambda(reduce_op, view_params),
                 ne: Box::new(self.rewrite_specialized_body(ne, view_params)),
                 inputs: inputs
                     .iter()

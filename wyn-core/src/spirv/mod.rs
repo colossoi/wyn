@@ -30,6 +30,21 @@ use rspirv::spirv::{self, AddressingModel, Capability, MemoryModel, StorageClass
 
 /// Constructor wraps rspirv::Builder with an ergonomic API that handles:
 /// - Automatic variable hoisting to function entry block
+/// Cache key for interface block types (push constants, storage buffers, uniforms).
+/// These are distinct from plain struct types even when member types match.
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct InterfaceBlockKey {
+    kind: InterfaceBlockKind,
+    /// Member types + offsets + optional array strides
+    members: Vec<(spirv::Word, u32)>, // (type, offset)
+}
+
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+enum InterfaceBlockKind {
+    PushConstant,
+    StorageBuffer,
+}
+
 /// - Block management with implicit branch from variables block to code
 /// - Value and type caching
 struct Constructor {
@@ -77,7 +92,8 @@ struct Constructor {
     ptr_type_cache: HashMap<(spirv::StorageClass, spirv::Word), spirv::Word>,
     runtime_array_cache: HashMap<(spirv::Word, u32), spirv::Word>, // (elem_type, stride) -> decorated type
     buffer_block_cache: HashMap<spirv::Word, spirv::Word>, // runtime_array_type -> Block-decorated struct
-    array_elem_cache: HashMap<spirv::Word, spirv::Word>,   // array_type -> element_type
+    interface_block_cache: HashMap<InterfaceBlockKey, spirv::Word>,
+    array_elem_cache: HashMap<spirv::Word, spirv::Word>, // array_type -> element_type
 
     // Entry point interface tracking
     entry_point_interfaces: HashMap<String, Vec<spirv::Word>>,
@@ -163,6 +179,7 @@ impl Constructor {
             ptr_type_cache: HashMap::new(),
             runtime_array_cache: HashMap::new(),
             buffer_block_cache: HashMap::new(),
+            interface_block_cache: HashMap::new(),
             array_elem_cache: HashMap::new(),
             entry_point_interfaces: HashMap::new(),
             uniform_variables: HashMap::new(),
@@ -492,6 +509,51 @@ impl Constructor {
         }
     }
 
+    /// Create a decorated interface block struct type.
+    /// Atomically creates the OpTypeStruct AND all required decorations.
+    /// Cached by kind + layout so identical blocks share one ID, but
+    /// never share with plain tuple structs.
+    fn create_interface_block_type(
+        &mut self,
+        kind: InterfaceBlockKind,
+        member_types: &[spirv::Word],
+        member_offsets: &[u32],
+        member_poly_types: &[&PolyType<TypeName>],
+    ) -> spirv::Word {
+        let key = InterfaceBlockKey {
+            kind,
+            members: member_types.iter().zip(member_offsets.iter()).map(|(&t, &o)| (t, o)).collect(),
+        };
+        if let Some(&ty) = self.interface_block_cache.get(&key) {
+            return ty;
+        }
+
+        // Create a fresh struct — do NOT go through get_or_create_struct_type
+        // to avoid sharing IDs with plain tuple structs.
+        let ty = self.builder.type_struct(member_types.iter().copied());
+
+        // Decorate as Block
+        self.builder.decorate(ty, spirv::Decoration::Block, []);
+
+        // Apply member offsets
+        for (i, &offset) in member_offsets.iter().enumerate() {
+            self.builder.member_decorate(
+                ty,
+                i as u32,
+                spirv::Decoration::Offset,
+                [Operand::LiteralBit32(offset)],
+            );
+        }
+
+        // Apply ArrayStride for array members
+        for (i, poly_ty) in member_poly_types.iter().enumerate() {
+            self.apply_buffer_array_strides(member_types[i], poly_ty);
+        }
+
+        self.interface_block_cache.insert(key, ty);
+        ty
+    }
+
     /// Get or create a Block-decorated struct wrapping a runtime array (for storage buffers)
     fn get_or_create_buffer_block_type(&mut self, runtime_array_type: spirv::Word) -> spirv::Word {
         if let Some(&ty) = self.buffer_block_cache.get(&runtime_array_type) {
@@ -550,6 +612,25 @@ impl Constructor {
 
         // Ensure nested array types have ArrayStride for buffer layout
         self.apply_buffer_array_strides(elem_spirv, &elem_ty);
+
+        // If the element type is a tuple/struct, add member offset decorations
+        // for the buffer layout. We add them to the elem type directly since
+        // it will be used inside a runtime array in a storage buffer.
+        if let PolyType::Constructed(TypeName::Tuple(_), args) = &elem_ty {
+            if self.buffer_stride_decorated.insert(elem_spirv) {
+                let mut offset = 0u32;
+                for (i, field_ty) in args.iter().enumerate() {
+                    self.builder.member_decorate(
+                        elem_spirv,
+                        i as u32,
+                        spirv::Decoration::Offset,
+                        [Operand::LiteralBit32(offset)],
+                    );
+                    offset += type_byte_size(field_ty)
+                        .unwrap_or_else(|| panic!("tuple field {:?} has unknown byte size", field_ty));
+                }
+            }
+        }
 
         // Create runtime array type (cached to avoid duplicate decorations)
         let runtime_array = self.get_or_create_runtime_array_type(elem_spirv, stride);
@@ -3017,22 +3098,19 @@ fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &EntryPoint) -> R
         .filter_map(|(i, inp)| inp.push_constant_offset.map(|off| (i, off)))
         .collect();
     let pc_var = if !pc_inputs.is_empty() {
-        // Build member types and apply decorations
+        // Build member types for push constant block
         let member_types: Vec<spirv::Word> =
             pc_inputs.iter().map(|&(i, _)| constructor.polytype_to_spirv(&entry.inputs[i].ty)).collect();
+        let member_offsets: Vec<u32> = pc_inputs.iter().map(|&(_, off)| off).collect();
+        let member_poly_types: Vec<&PolyType<TypeName>> =
+            pc_inputs.iter().map(|&(i, _)| &entry.inputs[i].ty).collect();
 
-        let pc_struct = constructor.builder.type_struct(member_types.iter().copied());
-        constructor.builder.decorate(pc_struct, spirv::Decoration::Block, []);
-        for (member_idx, &(input_idx, offset)) in pc_inputs.iter().enumerate() {
-            constructor.builder.member_decorate(
-                pc_struct,
-                member_idx as u32,
-                spirv::Decoration::Offset,
-                [Operand::LiteralBit32(offset)],
-            );
-            // Arrays inside push constants need ArrayStride decorations
-            constructor.apply_buffer_array_strides(member_types[member_idx], &entry.inputs[input_idx].ty);
-        }
+        let pc_struct = constructor.create_interface_block_type(
+            InterfaceBlockKind::PushConstant,
+            &member_types,
+            &member_offsets,
+            &member_poly_types,
+        );
 
         let pc_ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::PushConstant, pc_struct);
         let var_id =

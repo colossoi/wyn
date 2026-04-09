@@ -1620,7 +1620,13 @@ impl<'a> Converter<'a> {
         match soac {
             SoacOp::Map { lam, inputs } => self.convert_soac_map(lam, inputs, ty),
             SoacOp::Reduce { op, ne, input, .. } => self.convert_soac_reduce(op, ne, input, ty),
-            SoacOp::Redomap { op, ne, inputs, .. } => self.convert_soac_redomap(op, ne, inputs, ty),
+            SoacOp::Redomap {
+                op,
+                reduce_op,
+                ne,
+                inputs,
+                ..
+            } => self.convert_soac_redomap(op, reduce_op, ne, inputs, ty),
             SoacOp::Scan { op, ne, input } => self.convert_soac_scan(op, ne, input, ty),
             SoacOp::Filter { pred, input } => self.convert_soac_filter(pred, input, ty),
             SoacOp::Scatter { .. } => todo!("SOAC scatter lowering"),
@@ -1801,15 +1807,21 @@ impl<'a> Converter<'a> {
     fn convert_soac_redomap(
         &mut self,
         op: &Lambda,
+        reduce_op: &Lambda,
         ne: &Term,
         inputs: &[ArrayExpr],
         result_ty: Type<TypeName>,
     ) -> Result<ValueId, ConvertError> {
         let op_name = self.lambda_fn_name(op)?;
+        let reduce_func_name = self.lambda_fn_name(reduce_op)?;
 
-        // Convert captures
+        // Convert captures (from fused op)
         let capture_values: Vec<ValueId> =
             op.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
+
+        // Convert reduce_op captures
+        let reduce_captures: Vec<ValueId> =
+            reduce_op.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
 
         // Collect input array types before converting (needed for SoA-aware ops)
         let input_arr_types: Vec<Type<TypeName>> =
@@ -1830,9 +1842,11 @@ impl<'a> Converter<'a> {
             .push_inst(
                 InstKind::Soac(Soac::Redomap {
                     func: op_name,
+                    reduce_func: reduce_func_name,
                     inputs: input_values,
                     init: init_value,
                     captures: capture_values,
+                    reduce_captures,
                     input_array_types: input_arr_types,
                     input_elem_types,
                 }),
