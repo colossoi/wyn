@@ -211,6 +211,9 @@ enum Command {
         /// Max nonces per GPU dispatch (avoids GPU timeout). Loops through the full range in chunks.
         #[arg(long, short = 'c', default_value = "262144")]
         chunk_size: u32,
+        /// Run naga validation on the SPIR-V before sending to the GPU driver
+        #[arg(long)]
+        validate: bool,
         /// Print verbose output
         #[arg(short, long)]
         verbose: bool,
@@ -1619,25 +1622,6 @@ async fn run_miner(
     });
 
     // Create compute pipelines for both stages
-    // Try naga validation before sending to the driver (catches issues spirv-val misses)
-    if verbose { println!("  Running naga validation..."); }
-    {
-        let spv_bytes = fs::read(&path)?;
-        let spv_words: Vec<u32> = spv_bytes.chunks_exact(4)
-            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect();
-        device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let _naga_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("naga_validate"),
-            source: wgpu::ShaderSource::SpirV(std::borrow::Cow::Borrowed(&spv_words)),
-        });
-        let err = pollster::block_on(device.pop_error_scope());
-        match err {
-            Some(e) => eprintln!("WARNING: Naga validation failed: {}", e),
-            None => { if verbose { println!("  Naga validation passed"); } }
-        }
-    }
-
     if verbose { println!("  Creating phase 1 pipeline ({})...", mp.stages[0].entry_point); }
     let phase1_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("miner_phase1"),
@@ -3144,8 +3128,33 @@ fn main() -> Result<()> {
             nonce_offset,
             workgroups,
             chunk_size,
+            validate,
             verbose,
         } => {
+            if validate {
+                let spv_bytes = fs::read(&path)
+                    .with_context(|| format!("Failed to read {}", path.display()))?;
+                let spv_words: Vec<u32> = spv_bytes.chunks_exact(4)
+                    .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect();
+                let naga_result = naga::front::spv::parse_u8_slice(
+                    bytemuck::cast_slice(&spv_words),
+                    &naga::front::spv::Options::default(),
+                );
+                match naga_result {
+                    Ok(module) => {
+                        let mut validator = naga::valid::Validator::new(
+                            naga::valid::ValidationFlags::all(),
+                            naga::valid::Capabilities::all(),
+                        );
+                        match validator.validate(&module) {
+                            Ok(_) => println!("Naga validation passed"),
+                            Err(e) => eprintln!("Naga validation error: {}", e),
+                        }
+                    }
+                    Err(e) => eprintln!("Naga SPIR-V parse error: {}", e),
+                }
+            }
             pollster::block_on(run_miner(path, header_hex, nonces, nonce_offset, workgroups, chunk_size, verbose))?;
         }
         Command::Validate { path, verbose } => {

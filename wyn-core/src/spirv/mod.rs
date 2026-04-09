@@ -2971,6 +2971,14 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
     }
 
     // Lower all entry points
+    // Collect all bindings that ANY entry point writes to (outputs).
+    // These must not be marked NonWritable even when read by another entry point.
+    let written_bindings: std::collections::HashSet<(u32, u32)> = program
+        .entry_points
+        .iter()
+        .flat_map(|e| e.outputs.iter().filter_map(|o| o.storage_binding))
+        .collect();
+
     for entry in &program.entry_points {
         let (spirv_model, local_size) = match &entry.execution_model {
             ExecutionModel::Vertex => (spirv::ExecutionModel::Vertex, None),
@@ -2979,7 +2987,7 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
         };
 
         entry_info.push((entry.name.clone(), spirv_model, local_size));
-        lower_ssa_entry_point(&mut constructor, entry)?;
+        lower_ssa_entry_point(&mut constructor, entry, &written_bindings)?;
     }
 
     // Emit entry point declarations
@@ -3064,7 +3072,11 @@ fn lower_ssa_function(constructor: &mut Constructor, func: &Function) -> Result<
 }
 
 /// Lower an SSA entry point to SPIR-V.
-fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &EntryPoint) -> Result<()> {
+fn lower_ssa_entry_point(
+    constructor: &mut Constructor,
+    entry: &EntryPoint,
+    written_bindings: &std::collections::HashSet<(u32, u32)>,
+) -> Result<()> {
     let body = &entry.body;
     let is_compute = matches!(entry.execution_model, ExecutionModel::Compute { .. });
 
@@ -3145,13 +3157,17 @@ fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &EntryPoint) -> R
             }
         } else if let Some((set, binding)) = input.storage_binding {
             let var_id = constructor.create_storage_buffer(&input.ty, set, binding);
-            // Mark input storage buffers as non-writable so naga/wgpu
-            // sees them as read-only (LOAD access only).
-            constructor.builder.decorate(
-                var_id,
-                spirv::Decoration::NonWritable,
-                std::iter::empty::<Operand>(),
-            );
+            // Mark input storage buffers as non-writable ONLY if no other
+            // entry point writes to the same binding. In multi-entry modules
+            // (e.g., reduce phase1 + phase2), the partials buffer is written
+            // by phase1 and read by phase2 — it must stay writable.
+            if !written_bindings.contains(&(set, binding)) {
+                constructor.builder.decorate(
+                    var_id,
+                    spirv::Decoration::NonWritable,
+                    std::iter::empty::<Operand>(),
+                );
+            }
             interfaces.push(var_id);
         } else {
             // Regular input with location
