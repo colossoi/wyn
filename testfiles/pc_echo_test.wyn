@@ -1,0 +1,12 @@
+-- Diagnostic: echo push constant words to output buffer.
+-- Same push constant layout as the miner.
+-- Outputs 29 u32s: header_base[0..19], target[0..8], n, nonce_offset
+
+#[compute]
+entry echo(header_base: [19]u32, target: [8]u32, n: u32, nonce_offset: u32) []u32 =
+    map(|i|
+        if i < 19 then header_base[i]
+        else if i < 27 then target[i - 19]
+        else if i == 27 then n
+        else nonce_offset,
+    iota(29))

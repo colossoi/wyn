@@ -118,6 +118,9 @@ struct Constructor {
     /// GlobalInvocationId variable for compute shaders (set during entry point setup)
     global_invocation_id: Option<spirv::Word>,
 
+    /// Shared push constant variable (at most one per SPIR-V module)
+    push_constant_var: Option<spirv::Word>,
+
     /// Linked SPIR-V functions: linkage_name -> function_id
     linked_functions: HashMap<String, spirv::Word>,
 
@@ -192,6 +195,7 @@ impl Constructor {
             impl_source: ImplSource::default(),
             storage_buffers: HashMap::new(),
             global_invocation_id: None,
+            push_constant_var: None,
             linked_functions: HashMap::new(),
             current_entry_outputs: Vec::new(),
             buffer_stride_decorated: HashSet::new(),
@@ -3125,8 +3129,16 @@ fn lower_ssa_entry_point(
         );
 
         let pc_ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::PushConstant, pc_struct);
-        let var_id =
-            constructor.builder.variable(pc_ptr_type, None, spirv::StorageClass::PushConstant, None);
+        // Reuse the same push constant variable across entry points in the same module.
+        // SPIR-V allows at most one PushConstant variable per module.
+        let var_id = if let Some(existing) = constructor.push_constant_var {
+            existing
+        } else {
+            let var_id =
+                constructor.builder.variable(pc_ptr_type, None, spirv::StorageClass::PushConstant, None);
+            constructor.push_constant_var = Some(var_id);
+            var_id
+        };
         interfaces.push(var_id);
         Some(var_id)
     } else {
