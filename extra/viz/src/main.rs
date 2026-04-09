@@ -1507,6 +1507,7 @@ async fn run_miner(
     nonce_offset: u32,
     workgroups_override: Option<u32>,
     chunk_size: u32,
+    validate: bool,
     verbose: bool,
 ) -> Result<()> {
     let header_base = header_hex;
@@ -1539,6 +1540,23 @@ async fn run_miner(
     };
 
     let (device, queue) = create_headless_device(verbose).await?;
+
+    if validate {
+        let spv_bytes = fs::read(&path)?;
+        let spv_words: Vec<u32> = spv_bytes.chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let _module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("naga_validate"),
+            source: wgpu::ShaderSource::SpirV(std::borrow::Cow::Borrowed(&spv_words)),
+        });
+        match device.pop_error_scope().await {
+            Some(e) => eprintln!("Naga validation error: {}", e),
+            None => println!("Naga validation passed"),
+        }
+    }
+
     let module = load_spirv_module(&device, &path)?;
 
     // Validate: cross-check SPIR-V bindings against pipeline descriptor
@@ -3131,31 +3149,7 @@ fn main() -> Result<()> {
             validate,
             verbose,
         } => {
-            if validate {
-                let spv_bytes = fs::read(&path)
-                    .with_context(|| format!("Failed to read {}", path.display()))?;
-                let spv_words: Vec<u32> = spv_bytes.chunks_exact(4)
-                    .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                    .collect();
-                let naga_result = naga::front::spv::parse_u8_slice(
-                    bytemuck::cast_slice(&spv_words),
-                    &naga::front::spv::Options::default(),
-                );
-                match naga_result {
-                    Ok(module) => {
-                        let mut validator = naga::valid::Validator::new(
-                            naga::valid::ValidationFlags::all(),
-                            naga::valid::Capabilities::all(),
-                        );
-                        match validator.validate(&module) {
-                            Ok(_) => println!("Naga validation passed"),
-                            Err(e) => eprintln!("Naga validation error: {}", e),
-                        }
-                    }
-                    Err(e) => eprintln!("Naga SPIR-V parse error: {}", e),
-                }
-            }
-            pollster::block_on(run_miner(path, header_hex, nonces, nonce_offset, workgroups, chunk_size, verbose))?;
+            pollster::block_on(run_miner(path, header_hex, nonces, nonce_offset, workgroups, chunk_size, validate, verbose))?;
         }
         Command::Validate { path, verbose } => {
             pollster::block_on(validate_spirv(&path, verbose))?;
