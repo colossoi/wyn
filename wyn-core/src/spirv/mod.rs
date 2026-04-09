@@ -73,6 +73,8 @@ struct Constructor {
 
     // Environment: name -> value ID
     env: HashMap<String, spirv::Word>,
+    // Function parameter SPIR-V IDs in declaration order (positional mapping)
+    param_ids: Vec<spirv::Word>,
 
     // Function map: name -> function ID
     functions: HashMap<String, spirv::Word>,
@@ -173,6 +175,7 @@ impl Constructor {
             variables_block: None,
             first_code_block: None,
             env: HashMap::new(),
+            param_ids: Vec::new(),
             functions: HashMap::new(),
             glsl_ext_inst_id,
             polytype_cache: HashMap::new(),
@@ -754,9 +757,11 @@ impl Constructor {
         };
 
         // Create function parameters
+        self.param_ids.clear();
         for (i, &param_name) in param_names.iter().enumerate() {
             let param_id = self.builder.function_parameter(param_types[i])?;
             self.env.insert(param_name.to_string(), param_id);
+            self.param_ids.push(param_id);
         }
 
         // Create two blocks: one for variables, one for code
@@ -1009,10 +1014,21 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
     }
 
     fn lower(&mut self) -> Result<spirv::Word> {
-        // Map function parameters to their SPIR-V values
-        for (value_id, _, name) in &self.body.params {
-            if let Some(&spirv_id) = self.constructor.env.get(name) {
-                self.value_map.insert(*value_id, spirv_id);
+        // Map function parameters to their SPIR-V values.
+        // For regular functions, use positional mapping (param_ids) to avoid
+        // name collisions when two params share a string name.
+        // For entry points (no param_ids), fall back to name-based env lookup.
+        if self.constructor.param_ids.len() == self.body.params.len()
+            && !self.constructor.param_ids.is_empty()
+        {
+            for (i, (value_id, _, _)) in self.body.params.iter().enumerate() {
+                self.value_map.insert(*value_id, self.constructor.param_ids[i]);
+            }
+        } else {
+            for (value_id, _, name) in &self.body.params {
+                if let Some(&spirv_id) = self.constructor.env.get(name) {
+                    self.value_map.insert(*value_id, spirv_id);
+                }
             }
         }
 
