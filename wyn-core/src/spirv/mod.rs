@@ -2228,14 +2228,12 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 } else {
                     // Composite variant: SPIR-V array value
                     // Check for compile-time constant index for OpCompositeExtract
-                    if let Some(ConstantValue::U32(i)) = index.as_const() {
-                        Ok(self.constructor.builder.composite_extract(result_ty, None, base_id, [i])?)
-                    } else if let Some(ConstantValue::I32(i)) = index.as_const() {
+                    if let Some(const_idx) = self.try_resolve_const_index(index) {
                         Ok(self.constructor.builder.composite_extract(
                             result_ty,
                             None,
                             base_id,
-                            [i as u32],
+                            [const_idx],
                         )?)
                     } else {
                         self.lower_composite_index(base_id, index_id, result_ty, &base_ty)
@@ -2253,6 +2251,28 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
     }
 
     /// Lower indexing into a View array ({buffer_id, offset, len} handle-based struct).
+    /// Try to resolve a ValueRef to a constant u32 index.
+    /// Handles both inline ValueRef::Const and SSA instructions that produce constants.
+    fn try_resolve_const_index(&self, vr: ValueRef) -> Option<u32> {
+        match vr {
+            ValueRef::Const(ConstantValue::U32(i)) => Some(i),
+            ValueRef::Const(ConstantValue::I32(i)) => Some(i as u32),
+            ValueRef::Ssa(id) => {
+                let inst_id = match self.body.inner.values.get(id)?.def {
+                    wyn_ssa::ValueDef::Inst { inst } => inst,
+                    _ => return None,
+                };
+                match &self.body.inner.insts.get(inst_id)?.data {
+                    InstKind::Int(s) => {
+                        s.parse::<u32>().ok().or_else(|| s.parse::<i32>().ok().map(|i| i as u32))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     fn lower_view_index(
         &mut self,
         _view_ssa: ValueId,
