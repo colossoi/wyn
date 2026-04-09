@@ -12,6 +12,9 @@ spirv-as lib/sha256_compress.spvasm -o /tmp/sha256_compress.spv --target-env spv
 # Link the two modules
 spirv-link /tmp/miner.spv /tmp/sha256_compress.spv -o testfiles/miner.spv
 
+# Copy pipeline descriptor alongside the linked .spv
+cp /tmp/miner.json testfiles/miner.json
+
 # Validate
 spirv-val testfiles/miner.spv
 echo "OK: testfiles/miner.spv validated"

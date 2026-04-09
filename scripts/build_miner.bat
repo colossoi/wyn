@@ -15,6 +15,9 @@ echo Linking...
 spirv-link %TEMP%\miner.spv %TEMP%\sha256_compress.spv -o testfiles\miner.spv
 if errorlevel 1 goto :fail
 
+echo Copying pipeline descriptor...
+copy /y %TEMP%\miner.json testfiles\miner.json >nul
+
 echo Validating...
 spirv-val testfiles\miner.spv
 if errorlevel 1 goto :fail
