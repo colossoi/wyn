@@ -177,8 +177,20 @@ impl PartialEvaluator {
                 self.apply(func, arg_vals, term)
             }
 
-            // Lambda - residualize (should be handled at def level)
-            TermKind::Lambda(..) => Value::Unknown(term.clone()),
+            // Lambda - descend into body to fold constant sub-expressions.
+            TermKind::Lambda(lam) => {
+                let body = self.fold_in_body(&lam.body);
+                Value::Unknown(self.mk_term(
+                    term.ty.clone(),
+                    term.span,
+                    TermKind::Lambda(Lambda {
+                        params: lam.params.clone(),
+                        body: Box::new(body),
+                        ret_ty: lam.ret_ty.clone(),
+                        captures: lam.captures.clone(),
+                    }),
+                ))
+            }
 
             // Loop - residualize (not evaluating loops at compile time)
             TermKind::Loop { .. } => Value::Unknown(term.clone()),
@@ -385,6 +397,140 @@ impl PartialEvaluator {
             ("-", Value::Float(f)) => Value::Float(-f),
             ("!", Value::Bool(b)) => Value::Bool(!b),
             _ => Value::Unknown(original.clone()),
+        }
+    }
+
+    // =========================================================================
+    // Structural constant folding inside opaque bodies (lambdas, loops)
+    // =========================================================================
+
+    /// Structurally descend into a term, folding constant sub-expressions
+    /// (like `1.0 / 2.2` → `0.4545`) without changing the Let/Var structure.
+    fn fold_in_body(&mut self, term: &Term) -> Term {
+        match &term.kind {
+            // Constant sub-expression: App of BinOp/UnOp on literals
+            TermKind::App { func, args } if matches!(func.kind, TermKind::BinOp(_) | TermKind::UnOp(_)) => {
+                let folded_args: Vec<Term> = args.iter().map(|a| self.fold_in_body(a)).collect();
+                // Try to evaluate if all args are literals
+                let arg_vals: Vec<Value> = folded_args.iter().map(|a| self.try_literal_value(a)).collect();
+                if arg_vals.iter().all(|v| !matches!(v, Value::Unknown(_))) {
+                    let result = self.apply(func, arg_vals, term);
+                    if !matches!(result, Value::Unknown(_)) {
+                        return self.reify(result, &term.ty, term.span);
+                    }
+                }
+                // Couldn't fold — rebuild with folded children
+                self.mk_term(
+                    term.ty.clone(),
+                    term.span,
+                    TermKind::App {
+                        func: func.clone(),
+                        args: folded_args,
+                    },
+                )
+            }
+            // Recurse into Let
+            TermKind::Let {
+                name,
+                name_ty,
+                rhs,
+                body,
+            } => {
+                let rhs = self.fold_in_body(rhs);
+                let body = self.fold_in_body(body);
+                self.mk_term(
+                    term.ty.clone(),
+                    term.span,
+                    TermKind::Let {
+                        name: *name,
+                        name_ty: name_ty.clone(),
+                        rhs: Box::new(rhs),
+                        body: Box::new(body),
+                    },
+                )
+            }
+            // Recurse into If
+            TermKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                let cond = self.fold_in_body(cond);
+                let then_branch = self.fold_in_body(then_branch);
+                let else_branch = self.fold_in_body(else_branch);
+                self.mk_term(
+                    term.ty.clone(),
+                    term.span,
+                    TermKind::If {
+                        cond: Box::new(cond),
+                        then_branch: Box::new(then_branch),
+                        else_branch: Box::new(else_branch),
+                    },
+                )
+            }
+            // Recurse into App (non-operator)
+            TermKind::App { func, args } => {
+                let func = self.fold_in_body(func);
+                let args = args.iter().map(|a| self.fold_in_body(a)).collect();
+                self.mk_term(
+                    term.ty.clone(),
+                    term.span,
+                    TermKind::App {
+                        func: Box::new(func),
+                        args,
+                    },
+                )
+            }
+            // Recurse into Lambda
+            TermKind::Lambda(lam) => {
+                let body = self.fold_in_body(&lam.body);
+                self.mk_term(
+                    term.ty.clone(),
+                    term.span,
+                    TermKind::Lambda(Lambda {
+                        params: lam.params.clone(),
+                        body: Box::new(body),
+                        ret_ty: lam.ret_ty.clone(),
+                        captures: lam.captures.clone(),
+                    }),
+                )
+            }
+            // Recurse into Loop
+            TermKind::Loop {
+                loop_var,
+                loop_var_ty,
+                init,
+                init_bindings,
+                kind,
+                body,
+            } => {
+                let init = self.fold_in_body(init);
+                let body = self.fold_in_body(body);
+                self.mk_term(
+                    term.ty.clone(),
+                    term.span,
+                    TermKind::Loop {
+                        loop_var: *loop_var,
+                        loop_var_ty: loop_var_ty.clone(),
+                        init: Box::new(init),
+                        init_bindings: init_bindings.clone(),
+                        kind: kind.clone(),
+                        body: Box::new(body),
+                    },
+                )
+            }
+            // Leaves and everything else — return unchanged
+            _ => term.clone(),
+        }
+    }
+
+    /// Try to extract a literal Value from a term. Returns Unknown for non-literals.
+    fn try_literal_value(&self, term: &Term) -> Value {
+        match &term.kind {
+            TermKind::IntLit(s) => Value::Int(s.parse().unwrap_or(0)),
+            TermKind::FloatLit(f) => Value::Float(*f as f64),
+            TermKind::BoolLit(b) => Value::Bool(*b),
+            _ => Value::Unknown(term.clone()),
         }
     }
 
