@@ -1619,6 +1619,25 @@ async fn run_miner(
     });
 
     // Create compute pipelines for both stages
+    // Try naga validation before sending to the driver (catches issues spirv-val misses)
+    if verbose { println!("  Running naga validation..."); }
+    {
+        let spv_bytes = fs::read(&path)?;
+        let spv_words: Vec<u32> = spv_bytes.chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let _naga_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("naga_validate"),
+            source: wgpu::ShaderSource::SpirV(std::borrow::Cow::Borrowed(&spv_words)),
+        });
+        let err = pollster::block_on(device.pop_error_scope());
+        match err {
+            Some(e) => eprintln!("WARNING: Naga validation failed: {}", e),
+            None => { if verbose { println!("  Naga validation passed"); } }
+        }
+    }
+
     if verbose { println!("  Creating phase 1 pipeline ({})...", mp.stages[0].entry_point); }
     let phase1_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("miner_phase1"),
