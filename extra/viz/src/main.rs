@@ -1539,11 +1539,12 @@ async fn run_miner(
     let module = load_spirv_module(&device, &path)?;
 
     // Create buffers from pipeline descriptor bindings.
-    // The partials and result buffers are sized based on workgroup count.
     // Result buffer: 1 element of (u32, [8]u32) = 36 bytes
-    // Partials buffer: workgroup_count elements of 36 bytes
+    // Partials buffer: one entry per thread in the largest chunk dispatch.
+    // Max threads per chunk = chunk (one thread per nonce in the chunk).
     let result_size = 36u64;
-    let partials_size = workgroup_size as u64 * result_size; // one partial per thread in a workgroup
+    let max_threads_per_chunk = chunk as u64;
+    let partials_size = max_threads_per_chunk * result_size;
 
     let mut buffers: HashMap<u32, (wgpu::Buffer, u64)> = HashMap::new();
     for binding in &mp.bindings {
