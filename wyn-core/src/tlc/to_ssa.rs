@@ -253,11 +253,18 @@ fn convert_function(
     }
 
     // Extract parameters from nested Lams
-    let (params, inner_body) = extract_params(&def.body, symbols);
+    let (params, inner_body) = extract_params(&def.body);
 
     // Build parameter list for FuncBuilder
-    let param_list: Vec<(Type<TypeName>, String)> =
-        params.iter().map(|(name, ty)| (ty.clone(), name.clone())).collect();
+    let param_list: Vec<(Type<TypeName>, String)> = params
+        .iter()
+        .map(|(sym, ty)| {
+            (
+                ty.clone(),
+                symbols.get(*sym).expect("BUG: symbol not in table").clone(),
+            )
+        })
+        .collect();
 
     let ret_type = inner_body.ty.clone();
     let builder = FuncBuilder::new(param_list, ret_type.clone());
@@ -272,9 +279,9 @@ fn convert_function(
     );
 
     // Map parameters to their ValueIds
-    for (i, (name, _)) in params.iter().enumerate() {
+    for (i, (sym, _)) in params.iter().enumerate() {
         let value = converter.builder.get_param(i);
-        converter.locals.insert(name.clone(), value);
+        converter.locals.insert(*sym, value);
     }
 
     // Wrap view-array parameters in inherited StorageView instructions so
@@ -282,7 +289,7 @@ fn convert_function(
     // back to the caller's StorageView.
 
     let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
-    for (i, (name, ty)) in params.iter().enumerate() {
+    for (i, (sym, ty)) in params.iter().enumerate() {
         let is_view = ty
             .array_variant()
             .map(|v| matches!(v, Type::Constructed(TypeName::ArrayVariantView, _)))
@@ -303,7 +310,7 @@ fn convert_function(
                 .builder
                 .emit_inherited_view(param_val, zero, view_len, ty.clone())
                 .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
-            converter.locals.insert(name.clone(), view);
+            converter.locals.insert(*sym, view);
         }
     }
 
@@ -345,16 +352,18 @@ fn convert_entry_point(
     let def_name = symbols.get(def.name).expect("BUG: symbol not in table").clone();
 
     // Extract parameters from nested Lams
-    let (params, inner_body) = extract_params(&def.body, symbols);
+    let (params, inner_body) = extract_params(&def.body);
 
     let is_compute = matches!(entry.entry_type, ast::Attribute::Compute);
 
     // Build inputs with decorations
     let mut inputs = Vec::new();
+    let mut param_syms = Vec::new(); // Track SymbolIds alongside inputs for locals binding
     let mut binding_num = 0u32;
     let mut pc_offset = 0u32;
 
-    for (i, (name, ty)) in params.iter().enumerate() {
+    for (i, (sym, ty)) in params.iter().enumerate() {
+        let name = symbols.get(*sym).expect("BUG: symbol not in table").clone();
         let decoration = entry.params.get(i).and_then(|p| extract_io_decoration(p));
         let size_hint = entry.params.get(i).and_then(|p| extract_size_hint(p));
 
@@ -379,8 +388,9 @@ fn convert_entry_point(
             None
         };
 
+        param_syms.push(*sym);
         inputs.push(EntryInput {
-            name: name.clone(),
+            name,
             ty: ty.clone(),
             decoration,
             size_hint,
@@ -390,8 +400,15 @@ fn convert_entry_point(
     }
 
     // Build parameter list for FuncBuilder
-    let param_list: Vec<(Type<TypeName>, String)> =
-        params.iter().map(|(name, ty)| (ty.clone(), name.clone())).collect();
+    let param_list: Vec<(Type<TypeName>, String)> = params
+        .iter()
+        .map(|(sym, ty)| {
+            (
+                ty.clone(),
+                symbols.get(*sym).expect("BUG: symbol not in table").clone(),
+            )
+        })
+        .collect();
 
     let ret_type = inner_body.ty.clone();
     let builder = FuncBuilder::new(param_list, ret_type.clone());
@@ -406,9 +423,9 @@ fn convert_entry_point(
     );
 
     // Map parameters
-    for (i, (name, _)) in params.iter().enumerate() {
+    for (i, (sym, _)) in params.iter().enumerate() {
         let value = converter.builder.get_param(i);
-        converter.locals.insert(name.clone(), value);
+        converter.locals.insert(*sym, value);
     }
 
     // Wrap storage buffer parameters in whole-buffer views so that any direct
@@ -416,13 +433,13 @@ fn convert_entry_point(
     // ValueId that has no SPIR-V representation. The parallelizer replaces the
     // entire body when it applies, so these views are harmless in that case.
     let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
-    for input in &inputs {
+    for (idx, input) in inputs.iter().enumerate() {
         if let Some((set, binding)) = input.storage_binding {
             let view = converter
                 .builder
                 .emit_storage_view(set, binding, input.ty.clone())
                 .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
-            converter.locals.insert(input.name.clone(), view);
+            converter.locals.insert(param_syms[idx], view);
         }
     }
 
@@ -588,19 +605,18 @@ fn convert_entry_point(
 }
 
 /// Extract parameters from a Lambda term.
-/// Returns parameter names as Strings (looked up from symbol table) for SSA construction.
-fn extract_params<'a>(term: &'a Term, symbols: &SymbolTable) -> (Vec<(String, Type<TypeName>)>, &'a Term) {
+/// Returns parameter SymbolIds and types for SSA construction.
+fn extract_params<'a>(term: &'a Term) -> (Vec<(SymbolId, Type<TypeName>)>, &'a Term) {
     match &term.kind {
         TermKind::Lambda(Lambda {
             params: lam_params,
             body,
             ..
         }) => {
-            let (mut params, inner) = extract_params(body, symbols);
+            let (mut params, inner) = extract_params(body);
             // Insert in reverse order so first param ends up first
             for (p, ty) in lam_params.iter().rev() {
-                let param_name = symbols.get(*p).expect("BUG: symbol not in table").clone();
-                params.insert(0, (param_name, ty.clone()));
+                params.insert(0, (*p, ty.clone()));
             }
             (params, inner)
         }
@@ -713,8 +729,8 @@ fn convert_to_io_decoration(attr: &ast::Attribute) -> Option<IoDecoration> {
 struct Converter<'a> {
     /// The SSA function builder.
     builder: FuncBuilder,
-    /// Mapping from variable names to SSA values.
-    locals: HashMap<String, ValueId>,
+    /// Mapping from variable SymbolIds to SSA values.
+    locals: HashMap<SymbolId, ValueId>,
     /// Top-level definitions for resolving function calls.
     top_level: &'a HashMap<SymbolId, &'a TlcDef>,
     /// Arity-0 defs indexed by name (for cross-SymbolId lookup after specialize).
@@ -758,10 +774,11 @@ impl<'a> Converter<'a> {
 
         match &term.kind {
             TermKind::Var(sym) => {
+                if let Some(&value) = self.locals.get(sym) {
+                    return Ok(value);
+                }
                 let name = self.symbols.get(*sym).expect("BUG: symbol not in table");
-                if let Some(&value) = self.locals.get(name) {
-                    Ok(value)
-                } else if let Some(&cached) = self.inlined_constants.get(name) {
+                if let Some(&cached) = self.inlined_constants.get(name) {
                     Ok(cached)
                 } else if self.pure_constants.contains(name) {
                     // Hoisted constant — emit a Global reference instead of inlining
@@ -812,11 +829,10 @@ impl<'a> Converter<'a> {
                 rhs,
                 body,
             } => {
-                let name = self.symbols.get(*name_sym).expect("BUG: symbol not in table").clone();
                 let rhs_value = self.convert_term(rhs)?;
-                self.locals.insert(name.clone(), rhs_value);
+                self.locals.insert(*name_sym, rhs_value);
                 let result = self.convert_term(body)?;
-                self.locals.remove(&name);
+                self.locals.remove(name_sym);
                 Ok(result)
             }
 
@@ -836,24 +852,9 @@ impl<'a> Converter<'a> {
                 kind,
                 body,
             } => {
-                // Look up names from symbol table for loop variables
-                let loop_var_name = self.symbols.get(*loop_var).expect("BUG: symbol not in table");
-                let resolved_bindings: Vec<(String, Type<TypeName>, &Term)> = init_bindings
-                    .iter()
-                    .map(|(sym, ty, expr)| {
-                        let name = self.symbols.get(*sym).expect("BUG: symbol not in table").clone();
-                        (name, ty.clone(), expr)
-                    })
-                    .collect();
-                self.convert_loop(
-                    loop_var_name,
-                    loop_var_ty,
-                    init,
-                    &resolved_bindings,
-                    kind,
-                    body,
-                    ty,
-                )
+                let resolved_bindings: Vec<(SymbolId, Type<TypeName>, &Term)> =
+                    init_bindings.iter().map(|(sym, ty, expr)| (*sym, ty.clone(), expr)).collect();
+                self.convert_loop(*loop_var, loop_var_ty, init, &resolved_bindings, kind, body, ty)
             }
 
             TermKind::Lambda(..) => {
@@ -1240,10 +1241,10 @@ impl<'a> Converter<'a> {
     /// Convert a loop to SSA.
     fn convert_loop(
         &mut self,
-        loop_var: &str,
+        loop_var: SymbolId,
         loop_var_ty: &Type<TypeName>,
         init: &Term,
-        init_bindings: &[(String, Type<TypeName>, &Term)],
+        init_bindings: &[(SymbolId, Type<TypeName>, &Term)],
         kind: &TlcLoopKind,
         body: &Term,
         _result_ty: Type<TypeName>,
@@ -1252,41 +1253,35 @@ impl<'a> Converter<'a> {
             TlcLoopKind::While { cond } => {
                 self.convert_while_loop(loop_var, loop_var_ty, init, init_bindings, cond, body)
             }
-            TlcLoopKind::ForRange { var, var_ty, bound } => {
-                let index_var = self.symbols.get(*var).expect("BUG: symbol not in table");
-                self.convert_for_range_loop(
-                    loop_var,
-                    loop_var_ty,
-                    init,
-                    init_bindings,
-                    index_var,
-                    var_ty,
-                    bound,
-                    body,
-                )
-            }
-            TlcLoopKind::For { var, var_ty, iter } => {
-                let elem_var = self.symbols.get(*var).expect("BUG: symbol not in table");
-                self.convert_for_in_loop(
-                    loop_var,
-                    loop_var_ty,
-                    init,
-                    init_bindings,
-                    elem_var,
-                    var_ty,
-                    iter,
-                    body,
-                )
-            }
+            TlcLoopKind::ForRange { var, var_ty, bound } => self.convert_for_range_loop(
+                loop_var,
+                loop_var_ty,
+                init,
+                init_bindings,
+                *var,
+                var_ty,
+                bound,
+                body,
+            ),
+            TlcLoopKind::For { var, var_ty, iter } => self.convert_for_in_loop(
+                loop_var,
+                loop_var_ty,
+                init,
+                init_bindings,
+                *var,
+                var_ty,
+                iter,
+                body,
+            ),
         }
     }
 
     fn convert_while_loop(
         &mut self,
-        loop_var: &str,
+        loop_var: SymbolId,
         loop_var_ty: &Type<TypeName>,
         init: &Term,
-        init_bindings: &[(String, Type<TypeName>, &Term)],
+        init_bindings: &[(SymbolId, Type<TypeName>, &Term)],
         cond: &Term,
         body: &Term,
     ) -> Result<ValueId, ConvertError> {
@@ -1307,12 +1302,12 @@ impl<'a> Converter<'a> {
         self.builder
             .switch_to_block(loop_blocks.header)
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
-        self.locals.insert(loop_var.to_string(), loop_blocks.acc);
+        self.locals.insert(loop_var, loop_blocks.acc);
 
         // Process init_bindings
-        for (name, _ty, expr) in init_bindings {
+        for (sym, _ty, expr) in init_bindings {
             let value = self.convert_term(expr)?;
-            self.locals.insert(name.clone(), value);
+            self.locals.insert(*sym, value);
         }
 
         // Convert condition
@@ -1346,9 +1341,9 @@ impl<'a> Converter<'a> {
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
 
         // Clean up
-        self.locals.remove(loop_var);
-        for (name, _, _) in init_bindings {
-            self.locals.remove(name);
+        self.locals.remove(&loop_var);
+        for (sym, _, _) in init_bindings {
+            self.locals.remove(sym);
         }
 
         Ok(loop_blocks.result)
@@ -1356,11 +1351,11 @@ impl<'a> Converter<'a> {
 
     fn convert_for_range_loop(
         &mut self,
-        loop_var: &str,
+        loop_var: SymbolId,
         loop_var_ty: &Type<TypeName>,
         init: &Term,
-        init_bindings: &[(String, Type<TypeName>, &Term)],
-        index_var: &str,
+        init_bindings: &[(SymbolId, Type<TypeName>, &Term)],
+        index_var: SymbolId,
         _index_var_ty: &Type<TypeName>,
         bound: &Term,
         body: &Term,
@@ -1391,13 +1386,13 @@ impl<'a> Converter<'a> {
         self.builder
             .switch_to_block(loop_blocks.header)
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
-        self.locals.insert(loop_var.to_string(), loop_blocks.acc);
-        self.locals.insert(index_var.to_string(), loop_blocks.index);
+        self.locals.insert(loop_var, loop_blocks.acc);
+        self.locals.insert(index_var, loop_blocks.index);
 
         // Process init_bindings
-        for (name, _ty, expr) in init_bindings {
+        for (sym, _ty, expr) in init_bindings {
             let value = self.convert_term(expr)?;
-            self.locals.insert(name.clone(), value);
+            self.locals.insert(*sym, value);
         }
 
         // Check i < bound
@@ -1441,10 +1436,10 @@ impl<'a> Converter<'a> {
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
 
         // Clean up
-        self.locals.remove(loop_var);
-        self.locals.remove(index_var);
-        for (name, _, _) in init_bindings {
-            self.locals.remove(name);
+        self.locals.remove(&loop_var);
+        self.locals.remove(&index_var);
+        for (sym, _, _) in init_bindings {
+            self.locals.remove(sym);
         }
 
         Ok(loop_blocks.result)
@@ -1452,11 +1447,11 @@ impl<'a> Converter<'a> {
 
     fn convert_for_in_loop(
         &mut self,
-        loop_var: &str,
+        loop_var: SymbolId,
         loop_var_ty: &Type<TypeName>,
         init: &Term,
-        init_bindings: &[(String, Type<TypeName>, &Term)],
-        elem_var: &str,
+        init_bindings: &[(SymbolId, Type<TypeName>, &Term)],
+        elem_var: SymbolId,
         elem_ty: &Type<TypeName>,
         iter: &Term,
         body: &Term,
@@ -1491,16 +1486,16 @@ impl<'a> Converter<'a> {
         self.builder
             .switch_to_block(loop_blocks.header)
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
-        self.locals.insert(loop_var.to_string(), loop_blocks.acc);
+        self.locals.insert(loop_var, loop_blocks.acc);
 
         // Get element at index (SoA-aware)
         let elem = self.soa_index(iter_value, loop_blocks.index, &iter_ty, elem_ty)?;
-        self.locals.insert(elem_var.to_string(), elem);
+        self.locals.insert(elem_var, elem);
 
         // Process init_bindings
-        for (name, _ty, expr) in init_bindings {
+        for (sym, _ty, expr) in init_bindings {
             let value = self.convert_term(expr)?;
-            self.locals.insert(name.clone(), value);
+            self.locals.insert(*sym, value);
         }
 
         // Check i < len
@@ -1544,10 +1539,10 @@ impl<'a> Converter<'a> {
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
 
         // Clean up
-        self.locals.remove(loop_var);
-        self.locals.remove(elem_var);
-        for (name, _, _) in init_bindings {
-            self.locals.remove(name);
+        self.locals.remove(&loop_var);
+        self.locals.remove(&elem_var);
+        for (sym, _, _) in init_bindings {
+            self.locals.remove(sym);
         }
 
         Ok(loop_blocks.result)
