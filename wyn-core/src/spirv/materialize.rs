@@ -14,7 +14,9 @@
 //! After this rewrite, `lift_and_merge` can hoist Materialize out of loops
 //! since it only depends on the (loop-invariant) array value.
 
-use crate::ssa::types::{FuncBody, InstKind, Program, ValueRef};
+use crate::ssa::types::{FuncBody, InstKind, Program, ValueRef, WynFunction};
+use std::collections::HashSet;
+use wyn_ssa::ValueLike;
 
 /// Run the materialize pass on the entire program.
 pub fn materialize_dynamic_indices(mut program: Program) -> Program {
@@ -29,6 +31,7 @@ pub fn materialize_dynamic_indices(mut program: Program) -> Program {
 
 fn materialize_func(body: &mut FuncBody) {
     rewrite_dynamic_indices(body);
+    hoist_materialize_past_loops(body);
     wyn_ssa::lift_and_merge(&mut body.inner);
 }
 
@@ -127,4 +130,74 @@ fn is_constant_int(
         None => return false, // block param or function param — not constant
     };
     matches!(func.insts[inst_id].data, InstKind::Int(_))
+}
+
+/// Move Materialize instructions (and their loop-invariant operand chains) to the
+/// function entry block. The generic lift_and_merge can't cross CondBranch blocks
+/// (which include loop headers), so we handle that here with control_headers knowledge.
+fn hoist_materialize_past_loops(body: &mut FuncBody) {
+    let entry = body.inner.entry;
+
+    // Find all Materialize instructions not in the entry block
+    let to_hoist: Vec<wyn_ssa::InstId> = body
+        .inner
+        .insts
+        .iter()
+        .filter(|(_, inst)| matches!(inst.data, InstKind::Materialize { .. }) && inst.parent != entry)
+        .map(|(id, _)| id)
+        .collect();
+
+    for mat_id in to_hoist {
+        // Also hoist the operand chain (the ArrayLit that produces the array value)
+        let operand_ids = collect_hoistable_chain(&body.inner, mat_id);
+
+        for id in operand_ids {
+            if body.inner.insts[id].parent == entry {
+                continue;
+            }
+            let old_block = body.inner.insts[id].parent;
+            if let Some(pos) = body.inner.blocks[old_block].insts.iter().position(|&i| i == id) {
+                body.inner.blocks[old_block].insts.remove(pos);
+            }
+            body.inner.blocks[entry].insts.push(id);
+            body.inner.insts[id].parent = entry;
+        }
+    }
+}
+
+/// Collect an instruction and all its hoistable SSA operands (transitively).
+/// Returns them in dependency order (operands first).
+fn collect_hoistable_chain(func: &WynFunction, root: wyn_ssa::InstId) -> Vec<wyn_ssa::InstId> {
+    let mut result = Vec::new();
+    let mut visited = HashSet::new();
+    collect_chain_rec(func, root, &mut result, &mut visited);
+    result
+}
+
+fn collect_chain_rec(
+    func: &WynFunction,
+    inst_id: wyn_ssa::InstId,
+    result: &mut Vec<wyn_ssa::InstId>,
+    visited: &mut HashSet<wyn_ssa::InstId>,
+) {
+    if !visited.insert(inst_id) {
+        return;
+    }
+    if !func.insts.contains_key(inst_id) {
+        return;
+    }
+    // Recurse into SSA operands first (dependency order)
+    let uses: Vec<wyn_ssa::ValueId> = func.insts[inst_id].data.ssa_uses();
+    for val_id in uses {
+        let def_inst = func.values.get(val_id).and_then(|v| match v.def {
+            wyn_ssa::ValueDef::Inst { inst } => Some(inst),
+            _ => None,
+        });
+        if let Some(def_inst) = def_inst {
+            if func.insts[def_inst].data.is_hoistable() {
+                collect_chain_rec(func, def_inst, result, visited);
+            }
+        }
+    }
+    result.push(inst_id);
 }

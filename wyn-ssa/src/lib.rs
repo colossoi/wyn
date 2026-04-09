@@ -675,80 +675,90 @@ pub fn lift_and_merge<I: ValueLike, E: Copy + Eq + Hash + Debug, T: Clone + Debu
 fn hoist_all<I: ValueLike, E: Copy + Eq + Hash + Debug, T: Clone + Debug + PartialEq>(
     func: &mut Function<I, E, T>,
 ) {
-    let dom = Dominators::compute(func);
+    // Iterate to fixpoint: hoisting X may enable hoisting Y that depends on X.
+    for _ in 0..10 {
+        let mut changed = false;
 
-    let candidates: Vec<InstId> = func
-        .insts
-        .iter()
-        .filter_map(|(id, node)| {
-            if node.result.is_some() && node.effects.is_none() && node.data.is_hoistable() {
-                Some(id)
+        let dom = Dominators::compute(func);
+
+        let candidates: Vec<InstId> = func
+            .insts
+            .iter()
+            .filter_map(|(id, node)| {
+                if node.result.is_some() && node.effects.is_none() && node.data.is_hoistable() {
+                    Some(id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for inst_id in candidates {
+            if !func.insts.contains_key(inst_id) {
+                continue;
+            }
+
+            let current_block = func.insts[inst_id].parent;
+
+            // Find the floor: deepest operand block (can't go above any operand).
+            let mut operand_blocks: Vec<BlockId> = Vec::new();
+            func.insts[inst_id].data.for_each_operand(|v| {
+                operand_blocks.push(func.block_of_value(v));
+            });
+
+            let floor = if operand_blocks.is_empty() {
+                func.entry
             } else {
-                None
-            }
-        })
-        .collect();
-
-    for inst_id in candidates {
-        if !func.insts.contains_key(inst_id) {
-            continue;
-        }
-
-        let current_block = func.insts[inst_id].parent;
-
-        // Find the floor: deepest operand block (can't go above any operand).
-        let mut operand_blocks: Vec<BlockId> = Vec::new();
-        func.insts[inst_id].data.for_each_operand(|v| {
-            operand_blocks.push(func.block_of_value(v));
-        });
-
-        let floor = if operand_blocks.is_empty() {
-            func.entry
-        } else {
-            let deepest = *operand_blocks.iter().max_by_key(|&&b| dom.dom_set_size(b)).unwrap();
-            if !operand_blocks.iter().all(|&b| dom.dominates(b, deepest)) {
-                continue; // operands in sibling branches
-            }
-            deepest
-        };
-
-        // Walk up from current block toward the floor, stopping if we'd
-        // cross a conditional branch without a matching sibling instruction.
-        let mut target = current_block;
-        loop {
-            let Some(parent) = dom.idom(target) else {
-                break; // reached entry
+                let deepest = *operand_blocks.iter().max_by_key(|&&b| dom.dom_set_size(b)).unwrap();
+                if !operand_blocks.iter().all(|&b| dom.dominates(b, deepest)) {
+                    continue; // operands in sibling branches
+                }
+                deepest
             };
 
-            // Don't go above the operand floor
-            if !dom.dominates(floor, parent) && floor != parent {
-                break;
+            // Walk up from current block toward the floor, stopping if we'd
+            // cross a conditional branch without a matching sibling instruction.
+            let mut target = current_block;
+            loop {
+                let Some(parent) = dom.idom(target) else {
+                    break; // reached entry
+                };
+
+                // Don't go above the operand floor
+                if !dom.dominates(floor, parent) && floor != parent {
+                    break;
+                }
+
+                // Check if parent ends in a conditional branch
+                if matches!(func.blocks[parent].term, Terminator::CondBranch { .. }) {
+                    // We're inside one branch. Don't hoist past the conditional.
+                    break;
+                }
+
+                target = parent;
             }
 
-            // Check if parent ends in a conditional branch
-            if matches!(func.blocks[parent].term, Terminator::CondBranch { .. }) {
-                // We're inside one branch. Don't hoist past the conditional.
-                break;
+            if target == current_block {
+                continue;
             }
 
-            target = parent;
+            // Remove from current block
+            let old_pos = func.blocks[current_block].insts.iter().position(|&id| id == inst_id);
+            if let Some(pos) = old_pos {
+                func.blocks[current_block].insts.remove(pos);
+            }
+
+            // Insert at the right position in target block
+            let insert_idx = block_top_insert_index_after_operands(func, target, &func.insts[inst_id].data);
+            func.blocks[target].insts.insert(insert_idx, inst_id);
+            func.insts[inst_id].parent = target;
+            changed = true;
         }
 
-        if target == current_block {
-            continue;
+        if !changed {
+            break;
         }
-
-        // Remove from current block
-        let old_pos = func.blocks[current_block].insts.iter().position(|&id| id == inst_id);
-        if let Some(pos) = old_pos {
-            func.blocks[current_block].insts.remove(pos);
-        }
-
-        // Insert at the right position in target block
-        let insert_idx = block_top_insert_index_after_operands(func, target, &func.insts[inst_id].data);
-        func.blocks[target].insts.insert(insert_idx, inst_id);
-        func.insts[inst_id].parent = target;
-    }
+    } // end fixpoint loop
 }
 
 /// Find duplicate instructions in each block and merge them.
