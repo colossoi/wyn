@@ -1494,7 +1494,9 @@ fn output_results(
     Ok(())
 }
 
-/// Run the Bitcoin miner shader and check for hash hits
+/// Run the Bitcoin miner shader and check for hash hits.
+/// Uses the two-phase reduce pipeline: phase 1 hashes + checks target per thread,
+/// phase 2 combines partial results. Output is a single (nonce, hash) tuple.
 async fn run_miner(
     path: PathBuf,
     header_hex: [u32; 19],
@@ -1506,14 +1508,11 @@ async fn run_miner(
 ) -> Result<()> {
     let header_base = header_hex;
     let workgroup_size = 64u32;
-    let chunk = chunk_size.max(workgroup_size); // at least one workgroup
+    let chunk = chunk_size.max(workgroup_size);
     let num_chunks = (nonces + chunk - 1) / chunk;
 
-    // Extract target from the bits field (word 18 of header).
-    // parse_header_hex reads bytes as BE u32, but bits is a LE u32 in the
-    // serialized header, so swap back to get the real compact target.
     let bits_be = header_base[18];
-    let bits = bits_be.swap_bytes(); // back to LE interpretation
+    let bits = bits_be.swap_bytes();
     let target = decode_compact_target(bits);
 
     if verbose {
@@ -1524,76 +1523,96 @@ async fn run_miner(
         println!("  Chunk size: {} ({} chunks)", chunk, num_chunks);
     }
 
+    // Load pipeline descriptor (JSON sidecar next to the .spv)
+    let descriptor_path = path.with_extension("json");
+    let descriptor_json = fs::read_to_string(&descriptor_path)
+        .with_context(|| format!("Failed to read pipeline descriptor: {}", descriptor_path.display()))?;
+    let descriptor: pipeline_desc::PipelineDescriptor = serde_json::from_str(&descriptor_json)
+        .with_context(|| "Failed to parse pipeline descriptor JSON")?;
+
+    let mp = match descriptor.pipelines.first() {
+        Some(pipeline_desc::Pipeline::MultiCompute(mp)) => mp,
+        _ => return Err(anyhow!("Expected multi_compute pipeline in descriptor")),
+    };
+
     let (device, queue) = create_headless_device(verbose).await?;
-
-    // Buffers sized for one chunk
-    let chunk_byte_size = chunk as u64 * 8 * 4;
-
-    let output_buffer = device.create_buffer(&BufferDescriptor {
-        label: Some("miner_output"),
-        size: chunk_byte_size,
-        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
-
-    let staging = device.create_buffer(&BufferDescriptor {
-        label: Some("miner_staging"),
-        size: chunk_byte_size,
-        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-
-    let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-        label: Some("miner_bind_group_layout"),
-        entries: &[BindGroupLayoutEntry {
-            binding: 0,
-            visibility: ShaderStages::COMPUTE,
-            ty: BindingType::Buffer {
-                ty: BufferBindingType::Storage { read_only: false },
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        }],
-    });
-
-    let bind_group = device.create_bind_group(&BindGroupDescriptor {
-        label: Some("miner_bind_group"),
-        layout: &bind_group_layout,
-        entries: &[BindGroupEntry {
-            binding: 0,
-            resource: BindingResource::Buffer(wgpu::BufferBinding {
-                buffer: &output_buffer,
-                offset: 0,
-                size: None,
-            }),
-        }],
-    });
-
     let module = load_spirv_module(&device, &path)?;
 
-    let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+    // Create buffers from pipeline descriptor bindings.
+    // The partials and result buffers are sized based on workgroup count.
+    // Result buffer: 1 element of (u32, [8]u32) = 36 bytes
+    // Partials buffer: workgroup_count elements of 36 bytes
+    let result_size = 36u64;
+    let partials_size = workgroup_size as u64 * result_size; // one partial per thread in a workgroup
+
+    let mut buffers: HashMap<u32, (wgpu::Buffer, u64)> = HashMap::new();
+    for binding in &mp.bindings {
+        if let pipeline_desc::Binding::StorageBuffer { binding: b, usage, .. } = binding {
+            let size = match usage {
+                pipeline_desc::BufferUsage::Intermediate => partials_size,
+                pipeline_desc::BufferUsage::Output => result_size,
+                _ => continue,
+            };
+            let buffer = device.create_buffer(&BufferDescriptor {
+                label: Some(&format!("miner_binding_{}", b)),
+                size,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            buffers.insert(*b, (buffer, size));
+        }
+    }
+
+    let (bind_group_layout, bind_group) = build_bind_group(&device, &mp.bindings, &buffers)?;
+
+    // Build pipeline layout with push constants
+    let pc_range = wgpu::PushConstantRange {
+        stages: wgpu::ShaderStages::COMPUTE,
+        range: 0..116, // header_base(76) + target(32) + n(4) + nonce_offset(4)
+    };
+    let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
         label: Some("miner_layout"),
         bind_group_layouts: &[&bind_group_layout],
-        push_constant_ranges: &[wgpu::PushConstantRange {
-            stages: wgpu::ShaderStages::COMPUTE,
-            range: 0..84,
-        }],
+        push_constant_ranges: &[pc_range],
     });
 
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("miner_pipeline"),
-        layout: Some(&layout),
+    // Create compute pipelines for both stages
+    let phase1_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("miner_phase1"),
+        layout: Some(&pipeline_layout),
         module: &module,
-        entry_point: Some("mine"),
+        entry_point: Some(&mp.stages[0].entry_point),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+    let phase2_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("miner_phase2"),
+        layout: Some(&pipeline_layout),
+        module: &module,
+        entry_point: Some(&mp.stages[1].entry_point),
         compilation_options: Default::default(),
         cache: None,
     });
 
+    // Staging buffer for reading back the 36-byte result
+    let staging = device.create_buffer(&BufferDescriptor {
+        label: Some("miner_staging"),
+        size: result_size,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    // Find the result buffer binding
+    let result_binding = mp.bindings.iter().find_map(|b| {
+        if let pipeline_desc::Binding::StorageBuffer { binding, usage: pipeline_desc::BufferUsage::Output, .. } = b {
+            Some(*binding)
+        } else {
+            None
+        }
+    }).ok_or_else(|| anyhow!("No output binding in pipeline descriptor"))?;
+
     let start_time = std::time::Instant::now();
-    let mut hits = Vec::new();
-    let mut total_computed = 0u64;
-    let mut timed_out = false;
+    let mut hit: Option<(u32, Vec<u32>)> = None;
 
     for chunk_idx in 0..num_chunks {
         let chunk_offset = nonce_offset + chunk_idx * chunk;
@@ -1601,9 +1620,12 @@ async fn run_miner(
         let num_workgroups =
             workgroups_override.unwrap_or_else(|| (chunk_n + workgroup_size - 1) / workgroup_size);
 
-        // Build push constants for this chunk
-        let mut pc_bytes = Vec::with_capacity(84);
+        // Push constants: header_base(76) + target(32) + n(4) + nonce_offset(4) = 116 bytes
+        let mut pc_bytes = Vec::with_capacity(116);
         for word in &header_base {
+            pc_bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        for word in &target {
             pc_bytes.extend_from_slice(&word.to_le_bytes());
         }
         pc_bytes.extend_from_slice(&chunk_n.to_le_bytes());
@@ -1613,23 +1635,38 @@ async fn run_miner(
             label: Some("miner_encoder"),
         });
 
+        // Phase 1: each thread hashes its chunk, writes partial to partials buffer
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("miner_pass"),
+                label: Some("miner_phase1"),
                 timestamp_writes: None,
             });
-            cpass.set_pipeline(&pipeline);
+            cpass.set_pipeline(&phase1_pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
             cpass.set_push_constants(0, &pc_bytes);
             cpass.dispatch_workgroups(num_workgroups, 1, 1);
         }
 
-        let readback_size = chunk_n as u64 * 8 * 4;
-        encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging, 0, readback_size);
+        // Phase 2: single thread combines partials → result
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("miner_phase2"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&phase2_pipeline);
+            cpass.set_bind_group(0, &bind_group, &[]);
+            cpass.set_push_constants(0, &pc_bytes);
+            cpass.dispatch_workgroups(1, 1, 1);
+        }
+
+        // Copy result to staging
+        let (result_buf, _) = &buffers[&result_binding];
+        encoder.copy_buffer_to_buffer(result_buf, 0, &staging, 0, result_size);
         queue.submit(Some(encoder.finish()));
         let _ = device.poll(wgpu::PollType::Wait);
 
-        let buffer_slice = staging.slice(..readback_size);
+        // Read back result
+        let buffer_slice = staging.slice(..result_size);
         let (tx, rx) = std::sync::mpsc::channel();
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
             tx.send(result).unwrap();
@@ -1638,82 +1675,63 @@ async fn run_miner(
         rx.recv().unwrap()?;
 
         let data = buffer_slice.get_mapped_range();
-        let hash_words: &[u32] = bytemuck::cast_slice(&data);
+        let words: &[u32] = bytemuck::cast_slice(&data);
+        let nonce = words[0];
+        let hash = &words[1..9];
 
-        let mut chunk_zeros = 0usize;
-        for i in 0..chunk_n as usize {
-            let hash = &hash_words[i * 8..(i + 1) * 8];
-            let nonce = chunk_offset + i as u32;
-            if hash.iter().all(|&w| w == 0) {
-                chunk_zeros += 1;
-                continue;
-            }
-            if verbose {
-                print!("  nonce {:>10} -> ", nonce);
-                for word in hash {
-                    print!("{:08x}", word);
-                }
-                println!();
-            }
-            if hash_below_target(hash, &target) {
-                hits.push((nonce, hash.to_vec()));
-            }
-        }
-
-        total_computed += (chunk_n as usize - chunk_zeros) as u64;
-
-        drop(data);
-        staging.unmap();
-
-        if !hits.is_empty() {
-            break; // found a hit, stop searching
-        }
-
-        if chunk_zeros > 0 {
-            eprintln!(
-                "WARNING: GPU timeout in chunk {} (nonces {}..{}). Try a smaller --chunk-size.",
-                chunk_idx + 1,
-                chunk_offset,
-                chunk_offset + chunk_n,
-            );
-            timed_out = true;
-            break;
-        }
-
-        if verbose && num_chunks > 1 {
-            let progress = (chunk_idx + 1) as f64 / num_chunks as f64 * 100.0;
-            let elapsed = start_time.elapsed();
-            let rate = total_computed as f64 / elapsed.as_secs_f64();
-            eprint!("\r  chunk {}/{} ({:.0}%) {:.0} H/s", chunk_idx + 1, num_chunks, progress, rate);
-        }
-    }
-
-    if verbose && num_chunks > 1 {
-        eprintln!(); // newline after progress
-    }
-
-    let elapsed = start_time.elapsed();
-    let hash_rate = total_computed as f64 / elapsed.as_secs_f64();
-
-    println!(
-        "Mined {} nonces in {:.2?} ({:.0} H/s){}",
-        total_computed,
-        elapsed,
-        hash_rate,
-        if timed_out { " (interrupted)" } else { "" },
-    );
-
-    if hits.is_empty() {
-        println!("No hits found");
-    } else {
-        println!("{} hit(s) found:", hits.len());
-        for (nonce, hash) in &hits {
-            print!("  nonce {:>10} -> ", nonce);
+        if verbose {
+            print!("  chunk {:>4}: nonce {:>10} -> ", chunk_idx + 1, nonce);
             for word in hash {
                 print!("{:08x}", word);
             }
             println!();
         }
+
+        // Check sentinel: 0xFFFFFFFF means no hit
+        if nonce != 0xFFFFFFFF {
+            hit = Some((nonce, hash.to_vec()));
+        }
+
+        drop(data);
+        staging.unmap();
+
+        if hit.is_some() {
+            break;
+        }
+
+        if verbose && num_chunks > 1 {
+            let elapsed = start_time.elapsed();
+            let computed = (chunk_idx + 1) as u64 * chunk as u64;
+            let rate = computed as f64 / elapsed.as_secs_f64();
+            eprint!(
+                "\r  chunk {}/{} ({:.0}%) {:.0} H/s",
+                chunk_idx + 1,
+                num_chunks,
+                (chunk_idx + 1) as f64 / num_chunks as f64 * 100.0,
+                rate
+            );
+        }
+    }
+
+    if verbose && num_chunks > 1 {
+        eprintln!();
+    }
+
+    let elapsed = start_time.elapsed();
+    let total_computed = num_chunks.min((nonces + chunk - 1) / chunk) as u64 * chunk as u64;
+    let hash_rate = total_computed as f64 / elapsed.as_secs_f64();
+
+    println!("Mined {} nonces in {:.2?} ({:.0} H/s)", nonces, elapsed, hash_rate);
+
+    if let Some((nonce, hash)) = &hit {
+        println!("Hit found:");
+        print!("  nonce {:>10} -> ", nonce);
+        for word in hash {
+            print!("{:08x}", word);
+        }
+        println!();
+    } else {
+        println!("No hits found");
     }
 
     Ok(())
