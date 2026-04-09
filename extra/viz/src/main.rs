@@ -1538,6 +1538,40 @@ async fn run_miner(
     let (device, queue) = create_headless_device(verbose).await?;
     let module = load_spirv_module(&device, &path)?;
 
+    // Validate: cross-check SPIR-V bindings against pipeline descriptor
+    {
+        let spv_bytes = fs::read(&path)?;
+        let spv_words: Vec<u32> = spv_bytes
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        let entry_points = detect_entry_points(&spv_words)?;
+        let descriptor_entries: Vec<&str> = mp.stages.iter().map(|s| s.entry_point.as_str()).collect();
+        let descriptor_bindings: Vec<u32> = mp.bindings.iter().filter_map(|b| {
+            if let pipeline_desc::Binding::StorageBuffer { binding, .. } = b { Some(*binding) } else { None }
+        }).collect();
+
+        if verbose {
+            println!("  SPIR-V entry points: {:?}", entry_points.iter().map(|(n,_)| n.as_str()).collect::<Vec<_>>());
+            println!("  Descriptor stages: {:?}", descriptor_entries);
+            println!("  Descriptor storage bindings: {:?}", descriptor_bindings);
+        }
+
+        for stage_name in &descriptor_entries {
+            if !entry_points.iter().any(|(n, _)| n == stage_name) {
+                return Err(anyhow!("Descriptor references entry point '{}' not found in SPIR-V", stage_name));
+            }
+        }
+
+        // Check push constant size matches
+        let descriptor_pc_size: u32 = mp.bindings.iter().filter_map(|b| {
+            if let pipeline_desc::Binding::PushConstant { offset, size, .. } = b { Some(offset + size) } else { None }
+        }).max().unwrap_or(0);
+        if descriptor_pc_size > 0 && verbose {
+            println!("  Push constant size from descriptor: {} bytes", descriptor_pc_size);
+        }
+    }
+
     // Create buffers from pipeline descriptor bindings.
     // Result buffer: 1 element of (u32, [8]u32) = 36 bytes
     // Partials buffer: one entry per thread in the largest chunk dispatch.
@@ -1564,7 +1598,14 @@ async fn run_miner(
         }
     }
 
+    if verbose {
+        for (b, (_, size)) in &buffers {
+            println!("  Buffer binding {}: {} bytes", b, size);
+        }
+    }
+
     let (bind_group_layout, bind_group) = build_bind_group(&device, &mp.bindings, &buffers)?;
+    if verbose { println!("  Bind group created"); }
 
     // Build pipeline layout with push constants
     let pc_range = wgpu::PushConstantRange {
@@ -1578,6 +1619,7 @@ async fn run_miner(
     });
 
     // Create compute pipelines for both stages
+    if verbose { println!("  Creating phase 1 pipeline ({})...", mp.stages[0].entry_point); }
     let phase1_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("miner_phase1"),
         layout: Some(&pipeline_layout),
@@ -1586,6 +1628,7 @@ async fn run_miner(
         compilation_options: Default::default(),
         cache: None,
     });
+    if verbose { println!("  Creating phase 2 pipeline ({})...", mp.stages[1].entry_point); }
     let phase2_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("miner_phase2"),
         layout: Some(&pipeline_layout),
@@ -1594,6 +1637,7 @@ async fn run_miner(
         compilation_options: Default::default(),
         cache: None,
     });
+    if verbose { println!("  Pipelines created"); }
 
     // Staging buffer for reading back the 36-byte result
     let staging = device.create_buffer(&BufferDescriptor {
