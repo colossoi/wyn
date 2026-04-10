@@ -42,14 +42,21 @@ pub fn eliminate_dead_defs(program: Program) -> Program {
 ///
 /// Skips `_w_lambda_*` defs (SOAC bodies) — handled by `inline()`.
 pub fn inline_small(program: Program) -> Program {
-    let small_candidates = find_small_candidates(&program.defs, &program.symbols);
-    let constant_candidates = find_constant_candidates(&program.defs, &program.symbols);
+    let all_constants = find_all_constants(&program);
+    let mut small_candidates = find_small_candidates(&program.defs, &program.symbols);
 
-    if small_candidates.is_empty() && constant_candidates.is_empty() {
+    if small_candidates.is_empty() && all_constants.is_empty() {
         return program;
     }
 
-    // Collect lambda names before consuming defs, to skip inlining into them.
+    // Inline constants into small candidate bodies so that when we inline
+    // the candidate into a call site, the inlined body doesn't carry stale
+    // Var references to constants.
+    for (_sym, candidate) in &mut small_candidates {
+        candidate.body = inline_constants(candidate.body.clone(), &all_constants);
+    }
+
+    // Collect lambda names before consuming defs, to skip small-fn inlining into them.
     let lambda_syms: HashSet<SymbolId> = program
         .defs
         .iter()
@@ -62,11 +69,14 @@ pub fn inline_small(program: Program) -> Program {
         .defs
         .into_iter()
         .map(|def| {
-            if lambda_syms.contains(&def.name) {
-                return def;
-            }
-            let body = inline_constants(def.body, &constant_candidates);
-            let body = inline_term(body, &small_candidates, &mut term_ids);
+            // Constants are pure — inline them everywhere, including lambda bodies.
+            let body = inline_constants(def.body, &all_constants);
+            // Small function inlining only in non-lambda defs (lambdas are SOAC helpers).
+            let body = if lambda_syms.contains(&def.name) {
+                body
+            } else {
+                inline_term(body, &small_candidates, &mut term_ids)
+            };
             Def { body, ..def }
         })
         .collect();
@@ -166,11 +176,17 @@ fn find_small_candidates(defs: &[Def], symbols: &SymbolTable) -> HashMap<SymbolI
     candidates
 }
 
-/// Find constant defs (arity 0, non-entry, non-extern) for inlining.
-fn find_constant_candidates(defs: &[Def], _symbols: &SymbolTable) -> HashMap<SymbolId, Term> {
-    let mut candidates = HashMap::new();
+/// Find all constant defs, indexed by every SymbolId that could reference them.
+///
+/// A constant is an arity-0, non-entry, non-extern function def.
+/// After monomorphization, the same constant name may be referenced through
+/// different SymbolIds, so we index by name as well as by def SymbolId.
+fn find_all_constants(program: &Program) -> HashMap<SymbolId, Term> {
+    // Find the canonical constant defs.
+    let mut by_sym: HashMap<SymbolId, Term> = HashMap::new();
+    let mut by_name: HashMap<String, Term> = HashMap::new();
 
-    for def in defs {
+    for def in &program.defs {
         if !matches!(def.meta, DefMeta::Function) {
             continue;
         }
@@ -180,10 +196,27 @@ fn find_constant_candidates(defs: &[Def], _symbols: &SymbolTable) -> HashMap<Sym
         if def.arity != 0 {
             continue;
         }
-        candidates.insert(def.name, def.body.clone());
+        by_sym.insert(def.name, def.body.clone());
+        if let Some(name) = program.symbols.get(def.name) {
+            by_name.insert(name.clone(), def.body.clone());
+        }
     }
 
-    candidates
+    // Also map any other SymbolId that resolves to a constant's name.
+    for def in &program.defs {
+        if let Some(name) = program.symbols.get(def.name) {
+            if let Some(body) = by_name.get(name) {
+                by_sym.entry(def.name).or_insert_with(|| body.clone());
+            }
+        }
+    }
+    for (name, body) in &by_name {
+        if let Some(&def_sym) = program.def_syms.get(name) {
+            by_sym.entry(def_sym).or_insert_with(|| body.clone());
+        }
+    }
+
+    by_sym
 }
 
 /// Check if a term contains control flow (If, Loop) or SOACs.

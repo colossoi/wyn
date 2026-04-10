@@ -955,6 +955,17 @@ pub struct SsaConvertedWithPipeline {
     pub pipeline: pipeline_descriptor::PipelineDescriptor,
 }
 
+impl SsaConvertedWithPipeline {
+    /// Run SSA peephole optimizations.
+    pub fn optimize(self) -> SsaOptimized {
+        let ssa = ssa::opt::optimize(self.ssa);
+        SsaOptimized {
+            ssa,
+            pipeline: self.pipeline,
+        }
+    }
+}
+
 /// TLC after dead code elimination
 pub struct TlcReachable {
     pub tlc: tlc::Program,
