@@ -29,11 +29,11 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .monomorphize()
         .buffer_specialize()
         .inline()
-        .to_ssa()
-        .map_err(|e| crate::err_spirv!("{}", e))?
         .inline_small()
         .parallelize_soacs()
         .filter_reachable()
+        .to_ssa()
+        .map_err(|e| crate::err_spirv!("{}", e))?
         .optimize()
         .lower_soacs()
         .lower()?;
@@ -61,6 +61,9 @@ fn compile_through_ssa(input: &str) -> Result<Program, CompilerError> {
         .monomorphize()
         .buffer_specialize()
         .inline()
+        .inline_small()
+        .parallelize_soacs()
+        .filter_reachable()
         .to_ssa()
         .map_err(|e| crate::err_spirv!("{}", e))?;
     Ok(ssa.ssa)
@@ -494,17 +497,17 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     let tlc = tlc.inline();
     eprintln!("=== inline OK ===");
 
-    let ssa = tlc.to_ssa().expect("to_ssa");
-    eprintln!("=== to_ssa OK ===");
-
-    let ssa = ssa.inline_small();
+    let tlc = tlc.inline_small();
     eprintln!("=== inline_small OK ===");
 
-    let ssa = ssa.parallelize_soacs();
+    let tlc = tlc.parallelize_soacs();
     eprintln!("=== parallelize_soacs OK ===");
 
-    let ssa = ssa.filter_reachable();
+    let tlc = tlc.filter_reachable();
     eprintln!("=== filter_reachable OK ===");
+
+    let ssa = tlc.to_ssa().expect("to_ssa");
+    eprintln!("=== to_ssa OK ===");
 
     let ssa = ssa.optimize();
     eprintln!("=== optimize OK ===");
@@ -563,17 +566,17 @@ entry main(data: []i32) []i32 = [first(data)]
     let tlc = tlc.inline();
     eprintln!("=== inline OK ===");
 
-    let ssa = tlc.to_ssa().expect("to_ssa");
-    eprintln!("=== to_ssa OK ===");
-
-    let ssa = ssa.inline_small();
+    let tlc = tlc.inline_small();
     eprintln!("=== inline_small OK ===");
 
-    let ssa = ssa.parallelize_soacs();
+    let tlc = tlc.parallelize_soacs();
     eprintln!("=== parallelize_soacs OK ===");
 
-    let ssa = ssa.filter_reachable();
+    let tlc = tlc.filter_reachable();
     eprintln!("=== filter_reachable OK ===");
+
+    let ssa = tlc.to_ssa().expect("to_ssa");
+    eprintln!("=== to_ssa OK ===");
 
     let ssa = ssa.optimize();
     eprintln!("=== optimize OK ===");

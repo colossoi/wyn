@@ -23,7 +23,6 @@ pub mod lowering_common;
 pub mod tlc;
 
 pub mod glsl;
-pub mod parallelization;
 pub mod pipeline_descriptor;
 pub mod resolve_placeholders;
 pub mod spirv;
@@ -316,11 +315,12 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 //       -> .monomorphize()                              -> TlcMonomorphized
 //       -> .buffer_specialize()                         -> TlcBufferSpecialized
 //       -> .inline()                                    -> TlcInlined
+//       -> .inline_small()                              -> TlcSmallInlined
+//       -> .parallelize_soacs()                         -> TlcParallelized
+//       -> .filter_reachable()                          -> TlcReachable
 //       -> .to_ssa()                                    -> SsaConverted
 //
 // BackEnd Pipeline (SSA -> output):
-//       -> .parallelize_soacs()                         -> SsaParallelized
-//       -> .filter_reachable()                          -> SsaReachable
 //       -> .optimize()                                  -> SsaOptimized
 //       -> .lower_soacs()                               -> SsaSoacLowered
 //       -> .lower()                                     -> Lowered
@@ -986,59 +986,12 @@ pub struct SsaConverted {
 }
 
 impl SsaConverted {
-    /// Inline small functions at the SSA level.
-    pub fn inline_small(self) -> SsaInlined {
-        let ssa = ssa::ssa_inline::inline_small_functions(self.ssa);
-        SsaInlined { ssa }
-    }
-}
-
-/// SSA after small function inlining
-pub struct SsaInlined {
-    pub ssa: ssa::types::Program,
-}
-
-impl SsaInlined {
-    /// Parallelize SOACs in compute shaders.
-    pub fn parallelize_soacs(self) -> SsaParallelized {
-        let result = parallelization::parallelize_soacs(self.ssa);
-        SsaParallelized {
-            ssa: result.program,
-            pipeline: result.pipeline,
-        }
-    }
-}
-
-/// SSA with parallelized SOACs for compute shaders
-pub struct SsaParallelized {
-    pub ssa: ssa::types::Program,
-    pub pipeline: pipeline_descriptor::PipelineDescriptor,
-}
-
-impl SsaParallelized {
-    /// Eliminate dead functions (not reachable from any entry point).
-    pub fn filter_reachable(self) -> SsaReachable {
-        let ssa = ssa::reachability::eliminate_dead_functions(self.ssa);
-        SsaReachable {
-            ssa,
-            pipeline: self.pipeline,
-        }
-    }
-}
-
-/// SSA with dead functions eliminated
-pub struct SsaReachable {
-    pub ssa: ssa::types::Program,
-    pub pipeline: pipeline_descriptor::PipelineDescriptor,
-}
-
-impl SsaReachable {
     /// Run SSA peephole optimizations (param forwarding, empty block elimination).
     pub fn optimize(self) -> SsaOptimized {
         let ssa = ssa::opt::optimize(self.ssa);
         SsaOptimized {
             ssa,
-            pipeline: self.pipeline,
+            pipeline: pipeline_descriptor::PipelineDescriptor::default(),
         }
     }
 }
