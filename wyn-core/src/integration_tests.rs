@@ -1176,3 +1176,79 @@ entry vertex_main() #[builtin(position)] vec4f32 =
         soac_map_count
     );
 }
+
+/// Pipeline that includes TLC inline_small (the new pass).
+fn compile_to_ssa_with_inline_small(input: &str) -> Program {
+    let mut frontend = crate::cached_frontend();
+    let parsed = crate::Compiler::parse(input, &mut frontend.node_counter).expect("Parsing failed");
+    let alias_checked = parsed
+        .desugar(&mut frontend.node_counter)
+        .expect("Desugaring failed")
+        .resolve(&mut frontend.module_manager)
+        .expect("Name resolution failed")
+        .fold_ast_constants()
+        .type_check(&mut frontend.module_manager, &mut frontend.schemes)
+        .expect("Type checking failed")
+        .alias_check()
+        .expect("Borrow checking failed");
+
+    let known_defs = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
+    alias_checked
+        .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
+        .partial_eval()
+        .normalize_soacs()
+        .fuse_maps()
+        .defunctionalize()
+        .monomorphize()
+        .buffer_specialize()
+        .inline()
+        .inline_small()
+        .to_ssa()
+        .expect("SSA conversion failed")
+        .ssa
+}
+
+#[test]
+fn test_constant_inlining_global_ref() {
+    // Minimal repro: a constant def used by a function, going through inline_small.
+    // This should NOT produce an unresolved Global("PI") in SSA.
+    let ssa = compile_to_ssa_with_inline_small(
+        r#"
+def PI: f32 = 3.141592
+
+def use_pi(x: f32) f32 = x * PI
+
+#[fragment]
+entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
+    let r = use_pi(pos.x) in
+    @[r, 0.0, 0.0, 1.0]
+"#,
+    );
+
+    // Dump what we got.
+    eprintln!("{}", crate::ssa::print::format_program(&ssa));
+
+    // Check that no Global("PI") instruction exists — it should have been inlined.
+    for func in &ssa.functions {
+        for (_id, inst) in &func.body.inner.insts {
+            if let crate::ssa::types::InstKind::Global(name) = &inst.data {
+                assert_ne!(
+                    name, "PI",
+                    "Global @PI should have been inlined, but survived in function '{}'",
+                    func.name
+                );
+            }
+        }
+    }
+    for ep in &ssa.entry_points {
+        for (_id, inst) in &ep.body.inner.insts {
+            if let crate::ssa::types::InstKind::Global(name) = &inst.data {
+                assert_ne!(
+                    name, "PI",
+                    "Global @PI should have been inlined, but survived in entry '{}'",
+                    ep.name
+                );
+            }
+        }
+    }
+}

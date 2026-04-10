@@ -240,8 +240,16 @@ fn compile_file(
     // Inline small user functions and constants at TLC level
     let tlc_inlined = time("tlc_inline_small", verbose, || tlc_inlined.inline_small());
 
+    // Parallelize SOACs in compute shaders (structural decisions at TLC level)
+    let tlc_parallel = time("tlc_parallelize", verbose, || tlc_inlined.parallelize_soacs());
+
+    // Eliminate dead TLC defs
+    let tlc_reachable = time("tlc_filter_reachable", verbose, || {
+        tlc_parallel.filter_reachable()
+    });
+
     // Transform TLC to SSA
-    let ssa = time("to_ssa", verbose, || tlc_inlined.to_ssa())?;
+    let ssa = time("to_ssa", verbose, || tlc_reachable.to_ssa())?;
 
     // Dump initial SSA if requested
     if let Some(ref path) = output_init_ssa {
@@ -251,17 +259,8 @@ fn compile_file(
         }
     }
 
-    // Inline small functions
-    let ssa = time("ssa_inline", verbose, || ssa.inline_small());
-
-    // Parallelize SOACs in compute shaders
-    let parallelized = time("parallelize_soacs", verbose, || ssa.parallelize_soacs());
-
-    // Eliminate dead functions
-    let reachable = time("filter_reachable", verbose, || parallelized.filter_reachable());
-
     // SSA peephole optimizations
-    let optimized = time("ssa_opt", verbose, || reachable.optimize());
+    let optimized = time("ssa_opt", verbose, || ssa.optimize());
 
     // Dump optimized SSA if requested
     if let Some(ref path) = output_opt_ssa {

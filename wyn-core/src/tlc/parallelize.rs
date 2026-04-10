@@ -395,8 +395,13 @@ fn build_two_phase_entries(
     // Phase 1: the original SOAC (reduce or redomap) over the full input.
     // soac_lower + parallelization codegen will handle chunking.
     let phase1_name = format!("{}_phase1_chunks", entry_name);
-    let phase1_body =
-        rebuild_soac_with_lets(&analysis.soac, &analysis.prefix_lets, elem_type.clone(), span);
+    let phase1_body = build_chunked_soac_body(
+        &analysis.soac,
+        &analysis.prefix_lets,
+        elem_type.clone(),
+        span,
+        program,
+    );
     let phase1_def = make_entry_def(&phase1_name, phase1_body, elem_type.clone(), program);
 
     // Phase 2: reduce over the partials buffer.
@@ -485,8 +490,13 @@ fn build_scan_entries(
 
     // Phase 1: local scans per chunk.
     let phase1_name = format!("{}_phase1_local_scans", entry_name);
-    let phase1_body =
-        rebuild_soac_with_lets(&analysis.soac, &analysis.prefix_lets, elem_type.clone(), span);
+    let phase1_body = build_chunked_soac_body(
+        &analysis.soac,
+        &analysis.prefix_lets,
+        elem_type.clone(),
+        span,
+        program,
+    );
     let phase1_def = make_entry_def(&phase1_name, phase1_body, elem_type.clone(), program);
 
     // Phase 2: scan the block sums.
@@ -589,25 +599,56 @@ fn build_scan_entries(
 }
 
 // =============================================================================
-// Helpers
+// Chunked SOAC body builder
 // =============================================================================
 
-/// Rebuild a SOAC term with its prefix let-bindings.
-fn rebuild_soac_with_lets(
+/// Build a chunked SOAC body for a parallel entry point.
+///
+/// Generates:
+/// ```text
+/// let tid = _w_intrinsic_thread_id() in
+/// let total = 64 in
+/// let chunk_size = (input_len + total - 1) / total in
+/// let chunk_start = tid * chunk_size in
+/// let chunk_len = u32.min(chunk_size, input_len - chunk_start) in
+/// <soac over chunked inputs>
+/// ```
+fn build_chunked_soac_body(
     soac: &ParallelizableSoac,
     prefix_lets: &[(SymbolId, Type<TypeName>, Term)],
     result_ty: Type<TypeName>,
     span: ast::Span,
+    program: &mut Program,
 ) -> Term {
-    let soac_op = match soac {
-        ParallelizableSoac::Map { lam, inputs, .. } => SoacOp::Map {
-            lam: lam.clone(),
-            inputs: inputs.clone(),
-        },
+    let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+
+    // Allocate symbols for chunk arithmetic bindings.
+    let tid_sym = program.symbols.alloc("_par_tid".into());
+    let total_sym = program.symbols.alloc("_par_total".into());
+    let input_len_sym = program.symbols.alloc("_par_input_len".into());
+    let chunk_size_sym = program.symbols.alloc("_par_chunk_size".into());
+    let chunk_start_sym = program.symbols.alloc("_par_chunk_start".into());
+    let chunk_len_sym = program.symbols.alloc("_par_chunk_len".into());
+
+    // Build chunked input ArrayExprs (replace storage buffer offset/len with chunk range).
+    let chunk_start_var = var_term(chunk_start_sym, u32_ty.clone(), span);
+    let chunk_len_var = var_term(chunk_len_sym, u32_ty.clone(), span);
+
+    let chunked_soac = match soac {
+        ParallelizableSoac::Map { lam, inputs, .. } => {
+            let chunked_inputs = inputs
+                .iter()
+                .map(|input| chunk_array_expr(input, &chunk_start_var, &chunk_len_var))
+                .collect();
+            SoacOp::Map {
+                lam: lam.clone(),
+                inputs: chunked_inputs,
+            }
+        }
         ParallelizableSoac::Reduce { op, ne, input, .. } => SoacOp::Reduce {
             op: op.clone(),
             ne: ne.clone(),
-            input: input.clone(),
+            input: chunk_array_expr(input, &chunk_start_var, &chunk_len_var),
             props: ReduceProps::default(),
         },
         ParallelizableSoac::Redomap {
@@ -616,37 +657,266 @@ fn rebuild_soac_with_lets(
             ne,
             inputs,
             ..
-        } => SoacOp::Redomap {
-            op: op.clone(),
-            reduce_op: reduce_op.clone(),
-            ne: ne.clone(),
-            inputs: inputs.clone(),
-            props: ReduceProps::default(),
-        },
+        } => {
+            let chunked_inputs = inputs
+                .iter()
+                .map(|input| chunk_array_expr(input, &chunk_start_var, &chunk_len_var))
+                .collect();
+            SoacOp::Redomap {
+                op: op.clone(),
+                reduce_op: reduce_op.clone(),
+                ne: ne.clone(),
+                inputs: chunked_inputs,
+                props: ReduceProps::default(),
+            }
+        }
         ParallelizableSoac::Scan { op, ne, input, .. } => SoacOp::Scan {
             op: op.clone(),
             ne: ne.clone(),
-            input: input.clone(),
+            input: chunk_array_expr(input, &chunk_start_var, &chunk_len_var),
         },
     };
 
-    let mut body = soac_term(soac_op, result_ty.clone(), span);
+    // Get the input length term from the first input's provenance.
+    let input_len_term = get_input_len(soac, span);
 
+    // Build the body bottom-up: SOAC first, then wrap with let bindings.
+    let mut body = soac_term(chunked_soac, result_ty.clone(), span);
+
+    // Wrap with prefix lets (from the original entry body).
     for (name, ty, rhs) in prefix_lets.iter().rev() {
-        body = Term {
-            id: TermId(0),
-            ty: result_ty.clone(),
-            span,
-            kind: TermKind::Let {
-                name: *name,
-                name_ty: ty.clone(),
-                rhs: Box::new(rhs.clone()),
-                body: Box::new(body),
-            },
-        };
+        body = let_term(*name, ty.clone(), rhs.clone(), body, span);
     }
 
+    // Wrap with chunk arithmetic lets.
+    // chunk_len = u32.min(chunk_size, input_len - chunk_start)
+    let len_minus_start = binop(
+        "-",
+        var_term(input_len_sym, u32_ty.clone(), span),
+        var_term(chunk_start_sym, u32_ty.clone(), span),
+        u32_ty.clone(),
+        span,
+    );
+    let min_call = app_term(
+        "_w_u32_min",
+        vec![var_term(chunk_size_sym, u32_ty.clone(), span), len_minus_start],
+        u32_ty.clone(),
+        span,
+        program,
+    );
+    body = let_term(chunk_len_sym, u32_ty.clone(), min_call, body, span);
+
+    // chunk_start = tid * chunk_size
+    let chunk_start_rhs = binop(
+        "*",
+        var_term(tid_sym, u32_ty.clone(), span),
+        var_term(chunk_size_sym, u32_ty.clone(), span),
+        u32_ty.clone(),
+        span,
+    );
+    body = let_term(chunk_start_sym, u32_ty.clone(), chunk_start_rhs, body, span);
+
+    // chunk_size = (input_len + total - 1) / total
+    let total_minus_1 = binop(
+        "-",
+        var_term(total_sym, u32_ty.clone(), span),
+        uint_lit(1, span),
+        u32_ty.clone(),
+        span,
+    );
+    let len_plus = binop(
+        "+",
+        var_term(input_len_sym, u32_ty.clone(), span),
+        total_minus_1,
+        u32_ty.clone(),
+        span,
+    );
+    let chunk_size_rhs = binop(
+        "/",
+        len_plus,
+        var_term(total_sym, u32_ty.clone(), span),
+        u32_ty.clone(),
+        span,
+    );
+    body = let_term(chunk_size_sym, u32_ty.clone(), chunk_size_rhs, body, span);
+
+    // input_len = <from provenance>
+    body = let_term(input_len_sym, u32_ty.clone(), input_len_term, body, span);
+
+    // total = TOTAL_THREADS
+    body = let_term(
+        total_sym,
+        u32_ty.clone(),
+        uint_lit(TOTAL_THREADS as u64, span),
+        body,
+        span,
+    );
+
+    // tid = _w_intrinsic_thread_id()
+    let tid_rhs = intrinsic_term("_w_intrinsic_thread_id", vec![], u32_ty.clone(), span, program);
+    body = let_term(tid_sym, u32_ty.clone(), tid_rhs, body, span);
+
     body
+}
+
+/// Replace a storage buffer's offset/len with chunk-relative values.
+fn chunk_array_expr(input: &ArrayExpr, chunk_start: &Term, chunk_len: &Term) -> ArrayExpr {
+    match input {
+        ArrayExpr::StorageBuffer {
+            set,
+            binding,
+            offset,
+            elem_ty,
+            ..
+        } => {
+            // New offset = original_offset + chunk_start
+            let new_offset = if is_zero_lit(offset) {
+                chunk_start.clone()
+            } else {
+                binop(
+                    "+",
+                    (**offset).clone(),
+                    chunk_start.clone(),
+                    chunk_start.ty.clone(),
+                    chunk_start.span,
+                )
+            };
+            ArrayExpr::StorageBuffer {
+                set: *set,
+                binding: *binding,
+                offset: Box::new(new_offset),
+                len: Box::new(chunk_len.clone()),
+                elem_ty: elem_ty.clone(),
+            }
+        }
+        ArrayExpr::Range { start, len: _ } => {
+            // Range: chunk_start..chunk_len starting from original start
+            let new_start = binop(
+                "+",
+                (**start).clone(),
+                chunk_start.clone(),
+                chunk_start.ty.clone(),
+                chunk_start.span,
+            );
+            ArrayExpr::Range {
+                start: Box::new(new_start),
+                len: Box::new(chunk_len.clone()),
+            }
+        }
+        other => other.clone(), // shouldn't happen for parallelizable inputs
+    }
+}
+
+/// Get the input length term from the SOAC's first input.
+fn get_input_len(soac: &ParallelizableSoac, span: ast::Span) -> Term {
+    match soac {
+        ParallelizableSoac::Map { inputs, .. } | ParallelizableSoac::Redomap { inputs, .. } => {
+            get_array_expr_len(&inputs[0], span)
+        }
+        ParallelizableSoac::Reduce { input, .. } | ParallelizableSoac::Scan { input, .. } => {
+            get_array_expr_len(input, span)
+        }
+    }
+}
+
+fn get_array_expr_len(ae: &ArrayExpr, span: ast::Span) -> Term {
+    match ae {
+        ArrayExpr::StorageBuffer { len, .. } => (**len).clone(),
+        ArrayExpr::Range { len, .. } => (**len).clone(),
+        _ => uint_lit(0, span), // fallback
+    }
+}
+
+fn is_zero_lit(term: &Term) -> bool {
+    matches!(&term.kind, TermKind::IntLit(s) if s == "0")
+}
+
+// =============================================================================
+// Term-building helpers
+// =============================================================================
+
+fn var_term(sym: SymbolId, ty: Type<TypeName>, span: ast::Span) -> Term {
+    Term {
+        id: TermId(0),
+        ty,
+        span,
+        kind: TermKind::Var(sym),
+    }
+}
+
+fn let_term(name: SymbolId, name_ty: Type<TypeName>, rhs: Term, body: Term, span: ast::Span) -> Term {
+    let ty = body.ty.clone();
+    Term {
+        id: TermId(0),
+        ty,
+        span,
+        kind: TermKind::Let {
+            name,
+            name_ty,
+            rhs: Box::new(rhs),
+            body: Box::new(body),
+        },
+    }
+}
+
+fn binop(op: &str, lhs: Term, rhs: Term, ty: Type<TypeName>, span: ast::Span) -> Term {
+    Term {
+        id: TermId(0),
+        ty: ty.clone(),
+        span,
+        kind: TermKind::App {
+            func: Box::new(Term {
+                id: TermId(0),
+                ty: Type::Constructed(
+                    TypeName::Arrow,
+                    vec![
+                        ty.clone(),
+                        Type::Constructed(TypeName::Arrow, vec![ty.clone(), ty.clone()]),
+                    ],
+                ),
+                span,
+                kind: TermKind::BinOp(crate::ast::BinaryOp { op: op.to_string() }),
+            }),
+            args: vec![lhs, rhs],
+        },
+    }
+}
+
+/// Build an intrinsic call term. Creates a symbol for the intrinsic name.
+fn intrinsic_term(
+    name: &str,
+    args: Vec<Term>,
+    ret_ty: Type<TypeName>,
+    span: ast::Span,
+    program: &mut Program,
+) -> Term {
+    let sym = if let Some(&existing) = program.def_syms.get(name) {
+        existing
+    } else {
+        let sym = program.symbols.alloc(name.to_string());
+        program.def_syms.insert(name.to_string(), sym);
+        sym
+    };
+    Term {
+        id: TermId(0),
+        ty: ret_ty,
+        span,
+        kind: TermKind::App {
+            func: Box::new(var_term(sym, Type::Variable(0), span)),
+            args,
+        },
+    }
+}
+
+/// Build a call to a named function (like u32.min).
+fn app_term(
+    name: &str,
+    args: Vec<Term>,
+    ret_ty: Type<TypeName>,
+    span: ast::Span,
+    program: &mut Program,
+) -> Term {
+    intrinsic_term(name, args, ret_ty, span, program)
 }
 
 fn soac_term(soac: SoacOp, ty: Type<TypeName>, span: ast::Span) -> Term {
