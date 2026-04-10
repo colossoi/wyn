@@ -845,6 +845,123 @@ pub struct TlcInlined {
 }
 
 impl TlcInlined {
+    /// Inline small user functions and constants at their call/reference sites.
+    pub fn inline_small(self) -> TlcSmallInlined {
+        let tlc = tlc::inline::inline_small(self.tlc);
+        TlcSmallInlined {
+            tlc,
+            type_table: self.type_table,
+        }
+    }
+
+    /// Eliminate unreachable defs (dead code elimination at TLC level).
+    pub fn filter_reachable(self) -> TlcReachable {
+        let tlc = tlc::inline::eliminate_dead_defs(self.tlc);
+        TlcReachable {
+            tlc,
+            type_table: self.type_table,
+        }
+    }
+
+    /// Transform TLC directly to SSA.
+    pub fn to_ssa(self) -> std::result::Result<SsaConverted, tlc::to_ssa::ConvertError> {
+        let ssa = tlc::to_ssa::convert_program(&self.tlc)?;
+        Ok(SsaConverted { ssa })
+    }
+}
+
+/// TLC after small function and constant inlining
+pub struct TlcSmallInlined {
+    pub tlc: tlc::Program,
+    pub type_table: TypeTable,
+}
+
+impl TlcSmallInlined {
+    /// Parallelize SOACs in compute entry points at the TLC level.
+    pub fn parallelize_soacs(self) -> TlcParallelized {
+        let result = tlc::parallelize::parallelize_soacs(self.tlc);
+        TlcParallelized {
+            tlc: result.program,
+            pipeline: result.pipeline,
+            type_table: self.type_table,
+        }
+    }
+
+    /// Eliminate unreachable defs (dead code elimination at TLC level).
+    pub fn filter_reachable(self) -> TlcReachable {
+        let tlc = tlc::inline::eliminate_dead_defs(self.tlc);
+        TlcReachable {
+            tlc,
+            type_table: self.type_table,
+        }
+    }
+
+    /// Transform TLC directly to SSA.
+    pub fn to_ssa(self) -> std::result::Result<SsaConverted, tlc::to_ssa::ConvertError> {
+        let ssa = tlc::to_ssa::convert_program(&self.tlc)?;
+        Ok(SsaConverted { ssa })
+    }
+}
+
+/// TLC after SOAC parallelization
+pub struct TlcParallelized {
+    pub tlc: tlc::Program,
+    pub pipeline: pipeline_descriptor::PipelineDescriptor,
+    pub type_table: TypeTable,
+}
+
+impl TlcParallelized {
+    /// Eliminate unreachable defs (dead code elimination at TLC level).
+    pub fn filter_reachable(self) -> TlcReachableWithPipeline {
+        let tlc = tlc::inline::eliminate_dead_defs(self.tlc);
+        TlcReachableWithPipeline {
+            tlc,
+            pipeline: self.pipeline,
+            type_table: self.type_table,
+        }
+    }
+
+    /// Transform TLC directly to SSA.
+    pub fn to_ssa(self) -> std::result::Result<SsaConvertedWithPipeline, tlc::to_ssa::ConvertError> {
+        let ssa = tlc::to_ssa::convert_program(&self.tlc)?;
+        Ok(SsaConvertedWithPipeline {
+            ssa,
+            pipeline: self.pipeline,
+        })
+    }
+}
+
+/// TLC after parallelization + dead code elimination
+pub struct TlcReachableWithPipeline {
+    pub tlc: tlc::Program,
+    pub pipeline: pipeline_descriptor::PipelineDescriptor,
+    pub type_table: TypeTable,
+}
+
+impl TlcReachableWithPipeline {
+    /// Transform TLC directly to SSA.
+    pub fn to_ssa(self) -> std::result::Result<SsaConvertedWithPipeline, tlc::to_ssa::ConvertError> {
+        let ssa = tlc::to_ssa::convert_program(&self.tlc)?;
+        Ok(SsaConvertedWithPipeline {
+            ssa,
+            pipeline: self.pipeline,
+        })
+    }
+}
+
+/// SSA after TLC-level parallelization (carries the pipeline descriptor).
+pub struct SsaConvertedWithPipeline {
+    pub ssa: ssa::types::Program,
+    pub pipeline: pipeline_descriptor::PipelineDescriptor,
+}
+
+/// TLC after dead code elimination
+pub struct TlcReachable {
+    pub tlc: tlc::Program,
+    pub type_table: TypeTable,
+}
+
+impl TlcReachable {
     /// Transform TLC directly to SSA.
     pub fn to_ssa(self) -> std::result::Result<SsaConverted, tlc::to_ssa::ConvertError> {
         let ssa = tlc::to_ssa::convert_program(&self.tlc)?;

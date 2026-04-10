@@ -237,6 +237,9 @@ fn compile_file(
     // Inline compiler-generated lambda defs + DCE
     let tlc_inlined = time("inline", verbose, || tlc_buf.inline());
 
+    // Inline small user functions and constants at TLC level
+    let tlc_inlined = time("tlc_inline_small", verbose, || tlc_inlined.inline_small());
+
     // Transform TLC to SSA
     let ssa = time("to_ssa", verbose, || tlc_inlined.to_ssa())?;
 

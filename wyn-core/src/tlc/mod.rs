@@ -14,6 +14,7 @@ pub mod monomorphize;
 #[cfg(test)]
 mod monomorphize_tests;
 pub mod normalize;
+pub mod parallelize;
 pub mod partial_eval;
 #[cfg(test)]
 mod partial_eval_tests;
@@ -99,6 +100,14 @@ pub fn extract_lambda_params(term: &Term) -> (Vec<(SymbolId, Type<TypeName>)>, T
         TermKind::Lambda(Lambda { params, body, .. }) => (params.clone(), (**body).clone()),
         _ => (vec![], term.clone()),
     }
+}
+
+/// Count the number of nodes in a term tree.
+/// Used as a size heuristic for inlining decisions.
+pub fn term_size(term: &Term) -> usize {
+    let mut count = 1; // count this node
+    term.for_each_child(&mut |child| count += term_size(child));
+    count
 }
 
 /// Collect all `TermKind::Var(sym)` SymbolIds referenced anywhere in a term tree.
