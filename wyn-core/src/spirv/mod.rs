@@ -340,11 +340,8 @@ impl Constructor {
                             ])
                         } else if let PolyType::Constructed(TypeName::ArrayVariantVirtual, _) = variant {
                             // Virtual variant: struct { start, step, len } for range representation
-                            self.get_or_create_struct_type(vec![
-                                self.i32_type,
-                                self.i32_type,
-                                self.i32_type,
-                            ])
+                            // Use the element type so u32 ranges get {u32, u32, u32}.
+                            self.get_or_create_struct_type(vec![elem_type, elem_type, elem_type])
                         } else {
                             // Composite variant (or placeholder): sized array value
                             match size {
@@ -1209,7 +1206,15 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 let len_id = self.get_value_ref(*len)?;
                 let step_id = match step {
                     Some(s) => self.get_value_ref(*s)?,
-                    None => self.constructor.const_i32(1), // default step = 1
+                    None => {
+                        // Default step = 1, matching the element type of the range.
+                        let elem_ty = ssa_result_ty.as_ref().and_then(|t| t.elem_type());
+                        if matches!(elem_ty, Some(PolyType::Constructed(TypeName::UInt(_), _))) {
+                            self.constructor.const_u32(1)
+                        } else {
+                            self.constructor.const_i32(1)
+                        }
+                    }
                 };
 
                 // Construct the struct: {start, step, len}
@@ -2024,13 +2029,38 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     .array_variant()
                     .ok_or_else(|| err_spirv!("length: expected array type, got {:?}", arr_ty))?;
                 match variant {
-                    // View: struct {buffer_ptr, offset, len} — len at index 2
+                    // View: struct {buffer_ptr, offset, len} — len is u32 in the struct
+                    // but the SSA result type is i32. Extract as u32 then bitcast.
+                    // TODO: view struct should use i32 to match language conventions.
                     PolyType::Constructed(TypeName::ArrayVariantView, _) => {
-                        Ok(self.constructor.builder.composite_extract(result_ty, None, args[0], [2u32])?)
+                        let u32_ty = self.constructor.u32_type;
+                        let len_u32 =
+                            self.constructor.builder.composite_extract(u32_ty, None, args[0], [2u32])?;
+                        Ok(self.constructor.builder.bitcast(result_ty, None, len_u32)?)
                     }
-                    // Virtual (range): struct {start, step, len} — len at index 2
+                    // Virtual (range): struct {start, step, len} — len field type
+                    // matches element type (may be u32), but SSA result is i32.
+                    // Extract with the actual field type, then bitcast if needed.
                     PolyType::Constructed(TypeName::ArrayVariantVirtual, _) => {
-                        Ok(self.constructor.builder.composite_extract(result_ty, None, args[0], [2u32])?)
+                        let elem_spirv = self
+                            .constructor
+                            .polytype_to_spirv(arr_ty.elem_type().expect("virtual array has elem"));
+                        if elem_spirv == result_ty {
+                            Ok(self.constructor.builder.composite_extract(
+                                result_ty,
+                                None,
+                                args[0],
+                                [2u32],
+                            )?)
+                        } else {
+                            let len_raw = self.constructor.builder.composite_extract(
+                                elem_spirv,
+                                None,
+                                args[0],
+                                [2u32],
+                            )?;
+                            Ok(self.constructor.builder.bitcast(result_ty, None, len_raw)?)
+                        }
                     }
                     // Composite: sized SPIR-V array — length is known from the type
                     PolyType::Constructed(TypeName::ArrayVariantComposite, _) => {
@@ -2389,7 +2419,10 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         let (buffer_var, _) = self.constructor.resolve_buffer_by_id(buffer_id_val, "lower_view_index")?;
         let offset_val = self.constructor.builder.composite_extract(u32_ty, None, view_id, [1u32])?;
 
-        // Index may be i32 from the language; reinterpret as u32 for offset arithmetic.
+        // TODO: The view struct stores {u32, u32, u32} but the language uses i32 for
+        // indices everywhere. This bitcast papers over the mismatch. The view struct
+        // fields should be i32 to match the rest of the language, eliminating this cast
+        // and the u32/i32 inconsistency throughout the SOAC lowering pipeline.
         let index_u32 = self.constructor.builder.bitcast(self.constructor.u32_type, None, index_id)?;
 
         // Compute final index = offset + index

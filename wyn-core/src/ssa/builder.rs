@@ -191,6 +191,11 @@ impl FuncBuilder {
         self.inner.func()
     }
 
+    /// Access the underlying function (mutable).
+    pub fn func_mut(&mut self) -> &mut wyn_ssa::Function<InstKind, EffectToken, Type<TypeName>> {
+        self.inner.func_mut()
+    }
+
     // =========================================================================
     // Convenience methods for common instructions
     // =========================================================================

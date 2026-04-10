@@ -165,7 +165,8 @@ fn find_small_candidates(defs: &[Def], symbols: &SymbolTable) -> HashMap<SymbolI
             continue;
         }
 
-        // Skip functions with control flow or SOACs — they'd become multi-block in SSA.
+        // Skip functions with control flow (If, Loop) — they'd become multi-block in SSA.
+        // SOACs are fine to inline — they're single instructions in SSA.
         if has_control_flow(&body) {
             continue;
         }
@@ -222,7 +223,7 @@ fn find_all_constants(program: &Program) -> HashMap<SymbolId, Term> {
 /// Check if a term contains control flow (If, Loop) or SOACs.
 fn has_control_flow(term: &Term) -> bool {
     match &term.kind {
-        TermKind::If { .. } | TermKind::Loop { .. } | TermKind::Soac(_) => true,
+        TermKind::If { .. } | TermKind::Loop { .. } => true,
         _ => {
             let mut found = false;
             term.for_each_child(&mut |child| {
