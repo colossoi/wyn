@@ -443,10 +443,7 @@ fn convert_entry_point(
         }
     }
 
-    // Convert the body
-    let result = converter.convert_term(inner_body)?;
-
-    // Convert execution model (needed to decide how to handle outputs)
+    // Build outputs early so we can create the output view before converting the body.
     let execution_model = match &entry.entry_type {
         ast::Attribute::Vertex => ExecutionModel::Vertex,
         ast::Attribute::Fragment => ExecutionModel::Fragment,
@@ -455,13 +452,37 @@ fn convert_entry_point(
         },
         _ => panic!("Invalid entry type attribute: {:?}", entry.entry_type),
     };
-
-    // Build outputs (pass binding_num so outputs continue from where inputs left off)
     let outputs = build_entry_outputs(entry, &inner_body.ty, is_compute, binding_num);
-
-    // For vertex/fragment shaders with outputs, emit explicit stores to output variables
     let is_compute = matches!(execution_model, ExecutionModel::Compute { .. });
     let is_unit_return = matches!(ret_type, Type::Constructed(TypeName::Unit, _));
+
+    // For compute entries with storage-backed outputs, create the output StorageView
+    // BEFORE converting the body so it's available for MapInto rewriting.
+    // Any compute entry whose output has a storage binding uses MapInto —
+    // the result variant (view, composite, etc.) doesn't matter.
+    let has_storage_output =
+        is_compute && !is_unit_return && outputs.iter().any(|o| o.storage_binding.is_some());
+
+    let compute_output_view = if has_storage_output {
+        if let Some(output) = outputs.first() {
+            let (set, binding) =
+                output.storage_binding.expect("BUG: compute output without storage binding");
+            let elem_ty = output.ty.elem_type().cloned().unwrap_or(output.ty.clone());
+            Some(
+                converter
+                    .builder
+                    .emit_storage_view(set, binding, elem_ty)
+                    .map_err(|e| ConvertError::BuilderError(e.to_string()))?,
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Convert the body
+    let result = converter.convert_term(inner_body)?;
 
     if is_unit_return {
         converter
@@ -469,70 +490,122 @@ fn convert_entry_point(
             .terminate(Terminator::Return(None))
             .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
     } else if is_compute && !outputs.is_empty() {
-        // Compute shader with non-unit return: write result to output storage buffer
-        // using the same StorageView + StorageViewIndex + Store helpers as the parallelizer.
-        let mut effect = converter.builder.entry_effect();
+        // Compute shader with non-unit return: write result to output storage buffer.
+        //
+        if let Some(output_view) = compute_output_view {
+            // View-array result: rewrite the Soac::Map that produced the result
+            // into Soac::MapInto so soac_lower writes directly to the output buffer.
+            if let Some(inst_id) = converter.builder.func().inst_of_value(result) {
+                let inst_data = converter.builder.func().insts[inst_id].data.clone();
+                match inst_data {
+                    InstKind::Soac(Soac::Map {
+                        func,
+                        inputs,
+                        captures,
+                        input_array_types,
+                        input_elem_types,
+                        output_elem_type,
+                    }) => {
+                        converter.builder.func_mut().insts[inst_id].data = InstKind::Soac(Soac::MapInto {
+                            func,
+                            inputs,
+                            captures,
+                            output_view,
+                            input_array_types,
+                            input_elem_types,
+                            output_elem_type,
+                        });
+                    }
+                    InstKind::Soac(Soac::Scan {
+                        func,
+                        input,
+                        init,
+                        captures,
+                        input_array_type,
+                        input_elem_type,
+                    }) => {
+                        converter.builder.func_mut().insts[inst_id].data = InstKind::Soac(Soac::ScanInto {
+                            func,
+                            input,
+                            init,
+                            captures,
+                            output_view,
+                            input_array_type,
+                            input_elem_type,
+                        });
+                    }
+                    _ => {}
+                }
+            }
 
-        for (i, output) in outputs.iter().enumerate() {
-            let (set, binding) =
-                output.storage_binding.expect("BUG: compute output without storage binding");
-            let value = if outputs.len() == 1 {
-                result
-            } else {
-                converter
-                    .builder
-                    .push_project(result, i as u32, output.ty.clone())
-                    .map_err(|e| ConvertError::BuilderError(e.to_string()))?
-            };
+            converter
+                .builder
+                .terminate(Terminator::Return(None))
+                .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+        } else {
+            let mut effect = converter.builder.entry_effect();
 
-            // Check if the output is a fixed-size array — if so, store elements individually
-            let fixed_size = output.ty.array_size().and_then(|s| {
-                if let Type::Constructed(TypeName::Size(n), _) = s { Some(*n) } else { None }
-            });
-            let elem_ty = output.ty.elem_type().cloned();
-
-            if let (Some(n), Some(et)) = (fixed_size, elem_ty) {
-                // Fixed-size array: unpack and store each element
-                let view = converter
-                    .builder
-                    .emit_storage_view(set, binding, et.clone())
-                    .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
-                for j in 0..n {
-                    let elem = converter
+            for (i, output) in outputs.iter().enumerate() {
+                let (set, binding) =
+                    output.storage_binding.expect("BUG: compute output without storage binding");
+                let value = if outputs.len() == 1 {
+                    result
+                } else {
+                    converter
                         .builder
-                        .push_project(value, j as u32, et.clone())
+                        .push_project(result, i as u32, output.ty.clone())
+                        .map_err(|e| ConvertError::BuilderError(e.to_string()))?
+                };
+
+                // Check if the output is a fixed-size array — if so, store elements individually
+                let fixed_size = output.ty.array_size().and_then(|s| {
+                    if let Type::Constructed(TypeName::Size(n), _) = s { Some(*n) } else { None }
+                });
+                let elem_ty = output.ty.elem_type().cloned();
+
+                if let (Some(n), Some(et)) = (fixed_size, elem_ty) {
+                    // Fixed-size array: unpack and store each element
+                    let view = converter
+                        .builder
+                        .emit_storage_view(set, binding, et.clone())
                         .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
-                    let idx = converter
+                    for j in 0..n {
+                        let elem = converter
+                            .builder
+                            .push_project(value, j as u32, et.clone())
+                            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+                        let idx = converter
+                            .builder
+                            .push_int(&j.to_string(), u32_ty.clone())
+                            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+                        effect = converter
+                            .builder
+                            .emit_storage_store(view, idx, elem, et.clone(), effect)
+                            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+                    }
+                } else {
+                    // Scalar or other: store directly at index 0
+                    let view = converter
                         .builder
-                        .push_int(&j.to_string(), u32_ty.clone())
+                        .emit_storage_view(set, binding, output.ty.clone())
+                        .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+                    let idx_zero = converter
+                        .builder
+                        .push_int("0", u32_ty.clone())
                         .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
                     effect = converter
                         .builder
-                        .emit_storage_store(view, idx, elem, et.clone(), effect)
+                        .emit_storage_store(view, idx_zero, value, output.ty.clone(), effect)
                         .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
                 }
-            } else {
-                // Scalar or other: store directly at index 0
-                let view = converter
-                    .builder
-                    .emit_storage_view(set, binding, output.ty.clone())
-                    .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
-                let idx_zero = converter
-                    .builder
-                    .push_int("0", u32_ty.clone())
-                    .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
-                effect = converter
-                    .builder
-                    .emit_storage_store(view, idx_zero, value, output.ty.clone(), effect)
-                    .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
             }
-        }
-        let _ = effect;
+            let _ = effect;
 
-        converter
-            .builder
-            .terminate(Terminator::Return(None))
-            .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+            converter
+                .builder
+                .terminate(Terminator::Return(None))
+                .map_err(|e| ConvertError::BuilderError(e.to_string()))?;
+        }
     } else if !is_compute && !is_unit_return && !outputs.is_empty() {
         // Vertex/fragment shader with outputs: emit OutputPtr + Store
         let mut effect = converter.builder.entry_effect();
@@ -1940,7 +2013,14 @@ impl<'a> Converter<'a> {
             ArrayExpr::Soac(_) => Type::Constructed(TypeName::Unit, vec![]), // placeholder
             ArrayExpr::Generate { elem_ty, .. } => elem_ty.clone(),
             ArrayExpr::Literal(_) => Type::Constructed(TypeName::Unit, vec![]),
-            ArrayExpr::Range { start, .. } => start.ty.clone(),
+            ArrayExpr::Range { start, .. } => Type::Constructed(
+                TypeName::Array,
+                vec![
+                    start.ty.clone(),
+                    Type::Constructed(TypeName::SizePlaceholder, vec![]),
+                    Type::Constructed(TypeName::ArrayVariantVirtual, vec![]),
+                ],
+            ),
             ArrayExpr::StorageBuffer { elem_ty, .. } => Type::Constructed(
                 TypeName::Array,
                 vec![

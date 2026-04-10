@@ -6,7 +6,7 @@
 
 use crate::ast::TypeName;
 use crate::ssa::builder::FuncBuilder;
-use crate::ssa::types::ValueId;
+use crate::ssa::types::{InstKind, ValueId, ValueRef};
 use crate::types::TypeExt;
 use polytype::Type;
 
@@ -125,10 +125,37 @@ pub fn soa_array_with(
             new_components.push(new_comp);
         }
         builder.push_tuple(new_components, arr_ty.clone()).map_err(|e| e.to_string())
+    } else if is_view_array(arr_ty) {
+        // View array: write to storage via StorageViewIndex + Store.
+        // The view struct is unchanged — writes are side effects.
+        let elem_ty = arr_ty.elem_type().expect("view array has elem type").clone();
+        let ptr = builder
+            .push_inst(
+                InstKind::StorageViewIndex {
+                    view: ValueRef::Ssa(arr),
+                    index: ValueRef::Ssa(index),
+                },
+                elem_ty.clone(),
+            )
+            .map_err(|e| e.to_string())?;
+        let effect = builder.entry_effect();
+        builder.push_store(ptr, elem, effect).map_err(|e| e.to_string())?;
+        // Return the view unchanged — the accumulator is the same view.
+        Ok(arr)
     } else {
         builder
             .push_call("_w_intrinsic_array_with", vec![arr, index, elem], arr_ty.clone())
             .map_err(|e| e.to_string())
+    }
+}
+
+/// Check if an array type is a view (storage-buffer-backed) array.
+fn is_view_array(ty: &Type<TypeName>) -> bool {
+    match ty {
+        Type::Constructed(TypeName::Array, args) if args.len() == 3 => {
+            crate::types::is_array_variant_view(&args[2])
+        }
+        _ => false,
     }
 }
 

@@ -307,6 +307,40 @@ fn format_soac(out: &mut String, soac: &Soac) {
                 let _ = write!(out, " captures=[{}]", format_values(captures));
             }
         }
+        Soac::MapInto {
+            func,
+            inputs,
+            captures,
+            output_view,
+            ..
+        } => {
+            let _ = write!(
+                out,
+                "soac.map_into @{func}({}) -> %{:?}",
+                format_values(inputs),
+                output_view
+            );
+            if !captures.is_empty() {
+                let _ = write!(out, " captures=[{}]", format_values(captures));
+            }
+        }
+        Soac::ScanInto {
+            func,
+            input,
+            init,
+            captures,
+            output_view,
+            ..
+        } => {
+            let _ = write!(
+                out,
+                "soac.scan_into @{func}(%{:?}, %{:?}) -> %{:?}",
+                init, input, output_view
+            );
+            if !captures.is_empty() {
+                let _ = write!(out, " captures=[{}]", format_values(captures));
+            }
+        }
         Soac::Reduce {
             func,
             input,

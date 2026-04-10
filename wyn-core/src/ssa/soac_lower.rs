@@ -301,6 +301,24 @@ fn expand_soac(
             output_elem_type,
             result_ty,
         ),
+        Soac::MapInto {
+            func,
+            inputs,
+            captures,
+            output_view,
+            input_array_types,
+            input_elem_types,
+            output_elem_type,
+        } => expand_map_into(
+            builder,
+            func,
+            &remap_values(inputs, value_map),
+            &remap_values(captures, value_map),
+            value_map[output_view],
+            input_array_types,
+            input_elem_types,
+            output_elem_type,
+        ),
         Soac::Reduce {
             func,
             input,
@@ -335,6 +353,24 @@ fn expand_soac(
             input_elem_type,
             result_ty,
         ),
+        Soac::ScanInto {
+            func,
+            input,
+            init,
+            captures,
+            output_view,
+            input_array_type,
+            input_elem_type,
+        } => expand_scan_into(
+            builder,
+            func,
+            value_map[input],
+            value_map[init],
+            &remap_values(captures, value_map),
+            value_map[output_view],
+            input_array_type,
+            input_elem_type,
+        ),
         Soac::Redomap {
             func,
             inputs,
@@ -358,6 +394,224 @@ fn expand_soac(
 
 fn remap_values(values: &[ValueId], map: &HashMap<ValueId, ValueId>) -> Vec<ValueId> {
     values.iter().map(|v| map[v]).collect()
+}
+
+/// Check if an array type is a view (storage-buffer-backed) array.
+fn is_view_array(ty: &Type<TypeName>) -> bool {
+    match ty {
+        Type::Constructed(TypeName::Array, args) if args.len() == 3 => {
+            crate::types::is_array_variant_view(&args[2])
+        }
+        _ => false,
+    }
+}
+
+/// Read an element from an array.
+/// - View arrays: StorageViewIndex + Load
+/// - Virtual arrays: compute start + index * step (like the old RangeInput strategy)
+/// - Everything else: soa_index (which uses push_index)
+fn read_element(
+    builder: &mut FuncBuilder,
+    arr: ValueId,
+    index: ValueId,
+    arr_ty: &Type<TypeName>,
+    elem_ty: &Type<TypeName>,
+) -> Option<ValueId> {
+    if is_view_array(arr_ty) {
+        let ptr = builder
+            .push_inst(
+                InstKind::StorageViewIndex {
+                    view: ValueRef::Ssa(arr),
+                    index: ValueRef::Ssa(index),
+                },
+                elem_ty.clone(),
+            )
+            .ok()?;
+        let effect = builder.entry_effect();
+        builder.push_load(ptr, elem_ty.clone(), effect).ok()
+    } else if is_virtual_array(arr_ty) {
+        // Virtual array {start, step, len}: element = start + index * step
+        let start = builder.push_project(arr, 0, elem_ty.clone()).ok()?;
+        let step = builder.push_project(arr, 1, elem_ty.clone()).ok()?;
+        let idx_times_step = builder.push_binop("*", index, step, elem_ty.clone()).ok()?;
+        builder.push_binop("+", start, idx_times_step, elem_ty.clone()).ok()
+    } else {
+        soa_index(builder, arr, index, arr_ty, elem_ty).ok()
+    }
+}
+
+/// Expand a Map SOAC using storage-aware strategies (for compute entry points).
+///
+/// Expand a MapInto SOAC: loop over inputs, call function, write each result
+/// to the output storage view via StorageViewIndex + Store.
+fn expand_map_into(
+    builder: &mut FuncBuilder,
+    func: &str,
+    inputs: &[ValueId],
+    captures: &[ValueId],
+    output_view: ValueId,
+    input_array_types: &[Type<TypeName>],
+    input_elem_types: &[Type<TypeName>],
+    output_elem_type: &Type<TypeName>,
+) -> Option<ValueId> {
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+    let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
+
+    let first_input_ty = &input_array_types[0];
+    let len = soa_length(builder, inputs[0], first_input_ty).ok()?;
+
+    // Loop with index only — no accumulator. Writes go to storage.
+    let header = builder.create_block();
+    let body_block = builder.create_block();
+    let exit = builder.create_block();
+    let index = builder.add_block_param(header, i32_ty.clone());
+
+    let zero = builder.push_int("0", i32_ty.clone()).ok()?;
+    builder
+        .terminate(Terminator::Branch {
+            target: header,
+            args: vec![zero],
+        })
+        .ok()?;
+
+    builder.switch_to_block_unchecked(header);
+    builder.mark_loop_header(header, exit, body_block);
+    let cond = builder.push_binop("<", index, len, bool_ty.clone()).ok()?;
+    builder
+        .terminate(Terminator::CondBranch {
+            cond,
+            then_target: body_block,
+            then_args: vec![],
+            else_target: exit,
+            else_args: vec![],
+        })
+        .ok()?;
+
+    builder.switch_to_block_unchecked(body_block);
+
+    // Read input elements — dispatches to StorageViewIndex+Load for view arrays,
+    // soa_index for everything else (composite arrays, virtual/range arrays).
+    let mut input_elems: Vec<ValueId> = Vec::with_capacity(inputs.len());
+    for (j, &arr) in inputs.iter().enumerate() {
+        let elem = read_element(builder, arr, index, &input_array_types[j], &input_elem_types[j])?;
+        input_elems.push(elem);
+    }
+
+    let mut call_args = input_elems;
+    call_args.extend(captures.iter().copied());
+
+    let output_elem = builder.push_call(func, call_args, output_elem_type.clone()).ok()?;
+
+    // Write to output storage view
+    let out_ptr = builder
+        .push_inst(
+            InstKind::StorageViewIndex {
+                view: ValueRef::Ssa(output_view),
+                index: ValueRef::Ssa(index),
+            },
+            output_elem_type.clone(),
+        )
+        .ok()?;
+    let effect = builder.entry_effect();
+    builder.push_store(out_ptr, output_elem, effect).ok()?;
+
+    let one = builder.push_int("1", i32_ty.clone()).ok()?;
+    let next_i = builder.push_binop("+", index, one, i32_ty).ok()?;
+    builder
+        .terminate(Terminator::Branch {
+            target: header,
+            args: vec![next_i],
+        })
+        .ok()?;
+
+    builder.switch_to_block_unchecked(exit);
+
+    // MapInto doesn't produce a value — the output is in storage.
+    // Return a dummy.
+    let dummy_ty = Type::Constructed(TypeName::Bool, vec![]);
+    builder.push_inst(InstKind::Bool(false), dummy_ty).ok()
+}
+
+/// Expand a ScanInto SOAC: loop with accumulator, write each result to output storage view.
+fn expand_scan_into(
+    builder: &mut FuncBuilder,
+    func: &str,
+    arr_value: ValueId,
+    init_value: ValueId,
+    captures: &[ValueId],
+    output_view: ValueId,
+    input_array_type: &Type<TypeName>,
+    input_elem_type: &Type<TypeName>,
+) -> Option<ValueId> {
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+    let acc_ty = input_elem_type.clone();
+
+    let len = soa_length(builder, arr_value, input_array_type).ok()?;
+
+    // Loop with (acc, index) — no array accumulator needed.
+    let header = builder.create_block();
+    let body_block = builder.create_block();
+    let exit = builder.create_block();
+    let acc = builder.add_block_param(header, acc_ty.clone());
+    let index = builder.add_block_param(header, i32_ty.clone());
+
+    let zero = builder.push_int("0", i32_ty.clone()).ok()?;
+    builder
+        .terminate(Terminator::Branch {
+            target: header,
+            args: vec![init_value, zero],
+        })
+        .ok()?;
+
+    builder.switch_to_block_unchecked(header);
+    let _ = builder.mark_loop_header(header, exit, body_block);
+    let cond = builder.push_binop("<", index, len, bool_ty).ok()?;
+    builder
+        .terminate(Terminator::CondBranch {
+            cond,
+            then_target: body_block,
+            then_args: vec![],
+            else_target: exit,
+            else_args: vec![],
+        })
+        .ok()?;
+
+    builder.switch_to_block_unchecked(body_block);
+
+    let elem = read_element(builder, arr_value, index, input_array_type, input_elem_type)?;
+
+    let mut call_args = vec![acc, elem];
+    call_args.extend(captures.iter().copied());
+    let new_acc = builder.push_call(func, call_args, acc_ty.clone()).ok()?;
+
+    // Write new_acc to output view at index
+    let out_ptr = builder
+        .push_inst(
+            InstKind::StorageViewIndex {
+                view: ValueRef::Ssa(output_view),
+                index: ValueRef::Ssa(index),
+            },
+            input_elem_type.clone(),
+        )
+        .ok()?;
+    let effect = builder.entry_effect();
+    builder.push_store(out_ptr, new_acc, effect).ok()?;
+
+    let one = builder.push_int("1", i32_ty.clone()).ok()?;
+    let next_i = builder.push_binop("+", index, one, i32_ty).ok()?;
+    builder
+        .terminate(Terminator::Branch {
+            target: header,
+            args: vec![new_acc, next_i],
+        })
+        .ok()?;
+
+    builder.switch_to_block_unchecked(exit);
+
+    let dummy_ty = Type::Constructed(TypeName::Bool, vec![]);
+    builder.push_inst(InstKind::Bool(false), dummy_ty).ok()
 }
 
 /// Expand a Map SOAC into a for-range loop.
@@ -429,14 +683,13 @@ fn expand_map(
 
     let mut input_elems: Vec<ValueId> = Vec::with_capacity(inputs.len());
     for (i, &arr) in inputs.iter().enumerate() {
-        let elem = soa_index(
+        let elem = read_element(
             builder,
             arr,
             loop_blocks.index,
             &input_array_types[i],
             &input_elem_types[i],
-        )
-        .ok()?;
+        )?;
         input_elems.push(elem);
     }
 
@@ -469,7 +722,14 @@ fn expand_map(
     Some(loop_blocks.result)
 }
 
-/// Expand a Map SOAC by unrolling: emit N individual calls and construct
+/// Expand a Map over storage-backed (view) arrays.
+///
+/// Instead of accumulating into an array with array_with, this reads each
+/// element via Index (which the SPIR-V backend lowers to StorageViewIndex+Load
+/// for view arrays) and writes results via StorageViewIndex+Store.
+///
+/// Returns the input array as the "result" (the output was written in-place
+/// to the output storage buffer by to_ssa's entry point output handling).
 /// the result directly, avoiding the loop/accumulator/array_with overhead.
 fn expand_map_unrolled(
     builder: &mut FuncBuilder,
@@ -600,14 +860,13 @@ fn expand_reduce(
     // Body
     builder.switch_to_block(loop_blocks.body).ok()?;
 
-    let elem = soa_index(
+    let elem = read_element(
         builder,
         arr_value,
         loop_blocks.index,
         input_array_type,
         input_elem_type,
-    )
-    .ok()?;
+    )?;
 
     let mut call_args = vec![loop_blocks.acc, elem];
     call_args.extend(captures.iter().copied());
@@ -676,14 +935,13 @@ fn expand_scan(
     // Body: new_acc = op(scalar_acc, elem); out[i] = new_acc
     builder.switch_to_block(loop_blocks.body).ok()?;
 
-    let elem = soa_index(
+    let elem = read_element(
         builder,
         arr_value,
         loop_blocks.index,
         input_array_type,
         input_elem_type,
-    )
-    .ok()?;
+    )?;
 
     let mut call_args = vec![scalar_acc, elem];
     call_args.extend(captures.iter().copied());
@@ -760,14 +1018,13 @@ fn expand_redomap(
 
     let mut call_args = vec![loop_blocks.acc];
     for (i, &arr) in inputs.iter().enumerate() {
-        let elem = soa_index(
+        let elem = read_element(
             builder,
             arr,
             loop_blocks.index,
             &input_array_types[i],
             &input_elem_types[i],
-        )
-        .ok()?;
+        )?;
         call_args.push(elem);
     }
     call_args.extend(captures.iter().copied());

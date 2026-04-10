@@ -531,6 +531,36 @@ pub enum Soac {
         /// Element type of the input array (for SoA-aware indexing).
         input_elem_type: Type<TypeName>,
     },
+    /// `map_into f inputs output_view` — like Map but writes results directly
+    /// to a storage buffer view instead of producing an array value.
+    /// Used for compute shaders where the output is a storage buffer.
+    MapInto {
+        /// Name of the map function (post-defunctionalization).
+        func: String,
+        /// Input arrays (one per lambda parameter).
+        inputs: Vec<ValueId>,
+        /// Captured variables passed as extra arguments to `func`.
+        captures: Vec<ValueId>,
+        /// The output storage view to write results to.
+        output_view: ValueId,
+        /// Types of each input array (for SoA-aware length/indexing).
+        input_array_types: Vec<Type<TypeName>>,
+        /// Element types of each input array (for SoA-aware indexing).
+        input_elem_types: Vec<Type<TypeName>>,
+        /// Element type of the output.
+        output_elem_type: Type<TypeName>,
+    },
+    /// `scan_into f init input output_view` — like Scan but writes results directly
+    /// to a storage buffer view instead of producing an array value.
+    ScanInto {
+        func: String,
+        input: ValueId,
+        init: ValueId,
+        captures: Vec<ValueId>,
+        output_view: ValueId,
+        input_array_type: Type<TypeName>,
+        input_elem_type: Type<TypeName>,
+    },
     /// Fused map+reduce: `func(acc, x1, ..., xn) -> acc'` over parallel inputs.
     /// Produced by fusion when a Map feeds directly into a Reduce.
     /// Lowered as a single loop without materializing the intermediate array.
@@ -581,6 +611,29 @@ impl Soac {
             } => {
                 let mut uses = vec![*input, *init];
                 uses.extend(captures.iter().copied());
+                uses
+            }
+            Soac::MapInto {
+                inputs,
+                captures,
+                output_view,
+                ..
+            } => {
+                let mut uses = inputs.clone();
+                uses.extend(captures.iter().copied());
+                uses.push(*output_view);
+                uses
+            }
+            Soac::ScanInto {
+                input,
+                init,
+                captures,
+                output_view,
+                ..
+            } => {
+                let mut uses = vec![*input, *init];
+                uses.extend(captures.iter().copied());
+                uses.push(*output_view);
                 uses
             }
             Soac::Redomap {
@@ -634,6 +687,34 @@ impl Soac {
                     sub(v);
                 }
             }
+            Soac::MapInto {
+                inputs,
+                captures,
+                output_view,
+                ..
+            } => {
+                for v in inputs.iter_mut() {
+                    sub(v);
+                }
+                for v in captures.iter_mut() {
+                    sub(v);
+                }
+                sub(output_view);
+            }
+            Soac::ScanInto {
+                input,
+                init,
+                captures,
+                output_view,
+                ..
+            } => {
+                sub(input);
+                sub(init);
+                for v in captures.iter_mut() {
+                    sub(v);
+                }
+                sub(output_view);
+            }
             Soac::Redomap {
                 inputs,
                 init,
@@ -659,6 +740,62 @@ impl Soac {
     /// the Soac's ValueId fields and the ValueRef-based substitution interface.
     pub fn substitute_refs(&mut self, sub: &mut impl FnMut(&mut ValueRef)) {
         match self {
+            Soac::MapInto {
+                inputs,
+                captures,
+                output_view,
+                ..
+            } => {
+                for v in inputs.iter_mut() {
+                    let mut vr = ValueRef::Ssa(*v);
+                    sub(&mut vr);
+                    if let ValueRef::Ssa(new_id) = vr {
+                        *v = new_id;
+                    }
+                }
+                for v in captures.iter_mut() {
+                    let mut vr = ValueRef::Ssa(*v);
+                    sub(&mut vr);
+                    if let ValueRef::Ssa(new_id) = vr {
+                        *v = new_id;
+                    }
+                }
+                let mut vr = ValueRef::Ssa(*output_view);
+                sub(&mut vr);
+                if let ValueRef::Ssa(new_id) = vr {
+                    *output_view = new_id;
+                }
+            }
+            Soac::ScanInto {
+                input,
+                init,
+                captures,
+                output_view,
+                ..
+            } => {
+                let mut vr = ValueRef::Ssa(*input);
+                sub(&mut vr);
+                if let ValueRef::Ssa(n) = vr {
+                    *input = n;
+                }
+                let mut vr = ValueRef::Ssa(*init);
+                sub(&mut vr);
+                if let ValueRef::Ssa(n) = vr {
+                    *init = n;
+                }
+                for v in captures.iter_mut() {
+                    let mut vr = ValueRef::Ssa(*v);
+                    sub(&mut vr);
+                    if let ValueRef::Ssa(n) = vr {
+                        *v = n;
+                    }
+                }
+                let mut vr = ValueRef::Ssa(*output_view);
+                sub(&mut vr);
+                if let ValueRef::Ssa(n) = vr {
+                    *output_view = n;
+                }
+            }
             Soac::Map { inputs, captures, .. } => {
                 for v in inputs.iter_mut() {
                     let mut vr = ValueRef::Ssa(*v);
@@ -763,8 +900,8 @@ impl Soac {
     /// Return the name of the function applied by this SOAC.
     pub fn func_name(&self) -> &str {
         match self {
-            Soac::Map { func, .. } => func,
-            Soac::Reduce { func, .. } => func,
+            Soac::Map { func, .. } | Soac::MapInto { func, .. } => func,
+            Soac::Reduce { func, .. } | Soac::ScanInto { func, .. } => func,
             Soac::Scan { func, .. } => func,
             Soac::Redomap { func, .. } => func,
         }
