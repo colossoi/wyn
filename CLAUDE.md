@@ -82,14 +82,17 @@ cd viz && cargo run vf ../complete_shader_example.spv --vertex vertex_main --fra
 
                [default: spirv]
 
-           --output-init-mir <FILE>
-               Output initial MIR (right after flattening, before optimizations)
-
-           --output-final-mir <FILE>
-               Output final MIR (right before lowering)
-
            --output-annotated <FILE>
                Output annotated source code with block IDs and locations
+
+           --output-tlc <FILE>
+               Output typed lambda calculus representation
+
+           --output-init-ssa <FILE>
+               Output initial SSA (right after conversion from TLC, before optimization)
+
+           --output-opt-ssa <FILE>
+               Output optimized SSA (after optimization, before SOAC lowering)
 
        -v, --verbose
                Print verbose output
