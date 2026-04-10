@@ -50,6 +50,9 @@ The compiler uses a multi-stage pipeline with typestate-driven phases. Each stag
 | **TlcMonomorphized** | `tlc::specialize`, `tlc::monomorphize` | Polymorphic intrinsics specialized; user functions monomorphized |
 | **TlcBufferSpecialized** | `tlc::buffer_specialize` | Storage buffer parameter specialization |
 | **TlcInlined** | `tlc::inline` | Compiler-generated lambda inlining + DCE |
+| **TlcSmallInlined** | `tlc::inline` | Inline small user functions and constants |
+| **TlcParallelized** | `tlc::parallelize` | Structural parallelization of compute shader SOACs (chunked entries, pipeline descriptors) |
+| **TlcReachable** | `tlc::inline` | Dead definition elimination |
 
 ### SSA
 
@@ -64,9 +67,6 @@ Key features of the SSA IR:
 | Stage | Module | Description |
 |-------|--------|-------------|
 | **SsaConverted** | `tlc::to_ssa` | TLC to SSA conversion via `FuncBuilder` |
-| **SsaInlined** | `ssa::ssa_inline` | Inline small single-block functions at call sites |
-| **SsaParallelized** | `parallelization` | SOACs parallelized for compute shaders |
-| **SsaReachable** | `ssa::reachability` | Dead function elimination |
 | **SsaOptimized** | `ssa::opt` | SSA peephole optimizations (see below) |
 | **SsaSoacLowered** | `ssa::soac_lower` | SOAC expansion: loops, map unrolling, map-reduce fusion |
 | **SsaMaterialized** | `spirv::materialize` | Dynamic array indices materialized for SPIR-V (+ LICM) |
@@ -170,7 +170,7 @@ cargo build --release
 cargo test
 ```
 
-540 tests currently pass (8 ignored for pending features).
+539 tests currently pass (6 ignored for pending features).
 
 ## Language Overview
 

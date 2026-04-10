@@ -56,14 +56,6 @@ pub fn inline_small(program: Program) -> Program {
         candidate.body = inline_constants(candidate.body.clone(), &all_constants);
     }
 
-    // Collect lambda names before consuming defs, to skip small-fn inlining into them.
-    let lambda_syms: HashSet<SymbolId> = program
-        .defs
-        .iter()
-        .filter(|d| program.symbols.get(d.name).map_or(false, |n| n.starts_with("_w_lambda_")))
-        .map(|d| d.name)
-        .collect();
-
     let mut term_ids = TermIdSource::new();
     let defs: Vec<Def> = program
         .defs
@@ -71,12 +63,7 @@ pub fn inline_small(program: Program) -> Program {
         .map(|def| {
             // Constants are pure — inline them everywhere, including lambda bodies.
             let body = inline_constants(def.body, &all_constants);
-            // Small function inlining only in non-lambda defs (lambdas are SOAC helpers).
-            let body = if lambda_syms.contains(&def.name) {
-                body
-            } else {
-                inline_term(body, &small_candidates, &mut term_ids)
-            };
+            let body = inline_term(body, &small_candidates, &mut term_ids);
             Def { body, ..def }
         })
         .collect();
