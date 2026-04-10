@@ -22,6 +22,7 @@ pub mod desugar;
 pub mod lowering_common;
 pub mod tlc;
 
+pub mod egir;
 pub mod glsl;
 pub mod pipeline_descriptor;
 pub mod resolve_placeholders;

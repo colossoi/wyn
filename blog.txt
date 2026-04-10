@@ -1,0 +1,491 @@
+
+The acyclic e-graph: Cranelift's mid-end optimizer
+
+Apr 9, 2026
+
+Today, I'll be writing about the aegraph, or acyclic egraph, the data structure at the heart of Cranelift's mid-end optimizer. I introduced this approach in 2022 and, after a somewhat circuitous path involving one full rewrite, a number of interesting realizations and "patches" to the initial idea, various discussions with the wider e-graph community (including a talk (slides) at the EGRAPHS workshop at PLDI 2023 and a recent talk and discussions at the e-graphs Dagstuhl seminar), and a whole bunch of contributed rewrite rules over the past three years, it is time that I describe the why (why an e-graph? what benefits does it bring?), the how (how did we escape the pitfalls of full equality saturation? how did we make this efficient enough to productionize in Cranelift?), and the how much (does it help? how can we evaluate it against alternatives?).
+
+For those who are already familiar with Cranelift's mid-end and its aegraph, note that I'm taking a slightly different approach in this post. I've come to the viewpoint that the "sea-of-nodes" aspect of our aegraph, and the translation passes we've designed to translate into and out of it (with optimizations fused in along the way), are actually more fundamental than the "multi-representation" part of the aegraph, or in other words, the "equivalance class" part itself. I'm choosing to introduce the ideas from sea-of-nodes-first in this post, so we will see a "trivial eclass of one enode" version of the aegraph first (no union nodes), then motivate unions later. In actuality, when I was experimenting then building this functionality in Cranelift in 2022, the desire to integrate e-graphs came first, and aegraphs were created to make them practical; the pedagogy and design taxonomy have only become clear to me over time. With that, let's jump in!
+Initial context: Fixpoint Loops and the Pass-Ordering Problem
+
+Around May of 2022, I had introduced a simple alias analysis and related optimizations (removing redundant loads, and doing store-to-load forwarding). It worked fine on all of the expected test cases, and we saw real speedup on a few benchmarks (e.g. 5% on meshoptimizer here) but led to a new question as well: how should we integrate this pass with our other optimization passes, which at the time included GVN (global value numbering), LICM (loop-invariant code motion), constant propagation and some algebraic rewrites?
+
+To see why this is an interesting question, consider how GVN, which canonicalizes values, and redundant load elimination interact, on the following IR snippet:
+
+v2 = load.i64 v0+8
+v3 = iadd v2, v1   ;; e.g., array indexing
+v4 = load.i8 v3
+
+;; ... (no stores or other side effects here) ...
+
+v10 = load.i64 v0+8
+v11 = iadd v10, v1
+v12 = load.i8 v11
+
+Redundant load elimination (RLE) will be able to see that the load defining v10 can be removed, and v10 can be made an anlias of v2, in a single pass. In a perfect world, we should then be able to see that v11 becomes the same as v3 by means of GVN's canonicalization, and subsequently, v12 becomes an alias of v4. But those last two steps imply a tight cooperation between two different optimization passes: we need to run one full pass of RLE (result: v10 rewritten), then one full pass of GVN (result: v11 rewritten), then one additional full pass of RLE (result: v12 rewritten). One can see that an arbitrarily long chain of such reasoning steps, bouncing through different passes, might require an arbitrarily long sequence of pass invocations to fully simplify. Not good!
+
+This is known as the pass-ordering problem in the study of compilers and is a classical heuristic question with no easy answers as long as the passes remain separate, coarse-grained algorithms (i.e., not interwoven). To permit some interesting cases to work in the initial Cranelift integration of alias analysis-based rewrites, I made a somewhat ad-hoc choice to invoke GVN once after the alias-analysis rewrite pass.
+
+But this is clearly arbitrary, wastes compilation effort in the common case, and we should be able to do better. In general, the solution should reason about all passes' possible rewrites in a unified framework, and interleave them in a fine-grained way: so, for example, if we can apply RLE then GVN five times in a row just for one localized expression, we should be able to do that, without running each of these passes on the whole function body. In other words, we want a "single fixpoint loop" that iterates until optimization is done at a fine granularity.
+Three Building Blocks: Rewrites, Code Motion, and Canonicalization
+
+Let's review the optimizations we had at this point:
+
+    GVN (global value numbering), which is a canonicalization operation: within a given scope where a value is defined (for SSA IRs, the subtree of the dominance tree below a given definition), any identical computations of that value should be canonicalized to the original one.
+
+    LICM (loop-invariant code motion), which is a code-motion operation: computations that occur within a loop, but whose value is guaranteed to be the same on each iteration, should be moved out. Loop invariance can be defined recursively: values already outside the loop, or pure operators inside the loop whose arguments are all loop-invariant. The transform doesn't change any operators, it only moves where they occur.
+
+    Constant propagation (cprop) and algebraic rewrites: these are transforms like rewriting 1 + 2 to 3 (cprop) or x + 0 to x (algebraic). They can all be expressed as substitutions for expressions that match a given pattern.
+
+    Redundant load elimination and store-to-load forwarding: these both replace load operators with the SSA value that operator is known to load.
+
+    And one that we wanted to implement: rematerialization, which reduces register pressure for values that are easier to recompute on demand (e.g., integer constants) by re-defining them with a new computation. This can be seen as a kind of code motion as well.
+
+As a start to thinking about frameworks, we can categorize the above into code motion, canonicalization, and rewrites. Code motion is what it sounds like: it involves moving where a computation occurs, but not changing it otherwise. Canonicalization is the unifying of more than one instance of a computation into one ("canonical") instance. And rewrites are any optimization that replaces one expression with another that should compute the same value. Said more intuitively (and colloquially), these three categories attempt to cover the whole space of possibilities for "simple" optimizations: one can move code, merge identical code, or replace code with equivalent code. (The notable missing possibility here is the ability to change control flow and/or make use of control-flow-related reasoning; more on that in a later section.) Thus, if we can build a framework that handles these kinds of transforms, we should have a good infrastructure for the next steps in Cranelift's evolution.
+IR Design, Sea-of-Nodes, and Intermediate Points
+
+From first principles, one might ask: how should a unifying framework for these concerns look? Code motion and canonicalization together imply that perhaps computations (operator nodes) should not have a "location" in the program, whenever that can be avoided. In other words, perhaps we should find a way to represent add v1, v2 in our IR without putting it somewhere concrete in the control flow. Then all instances of that same computation would be merged (because duplicates would differ only by their location, which we removed), and code motion is... inapplicable, because code does not have a location?
+
+Well, not quite: the idea is that one starts with a conventional IR (with control flow), and ends with it too, but in the middle one can eliminate locations where possible. So in the transition to this representation, we erase locations, and canonicalize; and in the transition from this representation, we re-assign locations, and code-motion can be a side-effect of how we do that.
+
+What we just described above is called a sea-of-nodes IR. A sea-of-nodes IR is one that dispenses with a classical "sequential order" for all instructions or operators in the program, and instead builds a graph (the "sea") of operators (the "nodes") with edges to denote the actual dependencies, either for dataflow or control flow.
+
+In the purest form of this design, one can represent every IR transform as a graph rewrite, because a graph is all there is. For example, LICM, a kind of code motion that hoists a computation out of a loop, is a purely algebraic rewrite on the subgraph representing the loop body. This is because the loop itself is a kind of node in the sea of nodes, with control-flow edges like any other edge; code motion is not a "special" action outside the scope of the expression language (nodes and their operands).
+
+While that kind of flexibility is tempting, it comes with a significant complexity tax as well: it means that reasoning through and implementing classical compiler analyses and transforms is more difficult, at least for existing compiler engineers with their experience, because the IR is so different from the classical data structure (CFG of basic blocks). The V8 team wrote about this difficulty recently as support for their decision to migrate away from a pure Sea-of-Nodes representation.
+
+However, we might achieve some progress toward our goal -- providing a general framework for rewrites, code motion and canonicalization -- if we take inspiration from sea-of-nodes' handling of pure (side-effect-free) operators, and the way that they can "float" in the sea, unmoored by any anchor other than actual inputs and outputs (dataflow edges). Stated succinctly: what if we kept the CFG for the side-effectful instructions (call it the "side-effect skeleton") and used a sea-of-nodes for the rest?
+
+Figure: sea-of-nodes-with-CFG
+
+This would allow for us to unify code motion, canonicalization and rewrites, as described above: canonicalization works on pure operators, because we remove distinctions based on location; code-motion can occur when we put pur eoperators back in the CFG; and rewrites can occur on pure operators. In fact rewrites are now both (i) simpler to reason about, because we don't have to place expression nodes at locations in an IR, only create them "floating in the air", and (ii) more efficient, because they occur once on a canonicalized instance of an expression, rather than all instances separately.
+
+We'll call this representation a "sea-of-nodes with CFG".
+Implementing Sea-of-Nodes-with-CFG
+
+Now, to practical implementation: architecting the entire compiler around sea-of-nodes for pure operators might make sense from first principles, but as a modification of the existing Cranelift compiler pipeline, we would not want to (or be able to) make such a radical change in one step. Rather, I wanted to build this as a replacement for the mid-end, taking CLIF (our conventional CFG-based SSA IR) as input and producing CLIF as output. So we need a three-stage optimizer:
+
+    Lift all pure operators out of the CFG, leaving behind the skeleton. Put these operators into the "sea" of pure computation nodes, deduplicating (hash-consing) as we go.
+
+    Perform rewrites on these operators, replacing some values with others according to whatever rules we have that preserve value equivalence.
+
+    Convert this sea-of-pure-nodes back to sequential IR by scheduling nodes into the CFG. We'll call this process "elaboration" of the computations.
+
+This is in fact how the heart of Cranelift's mid-end now works; we'll go through each part above in turn.
+Into Sea-of-Nodes-with-CFG: Canonicalization
+
+Let's talk about how we get into the sea-of-nodes representation first. The most straightforward answer, of course, would be to simply "remove the nodes from the CFG" and let them free-float, referenced by their uses that remain in the skeleton -- and that's it. But that gives up on the obvious opportunity offered by the fact that these operators are pure (have no side-effects, or implicit dependencies on the rest of the world): an operator op v1, v2 always produces the same value given the same inputs, and two separate instances of this node have no distinguishing features or other properties that should lead to different results. Hence, we should canonicalize, or hash-cons, nodes.
+
+Hash-consing is a standard technique in systems that have value- or operator-nodes: the idea is to keep a lookup table indexed by the contents of each value or operator, perform lookups in this table when creating a new node, and reuse existing nodes when a match occurs.
+
+What is the equivalence class by which we deduplicate? (In other words, more concretely, how do we define Eq and Hash on sea-of-nodes values?) We adopt a very simple answer (and deal with subtleties later, as is often the case!): the (shallow) content of a given node is its identity. In other words, if we have iadd v1, v2, then that is "equal to" (deduplicates with) any other such operator.
+
+Now, this shallow notion of equality may not seem like enough to canonicalize all instances of the same expression tree. Consider if we had
+
+v0 = ...
+v1 = ...
+v2 = iadd v0, v1
+v3 = iconst 42
+v4 = imul v2, v3
+
+v5 = iadd v0, v1
+v6 = iconst 42
+v7 = imul v5, v6
+
+Clearly any reasonable canonicalization algorithm should consider v4 and v7 to be the same, and condense uses of them into uses of one canonical node. But the nodes are not shallowly ewqual. How do we get from here to there?
+
+One possible answer is induction: we could canonicalize a node only after all of its operands have been canonicalized (and rewritten), so we know that if subtrees are identical, we will have identical value numbers. Thus, inductively, all values would be canonicalized deeply.
+
+This requires processing definitions of a node before its uses, however. Fortunately, the SSA CFG from which we are constructing the sea-of-nodes-with-CFG provides us this property already if we traverse it in a particular order: we need to visit blocks in the control-flow graph in some preorder of the dominance tree (domtree), which we usually have available already.
+
+So we have an algorithm something like the following pseudo-code to canonicalize the SSA CFG into a sea-of-nodes-with-CFG:
+
+def canonicalize(basic_block):
+  for inst in basic_block:
+    if is_pure(inst):                 # only dedup and move to sea-of-nodes for "pure" insts;
+                                      # leave the "skeleton" in place
+      basic_block.remove(inst)
+      inst.rename_values(rename_map)  # rewrite uses according to a value->value map
+      if inst in hashcons_map:        # equality defined by shallow content
+        rename_map[inst.value] = hashcons_map[inst]
+      else:
+        nodes.push(inst)              # add to the sea-of-nodes
+        hashcons_map[inst] = inst.value
+    else:
+      # we still need to rename the CFG skeleton's uses to refer to sea-of-nodes
+      inst.rename_values(rename_map)
+
+  # recursive domtree-preorder traversal.
+  for child in domtree.children(basic_block):
+    canonicalize(child)
+
+This will handle not only the above example, where we have "deep equality" (because we will canonicalize and rename e.g. v5 into v2 before visiting v5's use), but also more complex examples with the redundancies spread across basic blocks.
+
+Finally: how does the "-with-CFG" aspect of all of this? So far, we have very much glossed over any values that are defined in the CFG skeleton, other than to imply above that they are never renamed (because we never take the is_pure branch). But is this OK?
+
+Yes, in a sense, by construction: we have defined all impure values to have their own "identity", distinct from any other such value, even if shallowly equal at a syntactic level. This aligns with the notion that impure computations have implicit inputs: for example, load v0 appearing twice in the program may produce different values at those two different times, so we cannot deduplicate it. This can be relaxed if we have a dedicated analysis that can reason about such implicit dependencies, and in fact for loads we do have one (alias analysis, feeding into redundant-load elimination and store-to-load forwarding). But in general, we cannot do anything with these "roots". Rather, they stay in the skeleton, feed values into the sea of nodes, and consume values back out of that sea of nodes.
+Out of Sea-of-Nodes-with-CFG: Scoped Elaboration
+
+Given a sea-of-nodes + skeleton representation of a program, how do we go back to a conventional CFG, with fully linearized operators (i.e., each of which has a concrete program-point where it is computed), to feed to the compiler backend and lower to machine code?
+
+The basic task is to decide a location at which to put each operator. Since nodes in the sea-of-nodes are "rooted" (referenced and ultimately computed/used) by side-effectful operators in the CFG skeleton, the first idea one might have is to copy pure nodes back into the CFG where they are referenced. One could do this recursively: if e.g. we have a side-effecting instruction store v1, v2, we can place the (pure operator) definitions of v1 and v2 just before this instruction; if those definitions require other values, likewise compute them first. We could call this "elaboration".
+
+Let's consider the single-basic-block case first and then define something like the following pseudocode:
+
+def demand_based_elaboration(bb):
+  for inst in bb:
+    elaborate_inst(inst, bb, before=inst)
+
+def elaborate_inst(inst, bb, before):
+  for value in inst.args:
+    inst.rewrite_arg(value, elaborate_value(value, bb, before=inst))
+  if is_pure(inst):
+    bb.insert_before(before, inst)
+  return inst.def
+
+def elaborate_value(value, bb, before):
+  if defined_by_inst(value):   # some values are blockparam roots, not inst defs
+    return elaborate_inst(value.inst, bb, before)
+  else:
+    return value
+
+This would certainly work, but is far too simple: it duplicates computation every time a value is used, and no value (other than blockparam roots) is ever used more than once. This will almost certainly result in extreme blowup in program size!
+
+So if we use a value multiple times, it seems that we should compute it once, some place in the program before any of the uses. For example, perhaps we could augment the above algorithm with a map that records the resulting value number the first time we elaborate a node, and reuses it (i.e., memoizes the elaboration):
+
+# ...
+
+def elaborate_value(value, bb, before):
+  if value in elaborated:
+    return already_elaborated[value]
+  else if defined_by_inst(inst):
+    result = elaborate_inst(value.inst, bb, before)
+    elaborated[value] = result
+    return result
+  else:
+    return value
+
+This modifeid algorithm will handle the case of a single block with reuse efficiently, computing a value the first time it is used ("on demand") as expected.
+
+Now let's consider multiple basic blocks. One might be tempted to wrap the above with a traversal, as we did for the translation into sea-of-nodes:
+
+def elaborate_domtree(bb):
+  demand_based_elaboration(bb)
+  for child in domtree.children(bb):
+    elaborate_domtree(child)
+
+def elaborate(func):
+  elaborate_domtree(func.entry)
+
+But this, too, has an issue. Consider a program that began as a CFG with many paths, two of which compute the same value:
+
+Figure: CFG with some redundancy between code paths
+
+If we define some traversal over all basic blocks to perform an elaboration as above, with a single map elaborated, we will
+
+    Elaborate a computation of v2 in bb2 and use it there;
+    Use it in bb3 as well in place of v3, since it has already been computed and is in thus memoized;
+    And thus generate invalid SSA, where a value is used on a path where it is never computed!
+
+Perhaps we could hoist the computation to a "common ancestor" of all of its uses instead. Here that would be bb1. But that creates yet another problem: if control flows from bb1 to bb4, then we will have computed the value and never used it -- in supposedly optimized code! This is sometimes called a "partial redundancy": a computation that is sometimes unused, depending on control flow. We would like to avoid this if possible.
+
+It turns out that this problem exactly corresponds to common subexpression elimination (CSE), which aims to find one place to compute a value possibly used multiple times. The usual approach in SSA code, global value numbering (GVN), solves the problem by reasoning about scopes, where a "scope" is the region in which a value has already been computed. The intuition is that at any given use, we can cast a "shadow" downward and remove redundant uses but only in that shadow. So in our example program, if bb1 computed v2 then we could reuse it in bb2 and bb3; but because it occurs independently in two subtrees with no common ancestor, we do nothing; we duplicate it (re-elaborate it).
+
+SSA "scopes" -- regions in which a value can be used -- are defined by the dominance relation, and so we can work with a domtree traversal to implement the needed behavior. Concretely, we can do a domtree preorder traversal; we can keep the elaborated map but separate it into scope "overlays", and push a new overlay for each subtree. This formalizes the "shadow" intuition above. We call this scoped elaboration. Pseudo-code follows:
+
+def find_in_scope(value, scope):
+  if value in scope.map:
+    return scope.map[value]
+  elif scope.parent:
+    return find_in_scope(value, scope.parent)
+  else:
+    return None
+
+def elaborate_value(value, bb, before, scope):
+  if find_in_scope(value, scope):
+    # ...
+  # ...
+  
+def elaborate_domtree(bb, scope):
+  demand_based_elaboration(bb, scope)
+  for child in domtree.children(bb):
+    subscope = { map = {}, parent = scope }
+    elaborate_domtree(child, subscope)
+    
+def elaborate(func):
+  root_scope = { map = {}, parent = None }
+  elaborate_domtree(func.entry, root_scope)
+
+The real implementation of our scoped hashmap takes advantage of the fact that keys will not overlap between overlay layers (because once defined, a value will not be re-defined in a lower layer), and this enables us to have true O(1) rather than O(depth) lookup using some tricks with a layer number and generation-per-layer (see implementation for details!). Nevertheless, the semantics are the same as above.
+
+As we foreshadowed above, just as the problem is closely related to CSE and GVN, scoped elaboration is as well. In fact, the approach of tracking a definition-within-scope for scopes that correspond to subtrees in the domtree, given a preorder traversal on the domtree, is exactly how Cranelift's old implementation works as well. We even borrowed the scoped hashmap implementation!
+
+A few more observations are in order. First, it's fairly interesting that we sometimes re-elaborate a node into multiple dom subtrees; why is this? Does this introduce inefficiency (e.g. in code size) or is it the best we can do?
+
+The duplication is, in my opinion, best seen as a dual of the canonicalization. The original code may have multiple copies of a pure computation in multiple paths, with no common ancestor that computes that value. When translating to see-of-nodes, we will canonicalize that computation, so we can optimize it once. But then when returning to the original linearized IR, we may need to restore the original duplication if there truly was no (non-redundancy-producing) optimization opportunity. Additionally, and very importantly: we should never elaborate a value in more than one place unless it also appeared in more than once in the original program. So we should not grow the program size beyond the original.
+
+Another interesting observation is that by driving elaboration by demand (from the roots in the side-effecting CFG skeleton), we do dead-code elimination (DCE) of the pure operations for free. Their existence in the sea of nodes may cost us some compile time if we spend effort to optimize them (only to throw them away later); but anything that becomes dead because of rewrites in sea-of-nodes will then naturally disappear from the final result.
+
+A third observation is that elaboration gives us a central location to control when and where code is placed in the final program. In other words, there is room for us to add heuristics beyond the simplest version of the algorithm described above. For example: we stated that we did not want to introduce any partial redundancies. But for correctness, we don't need to adhere to this: our only real restriction is that a pure computation cannot happen before its arguments are computed (i.e., we have to obey dataflow dependencies). So, for example, if we have the loop nest (structure of loops in the program) available, if a pure computation within a loop does not use any values that are computed within that loop, we know it is loop-invariant and we may choose to elaborate it before the loop begins (into the "preheader"), in a transform known as loop-invariant code motion (LICM). This is redundant if the loop executes zero iterations, but most loops execute at least once; and performing a loop-invariant computation only once can be a huge efficiency improvement.
+
+In the other direction -- pushing computation downward rather than upward -- we could choose to implement rematerialization by strategically forgetting a value in the already-elaborated scope and recomputing it at a new use. Why would we do this? Perhaps it is cheaper to recompute than to thread the original value through the program. For example, constant values are very cheap to "compute" (typically 1 or 2 instructions) but burning a machine register to keep a constant across a long function can be expensive.
+
+There is a lot of room for heuristic code scheduling within elaboration as well (LICM and rematerialization can be seen as scheduling too, but here I mean the order that operations are linearized within the block they are otherwise elaborated into). For a modern out-of-order CPU, this may not matter too much to the hardware -- but it may matter to the register allocator, because reordering instructions changes the "interference graph", or the way that different live register values compete for finite resources (hardware registers). E.g., pushing an instruction that uses many values for the last time "earlier" (to eliminate the need to store those values) is great; but this minimization is not always straightforward. In fact, ordering instructions that define and use values to minimize the coloring count for the resulting live-range interference graph is an NP-complete problem. So it goes, too often, in compiler engineering!
+
+Despite the complexities that may arise in combining many heuristics, these three dimensions -- LICM, rematerialization, and code scheduling for register pressure -- are an interesting high-dimensional cost optimization problem and one that we still haven't fully solved (see e.g. #6159, #6260 and #8959).
+Optimizing Pure Expression Nodes: Rewrite Framework
+
+We've covered the transitions into and out of the sea-of-nodes-with-CFG program representation. We've seen how merely this translation gives us GVN (deduplication), DCE, LICM, and rematerialization "for free" (not really free, but falling out as a natural consequence of the algorithms). But we still haven't covered one of the most classical sets of optimizations: algebraic (and other) rewrites from one expression to another equivalent one (e.g, x+0 to x). How can we do this on the sea-of-nodes?
+
+In principle, the answer is as "simple" as: build the logic that pattern-matches the "left-hand side" of a rewrite (the part that we have a "better" equivalent expression for), and then replaces it with the "right-hand side". That is, in x + 0 -> x, the left-hand side is x + 0 and the right-hand side is x. Such a framework is highly amenable to a domain-specific language to express these rewrites: ideally one doesn't want to write code that manually iterates through nodes to find these patterns. Fortunately for us, in the Cranelift project we have the ISLE (instruction-selection and lowering-expressions) DSL (RFC, language reference, blog post). I originally designed ISLE in the context of instruction lowering, as the name implies, but I was careful to keep a separation between the core language and its "prelude" binding it to a particular environment. Hence we could adapt it fairly easily to rewrite a graph of Cranelift IR operators as well. The idea is that, as in instruction lowering, for mid-end optimizations we invoke an ISLE constructor (entry point) on a particular node and the ruleset produces a posibly better node.
+
+That gives us the logic for one expression, but there is still an open question how to apply these rewrites: to which nodes, in what order, and how to manage or update any uses of a node when that node is rewritten.
+
+The two general design axes one might consider are:
+
+    Eager or deferred: do we apply rewrites to a node as soon as it exists, or apply them later (perhaps as some sort of batch-rewrite)?
+
+    Single-rewrite or fixpoint loop: do we rewrite a node only once, or apply rewrite rules again to the result of a rewrite? Also, if the operand of a node is rewritten, do we (and how do we) rewrite users of that node as well, since more tree-matching patterns may now apply to the new subtree?
+
+It is clear that different choices to these questions could lead to different efficiency-quality tradeoffs: most obviously, applying rewrites in a fixpoint should produce better code at the cost of longer compile time. But also, it seems possible that either eager or deferred rewrite processing could win, depending on the workload and particular rules: batching (hence, deferred until one bulk pass) often leads to efficiency advantages (see the egg paper and discussion below!), but also, deferral may require additional bookkeeping vs. eagerly rewriting before making use of the (soon to be stale) original value.
+
+For the overall design that we have described so far, there turns out to be a fairly clear optimal answer, surprisingly: because we build an acyclic sea-of-nodes, as long as we keep it acyclic during rewrites, we should be able to do a single rewrite pass rather than a fixpoint. And, to make that single pass work, we rewrite eagerly, as soon as we create a node; then use the final rewritten version of that node for any uses of the original value. Because we visit defs before uses and do rewrites immediately at the def, we never need to update (and re-canonicalize!) nodes after creation.
+
+An aside is in order: while it is fairly clear why the sea-of-nodes-with-CFG is initially acyclic -- because SSA permits dataflow cycles only through block-parameters / phi-nodes, and those remain in the CFG, which we don't "look through" when applying rewrites -- it is less clear why rewrites should maintain acyclicity, especially in the face of hashconsing, which may "tie the knot" of a cycle if we're not careful. The answer lies in the previous paragraph: once we create a node, we never update it. That's it! We've now maintained acyclicity, by construction.
+
+Perhaps surprisingly as well, this rewrite process can be fused with the translation pass into the sea-of-nodes itself. So we can amend the above canonicalize to
+
+def canonicalize(basic_block):
+  for inst in basic_block:
+    if is_pure(inst):
+      # ...
+      if inst in hashcons_map:
+        # ...
+      else:
+        inst = rewrite(inst)          # NEW
+        nodes.push(inst)              # add to the sea-of-nodes
+        hashcons_map[inst] = inst.value
+    else:
+       # ...
+
+i.e., simply add the rewrite rule application at the place we create nodes, and hashcons based on the final version of the instruction.
+
+Now, note that this is not quite complete yet: inst = rewrite(inst) is doing some heavy lifting, and is actually a bit too simplistic, in the sense that this implies that a rewrite rule can only ever rewrite to one instruction on the right hand side. This isn't quite right: for example, one may want a DeMorgan rewrite rule ~(x & y) -> ~x | ~y. The right-hand side includes three operator nodes (instructions): two bitwise-NOTs and the OR that uses them. What if x or y in this pattern also match a subexpression that can be simplified with some logic rule?
+
+There seem to be two general answers: create the original right-hand side nodes un-rewritten and later apply rewrites, or immedaitely and recursively rewrite. As we observed above, deferral requires additional bookkeeping and re-canonicalization as a node's inputs change, so we choose the recursive approach. So, concretely, given ~((a & b) & (c & d)) and the one rewrite rule above, we would:
+
+    Encounter the top-level ~, and try to match the rewrite rule's left-hand side. It would match with bindings x = (a & b) and y = (c & d).
+    Apply the right-hand side ~x | ~y bottom-up, buliding nodes and rewriting them as we go:
+        First, ~x. This creates ~(a & b), which recursively fires the rule, which results in (~a | ~b).
+        Then, ~y. This creates ~(c & d), again recursively firing the rule, which results in (~c | ~d).
+        We then create the top-level node on the right-hand side, resulting in (~a | ~b) | (~c | ~d).
+
+One needs to limit the recursion if there is any concern that rule chain depths may not be statically bounded or easily analyzable, but otherwise this yields the correct answer in a single pass without the need to track users of a node to later rewrite and recanonicalize it.
+
+And that's the whole pipeline: we now have a way to optimize code by translating to sea-of-nodes-with-CFG, applying rewrites as we go, then translating back to classical SSA CFG. In the process we've achieved all the goals we set out with: GVN, LICM, DCE, rematerialization, and algebraic rewrites.
+E-graphs: Representing Many Possible Rewrites
+
+So far, we've described a system that has zero or one deterministic rewrite for any given node; this is analogous to a classical compiler pipeline that destructively updates instructions/operators. This is great for rewrite rules like x+0 -> x: the right-hand side is unambiguously better if it is "smaller" (rewrites a whole expression into only one of its parts). This is also fine when instructions have clear and very distinct costs, such as integer divide (typically tens of cycles or more even on modern CPUs) by a constant converted into magic wrapping multiplies.
+
+But what about cases where the benefit of a rewrite is less clear, or depends on context, or depends on how it may or may not be able to compose with or enable other rewrites in a given program?
+
+For example, consider the classical example from the 2021 paper on egg, an e-graph framework: if we have the expression (x * 2) / 2 in our program, we would expect that to simplify to x1. To implement this simplification, we might have a general rewrite rule (x * k) / k -> x. But we might also, separately, have a rewrite rule that (x * 2^k) -> (x << k), i.e., convert a multiplication into a left-shift operation. If we performed this latter rewrite eagerly, the former rewrite rule might never match.
+
+(Now, you might complain that we could also convert the divide into a right-shift, then we have another rewrite rule that simplifies (x << k) >> k -> x. In this particular example, that might be reasonable. But (i) that required careful thinking about canonical forms, where multiplies/divides by powers-of-2 are always canonicalized down to shifts, and (ii) this same fortunate behavior might not exist for all rulesets.)
+1
+
+Possibly with masking of the top bit if our IR semantics have defined wrapping/truncation behavior: x & 0x7fff..ffff.
+
+In general, we also have a question at the rule-application level: if multiple rules apply, which do we take? In the above example, we would have had to have some prioritization scheme to (say) apply strength-reduction rules to convert to shifts before we example divide-of-multiply. That's an extra layer of heuristic engineering that must be considered when designing the optimizer.
+
+Onto the scene, then, comes a new data structure: the e-graph, or equivalence graph, which is a kind of sea-of-nodes program/expression representation that can represent many different equivalent forms of a program at once. The key idea is that, rather than have a single expression node as a referent for any value, we have an e-class (equivalence class) that contains many e-nodes, and we can pick any of these e-nodes to compute the value.
+
+The idea is a sort of principled approach to the optimization problem: let's model the state space explicitly, and then pick the best result objectively. Typically one uses the result of an e-graph by "extracting" one possible representation of the program according to a cost metric. (More on this below, but a simple cost metric could be a static number per operator kind, plus cost of inputs.)
+
+The magic of e-graphs is how they can compress a very large combinatorial space of equivalent programs into a small data structure. A detailed exploration of how this works is beyond the scope of this blog post (please read the egg paper: it's very good!) but a very short intuitive summary might be something like:
+
+    Ensuring that all value uses point to an e-class rather than a particular node will propagate knowledge of equivalences to maximally many places. That is, if we know that op1 v1, v2 is equivalent to op2 v3, v4, all users of the op1 v1, v2 expression should automatically get the knowledge propagated that they can use any form. This knowledge propagation is the essence of "equality saturation" that e-graphs enable.
+
+    A strong regime of canonicalization and "re-interning" (re-hashconsing), which the egg paper calls "rebuilding", ensures that such information is maximally propagated. Basically, when we discover that the op1 and op2 expressions above are equivalent, we re-process all users of both op1 and op2, looking for more follow-on consequences. Merging those two might in turn cause other expressions to be equivalent or other rewrite rules to fire.
+
+Practical Efficiency of Classical E-graphs
+
+The two problems that arise with a "classical e-graph" (by which I include the 2021 egg paper's batched-rebuliding formulation) are blowup -- that is, too many rewrite rules apply and the e-graph becomes too large -- and data-structure inefficiency.
+
+The blowup problem is easier to understand: if we allow for representing many different forms of the program, maybe we will represent too many, and run out of memory and processing time. It is often hard to control how rules will compose and lead to blowup, as well: each rewrite rule may seem reasonable in isolation, but the transitive closure of all possible programs under a well-developed set of equivalences can be massive. So practical applications of e-graphs usually need some kind of meta/strategy driver layer that uses "fuel" to bound effort, and/or selectively applies rewrites where they are likely to lead to better outcomes. Even then, this operating regime often has compile-times measured in seconds or worse. This may be appropriate for certain kinds of optimization problems where compilation happens once or rarely and the quality of the outcome is extremely important (e.g., hardware design), but not for a fast compiler like Cranelift.
+
+We can protect against such outcomes with careful heuristics, though, and the possibility of allowing for objective choice of the best possible expression is still very tempting. So in my initial experiments, I applied the egg crate to the problem and eventually, with custom tweaks, managed to get e-graph roundtripping to 23% overhead -- with no rewrites applied. That's not bad at first glance but it proposes to replace an optimization pipeline that itself takes only 10% of compile-time, and we haven't yet added the rewrites to the 23%. (And the 23% came after a good amount of data-structure engineering to reduce storage; the initial overhead was over 2x.)
+
+In profiling the optimizer's execution, the overheads were occurring more or less in building the e-graph itself (that is, cache misses throughout the code transcribing IR to the e-graph). And what does the e-graph contain? Per e-class, it contains a "parent pointer" list: we need to track users of every e-class so that we can re-canonicalize them during the "rebuild" step when e-classes are merged (a new equivalence is discovered). And, even more fundamentally, it stores e-nodes separately from e-classes, which is an essential element of the idea but means that we have (at least) two different entities for each value, even when most e-classes have only one e-node.
+
+Is there any way to simplify the data structures so that we don't have to store so many different bits for one value?
+Insight #1: Implicit E-graph in the SSA IR
+
+The first major insight that enabled efficient implementation of an e-graph in Cranelift was that we could redefine the existing IR into an implicit e-graph, without copying over the whole function body into an e-graph and back, thus avoiding the compile-time penalty of this data movement. (Data movement can be very expensive when the main loops of a program are otherwise fairly optimized! It is best to keep and operate on data in-place whenever possible.)
+
+We start with a sea-of-nodes-with-CFG, where we have an IR with SSA values not placed in basic blocks. We can already build this "in-place" in Cranelift's IR, CLIF, by removing existing SSA definitions from the CFG but keeping their data in the data-flow graph (DFG) data structures.
+
+Then, to allow for multi-representation in an e-graph, the idea is to discard the separation between e-classes and e-nodes, and instead define a new kind of IR node that is a union node. Rather than two index spaces, for e-nodes and e-classes, we have only one index space, the SSA value space. An SSA value is either an ordinary operator result or a block parameter (as before), or a union of two other SSA values. Any arbitrary e-class can then be represented via a binary tree of union nodes. We don't need to change anything about operator arguments to make use of this representation: operators already refer to value numbers, and an e-class of multiple e-nodes (defined by the "top" union node in its union tree) already has a value number.
+
+The coolest thing about this representation is: once we have a sea-of-nodes, it is already implcitly an e-graph, with "trivial" (one-member) e-classes for each e-node. Thus, the lift from sea-of-nodes to e-graph is a no-op -- the best (and cheapest) kind of compile-time pass. We only pay for multi-representation when we use that capability, creating union nodes as needed.
+Insight #2: Acyclicity with Eager Rewrites
+
+The other aspect of the classical e-graph data structure's cost has to do with its need to rebuild, and in order to do so, to track all uses of an e-class (its "parents" in egg's terminology). Cranelift does not keep bidirectional use-def links, and the binary tree of union nodes would make this even more complex still to track.
+
+In trying to address this cost, I started with a somewhat radical question: what would happen if we never rebuilt (to propagate equalities)? How much "optimization goodness" would that give up?
+
+If one (i) builds an e-graph then (ii) applies rewrite rules to find better versions of nodes, adding to e-classes, then the answer is that this would hardly work at all: this would mean that all users of a value would see only its initial form and never its rewrites. The rewritten forms would float in the sea-of-nodes, and union-nodes joining them to the original forms would exist, but no users would actually refer to those union nodes.
+
+Instead, what is needed is to apply rewrites eagerly. When we create a new node in the sea-of-nodes, we apply all rewrites immediately, then join those rewrites with the original form with union nodes. The "top" of that union tree is then the value number used as the "optimized form" of that original value, referenced by all subsequent uses.
+
+The union-node representation plays a key part of this story: it acts as an immutable data structure in a sense, where we always append new knowledge and union it with existing values, and refer to that "newer version" of an e-class; but we never go back and update existing references.
+
+This has a very nice implication for the graph structure of the sea of nodes as well: it preserves acyclicity! Classical e-graphs, in their rebuild step, can create cycles even when the input is acyclic because they can condense nodes arbitrarily. But when we eagerly rewrite, then freeze, we can never "tie the knot" and create a cycle.
+
+This acyclicity is important because it permits a single pass for the rewrites. In fact, taking our sea-of-nodes build algorithm above as a baseline, we can add eager rewriting as a very small change: when we apply rewrites, we build a "union-node spine" to join all rewritten forms, rather than destructively take only the rewritten form.
+
+def canonicalize_and_rewrite(basic_block):
+  for inst in basic_block:
+    if is_pure(inst):
+      # ...
+      if inst in hashcons_map:
+        # ...
+      else:
+        optimized = rewrites(inst)                     # NEW
+        union = join_with_union_nodes(inst, optimized) # NEW
+        optimized_form[inst.def] = union
+    else:
+       # ...
+
+All of these aspects work together and cannot really be separated:
+
+    Union nodes allow for a cheap, pay-as-you-go representation for e-classes, without a two-level data structure (nodes and classes) and without parent pointers.
+    Eager rewriting, applied as we build the e-graph (sea of nodes), allows for a single-pass algorithm and ensures all members of the e-class are present before it is "sealed" by union nodes and referenced by uses.
+    Acyclicity, present in the input (because of SSA), is preserved by the append-only, immutable nature of union nodes, and permits eager rewriting to work in a single pass.
+
+Note that here we are glossing over recursive rewrites. Due to space constraints I will only outline the problem and solution briefly: the right-hand side of a rewrite rule application (rewrites above) will produce nodes that themselves may be able to trigger further rewrites. Rather than leave this to another iteration of a rewrite loop, as a classical e-graph driver might do, we want to eagerly rewrite this right-hand side as well before establishing any uses of it. So we recursively re-invoke rewrites; and this occurs within the right-hand side of rules as pieces of the final expression are created, as well. This recursion is tightly bounded (in levels and in total rewrite invocations per top-level loop iteration) to prevent blowup.
+
+Finally, we are also glossing over details of how we apply our pattern-matching/rewrite DSL, ISLE, to the rewrite problem when multiple rewrites are now permitted. In brief, we extended the language to permit "multi-extractors" and "multi-constructors": rather than matching only one rule, and disambiguating by priority, we take all applicable rules. The RFC has more details.
+The Extraction Problem
+
+So we now have a way to represent multiple expressions as alternatives to compute the same value. How do we compile this program? It surely wouldn't make sense to compile all of these expressions: they produce the same bits, so we only need one. Which one do we pick?
+
+This is the extraction problem, and it is both easy to state and deceptively hard (in fact, NP-hard): choose the easiest (cheapest) expression to compute any given value.
+
+Why is this hard? First, let's construct the case where it's easy. Let's say that we have one root expression (say, returned from a function) with all pure operators. This forms a tree of choices: each eclass lets us choose one enode to compute it, and that enode has arguments that themselves refer to eclasses with cnoices.
+
+Given this tree of choices, with every choice independent, we can pick the best choice for each subtree, and compute the cost of any given expression node as best-cost-of-args plus that own node's cost to compute. In more formal algorithmic terms, that is optimal substructure.
+
+Unfortunately, as soon as we permit references to shared nodes (a DAG rather than a tree), this nice structure evaporates. To see why, consider: we could have two eclasses we wish to compute
+
+v0 = union v10, v11
+v1 = union v10, v12
+
+with computations (not shown) v10 that costs 10 units to compute, and v11 and v12 that each cost 7 units to compute. The optimal choice at each subproblem is to choose the cheaper computation (v11 or v12), but the program would actually be more globally optimal if we computed only v10 (cost of 10 total). A solver that tries to recognize this would either process each root (v0 and v1) one at a time and "backtrack" at some point once it sees the additional use, or somehow build a shared representation of the problem, which is no longer deconstructed in a way that permits sub-problem solutions to compose.
+
+In fact, the extraction problem is NP-hard. To see why, I will show a simple linear-time reduction (mapping) from a known NP-hard problem, weighted set-cover, to eclass extraction.
+
+Take each weighted set S with weight w and elements S = { x_1, x_2, ... }. Add an enode (operator with args) N, with self-cost (not including args) w, and no arguments. Then for each element x_n in the universe (the union of all sets' elements), define an eclass: that is, if we have an x_i, define an eclass C_i. Then for each set-element edge (for each i, j such that x_i ∈ S_j), add an enode to C_i with opaque zero-cost operator SetElt_ij(y) where y is the eclass for x_i.
+
+Performing an optimal (lowest-cost) extraction, with all eclasses C_i taken as roots, will compute the lowest-weight set cover: the choice of enode in each eclass C_i encodes which set we choose to cover element x_i. Thus, because egraph extraction with shared structure can compute the solution to an NP-hard problem (weighted set cover), egraph extraction with shared structure is NP-hard.
+
+OK, but we want a fast compiler. What do we do?
+
+The classical compiler-literature answer to this problem -- seen over and over in a 50-year history -- is "solve a simpler approximation problem". Register allocation, for example, is filled with simplified problem models (linear scarn, no live-range splitting, ...) that reduce the decision space and allow for a simpler algorithm.
+
+In our case, we solve the extraction problem with a simplifying choice: we will not try to account for shared substructure and the way that it complicates accounting of cost. In other words, we'll ignore shared substructure, pretending that each use of a subtree counts that subtree's cost anew. For each enode, having computed the cost of each of its arguments, we can compute its own cost easily as the sum of its arguments plus its own computation cost; and for each eclass, we can pick the minimum-cost enode. That's it!
+
+We implement this with a dynamic programming algorithm: we do a toposort of the aegraph (which can always be done, because it's acyclic), then process nodes from leaves upward, accumulating cost and picking minima at each subproblem. This is a single pass and is a relatively fast and straightforward algorithm.
+
+After the Dagstuhl seminar in January, I had an ongoing discussion with collaborators Alexa VanHattum and Nick Fitzgerald about whether we could do better here. Alexa and Nick both prototyped a bunch of interesting alternatives: dynamically updating (shortcutting to zero) costs when subtrees become used ("sunk-cost" accounting), computing costs by doing full top-down traversals rather than bottom-up dynamic programming (and then mixing in memoization somehow), trying to account for sharing by doing DP but tracking the full set of covered leaves, and some other things. This was an interesting exploration but in the end we didn't find anything that looked better in the compile-time / execution-time tradeoff space. We have an issue tracking this and more ideas are always welcome, of course.
+Other Aspects
+
+There are two other aspects of our aegraph implementation that I don't have space to go into in this post:
+
+    There is an interesting problem that arises with respect to the domtree and SSA invariants when different values are merged together with a union node and some of them have wider "scope" than others. For example, via store-to-load forwarding we may know that a load instruction produces a constant 0; so we might have a union node with iconst 0. The load can only happen at its current location, but iconst 0 can be computed anywhere. A user of this eclass should be able to pick either value (said another way: extraction should not be load-bearing for correctness). If the user is within the dominance subtree under the load, then all is fine, but if not, e.g. if some other user of iconst 0 elsewhere in the function errantly happened upon the eclass-neighbor load instruction, we might get an invalid program.
+
+    There are many ways one might be tempted to solve this, but in the end we landed on an "available block" analysis that runs as we build nodes. For every node, we record which block is the "highest" in the domtree that it can be computed: function entry for pure zero-argument nodes, current block for any impute nodes, otherwise the lowest node in the domtree among available blocks for all arguments. (Claim: the available-nodes for all args of a node will form an ancestor path in the domtree; one will always exist that is dominated by all others. This follows from the properties of SSA.) Then when we insert into the hashcons map, we insert at the level that the final union is available.
+
+    We also have an important optimization that we call subsume. This is an identity operator that wraps a value returned by a rewrite rule. It is not required for correctness, but its semantics are: if any value is marked "subsume", all "subsuming" values erase existing members of the eclass. Usually, only one subsuming rule will match (but this, also, is not necessary for correctness).
+
+    The usual use-case is for rules that have clear "directionality": it is always better to say 2 than (iadd 1 1), so let's go ahead and shrink the eclass so that all further matching, and eventual extraction, is more efficient.
+
+Evaluation
+
+So how does all of this actually work? Do aegraphs benefit Cranelift's strength as a compiler -- its ability to optimize code, its efficiency in doing so quickly, or both?
+
+This is the part where I offer a somewhat surprising conclusion: the tl;dr of this post is that I believe the sea-of-nodes-with-CFG aspect of this mid-end works great, but the aegraph itself -- the ability to represent multiple options for one value -- may not (yet?) be pulling its weight. It doesn't really hurt much either, so maybe it's a reasonable capability to keep around. But in any case, it's an interesting conclusion and we'll dig more into it below.
+
+The main interesting evaluation is a two-dimension comparison of compile time -- that is, how long Cranelift takes to compile code -- on the X-axis, versus execution time -- that is, how long the resulting code takes to execute -- on the Y-axis. This forms a tradeoff space: it may be good to spend a little more time to compile if the resulting code runs faster (or vice-versa), for example. Of course, reducing both is best. One point may be "strictly better" than another if it reduces both -- then there is no tradeoff, because one would always choose the configuration that both compiles faster and produces better code. (One can then find the Pareto frontier of points that form a set in which none is strictly better than another -- these are all "valid configuration points" that one may rationally choose depending on one's goals.)
+
+Below we have a compile-time vs. execution-time plot for a number of configurations of Cranelift, compiling and running the Sightglass benchmark suite:
+
+    No optimizations enabled;
+    The (on by default) aegraph-based optimization pipeline, as described in this post, with several variants (below);
+    A "classical optimization pipeline" that does not form a sea-of-nodes-with-CFG at all; instead, it applies exactly the same rewrite rules, but in-place, and interleaves with classical GVN and LICM passes;
+    Variants of the aegraphs pipeline and classical pipeline with the whole mid-end repeated 2 or 3 times (to test whether code continues to get better).
+
+Here's the main result:
+
+Figure: compile time vs. execution time
+
+A few conclusions are in order. First, the aegraph pipeline does generate better code than the classical pipeline. This objective result is "mission accomplished" with respect to the aegraph effort's original motivation: we wanted to allow optimization passes to interact more finely and optimize more completely. Note in particular that repeating the classical pipeline multiple times does not get the same result; we could not have obtained the ~2% speedup without building a new optimization framework.
+
+Second, though, there is clearly a Pareto frontier that includes "no optimizations" and "classical pipeline" as well as the aegraph variants: each takes more compilation time than the previous. In other words, moving from a classical compiler pipeline to the design described here, we spend about 7-8% more compile time. Notably, this is not the result that we had when we first built the aegraphs implementation in 2023 and switched over -- at that time, we were more or less at parity. This is likely a result of the growth of the body of rewrite rules over the intervening three years.
+
+To get a better picture of how aegraph's various design choices matter, let's zoom into the area in the red ellipse above, which contains multiple variants of the aegraphs pipeline:
+
+    "aegraph": Exactly as described in this post, and default Cranelift configuration;
+    "no multivalue (eager pick)": sea-of-nodes-with-CFG, without union nodes; i.e., not actually representing more than one equivalent value in an eclass. Instead, after evaluating rewrite rules, we pick the best option and use that one option (destructively replacing the original);
+    "no rematerialization": testing the effect of this aspect of the elaboration algorithm;
+    "no subsume": testing this efficiency tweak of the rewrite-rule application.
+
+Here's the plot:
+
+Figure: aegraphs variants
+
+One can see that there are some definite tradeoffs, but looking closely at the axis scales, these effects are very very small. In particular, moving from sea-of-nodes-with-CFG to true aegraph (taking all rewritten values, and picking the best in a principled way with cost-based extraction) nets us ~0.1% execution-time improvement, at ~0.005% compile-time cost. That's more-or-less in the noise.
+
+Supporting that conclusion is the statistic that the average eclass size after rewriting is 1.13 enodes: in other words, very few cases with our ruleset and benchmark corpus actually result in more tha one option.
+
+Finally, the most interesting question in my view: does the eager aspect of aegraphs -- applying rewrite rules right away, and never going back to "fill in" other equivalences -- matter? In other words, does skipping equality saturation take the egraph goodness out of an egraph(-alike)?
+
+We can measure this, too: I instrumented our implementation to track when a subtree of an eclass is not chosen by extraction, and then any node in that subtree is later actually elaborated (in other words, when we use a suboptimal choice because we could not see an equality in the "wrong" direction). This should only happen if, in theory, our rules rewrite f to g where cost(g) > cost(f), and we don't have a rewrite g to f: then a user of g might never directly get a rewrite of f eagerly, but a later coincidentally-occurring f might rewrite onto g (but we'll never propagate that equality into the original users of g).
+
+It turns out that, in all of our benchmarks, with ~4 million value nodes created overall, this happens two (2) times. Both instances occur in spidermonkey.wasm (a large benchmark that consists of the SpiderMonkey JS engine, compiled to WebAssembly, then run through Wasmtime+Cranelift), and occur due to an ireduce-of-iadd rewrite rule that violates this move-toward-lower-cost principle (explicitly, in the name of simplicity). Overall, we conclude that the eager rewrites are effective as long as the ruleset is designed with optimization (rather than mere exploration of all equivalent expressions) in mind.
+Discussion
+
+The most surprising conclusion in all of the data was, for me, that aegraphs (per se) -- multi-value representations -- don't seem to matter. What?! That was the entire point of the project, and (proper) e-graphs have seen great promise in other application areas.
+
+I think the main reason for this is that our workload is somewhat "small" in a combinatorial possibility-space sense: we are (i) compiling workloads that are often optimized already (as Wasm modules) before hitting the Cranelift compilation pipeline, and (ii) applying a set of rewrite rules that, while large and growing (hundreds of rules), explicitly do not include identities like associativity and commutativity, or arbitrary algebraic identities, that do not "simplify" somehow. In other words, if we're generally applying rewrites that look more like simple, obvious "cleanups", we would expect that we don't hold a "superposition" of multiple good expression options very often.
+
+Given that it doesn't cost us that much compile time to keep aegraphs around, though, maybe this is... fine? Having the capability to do principled cost-based extraction is great, versus having to think about whether a rewrite rule should exist. We still do try to be careful not to introduce rules that are never productive, of course.
+
+And, further into the future, one could imagine that workloads with more optimization opportunity could cause more interesting situations to occur within the aegraph, leading to more emergent composition in the rewrites.
+Future Directions
+
+There are a bunch of directions we could (and should) take this in the future. In terms of evaluation: finding the "corner of the use-case domain" where aegraphs truly shine is still an open question. More concretely: if we evaluate Cranelift with new and different workloads, and/or pile on more rewrite rules, do we get to a point where the classical benefit of "multi-representation with cost-based extraction" pays off in a conventional compiler? I don't know!
+
+There is also still a lot of room to improve the core algorithms:
+
+    Better extraction, as mentioned above: something that accounts for shared substructure would be great, as long as we don't have to pay the NP-hard cost for it. Maybe there's a nice approximation algorithm that's better than our current dynamic-programming approach.
+
+    We'd like to be able to handle more rewrites that alter the CFG skeleton as well. Right now, we have a separate ISLE entry-point that allows for destructive rewriting of skeleton instructions (thanks to my colleage Nick Fitzgerald for building this!). However, maybe we could remove redundant block parameters (phi nodes), for example; and/or maybe we could fold branches; and/or maybe we could apply path-sensitive knowledge to values when used in certain control-flow contexts (x=1 in the dominance subtree under the "true" branch for if x==1, goto ...). My former colleague Jamey Sharp wrote up a few excellent, in-depth issues on these topics in our tracker (#5623, #6109, #6129) and I think there is a lot of potential here.
+
+    (The full version of this is, again, something like RVSDG in the node language seems like the most principled option to express all useful forms of control-flow rewrites; Jamey also has a prototype called optir for this.)
+
+    It would be interesting to experiment with incorporating our lowering backend rules into the aegraph somehow: they are a rich, fruitful target-specific database of natural "costs" for various operations. For example, on AArch64 we can fold shifts and extends into (some) arithmetic operations for "free"; maybe this alters the extraction choices we make. Or likewise for the various odd corners of addressing modes on each architecture.
+
+    The simple version of this idea is to incorporate lowering rules as rewrites, and make the egraph's node language a union of CLIF and the machine's instruction set. But maybe there's something better we could do instead, allowing multi-extractors to see the aegraph eclasses directly and keeping various VCode sequences. I need to write up more of my ideas on this topic someday. Jamey also has more thoughts on this in #8529.
+
+I'm sure there are other things that could be done here too!
+Further Reading
+
+    I gave a talk about aegraphs at EGRAPHS 2023: slides, re-recorded video (the original was not recorded).
+
+    I gave a talk about aegraphs at the January 2026 Dagstuhl e-graphs seminar; the slides are a heavily updated and amended version of the 2023 talk, with the experiments/data I presented here.
+
+    There is a Cranelift RFC on aegraphs here, and one on ISLE (the rewrite DSL that we use to drive rewrites in the aegraph) here.
+
+    The main PR that implemented the current form of aegraphs is here, co-authored by my former colleague Jamey Sharp (this production implementation was a fantastically fun and productive pair-programming project!).
+

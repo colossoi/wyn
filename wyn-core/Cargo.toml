@@ -12,6 +12,8 @@ polytype.workspace = true
 spirv.workspace = true
 log.workspace = true
 wyn-ssa = { path = "../wyn-ssa" }
+slotmap = "1.0"
+smallvec = "1.13"
 rspirv = "0.12"
 itertools = "0.14.0"
 indexmap = "2.7"

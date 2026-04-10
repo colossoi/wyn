@@ -1474,6 +1474,8 @@ dependencies = [
  "rspirv",
  "serde",
  "serde_json",
+ "slotmap",
+ "smallvec",
  "spirv",
  "thiserror",
  "wyn-ssa",
