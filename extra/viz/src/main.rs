@@ -492,6 +492,9 @@ async fn create_headless_device(verbose: bool) -> Result<(wgpu::Device, wgpu::Qu
     if adapter_features.contains(wgpu::Features::PUSH_CONSTANTS) {
         required_features |= wgpu::Features::PUSH_CONSTANTS;
     }
+    if adapter_features.contains(wgpu::Features::TIMESTAMP_QUERY) {
+        required_features |= wgpu::Features::TIMESTAMP_QUERY;
+    }
 
     let mut limits = wgpu::Limits::default();
     limits.max_push_constant_size = adapter.limits().max_push_constant_size;
@@ -506,6 +509,104 @@ async fn create_headless_device(verbose: bool) -> Result<(wgpu::Device, wgpu::Qu
         })
         .await
         .context("failed to create logical device")
+}
+
+/// GPU timestamp profiler for compute passes.
+/// Wraps a wgpu QuerySet + resolve/read buffers. Each "slot" records
+/// begin/end timestamps for one compute pass (2 queries per slot).
+struct GpuTimestamps {
+    query_set: wgpu::QuerySet,
+    resolve_buf: wgpu::Buffer,
+    read_buf: wgpu::Buffer,
+    ns_per_tick: f64,
+    num_slots: u32,       // total slots allocated
+    queries_per_slot: u32, // 2 queries per slot (begin + end)
+}
+
+impl GpuTimestamps {
+    /// Create a new profiler with `num_slots` slots. Returns None if the device
+    /// doesn't support TIMESTAMP_QUERY.
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue, num_slots: u32) -> Option<Self> {
+        if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+            return None;
+        }
+        let queries_per_slot = 2;
+        let total_queries = num_slots * queries_per_slot;
+        let byte_size = total_queries as u64 * 8;
+        Some(Self {
+            query_set: device.create_query_set(&wgpu::QuerySetDescriptor {
+                label: Some("gpu_timestamps"),
+                count: total_queries,
+                ty: wgpu::QueryType::Timestamp,
+            }),
+            resolve_buf: device.create_buffer(&BufferDescriptor {
+                label: Some("timestamp_resolve"),
+                size: byte_size,
+                usage: BufferUsages::QUERY_RESOLVE | BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }),
+            read_buf: device.create_buffer(&BufferDescriptor {
+                label: Some("timestamp_read"),
+                size: byte_size,
+                usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            ns_per_tick: queue.get_timestamp_period() as f64,
+            num_slots,
+            queries_per_slot,
+        })
+    }
+
+    /// Returns the `ComputePassTimestampWrites` for the given slot index.
+    fn writes_for(&self, slot: u32) -> wgpu::ComputePassTimestampWrites<'_> {
+        let base = slot * self.queries_per_slot;
+        wgpu::ComputePassTimestampWrites {
+            query_set: &self.query_set,
+            beginning_of_pass_write_index: Some(base),
+            end_of_pass_write_index: Some(base + 1),
+        }
+    }
+
+    /// Resolve all queries and read back the timestamps. Returns a Vec of
+    /// (begin_ns, end_ns) per slot, stopping at the first unused slot.
+    async fn read_back(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<Vec<(f64, f64)>> {
+        let total = self.num_slots * self.queries_per_slot;
+        let byte_size = total as u64 * 8;
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("timestamp_resolve"),
+        });
+        encoder.resolve_query_set(&self.query_set, 0..total, &self.resolve_buf, 0);
+        encoder.copy_buffer_to_buffer(&self.resolve_buf, 0, &self.read_buf, 0, byte_size);
+        queue.submit(Some(encoder.finish()));
+        let _ = device.poll(wgpu::PollType::Wait);
+
+        let slice = self.read_buf.slice(..byte_size);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| { tx.send(r).unwrap(); });
+        let _ = device.poll(wgpu::PollType::Wait);
+        rx.recv().unwrap()?;
+
+        let data = slice.get_mapped_range();
+        let raw: &[u64] = bytemuck::cast_slice(&data);
+
+        let mut results = Vec::new();
+        for i in 0..self.num_slots as usize {
+            let begin = raw[i * 2];
+            let end = raw[i * 2 + 1];
+            if begin == 0 && end == 0 { break; }
+            results.push((
+                begin as f64 * self.ns_per_tick,
+                end as f64 * self.ns_per_tick,
+            ));
+        }
+        drop(data);
+        self.read_buf.unmap();
+        Ok(results)
+    }
 }
 
 /// Storage buffer specification parsed from CLI
@@ -1692,6 +1793,13 @@ async fn run_miner(
         mapped_at_creation: false,
     });
 
+    // GPU timestamp profiling (2 slots per chunk: phase1, phase2)
+    let gpu_phase1 = GpuTimestamps::new(&device, &queue, num_chunks);
+    let gpu_phase2 = GpuTimestamps::new(&device, &queue, num_chunks);
+    if gpu_phase1.is_none() && verbose {
+        eprintln!("  Warning: TIMESTAMP_QUERY not supported, no GPU timing available");
+    }
+
     let start_time = std::time::Instant::now();
     let mut hit: Option<(u32, Vec<u32>)> = None;
 
@@ -1700,6 +1808,12 @@ async fn run_miner(
         let chunk_n = chunk.min(nonces - chunk_idx * chunk);
         let num_workgroups =
             workgroups_override.unwrap_or_else(|| (chunk_n + workgroup_size - 1) / workgroup_size);
+
+        if verbose {
+            println!("  Chunk {}/{}: {} workgroups × {} threads = {} threads ({} nonces)",
+                chunk_idx + 1, num_chunks, num_workgroups, workgroup_size,
+                num_workgroups * workgroup_size, chunk_n);
+        }
 
         // Push constants: header_base(76) + target(32) + n(4) + nonce_offset(4) = 116 bytes
         let mut pc_bytes = Vec::with_capacity(116);
@@ -1720,7 +1834,7 @@ async fn run_miner(
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("miner_phase1"),
-                timestamp_writes: None,
+                timestamp_writes: gpu_phase1.as_ref().map(|t| t.writes_for(chunk_idx)),
             });
             cpass.set_pipeline(&phase1_pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
@@ -1768,7 +1882,7 @@ async fn run_miner(
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("miner_phase2"),
-                timestamp_writes: None,
+                timestamp_writes: gpu_phase2.as_ref().map(|t| t.writes_for(chunk_idx)),
             });
             cpass.set_pipeline(&phase2_pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
@@ -1838,7 +1952,46 @@ async fn run_miner(
     let total_computed = num_chunks.min((nonces + chunk - 1) / chunk) as u64 * chunk as u64;
     let hash_rate = total_computed as f64 / elapsed.as_secs_f64();
 
-    println!("Mined {} nonces in {:.2?} ({:.0} H/s)", nonces, elapsed, hash_rate);
+    // Resolve and print GPU timestamps
+    if let (Some(t1), Some(t2)) = (&gpu_phase1, &gpu_phase2) {
+        let p1_times = t1.read_back(&device, &queue).await?;
+        let p2_times = t2.read_back(&device, &queue).await?;
+
+        let mut total_phase1_ns = 0.0f64;
+        let mut total_phase2_ns = 0.0f64;
+
+        println!("\nGPU timing (per chunk):");
+        for (i, ((p1_begin, p1_end), (p2_begin, p2_end))) in
+            p1_times.iter().zip(p2_times.iter()).enumerate()
+        {
+            let p1_ns = p1_end - p1_begin;
+            let p2_ns = p2_end - p2_begin;
+            let gap_ns = p2_begin - p1_end;
+            total_phase1_ns += p1_ns;
+            total_phase2_ns += p2_ns;
+            if verbose || p1_times.len() <= 4 {
+                let chunk_n = chunk.min(nonces - i as u32 * chunk);
+                let nwg = workgroups_override.unwrap_or_else(|| (chunk_n + workgroup_size - 1) / workgroup_size);
+                println!("  chunk {:>3}: phase1 {:.3}ms ({} wg × {} = {} threads)  phase2 {:.3}ms  gap {:.3}ms",
+                    i + 1,
+                    p1_ns / 1_000_000.0, nwg, workgroup_size, nwg * workgroup_size,
+                    p2_ns / 1_000_000.0,
+                    gap_ns / 1_000_000.0);
+            }
+        }
+        if !p1_times.is_empty() {
+            let total_gpu_ns = total_phase1_ns + total_phase2_ns;
+            let total_nonces = p1_times.len() as u64 * chunk as u64;
+            let gpu_hash_rate = total_nonces as f64 / (total_phase1_ns / 1_000_000_000.0);
+            println!("  total:    phase1 {:.3}ms  phase2 {:.3}ms  gpu total {:.3}ms",
+                total_phase1_ns / 1_000_000.0,
+                total_phase2_ns / 1_000_000.0,
+                total_gpu_ns / 1_000_000.0);
+            println!("  GPU hash rate: {:.0} H/s (phase1 only, excludes dispatch overhead)", gpu_hash_rate);
+        }
+    }
+
+    println!("Mined {} nonces in {:.2?} ({:.0} H/s wall clock)", nonces, elapsed, hash_rate);
 
     if let Some((nonce, hash)) = &hit {
         println!("Hit found:");
