@@ -3,7 +3,7 @@
 use crate::ast::TypeName;
 use crate::ssa::types::{ConstantValue, EffectToken, InstKind};
 use polytype::Type;
-use slotmap::{new_key_type, SlotMap};
+use slotmap::{SlotMap, new_key_type};
 use smallvec::SmallVec;
 use std::collections::HashMap;
 use wyn_ssa::BlockId;
@@ -37,10 +37,17 @@ pub enum PureOp {
     UnaryOp(String),
     Tuple(usize),
     Vector(usize),
-    Matrix { rows: usize, cols: usize },
+    Matrix {
+        rows: usize,
+        cols: usize,
+    },
     ArrayLit(usize),
-    ArrayRange { has_step: bool },
-    Project { index: u32 },
+    ArrayRange {
+        has_step: bool,
+    },
+    Project {
+        index: u32,
+    },
     Index,
     Materialize,
     DynamicExtract,
@@ -345,7 +352,13 @@ pub fn rebuild_inst_kind(op: &PureOp, operands: &[wyn_ssa::ValueId]) -> InstKind
             let mut mat = Vec::with_capacity(*rows);
             let mut idx = 0;
             for _ in 0..*rows {
-                let row: Vec<ValueRef> = (0..*cols).map(|_| { let v = vr(idx); idx += 1; v }).collect();
+                let row: Vec<ValueRef> = (0..*cols)
+                    .map(|_| {
+                        let v = vr(idx);
+                        idx += 1;
+                        v
+                    })
+                    .collect();
                 mat.push(row);
             }
             InstKind::Matrix(mat)

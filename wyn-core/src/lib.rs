@@ -838,6 +838,12 @@ impl TlcInlined {
         let ssa = tlc::to_ssa::convert_program(&self.tlc)?;
         Ok(SsaConverted { ssa })
     }
+
+    /// Transform TLC to SSA via the EGraph path (GVN + DCE for free).
+    pub fn to_egir(self) -> std::result::Result<SsaConverted, egir::from_tlc::ConvertError> {
+        let ssa = egir::from_tlc::convert_program(&self.tlc)?;
+        Ok(SsaConverted { ssa })
+    }
 }
 
 /// TLC after small function and constant inlining
@@ -871,6 +877,12 @@ impl TlcSmallInlined {
         let ssa = tlc::to_ssa::convert_program(&self.tlc)?;
         Ok(SsaConverted { ssa })
     }
+
+    /// Transform TLC to SSA via the EGraph path (GVN + DCE for free).
+    pub fn to_egir(self) -> std::result::Result<SsaConverted, egir::from_tlc::ConvertError> {
+        let ssa = egir::from_tlc::convert_program(&self.tlc)?;
+        Ok(SsaConverted { ssa })
+    }
 }
 
 /// TLC after SOAC parallelization
@@ -899,6 +911,15 @@ impl TlcParallelized {
             pipeline: self.pipeline,
         })
     }
+
+    /// Transform TLC to SSA via the EGraph path (GVN + DCE for free).
+    pub fn to_egir(self) -> std::result::Result<SsaConvertedWithPipeline, egir::from_tlc::ConvertError> {
+        let ssa = egir::from_tlc::convert_program(&self.tlc)?;
+        Ok(SsaConvertedWithPipeline {
+            ssa,
+            pipeline: self.pipeline,
+        })
+    }
 }
 
 /// TLC after parallelization + dead code elimination
@@ -912,6 +933,15 @@ impl TlcReachableWithPipeline {
     /// Transform TLC directly to SSA.
     pub fn to_ssa(self) -> std::result::Result<SsaConvertedWithPipeline, tlc::to_ssa::ConvertError> {
         let ssa = tlc::to_ssa::convert_program(&self.tlc)?;
+        Ok(SsaConvertedWithPipeline {
+            ssa,
+            pipeline: self.pipeline,
+        })
+    }
+
+    /// Transform TLC to SSA via the EGraph path (GVN + DCE for free).
+    pub fn to_egir(self) -> std::result::Result<SsaConvertedWithPipeline, egir::from_tlc::ConvertError> {
+        let ssa = egir::from_tlc::convert_program(&self.tlc)?;
         Ok(SsaConvertedWithPipeline {
             ssa,
             pipeline: self.pipeline,
@@ -946,6 +976,12 @@ impl TlcReachable {
     /// Transform TLC directly to SSA.
     pub fn to_ssa(self) -> std::result::Result<SsaConverted, tlc::to_ssa::ConvertError> {
         let ssa = tlc::to_ssa::convert_program(&self.tlc)?;
+        Ok(SsaConverted { ssa })
+    }
+
+    /// Transform TLC to SSA via the EGraph path (GVN + DCE for free).
+    pub fn to_egir(self) -> std::result::Result<SsaConverted, egir::from_tlc::ConvertError> {
+        let ssa = egir::from_tlc::convert_program(&self.tlc)?;
         Ok(SsaConverted { ssa })
     }
 }

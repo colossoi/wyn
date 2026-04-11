@@ -12,9 +12,7 @@
 
 use crate::ast::TypeName;
 use crate::ssa::builder::FuncBuilder;
-use crate::ssa::types::{
-    BlockId, ControlHeader, FuncBody, InstKind, ValueId, ValueRef,
-};
+use crate::ssa::types::{BlockId, ControlHeader, FuncBody, InstKind, ValueId, ValueRef};
 use polytype::Type;
 use std::collections::HashMap;
 use wyn_ssa::BlockId as SkelBlockId;
@@ -167,11 +165,7 @@ impl<'a> Elaborator<'a> {
     /// Elaborate a side-effectful instruction.
     fn elaborate_side_effect(&mut self, se: &SideEffect) {
         // Demand-elaborate all operands (this recursively places pure nodes).
-        let args: Vec<ValueId> = se
-            .operand_nodes
-            .iter()
-            .map(|&nid| self.demand(nid))
-            .collect();
+        let args: Vec<ValueId> = se.operand_nodes.iter().map(|&nid| self.demand(nid)).collect();
 
         // Rebuild the InstKind with new ValueIds.
         let kind = rebuild_effectful_inst_kind(&se.kind, &args);
@@ -207,10 +201,7 @@ impl<'a> Elaborator<'a> {
             ENode::Constant(c) => {
                 let ty = self.graph.types[&resolved].clone();
                 let kind = const_to_inst_kind(c);
-                let vid = self
-                    .builder
-                    .push_inst(kind, ty)
-                    .expect("elaborate constant push failed");
+                let vid = self.builder.push_inst(kind, ty).expect("elaborate constant push failed");
                 self.elaborated.insert(resolved, vid);
                 vid
             }
@@ -220,10 +211,7 @@ impl<'a> Elaborator<'a> {
 
                 let ty = self.graph.types[&resolved].clone();
                 let kind = pure_to_inst_kind(op, &args);
-                let vid = self
-                    .builder
-                    .push_inst(kind, ty)
-                    .expect("elaborate pure push failed");
+                let vid = self.builder.push_inst(kind, ty).expect("elaborate pure push failed");
                 self.elaborated.insert(resolved, vid);
                 vid
             }
@@ -254,9 +242,7 @@ impl<'a> Elaborator<'a> {
     fn elaborate_terminator(&mut self, term: &SkeletonTerminator) {
         let t = match term {
             SkeletonTerminator::Return(None) => wyn_ssa::Terminator::Return(None),
-            SkeletonTerminator::Return(Some(nid)) => {
-                wyn_ssa::Terminator::Return(Some(self.demand(*nid)))
-            }
+            SkeletonTerminator::Return(Some(nid)) => wyn_ssa::Terminator::Return(Some(self.demand(*nid))),
             SkeletonTerminator::Branch { target, args } => {
                 let out_args: Vec<ValueId> = args.iter().map(|&nid| self.demand(nid)).collect();
                 wyn_ssa::Terminator::Branch {

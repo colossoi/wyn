@@ -101,6 +101,9 @@ enum DriverError {
 
     #[error("SSA conversion error: {0}")]
     SsaConversionError(#[from] wyn_core::tlc::to_ssa::ConvertError),
+
+    #[error("EGraph conversion error: {0}")]
+    EgirConversionError(#[from] wyn_core::egir::from_tlc::ConvertError),
 }
 
 fn main() -> Result<(), DriverError> {
@@ -245,8 +248,8 @@ fn compile_file(
         tlc_parallel.filter_reachable()
     });
 
-    // Transform TLC to SSA
-    let ssa = time("to_ssa", verbose, || tlc_reachable.to_ssa())?;
+    // Transform TLC to SSA via EGraph (GVN + DCE for free)
+    let ssa = time("to_egir", verbose, || tlc_reachable.to_egir())?;
 
     // Dump initial SSA if requested
     if let Some(ref path) = output_init_ssa {

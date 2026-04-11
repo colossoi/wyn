@@ -8,13 +8,15 @@
 //! - Scoped elaboration converts back to sequential SSA (DCE for free)
 //! - Rewrite rules are applied eagerly during construction (Phase 2+)
 
-pub mod types;
 mod canonicalize;
 mod domtree;
 mod elaborate;
 mod extract;
 mod rewrite;
 mod scoped_map;
+pub mod types;
+
+pub mod from_tlc;
 
 #[cfg(test)]
 mod tests;
@@ -69,28 +71,16 @@ fn optimize_func(body: &FuncBody) -> FuncBody {
     let ssa_domtree = domtree::DomTree::build(&domtree::SsaCfgView { body });
     let mut orig_block_map = HashMap::new();
     orig_block_map.insert(body.entry_block(), graph.skeleton.entry);
-    let skel_blocks: Vec<wyn_ssa::BlockId> = graph
-        .skeleton
-        .blocks
-        .keys()
-        .filter(|&b| b != graph.skeleton.entry)
-        .collect();
-    let orig_non_entry: Vec<wyn_ssa::BlockId> = ssa_domtree
-        .preorder()
-        .iter()
-        .copied()
-        .filter(|&b| b != body.entry_block())
-        .collect();
+    let skel_blocks: Vec<wyn_ssa::BlockId> =
+        graph.skeleton.blocks.keys().filter(|&b| b != graph.skeleton.entry).collect();
+    let orig_non_entry: Vec<wyn_ssa::BlockId> =
+        ssa_domtree.preorder().iter().copied().filter(|&b| b != body.entry_block()).collect();
     for (orig, skel) in orig_non_entry.iter().zip(skel_blocks.iter()) {
         orig_block_map.insert(*orig, *skel);
     }
 
     // Build param list for elaboration.
-    let params: Vec<_> = body
-        .params
-        .iter()
-        .map(|(_, ty, name)| (ty.clone(), name.clone()))
-        .collect();
+    let params: Vec<_> = body.params.iter().map(|(_, ty, name)| (ty.clone(), name.clone())).collect();
 
     // Phase 2: elaborate sea-of-nodes → FuncBody (with scoped dedup = DCE).
     elaborate::elaborate(

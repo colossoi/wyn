@@ -677,6 +677,18 @@ fn convert_entry_point(
     })
 }
 
+/// Public entry point for `convert_entry_point`, used by `egir::from_tlc`.
+pub fn convert_entry_point_pub(
+    def: &TlcDef,
+    entry: &ast::EntryDecl,
+    top_level: &HashMap<SymbolId, &TlcDef>,
+    constants_by_name: &HashMap<String, SymbolId>,
+    symbols: &SymbolTable,
+    pure_constants: &HashSet<String>,
+) -> Result<EntryPoint, ConvertError> {
+    convert_entry_point(def, entry, top_level, constants_by_name, symbols, pure_constants)
+}
+
 /// Extract parameters from a Lambda term.
 /// Returns parameter SymbolIds and types for SSA construction.
 fn extract_params<'a>(term: &'a Term) -> (Vec<(SymbolId, Type<TypeName>)>, &'a Term) {

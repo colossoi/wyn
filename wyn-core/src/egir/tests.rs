@@ -17,10 +17,7 @@ fn bool_ty() -> Type<TypeName> {
 #[test]
 fn roundtrip_simple_add() {
     // Build: fn f(a: i32, b: i32) -> i32 { a + b }
-    let mut builder = FuncBuilder::new(
-        vec![(i32_ty(), "a".into()), (i32_ty(), "b".into())],
-        i32_ty(),
-    );
+    let mut builder = FuncBuilder::new(vec![(i32_ty(), "a".into()), (i32_ty(), "b".into())], i32_ty());
 
     let a = builder.get_param(0);
     let b = builder.get_param(1);
@@ -34,9 +31,7 @@ fn roundtrip_simple_add() {
             i32_ty(),
         )
         .unwrap();
-    builder
-        .terminate(wyn_ssa::Terminator::Return(Some(sum)))
-        .unwrap();
+    builder.terminate(wyn_ssa::Terminator::Return(Some(sum))).unwrap();
 
     let body = builder.finish().unwrap();
 
@@ -70,12 +65,8 @@ fn gvn_deduplicates_constants() {
     // Build: fn f() -> i32 { let x = 42; let y = 42; x + y }
     let mut builder = FuncBuilder::new(vec![], i32_ty());
 
-    let x = builder
-        .push_inst(InstKind::Int("42".into()), i32_ty())
-        .unwrap();
-    let y = builder
-        .push_inst(InstKind::Int("42".into()), i32_ty())
-        .unwrap();
+    let x = builder.push_inst(InstKind::Int("42".into()), i32_ty()).unwrap();
+    let y = builder.push_inst(InstKind::Int("42".into()), i32_ty()).unwrap();
     let sum = builder
         .push_inst(
             InstKind::BinOp {
@@ -86,9 +77,7 @@ fn gvn_deduplicates_constants() {
             i32_ty(),
         )
         .unwrap();
-    builder
-        .terminate(wyn_ssa::Terminator::Return(Some(sum)))
-        .unwrap();
+    builder.terminate(wyn_ssa::Terminator::Return(Some(sum))).unwrap();
 
     let body = builder.finish().unwrap();
     let result = super::optimize_func(&body);
@@ -126,9 +115,7 @@ fn dce_removes_dead_code() {
             i32_ty(),
         )
         .unwrap();
-    builder
-        .terminate(wyn_ssa::Terminator::Return(Some(a)))
-        .unwrap();
+    builder.terminate(wyn_ssa::Terminator::Return(Some(a))).unwrap();
 
     let body = builder.finish().unwrap();
     let result = super::optimize_func(&body);
@@ -196,9 +183,7 @@ fn roundtrip_if_else() {
 
     // Merge block: return result
     builder.switch_to_block(ite.merge_block).unwrap();
-    builder
-        .terminate(wyn_ssa::Terminator::Return(Some(ite.result)))
-        .unwrap();
+    builder.terminate(wyn_ssa::Terminator::Return(Some(ite.result))).unwrap();
 
     let body = builder.finish().unwrap();
     let result = super::optimize_func(&body);
