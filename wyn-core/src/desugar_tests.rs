@@ -19,9 +19,8 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .type_check(&mut frontend.module_manager, &mut frontend.schemes)?
         .alias_check()?;
 
-    let known_defs = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
     alias_checked
-        .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
+        .to_tlc(&frontend.schemes, &frontend.module_manager)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -51,9 +50,8 @@ fn compile_through_ssa(input: &str) -> Result<Program, CompilerError> {
         .type_check(&mut frontend.module_manager, &mut frontend.schemes)?
         .alias_check()?;
 
-    let known_defs = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
     let ssa = alias_checked
-        .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
+        .to_tlc(&frontend.schemes, &frontend.module_manager)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -475,8 +473,7 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
         .expect("alias_check");
     eprintln!("=== frontend OK ===");
 
-    let known_defs = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
-    let tlc = alias_checked.to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager);
+    let tlc = alias_checked.to_tlc(&frontend.schemes, &frontend.module_manager);
     eprintln!("=== to_tlc OK ===");
 
     let tlc = tlc.partial_eval();
@@ -544,8 +541,7 @@ entry main(data: []i32) []i32 = [first(data)]
         .expect("alias_check");
     eprintln!("=== frontend OK ===");
 
-    let known_defs = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
-    let tlc = alias_checked.to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager);
+    let tlc = alias_checked.to_tlc(&frontend.schemes, &frontend.module_manager);
     eprintln!("=== to_tlc OK ===");
 
     let tlc = tlc.partial_eval();

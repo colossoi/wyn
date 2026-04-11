@@ -1098,18 +1098,20 @@ impl<'a> Transformer<'a> {
         self.scope.get(name).copied()
     }
 
-    /// Define or resolve a name that's used as a variable reference.
-    /// Checks local scope first, then top-level symbols, then creates a new symbol.
+    /// Resolve a name to its SymbolId.
+    /// Checks local scope, then top-level symbols. Compiler-internal names (`_w_*`)
+    /// are allocated on demand; all other names must be pre-registered via NameRegistry.
     fn resolve_or_define(&mut self, name: &str) -> SymbolId {
         if let Some(id) = self.resolve(name) {
             id
         } else if let Some(&id) = self.top_level_symbols.get(name) {
-            // Found in top-level symbols (function names registered in first pass)
+            id
+        } else if name.starts_with("_w_") {
+            let id = self.symbols.alloc(name.to_string());
+            self.top_level_symbols.insert(name.to_string(), id);
             id
         } else {
-            // Not in scope - this is a reference to an intrinsic or external function.
-            // Create a symbol for it.
-            self.symbols.alloc(name.to_string())
+            panic!("ICE: unresolved name '{}' in TLC transform", name);
         }
     }
 
@@ -2163,14 +2165,14 @@ impl<'a> Transformer<'a> {
         let (loop_var, loop_var_ty, init_bindings) =
             self.build_loop_var_and_bindings(&loop_expr.pattern, &acc_ty, span);
 
-        // Transform body (pattern bindings are handled via init_bindings)
-        let body = self.transform_expr(&loop_expr.body);
-
         match &loop_expr.form {
             ast::LoopForm::For(idx_var, bound) => {
                 let bound_term = self.transform_expr(bound);
                 let index_ty = Type::Constructed(TypeName::Int(32), vec![]);
                 let idx_var_sym = self.define(idx_var);
+
+                // Transform body after defining the index variable
+                let body = self.transform_expr(&loop_expr.body);
 
                 self.mk_term(
                     ty,
@@ -2196,6 +2198,9 @@ impl<'a> Transformer<'a> {
                 let elem_var_name = elem_pattern.simple_name().unwrap_or("_w_elem").to_string();
                 let elem_var_sym = self.define(&elem_var_name);
 
+                // Transform body after defining the element variable
+                let body = self.transform_expr(&loop_expr.body);
+
                 self.mk_term(
                     ty,
                     span,
@@ -2215,6 +2220,7 @@ impl<'a> Transformer<'a> {
             }
 
             ast::LoopForm::While(cond) => {
+                let body = self.transform_expr(&loop_expr.body);
                 let cond_term = self.transform_expr(cond);
 
                 self.mk_term(

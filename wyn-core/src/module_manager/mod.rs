@@ -583,9 +583,11 @@ impl ModuleManager {
         Self::expr_uses_intrinsic(&decl.body)
     }
 
-    /// Get all elaborated modules for TLC transformation
+    /// Get all elaborated modules for TLC transformation (sorted for determinism)
     pub fn get_elaborated_modules(&self) -> impl Iterator<Item = (&String, &ElaboratedModule)> {
-        self.elaborated_modules.iter()
+        let mut modules: Vec<_> = self.elaborated_modules.iter().collect();
+        modules.sort_by(|a, b| a.0.cmp(b.0));
+        modules.into_iter()
     }
 
     /// Recursively check if an expression uses _w_intrinsic_* functions

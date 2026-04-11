@@ -20,6 +20,7 @@ pub mod alias_checker;
 pub mod ast_const_fold;
 pub mod desugar;
 pub mod lowering_common;
+pub mod name_registry;
 pub mod tlc;
 
 pub mod glsl;
@@ -217,45 +218,6 @@ pub use ast::TypeName;
 pub use polytype::Context as PolytypeContext;
 pub type TypeTable = HashMap<NodeId, TypeScheme<TypeName>>;
 pub type SpanTable = HashMap<NodeId, ast::Span>;
-
-/// Build the set of known definition names that should not be captured as free variables.
-/// This includes intrinsics, user declarations, and prelude functions.
-pub fn build_known_defs(
-    ast: &ast::Program,
-    module_manager: &module_manager::ModuleManager,
-) -> std::collections::HashSet<String> {
-    let mut known_defs = impl_source::ImplSource::default().all_names();
-
-    // Also add polymorphic intrinsics from IntrinsicSource (sign, abs, magnitude, etc.)
-    let mut ctx = polytype::Context::<ast::TypeName>::default();
-    known_defs.extend(intrinsics::IntrinsicSource::new(&mut ctx).all_names());
-
-    // Add top-level function names from user program
-    for decl in &ast.declarations {
-        match decl {
-            ast::Declaration::Decl(d) => {
-                known_defs.insert(d.name.clone());
-            }
-            ast::Declaration::Entry(e) => {
-                known_defs.insert(e.name.clone());
-            }
-            ast::Declaration::Uniform(u) => {
-                known_defs.insert(u.name.clone());
-            }
-            ast::Declaration::Storage(s) => {
-                known_defs.insert(s.name.clone());
-            }
-            _ => {}
-        }
-    }
-
-    // Add prelude function names
-    for decl in module_manager.get_prelude_function_declarations() {
-        known_defs.insert(decl.name.clone());
-    }
-
-    known_defs
-}
 
 /// Build a SpanTable from an AST by collecting all NodeId -> Span mappings
 pub fn build_span_table(program: &ast::Program) -> SpanTable {
@@ -520,6 +482,7 @@ impl AstConstFoldedEarly {
         let type_table = checker.check_program(&self.ast)?;
         // Populate schemes with function type schemes from type checking
         *schemes = checker.get_function_schemes();
+        let checker_builtins = checker.builtin_names();
         let warnings: Vec<_> = checker.warnings().to_vec();
         let span_table = build_span_table(&self.ast);
 
@@ -528,6 +491,7 @@ impl AstConstFoldedEarly {
             type_table,
             span_table,
             warnings,
+            checker_builtins,
         })
     }
 }
@@ -538,6 +502,7 @@ pub struct TypeChecked {
     pub type_table: TypeTable,
     pub span_table: SpanTable,
     pub warnings: Vec<type_checker::TypeWarning>,
+    pub checker_builtins: Vec<String>,
 }
 
 impl TypeChecked {
@@ -566,6 +531,7 @@ impl TypeChecked {
             span_table: self.span_table,
             warnings: self.warnings,
             alias_result,
+            checker_builtins: self.checker_builtins,
         })
     }
 }
@@ -577,6 +543,7 @@ pub struct AliasChecked {
     pub span_table: SpanTable,
     pub warnings: Vec<type_checker::TypeWarning>,
     pub alias_result: alias_checker::AliasCheckResult,
+    pub checker_builtins: Vec<String>,
 }
 
 impl AliasChecked {
@@ -605,23 +572,28 @@ impl AliasChecked {
     }
 
     /// Transform AST to TLC (new pipeline path)
-    /// `known_defs` contains names that should not be captured as free variables during lambda lifting
     /// `schemes` contains type schemes for all functions (populated during type_check)
     /// `module_manager` provides access to prelude declarations for TLC transformation
     pub fn to_tlc(
         self,
-        known_defs: std::collections::HashSet<String>,
         schemes: &HashMap<String, types::TypeScheme>,
         module_manager: &module_manager::ModuleManager,
     ) -> TlcTransformed {
-        // Create shared tables for all transformations
+        // Build unified name registry — single source of truth for all top-level names.
+        let registry =
+            name_registry::NameRegistry::build(&self.ast, module_manager, &self.checker_builtins);
+
+        // Pre-register ALL names with deterministic SymbolId assignment (BTreeMap order).
         let mut symbols = SymbolTable::new();
         let mut top_level_symbols = std::collections::HashMap::new();
+        for (name, _kind) in registry.iter() {
+            let sym = symbols.alloc(name.to_string());
+            top_level_symbols.insert(name.to_string(), sym);
+        }
 
-        // Transform prelude to TLC using the same type_table (consistent type variables)
+        // Transform prelude module declarations (f32.pi, rand.init, etc.)
+        // All names already registered — no separate first pass needed.
         let mut prelude_tlc_defs = Vec::new();
-
-        // Transform module declarations (f32.pi, rand.init, etc.)
         for (module_name, elaborated) in module_manager.get_elaborated_modules() {
             let mut transformer = tlc::Transformer::with_namespace(
                 &self.type_table,
@@ -631,8 +603,6 @@ impl AliasChecked {
             );
             for item in &elaborated.items {
                 if let module_manager::ElaboratedItem::Decl(decl) = item {
-                    // Transform all def declarations - wrapper functions that call intrinsics
-                    // need to be in TLC so they can be called by other prelude functions.
                     if let Some(def) = transformer.transform_decl(decl) {
                         prelude_tlc_defs.push(def);
                     }
@@ -645,14 +615,13 @@ impl AliasChecked {
             let mut transformer =
                 tlc::Transformer::new(&self.type_table, &mut symbols, &mut top_level_symbols);
             for decl in module_manager.get_prelude_function_declarations() {
-                // Transform all prelude functions - even those that wrap intrinsics
                 if let Some(def) = transformer.transform_decl(decl) {
                     prelude_tlc_defs.push(def);
                 }
             }
         }
 
-        // Transform user program to TLC using the shared symbol table
+        // Transform user program to TLC
         let mut transformer = tlc::Transformer::new(&self.type_table, &mut symbols, &mut top_level_symbols);
         let mut parts = transformer.transform_program(&self.ast);
 
@@ -667,7 +636,7 @@ impl AliasChecked {
         TlcTransformed {
             tlc: tlc_program,
             type_table: self.type_table,
-            known_defs,
+            known_defs: registry.name_set(),
             schemes: schemes.clone(),
         }
     }

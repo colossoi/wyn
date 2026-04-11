@@ -398,12 +398,9 @@ fn compile_impl(source: &str) -> CompileResult {
         return CompileResult::err_msg("Alias checking failed".to_string());
     }
 
-    // Build builtins set for lambda lifting
-    let builtins = wyn_core::build_known_defs(&alias_checked.ast, &frontend.module_manager);
-
     // Transform to TLC, monomorphize, then to SSA
     let ssa = match alias_checked
-        .to_tlc(builtins, &frontend.schemes, &frontend.module_manager)
+        .to_tlc(&frontend.schemes, &frontend.module_manager)
         .partial_eval()
         .normalize_soacs().fuse_maps()
         .defunctionalize()
@@ -501,11 +498,8 @@ fn compile_with_ir_impl(source: &str) -> CompileResultWithIR {
         return CompileResultWithIR::err_msg("Alias checking failed".to_string());
     }
 
-    // Build builtins set
-    let builtins = wyn_core::build_known_defs(&alias_checked.ast, &frontend.module_manager);
-
     // Transform to TLC
-    let tlc_program = alias_checked.to_tlc(builtins, &frontend.schemes, &frontend.module_manager);
+    let tlc_program = alias_checked.to_tlc(&frontend.schemes, &frontend.module_manager);
 
     // Capture TLC tree (after partial eval, before defunctionalization)
     let tlc_after_partial_eval = tlc_program.partial_eval();

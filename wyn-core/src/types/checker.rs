@@ -1,7 +1,7 @@
 use super::{SkolemId, Type, TypeExt, TypeName, TypeScheme};
 use crate::ast::*;
 use crate::error::{CompilerError, Result};
-use crate::scope::ScopeStack;
+use crate::scope::{IdentifierKind, ScopeEntry, ScopeStack};
 use crate::{bail_type_at, err_module, err_type, err_type_at, err_undef_at};
 use log::debug;
 use polytype::Context;
@@ -53,16 +53,16 @@ impl TypeWarning {
 }
 
 pub struct TypeChecker<'a> {
-    scope_stack: ScopeStack<TypeScheme>, // Store polymorphic types
-    context: Context<TypeName>,          // Polytype unification context
+    scope_stack: ScopeStack<ScopeEntry<TypeScheme>>,
+    context: Context<TypeName>, // Polytype unification context
     record_field_map: HashMap<(String, String), Type>, // Map (type_name, field_name) -> field_type
     impl_source: crate::impl_source::ImplSource, // Implementation source for code generation
     intrinsics: crate::intrinsics::IntrinsicSource, // Type registry for polymorphic builtins
     module_manager: &'a crate::module_manager::ModuleManager, // Lazy module loading
     type_table: HashMap<crate::ast::NodeId, TypeScheme>, // Maps NodeId to type scheme
-    warnings: Vec<TypeWarning>,          // Collected warnings
-    type_holes: Vec<(NodeId, Span)>,     // Track type hole locations for warning emission
-    arity_map: HashMap<String, usize>,   // function name -> required arity (number of params)
+    warnings: Vec<TypeWarning>, // Collected warnings
+    type_holes: Vec<(NodeId, Span)>, // Track type hole locations for warning emission
+    arity_map: HashMap<String, usize>, // function name -> required arity (number of params)
     /// ID source for generating unique skolem constants when opening existential types.
     skolem_ids: crate::IdSource<SkolemId>,
     /// Current module context for resolving unqualified type aliases in expressions.
@@ -398,9 +398,14 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
+    /// Insert a name into the scope with a given identifier kind.
+    fn define(&mut self, name: String, kind: IdentifierKind, value: TypeScheme) {
+        self.scope_stack.insert(name, ScopeEntry { kind, value });
+    }
+
     /// Look up a variable in the scope stack (for testing)
     pub fn lookup(&self, name: &str) -> Option<TypeScheme> {
-        self.scope_stack.lookup(name).cloned()
+        self.scope_stack.lookup(name).map(|e| e.value.clone())
     }
 
     /// Get a reference to the context (for testing)
@@ -411,8 +416,8 @@ impl<'a> TypeChecker<'a> {
     /// Compute all free type variables in the current environment (scope stack)
     fn env_free_type_vars(&self) -> BTreeSet<usize> {
         let mut acc = BTreeSet::new();
-        self.scope_stack.for_each_binding(|_name, sch| {
-            acc.extend(fv_scheme(sch));
+        self.scope_stack.for_each_binding(|_name, entry| {
+            acc.extend(fv_scheme(&entry.value));
         });
         acc
     }
@@ -507,8 +512,7 @@ impl<'a> TypeChecker<'a> {
             // Unqualified: scope > intrinsics
             self.scope_stack
                 .lookup(full_name)
-                .cloned()
-                .map(SchemeLookup::Single)
+                .map(|e| SchemeLookup::Single(e.value.clone()))
                 .or_else(|| self.lookup_intrinsic(full_name))
         };
 
@@ -648,7 +652,7 @@ impl<'a> TypeChecker<'a> {
                 } else {
                     TypeScheme::Monotype(expected_type.clone())
                 };
-                self.scope_stack.insert(name.clone(), type_scheme);
+                self.define(name.clone(), IdentifierKind::Local, type_scheme);
                 // Store resolved type in type_table for mirize
                 self.type_table.insert(
                     pattern.h.id,
@@ -920,7 +924,11 @@ impl<'a> TypeChecker<'a> {
 
         let mut all_vars = vec![n, s];
         all_vars.extend(&elem_vars);
-        self.scope_stack.insert(format!("zip{}", arity), Self::forall(&all_vars, body));
+        self.define(
+            format!("zip{}", arity),
+            IdentifierKind::Builtin,
+            Self::forall(&all_vars, body),
+        );
     }
 
     /// Build a Vec type: Vec[elem, size]
@@ -996,11 +1004,15 @@ impl<'a> TypeChecker<'a> {
         Ok(func_type)
     }
 
+    fn define_builtin(&mut self, name: &str, scheme: TypeScheme) {
+        self.define(name.to_string(), IdentifierKind::Builtin, scheme);
+    }
+
     pub fn load_builtins(&mut self) -> Result<()> {
         // length: ∀n a s. Array[a, s, n] -> i32
         let (n, a, s) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
         let body = Self::arrow_chain(&[Self::array_ty(Self::var(a), s, n)], i32());
-        self.scope_stack.insert("length".to_string(), Self::forall(&[n, a, s], body));
+        self.define_builtin("length", Self::forall(&[n, a, s], body));
 
         // map: ∀a b n s. (a -> b) -> Array[a, s, n] -> Array[b, s, n]
         let (a, b, n, s) = (
@@ -1016,7 +1028,7 @@ impl<'a> TypeChecker<'a> {
             ],
             Self::array_ty(Self::var(b), s, n),
         );
-        self.scope_stack.insert("map".to_string(), Self::forall(&[a, b, n, s], body));
+        self.define_builtin("map", Self::forall(&[a, b, n, s], body));
 
         // zip: ∀n a b s. Array[a, s, n] -> Array[b, s, n] -> Array[(a, b), s, n]
         let (n, a, b, s) = (
@@ -1032,7 +1044,7 @@ impl<'a> TypeChecker<'a> {
             ],
             Self::array_ty(tuple(vec![Self::var(a), Self::var(b)]), s, n),
         );
-        self.scope_stack.insert("zip".to_string(), Self::forall(&[n, a, b, s], body));
+        self.define_builtin("zip", Self::forall(&[n, a, b, s], body));
 
         // zip3..zip5: ∀n a1..aN s. [a1,s,n] -> ... -> [aN,s,n] -> [(a1,...,aN),s,n]
         for arity in 3..=5 {
@@ -1045,12 +1057,12 @@ impl<'a> TypeChecker<'a> {
             &[Self::array_ty(Self::var(a), s, n)],
             Self::vec_ty(n, Self::var(a)),
         );
-        self.scope_stack.insert("to_vec".to_string(), Self::forall(&[n, a, s], body));
+        self.define_builtin("to_vec", Self::forall(&[n, a, s], body));
 
         // replicate: ∀size a s. i32 -> a -> Array[a, s, size]
         let (size, a, s) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
         let body = Self::arrow_chain(&[i32(), Self::var(a)], Self::array_ty(Self::var(a), s, size));
-        self.scope_stack.insert("replicate".to_string(), Self::forall(&[size, a, s], body));
+        self.define_builtin("replicate", Self::forall(&[size, a, s], body));
 
         // reduce: ∀a n s. (a -> a -> a) -> a -> Array[a, s, n] -> a
         let (a, n, s) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
@@ -1059,7 +1071,7 @@ impl<'a> TypeChecker<'a> {
             &[op_ty, Self::var(a), Self::array_ty(Self::var(a), s, n)],
             Self::var(a),
         );
-        self.scope_stack.insert("reduce".to_string(), Self::forall(&[a, n, s], body));
+        self.define_builtin("reduce", Self::forall(&[a, n, s], body));
 
         // scan: ∀a n s. (a -> a -> a) -> a -> Array[a, s, n] -> Array[a, s, n]
         let (a, n, s) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
@@ -1068,7 +1080,7 @@ impl<'a> TypeChecker<'a> {
             &[op_ty, Self::var(a), Self::array_ty(Self::var(a), s, n)],
             Self::array_ty(Self::var(a), s, n),
         );
-        self.scope_stack.insert("scan".to_string(), Self::forall(&[a, n, s], body));
+        self.define_builtin("scan", Self::forall(&[a, n, s], body));
 
         // filter: ∀a n s. (a -> bool) -> Array[a, s, n] -> ?k. Array[a, s, k]
         let (a, n, s) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
@@ -1081,7 +1093,7 @@ impl<'a> TypeChecker<'a> {
         let result_array = Type::Constructed(TypeName::Array, vec![Self::var(a), k_var, Self::var(s)]);
         let existential_result = Type::Constructed(TypeName::Existential(vec![k]), vec![result_array]);
         let body = Self::arrow_chain(&[pred_ty, array_a], existential_result);
-        self.scope_stack.insert("filter".to_string(), Self::forall(&[a, n, s], body));
+        self.define_builtin("filter", Self::forall(&[a, n, s], body));
 
         // scatter: ∀a n m s1 s2 s3. Array[a, s1, n] -> Array[i32, s2, m] -> Array[a, s3, m] -> Array[a, s1, n]
         let (a, n, m) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
@@ -1090,7 +1102,7 @@ impl<'a> TypeChecker<'a> {
         let indices_array = Self::array_ty(i32(), s2, m);
         let values_array = Self::array_ty(Self::var(a), s3, m);
         let body = Self::arrow_chain(&[dest_array.clone(), indices_array, values_array], dest_array);
-        self.scope_stack.insert("scatter".to_string(), Self::forall(&[a, n, m, s1, s2, s3], body));
+        self.define_builtin("scatter", Self::forall(&[a, n, m, s1, s2, s3], body));
 
         // reduce_by_index: ∀a n m s1 s2 s3. Array[a, s1, n] -> (a -> a -> a) -> a -> Array[i32, s2, m] -> Array[a, s3, m] -> Array[a, s1, n]
         let (a, n, m) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
@@ -1109,21 +1121,18 @@ impl<'a> TypeChecker<'a> {
             ],
             dest_array,
         );
-        self.scope_stack.insert(
-            "reduce_by_index".to_string(),
-            Self::forall(&[a, n, m, s1, s2, s3], body),
-        );
+        self.define_builtin("reduce_by_index", Self::forall(&[a, n, m, s1, s2, s3], body));
 
         // _w_alloc_array: ∀n t s. i32 -> Array[t, s, n]
         let (n, t, s) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
         let body = Self::arrow_chain(&[i32()], Self::array_ty(Self::var(t), s, n));
-        self.scope_stack.insert("_w_alloc_array".to_string(), Self::forall(&[n, t, s], body));
+        self.define_builtin("_w_alloc_array", Self::forall(&[n, t, s], body));
 
         // dot: ∀n t. Vec(n, t) -> Vec(n, t) -> t
         let (n, t) = (self.fresh_var(), self.fresh_var());
         let vec = Self::vec_ty(n, Self::var(t));
         let body = Self::arrow_chain(&[vec.clone(), vec], Self::var(t));
-        self.scope_stack.insert("dot".to_string(), Self::forall(&[n, t], body));
+        self.define_builtin("dot", Self::forall(&[n, t], body));
 
         // Math functions: ∀t. t -> t (works on f32, vec2f32, vec3f32, vec4f32)
         let t = self.fresh_var();
@@ -1131,7 +1140,7 @@ impl<'a> TypeChecker<'a> {
         for name in &[
             "sin", "cos", "tan", "sqrt", "abs", "floor", "ceil", "fract", "exp", "log",
         ] {
-            self.scope_stack.insert(name.to_string(), math_unary.clone());
+            self.define_builtin(name, math_unary.clone());
         }
 
         // Register vector field mappings
@@ -1140,6 +1149,11 @@ impl<'a> TypeChecker<'a> {
         // Note: Prelude files are automatically loaded when ModuleManager is created
 
         Ok(())
+    }
+
+    /// Names registered by `load_builtins`, queried from the scope by kind.
+    pub fn builtin_names(&self) -> Vec<String> {
+        self.scope_stack.names_by_kind(IdentifierKind::Builtin)
     }
 
     fn register_vector_fields(&mut self) {
@@ -1308,7 +1322,7 @@ impl<'a> TypeChecker<'a> {
                 "Adding parameter '{}' to scope with type: {:?}",
                 param_name, param_type
             );
-            self.scope_stack.insert(param_name, type_scheme);
+            self.define(param_name, IdentifierKind::Local, type_scheme);
         }
 
         // Infer body type
@@ -1342,8 +1356,8 @@ impl<'a> TypeChecker<'a> {
             self.check_decl_as_in_module(&decl, &qualified_name, Some(&module_name))?;
 
             // Cache the scheme for fast lookup during name resolution
-            if let Some(scheme) = self.scope_stack.lookup(&qualified_name).cloned() {
-                self.module_schemes.insert(qualified_name, scheme);
+            if let Some(entry) = self.scope_stack.lookup(&qualified_name) {
+                self.module_schemes.insert(qualified_name, entry.value.clone());
             }
         }
 
@@ -1377,9 +1391,8 @@ impl<'a> TypeChecker<'a> {
     /// This ensures monomorphization has consistent type variable IDs across params/return.
     pub fn get_function_schemes(&self) -> std::collections::HashMap<String, TypeScheme> {
         let mut schemes = std::collections::HashMap::new();
-        self.scope_stack.for_each_binding(|name, scheme| {
-            // Apply context to resolve address space variables that were defaulted
-            let resolved = self.apply_context_to_scheme(scheme);
+        self.scope_stack.for_each_binding(|name, entry| {
+            let resolved = self.apply_context_to_scheme(&entry.value);
             schemes.insert(name.to_string(), resolved);
         });
         schemes
@@ -1434,8 +1447,8 @@ impl<'a> TypeChecker<'a> {
     ) {
         // Extract schemes from scope_stack before consuming self
         let mut schemes = std::collections::HashMap::new();
-        self.scope_stack.for_each_binding(|name, scheme| {
-            schemes.insert(name.to_string(), scheme.clone());
+        self.scope_stack.for_each_binding(|name, entry| {
+            schemes.insert(name.to_string(), entry.value.clone());
         });
         (self.context, self.type_table, self.intrinsics, schemes)
     }
@@ -1524,7 +1537,7 @@ impl<'a> TypeChecker<'a> {
     fn check_uniform_decl(&mut self, decl: &UniformDecl) -> Result<()> {
         // Add the uniform to scope with its declared type
         let type_scheme = TypeScheme::Monotype(decl.ty.clone());
-        self.scope_stack.insert(decl.name.clone(), type_scheme);
+        self.define(decl.name.clone(), IdentifierKind::UserDecl, type_scheme);
         debug!("Inserting uniform variable '{}' into scope", decl.name);
         Ok(())
     }
@@ -1532,7 +1545,7 @@ impl<'a> TypeChecker<'a> {
     fn check_storage_decl(&mut self, decl: &StorageDecl) -> Result<()> {
         // Add the storage buffer to scope with its declared type
         let type_scheme = TypeScheme::Monotype(decl.ty.clone());
-        self.scope_stack.insert(decl.name.clone(), type_scheme);
+        self.define(decl.name.clone(), IdentifierKind::UserDecl, type_scheme);
         debug!("Inserting storage variable '{}' into scope", decl.name);
         Ok(())
     }
@@ -1584,7 +1597,7 @@ impl<'a> TypeChecker<'a> {
             // Generalize the type to enable polymorphism
             let type_scheme = self.generalize(&stored_type);
             debug!("Inserting variable '{}' into scope", scope_name);
-            self.scope_stack.insert(scope_name.to_string(), type_scheme);
+            self.define(scope_name.to_string(), IdentifierKind::UserDecl, type_scheme);
             debug!("Inferred type for {}: {}", scope_name, stored_type);
         } else {
             // Function declaration: let/def name param1 param2 = body
@@ -1643,7 +1656,7 @@ impl<'a> TypeChecker<'a> {
 
             // Update scope with inferred type using generalization
             let type_scheme = self.generalize(&func_type);
-            self.scope_stack.insert(scope_name.to_string(), type_scheme);
+            self.define(scope_name.to_string(), IdentifierKind::UserDecl, type_scheme);
 
             // Track arity for partial application checking
             self.arity_map.insert(scope_name.to_string(), decl.params.len());
@@ -1660,14 +1673,14 @@ impl<'a> TypeChecker<'a> {
     fn check_sig_decl(&mut self, decl: &SigDecl) -> Result<()> {
         // Sig declarations are just type signatures - register them in scope
         let type_scheme = TypeScheme::Monotype(decl.ty.clone());
-        self.scope_stack.insert(decl.name.clone(), type_scheme);
+        self.define(decl.name.clone(), IdentifierKind::UserDecl, type_scheme);
         Ok(())
     }
 
     fn check_extern_decl(&mut self, decl: &ExternDecl) -> Result<()> {
         // Extern declarations register a type signature for a linked SPIR-V function
         let type_scheme = TypeScheme::Monotype(decl.ty.clone());
-        self.scope_stack.insert(decl.name.clone(), type_scheme);
+        self.define(decl.name.clone(), IdentifierKind::UserDecl, type_scheme);
         debug!(
             "Registered extern function '{}' with linkage '{}'",
             decl.name, decl.linkage_name
@@ -2299,8 +2312,7 @@ impl<'a> TypeChecker<'a> {
                     }
                     LoopForm::For(var_name, bound) => {
                         // Iteration variable is i32
-                        self.scope_stack
-                            .insert(var_name.clone(), TypeScheme::Monotype(i32()));
+                        self.define(var_name.clone(), IdentifierKind::Local, TypeScheme::Monotype(i32()));
 
                         // Bound must be integer
                         let bound_type = self.infer_expression(bound)?;

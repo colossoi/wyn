@@ -15,9 +15,8 @@ fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
         .alias_check()
         .expect("Alias checking failed");
 
-    let known_defs = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
     let ssa = alias_checked
-        .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
+        .to_tlc(&frontend.schemes, &frontend.module_manager)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -343,9 +342,8 @@ fn compile_to_spirv_with_partial_eval(source: &str) -> Result<Vec<u32>> {
         .expect("Type checking failed")
         .alias_check()
         .expect("Alias checking failed");
-    let known_defs = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
     let ssa = alias_checked
-        .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
+        .to_tlc(&frontend.schemes, &frontend.module_manager)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()

@@ -18,8 +18,8 @@ use crate::types::TypeExt;
 const MAP_UNROLL_THRESHOLD: usize = 16;
 use crate::ssa::types::Program;
 use crate::ssa::types::{
-    BlockId, EffectToken, EntryPoint, FuncBody, InstKind, Soac,
-    Terminator, TerminatorExt, ValueId, ValueRef,
+    BlockId, EffectToken, EntryPoint, FuncBody, InstKind, Soac, Terminator, TerminatorExt, ValueId,
+    ValueRef,
 };
 use crate::types::is_virtual_array;
 use polytype::Type;

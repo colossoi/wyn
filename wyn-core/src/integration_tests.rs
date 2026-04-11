@@ -23,9 +23,8 @@ fn compile_to_ssa(input: &str) -> Program {
         .alias_check()
         .expect("Borrow checking failed");
 
-    let known_defs = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
     alias_checked
-        .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
+        .to_tlc(&frontend.schemes, &frontend.module_manager)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -72,8 +71,7 @@ fn compile_to_fused_tlc(input: &str) -> crate::tlc::Program {
         .alias_check()
         .expect("Borrow checking failed");
 
-    let known_defs = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
-    let tlc = alias_checked.to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager);
+    let tlc = alias_checked.to_tlc(&frontend.schemes, &frontend.module_manager);
     let fused = tlc.partial_eval().normalize_soacs().fuse_maps();
     fused.tlc
 }
@@ -678,9 +676,8 @@ entry vertex_main() #[builtin(position)] vec4f32 =
         .and_then(|t| t.alias_check())
         .expect("Failed before TLC transform");
 
-    let builtins = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
     let result = alias_checked
-        .to_tlc(builtins, &frontend.schemes, &mut frontend.module_manager)
+        .to_tlc(&frontend.schemes, &frontend.module_manager)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -724,9 +721,8 @@ entry compute_main(data: []i32) i32 =
         .and_then(|t| t.alias_check())
         .expect("Failed before TLC transform");
 
-    let builtins = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
     let result = alias_checked
-        .to_tlc(builtins, &frontend.schemes, &mut frontend.module_manager)
+        .to_tlc(&frontend.schemes, &frontend.module_manager)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -772,9 +768,8 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
         .and_then(|t| t.alias_check())
         .expect("Failed before TLC transform");
 
-    let builtins = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
     let result = alias_checked
-        .to_tlc(builtins, &frontend.schemes, &mut frontend.module_manager)
+        .to_tlc(&frontend.schemes, &frontend.module_manager)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -864,9 +859,8 @@ fn compile_to_spirv(input: &str) -> Result<Vec<u32>, Box<dyn std::error::Error>>
         .type_check(&mut frontend.module_manager, &mut frontend.schemes)?
         .alias_check()?;
 
-    let builtins = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
     let result = alias_checked
-        .to_tlc(builtins, &frontend.schemes, &mut frontend.module_manager)
+        .to_tlc(&frontend.schemes, &frontend.module_manager)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -901,9 +895,8 @@ fn compile_to_ssa_with_modules(input: &str) -> Program {
         .alias_check()
         .expect("Alias check failed");
 
-    let known_defs = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
     alias_checked
-        .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
+        .to_tlc(&frontend.schemes, &frontend.module_manager)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -1181,9 +1174,8 @@ fn compile_to_ssa_with_inline_small(input: &str) -> Program {
         .alias_check()
         .expect("Borrow checking failed");
 
-    let known_defs = crate::build_known_defs(&alias_checked.ast, &mut frontend.module_manager);
     alias_checked
-        .to_tlc(known_defs, &frontend.schemes, &mut frontend.module_manager)
+        .to_tlc(&frontend.schemes, &frontend.module_manager)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()

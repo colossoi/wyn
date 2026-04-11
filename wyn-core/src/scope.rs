@@ -1,5 +1,31 @@
 use std::collections::HashMap;
 
+/// What kind of identifier a scope entry represents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentifierKind {
+    /// Type-checker builtins: map, reduce, scan, filter, scatter, zip, length, dot, sin, cos, ...
+    Builtin,
+    /// Type-specific operations from ImplSource: f32.add, i32.mul, u32.&
+    ImplOp,
+    /// Polymorphic intrinsics from IntrinsicSource: _w_intrinsic_map, abs, sign
+    PolymorphicIntrinsic,
+    /// Module-qualified items: f32.sin, f32.pi, trig.sinpi
+    ModuleItem,
+    /// Prelude functions: unzip, all, any
+    PreludeFunction,
+    /// User declarations: Decl, Entry, Extern, Uniform, Storage
+    UserDecl,
+    /// Lambda params, let bindings (ephemeral, scoped)
+    Local,
+}
+
+/// A scope entry pairing a value with its identifier category.
+#[derive(Debug, Clone)]
+pub struct ScopeEntry<T> {
+    pub kind: IdentifierKind,
+    pub value: T,
+}
+
 /// A single scope containing variable bindings
 #[derive(Debug, Clone)]
 pub struct Scope<T> {
@@ -135,5 +161,19 @@ impl<T: Clone> ScopeStack<T> {
         }
 
         free_vars
+    }
+}
+
+// Specialized methods for ScopeEntry-based scopes.
+impl<T: Clone> ScopeStack<ScopeEntry<T>> {
+    /// Collect all names with the given kind across all scopes.
+    pub fn names_by_kind(&self, kind: IdentifierKind) -> Vec<String> {
+        let mut names = Vec::new();
+        self.for_each_binding(|name, entry| {
+            if entry.kind == kind {
+                names.push(name.to_string());
+            }
+        });
+        names
     }
 }
