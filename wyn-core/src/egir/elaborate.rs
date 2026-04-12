@@ -222,7 +222,12 @@ impl<'a> Elaborator<'a> {
         if let Some(result_nid) = se.result {
             let ty = self.graph.types[&result_nid].clone();
             let vid = self.emit_at(skel_bid, kind, ty, effects);
-            self.elaborated.insert(result_nid, (vid, skel_bid));
+            // Insert under the resolved id so demand_placed's `self.resolve(nid)
+            // → get(&resolved)` path finds it. Today extract maps every
+            // SideEffectResult to itself, but that's a brittle invariant —
+            // this keeps the insert symmetric with every other site.
+            let resolved = self.resolve(result_nid);
+            self.elaborated.insert(resolved, (vid, skel_bid));
         } else {
             let out_bid = self.block_map[&skel_bid];
             self.builder.func_mut().append_void_inst(out_bid, kind, effects);
