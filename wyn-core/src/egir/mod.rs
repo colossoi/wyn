@@ -12,6 +12,7 @@ mod canonicalize;
 mod domtree;
 mod elaborate;
 mod extract;
+mod fold;
 mod rewrite;
 mod scoped_map;
 pub mod types;

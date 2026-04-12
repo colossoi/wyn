@@ -1495,37 +1495,51 @@ mod tests {
 
     #[test]
     fn test_gvn_via_let() {
-        // let x = 42 in let y = 42 in x + y
-        // GVN should deduplicate the two 42 constants.
+        // let x = 42 in let y = 42 in (x, y)
+        // GVN should deduplicate the two 42 constants into a single node.
+        // (A `+` would be constant-folded to `84`, erasing the evidence.)
+        use polytype::Type;
+        let pair_ty = Type::Constructed(TypeName::Tuple(2), vec![i32_ty(), i32_ty()]);
+
         let lit42 = mk_term(i32_ty(), TermKind::IntLit("42".into()));
         let lit42b = mk_term(i32_ty(), TermKind::IntLit("42".into()));
 
         let mut symbols = crate::SymbolTable::new();
         let x_sym = symbols.alloc("x".into());
         let y_sym = symbols.alloc("y".into());
+        let tuple_sym = symbols.alloc("_w_tuple".into());
 
-        let add_op = mk_term(i32_ty(), TermKind::BinOp(crate::ast::BinaryOp { op: "+".into() }));
+        let tuple_op = mk_term(
+            Type::Constructed(
+                TypeName::Arrow,
+                vec![
+                    i32_ty(),
+                    Type::Constructed(TypeName::Arrow, vec![i32_ty(), pair_ty.clone()]),
+                ],
+            ),
+            TermKind::Var(tuple_sym),
+        );
         let x_ref = mk_term(i32_ty(), TermKind::Var(x_sym));
         let y_ref = mk_term(i32_ty(), TermKind::Var(y_sym));
-        let add_app = mk_term(
-            i32_ty(),
+        let pair_app = mk_term(
+            pair_ty.clone(),
             TermKind::App {
-                func: Box::new(add_op),
+                func: Box::new(tuple_op),
                 args: vec![x_ref, y_ref],
             },
         );
 
         let inner_let = mk_term(
-            i32_ty(),
+            pair_ty.clone(),
             TermKind::Let {
                 name: y_sym,
                 name_ty: i32_ty(),
                 rhs: Box::new(lit42b),
-                body: Box::new(add_app),
+                body: Box::new(pair_app),
             },
         );
         let outer_let = mk_term(
-            i32_ty(),
+            pair_ty.clone(),
             TermKind::Let {
                 name: x_sym,
                 name_ty: i32_ty(),
@@ -1542,7 +1556,7 @@ mod tests {
         let result = converter.convert_term(&outer_let).expect("conversion failed");
         converter.set_return(Some(result));
 
-        let func = converter.elaborate_to_funcbody(&[], i32_ty()).expect("elaboration failed");
+        let func = converter.elaborate_to_funcbody(&[], pair_ty).expect("elaboration failed");
 
         let entry = func.get_block(func.entry_block());
         // GVN: should have only ONE Int("42") instruction, not two.

@@ -256,7 +256,7 @@ impl EGraph {
         operands: SmallVec<[NodeId; 4]>,
         ty: Type<TypeName>,
     ) -> NodeId {
-        if let Some(folded) = self.try_algebraic_fold(&op, &operands) {
+        if let Some(folded) = self.try_algebraic_fold(&op, &operands, &ty) {
             return folded;
         }
         let key = NodeKey {
@@ -270,32 +270,6 @@ impl EGraph {
         self.types.insert(id, ty);
         self.hash_cons.insert(key, id);
         id
-    }
-
-    /// Algebraic rewrites applied eagerly at intern time.
-    /// Currently: `Project{i}(Tuple/Vector/ArrayLit(a,b,…)) → i-th operand`.
-    fn try_algebraic_fold(&self, op: &PureOp, operands: &[NodeId]) -> Option<NodeId> {
-        if let PureOp::Project { index } = op {
-            if operands.len() == 1 {
-                if let ENode::Pure {
-                    op: base_op,
-                    operands: base_operands,
-                } = &self.nodes[operands[0]]
-                {
-                    let len = match base_op {
-                        PureOp::Tuple(n) | PureOp::Vector(n) | PureOp::ArrayLit(n) => Some(*n),
-                        _ => None,
-                    };
-                    if let Some(n) = len {
-                        let i = *index as usize;
-                        if i < n {
-                            return Some(base_operands[i]);
-                        }
-                    }
-                }
-            }
-        }
-        None
     }
 
     /// Allocate a node for a side-effect result (not hash-consed).

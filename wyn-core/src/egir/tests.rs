@@ -62,30 +62,24 @@ fn roundtrip_simple_add() {
 /// Test that GVN deduplicates identical pure computations.
 #[test]
 fn gvn_deduplicates_constants() {
-    // Build: fn f() -> i32 { let x = 42; let y = 42; x + y }
-    let mut builder = FuncBuilder::new(vec![], i32_ty());
+    // Build: fn f() -> (i32, i32) { let x = 42; let y = 42; (x, y) }
+    // Using a Tuple instead of `x + y` so the constants aren't folded away.
+    use crate::ast::TypeName;
+    use polytype::Type;
+    let pair_ty = Type::Constructed(TypeName::Tuple(2), vec![i32_ty(), i32_ty()]);
+    let mut builder = FuncBuilder::new(vec![], pair_ty.clone());
 
     let x = builder.push_inst(InstKind::Int("42".into()), i32_ty()).unwrap();
     let y = builder.push_inst(InstKind::Int("42".into()), i32_ty()).unwrap();
-    let sum = builder
-        .push_inst(
-            InstKind::BinOp {
-                op: "+".into(),
-                lhs: ValueRef::Ssa(x),
-                rhs: ValueRef::Ssa(y),
-            },
-            i32_ty(),
-        )
-        .unwrap();
-    builder.terminate(wyn_ssa::Terminator::Return(Some(sum))).unwrap();
+    let pair =
+        builder.push_inst(InstKind::Tuple(vec![ValueRef::Ssa(x), ValueRef::Ssa(y)]), pair_ty).unwrap();
+    builder.terminate(wyn_ssa::Terminator::Return(Some(pair))).unwrap();
 
     let body = builder.finish().unwrap();
     let result = super::optimize_func(&body);
 
     let entry = result.get_block(result.entry_block());
     // GVN should deduplicate the two `42` constants into one.
-    // So we should have: 1 Int("42") + 1 BinOp = 2 instructions
-    // (instead of 2 Int + 1 BinOp = 3 in the original).
     let const_count = entry
         .insts
         .iter()
