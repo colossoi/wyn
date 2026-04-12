@@ -14,11 +14,13 @@ use crate::ast::TypeName;
 use crate::ssa::builder::FuncBuilder;
 use crate::ssa::types::{BlockId, ControlHeader, FuncBody, InstKind, ValueId, ValueRef};
 use polytype::Type;
+use smallvec::SmallVec;
 use std::collections::HashMap;
 use wyn_ssa::BlockId as SkelBlockId;
 
 use super::domtree::DomTree;
 use super::extract;
+use super::loop_analysis::LoopAnalysis;
 use super::scoped_map::ScopedMap;
 use super::types::*;
 
@@ -34,25 +36,31 @@ pub fn elaborate(
     // Phase 1: cost-based extraction.
     let best = extract::extract(graph);
 
+    // Loop analysis over the skeleton, used by LICM placement.
+    let loop_analysis = LoopAnalysis::build(&graph.skeleton, control_headers, domtree);
+
     // Phase 2: set up elaborator.
     let mut elab = Elaborator {
         graph,
         best,
         domtree,
+        loop_analysis: &loop_analysis,
+        loop_stack: SmallVec::new(),
         elaborated: ScopedMap::new(),
         builder: FuncBuilder::new(params.to_vec(), return_ty),
         block_map: HashMap::new(),
         current_block: None,
+        current_skel_block: None,
     };
 
-    // Map function params: NodeId → ValueId.
+    // Map function params: NodeId → (ValueId, skel entry block).
+    let skel_entry = graph.skeleton.entry;
     for i in 0..elab.builder.num_params() {
         let vid = elab.builder.get_param(i);
-        // Find the FuncParam NodeId for this index.
         for (nid, node) in &graph.nodes {
             if matches!(node, ENode::FuncParam { index } if *index == i) {
                 let resolved = elab.resolve(nid);
-                elab.elaborated.insert(resolved, vid);
+                elab.elaborated.insert(resolved, (vid, skel_entry));
                 break;
             }
         }
@@ -75,7 +83,7 @@ pub fn elaborate(
             let ty = graph.types[&param_nid].clone();
             let vid = elab.builder.add_block_param(out_bid, ty);
             let resolved = elab.resolve(param_nid);
-            elab.elaborated.insert(resolved, vid);
+            elab.elaborated.insert(resolved, (vid, skel_bid));
         }
     }
 
@@ -119,14 +127,28 @@ pub fn elaborate(
     elab.builder.finish_unchecked()
 }
 
+/// Stack frame for each loop we're currently inside (innermost at top).
+struct LoopStackEntry {
+    /// Skeleton block that is the loop header.
+    header: SkelBlockId,
+    /// Skeleton block to hoist loop-invariants into (the header's idom).
+    hoist_block: SkelBlockId,
+    /// ScopedMap depth at which this loop's body scope was pushed.
+    scope_depth: usize,
+}
+
 struct Elaborator<'a> {
     graph: &'a EGraph,
     best: HashMap<NodeId, NodeId>,
     domtree: &'a DomTree,
-    elaborated: ScopedMap<NodeId, ValueId>,
+    loop_analysis: &'a LoopAnalysis,
+    loop_stack: SmallVec<[LoopStackEntry; 4]>,
+    /// NodeId → (ValueId, skeleton block where it was placed).
+    elaborated: ScopedMap<NodeId, (ValueId, SkelBlockId)>,
     builder: FuncBuilder,
     block_map: HashMap<SkelBlockId, BlockId>,
     current_block: Option<BlockId>,
+    current_skel_block: Option<SkelBlockId>,
 }
 
 impl<'a> Elaborator<'a> {
@@ -139,60 +161,86 @@ impl<'a> Elaborator<'a> {
 
     fn elaborate_subtree(&mut self, skel_bid: SkelBlockId) {
         self.elaborated.push_scope();
+        let pushed_loop = self.maybe_push_loop(skel_bid);
+
         let out_bid = self.block_map[&skel_bid];
         self.current_block = Some(out_bid);
+        self.current_skel_block = Some(skel_bid);
         self.builder.switch_to_block_unchecked(out_bid);
 
         let skel_block = self.graph.skeleton.blocks[skel_bid].clone();
 
         // Elaborate side-effectful instructions.
         for se in &skel_block.side_effects {
-            self.elaborate_side_effect(se);
+            self.elaborate_side_effect(se, skel_bid);
         }
 
         // Elaborate terminator.
         self.elaborate_terminator(&skel_block.term);
 
-        // Recurse into domtree children.
+        // Recurse into domtree children. Each child switches to its own block
+        // on entry, so we re-set ours before emitting our terminator above, and
+        // the child loop here just handles descent.
         let children: Vec<SkelBlockId> = self.domtree.dom_children(skel_bid).to_vec();
         for child in children {
             self.elaborate_subtree(child);
         }
 
+        if pushed_loop {
+            self.loop_stack.pop();
+        }
         self.elaborated.pop_scope();
     }
 
-    /// Elaborate a side-effectful instruction.
-    fn elaborate_side_effect(&mut self, se: &SideEffect) {
-        // Demand-elaborate all operands (this recursively places pure nodes).
+    /// Push a loop stack frame if `skel_bid` is a loop header.
+    fn maybe_push_loop(&mut self, skel_bid: SkelBlockId) -> bool {
+        if !self.loop_analysis.is_header(skel_bid) {
+            return false;
+        }
+        let hoist_block = self
+            .domtree
+            .idom(skel_bid)
+            .expect("loop header should have an immediate dominator (the preheader)");
+        let scope_depth = self.elaborated.depth();
+        self.loop_stack.push(LoopStackEntry {
+            header: skel_bid,
+            hoist_block,
+            scope_depth,
+        });
+        true
+    }
+
+    /// Elaborate a side-effectful instruction. Side effects stay pinned to
+    /// their containing skeleton block — only the operands go through
+    /// demand() where LICM may move them.
+    fn elaborate_side_effect(&mut self, se: &SideEffect, skel_bid: SkelBlockId) {
         let args: Vec<ValueId> = se.operand_nodes.iter().map(|&nid| self.demand(nid)).collect();
 
-        // Rebuild the InstKind with new ValueIds.
         let kind = rebuild_effectful_inst_kind(&se.kind, &args);
+        let effects = se.effects;
 
         if let Some(result_nid) = se.result {
             let ty = self.graph.types[&result_nid].clone();
-            let effects = se.effects;
-            let vid = self
-                .builder
-                .push_inst_with_effects(kind, ty, effects)
-                .expect("elaborate side-effect push failed");
-            self.elaborated.insert(result_nid, vid);
+            let vid = self.emit_at(skel_bid, kind, ty, effects);
+            self.elaborated.insert(result_nid, (vid, skel_bid));
         } else {
-            let effects = se.effects;
-            self.builder
-                .push_void_inst_with_effects(kind, effects)
-                .expect("elaborate void side-effect push failed");
+            let out_bid = self.block_map[&skel_bid];
+            self.builder.func_mut().append_void_inst(out_bid, kind, effects);
         }
     }
 
     /// Demand-driven elaboration: given a NodeId, produce a ValueId.
     fn demand(&mut self, nid: NodeId) -> ValueId {
+        self.demand_placed(nid).0
+    }
+
+    /// Demand a node and return both the ValueId and the skeleton block it
+    /// was placed in.
+    fn demand_placed(&mut self, nid: NodeId) -> (ValueId, SkelBlockId) {
         let resolved = self.resolve(nid);
 
-        // Check scoped cache.
-        if let Some(vid) = self.elaborated.get(&resolved) {
-            return vid;
+        if let Some(entry) = self.elaborated.get(&resolved) {
+            return entry;
         }
 
         let node = self.graph.nodes[resolved].clone();
@@ -201,19 +249,22 @@ impl<'a> Elaborator<'a> {
             ENode::Constant(c) => {
                 let ty = self.graph.types[&resolved].clone();
                 let kind = const_to_inst_kind(c);
-                let vid = self.builder.push_inst(kind, ty).expect("elaborate constant push failed");
-                self.elaborated.insert(resolved, vid);
-                vid
+                let placed = self.choose_placement(&[]);
+                let vid = self.emit_at(placed, kind, ty, None);
+                self.record_placement(resolved, vid, placed);
+                (vid, placed)
             }
             ENode::Pure { op, operands } => {
-                // Recursively demand-elaborate operands.
-                let args: Vec<ValueId> = operands.iter().map(|&op_nid| self.demand(op_nid)).collect();
+                let arg_placements: Vec<(ValueId, SkelBlockId)> =
+                    operands.iter().map(|&op_nid| self.demand_placed(op_nid)).collect();
+                let args: Vec<ValueId> = arg_placements.iter().map(|&(v, _)| v).collect();
 
                 let ty = self.graph.types[&resolved].clone();
                 let kind = pure_to_inst_kind(op, &args);
-                let vid = self.builder.push_inst(kind, ty).expect("elaborate pure push failed");
-                self.elaborated.insert(resolved, vid);
-                vid
+                let placed = self.choose_placement(&arg_placements);
+                let vid = self.emit_at(placed, kind, ty, None);
+                self.record_placement(resolved, vid, placed);
+                (vid, placed)
             }
             ENode::FuncParam { .. } | ENode::BlockParam { .. } => {
                 panic!(
@@ -231,6 +282,75 @@ impl<'a> Elaborator<'a> {
                 panic!("Union {:?} should have been resolved by extract", resolved);
             }
         }
+    }
+
+    /// Decide where to place a pure node given the skeleton blocks where its
+    /// operands live. Walks the loop stack innermost→outermost and hoists
+    /// out of every enclosing loop whose body contains none of the operands.
+    fn choose_placement(&self, operand_blocks: &[(ValueId, SkelBlockId)]) -> SkelBlockId {
+        let current = self.current_skel_block.expect("current skel block unset");
+        let mut candidate = current;
+        let is_nullary = operand_blocks.is_empty();
+        // Active loops contain the current block in their body.
+        let active: SmallVec<[&LoopStackEntry; 4]> = self
+            .loop_stack
+            .iter()
+            .rev()
+            .filter(|f| self.loop_analysis.is_in_loop(current, f.header))
+            .collect();
+        // For a nullary pure node (no operands), don't hoist all the way to
+        // function entry — cap at the outermost enclosing loop's preheader.
+        // Without this, every literal 0/1/constant gets dumped into the entry
+        // block, bloating it and potentially across other loops where it
+        // would be cleaner to keep them local.
+        let hoist_limit = if is_nullary { active.len().saturating_sub(1) } else { active.len() };
+        for (i, frame) in active.iter().enumerate() {
+            if i >= hoist_limit {
+                break;
+            }
+            let any_inside =
+                operand_blocks.iter().any(|&(_, b)| self.loop_analysis.is_in_loop(b, frame.header));
+            if any_inside {
+                break;
+            }
+            candidate = frame.hoist_block;
+        }
+        candidate
+    }
+
+    /// Record an elaborated node. If the placement is at an outer scope (a
+    /// loop's hoist_block), insert the binding at that loop's scope_depth so
+    /// it remains visible to siblings inside the loop body but scopes out
+    /// with the loop frame.
+    fn record_placement(&mut self, nid: NodeId, vid: ValueId, placed: SkelBlockId) {
+        let current = self.current_skel_block.expect("current skel block unset");
+        // Only consider active loop frames (same filter as choose_placement).
+        let insert_depth = self
+            .loop_stack
+            .iter()
+            .rev()
+            .filter(|f| self.loop_analysis.is_in_loop(current, f.header))
+            .find(|f| f.hoist_block == placed)
+            .map(|f| f.scope_depth);
+        if let Some(d) = insert_depth {
+            self.elaborated.insert_at_depth(d, nid, (vid, placed));
+        } else {
+            self.elaborated.insert(nid, (vid, placed));
+        }
+    }
+
+    /// Emit an instruction into `target_skel`'s output block, bypassing the
+    /// "block already terminated" check. The insts list is stored separately
+    /// from the terminator, so appending is still well-formed.
+    fn emit_at(
+        &mut self,
+        target_skel: SkelBlockId,
+        kind: InstKind,
+        ty: Type<TypeName>,
+        effects: Option<(crate::ssa::types::EffectToken, crate::ssa::types::EffectToken)>,
+    ) -> ValueId {
+        let out_bid = self.block_map[&target_skel];
+        self.builder.func_mut().append_inst(out_bid, kind, ty, effects)
     }
 
     /// Resolve a NodeId through the extraction map.

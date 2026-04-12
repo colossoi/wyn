@@ -13,6 +13,7 @@ mod domtree;
 mod elaborate;
 mod extract;
 mod fold;
+mod loop_analysis;
 mod rewrite;
 mod scoped_map;
 pub mod types;

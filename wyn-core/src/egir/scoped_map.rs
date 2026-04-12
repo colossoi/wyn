@@ -51,9 +51,30 @@ impl<K: Hash + Eq + Clone, V: Copy> ScopedMap<K, V> {
         self.scope_keys[self.depth].push(key);
     }
 
+    /// Insert a key-value pair at a specific (ancestor) scope depth.
+    ///
+    /// The entry is spliced into the value stack ordered by depth so that
+    /// `get()` still returns the innermost visible entry. Used by LICM to
+    /// place a hoisted value in the loop-preheader's scope rather than the
+    /// current scope: siblings inside the loop body still see the value via
+    /// `get`, and when the loop scope pops, the value scopes out naturally.
+    pub fn insert_at_depth(&mut self, depth: usize, key: K, value: V) {
+        debug_assert!(depth <= self.depth);
+        let stack = self.map.entry(key.clone()).or_default();
+        // Find the insertion point (keep stacks sorted by depth, stable).
+        let pos = stack.iter().rposition(|(d, _)| *d <= depth).map_or(0, |i| i + 1);
+        stack.insert(pos, (depth, value));
+        self.scope_keys[depth].push(key);
+    }
+
     /// Look up a key. Returns the most recently inserted value visible in the current scope.
     pub fn get(&self, key: &K) -> Option<V> {
         self.map.get(key).and_then(|stack| stack.last().map(|(_, v)| *v))
+    }
+
+    /// Current scope depth (0 = root).
+    pub fn depth(&self) -> usize {
+        self.depth
     }
 }
 
