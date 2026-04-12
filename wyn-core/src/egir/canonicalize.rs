@@ -16,9 +16,10 @@ use super::types::*;
 
 /// Convert an SSA FuncBody into an EGraph.
 ///
-/// Returns the EGraph and a DomTree built from the *skeleton* CFG
-/// (needed later by the elaboration pass).
-pub fn canonicalize(body: &FuncBody) -> (EGraph, DomTree) {
+/// Returns the EGraph, a DomTree built from the *skeleton* CFG
+/// (needed later by the elaboration pass), and the orig→skeleton
+/// block map that the elaborator needs to rewire control headers.
+pub fn canonicalize(body: &FuncBody) -> (EGraph, DomTree, HashMap<BlockId, BlockId>) {
     let mut graph = EGraph::new();
     let mut val_map: HashMap<ValueId, NodeId> = HashMap::new();
 
@@ -107,7 +108,7 @@ pub fn canonicalize(body: &FuncBody) -> (EGraph, DomTree) {
         skeleton: &graph.skeleton,
     });
 
-    (graph, skel_domtree)
+    (graph, skel_domtree, block_map)
 }
 
 // ---------------------------------------------------------------------------

@@ -203,11 +203,9 @@ fn convert_function(
 }
 
 /// Entry point conversion delegates to the legacy TLC→SSA builder (for GPU I/O
-/// setup: storage views, output ptrs, MapInto rewriting). The resulting FuncBody
-/// does NOT currently round-trip through the EGraph — doing so breaks the
-/// SPIR-V structured-control-flow validation on several testfiles (entrylevel,
-/// holodice, kuko, red_triangle), because canonicalize→elaborate re-derives
-/// the block layout in a way the backend's control-header pass doesn't match.
+/// setup: storage views, output ptrs, MapInto rewriting), then round-trips the
+/// resulting FuncBody through the EGraph so EGIR's GVN/DCE/folds apply to the
+/// entry body.
 fn convert_entry_point(
     def: &TlcDef,
     entry: &crate::ast::EntryDecl,
@@ -216,7 +214,7 @@ fn convert_entry_point(
     symbols: &SymbolTable,
     pure_constants: &HashSet<String>,
 ) -> Result<crate::ssa::types::EntryPoint, ConvertError> {
-    crate::egir::entry_points::convert_entry_point_pub(
+    let mut ep = crate::egir::entry_points::convert_entry_point_pub(
         def,
         entry,
         top_level,
@@ -224,7 +222,9 @@ fn convert_entry_point(
         symbols,
         pure_constants,
     )
-    .map_err(|e| ConvertError::GraphError(format!("entry point builder: {}", e)))
+    .map_err(|e| ConvertError::GraphError(format!("entry point builder: {}", e)))?;
+    ep.body = crate::egir::optimize_func(&ep.body);
+    Ok(ep)
 }
 
 // ============================================================================

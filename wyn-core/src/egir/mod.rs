@@ -24,7 +24,6 @@ pub mod from_tlc;
 mod tests;
 
 use crate::ssa::types::{FuncBody, Program};
-use std::collections::HashMap;
 
 /// Run the aegraph optimization on a full SSA program.
 ///
@@ -65,23 +64,10 @@ pub fn optimize_program(program: &Program) -> Program {
 }
 
 /// Optimize a single function body through the aegraph pipeline.
-fn optimize_func(body: &FuncBody) -> FuncBody {
+pub(crate) fn optimize_func(body: &FuncBody) -> FuncBody {
     // Phase 1: canonicalize SSA → sea-of-nodes (with hash-consing = GVN).
-    let (graph, skel_domtree) = canonicalize::canonicalize(body);
+    let (graph, skel_domtree, orig_block_map) = canonicalize::canonicalize(body);
 
-    // Build block map: original BlockId → skeleton BlockId.
-    let ssa_domtree = domtree::DomTree::build(&domtree::SsaCfgView { body });
-    let mut orig_block_map = HashMap::new();
-    orig_block_map.insert(body.entry_block(), graph.skeleton.entry);
-    let skel_blocks: Vec<wyn_ssa::BlockId> =
-        graph.skeleton.blocks.keys().filter(|&b| b != graph.skeleton.entry).collect();
-    let orig_non_entry: Vec<wyn_ssa::BlockId> =
-        ssa_domtree.preorder().iter().copied().filter(|&b| b != body.entry_block()).collect();
-    for (orig, skel) in orig_non_entry.iter().zip(skel_blocks.iter()) {
-        orig_block_map.insert(*orig, *skel);
-    }
-
-    // Build param list for elaboration.
     let params: Vec<_> = body.params.iter().map(|(_, ty, name)| (ty.clone(), name.clone())).collect();
 
     // Phase 2: elaborate sea-of-nodes → FuncBody (with scoped dedup = DCE).
