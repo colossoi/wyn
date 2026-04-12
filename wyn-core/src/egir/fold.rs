@@ -2,6 +2,7 @@
 //!
 //! Rules:
 //! - `Project{i}(Tuple/Vector/ArrayLit(a,b,…)) → i-th operand`
+//! - `Index(Tuple/Vector/ArrayLit(a,b,…), const k) → k-th operand`
 //! - identity elim: `x+0`, `0+x`, `x-0`, `x*1`, `1*x`, `x/1`
 //! - absorbing:    `x*0 → 0`, `0*x → 0`
 //! - double negation: `-(-x) → x`, `!(!x) → x`
@@ -26,6 +27,7 @@ impl EGraph {
     ) -> Option<NodeId> {
         match op {
             PureOp::Project { index } if operands.len() == 1 => self.fold_project(*index, operands[0]),
+            PureOp::Index if operands.len() == 2 => self.fold_index(operands[0], operands[1]),
             PureOp::BinOp(name) if operands.len() == 2 => {
                 let (a, b) = (operands[0], operands[1]);
                 self.fold_binop_identity(name, a, b)
@@ -34,6 +36,24 @@ impl EGraph {
             PureOp::UnaryOp(name) if operands.len() == 1 => self.fold_unary(name, operands[0]),
             _ => None,
         }
+    }
+
+    /// `Index(Tuple/Vector/ArrayLit(e0,…,en), const k) → e_k`
+    fn fold_index(&self, base: NodeId, index: NodeId) -> Option<NodeId> {
+        let k =
+            self.as_i32(index).map(|v| v as usize).or_else(|| self.as_u32(index).map(|v| v as usize))?;
+        let ENode::Pure {
+            op: base_op,
+            operands: base_operands,
+        } = &self.nodes[base]
+        else {
+            return None;
+        };
+        let len = match base_op {
+            PureOp::Tuple(n) | PureOp::Vector(n) | PureOp::ArrayLit(n) => *n,
+            _ => return None,
+        };
+        (k < len).then(|| base_operands[k])
     }
 
     /// `Project{i}(Tuple/Vector/ArrayLit(e0,…,en)) → e_i`

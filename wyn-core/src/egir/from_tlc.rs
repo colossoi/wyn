@@ -202,10 +202,12 @@ fn convert_function(
     })
 }
 
-/// Entry point conversion delegates to `to_ssa` for now — the GPU I/O logic
-/// (storage views, output ptrs, MapInto rewriting) is complex and identical
-/// in both paths. The resulting FuncBody can be optionally canonicalized
-/// through the EGraph afterward.
+/// Entry point conversion delegates to the legacy TLC→SSA builder (for GPU I/O
+/// setup: storage views, output ptrs, MapInto rewriting). The resulting FuncBody
+/// does NOT currently round-trip through the EGraph — doing so breaks the
+/// SPIR-V structured-control-flow validation on several testfiles (entrylevel,
+/// holodice, kuko, red_triangle), because canonicalize→elaborate re-derives
+/// the block layout in a way the backend's control-header pass doesn't match.
 fn convert_entry_point(
     def: &TlcDef,
     entry: &crate::ast::EntryDecl,
@@ -222,7 +224,7 @@ fn convert_entry_point(
         symbols,
         pure_constants,
     )
-    .map_err(|e| ConvertError::GraphError(format!("entry point via to_ssa: {}", e)))
+    .map_err(|e| ConvertError::GraphError(format!("entry point builder: {}", e)))
 }
 
 // ============================================================================
