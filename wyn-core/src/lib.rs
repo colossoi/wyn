@@ -956,11 +956,10 @@ pub struct SsaConvertedWithPipeline {
 }
 
 impl SsaConvertedWithPipeline {
-    /// Run SSA peephole optimizations.
+    /// SSA peephole optimizations (currently unwired — pass-through).
     pub fn optimize(self) -> SsaOptimized {
-        let ssa = ssa::opt::optimize(self.ssa);
         SsaOptimized {
-            ssa,
+            ssa: self.ssa,
             pipeline: self.pipeline,
         }
     }
@@ -992,11 +991,10 @@ pub struct SsaConverted {
 }
 
 impl SsaConverted {
-    /// Run SSA peephole optimizations (param forwarding, empty block elimination).
+    /// SSA peephole optimizations (currently unwired — pass-through).
     pub fn optimize(self) -> SsaOptimized {
-        let ssa = ssa::opt::optimize(self.ssa);
         SsaOptimized {
-            ssa,
+            ssa: self.ssa,
             pipeline: pipeline_descriptor::PipelineDescriptor::default(),
         }
     }
