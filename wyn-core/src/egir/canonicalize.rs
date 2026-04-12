@@ -5,9 +5,7 @@
 //! instructions in the skeleton CFG.
 
 use crate::ast::TypeName;
-use crate::ssa::types::{
-    BlockId, ConstantValue, FuncBody, InstKind, ValueId, ValueRef,
-};
+use crate::ssa::types::{BlockId, ConstantValue, FuncBody, InstKind, ValueId, ValueRef};
 use polytype::Type;
 use smallvec::SmallVec;
 use std::collections::HashMap;
@@ -67,13 +65,12 @@ pub fn canonicalize(body: &FuncBody) -> (EGraph, DomTree) {
 
             if kind.is_hoistable() {
                 // Pure instruction → lift into e-graph with hash-consing.
-                let operands = resolve_operands(kind, &val_map, &mut graph);
-                let pure_op = extract_pure_op(kind)
-                    .expect("is_hoistable but no PureOp mapping");
                 let ty = inst
                     .result
                     .map(|r| body.get_value_type(r).clone())
                     .unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![]));
+                let operands = resolve_operands(kind, &val_map, &mut graph);
+                let pure_op = extract_pure_op(kind, &ty).expect("is_hoistable but no PureOp mapping");
                 let nid = graph.intern_pure(pure_op, operands, ty);
 
                 if let Some(result_vid) = inst.result {
@@ -87,14 +84,12 @@ pub fn canonicalize(body: &FuncBody) -> (EGraph, DomTree) {
                     graph.alloc_side_effect_result(ty)
                 });
 
-                graph.skeleton.blocks[skel_bid]
-                    .side_effects
-                    .push(SideEffect {
-                        kind: kind.clone(),
-                        operand_nodes: operands,
-                        result: result_nid,
-                        effects: inst.effects,
-                    });
+                graph.skeleton.blocks[skel_bid].side_effects.push(SideEffect {
+                    kind: kind.clone(),
+                    operand_nodes: operands,
+                    result: result_nid,
+                    effects: inst.effects,
+                });
 
                 if let (Some(result_vid), Some(result_nid)) = (inst.result, result_nid) {
                     val_map.insert(result_vid, result_nid);
@@ -125,24 +120,14 @@ fn resolve_operands(
     val_map: &HashMap<ValueId, NodeId>,
     graph: &mut EGraph,
 ) -> SmallVec<[NodeId; 4]> {
-    kind.value_uses()
-        .iter()
-        .map(|vr| resolve_value_ref(vr, val_map, graph))
-        .collect()
+    kind.value_uses().iter().map(|vr| resolve_value_ref(vr, val_map, graph)).collect()
 }
 
-fn resolve_value_ref(
-    vr: &ValueRef,
-    val_map: &HashMap<ValueId, NodeId>,
-    graph: &mut EGraph,
-) -> NodeId {
+fn resolve_value_ref(vr: &ValueRef, val_map: &HashMap<ValueId, NodeId>, graph: &mut EGraph) -> NodeId {
     match vr {
-        ValueRef::Ssa(vid) => *val_map.get(vid).unwrap_or_else(|| {
-            panic!(
-                "ValueId {:?} not in val_map during canonicalization",
-                vid
-            )
-        }),
+        ValueRef::Ssa(vid) => *val_map
+            .get(vid)
+            .unwrap_or_else(|| panic!("ValueId {:?} not in val_map during canonicalization", vid)),
         ValueRef::Const(c) => {
             let ty = const_type(c);
             graph.intern_constant(*c, ty)
@@ -167,14 +152,10 @@ fn convert_terminator(
     block_map: &HashMap<BlockId, BlockId>,
 ) -> SkeletonTerminator {
     let mv = |vid: ValueId| -> NodeId {
-        *val_map.get(&vid).unwrap_or_else(|| {
-            panic!("ValueId {:?} not in val_map (terminator)", vid)
-        })
+        *val_map.get(&vid).unwrap_or_else(|| panic!("ValueId {:?} not in val_map (terminator)", vid))
     };
     let mb = |bid: BlockId| -> BlockId {
-        *block_map.get(&bid).unwrap_or_else(|| {
-            panic!("BlockId {:?} not in block_map (terminator)", bid)
-        })
+        *block_map.get(&bid).unwrap_or_else(|| panic!("BlockId {:?} not in block_map (terminator)", bid))
     };
 
     match term {

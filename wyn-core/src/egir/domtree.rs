@@ -67,9 +67,7 @@ impl DomTree {
                 } else {
                     let mut iter = pred_list.iter();
                     let first = doms[iter.next().unwrap()].clone();
-                    iter.fold(first, |acc, p| {
-                        acc.intersection(&doms[p]).copied().collect()
-                    })
+                    iter.fold(first, |acc, p| acc.intersection(&doms[p]).copied().collect())
                 };
                 new_set.insert(b);
                 if new_set != doms[&b] {

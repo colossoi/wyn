@@ -249,7 +249,7 @@ fn compile_file(
     });
 
     // Transform TLC to SSA via EGraph (GVN + DCE for free)
-    let ssa = time("to_egir", verbose, || tlc_reachable.to_egir())?;
+    let ssa = time("to_egir", verbose, || tlc_reachable.to_ssa())?;
 
     // Dump initial SSA if requested
     if let Some(ref path) = output_init_ssa {

@@ -47,10 +47,7 @@ impl<K: Hash + Eq + Clone, V: Copy> ScopedMap<K, V> {
 
     /// Insert a key-value pair in the current scope.
     pub fn insert(&mut self, key: K, value: V) {
-        self.map
-            .entry(key.clone())
-            .or_default()
-            .push((self.depth, value));
+        self.map.entry(key.clone()).or_default().push((self.depth, value));
         self.scope_keys[self.depth].push(key);
     }
 

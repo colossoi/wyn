@@ -328,7 +328,14 @@ impl<'a> Converter<'a> {
 
         match &term.kind {
             // --- Literals ---
-            TermKind::IntLit(s) => Ok(self.graph.intern_pure(PureOp::Int(s.clone()), smallvec![], ty)),
+            TermKind::IntLit(s) => {
+                let op = if matches!(&ty, Type::Constructed(TypeName::UInt(_), _)) {
+                    PureOp::Uint(s.clone())
+                } else {
+                    PureOp::Int(s.clone())
+                };
+                Ok(self.graph.intern_pure(op, smallvec![], ty))
+            }
             TermKind::FloatLit(f) => {
                 Ok(self.graph.intern_pure(PureOp::Float(f.to_string()), smallvec![], ty))
             }

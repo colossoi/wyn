@@ -26,7 +26,10 @@ new_key_type! {
 /// - Derives `Hash + Eq` for hash-consing
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PureOp {
+    /// Signed integer literal (i8, i16, i32, i64).
     Int(String),
+    /// Unsigned integer literal (u8, u16, u32, u64).
+    Uint(String),
     Float(String),
     Bool(bool),
     Unit,
@@ -289,9 +292,12 @@ impl EGraph {
 
 /// Extract a `PureOp` from a pure `InstKind`, returning `None` if the
 /// instruction is not pure/hoistable.
-pub fn extract_pure_op(kind: &InstKind) -> Option<PureOp> {
+pub fn extract_pure_op(kind: &InstKind, ty: &Type<TypeName>) -> Option<PureOp> {
     match kind {
-        InstKind::Int(s) => Some(PureOp::Int(s.clone())),
+        InstKind::Int(s) => {
+            let is_unsigned = matches!(ty, Type::Constructed(TypeName::UInt(_), _));
+            if is_unsigned { Some(PureOp::Uint(s.clone())) } else { Some(PureOp::Int(s.clone())) }
+        }
         InstKind::Float(s) => Some(PureOp::Float(s.clone())),
         InstKind::Bool(b) => Some(PureOp::Bool(*b)),
         InstKind::Unit => Some(PureOp::Unit),
@@ -330,7 +336,7 @@ pub fn rebuild_inst_kind(op: &PureOp, operands: &[wyn_ssa::ValueId]) -> InstKind
     use crate::ssa::types::ValueRef;
     let vr = |i: usize| -> ValueRef { ValueRef::Ssa(operands[i]) };
     match op {
-        PureOp::Int(s) => InstKind::Int(s.clone()),
+        PureOp::Int(s) | PureOp::Uint(s) => InstKind::Int(s.clone()),
         PureOp::Float(s) => InstKind::Float(s.clone()),
         PureOp::Bool(b) => InstKind::Bool(*b),
         PureOp::Unit => InstKind::Unit,

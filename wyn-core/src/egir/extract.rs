@@ -67,6 +67,7 @@ fn op_cost(op: &PureOp) -> Cost {
     match op {
         // Leaves / free operations:
         PureOp::Int(_)
+        | PureOp::Uint(_)
         | PureOp::Float(_)
         | PureOp::Bool(_)
         | PureOp::Unit
@@ -130,11 +131,8 @@ fn topological_sort(graph: &EGraph) -> Vec<NodeId> {
     }
 
     // Start with leaves (nodes with 0 children = 0 in-degree).
-    let mut queue: Vec<NodeId> = in_degree
-        .iter()
-        .filter(|(_, &deg)| deg == 0)
-        .map(|(&nid, _)| nid)
-        .collect();
+    let mut queue: Vec<NodeId> =
+        in_degree.iter().filter(|(_, &deg)| deg == 0).map(|(&nid, _)| nid).collect();
 
     let mut result = Vec::with_capacity(graph.nodes.len());
 

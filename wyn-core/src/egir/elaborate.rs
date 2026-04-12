@@ -292,7 +292,7 @@ fn const_to_inst_kind(c: &ConstantValue) -> InstKind {
 fn pure_to_inst_kind(op: &PureOp, args: &[ValueId]) -> InstKind {
     let vr = |i: usize| -> ValueRef { ValueRef::Ssa(args[i]) };
     match op {
-        PureOp::Int(s) => InstKind::Int(s.clone()),
+        PureOp::Int(s) | PureOp::Uint(s) => InstKind::Int(s.clone()),
         PureOp::Float(s) => InstKind::Float(s.clone()),
         PureOp::Bool(b) => InstKind::Bool(*b),
         PureOp::Unit => InstKind::Unit,
