@@ -408,7 +408,7 @@ fn compile_impl(source: &str) -> CompileResult {
         .monomorphize()
         .buffer_specialize()
         .inline()
-        .to_ssa()
+        .to_egir()
     {
         Ok(s) => s,
         Err(e) => return CompileResult::err_msg(format!("SSA conversion error: {:?}", e)),
@@ -513,7 +513,7 @@ fn compile_with_ir_impl(source: &str) -> CompileResultWithIR {
         .monomorphize()
         .buffer_specialize()
         .inline()
-        .to_ssa()
+        .to_egir()
     {
         Ok(s) => s,
         Err(e) => return CompileResultWithIR::err_msg(format!("SSA conversion error: {:?}", e)),

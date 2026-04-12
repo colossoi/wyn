@@ -31,7 +31,7 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .inline_small()
         .parallelize_soacs()
         .filter_reachable()
-        .to_ssa()
+        .to_egir()
         .map_err(|e| crate::err_spirv!("{}", e))?
         .optimize()
         .lower_soacs()
@@ -62,7 +62,7 @@ fn compile_through_ssa(input: &str) -> Result<Program, CompilerError> {
         .inline_small()
         .parallelize_soacs()
         .filter_reachable()
-        .to_ssa()
+        .to_egir()
         .map_err(|e| crate::err_spirv!("{}", e))?;
     Ok(ssa.ssa)
 }
@@ -503,8 +503,8 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     let tlc = tlc.filter_reachable();
     eprintln!("=== filter_reachable OK ===");
 
-    let ssa = tlc.to_ssa().expect("to_ssa");
-    eprintln!("=== to_ssa OK ===");
+    let ssa = tlc.to_egir().expect("to_egir");
+    eprintln!("=== to_egir OK ===");
 
     let ssa = ssa.optimize();
     eprintln!("=== optimize OK ===");
@@ -571,8 +571,8 @@ entry main(data: []i32) []i32 = [first(data)]
     let tlc = tlc.filter_reachable();
     eprintln!("=== filter_reachable OK ===");
 
-    let ssa = tlc.to_ssa().expect("to_ssa");
-    eprintln!("=== to_ssa OK ===");
+    let ssa = tlc.to_egir().expect("to_egir");
+    eprintln!("=== to_egir OK ===");
 
     let ssa = ssa.optimize();
     eprintln!("=== optimize OK ===");

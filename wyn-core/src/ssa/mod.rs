@@ -13,7 +13,6 @@
 pub mod builder;
 pub mod layout;
 pub mod merge;
-pub mod opt;
 pub mod print;
 pub mod soa_helpers;
 pub mod soac_lower;

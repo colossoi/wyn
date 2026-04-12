@@ -281,10 +281,10 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 //       -> .inline_small()                              -> TlcSmallInlined
 //       -> .parallelize_soacs()                         -> TlcParallelized
 //       -> .filter_reachable()                          -> TlcReachable
-//       -> .to_ssa()                                    -> SsaConverted
+//       -> .to_egir()                                   -> SsaConverted
 //
 // BackEnd Pipeline (SSA -> output):
-//       -> .optimize()                                  -> SsaOptimized
+//       -> .optimize()                                  -> SsaOptimized  (no-op pass-through)
 //       -> .lower_soacs()                               -> SsaSoacLowered
 //       -> .lower()                                     -> Lowered
 
@@ -833,12 +833,6 @@ impl TlcInlined {
         }
     }
 
-    /// Transform TLC directly to SSA.
-    pub fn to_ssa(self) -> std::result::Result<SsaConverted, tlc::to_ssa::ConvertError> {
-        let ssa = tlc::to_ssa::convert_program(&self.tlc)?;
-        Ok(SsaConverted { ssa })
-    }
-
     /// Transform TLC to SSA via the EGraph path (GVN + DCE for free).
     pub fn to_egir(self) -> std::result::Result<SsaConverted, egir::from_tlc::ConvertError> {
         let ssa = egir::from_tlc::convert_program(&self.tlc)?;
@@ -872,12 +866,6 @@ impl TlcSmallInlined {
         }
     }
 
-    /// Transform TLC directly to SSA.
-    pub fn to_ssa(self) -> std::result::Result<SsaConverted, tlc::to_ssa::ConvertError> {
-        let ssa = tlc::to_ssa::convert_program(&self.tlc)?;
-        Ok(SsaConverted { ssa })
-    }
-
     /// Transform TLC to SSA via the EGraph path (GVN + DCE for free).
     pub fn to_egir(self) -> std::result::Result<SsaConverted, egir::from_tlc::ConvertError> {
         let ssa = egir::from_tlc::convert_program(&self.tlc)?;
@@ -903,15 +891,6 @@ impl TlcParallelized {
         }
     }
 
-    /// Transform TLC directly to SSA.
-    pub fn to_ssa(self) -> std::result::Result<SsaConvertedWithPipeline, tlc::to_ssa::ConvertError> {
-        let ssa = tlc::to_ssa::convert_program(&self.tlc)?;
-        Ok(SsaConvertedWithPipeline {
-            ssa,
-            pipeline: self.pipeline,
-        })
-    }
-
     /// Transform TLC to SSA via the EGraph path (GVN + DCE for free).
     pub fn to_egir(self) -> std::result::Result<SsaConvertedWithPipeline, egir::from_tlc::ConvertError> {
         let ssa = egir::from_tlc::convert_program(&self.tlc)?;
@@ -930,15 +909,6 @@ pub struct TlcReachableWithPipeline {
 }
 
 impl TlcReachableWithPipeline {
-    /// Transform TLC directly to SSA.
-    pub fn to_ssa(self) -> std::result::Result<SsaConvertedWithPipeline, tlc::to_ssa::ConvertError> {
-        let ssa = tlc::to_ssa::convert_program(&self.tlc)?;
-        Ok(SsaConvertedWithPipeline {
-            ssa,
-            pipeline: self.pipeline,
-        })
-    }
-
     /// Transform TLC to SSA via the EGraph path (GVN + DCE for free).
     pub fn to_egir(self) -> std::result::Result<SsaConvertedWithPipeline, egir::from_tlc::ConvertError> {
         let ssa = egir::from_tlc::convert_program(&self.tlc)?;
@@ -972,12 +942,6 @@ pub struct TlcReachable {
 }
 
 impl TlcReachable {
-    /// Transform TLC directly to SSA.
-    pub fn to_ssa(self) -> std::result::Result<SsaConverted, tlc::to_ssa::ConvertError> {
-        let ssa = tlc::to_ssa::convert_program(&self.tlc)?;
-        Ok(SsaConverted { ssa })
-    }
-
     /// Transform TLC to SSA via the EGraph path (GVN + DCE for free).
     pub fn to_egir(self) -> std::result::Result<SsaConverted, egir::from_tlc::ConvertError> {
         let ssa = egir::from_tlc::convert_program(&self.tlc)?;

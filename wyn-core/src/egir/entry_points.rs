@@ -12,7 +12,7 @@ use crate::types::TypeExt;
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 
-use super::{
+use crate::tlc::{
     ArrayExpr, Def as TlcDef, DefMeta, Lambda, LoopKind as TlcLoopKind, Program as TlcProgram, SoacOp,
     Term, TermKind,
 };

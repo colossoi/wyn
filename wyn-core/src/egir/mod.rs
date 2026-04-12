@@ -16,6 +16,7 @@ mod rewrite;
 mod scoped_map;
 pub mod types;
 
+pub mod entry_points;
 pub mod from_tlc;
 
 #[cfg(test)]

@@ -214,7 +214,7 @@ fn convert_entry_point(
     symbols: &SymbolTable,
     pure_constants: &HashSet<String>,
 ) -> Result<crate::ssa::types::EntryPoint, ConvertError> {
-    crate::tlc::to_ssa::convert_entry_point_pub(
+    crate::egir::entry_points::convert_entry_point_pub(
         def,
         entry,
         top_level,

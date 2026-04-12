@@ -99,9 +99,6 @@ enum DriverError {
     #[error("Compilation error: {0}")]
     CompilationError(#[from] wyn_core::error::CompilerError),
 
-    #[error("SSA conversion error: {0}")]
-    SsaConversionError(#[from] wyn_core::tlc::to_ssa::ConvertError),
-
     #[error("EGraph conversion error: {0}")]
     EgirConversionError(#[from] wyn_core::egir::from_tlc::ConvertError),
 }

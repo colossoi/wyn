@@ -23,9 +23,6 @@ pub mod soa;
 pub mod specialize;
 #[cfg(test)]
 mod specialize_tests;
-pub mod to_ssa;
-#[cfg(test)]
-mod to_ssa_tests;
 
 use crate::ast::{self, NodeId, Span, TypeName};
 use crate::types::TypeExt;
