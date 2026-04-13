@@ -72,6 +72,28 @@ What you get "for free":
 - **LICM** — `loop_analysis` picks the outermost loop where all operands are available as the placement point.
 - **Branch folding + redundant-phi elimination** — `skel_opt` rewrites the skeleton CFG before elaboration.
 
+| Module | Description |
+|--------|-------------|
+| `from_tlc` | Direct TLC term → EGraph lowering (replaces the old `tlc::to_ssa`) |
+| `canonicalize` | SSA `FuncBody` → EGraph (alternative entry, used for round-trip tests) |
+| `elaborate` | EGraph → `FuncBody` via `FuncBuilder`, demand-driven and scoped |
+| `extract` | Cost-based bottom-up selection of the best representative per node |
+| `skel_opt` | Skeleton-level CFG rewrites (branch folding, redundant phi elim) |
+| `fold` | Algebraic simplification applied during `intern_pure` |
+| `domtree` | Generic dominator tree working over both SSA and skeleton CFGs |
+| `loop_analysis` | Loop nesting info for LICM placement |
+| `rewrite` | Trait + driver for pattern-based rewrite rules (Phase 2; current ruleset empty) |
+
+### SSA
+
+The SSA IR is built on the **`wyn-ssa`** crate, a generic SSA framework parameterized over instruction type, effect token type, and value type. The concrete instantiation uses `InstKind` for instructions, `EffectToken` for effects, and `Type<TypeName>` for types.
+
+Key features of the SSA IR:
+- CFG with basic blocks and block parameters (not phi nodes)
+- Effect tokens tracked at framework level on `InstNode`, not inside instruction variants
+- `ValueDef::FunctionParam` distinct from `ValueDef::Param` (block params)
+- `ControlHeader` metadata stored in a side-map on `FuncBody`, not on blocks
+
 | Stage | Module | Description |
 |-------|--------|-------------|
 | **SsaConverted** | `egir::from_tlc` | TLC lowered into EGraph, then elaborated to SSA `FuncBody` |
@@ -83,28 +105,6 @@ Alternative backend:
 | Stage | Module | Description |
 |-------|--------|-------------|
 | **GLSL** | `glsl` | SSA to GLSL source code (from `SsaSoacLowered`, no materialize needed) |
-
-### EGIR modules
-
-- **`from_tlc`** — Direct TLC term → EGraph lowering (replaces the old `tlc::to_ssa`).
-- **`canonicalize`** — SSA `FuncBody` → EGraph (alternative entry, used for round-trip tests).
-- **`elaborate`** — EGraph → `FuncBody` via `FuncBuilder`, demand-driven and scoped.
-- **`extract`** — Cost-based bottom-up selection of the best representative per node.
-- **`skel_opt`** — Skeleton-level CFG rewrites (branch folding, redundant phi elim).
-- **`fold`** — Algebraic simplification applied during `intern_pure`.
-- **`domtree`** — Generic dominator tree working over both SSA and skeleton CFGs.
-- **`loop_analysis`** — Loop nesting info for LICM placement.
-- **`rewrite`** — Trait + driver for pattern-based rewrite rules (Phase 2; current ruleset empty).
-
-### SSA (target IR)
-
-The SSA IR is built on the **`wyn-ssa`** crate, a generic SSA framework parameterized over instruction type, effect token type, and value type. The concrete instantiation uses `InstKind` for instructions, `EffectToken` for effects, and `Type<TypeName>` for types.
-
-Key features of the SSA IR:
-- CFG with basic blocks and block parameters (not phi nodes)
-- Effect tokens tracked at framework level on `InstNode`, not inside instruction variants
-- `ValueDef::FunctionParam` distinct from `ValueDef::Param` (block params)
-- `ControlHeader` metadata stored in a side-map on `FuncBody`, not on blocks
 
 ### SSA Passes in `wyn-ssa` (generic framework)
 
