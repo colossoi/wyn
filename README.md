@@ -54,20 +54,28 @@ The compiler uses a multi-stage pipeline with typestate-driven phases. Each stag
 | **TlcParallelized** | `tlc::parallelize` | Structural parallelization of compute shader SOACs (chunked entries, pipeline descriptors) |
 | **TlcReachable** | `tlc::inline` | Dead definition elimination |
 
-### SSA
+### EGIR (Acyclic E-Graph IR)
 
-The SSA IR is built on the **`wyn-ssa`** crate, a generic SSA framework parameterized over instruction type, effect token type, and value type. The concrete instantiation uses `InstKind` for instructions, `EffectToken` for effects, and `Type<TypeName>` for types.
+TLC lowers directly into an **acyclic e-graph** (sea of pure nodes + skeleton CFG) rather than into sequential SSA. The e-graph is the central mid-end IR: most optimizations fall out of the data structure without dedicated passes.
 
-Key features of the SSA IR:
-- CFG with basic blocks and block parameters (not phi nodes)
-- Effect tokens tracked at framework level on `InstNode`, not inside instruction variants
-- `ValueDef::FunctionParam` distinct from `ValueDef::Param` (block params)
-- `ControlHeader` metadata stored in a side-map on `FuncBody`, not on blocks
+Key structures (`egir::types`):
+- **`ENode::Pure { op, operands }`** — hash-consed pure value; GVN is automatic.
+- **`Skeleton`** — a CFG of side-effectful instructions (`SideEffect`) anchored in blocks with `SkeletonTerminator`s. Operands are `NodeId`s.
+- **`ENode::SideEffectResult`** — unique (non-hash-consed) handle for the value produced by a skeleton instruction, consumable by the pure sea.
+- **Purity is blacklisted**, not whitelisted: an instruction flows into the pure sea unless it carries an effect token *and* is one of `Alloca`, `Load`, `Store`, `Soac`. `Call`, `Intrinsic`, `StorageView*`, `OutputPtr` are pure.
+
+What you get "for free":
+- **GVN** — `intern_pure(op, operands)` returns an existing `NodeId` when `(op, operands)` match.
+- **Constant folding** — `intern_pure` consults `fold.rs` before inserting; folded results are themselves interned, so folds compose.
+- **DCE** — `elaborate` is demand-driven from skeleton roots; unreached pure nodes are never emitted.
+- **CSE along a domtree path** — `ScopedMap` tracks emitted nodes per dominator scope; siblings never cross-pollute.
+- **LICM** — `loop_analysis` picks the outermost loop where all operands are available as the placement point.
+- **Branch folding + redundant-phi elimination** — `skel_opt` rewrites the skeleton CFG before elaboration.
 
 | Stage | Module | Description |
 |-------|--------|-------------|
-| **SsaConverted** | `tlc::to_ssa` | TLC to SSA conversion via `FuncBuilder` |
-| **SsaOptimized** | `ssa::opt` | SSA peephole optimizations (see below) |
+| **SsaConverted** | `egir::from_tlc` | TLC lowered into EGraph, then elaborated to SSA `FuncBody` |
+| **SsaOptimized** | (pass-through) | Placeholder; optimization already happened in EGraph |
 | **SsaSoacLowered** | `ssa::soac_lower` | SOAC expansion: loops, map unrolling, map-reduce fusion |
 | **SsaMaterialized** | `spirv::materialize` | Dynamic array indices materialized for SPIR-V (+ LICM) |
 | **Lowered** | `spirv` | SSA to SPIR-V code generation |
@@ -77,19 +85,30 @@ Alternative backend:
 |-------|--------|-------------|
 | **GLSL** | `glsl` | SSA to GLSL source code (from `SsaSoacLowered`, no materialize needed) |
 
-### SSA Optimization Passes (`ssa::opt`)
+### EGIR modules
 
-Run in order on each function body:
+- **`from_tlc`** — Direct TLC term → EGraph lowering (replaces the old `tlc::to_ssa`).
+- **`canonicalize`** — SSA `FuncBody` → EGraph (alternative entry, used for round-trip tests).
+- **`elaborate`** — EGraph → `FuncBody` via `FuncBuilder`, demand-driven and scoped.
+- **`extract`** — Cost-based bottom-up selection of the best representative per node.
+- **`skel_opt`** — Skeleton-level CFG rewrites (branch folding, redundant phi elim).
+- **`fold`** — Algebraic simplification applied during `intern_pure`.
+- **`domtree`** — Generic dominator tree working over both SSA and skeleton CFGs.
+- **`loop_analysis`** — Loop nesting info for LICM placement.
+- **`rewrite`** — Trait + driver for pattern-based rewrite rules (Phase 2; current ruleset empty).
 
-1. **Forward params** — When a block has one unconditional predecessor, replace block params with the branch args
-2. **Project fold** — Copy propagation through tuple/vector/array construction: `project(tuple(a, b), 0)` → `a`
-3. **Local CSE** — Per-block common subexpression elimination for constants and globals
-4. **DCE** — Dead code elimination (remove unused non-effectful instructions)
-5. **Empty block elimination** — Remove blocks with no instructions that just jump elsewhere
+### SSA (target IR)
+
+The SSA IR is built on the **`wyn-ssa`** crate, a generic SSA framework parameterized over instruction type, effect token type, and value type. The concrete instantiation uses `InstKind` for instructions, `EffectToken` for effects, and `Type<TypeName>` for types.
+
+Key features of the SSA IR:
+- CFG with basic blocks and block parameters (not phi nodes)
+- Effect tokens tracked at framework level on `InstNode`, not inside instruction variants
+- `ValueDef::FunctionParam` distinct from `ValueDef::Param` (block params)
+- `ControlHeader` metadata stored in a side-map on `FuncBody`, not on blocks
 
 ### SSA Passes in `wyn-ssa` (generic framework)
 
-- **`lift_and_merge`** — Hoist pure instructions to deepest operand block (LICM), then deduplicate equivalent instructions. Respects conditional branches (won't hoist past `CondBranch`).
 - **`forward_single_pred_params`** — Forward block parameters through single-predecessor edges
 - **`eliminate_empty_blocks`** — Remove empty unconditional-jump blocks
 - **`inline_block_param` / `inline_entry_param`** — Replace a block parameter with a constant instruction
@@ -170,7 +189,7 @@ cargo build --release
 cargo test
 ```
 
-539 tests currently pass (6 ignored for pending features).
+564 tests currently pass (6 ignored for pending features). All 24 end-to-end testfiles in `testfiles/` compile and validate (`bash scripts/validate_testfiles.sh`).
 
 ## Language Overview
 
