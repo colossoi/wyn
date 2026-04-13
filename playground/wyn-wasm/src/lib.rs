@@ -421,11 +421,8 @@ fn compile_impl(source: &str) -> CompileResult {
     // Eliminate dead functions
     let reachable = parallelized.filter_reachable();
 
-    // SSA peephole optimizations
-    let optimized = reachable.optimize();
-
     // Lower SOAC instructions to explicit loops
-    let soac_lowered = optimized.lower_soacs();
+    let soac_lowered = reachable.lower_soacs();
 
     // Lower to Shadertoy GLSL
     match soac_lowered.lower_shadertoy() {

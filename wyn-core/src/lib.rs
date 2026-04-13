@@ -284,7 +284,6 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 //       -> .to_egir()                                   -> SsaConverted
 //
 // BackEnd Pipeline (SSA -> output):
-//       -> .optimize()                                  -> SsaOptimized  (no-op pass-through)
 //       -> .lower_soacs()                               -> SsaSoacLowered
 //       -> .lower()                                     -> Lowered
 
@@ -926,10 +925,11 @@ pub struct SsaConvertedWithPipeline {
 }
 
 impl SsaConvertedWithPipeline {
-    /// SSA peephole optimizations (currently unwired — pass-through).
-    pub fn optimize(self) -> SsaOptimized {
-        SsaOptimized {
-            ssa: self.ssa,
+    /// Lower first-class SOAC instructions to explicit loops.
+    pub fn lower_soacs(self) -> SsaSoacLowered {
+        let ssa = ssa::soac_lower::lower_soacs(self.ssa);
+        SsaSoacLowered {
+            ssa,
             pipeline: self.pipeline,
         }
     }
@@ -955,28 +955,12 @@ pub struct SsaConverted {
 }
 
 impl SsaConverted {
-    /// SSA peephole optimizations (currently unwired — pass-through).
-    pub fn optimize(self) -> SsaOptimized {
-        SsaOptimized {
-            ssa: self.ssa,
-            pipeline: pipeline_descriptor::PipelineDescriptor::default(),
-        }
-    }
-}
-
-/// SSA after peephole optimizations
-pub struct SsaOptimized {
-    pub ssa: ssa::types::Program,
-    pub pipeline: pipeline_descriptor::PipelineDescriptor,
-}
-
-impl SsaOptimized {
     /// Lower first-class SOAC instructions to explicit loops.
     pub fn lower_soacs(self) -> SsaSoacLowered {
         let ssa = ssa::soac_lower::lower_soacs(self.ssa);
         SsaSoacLowered {
             ssa,
-            pipeline: self.pipeline,
+            pipeline: pipeline_descriptor::PipelineDescriptor::default(),
         }
     }
 }

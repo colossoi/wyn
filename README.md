@@ -75,7 +75,6 @@ What you get "for free":
 | Stage | Module | Description |
 |-------|--------|-------------|
 | **SsaConverted** | `egir::from_tlc` | TLC lowered into EGraph, then elaborated to SSA `FuncBody` |
-| **SsaOptimized** | (pass-through) | Placeholder; optimization already happened in EGraph |
 | **SsaSoacLowered** | `ssa::soac_lower` | SOAC expansion: loops, map unrolling, map-reduce fusion |
 | **SsaMaterialized** | `spirv::materialize` | Dynamic array indices materialized for SPIR-V (+ LICM) |
 | **Lowered** | `spirv` | SSA to SPIR-V code generation |

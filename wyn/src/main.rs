@@ -256,19 +256,16 @@ fn compile_file(
         }
     }
 
-    // SSA peephole optimizations
-    let optimized = time("ssa_opt", verbose, || ssa.optimize());
-
-    // Dump optimized SSA if requested
+    // Dump optimized SSA if requested (EGIR has already optimized at this point)
     if let Some(ref path) = output_opt_ssa {
-        fs::write(path, wyn_core::ssa::print::format_program(&optimized.ssa))?;
+        fs::write(path, wyn_core::ssa::print::format_program(&ssa.ssa))?;
         if verbose {
             info!("Wrote optimized SSA to {}", path.display());
         }
     }
 
     // Lower first-class SOAC instructions to explicit loops
-    let soac_lowered = time("soac_lower", verbose, || optimized.lower_soacs());
+    let soac_lowered = time("soac_lower", verbose, || ssa.lower_soacs());
 
     match target {
         Target::Spirv => {

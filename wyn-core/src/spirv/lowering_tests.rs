@@ -28,8 +28,7 @@ fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
         .parallelize_soacs()
         .filter_reachable()
         .to_egir()
-        .expect("SSA conversion failed")
-        .optimize();
+        .expect("SSA conversion failed");
 
     ssa.lower_soacs().lower().map(|l| l.spirv)
 }
@@ -355,8 +354,7 @@ fn compile_to_spirv_with_partial_eval(source: &str) -> Result<Vec<u32>> {
         .parallelize_soacs()
         .filter_reachable()
         .to_egir()
-        .expect("SSA conversion failed")
-        .optimize();
+        .expect("SSA conversion failed");
 
     ssa.lower_soacs().lower().map(|l| l.spirv)
 }
