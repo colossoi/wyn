@@ -49,7 +49,7 @@ The compiler uses a multi-stage pipeline with typestate-driven phases. Each stag
 | **TlcDefunctionalized** | `tlc::defunctionalize` | Lambda lifting + SOAC capture flattening |
 | **TlcMonomorphized** | `tlc::specialize`, `tlc::monomorphize` | Polymorphic intrinsics specialized; user functions monomorphized |
 | **TlcBufferSpecialized** | `tlc::buffer_specialize` | Storage buffer parameter specialization |
-| **TlcInlined** | `tlc::inline` | Compiler-generated lambda inlining + DCE |
+| **TlcGeneratedLambdasFolded** | `tlc::inline` | Fold compiler-generated `_w_lambda_*` defs (from defunctionalization) back at call sites + DCE |
 | **TlcSmallInlined** | `tlc::inline` | Inline small user functions and constants |
 | **TlcParallelized** | `tlc::parallelize` | Structural parallelization of compute shader SOACs (chunked entries, pipeline descriptors) |
 | **TlcReachable** | `tlc::inline` | Dead definition elimination |

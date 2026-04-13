@@ -1392,7 +1392,7 @@ mod tests {
             .defunctionalize()
             .monomorphize()
             .buffer_specialize()
-            .inline()
+            .fold_generated_lambdas()
             .inline_small()
             .parallelize_soacs()
             .filter_reachable();

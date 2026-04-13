@@ -232,10 +232,10 @@ fn compile_file(
     let tlc_buf = time("buffer_specialize", verbose, || tlc_mono.buffer_specialize());
 
     // Inline compiler-generated lambda defs + DCE
-    let tlc_inlined = time("inline", verbose, || tlc_buf.inline());
+    let tlc_folded = time("inline", verbose, || tlc_buf.fold_generated_lambdas());
 
     // Inline small user functions and constants at TLC level
-    let tlc_inlined = time("tlc_inline_small", verbose, || tlc_inlined.inline_small());
+    let tlc_inlined = time("tlc_inline_small", verbose, || tlc_folded.inline_small());
 
     // Parallelize SOACs in compute shaders (structural decisions at TLC level)
     let tlc_parallel = time("tlc_parallelize", verbose, || tlc_inlined.parallelize_soacs());

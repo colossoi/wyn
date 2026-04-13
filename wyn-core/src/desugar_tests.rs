@@ -27,7 +27,7 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .defunctionalize()
         .monomorphize()
         .buffer_specialize()
-        .inline()
+        .fold_generated_lambdas()
         .inline_small()
         .parallelize_soacs()
         .filter_reachable()
@@ -57,7 +57,7 @@ fn compile_through_ssa(input: &str) -> Result<Program, CompilerError> {
         .defunctionalize()
         .monomorphize()
         .buffer_specialize()
-        .inline()
+        .fold_generated_lambdas()
         .inline_small()
         .parallelize_soacs()
         .filter_reachable()
@@ -490,7 +490,7 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     let tlc = tlc.buffer_specialize();
     eprintln!("=== buffer_specialize OK ===");
 
-    let tlc = tlc.inline();
+    let tlc = tlc.fold_generated_lambdas();
     eprintln!("=== inline OK ===");
 
     let tlc = tlc.inline_small();
@@ -555,7 +555,7 @@ entry main(data: []i32) []i32 = [first(data)]
     let tlc = tlc.buffer_specialize();
     eprintln!("=== buffer_specialize OK ===");
 
-    let tlc = tlc.inline();
+    let tlc = tlc.fold_generated_lambdas();
     eprintln!("=== inline OK ===");
 
     let tlc = tlc.inline_small();

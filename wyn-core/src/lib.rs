@@ -277,7 +277,7 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 //       -> .defunctionalize()                           -> TlcDefunctionalized
 //       -> .monomorphize()                              -> TlcMonomorphized
 //       -> .buffer_specialize()                         -> TlcBufferSpecialized
-//       -> .inline()                                    -> TlcInlined
+//       -> .fold_generated_lambdas()                    -> TlcGeneratedLambdasFolded
 //       -> .inline_small()                              -> TlcSmallInlined
 //       -> .parallelize_soacs()                         -> TlcParallelized
 //       -> .filter_reachable()                          -> TlcReachable
@@ -797,10 +797,10 @@ pub struct TlcBufferSpecialized {
 impl TlcBufferSpecialized {
     /// Inline compiler-generated `_w_lambda_*` defs back at their call sites,
     /// then remove unreferenced defs (DCE).
-    pub fn inline(self) -> TlcInlined {
+    pub fn fold_generated_lambdas(self) -> TlcGeneratedLambdasFolded {
         let inlined = tlc::inline::inline(self.tlc);
         inlined.assert_flat_apps();
-        TlcInlined {
+        TlcGeneratedLambdasFolded {
             tlc: inlined,
             type_table: self.type_table,
         }
@@ -808,12 +808,12 @@ impl TlcBufferSpecialized {
 }
 
 /// TLC after inlining compiler-generated lambda defs and DCE
-pub struct TlcInlined {
+pub struct TlcGeneratedLambdasFolded {
     pub tlc: tlc::Program,
     pub type_table: TypeTable,
 }
 
-impl TlcInlined {
+impl TlcGeneratedLambdasFolded {
     /// Inline small user functions and constants at their call/reference sites.
     pub fn inline_small(self) -> TlcSmallInlined {
         let tlc = tlc::inline::inline_small(self.tlc);
