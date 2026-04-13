@@ -89,6 +89,12 @@ fn op_cost(op: &PureOp) -> Cost {
         PureOp::Matrix { .. } => 2,
         PureOp::DynamicExtract => 2,
         PureOp::Materialize => 3,
+        PureOp::OutputPtr { .. } => 0,
+        PureOp::StorageView(_) => 2,
+        PureOp::StorageViewIndex => 1,
+        PureOp::StorageViewLen => 0,
+        PureOp::Intrinsic(_) => 2,
+        PureOp::Call(_) => 3,
     }
 }
 

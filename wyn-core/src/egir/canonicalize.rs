@@ -64,16 +64,23 @@ pub fn canonicalize(body: &FuncBody) -> (EGraph, DomTree, HashMap<BlockId, Block
             let inst = body.get_inst(inst_id);
             let kind = &inst.data;
 
-            if kind.is_hoistable() {
-                // Pure instruction → lift into e-graph with hash-consing.
-                let ty = inst
-                    .result
-                    .map(|r| body.get_value_type(r).clone())
-                    .unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![]));
-                let operands = resolve_operands(kind, &val_map, &mut graph);
-                let pure_op = extract_pure_op(kind, &ty).expect("is_hoistable but no PureOp mapping");
-                let nid = graph.intern_pure(pure_op, operands, ty);
+            let ty = inst
+                .result
+                .map(|r| body.get_value_type(r).clone())
+                .unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![]));
 
+            // An instruction is lifted into the pure sea only if:
+            //   (1) it carries no effect tokens (front-end didn't order it), and
+            //   (2) its InstKind has a pure mapping (blacklist: Alloca/Load/Store/Soac).
+            let pure_op = if inst.effects.is_none() {
+                extract_pure_op(kind, &ty)
+            } else {
+                None
+            };
+
+            if let Some(pure_op) = pure_op {
+                let operands = resolve_operands(kind, &val_map, &mut graph);
+                let nid = graph.intern_pure(pure_op, operands, ty);
                 if let Some(result_vid) = inst.result {
                     val_map.insert(result_vid, nid);
                 }

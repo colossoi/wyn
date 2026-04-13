@@ -429,63 +429,7 @@ fn const_to_inst_kind(c: &ConstantValue) -> InstKind {
 }
 
 fn pure_to_inst_kind(op: &PureOp, args: &[ValueId]) -> InstKind {
-    let vr = |i: usize| -> ValueRef { ValueRef::Ssa(args[i]) };
-    match op {
-        PureOp::Int(s) | PureOp::Uint(s) => InstKind::Int(s.clone()),
-        PureOp::Float(s) => InstKind::Float(s.clone()),
-        PureOp::Bool(b) => InstKind::Bool(*b),
-        PureOp::Unit => InstKind::Unit,
-        PureOp::StringLit(s) => InstKind::String(s.clone()),
-        PureOp::Global(s) => InstKind::Global(s.clone()),
-        PureOp::Extern(s) => InstKind::Extern(s.clone()),
-        PureOp::BinOp(op_name) => InstKind::BinOp {
-            op: op_name.clone(),
-            lhs: vr(0),
-            rhs: vr(1),
-        },
-        PureOp::UnaryOp(op_name) => InstKind::UnaryOp {
-            op: op_name.clone(),
-            operand: vr(0),
-        },
-        PureOp::Tuple(n) => InstKind::Tuple((0..*n).map(|i| vr(i)).collect()),
-        PureOp::Vector(n) => InstKind::Vector((0..*n).map(|i| vr(i)).collect()),
-        PureOp::Matrix { rows, cols } => {
-            let mut mat = Vec::with_capacity(*rows);
-            let mut idx = 0;
-            for _ in 0..*rows {
-                let row: Vec<ValueRef> = (0..*cols)
-                    .map(|_| {
-                        let v = vr(idx);
-                        idx += 1;
-                        v
-                    })
-                    .collect();
-                mat.push(row);
-            }
-            InstKind::Matrix(mat)
-        }
-        PureOp::ArrayLit(n) => InstKind::ArrayLit {
-            elements: (0..*n).map(|i| vr(i)).collect(),
-        },
-        PureOp::ArrayRange { has_step } => InstKind::ArrayRange {
-            start: vr(0),
-            len: vr(1),
-            step: if *has_step { Some(vr(2)) } else { None },
-        },
-        PureOp::Project { index } => InstKind::Project {
-            base: vr(0),
-            index: *index,
-        },
-        PureOp::Index => InstKind::Index {
-            base: vr(0),
-            index: vr(1),
-        },
-        PureOp::Materialize => InstKind::Materialize { value: vr(0) },
-        PureOp::DynamicExtract => InstKind::DynamicExtract {
-            base: vr(0),
-            index: vr(1),
-        },
-    }
+    super::types::rebuild_inst_kind(op, args)
 }
 
 /// Rebuild an effectful InstKind from the original kind and new operands.

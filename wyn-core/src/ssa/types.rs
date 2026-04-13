@@ -909,7 +909,7 @@ impl Soac {
 }
 
 /// Where a view array gets its data from.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ViewSource {
     /// Backed by a storage buffer at (set, binding).
     Storage {

@@ -1,7 +1,7 @@
 //! Core data structures for the acyclic e-graph (aegraph).
 
 use crate::ast::TypeName;
-use crate::ssa::types::{ConstantValue, EffectToken, InstKind};
+use crate::ssa::types::{ConstantValue, EffectToken, InstKind, ViewSource};
 use polytype::Type;
 use slotmap::{SlotMap, new_key_type};
 use smallvec::SmallVec;
@@ -54,9 +54,26 @@ pub enum PureOp {
     Index,
     Materialize,
     DynamicExtract,
-    // Call and Intrinsic are effectful in some contexts but hoistable in the
-    // current SSA — they have no effect tokens. We treat them as pure here
-    // since is_hoistable() excludes them.
+    Call(String),
+    Intrinsic(String),
+    /// Storage buffer view creation. The `Inherited` parent (if any) is
+    /// carried in the operands tail, not in this tag, so equivalent views
+    /// with the same backing source hash-cons together.
+    StorageView(PureViewSource),
+    StorageViewIndex,
+    StorageViewLen,
+    OutputPtr {
+        index: usize,
+    },
+}
+
+/// Hashable variant of `ViewSource` for use inside a `PureOp`.
+/// Drops the `ValueId` from `Inherited` — that parent is stored as an
+/// operand in the `ENode::Pure`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum PureViewSource {
+    Storage { set: u32, binding: u32 },
+    Inherited,
 }
 
 // ---------------------------------------------------------------------------
@@ -326,8 +343,24 @@ pub fn extract_pure_op(kind: &InstKind, ty: &Type<TypeName>) -> Option<PureOp> {
         InstKind::Index { .. } => Some(PureOp::Index),
         InstKind::Materialize { .. } => Some(PureOp::Materialize),
         InstKind::DynamicExtract { .. } => Some(PureOp::DynamicExtract),
-        // Not pure / not hoistable:
-        _ => None,
+        InstKind::Call { func, .. } => Some(PureOp::Call(func.clone())),
+        InstKind::Intrinsic { name, .. } => Some(PureOp::Intrinsic(name.clone())),
+        InstKind::StorageView { source, .. } => {
+            let src = match source {
+                ViewSource::Storage { set, binding } => PureViewSource::Storage { set: *set, binding: *binding },
+                ViewSource::Inherited { .. } => PureViewSource::Inherited,
+            };
+            Some(PureOp::StorageView(src))
+        }
+        InstKind::StorageViewIndex { .. } => Some(PureOp::StorageViewIndex),
+        InstKind::StorageViewLen { .. } => Some(PureOp::StorageViewLen),
+        InstKind::OutputPtr { index } => Some(PureOp::OutputPtr { index: *index }),
+        // Blacklist: the only truly effectful InstKinds. Everything else above
+        // is treated as pure (hash-consable, hoistable).
+        InstKind::Alloca { .. }
+        | InstKind::Load { .. }
+        | InstKind::Store { .. }
+        | InstKind::Soac(_) => None,
     }
 }
 
@@ -393,6 +426,31 @@ pub fn rebuild_inst_kind(op: &PureOp, operands: &[wyn_ssa::ValueId]) -> InstKind
             base: vr(0),
             index: vr(1),
         },
+        PureOp::Call(func) => InstKind::Call {
+            func: func.clone(),
+            args: (0..operands.len()).map(|i| vr(i)).collect(),
+        },
+        PureOp::Intrinsic(name) => InstKind::Intrinsic {
+            name: name.clone(),
+            args: (0..operands.len()).map(|i| vr(i)).collect(),
+        },
+        PureOp::StorageView(src) => {
+            let source = match src {
+                PureViewSource::Storage { set, binding } => ViewSource::Storage { set: *set, binding: *binding },
+                PureViewSource::Inherited => ViewSource::Inherited { parent: operands[2] },
+            };
+            InstKind::StorageView {
+                source,
+                offset: vr(0),
+                len: vr(1),
+            }
+        }
+        PureOp::StorageViewIndex => InstKind::StorageViewIndex {
+            view: vr(0),
+            index: vr(1),
+        },
+        PureOp::StorageViewLen => InstKind::StorageViewLen { view: vr(0) },
+        PureOp::OutputPtr { index } => InstKind::OutputPtr { index: *index },
     }
 }
 
