@@ -18,8 +18,7 @@ A minimal compiler for a Futhark-like programming language that generates SPIR-V
 
 The project is organized as a Rust workspace:
 
-- **`wyn-ssa/`** - Generic SSA framework library (blocks, values, instructions, terminators, optimization passes)
-- **`wyn-core/`** - Compiler library (lexer, parser, type checker, TLC, SSA, SPIR-V/GLSL backends)
+- **`wyn-core/`** - Compiler library (lexer, parser, type checker, TLC, EGIR mid-end, SSA, SPIR-V/GLSL backends). Includes an in-crate generic SSA framework at `ssa::framework` (blocks, values, instructions, terminators) used only for codegen.
 - **`wyn/`** - Command-line executable
 - **`wyn-analyzer/`** - Language server (in development)
 - **`viz/`** - Visualization tool for rendering SPIR-V shaders
@@ -56,13 +55,13 @@ The compiler uses a multi-stage pipeline with typestate-driven phases. Each stag
 
 ### EGIR (Acyclic E-Graph IR)
 
-TLC lowers directly into an **acyclic e-graph** (sea of pure nodes + skeleton CFG) rather than into sequential SSA. The e-graph is the central mid-end IR: most optimizations fall out of the data structure without dedicated passes.
+The mid-end is an **acyclic e-graph**: a sea of hash-consed pure nodes plus a skeleton CFG of effectful instructions. Most optimizations fall out of the data structure without dedicated passes.
 
 Key structures (`egir::types`):
 - **`ENode::Pure { op, operands }`** — hash-consed pure value; GVN is automatic.
 - **`Skeleton`** — a CFG of side-effectful instructions (`SideEffect`) anchored in blocks with `SkeletonTerminator`s. Operands are `NodeId`s.
 - **`ENode::SideEffectResult`** — unique (non-hash-consed) handle for the value produced by a skeleton instruction, consumable by the pure sea.
-- **Purity is blacklisted**, not whitelisted: an instruction flows into the pure sea unless it carries an effect token *and* is one of `Alloca`, `Load`, `Store`, `Soac`. `Call`, `Intrinsic`, `StorageView*`, `OutputPtr` are pure.
+- **Purity is blacklisted**, not whitelisted: the only `InstKind`s kept in the skeleton are `Alloca`, `Load`, `Store`. Everything else — `Call`, `Intrinsic`, `StorageView*`, `StorageViewIndex`, `OutputPtr`, `Index`, `Project`, etc. — is hash-consed into the pure sea.
 
 What you get "for free":
 - **GVN** — `intern_pure(op, operands)` returns an existing `NodeId` when `(op, operands)` match.
@@ -72,53 +71,36 @@ What you get "for free":
 - **LICM** — `loop_analysis` picks the outermost loop where all operands are available as the placement point.
 - **Branch folding + redundant-phi elimination** — `skel_opt` rewrites the skeleton CFG before elaboration.
 
-| Module | Description |
-|--------|-------------|
-| `from_tlc` | Direct TLC term → EGraph lowering (replaces the old `tlc::to_ssa`) |
-| `canonicalize` | SSA `FuncBody` → EGraph (alternative entry, used for round-trip tests) |
-| `elaborate` | EGraph → `FuncBody` via `FuncBuilder`, demand-driven and scoped |
-| `extract` | Cost-based bottom-up selection of the best representative per node |
-| `soac_expand` | Rewrites every `SideEffectKind::Pending(PendingSoac::...)` into an explicit loop subgraph (block-split + header/body/after, alloca/store for output arrays, view loads for view inputs, SoA-aware reads). Runs between `from_tlc` and `elaborate`. |
-| `skel_opt` | Skeleton-level CFG rewrites (branch folding, redundant phi elim) |
-| `fold` | Algebraic simplification applied during `intern_pure` |
-| `domtree` | Generic dominator tree working over both SSA and skeleton CFGs |
-| `loop_analysis` | Loop nesting info for LICM placement |
-| `rewrite` | Trait + driver for pattern-based rewrite rules (Phase 2; current ruleset empty) |
+| Stage | Module | Description |
+|-------|--------|-------------|
+| **EgirRaw** | `egir::from_tlc` | TLC term → EGraph; `_w_intrinsic_*` calls lowered as pure `PureOp::Intrinsic` (effectful intrinsics like `_w_intrinsic_storage_index` handled by explicit arms) |
+| **EgirSoacExpanded** | `egir::soac_expand` | Every `PendingSoac` rewritten into an explicit loop subgraph (block-split + header/body/after, alloca/store for output arrays, view loads, SoA-aware reads). Map with a statically-sized input of ≤16 elements is unrolled via a shared `try_unroll` / `build_loop` / `expand_loop` core |
+| **EgirMaterialized** | `egir::materialize` | (optional, SPIR-V only) dynamic `Index` → `Materialize` + `DynamicExtract`, then LICM-hoisted out of loops |
+| **EgirSkelOptimized** | `egir::skel_opt` | Skeleton CFG rewrites: branch folding, redundant-phi elimination |
 
-### SSA
+Exit: `EgirSkelOptimized::elaborate()` → `SsaConverted` (see SSA section). Supporting modules: `fold` (algebraic simplification during `intern_pure`), `extract` (cost-based node selection), `domtree`, `loop_analysis`, `canonicalize` (SSA → EGraph, for round-trip tests), `rewrite` (pattern-rewrite driver; ruleset currently empty).
 
-The SSA IR is built on the **`wyn-ssa`** crate, a generic SSA framework parameterized over instruction type, effect token type, and value type. The concrete instantiation uses `InstKind` for instructions, `EffectToken` for effects, and `Type<TypeName>` for types.
+### SSA (codegen only)
 
-Key features of the SSA IR:
+EGIR elaboration produces an SSA `Program` consumed by the SPIR-V/GLSL backends. SSA is intentionally minimal: all mid-end machinery (effect tokens, canonicalization, verification, generic transform passes) lives in EGIR. The `ssa::framework` module provides a generic CFG-with-block-params representation; `ssa::types` is the concrete instantiation (`InstKind` instructions, `Type<TypeName>` values).
+
+Key properties:
 - CFG with basic blocks and block parameters (not phi nodes)
-- Effect tokens tracked at framework level on `InstNode`, not inside instruction variants
+- No effect tokens at the SSA layer — instruction order is fixed by elaboration
 - `ValueDef::FunctionParam` distinct from `ValueDef::Param` (block params)
 - `ControlHeader` metadata stored in a side-map on `FuncBody`, not on blocks
 
-| Stage | Module | Description |
+| Stage | Source | Description |
 |-------|--------|-------------|
-| **SsaConverted** | `egir::from_tlc` + `egir::soac_expand` | TLC lowered into EGraph, SOACs expanded into explicit loops, then elaborated to SSA `FuncBody` |
-| **SsaMaterialized** | `spirv::materialize` | Dynamic array indices materialized for SPIR-V (+ LICM) |
-| **Lowered** | `spirv` | SSA to SPIR-V code generation |
-
-Alternative backend:
-| Stage | Module | Description |
-|-------|--------|-------------|
-| **GLSL** | `glsl` | SSA to GLSL source code (lowered straight from `SsaConverted`) |
-
-### SSA Passes in `wyn-ssa` (generic framework)
-
-- **`forward_single_pred_params`** — Forward block parameters through single-predecessor edges
-- **`eliminate_empty_blocks`** — Remove empty unconditional-jump blocks
-- **`inline_block_param` / `inline_entry_param`** — Replace a block parameter with a constant instruction
-- **`verify_effects`** — Check effect token chain linearity
+| **SsaConverted** | `egir::pipeline::elaborate` | EGIR chain elaborated into SSA `Program` |
+| **SsaMaterialized** | (optional, SPIR-V only) | Via `egir::materialize` inside the EGIR chain |
+| **Lowered** | `spirv` / `glsl` | SSA to SPIR-V or GLSL |
 
 ### SPIR-V Backend Optimizations
 
 - **Polytype cache** — Memoizes `polytype_to_spirv` to prevent duplicate type instructions
 - **Composite constant cache** — Deduplicates `OpConstantComposite` by (type, constituents)
 - **Null constant cache** — Deduplicates `OpConstantNull` by type
-- **Materialize pass** — Rewrites dynamic `Index` into `Materialize` + `DynamicExtract`, then `lift_and_merge` hoists `Materialize` out of loops
 
 ### Defunctionalization
 
@@ -188,7 +170,7 @@ cargo build --release
 cargo test
 ```
 
-564 tests currently pass (6 ignored for pending features). All 24 end-to-end testfiles in `testfiles/` compile and validate (`bash scripts/validate_testfiles.sh`).
+552 tests currently pass (5 ignored for pending features). All 24 end-to-end testfiles in `testfiles/` compile and validate (`bash scripts/validate_testfiles.sh`).
 
 ## Language Overview
 
@@ -248,7 +230,7 @@ def zip_arrays xs ys = zip xs ys
 - **nom** — Parser combinators
 - **polytype** — Hindley-Milner type system
 - **rspirv** — SPIR-V builder
-- **slotmap** — Arena allocation for SSA IDs (via wyn-ssa)
+- **slotmap** — Arena allocation for SSA IDs
 - **thiserror** — Error handling
 - **clap** — CLI parsing
 
