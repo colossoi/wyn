@@ -919,25 +919,14 @@ impl<'a> Converter<'a> {
                 Ok(result_nid)
             }
             name if name.starts_with("_w_intrinsic_") => {
-                // Intrinsic call → side effect
+                // Default: treat intrinsics as pure (hash-consable). Effectful
+                // intrinsics (loads/stores/scatters) get explicit earlier arms
+                // (e.g. `_w_intrinsic_storage_index` above lowers to a Load).
+                // Known-effectful names that reach here would need a blacklist
+                // branch; at present all remaining intrinsics are pure.
                 let arg_nids: SmallVec<[NodeId; 4]> =
                     args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
-                let arg_vrefs: Vec<ValueRef> = (0..arg_nids.len())
-                    .map(|_| ValueRef::Ssa(crate::ssa::types::ValueId::default()))
-                    .collect();
-                let result_nid = self.graph.alloc_side_effect_result(ty.clone());
-                let effect_in = EffectToken(0);
-                let effect_out = self.alloc_effect();
-                self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
-                    kind: SideEffectKind::Inst(InstKind::Intrinsic {
-                        name: name.to_string(),
-                        args: arg_vrefs,
-                    }),
-                    operand_nodes: arg_nids,
-                    result: Some(result_nid),
-                    effects: Some((effect_in, effect_out)),
-                });
-                Ok(result_nid)
+                Ok(self.graph.intern_pure(PureOp::Intrinsic(name.to_string()), arg_nids, ty))
             }
             _ => {
                 // Function call
