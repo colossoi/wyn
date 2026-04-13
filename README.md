@@ -78,6 +78,7 @@ What you get "for free":
 | `canonicalize` | SSA `FuncBody` → EGraph (alternative entry, used for round-trip tests) |
 | `elaborate` | EGraph → `FuncBody` via `FuncBuilder`, demand-driven and scoped |
 | `extract` | Cost-based bottom-up selection of the best representative per node |
+| `soac_expand` | Rewrites every `SideEffectKind::Pending(PendingSoac::...)` into an explicit loop subgraph (block-split + header/body/after, alloca/store for output arrays, view loads for view inputs, SoA-aware reads). Runs between `from_tlc` and `elaborate`. |
 | `skel_opt` | Skeleton-level CFG rewrites (branch folding, redundant phi elim) |
 | `fold` | Algebraic simplification applied during `intern_pure` |
 | `domtree` | Generic dominator tree working over both SSA and skeleton CFGs |
@@ -96,15 +97,14 @@ Key features of the SSA IR:
 
 | Stage | Module | Description |
 |-------|--------|-------------|
-| **SsaConverted** | `egir::from_tlc` | TLC lowered into EGraph, then elaborated to SSA `FuncBody` |
-| **SsaSoacLowered** | `ssa::soac_lower` | SOAC expansion: loops, map unrolling, map-reduce fusion |
+| **SsaConverted** | `egir::from_tlc` + `egir::soac_expand` | TLC lowered into EGraph, SOACs expanded into explicit loops, then elaborated to SSA `FuncBody` |
 | **SsaMaterialized** | `spirv::materialize` | Dynamic array indices materialized for SPIR-V (+ LICM) |
 | **Lowered** | `spirv` | SSA to SPIR-V code generation |
 
 Alternative backend:
 | Stage | Module | Description |
 |-------|--------|-------------|
-| **GLSL** | `glsl` | SSA to GLSL source code (from `SsaSoacLowered`, no materialize needed) |
+| **GLSL** | `glsl` | SSA to GLSL source code (lowered straight from `SsaConverted`) |
 
 ### SSA Passes in `wyn-ssa` (generic framework)
 

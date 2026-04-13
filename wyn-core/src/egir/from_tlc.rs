@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::TypeName;
 use crate::ssa::types::{ControlHeader, EffectToken, FuncBody, Function, InstKind, Program, ValueRef};
-use crate::ssa::types::{Soac, ViewSource};
+use crate::ssa::types::ViewSource;
 use crate::tlc::{
     ArrayExpr, Def as TlcDef, DefMeta, Lambda, LoopKind, Program as TlcProgram, SoacOp, Term, TermKind,
 };
@@ -360,39 +360,27 @@ fn rewrite_map_scan_to_into(graph: &mut EGraph, target_result: NodeId, output_vi
             }
             let kind = se.kind.clone();
             match kind {
-                InstKind::Soac(Soac::Map {
+                SideEffectKind::Pending(PendingSoac::Map {
                     func,
-                    inputs,
-                    captures,
                     input_array_types,
                     input_elem_types,
                     output_elem_type,
                 }) => {
-                    se.kind = InstKind::Soac(Soac::MapInto {
+                    se.kind = SideEffectKind::Pending(PendingSoac::MapInto {
                         func,
-                        inputs,
-                        captures,
-                        output_view: Default::default(),
                         input_array_types,
                         input_elem_types,
                         output_elem_type,
                     });
                     se.operand_nodes.push(output_view);
                 }
-                InstKind::Soac(Soac::Scan {
+                SideEffectKind::Pending(PendingSoac::Scan {
                     func,
-                    input,
-                    init,
-                    captures,
                     input_array_type,
                     input_elem_type,
                 }) => {
-                    se.kind = InstKind::Soac(Soac::ScanInto {
+                    se.kind = SideEffectKind::Pending(PendingSoac::ScanInto {
                         func,
-                        input,
-                        init,
-                        captures,
-                        output_view: Default::default(),
                         input_array_type,
                         input_elem_type,
                     });
@@ -581,7 +569,7 @@ impl<'a> Converter<'a> {
             value: ValueRef::Ssa(Default::default()),
         };
         self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
-            kind,
+            kind: SideEffectKind::Inst(kind),
             operand_nodes: smallvec![ptr_nid, value_nid],
             result: None,
             effects: Some((effect_in, effect_out)),
@@ -624,8 +612,7 @@ impl<'a> Converter<'a> {
         params: &[(Type<TypeName>, String)],
         return_ty: Type<TypeName>,
     ) -> Option<FuncBody> {
-        // Expand handled SOAC side-effects into explicit loops.
-        // Remaining variants fall through to ssa::soac_lower.
+        // Expand SOAC side-effects into explicit loops before elaborate.
         super::soac_expand::expand_soacs(&mut self.graph, &mut self.control_headers);
 
         let skel_domtree = DomTree::build(&SkeletonCfgView {
@@ -921,9 +908,9 @@ impl<'a> Converter<'a> {
                 let effect_in = EffectToken(0);
                 let effect_out = self.alloc_effect();
                 self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
-                    kind: InstKind::Load {
+                    kind: SideEffectKind::Inst(InstKind::Load {
                         ptr: ValueRef::Ssa(crate::ssa::types::ValueId::default()),
-                    },
+                    }),
                     operand_nodes: smallvec![ptr_nid],
                     result: Some(result_nid),
                     effects: Some((effect_in, effect_out)),
@@ -941,10 +928,10 @@ impl<'a> Converter<'a> {
                 let effect_in = EffectToken(0);
                 let effect_out = self.alloc_effect();
                 self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
-                    kind: InstKind::Intrinsic {
+                    kind: SideEffectKind::Inst(InstKind::Intrinsic {
                         name: name.to_string(),
                         args: arg_vrefs,
-                    },
+                    }),
                     operand_nodes: arg_nids,
                     result: Some(result_nid),
                     effects: Some((effect_in, effect_out)),
@@ -964,10 +951,10 @@ impl<'a> Converter<'a> {
                         let effect_in = EffectToken(0);
                         let effect_out = self.alloc_effect();
                         self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
-                            kind: InstKind::Call {
+                            kind: SideEffectKind::Inst(InstKind::Call {
                                 func: name.to_string(),
                                 args: arg_vrefs,
-                            },
+                            }),
                             operand_nodes: arg_nids,
                             result: Some(result_nid),
                             effects: Some((effect_in, effect_out)),
@@ -989,10 +976,10 @@ impl<'a> Converter<'a> {
                     let effect_in = EffectToken(0);
                     let effect_out = self.alloc_effect();
                     self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
-                        kind: InstKind::Call {
+                        kind: SideEffectKind::Inst(InstKind::Call {
                             func: name.to_string(),
                             args: arg_vrefs,
-                        },
+                        }),
                         operand_nodes: arg_nids,
                         result: Some(result_nid),
                         effects: Some((effect_in, effect_out)),
@@ -1382,13 +1369,19 @@ impl<'a> Converter<'a> {
         }
     }
 
-    /// Emit a SOAC as a side effect in the skeleton. Returns the result NodeId.
-    fn emit_soac(&mut self, kind: InstKind, operands: SmallVec<[NodeId; 4]>, ty: Type<TypeName>) -> NodeId {
+    /// Emit a SOAC placeholder as a side effect in the skeleton. Returns the
+    /// result NodeId that `soac_expand` will rebind during expansion.
+    fn emit_soac(
+        &mut self,
+        soac: PendingSoac,
+        operands: SmallVec<[NodeId; 4]>,
+        ty: Type<TypeName>,
+    ) -> NodeId {
         let result_nid = self.graph.alloc_side_effect_result(ty);
         let effect_in = EffectToken(0);
         let effect_out = self.alloc_effect();
         self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
-            kind,
+            kind: SideEffectKind::Pending(soac),
             operand_nodes: operands,
             result: Some(result_nid),
             effects: Some((effect_in, effect_out)),
@@ -1426,14 +1419,12 @@ impl<'a> Converter<'a> {
         operands.extend_from_slice(&capture_nids);
 
         Ok(self.emit_soac(
-            InstKind::Soac(Soac::Map {
+            PendingSoac::Map {
                 func: f_name,
-                inputs: vec![Default::default(); input_nids.len()],
-                captures: vec![Default::default(); capture_nids.len()],
                 input_array_types: input_arr_types,
                 input_elem_types,
                 output_elem_type: output_elem_ty,
-            }),
+            },
             operands,
             result_ty,
         ))
@@ -1458,14 +1449,11 @@ impl<'a> Converter<'a> {
         operands.extend(capture_nids.iter().copied());
 
         Ok(self.emit_soac(
-            InstKind::Soac(Soac::Reduce {
+            PendingSoac::Reduce {
                 func: op_name,
-                input: Default::default(),
-                init: Default::default(),
-                captures: vec![Default::default(); capture_nids.len()],
                 input_array_type: arr_ty,
                 input_elem_type: elem_ty,
-            }),
+            },
             operands,
             result_ty,
         ))
@@ -1500,16 +1488,12 @@ impl<'a> Converter<'a> {
         operands.extend(reduce_capture_nids.iter().copied());
 
         Ok(self.emit_soac(
-            InstKind::Soac(Soac::Redomap {
+            PendingSoac::Redomap {
                 func: op_name,
                 reduce_func: reduce_func_name,
-                inputs: vec![Default::default(); input_nids.len()],
-                init: Default::default(),
-                captures: vec![Default::default(); capture_nids.len()],
-                reduce_captures: vec![Default::default(); reduce_capture_nids.len()],
                 input_array_types: input_arr_types,
                 input_elem_types,
-            }),
+            },
             operands,
             result_ty,
         ))
@@ -1534,14 +1518,11 @@ impl<'a> Converter<'a> {
         operands.extend(capture_nids.iter().copied());
 
         Ok(self.emit_soac(
-            InstKind::Soac(Soac::Scan {
+            PendingSoac::Scan {
                 func: op_name,
-                input: Default::default(),
-                init: Default::default(),
-                captures: vec![Default::default(); capture_nids.len()],
                 input_array_type: arr_ty,
                 input_elem_type: elem_ty,
-            }),
+            },
             operands,
             result_ty,
         ))
@@ -1566,16 +1547,25 @@ impl<'a> Converter<'a> {
         let mut operands: SmallVec<[NodeId; 4]> = smallvec![pred_ref, arr_nid];
         operands.extend(capture_nids.iter().copied());
 
+        // Filter is not a SOAC that soac_expand handles; emit it as a regular
+        // effectful Intrinsic side-effect. (Upstream compilation typically
+        // lowers Filter before reaching here, but we keep the fallback for
+        // completeness.)
         let dummy_vrefs: Vec<ValueRef> =
             (0..operands.len()).map(|_| ValueRef::Ssa(Default::default())).collect();
-        Ok(self.emit_soac(
-            InstKind::Intrinsic {
+        let result_nid = self.graph.alloc_side_effect_result(result_ty);
+        let effect_in = EffectToken(0);
+        let effect_out = self.alloc_effect();
+        self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
+            kind: SideEffectKind::Inst(InstKind::Intrinsic {
                 name: "_w_intrinsic_filter".into(),
                 args: dummy_vrefs,
-            },
-            operands,
-            result_ty,
-        ))
+            }),
+            operand_nodes: operands,
+            result: Some(result_nid),
+            effects: Some((effect_in, effect_out)),
+        });
+        Ok(result_nid)
     }
 
     // ========================================================================
@@ -1624,14 +1614,14 @@ impl<'a> Converter<'a> {
                 let effect_in = EffectToken(0);
                 let effect_out = self.alloc_effect();
                 self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
-                    kind: InstKind::StorageView {
+                    kind: SideEffectKind::Inst(InstKind::StorageView {
                         source: ViewSource::Storage {
                             set: *set,
                             binding: *binding,
                         },
                         offset: ValueRef::Ssa(Default::default()),
                         len: ValueRef::Ssa(Default::default()),
-                    },
+                    }),
                     operand_nodes: smallvec![offset_nid, len_nid],
                     result: Some(result_nid),
                     effects: Some((effect_in, effect_out)),

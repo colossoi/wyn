@@ -1448,12 +1448,6 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 }
             }
 
-            InstKind::Soac(_) => {
-                panic!(
-                    "internal compiler error: Soac instruction reached SPIR-V backend; soac_lower pass was not run"
-                )
-            }
-
             InstKind::Materialize { value } => {
                 let value_id = self.get_value_ref(*value)?;
                 let value_ty = self.get_value_type_ref(*value);

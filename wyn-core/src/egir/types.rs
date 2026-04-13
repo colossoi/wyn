@@ -142,14 +142,80 @@ impl ENode {
 /// A side-effectful instruction anchored in the skeleton CFG.
 #[derive(Clone, Debug)]
 pub struct SideEffect {
-    /// The original InstKind (effectful variant).
-    pub kind: InstKind,
+    /// What this side-effect is. Either an SSA `InstKind` that survives into
+    /// the final `FuncBody`, or an intermediate `PendingSoac` that must be
+    /// rewritten by `soac_expand` before `elaborate` runs.
+    pub kind: SideEffectKind,
     /// Operands resolved to NodeIds.
     pub operand_nodes: SmallVec<[NodeId; 4]>,
     /// Result value, if this instruction produces one.
     pub result: Option<NodeId>,
     /// Effect token chain.
     pub effects: Option<(EffectToken, EffectToken)>,
+}
+
+/// A skeleton side-effect's concrete kind.
+#[derive(Clone, Debug)]
+pub enum SideEffectKind {
+    /// An SSA-level effectful instruction (`Alloca` / `Load` / `Store` /
+    /// `Call` / `Intrinsic` / `StorageView*` / `OutputPtr` with effects).
+    /// This is what lands in the final `FuncBody` after elaboration.
+    Inst(InstKind),
+    /// A placeholder for an unexpanded SOAC. Produced by `from_tlc` and
+    /// consumed by `soac_expand`. Never reaches elaborate.
+    Pending(PendingSoac),
+}
+
+/// An unexpanded SOAC operation held in the skeleton until `soac_expand` rewrites
+/// it into an explicit loop. All operand NodeIds live in `SideEffect.operand_nodes`
+/// with a variant-specific layout (documented per-variant in `soac_expand`).
+#[derive(Clone, Debug)]
+pub enum PendingSoac {
+    /// `map f inputs` → composite output array.
+    /// Operands: `[input_0, ..., input_{n-1}, ...captures]`.
+    Map {
+        func: String,
+        input_array_types: Vec<Type<TypeName>>,
+        input_elem_types: Vec<Type<TypeName>>,
+        output_elem_type: Type<TypeName>,
+    },
+    /// `reduce f init input` → scalar accumulator.
+    /// Operands: `[input, init, ...captures]`.
+    Reduce {
+        func: String,
+        input_array_type: Type<TypeName>,
+        input_elem_type: Type<TypeName>,
+    },
+    /// `scan f init input` → composite output array.
+    /// Operands: `[input, init, ...captures]`.
+    Scan {
+        func: String,
+        input_array_type: Type<TypeName>,
+        input_elem_type: Type<TypeName>,
+    },
+    /// `map_into f inputs view` → writes to storage view (unit-valued).
+    /// Operands: `[input_0, ..., input_{n-1}, ...captures, output_view]`.
+    MapInto {
+        func: String,
+        input_array_types: Vec<Type<TypeName>>,
+        input_elem_types: Vec<Type<TypeName>>,
+        output_elem_type: Type<TypeName>,
+    },
+    /// `scan_into f init input view` → writes to storage view (unit-valued).
+    /// Operands: `[input, init, ...captures, output_view]`.
+    ScanInto {
+        func: String,
+        input_array_type: Type<TypeName>,
+        input_elem_type: Type<TypeName>,
+    },
+    /// Fused map+reduce: per iteration `acc = func(acc, x1, ..., xn, ...caps)`.
+    /// Operands: `[input_0, ..., input_{n-1}, init, ...captures, ...reduce_captures]`.
+    Redomap {
+        func: String,
+        reduce_func: String,
+        input_array_types: Vec<Type<TypeName>>,
+        input_elem_types: Vec<Type<TypeName>>,
+    },
 }
 
 /// Terminator using NodeIds for value references.
@@ -359,8 +425,7 @@ pub fn extract_pure_op(kind: &InstKind, ty: &Type<TypeName>) -> Option<PureOp> {
         // is treated as pure (hash-consable, hoistable).
         InstKind::Alloca { .. }
         | InstKind::Load { .. }
-        | InstKind::Store { .. }
-        | InstKind::Soac(_) => None,
+        | InstKind::Store { .. } => None,
     }
 }
 

@@ -1,9 +1,10 @@
-//! Expand `InstKind::Soac(...)` skeleton side-effects into explicit loops
-//! with pure ops in the sea and block params carrying accumulators.
+//! Expand `SideEffectKind::Pending(PendingSoac::...)` skeleton side-effects
+//! into explicit loop subgraphs with pure ops in the sea and block params
+//! carrying accumulators.
 //!
-//! Runs after `from_tlc` populates the EGraph and before `elaborate`
-//! produces the final `FuncBody`. Variants not yet handled here fall
-//! through to the legacy SSA-level `ssa::soac_lower` pass.
+//! Runs after `from_tlc` populates the EGraph and before `elaborate` produces
+//! the final `FuncBody`. Every variant must be handled here — there is no
+//! fallback. Any `Pending` left in the skeleton at elaboration time is a bug.
 
 use std::collections::HashMap;
 
@@ -12,16 +13,15 @@ use smallvec::{SmallVec, smallvec};
 use wyn_ssa::BlockId;
 
 use crate::ast::TypeName;
-use crate::ssa::types::{ControlHeader, EffectToken, InstKind, Soac, ValueRef};
+use crate::ssa::types::{ControlHeader, EffectToken, InstKind, ValueRef};
 use crate::types::TypeExt;
 use crate::types::{is_array_variant_composite, is_array_variant_view, is_virtual_array};
 
-use super::types::{EGraph, ENode, NodeId, PureOp, SideEffect, SkeletonTerminator};
+use super::types::{
+    EGraph, ENode, NodeId, PendingSoac, PureOp, SideEffect, SideEffectKind, SkeletonTerminator,
+};
 
-/// Expand every SOAC skeleton side-effect this pass currently knows how
-/// to handle (starting with Reduce over plain composite arrays).
-/// Variants left alone remain in the skeleton and are handled later by
-/// the legacy `ssa::soac_lower` pass.
+/// Expand every `SideEffectKind::Pending(PendingSoac::...)` in the skeleton.
 pub fn expand_soacs(graph: &mut EGraph, control_headers: &mut HashMap<BlockId, ControlHeader>) {
     // Collect (block, index) of every handleable Soac in a stable order.
     // Process back-to-front within each block so earlier indices stay valid.
@@ -64,28 +64,23 @@ fn alloc_effect(next: &mut u32) -> EffectToken {
 }
 
 /// Does this SOAC kind have a TLC→EGIR expansion implemented here?
-fn is_handleable_soac(kind: &InstKind) -> bool {
-    let InstKind::Soac(soac) = kind else {
+fn is_handleable_soac(kind: &SideEffectKind) -> bool {
+    let SideEffectKind::Pending(soac) = kind else {
         return false;
     };
     match soac {
-        Soac::Reduce { input_array_type, .. } => is_plain_array_source(input_array_type),
-        Soac::Redomap { input_array_types, .. } => {
+        PendingSoac::Reduce { input_array_type, .. } => is_plain_array_source(input_array_type),
+        PendingSoac::Redomap { input_array_types, .. } => {
             input_array_types.iter().all(is_plain_array_source)
         }
-        // Scan writes to a pure output array built via _w_intrinsic_array_with;
-        // that requires a composite result type, so reject view-source inputs
-        // for now (would need a different result representation).
-        Soac::Scan { input_array_type, .. } => is_plain_composite(input_array_type),
-        // Map: output is built via array_with, so its result type must be a
-        // composite array. Inputs can be any plain array source.
-        Soac::Map { input_array_types, .. } => {
+        PendingSoac::Scan { input_array_type, .. } => is_plain_composite(input_array_type),
+        PendingSoac::Map { input_array_types, .. } => {
             input_array_types.iter().all(is_plain_array_source)
         }
-        Soac::MapInto { input_array_types, .. } => {
+        PendingSoac::MapInto { input_array_types, .. } => {
             input_array_types.iter().all(is_plain_array_source)
         }
-        Soac::ScanInto { input_array_type, .. } => is_plain_array_source(input_array_type),
+        PendingSoac::ScanInto { input_array_type, .. } => is_plain_array_source(input_array_type),
     }
 }
 
@@ -170,7 +165,7 @@ fn expand_one(
 ) {
     let se = graph.skeleton.blocks[bid].side_effects.remove(idx);
     match &se.kind {
-        InstKind::Soac(Soac::Reduce {
+        SideEffectKind::Pending(PendingSoac::Reduce {
             func,
             input_array_type,
             input_elem_type,
@@ -204,7 +199,7 @@ fn expand_one(
                 next_effect,
             );
         }
-        InstKind::Soac(Soac::Redomap {
+        SideEffectKind::Pending(PendingSoac::Redomap {
             func,
             input_array_types,
             input_elem_types,
@@ -250,7 +245,7 @@ fn expand_one(
                 next_effect,
             );
         }
-        InstKind::Soac(Soac::Map {
+        SideEffectKind::Pending(PendingSoac::Map {
             func,
             input_array_types,
             input_elem_types,
@@ -293,7 +288,7 @@ fn expand_one(
                 next_effect,
             );
         }
-        InstKind::Soac(Soac::MapInto {
+        SideEffectKind::Pending(PendingSoac::MapInto {
             func,
             input_array_types,
             input_elem_types,
@@ -337,7 +332,7 @@ fn expand_one(
                 next_effect,
             );
         }
-        InstKind::Soac(Soac::ScanInto {
+        SideEffectKind::Pending(PendingSoac::ScanInto {
             func,
             input_array_type,
             input_elem_type,
@@ -373,7 +368,7 @@ fn expand_one(
                 next_effect,
             );
         }
-        InstKind::Soac(Soac::Scan {
+        SideEffectKind::Pending(PendingSoac::Scan {
             func,
             input_array_type,
             input_elem_type,
@@ -541,10 +536,10 @@ fn build_scan_into_loop(
     let eff_in = alloc_effect(next_effect);
     let eff_out = alloc_effect(next_effect);
     graph.skeleton.blocks[handles.body].side_effects.push(SideEffect {
-        kind: InstKind::Store {
+        kind: SideEffectKind::Inst(InstKind::Store {
             ptr: ValueRef::Ssa(Default::default()),
             value: ValueRef::Ssa(Default::default()),
-        },
+        }),
         operand_nodes: smallvec![ptr_nid, new_acc_nid],
         result: None,
         effects: Some((eff_in, eff_out)),
@@ -613,10 +608,10 @@ fn build_map_into_loop(
     let eff_in = alloc_effect(next_effect);
     let eff_out = alloc_effect(next_effect);
     graph.skeleton.blocks[handles.body].side_effects.push(SideEffect {
-        kind: InstKind::Store {
+        kind: SideEffectKind::Inst(InstKind::Store {
             ptr: ValueRef::Ssa(Default::default()),
             value: ValueRef::Ssa(Default::default()),
-        },
+        }),
         operand_nodes: smallvec![ptr_nid, y_nid],
         result: None,
         effects: Some((eff_in, eff_out)),
@@ -985,9 +980,9 @@ fn emit_read_element(
         let eff_in = alloc_effect(next_effect);
         let eff_out = alloc_effect(next_effect);
         graph.skeleton.blocks[body].side_effects.push(SideEffect {
-            kind: InstKind::Load {
+            kind: SideEffectKind::Inst(InstKind::Load {
                 ptr: ValueRef::Ssa(Default::default()),
-            },
+            }),
             operand_nodes: smallvec![ptr_nid],
             result: Some(load_result),
             effects: Some((eff_in, eff_out)),

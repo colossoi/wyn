@@ -230,7 +230,13 @@ impl<'a> Elaborator<'a> {
     fn elaborate_side_effect(&mut self, se: &SideEffect, skel_bid: SkelBlockId) {
         let args: Vec<ValueId> = se.operand_nodes.iter().map(|&nid| self.demand(nid)).collect();
 
-        let kind = rebuild_effectful_inst_kind(&se.kind, &args);
+        let inst_kind = match &se.kind {
+            super::types::SideEffectKind::Inst(k) => k,
+            super::types::SideEffectKind::Pending(p) => {
+                panic!("elaborate: unexpanded PendingSoac in skeleton: {:?}", p)
+            }
+        };
+        let kind = rebuild_effectful_inst_kind(inst_kind, &args);
         let effects = se.effects;
 
         if let Some(result_nid) = se.result {

@@ -93,7 +93,10 @@ pub fn canonicalize(body: &FuncBody) -> (EGraph, DomTree, HashMap<BlockId, Block
                 });
 
                 graph.skeleton.blocks[skel_bid].side_effects.push(SideEffect {
-                    kind: kind.clone(),
+                    // Canonicalize sees SSA instructions only — wrap in
+                    // SideEffectKind::Inst. There's no `PendingSoac` path
+                    // because SSA no longer carries SOACs.
+                    kind: super::types::SideEffectKind::Inst(kind.clone()),
                     operand_nodes: operands,
                     result: result_nid,
                     effects: inst.effects,

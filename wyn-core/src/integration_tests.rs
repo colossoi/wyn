@@ -1082,78 +1082,12 @@ entry frag(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     compile_to_spirv(source).expect("constants referencing constants should compile");
 }
 
-// =============================================================================
-// SoA Extraction Map Optimization
-// =============================================================================
-
-/// Mirrors the raytrace pattern: zip-map over multiple arrays producing a large
-/// tuple, then extract individual fields with separate maps. After SoA, the
-/// extraction maps should become tuple projections, not loops.
-#[test]
-#[ignore] // Known bug: SoA transform doesn't eliminate extraction maps after zip-map
-fn test_soa_eliminates_extraction_maps() {
-    use crate::ssa::types::{InstKind, Soac};
-
-    let ssa = compile_to_ssa(
-        r#"
-def processOne(i: i32, x: f32, y: f32, active: i32) (f32, f32, f32, i32) =
-    if active == 0 then (0.0, 0.0, 0.0, 0)
-    else
-        let r = x * 2.0 in
-        let g = y * 3.0 in
-        let contrib = r + g in
-        (r, g, contrib, 1)
-
-def processBatch(
-    xs: [4]f32, ys: [4]f32, active: [4]i32
-) ([4]f32, [4]f32, [4]f32, [4]i32) =
-    let indices = [0, 1, 2, 3] in
-    let results = map(
-        |(i, x, y, a): (i32, f32, f32, i32)| processOne(i, x, y, a),
-        zip4(indices, xs, ys, active)) in
-    -- Extract each field with a separate map (raytrace pattern)
-    let newXs = map(|r: (f32, f32, f32, i32)| r.0, results) in
-    let newYs = map(|r: (f32, f32, f32, i32)| r.1, results) in
-    let contribs = map(|r: (f32, f32, f32, i32)| r.2, results) in
-    let newActive = map(|r: (f32, f32, f32, i32)| r.3, results) in
-    (newXs, newYs, contribs, newActive)
-
-#[vertex]
-entry vertex_main() #[builtin(position)] vec4f32 =
-    let xs = [1.0, 2.0, 3.0, 4.0] in
-    let ys = [5.0, 6.0, 7.0, 8.0] in
-    let active = [1, 1, 0, 1] in
-    let (rx, ry, rc, ra) = processBatch(xs, ys, active) in
-    @[rx[0] + ry[0] + rc[0], f32.i32(ra[0]), 0.0, 1.0]
-"#,
-    );
-
-    // Find processBatch (may be inlined into vertex_main)
-    let func = ssa.functions.iter().find(|f| f.name == "processBatch");
-    let body = if let Some(f) = func {
-        &f.body
-    } else {
-        &ssa.entry_points.iter().find(|e| e.name == "vertex_main").expect("vertex_main").body
-    };
-
-    let soac_map_count: usize = body
-        .inner
-        .blocks
-        .values()
-        .flat_map(|b| b.insts.iter())
-        .filter(|&&inst_id| matches!(body.get_inst(inst_id).data, InstKind::Soac(Soac::Map { .. })))
-        .count();
-
-    // The processOne map should remain (real work), but the 4 extraction maps
-    // (|r| r.0 .. |r| r.3) should be eliminated by SoA → just tuple projections.
-    // Expect at most 1 SOAC map.
-    assert!(
-        soac_map_count <= 1,
-        "Expected at most 1 SOAC map (processOne), but found {}. \
-         The extraction maps were not eliminated by SoA transform.",
-        soac_map_count
-    );
-}
+// `test_soa_eliminates_extraction_maps` was deleted: it inspected post-SSA for
+// `InstKind::Soac(Soac::Map { .. })`, but SOACs no longer exist as SSA
+// instructions — they're expanded inside EGIR (`egir::soac_expand`) before
+// elaboration produces any SSA. The underlying optimization concern (extraction
+// maps after a zip-map should fold to tuple projections) is now an EGIR-level
+// question and would need a different shape of test.
 
 /// Pipeline that includes TLC inline_small (the new pass).
 fn compile_to_ssa_with_inline_small(input: &str) -> Program {

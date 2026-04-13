@@ -282,110 +282,11 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
         InstKind::OutputPtr { index } => {
             let _ = write!(out, "output_ptr {index}");
         }
-        InstKind::Soac(soac) => {
-            format_soac(out, soac);
-        }
         InstKind::Materialize { value } => {
             let _ = write!(out, "materialize {}", format_ref(value));
         }
         InstKind::DynamicExtract { base, index } => {
             let _ = write!(out, "dynamic_extract {}[{}]", format_ref(base), format_ref(index));
-        }
-    }
-}
-
-fn format_soac(out: &mut String, soac: &Soac) {
-    match soac {
-        Soac::Map {
-            func,
-            inputs,
-            captures,
-            ..
-        } => {
-            let _ = write!(out, "soac.map @{func}({})", format_values(inputs));
-            if !captures.is_empty() {
-                let _ = write!(out, " captures=[{}]", format_values(captures));
-            }
-        }
-        Soac::MapInto {
-            func,
-            inputs,
-            captures,
-            output_view,
-            ..
-        } => {
-            let _ = write!(
-                out,
-                "soac.map_into @{func}({}) -> %{:?}",
-                format_values(inputs),
-                output_view
-            );
-            if !captures.is_empty() {
-                let _ = write!(out, " captures=[{}]", format_values(captures));
-            }
-        }
-        Soac::ScanInto {
-            func,
-            input,
-            init,
-            captures,
-            output_view,
-            ..
-        } => {
-            let _ = write!(
-                out,
-                "soac.scan_into @{func}(%{:?}, %{:?}) -> %{:?}",
-                init, input, output_view
-            );
-            if !captures.is_empty() {
-                let _ = write!(out, " captures=[{}]", format_values(captures));
-            }
-        }
-        Soac::Reduce {
-            func,
-            input,
-            init,
-            captures,
-            ..
-        } => {
-            let _ = write!(
-                out,
-                "soac.reduce @{func}({}, {})",
-                fmt_val(*input),
-                fmt_val(*init)
-            );
-            if !captures.is_empty() {
-                let _ = write!(out, " captures=[{}]", format_values(captures));
-            }
-        }
-        Soac::Scan {
-            func,
-            input,
-            init,
-            captures,
-            ..
-        } => {
-            let _ = write!(out, "soac.scan @{func}({}, {})", fmt_val(*input), fmt_val(*init));
-            if !captures.is_empty() {
-                let _ = write!(out, " captures=[{}]", format_values(captures));
-            }
-        }
-        Soac::Redomap {
-            func,
-            inputs,
-            init,
-            captures,
-            ..
-        } => {
-            let _ = write!(
-                out,
-                "soac.redomap @{func}({}, {})",
-                format_values(inputs),
-                fmt_val(*init)
-            );
-            if !captures.is_empty() {
-                let _ = write!(out, " captures=[{}]", format_values(captures));
-            }
         }
     }
 }
