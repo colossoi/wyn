@@ -927,7 +927,11 @@ pub struct SsaConvertedWithPipeline {
 impl SsaConvertedWithPipeline {
     /// Lower first-class SOAC instructions to explicit loops.
     pub fn lower_soacs(self) -> SsaSoacLowered {
-        let ssa = ssa::soac_lower::lower_soacs(self.ssa);
+        // DO NOT PUT THIS BACK IN, ASK THE USER FIRST.
+        // ssa::soac_lower is intentionally unwired while egir::soac_expand is
+        // being ported variant-by-variant. Rewiring it creates a fallback that
+        // hides which variants soac_expand is failing to handle.
+        let ssa = self.ssa;
         SsaSoacLowered {
             ssa,
             pipeline: self.pipeline,
@@ -957,7 +961,11 @@ pub struct SsaConverted {
 impl SsaConverted {
     /// Lower first-class SOAC instructions to explicit loops.
     pub fn lower_soacs(self) -> SsaSoacLowered {
-        let ssa = ssa::soac_lower::lower_soacs(self.ssa);
+        // DO NOT PUT THIS BACK IN, ASK THE USER FIRST.
+        // ssa::soac_lower is intentionally unwired while egir::soac_expand is
+        // being ported variant-by-variant. Rewiring it creates a fallback that
+        // hides which variants soac_expand is failing to handle.
+        let ssa = self.ssa;
         SsaSoacLowered {
             ssa,
             pipeline: pipeline_descriptor::PipelineDescriptor::default(),

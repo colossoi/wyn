@@ -620,10 +620,14 @@ impl<'a> Converter<'a> {
 
     /// Elaborate the built EGraph into a FuncBody.
     fn elaborate_to_funcbody(
-        self,
+        mut self,
         params: &[(Type<TypeName>, String)],
         return_ty: Type<TypeName>,
     ) -> Option<FuncBody> {
+        // Expand handled SOAC side-effects into explicit loops.
+        // Remaining variants fall through to ssa::soac_lower.
+        super::soac_expand::expand_soacs(&mut self.graph, &mut self.control_headers);
+
         let skel_domtree = DomTree::build(&SkeletonCfgView {
             skeleton: &self.graph.skeleton,
         });

@@ -17,6 +17,7 @@ mod loop_analysis;
 mod rewrite;
 mod scoped_map;
 mod skel_opt;
+mod soac_expand;
 pub mod types;
 
 pub mod from_tlc;
@@ -69,7 +70,21 @@ pub(crate) fn optimize_func(body: &FuncBody) -> FuncBody {
     // Phase 1: canonicalize SSA → sea-of-nodes (with hash-consing = GVN).
     let (mut graph, initial_domtree, orig_block_map) = canonicalize::canonicalize(body);
 
-    // Phase 1b: skeleton rewrites (branch folding + redundant phi elim).
+    // Remap body.control_headers (orig block ids) to skeleton block ids so
+    // soac_expand can insert new Loop headers keyed on skeleton blocks.
+    let mut control_headers: std::collections::HashMap<_, _> = body
+        .control_headers
+        .iter()
+        .filter_map(|(orig, hdr)| {
+            let skel = orig_block_map.get(orig)?;
+            Some((*skel, hdr.remap(&|b| orig_block_map[&b])))
+        })
+        .collect();
+
+    // Phase 1b: expand SOAC side-effects into loops (mutates skeleton + headers).
+    soac_expand::expand_soacs(&mut graph, &mut control_headers);
+
+    // Phase 1c: skeleton rewrites (branch folding + redundant phi elim).
     let aliases = skel_opt::optimize_skeleton(&mut graph);
 
     // Skeleton rewrites can change CFG edges; rebuild the skeleton domtree.
@@ -80,14 +95,19 @@ pub(crate) fn optimize_func(body: &FuncBody) -> FuncBody {
 
     let params: Vec<_> = body.params.iter().map(|(_, ty, name)| (ty.clone(), name.clone())).collect();
 
+    // elaborate takes an orig→skel block map and control_headers keyed on orig.
+    // We already remapped headers into skel-space, so use an identity map.
+    let identity_map: std::collections::HashMap<_, _> =
+        graph.skeleton.blocks.keys().map(|b| (b, b)).collect();
+
     // Phase 2: elaborate sea-of-nodes → FuncBody (with scoped dedup = DCE).
     elaborate::elaborate(
         &graph,
         &skel_domtree,
         &params,
         body.return_ty.clone(),
-        &body.control_headers,
-        &orig_block_map,
+        &control_headers,
+        &identity_map,
         &aliases,
     )
 }
