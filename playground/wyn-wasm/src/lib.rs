@@ -416,7 +416,7 @@ fn compile_impl(source: &str) -> CompileResult {
         Ok(s) => s,
         Err(e) => return CompileResult::err_msg(format!("SSA conversion error: {:?}", e)),
     };
-    let ssa = raw.expand_soacs().optimize_skeleton().elaborate();
+    let ssa = raw.expand_soacs(false).optimize_skeleton().elaborate();
 
     // Lower to Shadertoy GLSL
     match ssa.lower_shadertoy() {
@@ -511,7 +511,7 @@ fn compile_with_ir_impl(source: &str) -> CompileResultWithIR {
         Ok(s) => s,
         Err(e) => return CompileResultWithIR::err_msg(format!("SSA conversion error: {:?}", e)),
     };
-    let ssa = raw.expand_soacs().optimize_skeleton().elaborate();
+    let ssa = raw.expand_soacs(false).optimize_skeleton().elaborate();
 
     // Lower to Shadertoy GLSL
     match ssa.lower_shadertoy() {

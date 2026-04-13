@@ -23,7 +23,16 @@ use super::types::{
 };
 
 /// Expand every `SideEffectKind::Pending(PendingSoac::...)` in the skeleton.
-pub fn expand_soacs(graph: &mut EGraph, control_headers: &mut HashMap<BlockId, ControlHeader>) {
+///
+/// `unroll_maps`: when true, Map over statically-sized arrays up to 16
+/// elements is unrolled into straight-line code. GLSL targets pass `false`
+/// (the GLSL structurizer prefers explicit loops; GLSL drivers unroll on
+/// their own).
+pub fn expand_soacs(
+    graph: &mut EGraph,
+    control_headers: &mut HashMap<BlockId, ControlHeader>,
+    unroll_maps: bool,
+) {
     // Collect (block, index) of every handleable Soac in a stable order.
     // Process back-to-front within each block so earlier indices stay valid.
     let mut targets: Vec<(BlockId, usize)> = Vec::new();
@@ -40,7 +49,7 @@ pub fn expand_soacs(graph: &mut EGraph, control_headers: &mut HashMap<BlockId, C
 
     let mut next_effect = next_effect_token(graph);
     for (bid, idx) in targets {
-        expand_one(graph, control_headers, bid, idx, &mut next_effect);
+        expand_one(graph, control_headers, bid, idx, &mut next_effect, unroll_maps);
     }
     let _ = next_effect; // silence unused when no view-array reductions
 }
@@ -163,6 +172,7 @@ fn expand_one(
     bid: BlockId,
     idx: usize,
     next_effect: &mut u32,
+    unroll_maps: bool,
 ) {
     let se = graph.skeleton.blocks[bid].side_effects.remove(idx);
     match &se.kind {
@@ -284,7 +294,8 @@ fn expand_one(
             };
             // Don't allow unroll when output or any input is a SoA tuple:
             // `_w_intrinsic_array_with` targets composite arrays only.
-            let allow_unroll = as_soa_tuple(&out_arr_ty).is_none()
+            let allow_unroll = unroll_maps
+                && as_soa_tuple(&out_arr_ty).is_none()
                 && read_inputs.iter().all(|(_, a, _)| as_soa_tuple(a).is_none());
             expand_loop(
                 graph,

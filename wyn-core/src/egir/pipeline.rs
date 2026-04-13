@@ -219,12 +219,15 @@ impl ProgramEgir<Raw> {
         )
     }
 
-    pub fn expand_soacs(self) -> EgirSoacExpanded {
+    /// `unroll_maps`: whether to unroll small-constant-length Maps into
+    /// straight-line code. Typically `true` for SPIR-V and `false` for GLSL
+    /// (where drivers unroll themselves and the structurizer prefers loops).
+    pub fn expand_soacs(self, unroll_maps: bool) -> EgirSoacExpanded {
         let functions = self
             .functions
             .into_iter()
             .map(|mut f| {
-                soac_expand::expand_soacs(&mut f.graph, &mut f.control_headers);
+                soac_expand::expand_soacs(&mut f.graph, &mut f.control_headers, unroll_maps);
                 f.transition::<SoacExpanded>()
             })
             .collect();
@@ -232,7 +235,7 @@ impl ProgramEgir<Raw> {
             .entry_points
             .into_iter()
             .map(|mut e| {
-                soac_expand::expand_soacs(&mut e.graph, &mut e.control_headers);
+                soac_expand::expand_soacs(&mut e.graph, &mut e.control_headers, unroll_maps);
                 e.transition::<SoacExpanded>()
             })
             .collect();

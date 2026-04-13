@@ -249,7 +249,10 @@ fn compile_file(
     // `materialize` (rewrite dynamic Index → Materialize+DynamicExtract);
     // GLSL skips it.
     let raw = time("to_egraph", verbose, || tlc_reachable.to_egraph())?;
-    let expanded = time("expand_soacs", verbose, || raw.expand_soacs());
+    // Unroll small Maps for SPIR-V; leave loops intact for GLSL (drivers
+    // unroll themselves and the structurizer is happier with real loops).
+    let unroll_maps = matches!(target, Target::Spirv);
+    let expanded = time("expand_soacs", verbose, || raw.expand_soacs(unroll_maps));
     let ssa = match target {
         Target::Spirv => time("egir_passes_spirv", verbose, || {
             expanded.materialize().optimize_skeleton().elaborate()

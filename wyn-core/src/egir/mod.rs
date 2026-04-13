@@ -99,6 +99,6 @@ pub(crate) fn optimize_func(body: &FuncBody) -> FuncBody {
         control_headers,
     );
     let ssa =
-        pipeline::ProgramEgir::single_function(func).expand_soacs().optimize_skeleton().elaborate().ssa;
+        pipeline::ProgramEgir::single_function(func).expand_soacs(true).optimize_skeleton().elaborate().ssa;
     ssa.functions.into_iter().next().expect("optimize_func produced no body").body
 }

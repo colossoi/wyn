@@ -641,7 +641,8 @@ impl<'a> Converter<'a> {
             graph,
             control_headers,
         );
-        let elaborated = ProgramEgir::single_function(func).expand_soacs().optimize_skeleton().elaborate();
+        let elaborated =
+            ProgramEgir::single_function(func).expand_soacs(true).optimize_skeleton().elaborate();
         elaborated.ssa.functions.into_iter().next().map(|f| f.body)
     }
 
@@ -1872,7 +1873,7 @@ mod tests {
 
         convert_program(&tlc.tlc, PipelineDescriptor::default())
             .expect("egir::from_tlc conversion failed")
-            .expand_soacs()
+            .expand_soacs(true)
             .optimize_skeleton()
             .elaborate()
             .ssa

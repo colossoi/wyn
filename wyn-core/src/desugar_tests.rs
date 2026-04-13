@@ -33,7 +33,7 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .filter_reachable()
         .to_egraph()
         .map_err(|e| crate::err_spirv!("{}", e))?
-        .expand_soacs()
+        .expand_soacs(true)
         .materialize()
         .optimize_skeleton()
         .elaborate()
@@ -66,7 +66,7 @@ fn compile_through_ssa(input: &str) -> Result<Program, CompilerError> {
         .filter_reachable()
         .to_egraph()
         .map_err(|e| crate::err_spirv!("{}", e))?
-        .expand_soacs()
+        .expand_soacs(true)
         .materialize()
         .optimize_skeleton()
         .elaborate();
@@ -510,7 +510,7 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     eprintln!("=== filter_reachable OK ===");
 
     let ssa =
-        tlc.to_egraph().expect("to_egir").expand_soacs().materialize().optimize_skeleton().elaborate();
+        tlc.to_egraph().expect("to_egir").expand_soacs(true).materialize().optimize_skeleton().elaborate();
     eprintln!("=== EGIR chain OK ===");
 
     let _lowered = ssa.lower().expect("lower");
@@ -573,7 +573,7 @@ entry main(data: []i32) []i32 = [first(data)]
     eprintln!("=== filter_reachable OK ===");
 
     let ssa =
-        tlc.to_egraph().expect("to_egir").expand_soacs().materialize().optimize_skeleton().elaborate();
+        tlc.to_egraph().expect("to_egir").expand_soacs(true).materialize().optimize_skeleton().elaborate();
     eprintln!("=== EGIR chain OK ===");
 
     let _lowered = ssa.lower().expect("lower");

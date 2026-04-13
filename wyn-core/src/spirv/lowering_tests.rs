@@ -29,7 +29,7 @@ fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
         .filter_reachable()
         .to_egraph()
         .expect("SSA conversion failed")
-        .expand_soacs()
+        .expand_soacs(true)
         .materialize()
         .optimize_skeleton()
         .elaborate();
@@ -359,7 +359,7 @@ fn compile_to_spirv_with_partial_eval(source: &str) -> Result<Vec<u32>> {
         .filter_reachable()
         .to_egraph()
         .expect("SSA conversion failed")
-        .expand_soacs()
+        .expand_soacs(true)
         .materialize()
         .optimize_skeleton()
         .elaborate();
