@@ -264,8 +264,7 @@ fn compile_file(
         }
     }
 
-    // Lower first-class SOAC instructions to explicit loops
-    let soac_lowered = time("soac_lower", verbose, || ssa.lower_soacs());
+    let soac_lowered = ssa;
 
     match target {
         Target::Spirv => {

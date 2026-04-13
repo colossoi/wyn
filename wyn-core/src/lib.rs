@@ -284,7 +284,6 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 //       -> .to_egir()                                   -> SsaConverted
 //
 // BackEnd Pipeline (SSA -> output):
-//       -> .lower_soacs()                               -> SsaSoacLowered
 //       -> .lower()                                     -> Lowered
 
 // =============================================================================
@@ -828,6 +827,7 @@ impl TlcGeneratedLambdasFolded {
         let tlc = tlc::inline::eliminate_dead_defs(self.tlc);
         TlcReachable {
             tlc,
+            pipeline: pipeline_descriptor::PipelineDescriptor::default(),
             type_table: self.type_table,
         }
     }
@@ -835,7 +835,10 @@ impl TlcGeneratedLambdasFolded {
     /// Transform TLC to SSA via the EGraph path (GVN + DCE for free).
     pub fn to_egir(self) -> std::result::Result<SsaConverted, egir::from_tlc::ConvertError> {
         let ssa = egir::from_tlc::convert_program(&self.tlc)?;
-        Ok(SsaConverted { ssa })
+        Ok(SsaConverted {
+            ssa,
+            pipeline: pipeline_descriptor::PipelineDescriptor::default(),
+        })
     }
 }
 
@@ -861,6 +864,7 @@ impl TlcSmallInlined {
         let tlc = tlc::inline::eliminate_dead_defs(self.tlc);
         TlcReachable {
             tlc,
+            pipeline: pipeline_descriptor::PipelineDescriptor::default(),
             type_table: self.type_table,
         }
     }
@@ -868,7 +872,10 @@ impl TlcSmallInlined {
     /// Transform TLC to SSA via the EGraph path (GVN + DCE for free).
     pub fn to_egir(self) -> std::result::Result<SsaConverted, egir::from_tlc::ConvertError> {
         let ssa = egir::from_tlc::convert_program(&self.tlc)?;
-        Ok(SsaConverted { ssa })
+        Ok(SsaConverted {
+            ssa,
+            pipeline: pipeline_descriptor::PipelineDescriptor::default(),
+        })
     }
 }
 
@@ -881,9 +888,9 @@ pub struct TlcParallelized {
 
 impl TlcParallelized {
     /// Eliminate unreachable defs (dead code elimination at TLC level).
-    pub fn filter_reachable(self) -> TlcReachableWithPipeline {
+    pub fn filter_reachable(self) -> TlcReachable {
         let tlc = tlc::inline::eliminate_dead_defs(self.tlc);
-        TlcReachableWithPipeline {
+        TlcReachable {
             tlc,
             pipeline: self.pipeline,
             type_table: self.type_table,
@@ -891,57 +898,20 @@ impl TlcParallelized {
     }
 
     /// Transform TLC to SSA via the EGraph path (GVN + DCE for free).
-    pub fn to_egir(self) -> std::result::Result<SsaConvertedWithPipeline, egir::from_tlc::ConvertError> {
+    pub fn to_egir(self) -> std::result::Result<SsaConverted, egir::from_tlc::ConvertError> {
         let ssa = egir::from_tlc::convert_program(&self.tlc)?;
-        Ok(SsaConvertedWithPipeline {
+        Ok(SsaConverted {
             ssa,
             pipeline: self.pipeline,
         })
     }
 }
 
-/// TLC after parallelization + dead code elimination
-pub struct TlcReachableWithPipeline {
-    pub tlc: tlc::Program,
-    pub pipeline: pipeline_descriptor::PipelineDescriptor,
-    pub type_table: TypeTable,
-}
-
-impl TlcReachableWithPipeline {
-    /// Transform TLC to SSA via the EGraph path (GVN + DCE for free).
-    pub fn to_egir(self) -> std::result::Result<SsaConvertedWithPipeline, egir::from_tlc::ConvertError> {
-        let ssa = egir::from_tlc::convert_program(&self.tlc)?;
-        Ok(SsaConvertedWithPipeline {
-            ssa,
-            pipeline: self.pipeline,
-        })
-    }
-}
-
-/// SSA after TLC-level parallelization (carries the pipeline descriptor).
-pub struct SsaConvertedWithPipeline {
-    pub ssa: ssa::types::Program,
-    pub pipeline: pipeline_descriptor::PipelineDescriptor,
-}
-
-impl SsaConvertedWithPipeline {
-    /// Lower first-class SOAC instructions to explicit loops.
-    pub fn lower_soacs(self) -> SsaSoacLowered {
-        // DO NOT PUT THIS BACK IN, ASK THE USER FIRST.
-        // ssa::soac_lower is intentionally unwired while egir::soac_expand is
-        // being ported variant-by-variant. Rewiring it creates a fallback that
-        // hides which variants soac_expand is failing to handle.
-        let ssa = self.ssa;
-        SsaSoacLowered {
-            ssa,
-            pipeline: self.pipeline,
-        }
-    }
-}
-
-/// TLC after dead code elimination
+/// TLC after dead code elimination. Always carries a `PipelineDescriptor`
+/// (empty for non-parallelized paths).
 pub struct TlcReachable {
     pub tlc: tlc::Program,
+    pub pipeline: pipeline_descriptor::PipelineDescriptor,
     pub type_table: TypeTable,
 }
 
@@ -949,37 +919,20 @@ impl TlcReachable {
     /// Transform TLC to SSA via the EGraph path (GVN + DCE for free).
     pub fn to_egir(self) -> std::result::Result<SsaConverted, egir::from_tlc::ConvertError> {
         let ssa = egir::from_tlc::convert_program(&self.tlc)?;
-        Ok(SsaConverted { ssa })
-    }
-}
-
-/// TLC has been converted directly to SSA
-pub struct SsaConverted {
-    pub ssa: ssa::types::Program,
-}
-
-impl SsaConverted {
-    /// Lower first-class SOAC instructions to explicit loops.
-    pub fn lower_soacs(self) -> SsaSoacLowered {
-        // DO NOT PUT THIS BACK IN, ASK THE USER FIRST.
-        // ssa::soac_lower is intentionally unwired while egir::soac_expand is
-        // being ported variant-by-variant. Rewiring it creates a fallback that
-        // hides which variants soac_expand is failing to handle.
-        let ssa = self.ssa;
-        SsaSoacLowered {
+        Ok(SsaConverted {
             ssa,
-            pipeline: pipeline_descriptor::PipelineDescriptor::default(),
-        }
+            pipeline: self.pipeline,
+        })
     }
 }
 
-/// SSA after SOAC instructions have been lowered to explicit loops
-pub struct SsaSoacLowered {
+/// TLC has been converted directly to SSA (via EGIR).
+pub struct SsaConverted {
     pub ssa: ssa::types::Program,
     pub pipeline: pipeline_descriptor::PipelineDescriptor,
 }
 
-impl SsaSoacLowered {
+impl SsaConverted {
     /// Materialize dynamic array indices for SPIR-V and hoist out of loops.
     pub fn materialize(self) -> SsaMaterialized {
         let ssa = spirv::materialize::materialize_dynamic_indices(self.ssa);

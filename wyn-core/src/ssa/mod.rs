@@ -14,8 +14,6 @@ pub mod builder;
 pub mod layout;
 pub mod merge;
 pub mod print;
-pub mod soa_helpers;
-pub mod soac_lower;
 pub mod types;
 pub mod verify;
 

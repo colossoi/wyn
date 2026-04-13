@@ -690,7 +690,7 @@ entry vertex_main() #[builtin(position)] vec4f32 =
         .filter_reachable()
         .to_egir()
         .expect("SSA conversion failed")
-        .lower_soacs()
+        
         .lower();
 
     assert!(result.is_ok(), "SPIR-V compilation failed: {:?}", result.err());
@@ -734,7 +734,7 @@ entry compute_main(data: []i32) i32 =
         .filter_reachable()
         .to_egir()
         .expect("SSA conversion failed")
-        .lower_soacs()
+        
         .lower();
 
     assert!(result.is_ok(), "SPIR-V compilation failed: {:?}", result.err());
@@ -780,7 +780,7 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
         .filter_reachable()
         .to_egir()
         .expect("SSA conversion failed")
-        .lower_soacs()
+        
         .lower();
 
     assert!(result.is_ok(), "SPIR-V compilation failed: {:?}", result.err());
@@ -869,7 +869,7 @@ fn compile_to_spirv(input: &str) -> Result<Vec<u32>, Box<dyn std::error::Error>>
         .parallelize_soacs()
         .filter_reachable()
         .to_egir()?
-        .lower_soacs()
+        
         .lower()?;
 
     Ok(result.spirv)

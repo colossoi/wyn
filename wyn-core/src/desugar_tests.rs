@@ -33,7 +33,7 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .filter_reachable()
         .to_egir()
         .map_err(|e| crate::err_spirv!("{}", e))?
-        .lower_soacs()
+        
         .lower()?;
     Ok(())
 }
@@ -505,8 +505,6 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     let ssa = tlc.to_egir().expect("to_egir");
     eprintln!("=== to_egir OK ===");
 
-    let ssa = ssa.lower_soacs();
-    eprintln!("=== lower_soacs OK ===");
 
     let _lowered = ssa.lower().expect("lower");
     eprintln!("=== lower OK ===");
@@ -570,8 +568,6 @@ entry main(data: []i32) []i32 = [first(data)]
     let ssa = tlc.to_egir().expect("to_egir");
     eprintln!("=== to_egir OK ===");
 
-    let ssa = ssa.lower_soacs();
-    eprintln!("=== lower_soacs OK ===");
 
     let _lowered = ssa.lower().expect("lower");
     eprintln!("=== lower OK ===");

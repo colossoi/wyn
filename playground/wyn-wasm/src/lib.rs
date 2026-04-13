@@ -422,7 +422,7 @@ fn compile_impl(source: &str) -> CompileResult {
     let reachable = parallelized.filter_reachable();
 
     // Lower SOAC instructions to explicit loops
-    let soac_lowered = reachable.lower_soacs();
+    let soac_lowered = reachable;
 
     // Lower to Shadertoy GLSL
     match soac_lowered.lower_shadertoy() {
@@ -521,7 +521,7 @@ fn compile_with_ir_impl(source: &str) -> CompileResultWithIR {
     let parallelized = ssa.parallelize_soacs();
     let reachable = parallelized.filter_reachable();
     let optimized = reachable.optimize();
-    let soac_lowered = optimized.lower_soacs();
+    let soac_lowered = optimized;
 
     // Lower to Shadertoy GLSL
     // Note: MIR visualization is no longer available (MIR eliminated from pipeline)
