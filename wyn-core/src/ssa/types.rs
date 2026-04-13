@@ -99,14 +99,6 @@ impl From<ValueId> for ValueRef {
     }
 }
 
-/// Effect token for side effect ordering.
-///
-/// Effect tokens form a chain that ensures effectful operations
-/// (loads, stores, etc.) execute in the correct order.
-/// Pure operations don't need effect tokens.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct EffectToken(pub u32);
-
 // =============================================================================
 // ControlHeader (side-map metadata, not part of BasicBlock)
 // =============================================================================
@@ -490,9 +482,9 @@ pub enum ViewSource {
 // =============================================================================
 
 /// The concrete wyn-ssa Function type used throughout wyn-core.
-pub type WynFunction = crate::ssa::framework::Function<InstKind, EffectToken, Type<TypeName>>;
+pub type WynFunction = crate::ssa::framework::Function<InstKind, Type<TypeName>>;
 /// The concrete wyn-ssa InstNode type.
-pub type WynInstNode = crate::ssa::framework::InstNode<InstKind, EffectToken>;
+pub type WynInstNode = crate::ssa::framework::InstNode<InstKind>;
 
 /// An SSA function body.
 #[derive(Debug, Clone)]
@@ -509,26 +501,11 @@ pub struct FuncBody {
     /// Return type of the function.
     pub return_ty: Type<TypeName>,
 
-    /// Next effect token ID (for allocation).
-    pub(crate) next_effect: u32,
-
     /// DPS output parameter (if using destination-passing style).
     pub dps_output: Option<ValueId>,
 }
 
 impl FuncBody {
-    /// The entry effect token (always EffectToken(0)).
-    pub fn entry_effect(&self) -> EffectToken {
-        EffectToken(0)
-    }
-
-    /// Allocate a new effect token.
-    pub fn alloc_effect(&mut self) -> EffectToken {
-        let token = EffectToken(self.next_effect);
-        self.next_effect += 1;
-        token
-    }
-
     /// Get the type of a value.
     pub fn get_value_type(&self, value: ValueId) -> &Type<TypeName> {
         self.inner.value_type(value)
@@ -574,66 +551,9 @@ impl FuncBody {
 // Instr trait implementation for InstKind
 // =============================================================================
 
-impl crate::ssa::framework::Instr for InstKind {
-    fn for_each_operand(&self, mut f: impl FnMut(ValueId)) {
-        for v in self.ssa_uses() {
-            f(v);
-        }
-    }
-
-    fn map_operands(&self, f: impl FnMut(ValueId) -> ValueId) -> Self {
-        // Wrap FnMut in a RefCell so we can call it through an &-ref closure
-        let f = std::cell::RefCell::new(f);
-        self.remap(&|v| (f.borrow_mut())(v))
-    }
-}
-
-impl crate::ssa::framework::ValueLike for InstKind {
-    fn is_hoistable(&self) -> bool {
-        matches!(
-            self,
-            InstKind::Int(_)
-                | InstKind::Float(_)
-                | InstKind::Bool(_)
-                | InstKind::Unit
-                | InstKind::String(_)
-                | InstKind::Global(_)
-                | InstKind::Extern(_)
-                | InstKind::BinOp { .. }
-                | InstKind::UnaryOp { .. }
-                | InstKind::Tuple(_)
-                | InstKind::Vector(_)
-                | InstKind::Matrix(_)
-                | InstKind::ArrayLit { .. }
-                | InstKind::ArrayRange { .. }
-                | InstKind::Project { .. }
-                | InstKind::Index { .. }
-                | InstKind::Materialize { .. }
-                | InstKind::DynamicExtract { .. }
-        )
-    }
-
-    fn is_closed(&self) -> bool {
-        self.ssa_uses().is_empty()
-    }
-
-    fn equivalent_to(&self, other: &Self) -> bool {
-        // Structural equality for CSE — only for pure value-producing instructions.
-        // We use Debug format as a quick deep-equality check.
-        // A proper implementation would compare fields directly.
-        format!("{:?}", self) == format!("{:?}", other)
-    }
-}
-
 // =============================================================================
 // Display Implementations
 // =============================================================================
-
-impl std::fmt::Display for EffectToken {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "!{}", self.0)
-    }
-}
 
 // =============================================================================
 // Program-Level Types

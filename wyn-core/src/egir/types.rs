@@ -2,7 +2,23 @@
 
 use crate::ast::TypeName;
 use crate::ssa::framework::BlockId;
-use crate::ssa::types::{ConstantValue, EffectToken, InstKind, ViewSource};
+use crate::ssa::types::{ConstantValue, InstKind, ViewSource};
+
+/// Effect token for ordering effectful ops during EGIR passes.
+///
+/// These are purely an EGIR-internal concept — they never reach the SSA
+/// backend. `elaborate` emits instructions in skeleton block order and
+/// doesn't pass the tokens through. The token chain only exists to support
+/// rewriting passes (e.g. `soac_expand` allocating fresh tokens for new
+/// Load/Store side-effects so they don't collide with existing ones).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EffectToken(pub u32);
+
+impl std::fmt::Display for EffectToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "!{}", self.0)
+    }
+}
 use polytype::Type;
 use slotmap::{SlotMap, new_key_type};
 use smallvec::SmallVec;

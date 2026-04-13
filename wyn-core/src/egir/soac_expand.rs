@@ -12,8 +12,9 @@ use crate::ssa::framework::BlockId;
 use polytype::Type;
 use smallvec::{SmallVec, smallvec};
 
+use super::types::EffectToken;
 use crate::ast::TypeName;
-use crate::ssa::types::{ControlHeader, EffectToken, InstKind, ValueRef};
+use crate::ssa::types::{ControlHeader, InstKind, ValueRef};
 use crate::types::TypeExt;
 use crate::types::{is_array_variant_composite, is_array_variant_view, is_virtual_array};
 

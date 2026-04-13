@@ -5,7 +5,6 @@
 //! instructions in the skeleton CFG.
 
 use crate::ast::TypeName;
-use crate::ssa::framework::ValueLike;
 use crate::ssa::types::{BlockId, ConstantValue, FuncBody, InstKind, ValueId, ValueRef};
 use polytype::Type;
 use smallvec::SmallVec;
@@ -22,6 +21,7 @@ use super::types::*;
 pub fn canonicalize(body: &FuncBody) -> (EGraph, DomTree, HashMap<BlockId, BlockId>) {
     let mut graph = EGraph::new();
     let mut val_map: HashMap<ValueId, NodeId> = HashMap::new();
+    let mut next_effect: u32 = 1;
 
     // --- 1. Compute domtree from original SSA CFG. ---
     let ssa_domtree = DomTree::build(&SsaCfgView { body });
@@ -69,10 +69,10 @@ pub fn canonicalize(body: &FuncBody) -> (EGraph, DomTree, HashMap<BlockId, Block
                 .map(|r| body.get_value_type(r).clone())
                 .unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![]));
 
-            // An instruction is lifted into the pure sea only if:
-            //   (1) it carries no effect tokens (front-end didn't order it), and
-            //   (2) its InstKind has a pure mapping (blacklist: Alloca/Load/Store/Soac).
-            let pure_op = if inst.effects.is_none() { extract_pure_op(kind, &ty) } else { None };
+            // An instruction lifts into the pure sea iff its InstKind has a pure
+            // mapping (blacklist: Alloca / Load / Store). SSA no longer carries
+            // effect tokens, so the kind alone is the discriminator.
+            let pure_op = extract_pure_op(kind, &ty);
 
             if let Some(pure_op) = pure_op {
                 let operands = resolve_operands(kind, &val_map, &mut graph);
@@ -81,21 +81,24 @@ pub fn canonicalize(body: &FuncBody) -> (EGraph, DomTree, HashMap<BlockId, Block
                     val_map.insert(result_vid, nid);
                 }
             } else {
-                // Effectful instruction → keep in skeleton.
+                // Effectful instruction → keep in skeleton. Canonicalize reads
+                // from SSA, so there's no Pending path here. Allocate a fresh
+                // effect-token pair for the egir pass that may run next (e.g.
+                // soac_expand) — the pair is egir-internal, never reaches SSA.
                 let operands = resolve_operands(kind, &val_map, &mut graph);
                 let result_nid = inst.result.map(|r| {
                     let ty = body.get_value_type(r).clone();
                     graph.alloc_side_effect_result(ty)
                 });
+                let eff_in = EffectToken(next_effect);
+                let eff_out = EffectToken(next_effect + 1);
+                next_effect += 2;
 
                 graph.skeleton.blocks[skel_bid].side_effects.push(SideEffect {
-                    // Canonicalize sees SSA instructions only — wrap in
-                    // SideEffectKind::Inst. There's no `PendingSoac` path
-                    // because SSA no longer carries SOACs.
                     kind: super::types::SideEffectKind::Inst(kind.clone()),
                     operand_nodes: operands,
                     result: result_nid,
-                    effects: inst.effects,
+                    effects: Some((eff_in, eff_out)),
                 });
 
                 if let (Some(result_vid), Some(result_nid)) = (inst.result, result_nid) {

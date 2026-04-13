@@ -7,10 +7,11 @@
 
 use std::collections::{HashMap, HashSet};
 
+use super::types::EffectToken;
 use crate::ast::TypeName;
 use crate::ssa::framework::BlockId;
 use crate::ssa::types::ViewSource;
-use crate::ssa::types::{ControlHeader, EffectToken, FuncBody, Function, InstKind, Program, ValueRef};
+use crate::ssa::types::{ControlHeader, FuncBody, Function, InstKind, Program, ValueRef};
 use crate::tlc::{
     ArrayExpr, Def as TlcDef, DefMeta, Lambda, LoopKind, Program as TlcProgram, SoacOp, Term, TermKind,
 };

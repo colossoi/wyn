@@ -7,8 +7,7 @@ use crate::ast::TypeName;
 use polytype::Type;
 
 use super::types::{
-    BlockId, ControlHeader, EffectToken, FuncBody, InstId, InstKind, Terminator, ValueId, ValueRef,
-    ViewSource,
+    BlockId, ControlHeader, FuncBody, InstId, InstKind, Terminator, ValueId, ValueRef, ViewSource,
 };
 
 /// Error during function building.
@@ -16,11 +15,10 @@ pub type BuilderError = crate::ssa::framework::BuilderError;
 
 /// Builder for constructing SSA functions.
 pub struct FuncBuilder {
-    inner: crate::ssa::framework::FuncBuilder<InstKind, EffectToken, Type<TypeName>>,
+    inner: crate::ssa::framework::FuncBuilder<InstKind, Type<TypeName>>,
     control_headers: std::collections::HashMap<BlockId, ControlHeader>,
     params: Vec<(ValueId, Type<TypeName>, String)>,
     return_ty: Type<TypeName>,
-    next_effect: u32,
     dps_output: Option<ValueId>,
 }
 
@@ -41,7 +39,6 @@ impl FuncBuilder {
             control_headers: std::collections::HashMap::new(),
             params: func_params,
             return_ty,
-            next_effect: 1,
             dps_output: None,
         }
     }
@@ -54,18 +51,6 @@ impl FuncBuilder {
     /// Get the number of function parameters.
     pub fn num_params(&self) -> usize {
         self.params.len()
-    }
-
-    /// The entry effect token (always EffectToken(0)).
-    pub fn entry_effect(&self) -> EffectToken {
-        EffectToken(0)
-    }
-
-    /// Allocate a new effect token.
-    pub fn alloc_effect(&mut self) -> EffectToken {
-        let token = EffectToken(self.next_effect);
-        self.next_effect += 1;
-        token
     }
 
     /// Set the DPS output parameter.
@@ -129,31 +114,12 @@ impl FuncBuilder {
 
     /// Push an instruction that produces a value.
     pub fn push_inst(&mut self, kind: InstKind, ty: Type<TypeName>) -> Result<ValueId, BuilderError> {
-        self.inner.push_inst(kind, ty, None)
-    }
-
-    /// Push an instruction with explicit effects.
-    pub fn push_inst_with_effects(
-        &mut self,
-        kind: InstKind,
-        ty: Type<TypeName>,
-        effects: Option<(EffectToken, EffectToken)>,
-    ) -> Result<ValueId, BuilderError> {
-        self.inner.push_inst(kind, ty, effects)
+        self.inner.push_inst(kind, ty)
     }
 
     /// Push an instruction that produces no value (e.g., Store).
     pub fn push_void_inst(&mut self, kind: InstKind) -> Result<InstId, BuilderError> {
-        self.inner.push_void_inst(kind, None)
-    }
-
-    /// Push a void instruction with explicit effects.
-    pub fn push_void_inst_with_effects(
-        &mut self,
-        kind: InstKind,
-        effects: Option<(EffectToken, EffectToken)>,
-    ) -> Result<InstId, BuilderError> {
-        self.inner.push_void_inst(kind, effects)
+        self.inner.push_void_inst(kind)
     }
 
     /// Set the terminator for the current block.
@@ -169,7 +135,6 @@ impl FuncBuilder {
             control_headers: self.control_headers,
             params: self.params,
             return_ty: self.return_ty,
-            next_effect: self.next_effect,
             dps_output: self.dps_output,
         })
     }
@@ -181,20 +146,17 @@ impl FuncBuilder {
             control_headers: self.control_headers,
             params: self.params,
             return_ty: self.return_ty,
-            next_effect: self.next_effect,
             dps_output: self.dps_output,
         }
     }
 
     /// Access the underlying function (read-only).
-    pub fn func(&self) -> &crate::ssa::framework::Function<InstKind, EffectToken, Type<TypeName>> {
+    pub fn func(&self) -> &crate::ssa::framework::Function<InstKind, Type<TypeName>> {
         self.inner.func()
     }
 
     /// Access the underlying function (mutable).
-    pub fn func_mut(
-        &mut self,
-    ) -> &mut crate::ssa::framework::Function<InstKind, EffectToken, Type<TypeName>> {
+    pub fn func_mut(&mut self) -> &mut crate::ssa::framework::Function<InstKind, Type<TypeName>> {
         self.inner.func_mut()
     }
 
@@ -340,13 +302,7 @@ impl FuncBuilder {
     }
 
     /// Push a load instruction. Returns the loaded value.
-    pub fn push_load(
-        &mut self,
-        ptr: ValueId,
-        result_ty: Type<TypeName>,
-        effect_in: EffectToken,
-    ) -> Result<ValueId, BuilderError> {
-        let effect_out = self.alloc_effect();
+    pub fn push_load(&mut self, ptr: ValueId, result_ty: Type<TypeName>) -> Result<ValueId, BuilderError> {
         let block = self.current_block().ok_or(BuilderError::NoCurrentBlock)?;
         if !matches!(self.inner.func().blocks[block].term, Terminator::Unreachable) {
             return Err(BuilderError::BlockAlreadyTerminated(block));
@@ -357,18 +313,11 @@ impl FuncBuilder {
                 ptr: ValueRef::from(ptr),
             },
             result_ty,
-            Some((effect_in, effect_out)),
         ))
     }
 
-    /// Push a store instruction. Returns the output effect token.
-    pub fn push_store(
-        &mut self,
-        ptr: ValueId,
-        value: ValueId,
-        effect_in: EffectToken,
-    ) -> Result<EffectToken, BuilderError> {
-        let effect_out = self.alloc_effect();
+    /// Push a store instruction.
+    pub fn push_store(&mut self, ptr: ValueId, value: ValueId) -> Result<(), BuilderError> {
         let block = self.current_block().ok_or(BuilderError::NoCurrentBlock)?;
         if !matches!(self.inner.func().blocks[block].term, Terminator::Unreachable) {
             return Err(BuilderError::BlockAlreadyTerminated(block));
@@ -379,9 +328,8 @@ impl FuncBuilder {
                 ptr: ValueRef::from(ptr),
                 value: ValueRef::from(value),
             },
-            Some((effect_in, effect_out)),
         );
-        Ok(effect_out)
+        Ok(())
     }
 
     // =========================================================================
@@ -436,8 +384,7 @@ impl FuncBuilder {
         index: ValueId,
         value: ValueId,
         elem_ty: Type<TypeName>,
-        effect_in: EffectToken,
-    ) -> Result<EffectToken, BuilderError> {
+    ) -> Result<(), BuilderError> {
         let ptr = self.push_inst(
             InstKind::StorageViewIndex {
                 view: ValueRef::from(view),
@@ -445,7 +392,7 @@ impl FuncBuilder {
             },
             elem_ty,
         )?;
-        self.push_store(ptr, value, effect_in)
+        self.push_store(ptr, value)
     }
 
     // =========================================================================
