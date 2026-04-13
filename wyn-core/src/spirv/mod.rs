@@ -4,7 +4,6 @@
 
 #[cfg(test)]
 mod lowering_tests;
-pub mod materialize;
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::TypeName;

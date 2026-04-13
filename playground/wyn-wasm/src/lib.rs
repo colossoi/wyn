@@ -398,34 +398,28 @@ fn compile_impl(source: &str) -> CompileResult {
         return CompileResult::err_msg("Alias checking failed".to_string());
     }
 
-    // Transform to TLC, monomorphize, then to SSA
-    let ssa = match alias_checked
+    // Full TLC pipeline, then the EGIR chain (skipping `materialize` —
+    // GLSL supports dynamic indexing natively).
+    let raw = match alias_checked
         .to_tlc(&frontend.schemes, &frontend.module_manager)
         .partial_eval()
         .normalize_soacs().fuse_maps()
         .defunctionalize()
-        
         .monomorphize()
         .buffer_specialize()
-        .inline()
-        .to_egir()
+        .fold_generated_lambdas()
+        .inline_small()
+        .parallelize_soacs()
+        .filter_reachable()
+        .to_egraph()
     {
         Ok(s) => s,
         Err(e) => return CompileResult::err_msg(format!("SSA conversion error: {:?}", e)),
     };
-
-    // Inline small functions, then parallelize SOACs
-    let ssa = ssa.inline_small();
-    let parallelized = ssa.parallelize_soacs();
-
-    // Eliminate dead functions
-    let reachable = parallelized.filter_reachable();
-
-    // Lower SOAC instructions to explicit loops
-    let soac_lowered = reachable;
+    let ssa = raw.expand_soacs().optimize_skeleton().elaborate();
 
     // Lower to Shadertoy GLSL
-    match soac_lowered.lower_shadertoy() {
+    match ssa.lower_shadertoy() {
         Ok(glsl) => CompileResult::ok(glsl),
         Err(e) => CompileResult::err(e),
     }
@@ -502,30 +496,25 @@ fn compile_with_ir_impl(source: &str) -> CompileResultWithIR {
     let tlc_after_partial_eval = tlc_program.partial_eval();
     let tlc_tree = tlc_tree::program_to_tree(&tlc_after_partial_eval.tlc);
 
-    // Continue pipeline: fuse maps, defunctionalize, monomorphize, then to SSA
-    let ssa = match tlc_after_partial_eval
+    // Full TLC pipeline, then the EGIR chain (GLSL skips materialize).
+    let raw = match tlc_after_partial_eval
         .normalize_soacs().fuse_maps()
         .defunctionalize()
-        
         .monomorphize()
         .buffer_specialize()
-        .inline()
-        .to_egir()
+        .fold_generated_lambdas()
+        .inline_small()
+        .parallelize_soacs()
+        .filter_reachable()
+        .to_egraph()
     {
         Ok(s) => s,
         Err(e) => return CompileResultWithIR::err_msg(format!("SSA conversion error: {:?}", e)),
     };
-
-    // SSA pipeline
-    let ssa = ssa.inline_small();
-    let parallelized = ssa.parallelize_soacs();
-    let reachable = parallelized.filter_reachable();
-    let optimized = reachable.optimize();
-    let soac_lowered = optimized;
+    let ssa = raw.expand_soacs().optimize_skeleton().elaborate();
 
     // Lower to Shadertoy GLSL
-    // Note: MIR visualization is no longer available (MIR eliminated from pipeline)
-    match soac_lowered.lower_shadertoy() {
+    match ssa.lower_shadertoy() {
         Ok(glsl) => CompileResultWithIR {
             success: true,
             glsl: Some(glsl),

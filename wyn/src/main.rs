@@ -245,8 +245,19 @@ fn compile_file(
         tlc_parallel.filter_reachable()
     });
 
-    // Transform TLC to SSA via EGraph (GVN + DCE for free)
-    let ssa = time("to_egir", verbose, || tlc_reachable.to_egir())?;
+    // Build the raw EGIR program, then chain the passes. SPIR-V needs
+    // `materialize` (rewrite dynamic Index → Materialize+DynamicExtract);
+    // GLSL skips it.
+    let raw = time("to_egraph", verbose, || tlc_reachable.to_egraph())?;
+    let expanded = time("expand_soacs", verbose, || raw.expand_soacs());
+    let ssa = match target {
+        Target::Spirv => time("egir_passes_spirv", verbose, || {
+            expanded.materialize().optimize_skeleton().elaborate()
+        }),
+        Target::Glsl | Target::Shadertoy => time("egir_passes_glsl", verbose, || {
+            expanded.optimize_skeleton().elaborate()
+        }),
+    };
 
     // Dump initial SSA if requested
     if let Some(ref path) = output_init_ssa {

@@ -72,7 +72,10 @@ pub enum PureOp {
 /// operand in the `ENode::Pure`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PureViewSource {
-    Storage { set: u32, binding: u32 },
+    Storage {
+        set: u32,
+        binding: u32,
+    },
     Inherited,
 }
 
@@ -413,7 +416,10 @@ pub fn extract_pure_op(kind: &InstKind, ty: &Type<TypeName>) -> Option<PureOp> {
         InstKind::Intrinsic { name, .. } => Some(PureOp::Intrinsic(name.clone())),
         InstKind::StorageView { source, .. } => {
             let src = match source {
-                ViewSource::Storage { set, binding } => PureViewSource::Storage { set: *set, binding: *binding },
+                ViewSource::Storage { set, binding } => PureViewSource::Storage {
+                    set: *set,
+                    binding: *binding,
+                },
                 ViewSource::Inherited { .. } => PureViewSource::Inherited,
             };
             Some(PureOp::StorageView(src))
@@ -423,9 +429,7 @@ pub fn extract_pure_op(kind: &InstKind, ty: &Type<TypeName>) -> Option<PureOp> {
         InstKind::OutputPtr { index } => Some(PureOp::OutputPtr { index: *index }),
         // Blacklist: the only truly effectful InstKinds. Everything else above
         // is treated as pure (hash-consable, hoistable).
-        InstKind::Alloca { .. }
-        | InstKind::Load { .. }
-        | InstKind::Store { .. } => None,
+        InstKind::Alloca { .. } | InstKind::Load { .. } | InstKind::Store { .. } => None,
     }
 }
 
@@ -501,7 +505,10 @@ pub fn rebuild_inst_kind(op: &PureOp, operands: &[wyn_ssa::ValueId]) -> InstKind
         },
         PureOp::StorageView(src) => {
             let source = match src {
-                PureViewSource::Storage { set, binding } => ViewSource::Storage { set: *set, binding: *binding },
+                PureViewSource::Storage { set, binding } => ViewSource::Storage {
+                    set: *set,
+                    binding: *binding,
+                },
                 PureViewSource::Inherited => ViewSource::Inherited { parent: operands[2] },
             };
             InstKind::StorageView {

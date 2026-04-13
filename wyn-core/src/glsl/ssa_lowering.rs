@@ -936,7 +936,6 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 }
             }
 
-
             InstKind::Materialize { .. } | InstKind::DynamicExtract { .. } => {
                 bail_glsl!("Materialize/DynamicExtract not supported in GLSL (SPIR-V-specific lowering)")
             }

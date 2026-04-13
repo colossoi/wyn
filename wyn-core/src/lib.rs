@@ -47,6 +47,9 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::marker::PhantomData;
 
+use egir::from_tlc::ConvertError;
+use egir::pipeline::EgirRaw;
+
 use indexmap::IndexMap;
 
 use ast::{NodeCounter, NodeId};
@@ -832,13 +835,12 @@ impl TlcGeneratedLambdasFolded {
         }
     }
 
-    /// Transform TLC to SSA via the EGraph path (GVN + DCE for free).
-    pub fn to_egir(self) -> std::result::Result<SsaConverted, egir::from_tlc::ConvertError> {
-        let ssa = egir::from_tlc::convert_program(&self.tlc)?;
-        Ok(SsaConverted {
-            ssa,
-            pipeline: pipeline_descriptor::PipelineDescriptor::default(),
-        })
+    /// Build the raw EGIR program. Callers chain the pipeline
+    /// (`expand_soacs → [materialize →] optimize_skeleton → elaborate`)
+    /// explicitly — materialize is the only optional pass and is required for
+    /// SPIR-V but not GLSL.
+    pub fn to_egraph(self) -> std::result::Result<EgirRaw, ConvertError> {
+        egir::from_tlc::convert_program(&self.tlc, pipeline_descriptor::PipelineDescriptor::default())
     }
 }
 
@@ -869,13 +871,12 @@ impl TlcSmallInlined {
         }
     }
 
-    /// Transform TLC to SSA via the EGraph path (GVN + DCE for free).
-    pub fn to_egir(self) -> std::result::Result<SsaConverted, egir::from_tlc::ConvertError> {
-        let ssa = egir::from_tlc::convert_program(&self.tlc)?;
-        Ok(SsaConverted {
-            ssa,
-            pipeline: pipeline_descriptor::PipelineDescriptor::default(),
-        })
+    /// Build the raw EGIR program. Callers chain the pipeline
+    /// (`expand_soacs → [materialize →] optimize_skeleton → elaborate`)
+    /// explicitly — materialize is the only optional pass and is required for
+    /// SPIR-V but not GLSL.
+    pub fn to_egraph(self) -> std::result::Result<EgirRaw, ConvertError> {
+        egir::from_tlc::convert_program(&self.tlc, pipeline_descriptor::PipelineDescriptor::default())
     }
 }
 
@@ -897,13 +898,8 @@ impl TlcParallelized {
         }
     }
 
-    /// Transform TLC to SSA via the EGraph path (GVN + DCE for free).
-    pub fn to_egir(self) -> std::result::Result<SsaConverted, egir::from_tlc::ConvertError> {
-        let ssa = egir::from_tlc::convert_program(&self.tlc)?;
-        Ok(SsaConverted {
-            ssa,
-            pipeline: self.pipeline,
-        })
+    pub fn to_egraph(self) -> std::result::Result<EgirRaw, ConvertError> {
+        egir::from_tlc::convert_program(&self.tlc, self.pipeline)
     }
 }
 
@@ -916,13 +912,8 @@ pub struct TlcReachable {
 }
 
 impl TlcReachable {
-    /// Transform TLC to SSA via the EGraph path (GVN + DCE for free).
-    pub fn to_egir(self) -> std::result::Result<SsaConverted, egir::from_tlc::ConvertError> {
-        let ssa = egir::from_tlc::convert_program(&self.tlc)?;
-        Ok(SsaConverted {
-            ssa,
-            pipeline: self.pipeline,
-        })
+    pub fn to_egraph(self) -> std::result::Result<EgirRaw, ConvertError> {
+        egir::from_tlc::convert_program(&self.tlc, self.pipeline)
     }
 }
 
@@ -933,45 +924,23 @@ pub struct SsaConverted {
 }
 
 impl SsaConverted {
-    /// Materialize dynamic array indices for SPIR-V and hoist out of loops.
-    pub fn materialize(self) -> SsaMaterialized {
-        let ssa = spirv::materialize::materialize_dynamic_indices(self.ssa);
-        SsaMaterialized {
-            ssa,
-            pipeline: self.pipeline,
-        }
-    }
-
-    /// Lower SSA to SPIR-V (materializes dynamic indices automatically).
-    pub fn lower(self) -> error::Result<Lowered> {
-        self.materialize().lower()
-    }
-
-    /// Lower SSA to GLSL (skips materialization — not needed for GLSL).
-    pub fn lower_glsl(self) -> error::Result<glsl::GlslOutput> {
-        glsl::lower(&self.ssa)
-    }
-
-    /// Lower SSA to Shadertoy-compatible GLSL.
-    pub fn lower_shadertoy(self) -> error::Result<String> {
-        glsl::lower_shadertoy(&self.ssa)
-    }
-}
-
-/// SSA after dynamic array indices have been materialized for SPIR-V
-pub struct SsaMaterialized {
-    pub ssa: ssa::types::Program,
-    pub pipeline: pipeline_descriptor::PipelineDescriptor,
-}
-
-impl SsaMaterialized {
-    /// Lower SSA to SPIR-V.
+    /// Lower SSA to SPIR-V. Materialization (`Index` → `Materialize` +
+    /// `DynamicExtract`) was already done by the EGIR pipeline if `to_egir`
+    /// was called with `EgirOpts::for_spirv()`.
     pub fn lower(self) -> error::Result<Lowered> {
         let spirv = spirv::lower_ssa_program(&self.ssa)?;
         Ok(Lowered {
             spirv,
             pipeline: self.pipeline,
         })
+    }
+
+    pub fn lower_glsl(self) -> error::Result<glsl::GlslOutput> {
+        glsl::lower(&self.ssa)
+    }
+
+    pub fn lower_shadertoy(self) -> error::Result<String> {
+        glsl::lower_shadertoy(&self.ssa)
     }
 }
 

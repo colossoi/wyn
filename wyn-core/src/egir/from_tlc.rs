@@ -8,8 +8,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::TypeName;
-use crate::ssa::types::{ControlHeader, EffectToken, FuncBody, Function, InstKind, Program, ValueRef};
 use crate::ssa::types::ViewSource;
+use crate::ssa::types::{ControlHeader, EffectToken, FuncBody, Function, InstKind, Program, ValueRef};
 use crate::tlc::{
     ArrayExpr, Def as TlcDef, DefMeta, Lambda, LoopKind, Program as TlcProgram, SoacOp, Term, TermKind,
 };
@@ -19,9 +19,10 @@ use polytype::Type;
 use smallvec::{SmallVec, smallvec};
 use wyn_ssa::BlockId;
 
-use super::domtree::{DomTree, SkeletonCfgView};
-use super::elaborate;
+use super::pipeline::{EgirRaw, EntryEgir, FuncEgir, ProgramEgir, Raw};
 use super::types::*;
+use crate::ast::Span;
+use crate::pipeline_descriptor::PipelineDescriptor;
 
 // ============================================================================
 // Error type
@@ -50,8 +51,14 @@ impl std::error::Error for ConvertError {}
 // Public entry point
 // ============================================================================
 
-/// Convert a TLC program directly to SSA via EGraph elaboration.
-pub fn convert_program(program: &TlcProgram) -> Result<Program, ConvertError> {
+/// Convert a TLC program into a raw EGIR program — each function and entry
+/// point becomes a per-body `EGraph` + metadata, waiting for the caller to
+/// chain the pipeline (`expand_soacs → [materialize →] optimize_skeleton →
+/// elaborate`).
+pub fn convert_program(
+    program: &TlcProgram,
+    pipeline: PipelineDescriptor,
+) -> Result<EgirRaw, ConvertError> {
     let top_level: HashMap<SymbolId, &TlcDef> = program.defs.iter().map(|d| (d.name, d)).collect();
     let symbols = &program.symbols;
 
@@ -62,7 +69,10 @@ pub fn convert_program(program: &TlcProgram) -> Result<Program, ConvertError> {
         .filter_map(|d| symbols.get(d.name).map(|n| (n.clone(), d.name)))
         .collect();
 
-    // Phase 1: detect pure constants (same logic as to_ssa).
+    // Phase 1: detect pure constants. We elaborate each arity-0 def's body
+    // through the full EGIR pipeline once (using a throwaway chain) to see if
+    // it collapses to a purely-constant FuncBody. Constants are hoisted to
+    // program scope and referenced by `PureOp::Global`.
     let mut pure_constant_names: HashSet<String> = HashSet::new();
     let mut constants = Vec::new();
 
@@ -75,7 +85,6 @@ pub fn convert_program(program: &TlcProgram) -> Result<Program, ConvertError> {
         }
         let def_name = symbols.get(def.name).expect("BUG: symbol not in table").clone();
 
-        // Build a mini EGraph for the constant body and check if it's purely constant.
         let mut converter = Converter::new(
             &top_level,
             &constants_by_name,
@@ -84,7 +93,7 @@ pub fn convert_program(program: &TlcProgram) -> Result<Program, ConvertError> {
         );
         if let Ok(result_nid) = converter.convert_term(&def.body) {
             converter.set_return(Some(result_nid));
-            if let Some(body) = converter.elaborate_to_funcbody(&[], def.body.ty.clone()) {
+            if let Some(body) = converter.probe_constant_body(def.body.ty.clone()) {
                 if is_purely_constant_body(&body) {
                     pure_constant_names.insert(def_name.clone());
                     constants.push(crate::ssa::types::Constant {
@@ -98,9 +107,10 @@ pub fn convert_program(program: &TlcProgram) -> Result<Program, ConvertError> {
         }
     }
 
-    // Phase 2: convert functions and entry points.
-    let mut functions = Vec::new();
-    let mut entry_points = Vec::new();
+    // Phase 2: convert functions and entry points into raw EGIR records.
+    let mut functions: Vec<FuncEgir<Raw>> = Vec::new();
+    let mut externs: Vec<Function> = Vec::new();
+    let mut entry_points: Vec<EntryEgir<Raw>> = Vec::new();
 
     for def in &program.defs {
         match &def.meta {
@@ -109,9 +119,11 @@ pub fn convert_program(program: &TlcProgram) -> Result<Program, ConvertError> {
                 if pure_constant_names.contains(def_name) {
                     continue;
                 }
-                let func =
-                    convert_function(def, &top_level, &constants_by_name, symbols, &pure_constant_names)?;
-                functions.push(func);
+                match convert_function(def, &top_level, &constants_by_name, symbols, &pure_constant_names)?
+                {
+                    ConvertedFunc::Extern(f) => externs.push(f),
+                    ConvertedFunc::Regular(fe) => functions.push(fe),
+                }
             }
             DefMeta::EntryPoint(entry) => {
                 let ep = convert_entry_point(
@@ -127,13 +139,20 @@ pub fn convert_program(program: &TlcProgram) -> Result<Program, ConvertError> {
         }
     }
 
-    Ok(Program {
+    Ok(ProgramEgir::new(
         functions,
+        externs,
         entry_points,
         constants,
-        uniforms: program.uniforms.clone(),
-        storage: program.storage.clone(),
-    })
+        program.uniforms.clone(),
+        program.storage.clone(),
+        pipeline,
+    ))
+}
+
+enum ConvertedFunc {
+    Extern(Function),
+    Regular(FuncEgir<Raw>),
 }
 
 // ============================================================================
@@ -146,10 +165,11 @@ fn convert_function(
     constants_by_name: &HashMap<String, SymbolId>,
     symbols: &SymbolTable,
     pure_constants: &HashSet<String>,
-) -> Result<Function, ConvertError> {
+) -> Result<ConvertedFunc, ConvertError> {
     let def_name = symbols.get(def.name).expect("BUG").clone();
 
-    // Extern functions
+    // Extern functions: emit a 1-block Unreachable stub directly; no EGIR
+    // passes apply to them. They flow through as `Function` records.
     if let TermKind::Extern(linkage_name) = &def.body.kind {
         let (param_types, ret_type) = extract_function_signature(&def.ty);
         let params: Vec<(Type<TypeName>, String)> =
@@ -159,15 +179,15 @@ fn convert_function(
             .terminate(crate::ssa::types::Terminator::Unreachable)
             .map_err(|e| ConvertError::GraphError(e.to_string()))?;
         let body = builder.finish().map_err(|e| ConvertError::GraphError(e.to_string()))?;
-        return Ok(Function {
+        return Ok(ConvertedFunc::Extern(Function {
             name: def_name,
             body,
             span: def.body.span,
             linkage_name: Some(linkage_name.clone()),
-        });
+        }));
     }
 
-    // Regular functions: extract lambda params.
+    // Regular functions: extract lambda params and build an EGraph.
     let (inner_body, params) = extract_lambda_params(&def.body);
     let ret_type = inner_body.ty.clone();
     let param_info: Vec<(Type<TypeName>, String)> = params
@@ -179,27 +199,23 @@ fn convert_function(
         .collect();
 
     let mut converter = Converter::new(top_level, constants_by_name, symbols, pure_constants.clone());
-
-    // Register function params.
     for (i, (sym, ty)) in params.iter().enumerate() {
         let nid = converter.graph.add_func_param(i, ty.clone());
         converter.locals.insert(*sym, nid);
     }
-
-    // Convert body.
     let result = converter.convert_term(inner_body)?;
     converter.set_return(Some(result));
 
-    let body = converter
-        .elaborate_to_funcbody(&param_info, ret_type)
-        .ok_or_else(|| ConvertError::GraphError("elaboration failed".into()))?;
-
-    Ok(Function {
-        name: def_name,
-        body,
-        span: def.body.span,
-        linkage_name: None,
-    })
+    let (graph, control_headers) = converter.into_graph_parts();
+    Ok(ConvertedFunc::Regular(FuncEgir::new(
+        def_name,
+        def.body.span,
+        None,
+        param_info,
+        ret_type,
+        graph,
+        control_headers,
+    )))
 }
 
 /// Convert an entry point directly via the EGraph Converter — one path, no
@@ -211,9 +227,9 @@ fn convert_entry_point(
     constants_by_name: &HashMap<String, SymbolId>,
     symbols: &SymbolTable,
     pure_constants: &HashSet<String>,
-) -> Result<crate::ssa::types::EntryPoint, ConvertError> {
+) -> Result<EntryEgir<Raw>, ConvertError> {
     use crate::ast;
-    use crate::ssa::types::{EntryInput, EntryPoint, ExecutionModel, IoDecoration};
+    use crate::ssa::types::{EntryInput, ExecutionModel, IoDecoration};
 
     let def_name = symbols.get(def.name).expect("BUG: symbol not in table").clone();
     let (inner_body, params) = extract_lambda_params(&def.body);
@@ -261,13 +277,10 @@ fn convert_entry_point(
     }
 
     let ret_type = inner_body.ty.clone();
-    let param_info: Vec<(Type<TypeName>, String)> = params
-        .iter()
-        .map(|(sym, ty)| (ty.clone(), symbols.get(*sym).expect("BUG").clone()))
-        .collect();
+    let param_info: Vec<(Type<TypeName>, String)> =
+        params.iter().map(|(sym, ty)| (ty.clone(), symbols.get(*sym).expect("BUG").clone())).collect();
 
-    let mut converter =
-        Converter::new(top_level, constants_by_name, symbols, pure_constants.clone());
+    let mut converter = Converter::new(top_level, constants_by_name, symbols, pure_constants.clone());
 
     // Register function params as FuncParam NodeIds.
     for (i, (sym, ty)) in params.iter().enumerate() {
@@ -287,7 +300,9 @@ fn convert_entry_point(
     let execution_model = match &entry.entry_type {
         ast::Attribute::Vertex => ExecutionModel::Vertex,
         ast::Attribute::Fragment => ExecutionModel::Fragment,
-        ast::Attribute::Compute => ExecutionModel::Compute { local_size: (64, 1, 1) },
+        ast::Attribute::Compute => ExecutionModel::Compute {
+            local_size: (64, 1, 1),
+        },
         _ => panic!("Invalid entry type attribute: {:?}", entry.entry_type),
     };
 
@@ -300,9 +315,8 @@ fn convert_entry_point(
         is_compute && !is_unit_return && outputs.iter().any(|o| o.storage_binding.is_some());
     let compute_output_view = if has_storage_output {
         outputs.first().map(|output| {
-            let (set, binding) = output
-                .storage_binding
-                .expect("BUG: compute output without storage binding");
+            let (set, binding) =
+                output.storage_binding.expect("BUG: compute output without storage binding");
             let elem_ty = output.ty.elem_type().cloned().unwrap_or(output.ty.clone());
             converter.emit_storage_view(set, binding, elem_ty)
         })
@@ -335,18 +349,18 @@ fn convert_entry_point(
         converter.set_return(Some(result_nid));
     }
 
-    let body = converter
-        .elaborate_to_funcbody(&param_info, ret_type)
-        .ok_or_else(|| ConvertError::GraphError("entry point elaboration failed".into()))?;
-
-    Ok(EntryPoint {
-        name: def_name,
-        body,
+    let (graph, control_headers) = converter.into_graph_parts();
+    Ok(EntryEgir::new(
+        def_name,
+        def.body.span,
         execution_model,
         inputs,
         outputs,
-        span: def.body.span,
-    })
+        param_info,
+        ret_type,
+        graph,
+        control_headers,
+    ))
 }
 
 /// Rewrite a `Soac::Map` / `Soac::Scan` skeleton side-effect whose result is
@@ -401,9 +415,7 @@ fn emit_compute_output_stores(
     outputs: &[crate::ssa::types::EntryOutput],
 ) {
     for (i, output) in outputs.iter().enumerate() {
-        let (set, binding) = output
-            .storage_binding
-            .expect("BUG: compute output without storage binding");
+        let (set, binding) = output.storage_binding.expect("BUG: compute output without storage binding");
         let value_nid = if outputs.len() == 1 {
             result_nid
         } else {
@@ -411,11 +423,7 @@ fn emit_compute_output_stores(
         };
 
         let fixed_size = output.ty.array_size().and_then(|s| {
-            if let Type::Constructed(TypeName::Size(n), _) = s {
-                Some(*n)
-            } else {
-                None
-            }
+            if let Type::Constructed(TypeName::Size(n), _) = s { Some(*n) } else { None }
         });
         let elem_ty = output.ty.elem_type().cloned();
 
@@ -536,8 +544,7 @@ impl<'a> Converter<'a> {
 
     fn intern_u32(&mut self, n: u32) -> NodeId {
         let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
-        self.graph
-            .intern_pure(PureOp::Uint(n.to_string()), smallvec![], u32_ty)
+        self.graph.intern_pure(PureOp::Uint(n.to_string()), smallvec![], u32_ty)
     }
 
     /// Create a pure `StorageView(Storage { set, binding })` node. Builds the
@@ -586,62 +593,59 @@ impl<'a> Converter<'a> {
         value_nid: NodeId,
         elem_ty: Type<TypeName>,
     ) {
-        let ptr_nid = self.graph.intern_pure(
-            PureOp::StorageViewIndex,
-            smallvec![view_nid, index_nid],
-            elem_ty,
-        );
+        let ptr_nid =
+            self.graph.intern_pure(PureOp::StorageViewIndex, smallvec![view_nid, index_nid], elem_ty);
         let _ = self.emit_store(ptr_nid, value_nid);
     }
 
     /// Emit a pure `OutputPtr(index)` node.
     fn emit_output_ptr(&mut self, index: usize, ptr_ty: Type<TypeName>) -> NodeId {
-        self.graph
-            .intern_pure(PureOp::OutputPtr { index }, smallvec![], ptr_ty)
+        self.graph.intern_pure(PureOp::OutputPtr { index }, smallvec![], ptr_ty)
     }
 
     /// Emit a pure `Project(base, index)` node.
     fn emit_project(&mut self, base_nid: NodeId, index: u32, ty: Type<TypeName>) -> NodeId {
-        self.graph
-            .intern_pure(PureOp::Project { index }, smallvec![base_nid], ty)
+        self.graph.intern_pure(PureOp::Project { index }, smallvec![base_nid], ty)
     }
 
-    /// Elaborate the built EGraph into a FuncBody.
+    /// Extract the built EGraph + control_headers, leaving the rest of the
+    /// Converter state behind. Used by the top-level `convert_program`
+    /// phase to feed a ready-to-chain `FuncEgir<Raw>` / `EntryEgir<Raw>`.
+    fn into_graph_parts(self) -> (EGraph, HashMap<BlockId, ControlHeader>) {
+        (self.graph, self.control_headers)
+    }
+
+    /// Run the Converter's built EGraph through a throwaway single-function
+    /// pipeline (`expand_soacs → optimize_skeleton → elaborate`) and return
+    /// the resulting `FuncBody`. Used by:
+    ///   * the pure-constant detection phase of `convert_program` (with
+    ///     empty params);
+    ///   * the inline tests in `mod tests` below.
+    ///
+    /// Production (non-test) function and entry-point conversion goes
+    /// through `convert_program`, which returns a `ProgramEgir<Raw>` so the
+    /// caller can compose the pipeline explicitly.
     fn elaborate_to_funcbody(
-        mut self,
+        self,
         params: &[(Type<TypeName>, String)],
         return_ty: Type<TypeName>,
     ) -> Option<FuncBody> {
-        // Expand SOAC side-effects into explicit loops before elaborate.
-        super::soac_expand::expand_soacs(&mut self.graph, &mut self.control_headers);
-
-        let skel_domtree = DomTree::build(&SkeletonCfgView {
-            skeleton: &self.graph.skeleton,
-        });
-
-        // Identity map: skeleton blocks map to themselves.
-        let identity_map: HashMap<crate::ssa::types::BlockId, BlockId> = self
-            .graph
-            .skeleton
-            .blocks
-            .keys()
-            .map(|b| {
-                // Convert wyn_ssa::BlockId to ssa::types::BlockId.
-                // They're the same type (both re-exported from wyn_ssa).
-                (b, b)
-            })
-            .collect();
-
-        let empty_aliases = HashMap::new();
-        Some(elaborate::elaborate(
-            &self.graph,
-            &skel_domtree,
-            params,
+        let (graph, control_headers) = self.into_graph_parts();
+        let func = FuncEgir::<Raw>::new(
+            "<probe>".to_string(),
+            Span::new(0, 0, 0, 0),
+            None,
+            params.to_vec(),
             return_ty,
-            &self.control_headers,
-            &identity_map,
-            &empty_aliases,
-        ))
+            graph,
+            control_headers,
+        );
+        let elaborated = ProgramEgir::single_function(func).expand_soacs().optimize_skeleton().elaborate();
+        elaborated.ssa.functions.into_iter().next().map(|f| f.body)
+    }
+
+    fn probe_constant_body(self, return_ty: Type<TypeName>) -> Option<FuncBody> {
+        self.elaborate_to_funcbody(&[], return_ty)
     }
 
     // ========================================================================
@@ -874,9 +878,7 @@ impl<'a> Converter<'a> {
             "_w_intrinsic_storage_index" if args.len() == 3 => {
                 let set = match &args[0].kind {
                     TermKind::IntLit(s) => s.parse::<u32>().map_err(|_| {
-                        ConvertError::GraphError(
-                            "_w_intrinsic_storage_index: set not a u32".into(),
-                        )
+                        ConvertError::GraphError("_w_intrinsic_storage_index: set not a u32".into())
                     })?,
                     _ => {
                         return Err(ConvertError::GraphError(
@@ -886,9 +888,7 @@ impl<'a> Converter<'a> {
                 };
                 let binding = match &args[1].kind {
                     TermKind::IntLit(s) => s.parse::<u32>().map_err(|_| {
-                        ConvertError::GraphError(
-                            "_w_intrinsic_storage_index: binding not a u32".into(),
-                        )
+                        ConvertError::GraphError("_w_intrinsic_storage_index: binding not a u32".into())
                     })?,
                     _ => {
                         return Err(ConvertError::GraphError(
@@ -1849,7 +1849,10 @@ fn build_entry_outputs(
 mod tests {
     use super::*;
 
-    /// Compile a source string through the full TLC pipeline, then convert via EGraph.
+    /// Compile a source string through the full TLC pipeline, then convert
+    /// through the full EGIR chain (`from_tlc → expand_soacs → optimize_skeleton
+    /// → elaborate`) to a `Program`. No `materialize` — tests don't exercise
+    /// SPIR-V-specific dynamic-index rewrites.
     fn compile_via_egir(src: &str) -> Program {
         let mut frontend = crate::cached_frontend();
         let parsed = crate::Compiler::parse(src, &mut frontend.node_counter).expect("Parsing failed");
@@ -1877,7 +1880,12 @@ mod tests {
             .parallelize_soacs()
             .filter_reachable();
 
-        convert_program(&tlc.tlc).expect("egir::from_tlc conversion failed")
+        convert_program(&tlc.tlc, PipelineDescriptor::default())
+            .expect("egir::from_tlc conversion failed")
+            .expand_soacs()
+            .optimize_skeleton()
+            .elaborate()
+            .ssa
     }
 
     use crate::ast::Span;

@@ -14,6 +14,8 @@ mod elaborate;
 mod extract;
 mod fold;
 mod loop_analysis;
+mod materialize;
+pub mod pipeline;
 mod rewrite;
 mod scoped_map;
 mod skel_opt;
@@ -65,14 +67,18 @@ pub fn optimize_program(program: &Program) -> Program {
     }
 }
 
-/// Optimize a single function body through the aegraph pipeline.
+/// Round-trip a function body through the aegraph pipeline (canonicalize →
+/// expand_soacs → optimize_skeleton → elaborate). Used by EGIR's own tests
+/// to validate the canonicalize-from-SSA path; production goes through
+/// `from_tlc::convert_program`.
+///
+/// Wraps the single body in a one-function `ProgramEgir<Raw>`, runs the full
+/// typestate chain, and extracts the single elaborated body back out.
 pub(crate) fn optimize_func(body: &FuncBody) -> FuncBody {
-    // Phase 1: canonicalize SSA → sea-of-nodes (with hash-consing = GVN).
-    let (mut graph, initial_domtree, orig_block_map) = canonicalize::canonicalize(body);
+    let (graph, _initial_domtree, orig_block_map) = canonicalize::canonicalize(body);
 
-    // Remap body.control_headers (orig block ids) to skeleton block ids so
-    // soac_expand can insert new Loop headers keyed on skeleton blocks.
-    let mut control_headers: std::collections::HashMap<_, _> = body
+    // Remap body.control_headers (orig block ids) to skeleton block ids.
+    let control_headers: std::collections::HashMap<_, _> = body
         .control_headers
         .iter()
         .filter_map(|(orig, hdr)| {
@@ -81,33 +87,18 @@ pub(crate) fn optimize_func(body: &FuncBody) -> FuncBody {
         })
         .collect();
 
-    // Phase 1b: expand SOAC side-effects into loops (mutates skeleton + headers).
-    soac_expand::expand_soacs(&mut graph, &mut control_headers);
-
-    // Phase 1c: skeleton rewrites (branch folding + redundant phi elim).
-    let aliases = skel_opt::optimize_skeleton(&mut graph);
-
-    // Skeleton rewrites can change CFG edges; rebuild the skeleton domtree.
-    let skel_domtree = domtree::DomTree::build(&domtree::SkeletonCfgView {
-        skeleton: &graph.skeleton,
-    });
-    drop(initial_domtree);
-
     let params: Vec<_> = body.params.iter().map(|(_, ty, name)| (ty.clone(), name.clone())).collect();
 
-    // elaborate takes an orig→skel block map and control_headers keyed on orig.
-    // We already remapped headers into skel-space, so use an identity map.
-    let identity_map: std::collections::HashMap<_, _> =
-        graph.skeleton.blocks.keys().map(|b| (b, b)).collect();
-
-    // Phase 2: elaborate sea-of-nodes → FuncBody (with scoped dedup = DCE).
-    elaborate::elaborate(
-        &graph,
-        &skel_domtree,
-        &params,
+    let func = pipeline::FuncEgir::new(
+        "<optimize_func>".to_string(),
+        crate::ast::Span::new(0, 0, 0, 0),
+        None,
+        params,
         body.return_ty.clone(),
-        &control_headers,
-        &identity_map,
-        &aliases,
-    )
+        graph,
+        control_headers,
+    );
+    let ssa =
+        pipeline::ProgramEgir::single_function(func).expand_soacs().optimize_skeleton().elaborate().ssa;
+    ssa.functions.into_iter().next().expect("optimize_func produced no body").body
 }

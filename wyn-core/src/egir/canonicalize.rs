@@ -72,11 +72,7 @@ pub fn canonicalize(body: &FuncBody) -> (EGraph, DomTree, HashMap<BlockId, Block
             // An instruction is lifted into the pure sea only if:
             //   (1) it carries no effect tokens (front-end didn't order it), and
             //   (2) its InstKind has a pure mapping (blacklist: Alloca/Load/Store/Soac).
-            let pure_op = if inst.effects.is_none() {
-                extract_pure_op(kind, &ty)
-            } else {
-                None
-            };
+            let pure_op = if inst.effects.is_none() { extract_pure_op(kind, &ty) } else { None };
 
             if let Some(pure_op) = pure_op {
                 let operands = resolve_operands(kind, &val_map, &mut graph);

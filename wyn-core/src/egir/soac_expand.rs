@@ -70,16 +70,16 @@ fn is_handleable_soac(kind: &SideEffectKind) -> bool {
     };
     match soac {
         PendingSoac::Reduce { input_array_type, .. } => is_plain_array_source(input_array_type),
-        PendingSoac::Redomap { input_array_types, .. } => {
-            input_array_types.iter().all(is_plain_array_source)
-        }
+        PendingSoac::Redomap {
+            input_array_types, ..
+        } => input_array_types.iter().all(is_plain_array_source),
         PendingSoac::Scan { input_array_type, .. } => is_plain_composite(input_array_type),
-        PendingSoac::Map { input_array_types, .. } => {
-            input_array_types.iter().all(is_plain_array_source)
-        }
-        PendingSoac::MapInto { input_array_types, .. } => {
-            input_array_types.iter().all(is_plain_array_source)
-        }
+        PendingSoac::Map {
+            input_array_types, ..
+        } => input_array_types.iter().all(is_plain_array_source),
+        PendingSoac::MapInto {
+            input_array_types, ..
+        } => input_array_types.iter().all(is_plain_array_source),
         PendingSoac::ScanInto { input_array_type, .. } => is_plain_array_source(input_array_type),
     }
 }
@@ -304,8 +304,7 @@ fn expand_one(
             let n_inputs = arr_tys.len();
             let input_nids: Vec<NodeId> = se.operand_nodes[..n_inputs].to_vec();
             let view_nid = *se.operand_nodes.last().expect("MapInto has output_view operand");
-            let captures: Vec<NodeId> =
-                se.operand_nodes[n_inputs..se.operand_nodes.len() - 1].to_vec();
+            let captures: Vec<NodeId> = se.operand_nodes[n_inputs..se.operand_nodes.len() - 1].to_vec();
             let result_nid = se.result.expect("MapInto has a (dummy) result");
 
             let read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)> = input_nids
@@ -346,8 +345,7 @@ fn expand_one(
             let arr_nid = se.operand_nodes[0];
             let init_nid = se.operand_nodes[1];
             let view_nid = *se.operand_nodes.last().expect("ScanInto has output_view");
-            let captures: Vec<NodeId> =
-                se.operand_nodes[2..se.operand_nodes.len() - 1].to_vec();
+            let captures: Vec<NodeId> = se.operand_nodes[2..se.operand_nodes.len() - 1].to_vec();
             let result_nid = se.result.expect("ScanInto has a (dummy) result");
 
             build_scan_into_loop(
@@ -441,8 +439,11 @@ fn build_map_loop(
         idx_in_block,
         LoopSkeletonSpec {
             carried: vec![(spec.out_arr_ty.clone(), init_out_nid)],
-            result: ResultBinding::Carried { result_node: spec.result_node, idx: 0 },
-            
+            result: ResultBinding::Carried {
+                result_node: spec.result_node,
+                idx: 0,
+            },
+
             len_input: spec.len_input,
         },
     );
@@ -453,8 +454,7 @@ fn build_map_loop(
     // call_args = [elem1, ..., elemN, ...captures]
     let mut call_operands: smallvec::SmallVec<[NodeId; 4]> = SmallVec::new();
     for (arr, arr_ty, elem_ty) in &spec.read_inputs {
-        let elem_nid =
-            emit_read_element(graph, handles.body, *arr, idx_nid, arr_ty, elem_ty, next_effect);
+        let elem_nid = emit_read_element(graph, handles.body, *arr, idx_nid, arr_ty, elem_ty, next_effect);
         call_operands.push(elem_nid);
     }
     call_operands.extend(spec.captures.iter().copied());
@@ -519,13 +519,11 @@ fn build_scan_into_loop(
     let idx_nid = handles.idx_nid;
 
     let (arr, arr_ty, elem_ty) = spec.input;
-    let elem_nid =
-        emit_read_element(graph, handles.body, arr, idx_nid, &arr_ty, &elem_ty, next_effect);
+    let elem_nid = emit_read_element(graph, handles.body, arr, idx_nid, &arr_ty, &elem_ty, next_effect);
 
     let mut call_operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![acc_nid, elem_nid];
     call_operands.extend(spec.captures.iter().copied());
-    let new_acc_nid =
-        graph.intern_pure(PureOp::Call(spec.func), call_operands, spec.acc_ty.clone());
+    let new_acc_nid = graph.intern_pure(PureOp::Call(spec.func), call_operands, spec.acc_ty.clone());
 
     // view[i] = new_acc: StorageViewIndex (pure) + Store (effectful).
     let ptr_nid = graph.intern_pure(
@@ -592,8 +590,7 @@ fn build_map_into_loop(
     // y = func(elem1, ..., ...caps)
     let mut call_operands: smallvec::SmallVec<[NodeId; 4]> = SmallVec::new();
     for (arr, arr_ty, elem_ty) in &spec.read_inputs {
-        let elem_nid =
-            emit_read_element(graph, handles.body, *arr, idx_nid, arr_ty, elem_ty, next_effect);
+        let elem_nid = emit_read_element(graph, handles.body, *arr, idx_nid, arr_ty, elem_ty, next_effect);
         call_operands.push(elem_nid);
     }
     call_operands.extend(spec.captures.iter().copied());
@@ -665,8 +662,11 @@ fn build_scan_loop(
                 (spec.out_arr_ty.clone(), init_out_nid),
                 (spec.acc_ty.clone(), spec.init_acc),
             ],
-            result: ResultBinding::Carried { result_node: spec.result_node, idx: 0 }, // the output array is the result
-            
+            result: ResultBinding::Carried {
+                result_node: spec.result_node,
+                idx: 0,
+            }, // the output array is the result
+
             len_input: spec.len_input,
         },
     );
@@ -735,8 +735,11 @@ fn build_accumulator_loop(
         idx_in_block,
         LoopSkeletonSpec {
             carried: vec![(spec.acc_ty.clone(), spec.init_acc)],
-            result: ResultBinding::Carried { result_node: spec.result_node, idx: 0 },
-            
+            result: ResultBinding::Carried {
+                result_node: spec.result_node,
+                idx: 0,
+            },
+
             len_input: spec.len_input.clone(),
         },
     );
@@ -746,8 +749,15 @@ fn build_accumulator_loop(
     let idx_nid = handles.idx_nid;
     let mut call_operands: smallvec::SmallVec<[NodeId; 4]> = smallvec![acc_nid];
     for (arr_nid, arr_ty, elem_ty) in &spec.read_inputs {
-        let elem_nid =
-            emit_read_element(graph, handles.body, *arr_nid, idx_nid, arr_ty, elem_ty, next_effect);
+        let elem_nid = emit_read_element(
+            graph,
+            handles.body,
+            *arr_nid,
+            idx_nid,
+            arr_ty,
+            elem_ty,
+            next_effect,
+        );
         call_operands.push(elem_nid);
     }
     call_operands.extend(spec.captures.iter().copied());
@@ -776,11 +786,16 @@ struct LoopSkeletonSpec {
 enum ResultBinding {
     /// Rebind `result_node` as `after`'s block param populated by
     /// `carried[idx]` when the loop exits. Used for Reduce/Redomap/Scan/Map.
-    Carried { result_node: NodeId, idx: usize },
+    Carried {
+        result_node: NodeId,
+        idx: usize,
+    },
     /// Rebind `result_node` as a constant `Bool(false)` (dummy) — the SOAC
     /// produces no consumed value (MapInto/ScanInto's writes are effectful
     /// and the "result" is discarded by the entry-point finalize step).
-    DummyBool { result_node: NodeId },
+    DummyBool {
+        result_node: NodeId,
+    },
 }
 
 struct LoopHandles {
@@ -806,8 +821,7 @@ fn build_loop_skeleton(
 
     // Split `bid` into preheader (bid) + after (holding suffix side-effects + old term).
     let after = graph.skeleton.create_block();
-    let suffix: Vec<SideEffect> =
-        graph.skeleton.blocks[bid].side_effects.drain(idx_in_block..).collect();
+    let suffix: Vec<SideEffect> = graph.skeleton.blocks[bid].side_effects.drain(idx_in_block..).collect();
     let old_term = std::mem::replace(
         &mut graph.skeleton.blocks[bid].term,
         SkeletonTerminator::Unreachable,
@@ -838,9 +852,7 @@ fn build_loop_skeleton(
             graph.skeleton.blocks[after].params.push(result_node);
         }
         ResultBinding::DummyBool { result_node } => {
-            graph.nodes[result_node] = ENode::Constant(
-                crate::ssa::types::ConstantValue::Bool(false),
-            );
+            graph.nodes[result_node] = ENode::Constant(crate::ssa::types::ConstantValue::Bool(false));
         }
     }
 
@@ -867,8 +879,7 @@ fn build_loop_skeleton(
 
     // Header terminator: condbr i<len -> body / after(result_carried).
     let len_nid = emit_length(graph, spec.len_input.0, &spec.len_input.1, &i32_ty);
-    let cond_nid =
-        graph.intern_pure(PureOp::BinOp("<".into()), smallvec![idx_nid, len_nid], bool_ty);
+    let cond_nid = graph.intern_pure(PureOp::BinOp("<".into()), smallvec![idx_nid, len_nid], bool_ty);
     let else_args: Vec<NodeId> = match spec.result {
         ResultBinding::Carried { idx, .. } => vec![carried_nids[idx]],
         // No `after` block param in the dummy case — branch with empty args.
@@ -990,16 +1001,9 @@ fn emit_read_element(
         load_result
     } else if is_virtual_source(arr_ty) {
         // Virtual {start, step, len}: elem = start + i * step.
-        let start_nid = graph.intern_pure(
-            PureOp::Project { index: 0 },
-            smallvec![arr_nid],
-            elem_ty.clone(),
-        );
-        let step_nid = graph.intern_pure(
-            PureOp::Project { index: 1 },
-            smallvec![arr_nid],
-            elem_ty.clone(),
-        );
+        let start_nid =
+            graph.intern_pure(PureOp::Project { index: 0 }, smallvec![arr_nid], elem_ty.clone());
+        let step_nid = graph.intern_pure(PureOp::Project { index: 1 }, smallvec![arr_nid], elem_ty.clone());
         let mul_nid = graph.intern_pure(
             PureOp::BinOp("*".into()),
             smallvec![idx_nid, step_nid],
