@@ -19,7 +19,6 @@ mod scoped_map;
 mod skel_opt;
 pub mod types;
 
-pub mod entry_points;
 pub mod from_tlc;
 
 #[cfg(test)]

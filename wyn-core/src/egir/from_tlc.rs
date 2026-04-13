@@ -202,10 +202,8 @@ fn convert_function(
     })
 }
 
-/// Entry point conversion delegates to the legacy TLC→SSA builder (for GPU I/O
-/// setup: storage views, output ptrs, MapInto rewriting), then round-trips the
-/// resulting FuncBody through the EGraph so EGIR's GVN/DCE/folds apply to the
-/// entry body.
+/// Convert an entry point directly via the EGraph Converter — one path, no
+/// round-trip through the legacy SSA builder.
 fn convert_entry_point(
     def: &TlcDef,
     entry: &crate::ast::EntryDecl,
@@ -214,17 +212,271 @@ fn convert_entry_point(
     symbols: &SymbolTable,
     pure_constants: &HashSet<String>,
 ) -> Result<crate::ssa::types::EntryPoint, ConvertError> {
-    let mut ep = crate::egir::entry_points::convert_entry_point_pub(
-        def,
-        entry,
-        top_level,
-        constants_by_name,
-        symbols,
-        pure_constants,
-    )
-    .map_err(|e| ConvertError::GraphError(format!("entry point builder: {}", e)))?;
-    ep.body = crate::egir::optimize_func(&ep.body);
-    Ok(ep)
+    use crate::ast;
+    use crate::ssa::types::{EntryInput, EntryPoint, ExecutionModel, IoDecoration};
+
+    let def_name = symbols.get(def.name).expect("BUG: symbol not in table").clone();
+    let (inner_body, params) = extract_lambda_params(&def.body);
+    let is_compute = matches!(entry.entry_type, ast::Attribute::Compute);
+
+    // Build entry inputs with IO decorations, storage bindings, push constants.
+    let mut inputs: Vec<EntryInput> = Vec::with_capacity(params.len());
+    let mut param_syms: Vec<SymbolId> = Vec::with_capacity(params.len());
+    let mut binding_num: u32 = 0;
+    let mut pc_offset: u32 = 0;
+
+    for (i, (sym, ty)) in params.iter().enumerate() {
+        let name = symbols.get(*sym).expect("BUG: symbol not in table").clone();
+        let decoration = entry.params.get(i).and_then(extract_io_decoration);
+        let size_hint = entry.params.get(i).and_then(extract_size_hint);
+
+        let storage_binding = if is_compute && is_unsized_array(ty) {
+            let b = (0, binding_num);
+            binding_num += 1;
+            Some(b)
+        } else {
+            None
+        };
+
+        let push_constant_offset = if is_compute
+            && storage_binding.is_none()
+            && !matches!(&decoration, Some(IoDecoration::BuiltIn(_)))
+        {
+            let offset = pc_offset;
+            pc_offset += crate::ssa::layout::type_byte_size(ty).unwrap_or(4);
+            Some(offset)
+        } else {
+            None
+        };
+
+        param_syms.push(*sym);
+        inputs.push(EntryInput {
+            name,
+            ty: ty.clone(),
+            decoration,
+            size_hint,
+            storage_binding,
+            push_constant_offset,
+        });
+    }
+
+    let ret_type = inner_body.ty.clone();
+    let param_info: Vec<(Type<TypeName>, String)> = params
+        .iter()
+        .map(|(sym, ty)| (ty.clone(), symbols.get(*sym).expect("BUG").clone()))
+        .collect();
+
+    let mut converter =
+        Converter::new(top_level, constants_by_name, symbols, pure_constants.clone());
+
+    // Register function params as FuncParam NodeIds.
+    for (i, (sym, ty)) in params.iter().enumerate() {
+        let nid = converter.graph.add_func_param(i, ty.clone());
+        converter.locals.insert(*sym, nid);
+    }
+
+    // Wrap storage-buffer inputs in whole-buffer StorageViews so any direct use
+    // of the param sees a view rather than a raw buffer handle.
+    for (idx, input) in inputs.iter().enumerate() {
+        if let Some((set, binding)) = input.storage_binding {
+            let view_nid = converter.emit_storage_view(set, binding, input.ty.clone());
+            converter.locals.insert(param_syms[idx], view_nid);
+        }
+    }
+
+    let execution_model = match &entry.entry_type {
+        ast::Attribute::Vertex => ExecutionModel::Vertex,
+        ast::Attribute::Fragment => ExecutionModel::Fragment,
+        ast::Attribute::Compute => ExecutionModel::Compute { local_size: (64, 1, 1) },
+        _ => panic!("Invalid entry type attribute: {:?}", entry.entry_type),
+    };
+
+    let outputs = build_entry_outputs(entry, &inner_body.ty, is_compute, binding_num);
+    let is_unit_return = matches!(ret_type, Type::Constructed(TypeName::Unit, _));
+
+    // Pre-create the output StorageView for compute+storage-output entries so
+    // it's available for the Map→MapInto rewrite on the result node.
+    let has_storage_output =
+        is_compute && !is_unit_return && outputs.iter().any(|o| o.storage_binding.is_some());
+    let compute_output_view = if has_storage_output {
+        outputs.first().map(|output| {
+            let (set, binding) = output
+                .storage_binding
+                .expect("BUG: compute output without storage binding");
+            let elem_ty = output.ty.elem_type().cloned().unwrap_or(output.ty.clone());
+            converter.emit_storage_view(set, binding, elem_ty)
+        })
+    } else {
+        None
+    };
+
+    // Convert body.
+    let result_nid = converter.convert_term(inner_body)?;
+
+    // Finalize based on entry-point kind.
+    if is_unit_return {
+        converter.set_return(None);
+    } else if is_compute && !outputs.is_empty() {
+        if let Some(output_view_nid) = compute_output_view {
+            // Rewrite the Soac::Map/Scan whose result is result_nid to
+            // Map/ScanInto so its output goes directly to the view.
+            rewrite_map_scan_to_into(&mut converter.graph, result_nid, output_view_nid);
+            converter.set_return(None);
+        } else {
+            // Non-view result: emit storage stores for each output.
+            emit_compute_output_stores(&mut converter, result_nid, &outputs);
+            converter.set_return(None);
+        }
+    } else if !is_compute && !is_unit_return && !outputs.is_empty() {
+        // Vertex/fragment: OutputPtr + Store per output.
+        emit_vertex_fragment_output_stores(&mut converter, result_nid, &outputs);
+        converter.set_return(None);
+    } else {
+        converter.set_return(Some(result_nid));
+    }
+
+    let body = converter
+        .elaborate_to_funcbody(&param_info, ret_type)
+        .ok_or_else(|| ConvertError::GraphError("entry point elaboration failed".into()))?;
+
+    Ok(EntryPoint {
+        name: def_name,
+        body,
+        execution_model,
+        inputs,
+        outputs,
+        span: def.body.span,
+    })
+}
+
+/// Rewrite a `Soac::Map` / `Soac::Scan` skeleton side-effect whose result is
+/// `target_result` into the corresponding `MapInto` / `ScanInto` variant
+/// writing to `output_view`.
+fn rewrite_map_scan_to_into(graph: &mut EGraph, target_result: NodeId, output_view: NodeId) {
+    for (_bid, block) in graph.skeleton.blocks.iter_mut() {
+        for se in &mut block.side_effects {
+            if se.result != Some(target_result) {
+                continue;
+            }
+            let kind = se.kind.clone();
+            match kind {
+                InstKind::Soac(Soac::Map {
+                    func,
+                    inputs,
+                    captures,
+                    input_array_types,
+                    input_elem_types,
+                    output_elem_type,
+                }) => {
+                    se.kind = InstKind::Soac(Soac::MapInto {
+                        func,
+                        inputs,
+                        captures,
+                        output_view: Default::default(),
+                        input_array_types,
+                        input_elem_types,
+                        output_elem_type,
+                    });
+                    se.operand_nodes.push(output_view);
+                }
+                InstKind::Soac(Soac::Scan {
+                    func,
+                    input,
+                    init,
+                    captures,
+                    input_array_type,
+                    input_elem_type,
+                }) => {
+                    se.kind = InstKind::Soac(Soac::ScanInto {
+                        func,
+                        input,
+                        init,
+                        captures,
+                        output_view: Default::default(),
+                        input_array_type,
+                        input_elem_type,
+                    });
+                    se.operand_nodes.push(output_view);
+                }
+                _ => {}
+            }
+            return;
+        }
+    }
+}
+
+/// Compute entry with a non-view result: store the result (or its tuple
+/// components) into the output storage buffers.
+fn emit_compute_output_stores(
+    converter: &mut Converter<'_>,
+    result_nid: NodeId,
+    outputs: &[crate::ssa::types::EntryOutput],
+) {
+    for (i, output) in outputs.iter().enumerate() {
+        let (set, binding) = output
+            .storage_binding
+            .expect("BUG: compute output without storage binding");
+        let value_nid = if outputs.len() == 1 {
+            result_nid
+        } else {
+            converter.emit_project(result_nid, i as u32, output.ty.clone())
+        };
+
+        let fixed_size = output.ty.array_size().and_then(|s| {
+            if let Type::Constructed(TypeName::Size(n), _) = s {
+                Some(*n)
+            } else {
+                None
+            }
+        });
+        let elem_ty = output.ty.elem_type().cloned();
+
+        if let (Some(n), Some(et)) = (fixed_size, elem_ty) {
+            let view_nid = converter.emit_storage_view(set, binding, et.clone());
+            for j in 0..n {
+                let elem_nid = converter.emit_project(value_nid, j as u32, et.clone());
+                let idx_nid = converter.intern_u32(j as u32);
+                converter.emit_storage_store(view_nid, idx_nid, elem_nid, et.clone());
+            }
+        } else {
+            let view_nid = converter.emit_storage_view(set, binding, output.ty.clone());
+            let idx_zero = converter.intern_u32(0);
+            converter.emit_storage_store(view_nid, idx_zero, value_nid, output.ty.clone());
+        }
+    }
+}
+
+/// Vertex/fragment entry: write the result (or tuple components) to
+/// `OutputPtr(i)` locations.
+fn emit_vertex_fragment_output_stores(
+    converter: &mut Converter<'_>,
+    result_nid: NodeId,
+    outputs: &[crate::ssa::types::EntryOutput],
+) {
+    if outputs.len() == 1 {
+        let ptr_ty = Type::Constructed(
+            TypeName::Pointer,
+            vec![
+                outputs[0].ty.clone(),
+                Type::Constructed(TypeName::PointerOutput, vec![]),
+            ],
+        );
+        let ptr_nid = converter.emit_output_ptr(0, ptr_ty);
+        converter.emit_store(ptr_nid, result_nid);
+    } else {
+        for (i, output) in outputs.iter().enumerate() {
+            let component = converter.emit_project(result_nid, i as u32, output.ty.clone());
+            let ptr_ty = Type::Constructed(
+                TypeName::Pointer,
+                vec![
+                    output.ty.clone(),
+                    Type::Constructed(TypeName::PointerOutput, vec![]),
+                ],
+            );
+            let ptr_nid = converter.emit_output_ptr(i, ptr_ty);
+            converter.emit_store(ptr_nid, component);
+        }
+    }
 }
 
 // ============================================================================
@@ -286,6 +538,84 @@ impl<'a> Converter<'a> {
     /// Set the return terminator on the current block.
     fn set_return(&mut self, result: Option<NodeId>) {
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Return(result);
+    }
+
+    // -- Entry-point emission helpers --
+    //
+    // These build the shader-entry-point glue (storage views, output ptrs,
+    // stores) as EGraph nodes + skeleton side-effects. Pure pieces go through
+    // intern_pure; memory writes go into the current skeleton block.
+
+    fn intern_u32(&mut self, n: u32) -> NodeId {
+        let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+        self.graph
+            .intern_pure(PureOp::Uint(n.to_string()), smallvec![], u32_ty)
+    }
+
+    /// Create a pure `StorageView(Storage { set, binding })` node. Builds the
+    /// implicit `offset=0` and `len=_w_intrinsic_storage_len(set, binding)`
+    /// operands as pure ops.
+    fn emit_storage_view(&mut self, set: u32, binding: u32, view_ty: Type<TypeName>) -> NodeId {
+        let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+        let set_nid = self.intern_u32(set);
+        let binding_nid = self.intern_u32(binding);
+        let len_nid = self.graph.intern_pure(
+            PureOp::Intrinsic("_w_intrinsic_storage_len".into()),
+            smallvec![set_nid, binding_nid],
+            u32_ty,
+        );
+        let zero_nid = self.intern_u32(0);
+        self.graph.intern_pure(
+            PureOp::StorageView(PureViewSource::Storage { set, binding }),
+            smallvec![zero_nid, len_nid],
+            view_ty,
+        )
+    }
+
+    /// Emit a `Store` side-effect in the current block, returning the new effect token.
+    fn emit_store(&mut self, ptr_nid: NodeId, value_nid: NodeId) -> EffectToken {
+        let effect_in = EffectToken(0); // placeholder; real chain is built by elaborate
+        let effect_out = self.alloc_effect();
+        let kind = InstKind::Store {
+            ptr: ValueRef::Ssa(Default::default()),
+            value: ValueRef::Ssa(Default::default()),
+        };
+        self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
+            kind,
+            operand_nodes: smallvec![ptr_nid, value_nid],
+            result: None,
+            effects: Some((effect_in, effect_out)),
+        });
+        effect_out
+    }
+
+    /// Emit a store through a StorageView at `index`. Pure `StorageViewIndex`
+    /// produces the pointer; the Store is effectful.
+    fn emit_storage_store(
+        &mut self,
+        view_nid: NodeId,
+        index_nid: NodeId,
+        value_nid: NodeId,
+        elem_ty: Type<TypeName>,
+    ) {
+        let ptr_nid = self.graph.intern_pure(
+            PureOp::StorageViewIndex,
+            smallvec![view_nid, index_nid],
+            elem_ty,
+        );
+        let _ = self.emit_store(ptr_nid, value_nid);
+    }
+
+    /// Emit a pure `OutputPtr(index)` node.
+    fn emit_output_ptr(&mut self, index: usize, ptr_ty: Type<TypeName>) -> NodeId {
+        self.graph
+            .intern_pure(PureOp::OutputPtr { index }, smallvec![], ptr_ty)
+    }
+
+    /// Emit a pure `Project(base, index)` node.
+    fn emit_project(&mut self, base_nid: NodeId, index: u32, ty: Type<TypeName>) -> NodeId {
+        self.graph
+            .intern_pure(PureOp::Project { index }, smallvec![base_nid], ty)
     }
 
     /// Elaborate the built EGraph into a FuncBody.
@@ -546,6 +876,55 @@ impl<'a> Converter<'a> {
                     smallvec![start, len],
                     ty,
                 ))
+            }
+            // _w_intrinsic_storage_index(set_const, binding_const, index) → load
+            // from a storage view. Emitted by buffer_specialize for functions
+            // that index directly into a bound buffer.
+            "_w_intrinsic_storage_index" if args.len() == 3 => {
+                let set = match &args[0].kind {
+                    TermKind::IntLit(s) => s.parse::<u32>().map_err(|_| {
+                        ConvertError::GraphError(
+                            "_w_intrinsic_storage_index: set not a u32".into(),
+                        )
+                    })?,
+                    _ => {
+                        return Err(ConvertError::GraphError(
+                            "_w_intrinsic_storage_index: set must be int literal".into(),
+                        ));
+                    }
+                };
+                let binding = match &args[1].kind {
+                    TermKind::IntLit(s) => s.parse::<u32>().map_err(|_| {
+                        ConvertError::GraphError(
+                            "_w_intrinsic_storage_index: binding not a u32".into(),
+                        )
+                    })?,
+                    _ => {
+                        return Err(ConvertError::GraphError(
+                            "_w_intrinsic_storage_index: binding must be int literal".into(),
+                        ));
+                    }
+                };
+                let index_nid = self.convert_term(&args[2])?;
+                let view_nid = self.emit_storage_view(set, binding, ty.clone());
+                let ptr_nid = self.graph.intern_pure(
+                    PureOp::StorageViewIndex,
+                    smallvec![view_nid, index_nid],
+                    ty.clone(),
+                );
+                // Load the element; Load is effectful.
+                let result_nid = self.graph.alloc_side_effect_result(ty.clone());
+                let effect_in = EffectToken(0);
+                let effect_out = self.alloc_effect();
+                self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
+                    kind: InstKind::Load {
+                        ptr: ValueRef::Ssa(crate::ssa::types::ValueId::default()),
+                    },
+                    operand_nodes: smallvec![ptr_nid],
+                    result: Some(result_nid),
+                    effects: Some((effect_in, effect_out)),
+                });
+                Ok(result_nid)
             }
             name if name.starts_with("_w_intrinsic_") => {
                 // Intrinsic call → side effect
@@ -1359,6 +1738,113 @@ fn extract_lambda_params(term: &Term) -> (&Term, Vec<(SymbolId, Type<TypeName>)>
         current = &lam.body;
     }
     (current, params)
+}
+
+/// Check if a type is an unsized array (runtime-sized storage buffer).
+fn is_unsized_array(ty: &Type<TypeName>) -> bool {
+    ty.array_size().map(|s| matches!(s, Type::Variable(_))).unwrap_or(false)
+}
+
+/// Extract an IO decoration (builtin or location attribute) from a pattern.
+fn extract_io_decoration(pattern: &crate::ast::Pattern) -> Option<crate::ssa::types::IoDecoration> {
+    use crate::ast;
+    use crate::ssa::types::IoDecoration;
+    match &pattern.kind {
+        ast::PatternKind::Attributed(attrs, inner) => {
+            for attr in attrs {
+                match attr {
+                    ast::Attribute::BuiltIn(builtin) => return Some(IoDecoration::BuiltIn(*builtin)),
+                    ast::Attribute::Location(loc) => return Some(IoDecoration::Location(*loc)),
+                    _ => {}
+                }
+            }
+            extract_io_decoration(inner)
+        }
+        ast::PatternKind::Typed(inner, _) => extract_io_decoration(inner),
+        _ => None,
+    }
+}
+
+/// Extract a `#[size_hint(N)]` attribute from a pattern.
+fn extract_size_hint(pattern: &crate::ast::Pattern) -> Option<u32> {
+    use crate::ast;
+    match &pattern.kind {
+        ast::PatternKind::Attributed(attrs, inner) => {
+            for attr in attrs {
+                if let ast::Attribute::SizeHint(n) = attr {
+                    return Some(*n);
+                }
+            }
+            extract_size_hint(inner)
+        }
+        ast::PatternKind::Typed(inner, _) => extract_size_hint(inner),
+        _ => None,
+    }
+}
+
+/// Convert an AST attribute to an IO decoration.
+fn convert_to_io_decoration(attr: &crate::ast::Attribute) -> Option<crate::ssa::types::IoDecoration> {
+    use crate::ast;
+    use crate::ssa::types::IoDecoration;
+    match attr {
+        ast::Attribute::BuiltIn(b) => Some(IoDecoration::BuiltIn(*b)),
+        ast::Attribute::Location(l) => Some(IoDecoration::Location(*l)),
+        _ => None,
+    }
+}
+
+/// Build entry outputs from an AST `EntryDecl`.
+/// For compute shaders, non-unit outputs get sequential storage bindings starting at `binding_start`.
+fn build_entry_outputs(
+    entry: &crate::ast::EntryDecl,
+    ret_type: &Type<TypeName>,
+    is_compute: bool,
+    binding_start: u32,
+) -> Vec<crate::ssa::types::EntryOutput> {
+    use crate::ssa::types::EntryOutput;
+    let mut binding_num = binding_start;
+    let mut storage_binding_for = |ty: &Type<TypeName>, is_compute: bool| -> Option<(u32, u32)> {
+        if is_compute && !matches!(ty, Type::Constructed(TypeName::Unit, _)) {
+            let b = (0, binding_num);
+            binding_num += 1;
+            Some(b)
+        } else {
+            None
+        }
+    };
+
+    if entry.outputs.iter().all(|o| o.attribute.is_none()) && entry.outputs.len() == 1 {
+        if !matches!(ret_type, Type::Constructed(TypeName::Unit, _)) {
+            vec![EntryOutput {
+                ty: ret_type.clone(),
+                decoration: None,
+                storage_binding: storage_binding_for(ret_type, is_compute),
+            }]
+        } else {
+            vec![]
+        }
+    } else if let Type::Constructed(TypeName::Tuple(_), component_types) = ret_type {
+        entry
+            .outputs
+            .iter()
+            .zip(component_types.iter())
+            .map(|(output, ty)| EntryOutput {
+                ty: ty.clone(),
+                decoration: output.attribute.as_ref().and_then(convert_to_io_decoration),
+                storage_binding: storage_binding_for(ty, is_compute),
+            })
+            .collect()
+    } else {
+        vec![EntryOutput {
+            ty: ret_type.clone(),
+            decoration: entry
+                .outputs
+                .first()
+                .and_then(|o| o.attribute.as_ref())
+                .and_then(convert_to_io_decoration),
+            storage_binding: storage_binding_for(ret_type, is_compute),
+        }]
+    }
 }
 
 // ============================================================================
