@@ -25,6 +25,12 @@ use super::scoped_map::ScopedMap;
 use super::types::*;
 
 /// Elaborate an EGraph back into a FuncBody.
+///
+/// `aliases` maps block-param NodeIds that were stripped by skeleton
+/// rewrites (see `skel_opt`) to their replacement NodeIds. These are
+/// merged into the extraction's `best` map so any incidental demand of
+/// a stripped param — e.g., via a Pure node hash-consed with the param
+/// in its operands — transparently redirects to the replacement.
 pub fn elaborate(
     graph: &EGraph,
     domtree: &DomTree,
@@ -32,9 +38,17 @@ pub fn elaborate(
     return_ty: Type<TypeName>,
     control_headers: &HashMap<BlockId, ControlHeader>,
     orig_block_map: &HashMap<BlockId, SkelBlockId>,
+    aliases: &HashMap<NodeId, NodeId>,
 ) -> FuncBody {
     // Phase 1: cost-based extraction.
-    let best = extract::extract(graph);
+    let mut best = extract::extract(graph);
+    // Merge skel_opt aliases into `best` preserving transitivity: if X is
+    // itself in `best`, follow through so resolve(param) lands on the
+    // final representative.
+    for (&k, &v) in aliases {
+        let target = best.get(&v).copied().unwrap_or(v);
+        best.insert(k, target);
+    }
 
     // Loop analysis over the skeleton, used by LICM placement.
     let loop_analysis = LoopAnalysis::build(&graph.skeleton, control_headers, domtree);

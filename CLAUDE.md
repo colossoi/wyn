@@ -56,6 +56,14 @@ cargo run --bin wyn -- check test.wyn
 - SPIR-V generation in `spirv/mod.rs`
 - All new syntax elements should have unit tests
 
+### Test Organization
+- **Unit tests live in a separate `<modname>_tests.rs` file**, NOT inline in the
+  source file. For `foo.rs`, tests go in `foo_tests.rs` registered as
+  `#[cfg(test)] mod foo_tests;` in the parent `mod.rs`. This keeps source files
+  focused on implementation and keeps test churn out of source diffs.
+- Existing examples: `tlc/defunctionalize_tests.rs`, `tlc/monomorphize_tests.rs`,
+  `ssa/builder_tests.rs`, `ssa/verify_tests.rs`.
+
 ### Visualizing SPIR-V Output
 ```bash
 cd viz && cargo run vf ../complete_shader_example.spv --vertex vertex_main --fragment fragment_main

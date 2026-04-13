@@ -311,6 +311,7 @@ impl<'a> Converter<'a> {
             })
             .collect();
 
+        let empty_aliases = HashMap::new();
         Some(elaborate::elaborate(
             &self.graph,
             &skel_domtree,
@@ -318,6 +319,7 @@ impl<'a> Converter<'a> {
             return_ty,
             &self.control_headers,
             &identity_map,
+            &empty_aliases,
         ))
     }
 

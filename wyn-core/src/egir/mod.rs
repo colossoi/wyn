@@ -16,6 +16,7 @@ mod fold;
 mod loop_analysis;
 mod rewrite;
 mod scoped_map;
+mod skel_opt;
 pub mod types;
 
 pub mod entry_points;
@@ -67,7 +68,16 @@ pub fn optimize_program(program: &Program) -> Program {
 /// Optimize a single function body through the aegraph pipeline.
 pub(crate) fn optimize_func(body: &FuncBody) -> FuncBody {
     // Phase 1: canonicalize SSA → sea-of-nodes (with hash-consing = GVN).
-    let (graph, skel_domtree, orig_block_map) = canonicalize::canonicalize(body);
+    let (mut graph, initial_domtree, orig_block_map) = canonicalize::canonicalize(body);
+
+    // Phase 1b: skeleton rewrites (branch folding + redundant phi elim).
+    let aliases = skel_opt::optimize_skeleton(&mut graph);
+
+    // Skeleton rewrites can change CFG edges; rebuild the skeleton domtree.
+    let skel_domtree = domtree::DomTree::build(&domtree::SkeletonCfgView {
+        skeleton: &graph.skeleton,
+    });
+    drop(initial_domtree);
 
     let params: Vec<_> = body.params.iter().map(|(_, ty, name)| (ty.clone(), name.clone())).collect();
 
@@ -79,5 +89,6 @@ pub(crate) fn optimize_func(body: &FuncBody) -> FuncBody {
         body.return_ty.clone(),
         &body.control_headers,
         &orig_block_map,
+        &aliases,
     )
 }
