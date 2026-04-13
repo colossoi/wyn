@@ -1478,15 +1478,6 @@ dependencies = [
  "smallvec",
  "spirv",
  "thiserror",
- "wyn-ssa",
-]
-
-[[package]]
-name = "wyn-ssa"
-version = "0.1.0"
-dependencies = [
- "slotmap",
- "smallvec",
 ]
 
 [[package]]

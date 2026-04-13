@@ -8,6 +8,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::TypeName;
+use crate::ssa::framework::BlockId;
 use crate::ssa::types::ViewSource;
 use crate::ssa::types::{ControlHeader, EffectToken, FuncBody, Function, InstKind, Program, ValueRef};
 use crate::tlc::{
@@ -17,7 +18,6 @@ use crate::types::TypeExt;
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 use smallvec::{SmallVec, smallvec};
-use wyn_ssa::BlockId;
 
 use super::pipeline::{EgirRaw, EntryEgir, FuncEgir, ProgramEgir, Raw};
 use super::types::*;
@@ -2103,7 +2103,7 @@ mod tests {
         // Entry should end with CondBranch
         let entry = func.get_block(func.entry_block());
         assert!(
-            matches!(&entry.term, wyn_ssa::Terminator::CondBranch { .. }),
+            matches!(&entry.term, crate::ssa::framework::Terminator::CondBranch { .. }),
             "Entry should end with CondBranch, got {:?}",
             entry.term
         );

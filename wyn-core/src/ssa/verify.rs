@@ -147,7 +147,7 @@ impl<'a> Verifier<'a> {
         }
     }
 
-    fn verify_block(&mut self, block_id: BlockId, block: &wyn_ssa::BasicBlock) {
+    fn verify_block(&mut self, block_id: BlockId, block: &crate::ssa::framework::BasicBlock) {
         // Register block parameters as defined (skip entry block — its params
         // are already registered as function params)
         if block_id != self.body.entry_block() {

@@ -3,8 +3,8 @@
 //! Can be built from either a skeleton CFG or an original SSA FuncBody.
 //! Used by canonicalization (preorder traversal) and elaboration (scoping).
 
+use crate::ssa::framework::BlockId;
 use std::collections::{HashMap, HashSet};
-use wyn_ssa::BlockId;
 
 /// Dominator tree.
 pub struct DomTree {

@@ -5,11 +5,11 @@
 //! instructions in the skeleton CFG.
 
 use crate::ast::TypeName;
+use crate::ssa::framework::ValueLike;
 use crate::ssa::types::{BlockId, ConstantValue, FuncBody, InstKind, ValueId, ValueRef};
 use polytype::Type;
 use smallvec::SmallVec;
 use std::collections::HashMap;
-use wyn_ssa::ValueLike;
 
 use super::domtree::{DomTree, SsaCfgView};
 use super::types::*;
@@ -154,7 +154,7 @@ fn const_type(c: &ConstantValue) -> Type<TypeName> {
 
 /// Convert a wyn-ssa Terminator to a SkeletonTerminator.
 fn convert_terminator(
-    term: &wyn_ssa::Terminator,
+    term: &crate::ssa::framework::Terminator,
     val_map: &HashMap<ValueId, NodeId>,
     block_map: &HashMap<BlockId, BlockId>,
 ) -> SkeletonTerminator {
@@ -166,13 +166,13 @@ fn convert_terminator(
     };
 
     match term {
-        wyn_ssa::Terminator::Return(None) => SkeletonTerminator::Return(None),
-        wyn_ssa::Terminator::Return(Some(v)) => SkeletonTerminator::Return(Some(mv(*v))),
-        wyn_ssa::Terminator::Branch { target, args } => SkeletonTerminator::Branch {
+        crate::ssa::framework::Terminator::Return(None) => SkeletonTerminator::Return(None),
+        crate::ssa::framework::Terminator::Return(Some(v)) => SkeletonTerminator::Return(Some(mv(*v))),
+        crate::ssa::framework::Terminator::Branch { target, args } => SkeletonTerminator::Branch {
             target: mb(*target),
             args: args.iter().map(|v| mv(*v)).collect(),
         },
-        wyn_ssa::Terminator::CondBranch {
+        crate::ssa::framework::Terminator::CondBranch {
             cond,
             then_target,
             then_args,
@@ -185,6 +185,6 @@ fn convert_terminator(
             else_target: mb(*else_target),
             else_args: else_args.iter().map(|v| mv(*v)).collect(),
         },
-        wyn_ssa::Terminator::Unreachable => SkeletonTerminator::Unreachable,
+        crate::ssa::framework::Terminator::Unreachable => SkeletonTerminator::Unreachable,
     }
 }

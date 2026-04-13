@@ -12,11 +12,11 @@ use super::types::{
 };
 
 /// Error during function building.
-pub type BuilderError = wyn_ssa::BuilderError;
+pub type BuilderError = crate::ssa::framework::BuilderError;
 
 /// Builder for constructing SSA functions.
 pub struct FuncBuilder {
-    inner: wyn_ssa::FuncBuilder<InstKind, EffectToken, Type<TypeName>>,
+    inner: crate::ssa::framework::FuncBuilder<InstKind, EffectToken, Type<TypeName>>,
     control_headers: std::collections::HashMap<BlockId, ControlHeader>,
     params: Vec<(ValueId, Type<TypeName>, String)>,
     return_ty: Type<TypeName>,
@@ -27,7 +27,7 @@ pub struct FuncBuilder {
 impl FuncBuilder {
     /// Create a new function builder with the given parameters and return type.
     pub fn new(params: Vec<(Type<TypeName>, String)>, return_ty: Type<TypeName>) -> Self {
-        let mut inner = wyn_ssa::FuncBuilder::new();
+        let mut inner = crate::ssa::framework::FuncBuilder::new();
         let _entry = inner.entry();
 
         let mut func_params = Vec::new();
@@ -187,12 +187,14 @@ impl FuncBuilder {
     }
 
     /// Access the underlying function (read-only).
-    pub fn func(&self) -> &wyn_ssa::Function<InstKind, EffectToken, Type<TypeName>> {
+    pub fn func(&self) -> &crate::ssa::framework::Function<InstKind, EffectToken, Type<TypeName>> {
         self.inner.func()
     }
 
     /// Access the underlying function (mutable).
-    pub fn func_mut(&mut self) -> &mut wyn_ssa::Function<InstKind, EffectToken, Type<TypeName>> {
+    pub fn func_mut(
+        &mut self,
+    ) -> &mut crate::ssa::framework::Function<InstKind, EffectToken, Type<TypeName>> {
         self.inner.func_mut()
     }
 

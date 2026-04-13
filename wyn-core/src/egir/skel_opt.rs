@@ -58,7 +58,7 @@ pub fn optimize_skeleton(graph: &mut EGraph) -> HashMap<NodeId, NodeId> {
 fn fold_constant_branches(graph: &mut EGraph) -> bool {
     // Collect rewrites first so we don't hold a borrow of graph.nodes
     // while mutating skeleton.blocks.
-    let mut rewrites: Vec<(wyn_ssa::BlockId, SkeletonTerminator)> = Vec::new();
+    let mut rewrites: Vec<(crate::ssa::framework::BlockId, SkeletonTerminator)> = Vec::new();
     for (bid, block) in &graph.skeleton.blocks {
         if let SkeletonTerminator::CondBranch {
             cond,
@@ -125,29 +125,30 @@ fn eliminate_redundant_params(graph: &mut EGraph) -> HashMap<NodeId, NodeId> {
     // incoming[B][i] = every distinct NodeId passed into B.params[i] by
     // some predecessor branch terminator. We only need to know "is the
     // set of size 1?", so track up to two distinct values.
-    let mut incoming: HashMap<wyn_ssa::BlockId, Vec<SmallVec<[NodeId; 2]>>> = HashMap::new();
+    let mut incoming: HashMap<crate::ssa::framework::BlockId, Vec<SmallVec<[NodeId; 2]>>> = HashMap::new();
     for (bid, block) in &graph.skeleton.blocks {
         let mut per_param = Vec::with_capacity(block.params.len());
         per_param.resize(block.params.len(), SmallVec::<[NodeId; 2]>::new());
         incoming.insert(bid, per_param);
     }
 
-    let collect = |target: wyn_ssa::BlockId,
-                   args: &[NodeId],
-                   incoming: &mut HashMap<wyn_ssa::BlockId, Vec<SmallVec<[NodeId; 2]>>>| {
-        let slots = incoming.get_mut(&target).expect("target in skeleton");
-        debug_assert_eq!(
-            slots.len(),
-            args.len(),
-            "arity mismatch at branch to {:?}",
-            target
-        );
-        for (i, &arg) in args.iter().enumerate() {
-            if !slots[i].contains(&arg) && slots[i].len() < 2 {
-                slots[i].push(arg);
+    let collect =
+        |target: crate::ssa::framework::BlockId,
+         args: &[NodeId],
+         incoming: &mut HashMap<crate::ssa::framework::BlockId, Vec<SmallVec<[NodeId; 2]>>>| {
+            let slots = incoming.get_mut(&target).expect("target in skeleton");
+            debug_assert_eq!(
+                slots.len(),
+                args.len(),
+                "arity mismatch at branch to {:?}",
+                target
+            );
+            for (i, &arg) in args.iter().enumerate() {
+                if !slots[i].contains(&arg) && slots[i].len() < 2 {
+                    slots[i].push(arg);
+                }
             }
-        }
-    };
+        };
 
     for (_bid, block) in &graph.skeleton.blocks {
         match &block.term {
@@ -170,7 +171,7 @@ fn eliminate_redundant_params(graph: &mut EGraph) -> HashMap<NodeId, NodeId> {
     // no predecessors and its params (when present) come from the source
     // function params, not from a branch.
     let entry = graph.skeleton.entry;
-    let mut redundant: HashMap<wyn_ssa::BlockId, Vec<(usize, NodeId)>> = HashMap::new();
+    let mut redundant: HashMap<crate::ssa::framework::BlockId, Vec<(usize, NodeId)>> = HashMap::new();
     let mut aliases: HashMap<NodeId, NodeId> = HashMap::new();
     for (bid, block) in &graph.skeleton.blocks {
         if bid == entry {

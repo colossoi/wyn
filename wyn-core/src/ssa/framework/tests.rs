@@ -1,4 +1,4 @@
-use crate::*;
+use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct TestEffect(u32);

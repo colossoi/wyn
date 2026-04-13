@@ -3,9 +3,9 @@
 //! Converts the SSA CFG (blocks + branches) into a tree that maps directly
 //! to GLSL control flow: sequential statements, if-else, while loops.
 
+use crate::ssa::framework::InstId;
 use crate::ssa::types::{BlockId, ControlHeader, FuncBody, Terminator, ValueId};
 use std::collections::HashSet;
-use wyn_ssa::InstId;
 
 /// A node in the structured control flow tree.
 #[derive(Debug)]

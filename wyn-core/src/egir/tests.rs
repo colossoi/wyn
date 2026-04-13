@@ -31,7 +31,7 @@ fn roundtrip_simple_add() {
             i32_ty(),
         )
         .unwrap();
-    builder.terminate(wyn_ssa::Terminator::Return(Some(sum))).unwrap();
+    builder.terminate(crate::ssa::framework::Terminator::Return(Some(sum))).unwrap();
 
     let body = builder.finish().unwrap();
 
@@ -56,7 +56,10 @@ fn roundtrip_simple_add() {
     );
 
     // Terminator should be a return.
-    assert!(matches!(&entry.term, wyn_ssa::Terminator::Return(Some(_))));
+    assert!(matches!(
+        &entry.term,
+        crate::ssa::framework::Terminator::Return(Some(_))
+    ));
 }
 
 /// Test that GVN deduplicates identical pure computations.
@@ -73,7 +76,7 @@ fn gvn_deduplicates_constants() {
     let y = builder.push_inst(InstKind::Int("42".into()), i32_ty()).unwrap();
     let pair =
         builder.push_inst(InstKind::Tuple(vec![ValueRef::Ssa(x), ValueRef::Ssa(y)]), pair_ty).unwrap();
-    builder.terminate(wyn_ssa::Terminator::Return(Some(pair))).unwrap();
+    builder.terminate(crate::ssa::framework::Terminator::Return(Some(pair))).unwrap();
 
     let body = builder.finish().unwrap();
     let result = super::optimize_func(&body);
@@ -109,7 +112,7 @@ fn dce_removes_dead_code() {
             i32_ty(),
         )
         .unwrap();
-    builder.terminate(wyn_ssa::Terminator::Return(Some(a))).unwrap();
+    builder.terminate(crate::ssa::framework::Terminator::Return(Some(a))).unwrap();
 
     let body = builder.finish().unwrap();
     let result = super::optimize_func(&body);
@@ -148,7 +151,7 @@ fn roundtrip_if_else() {
     let ite = builder.create_if_then_else(i32_ty());
 
     builder
-        .terminate(wyn_ssa::Terminator::CondBranch {
+        .terminate(crate::ssa::framework::Terminator::CondBranch {
             cond: c,
             then_target: ite.then_block,
             then_args: vec![],
@@ -160,7 +163,7 @@ fn roundtrip_if_else() {
     // Then block: return a
     builder.switch_to_block(ite.then_block).unwrap();
     builder
-        .terminate(wyn_ssa::Terminator::Branch {
+        .terminate(crate::ssa::framework::Terminator::Branch {
             target: ite.merge_block,
             args: vec![a],
         })
@@ -169,7 +172,7 @@ fn roundtrip_if_else() {
     // Else block: return b
     builder.switch_to_block(ite.else_block).unwrap();
     builder
-        .terminate(wyn_ssa::Terminator::Branch {
+        .terminate(crate::ssa::framework::Terminator::Branch {
             target: ite.merge_block,
             args: vec![b],
         })
@@ -177,7 +180,7 @@ fn roundtrip_if_else() {
 
     // Merge block: return result
     builder.switch_to_block(ite.merge_block).unwrap();
-    builder.terminate(wyn_ssa::Terminator::Return(Some(ite.result))).unwrap();
+    builder.terminate(crate::ssa::framework::Terminator::Return(Some(ite.result))).unwrap();
 
     let body = builder.finish().unwrap();
     let result = super::optimize_func(&body);
@@ -188,7 +191,7 @@ fn roundtrip_if_else() {
     // Entry should have a CondBranch terminator.
     let entry = result.get_block(result.entry_block());
     assert!(
-        matches!(&entry.term, wyn_ssa::Terminator::CondBranch { .. }),
+        matches!(&entry.term, crate::ssa::framework::Terminator::CondBranch { .. }),
         "Entry should end with CondBranch"
     );
 }

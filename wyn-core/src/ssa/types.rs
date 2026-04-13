@@ -33,11 +33,11 @@ use rspirv::spirv;
 use std::collections::HashMap;
 
 // Re-export ID types from wyn-ssa.
-pub use wyn_ssa::{BlockId, InstId, ValueId};
+pub use crate::ssa::framework::{BlockId, InstId, ValueId};
 // Re-export Terminator from wyn-ssa.
-pub use wyn_ssa::Terminator;
+pub use crate::ssa::framework::Terminator;
 // Re-export BasicBlock from wyn-ssa.
-pub use wyn_ssa::BasicBlock;
+pub use crate::ssa::framework::BasicBlock;
 
 /// A compile-time constant value that can be carried inline in a `ValueRef`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -490,9 +490,9 @@ pub enum ViewSource {
 // =============================================================================
 
 /// The concrete wyn-ssa Function type used throughout wyn-core.
-pub type WynFunction = wyn_ssa::Function<InstKind, EffectToken, Type<TypeName>>;
+pub type WynFunction = crate::ssa::framework::Function<InstKind, EffectToken, Type<TypeName>>;
 /// The concrete wyn-ssa InstNode type.
-pub type WynInstNode = wyn_ssa::InstNode<InstKind, EffectToken>;
+pub type WynInstNode = crate::ssa::framework::InstNode<InstKind, EffectToken>;
 
 /// An SSA function body.
 #[derive(Debug, Clone)]
@@ -574,7 +574,7 @@ impl FuncBody {
 // Instr trait implementation for InstKind
 // =============================================================================
 
-impl wyn_ssa::Instr for InstKind {
+impl crate::ssa::framework::Instr for InstKind {
     fn for_each_operand(&self, mut f: impl FnMut(ValueId)) {
         for v in self.ssa_uses() {
             f(v);
@@ -588,7 +588,7 @@ impl wyn_ssa::Instr for InstKind {
     }
 }
 
-impl wyn_ssa::ValueLike for InstKind {
+impl crate::ssa::framework::ValueLike for InstKind {
     fn is_hoistable(&self) -> bool {
         matches!(
             self,

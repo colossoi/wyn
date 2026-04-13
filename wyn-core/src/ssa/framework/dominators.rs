@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use std::fmt::Debug;
 
-use crate::{BlockId, Function, Instr};
+use super::{BlockId, Function, Instr};
 
 pub(crate) struct Dominators {
     entry: BlockId,

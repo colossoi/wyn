@@ -1477,7 +1477,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
     fn lower_terminator(
         &mut self,
         _block_id: BlockId,
-        _block: &wyn_ssa::BasicBlock,
+        _block: &crate::ssa::framework::BasicBlock,
         term: &Terminator,
     ) -> Result<()> {
         let current_block = self.constructor.current_block.unwrap();
@@ -2383,7 +2383,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             ValueRef::Const(ConstantValue::I32(i)) => Some(i as u32),
             ValueRef::Ssa(id) => {
                 let inst_id = match self.body.inner.values.get(id)?.def {
-                    wyn_ssa::ValueDef::Inst { inst } => inst,
+                    crate::ssa::framework::ValueDef::Inst { inst } => inst,
                     _ => return None,
                 };
                 match &self.body.inner.insts.get(inst_id)?.data {

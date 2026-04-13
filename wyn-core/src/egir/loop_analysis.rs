@@ -14,8 +14,8 @@
 //! greatest depth wins, because a nested-inner header is always strictly
 //! deeper than its enclosing outer header.
 
+use crate::ssa::framework::BlockId;
 use std::collections::{HashMap, HashSet};
-use wyn_ssa::BlockId;
 
 use crate::ssa::types::ControlHeader;
 

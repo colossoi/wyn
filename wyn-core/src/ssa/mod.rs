@@ -11,6 +11,7 @@
 //! - `layout`: Type layout calculations for SPIR-V memory operations
 
 pub mod builder;
+pub mod framework;
 pub mod layout;
 pub mod merge;
 pub mod print;

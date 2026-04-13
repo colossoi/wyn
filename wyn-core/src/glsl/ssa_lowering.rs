@@ -566,7 +566,7 @@ impl<'a> LowerCtx<'a> {
 
 /// Format a ValueId as a short, valid GLSL identifier.
 fn glsl_var(id: ValueId) -> String {
-    use wyn_ssa::Key;
+    use crate::ssa::framework::Key;
     let ffi = id.data().as_ffi();
     let idx = ffi & 0xFFFFFFFF;
     let ver = ffi >> 32;
@@ -765,7 +765,11 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
     }
 
     /// Emit header instructions, using assignment for already-declared variables.
-    fn emit_header_insts(&mut self, insts: &[wyn_ssa::InstId], output: &mut String) -> Result<()> {
+    fn emit_header_insts(
+        &mut self,
+        insts: &[crate::ssa::framework::InstId],
+        output: &mut String,
+    ) -> Result<()> {
         for &inst_id in insts {
             let inst = self.body.get_inst(inst_id);
             let expr = self.lower_inst(inst, output)?;

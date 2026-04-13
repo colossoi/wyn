@@ -1,12 +1,12 @@
 //! Core data structures for the acyclic e-graph (aegraph).
 
 use crate::ast::TypeName;
+use crate::ssa::framework::BlockId;
 use crate::ssa::types::{ConstantValue, EffectToken, InstKind, ViewSource};
 use polytype::Type;
 use slotmap::{SlotMap, new_key_type};
 use smallvec::SmallVec;
 use std::collections::HashMap;
-use wyn_ssa::BlockId;
 
 new_key_type! {
     /// Identity of a node in the e-graph. Every pure node, union node,
@@ -437,7 +437,7 @@ pub fn extract_pure_op(kind: &InstKind, ty: &Type<TypeName>) -> Option<PureOp> {
 ///
 /// The `operands` must be in the same order as `InstKind::value_uses()` returns
 /// for the original instruction.
-pub fn rebuild_inst_kind(op: &PureOp, operands: &[wyn_ssa::ValueId]) -> InstKind {
+pub fn rebuild_inst_kind(op: &PureOp, operands: &[crate::ssa::framework::ValueId]) -> InstKind {
     use crate::ssa::types::ValueRef;
     let vr = |i: usize| -> ValueRef { ValueRef::Ssa(operands[i]) };
     match op {
@@ -528,7 +528,10 @@ pub fn rebuild_inst_kind(op: &PureOp, operands: &[wyn_ssa::ValueId]) -> InstKind
 
 /// Rebuild an effectful `InstKind` from the original kind and new operands
 /// (as `ValueId`s, same order as `value_uses()`).
-pub fn rebuild_effectful_inst_kind(original: &InstKind, operands: &[wyn_ssa::ValueId]) -> InstKind {
+pub fn rebuild_effectful_inst_kind(
+    original: &InstKind,
+    operands: &[crate::ssa::framework::ValueId],
+) -> InstKind {
     use crate::ssa::types::ValueRef;
     let mut result = original.clone();
     let mut idx = 0;

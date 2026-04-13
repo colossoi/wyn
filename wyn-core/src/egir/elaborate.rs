@@ -12,11 +12,11 @@
 
 use crate::ast::TypeName;
 use crate::ssa::builder::FuncBuilder;
+use crate::ssa::framework::BlockId as SkelBlockId;
 use crate::ssa::types::{BlockId, ControlHeader, FuncBody, InstKind, ValueId, ValueRef};
 use polytype::Type;
 use smallvec::SmallVec;
 use std::collections::HashMap;
-use wyn_ssa::BlockId as SkelBlockId;
 
 use super::domtree::DomTree;
 use super::extract;
@@ -386,11 +386,13 @@ impl<'a> Elaborator<'a> {
     /// Elaborate a skeleton terminator.
     fn elaborate_terminator(&mut self, term: &SkeletonTerminator) {
         let t = match term {
-            SkeletonTerminator::Return(None) => wyn_ssa::Terminator::Return(None),
-            SkeletonTerminator::Return(Some(nid)) => wyn_ssa::Terminator::Return(Some(self.demand(*nid))),
+            SkeletonTerminator::Return(None) => crate::ssa::framework::Terminator::Return(None),
+            SkeletonTerminator::Return(Some(nid)) => {
+                crate::ssa::framework::Terminator::Return(Some(self.demand(*nid)))
+            }
             SkeletonTerminator::Branch { target, args } => {
                 let out_args: Vec<ValueId> = args.iter().map(|&nid| self.demand(nid)).collect();
-                wyn_ssa::Terminator::Branch {
+                crate::ssa::framework::Terminator::Branch {
                     target: self.block_map[target],
                     args: out_args,
                 }
@@ -405,7 +407,7 @@ impl<'a> Elaborator<'a> {
                 let cond_vid = self.demand(*cond);
                 let ta: Vec<ValueId> = then_args.iter().map(|&nid| self.demand(nid)).collect();
                 let ea: Vec<ValueId> = else_args.iter().map(|&nid| self.demand(nid)).collect();
-                wyn_ssa::Terminator::CondBranch {
+                crate::ssa::framework::Terminator::CondBranch {
                     cond: cond_vid,
                     then_target: self.block_map[then_target],
                     then_args: ta,
@@ -413,7 +415,7 @@ impl<'a> Elaborator<'a> {
                     else_args: ea,
                 }
             }
-            SkeletonTerminator::Unreachable => wyn_ssa::Terminator::Unreachable,
+            SkeletonTerminator::Unreachable => crate::ssa::framework::Terminator::Unreachable,
         };
         let _ = self.builder.terminate(t);
     }

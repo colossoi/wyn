@@ -55,7 +55,11 @@ fn build_condbranch_skel(
     cond: NodeId,
     then_arg: Option<NodeId>,
     else_arg: Option<NodeId>,
-) -> (wyn_ssa::BlockId, wyn_ssa::BlockId, wyn_ssa::BlockId) {
+) -> (
+    crate::ssa::framework::BlockId,
+    crate::ssa::framework::BlockId,
+    crate::ssa::framework::BlockId,
+) {
     let entry = graph.skeleton.entry;
     let then_bid = graph.skeleton.create_block();
     let else_bid = graph.skeleton.create_block();
@@ -136,7 +140,11 @@ fn build_merge_skel(
     graph: &mut EGraph,
     merge_arg_left: NodeId,
     merge_arg_right: NodeId,
-) -> (wyn_ssa::BlockId, wyn_ssa::BlockId, NodeId) {
+) -> (
+    crate::ssa::framework::BlockId,
+    crate::ssa::framework::BlockId,
+    NodeId,
+) {
     let entry = graph.skeleton.entry;
     let b1 = graph.skeleton.create_block();
     let b2 = graph.skeleton.create_block();

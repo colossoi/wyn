@@ -8,9 +8,9 @@
 
 use std::collections::HashMap;
 
+use crate::ssa::framework::BlockId;
 use polytype::Type;
 use smallvec::{SmallVec, smallvec};
-use wyn_ssa::BlockId;
 
 use crate::ast::TypeName;
 use crate::ssa::types::{ControlHeader, EffectToken, InstKind, ValueRef};
