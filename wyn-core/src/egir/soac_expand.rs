@@ -272,21 +272,48 @@ fn expand_one(
                 .collect();
             let len_input = (input_nids[0], arr_tys[0].clone());
 
-            build_map_loop(
+            let init_out_nid = graph.intern_pure(
+                PureOp::Call("_w_intrinsic_uninit".into()),
+                smallvec![],
+                out_arr_ty.clone(),
+            );
+            let carried = vec![(out_arr_ty.clone(), init_out_nid)];
+            let result = ResultBinding::Carried {
+                result_node: result_nid,
+                idx: 0,
+            };
+            // Don't allow unroll when output or any input is a SoA tuple:
+            // `_w_intrinsic_array_with` targets composite arrays only.
+            let allow_unroll = as_soa_tuple(&out_arr_ty).is_none()
+                && read_inputs.iter().all(|(_, a, _)| as_soa_tuple(a).is_none());
+            expand_loop(
                 graph,
                 control_headers,
                 bid,
                 idx,
-                MapLoop {
-                    len_input,
-                    read_inputs,
-                    out_elem_ty,
-                    out_arr_ty,
-                    result_node: result_nid,
-                    func,
-                    captures,
-                },
+                &len_input,
+                &carried,
+                &result,
                 next_effect,
+                allow_unroll,
+                |graph, next_effect, body_bid, idx_nid, carried_nids| {
+                    let out_nid = carried_nids[0];
+                    let mut call_operands: SmallVec<[NodeId; 4]> = SmallVec::new();
+                    for (arr, arr_ty, elem_ty) in &read_inputs {
+                        let elem_nid =
+                            emit_read_element(graph, body_bid, *arr, idx_nid, arr_ty, elem_ty, next_effect);
+                        call_operands.push(elem_nid);
+                    }
+                    call_operands.extend(captures.iter().copied());
+                    let y_nid =
+                        graph.intern_pure(PureOp::Call(func.clone()), call_operands, out_elem_ty.clone());
+                    let new_out = graph.intern_pure(
+                        PureOp::Call("_w_intrinsic_array_with".into()),
+                        smallvec![out_nid, idx_nid, y_nid],
+                        out_arr_ty.clone(),
+                    );
+                    vec![new_out]
+                },
             );
         }
         SideEffectKind::Pending(PendingSoac::MapInto {
@@ -407,71 +434,162 @@ fn expand_one(
     }
 }
 
-/// Map: `y = func(elem1, ..., elemN, ...caps); out[i] = y` per iteration. One
-/// loop-carried value (the output array), built via `_w_intrinsic_array_with`.
-struct MapLoop {
-    len_input: (NodeId, Type<TypeName>),
-    read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)>,
-    out_elem_ty: Type<TypeName>,
-    out_arr_ty: Type<TypeName>,
-    result_node: NodeId,
-    func: String,
-    captures: Vec<NodeId>,
-}
-
-fn build_map_loop(
+/// Emit a real loop via `build_loop_skeleton`, invoking `emit_body` in the
+/// body block to produce the new carried values, then wire the back-edge.
+fn build_loop<F>(
     graph: &mut EGraph,
     control_headers: &mut HashMap<BlockId, ControlHeader>,
     bid: BlockId,
     idx_in_block: usize,
-    spec: MapLoop,
+    len_input: &(NodeId, Type<TypeName>),
+    carried: &[(Type<TypeName>, NodeId)],
+    result: &ResultBinding,
     next_effect: &mut u32,
-) {
-    let init_out_nid = graph.intern_pure(
-        PureOp::Call("_w_intrinsic_uninit".into()),
-        smallvec![],
-        spec.out_arr_ty.clone(),
-    );
-
+    mut emit_body: F,
+) where
+    F: FnMut(&mut EGraph, &mut u32, BlockId, NodeId, &[NodeId]) -> Vec<NodeId>,
+{
     let handles = build_loop_skeleton(
         graph,
         control_headers,
         bid,
         idx_in_block,
         LoopSkeletonSpec {
-            carried: vec![(spec.out_arr_ty.clone(), init_out_nid)],
-            result: ResultBinding::Carried {
-                result_node: spec.result_node,
-                idx: 0,
-            },
-
-            len_input: spec.len_input,
+            carried: carried.to_vec(),
+            result: result.clone(),
+            len_input: len_input.clone(),
         },
     );
-
-    let out_nid = handles.carried[0];
-    let idx_nid = handles.idx_nid;
-
-    // call_args = [elem1, ..., elemN, ...captures]
-    let mut call_operands: smallvec::SmallVec<[NodeId; 4]> = SmallVec::new();
-    for (arr, arr_ty, elem_ty) in &spec.read_inputs {
-        let elem_nid = emit_read_element(graph, handles.body, *arr, idx_nid, arr_ty, elem_ty, next_effect);
-        call_operands.push(elem_nid);
-    }
-    call_operands.extend(spec.captures.iter().copied());
-    let y_nid = graph.intern_pure(PureOp::Call(spec.func), call_operands, spec.out_elem_ty);
-
-    let new_out_nid = graph.intern_pure(
-        PureOp::Call("_w_intrinsic_array_with".into()),
-        smallvec![out_nid, idx_nid, y_nid],
-        spec.out_arr_ty,
+    let new_carried = emit_body(
+        graph,
+        next_effect,
+        handles.body,
+        handles.idx_nid,
+        &handles.carried,
     );
-
-    let next_i_nid = increment(graph, idx_nid);
+    debug_assert_eq!(new_carried.len(), carried.len());
+    let next_i_nid = increment(graph, handles.idx_nid);
+    let mut args = new_carried;
+    args.push(next_i_nid);
     graph.skeleton.blocks[handles.body].term = SkeletonTerminator::Branch {
         target: handles.header,
-        args: vec![new_out_nid, next_i_nid],
+        args,
     };
+}
+
+/// Try to unroll a small loop; if the trip count isn't statically small (or
+/// `allow_unroll` is false), fall back to a real loop. Both paths share the
+/// same `emit_body` closure — write iteration logic once.
+fn expand_loop<F>(
+    graph: &mut EGraph,
+    control_headers: &mut HashMap<BlockId, ControlHeader>,
+    bid: BlockId,
+    idx_in_block: usize,
+    len_input: &(NodeId, Type<TypeName>),
+    carried: &[(Type<TypeName>, NodeId)],
+    result: &ResultBinding,
+    next_effect: &mut u32,
+    allow_unroll: bool,
+    mut emit_body: F,
+) where
+    F: FnMut(&mut EGraph, &mut u32, BlockId, NodeId, &[NodeId]) -> Vec<NodeId>,
+{
+    if allow_unroll
+        && try_unroll(
+            graph,
+            bid,
+            idx_in_block,
+            len_input,
+            carried,
+            result,
+            next_effect,
+            &mut emit_body,
+        )
+    {
+        return;
+    }
+    build_loop(
+        graph,
+        control_headers,
+        bid,
+        idx_in_block,
+        len_input,
+        carried,
+        result,
+        next_effect,
+        emit_body,
+    );
+}
+
+/// Generic small-loop unroller. Returns `true` if the loop was unrolled
+/// straight-line into `bid`; `false` if the trip count isn't statically
+/// known to be small, and the caller should fall back to emitting a real
+/// loop via `build_loop_skeleton`.
+///
+/// `emit_body(graph, next_effect, bid, idx_const_nid, carried_in)` produces
+/// the `carried_out` NodeIds for one iteration, inlined into `bid`.
+fn try_unroll<F>(
+    graph: &mut EGraph,
+    bid: BlockId,
+    idx_in_block: usize,
+    len_input: &(NodeId, Type<TypeName>),
+    carried: &[(Type<TypeName>, NodeId)],
+    result: &ResultBinding,
+    next_effect: &mut u32,
+    mut emit_body: F,
+) -> bool
+where
+    F: FnMut(&mut EGraph, &mut u32, BlockId, NodeId, &[NodeId]) -> Vec<NodeId>,
+{
+    const UNROLL_THRESHOLD: usize = 16;
+
+    // SoA-tuple driving inputs don't have a direct `array_size`; skip.
+    if as_soa_tuple(&len_input.1).is_some() {
+        return false;
+    }
+    let Some(size_ty) = len_input.1.array_size() else {
+        return false;
+    };
+    let n = match size_ty {
+        Type::Constructed(TypeName::Size(n), _) => *n,
+        _ => return false,
+    };
+    if n > UNROLL_THRESHOLD {
+        return false;
+    }
+
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+
+    // Stash side-effects that followed the (already-removed) Soac so any
+    // effectful reads/writes emitted by `emit_body` land at the Soac's
+    // original position.
+    let suffix: Vec<SideEffect> = graph.skeleton.blocks[bid].side_effects.drain(idx_in_block..).collect();
+
+    let mut carried_nids: Vec<NodeId> = carried.iter().map(|(_, init)| *init).collect();
+    for i in 0..n {
+        let idx_nid = graph.intern_pure(PureOp::Int(i.to_string()), smallvec![], i32_ty.clone());
+        carried_nids = emit_body(graph, next_effect, bid, idx_nid, &carried_nids);
+        debug_assert_eq!(carried_nids.len(), carried.len());
+    }
+
+    // Rebind the original SOAC result NodeId. For `Carried`, alias to the
+    // final carried value by cloning its ENode into `result_node`'s slot.
+    match result {
+        ResultBinding::Carried { result_node, idx } => {
+            let final_nid = carried_nids[*idx];
+            if final_nid != *result_node {
+                let final_enode = graph.nodes[final_nid].clone();
+                graph.nodes[*result_node] = final_enode;
+                graph.types.insert(*result_node, carried[*idx].0.clone());
+            }
+        }
+        ResultBinding::DummyBool { result_node } => {
+            graph.nodes[*result_node] = ENode::Constant(crate::ssa::types::ConstantValue::Bool(false));
+        }
+    }
+
+    graph.skeleton.blocks[bid].side_effects.extend(suffix);
+    true
 }
 
 /// ScanInto: `new_acc = func(acc, elem, ...caps); view[i] = new_acc` per iteration.
@@ -784,6 +902,7 @@ struct LoopSkeletonSpec {
     len_input: (NodeId, Type<TypeName>),
 }
 
+#[derive(Clone)]
 enum ResultBinding {
     /// Rebind `result_node` as `after`'s block param populated by
     /// `carried[idx]` when the loop exits. Used for Reduce/Redomap/Scan/Map.
