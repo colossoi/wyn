@@ -421,7 +421,7 @@ fn apply_type_subst_to_place(place: &Place, subst: &TypeSubst, _term_ids: &mut T
 
 /// Compute free variables of a term, given explicit sets of bound names.
 /// Returns the actual Term for each free variable (preserving its type and span).
-fn compute_free_vars(
+pub(super) fn compute_free_vars(
     term: &Term,
     bound: &HashSet<SymbolId>,
     top_level: &HashSet<SymbolId>,
@@ -434,7 +434,7 @@ fn compute_free_vars(
     free
 }
 
-fn collect_free_vars(
+pub(super) fn collect_free_vars(
     term: &Term,
     bound: &HashSet<SymbolId>,
     top_level: &HashSet<SymbolId>,
@@ -553,7 +553,7 @@ fn collect_free_vars(
     }
 }
 
-fn collect_free_vars_lambda(
+pub(super) fn collect_free_vars_lambda(
     lam: &Lambda,
     bound: &HashSet<SymbolId>,
     top_level: &HashSet<SymbolId>,
@@ -580,7 +580,7 @@ fn collect_free_vars_lambda(
     }
 }
 
-fn collect_free_vars_soac(
+pub(super) fn collect_free_vars_soac(
     soac: &SoacOp,
     bound: &HashSet<SymbolId>,
     top_level: &HashSet<SymbolId>,
@@ -636,7 +636,7 @@ fn collect_free_vars_soac(
     }
 }
 
-fn collect_free_vars_array_expr(
+pub(super) fn collect_free_vars_array_expr(
     ae: &ArrayExpr,
     bound: &HashSet<SymbolId>,
     top_level: &HashSet<SymbolId>,
@@ -667,8 +667,15 @@ fn collect_free_vars_array_expr(
             collect_free_vars(start, bound, top_level, known_defs, symbols, free, seen);
             collect_free_vars(len, bound, top_level, known_defs, symbols, free, seen);
         }
-        ArrayExpr::StorageBuffer { .. } => {
-            unreachable!("StorageBuffer introduced after defunctionalization")
+        ArrayExpr::StorageBuffer { offset, len, .. } => {
+            // StorageBuffer is introduced by `buffer_specialize` (after
+            // defunctionalization), so defunctionalize itself never walks
+            // one. But this FV helper is also reused by `parallelize`,
+            // which runs later and DOES see StorageBuffer nodes. The set
+            // and binding fields are compile-time u32s; only `offset` and
+            // `len` can carry free Var references.
+            collect_free_vars(offset, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars(len, bound, top_level, known_defs, symbols, free, seen);
         }
     }
 }

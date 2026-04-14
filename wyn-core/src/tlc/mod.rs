@@ -15,6 +15,8 @@ pub mod monomorphize;
 mod monomorphize_tests;
 pub mod normalize;
 pub mod parallelize;
+#[cfg(test)]
+mod parallelize_tests;
 pub mod partial_eval;
 #[cfg(test)]
 mod partial_eval_tests;

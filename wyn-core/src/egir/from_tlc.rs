@@ -332,13 +332,15 @@ fn convert_entry_point(
     if is_unit_return {
         converter.set_return(None);
     } else if is_compute && !outputs.is_empty() {
-        if let Some(output_view_nid) = compute_output_view {
-            // Rewrite the Soac::Map/Scan whose result is result_nid to
-            // Map/ScanInto so its output goes directly to the view.
+        // Map/Scan producing an array → rewrite to MapInto/ScanInto so the
+        // streaming writes land directly in the output view. Everything
+        // else (Reduce/Redomap returning a scalar or tuple, or a plain
+        // expression) → compute the value, then store it explicitly.
+        let soac_produces_array = result_soac_is_map_or_scan(&converter.graph, result_nid);
+        if let (true, Some(output_view_nid)) = (soac_produces_array, compute_output_view) {
             rewrite_map_scan_to_into(&mut converter.graph, result_nid, output_view_nid);
             converter.set_return(None);
         } else {
-            // Non-view result: emit storage stores for each output.
             emit_compute_output_stores(&mut converter, result_nid, &outputs);
             converter.set_return(None);
         }
@@ -367,6 +369,24 @@ fn convert_entry_point(
 /// Rewrite a `Soac::Map` / `Soac::Scan` skeleton side-effect whose result is
 /// `target_result` into the corresponding `MapInto` / `ScanInto` variant
 /// writing to `output_view`.
+/// True iff the side-effect producing `result` is a Map or Scan SOAC —
+/// i.e. a SOAC that streams elements to an output array. Reduce/Redomap
+/// produce a scalar/tuple instead.
+fn result_soac_is_map_or_scan(graph: &EGraph, result: NodeId) -> bool {
+    for (_bid, block) in &graph.skeleton.blocks {
+        for se in &block.side_effects {
+            if se.result == Some(result) {
+                return matches!(
+                    &se.kind,
+                    SideEffectKind::Pending(PendingSoac::Map { .. })
+                        | SideEffectKind::Pending(PendingSoac::Scan { .. })
+                );
+            }
+        }
+    }
+    false
+}
+
 fn rewrite_map_scan_to_into(graph: &mut EGraph, target_result: NodeId, output_view: NodeId) {
     for (_bid, block) in graph.skeleton.blocks.iter_mut() {
         for se in &mut block.side_effects {
@@ -918,6 +938,40 @@ impl<'a> Converter<'a> {
                     effects: Some((effect_in, effect_out)),
                 });
                 Ok(result_nid)
+            }
+            // _w_intrinsic_storage_store(set_lit, binding_lit, index, value) → effectful
+            // Store into storage_view(set, binding) at `index`. Emitted by
+            // parallelize.rs for phase-entry output writes where index depends
+            // on thread_id (and can't be expressed as a Map→MapInto).
+            "_w_intrinsic_storage_store" if args.len() == 4 => {
+                let set = match &args[0].kind {
+                    TermKind::IntLit(s) => s.parse::<u32>().map_err(|_| {
+                        ConvertError::GraphError("_w_intrinsic_storage_store: set not a u32".into())
+                    })?,
+                    _ => {
+                        return Err(ConvertError::GraphError(
+                            "_w_intrinsic_storage_store: set must be int literal".into(),
+                        ));
+                    }
+                };
+                let binding = match &args[1].kind {
+                    TermKind::IntLit(s) => s.parse::<u32>().map_err(|_| {
+                        ConvertError::GraphError("_w_intrinsic_storage_store: binding not a u32".into())
+                    })?,
+                    _ => {
+                        return Err(ConvertError::GraphError(
+                            "_w_intrinsic_storage_store: binding must be int literal".into(),
+                        ));
+                    }
+                };
+                let index_nid = self.convert_term(&args[2])?;
+                let value_nid = self.convert_term(&args[3])?;
+                let value_ty = args[3].ty.clone();
+                let view_nid = self.emit_storage_view(set, binding, value_ty.clone());
+                self.emit_storage_store(view_nid, index_nid, value_nid, value_ty);
+                // Result is unit.
+                let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
+                Ok(self.graph.intern_pure(PureOp::Unit, smallvec![], unit_ty))
             }
             name if name.starts_with("_w_intrinsic_") => {
                 // Default: treat intrinsics as pure (hash-consable). Effectful
