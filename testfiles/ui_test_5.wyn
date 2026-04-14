@@ -1,0 +1,1575 @@
+-- "ui_test_5" — Wyn port of a sci-fi UI Shadertoy shader.
+-- Concentric ray-marched rings with a 2D HUD overlay: seven-segment
+-- digits, arcs, arrows, graphs. The original GLSL is preserved
+-- commented-out below.
+
+------------------------------------------------------------
+-- Uniforms
+------------------------------------------------------------
+#[uniform(set=1, binding=0)] def iResolution: vec2f32
+#[uniform(set=1, binding=1)] def iTime: f32
+
+------------------------------------------------------------
+-- Constants
+------------------------------------------------------------
+def max_steps: i32 = 64
+
+def seg_0: i32 = 0
+def seg_1: i32 = 1
+def seg_2: i32 = 2
+def seg_3: i32 = 3
+def seg_4: i32 = 4
+def seg_5: i32 = 5
+def seg_6: i32 = 6
+def seg_7: i32 = 7
+def seg_8: i32 = 8
+def seg_9: i32 = 9
+def seg_dp: i32 = 39
+
+------------------------------------------------------------
+-- Helpers replacing the GLSL #defines
+------------------------------------------------------------
+
+-- 2D rotation matrix. GLSL `v *= Rot(a)` means `v = v * R`.
+def rot(a: f32) mat2f32 =
+  let c = f32.cos(a) in
+  let s = f32.sin(a) in
+  @[[c, 0.0 - s], [s, c]]
+
+-- Pixel-scaled antialiasing width.
+def antialiasing(n: f32) f32 = n / f32.min(iResolution.y, iResolution.x)
+
+-- smoothstep with the antialiasing width as lower edge.
+def smoothAA(d: f32, b: f32) f32 = smoothstep(antialiasing(1.0), b, d)
+
+-- Axis-aligned box SDF.
+def box(p: vec2f32, s: vec2f32) f32 =
+  f32.max(f32.abs(p.x) - s.x, f32.abs(p.y) - s.y)
+
+-- Triangle clip SDF from the original: box, then two half-plane cuts.
+def tri(p: vec2f32, s: vec2f32, a: f32) f32 =
+  let pa = dot(p, @[f32.cos(a), f32.sin(a)]) in
+  let pb = 0.0 - dot(p, @[f32.cos(0.0 - a), f32.sin(0.0 - a)]) in
+  let bx = f32.max(f32.abs(p.x) - s.x, f32.abs(p.y) - s.y) in
+  f32.max(pb, f32.max(pa, bx))
+
+-- Skews.
+def skewX(a: f32) mat2f32 = @[[1.0, f32.tan(a)], [0.0, 1.0]]
+def skewY(a: f32) mat2f32 = @[[1.0, 0.0], [f32.tan(a), 1.0]]
+
+-- Polar domain fold: length(a) * cos(folded_angle + vec2(0, 11)).
+def domainFold(a: vec2f32, b: f32) vec2f32 =
+  let l   = magnitude(a) in
+  let ang = atan2(a.y, a.x) in
+  let k   = 6.28 / (b * 8.0) in
+  let fold = mod(ang + k, k * 2.0) + (b - 1.0) * k in
+  @[l * f32.cos(fold + 0.0), l * f32.cos(fold + 11.0)]
+
+------------------------------------------------------------
+-- Small numeric helpers
+------------------------------------------------------------
+
+def hash21(p0: vec2f32) f32 =
+  let p1 = @[fract(p0.x * 234.56), fract(p0.y * 789.34)] in
+  let dotpp = dot(p1, @[p1.x + 34.56, p1.y + 34.56]) in
+  let p2 = @[p1.x + dotpp, p1.y + dotpp] in
+  fract(p2.x + p2.y)
+
+def cubicInOut(t: f32) f32 =
+  if t < 0.5 then 4.0 * t * t * t
+  else 0.5 * pow(2.0 * t - 2.0, 3.0) + 1.0
+
+def getTime(t: f32, duration: f32) f32 =
+  clamp(t, 0.0, duration) / duration
+
+------------------------------------------------------------
+-- Seven-segment digit SDFs
+------------------------------------------------------------
+
+def segBase(p: vec2f32) f32 =
+  let w = 0.05 * 3.0 in
+  let h = 0.05 * 5.0 in
+  -- Grid cutout mask.
+  let g = @[mod(p.x, 0.05) - 0.025, mod(p.y, 0.05) - 0.025] in
+  let gridMask = f32.min(f32.abs(g.x) - 0.005, f32.abs(g.y) - 0.005) in
+  -- Outer frame + slanted corners.
+  let d0 = box(p, @[w * 0.5, h * 0.5]) in
+  let pc = @[f32.abs(p.x) - 0.1, f32.abs(p.y) - 0.05] in
+  let a = radians(45.0) in
+  let d1 = dot(pc, @[f32.cos(a), f32.sin(a)]) in
+  let d2 = f32.max(d1, d0) in
+  f32.max(0.0 - gridMask, d2)
+
+def seg0(p: vec2f32) f32 =
+  let d = segBase(p) in
+  let mask = box(p, @[0.03, 0.03 * 2.7]) in
+  f32.max(0.0 - mask, d)
+
+def seg1(p: vec2f32) f32 =
+  let d0 = segBase(p) in
+  let p1 = @[p.x + 0.03, p.y + 0.03] in
+  let mask1 = box(p1, @[0.06, 0.111]) in
+  let d1 = f32.max(0.0 - mask1, d0) in
+  let p2 = @[p.x + 0.054, p.y - 0.105] in
+  let mask2 = box(p2, @[0.03, 0.03]) in
+  f32.max(0.0 - mask2, d1)
+
+def seg2(p: vec2f32) f32 =
+  let d0 = segBase(p) in
+  let p1 = @[p.x + 0.03, p.y - 0.05] in
+  let mask1 = box(p1, @[0.06, 0.03]) in
+  let d1 = f32.max(0.0 - mask1, d0) in
+  let p2 = @[p.x - 0.03, p.y + 0.05] in
+  let mask2 = box(p2, @[0.06, 0.03]) in
+  f32.max(0.0 - mask2, d1)
+
+def seg3(p: vec2f32) f32 =
+  let d0 = segBase(p) in
+  let p1 = @[p.x + 0.03, f32.abs(p.y) - 0.05] in
+  let mask1 = box(p1, @[0.06, 0.03]) in
+  let d1 = f32.max(0.0 - mask1, d0) in
+  let p2 = @[p.x + 0.05, p.y] in
+  let mask2 = box(p2, @[0.03, 0.03]) in
+  f32.max(0.0 - mask2, d1)
+
+def seg4(p: vec2f32) f32 =
+  let d0 = segBase(p) in
+  let p1 = @[p.x + 0.03, p.y + 0.08] in
+  let mask1 = box(p1, @[0.06, 0.06]) in
+  let d1 = f32.max(0.0 - mask1, d0) in
+  let p2 = @[p.x, p.y - 0.08] in
+  let mask2 = box(p2, @[0.03, 0.06]) in
+  f32.max(0.0 - mask2, d1)
+
+def seg5(p: vec2f32) f32 =
+  let d0 = segBase(p) in
+  let p1 = @[p.x - 0.03, p.y - 0.05] in
+  let mask1 = box(p1, @[0.06, 0.03]) in
+  let d1 = f32.max(0.0 - mask1, d0) in
+  let p2 = @[p.x + 0.03, p.y + 0.05] in
+  let mask2 = box(p2, @[0.06, 0.03]) in
+  f32.max(0.0 - mask2, d1)
+
+def seg6(p: vec2f32) f32 =
+  let d0 = segBase(p) in
+  let p1 = @[p.x - 0.03, p.y - 0.05] in
+  let mask1 = box(p1, @[0.06, 0.03]) in
+  let d1 = f32.max(0.0 - mask1, d0) in
+  let p2 = @[p.x, p.y + 0.05] in
+  let mask2 = box(p2, @[0.03, 0.03]) in
+  f32.max(0.0 - mask2, d1)
+
+def seg7(p: vec2f32) f32 =
+  let d = segBase(p) in
+  let p1 = @[p.x + 0.03, p.y + 0.03] in
+  let mask = box(p1, @[0.06, 0.111]) in
+  f32.max(0.0 - mask, d)
+
+def seg8(p: vec2f32) f32 =
+  let d = segBase(p) in
+  let p1 = @[p.x, f32.abs(p.y) - 0.05] in
+  let mask = box(p1, @[0.03, 0.03]) in
+  f32.max(0.0 - mask, d)
+
+def seg9(p: vec2f32) f32 =
+  let d0 = segBase(p) in
+  let p1 = @[p.x, p.y - 0.05] in
+  let mask1 = box(p1, @[0.03, 0.03]) in
+  let d1 = f32.max(0.0 - mask1, d0) in
+  let p2 = @[p.x + 0.03, p.y + 0.05] in
+  let mask2 = box(p2, @[0.06, 0.03]) in
+  f32.max(0.0 - mask2, d1)
+
+def segDP(p: vec2f32) f32 =
+  let d = segBase(p) in
+  let p1 = @[p.x, p.y + 0.1] in
+  let mask = box(p1, @[0.028, 0.028]) in
+  f32.max(mask, d)
+
+def drawFont(p0: vec2f32, char: i32) f32 =
+  let p = p0 * 2.0 in
+  if char == seg_0 then seg0(p)
+  else if char == seg_1 then seg1(p)
+  else if char == seg_2 then seg2(p)
+  else if char == seg_3 then seg3(p)
+  else if char == seg_4 then seg4(p)
+  else if char == seg_5 then seg5(p)
+  else if char == seg_6 then seg6(p)
+  else if char == seg_7 then seg7(p)
+  else if char == seg_8 then seg8(p)
+  else if char == seg_9 then seg9(p)
+  else if char == seg_dp then segDP(p)
+  else 10.0
+
+------------------------------------------------------------
+-- Ring SDFs
+------------------------------------------------------------
+
+def ring0(p0: vec2f32) f32 =
+  let p1 = p0 * rot(radians(0.0 - iTime * 30.0 + 50.0)) in
+  let df1 = domainFold(p1, 16.0) in
+  let p1s = df1 - @[0.35, 0.35] in
+  let d0 = box(p1s * rot(radians(45.0)), @[0.005, 0.03]) in
+  -- Wedge cut 1 (using p1, not the df'd version)
+  let a1a = radians(165.0) in
+  let a1b = radians(0.0 - 165.0) in
+  let d1 = f32.max(dot(p1, @[f32.cos(a1a), f32.sin(a1a)]), d0) in
+  let d2 = f32.max(dot(p1, @[f32.cos(a1b), f32.sin(a1b)]), d1) in
+  -- Inner arcs around 0.55 radius
+  let p3 = p0 * rot(radians(iTime * 30.0 + 30.0)) in
+  let d3 = f32.abs(magnitude(p3) - 0.55) - 0.015 in
+  let d4 = f32.max(0.0 - (f32.abs(p3.x) - 0.4), d3) in
+  let d5 = f32.min(d2, d4) in
+  let d6 = f32.abs(magnitude(p0) - 0.55) - 0.001 in
+  let d7 = f32.min(d5, d6) in
+  -- Wavy outer circle at 0.65
+  let p4 = p0 * rot(radians(0.0 - iTime * 50.0 + 30.0)) in
+  let wave = @[f32.sin(p4.x * 25.0 - radians(iTime * 80.0)) * 0.01,
+               f32.sin(p4.y * 25.0 - radians(iTime * 80.0)) * 0.01] in
+  let p4w = p4 + wave in
+  let d8 = f32.abs(magnitude(p4w) - 0.65) - 0.0001 in
+  let d9 = f32.min(d7, d8) in
+  -- Two orbiting triangles
+  let aTri1 = radians(0.0 - f32.sin(iTime * 1.2) * 120.0) + radians(0.0 - 70.0) in
+  let pTri1 = @[p0.x + f32.cos(aTri1) * 0.58, p0.y + f32.sin(aTri1) * 0.58] in
+  let pTri1r = pTri1 * rot(0.0 - aTri1) * rot(radians(90.0)) in
+  let dT1 = f32.abs(tri(pTri1r, @[0.03, 0.03], radians(45.0))) - 0.003 in
+  let d10 = f32.min(d9, dT1) in
+  let aTri2 = radians(f32.sin(iTime * 1.3) * 100.0) + radians(0.0 - 10.0) in
+  let pTri2 = @[p0.x + f32.cos(aTri2) * 0.58, p0.y + f32.sin(aTri2) * 0.58] in
+  let pTri2r = pTri2 * rot(0.0 - aTri2) * rot(radians(90.0)) in
+  let dT2 = f32.abs(tri(pTri2r, @[0.03, 0.03], radians(45.0))) - 0.003 in
+  f32.min(d10, dT2)
+
+def ring1(p0: vec2f32) f32 =
+  let size = 0.45 in
+  let deg  = 140.0 in
+  let d0 = f32.abs(magnitude(p0) - size) - 0.02 in
+  let p1 = p0 * rot(radians(iTime * 60.0)) in
+  let a1 = radians(deg) in
+  let d1 = f32.max(dot(p1, @[f32.cos(a1), f32.sin(a1)]), d0) in
+  let a2 = radians(0.0 - deg) in
+  let d2 = f32.max(dot(p1, @[f32.cos(a2), f32.sin(a2)]), d1) in
+  let d3 = f32.abs(magnitude(p0) - size) - 0.001 in
+  f32.min(d2, d3)
+
+def ring2(p0: vec2f32) f32 =
+  let size = 0.3 in
+  let deg  = 120.0 in
+  let th   = 0.02 in
+  let p1 = p0 * rot(0.0 - radians(f32.sin(iTime * 2.0) * 90.0)) in
+  let d0 = f32.abs(magnitude(p1) - size) - th in
+  let a_neg = radians(0.0 - deg) in
+  let a_pos = radians(deg) in
+  let d1 = f32.max(dot(p1, @[f32.cos(a_neg), f32.sin(a_neg)]), d0) in
+  let d2 = f32.max(dot(p1, @[f32.cos(a_pos), f32.sin(a_pos)]), d1) in
+  let e0 = f32.abs(magnitude(p1) - size) - th in
+  let e1 = f32.max(0.0 - dot(p1, @[f32.cos(a_neg), f32.sin(a_neg)]), e0) in
+  let e2 = f32.max(0.0 - dot(p1, @[f32.cos(a_pos), f32.sin(a_pos)]), e1) in
+  f32.min(d2, e2)
+
+def ring3(p0: vec2f32) f32 =
+  let p1 = p0 * rot(radians(0.0 - iTime * 80.0 - 120.0)) in
+  let deg = 140.0 in
+  let df1 = domainFold(p1, 6.0) in
+  let dfs = df1 - @[0.3, 0.3] in
+  let d0 = f32.abs(box(dfs * rot(radians(45.0)), @[0.03, 0.025])) - 0.003 in
+  let a_neg = radians(0.0 - deg) in
+  let a_pos = radians(deg) in
+  let d1 = f32.max(dot(p1, @[f32.cos(a_neg), f32.sin(a_neg)]), d0) in
+  let d2 = f32.max(dot(p1, @[f32.cos(a_pos), f32.sin(a_pos)]), d1) in
+  let e0 = f32.abs(box(dfs * rot(radians(45.0)), @[0.03, 0.025])) - 0.003 in
+  let e1 = f32.max(0.0 - dot(p1, @[f32.cos(a_neg), f32.sin(a_neg)]), e0) in
+  let e2 = f32.max(0.0 - dot(p1, @[f32.cos(a_pos), f32.sin(a_pos)]), e1) in
+  f32.min(d2, e2)
+
+def ring4(p0: vec2f32) f32 =
+  let p1 = p0 * rot(radians(iTime * 75.0 - 220.0)) in
+  let deg = 20.0 in
+  let d0 = f32.abs(magnitude(p1) - 0.25) - 0.01 in
+  let df1 = domainFold(p1, 2.0) in
+  let dfs = df1 - @[0.1, 0.1] in
+  let a_neg = radians(0.0 - deg) in
+  let a_pos = radians(deg) in
+  let d1 = f32.max(0.0 - dot(dfs, @[f32.cos(a_neg), f32.sin(a_neg)]), d0) in
+  f32.max(0.0 - dot(dfs, @[f32.cos(a_pos), f32.sin(a_pos)]), d1)
+
+def ring5(p0: vec2f32) f32 =
+  let p1 = p0 * rot(radians(0.0 - iTime * 70.0 + 170.0)) in
+  let deg1 = 150.0 in
+  let d0 = f32.abs(magnitude(p1) - 0.16) - 0.02 in
+  let a_neg = radians(0.0 - deg1) in
+  let a_pos = radians(deg1) in
+  let d1 = f32.max(dot(p1, @[f32.cos(a_neg), f32.sin(a_neg)]), d0) in
+  let d2 = f32.max(dot(p1, @[f32.cos(a_pos), f32.sin(a_pos)]), d1) in
+  let p2 = p1 * rot(radians(0.0 - 30.0)) in
+  let e0 = f32.abs(magnitude(p2) - 0.136) - 0.02 in
+  let deg2 = 60.0 in
+  let b_neg = radians(0.0 - deg2) in
+  let b_pos = radians(deg2) in
+  let e1 = f32.max(0.0 - dot(p2, @[f32.cos(b_neg), f32.sin(b_neg)]), e0) in
+  let e2 = f32.max(0.0 - dot(p2, @[f32.cos(b_pos), f32.sin(b_pos)]), e1) in
+  f32.min(d2, e2)
+
+def ring6(p0: vec2f32) f32 =
+  let p1 = p0 * rot(radians(iTime * 72.0 + 110.0)) in
+  let d0 = f32.abs(magnitude(p1) - 0.95) - 0.001 in
+  let d1 = f32.max(0.0 - (f32.abs(p1.x) - 0.4), d0) in
+  let d2 = f32.max(0.0 - (f32.abs(p1.y) - 0.4), d1) in
+  let p2 = p0 * rot(radians(0.0 - iTime * 30.0 + 50.0)) in
+  let df1 = domainFold(p2, 16.0) in
+  let dfs = df1 - @[0.6, 0.6] in
+  let e0 = box(dfs * rot(radians(45.0)), @[0.02, 0.03]) in
+  let deg = 155.0 in
+  let a_pos = radians(deg) in
+  let a_neg = radians(0.0 - deg) in
+  let e1 = f32.max(0.0 - dot(p2, @[f32.cos(a_pos), f32.sin(a_pos)]), e0) in
+  let e2 = f32.max(0.0 - dot(p2, @[f32.cos(a_neg), f32.sin(a_neg)]), e1) in
+  f32.min(d2, e2)
+
+------------------------------------------------------------
+-- Background fractal grid
+------------------------------------------------------------
+
+def bg(p0: vec2f32) f32 =
+  let p_t = @[p0.x, p0.y - iTime * 0.1] in
+  let p1 = p_t * 2.8 in
+  let gv0 = @[fract(p1.x) - 0.5, fract(p1.y) - 0.5] in
+  let gv2 = @[fract(p1.x * 3.0) - 0.5, fract(p1.y * 3.0) - 0.5] in
+  let id  = @[p1.x - fract(p1.x), p1.y - fract(p1.y)] in
+  let d0  = f32.min(box(gv2, @[0.02, 0.09]), box(gv2, @[0.09, 0.02])) in
+  let n   = hash21(id) in
+  let gv  = @[gv0.x + 0.166, gv0.y + 0.17] in
+  let d_base = f32.abs(box(gv, @[0.169, 0.169])) - 0.004 in
+  let d_branch =
+    if n < 0.3 then
+      let gvr = gv * rot(radians(iTime * 60.0)) in
+      let dx = f32.max(0.0 - (f32.abs(gvr.x) - 0.08), d_base) in
+      let dy = f32.max(0.0 - (f32.abs(gvr.y) - 0.08), dx) in
+      f32.min(d0, dy)
+    else if n < 0.6 then
+      let gvr = gv * rot(radians(0.0 - iTime * 60.0)) in
+      let dx = f32.max(0.0 - (f32.abs(gvr.x) - 0.08), d_base) in
+      let dy = f32.max(0.0 - (f32.abs(gvr.y) - 0.08), dx) in
+      f32.min(d0, dy)
+    else
+      let gvr = gv * rot(radians(iTime * 60.0) + n) in
+      let d_ring = f32.abs(magnitude(gvr) - 0.1) - 0.025 in
+      let d_ring2 = f32.max(0.0 - (f32.abs(gvr.x) - 0.03), d_ring) in
+      f32.min(d0, f32.abs(d_ring2) - 0.003) in
+  -- Fine grid dots
+  let p2 = @[mod(p_t.x, 0.02) - 0.01, mod(p_t.y, 0.02) - 0.01] in
+  let d_dots = box(p2, @[0.001, 0.001]) in
+  f32.min(d_branch, d_dots)
+
+------------------------------------------------------------
+-- UI widgets
+------------------------------------------------------------
+
+def numberWithCircleUI(p0: vec2f32) f32 =
+  let p = p0 * skewX(radians(0.0 - 15.0)) in
+  let n1 = i32.f32(mod(iTime * 6.0, 10.0)) in
+  let d0 = drawFont(p - @[0.0 - 0.16, 0.0], n1) in
+  let n2 = i32.f32(mod(iTime * 3.0, 10.0)) in
+  let d1 = f32.min(d0, drawFont(p - @[0.0 - 0.08, 0.0], n2)) in
+  let d2 = f32.min(d1, drawFont(p - @[0.0 - 0.02, 0.0], seg_dp)) in
+  let p_small = p * 1.5 in
+  let n3 = i32.f32(mod(iTime * 10.0, 10.0)) in
+  let d3 = f32.min(d2, drawFont(p_small - @[0.04, 0.0 - 0.03], n3)) in
+  let n4 = i32.f32(mod(iTime * 15.0, 10.0)) in
+  let d4 = f32.abs(f32.min(d3, drawFont(p_small - @[0.12, 0.0 - 0.03], n4))) - 0.002 in
+  -- Rotating cross mark
+  let pc = p0 - @[0.07, 0.0] in
+  let pcr = pc * rot(radians(0.0 - iTime * 50.0)) in
+  let df1 = domainFold(pcr, 4.0) in
+  let dfs = df1 - @[0.085, 0.085] in
+  let dx0 = box(dfs * rot(radians(45.0)), @[0.015, 0.018]) in
+  let dx1 = f32.max(0.0 - box(p0, @[0.13, 0.07]), dx0) in
+  f32.min(d4, f32.abs(dx1) - 0.0005)
+
+def blockUI(p0: vec2f32) f32 =
+  let p1 = @[mod(p0.x + iTime * 0.05, 0.04) - 0.02, f32.abs(p0.y) - 0.02] in
+  let d0 = box(p1, @[0.0085, 0.0085]) in
+  let p2 = @[mod(p0.x + iTime * 0.05 + 0.02, 0.04) - 0.02, f32.abs(p0.y) - 0.02] in
+  let d1 = f32.min(d0, box(p2, @[0.0085, 0.0085])) in
+  let d2 = f32.max(f32.abs(p0.x) - 0.2, d1) in
+  f32.abs(d2) - 0.0002
+
+def smallCircleUI(p_in: vec2f32) f32 =
+  let p0 = p_in * 1.1 in
+  let deg0 = 20.0 in
+  let p1 = p0 * rot(radians(f32.sin(iTime * 3.0) * 50.0)) in
+  let d0 = f32.abs(magnitude(p1) - 0.1) - 0.003 in
+  let df1 = domainFold(p1, 0.75) in
+  let dfs = df1 - @[0.02, 0.02] in
+  let a_neg = radians(0.0 - deg0) in
+  let a_pos = radians(deg0) in
+  let d1 = f32.max(0.0 - dot(dfs, @[f32.cos(a_neg), f32.sin(a_neg)]), d0) in
+  let d2 = f32.max(0.0 - dot(dfs, @[f32.cos(a_pos), f32.sin(a_pos)]), d1) in
+  let p2 = p0 * rot(radians(0.0 - f32.sin(iTime * 2.0) * 80.0)) in
+  let e0 = f32.abs(magnitude(p2) - 0.08) - 0.001 in
+  let e1 = f32.max(0.0 - p2.x, e0) in
+  let d3 = f32.min(d2, e1) in
+  let p3 = p0 * rot(radians(0.0 - iTime * 50.0)) in
+  let f0 = f32.abs(magnitude(p3) - 0.05) - 0.015 in
+  let deg1 = 170.0 in
+  let b_pos = radians(deg1) in
+  let b_neg = radians(0.0 - deg1) in
+  let f1 = f32.max(0.0 - dot(p3, @[f32.cos(b_pos), f32.sin(b_pos)]), f0) in
+  let f2 = f32.max(0.0 - dot(p3, @[f32.cos(b_neg), f32.sin(b_neg)]), f1) in
+  f32.min(d3, f32.abs(f2) - 0.0005)
+
+def smallCircleUI2(p0: vec2f32) f32 =
+  let d0 = f32.abs(magnitude(p0) - 0.04) - 0.0001 in
+  let p1 = p0 * rot(radians(iTime * 30.0)) in
+  let deg = 140.0 in
+  let a_pos = radians(deg) in
+  let a_neg = radians(0.0 - deg) in
+  let e0 = magnitude(p1) - 0.03 in
+  let e1 = f32.max(0.0 - dot(p1, @[f32.cos(a_pos), f32.sin(a_pos)]), e0) in
+  let e2 = f32.max(0.0 - dot(p1, @[f32.cos(a_neg), f32.sin(a_neg)]), e1) in
+  let d1 = f32.min(d0, e2) in
+  let f0 = magnitude(p1) - 0.03 in
+  let f1 = f32.max(dot(p1, @[f32.cos(a_pos), f32.sin(a_pos)]), f0) in
+  let f2 = f32.max(dot(p1, @[f32.cos(a_neg), f32.sin(a_neg)]), f1) in
+  let d2 = f32.min(d1, f2) in
+  f32.max(0.0 - (magnitude(p1) - 0.02), d2)
+
+def rectUI(p_in: vec2f32) f32 =
+  let p0 = p_in * rot(radians(45.0)) in
+  let d0 = f32.abs(box(p0, @[0.12, 0.12])) - 0.003 in
+  let p1 = p0 * rot(radians(iTime * 60.0)) in
+  let d1 = f32.max(0.0 - (f32.abs(p1.x) - 0.05), d0) in
+  let d2 = f32.max(0.0 - (f32.abs(p1.y) - 0.05), d1) in
+  let d3 = f32.min(d2, f32.abs(box(p0, @[0.12, 0.12])) - 0.0005) in
+  let e0 = f32.abs(box(p0, @[0.09, 0.09])) - 0.003 in
+  let p2 = p0 * rot(radians(0.0 - iTime * 50.0)) in
+  let e1 = f32.max(0.0 - (f32.abs(p2.x) - 0.03), e0) in
+  let e2 = f32.max(0.0 - (f32.abs(p2.y) - 0.03), e1) in
+  let d4 = f32.min(d3, e2) in
+  let d5 = f32.min(d4, f32.abs(box(p0, @[0.09, 0.09])) - 0.0005) in
+  let p3 = p0 * rot(radians(0.0 - 45.0)) in
+  let p3y = @[p3.x, f32.abs(p3.y) - 0.07 - f32.sin(iTime * 3.0) * 0.01] in
+  let d6 = f32.min(d5, tri(p3y, @[0.02, 0.02], radians(45.0))) in
+  let p4 = p0 * rot(radians(45.0)) in
+  let p4y = @[p4.x, f32.abs(p4.y) - 0.07 - f32.sin(iTime * 3.0) * 0.01] in
+  let d7 = f32.min(d6, tri(p4y, @[0.02, 0.02], radians(45.0))) in
+  let p5 = p0 * rot(radians(45.0)) in
+  let g0 = f32.abs(box(p5, @[0.025, 0.025])) - 0.0005 in
+  let g1 = f32.max(0.0 - (f32.abs(p5.x) - 0.01), g0) in
+  let g2 = f32.max(0.0 - (f32.abs(p5.y) - 0.01), g1) in
+  f32.min(d7, g2)
+
+def graphUI(p0: vec2f32) f32 =
+  let p1 = @[p0.x + 0.5, (p0.y - iTime * 0.25) * 100.0] in
+  let gv = @[fract(p1.x) - 0.5, fract(p1.y) - 0.5] in
+  let id = @[p1.x - fract(p1.x), p1.y - fract(p1.y)] in
+  let n  = hash21(@[id.y, id.y]) * 2.0 in
+  let w  = (f32.abs(f32.sin(iTime * n) + 0.25) * 0.03) * n * 0.5 in
+  let d0 = box(gv, @[w, 0.1]) in
+  let d1 = f32.max(f32.abs(p0.x) - 0.2, d0) in
+  f32.max(f32.abs(p0.y) - 0.2, d1)
+
+def staticUI(p0: vec2f32) f32 =
+  let d0 = box(p0, @[0.005, 0.13]) in
+  let p1 = (p0 - @[0.02, 0.0 - 0.147]) * rot(radians(0.0 - 45.0)) in
+  let d1 = f32.min(d0, box(p1, @[0.005, 0.028])) in
+  let d2 = f32.min(d1, box(p0 - @[0.04, 0.0 - 0.2135], @[0.005, 0.049])) in
+  let p2 = (p0 - @[0.02, 0.0 - 0.28]) * rot(radians(45.0)) in
+  let d3 = f32.min(d2, box(p2, @[0.005, 0.03])) in
+  let d4 = f32.min(d3, magnitude(p0 - @[0.0, 0.13]) - 0.012) in
+  f32.min(d4, magnitude(p0 - @[0.0, 0.0 - 0.3]) - 0.012)
+
+def arrowUI(p0: vec2f32) f32 =
+  let px = 0.0 - p0.x in
+  let px_t = mod(px - iTime * 0.12, 0.07) - 0.035 - 0.0325 in
+  let p1 = @[px_t * 0.9, p0.y * 1.5] in
+  let p2 = p1 * rot(radians(90.0)) in
+  let t0 = tri(p2, @[0.05, 0.05], radians(45.0)) in
+  let t1 = f32.max(0.0 - tri(p2 - @[0.0, 0.0 - 0.03], @[0.05, 0.05], radians(45.0)), t0) in
+  let t2 = f32.abs(t1) - 0.0005 in
+  f32.max(f32.abs(p0.x) - 0.15, t2)
+
+def sideLine(p_in: vec2f32) f32 =
+  let p0 = @[0.0 - p_in.x, p_in.y] in
+  let p1 = @[p0.x, f32.abs(p0.y) - 0.17] in
+  let p2 = p1 * rot(radians(45.0)) in
+  let d0 = box(p2, @[0.035, 0.01]) in
+  let d1 = f32.min(d0, box(p0 - @[0.0217, 0.0], @[0.01, 0.152])) in
+  f32.abs(d1) - 0.0005
+
+def sideUI(p0: vec2f32) f32 =
+  let p1 = @[0.0 - p0.x + 0.025, p0.y] in
+  let d0 = sideLine(p1) in
+  let p2 = @[p0.x, f32.abs(p0.y) - 0.275] in
+  f32.min(d0, sideLine(p2))
+
+def overlayUI(p0: vec2f32) f32 =
+  let d0 = numberWithCircleUI(p0 - @[0.56, 0.0 - 0.34]) in
+  let p_blk = @[f32.abs(p0.x) - 0.56, p0.y - 0.45] in
+  let d1 = f32.min(d0, blockUI(p_blk)) in
+  let p_sc2a = @[f32.abs(p0.x) - 0.72, p0.y - 0.35] in
+  let d2 = f32.min(d1, smallCircleUI2(p_sc2a)) in
+  let d3 = f32.min(d2, smallCircleUI2(p0 - @[0.0 - 0.39, 0.0 - 0.42])) in
+  let p_sc1 = @[p0.x - 0.58, f32.abs(p0.y - 0.07) - 0.12] in
+  let d4 = f32.min(d3, smallCircleUI(p_sc1)) in
+  let d5 = f32.min(d4, rectUI(p0 - @[0.0 - 0.58, 0.0 - 0.3])) in
+  let p_graph_0 = p0 - @[0.0 - 0.58, 0.1] in
+  let p_graph = @[f32.abs(p_graph_0.x) - 0.05, p_graph_0.y] in
+  let d6 = f32.min(d5, graphUI(p_graph)) in
+  let p_stat = @[f32.abs(p0.x) - 0.72, p0.y - 0.13] in
+  let d7 = f32.min(d6, staticUI(p_stat)) in
+  let p_arrow = @[f32.abs(p0.x) - 0.51, p0.y - 0.35] in
+  let d8 = f32.min(d7, arrowUI(p_arrow)) in
+  let p_side = @[f32.abs(p0.x) - 0.82, p0.y] in
+  f32.min(d8, sideUI(p_side))
+
+------------------------------------------------------------
+-- 3D ray-march scene
+------------------------------------------------------------
+
+def thicknessAt(t: f32) f32 =
+  let maxT = 0.03 in
+  let minT = 0.007 in
+  let frame = mod(iTime, 30.0) in
+  if frame >= 10.0 then
+    if frame < 20.0 then
+      let tm = getTime(frame - 10.0, 1.5) in
+      (maxT + minT) - cubicInOut(tm) * maxT
+    else
+      let tm = getTime(frame - 20.0, 1.5) in
+      minT + cubicInOut(tm) * maxT
+  else maxT
+
+def getDist(p0: vec3f32) f32 =
+  let p = @[p0.x, p0.y, p0.z + 0.7] in
+  let th = thicknessAt(iTime) in
+  let xy0 = @[p.x, p.y] in
+  let d0 = f32.max(f32.abs(p.z) - th, ring0(xy0)) in
+  let d1 = f32.max(f32.abs(p.z - 0.2) - th, ring1(xy0)) in
+  let d2 = f32.max(f32.abs(p.z - 0.4) - th, ring2(xy0)) in
+  let d3 = f32.max(f32.abs(p.z - 0.6) - th, ring3(xy0)) in
+  let d4 = f32.max(f32.abs(p.z - 0.8) - th, ring4(xy0)) in
+  let d5 = f32.max(f32.abs(p.z - 1.0) - th, ring5(xy0)) in
+  let d6 = f32.max(f32.abs(p.z - 1.2) - th, ring6(xy0)) in
+  f32.min(f32.min(f32.min(d0, d1), f32.min(d2, d3)),
+          f32.min(f32.min(d4, d5), d6))
+
+def rayMarch(ro: vec3f32, rd: vec3f32) vec3f32 =
+  let glowVal = 0.003 in
+  let tmax    = 5.0 in
+  let (_, _, alpha, steps) =
+    loop (i, t, a, s) = (0, 0.0, 0.0, 0.0) while i < max_steps do
+      if t > tmax then (max_steps, t, a, s)
+      else
+        let p   = ro + rd * t in
+        let d   = getDist(p) in
+        let da  = 1.0 - smoothstep(0.0, glowVal, d) in
+        let tn  = t + f32.max(0.0001, f32.abs(d) * 0.6) in
+        (i + 1, tn, a + da, f32.i32(i))
+  in
+  let norm = if steps > 0.0 then alpha / steps else 0.0 in
+  @[norm * 1.5, norm * 1.5, norm * 1.5]
+
+def cameraRay(uv: vec2f32, ro: vec3f32, la: vec3f32, z: f32) vec3f32 =
+  let f = normalize(la - ro) in
+  let r = normalize(cross(@[0.0, 1.0, 0.0], f)) in
+  let u = cross(f, r) in
+  let c = ro + f * z in
+  let i = c + r * uv.x + u * uv.y in
+  normalize(i - ro)
+
+------------------------------------------------------------
+-- Entry points
+------------------------------------------------------------
+
+def verts: [3]vec4f32 =
+  [@[-1.0, -1.0, 0.0, 1.0],
+   @[3.0, -1.0, 0.0, 1.0],
+   @[-1.0, 3.0, 0.0, 1.0]]
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 = verts[vertex_id]
+
+-- Camera: static orbit + animated bobbing during the last 20s of the loop.
+def cameraOrigin(uv: vec2f32) vec3f32 =
+  let frame  = mod(iTime, 30.0) in
+  let (yz, ogRXZ, animRXZ) =
+    if frame >= 10.0 then
+      if frame < 20.0 then
+        let tm = getTime(frame - 10.0, 1.5) in
+        (45.0 - cubicInOut(tm) * 45.0,
+         50.0 - cubicInOut(tm) * 50.0,
+         20.0 - cubicInOut(tm) * 20.0)
+      else
+        let tm = getTime(frame - 20.0, 1.5) in
+        (cubicInOut(tm) * 45.0,
+         cubicInOut(tm) * 50.0,
+         cubicInOut(tm) * 20.0)
+    else (45.0, 50.0, 20.0)
+  in
+  -- Rotate base (0, 0, -2.1) around X (yz plane) then Y (xz plane).
+  let ro0 = @[0.0, 0.0, 0.0 - 2.1] in
+  let r1  = rot(radians(yz)) in
+  let yz_in = @[ro0.y, ro0.z] * r1 in
+  let ro1 = @[ro0.x, yz_in.x, yz_in.y] in
+  let r2  = rot(radians(f32.sin(iTime * 0.3) * animRXZ + ogRXZ)) in
+  let xz_in = @[ro1.x, ro1.z] * r2 in
+  @[xz_in.x, ro1.y, xz_in.y]
+
+#[fragment]
+entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+  -- Flip Y for Vulkan
+  let coord = @[fragCoord.x, iResolution.y - fragCoord.y] in
+  -- Zoom out so the UI overlay (±0.82 horizontally) and outer ring
+  -- (±0.95) both fit a 4:3 viewport. Original divides by iResolution.y
+  -- and assumes 16:9.
+  let scale = iResolution.y * 0.7 in
+  let uv    = @[(coord.x - 0.5 * iResolution.x) / scale,
+                (coord.y - 0.5 * iResolution.y) / scale] in
+  let ro    = cameraOrigin(uv) in
+  let rd    = cameraRay(uv, ro, @[0.0, 0.0, 0.0], 1.0) in
+  let scene = rayMarch(ro, rd) in
+  let bg_d  = bg(uv) in
+  let col0  = mix(@[0.0, 0.0, 0.0], @[1.0, 1.0, 1.0], smoothAA(bg_d, 0.0)) in
+  let col1  = mix(col0, scene, 0.7) in
+  let col2  = pow(col1, @[0.9545, 0.9545, 0.9545]) in
+  let ui_d  = overlayUI(uv) in
+  let col3  = mix(col2, @[1.0, 1.0, 1.0], smoothAA(ui_d, 0.0)) in
+  @[col3.x, col3.y, col3.z, 1.0]
+
+------------------------------------------------------------
+-- Original GLSL below (commented out)
+------------------------------------------------------------
+
+-- #define MAX_STEPS 64
+-- #define Rot(a) mat2(cos(a),-sin(a),sin(a),cos(a))
+-- #define antialiasing(n) n/min(iResolution.y,iResolution.x)
+-- #define S(d,b) smoothstep(antialiasing(1.0),b,d)
+-- #define B(p,s) max(abs(p).x-s.x,abs(p).y-s.y)
+-- #define Tri(p,s,a) max(-dot(p,vec2(cos(-a),sin(-a))),max(dot(p,vec2(cos(a),sin(a))),max(abs(p).x-s.x,abs(p).y-s.y)))
+-- #define DF(a,b) length(a) * cos( mod( atan(a.y,a.x)+6.28/(b*8.0), 6.28/((b*8.0)*0.5))+(b-1.)*6.28/(b*8.0) + vec2(0,11) )
+-- #define Skew(a,b) mat2(1.0,tan(a),tan(b),1.0)
+-- #define SkewX(a) mat2(1.0,tan(a),0.0,1.0)
+-- #define SkewY(a) mat2(1.0,0.0,tan(a),1.0)
+-- #define seg_0 0
+-- #define seg_1 1
+-- #define seg_2 2
+-- #define seg_3 3
+-- #define seg_4 4
+-- #define seg_5 5
+-- #define seg_6 6
+-- #define seg_7 7
+-- #define seg_8 8
+-- #define seg_9 9
+-- #define seg_DP 39
+-- 
+-- float Hash21(vec2 p) {
+--     p = fract(p*vec2(234.56,789.34));
+--     p+=dot(p,p+34.56);
+--     return fract(p.x+p.y);
+-- }
+-- 
+-- float cubicInOut(float t) {
+--   return t < 0.5
+--     ? 4.0 * t * t * t
+--     : 0.5 * pow(2.0 * t - 2.0, 3.0) + 1.0;
+-- }
+-- 
+-- float getTime(float t, float duration){
+--     return clamp(t,0.0,duration)/duration;
+-- }
+-- 
+-- 
+-- float segBase(vec2 p){
+--     vec2 prevP = p;
+--     
+--     float size = 0.02;
+--     float padding = 0.05;
+-- 
+--     float w = padding*3.0;
+--     float h = padding*5.0;
+-- 
+--     p = mod(p,0.05)-0.025;
+--     float thickness = 0.005;
+--     float gridMask = min(abs(p.x)-thickness,abs(p.y)-thickness);
+--     
+--     p = prevP;
+--     float d = B(p,vec2(w*0.5,h*0.5));
+--     float a = radians(45.0);
+--     p.x = abs(p.x)-0.1;
+--     p.y = abs(p.y)-0.05;
+--     float d2 = dot(p,vec2(cos(a),sin(a)));
+--     d = max(d2,d);
+--     d = max(-gridMask,d);
+--     return d;
+-- }
+-- 
+-- float seg0(vec2 p){
+--     vec2 prevP = p;
+--     float d = segBase(p);
+--     float size = 0.03;
+--     float mask = B(p,vec2(size,size*2.7));
+--     d = max(-mask,d);
+--     return d;
+-- }
+-- 
+-- float seg1(vec2 p){
+--     vec2 prevP = p;
+--     float d = segBase(p);
+--     float size = 0.03;
+--     p.x+=size;
+--     p.y+=size;
+--     float mask = B(p,vec2(size*2.,size*3.7));
+--     d = max(-mask,d);
+--     
+--     p = prevP;
+--     
+--     p.x+=size*1.8;
+--     p.y-=size*3.5;
+--     mask = B(p,vec2(size));
+--     d = max(-mask,d);
+--     
+--     return d;
+-- }
+-- 
+-- float seg2(vec2 p){
+--     vec2 prevP = p;
+--     float d = segBase(p);
+--     float size = 0.03;
+--     p.x+=size;
+--     p.y-=0.05;
+--     float mask = B(p,vec2(size*2.,size));
+--     d = max(-mask,d);
+-- 
+--     p = prevP;
+--     p.x-=size;
+--     p.y+=0.05;
+--     mask = B(p,vec2(size*2.,size));
+--     d = max(-mask,d);
+--     
+--     return d;
+-- }
+-- 
+-- float seg3(vec2 p){
+--     vec2 prevP = p;
+--     float d = segBase(p);
+--     float size = 0.03;
+--     p.y = abs(p.y);
+--     p.x+=size;
+--     p.y-=0.05;
+--     float mask = B(p,vec2(size*2.,size));
+--     d = max(-mask,d);
+-- 
+--     p = prevP;
+--     p.x+=0.05;
+--     mask = B(p,vec2(size,size));
+--     d = max(-mask,d);
+--     
+--     return d;
+-- }
+-- 
+-- float seg4(vec2 p){
+--     vec2 prevP = p;
+--     float d = segBase(p);
+--     float size = 0.03;
+--     
+--     p.x+=size;
+--     p.y+=0.08;
+--     float mask = B(p,vec2(size*2.,size*2.0));
+--     d = max(-mask,d);
+-- 
+--     p = prevP;
+--     
+--     p.y-=0.08;
+--     mask = B(p,vec2(size,size*2.0));
+--     d = max(-mask,d);
+--     
+--     return d;
+-- }
+-- 
+-- float seg5(vec2 p){
+--     vec2 prevP = p;
+--     float d = segBase(p);
+--     float size = 0.03;
+--     p.x-=size;
+--     p.y-=0.05;
+--     float mask = B(p,vec2(size*2.,size));
+--     d = max(-mask,d);
+-- 
+--     p = prevP;
+--     p.x+=size;
+--     p.y+=0.05;
+--     mask = B(p,vec2(size*2.,size));
+--     d = max(-mask,d);
+--     
+--     return d;
+-- }
+-- 
+-- float seg6(vec2 p){
+--     vec2 prevP = p;
+--     float d = segBase(p);
+--     float size = 0.03;
+--     p.x-=size;
+--     p.y-=0.05;
+--     float mask = B(p,vec2(size*2.,size));
+--     d = max(-mask,d);
+-- 
+--     p = prevP;
+--     p.y+=0.05;
+--     mask = B(p,vec2(size,size));
+--     d = max(-mask,d);
+--     
+--     return d;
+-- }
+-- 
+-- float seg7(vec2 p){
+--     vec2 prevP = p;
+--     float d = segBase(p);
+--     float size = 0.03;
+--     p.x+=size;
+--     p.y+=size;
+--     float mask = B(p,vec2(size*2.,size*3.7));
+--     d = max(-mask,d);
+--     return d;
+-- }
+-- 
+-- 
+-- float seg8(vec2 p){
+--     vec2 prevP = p;
+--     float d = segBase(p);
+--     float size = 0.03;
+--     p.y = abs(p.y);
+--     p.y-=0.05;
+--     float mask = B(p,vec2(size,size));
+--     d = max(-mask,d);
+--     
+--     return d;
+-- }
+-- 
+-- float seg9(vec2 p){
+--     vec2 prevP = p;
+--     float d = segBase(p);
+--     float size = 0.03;
+--     p.y-=0.05;
+--     float mask = B(p,vec2(size,size));
+--     d = max(-mask,d);
+-- 
+--     p = prevP;
+--     p.x+=size;
+--     p.y+=0.05;
+--     mask = B(p,vec2(size*2.,size));
+--     d = max(-mask,d);
+--     
+--     return d;
+-- }
+-- 
+-- float segDecimalPoint(vec2 p){
+--     vec2 prevP = p;
+--     float d = segBase(p);
+--     float size = 0.028;
+--     p.y+=0.1;
+--     float mask = B(p,vec2(size,size));
+--     d = max(mask,d);
+--     return d;
+-- }
+-- 
+-- float drawFont(vec2 p, int char){
+--     p*=2.0;
+--     float d = 10.;
+--     if(char == seg_0) {
+--         d = seg0(p);
+--     } else if(char == seg_1) {
+--         d = seg1(p);
+--     } else if(char == seg_2) {
+--         d = seg2(p);
+--     } else if(char == seg_3) {
+--         d = seg3(p);
+--     } else if(char == seg_4) {
+--         d = seg4(p);
+--     } else if(char == seg_5) {
+--         d = seg5(p);
+--     } else if(char == seg_6) {
+--         d = seg6(p);
+--     } else if(char == seg_7) {
+--         d = seg7(p);
+--     } else if(char == seg_8) {
+--         d = seg8(p);
+--     } else if(char == seg_9) {
+--         d = seg9(p);
+--     } else if(char == seg_DP) {
+--         d = segDecimalPoint(p);
+--     }
+--     
+--     return d;
+-- }
+-- 
+-- float ring0(vec2 p){
+--     vec2 prevP = p;
+--     p*=Rot(radians(-iTime*30.+50.));
+--     p = DF(p,16.0);
+--     p -= vec2(0.35);
+--     float d = B(p*Rot(radians(45.0)),vec2(0.005,0.03));
+--     p = prevP;
+--     
+--     p*=Rot(radians(-iTime*30.+50.));
+--     float deg = 165.;
+--     float a = radians(deg);
+--     d = max(dot(p,vec2(cos(a),sin(a))),d);
+--     a = radians(-deg);
+--     d = max(dot(p,vec2(cos(a),sin(a))),d);    
+--     
+--     p = prevP;
+--     p*=Rot(radians(iTime*30.+30.));
+--     float d2 = abs(length(p)-0.55)-0.015;
+--     d2 = max(-(abs(p.x)-0.4),d2);
+--     d = min(d,d2);
+--     p = prevP;
+--     d2 = abs(length(p)-0.55)-0.001;
+--     d = min(d,d2);
+--     
+--     p = prevP;
+--     p*=Rot(radians(-iTime*50.+30.));
+--     p+=sin(p*25.-radians(iTime*80.))*0.01;
+--     d2 = abs(length(p)-0.65)-0.0001;
+--     d = min(d,d2);
+--     
+--     p = prevP;
+--     a = radians(-sin(iTime*1.2))*120.0;
+--     a+=radians(-70.);
+--     p.x+=cos(a)*0.58;
+--     p.y+=sin(a)*0.58;
+--     
+--     d2 = abs(Tri(p*Rot(-a)*Rot(radians(90.0)),vec2(0.03),radians(45.)))-0.003;
+--     d = min(d,d2);      
+--     
+--     p = prevP;
+--     a = radians(sin(iTime*1.3))*100.0;
+--     a+=radians(-10.);
+--     p.x+=cos(a)*0.58;
+--     p.y+=sin(a)*0.58;
+--     
+--     d2 = abs(Tri(p*Rot(-a)*Rot(radians(90.0)),vec2(0.03),radians(45.)))-0.003;
+--     d = min(d,d2);     
+--     
+--     return d;
+-- }
+-- 
+-- float ring1(vec2 p){
+--     vec2 prevP = p;
+--     float size = 0.45;
+--     float deg = 140.;
+--     float thickness = 0.02;
+--     float d = abs(length(p)-size)-thickness;
+--     
+--     p*=Rot(radians(iTime*60.));
+--     float a = radians(deg);
+--     d = max(dot(p,vec2(cos(a),sin(a))),d);
+--     a = radians(-deg);
+--     d = max(dot(p,vec2(cos(a),sin(a))),d);
+--     
+--     p = prevP;
+--     float d2 = abs(length(p)-size)-0.001;
+--     
+--     return min(d,d2);
+-- }
+-- 
+-- float ring2(vec2 p){
+--     vec2 prevP = p;
+--     float size = 0.3;
+--     float deg = 120.;
+--     float thickness = 0.02;
+--     
+--     p*=Rot(-radians(sin(iTime*2.)*90.));
+--     float d = abs(length(p)-size)-thickness;
+--     float a = radians(-deg);
+--     d = max(dot(p,vec2(cos(a),sin(a))),d);
+--     a = radians(deg);
+--     d = max(dot(p,vec2(cos(a),sin(a))),d);
+--     
+--     float d2 = abs(length(p)-size)-thickness;
+--     a = radians(-deg);
+--     d2 = max(-dot(p,vec2(cos(a),sin(a))),d2);
+--     a = radians(deg);
+--     d2 = max(-dot(p,vec2(cos(a),sin(a))),d2);
+--     
+--     return min(d,d2);
+-- }
+-- 
+-- float ring3(vec2 p){
+--     p*=Rot(radians(-iTime*80.-120.));
+--     
+--     vec2 prevP = p;
+--     float deg = 140.;
+--     
+--     p = DF(p,6.0);
+--     p -= vec2(0.3);
+--     float d = abs(B(p*Rot(radians(45.0)),vec2(0.03,0.025)))-0.003;
+--     
+--     p = prevP;
+--     float a = radians(-deg);
+--     d = max(dot(p,vec2(cos(a),sin(a))),d);
+--     a = radians(deg);
+--     d = max(dot(p,vec2(cos(a),sin(a))),d);
+--     
+--     p = prevP;
+--     
+--     p = DF(p,6.0);
+--     p -= vec2(0.3);
+--     float d2 = abs(B(p*Rot(radians(45.0)),vec2(0.03,0.025)))-0.003;
+--     
+--     p = prevP;
+--     a = radians(-deg);
+--     d2 = max(-dot(p,vec2(cos(a),sin(a))),d2);
+--     a = radians(deg);
+--     d2 = max(-dot(p,vec2(cos(a),sin(a))),d2);
+--     
+--     return min(d,d2);
+-- }
+-- 
+-- float ring4(vec2 p){
+--     p*=Rot(radians(iTime*75.-220.));
+--     
+--     vec2 prevP = p;
+--     float deg = 20.;
+--     
+--     float d = abs(length(p)-0.25)-0.01;
+--     
+--     p = DF(p,2.0);
+--     p -= vec2(0.1);
+--     
+--     float a = radians(-deg);
+--     d = max(-dot(p,vec2(cos(a),sin(a))),d);
+--     a = radians(deg);
+--     d = max(-dot(p,vec2(cos(a),sin(a))),d);
+--     
+--     return d;
+-- }
+-- 
+-- float ring5(vec2 p){
+--     p*=Rot(radians(-iTime*70.+170.));
+--     
+--     vec2 prevP = p;
+--     float deg = 150.;
+--     
+--     float d = abs(length(p)-0.16)-0.02;
+--     
+--     float a = radians(-deg);
+--     d = max(dot(p,vec2(cos(a),sin(a))),d);
+--     a = radians(deg);
+--     d = max(dot(p,vec2(cos(a),sin(a))),d);
+--     
+--     p = prevP;
+--     p*=Rot(radians(-30.));
+--     float d2 = abs(length(p)-0.136)-0.02;
+--     
+--     deg = 60.;
+--     a = radians(-deg);
+--     d2 = max(-dot(p,vec2(cos(a),sin(a))),d2);
+--     a = radians(deg);
+--     d2 = max(-dot(p,vec2(cos(a),sin(a))),d2);
+--     
+--     d = min(d,d2);
+--     
+--     return d;
+-- }
+-- 
+-- float ring6(vec2 p){
+--     vec2 prevP = p;
+--     p*=Rot(radians(iTime*72.+110.));
+--     
+--     float d = abs(length(p)-0.95)-0.001;
+--     d = max(-(abs(p.x)-0.4),d);
+--     d = max(-(abs(p.y)-0.4),d);
+--     
+--     p = prevP;
+--     p*=Rot(radians(-iTime*30.+50.));
+--     p = DF(p,16.0);
+--     p -= vec2(0.6);
+--     float d2 = B(p*Rot(radians(45.0)),vec2(0.02,0.03));
+--     p = prevP;
+--     
+--     p*=Rot(radians(-iTime*30.+50.));
+--     float deg = 155.;
+--     float a = radians(deg);
+--     d2 = max(-dot(p,vec2(cos(a),sin(a))),d2);
+--     a = radians(-deg);
+--     d2 = max(-dot(p,vec2(cos(a),sin(a))),d2);    
+--     
+--     return min(d,d2);
+-- }
+-- 
+-- float bg(vec2 p){
+--     p.y-=iTime*0.1;
+--     vec2 prevP = p;
+-- 
+--     p*=2.8;
+--     vec2 gv = fract(p)-0.5;
+--     vec2 gv2 = fract(p*3.)-0.5;
+--     vec2 id = floor(p);
+-- 
+--     float d = min(B(gv2,vec2(0.02,0.09)),B(gv2,vec2(0.09,0.02)));
+--     
+--     float n = Hash21(id);
+--     gv+=vec2(0.166,0.17);
+--     float d2 = abs(B(gv,vec2(0.169)))-0.004;
+--          
+--     if(n<0.3){
+--         gv*= Rot(radians(iTime*60.));
+--         d2 = max(-(abs(gv.x)-0.08),d2);
+--         d2 = max(-(abs(gv.y)-0.08),d2);
+--         d = min(d,d2);
+--     } else if(n>=0.3 && n<0.6){
+--         gv*= Rot(radians(-iTime*60.));
+--         d2 = max(-(abs(gv.x)-0.08),d2);
+--         d2 = max(-(abs(gv.y)-0.08),d2);
+--         d = min(d,d2);
+--     } else if(n>=0.6 && n<1.){
+--         gv*= Rot(radians(iTime*60.)+n);
+--         d2 = abs(length(gv)-0.1)-0.025;
+--         d2 = max(-(abs(gv.x)-0.03),d2);
+--         d = min(d,abs(d2)-0.003);
+--     }
+--     
+--     p = prevP;
+--     p = mod(p,0.02)-0.01;
+--     d2 = B(p,vec2(0.001));
+--     d = min(d,d2);
+--     
+--     return d;
+-- }
+-- 
+-- float numberWithCIrcleUI(vec2 p){
+--     
+--     vec2 prevP = p;
+--     
+--     p*=SkewX(radians(-15.0));
+--     int num = int(mod(iTime*6.0,10.0));
+--     float d = drawFont(p-vec2(-0.16,0.),num);
+--     num = int(mod(iTime*3.0,10.0));
+--     float d2 = drawFont(p-vec2(-0.08,0.),num);
+--     d = min(d,d2); 
+--     d2 = drawFont(p-vec2(-0.02,0.),seg_DP);
+--     d = min(d,d2); 
+--     
+--     p*=1.5;
+--     num = int(mod(iTime*10.0,10.0));
+--     d2 = drawFont(p-vec2(0.04,-0.03),num);
+--     d = min(d,d2); 
+--     num = int(mod(iTime*15.0,10.0));
+--     d2 = drawFont(p-vec2(0.12,-0.03),num);
+--     d = abs(min(d,d2))-0.002; 
+--     
+--     p = prevP;
+--     
+--     p.x-=0.07;
+--     p*=Rot(radians(-iTime*50.));
+--     p = DF(p,4.);
+--     p -= vec2(0.085);
+--     d2 = B(p*Rot(radians(45.0)),vec2(0.015,0.018));
+--     p = prevP;
+--     d2 = max(-B(p,vec2(0.13,0.07)),d2);
+--     d = min(d,abs(d2)-0.0005);
+--     
+--     return d;
+-- }
+-- 
+-- float blockUI(vec2 p){
+--     vec2 prevP = p;
+--     p.x+=iTime*0.05;
+--     p.y = abs(p.y)-0.02;
+--     p.x = mod(p.x,0.04)-0.02;
+--     float d = B(p,vec2(0.0085));
+--     p = prevP;
+--     p.x+=iTime*0.05;
+--     p.x+=0.02;
+--     p.x = mod(p.x,0.04)-0.02;
+--     float d2 = B(p,vec2(0.0085));
+--     d = min(d,d2);
+--     p = prevP;
+--     d = max((abs(p.x)-0.2),d);
+--     return abs(d)-0.0002;
+-- }
+-- 
+-- float smallCircleUI(vec2 p){
+--     p*=1.1;
+--     vec2 prevP = p;
+--     
+--     float deg = 20.;
+--     
+--     p*=Rot(radians(sin(iTime*3.)*50.));
+--     float d = abs(length(p)-0.1)-0.003;
+--     
+--     p = DF(p,0.75);
+--     p -= vec2(0.02);
+--     
+--     float a = radians(-deg);
+--     d = max(-dot(p,vec2(cos(a),sin(a))),d);
+--     a = radians(deg);
+--     d = max(-dot(p,vec2(cos(a),sin(a))),d);
+--     
+--     p = prevP;
+--     p*=Rot(radians(-sin(iTime*2.)*80.));
+--     float d2 = abs(length(p)-0.08)-0.001;
+--     d2 = max(-p.x,d2);
+--     d = min(d,d2);
+--     
+--     p = prevP;
+--     p*=Rot(radians(-iTime*50.));
+--     d2 = abs(length(p)-0.05)-0.015;
+--     deg = 170.;
+--     a = radians(deg);
+--     d2 = max(-dot(p,vec2(cos(a),sin(a))),d2);
+--     a = radians(-deg);
+--     d2 = max(-dot(p,vec2(cos(a),sin(a))),d2); 
+--     d = min(d,abs(d2)-0.0005);
+--     
+--     return d;
+-- }
+-- 
+-- float smallCircleUI2(vec2 p){
+--     vec2 prevP = p;
+--     float d = abs(length(p)-0.04)-0.0001;
+--     float d2 = length(p)-0.03;
+--     
+--     p*=Rot(radians(iTime*30.));
+--     float deg = 140.;
+--     float a = radians(deg);
+--     d2 = max(-dot(p,vec2(cos(a),sin(a))),d2);
+--     a = radians(-deg);
+--     d2 = max(-dot(p,vec2(cos(a),sin(a))),d2); 
+--     d = min(d,d2);
+--     
+--     d2 = length(p)-0.03;
+--     a = radians(deg);
+--     d2 = max(dot(p,vec2(cos(a),sin(a))),d2);
+--     a = radians(-deg);
+--     d2 = max(dot(p,vec2(cos(a),sin(a))),d2); 
+--     d = min(d, d2);
+--     
+--     d = max(-(length(p)-0.02),d);
+--     
+--     return d;
+-- }
+-- 
+-- float rectUI(vec2 p){
+--     p*= Rot(radians(45.));
+--     vec2 prevP = p;
+--     float d = abs(B(p,vec2(0.12)))-0.003;
+--     p*= Rot(radians(iTime*60.));
+--     d = max(-(abs(p.x)-0.05),d);
+--     d = max(-(abs(p.y)-0.05),d);
+--     p = prevP;
+--     float d2 = abs(B(p,vec2(0.12)))-0.0005;
+--     d = min(d,d2);
+--     
+--     d2 = abs(B(p,vec2(0.09)))-0.003;
+--     p*= Rot(radians(-iTime*50.));
+--     d2 = max(-(abs(p.x)-0.03),d2);
+--     d2 = max(-(abs(p.y)-0.03),d2);
+--     d = min(d,d2);
+--     p = prevP;
+--     d2 = abs(B(p,vec2(0.09)))-0.0005;
+--     d = min(d,d2);
+--     
+--     p*=Rot(radians(-45.));
+--     p.y = abs(p.y)-0.07-sin(iTime*3.)*0.01;
+--     d2 = Tri(p,vec2(0.02),radians(45.));
+--     d = min(d,d2);
+--     
+--     p = prevP;
+--     p*=Rot(radians(45.));
+--     p.y = abs(p.y)-0.07-sin(iTime*3.)*0.01;
+--     d2 = Tri(p,vec2(0.02),radians(45.));
+--     d = min(d,d2);
+--     
+--     p = prevP;
+--     p*=Rot(radians(45.));
+--     d2 = abs(B(p,vec2(0.025)))-0.0005;
+--     d2 = max(-(abs(p.x)-0.01),d2);
+--     d2 = max(-(abs(p.y)-0.01),d2);
+--     d = min(d,d2);
+--     
+--     return d;
+-- }
+-- 
+-- float graphUI(vec2 p){
+--     vec2 prevP = p;
+--     p.x+=0.5;
+--     p.y-=iTime*0.25;
+--     p*=vec2(1.,100.);
+-- 
+--     vec2 gv = fract(p)-0.5;
+--     vec2 id = floor(p);
+--     
+--     float n = Hash21(vec2(id.y))*2.;
+--     
+--     float w = (abs(sin(iTime*n)+0.25)*0.03)*n*0.5;
+--     float d = B(gv,vec2(w, 0.1));
+--     
+--     p = prevP;
+--     d = max((abs(p.x)-0.2),d);
+--     d = max((abs(p.y)-0.2),d);
+--     
+--     return d;
+-- }
+-- 
+-- float staticUI(vec2 p){
+--     vec2 prevP = p;
+--     float d = B(p,vec2(0.005,0.13));
+--     p-=vec2(0.02,-0.147);
+--     p*=Rot(radians(-45.));
+--     float d2 = B(p,vec2(0.005,0.028));
+--     d = min(d,d2);
+--     p = prevP;
+--     d2 = B(p-vec2(0.04,-0.2135),vec2(0.005,0.049));
+--     d = min(d,d2);
+--     p-=vec2(0.02,-0.28);
+--     p*=Rot(radians(45.));
+--     d2 = B(p,vec2(0.005,0.03));
+--     d = min(d,d2);
+--     p = prevP;
+--     d2 = length(p-vec2(0.,0.13))-0.012;
+--     d = min(d,d2);
+--     d2 = length(p-vec2(0.,-0.3))-0.012;
+--     d = min(d,d2);
+--     return d;
+-- }
+-- 
+-- float arrowUI(vec2 p){
+--     vec2 prevP = p;
+--     p.x*=-1.;
+--     p.x-=iTime*0.12;
+--     p.x = mod(p.x,0.07)-0.035;
+--     p.x-=0.0325;
+--     
+--     p*=vec2(0.9,1.5);
+--     p*=Rot(radians(90.));
+--     float d = Tri(p,vec2(0.05),radians(45.));
+--     d = max(-Tri(p-vec2(0.,-0.03),vec2(0.05),radians(45.)),d);
+--     d = abs(d)-0.0005;
+--     p = prevP;
+--     d = max(abs(p.x)-0.15,d);
+--     return d;
+-- }
+-- 
+-- float sideLine(vec2 p) {
+--     p.x*=-1.0;
+--     vec2 prevP = p;
+--     p.y = abs(p.y)-0.17;
+--     p*=Rot(radians(45.));
+--     float d = B(p,vec2(0.035,0.01));
+--     p = prevP;
+--     float d2 = B(p-vec2(0.0217,0.),vec2(0.01,0.152));
+--     d = min(d,d2);
+--     return abs(d)-0.0005;
+-- }
+-- 
+-- float sideUI(vec2 p){
+--     vec2 prevP = p;
+--     p.x*=-1.;
+--     p.x+=0.025;
+--     float d = sideLine(p);
+--     p = prevP;
+--     p.y= abs(p.y)-0.275;
+--     float d2 = sideLine(p);
+--     d = min(d,d2);
+--     return d;
+-- }
+-- 
+-- float overlayUI(vec2 p){
+--     vec2 prevP = p;
+--     
+--     float d = numberWithCIrcleUI(p-vec2(0.56,-0.34));
+--     p.x = abs(p.x)-0.56;
+--     p.y-=0.45;
+--     float d2 = blockUI(p);
+--     d = min(d,d2);
+--     p = prevP;
+--     
+--     p.x = abs(p.x)-0.72;
+--     p.y-=0.35;
+--     d2 = smallCircleUI2(p);
+--     d = min(d,d2);
+--     p = prevP;
+--     d2 = smallCircleUI2(p-vec2(-0.39,-0.42));
+--     d = min(d,d2);
+--     
+--     p = prevP;
+--     p.x -= 0.58;
+--     p.y -= 0.07;
+--     p.y = abs(p.y)-0.12;
+--     d2 = smallCircleUI(p);
+--     d = min(d,d2);
+--     
+--     p = prevP;
+--     d2 = rectUI(p-vec2(-0.58,-0.3));
+--     d = min(d,d2);
+--     
+--     p-=vec2(-0.58,0.1);
+--     p.x = abs(p.x)-0.05;
+--     d2 = graphUI(p);
+--     d = min(d,d2);
+--     p = prevP;
+--     
+--     p.x = abs(p.x)-0.72;
+--     p.y-=0.13;
+--     d2 = staticUI(p);
+--     d = min(d,d2);
+--     p = prevP;
+--     
+--     p.x = abs(p.x)-0.51;
+--     p.y-=0.35;
+--     d2 = arrowUI(p);
+--     d = min(d,d2);
+--     p = prevP;
+--     
+--     p.x = abs(p.x)-0.82;
+--     d2 = sideUI(p);
+--     d = min(d,d2);
+--     
+--     return d;
+-- }
+-- 
+-- float GetDist(vec3 p) {
+--     vec3 prevP = p;
+--     
+--     p.z+=0.7;
+--     float maxThick = 0.03;
+--     float minThick = 0.007;
+--     float thickness = maxThick;
+--     float frame = mod(iTime,30.);
+--     float time = frame;
+--     if(frame>=10.0 && frame<20.){
+--         time = getTime(time-10.0,1.5);
+--         thickness = (maxThick+minThick)-cubicInOut(time)*maxThick;
+--     } else if(frame>=20.){
+--         time = getTime(time-20.0,1.5);
+--         thickness = minThick+cubicInOut(time)*maxThick;
+--     }    
+--     
+--     float d = ring0(p.xy);
+--     d = max((abs(p.z)-thickness),d);
+--     
+--     p.z-=0.2;
+--     float d2 = ring1(p.xy);
+--     d2 = max((abs(p.z)-thickness),d2);
+--     d = min(d,d2);
+--     
+--     p.z-=0.2;
+--     d2 = ring2(p.xy);
+--     d2 = max((abs(p.z)-thickness),d2);
+--     d = min(d,d2);
+--         
+--     p.z-=0.2;
+--     d2 = ring3(p.xy);
+--     d2 = max((abs(p.z)-thickness),d2);
+--     d = min(d,d2);
+--             
+--     p.z-=0.2;
+--     d2 = ring4(p.xy);
+--     d2 = max((abs(p.z)-thickness),d2);
+--     d = min(d,d2);
+--     
+--     p.z-=0.2;
+--     d2 = ring5(p.xy);
+--     d2 = max((abs(p.z)-thickness),d2);
+--     d = min(d,d2);
+--     
+--     p.z-=0.2;
+--     d2 = ring6(p.xy);
+--     d2 = max((abs(p.z)-thickness),d2);
+--     d = min(d,d2);
+--     
+--     return d;
+-- }
+-- 
+-- vec3 RayMarch(vec3 ro, vec3 rd, int stepnum) {
+--     vec3 res = vec3(0.0);
+--     float steps = 0.0;
+--     float alpha = 0.0;
+--     
+--     float tmax = 5.;
+--     float t = 0.0;
+--     
+--     float glowVal = 0.003;
+--     
+--     for(float i=0.; i<float(stepnum); i++) {
+--         steps = i;
+--         vec3 p = ro + rd*t;
+--         float d = GetDist(p);
+--         float absd = abs(d);
+-- 
+--         if (t > tmax) break;
+-- 
+--         alpha += 1.0 - smoothstep(0.0,glowVal, d);        
+--         t += max(0.0001, absd * 0.6);
+--     }
+--     alpha /= steps;
+--     
+--     res += alpha * vec3(1.5);
+--     return res;
+-- }
+-- 
+-- vec3 R(vec2 uv, vec3 p, vec3 l, float z) {
+--     vec3 f = normalize(l-p),
+--         r = normalize(cross(vec3(0,1,0), f)),
+--         u = cross(f,r),
+--         c = p+f*z,
+--         i = c + uv.x*r + uv.y*u,
+--         d = normalize(i-p);
+--     return d;
+-- }
+-- 
+-- void mainImage( out vec4 fragColor, in vec2 fragCoord )
+-- {
+--     vec2 uv = (fragCoord-.5*iResolution.xy)/iResolution.y;
+--     vec2 m =  iMouse.xy/iResolution.xy;
+--     
+--     vec3 ro = vec3(0, 0, -2.1);
+--     if(iMouse.z>0.){
+--         ro.yz *= Rot(m.y*3.14+1.);
+--         ro.y = max(-0.9,ro.y);
+--         ro.xz *= Rot(-m.x*6.2831);
+--     } else {
+--     
+--         float YZ = 45.;
+--         float ogRXZ = 50.;
+--         float animRXZ = 20.;
+--         
+--         float frame = mod(iTime,30.);
+--         float time = frame;
+-- 
+--         if(frame>=10.0 && frame<20.){
+--             time = getTime(time-10.0,1.5);
+--             
+--             YZ = 45.-cubicInOut(time)*45.0;
+--             ogRXZ = 50.-cubicInOut(time)*50.0;
+--             animRXZ = 20.-cubicInOut(time)*20.0;
+--         } else if(frame>=20.){
+--             time = getTime(time-20.0,1.5);
+--             
+--             YZ = cubicInOut(time)*45.0;
+--             ogRXZ = cubicInOut(time)*50.0;
+--             animRXZ = cubicInOut(time)*20.0;
+--         }
+--     
+--         ro.yz *= Rot(radians(YZ));
+--         ro.xz *= Rot(radians(sin(iTime*0.3)*animRXZ+ogRXZ));
+--     }
+--     
+--     vec3 rd = R(uv, ro, vec3(0,0.0,0), 1.0);
+--     vec3 d = RayMarch(ro, rd, MAX_STEPS);
+--     vec3 col = vec3(.0);
+--     float bd = bg(uv);
+--     col = mix(col,vec3(1.),S(bd,0.0));
+-- 
+--     col=mix(col,d.xyz,0.7);
+--     // gamma correction
+--     col = pow( col, vec3(0.9545) );    
+-- 
+--     float d2 = overlayUI(uv);
+--     col = mix(col,vec3(1.),S(d2,0.0));
+--     
+--     fragColor = vec4(col,1.0);
+-- }
