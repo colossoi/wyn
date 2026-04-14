@@ -1139,9 +1139,20 @@ impl<'a> TypeChecker<'a> {
         let t = self.fresh_var();
         let math_unary = Self::forall(&[t], Type::arrow(Self::var(t), Self::var(t)));
         for name in &[
-            "sin", "cos", "tan", "sqrt", "abs", "floor", "ceil", "fract", "exp", "log",
+            "sin", "cos", "tan", "sqrt", "abs", "floor", "ceil", "fract", "exp", "log", "atan", "radians",
+            "degrees",
         ] {
             self.define_builtin(name, math_unary.clone());
+        }
+
+        // Binary math functions: ∀t. t -> t -> t
+        let t = self.fresh_var();
+        let math_binary = Self::forall(
+            &[t],
+            Self::arrow_chain(&[Self::var(t), Self::var(t)], Self::var(t)),
+        );
+        for name in &["pow", "atan2", "mod"] {
+            self.define_builtin(name, math_binary.clone());
         }
 
         // Register vector field mappings

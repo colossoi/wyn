@@ -1989,6 +1989,16 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             "pow" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 26, operands)?),
             "exp" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 27, operands)?),
             "log" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 28, operands)?),
+            "radians" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 11, operands)?),
+            "degrees" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 12, operands)?),
+            "atan" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 18, operands)?),
+            "atan2" => Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, 25, operands)?),
+            "mod" => {
+                if args.len() != 2 {
+                    bail_spirv!("mod requires 2 arguments");
+                }
+                Ok(self.constructor.builder.f_mod(result_ty, None, args[0], args[1])?)
+            }
             "dot" => {
                 if args.len() != 2 {
                     bail_spirv!("dot requires 2 arguments");

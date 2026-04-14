@@ -61,6 +61,13 @@ const INTRINSIC_RENAMES: &[(&str, &str)] = &[
     ("abs", "_w_intrinsic_abs"),
     ("exp", "_w_intrinsic_exp"),
     ("log", "_w_intrinsic_log"),
+    ("atan", "_w_intrinsic_atan"),
+    ("radians", "_w_intrinsic_radians"),
+    ("degrees", "_w_intrinsic_degrees"),
+    // Binary math functions
+    ("pow", "_w_intrinsic_pow"),
+    ("atan2", "_w_intrinsic_atan2"),
+    ("mod", "_w_intrinsic_mod"),
 ];
 
 /// SOAC names that are intercepted in transform_application and turned into
