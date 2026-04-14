@@ -469,6 +469,7 @@ impl<'a> Parser<'a> {
             type_params,
             params,
             outputs,
+            storage_bindings: Vec::new(),
             body,
         }))
     }

@@ -359,6 +359,7 @@ fn convert_entry_point(
         execution_model,
         inputs,
         outputs,
+        entry.storage_bindings.clone(),
         param_info,
         ret_type,
         graph,

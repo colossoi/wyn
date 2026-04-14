@@ -3006,31 +3006,15 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
         }
     }
 
-    // Also pre-create buffers referenced by `StorageView { source: Storage }`
-    // instructions anywhere in the program. parallelize.rs emits these for
-    // phase-entry output writes without declaring them as entry outputs, so
-    // the inputs/outputs walk above doesn't cover them.
-    let scan_body = |body: &FuncBody, constructor: &mut Constructor| {
-        for inst in body.inner.insts.values() {
-            if let InstKind::StorageView {
-                source: ViewSource::Storage { set, binding },
-                ..
-            } = &inst.data
-            {
-                if !constructor.storage_buffers.contains_key(&(*set, *binding)) {
-                    if let Some(result) = inst.result {
-                        let view_ty = body.get_value_type(result).clone();
-                        constructor.create_storage_buffer(&view_ty, *set, *binding);
-                    }
-                }
+    // Also pre-create buffers from each entry's `storage_bindings` — the
+    // typed list of compiler-introduced bindings (e.g. parallelize's
+    // partials/result intermediates) that aren't user-visible outputs.
+    for entry in &program.entry_points {
+        for sb in &entry.storage_bindings {
+            if !constructor.storage_buffers.contains_key(&(sb.set, sb.binding)) {
+                constructor.create_storage_buffer(&sb.elem_ty, sb.set, sb.binding);
             }
         }
-    };
-    for func in &program.functions {
-        scan_body(&func.body, &mut constructor);
-    }
-    for entry in &program.entry_points {
-        scan_body(&entry.body, &mut constructor);
     }
 
     // Now lower all function bodies
@@ -3097,19 +3081,13 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
                         }
                     }
                 }
-                // Also pick up storage buffers referenced directly via
-                // StorageView instructions in the entry's body (parallelize.rs
-                // emits these for phase-entry output writes).
-                for inst in entry.body.inner.insts.values() {
-                    if let InstKind::StorageView {
-                        source: ViewSource::Storage { set, binding },
-                        ..
-                    } = &inst.data
-                    {
-                        if let Some(&(var_id, _, _)) = constructor.storage_buffers.get(&(*set, *binding)) {
-                            if !interfaces.contains(&var_id) {
-                                interfaces.push(var_id);
-                            }
+                // Also include compiler-introduced storage bindings from
+                // the entry's typed `storage_bindings` list (e.g.
+                // parallelize's partials/result intermediates).
+                for sb in &entry.storage_bindings {
+                    if let Some(&(var_id, _, _)) = constructor.storage_buffers.get(&(sb.set, sb.binding)) {
+                        if !interfaces.contains(&var_id) {
+                            interfaces.push(var_id);
                         }
                     }
                 }

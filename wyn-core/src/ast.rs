@@ -316,6 +316,34 @@ pub struct EntryOutput {
     pub attribute: Option<Attribute>,
 }
 
+/// Role a storage buffer plays in a compute entry point's interface.
+///
+/// Distinguishes user-visible reads/writes from compiler-introduced
+/// intermediate buffers (e.g. the `partials` buffer threaded between the
+/// two phases of a parallelized reduce). Intermediates are not source-level
+/// outputs — conflating them with `EntryOutput` would muddle semantics.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StorageRole {
+    /// Entry reads from this buffer.
+    Input,
+    /// Entry writes the user-visible result to this buffer.
+    Output,
+    /// Compiler-introduced pipeline-staging buffer (read or written).
+    Intermediate,
+}
+
+/// A storage-buffer binding the entry point touches, declared as first-class
+/// interface metadata. Populated by compiler passes that introduce
+/// bindings the source program didn't (e.g. `parallelize`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct StorageBindingDecl {
+    pub set: u32,
+    pub binding: u32,
+    pub role: StorageRole,
+    /// The element type stored at each index of the buffer.
+    pub elem_ty: Type,
+}
+
 /// Entry point declaration (vertex/fragment/compute shader)
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntryDecl {
@@ -326,6 +354,10 @@ pub struct EntryDecl {
     pub type_params: Vec<String>,  // Regular type parameters: <T, U>
     pub params: Vec<Pattern>,      // Input parameters as patterns
     pub outputs: Vec<EntryOutput>, // Output fields with optional attributes
+    /// Compiler-introduced storage bindings (e.g. parallelize's partials/result
+    /// intermediates). Parsers leave this empty; later passes fill it in so
+    /// downstream stages have one source of truth for the entry interface.
+    pub storage_bindings: Vec<StorageBindingDecl>,
     pub body: Expression,
 }
 

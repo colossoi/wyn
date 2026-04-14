@@ -753,11 +753,20 @@ fn build_two_phase_entries(
         program,
         Some(partials_binding),
     );
+    // Phase 1 storage interface: reads whatever the input SOAC declares
+    // (those come in via the TLC body already), writes `partials` at `tid`.
+    let phase1_bindings = vec![ast::StorageBindingDecl {
+        set: partials_binding.0,
+        binding: partials_binding.1,
+        role: ast::StorageRole::Intermediate,
+        elem_ty: elem_type.clone(),
+    }];
     let phase1_def = make_entry_def(
         &phase1_name,
         phase1_body,
         unit_ty.clone(),
         &analysis.required_params,
+        phase1_bindings,
         program,
     );
 
@@ -791,11 +800,28 @@ fn build_two_phase_entries(
         program,
     );
     let phase2_body = let_term(r_sym, elem_type.clone(), phase2_soac_term, phase2_store, span);
+    // Phase 2 storage interface: reads `partials` (as an Intermediate) and
+    // writes the final user-visible `result`.
+    let phase2_bindings = vec![
+        ast::StorageBindingDecl {
+            set: partials_binding.0,
+            binding: partials_binding.1,
+            role: ast::StorageRole::Intermediate,
+            elem_ty: elem_type.clone(),
+        },
+        ast::StorageBindingDecl {
+            set: result_binding.0,
+            binding: result_binding.1,
+            role: ast::StorageRole::Output,
+            elem_ty: elem_type.clone(),
+        },
+    ];
     let phase2_def = make_entry_def(
         &phase2_name,
         phase2_body,
         unit_ty.clone(),
         &analysis.required_params,
+        phase2_bindings,
         program,
     );
 
@@ -880,6 +906,7 @@ fn build_scan_entries(
         phase1_body,
         elem_type.clone(),
         &analysis.required_params,
+        Vec::new(),
         program,
     );
 
@@ -903,6 +930,7 @@ fn build_scan_entries(
         phase2_body,
         elem_type.clone(),
         &analysis.required_params,
+        Vec::new(),
         program,
     );
 
@@ -926,6 +954,7 @@ fn build_scan_entries(
         phase3_body,
         elem_type.clone(),
         &analysis.required_params,
+        Vec::new(),
         program,
     );
 
@@ -1342,6 +1371,7 @@ fn make_entry_def(
     body: Term,
     return_ty: Type<TypeName>,
     required_params: &[(SymbolId, Type<TypeName>)],
+    storage_bindings: Vec<ast::StorageBindingDecl>,
     program: &mut Program,
 ) -> Def {
     let sym = program.symbols.alloc(name.to_string());
@@ -1419,6 +1449,7 @@ fn make_entry_def(
             type_params: vec![],
             params: ast_params,
             outputs,
+            storage_bindings,
             body: dummy_expr,
         })),
         arity: required_params.len(),

@@ -601,6 +601,11 @@ pub struct EntryPoint {
     pub execution_model: ExecutionModel,
     pub inputs: Vec<EntryInput>,
     pub outputs: Vec<EntryOutput>,
+    /// Compiler-introduced storage bindings the entry touches beyond its
+    /// declared inputs/outputs (e.g. partials/intermediate buffers emitted
+    /// by `parallelize`). Carried end-to-end so SPIR-V generation has a
+    /// single source of truth for each entry's buffer interface.
+    pub storage_bindings: Vec<crate::ast::StorageBindingDecl>,
     pub span: Span,
 }
 

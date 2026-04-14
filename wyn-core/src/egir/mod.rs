@@ -53,6 +53,7 @@ pub fn optimize_program(program: &Program) -> Program {
             execution_model: ep.execution_model.clone(),
             inputs: ep.inputs.clone(),
             outputs: ep.outputs.clone(),
+            storage_bindings: ep.storage_bindings.clone(),
             span: ep.span,
             body,
         });
