@@ -38,8 +38,8 @@ pub struct NameRegistry {
 }
 
 const MATH_BUILTINS: &[&str] = &[
-    "sin", "cos", "tan", "sqrt", "abs", "floor", "ceil", "fract", "exp", "log", "atan", "radians",
-    "degrees", "pow", "atan2", "mod",
+    "sin", "cos", "tan", "sqrt", "abs", "floor", "ceil", "fract", "exp", "log", "atan", "asin", "acos",
+    "radians", "degrees", "pow", "atan2", "mod",
 ];
 
 impl NameRegistry {

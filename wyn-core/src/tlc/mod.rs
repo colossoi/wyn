@@ -62,6 +62,8 @@ const INTRINSIC_RENAMES: &[(&str, &str)] = &[
     ("exp", "_w_intrinsic_exp"),
     ("log", "_w_intrinsic_log"),
     ("atan", "_w_intrinsic_atan"),
+    ("asin", "_w_intrinsic_asin"),
+    ("acos", "_w_intrinsic_acos"),
     ("radians", "_w_intrinsic_radians"),
     ("degrees", "_w_intrinsic_degrees"),
     // Binary math functions

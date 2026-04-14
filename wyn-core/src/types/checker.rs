@@ -1139,8 +1139,8 @@ impl<'a> TypeChecker<'a> {
         let t = self.fresh_var();
         let math_unary = Self::forall(&[t], Type::arrow(Self::var(t), Self::var(t)));
         for name in &[
-            "sin", "cos", "tan", "sqrt", "abs", "floor", "ceil", "fract", "exp", "log", "atan", "radians",
-            "degrees",
+            "sin", "cos", "tan", "sqrt", "abs", "floor", "ceil", "fract", "exp", "log", "atan", "asin",
+            "acos", "radians", "degrees",
         ] {
             self.define_builtin(name, math_unary.clone());
         }
