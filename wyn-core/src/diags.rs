@@ -4,6 +4,7 @@
 //! something close to Wyn syntax.
 
 use crate::ast::*;
+use crate::interface::EntryDecl;
 use crate::types::TypeExt;
 use polytype::Type as PolyType;
 use std::fmt::Write;

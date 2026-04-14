@@ -7,6 +7,7 @@
 
 use crate::ast::*;
 use crate::error::Result;
+use crate::interface::EntryDecl;
 use crate::types::TypeExt;
 use crate::visitor::{self, Visitor};
 use crate::{NodeId, SpanTable, TypeTable};

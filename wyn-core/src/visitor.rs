@@ -7,6 +7,7 @@
 
 use crate::NodeId;
 use crate::ast::*;
+use crate::interface::{Attribute, EntryDecl, StorageDecl, UniformDecl};
 use crate::lexer::IntString;
 use std::ops::ControlFlow;
 

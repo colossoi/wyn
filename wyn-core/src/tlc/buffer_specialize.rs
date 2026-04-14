@@ -17,6 +17,7 @@ use super::{
     ArrayExpr, Def, DefMeta, Lambda, LoopKind, Place, Program, SoacOp, Term, TermIdSource, TermKind,
 };
 use crate::ast::{self, Span, TypeName};
+use crate::interface;
 use crate::types::TypeExt;
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
@@ -111,7 +112,7 @@ pub fn buffer_specialize(program: Program) -> Program {
     for def in &program.defs {
         match &def.meta {
             DefMeta::EntryPoint(entry) => {
-                if matches!(entry.entry_type, ast::Attribute::Compute) {
+                if matches!(entry.entry_type, interface::Attribute::Compute) {
                     let processed = specializer.process_entry_point(def, entry);
                     processed_defs.push(processed);
                 } else {
@@ -139,7 +140,7 @@ pub fn buffer_specialize(program: Program) -> Program {
 impl BufferSpecializer {
     /// Process a compute entry point: compute buffer bindings for its params,
     /// then walk the body rewriting calls to functions that receive buffer args.
-    fn process_entry_point(&mut self, def: &Def, _entry: &ast::EntryDecl) -> Def {
+    fn process_entry_point(&mut self, def: &Def, _entry: &interface::EntryDecl) -> Def {
         // Compute buffer bindings for entry params (same logic as to_ssa.rs)
         let (params, _inner_body) = extract_params(&def.body);
         let mut binding_num = 0u32;

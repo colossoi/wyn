@@ -7,11 +7,12 @@
 //! Must run after type checking and before flattening.
 
 use crate::ast::{
-    BinaryOp, Decl, Declaration, EntryDecl, ExprKind, Expression, LambdaExpr, NodeCounter, NodeCounterExt,
-    Pattern, PatternKind, Program, RangeExpr, RangeKind, SliceExpr, Span,
+    BinaryOp, Decl, Declaration, ExprKind, Expression, LambdaExpr, NodeCounter, NodeCounterExt, Pattern,
+    PatternKind, Program, RangeExpr, RangeKind, SliceExpr, Span,
 };
 use crate::err_flatten_at;
 use crate::error::Result;
+use crate::interface::EntryDecl;
 
 /// Desugars range and slice expressions into map/iota constructs.
 pub struct Desugarer<'a> {

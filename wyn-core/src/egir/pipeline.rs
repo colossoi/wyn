@@ -22,6 +22,7 @@ use std::marker::PhantomData;
 use polytype::Type;
 
 use crate::ast::{self, Span, TypeName};
+use crate::interface;
 use crate::pipeline_descriptor::PipelineDescriptor;
 use crate::ssa::types::{
     BlockId, Constant, ControlHeader, EntryInput, EntryOutput, EntryPoint, ExecutionModel, Function,
@@ -104,7 +105,7 @@ pub struct EntryEgir<S> {
     pub execution_model: ExecutionModel,
     pub inputs: Vec<EntryInput>,
     pub outputs: Vec<EntryOutput>,
-    pub storage_bindings: Vec<ast::StorageBindingDecl>,
+    pub storage_bindings: Vec<interface::StorageBindingDecl>,
     pub params: Vec<(Type<TypeName>, String)>,
     pub return_ty: Type<TypeName>,
     pub graph: EGraph,
@@ -120,7 +121,7 @@ impl EntryEgir<Raw> {
         execution_model: ExecutionModel,
         inputs: Vec<EntryInput>,
         outputs: Vec<EntryOutput>,
-        storage_bindings: Vec<ast::StorageBindingDecl>,
+        storage_bindings: Vec<interface::StorageBindingDecl>,
         params: Vec<(Type<TypeName>, String)>,
         return_ty: Type<TypeName>,
         graph: EGraph,
@@ -174,8 +175,8 @@ pub struct ProgramEgir<S> {
     pub externs: Vec<Function>,
     pub entry_points: Vec<EntryEgir<S>>,
     pub constants: Vec<Constant>,
-    pub uniforms: Vec<ast::UniformDecl>,
-    pub storage: Vec<ast::StorageDecl>,
+    pub uniforms: Vec<interface::UniformDecl>,
+    pub storage: Vec<interface::StorageDecl>,
     pub pipeline: PipelineDescriptor,
     _marker: PhantomData<S>,
 }
@@ -191,8 +192,8 @@ impl ProgramEgir<Raw> {
         externs: Vec<Function>,
         entry_points: Vec<EntryEgir<Raw>>,
         constants: Vec<Constant>,
-        uniforms: Vec<ast::UniformDecl>,
-        storage: Vec<ast::StorageDecl>,
+        uniforms: Vec<interface::UniformDecl>,
+        storage: Vec<interface::StorageDecl>,
         pipeline: PipelineDescriptor,
     ) -> Self {
         ProgramEgir {

@@ -2,6 +2,7 @@ pub mod ast;
 pub mod diags;
 pub mod error;
 pub mod impl_source;
+pub mod interface;
 pub mod intrinsics;
 pub mod lexer;
 pub mod module_manager;

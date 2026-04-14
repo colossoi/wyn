@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::types::EffectToken;
 use crate::ast::TypeName;
+use crate::interface;
 use crate::ssa::framework::BlockId;
 use crate::ssa::types::ViewSource;
 use crate::ssa::types::{ControlHeader, FuncBody, Function, InstKind, Program, ValueRef};
@@ -223,7 +224,7 @@ fn convert_function(
 /// round-trip through the legacy SSA builder.
 fn convert_entry_point(
     def: &TlcDef,
-    entry: &crate::ast::EntryDecl,
+    entry: &interface::EntryDecl,
     top_level: &HashMap<SymbolId, &TlcDef>,
     constants_by_name: &HashMap<String, SymbolId>,
     symbols: &SymbolTable,
@@ -234,7 +235,7 @@ fn convert_entry_point(
 
     let def_name = symbols.get(def.name).expect("BUG: symbol not in table").clone();
     let (inner_body, params) = extract_lambda_params(&def.body);
-    let is_compute = matches!(entry.entry_type, ast::Attribute::Compute);
+    let is_compute = matches!(entry.entry_type, interface::Attribute::Compute);
 
     // Build entry inputs with IO decorations, storage bindings, push constants.
     let mut inputs: Vec<EntryInput> = Vec::with_capacity(params.len());
@@ -299,9 +300,9 @@ fn convert_entry_point(
     }
 
     let execution_model = match &entry.entry_type {
-        ast::Attribute::Vertex => ExecutionModel::Vertex,
-        ast::Attribute::Fragment => ExecutionModel::Fragment,
-        ast::Attribute::Compute => ExecutionModel::Compute {
+        interface::Attribute::Vertex => ExecutionModel::Vertex,
+        interface::Attribute::Fragment => ExecutionModel::Fragment,
+        interface::Attribute::Compute => ExecutionModel::Compute {
             local_size: (64, 1, 1),
         },
         _ => panic!("Invalid entry type attribute: {:?}", entry.entry_type),
@@ -1793,8 +1794,12 @@ fn extract_io_decoration(pattern: &crate::ast::Pattern) -> Option<crate::ssa::ty
         ast::PatternKind::Attributed(attrs, inner) => {
             for attr in attrs {
                 match attr {
-                    ast::Attribute::BuiltIn(builtin) => return Some(IoDecoration::BuiltIn(*builtin)),
-                    ast::Attribute::Location(loc) => return Some(IoDecoration::Location(*loc)),
+                    interface::Attribute::BuiltIn(builtin) => {
+                        return Some(IoDecoration::BuiltIn(*builtin));
+                    }
+                    interface::Attribute::Location(loc) => {
+                        return Some(IoDecoration::Location(*loc));
+                    }
                     _ => {}
                 }
             }
@@ -1811,7 +1816,7 @@ fn extract_size_hint(pattern: &crate::ast::Pattern) -> Option<u32> {
     match &pattern.kind {
         ast::PatternKind::Attributed(attrs, inner) => {
             for attr in attrs {
-                if let ast::Attribute::SizeHint(n) = attr {
+                if let interface::Attribute::SizeHint(n) = attr {
                     return Some(*n);
                 }
             }
@@ -1823,12 +1828,12 @@ fn extract_size_hint(pattern: &crate::ast::Pattern) -> Option<u32> {
 }
 
 /// Convert an AST attribute to an IO decoration.
-fn convert_to_io_decoration(attr: &crate::ast::Attribute) -> Option<crate::ssa::types::IoDecoration> {
+fn convert_to_io_decoration(attr: &interface::Attribute) -> Option<crate::ssa::types::IoDecoration> {
     use crate::ast;
     use crate::ssa::types::IoDecoration;
     match attr {
-        ast::Attribute::BuiltIn(b) => Some(IoDecoration::BuiltIn(*b)),
-        ast::Attribute::Location(l) => Some(IoDecoration::Location(*l)),
+        interface::Attribute::BuiltIn(b) => Some(IoDecoration::BuiltIn(*b)),
+        interface::Attribute::Location(l) => Some(IoDecoration::Location(*l)),
         _ => None,
     }
 }
@@ -1836,7 +1841,7 @@ fn convert_to_io_decoration(attr: &crate::ast::Attribute) -> Option<crate::ssa::
 /// Build entry outputs from an AST `EntryDecl`.
 /// For compute shaders, non-unit outputs get sequential storage bindings starting at `binding_start`.
 fn build_entry_outputs(
-    entry: &crate::ast::EntryDecl,
+    entry: &interface::EntryDecl,
     ret_type: &Type<TypeName>,
     is_compute: bool,
     binding_start: u32,

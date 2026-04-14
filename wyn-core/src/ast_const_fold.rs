@@ -9,9 +9,10 @@
 //! Float and boolean constants can be added later if needed.
 
 use crate::ast::{
-    Decl, Declaration, EntryDecl, ExprKind, Expression, IfExpr, LetInExpr, LoopExpr, LoopForm, MatchExpr,
-    Program, RangeExpr,
+    Decl, Declaration, ExprKind, Expression, IfExpr, LetInExpr, LoopExpr, LoopForm, MatchExpr, Program,
+    RangeExpr,
 };
+use crate::interface::EntryDecl;
 use std::collections::HashMap;
 
 /// AST-level constant folder for integer constants.

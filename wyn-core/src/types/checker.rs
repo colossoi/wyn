@@ -1,6 +1,7 @@
 use super::{SkolemId, Type, TypeExt, TypeName, TypeScheme};
 use crate::ast::*;
 use crate::error::{CompilerError, Result};
+use crate::interface::{StorageDecl, UniformDecl};
 use crate::scope::{IdentifierKind, ScopeEntry, ScopeStack};
 use crate::{bail_type_at, err_module, err_type, err_type_at, err_undef_at};
 use log::debug;

@@ -1,5 +1,8 @@
 use crate::ast::*;
 use crate::error::Result;
+use crate::interface::{
+    Attribute, EntryDecl, EntryOutput, StorageAccess, StorageDecl, StorageLayout, UniformDecl,
+};
 use crate::lexer::{LocatedToken, Token};
 use crate::types;
 use crate::{bail_parse_at, err_parse, err_parse_at};

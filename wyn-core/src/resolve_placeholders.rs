@@ -14,7 +14,8 @@
 //! This pass also builds TypeSchemes for module specs (like f32.sin), so that
 //! the type checker doesn't need to re-convert type parameters to variables.
 
-use crate::ast::{self, Declaration, EntryDecl, Expression, Pattern, PatternKind, Program, TypeParam};
+use crate::ast::{self, Declaration, Expression, Pattern, PatternKind, Program, TypeParam};
+use crate::interface::EntryDecl;
 use crate::types::TypeName;
 use polytype::{Context, Type, TypeScheme};
 use std::collections::HashMap;

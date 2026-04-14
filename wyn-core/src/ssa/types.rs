@@ -28,6 +28,7 @@
 //! inspection of phi nodes to understand where values come from.
 
 use crate::ast::{self, Span, TypeName};
+use crate::interface;
 use polytype::Type;
 use rspirv::spirv;
 use std::collections::HashMap;
@@ -570,9 +571,9 @@ pub struct Program {
     /// Emitted once at module scope; functions reference them via `InstKind::Global`.
     pub constants: Vec<Constant>,
     /// Uniform declarations.
-    pub uniforms: Vec<ast::UniformDecl>,
+    pub uniforms: Vec<interface::UniformDecl>,
     /// Storage buffer declarations.
-    pub storage: Vec<ast::StorageDecl>,
+    pub storage: Vec<interface::StorageDecl>,
 }
 
 /// A program-level constant definition.
@@ -605,7 +606,7 @@ pub struct EntryPoint {
     /// declared inputs/outputs (e.g. partials/intermediate buffers emitted
     /// by `parallelize`). Carried end-to-end so SPIR-V generation has a
     /// single source of truth for each entry's buffer interface.
-    pub storage_bindings: Vec<crate::ast::StorageBindingDecl>,
+    pub storage_bindings: Vec<interface::StorageBindingDecl>,
     pub span: Span,
 }
 

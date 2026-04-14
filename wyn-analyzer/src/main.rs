@@ -9,6 +9,7 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 use wyn_core::FrontEnd;
 use wyn_core::TypeTable;
 use wyn_core::ast::{self, NodeCounter, NodeId, Span};
+use wyn_core::interface;
 use wyn_core::lexer;
 use wyn_core::module_manager::{ModuleManager, PreElaboratedPrelude};
 use wyn_core::types::{Type, TypeName, TypeScheme, format_scheme};
@@ -779,9 +780,9 @@ fn find_declaration_name_at(ast: &ast::Program, line: usize, col: usize) -> Opti
                 let body_span = entry.body.h.span;
                 if line == body_span.start_line && col < body_span.start_col {
                     let kind = match &entry.entry_type {
-                        ast::Attribute::Vertex => "vertex",
-                        ast::Attribute::Fragment => "fragment",
-                        ast::Attribute::Compute => "compute",
+                        interface::Attribute::Vertex => "vertex",
+                        interface::Attribute::Fragment => "fragment",
+                        interface::Attribute::Compute => "compute",
                         _ => "entry",
                     };
                     return Some((entry.name.clone(), kind));
@@ -1326,9 +1327,9 @@ fn declaration_to_symbol(decl: &ast::Declaration) -> Option<DocumentSymbol> {
             let span = entry.body.h.span;
             let range = span_to_range(span);
             let kind_str = match &entry.entry_type {
-                ast::Attribute::Vertex => "vertex",
-                ast::Attribute::Fragment => "fragment",
-                ast::Attribute::Compute => "compute",
+                interface::Attribute::Vertex => "vertex",
+                interface::Attribute::Fragment => "fragment",
+                interface::Attribute::Compute => "compute",
                 _ => "entry",
             };
             Some(DocumentSymbol {

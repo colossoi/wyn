@@ -27,6 +27,7 @@ pub mod specialize;
 mod specialize_tests;
 
 use crate::ast::{self, NodeId, Span, TypeName};
+use crate::interface;
 use crate::types::TypeExt;
 use crate::{SymbolId, SymbolTable, TypeTable};
 use polytype::Type;
@@ -458,7 +459,7 @@ pub enum DefMeta {
     /// A regular function or constant.
     Function,
     /// A shader entry point - stores the original AST entry for metadata.
-    EntryPoint(Box<ast::EntryDecl>),
+    EntryPoint(Box<interface::EntryDecl>),
 }
 
 /// A top-level definition in TLC.
@@ -477,9 +478,9 @@ pub struct Def {
 pub struct Program {
     pub defs: Vec<Def>,
     /// Uniform declarations (no bodies, just metadata).
-    pub uniforms: Vec<ast::UniformDecl>,
+    pub uniforms: Vec<interface::UniformDecl>,
     /// Storage buffer declarations (no bodies, just metadata).
-    pub storage: Vec<ast::StorageDecl>,
+    pub storage: Vec<interface::StorageDecl>,
     /// Symbol table: maps SymbolId to original name (for errors/debugging).
     pub symbols: SymbolTable,
     /// Canonical function name → def SymbolId mapping.
@@ -502,8 +503,8 @@ impl Program {
 #[derive(Debug, Clone)]
 pub struct ProgramParts {
     pub defs: Vec<Def>,
-    pub uniforms: Vec<ast::UniformDecl>,
-    pub storage: Vec<ast::StorageDecl>,
+    pub uniforms: Vec<interface::UniformDecl>,
+    pub storage: Vec<interface::StorageDecl>,
 }
 
 impl ProgramParts {
@@ -1232,7 +1233,7 @@ impl<'a> Transformer<'a> {
         })
     }
 
-    fn transform_entry(&mut self, entry: &ast::EntryDecl) -> Option<Def> {
+    fn transform_entry(&mut self, entry: &interface::EntryDecl) -> Option<Def> {
         // Clear scope for each entry to ensure fresh scope
         self.scope.clear();
         let body_ty = self.lookup_type(entry.body.h.id)?;

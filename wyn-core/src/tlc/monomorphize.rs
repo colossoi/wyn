@@ -14,6 +14,7 @@
 
 use super::{ArrayExpr, Def, DefMeta, Lambda, LoopKind, Program, SoacOp, Term, TermIdSource, TermKind};
 use crate::ast::TypeName;
+use crate::interface;
 use crate::types::TypeExt;
 use crate::types::TypeScheme;
 use crate::{SymbolId, SymbolTable};
@@ -50,9 +51,9 @@ pub(crate) struct Monomorphizer<'a> {
     /// Term ID source for creating new terms
     term_ids: TermIdSource,
     /// Uniform declarations (passed through unchanged)
-    uniforms: Vec<crate::ast::UniformDecl>,
+    uniforms: Vec<interface::UniformDecl>,
     /// Storage declarations (passed through unchanged)
-    storage: Vec<crate::ast::StorageDecl>,
+    storage: Vec<interface::StorageDecl>,
     /// Canonical function name → def SymbolId mapping (passed through unchanged)
     def_syms: std::collections::HashMap<String, crate::SymbolId>,
 }

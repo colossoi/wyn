@@ -6,7 +6,8 @@
 //!
 //! Loop creation and storage lowering stay in SSA (`to_ssa` + `soac_lower`).
 
-use crate::ast::{self, Attribute, TypeName};
+use crate::ast::{self, TypeName};
+use crate::interface::{self, Attribute};
 use crate::pipeline_descriptor::*;
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
@@ -755,10 +756,10 @@ fn build_two_phase_entries(
     );
     // Phase 1 storage interface: reads whatever the input SOAC declares
     // (those come in via the TLC body already), writes `partials` at `tid`.
-    let phase1_bindings = vec![ast::StorageBindingDecl {
+    let phase1_bindings = vec![interface::StorageBindingDecl {
         set: partials_binding.0,
         binding: partials_binding.1,
-        role: ast::StorageRole::Intermediate,
+        role: interface::StorageRole::Intermediate,
         elem_ty: elem_type.clone(),
     }];
     let phase1_def = make_entry_def(
@@ -803,16 +804,16 @@ fn build_two_phase_entries(
     // Phase 2 storage interface: reads `partials` (as an Intermediate) and
     // writes the final user-visible `result`.
     let phase2_bindings = vec![
-        ast::StorageBindingDecl {
+        interface::StorageBindingDecl {
             set: partials_binding.0,
             binding: partials_binding.1,
-            role: ast::StorageRole::Intermediate,
+            role: interface::StorageRole::Intermediate,
             elem_ty: elem_type.clone(),
         },
-        ast::StorageBindingDecl {
+        interface::StorageBindingDecl {
             set: result_binding.0,
             binding: result_binding.1,
-            role: ast::StorageRole::Output,
+            role: interface::StorageRole::Output,
             elem_ty: elem_type.clone(),
         },
     ];
@@ -1371,7 +1372,7 @@ fn make_entry_def(
     body: Term,
     return_ty: Type<TypeName>,
     required_params: &[(SymbolId, Type<TypeName>)],
-    storage_bindings: Vec<ast::StorageBindingDecl>,
+    storage_bindings: Vec<interface::StorageBindingDecl>,
     program: &mut Program,
 ) -> Def {
     let sym = program.symbols.alloc(name.to_string());
@@ -1432,7 +1433,7 @@ fn make_entry_def(
     // buffer rather than leaving a Return(value) that SPIR-V rejects.
     // (The ty field here is a placeholder — build_entry_outputs reads the
     //  TLC ret_type, not this.)
-    let outputs = vec![ast::EntryOutput {
+    let outputs = vec![interface::EntryOutput {
         ty: Type::Constructed(TypeName::Unit, vec![]),
         attribute: None,
     }];
@@ -1441,7 +1442,7 @@ fn make_entry_def(
         name: sym,
         ty: full_ty,
         body,
-        meta: DefMeta::EntryPoint(Box::new(ast::EntryDecl {
+        meta: DefMeta::EntryPoint(Box::new(interface::EntryDecl {
             entry_type: Attribute::Compute,
             name: name.to_string(),
             name_span: dummy_span,
