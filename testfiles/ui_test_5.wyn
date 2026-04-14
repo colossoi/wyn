@@ -66,6 +66,31 @@ def domainFold(a: vec2f32, b: f32) vec2f32 =
   @[l * f32.cos(fold + 0.0), l * f32.cos(fold + 11.0)]
 
 ------------------------------------------------------------
+-- SDF combinators
+------------------------------------------------------------
+
+def union(a: f32, b: f32) f32     = f32.min(a, b)
+def intersect(a: f32, b: f32) f32 = f32.max(a, b)
+def subtract(a: f32, b: f32) f32  = f32.max(0.0 - b, a)   -- a minus b
+def shell(d: f32, w: f32) f32     = f32.abs(d) - w         -- outline
+
+-- Clip d with two opposite half-plane cuts at ±halfAngleDeg (keeps the
+-- inner wedge — points where both half-plane dots are ≤ 0).
+def clipWedge(p: vec2f32, d: f32, halfAngleDeg: f32) f32 =
+  let a   = radians(halfAngleDeg) in
+  let pos = dot(p, @[f32.cos(a), f32.sin(a)]) in
+  let neg = dot(p, @[f32.cos(0.0 - a), f32.sin(0.0 - a)]) in
+  intersect(intersect(d, pos), neg)
+
+-- Same but inverted: keeps the outer wedge (points where both half-plane
+-- dots are ≥ 0).
+def clipWedgeInverted(p: vec2f32, d: f32, halfAngleDeg: f32) f32 =
+  let a   = radians(halfAngleDeg) in
+  let pos = 0.0 - dot(p, @[f32.cos(a), f32.sin(a)]) in
+  let neg = 0.0 - dot(p, @[f32.cos(0.0 - a), f32.sin(0.0 - a)]) in
+  intersect(intersect(d, pos), neg)
+
+------------------------------------------------------------
 -- Small numeric helpers
 ------------------------------------------------------------
 
@@ -242,90 +267,44 @@ def ring0(p0: vec2f32) f32 =
   f32.min(d10, dT2)
 
 def ring1(p0: vec2f32) f32 =
-  let size = 0.45 in
-  let deg  = 140.0 in
-  let d0 = f32.abs(magnitude(p0) - size) - 0.02 in
   let p1 = p0 * rot(radians(iTime * 60.0)) in
-  let a1 = radians(deg) in
-  let d1 = f32.max(dot(p1, @[f32.cos(a1), f32.sin(a1)]), d0) in
-  let a2 = radians(0.0 - deg) in
-  let d2 = f32.max(dot(p1, @[f32.cos(a2), f32.sin(a2)]), d1) in
-  let d3 = f32.abs(magnitude(p0) - size) - 0.001 in
-  f32.min(d2, d3)
+  union(
+    clipWedge(p1, shell(magnitude(p0) - 0.45, 0.02), 140.0),
+    shell(magnitude(p0) - 0.45, 0.001))
 
 def ring2(p0: vec2f32) f32 =
-  let size = 0.3 in
-  let deg  = 120.0 in
-  let th   = 0.02 in
-  let p1 = p0 * rot(0.0 - radians(f32.sin(iTime * 2.0) * 90.0)) in
-  let d0 = f32.abs(magnitude(p1) - size) - th in
-  let a_neg = radians(0.0 - deg) in
-  let a_pos = radians(deg) in
-  let d1 = f32.max(dot(p1, @[f32.cos(a_neg), f32.sin(a_neg)]), d0) in
-  let d2 = f32.max(dot(p1, @[f32.cos(a_pos), f32.sin(a_pos)]), d1) in
-  let e0 = f32.abs(magnitude(p1) - size) - th in
-  let e1 = f32.max(0.0 - dot(p1, @[f32.cos(a_neg), f32.sin(a_neg)]), e0) in
-  let e2 = f32.max(0.0 - dot(p1, @[f32.cos(a_pos), f32.sin(a_pos)]), e1) in
-  f32.min(d2, e2)
+  let p1   = p0 * rot(0.0 - radians(f32.sin(iTime * 2.0) * 90.0)) in
+  let ring = shell(magnitude(p1) - 0.3, 0.02) in
+  union(clipWedge(p1, ring, 120.0), clipWedgeInverted(p1, ring, 120.0))
 
 def ring3(p0: vec2f32) f32 =
-  let p1 = p0 * rot(radians(0.0 - iTime * 80.0 - 120.0)) in
-  let deg = 140.0 in
-  let df1 = domainFold(p1, 6.0) in
-  let dfs = df1 - @[0.3, 0.3] in
-  let d0 = f32.abs(box(dfs * rot(radians(45.0)), @[0.03, 0.025])) - 0.003 in
-  let a_neg = radians(0.0 - deg) in
-  let a_pos = radians(deg) in
-  let d1 = f32.max(dot(p1, @[f32.cos(a_neg), f32.sin(a_neg)]), d0) in
-  let d2 = f32.max(dot(p1, @[f32.cos(a_pos), f32.sin(a_pos)]), d1) in
-  let e0 = f32.abs(box(dfs * rot(radians(45.0)), @[0.03, 0.025])) - 0.003 in
-  let e1 = f32.max(0.0 - dot(p1, @[f32.cos(a_neg), f32.sin(a_neg)]), e0) in
-  let e2 = f32.max(0.0 - dot(p1, @[f32.cos(a_pos), f32.sin(a_pos)]), e1) in
-  f32.min(d2, e2)
+  let p1      = p0 * rot(radians(0.0 - iTime * 80.0 - 120.0)) in
+  let dfs     = domainFold(p1, 6.0) - @[0.3, 0.3] in
+  let pattern = shell(box(dfs * rot(radians(45.0)), @[0.03, 0.025]), 0.003) in
+  union(clipWedge(p1, pattern, 140.0), clipWedgeInverted(p1, pattern, 140.0))
 
 def ring4(p0: vec2f32) f32 =
-  let p1 = p0 * rot(radians(iTime * 75.0 - 220.0)) in
-  let deg = 20.0 in
-  let d0 = f32.abs(magnitude(p1) - 0.25) - 0.01 in
-  let df1 = domainFold(p1, 2.0) in
-  let dfs = df1 - @[0.1, 0.1] in
-  let a_neg = radians(0.0 - deg) in
-  let a_pos = radians(deg) in
-  let d1 = f32.max(0.0 - dot(dfs, @[f32.cos(a_neg), f32.sin(a_neg)]), d0) in
-  f32.max(0.0 - dot(dfs, @[f32.cos(a_pos), f32.sin(a_pos)]), d1)
+  let p1  = p0 * rot(radians(iTime * 75.0 - 220.0)) in
+  let dfs = domainFold(p1, 2.0) - @[0.1, 0.1] in
+  clipWedgeInverted(dfs, shell(magnitude(p1) - 0.25, 0.01), 20.0)
 
 def ring5(p0: vec2f32) f32 =
   let p1 = p0 * rot(radians(0.0 - iTime * 70.0 + 170.0)) in
-  let deg1 = 150.0 in
-  let d0 = f32.abs(magnitude(p1) - 0.16) - 0.02 in
-  let a_neg = radians(0.0 - deg1) in
-  let a_pos = radians(deg1) in
-  let d1 = f32.max(dot(p1, @[f32.cos(a_neg), f32.sin(a_neg)]), d0) in
-  let d2 = f32.max(dot(p1, @[f32.cos(a_pos), f32.sin(a_pos)]), d1) in
   let p2 = p1 * rot(radians(0.0 - 30.0)) in
-  let e0 = f32.abs(magnitude(p2) - 0.136) - 0.02 in
-  let deg2 = 60.0 in
-  let b_neg = radians(0.0 - deg2) in
-  let b_pos = radians(deg2) in
-  let e1 = f32.max(0.0 - dot(p2, @[f32.cos(b_neg), f32.sin(b_neg)]), e0) in
-  let e2 = f32.max(0.0 - dot(p2, @[f32.cos(b_pos), f32.sin(b_pos)]), e1) in
-  f32.min(d2, e2)
+  union(
+    clipWedge(p1, shell(magnitude(p1) - 0.16, 0.02), 150.0),
+    clipWedgeInverted(p2, shell(magnitude(p2) - 0.136, 0.02), 60.0))
 
 def ring6(p0: vec2f32) f32 =
-  let p1 = p0 * rot(radians(iTime * 72.0 + 110.0)) in
-  let d0 = f32.abs(magnitude(p1) - 0.95) - 0.001 in
-  let d1 = f32.max(0.0 - (f32.abs(p1.x) - 0.4), d0) in
-  let d2 = f32.max(0.0 - (f32.abs(p1.y) - 0.4), d1) in
-  let p2 = p0 * rot(radians(0.0 - iTime * 30.0 + 50.0)) in
-  let df1 = domainFold(p2, 16.0) in
-  let dfs = df1 - @[0.6, 0.6] in
-  let e0 = box(dfs * rot(radians(45.0)), @[0.02, 0.03]) in
-  let deg = 155.0 in
-  let a_pos = radians(deg) in
-  let a_neg = radians(0.0 - deg) in
-  let e1 = f32.max(0.0 - dot(p2, @[f32.cos(a_pos), f32.sin(a_pos)]), e0) in
-  let e2 = f32.max(0.0 - dot(p2, @[f32.cos(a_neg), f32.sin(a_neg)]), e1) in
-  f32.min(d2, e2)
+  let p1  = p0 * rot(radians(iTime * 72.0 + 110.0)) in
+  let big = subtract(
+              subtract(shell(magnitude(p1) - 0.95, 0.001),
+                       f32.abs(p1.x) - 0.4),
+              f32.abs(p1.y) - 0.4) in
+  let p2  = p0 * rot(radians(0.0 - iTime * 30.0 + 50.0)) in
+  let dfs = domainFold(p2, 16.0) - @[0.6, 0.6] in
+  let pattern = box(dfs * rot(radians(45.0)), @[0.02, 0.03]) in
+  union(big, clipWedgeInverted(p2, pattern, 155.0))
 
 ------------------------------------------------------------
 -- Background fractal grid
@@ -542,18 +521,20 @@ def thicknessAt(t: f32) f32 =
   else maxT
 
 def getDist(p0: vec3f32) f32 =
-  let p = @[p0.x, p0.y, p0.z + 0.7] in
+  let p  = @[p0.x, p0.y, p0.z + 0.7] in
   let th = thicknessAt(iTime) in
-  let xy0 = @[p.x, p.y] in
-  let d0 = f32.max(f32.abs(p.z) - th, ring0(xy0)) in
-  let d1 = f32.max(f32.abs(p.z - 0.2) - th, ring1(xy0)) in
-  let d2 = f32.max(f32.abs(p.z - 0.4) - th, ring2(xy0)) in
-  let d3 = f32.max(f32.abs(p.z - 0.6) - th, ring3(xy0)) in
-  let d4 = f32.max(f32.abs(p.z - 0.8) - th, ring4(xy0)) in
-  let d5 = f32.max(f32.abs(p.z - 1.0) - th, ring5(xy0)) in
-  let d6 = f32.max(f32.abs(p.z - 1.2) - th, ring6(xy0)) in
-  f32.min(f32.min(f32.min(d0, d1), f32.min(d2, d3)),
-          f32.min(f32.min(d4, d5), d6))
+  let xy = @[p.x, p.y] in
+  -- Each slab is the intersection of its ring SDF with a thin Z slice.
+  let slabs: [7]f32 = [
+    intersect(f32.abs(p.z)       - th, ring0(xy)),
+    intersect(f32.abs(p.z - 0.2) - th, ring1(xy)),
+    intersect(f32.abs(p.z - 0.4) - th, ring2(xy)),
+    intersect(f32.abs(p.z - 0.6) - th, ring3(xy)),
+    intersect(f32.abs(p.z - 0.8) - th, ring4(xy)),
+    intersect(f32.abs(p.z - 1.0) - th, ring5(xy)),
+    intersect(f32.abs(p.z - 1.2) - th, ring6(xy))
+  ] in
+  reduce(|a: f32, b: f32| union(a, b), 10000.0, slabs)
 
 def rayMarch(ro: vec3f32, rd: vec3f32) vec3f32 =
   let glowVal = 0.003 in
