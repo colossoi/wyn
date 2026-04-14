@@ -597,7 +597,7 @@ pub fn parallelize_soacs(mut program: Program) -> ParallelizationResult {
                         entry_point: name,
                         stage,
                     }],
-                    bindings: vec![],
+                    bindings: collect_program_resource_bindings(&program),
                     vertex_inputs: vec![],
                     fragment_outputs: vec![],
                 }));
@@ -1475,9 +1475,42 @@ fn collect_soac_bindings(soac: &SoacAnalysis) -> Vec<Binding> {
         .collect()
 }
 
+/// Program-level resource bindings (uniforms + read-only storage buffers).
+///
+/// Graphics pipelines and non-parallelized compute entries need to declare
+/// every resource the shader references so the host can build a matching
+/// pipeline layout. Without this, viz/wgpu rejects the pipeline with
+/// "Binding is missing from the pipeline layout".
+fn collect_program_resource_bindings(program: &Program) -> Vec<Binding> {
+    let mut bindings = Vec::new();
+    for u in &program.uniforms {
+        bindings.push(Binding::Uniform {
+            set: u.set,
+            binding: u.binding,
+            name: u.name.clone(),
+        });
+    }
+    for s in &program.storage {
+        let access = match s.access {
+            interface::StorageAccess::ReadOnly => Access::ReadOnly,
+            interface::StorageAccess::WriteOnly => Access::WriteOnly,
+            interface::StorageAccess::ReadWrite => Access::ReadWrite,
+        };
+        bindings.push(Binding::StorageBuffer {
+            set: s.set,
+            binding: s.binding,
+            access,
+            usage: BufferUsage::Input,
+            name: s.name.clone(),
+        });
+    }
+    bindings
+}
+
 fn build_default_pipeline(program: &Program) -> PipelineDescriptor {
     let mut pipelines = Vec::new();
 
+    let resource_bindings = collect_program_resource_bindings(program);
     for def in &program.defs {
         if let DefMeta::EntryPoint(ref decl) = def.meta {
             let name = program.symbols.get(def.name).cloned().unwrap_or_default();
@@ -1488,7 +1521,7 @@ fn build_default_pipeline(program: &Program) -> PipelineDescriptor {
                     dispatch_size: DispatchSize::DerivedFromInputLength {
                         workgroup_size: TOTAL_THREADS,
                     },
-                    bindings: vec![],
+                    bindings: resource_bindings.clone(),
                 }));
             } else {
                 let stage = if decl.entry_type == Attribute::Vertex {
@@ -1501,7 +1534,7 @@ fn build_default_pipeline(program: &Program) -> PipelineDescriptor {
                         entry_point: name,
                         stage,
                     }],
-                    bindings: vec![],
+                    bindings: resource_bindings.clone(),
                     vertex_inputs: vec![],
                     fragment_outputs: vec![],
                 }));

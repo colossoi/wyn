@@ -18,7 +18,7 @@ pub struct PipelineDescriptor {
 }
 
 /// A single pipeline within the program.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Pipeline {
     /// Single compute dispatch (Map, Scatter, simple compute).
@@ -30,7 +30,7 @@ pub enum Pipeline {
 }
 
 /// Single-dispatch compute pipeline.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ComputePipeline {
     pub entry_point: String,
     pub workgroup_size: (u32, u32, u32),
@@ -39,7 +39,7 @@ pub struct ComputePipeline {
 }
 
 /// Multi-dispatch compute pipeline.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct MultiComputePipeline {
     /// All bindings used across all stages.
     pub bindings: Vec<Binding>,
@@ -48,7 +48,7 @@ pub struct MultiComputePipeline {
 }
 
 /// A single stage in a multi-dispatch compute pipeline.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ComputeStage {
     pub entry_point: String,
     pub workgroup_size: (u32, u32, u32),
@@ -60,7 +60,7 @@ pub struct ComputeStage {
 }
 
 /// Graphics pipeline (vertex + fragment stages).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct GraphicsPipeline {
     pub stages: Vec<GraphicsStage>,
     pub bindings: Vec<Binding>,
@@ -69,14 +69,14 @@ pub struct GraphicsPipeline {
 }
 
 /// A stage in a graphics pipeline.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct GraphicsStage {
     pub entry_point: String,
     pub stage: ShaderStage,
 }
 
 /// Shader stage type.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShaderStage {
     Vertex,
@@ -84,7 +84,7 @@ pub enum ShaderStage {
 }
 
 /// How to determine the compute dispatch grid size.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DispatchSize {
     /// Fixed dispatch grid.
@@ -100,7 +100,7 @@ pub enum DispatchSize {
 }
 
 /// A GPU resource binding used by the pipeline.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Binding {
     /// Storage buffer (descriptor set binding).
@@ -126,7 +126,7 @@ pub enum Binding {
 }
 
 /// Access mode for a storage buffer.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Access {
     ReadOnly,
@@ -135,7 +135,7 @@ pub enum Access {
 }
 
 /// How a buffer is used in the pipeline.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BufferUsage {
     /// Read-only input from the host.
@@ -147,14 +147,14 @@ pub enum BufferUsage {
 }
 
 /// Vertex input attribute.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct VertexAttribute {
     pub location: u32,
     pub name: String,
 }
 
 /// Fragment output.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FragmentOutput {
     pub location: u32,
     pub name: String,
