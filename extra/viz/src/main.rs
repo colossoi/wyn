@@ -68,9 +68,12 @@ fn parse_header_hex(s: &str) -> std::result::Result<[u32; 19], String> {
         let hex = &s[i * 8..(i + 1) * 8];
         let bytes: [u8; 4] = [
             u8::from_str_radix(&hex[0..2], 16).map_err(|e| format!("bad hex at byte {}: {}", i * 4, e))?,
-            u8::from_str_radix(&hex[2..4], 16).map_err(|e| format!("bad hex at byte {}: {}", i * 4 + 1, e))?,
-            u8::from_str_radix(&hex[4..6], 16).map_err(|e| format!("bad hex at byte {}: {}", i * 4 + 2, e))?,
-            u8::from_str_radix(&hex[6..8], 16).map_err(|e| format!("bad hex at byte {}: {}", i * 4 + 3, e))?,
+            u8::from_str_radix(&hex[2..4], 16)
+                .map_err(|e| format!("bad hex at byte {}: {}", i * 4 + 1, e))?,
+            u8::from_str_radix(&hex[4..6], 16)
+                .map_err(|e| format!("bad hex at byte {}: {}", i * 4 + 2, e))?,
+            u8::from_str_radix(&hex[6..8], 16)
+                .map_err(|e| format!("bad hex at byte {}: {}", i * 4 + 3, e))?,
         ];
         *word = u32::from_be_bytes(bytes);
     }
@@ -519,7 +522,7 @@ struct GpuTimestamps {
     resolve_buf: wgpu::Buffer,
     read_buf: wgpu::Buffer,
     ns_per_tick: f64,
-    num_slots: u32,       // total slots allocated
+    num_slots: u32,        // total slots allocated
     queries_per_slot: u32, // 2 queries per slot (begin + end)
 }
 
@@ -569,11 +572,7 @@ impl GpuTimestamps {
 
     /// Resolve all queries and read back the timestamps. Returns a Vec of
     /// (begin_ns, end_ns) per slot, stopping at the first unused slot.
-    async fn read_back(
-        &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-    ) -> Result<Vec<(f64, f64)>> {
+    async fn read_back(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Result<Vec<(f64, f64)>> {
         let total = self.num_slots * self.queries_per_slot;
         let byte_size = total as u64 * 8;
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
@@ -586,7 +585,9 @@ impl GpuTimestamps {
 
         let slice = self.read_buf.slice(..byte_size);
         let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| { tx.send(r).unwrap(); });
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            tx.send(r).unwrap();
+        });
         let _ = device.poll(wgpu::PollType::Wait);
         rx.recv().unwrap()?;
 
@@ -597,11 +598,10 @@ impl GpuTimestamps {
         for i in 0..self.num_slots as usize {
             let begin = raw[i * 2];
             let end = raw[i * 2 + 1];
-            if begin == 0 && end == 0 { break; }
-            results.push((
-                begin as f64 * self.ns_per_tick,
-                end as f64 * self.ns_per_tick,
-            ));
+            if begin == 0 && end == 0 {
+                break;
+            }
+            results.push((begin as f64 * self.ns_per_tick, end as f64 * self.ns_per_tick));
         }
         drop(data);
         self.read_buf.unmap();
@@ -769,7 +769,12 @@ fn parse_push_constant_value(ty: &str, value: &str) -> Result<Vec<u8>> {
             })
             .collect::<Result<Vec<_>>>()?;
         if values.len() != count {
-            return Err(anyhow!("Expected {} values for {}, got {}", count, ty, values.len()));
+            return Err(anyhow!(
+                "Expected {} values for {}, got {}",
+                count,
+                ty,
+                values.len()
+            ));
         }
         Ok(values.iter().flat_map(|v| v.to_le_bytes()).collect())
     } else if let Some(rest) = ty.strip_prefix("i32x") {
@@ -779,7 +784,12 @@ fn parse_push_constant_value(ty: &str, value: &str) -> Result<Vec<u8>> {
             .map(|v| v.trim().parse::<i32>().map_err(|e| anyhow!("Invalid i32: {}: {}", v, e)))
             .collect::<Result<Vec<_>>>()?;
         if values.len() != count {
-            return Err(anyhow!("Expected {} values for {}, got {}", count, ty, values.len()));
+            return Err(anyhow!(
+                "Expected {} values for {}, got {}",
+                count,
+                ty,
+                values.len()
+            ));
         }
         Ok(values.iter().flat_map(|v| v.to_le_bytes()).collect())
     } else if let Some(rest) = ty.strip_prefix("f32x") {
@@ -789,7 +799,12 @@ fn parse_push_constant_value(ty: &str, value: &str) -> Result<Vec<u8>> {
             .map(|v| v.trim().parse::<f32>().map_err(|e| anyhow!("Invalid f32: {}: {}", v, e)))
             .collect::<Result<Vec<_>>>()?;
         if values.len() != count {
-            return Err(anyhow!("Expected {} values for {}, got {}", count, ty, values.len()));
+            return Err(anyhow!(
+                "Expected {} values for {}, got {}",
+                count,
+                ty,
+                values.len()
+            ));
         }
         Ok(values.iter().flat_map(|v| v.to_le_bytes()).collect())
     } else {
@@ -800,7 +815,8 @@ fn parse_push_constant_value(ty: &str, value: &str) -> Result<Vec<u8>> {
             }
             "u32" => {
                 let v = if let Some(hex) = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X")) {
-                    u32::from_str_radix(hex, 16).map_err(|e| anyhow!("Invalid hex u32: {}: {}", value, e))?
+                    u32::from_str_radix(hex, 16)
+                        .map_err(|e| anyhow!("Invalid hex u32: {}: {}", value, e))?
                 } else {
                     value.parse::<u32>().map_err(|e| anyhow!("Invalid u32: {}: {}", value, e))?
                 };
@@ -1111,12 +1127,30 @@ async fn run_pipeline(
     for (pi, pipeline) in desc.pipelines.iter().enumerate() {
         match pipeline {
             pipeline_desc::Pipeline::Compute(cp) => {
-                run_single_compute(&device, &queue, &module, cp, &inputs, &outputs, push_constants, verbose)
-                    .with_context(|| format!("Pipeline {} (compute) failed", pi))?;
+                run_single_compute(
+                    &device,
+                    &queue,
+                    &module,
+                    cp,
+                    &inputs,
+                    &outputs,
+                    push_constants,
+                    verbose,
+                )
+                .with_context(|| format!("Pipeline {} (compute) failed", pi))?;
             }
             pipeline_desc::Pipeline::MultiCompute(mp) => {
-                run_multi_compute(&device, &queue, &module, mp, &inputs, &outputs, push_constants, verbose)
-                    .with_context(|| format!("Pipeline {} (multi_compute) failed", pi))?;
+                run_multi_compute(
+                    &device,
+                    &queue,
+                    &module,
+                    mp,
+                    &inputs,
+                    &outputs,
+                    push_constants,
+                    verbose,
+                )
+                .with_context(|| format!("Pipeline {} (multi_compute) failed", pi))?;
             }
             pipeline_desc::Pipeline::Graphics(_) => {
                 eprintln!(
@@ -1331,10 +1365,8 @@ fn build_push_constant_bytes(
 
     // If we have CLI push constants but no descriptor bindings, use sequential layout
     if pc_bindings.is_empty() && !push_constants.is_empty() {
-        let mut pc_specs: Vec<PushConstantSpec> = push_constants
-            .iter()
-            .map(|s| PushConstantSpec::parse(s))
-            .collect::<Result<Vec<_>>>()?;
+        let mut pc_specs: Vec<PushConstantSpec> =
+            push_constants.iter().map(|s| PushConstantSpec::parse(s)).collect::<Result<Vec<_>>>()?;
 
         let mut offset = 0u32;
         for spec in &mut pc_specs {
@@ -1351,7 +1383,12 @@ fn build_push_constant_bytes(
         if verbose {
             println!("Push constants ({} bytes, sequential layout):", total);
             for spec in &pc_specs {
-                println!("  {} @ offset {}: {} bytes", spec.name, spec.offset, spec.byte_size());
+                println!(
+                    "  {} @ offset {}: {} bytes",
+                    spec.name,
+                    spec.offset,
+                    spec.byte_size()
+                );
             }
         }
         return Ok(bytes);
@@ -1367,11 +1404,7 @@ fn build_push_constant_bytes(
         .collect::<Result<HashMap<_, _>>>()?;
 
     // Compute total size from descriptor
-    let total_size = pc_bindings
-        .iter()
-        .map(|(_, offset, size)| offset + size)
-        .max()
-        .unwrap_or(0) as usize;
+    let total_size = pc_bindings.iter().map(|(_, offset, size)| offset + size).max().unwrap_or(0) as usize;
 
     let mut bytes = vec![0u8; total_size];
 
@@ -1630,8 +1663,12 @@ async fn run_miner(
 
     // Load pipeline descriptor (JSON sidecar next to the .spv)
     let descriptor_path = path.with_extension("json");
-    let descriptor_json = fs::read_to_string(&descriptor_path)
-        .with_context(|| format!("Failed to read pipeline descriptor: {}", descriptor_path.display()))?;
+    let descriptor_json = fs::read_to_string(&descriptor_path).with_context(|| {
+        format!(
+            "Failed to read pipeline descriptor: {}",
+            descriptor_path.display()
+        )
+    })?;
     let descriptor: pipeline_desc::PipelineDescriptor = serde_json::from_str(&descriptor_json)
         .with_context(|| "Failed to parse pipeline descriptor JSON")?;
 
@@ -1644,9 +1681,8 @@ async fn run_miner(
 
     if validate {
         let spv_bytes = fs::read(&path)?;
-        let spv_words: Vec<u32> = spv_bytes.chunks_exact(4)
-            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect();
+        let spv_words: Vec<u32> =
+            spv_bytes.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
         device.push_error_scope(wgpu::ErrorFilter::Validation);
         let _module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("naga_validate"),
@@ -1663,34 +1699,58 @@ async fn run_miner(
     // Validate: cross-check SPIR-V bindings against pipeline descriptor
     {
         let spv_bytes = fs::read(&path)?;
-        let spv_words: Vec<u32> = spv_bytes
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect();
+        let spv_words: Vec<u32> =
+            spv_bytes.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
         let entry_points = detect_entry_points(&spv_words)?;
         let descriptor_entries: Vec<&str> = mp.stages.iter().map(|s| s.entry_point.as_str()).collect();
-        let descriptor_bindings: Vec<u32> = mp.bindings.iter().filter_map(|b| {
-            if let pipeline_desc::Binding::StorageBuffer { binding, .. } = b { Some(*binding) } else { None }
-        }).collect();
+        let descriptor_bindings: Vec<u32> = mp
+            .bindings
+            .iter()
+            .filter_map(|b| {
+                if let pipeline_desc::Binding::StorageBuffer { binding, .. } = b {
+                    Some(*binding)
+                } else {
+                    None
+                }
+            })
+            .collect();
 
         if verbose {
-            println!("  SPIR-V entry points: {:?}", entry_points.iter().map(|(n,_)| n.as_str()).collect::<Vec<_>>());
+            println!(
+                "  SPIR-V entry points: {:?}",
+                entry_points.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>()
+            );
             println!("  Descriptor stages: {:?}", descriptor_entries);
             println!("  Descriptor storage bindings: {:?}", descriptor_bindings);
         }
 
         for stage_name in &descriptor_entries {
             if !entry_points.iter().any(|(n, _)| n == stage_name) {
-                return Err(anyhow!("Descriptor references entry point '{}' not found in SPIR-V", stage_name));
+                return Err(anyhow!(
+                    "Descriptor references entry point '{}' not found in SPIR-V",
+                    stage_name
+                ));
             }
         }
 
         // Check push constant size matches
-        let descriptor_pc_size: u32 = mp.bindings.iter().filter_map(|b| {
-            if let pipeline_desc::Binding::PushConstant { offset, size, .. } = b { Some(offset + size) } else { None }
-        }).max().unwrap_or(0);
+        let descriptor_pc_size: u32 = mp
+            .bindings
+            .iter()
+            .filter_map(|b| {
+                if let pipeline_desc::Binding::PushConstant { offset, size, .. } = b {
+                    Some(offset + size)
+                } else {
+                    None
+                }
+            })
+            .max()
+            .unwrap_or(0);
         if descriptor_pc_size > 0 && verbose {
-            println!("  Push constant size from descriptor: {} bytes", descriptor_pc_size);
+            println!(
+                "  Push constant size from descriptor: {} bytes",
+                descriptor_pc_size
+            );
         }
     }
 
@@ -1704,7 +1764,10 @@ async fn run_miner(
 
     let mut buffers: HashMap<u32, (wgpu::Buffer, u64)> = HashMap::new();
     for binding in &mp.bindings {
-        if let pipeline_desc::Binding::StorageBuffer { binding: b, usage, .. } = binding {
+        if let pipeline_desc::Binding::StorageBuffer {
+            binding: b, usage, ..
+        } = binding
+        {
             let size = match usage {
                 pipeline_desc::BufferUsage::Intermediate => partials_size,
                 pipeline_desc::BufferUsage::Output => result_size,
@@ -1727,7 +1790,9 @@ async fn run_miner(
     }
 
     let (bind_group_layout, bind_group) = build_bind_group(&device, &mp.bindings, &buffers)?;
-    if verbose { println!("  Bind group created"); }
+    if verbose {
+        println!("  Bind group created");
+    }
 
     // Build pipeline layout with push constants
     let pc_range = wgpu::PushConstantRange {
@@ -1741,7 +1806,9 @@ async fn run_miner(
     });
 
     // Create compute pipelines for both stages
-    if verbose { println!("  Creating phase 1 pipeline ({})...", mp.stages[0].entry_point); }
+    if verbose {
+        println!("  Creating phase 1 pipeline ({})...", mp.stages[0].entry_point);
+    }
     let phase1_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("miner_phase1"),
         layout: Some(&pipeline_layout),
@@ -1750,7 +1817,9 @@ async fn run_miner(
         compilation_options: Default::default(),
         cache: None,
     });
-    if verbose { println!("  Creating phase 2 pipeline ({})...", mp.stages[1].entry_point); }
+    if verbose {
+        println!("  Creating phase 2 pipeline ({})...", mp.stages[1].entry_point);
+    }
     let phase2_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("miner_phase2"),
         layout: Some(&pipeline_layout),
@@ -1759,7 +1828,9 @@ async fn run_miner(
         compilation_options: Default::default(),
         cache: None,
     });
-    if verbose { println!("  Pipelines created"); }
+    if verbose {
+        println!("  Pipelines created");
+    }
 
     // Staging buffer for reading back the 36-byte result
     let staging = device.create_buffer(&BufferDescriptor {
@@ -1770,20 +1841,38 @@ async fn run_miner(
     });
 
     // Find buffer bindings
-    let result_binding = mp.bindings.iter().find_map(|b| {
-        if let pipeline_desc::Binding::StorageBuffer { binding, usage: pipeline_desc::BufferUsage::Output, .. } = b {
-            Some(*binding)
-        } else {
-            None
-        }
-    }).ok_or_else(|| anyhow!("No output binding in pipeline descriptor"))?;
-    let partials_binding = mp.bindings.iter().find_map(|b| {
-        if let pipeline_desc::Binding::StorageBuffer { binding, usage: pipeline_desc::BufferUsage::Intermediate, .. } = b {
-            Some(*binding)
-        } else {
-            None
-        }
-    }).ok_or_else(|| anyhow!("No intermediate binding in pipeline descriptor"))?;
+    let result_binding = mp
+        .bindings
+        .iter()
+        .find_map(|b| {
+            if let pipeline_desc::Binding::StorageBuffer {
+                binding,
+                usage: pipeline_desc::BufferUsage::Output,
+                ..
+            } = b
+            {
+                Some(*binding)
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| anyhow!("No output binding in pipeline descriptor"))?;
+    let partials_binding = mp
+        .bindings
+        .iter()
+        .find_map(|b| {
+            if let pipeline_desc::Binding::StorageBuffer {
+                binding,
+                usage: pipeline_desc::BufferUsage::Intermediate,
+                ..
+            } = b
+            {
+                Some(*binding)
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| anyhow!("No intermediate binding in pipeline descriptor"))?;
 
     // Staging buffer for partials readback (debug)
     let partials_staging = device.create_buffer(&BufferDescriptor {
@@ -1810,9 +1899,15 @@ async fn run_miner(
             workgroups_override.unwrap_or_else(|| (chunk_n + workgroup_size - 1) / workgroup_size);
 
         if verbose {
-            println!("  Chunk {}/{}: {} workgroups × {} threads = {} threads ({} nonces)",
-                chunk_idx + 1, num_chunks, num_workgroups, workgroup_size,
-                num_workgroups * workgroup_size, chunk_n);
+            println!(
+                "  Chunk {}/{}: {} workgroups × {} threads = {} threads ({} nonces)",
+                chunk_idx + 1,
+                num_chunks,
+                num_workgroups,
+                workgroup_size,
+                num_workgroups * workgroup_size,
+                chunk_n
+            );
         }
 
         // Push constants: header_base(76) + target(32) + n(4) + nonce_offset(4) = 116 bytes
@@ -1845,14 +1940,17 @@ async fn run_miner(
         // Debug: dump partials after phase 1
         if verbose {
             let (partials_buf, partials_buf_size) = &buffers[&partials_binding];
-            let read_size = (num_workgroups as u64 * workgroup_size as u64 * result_size).min(*partials_buf_size);
+            let read_size =
+                (num_workgroups as u64 * workgroup_size as u64 * result_size).min(*partials_buf_size);
             encoder.copy_buffer_to_buffer(partials_buf, 0, &partials_staging, 0, read_size);
             queue.submit(Some(encoder.finish()));
             let _ = device.poll(wgpu::PollType::Wait);
 
             let slice = partials_staging.slice(..read_size);
             let (tx, rx) = std::sync::mpsc::channel();
-            slice.map_async(wgpu::MapMode::Read, move |r| { tx.send(r).unwrap(); });
+            slice.map_async(wgpu::MapMode::Read, move |r| {
+                tx.send(r).unwrap();
+            });
             let _ = device.poll(wgpu::PollType::Wait);
             rx.recv().unwrap()?;
             let data = slice.get_mapped_range();
@@ -1971,27 +2069,41 @@ async fn run_miner(
             total_phase2_ns += p2_ns;
             if verbose || p1_times.len() <= 4 {
                 let chunk_n = chunk.min(nonces - i as u32 * chunk);
-                let nwg = workgroups_override.unwrap_or_else(|| (chunk_n + workgroup_size - 1) / workgroup_size);
-                println!("  chunk {:>3}: phase1 {:.3}ms ({} wg × {} = {} threads)  phase2 {:.3}ms  gap {:.3}ms",
+                let nwg =
+                    workgroups_override.unwrap_or_else(|| (chunk_n + workgroup_size - 1) / workgroup_size);
+                println!(
+                    "  chunk {:>3}: phase1 {:.3}ms ({} wg × {} = {} threads)  phase2 {:.3}ms  gap {:.3}ms",
                     i + 1,
-                    p1_ns / 1_000_000.0, nwg, workgroup_size, nwg * workgroup_size,
+                    p1_ns / 1_000_000.0,
+                    nwg,
+                    workgroup_size,
+                    nwg * workgroup_size,
                     p2_ns / 1_000_000.0,
-                    gap_ns / 1_000_000.0);
+                    gap_ns / 1_000_000.0
+                );
             }
         }
         if !p1_times.is_empty() {
             let total_gpu_ns = total_phase1_ns + total_phase2_ns;
             let total_nonces = p1_times.len() as u64 * chunk as u64;
             let gpu_hash_rate = total_nonces as f64 / (total_phase1_ns / 1_000_000_000.0);
-            println!("  total:    phase1 {:.3}ms  phase2 {:.3}ms  gpu total {:.3}ms",
+            println!(
+                "  total:    phase1 {:.3}ms  phase2 {:.3}ms  gpu total {:.3}ms",
                 total_phase1_ns / 1_000_000.0,
                 total_phase2_ns / 1_000_000.0,
-                total_gpu_ns / 1_000_000.0);
-            println!("  GPU hash rate: {:.0} H/s (phase1 only, excludes dispatch overhead)", gpu_hash_rate);
+                total_gpu_ns / 1_000_000.0
+            );
+            println!(
+                "  GPU hash rate: {:.0} H/s (phase1 only, excludes dispatch overhead)",
+                gpu_hash_rate
+            );
         }
     }
 
-    println!("Mined {} nonces in {:.2?} ({:.0} H/s wall clock)", nonces, elapsed, hash_rate);
+    println!(
+        "Mined {} nonces in {:.2?} ({:.0} H/s wall clock)",
+        nonces, elapsed, hash_rate
+    );
 
     if let Some((nonce, hash)) = &hit {
         println!("Hit found:");
@@ -2142,10 +2254,8 @@ async fn run_compute_shader(
     let module = load_spirv_module(&device, &path)?;
 
     // Parse and layout push constants
-    let mut pc_specs: Vec<PushConstantSpec> = push_constants
-        .iter()
-        .map(|s| PushConstantSpec::parse(s))
-        .collect::<Result<Vec<_>>>()?;
+    let mut pc_specs: Vec<PushConstantSpec> =
+        push_constants.iter().map(|s| PushConstantSpec::parse(s)).collect::<Result<Vec<_>>>()?;
 
     let mut offset = 0u32;
     for spec in &mut pc_specs {
@@ -2164,7 +2274,12 @@ async fn run_compute_shader(
     if verbose && !pc_specs.is_empty() {
         println!("Push constants ({} bytes):", total_pc_size);
         for spec in &pc_specs {
-            println!("  {} @ offset {}: {} bytes", spec.name, spec.offset, spec.byte_size());
+            println!(
+                "  {} @ offset {}: {} bytes",
+                spec.name,
+                spec.offset,
+                spec.byte_size()
+            );
         }
     }
 
@@ -2294,6 +2409,13 @@ struct State {
     mouse_buffer: Option<wgpu::Buffer>,
     _difficulty_buffer: Option<wgpu::Buffer>,
     uniform_bind_group: Option<BindGroup>,
+    /// Descriptor-set index at which `uniform_bind_group` is bound. Defaults
+    /// to 0; overridden from the sidecar pipeline descriptor when the shader
+    /// declares its uniforms at a different set.
+    uniform_bind_group_set: u32,
+    /// Empty bind group, bound at every set index below
+    /// `uniform_bind_group_set` to satisfy wgpu's contiguous-sets requirement.
+    empty_bind_group: Option<BindGroup>,
     start_time: std::time::Instant,
     // Mouse tracking
     mouse_pos: [f32; 2],
@@ -2461,11 +2583,12 @@ impl State {
         surface.configure(&device, &config);
 
         // === Conditionally create uniform buffers based on spec ======
-        // Shadertoy canonical uniform ordering:
-        //   binding 0: iResolution (vec3, we use vec2)
-        //   binding 1: iTime (f32)
-        //   binding 2: difficulty (i32)
-        //   binding 5: iMouse (vec4)
+        // With --shadertoy we provide iResolution/iTime/iMouse/difficulty to
+        // the shader. The (set, binding) for each uniform comes from the
+        // sidecar pipeline descriptor (`<spv>.json`) when present, so the
+        // layout matches what the shader actually declares. We fall back to
+        // the canonical Shadertoy positions (set=0, bindings=[0,1,2,5]) when
+        // no sidecar is available.
         let (
             resolution_buffer,
             time_buffer,
@@ -2473,155 +2596,210 @@ impl State {
             difficulty_buffer,
             uniform_bind_group,
             uniform_bind_group_layout,
+            uniform_bind_group_set,
         ) = if let PipelineSpec::VertexFragment {
             shadertoy: true,
+            path,
             difficulty,
             ..
         } = spec
         {
-            // Binding 0: iResolution ([2]f32)
-            let resolution_buffer = device.create_buffer(&BufferDescriptor {
-                label: Some("resolution_buffer"),
-                size: std::mem::size_of::<ResolutionUniform>() as u64,
-                usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            let initial_resolution = ResolutionUniform {
-                resolution: [800.0, 600.0],
-                _pad: [0.0, 0.0],
+            // Map each well-known Shadertoy name to a slot on its preferred
+            // (legacy) binding. The sidecar, if present, overrides the
+            // binding and set number to match the shader's declarations.
+            struct Slot {
+                default_binding: u32,
+                actual_set: u32,
+                actual_binding: u32,
+                present: bool,
+            }
+            let mut resolution = Slot {
+                default_binding: 0,
+                actual_set: 0,
+                actual_binding: 0,
+                present: false,
             };
-            queue.write_buffer(&resolution_buffer, 0, bytemuck::cast_slice(&[initial_resolution]));
-
-            // Binding 1: iTime (f32)
-            let time_buffer = device.create_buffer(&BufferDescriptor {
-                label: Some("time_buffer"),
-                size: std::mem::size_of::<TimeUniform>() as u64,
-                usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            let initial_time = TimeUniform { time: 0.0 };
-            queue.write_buffer(&time_buffer, 0, bytemuck::cast_slice(&[initial_time]));
-
-            // Binding 2: difficulty (i32)
-            let difficulty_buffer = device.create_buffer(&BufferDescriptor {
-                label: Some("difficulty_buffer"),
-                size: std::mem::size_of::<DifficultyUniform>() as u64,
-                usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            let initial_difficulty = DifficultyUniform {
-                difficulty: *difficulty,
-                _pad: [0, 0, 0],
+            let mut time = Slot {
+                default_binding: 1,
+                actual_set: 0,
+                actual_binding: 1,
+                present: false,
             };
-            queue.write_buffer(&difficulty_buffer, 0, bytemuck::cast_slice(&[initial_difficulty]));
-
-            // Binding 5: iMouse (vec4f32)
-            let mouse_buffer = device.create_buffer(&BufferDescriptor {
-                label: Some("mouse_buffer"),
-                size: std::mem::size_of::<MouseUniform>() as u64,
-                usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            let initial_mouse = MouseUniform {
-                mouse: [0.0, 0.0, 0.0, 0.0],
+            let mut difficulty_slot = Slot {
+                default_binding: 2,
+                actual_set: 0,
+                actual_binding: 2,
+                present: false,
             };
-            queue.write_buffer(&mouse_buffer, 0, bytemuck::cast_slice(&[initial_mouse]));
+            let mut mouse = Slot {
+                default_binding: 5,
+                actual_set: 0,
+                actual_binding: 5,
+                present: false,
+            };
+
+            let sidecar = load_sidecar_uniforms(path);
+            if sidecar.is_empty() {
+                return Err(anyhow!(
+                    "viz vf --shadertoy: no sidecar pipeline descriptor found next to {:?}. \
+                     Recompile the shader with `wyn compile` to emit the `.json` alongside the `.spv`.",
+                    path
+                ));
+            }
+            // Descriptor-driven: only allocate slots the shader declares.
+            // All uniforms are assumed to live in the same set; mixed sets
+            // would need per-set bind groups (not supported yet).
+            for u in &sidecar {
+                let slot = match u.name.as_str() {
+                    "iResolution" => Some(&mut resolution),
+                    "iTime" => Some(&mut time),
+                    "difficulty" | "iDifficulty" => Some(&mut difficulty_slot),
+                    "iMouse" => Some(&mut mouse),
+                    _ => None,
+                };
+                if let Some(s) = slot {
+                    s.actual_set = u.set;
+                    s.actual_binding = u.binding;
+                    s.present = true;
+                }
+            }
+
+            // All declared uniforms must share one set.
+            let present_sets: Vec<u32> = [&resolution, &time, &difficulty_slot, &mouse]
+                .iter()
+                .filter(|s| s.present)
+                .map(|s| s.actual_set)
+                .collect();
+            let bind_group_set = present_sets.first().copied().unwrap_or(0);
+            if present_sets.iter().any(|s| *s != bind_group_set) {
+                return Err(anyhow!(
+                    "viz vf: shadertoy uniforms are split across multiple descriptor sets; \
+                     only a single set is currently supported"
+                ));
+            }
+
+            let make_buffer = |label: &'static str, size: u64| {
+                device.create_buffer(&BufferDescriptor {
+                    label: Some(label),
+                    size,
+                    usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            };
+
+            let resolution_buffer = resolution.present.then(|| {
+                let buf = make_buffer(
+                    "resolution_buffer",
+                    std::mem::size_of::<ResolutionUniform>() as u64,
+                );
+                let initial = ResolutionUniform {
+                    resolution: [800.0, 600.0],
+                    _pad: [0.0, 0.0],
+                };
+                queue.write_buffer(&buf, 0, bytemuck::cast_slice(&[initial]));
+                buf
+            });
+            let time_buffer = time.present.then(|| {
+                let buf = make_buffer("time_buffer", std::mem::size_of::<TimeUniform>() as u64);
+                queue.write_buffer(&buf, 0, bytemuck::cast_slice(&[TimeUniform { time: 0.0 }]));
+                buf
+            });
+            let difficulty_buffer = difficulty_slot.present.then(|| {
+                let buf = make_buffer(
+                    "difficulty_buffer",
+                    std::mem::size_of::<DifficultyUniform>() as u64,
+                );
+                let initial = DifficultyUniform {
+                    difficulty: *difficulty,
+                    _pad: [0, 0, 0],
+                };
+                queue.write_buffer(&buf, 0, bytemuck::cast_slice(&[initial]));
+                buf
+            });
+            let mouse_buffer = mouse.present.then(|| {
+                let buf = make_buffer("mouse_buffer", std::mem::size_of::<MouseUniform>() as u64);
+                queue.write_buffer(
+                    &buf,
+                    0,
+                    bytemuck::cast_slice(&[MouseUniform {
+                        mouse: [0.0, 0.0, 0.0, 0.0],
+                    }]),
+                );
+                buf
+            });
+
+            let buf_ty = BindingType::Buffer {
+                ty: BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            };
+            let buf_layout = |binding: u32| BindGroupLayoutEntry {
+                binding,
+                visibility: ShaderStages::VERTEX_FRAGMENT,
+                ty: buf_ty,
+                count: None,
+            };
+            let slots: Vec<(u32, &wgpu::Buffer)> = [
+                resolution_buffer.as_ref().map(|b| (resolution.actual_binding, b)),
+                time_buffer.as_ref().map(|b| (time.actual_binding, b)),
+                difficulty_buffer.as_ref().map(|b| (difficulty_slot.actual_binding, b)),
+                mouse_buffer.as_ref().map(|b| (mouse.actual_binding, b)),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            let layout_entries: Vec<BindGroupLayoutEntry> =
+                slots.iter().map(|(binding, _)| buf_layout(*binding)).collect();
+            let group_entries: Vec<BindGroupEntry> = slots
+                .iter()
+                .map(|(binding, buffer)| BindGroupEntry {
+                    binding: *binding,
+                    resource: BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer,
+                        offset: 0,
+                        size: None,
+                    }),
+                })
+                .collect();
 
             let uniform_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
                 label: Some("uniform_bind_group_layout"),
-                entries: &[
-                    BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: ShaderStages::VERTEX_FRAGMENT,
-                        ty: BindingType::Buffer {
-                            ty: BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: ShaderStages::VERTEX_FRAGMENT,
-                        ty: BindingType::Buffer {
-                            ty: BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: ShaderStages::VERTEX_FRAGMENT,
-                        ty: BindingType::Buffer {
-                            ty: BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    BindGroupLayoutEntry {
-                        binding: 5,
-                        visibility: ShaderStages::VERTEX_FRAGMENT,
-                        ty: BindingType::Buffer {
-                            ty: BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                ],
+                entries: &layout_entries,
             });
-
             let uniform_bind_group = device.create_bind_group(&BindGroupDescriptor {
                 label: Some("uniform_bind_group"),
                 layout: &uniform_bind_group_layout,
-                entries: &[
-                    BindGroupEntry {
-                        binding: 0,
-                        resource: BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &resolution_buffer,
-                            offset: 0,
-                            size: None,
-                        }),
-                    },
-                    BindGroupEntry {
-                        binding: 1,
-                        resource: BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &time_buffer,
-                            offset: 0,
-                            size: None,
-                        }),
-                    },
-                    BindGroupEntry {
-                        binding: 2,
-                        resource: BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &difficulty_buffer,
-                            offset: 0,
-                            size: None,
-                        }),
-                    },
-                    BindGroupEntry {
-                        binding: 5,
-                        resource: BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &mouse_buffer,
-                            offset: 0,
-                            size: None,
-                        }),
-                    },
-                ],
+                entries: &group_entries,
             });
 
             (
-                Some(resolution_buffer),
-                Some(time_buffer),
-                Some(mouse_buffer),
-                Some(difficulty_buffer),
+                resolution_buffer,
+                time_buffer,
+                mouse_buffer,
+                difficulty_buffer,
                 Some(uniform_bind_group),
                 Some(uniform_bind_group_layout),
+                bind_group_set,
             )
         } else {
-            (None, None, None, None, None, None)
+            (None, None, None, None, None, None, 0)
+        };
+
+        // If the uniform bind group lives at set > 0, we also need an empty
+        // bind group to satisfy wgpu's contiguous-set layout rule.
+        let (empty_bind_group_layout, empty_bind_group) = if uniform_bind_group_set > 0 {
+            let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                label: Some("empty_bind_group_layout"),
+                entries: &[],
+            });
+            let group = device.create_bind_group(&BindGroupDescriptor {
+                label: Some("empty_bind_group"),
+                layout: &layout,
+                entries: &[],
+            });
+            (Some(layout), Some(group))
+        } else {
+            (None, None)
         };
 
         // Make these mutable so TestPattern can set them
@@ -2650,10 +2828,18 @@ impl State {
                 let module = load_spirv_module(&device, path)
                     .with_context(|| format!("load SPIR-V module {:?}", path))?;
 
-                // Build bind group layout list conditionally
-                let mut bind_group_layouts_vec = vec![];
+                // Build the bind group layout list. The uniform layout (if
+                // any) lives at `uniform_bind_group_set`; wgpu requires set
+                // numbers to be contiguous, so we prefix the shared empty
+                // layout for any lower sets.
+                let mut bind_group_layouts_vec: Vec<&wgpu::BindGroupLayout> = vec![];
                 if *shadertoy {
                     if let Some(ref ubl) = uniform_bind_group_layout {
+                        if let Some(ref el) = empty_bind_group_layout {
+                            for _ in 0..uniform_bind_group_set {
+                                bind_group_layouts_vec.push(el);
+                            }
+                        }
                         bind_group_layouts_vec.push(ubl);
                     }
                 }
@@ -2790,6 +2976,8 @@ impl State {
             mouse_buffer,
             _difficulty_buffer: difficulty_buffer,
             uniform_bind_group,
+            uniform_bind_group_set,
+            empty_bind_group,
             start_time: now,
             mouse_pos: [0.0, 0.0],
             mouse_click_pos: [0.0, 0.0],
@@ -2884,9 +3072,17 @@ impl State {
                     });
 
                     rpass.set_pipeline(&self.pipeline);
-                    // Set uniform bind group if available (set=0)
+                    // Set uniform bind group if available, at the set number
+                    // declared by the shader (via sidecar descriptor). Fill
+                    // any lower sets with the shared empty bind group so the
+                    // pipeline layout is fully satisfied.
                     if let Some(ref bind_group) = self.uniform_bind_group {
-                        rpass.set_bind_group(0, bind_group, &[]);
+                        if let Some(ref empty) = self.empty_bind_group {
+                            for i in 0..self.uniform_bind_group_set {
+                                rpass.set_bind_group(i, empty, &[]);
+                            }
+                        }
+                        rpass.set_bind_group(self.uniform_bind_group_set, bind_group, &[]);
                     }
                     rpass.draw(0..3, 0..1);
                 }
@@ -2945,6 +3141,47 @@ impl State {
             }
         }
     }
+}
+
+/// A uniform the shader declares, as surfaced by the sidecar pipeline descriptor.
+#[derive(Debug, Clone)]
+struct UniformDecl {
+    set: u32,
+    binding: u32,
+    name: String,
+}
+
+/// Try to read `<spv_path>.json` (or `<spv_path_without_ext>.json`) and
+/// extract the uniforms declared by the first graphics pipeline. Returns
+/// an empty vec if no sidecar is present.
+fn load_sidecar_uniforms(spv_path: &Path) -> Vec<UniformDecl> {
+    let json_path = spv_path.with_extension("json");
+    let Ok(content) = fs::read_to_string(&json_path) else {
+        return Vec::new();
+    };
+    let Ok(desc) = serde_json::from_str::<pipeline_desc::PipelineDescriptor>(&content) else {
+        return Vec::new();
+    };
+    for p in &desc.pipelines {
+        if let pipeline_desc::Pipeline::Graphics(g) = p {
+            return g
+                .bindings
+                .iter()
+                .filter_map(|b| {
+                    if let pipeline_desc::Binding::Uniform { set, binding, name } = b {
+                        Some(UniformDecl {
+                            set: *set,
+                            binding: *binding,
+                            name: name.clone(),
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+        }
+    }
+    Vec::new()
 }
 
 // Load a .spv file and create a ShaderModule using the SPIR-V helper
@@ -3054,8 +3291,7 @@ impl ApplicationHandler for App {
         if let Some((w, h)) = window_size {
             attrs = attrs.with_inner_size(PhysicalSize::new(w, h));
         }
-        let window = match event_loop.create_window(attrs)
-        {
+        let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 eprintln!("failed to create window: {e}");
@@ -3341,7 +3577,14 @@ fn main() -> Result<()> {
             let input_map = parse_pairs(&inputs)?;
             let output_map = parse_pairs(&outputs)?;
 
-            pollster::block_on(run_pipeline(path, pipeline, input_map, output_map, &push_constants, verbose))?;
+            pollster::block_on(run_pipeline(
+                path,
+                pipeline,
+                input_map,
+                output_map,
+                &push_constants,
+                verbose,
+            ))?;
         }
         Command::Miner {
             path,
@@ -3353,7 +3596,16 @@ fn main() -> Result<()> {
             validate,
             verbose,
         } => {
-            pollster::block_on(run_miner(path, header_hex, nonces, nonce_offset, workgroups, chunk_size, validate, verbose))?;
+            pollster::block_on(run_miner(
+                path,
+                header_hex,
+                nonces,
+                nonce_offset,
+                workgroups,
+                chunk_size,
+                validate,
+                verbose,
+            ))?;
         }
         Command::Validate { path, verbose } => {
             pollster::block_on(validate_spirv(&path, verbose))?;
