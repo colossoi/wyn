@@ -84,21 +84,26 @@ def nor(p: vec3f32) vec3f32 =
 -- Returns (res_t, orbit_min_at_best, _). res_t = -1 if no hit.
 ------------------------------------------------------------
 def intersect(ro: vec3f32, rd: vec3f32, pixel_size: f32) vec3f32 =
-  let (_, _, _, _, _, _, res_t, res_y) =
+  let (_, t_final, _, _, _, _, res_t, res_y) =
     loop (i, t, os, pd, max_err, stop, rt, ry) = (0, 1.0, 0.0, 100.0, 1000.0, false, 0.0, 0.0)
     while i < 48 do
       if stop then (i + 1, t, os, pd, max_err, stop, rt, ry)
       else
         let c = scene(ro + rd * t) in
         let d = c.x in
-        let (step, os2, pd2) =
+        -- When we overstep (d <= os), back up AND reset d to 1.0 so the
+        -- error metric blows up and we don't lock res_t onto this too-close
+        -- sample. Skipping the d-reset (the naive translation) makes the
+        -- error feedback drift and produces evenly-spaced contour bands
+        -- in empty-space regions.
+        let (step, os2, pd2, d_eff) =
           if d > os then
             let os_new = 0.4 * d * d / pd in
-            (d + os_new, os_new, d)
+            (d + os_new, os_new, d, d)
           else
-            (0.0 - os, 0.0, 100.0)
+            (0.0 - os, 0.0, 100.0, 1.0)
         in
-        let error = d / t in
+        let error = d_eff / t in
         let (max_err2, rt2, ry2) =
           if error < max_err then (error, t, c.y)
           else (max_err, rt, ry)
@@ -107,7 +112,11 @@ def intersect(ro: vec3f32, rd: vec3f32, pixel_size: f32) vec3f32 =
         let stop2 = (error < pixel_size * 0.5) || (t2 > 20.0) in
         (i + 1, t2, os2, pd2, max_err2, stop2, rt2, ry2)
   in
-  let final_t = if res_t > 20.0 then 0.0 - 1.0 else res_t in
+  -- Miss is determined by the final t (where the march actually ended),
+  -- not the best-candidate res_t. Checking res_t instead lets empty-space
+  -- rays report stale "decent-looking" hits they happened to record
+  -- before overshooting.
+  let final_t = if t_final > 20.0 then 0.0 - 1.0 else res_t in
   @[final_t, res_y, 0.0]
 
 ------------------------------------------------------------
@@ -137,7 +146,9 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4
   let stime = 0.7 + 0.3 * f32.sin(iTime * 0.4) in
   let ctime = 0.7 + 0.3 * f32.cos(iTime * 0.4) in
   let ta = @[0.0, 0.0, 0.0] in
-  let ro = @[0.0, 3.0 * stime * ctime, 3.0 * (1.0 - stime * ctime)] in
+  -- 3.5 (vs original's 3.0) pulls the camera back a bit so the
+  -- fractal doesn't fill the whole frame in a 4:3 viewport.
+  let ro = @[0.0, 3.5 * stime * ctime, 3.5 * (1.0 - stime * ctime)] in
   let cf = normalize(ta - ro) in
   let cs = normalize(cross(cf, @[0.0, 1.0, 0.0])) in
   let cu = normalize(cross(cs, cf)) in
@@ -186,7 +197,12 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4
   let c2 = mix(c1, @[gray, gray, gray], 0.0 - 0.5) in
   let v = pow(16.0 * q.x * q.y * (1.0 - q.x) * (1.0 - q.y), 0.7) in
   let c3 = c2 * (0.5 + 0.5 * v) in
-  @[c3.x, c3.y, c3.z, 1.0]
+  -- Interleaved-gradient dither: sub-LSB noise that shifts the 8-bit
+  -- quantization boundaries by a different fraction per pixel so the
+  -- smooth bg gradient stops forming visible isocontours.
+  let dither = fract(52.9829189 * fract(dot(fragCoord, @[0.06711056, 0.00583715, 0.0, 0.0]))) in
+  let c4 = c3 + @[dither - 0.5, dither - 0.5, dither - 0.5] * (1.0 / 255.0) in
+  @[c4.x, c4.y, c4.z, 1.0]
 
 ------------------------------------------------------------
 -- Original GLSL below (commented out)
