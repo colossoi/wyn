@@ -9,9 +9,11 @@
 //! T11 additionally verifies `required_params` — the subset of outer
 //! Lambda params that the restructured body actually references.
 
-use super::parallelize::analyze_entry;
-use super::{ArrayExpr, Def, DefMeta, Lambda, ReduceProps, SoacOp, Term, TermId, TermIdSource, TermKind};
+use super::analyze_entry;
 use crate::ast::{self, Span, TypeName};
+use crate::tlc::{
+    ArrayExpr, Def, DefMeta, Lambda, LoopKind, ReduceProps, SoacOp, Term, TermId, TermIdSource, TermKind,
+};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 
@@ -292,7 +294,7 @@ fn t8_loop_body_rejected() {
             loop_var_ty: i32_ty(),
             init: Box::new(init),
             init_bindings: vec![],
-            kind: super::LoopKind::ForRange {
+            kind: LoopKind::ForRange {
                 var: i,
                 var_ty: i32_ty(),
                 bound: Box::new(bound),

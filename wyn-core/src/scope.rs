@@ -177,3 +177,7 @@ impl<T: Clone> ScopeStack<ScopeEntry<T>> {
         names
     }
 }
+
+#[cfg(test)]
+#[path = "scope_tests.rs"]
+mod scope_tests;

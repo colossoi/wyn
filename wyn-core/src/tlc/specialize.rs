@@ -119,3 +119,7 @@ fn type_prefix(ty: &Type<TypeName>) -> Option<String> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "specialize_tests.rs"]
+mod specialize_tests;

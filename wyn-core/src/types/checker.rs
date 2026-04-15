@@ -2906,3 +2906,7 @@ impl<'a> TypeChecker<'a> {
         Self::types_equal_structural(&a, &b)
     }
 }
+
+#[cfg(test)]
+#[path = "checker_tests.rs"]
+mod checker_tests;

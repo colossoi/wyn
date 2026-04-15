@@ -501,13 +501,13 @@ fn emit_vertex_fragment_output_stores(
 // Converter
 // ============================================================================
 
-pub(super) struct Converter<'a> {
+struct Converter<'a> {
     /// The e-graph being built.
-    pub(super) graph: EGraph,
+    graph: EGraph,
     /// Current skeleton block for side effects and terminators.
     current_block: BlockId,
     /// TLC variable → EGraph node mapping.
-    pub(super) locals: HashMap<SymbolId, NodeId>,
+    locals: HashMap<SymbolId, NodeId>,
     /// Top-level definitions.
     top_level: &'a HashMap<SymbolId, &'a TlcDef>,
     /// Arity-0 defs indexed by name.
@@ -525,7 +525,7 @@ pub(super) struct Converter<'a> {
 }
 
 impl<'a> Converter<'a> {
-    pub(super) fn new(
+    fn new(
         top_level: &'a HashMap<SymbolId, &'a TlcDef>,
         constants_by_name: &'a HashMap<String, SymbolId>,
         symbols: &'a SymbolTable,
@@ -554,7 +554,7 @@ impl<'a> Converter<'a> {
     }
 
     /// Set the return terminator on the current block.
-    pub(super) fn set_return(&mut self, result: Option<NodeId>) {
+    fn set_return(&mut self, result: Option<NodeId>) {
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Return(result);
     }
 
@@ -647,7 +647,7 @@ impl<'a> Converter<'a> {
     /// Production (non-test) function and entry-point conversion goes
     /// through `convert_program`, which returns a `ProgramEgir<Raw>` so the
     /// caller can compose the pipeline explicitly.
-    pub(super) fn elaborate_to_funcbody(
+    fn elaborate_to_funcbody(
         self,
         params: &[(Type<TypeName>, String)],
         return_ty: Type<TypeName>,
@@ -675,7 +675,7 @@ impl<'a> Converter<'a> {
     // Term conversion
     // ========================================================================
 
-    pub(super) fn convert_term(&mut self, term: &Term) -> Result<NodeId, ConvertError> {
+    fn convert_term(&mut self, term: &Term) -> Result<NodeId, ConvertError> {
         let ty = term.ty.clone();
 
         match &term.kind {
@@ -1889,3 +1889,7 @@ fn build_entry_outputs(
         }]
     }
 }
+
+#[cfg(test)]
+#[path = "from_tlc_tests.rs"]
+mod from_tlc_tests;

@@ -2125,3 +2125,7 @@ impl<'a> Defunctionalizer<'a> {
 pub fn defunctionalize(program: Program, known_defs: &HashSet<String>) -> Program {
     Defunctionalizer::defunctionalize(program, known_defs)
 }
+
+#[cfg(test)]
+#[path = "defunctionalize_tests.rs"]
+mod defunctionalize_tests;

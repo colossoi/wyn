@@ -1,8 +1,8 @@
 #![cfg(test)]
 
+use super::{Monomorphizer, SpecKey, Substitution, format_type_compact};
 use crate::ast::{Span, TypeName};
-use crate::tlc::monomorphize::{Monomorphizer, SpecKey, Substitution, format_type_compact};
-use crate::tlc::{Term, TermIdSource, TermKind};
+use crate::tlc::{Term, TermId, TermIdSource, TermKind};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 
@@ -24,7 +24,7 @@ impl TestBuilder {
         self.symbols.alloc(name.to_string())
     }
 
-    fn next_id(&mut self) -> super::TermId {
+    fn next_id(&mut self) -> TermId {
         self.ids.next_id()
     }
 

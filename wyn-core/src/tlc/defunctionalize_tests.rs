@@ -1,6 +1,6 @@
-use super::defunctionalize::defunctionalize;
-use super::{Def, DefMeta, Lambda, LoopKind, Program, Term, TermIdSource, TermKind};
+use super::defunctionalize;
 use crate::ast::{BinaryOp, Span, TypeName};
+use crate::tlc::{Def, DefMeta, Lambda, LoopKind, Program, Term, TermId, TermIdSource, TermKind};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 use std::collections::{HashMap, HashSet};
@@ -23,7 +23,7 @@ impl TestBuilder {
         self.symbols.alloc(name.to_string())
     }
 
-    fn next_id(&mut self) -> super::TermId {
+    fn next_id(&mut self) -> TermId {
         self.ids.next_id()
     }
 

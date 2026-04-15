@@ -256,3 +256,7 @@ pub fn desugar_program(program: &mut Program, nc: &mut NodeCounter) -> Result<()
     let mut desugarer = Desugarer::new(nc);
     desugarer.desugar_program(program)
 }
+
+#[cfg(test)]
+#[path = "desugar_tests.rs"]
+mod desugar_tests;

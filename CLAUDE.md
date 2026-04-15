@@ -58,11 +58,19 @@ cargo run --bin wyn -- check test.wyn
 
 ### Test Organization
 - **Unit tests live in a separate `<modname>_tests.rs` file**, NOT inline in the
-  source file. For `foo.rs`, tests go in `foo_tests.rs` registered as
-  `#[cfg(test)] mod foo_tests;` in the parent `mod.rs`. This keeps source files
+  source file. For `foo.rs`, tests go in `foo_tests.rs` registered as a child
+  module of `foo.rs` itself via `#[path]`:
+  ```rust
+  #[cfg(test)]
+  #[path = "foo_tests.rs"]
+  mod foo_tests;
+  ```
+  Placing the declaration inside `foo.rs` (rather than in the parent `mod.rs`)
+  makes the test module a child of `foo`, so it sees `foo`'s private items for
+  free — no `pub(super)` / `pub(crate)` plumbing. This keeps source files
   focused on implementation and keeps test churn out of source diffs.
-- Existing examples: `tlc/defunctionalize_tests.rs`, `tlc/monomorphize_tests.rs`,
-  `ssa/builder_tests.rs`, `ssa/verify_tests.rs`.
+- Existing examples: `tlc/defunctionalize.rs`, `tlc/fusion.rs`,
+  `egir/from_tlc.rs`, `ssa/builder.rs`.
 
 ### Visualizing SPIR-V Output
 ```bash

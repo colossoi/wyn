@@ -20,6 +20,3 @@ mod soac_expand;
 pub mod types;
 
 pub mod from_tlc;
-
-#[cfg(test)]
-mod from_tlc_tests;

@@ -1,7 +1,5 @@
 mod literal;
 #[cfg(test)]
-mod literal_tests;
-#[cfg(test)]
 mod tests;
 
 use crate::ast::Span;

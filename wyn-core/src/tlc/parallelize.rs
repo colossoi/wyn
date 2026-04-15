@@ -81,7 +81,7 @@ impl SoacAnalysis {
 
 /// Result of analyzing a compute entry point.
 #[derive(Debug, Clone)]
-pub(super) struct EntryAnalysis {
+struct EntryAnalysis {
     pub def_name: SymbolId,
     pub soac: SoacAnalysis,
     /// Let-binding prefix before the SOAC.
@@ -206,7 +206,7 @@ impl ScopeStack {
     }
 }
 
-pub(super) fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
+fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
     let mut scope = ScopeStack::default();
     let mut current: Term = def.body.clone();
 
@@ -1544,3 +1544,7 @@ fn build_default_pipeline(program: &Program) -> PipelineDescriptor {
 
     PipelineDescriptor { pipelines }
 }
+
+#[cfg(test)]
+#[path = "parallelize_tests.rs"]
+mod parallelize_tests;

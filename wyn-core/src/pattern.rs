@@ -242,3 +242,7 @@ fn collect_names(pattern: &Pattern, names: &mut Vec<String>) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "pattern_tests.rs"]
+mod pattern_tests;

@@ -18,7 +18,7 @@ use std::collections::HashMap;
 /// AST-level constant folder for integer constants.
 pub struct AstConstFolder {
     /// Known integer constants: name → value
-    pub(crate) constants: HashMap<String, i64>,
+    constants: HashMap<String, i64>,
 }
 
 impl AstConstFolder {
@@ -416,3 +416,7 @@ pub fn fold_ast_constants(program: &mut Program) {
     let mut folder = AstConstFolder::new();
     folder.fold_program(program);
 }
+
+#[cfg(test)]
+#[path = "ast_const_fold_tests.rs"]
+mod ast_const_fold_tests;

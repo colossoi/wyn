@@ -31,18 +31,7 @@ pub mod resolve_placeholders;
 pub mod spirv;
 
 #[cfg(test)]
-mod alias_checker_tests;
-#[cfg(test)]
-mod ast_const_fold_tests;
-#[cfg(test)]
-mod desugar_tests;
-#[cfg(test)]
-mod pattern_tests;
-
-#[cfg(test)]
 mod integration_tests;
-#[cfg(test)]
-mod scope_tests;
 
 use std::collections::HashMap;
 use std::hash::Hash;

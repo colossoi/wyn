@@ -947,3 +947,7 @@ impl AliasCheckResult {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "alias_checker_tests.rs"]
+mod alias_checker_tests;

@@ -233,3 +233,7 @@ pub fn parse_char_literal(input: &str) -> IResult<&str, Token> {
         Token::CharLiteral,
     )(input)
 }
+
+#[cfg(test)]
+#[path = "literal_tests.rs"]
+mod literal_tests;

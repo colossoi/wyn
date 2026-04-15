@@ -1088,3 +1088,7 @@ pub(crate) fn format_type_compact(ty: &Type<TypeName>) -> String {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "monomorphize_tests.rs"]
+mod monomorphize_tests;

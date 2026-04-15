@@ -685,3 +685,7 @@ impl PartialEvaluator {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "partial_eval_tests.rs"]
+mod partial_eval_tests;

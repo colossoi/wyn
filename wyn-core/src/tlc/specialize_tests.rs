@@ -1,8 +1,8 @@
 #![cfg(test)]
 
+use super::specialize;
 use crate::ast::{Span, TypeName};
-use crate::tlc::specialize::specialize;
-use crate::tlc::{Def, DefMeta, Program, Term, TermIdSource, TermKind};
+use crate::tlc::{Def, DefMeta, Program, Term, TermId, TermIdSource, TermKind};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 use std::collections::HashMap;
@@ -25,7 +25,7 @@ impl TestBuilder {
         self.symbols.alloc(name.to_string())
     }
 
-    fn next_id(&mut self) -> super::TermId {
+    fn next_id(&mut self) -> TermId {
         self.ids.next_id()
     }
 

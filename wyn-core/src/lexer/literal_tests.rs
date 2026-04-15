@@ -1,5 +1,5 @@
-use super::Token;
-use super::literal::*;
+use super::*;
+use crate::lexer::Token;
 
 #[test]
 fn test_hexadecimal_integers() {

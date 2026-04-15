@@ -6,25 +6,15 @@
 pub mod array_semantics;
 pub mod buffer_specialize;
 pub mod defunctionalize;
-#[cfg(test)]
-mod defunctionalize_tests;
 pub mod fusion;
 pub mod inline;
 pub mod monomorphize;
-#[cfg(test)]
-mod monomorphize_tests;
 pub mod normalize;
 pub mod parallelize;
-#[cfg(test)]
-mod parallelize_tests;
 pub mod partial_eval;
-#[cfg(test)]
-mod partial_eval_tests;
 pub mod producer_graph;
 pub mod soa;
 pub mod specialize;
-#[cfg(test)]
-mod specialize_tests;
 
 use crate::ast::{self, NodeId, Span, TypeName};
 use crate::interface;

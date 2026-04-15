@@ -2,7 +2,7 @@
 // Tests
 // ============================================================================
 
-use super::from_tlc::{Converter, convert_program};
+use super::{Converter, convert_program};
 use crate::SymbolId;
 use crate::ast::TypeName;
 use crate::pipeline_descriptor::PipelineDescriptor;

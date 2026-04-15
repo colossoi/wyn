@@ -7,9 +7,6 @@
 
 pub mod checker;
 
-#[cfg(test)]
-mod checker_tests;
-
 use std::collections::HashMap;
 
 // Type aliases for polytype types specialized to our TypeName
