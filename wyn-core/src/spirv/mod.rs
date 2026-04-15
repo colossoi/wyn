@@ -2599,6 +2599,18 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                             Ok(self.constructor.builder.load(result_ty, None, arr_var, None, [])?)
                         }
                     }
+                    Intrinsic::Length => {
+                        // InstKind::Intrinsic for `_w_intrinsic_length` is
+                        // dispatched through `lower_intrinsic`'s name-stripped
+                        // "length" arm above (which knows how to extract the
+                        // size from each array variant). We only end up here
+                        // if a Call instruction with this name reaches the
+                        // builtin path, which shouldn't happen under normal
+                        // SOAC lowering.
+                        bail_spirv!(
+                            "Intrinsic::Length should be lowered via lower_intrinsic, not lower_builtin_call"
+                        )
+                    }
                 }
             }
         }

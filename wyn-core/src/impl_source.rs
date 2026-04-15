@@ -113,6 +113,11 @@ pub enum Intrinsic {
     /// Functional array update: immutable copy-with-update
     /// Note: Could be moved to prelude once array comprehensions or fold is implemented
     ArrayWith,
+    /// `_w_intrinsic_length(arr) -> i32` — array size, distinct from
+    /// vector `magnitude` (which lowers through GlslExt(66)). Can't be a
+    /// PrimOp because GLSL uses method-call syntax `arr.length()` and
+    /// SPIR-V uses OpArrayLength with variant-specific handling.
+    Length,
 }
 
 /// Implementation source for all builtin functions and intrinsics
@@ -724,6 +729,7 @@ impl ImplSource {
             "_w_intrinsic_array_with",
             BuiltinImpl::Intrinsic(Intrinsic::ArrayWith),
         );
+        self.register("_w_intrinsic_length", BuiltinImpl::Intrinsic(Intrinsic::Length));
     }
 
     /// Register polymorphic intrinsics (no type suffix) that come from
@@ -735,6 +741,13 @@ impl ImplSource {
             ("_w_intrinsic_sin", BuiltinImpl::PrimOp(GlslExt(13))),
             ("_w_intrinsic_cos", BuiltinImpl::PrimOp(GlslExt(14))),
             ("_w_intrinsic_tan", BuiltinImpl::PrimOp(GlslExt(15))),
+            ("_w_intrinsic_asin", BuiltinImpl::PrimOp(GlslExt(16))),
+            ("_w_intrinsic_acos", BuiltinImpl::PrimOp(GlslExt(17))),
+            ("_w_intrinsic_atan", BuiltinImpl::PrimOp(GlslExt(18))),
+            ("_w_intrinsic_atan2", BuiltinImpl::PrimOp(GlslExt(25))),
+            ("_w_intrinsic_radians", BuiltinImpl::PrimOp(GlslExt(11))),
+            ("_w_intrinsic_degrees", BuiltinImpl::PrimOp(GlslExt(12))),
+            ("_w_intrinsic_mod", BuiltinImpl::PrimOp(FMod)),
             ("_w_intrinsic_sqrt", BuiltinImpl::PrimOp(GlslExt(31))),
             ("_w_intrinsic_abs", BuiltinImpl::PrimOp(GlslExt(4))),
             ("_w_intrinsic_floor", BuiltinImpl::PrimOp(GlslExt(8))),

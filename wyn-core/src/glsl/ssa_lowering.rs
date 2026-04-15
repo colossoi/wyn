@@ -5,7 +5,7 @@
 
 use crate::ast::{Span, TypeName};
 use crate::error::Result;
-use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
+use crate::impl_source::{BuiltinImpl, ImplSource, Intrinsic, PrimOp};
 use crate::lowering_common::ShaderStage;
 use crate::ssa::types::{ConstantValue, FuncBody, InstKind, ValueId, ValueRef, WynInstNode};
 use crate::ssa::types::{EntryPoint, ExecutionModel, Function, IoDecoration, Program};
@@ -1022,9 +1022,10 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
     ) -> Result<String> {
         match impl_ {
             BuiltinImpl::PrimOp(op) => self.lower_primop(op, args, ret_ty),
-            BuiltinImpl::Intrinsic(intr) => {
-                bail_glsl_at!(self.blame_span(), "Intrinsic {:?} not supported in GLSL", intr)
-            }
+            BuiltinImpl::Intrinsic(intr) => match intr {
+                Intrinsic::Length => Ok(format!("int({}.length())", args[0])),
+                _ => bail_glsl_at!(self.blame_span(), "Intrinsic {:?} not supported in GLSL", intr),
+            },
             BuiltinImpl::LinkedSpirv(name) => {
                 bail_glsl_at!(
                     self.blame_span(),
