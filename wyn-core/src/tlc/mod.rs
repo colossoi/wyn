@@ -1778,6 +1778,41 @@ impl<'a> Transformer<'a> {
 
             ast::ExprKind::FieldAccess(record, field) => {
                 let rec = self.transform_expr(record);
+                // Vec swizzle (1–4 letters of xyzw): build per-letter
+                // projections; single letter → scalar, multi → _w_vec_lit.
+                if !field.is_empty()
+                    && rec.ty.is_vec()
+                    && field.chars().all(|c| matches!(c, 'x' | 'y' | 'z' | 'w'))
+                {
+                    let elem_ty = rec.ty.elem_type().cloned().unwrap_or(ty.clone());
+                    let components: Vec<Term> = field
+                        .chars()
+                        .map(|c| {
+                            let idx = match c {
+                                'x' => 0,
+                                'y' => 1,
+                                'z' => 2,
+                                'w' => 3,
+                                _ => unreachable!(),
+                            };
+                            let idx_lit = self.mk_term(
+                                Type::Constructed(TypeName::Int(32), vec![]),
+                                span,
+                                TermKind::IntLit(idx.to_string()),
+                            );
+                            self.build_app(
+                                "_w_tuple_proj",
+                                vec![rec.clone(), idx_lit],
+                                elem_ty.clone(),
+                                span,
+                            )
+                        })
+                        .collect();
+                    if components.len() == 1 {
+                        return components.into_iter().next().unwrap();
+                    }
+                    return self.build_vec_lit_from_terms(&components, ty, span);
+                }
                 // Resolve field name to index, treat record as tuple
                 let field_idx = self
                     .resolve_field_index(&rec.ty, field)

@@ -2732,20 +2732,19 @@ impl<'a> TypeChecker<'a> {
             );
         }
 
-        // 3. Vec swizzle (x/y/z/w)
-        if matches!(field, "x" | "y" | "z" | "w") {
-            // If already a Vec, extract element type
-            if let Some(elem) = base_ty.elem_type() {
-                if base_ty.is_vec() {
-                    return Ok(elem.clone());
-                }
-            }
-
-            // Otherwise, constrain to Vec and return element type
+        // 3. Vec swizzle: single-letter returns a scalar, 2–4-letter
+        //    returns a vec of that length. Valid letters are {x,y,z,w};
+        //    each letter must be in range for the source vec's length
+        //    (`.z` on a vec2 is a range error, caught here if the size
+        //    is known, otherwise only that the base is a vec).
+        if !field.is_empty()
+            && field.len() <= 4
+            && field.chars().all(|c| matches!(c, 'x' | 'y' | 'z' | 'w'))
+        {
+            // Constrain base to some Vec<_, _>.
             let elem_var = self.context.new_variable();
             let size_var = self.context.new_variable();
-            let want_vec = Type::Constructed(TypeName::Vec, vec![elem_var.clone(), size_var]);
-
+            let want_vec = Type::Constructed(TypeName::Vec, vec![elem_var.clone(), size_var.clone()]);
             self.context.unify(base_ty, &want_vec).map_err(|_| {
                 err_type_at!(
                     *span,
@@ -2755,7 +2754,41 @@ impl<'a> TypeChecker<'a> {
                 )
             })?;
 
-            return Ok(elem_var.apply(&self.context));
+            // If the size is resolved, bounds-check the swizzle letters.
+            let resolved_base = base_ty.apply(&self.context);
+            if let Type::Constructed(TypeName::Vec, args) = &resolved_base {
+                if let Some(Type::Constructed(TypeName::Size(n), _)) = args.get(1) {
+                    for c in field.chars() {
+                        let idx = match c {
+                            'x' => 0,
+                            'y' => 1,
+                            'z' => 2,
+                            'w' => 3,
+                            _ => unreachable!(),
+                        };
+                        if idx >= *n {
+                            bail_type_at!(
+                                *span,
+                                "Swizzle '.{}' uses component '{}' (index {}) but source is vec{}",
+                                field,
+                                c,
+                                idx,
+                                n
+                            );
+                        }
+                    }
+                }
+            }
+
+            let elem = elem_var.apply(&self.context);
+            if field.len() == 1 {
+                return Ok(elem);
+            }
+            // Multi-letter swizzle → a new vec of that length.
+            return Ok(Type::Constructed(
+                TypeName::Vec,
+                vec![elem, Type::Constructed(TypeName::Size(field.len()), vec![])],
+            ));
         }
 
         // 4. Known type fields via impl_source / record_field_map
