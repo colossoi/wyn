@@ -181,25 +181,6 @@ impl DomTree {
 // CfgView implementations
 // ---------------------------------------------------------------------------
 
-/// CfgView adapter for an SSA FuncBody (original CFG).
-pub struct SsaCfgView<'a> {
-    pub body: &'a crate::ssa::types::FuncBody,
-}
-
-impl CfgView for SsaCfgView<'_> {
-    fn entry(&self) -> BlockId {
-        self.body.entry_block()
-    }
-
-    fn all_blocks(&self) -> Vec<BlockId> {
-        self.body.inner.blocks.keys().collect()
-    }
-
-    fn successors(&self, block: BlockId) -> Vec<BlockId> {
-        self.body.inner.blocks[block].term.successors().to_vec()
-    }
-}
-
 /// CfgView adapter for a Skeleton CFG.
 pub struct SkeletonCfgView<'a> {
     pub skeleton: &'a super::types::Skeleton,
