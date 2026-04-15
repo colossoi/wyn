@@ -26,7 +26,7 @@ def ry(p: vec3f32, a: f32) vec3f32 =
 ------------------------------------------------------------
 def mb(p_in: vec3f32) vec3f32 =
   -- Original swizzles p.xyz = p.xzy, i.e. swap y and z.
-  let p = @[p_in.x, p_in.z, p_in.y] in
+  let p = p_in.xzy in
   let power = 8.0 in
   let iters = 7 in
   -- Loop state: (i, z, dr, orbit_min)

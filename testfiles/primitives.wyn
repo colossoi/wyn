@@ -66,7 +66,7 @@ def sdEllipsoid(p:vec3f32, r:vec3f32) f32 =
   k0 * (k0 - 1.0) / k1
 
 def sdTorus(p:vec3f32, t:vec2f32) f32 =
-  let q = @[magnitude(@[p.x, p.z]) - t.x, p.y] in
+  let q = @[magnitude(p.xz) - t.x, p.y] in
   magnitude(q) - t.y
 
 def sdCappedTorus(p:vec3f32, sc:vec2f32, ra:f32, rb:f32) f32 =
@@ -83,7 +83,7 @@ def sdCapsule(p:vec3f32, a:vec3f32, b:vec3f32, r:f32) f32 =
   magnitude(@[pa.x - ba.x*h, pa.y - ba.y*h, pa.z - ba.z*h]) - r
 
 def sdVerticalCylinder(p:vec3f32, h:vec2f32) f32 =
-  let d = @[f32.abs(magnitude(@[p.x, p.z])) - h.x, f32.abs(p.y) - h.y] in
+  let d = @[f32.abs(magnitude(p.xz)) - h.x, f32.abs(p.y) - h.y] in
   f32.min(f32.max(d.x, d.y), 0.0) + magnitude(max(d, @[0.0, 0.0]))
 
 def sdCylinder(p:vec3f32, a:vec3f32, b:vec3f32, r:f32) f32 =
@@ -102,7 +102,7 @@ def sdCylinder(p:vec3f32, a:vec3f32, b:vec3f32, r:f32) f32 =
 
 def sdVerticalCone(p:vec3f32, c:vec2f32, h:f32) f32 =
   let q = @[h * c.x / c.y, 0.0 - h] in
-  let w = @[magnitude(@[p.x, p.z]), p.y] in
+  let w = @[magnitude(p.xz), p.y] in
   let a_t = clamp(dot(w, q) / dot2(q), 0.0, 1.0) in
   let a = @[w.x - q.x*a_t, w.y - q.y*a_t] in
   let b_t = clamp(w.x / q.x, 0.0, 1.0) in
@@ -113,7 +113,7 @@ def sdVerticalCone(p:vec3f32, c:vec2f32, h:f32) f32 =
   f32.sqrt(d) * sign(s)
 
 def sdCappedCone(p:vec3f32, h:f32, r1:f32, r2:f32) f32 =
-  let q = @[magnitude(@[p.x, p.z]), p.y] in
+  let q = @[magnitude(p.xz), p.y] in
   let k1 = @[r2, h] in
   let k2 = @[r2 - r1, 2.0*h] in
   let ca = @[q.x - f32.min(q.x, if q.y < 0.0 then r1 else r2), f32.abs(q.y) - h] in
@@ -123,7 +123,7 @@ def sdCappedCone(p:vec3f32, h:f32, r1:f32, r2:f32) f32 =
   s * f32.sqrt(f32.min(dot2(ca), dot2(cb)))
 
 def sdRoundCone(p:vec3f32, r1:f32, r2:f32, h:f32) f32 =
-  let q = @[magnitude(@[p.x, p.z]), p.y] in
+  let q = @[magnitude(p.xz), p.y] in
   let b = (r1 - r2) / h in
   let a = f32.sqrt(1.0 - b*b) in
   let k = dot(q, @[0.0 - b, a]) in
@@ -137,17 +137,17 @@ def sdOctahedron(p:vec3f32, s:f32) f32 =
   if 3.0*pa.x < m then
     let k = clamp(0.5*(pa.z - pa.y + s), 0.0, s) in magnitude(@[pa.x, pa.y - s + k, pa.z - k])
   else if 3.0*pa.y < m then
-    let q = @[pa.y, pa.z, pa.x] in
+    let q = pa.yzx in
     let k = clamp(0.5*(q.z - q.y + s), 0.0, s) in magnitude(@[q.x, q.y - s + k, q.z - k])
   else if 3.0*pa.z < m then
-    let q = @[pa.z, pa.x, pa.y] in
+    let q = pa.zxy in
     let k = clamp(0.5*(q.z - q.y + s), 0.0, s) in magnitude(@[q.x, q.y - s + k, q.z - k])
   else m * 0.57735027
 
 def sdPyramid(p:vec3f32, h:f32) f32 =
   let m2 = h*h + 0.25 in
   let pxz = @[f32.abs(p.x), f32.abs(p.z)] in
-  let pxz2 = if pxz.y > pxz.x then @[pxz.y, pxz.x] else pxz in
+  let pxz2 = if pxz.y > pxz.x then pxz.yx else pxz in
   let pxz3 = @[pxz2.x - 0.5, pxz2.y - 0.5] in
   let q = @[pxz3.y, h*p.y - 0.5*pxz3.x, h*pxz3.x + 0.5*p.y] in
   let s = f32.max(0.0 - q.x, 0.0) in

@@ -243,7 +243,7 @@ def circle(weight:f32, p:vec2f32, c:vec2f32, r:f32, w:f32) f32 =
 def edge_line(verts: [8]vec3f32, weight: f32, uv: vec2f32, line_width: f32, e: [2]i32) f32 =
   let a = verts[e[0]] in
   let b = verts[e[1]] in
-  line(weight, uv, @[a.x, a.y], @[b.x, b.y], line_width)
+  line(weight, uv, a.xy, b.xy, line_width)
 
 def sum_edges(verts: [8]vec3f32, weight: f32, uv: vec2f32, line_width: f32, edges: [12][2]i32) f32 =
   let (_, acc) = loop (i, acc) = (0, 0.0f32) while i < 12 do
@@ -373,7 +373,7 @@ def main_image(iResolution:vec2f32, iTime:f32, fragCoord:vec2f32) vec4f32 =
       let zinv = 1.0 / v4.z in
       let vert : vec3f32 = @[(v4.x*zinv), (v4.y*zinv), zinv] in
       let sh  = fragment(vert, iTime) in
-      let cov = circle(weight, uv, @[vert.x, vert.y], -vert.z, line_width) in
+      let cov = circle(weight, uv, vert.xy, -vert.z, line_width) in
       let sh_scaled = sh * cov in
       let acc' = acc + sh_scaled in
       (idx + 1, acc') in
@@ -387,4 +387,4 @@ entry fragment_main(#[builtin(frag_coord)] pos:vec4f32) #[location(0)] vec4f32 =
   let width = iResolution.x in
   let height = iResolution.y in
   let time = iTime in
-  main_image(@[width, height], time, @[pos.x, pos.y])
+  main_image(@[width, height], time, pos.xy)

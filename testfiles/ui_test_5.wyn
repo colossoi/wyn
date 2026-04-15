@@ -443,7 +443,7 @@ def graphUI(p0: vec2f32) f32 =
   let p1 = @[p0.x + 0.5, (p0.y - iTime * 0.25) * 100.0] in
   let gv = @[fract(p1.x) - 0.5, fract(p1.y) - 0.5] in
   let id = @[p1.x - fract(p1.x), p1.y - fract(p1.y)] in
-  let n  = hash21(@[id.y, id.y]) * 2.0 in
+  let n  = hash21(id.yy) * 2.0 in
   let w  = (f32.abs(f32.sin(iTime * n) + 0.25) * 0.03) * n * 0.5 in
   let d0 = box(gv, @[w, 0.1]) in
   let d1 = f32.max(f32.abs(p0.x) - 0.2, d0) in
@@ -523,7 +523,7 @@ def thicknessAt(t: f32) f32 =
 def getDist(p0: vec3f32) f32 =
   let p  = @[p0.x, p0.y, p0.z + 0.7] in
   let th = thicknessAt(iTime) in
-  let xy = @[p.x, p.y] in
+  let xy = p.xy in
   -- Each slab is the intersection of its ring SDF with a thin Z slice.
   let slabs: [7]f32 = [
     intersect(f32.abs(p.z)       - th, ring0(xy)),
@@ -592,10 +592,10 @@ def cameraOrigin(uv: vec2f32) vec3f32 =
   -- Rotate base (0, 0, -2.1) around X (yz plane) then Y (xz plane).
   let ro0 = @[0.0, 0.0, 0.0 - 2.1] in
   let r1  = rot(radians(yz)) in
-  let yz_in = @[ro0.y, ro0.z] * r1 in
+  let yz_in = ro0.yz * r1 in
   let ro1 = @[ro0.x, yz_in.x, yz_in.y] in
   let r2  = rot(radians(f32.sin(iTime * 0.3) * animRXZ + ogRXZ)) in
-  let xz_in = @[ro1.x, ro1.z] * r2 in
+  let xz_in = ro1.xz * r2 in
   @[xz_in.x, ro1.y, xz_in.y]
 
 #[fragment]
