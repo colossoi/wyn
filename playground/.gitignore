@@ -1,0 +1,14 @@
+.DS_Store
+.env
+/node_modules/
+
+# React Router
+/.react-router/
+/build/
+/dist/
+
+# wasm-pack output (rebuilt via `npm run build:wasm`)
+/app/lib/wasm-pkg/
+
+# Wrangler local state
+/.wrangler/

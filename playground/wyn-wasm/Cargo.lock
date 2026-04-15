@@ -434,17 +434,10 @@ dependencies = [
  "rspirv",
  "serde",
  "serde_json",
- "spirv",
- "thiserror",
- "wyn-ssa",
-]
-
-[[package]]
-name = "wyn-ssa"
-version = "0.1.0"
-dependencies = [
  "slotmap",
  "smallvec",
+ "spirv",
+ "thiserror",
 ]
 
 [[package]]

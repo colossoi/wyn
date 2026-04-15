@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "wyn-playground",
+  "compatibility_date": "2025-04-15",
+  "main": "./workers/app.ts",
+  "assets": {
+    "binding": "ASSETS",
+    "directory": "./dist/client"
+  },
+  "observability": {
+    "enabled": true
+  }
+}

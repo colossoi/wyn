@@ -1,57 +1,75 @@
 # Wyn Playground
 
-A web-based shader editor for Wyn, similar to Shadertoy. Write Wyn code, compile it to GLSL, and see your shaders run in real-time.
+Browser-based playground for the Wyn shader language: write Wyn, compile to GLSL in-browser via WASM, see the shader run on a WebGL canvas in real time. Built on React Router v7 (SSR) deployed to Cloudflare Pages via a Worker.
 
 ## Prerequisites
 
-- [Deno](https://deno.land/) (for the web server)
-- [wasm-pack](https://rustwasm.github.io/wasm-pack/) (for building the WASM compiler)
-- Rust toolchain with `wasm32-unknown-unknown` target
+- Node.js 20+
+- [wasm-pack](https://rustwasm.github.io/wasm-pack/) and a Rust toolchain with `wasm32-unknown-unknown`
+- Optional, for deploys: a Cloudflare account + `wrangler` (installed as a devDep)
 
 ## Setup
 
-1. Build the WASM compiler module:
-
 ```bash
-cd wyn-wasm
-wasm-pack build --target web --out-dir ../web/static/pkg
+cd playground
+npm install
+npm run build:wasm        # produces public/pkg/* via wasm-pack
 ```
 
-2. Start the development server:
+## Development
 
 ```bash
-cd web
-deno task dev
+npm run dev               # Vite dev server with HMR — http://localhost:5173
 ```
 
-3. Open http://localhost:8080 in your browser
+## Production build + local preview
 
-## Project Structure
+```bash
+npm run build             # rebuilds wasm + react-router build → build/{client,server}/
+npm run preview           # wrangler dev — serves the Worker against the built bundle
+```
+
+## Deploy to Cloudflare Pages
+
+**CLI**:
+```bash
+npm run deploy            # npm run build && wrangler deploy
+```
+First run prompts for Cloudflare auth.
+
+**Git integration**: point the Pages project at this repo with build command `cd playground && npm install && npm run build` and output directory `playground/dist/client`. The Worker entry is picked up from `wrangler.jsonc` automatically.
+
+## Project structure
 
 ```
 playground/
-├── wyn-wasm/           # Rust crate that compiles to WASM
-│   ├── Cargo.toml
-│   └── src/
-│       └── lib.rs      # WASM bindings for wyn-core
-├── web/                # Deno web server + frontend
-│   ├── deno.json
-│   ├── server.ts       # Simple static file server
-│   └── static/
-│       ├── index.html  # Main UI
-│       ├── app.js      # JavaScript application
-│       └── pkg/        # Built WASM files (generated)
-└── README.md
+├── app/                  # React Router app
+│   ├── root.tsx          # html shell + CodeMirror CDN script
+│   ├── routes/home.tsx   # playground orchestrator (state + flow)
+│   ├── components/       # Editor, Preview, IRTree, StatusBar
+│   ├── lib/wasm.ts       # WASM init + typed bindings
+│   ├── lib/webgl.ts      # shader compile + RAF loop
+│   └── app.css           # global stylesheet
+├── workers/app.ts        # Cloudflare Worker entry — runs the SSR handler
+├── public/
+│   ├── pkg/              # wasm-pack output (gitignored, rebuilt by build:wasm)
+│   └── _headers          # Cloudflare COOP/COEP headers
+├── wyn-wasm/             # Rust crate compiled to WASM
+├── react-router.config.ts
+├── vite.config.ts
+├── wrangler.jsonc
+└── package.json
 ```
 
-## Usage
+## Rebuilding after changes to `wyn-core`
 
-- Write your Wyn shader code in the editor
-- Press "Compile & Run" or Ctrl+Enter to compile and display
-- The generated GLSL is shown in the output panel
-- Supported Shadertoy uniforms: `iResolution`, `iTime`, `iMouse`
+```bash
+npm run build:wasm        # picks up the latest wyn-core via the cargo workspace
+```
 
-## Example Shader
+The dev server hot-reloads the JS/TSX side automatically; only the WASM rebuild needs an explicit step.
+
+## Example shader
 
 ```wyn
 #[uniform(set=0, binding=0)] def iResolution: vec2f32
@@ -75,13 +93,4 @@ def fragment_main(#[builtin(position)] fragCoord: vec4f32) -> #[location(0)] vec
   @[r, g, b, 1.0]
 ```
 
-## Rebuilding After Changes
-
-If you modify `wyn-core`, rebuild the WASM module:
-
-```bash
-cd wyn-wasm
-wasm-pack build --target web --out-dir ../web/static/pkg
-```
-
-Then refresh the browser to load the updated compiler.
+Supported Shadertoy uniforms: `iResolution`, `iTime`, `iMouse`.

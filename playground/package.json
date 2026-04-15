@@ -1,0 +1,29 @@
+{
+  "name": "wyn-playground",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:wasm": "cd wyn-wasm && wasm-pack build --target web --out-dir ../app/lib/wasm-pkg",
+    "build": "npm run build:wasm && react-router build",
+    "dev": "react-router dev",
+    "preview": "wrangler dev",
+    "deploy": "npm run build && wrangler deploy",
+    "typecheck": "react-router typegen && tsc"
+  },
+  "dependencies": {
+    "@react-router/cloudflare": "7.14.1",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "react-router": "7.14.1"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.0.0",
+    "@cloudflare/workers-types": "^4.20250101.0",
+    "@react-router/dev": "7.14.1",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "typescript": "^5.9.3",
+    "vite": "^8.0.3",
+    "wrangler": "^3.99.0"
+  }
+}
