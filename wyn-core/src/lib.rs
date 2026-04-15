@@ -38,7 +38,7 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 
 use egir::from_tlc::ConvertError;
-use egir::pipeline::EgirRaw;
+use egir::program::EgirInner;
 
 use indexmap::IndexMap;
 
@@ -433,7 +433,7 @@ pub struct Desugared {
 impl Desugared {
     /// Resolve names: rewrite FieldAccess -> QualifiedName and load modules
     pub fn resolve(mut self, module_manager: &module_manager::ModuleManager) -> Result<Resolved> {
-        name_resolution::resolve_program(&mut self.ast, module_manager)?;
+        name_resolution::run(&mut self.ast, module_manager)?;
         Ok(Resolved { ast: self.ast })
     }
 }
@@ -446,7 +446,7 @@ pub struct Resolved {
 impl Resolved {
     /// Fold AST-level integer constants (required before type checking)
     pub fn fold_ast_constants(mut self) -> AstConstFoldedEarly {
-        ast_const_fold::fold_ast_constants(&mut self.ast);
+        ast_const_fold::run(&mut self.ast);
         AstConstFoldedEarly { ast: self.ast }
     }
 }
@@ -675,7 +675,7 @@ impl TlcPartialEvaled {
     /// SoA transform + SOAC normalization: rewrite array-of-tuple types,
     /// flatten Map+Zip into multi-input Map, and convert standalone Zip to tuple.
     pub fn normalize_soacs(self) -> TlcSoaNormalized {
-        let normalized = tlc::soa::normalize(self.tlc);
+        let normalized = tlc::soa::run(self.tlc);
         TlcSoaNormalized {
             tlc: normalized,
             type_table: self.type_table,
@@ -696,7 +696,7 @@ pub struct TlcSoaNormalized {
 impl TlcSoaNormalized {
     /// Fuse consecutive SOAC operations to eliminate intermediate arrays.
     pub fn fuse_maps(self) -> TlcFused {
-        let fused = tlc::fusion::fuse(self.tlc);
+        let fused = tlc::fusion::run(self.tlc);
 
         TlcFused {
             tlc: fused,
@@ -740,7 +740,7 @@ impl TlcDefunctionalized {
     /// Specialize polymorphic intrinsics and monomorphize user functions.
     pub fn monomorphize(self) -> TlcMonomorphized {
         // Specialize polymorphic intrinsics (sign → f32.sign, etc.)
-        let specialized = tlc::specialize::specialize(self.tlc);
+        let specialized = tlc::specialize::run(self.tlc);
 
         // Convert string-keyed schemes to SymbolId-keyed for monomorphization
         let name_to_sym: HashMap<&str, SymbolId> =
@@ -752,7 +752,7 @@ impl TlcDefunctionalized {
             .collect();
 
         // Monomorphize polymorphic user functions
-        let monomorphized = tlc::monomorphize::monomorphize(specialized, &schemes_by_sym);
+        let monomorphized = tlc::monomorphize::run(specialized, &schemes_by_sym);
         monomorphized.assert_flat_apps();
         TlcMonomorphized {
             tlc: monomorphized,
@@ -771,7 +771,7 @@ impl TlcMonomorphized {
     /// Specialize functions that take view-array parameters per-buffer.
     /// After this pass, no `DefMeta::Function` has view-array parameters.
     pub fn buffer_specialize(self) -> TlcBufferSpecialized {
-        let specialized = tlc::buffer_specialize::buffer_specialize(self.tlc);
+        let specialized = tlc::buffer_specialize::run(self.tlc);
         specialized.assert_flat_apps();
         TlcBufferSpecialized {
             tlc: specialized,
@@ -790,7 +790,7 @@ impl TlcBufferSpecialized {
     /// Inline compiler-generated `_w_lambda_*` defs back at their call sites,
     /// then remove unreferenced defs (DCE).
     pub fn fold_generated_lambdas(self) -> TlcGeneratedLambdasFolded {
-        let inlined = tlc::inline::inline(self.tlc);
+        let inlined = tlc::inline::run_large(self.tlc);
         inlined.assert_flat_apps();
         TlcGeneratedLambdasFolded {
             tlc: inlined,
@@ -808,7 +808,7 @@ pub struct TlcGeneratedLambdasFolded {
 impl TlcGeneratedLambdasFolded {
     /// Inline small user functions and constants at their call/reference sites.
     pub fn inline_small(self) -> TlcSmallInlined {
-        let tlc = tlc::inline::inline_small(self.tlc);
+        let tlc = tlc::inline::run_small(self.tlc);
         TlcSmallInlined {
             tlc,
             type_table: self.type_table,
@@ -817,7 +817,7 @@ impl TlcGeneratedLambdasFolded {
 
     /// Eliminate unreachable defs (dead code elimination at TLC level).
     pub fn filter_reachable(self) -> TlcReachable {
-        let tlc = tlc::inline::eliminate_dead_defs(self.tlc);
+        let tlc = tlc::inline::run_reachable(self.tlc);
         TlcReachable {
             tlc,
             pipeline: pipeline_descriptor::PipelineDescriptor::default(),
@@ -830,7 +830,7 @@ impl TlcGeneratedLambdasFolded {
     /// explicitly — materialize is the only optional pass and is required for
     /// SPIR-V but not GLSL.
     pub fn to_egraph(self) -> std::result::Result<EgirRaw, ConvertError> {
-        egir::from_tlc::convert_program(&self.tlc, pipeline_descriptor::PipelineDescriptor::default())
+        egir::from_tlc::run(&self.tlc, pipeline_descriptor::PipelineDescriptor::default()).map(EgirRaw)
     }
 }
 
@@ -843,7 +843,7 @@ pub struct TlcSmallInlined {
 impl TlcSmallInlined {
     /// Parallelize SOACs in compute entry points at the TLC level.
     pub fn parallelize_soacs(self) -> TlcParallelized {
-        let result = tlc::parallelize::parallelize_soacs(self.tlc);
+        let result = tlc::parallelize::run(self.tlc);
         TlcParallelized {
             tlc: result.program,
             pipeline: result.pipeline,
@@ -853,7 +853,7 @@ impl TlcSmallInlined {
 
     /// Eliminate unreachable defs (dead code elimination at TLC level).
     pub fn filter_reachable(self) -> TlcReachable {
-        let tlc = tlc::inline::eliminate_dead_defs(self.tlc);
+        let tlc = tlc::inline::run_reachable(self.tlc);
         TlcReachable {
             tlc,
             pipeline: pipeline_descriptor::PipelineDescriptor::default(),
@@ -866,7 +866,7 @@ impl TlcSmallInlined {
     /// explicitly — materialize is the only optional pass and is required for
     /// SPIR-V but not GLSL.
     pub fn to_egraph(self) -> std::result::Result<EgirRaw, ConvertError> {
-        egir::from_tlc::convert_program(&self.tlc, pipeline_descriptor::PipelineDescriptor::default())
+        egir::from_tlc::run(&self.tlc, pipeline_descriptor::PipelineDescriptor::default()).map(EgirRaw)
     }
 }
 
@@ -880,7 +880,7 @@ pub struct TlcParallelized {
 impl TlcParallelized {
     /// Eliminate unreachable defs (dead code elimination at TLC level).
     pub fn filter_reachable(self) -> TlcReachable {
-        let tlc = tlc::inline::eliminate_dead_defs(self.tlc);
+        let tlc = tlc::inline::run_reachable(self.tlc);
         TlcReachable {
             tlc,
             pipeline: self.pipeline,
@@ -889,7 +889,7 @@ impl TlcParallelized {
     }
 
     pub fn to_egraph(self) -> std::result::Result<EgirRaw, ConvertError> {
-        egir::from_tlc::convert_program(&self.tlc, self.pipeline)
+        egir::from_tlc::run(&self.tlc, self.pipeline).map(EgirRaw)
     }
 }
 
@@ -903,7 +903,163 @@ pub struct TlcReachable {
 
 impl TlcReachable {
     pub fn to_egraph(self) -> std::result::Result<EgirRaw, ConvertError> {
-        egir::from_tlc::convert_program(&self.tlc, self.pipeline)
+        egir::from_tlc::run(&self.tlc, self.pipeline).map(EgirRaw)
+    }
+}
+
+// =============================================================================
+// EGIR typestate chain
+//
+// Four newtypes over a shared `EgirInner` (defined in `egir::program`).
+// Transitions consume `self` and re-wrap the inner into the next newtype.
+// Pass modules in `egir::*` are called per-body from inside the transitions
+// and are unaware of the newtype wrapping.
+// =============================================================================
+
+/// Raw EGIR program, directly produced by TLC → EGIR conversion.
+pub struct EgirRaw(EgirInner);
+
+/// EGIR after SOAC lowering: every `PendingSoac::{Map, Scan, Reduce, …}` in
+/// the skeleton has been expanded to explicit loops / unrolled code.
+pub struct EgirSoacExpanded(EgirInner);
+
+/// EGIR after materialization: dynamic `Index` into non-materialized composite
+/// values has been rewritten to `Materialize` + `DynamicExtract`. SPIR-V only.
+pub struct EgirMaterialized(EgirInner);
+
+/// EGIR after skeleton-CFG optimizations (LICM, dead-block elim, etc).
+pub struct EgirSkelOptimized(EgirInner);
+
+impl EgirRaw {
+    /// `unroll_maps`: whether to unroll small-constant-length Maps into
+    /// straight-line code. Typically `true` for SPIR-V and `false` for GLSL
+    /// (where drivers unroll themselves and the structurizer prefers loops).
+    pub fn expand_soacs(self, unroll_maps: bool) -> EgirSoacExpanded {
+        let EgirRaw(mut inner) = self;
+        for f in &mut inner.functions {
+            egir::soac_expand::run(&mut f.graph, &mut f.control_headers, unroll_maps);
+        }
+        for e in &mut inner.entry_points {
+            egir::soac_expand::run(&mut e.graph, &mut e.control_headers, unroll_maps);
+        }
+        EgirSoacExpanded(inner)
+    }
+}
+
+impl EgirSoacExpanded {
+    pub fn materialize(self) -> EgirMaterialized {
+        let EgirSoacExpanded(mut inner) = self;
+        for f in &mut inner.functions {
+            egir::materialize::run(&mut f.graph);
+        }
+        for e in &mut inner.entry_points {
+            egir::materialize::run(&mut e.graph);
+        }
+        EgirMaterialized(inner)
+    }
+
+    pub fn optimize_skeleton(self) -> EgirSkelOptimized {
+        let EgirSoacExpanded(inner) = self;
+        EgirSkelOptimized(egir_optimize_skeleton(inner))
+    }
+}
+
+impl EgirMaterialized {
+    pub fn optimize_skeleton(self) -> EgirSkelOptimized {
+        let EgirMaterialized(inner) = self;
+        EgirSkelOptimized(egir_optimize_skeleton(inner))
+    }
+}
+
+fn egir_optimize_skeleton(mut inner: EgirInner) -> EgirInner {
+    for f in &mut inner.functions {
+        let new_aliases = egir::skel_opt::run(&mut f.graph);
+        f.aliases.extend(new_aliases);
+    }
+    for e in &mut inner.entry_points {
+        let new_aliases = egir::skel_opt::run(&mut e.graph);
+        e.aliases.extend(new_aliases);
+    }
+    inner
+}
+
+impl EgirSkelOptimized {
+    /// Terminal step: lower each per-body e-graph to SSA and assemble the
+    /// final `SsaConverted`.
+    pub fn elaborate(self) -> SsaConverted {
+        use egir::domtree::{DomTree, SkeletonCfgView};
+        use ssa::types::{BlockId, EntryPoint, Function};
+        use std::collections::HashMap as Map;
+
+        let EgirSkelOptimized(inner) = self;
+
+        let functions: Vec<Function> = inner
+            .functions
+            .into_iter()
+            .map(|f| {
+                let body =
+                    elaborate_one_body(f.graph, &f.control_headers, &f.aliases, &f.params, f.return_ty);
+                Function {
+                    name: f.name,
+                    body,
+                    span: f.span,
+                    linkage_name: f.linkage_name,
+                }
+            })
+            .chain(inner.externs.into_iter())
+            .collect();
+
+        let entry_points: Vec<EntryPoint> = inner
+            .entry_points
+            .into_iter()
+            .map(|e| {
+                let body =
+                    elaborate_one_body(e.graph, &e.control_headers, &e.aliases, &e.params, e.return_ty);
+                EntryPoint {
+                    name: e.name,
+                    body,
+                    execution_model: e.execution_model,
+                    inputs: e.inputs,
+                    outputs: e.outputs,
+                    storage_bindings: e.storage_bindings,
+                    span: e.span,
+                }
+            })
+            .collect();
+
+        fn elaborate_one_body(
+            graph: egir::types::EGraph,
+            control_headers: &Map<BlockId, ssa::types::ControlHeader>,
+            aliases: &Map<egir::types::NodeId, egir::types::NodeId>,
+            params: &[(polytype::Type<ast::TypeName>, String)],
+            return_ty: polytype::Type<ast::TypeName>,
+        ) -> ssa::types::FuncBody {
+            let skel_domtree = DomTree::build(&SkeletonCfgView {
+                skeleton: &graph.skeleton,
+            });
+            let identity_map: Map<BlockId, BlockId> =
+                graph.skeleton.blocks.keys().map(|b| (b, b)).collect();
+            egir::elaborate::run(
+                &graph,
+                &skel_domtree,
+                params,
+                return_ty,
+                control_headers,
+                &identity_map,
+                aliases,
+            )
+        }
+
+        SsaConverted {
+            ssa: ssa::types::Program {
+                functions,
+                entry_points,
+                constants: inner.constants,
+                uniforms: inner.uniforms,
+                storage: inner.storage,
+            },
+            pipeline: inner.pipeline,
+        }
     }
 }
 

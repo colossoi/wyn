@@ -10,7 +10,7 @@ use crate::types::TypeExt;
 use polytype::Type;
 
 /// Specialize polymorphic intrinsics in a TLC program.
-pub fn specialize(program: Program) -> Program {
+pub fn run(program: Program) -> Program {
     let mut symbols = program.symbols;
     let mut term_ids = TermIdSource::new();
 

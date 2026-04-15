@@ -28,11 +28,7 @@ use super::types::{
 /// elements is unrolled into straight-line code. GLSL targets pass `false`
 /// (the GLSL structurizer prefers explicit loops; GLSL drivers unroll on
 /// their own).
-pub fn expand_soacs(
-    graph: &mut EGraph,
-    control_headers: &mut HashMap<BlockId, ControlHeader>,
-    unroll_maps: bool,
-) {
+pub fn run(graph: &mut EGraph, control_headers: &mut HashMap<BlockId, ControlHeader>, unroll_maps: bool) {
     // Collect (block, index) of every handleable Soac in a stable order.
     // Process back-to-front within each block so earlier indices stay valid.
     let mut targets: Vec<(BlockId, usize)> = Vec::new();

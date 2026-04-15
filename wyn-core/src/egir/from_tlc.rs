@@ -21,9 +21,8 @@ use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 use smallvec::{SmallVec, smallvec};
 
-use super::pipeline::{EgirRaw, EntryEgir, FuncEgir, ProgramEgir, Raw};
+use super::program::{EgirEntry, EgirFunc, EgirInner};
 use super::types::*;
-use crate::ast::Span;
 use crate::pipeline_descriptor::PipelineDescriptor;
 
 // ============================================================================
@@ -57,10 +56,7 @@ impl std::error::Error for ConvertError {}
 /// point becomes a per-body `EGraph` + metadata, waiting for the caller to
 /// chain the pipeline (`expand_soacs → [materialize →] optimize_skeleton →
 /// elaborate`).
-pub fn convert_program(
-    program: &TlcProgram,
-    pipeline: PipelineDescriptor,
-) -> Result<EgirRaw, ConvertError> {
+pub fn run(program: &TlcProgram, pipeline: PipelineDescriptor) -> Result<EgirInner, ConvertError> {
     let top_level: HashMap<SymbolId, &TlcDef> = program.defs.iter().map(|d| (d.name, d)).collect();
     let symbols = &program.symbols;
 
@@ -110,9 +106,9 @@ pub fn convert_program(
     }
 
     // Phase 2: convert functions and entry points into raw EGIR records.
-    let mut functions: Vec<FuncEgir<Raw>> = Vec::new();
+    let mut functions: Vec<EgirFunc> = Vec::new();
     let mut externs: Vec<Function> = Vec::new();
-    let mut entry_points: Vec<EntryEgir<Raw>> = Vec::new();
+    let mut entry_points: Vec<EgirEntry> = Vec::new();
 
     for def in &program.defs {
         match &def.meta {
@@ -141,7 +137,7 @@ pub fn convert_program(
         }
     }
 
-    Ok(ProgramEgir::new(
+    Ok(EgirInner::new(
         functions,
         externs,
         entry_points,
@@ -154,7 +150,7 @@ pub fn convert_program(
 
 enum ConvertedFunc {
     Extern(Function),
-    Regular(FuncEgir<Raw>),
+    Regular(EgirFunc),
 }
 
 // ============================================================================
@@ -209,7 +205,7 @@ fn convert_function(
     converter.set_return(Some(result));
 
     let (graph, control_headers) = converter.into_graph_parts();
-    Ok(ConvertedFunc::Regular(FuncEgir::new(
+    Ok(ConvertedFunc::Regular(EgirFunc::new(
         def_name,
         def.body.span,
         None,
@@ -229,7 +225,7 @@ fn convert_entry_point(
     constants_by_name: &HashMap<String, SymbolId>,
     symbols: &SymbolTable,
     pure_constants: &HashSet<String>,
-) -> Result<EntryEgir<Raw>, ConvertError> {
+) -> Result<EgirEntry, ConvertError> {
     use crate::ssa::types::{EntryInput, ExecutionModel, IoDecoration};
 
     let def_name = symbols.get(def.name).expect("BUG: symbol not in table").clone();
@@ -353,7 +349,7 @@ fn convert_entry_point(
     }
 
     let (graph, control_headers) = converter.into_graph_parts();
-    Ok(EntryEgir::new(
+    Ok(EgirEntry::new(
         def_name,
         def.body.span,
         execution_model,
@@ -644,7 +640,7 @@ impl<'a> Converter<'a> {
 
     /// Extract the built EGraph + control_headers, leaving the rest of the
     /// Converter state behind. Used by the top-level `convert_program`
-    /// phase to feed a ready-to-chain `FuncEgir<Raw>` / `EntryEgir<Raw>`.
+    /// phase to feed a ready-to-chain `EgirFunc` / `EgirEntry`.
     fn into_graph_parts(self) -> (EGraph, HashMap<BlockId, ControlHeader>) {
         (self.graph, self.control_headers)
     }
@@ -657,26 +653,30 @@ impl<'a> Converter<'a> {
     ///   * the inline tests in `mod tests` below.
     ///
     /// Production (non-test) function and entry-point conversion goes
-    /// through `convert_program`, which returns a `ProgramEgir<Raw>` so the
-    /// caller can compose the pipeline explicitly.
+    /// through `run`, which returns an `EgirInner` the caller wraps via
+    /// `EgirRaw` to compose the pipeline explicitly.
     fn elaborate_to_funcbody(
         self,
         params: &[(Type<TypeName>, String)],
         return_ty: Type<TypeName>,
     ) -> Option<FuncBody> {
-        let (graph, control_headers) = self.into_graph_parts();
-        let func = FuncEgir::<Raw>::new(
-            "<probe>".to_string(),
-            Span::new(0, 0, 0, 0),
-            None,
-            params.to_vec(),
+        let (mut graph, mut control_headers) = self.into_graph_parts();
+        super::soac_expand::run(&mut graph, &mut control_headers, true);
+        let aliases = super::skel_opt::run(&mut graph);
+        let skel_domtree = super::domtree::DomTree::build(&super::domtree::SkeletonCfgView {
+            skeleton: &graph.skeleton,
+        });
+        let identity_map: HashMap<BlockId, BlockId> =
+            graph.skeleton.blocks.keys().map(|b| (b, b)).collect();
+        Some(super::elaborate::run(
+            &graph,
+            &skel_domtree,
+            params,
             return_ty,
-            graph,
-            control_headers,
-        );
-        let elaborated =
-            ProgramEgir::single_function(func).expand_soacs(true).optimize_skeleton().elaborate();
-        elaborated.ssa.functions.into_iter().next().map(|f| f.body)
+            &control_headers,
+            &identity_map,
+            &aliases,
+        ))
     }
 
     fn probe_constant_body(self, return_ty: Type<TypeName>) -> Option<FuncBody> {

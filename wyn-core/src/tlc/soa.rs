@@ -1085,7 +1085,7 @@ impl SoaTransformer {
 ///    that touch array-of-tuple types.
 /// 2. Flattens Map+Zip into multi-input Map with split lambda params.
 /// 3. Converts standalone Zip to tuple construction.
-pub fn normalize(program: Program) -> Program {
+pub fn run(program: Program) -> Program {
     let transformer = SoaTransformer::new(program.symbols.clone());
     transformer.transform_program(program)
 }

@@ -31,7 +31,7 @@ use super::types::*;
 /// merged into the extraction's `best` map so any incidental demand of
 /// a stripped param — e.g., via a Pure node hash-consed with the param
 /// in its operands — transparently redirects to the replacement.
-pub fn elaborate(
+pub fn run(
     graph: &EGraph,
     domtree: &DomTree,
     params: &[(Type<TypeName>, String)],

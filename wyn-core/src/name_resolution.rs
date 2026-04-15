@@ -38,7 +38,7 @@ fn collect_pattern_bindings(pattern: &crate::ast::Pattern, scope: &mut ScopeStac
 }
 
 /// Resolve names in a program by rewriting FieldAccess -> QualifiedName
-pub fn resolve_program(program: &mut Program, module_manager: &ModuleManager) -> Result<()> {
+pub fn run(program: &mut Program, module_manager: &ModuleManager) -> Result<()> {
     for decl in &mut program.declarations {
         resolve_declaration(decl, module_manager)?;
     }

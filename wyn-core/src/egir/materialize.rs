@@ -24,7 +24,7 @@ use super::types::{EGraph, ENode, NodeId, PureOp};
 /// Rewrite all dynamic Index nodes in the e-graph to Materialize +
 /// DynamicExtract. Called by the typestate transition
 /// `EGraphSoacExpanded::materialize`.
-pub(super) fn run(graph: &mut EGraph) {
+pub(crate) fn run(graph: &mut EGraph) {
     // Snapshot first; we'll mutate node entries and add new Materialize nodes.
     let targets: Vec<(NodeId, NodeId, NodeId)> = graph
         .nodes

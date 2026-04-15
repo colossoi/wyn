@@ -92,7 +92,7 @@ fn extract_params(term: &Term) -> (Vec<(SymbolId, Type<TypeName>)>, &Term) {
 }
 
 /// Run buffer specialization on a TLC program.
-pub fn buffer_specialize(program: Program) -> Program {
+pub fn run(program: Program) -> Program {
     let mut specializer = BufferSpecializer {
         symbols: program.symbols,
         term_ids: TermIdSource::new(),

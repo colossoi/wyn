@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use super::specialize;
+use super::run;
 use crate::ast::{Span, TypeName};
 use crate::tlc::{Def, DefMeta, Program, Term, TermId, TermIdSource, TermKind};
 use crate::{SymbolId, SymbolTable};
@@ -88,7 +88,7 @@ fn test_specialize_sign_f32() {
         def_syms: HashMap::new(),
     };
 
-    let specialized = specialize(program);
+    let specialized = run(program);
 
     // Check that sign became f32.sign
     match &specialized.defs[0].body.kind {
@@ -164,7 +164,7 @@ fn test_specialize_min_i32() {
         def_syms: HashMap::new(),
     };
 
-    let specialized = specialize(program);
+    let specialized = run(program);
 
     // Check that min became i32.min in the application
     match &specialized.defs[0].body.kind {

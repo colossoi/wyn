@@ -28,7 +28,26 @@ The project is organized as a Rust workspace:
 
 The compiler uses a multi-stage pipeline with typestate-driven phases. Each stage consumes `self` and returns the next stage, enforcing valid ordering at compile time.
 
+### Mid-End: Acyclic E-Graph
+
+The mid-end is an **acyclic e-graph**: a sea of hash-consed pure nodes plus a skeleton CFG of effectful instructions. Most optimizations fall out of the data structure without dedicated passes.
+
+Key structures (`egir::types`):
+- **`ENode::Pure { op, operands }`** — hash-consed pure value; GVN is automatic.
+- **`Skeleton`** — a CFG of side-effectful instructions (`SideEffect`) anchored in blocks with `SkeletonTerminator`s. Operands are `NodeId`s.
+- **`ENode::SideEffectResult`** — unique (non-hash-consed) handle for the value produced by a skeleton instruction, consumable by the pure sea.
+- **Purity is blacklisted**, not whitelisted: the only `InstKind`s kept in the skeleton are `Alloca`, `Load`, `Store`. Everything else — `Call`, `Intrinsic`, `StorageView*`, `StorageViewIndex`, `OutputPtr`, `Index`, `Project`, etc. — is hash-consed into the pure sea.
+
+What you get "for free":
+- **GVN** — `intern_pure(op, operands)` returns an existing `NodeId` when `(op, operands)` match.
+- **Constant folding** — `intern_pure` consults `fold.rs` before inserting; folded results are themselves interned, so folds compose.
+- **DCE** — `elaborate` is demand-driven from skeleton roots; unreached pure nodes are never emitted.
+- **CSE along a domtree path** — `ScopedMap` tracks emitted nodes per dominator scope; siblings never cross-pollute.
+- **LICM** — `loop_analysis` picks the outermost loop where all operands are available as the placement point.
+- **Branch folding + redundant-phi elimination** — `skel_opt` rewrites the skeleton CFG before elaboration.
+
 ### Frontend (AST)
+
 | Stage | Module | Description |
 |-------|--------|-------------|
 | **Parsed** | `parser` | Tokenization and parsing into AST |
@@ -54,23 +73,6 @@ The compiler uses a multi-stage pipeline with typestate-driven phases. Each stag
 | **TlcReachable** | `tlc::inline` | Dead definition elimination |
 
 ### EGIR (Acyclic E-Graph IR)
-
-The mid-end is an **acyclic e-graph**: a sea of hash-consed pure nodes plus a skeleton CFG of effectful instructions. Most optimizations fall out of the data structure without dedicated passes.
-
-Key structures (`egir::types`):
-- **`ENode::Pure { op, operands }`** — hash-consed pure value; GVN is automatic.
-- **`Skeleton`** — a CFG of side-effectful instructions (`SideEffect`) anchored in blocks with `SkeletonTerminator`s. Operands are `NodeId`s.
-- **`ENode::SideEffectResult`** — unique (non-hash-consed) handle for the value produced by a skeleton instruction, consumable by the pure sea.
-- **Purity is blacklisted**, not whitelisted: the only `InstKind`s kept in the skeleton are `Alloca`, `Load`, `Store`. Everything else — `Call`, `Intrinsic`, `StorageView*`, `StorageViewIndex`, `OutputPtr`, `Index`, `Project`, etc. — is hash-consed into the pure sea.
-
-What you get "for free":
-- **GVN** — `intern_pure(op, operands)` returns an existing `NodeId` when `(op, operands)` match.
-- **Constant folding** — `intern_pure` consults `fold.rs` before inserting; folded results are themselves interned, so folds compose.
-- **DCE** — `elaborate` is demand-driven from skeleton roots; unreached pure nodes are never emitted.
-- **CSE along a domtree path** — `ScopedMap` tracks emitted nodes per dominator scope; siblings never cross-pollute.
-- **LICM** — `loop_analysis` picks the outermost loop where all operands are available as the placement point.
-- **Branch folding + redundant-phi elimination** — `skel_opt` rewrites the skeleton CFG before elaboration.
-
 | Stage | Module | Description |
 |-------|--------|-------------|
 | **EgirRaw** | `egir::from_tlc` | TLC term → EGraph; `_w_intrinsic_*` calls lowered as pure `PureOp::Intrinsic` (effectful intrinsics like `_w_intrinsic_storage_index` handled by explicit arms) |
@@ -78,23 +80,20 @@ What you get "for free":
 | **EgirMaterialized** | `egir::materialize` | (optional, SPIR-V only) dynamic `Index` → `Materialize` + `DynamicExtract`, then LICM-hoisted out of loops |
 | **EgirSkelOptimized** | `egir::skel_opt` | Skeleton CFG rewrites: branch folding, redundant-phi elimination |
 
-Exit: `EgirSkelOptimized::elaborate()` → `SsaConverted` (see SSA section). Supporting modules: `fold` (algebraic simplification during `intern_pure`), `extract` (cost-based node selection), `domtree`, `loop_analysis`, `canonicalize` (SSA → EGraph, for round-trip tests), `rewrite` (pattern-rewrite driver; ruleset currently empty).
-
 ### SSA (codegen only)
+| Stage | Source | Description |
+|-------|--------|-------------|
+| **SsaConverted** | `EgirSkelOptimized::elaborate` | EGIR chain elaborated into SSA `Program` |
+| **SsaMaterialized** | (optional, SPIR-V only) | Via `egir::materialize` inside the EGIR chain |
+| **Lowered** | `spirv` / `glsl` | SSA to SPIR-V or GLSL |
 
-EGIR elaboration produces an SSA `Program` consumed by the SPIR-V/GLSL backends. SSA is intentionally minimal: all mid-end machinery (effect tokens, canonicalization, verification, generic transform passes) lives in EGIR. The `ssa::framework` module provides a generic CFG-with-block-params representation; `ssa::types` is the concrete instantiation (`InstKind` instructions, `Type<TypeName>` values).
+SSA is intentionally minimal: all mid-end machinery (effect tokens, canonicalization, verification, generic transform passes) lives in EGIR. The `ssa::framework` module provides a generic CFG-with-block-params representation; `ssa::types` is the concrete instantiation (`InstKind` instructions, `Type<TypeName>` values).
 
 Key properties:
 - CFG with basic blocks and block parameters (not phi nodes)
 - No effect tokens at the SSA layer — instruction order is fixed by elaboration
 - `ValueDef::FunctionParam` distinct from `ValueDef::Param` (block params)
 - `ControlHeader` metadata stored in a side-map on `FuncBody`, not on blocks
-
-| Stage | Source | Description |
-|-------|--------|-------------|
-| **SsaConverted** | `egir::pipeline::elaborate` | EGIR chain elaborated into SSA `Program` |
-| **SsaMaterialized** | (optional, SPIR-V only) | Via `egir::materialize` inside the EGIR chain |
-| **Lowered** | `spirv` / `glsl` | SSA to SPIR-V or GLSL |
 
 ### SPIR-V Backend Optimizations
 

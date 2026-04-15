@@ -29,7 +29,7 @@ use super::types::{EGraph, ENode, NodeId, PureOp, SkeletonTerminator};
 
 /// Run all enabled skeleton rewrites to fixpoint. Returns an alias map
 /// mapping stripped block-param NodeIds to their replacement NodeIds.
-pub fn optimize_skeleton(graph: &mut EGraph) -> HashMap<NodeId, NodeId> {
+pub fn run(graph: &mut EGraph) -> HashMap<NodeId, NodeId> {
     let mut aliases: HashMap<NodeId, NodeId> = HashMap::new();
     loop {
         // Phase order: fold first, phi-elim second. Folding can shrink a

@@ -22,7 +22,7 @@ const INLINE_SIZE_THRESHOLD: usize = 30;
 /// Eliminate unreachable defs from a TLC program.
 ///
 /// Preserves entry points, extern defs, and their transitive dependencies.
-pub fn eliminate_dead_defs(program: Program) -> Program {
+pub fn run_reachable(program: Program) -> Program {
     let defs = dead_code_eliminate(program.defs);
     Program {
         defs,
@@ -41,7 +41,7 @@ pub fn eliminate_dead_defs(program: Program) -> Program {
 /// - Constants (arity-0 defs, substituted at Var reference sites)
 ///
 /// Skips `_w_lambda_*` defs (SOAC bodies) — handled by `inline()`.
-pub fn inline_small(program: Program) -> Program {
+pub fn run_small(program: Program) -> Program {
     let all_constants = find_all_constants(&program);
     let mut small_candidates = find_small_candidates(&program.defs, &program.symbols);
 
@@ -80,7 +80,7 @@ pub fn inline_small(program: Program) -> Program {
 }
 
 /// Inline compiler-generated lambda defs (`_w_lambda_*`) in a TLC program.
-pub fn inline(program: Program) -> Program {
+pub fn run_large(program: Program) -> Program {
     let inline_candidates = find_inline_candidates(&program.defs, &program.symbols);
 
     let mut term_ids = TermIdSource::new();

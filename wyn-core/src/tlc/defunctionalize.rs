@@ -719,7 +719,7 @@ pub struct Defunctionalizer<'a> {
 
 impl<'a> Defunctionalizer<'a> {
     /// Defunctionalize a program.
-    pub fn defunctionalize(program: Program, known_defs: &'a HashSet<String>) -> Program {
+    pub fn run(program: Program, known_defs: &'a HashSet<String>) -> Program {
         // Detect HOFs before defunctionalization (user-defined only;
         // intrinsic SOACs are now first-class SOAC nodes, not HOF calls)
         let hof_info = detect_hofs(&program.defs);
@@ -2123,7 +2123,7 @@ impl<'a> Defunctionalizer<'a> {
 /// - Captures become extra parameters (appended at end)
 /// - All call sites have captures flattened as trailing arguments
 pub fn defunctionalize(program: Program, known_defs: &HashSet<String>) -> Program {
-    Defunctionalizer::defunctionalize(program, known_defs)
+    Defunctionalizer::run(program, known_defs)
 }
 
 #[cfg(test)]

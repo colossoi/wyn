@@ -28,7 +28,7 @@ pub(crate) type Substitution = HashMap<usize, Type<TypeName>>;
 ///
 /// This walks through all definitions starting from entry points, finds calls
 /// to polymorphic functions, and creates specialized versions with concrete types.
-pub fn monomorphize(program: Program, schemes: &HashMap<SymbolId, TypeScheme>) -> Program {
+pub fn run(program: Program, schemes: &HashMap<SymbolId, TypeScheme>) -> Program {
     let mono = Monomorphizer::new(program, schemes);
     mono.run()
 }

@@ -2,7 +2,7 @@
 // Tests
 // ============================================================================
 
-use super::{Converter, convert_program};
+use super::{Converter, run};
 use crate::SymbolId;
 use crate::ast::TypeName;
 use crate::pipeline_descriptor::PipelineDescriptor;
@@ -42,8 +42,7 @@ fn compile_via_egir(src: &str) -> Program {
         .parallelize_soacs()
         .filter_reachable();
 
-    convert_program(&tlc.tlc, PipelineDescriptor::default())
-        .expect("egir::from_tlc conversion failed")
+    crate::EgirRaw(run(&tlc.tlc, PipelineDescriptor::default()).expect("egir::from_tlc conversion failed"))
         .expand_soacs(true)
         .optimize_skeleton()
         .elaborate()

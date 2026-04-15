@@ -26,7 +26,7 @@ impl<'a> Desugarer<'a> {
     }
 
     /// Desugar an entire program.
-    pub fn desugar_program(&mut self, program: &mut Program) -> Result<()> {
+    pub fn run(&mut self, program: &mut Program) -> Result<()> {
         for decl in &mut program.declarations {
             self.desugar_declaration(decl)?;
         }
@@ -254,7 +254,7 @@ impl<'a> Desugarer<'a> {
 /// Top-level function to desugar a program.
 pub fn desugar_program(program: &mut Program, nc: &mut NodeCounter) -> Result<()> {
     let mut desugarer = Desugarer::new(nc);
-    desugarer.desugar_program(program)
+    desugarer.run(program)
 }
 
 #[cfg(test)]

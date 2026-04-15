@@ -31,7 +31,7 @@ type Summaries = HashMap<SymbolId, FunctionSummary>;
 /// 2. Computes function summaries for interprocedural analysis
 /// 3. Builds producer graphs and fuses producer-consumer pairs
 /// 4. Repeats until fixpoint
-pub fn fuse(program: Program) -> Program {
+pub fn run(program: Program) -> Program {
     // Normalize: lift SOACs out of nested positions into let bindings
     let mut program = super::normalize::normalize(program);
 

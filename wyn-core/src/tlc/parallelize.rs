@@ -534,7 +534,7 @@ pub struct ParallelizationResult {
 }
 
 /// Parallelize SOACs in compute entry points.
-pub fn parallelize_soacs(mut program: Program) -> ParallelizationResult {
+pub fn run(mut program: Program) -> ParallelizationResult {
     let analyses = analyze_program(&program);
 
     if analyses.is_empty() {

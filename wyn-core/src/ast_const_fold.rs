@@ -412,7 +412,7 @@ impl AstConstFolder {
 }
 
 /// Convenience function to fold constants in a program.
-pub fn fold_ast_constants(program: &mut Program) {
+pub fn run(program: &mut Program) {
     let mut folder = AstConstFolder::new();
     folder.fold_program(program);
 }
