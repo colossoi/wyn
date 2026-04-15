@@ -1,4 +1,4 @@
-use super::defunctionalize;
+use super::run as defunctionalize;
 use crate::ast::{BinaryOp, Span, TypeName};
 use crate::tlc::{Def, DefMeta, Lambda, LoopKind, Program, Term, TermId, TermIdSource, TermKind};
 use crate::{SymbolId, SymbolTable};

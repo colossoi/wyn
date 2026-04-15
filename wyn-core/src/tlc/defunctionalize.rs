@@ -2122,7 +2122,7 @@ impl<'a> Defunctionalizer<'a> {
 /// - All lambdas are lifted to top-level definitions
 /// - Captures become extra parameters (appended at end)
 /// - All call sites have captures flattened as trailing arguments
-pub fn defunctionalize(program: Program, known_defs: &HashSet<String>) -> Program {
+pub fn run(program: Program, known_defs: &HashSet<String>) -> Program {
     Defunctionalizer::run(program, known_defs)
 }
 

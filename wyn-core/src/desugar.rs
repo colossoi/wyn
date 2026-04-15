@@ -252,7 +252,7 @@ impl<'a> Desugarer<'a> {
 }
 
 /// Top-level function to desugar a program.
-pub fn desugar_program(program: &mut Program, nc: &mut NodeCounter) -> Result<()> {
+pub fn run(program: &mut Program, nc: &mut NodeCounter) -> Result<()> {
     let mut desugarer = Desugarer::new(nc);
     desugarer.run(program)
 }

@@ -425,7 +425,7 @@ impl Parsed {
     /// Should be called before resolve() to ensure the generated identifiers
     /// (iota, map) get properly resolved.
     pub fn desugar(mut self, nc: &mut ast::NodeCounter) -> Result<Desugared> {
-        desugar::desugar_program(&mut self.0.ast, nc).map(|()| Desugared(self.0))
+        desugar::run(&mut self.0.ast, nc).map(|()| Desugared(self.0))
     }
 }
 
@@ -623,12 +623,12 @@ impl AliasChecked {
         // Combine parts with the symbol table to create the final Program
         let tlc_program = parts.with_symbols(symbols, top_level_symbols);
 
-        TlcTransformed {
+        TlcTransformed(TlcEarlyInner {
             tlc: tlc_program,
             type_table: self.type_table,
             known_defs: registry.name_set(),
             schemes: schemes.clone(),
-        }
+        })
     }
 }
 
@@ -636,92 +636,104 @@ impl AliasChecked {
 // TLC-based pipeline stages
 // =============================================================================
 
-/// AST has been transformed to TLC
-pub struct TlcTransformed {
+/// Shared payload for the TLC early states (`TlcTransformed`,
+/// `TlcPartialEvaled`, `TlcSoaNormalized`, `TlcFused`). Wrapped by each
+/// newtype; inner fields are crate-pub so the transition impls can move
+/// them across group boundaries by value.
+pub struct TlcEarlyInner {
     pub tlc: tlc::Program,
     pub type_table: TypeTable,
     /// Built-in names that should not be captured as free variables
-    known_defs: std::collections::HashSet<String>,
+    pub(crate) known_defs: std::collections::HashSet<String>,
     /// Type schemes for functions (for monomorphization)
-    schemes: HashMap<String, types::TypeScheme>,
+    pub(crate) schemes: HashMap<String, types::TypeScheme>,
+}
+
+/// AST has been transformed to TLC
+pub struct TlcTransformed(pub TlcEarlyInner);
+
+impl std::ops::Deref for TlcTransformed {
+    type Target = TlcEarlyInner;
+    fn deref(&self) -> &TlcEarlyInner {
+        &self.0
+    }
 }
 
 impl TlcTransformed {
     /// Constant folding and algebraic simplifications.
     pub fn partial_eval(self) -> TlcPartialEvaled {
-        self.tlc.assert_flat_apps();
-        let optimized = tlc::partial_eval::PartialEvaluator::partial_eval(self.tlc);
-        optimized.assert_flat_apps();
-        TlcPartialEvaled {
-            tlc: optimized,
-            type_table: self.type_table,
-            known_defs: self.known_defs,
-            schemes: self.schemes,
-        }
+        let mut inner = self.0;
+        inner.tlc.assert_flat_apps();
+        inner.tlc = tlc::partial_eval::PartialEvaluator::partial_eval(inner.tlc);
+        inner.tlc.assert_flat_apps();
+        TlcPartialEvaled(inner)
     }
 }
 
 /// TLC after partial evaluation
-pub struct TlcPartialEvaled {
-    pub tlc: tlc::Program,
-    pub type_table: TypeTable,
-    known_defs: std::collections::HashSet<String>,
-    schemes: HashMap<String, types::TypeScheme>,
+pub struct TlcPartialEvaled(pub TlcEarlyInner);
+
+impl std::ops::Deref for TlcPartialEvaled {
+    type Target = TlcEarlyInner;
+    fn deref(&self) -> &TlcEarlyInner {
+        &self.0
+    }
 }
 
 impl TlcPartialEvaled {
     /// SoA transform + SOAC normalization: rewrite array-of-tuple types,
     /// flatten Map+Zip into multi-input Map, and convert standalone Zip to tuple.
     pub fn normalize_soacs(self) -> TlcSoaNormalized {
-        let normalized = tlc::soa::run(self.tlc);
-        TlcSoaNormalized {
-            tlc: normalized,
-            type_table: self.type_table,
-            known_defs: self.known_defs,
-            schemes: self.schemes,
-        }
+        let mut inner = self.0;
+        inner.tlc = tlc::soa::run(inner.tlc);
+        TlcSoaNormalized(inner)
     }
 }
 
 /// TLC after SoA normalization (arrays never contain tuples, zips eliminated)
-pub struct TlcSoaNormalized {
-    pub tlc: tlc::Program,
-    pub type_table: TypeTable,
-    known_defs: std::collections::HashSet<String>,
-    schemes: HashMap<String, types::TypeScheme>,
+pub struct TlcSoaNormalized(pub TlcEarlyInner);
+
+impl std::ops::Deref for TlcSoaNormalized {
+    type Target = TlcEarlyInner;
+    fn deref(&self) -> &TlcEarlyInner {
+        &self.0
+    }
 }
 
 impl TlcSoaNormalized {
     /// Fuse consecutive SOAC operations to eliminate intermediate arrays.
     pub fn fuse_maps(self) -> TlcFused {
-        let fused = tlc::fusion::run(self.tlc);
-
-        TlcFused {
-            tlc: fused,
-            type_table: self.type_table,
-            known_defs: self.known_defs,
-            schemes: self.schemes,
-        }
+        let mut inner = self.0;
+        inner.tlc = tlc::fusion::run(inner.tlc);
+        TlcFused(inner)
     }
 }
 
 /// TLC after map fusion
-pub struct TlcFused {
-    pub tlc: tlc::Program,
-    pub type_table: TypeTable,
-    known_defs: std::collections::HashSet<String>,
-    schemes: HashMap<String, types::TypeScheme>,
+pub struct TlcFused(pub TlcEarlyInner);
+
+impl std::ops::Deref for TlcFused {
+    type Target = TlcEarlyInner;
+    fn deref(&self) -> &TlcEarlyInner {
+        &self.0
+    }
 }
 
 impl TlcFused {
     /// Defunctionalize: lift lambdas and flatten SOAC closure captures.
     pub fn defunctionalize(self) -> TlcDefunctionalized {
-        let defunc = tlc::defunctionalize::defunctionalize(self.tlc, &self.known_defs);
+        let TlcEarlyInner {
+            tlc,
+            type_table,
+            known_defs,
+            schemes,
+        } = self.0;
+        let defunc = tlc::defunctionalize::run(tlc, &known_defs);
         defunc.assert_flat_apps();
         TlcDefunctionalized {
             tlc: defunc,
-            type_table: self.type_table,
-            schemes: self.schemes,
+            type_table,
+            schemes,
         }
     }
 }
@@ -752,75 +764,90 @@ impl TlcDefunctionalized {
         // Monomorphize polymorphic user functions
         let monomorphized = tlc::monomorphize::run(specialized, &schemes_by_sym);
         monomorphized.assert_flat_apps();
-        TlcMonomorphized {
+        TlcMonomorphized(TlcLateInner {
             tlc: monomorphized,
             type_table: self.type_table,
-        }
+        })
     }
 }
 
-/// TLC with all functions monomorphized (no type variables remain)
-pub struct TlcMonomorphized {
+/// Shared payload for TLC states that carry just `{tlc, type_table}`
+/// (`TlcMonomorphized`, `TlcBufferSpecialized`, `TlcGeneratedLambdasFolded`,
+/// `TlcSmallInlined`).
+pub struct TlcLateInner {
     pub tlc: tlc::Program,
     pub type_table: TypeTable,
+}
+
+/// TLC with all functions monomorphized (no type variables remain)
+pub struct TlcMonomorphized(pub TlcLateInner);
+
+impl std::ops::Deref for TlcMonomorphized {
+    type Target = TlcLateInner;
+    fn deref(&self) -> &TlcLateInner {
+        &self.0
+    }
 }
 
 impl TlcMonomorphized {
     /// Specialize functions that take view-array parameters per-buffer.
     /// After this pass, no `DefMeta::Function` has view-array parameters.
     pub fn buffer_specialize(self) -> TlcBufferSpecialized {
-        let specialized = tlc::buffer_specialize::run(self.tlc);
-        specialized.assert_flat_apps();
-        TlcBufferSpecialized {
-            tlc: specialized,
-            type_table: self.type_table,
-        }
+        let mut inner = self.0;
+        inner.tlc = tlc::buffer_specialize::run(inner.tlc);
+        inner.tlc.assert_flat_apps();
+        TlcBufferSpecialized(inner)
     }
 }
 
 /// TLC after buffer specialization (no functions have view-array params)
-pub struct TlcBufferSpecialized {
-    pub tlc: tlc::Program,
-    pub type_table: TypeTable,
+pub struct TlcBufferSpecialized(pub TlcLateInner);
+
+impl std::ops::Deref for TlcBufferSpecialized {
+    type Target = TlcLateInner;
+    fn deref(&self) -> &TlcLateInner {
+        &self.0
+    }
 }
 
 impl TlcBufferSpecialized {
     /// Inline compiler-generated `_w_lambda_*` defs back at their call sites,
     /// then remove unreferenced defs (DCE).
     pub fn fold_generated_lambdas(self) -> TlcGeneratedLambdasFolded {
-        let inlined = tlc::inline::run_large(self.tlc);
-        inlined.assert_flat_apps();
-        TlcGeneratedLambdasFolded {
-            tlc: inlined,
-            type_table: self.type_table,
-        }
+        let mut inner = self.0;
+        inner.tlc = tlc::inline::run_large(inner.tlc);
+        inner.tlc.assert_flat_apps();
+        TlcGeneratedLambdasFolded(inner)
     }
 }
 
 /// TLC after inlining compiler-generated lambda defs and DCE
-pub struct TlcGeneratedLambdasFolded {
-    pub tlc: tlc::Program,
-    pub type_table: TypeTable,
+pub struct TlcGeneratedLambdasFolded(pub TlcLateInner);
+
+impl std::ops::Deref for TlcGeneratedLambdasFolded {
+    type Target = TlcLateInner;
+    fn deref(&self) -> &TlcLateInner {
+        &self.0
+    }
 }
 
 impl TlcGeneratedLambdasFolded {
     /// Inline small user functions and constants at their call/reference sites.
     pub fn inline_small(self) -> TlcSmallInlined {
-        let tlc = tlc::inline::run_small(self.tlc);
-        TlcSmallInlined {
-            tlc,
-            type_table: self.type_table,
-        }
+        let mut inner = self.0;
+        inner.tlc = tlc::inline::run_small(inner.tlc);
+        TlcSmallInlined(inner)
     }
 
     /// Eliminate unreachable defs (dead code elimination at TLC level).
     pub fn filter_reachable(self) -> TlcReachable {
-        let tlc = tlc::inline::run_reachable(self.tlc);
-        TlcReachable {
+        let TlcLateInner { tlc, type_table } = self.0;
+        let tlc = tlc::inline::run_reachable(tlc);
+        TlcReachable(TlcPipelineInner {
             tlc,
             pipeline: pipeline_descriptor::PipelineDescriptor::default(),
-            type_table: self.type_table,
-        }
+            type_table,
+        })
     }
 
     /// Build the raw EGIR program. Callers chain the pipeline
@@ -828,35 +855,41 @@ impl TlcGeneratedLambdasFolded {
     /// explicitly — materialize is the only optional pass and is required for
     /// SPIR-V but not GLSL.
     pub fn to_egraph(self) -> std::result::Result<EgirRaw, ConvertError> {
-        egir::from_tlc::run(&self.tlc, pipeline_descriptor::PipelineDescriptor::default()).map(EgirRaw)
+        egir::from_tlc::run(&self.0.tlc, pipeline_descriptor::PipelineDescriptor::default()).map(EgirRaw)
     }
 }
 
 /// TLC after small function and constant inlining
-pub struct TlcSmallInlined {
-    pub tlc: tlc::Program,
-    pub type_table: TypeTable,
+pub struct TlcSmallInlined(pub TlcLateInner);
+
+impl std::ops::Deref for TlcSmallInlined {
+    type Target = TlcLateInner;
+    fn deref(&self) -> &TlcLateInner {
+        &self.0
+    }
 }
 
 impl TlcSmallInlined {
     /// Parallelize SOACs in compute entry points at the TLC level.
     pub fn parallelize_soacs(self) -> TlcParallelized {
-        let result = tlc::parallelize::run(self.tlc);
-        TlcParallelized {
+        let TlcLateInner { tlc, type_table } = self.0;
+        let result = tlc::parallelize::run(tlc);
+        TlcParallelized(TlcPipelineInner {
             tlc: result.program,
             pipeline: result.pipeline,
-            type_table: self.type_table,
-        }
+            type_table,
+        })
     }
 
     /// Eliminate unreachable defs (dead code elimination at TLC level).
     pub fn filter_reachable(self) -> TlcReachable {
-        let tlc = tlc::inline::run_reachable(self.tlc);
-        TlcReachable {
+        let TlcLateInner { tlc, type_table } = self.0;
+        let tlc = tlc::inline::run_reachable(tlc);
+        TlcReachable(TlcPipelineInner {
             tlc,
             pipeline: pipeline_descriptor::PipelineDescriptor::default(),
-            type_table: self.type_table,
-        }
+            type_table,
+        })
     }
 
     /// Build the raw EGIR program. Callers chain the pipeline
@@ -864,44 +897,57 @@ impl TlcSmallInlined {
     /// explicitly — materialize is the only optional pass and is required for
     /// SPIR-V but not GLSL.
     pub fn to_egraph(self) -> std::result::Result<EgirRaw, ConvertError> {
-        egir::from_tlc::run(&self.tlc, pipeline_descriptor::PipelineDescriptor::default()).map(EgirRaw)
+        egir::from_tlc::run(&self.0.tlc, pipeline_descriptor::PipelineDescriptor::default()).map(EgirRaw)
     }
 }
 
-/// TLC after SOAC parallelization
-pub struct TlcParallelized {
+/// Shared payload for TLC states carrying `{tlc, pipeline, type_table}`
+/// (`TlcParallelized`, `TlcReachable`).
+pub struct TlcPipelineInner {
     pub tlc: tlc::Program,
     pub pipeline: pipeline_descriptor::PipelineDescriptor,
     pub type_table: TypeTable,
+}
+
+/// TLC after SOAC parallelization
+pub struct TlcParallelized(pub TlcPipelineInner);
+
+impl std::ops::Deref for TlcParallelized {
+    type Target = TlcPipelineInner;
+    fn deref(&self) -> &TlcPipelineInner {
+        &self.0
+    }
 }
 
 impl TlcParallelized {
     /// Eliminate unreachable defs (dead code elimination at TLC level).
     pub fn filter_reachable(self) -> TlcReachable {
-        let tlc = tlc::inline::run_reachable(self.tlc);
-        TlcReachable {
-            tlc,
-            pipeline: self.pipeline,
-            type_table: self.type_table,
-        }
+        let mut inner = self.0;
+        inner.tlc = tlc::inline::run_reachable(inner.tlc);
+        TlcReachable(inner)
     }
 
     pub fn to_egraph(self) -> std::result::Result<EgirRaw, ConvertError> {
-        egir::from_tlc::run(&self.tlc, self.pipeline).map(EgirRaw)
+        let TlcPipelineInner { tlc, pipeline, .. } = self.0;
+        egir::from_tlc::run(&tlc, pipeline).map(EgirRaw)
     }
 }
 
 /// TLC after dead code elimination. Always carries a `PipelineDescriptor`
 /// (empty for non-parallelized paths).
-pub struct TlcReachable {
-    pub tlc: tlc::Program,
-    pub pipeline: pipeline_descriptor::PipelineDescriptor,
-    pub type_table: TypeTable,
+pub struct TlcReachable(pub TlcPipelineInner);
+
+impl std::ops::Deref for TlcReachable {
+    type Target = TlcPipelineInner;
+    fn deref(&self) -> &TlcPipelineInner {
+        &self.0
+    }
 }
 
 impl TlcReachable {
     pub fn to_egraph(self) -> std::result::Result<EgirRaw, ConvertError> {
-        egir::from_tlc::run(&self.tlc, self.pipeline).map(EgirRaw)
+        let TlcPipelineInner { tlc, pipeline, .. } = self.0;
+        egir::from_tlc::run(&tlc, pipeline).map(EgirRaw)
     }
 }
 

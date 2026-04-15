@@ -77,7 +77,7 @@ fn compile_to_fused_tlc(input: &str) -> crate::tlc::Program {
 
     let tlc = alias_checked.to_tlc(&frontend.schemes, &frontend.module_manager);
     let fused = tlc.partial_eval().normalize_soacs().fuse_maps();
-    fused.tlc
+    fused.0.tlc
 }
 
 // =============================================================================

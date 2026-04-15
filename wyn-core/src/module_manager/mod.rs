@@ -256,7 +256,7 @@ impl ModuleManager {
 
         // Desugar range/slice expressions before elaboration
         // This ensures prelude functions like `iota` don't have unexpanded range expressions
-        desugar::desugar_program(&mut program, node_counter)?;
+        desugar::run(&mut program, node_counter)?;
 
         // Register module types first
         self.register_module_types(&program)?;
