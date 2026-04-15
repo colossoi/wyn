@@ -51,7 +51,7 @@ pub fn elaborate(
     }
 
     // Loop analysis over the skeleton, used by LICM placement.
-    let loop_analysis = LoopAnalysis::build(&graph.skeleton, control_headers, domtree);
+    let loop_analysis = LoopAnalysis::build(&graph.skeleton, control_headers);
 
     // Phase 2: set up elaborator.
     let mut elab = Elaborator {

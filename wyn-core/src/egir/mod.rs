@@ -13,10 +13,13 @@ mod fold;
 mod loop_analysis;
 mod materialize;
 pub mod pipeline;
-mod rewrite;
+pub mod rewrite;
 mod scoped_map;
 mod skel_opt;
 mod soac_expand;
 pub mod types;
 
 pub mod from_tlc;
+
+#[cfg(test)]
+mod from_tlc_tests;

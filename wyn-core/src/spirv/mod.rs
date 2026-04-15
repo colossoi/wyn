@@ -41,6 +41,7 @@ struct InterfaceBlockKey {
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 enum InterfaceBlockKind {
     PushConstant,
+    #[allow(dead_code)]
     StorageBuffer,
 }
 
@@ -62,7 +63,6 @@ struct Constructor {
     uint_const_cache: HashMap<u32, spirv::Word>,
     uint_const_reverse: HashMap<spirv::Word, u32>, // reverse lookup: ID -> value
     float_const_cache: HashMap<u32, spirv::Word>,  // bits as u32
-    float_const_reverse: HashMap<spirv::Word, u32>, // reverse lookup: ID -> bits
     bool_const_cache: HashMap<bool, spirv::Word>,
 
     // Current function state
@@ -168,7 +168,6 @@ impl Constructor {
             uint_const_cache: HashMap::new(),
             uint_const_reverse: HashMap::new(),
             float_const_cache: HashMap::new(),
-            float_const_reverse: HashMap::new(),
             bool_const_cache: HashMap::new(),
             current_block: None,
             variables_block: None,
@@ -886,14 +885,8 @@ impl Constructor {
         }
         let id = self.builder.constant_bit32(self.f32_type, bits);
         self.float_const_cache.insert(bits, id);
-        self.float_const_reverse.insert(id, bits);
         self.constant_ids.insert(id);
         id
-    }
-
-    /// Get the literal f32 value from a constant ID (reverse lookup)
-    fn get_const_f32_value(&self, id: spirv::Word) -> Option<f32> {
-        self.float_const_reverse.get(&id).copied().map(f32::from_bits)
     }
 
     /// Get or create a bool constant

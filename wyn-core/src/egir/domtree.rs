@@ -14,10 +14,6 @@ pub struct DomTree {
     children: HashMap<BlockId, Vec<BlockId>>,
     /// Preorder traversal of the domtree.
     preorder_list: Vec<BlockId>,
-    /// Depth of each block in the domtree (entry = 0).
-    depth: HashMap<BlockId, usize>,
-    /// Entry block.
-    entry: BlockId,
 }
 
 /// Generic CFG trait so we can compute domtrees from either SSA or skeleton.
@@ -115,14 +111,12 @@ impl DomTree {
 
         // Preorder traversal.
         let mut preorder_list = Vec::new();
-        let mut depth = HashMap::new();
-        let mut stack = vec![(entry, 0usize)];
-        while let Some((b, d)) = stack.pop() {
+        let mut stack = vec![entry];
+        while let Some(b) = stack.pop() {
             preorder_list.push(b);
-            depth.insert(b, d);
             if let Some(ch) = children.get(&b) {
                 for &c in ch.iter().rev() {
-                    stack.push((c, d + 1));
+                    stack.push(c);
                 }
             }
         }
@@ -131,8 +125,6 @@ impl DomTree {
             idom,
             children,
             preorder_list,
-            depth,
-            entry,
         }
     }
 
@@ -149,31 +141,6 @@ impl DomTree {
     /// Children of a block in the dominator tree.
     pub fn dom_children(&self, block: BlockId) -> &[BlockId] {
         self.children.get(&block).map_or(&[], |v| v.as_slice())
-    }
-
-    /// Depth of a block in the domtree (entry = 0).
-    pub fn block_depth(&self, block: BlockId) -> usize {
-        self.depth.get(&block).copied().unwrap_or(0)
-    }
-
-    /// Does `a` dominate `b`?
-    pub fn dominates(&self, a: BlockId, b: BlockId) -> bool {
-        if a == b {
-            return true;
-        }
-        let mut cur = b;
-        while let Some(parent) = self.idom(cur) {
-            if parent == a {
-                return true;
-            }
-            cur = parent;
-        }
-        false
-    }
-
-    /// Entry block.
-    pub fn entry(&self) -> BlockId {
-        self.entry
     }
 }
 

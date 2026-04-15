@@ -27,7 +27,7 @@
 //! This makes the data flow explicit at branch sites rather than requiring
 //! inspection of phi nodes to understand where values come from.
 
-use crate::ast::{self, Span, TypeName};
+use crate::ast::{Span, TypeName};
 use crate::interface;
 use polytype::Type;
 use rspirv::spirv;

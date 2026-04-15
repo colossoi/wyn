@@ -21,7 +21,7 @@ use std::marker::PhantomData;
 
 use polytype::Type;
 
-use crate::ast::{self, Span, TypeName};
+use crate::ast::{Span, TypeName};
 use crate::interface;
 use crate::pipeline_descriptor::PipelineDescriptor;
 use crate::ssa::types::{
