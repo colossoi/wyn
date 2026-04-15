@@ -2552,8 +2552,19 @@ impl State {
         });
 
         let caps = surface.get_capabilities(&adapter);
-        let format =
-            caps.formats.get(0).copied().ok_or_else(|| anyhow!("surface reports no supported formats"))?;
+        // Prefer a non-sRGB 8-bit format so the GPU doesn't re-encode on
+        // write — shadertoy-style shaders apply their own gamma via
+        // pow(col, 0.45) and expect the framebuffer to treat their output
+        // as final pixels. Higher-precision formats (Rgba16Float) would
+        // halve or quarter throughput without fixing the main issue
+        // (contour banding in the shader math, not quantization).
+        let format = caps
+            .formats
+            .iter()
+            .copied()
+            .find(|f| !f.is_srgb())
+            .or_else(|| caps.formats.get(0).copied())
+            .ok_or_else(|| anyhow!("surface reports no supported formats"))?;
         let size = window.inner_size();
 
         // Extract present mode from spec (default to Fifo for TestPattern)
