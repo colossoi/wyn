@@ -386,7 +386,7 @@ impl Compiler {
         let tokens = lexer::tokenize(source).map_err(|e| err_parse!("{}", e))?;
         let mut parser = parser::Parser::new(tokens, node_counter);
         let ast = parser.parse()?;
-        Ok(Parsed { ast })
+        Ok(Parsed(FrontInner { ast }))
     }
 }
 
@@ -394,10 +394,15 @@ impl Compiler {
 // FrontEnd stages (AST-based)
 // =============================================================================
 
-/// Source has been parsed into an AST
-pub struct Parsed {
-    pub ast: ast::Program,
+/// Shared payload for the front-end AST states (`Parsed`, `Desugared`,
+/// `Resolved`, `AstConstFoldedEarly`). Each state is a newtype wrapping this
+/// inner; transitions within the group just unwrap / re-wrap.
+struct FrontInner {
+    ast: ast::Program,
 }
+
+/// Source has been parsed into an AST
+pub struct Parsed(FrontInner);
 
 impl Parsed {
     /// Elaborate inline module declarations from the parsed program.
@@ -405,9 +410,9 @@ impl Parsed {
     /// then removes the Module declarations from the AST (they've been copied to module_manager).
     /// Should be called before desugar() if the program contains module definitions.
     pub fn elaborate_modules(mut self, module_manager: &mut module_manager::ModuleManager) -> Result<Self> {
-        module_manager.elaborate_modules(&self.ast)?;
+        module_manager.elaborate_modules(&self.0.ast)?;
         // Remove Module and ModuleTypeBind declarations - they've been elaborated
-        self.ast.declarations.retain(|decl| {
+        self.0.ast.declarations.retain(|decl| {
             !matches!(
                 decl,
                 ast::Declaration::Module(_) | ast::Declaration::ModuleTypeBind(_)
@@ -420,41 +425,34 @@ impl Parsed {
     /// Should be called before resolve() to ensure the generated identifiers
     /// (iota, map) get properly resolved.
     pub fn desugar(mut self, nc: &mut ast::NodeCounter) -> Result<Desugared> {
-        desugar::desugar_program(&mut self.ast, nc)?;
-        Ok(Desugared { ast: self.ast })
+        desugar::desugar_program(&mut self.0.ast, nc).map(|()| Desugared(self.0))
     }
 }
 
 /// Range and slice expressions have been desugared to map/iota
-pub struct Desugared {
-    pub ast: ast::Program,
-}
+pub struct Desugared(FrontInner);
 
 impl Desugared {
     /// Resolve names: rewrite FieldAccess -> QualifiedName and load modules
     pub fn resolve(mut self, module_manager: &module_manager::ModuleManager) -> Result<Resolved> {
-        name_resolution::run(&mut self.ast, module_manager)?;
-        Ok(Resolved { ast: self.ast })
+        name_resolution::run(&mut self.0.ast, module_manager)?;
+        Ok(Resolved(self.0))
     }
 }
 
 /// Names have been resolved
-pub struct Resolved {
-    pub ast: ast::Program,
-}
+pub struct Resolved(FrontInner);
 
 impl Resolved {
     /// Fold AST-level integer constants (required before type checking)
     pub fn fold_ast_constants(mut self) -> AstConstFoldedEarly {
-        ast_const_fold::run(&mut self.ast);
-        AstConstFoldedEarly { ast: self.ast }
+        ast_const_fold::run(&mut self.0.ast);
+        AstConstFoldedEarly(self.0)
     }
 }
 
 /// AST integer constants have been folded (before type checking)
-pub struct AstConstFoldedEarly {
-    pub ast: ast::Program,
-}
+pub struct AstConstFoldedEarly(FrontInner);
 
 impl AstConstFoldedEarly {
     /// Type check the program
@@ -465,21 +463,21 @@ impl AstConstFoldedEarly {
     ) -> Result<TypeChecked> {
         // Resolve type placeholders to type variables before type checking
         let mut resolver = resolve_placeholders::PlaceholderResolver::new();
-        resolver.resolve(module_manager, &mut self.ast);
+        resolver.resolve(module_manager, &mut self.0.ast);
         let (context, spec_schemes) = resolver.into_parts();
 
         let mut checker =
             type_checker::TypeChecker::with_context_and_schemes(module_manager, context, spec_schemes);
         checker.load_builtins()?;
-        let type_table = checker.check_program(&self.ast)?;
+        let type_table = checker.check_program(&self.0.ast)?;
         // Populate schemes with function type schemes from type checking
         *schemes = checker.get_function_schemes();
         let checker_builtins = checker.builtin_names();
         let warnings: Vec<_> = checker.warnings().to_vec();
-        let span_table = build_span_table(&self.ast);
+        let span_table = build_span_table(&self.0.ast);
 
         Ok(TypeChecked {
-            ast: self.ast,
+            ast: self.0.ast,
             type_table,
             span_table,
             warnings,
