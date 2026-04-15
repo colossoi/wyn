@@ -1,0 +1,68 @@
+-- "Creation" by Danilo Guanabara — Wyn port of the Shadertoy shader.
+-- 13-line GLSL original that builds a kaleidoscopic radial pattern by
+-- accumulating three iterations of a warped grid into R/G/B channels.
+-- Original: https://www.pouet.net/prod.php?which=57245
+-- The original GLSL is preserved commented-out below.
+
+#[uniform(set=1, binding=0)] def iResolution: vec2f32
+#[uniform(set=1, binding=1)] def iTime: f32
+
+def verts: [3]vec4f32 =
+  [@[-1.0, -1.0, 0.0, 1.0],
+   @[3.0, -1.0, 0.0, 1.0],
+   @[-1.0, 3.0, 0.0, 1.0]]
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 = verts[vertex_id]
+
+-- One iteration of the per-channel accumulation. Returns (c_i, l) where
+-- l is the radial distance used both for this iteration's warp and for
+-- the final divide in the fragment shader.
+def iter(fragXY: vec2f32, z: f32) (f32, f32) =
+  let p0    = fragXY / iResolution in
+  let uv0   = p0 in
+  let p1    = p0 - @[0.5, 0.5] in
+  let p     = @[p1.x * iResolution.x / iResolution.y, p1.y] in
+  let l     = magnitude(p) in
+  let phase = f32.sin(z) + 1.0 in
+  let warp  = f32.abs(f32.sin(l * 9.0 - z - z)) in
+  let uv    = uv0 + p / l * phase * warp in
+  let m     = mod(uv, @[1.0, 1.0]) - @[0.5, 0.5] in
+  (0.01 / magnitude(m), l)
+
+#[fragment]
+entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+  let fc = fragCoord.xy in
+  let z1 = iTime + 0.07 in
+  let (cx, _) = iter(fc, z1) in
+  let z2 = z1 + 0.07 in
+  let (cy, _) = iter(fc, z2) in
+  let z3 = z2 + 0.07 in
+  let (cz, l) = iter(fc, z3) in
+  @[cx / l, cy / l, cz / l, iTime]
+
+------------------------------------------------------------
+-- Original GLSL (commented out below)
+------------------------------------------------------------
+
+-- // http://www.pouet.net/prod.php?which=57245
+-- // If you intend to reuse this shader, please add credits to 'Danilo Guanabara'
+--
+-- #define t iTime
+-- #define r iResolution.xy
+--
+-- void mainImage( out vec4 fragColor, in vec2 fragCoord ){
+--     vec3 c;
+--     float l,z=t;
+--     for(int i=0;i<3;i++) {
+--         vec2 uv,p=fragCoord.xy/r;
+--         uv=p;
+--         p-=.5;
+--         p.x*=r.x/r.y;
+--         z+=.07;
+--         l=length(p);
+--         uv+=p/l*(sin(z)+1.)*abs(sin(l*9.-z-z));
+--         c[i]=.01/length(mod(uv,1.)-.5);
+--     }
+--     fragColor=vec4(c/l,t);
+-- }
