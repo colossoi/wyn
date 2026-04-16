@@ -784,7 +784,17 @@ impl<'a> LowerCtx<'a> {
                     }
                 }
                 TypeName::Array => {
-                    format!("{}[]", self.type_to_glsl(ty.elem_type().expect("Array has elem")))
+                    let elem = self.type_to_glsl(ty.elem_type().expect("Array has elem"));
+                    // GLSL requires function-parameter arrays to be sized, and
+                    // sized constructors need the size too. Emit `T[N]` when
+                    // the array size is a concrete `Size(N)`; fall back to
+                    // `T[]` only when the size is a variable (rare — mostly
+                    // for unmonomorphized types that shouldn't reach here).
+                    if let Some(PolyType::Constructed(TypeName::Size(n), _)) = ty.array_size() {
+                        format!("{}[{}]", elem, n)
+                    } else {
+                        format!("{}[]", elem)
+                    }
                 }
                 TypeName::Record(fields) => {
                     panic!("BUG: Record type reached GLSL lowering. Fields: {:?}", fields);
