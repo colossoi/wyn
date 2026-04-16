@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::types::EffectToken;
-use crate::ast::TypeName;
+use crate::ast::{Span, TypeName};
 use crate::interface;
 use crate::ssa::framework::BlockId;
 use crate::ssa::types::ViewSource;
