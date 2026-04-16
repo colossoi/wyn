@@ -1,6 +1,6 @@
 //! Core data structures for the acyclic e-graph (aegraph).
 
-use crate::ast::TypeName;
+use crate::ast::{Span, TypeName};
 use crate::ssa::framework::BlockId;
 use crate::ssa::types::{ConstantValue, InstKind, ViewSource};
 
@@ -171,6 +171,9 @@ pub struct SideEffect {
     pub result: Option<NodeId>,
     /// Effect token chain.
     pub effects: Option<(EffectToken, EffectToken)>,
+    /// Source span of the user expression that produced this side-effect,
+    /// or `None` for synthesized side-effects (e.g. SOAC expansion).
+    pub span: Option<Span>,
 }
 
 /// A skeleton side-effect's concrete kind.
@@ -312,6 +315,9 @@ pub struct EGraph {
     pub const_cache: HashMap<ConstantValue, NodeId>,
     /// The CFG skeleton.
     pub skeleton: Skeleton,
+    /// Source span associated with each pure node (first-writer-wins —
+    /// later interns of the same hash-consed node keep the original span).
+    pub node_spans: HashMap<NodeId, Span>,
 }
 
 impl EGraph {
@@ -322,6 +328,7 @@ impl EGraph {
             hash_cons: HashMap::new(),
             const_cache: HashMap::new(),
             skeleton: Skeleton::new(),
+            node_spans: HashMap::new(),
         }
     }
 
@@ -358,6 +365,19 @@ impl EGraph {
         operands: SmallVec<[NodeId; 4]>,
         ty: Type<TypeName>,
     ) -> NodeId {
+        self.intern_pure_with_span(op, operands, ty, None)
+    }
+
+    /// Intern a pure node with an attached source span. The span is recorded
+    /// on first intern; subsequent interns of an equivalent hash-consed node
+    /// keep the original span.
+    pub fn intern_pure_with_span(
+        &mut self,
+        op: PureOp,
+        operands: SmallVec<[NodeId; 4]>,
+        ty: Type<TypeName>,
+        span: Option<Span>,
+    ) -> NodeId {
         if let Some(folded) = self.try_algebraic_fold(&op, &operands, &ty) {
             return folded;
         }
@@ -371,6 +391,9 @@ impl EGraph {
         let id = self.nodes.insert(ENode::Pure { op, operands });
         self.types.insert(id, ty);
         self.hash_cons.insert(key, id);
+        if let Some(s) = span {
+            self.node_spans.insert(id, s);
+        }
         id
     }
 

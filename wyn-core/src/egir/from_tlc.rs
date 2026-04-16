@@ -522,6 +522,11 @@ struct Converter<'a> {
     control_headers: HashMap<BlockId, ControlHeader>,
     /// Effect token counter.
     next_effect: u32,
+    /// Span of the term currently being converted. Threaded through every
+    /// pure-node intern and side-effect push so backend errors can blame
+    /// the originating source. Pushed/popped in `convert_term`; `None`
+    /// only outside any term conversion (e.g. entry-point glue).
+    current_span: Option<Span>,
 }
 
 impl<'a> Converter<'a> {
@@ -544,7 +549,14 @@ impl<'a> Converter<'a> {
             pure_constants,
             control_headers: HashMap::new(),
             next_effect: 1,
+            current_span: None,
         }
+    }
+
+    /// Intern a pure node, attaching the current term's span (if any).
+    /// Use in preference to `self.graph.intern_pure` so spans flow through.
+    fn intern_pure(&mut self, op: PureOp, operands: SmallVec<[NodeId; 4]>, ty: Type<TypeName>) -> NodeId {
+        self.graph.intern_pure_with_span(op, operands, ty, self.current_span)
     }
 
     fn alloc_effect(&mut self) -> EffectToken {
@@ -566,7 +578,7 @@ impl<'a> Converter<'a> {
 
     fn intern_u32(&mut self, n: u32) -> NodeId {
         let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
-        self.graph.intern_pure(PureOp::Uint(n.to_string()), smallvec![], u32_ty)
+        self.intern_pure(PureOp::Uint(n.to_string()), smallvec![], u32_ty)
     }
 
     /// Create a pure `StorageView(Storage { set, binding })` node. Builds the
@@ -576,13 +588,13 @@ impl<'a> Converter<'a> {
         let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
         let set_nid = self.intern_u32(set);
         let binding_nid = self.intern_u32(binding);
-        let len_nid = self.graph.intern_pure(
+        let len_nid = self.intern_pure(
             PureOp::Intrinsic("_w_intrinsic_storage_len".into()),
             smallvec![set_nid, binding_nid],
             u32_ty,
         );
         let zero_nid = self.intern_u32(0);
-        self.graph.intern_pure(
+        self.intern_pure(
             PureOp::StorageView(PureViewSource::Storage { set, binding }),
             smallvec![zero_nid, len_nid],
             view_ty,
@@ -602,6 +614,7 @@ impl<'a> Converter<'a> {
             operand_nodes: smallvec![ptr_nid, value_nid],
             result: None,
             effects: Some((effect_in, effect_out)),
+            span: self.current_span,
         });
         effect_out
     }
@@ -615,19 +628,18 @@ impl<'a> Converter<'a> {
         value_nid: NodeId,
         elem_ty: Type<TypeName>,
     ) {
-        let ptr_nid =
-            self.graph.intern_pure(PureOp::StorageViewIndex, smallvec![view_nid, index_nid], elem_ty);
+        let ptr_nid = self.intern_pure(PureOp::StorageViewIndex, smallvec![view_nid, index_nid], elem_ty);
         let _ = self.emit_store(ptr_nid, value_nid);
     }
 
     /// Emit a pure `OutputPtr(index)` node.
     fn emit_output_ptr(&mut self, index: usize, ptr_ty: Type<TypeName>) -> NodeId {
-        self.graph.intern_pure(PureOp::OutputPtr { index }, smallvec![], ptr_ty)
+        self.intern_pure(PureOp::OutputPtr { index }, smallvec![], ptr_ty)
     }
 
     /// Emit a pure `Project(base, index)` node.
     fn emit_project(&mut self, base_nid: NodeId, index: u32, ty: Type<TypeName>) -> NodeId {
-        self.graph.intern_pure(PureOp::Project { index }, smallvec![base_nid], ty)
+        self.intern_pure(PureOp::Project { index }, smallvec![base_nid], ty)
     }
 
     /// Extract the built EGraph + control_headers, leaving the rest of the
@@ -677,7 +689,14 @@ impl<'a> Converter<'a> {
 
     fn convert_term(&mut self, term: &Term) -> Result<NodeId, ConvertError> {
         let ty = term.ty.clone();
+        let saved_span = self.current_span;
+        self.current_span = Some(term.span);
+        let result = self.convert_term_kind(term, ty);
+        self.current_span = saved_span;
+        result
+    }
 
+    fn convert_term_kind(&mut self, term: &Term, ty: Type<TypeName>) -> Result<NodeId, ConvertError> {
         match &term.kind {
             // --- Literals ---
             TermKind::IntLit(s) => {
@@ -686,15 +705,11 @@ impl<'a> Converter<'a> {
                 } else {
                     PureOp::Int(s.clone())
                 };
-                Ok(self.graph.intern_pure(op, smallvec![], ty))
+                Ok(self.intern_pure(op, smallvec![], ty))
             }
-            TermKind::FloatLit(f) => {
-                Ok(self.graph.intern_pure(PureOp::Float(f.to_string()), smallvec![], ty))
-            }
-            TermKind::BoolLit(b) => Ok(self.graph.intern_pure(PureOp::Bool(*b), smallvec![], ty)),
-            TermKind::StringLit(s) => {
-                Ok(self.graph.intern_pure(PureOp::StringLit(s.clone()), smallvec![], ty))
-            }
+            TermKind::FloatLit(f) => Ok(self.intern_pure(PureOp::Float(f.to_string()), smallvec![], ty)),
+            TermKind::BoolLit(b) => Ok(self.intern_pure(PureOp::Bool(*b), smallvec![], ty)),
+            TermKind::StringLit(s) => Ok(self.intern_pure(PureOp::StringLit(s.clone()), smallvec![], ty)),
 
             // --- Variables ---
             TermKind::Var(sym) => self.convert_var(*sym, ty),
@@ -714,9 +729,7 @@ impl<'a> Converter<'a> {
             }
 
             // --- Extern ---
-            TermKind::Extern(name) => {
-                Ok(self.graph.intern_pure(PureOp::Extern(name.clone()), smallvec![], ty))
-            }
+            TermKind::Extern(name) => Ok(self.intern_pure(PureOp::Extern(name.clone()), smallvec![], ty)),
 
             // --- Force (pass-through) ---
             TermKind::Force(inner) => self.convert_term(inner),
@@ -779,7 +792,7 @@ impl<'a> Converter<'a> {
 
         // Hoisted pure constant → Global reference
         if self.pure_constants.contains(&name) {
-            return Ok(self.graph.intern_pure(PureOp::Global(name), smallvec![], ty));
+            return Ok(self.intern_pure(PureOp::Global(name), smallvec![], ty));
         }
 
         // Arity-0 constant def → inline its body
@@ -798,7 +811,7 @@ impl<'a> Converter<'a> {
         }
 
         // Function reference → Global
-        Ok(self.graph.intern_pure(PureOp::Global(name), smallvec![], ty))
+        Ok(self.intern_pure(PureOp::Global(name), smallvec![], ty))
     }
 
     // ========================================================================
@@ -815,11 +828,11 @@ impl<'a> Converter<'a> {
             TermKind::BinOp(op) => {
                 let lhs = self.convert_term(&args[0])?;
                 let rhs = self.convert_term(&args[1])?;
-                Ok(self.graph.intern_pure(PureOp::BinOp(op.op.clone()), smallvec![lhs, rhs], ty))
+                Ok(self.intern_pure(PureOp::BinOp(op.op.clone()), smallvec![lhs, rhs], ty))
             }
             TermKind::UnOp(op) => {
                 let operand = self.convert_term(&args[0])?;
-                Ok(self.graph.intern_pure(PureOp::UnaryOp(op.op.clone()), smallvec![operand], ty))
+                Ok(self.intern_pure(PureOp::UnaryOp(op.op.clone()), smallvec![operand], ty))
             }
             TermKind::Var(sym) => {
                 let name = self.symbols.get(*sym).expect("BUG").clone();
@@ -849,13 +862,13 @@ impl<'a> Converter<'a> {
                 let operands: SmallVec<[NodeId; 4]> =
                     args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
                 let n = operands.len();
-                Ok(self.graph.intern_pure(PureOp::Tuple(n), operands, ty))
+                Ok(self.intern_pure(PureOp::Tuple(n), operands, ty))
             }
             "_w_vec_lit" => {
                 let operands: SmallVec<[NodeId; 4]> =
                     args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
                 let n = operands.len();
-                Ok(self.graph.intern_pure(PureOp::Vector(n), operands, ty))
+                Ok(self.intern_pure(PureOp::Vector(n), operands, ty))
             }
             "_w_tuple_proj" => {
                 if args.len() != 2 {
@@ -870,7 +883,7 @@ impl<'a> Converter<'a> {
                         ));
                     }
                 };
-                Ok(self.graph.intern_pure(PureOp::Project { index }, smallvec![base], ty))
+                Ok(self.intern_pure(PureOp::Project { index }, smallvec![base], ty))
             }
             "_w_index" => {
                 if args.len() != 2 {
@@ -878,22 +891,18 @@ impl<'a> Converter<'a> {
                 }
                 let base = self.convert_term(&args[0])?;
                 let index = self.convert_term(&args[1])?;
-                Ok(self.graph.intern_pure(PureOp::Index, smallvec![base, index], ty))
+                Ok(self.intern_pure(PureOp::Index, smallvec![base, index], ty))
             }
             "_w_array_lit" => {
                 let operands: SmallVec<[NodeId; 4]> =
                     args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
                 let n = operands.len();
-                Ok(self.graph.intern_pure(PureOp::ArrayLit(n), operands, ty))
+                Ok(self.intern_pure(PureOp::ArrayLit(n), operands, ty))
             }
             "_w_range" => {
                 let start = self.convert_term(&args[0])?;
                 let len = self.convert_term(&args[1])?;
-                Ok(self.graph.intern_pure(
-                    PureOp::ArrayRange { has_step: false },
-                    smallvec![start, len],
-                    ty,
-                ))
+                Ok(self.intern_pure(PureOp::ArrayRange { has_step: false }, smallvec![start, len], ty))
             }
             // _w_intrinsic_storage_index(set_const, binding_const, index) → load
             // from a storage view. Emitted by buffer_specialize for functions
@@ -921,7 +930,7 @@ impl<'a> Converter<'a> {
                 };
                 let index_nid = self.convert_term(&args[2])?;
                 let view_nid = self.emit_storage_view(set, binding, ty.clone());
-                let ptr_nid = self.graph.intern_pure(
+                let ptr_nid = self.intern_pure(
                     PureOp::StorageViewIndex,
                     smallvec![view_nid, index_nid],
                     ty.clone(),
@@ -937,6 +946,7 @@ impl<'a> Converter<'a> {
                     operand_nodes: smallvec![ptr_nid],
                     result: Some(result_nid),
                     effects: Some((effect_in, effect_out)),
+                    span: self.current_span,
                 });
                 Ok(result_nid)
             }
@@ -972,7 +982,7 @@ impl<'a> Converter<'a> {
                 self.emit_storage_store(view_nid, index_nid, value_nid, value_ty);
                 // Result is unit.
                 let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
-                Ok(self.graph.intern_pure(PureOp::Unit, smallvec![], unit_ty))
+                Ok(self.intern_pure(PureOp::Unit, smallvec![], unit_ty))
             }
             name if name.starts_with("_w_intrinsic_") => {
                 // Default: treat intrinsics as pure (hash-consable). Effectful
@@ -982,7 +992,7 @@ impl<'a> Converter<'a> {
                 // branch; at present all remaining intrinsics are pure.
                 let arg_nids: SmallVec<[NodeId; 4]> =
                     args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
-                Ok(self.graph.intern_pure(PureOp::Intrinsic(name.to_string()), arg_nids, ty))
+                Ok(self.intern_pure(PureOp::Intrinsic(name.to_string()), arg_nids, ty))
             }
             _ => {
                 // Function call
@@ -1004,6 +1014,7 @@ impl<'a> Converter<'a> {
                             operand_nodes: arg_nids,
                             result: Some(result_nid),
                             effects: Some((effect_in, effect_out)),
+                            span: self.current_span,
                         });
                         return Ok(result_nid);
                     }
@@ -1029,6 +1040,7 @@ impl<'a> Converter<'a> {
                         operand_nodes: arg_nids,
                         result: Some(result_nid),
                         effects: Some((effect_in, effect_out)),
+                        span: self.current_span,
                     });
                     Ok(result_nid)
                 } else {
@@ -1248,7 +1260,7 @@ impl<'a> Converter<'a> {
         // Init → header with (init, 0)
         let init_nid = self.convert_term(init)?;
         let bound_nid = self.convert_term(bound)?;
-        let zero = self.graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty.clone());
+        let zero = self.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty.clone());
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
             target: header,
             args: vec![init_nid, zero],
@@ -1262,8 +1274,7 @@ impl<'a> Converter<'a> {
             let val = self.convert_term(expr)?;
             self.locals.insert(*sym, val);
         }
-        let cond_nid =
-            self.graph.intern_pure(PureOp::BinOp("<".into()), smallvec![idx_nid, bound_nid], bool_ty);
+        let cond_nid = self.intern_pure(PureOp::BinOp("<".into()), smallvec![idx_nid, bound_nid], bool_ty);
         self.graph.skeleton.blocks[header].term = SkeletonTerminator::CondBranch {
             cond: cond_nid,
             then_target: body_block,
@@ -1275,8 +1286,8 @@ impl<'a> Converter<'a> {
         // Body: convert body, increment index, branch back
         self.current_block = body_block;
         let new_acc = self.convert_term(body)?;
-        let one = self.graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty.clone());
-        let next_i = self.graph.intern_pure(PureOp::BinOp("+".into()), smallvec![idx_nid, one], i32_ty);
+        let one = self.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty.clone());
+        let next_i = self.intern_pure(PureOp::BinOp("+".into()), smallvec![idx_nid, one], i32_ty);
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
             target: header,
             args: vec![new_acc, next_i],
@@ -1333,12 +1344,12 @@ impl<'a> Converter<'a> {
         let iter_nid = self.convert_term(iter)?;
 
         // Length intrinsic
-        let len_nid = self.graph.intern_pure(
+        let len_nid = self.intern_pure(
             PureOp::UnaryOp("_w_intrinsic_length".into()),
             smallvec![iter_nid],
             i32_ty.clone(),
         );
-        let zero = self.graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty.clone());
+        let zero = self.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty.clone());
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
             target: header,
             args: vec![init_nid, zero],
@@ -1351,8 +1362,7 @@ impl<'a> Converter<'a> {
             let val = self.convert_term(expr)?;
             self.locals.insert(*sym, val);
         }
-        let cond_nid =
-            self.graph.intern_pure(PureOp::BinOp("<".into()), smallvec![idx_nid, len_nid], bool_ty);
+        let cond_nid = self.intern_pure(PureOp::BinOp("<".into()), smallvec![idx_nid, len_nid], bool_ty);
         self.graph.skeleton.blocks[header].term = SkeletonTerminator::CondBranch {
             cond: cond_nid,
             then_target: body_block,
@@ -1363,12 +1373,12 @@ impl<'a> Converter<'a> {
 
         // Body: index into iterator, bind elem_var
         self.current_block = body_block;
-        let elem_nid = self.graph.intern_pure(PureOp::Index, smallvec![iter_nid, idx_nid], elem_ty.clone());
+        let elem_nid = self.intern_pure(PureOp::Index, smallvec![iter_nid, idx_nid], elem_ty.clone());
         self.locals.insert(elem_var, elem_nid);
 
         let new_acc = self.convert_term(body)?;
-        let one = self.graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty.clone());
-        let next_i = self.graph.intern_pure(PureOp::BinOp("+".into()), smallvec![idx_nid, one], i32_ty);
+        let one = self.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty.clone());
+        let next_i = self.intern_pure(PureOp::BinOp("+".into()), smallvec![idx_nid, one], i32_ty);
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
             target: header,
             args: vec![new_acc, next_i],
@@ -1431,6 +1441,7 @@ impl<'a> Converter<'a> {
             operand_nodes: operands,
             result: Some(result_nid),
             effects: Some((effect_in, effect_out)),
+            span: self.current_span,
         });
         result_nid
     }
@@ -1584,7 +1595,7 @@ impl<'a> Converter<'a> {
         let capture_nids: Vec<NodeId> =
             pred.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
         let arr_nid = self.convert_array_expr_value(input)?;
-        let pred_ref = self.graph.intern_pure(
+        let pred_ref = self.intern_pure(
             PureOp::Global(pred_name),
             smallvec![],
             Type::Constructed(TypeName::Unit, vec![]),
@@ -1610,6 +1621,7 @@ impl<'a> Converter<'a> {
             operand_nodes: operands,
             result: Some(result_nid),
             effects: Some((effect_in, effect_out)),
+            span: self.current_span,
         });
         Ok(result_nid)
     }
@@ -1628,12 +1640,12 @@ impl<'a> Converter<'a> {
                 let operands: SmallVec<[NodeId; 4]> =
                     terms.iter().map(|t| self.convert_term(t)).collect::<Result<_, _>>()?;
                 let n = operands.len();
-                Ok(self.graph.intern_pure(PureOp::ArrayLit(n), operands, ty))
+                Ok(self.intern_pure(PureOp::ArrayLit(n), operands, ty))
             }
             ArrayExpr::Range { start, len } => {
                 let start_nid = self.convert_term(start)?;
                 let len_nid = self.convert_term(len)?;
-                Ok(self.graph.intern_pure(
+                Ok(self.intern_pure(
                     PureOp::ArrayRange { has_step: false },
                     smallvec![start_nid, len_nid],
                     ty,
@@ -1671,6 +1683,7 @@ impl<'a> Converter<'a> {
                     operand_nodes: smallvec![offset_nid, len_nid],
                     result: Some(result_nid),
                     effects: Some((effect_in, effect_out)),
+                    span: self.current_span,
                 });
                 Ok(result_nid)
             }

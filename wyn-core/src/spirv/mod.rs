@@ -6,6 +6,7 @@
 mod lowering_tests;
 use std::collections::{HashMap, HashSet};
 
+use crate::ast::Span;
 use crate::ast::TypeName;
 use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
@@ -17,7 +18,7 @@ use crate::ssa::types::{
 use crate::ssa::types::{EntryPoint, ExecutionModel, Function, IoDecoration, Program};
 use crate::types;
 use crate::types::TypeExt;
-use crate::{bail_spirv, err_spirv};
+use crate::{bail_spirv, bail_spirv_at, err_spirv, err_spirv_at};
 use polytype::Type as PolyType;
 use rspirv::binary::Assemble;
 use rspirv::dr::{Builder, InsertPoint, Operand};
@@ -952,8 +953,8 @@ impl Constructor {
 /// - SSA blocks become SPIR-V blocks
 /// - Block parameters become OpPhi nodes
 /// - Terminators become branch instructions
-fn lower_ssa_body(constructor: &mut Constructor, body: &FuncBody) -> Result<spirv::Word> {
-    let mut ctx = LowerCtx::new(constructor, body, false);
+fn lower_ssa_body(constructor: &mut Constructor, body: &FuncBody, func_span: Span) -> Result<spirv::Word> {
+    let mut ctx = LowerCtx::new(constructor, body, false, func_span);
     ctx.lower()
 }
 
@@ -962,8 +963,12 @@ fn lower_ssa_body(constructor: &mut Constructor, body: &FuncBody) -> Result<spir
 /// Entry points are void functions — OpReturnValue is invalid.
 /// SSA for entry points should use OutputPtr+Store then ReturnUnit;
 /// Return(value) will produce an error.
-fn lower_ssa_body_for_entry(constructor: &mut Constructor, body: &FuncBody) -> Result<spirv::Word> {
-    let mut ctx = LowerCtx::new(constructor, body, true);
+fn lower_ssa_body_for_entry(
+    constructor: &mut Constructor,
+    body: &FuncBody,
+    func_span: Span,
+) -> Result<spirv::Word> {
+    let mut ctx = LowerCtx::new(constructor, body, true, func_span);
     ctx.lower()
 }
 
@@ -986,10 +991,21 @@ struct LowerCtx<'a, 'b> {
     /// Populated when lowering StorageView instructions so StorageViewIndex can
     /// resolve the buffer without relying on SPIR-V constant reverse lookups.
     view_buffer_id: HashMap<ValueId, u32>,
+    /// Span of the instruction currently being lowered (set by `lower_inst`).
+    /// Consumed via `blame_span()` so backend errors blame the source line of
+    /// the originating expression.
+    current_span: Option<Span>,
+    /// Function-level span fallback when an instruction has no span.
+    func_span: Span,
 }
 
 impl<'a, 'b> LowerCtx<'a, 'b> {
-    fn new(constructor: &'a mut Constructor, body: &'b FuncBody, is_entry_point: bool) -> Self {
+    fn new(
+        constructor: &'a mut Constructor,
+        body: &'b FuncBody,
+        is_entry_point: bool,
+        func_span: Span,
+    ) -> Self {
         LowerCtx {
             constructor,
             body,
@@ -999,7 +1015,15 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             block_indices: HashMap::new(),
             phi_inputs: Vec::new(),
             view_buffer_id: HashMap::new(),
+            current_span: None,
+            func_span,
         }
+    }
+
+    /// Source span used to blame an instruction's lowering errors. Falls back
+    /// to the function span when the instruction has no span of its own.
+    fn blame_span(&self) -> Span {
+        self.current_span.unwrap_or(self.func_span)
     }
 
     fn lower(&mut self) -> Result<spirv::Word> {
@@ -1135,21 +1159,25 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
     fn lower_inst(&mut self, inst: &WynInstNode) -> Result<()> {
         let ssa_result_ty = inst.result.map(|r| self.body.inner.value_type(r).clone());
         let result_ty = ssa_result_ty.as_ref().map(|t| self.constructor.polytype_to_spirv(t)).unwrap_or(0);
+        self.current_span = inst.span;
 
         let spirv_result = match &inst.data {
             InstKind::Int(s) => match ssa_result_ty.as_ref() {
                 Some(PolyType::Constructed(TypeName::UInt(32), _)) => {
-                    let val: u32 = s.parse().map_err(|_| err_spirv!("Invalid u32: {}", s))?;
+                    let val: u32 =
+                        s.parse().map_err(|_| err_spirv_at!(self.blame_span(), "Invalid u32: {}", s))?;
                     self.constructor.const_u32(val)
                 }
                 _ => {
-                    let val: i32 = s.parse().map_err(|_| err_spirv!("Invalid i32: {}", s))?;
+                    let val: i32 =
+                        s.parse().map_err(|_| err_spirv_at!(self.blame_span(), "Invalid i32: {}", s))?;
                     self.constructor.const_i32(val)
                 }
             },
 
             InstKind::Float(s) => {
-                let val: f32 = s.parse().map_err(|_| err_spirv!("Invalid f32: {}", s))?;
+                let val: f32 =
+                    s.parse().map_err(|_| err_spirv_at!(self.blame_span(), "Invalid f32: {}", s))?;
                 self.constructor.const_f32(val)
             }
 
@@ -1162,7 +1190,11 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             }
 
             InstKind::String(s) => {
-                bail_spirv!("String literals not supported in SPIR-V: {}", s)
+                bail_spirv_at!(
+                    self.blame_span(),
+                    "String literals not supported in SPIR-V: {}",
+                    s
+                )
             }
 
             InstKind::BinOp { op, lhs, rhs } => {
@@ -1260,19 +1292,17 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     // User-defined function
                     self.constructor.builder.function_call(result_ty, None, func_id, arg_ids)?
                 } else {
-                    bail_spirv!("Unknown function: {}", func)
+                    bail_spirv_at!(self.blame_span(), "Unknown function: {}", func)
                 }
             }
 
             InstKind::Global(name) => {
                 if let Some(&var_id) = self.constructor.uniform_variables.get(name) {
                     // Load uniform value
-                    let value_type = self
-                        .constructor
-                        .uniform_types
-                        .get(name)
-                        .copied()
-                        .ok_or_else(|| err_spirv!("Unknown uniform type: {}", name))?;
+                    let value_type =
+                        self.constructor.uniform_types.get(name).copied().ok_or_else(|| {
+                            err_spirv_at!(self.blame_span(), "Unknown uniform type: {}", name)
+                        })?;
                     let member_ptr_type = self.constructor.builder.type_pointer(
                         None,
                         spirv::StorageClass::Uniform,
@@ -1283,7 +1313,8 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         self.constructor.builder.access_chain(member_ptr_type, None, var_id, [zero])?;
                     self.constructor.builder.load(value_type, None, member_ptr, None, [])?
                 } else if self.constructor.storage_variables.contains_key(name) {
-                    bail_spirv!(
+                    bail_spirv_at!(
+                        self.blame_span(),
                         "Direct global access to storage buffer '{}' is invalid; use array indexing",
                         name
                     )
@@ -1292,7 +1323,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     // This handles `def verts: [3]vec4f32 = [...]` referenced as just `verts`.
                     self.constructor.builder.function_call(result_ty, None, func_id, [])?
                 } else {
-                    bail_spirv!("Unknown global: {}", name)
+                    bail_spirv_at!(self.blame_span(), "Unknown global: {}", name)
                 }
             }
 
@@ -1301,7 +1332,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 .linked_functions
                 .get(linkage_name)
                 .copied()
-                .ok_or_else(|| err_spirv!("Unknown extern: {}", linkage_name))?,
+                .ok_or_else(|| err_spirv_at!(self.blame_span(), "Unknown extern: {}", linkage_name))?,
 
             InstKind::Intrinsic { name, args } => {
                 let arg_ids: Vec<_> = args.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
@@ -1349,7 +1380,12 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                                 [buffer_id_const, offset_id, len_id],
                             )?
                         } else {
-                            bail_spirv!("Unknown storage buffer: set={}, binding={}", set, binding)
+                            bail_spirv_at!(
+                                self.blame_span(),
+                                "Unknown storage buffer: set={}, binding={}",
+                                set,
+                                binding
+                            )
                         }
                     }
                     ViewSource::Inherited { parent } => {
@@ -1399,11 +1435,9 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 // extractable as a constant, e.g. in the same entry point scope).
                 let (buffer_var, _) =
                     if let Some(&buf_id) = view.as_ssa().and_then(|id| self.view_buffer_id.get(&id)) {
-                        self.constructor
-                            .buffer_vars
-                            .get(buf_id as usize)
-                            .copied()
-                            .ok_or_else(|| err_spirv!("view_buffer_id: unknown buffer_id {}", buf_id))?
+                        self.constructor.buffer_vars.get(buf_id as usize).copied().ok_or_else(|| {
+                            err_spirv_at!(self.blame_span(), "view_buffer_id: unknown buffer_id {}", buf_id)
+                        })?
                     } else {
                         self.constructor.resolve_buffer_by_id(buffer_id_val, "StorageViewIndex")?
                     };
@@ -1432,7 +1466,8 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 if *index < self.constructor.current_entry_outputs.len() {
                     self.constructor.current_entry_outputs[*index]
                 } else {
-                    bail_spirv!(
+                    bail_spirv_at!(
+                        self.blame_span(),
                         "Output index {} out of bounds (have {} outputs)",
                         index,
                         self.constructor.current_entry_outputs.len()
@@ -3137,7 +3172,8 @@ fn lower_ssa_function(constructor: &mut Constructor, func: &Function) -> Result<
     let return_type = constructor.polytype_to_spirv(&body.return_ty);
 
     constructor.begin_function(&func.name, &param_names, &param_types, return_type)?;
-    lower_ssa_body(constructor, body).map_err(|e| err_spirv!("in function '{}': {}", func.name, e))?;
+    lower_ssa_body(constructor, body, func.span)
+        .map_err(|e| err_spirv!("in function '{}': {}", func.name, e))?;
     constructor.end_function()?;
 
     Ok(())
@@ -3354,7 +3390,7 @@ fn lower_ssa_entry_point(
 
     // Lower the body (stores to outputs are now explicit in SSA)
     // ReturnUnit blocks now emit ret() directly, so no extra return needed here.
-    let _result = lower_ssa_body_for_entry(constructor, body)?;
+    let _result = lower_ssa_body_for_entry(constructor, body, entry.span)?;
 
     constructor.end_function()?;
 

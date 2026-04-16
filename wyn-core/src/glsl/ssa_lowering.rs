@@ -3,14 +3,14 @@
 //! This module converts SSA programs to GLSL shader source code.
 //! It generates separate strings for vertex and fragment shaders.
 
-use crate::ast::TypeName;
-use crate::bail_glsl;
+use crate::ast::{Span, TypeName};
 use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
 use crate::lowering_common::ShaderStage;
 use crate::ssa::types::{ConstantValue, FuncBody, InstKind, ValueId, ValueRef, WynInstNode};
 use crate::ssa::types::{EntryPoint, ExecutionModel, Function, IoDecoration, Program};
 use crate::types::TypeExt;
+use crate::{bail_glsl, bail_glsl_at};
 use polytype::Type as PolyType;
 use rspirv::spirv;
 use std::collections::{HashMap, HashSet};
@@ -181,7 +181,7 @@ impl<'a> LowerCtx<'a> {
         }
 
         // Map output index 0 → fragColor for OutputPtr+Store handling
-        let mut body_ctx = BodyLowerCtx::new(self, &entry.body);
+        let mut body_ctx = BodyLowerCtx::new(self, &entry.body, entry.span);
         body_ctx.entry_output_names.insert(0, "fragColor".to_string());
         let result = body_ctx.lower(output)?;
         let used_output_ptrs = body_ctx.uses_output_ptrs;
@@ -335,7 +335,7 @@ impl<'a> LowerCtx<'a> {
         writeln!(output, "{} {}({}) {{", ret_ty, func.name, params.join(", ")).unwrap();
 
         self.indent += 1;
-        let result = self.lower_body(body, output)?;
+        let result = self.lower_body(body, func.span, output)?;
         writeln!(output, "{}return {};", self.indent_str(), result).unwrap();
         self.indent -= 1;
 
@@ -430,7 +430,7 @@ impl<'a> LowerCtx<'a> {
             writeln!(output, "{}{} {} = {};", self.indent_str(), ty, name, gl_var).unwrap();
         }
 
-        let mut body_ctx = BodyLowerCtx::new(self, body);
+        let mut body_ctx = BodyLowerCtx::new(self, body, entry.span);
         // Pre-populate output pointer names so OutputPtr+Store become GLSL assignments
         for (idx, name) in &output_names {
             body_ctx.entry_output_names.insert(*idx, name.clone());
@@ -481,8 +481,8 @@ impl<'a> LowerCtx<'a> {
     /// This walks the CFG and generates GLSL code. For now, we use a simple
     /// approach that emits variables for each SSA value and handles control
     /// flow by detecting patterns.
-    fn lower_body(&mut self, body: &FuncBody, output: &mut String) -> Result<String> {
-        let mut body_ctx = BodyLowerCtx::new(self, body);
+    fn lower_body(&mut self, body: &FuncBody, span: Span, output: &mut String) -> Result<String> {
+        let mut body_ctx = BodyLowerCtx::new(self, body, span);
         body_ctx.lower(output)
     }
 
@@ -587,10 +587,16 @@ struct BodyLowerCtx<'a, 'b> {
     entry_output_names: HashMap<usize, String>,
     /// Whether this body used OutputPtr+Store (so post-body assignment is skipped).
     uses_output_ptrs: bool,
+    /// Span of the instruction currently being lowered. Set by `lower_inst`
+    /// before recursing into helpers; consumed by `bail_glsl_at!` so backend
+    /// errors blame the source line of the originating expression.
+    current_span: Option<Span>,
+    /// Function-level span fallback when an instruction has no span of its own.
+    func_span: Span,
 }
 
 impl<'a, 'b> BodyLowerCtx<'a, 'b> {
-    fn new(ctx: &'a mut LowerCtx<'b>, body: &'a FuncBody) -> Self {
+    fn new(ctx: &'a mut LowerCtx<'b>, body: &'a FuncBody, func_span: Span) -> Self {
         BodyLowerCtx {
             ctx,
             body,
@@ -599,7 +605,15 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             output_ptrs: HashMap::new(),
             entry_output_names: HashMap::new(),
             uses_output_ptrs: false,
+            current_span: None,
+            func_span,
         }
+    }
+
+    /// Span used to blame an instruction's lowering errors. Falls back to
+    /// the function-level span if the instruction has no span of its own.
+    fn blame_span(&self) -> Span {
+        self.current_span.unwrap_or(self.func_span)
     }
 
     fn lower(&mut self, output: &mut String) -> Result<String> {
@@ -790,6 +804,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
 
     fn lower_inst(&mut self, inst: &WynInstNode, _output: &mut String) -> Result<String> {
         let result_ty = inst.result.map(|r| self.body.inner.value_type(r));
+        self.current_span = inst.span;
         match &inst.data {
             InstKind::Int(s) => Ok(s.clone()),
             InstKind::Float(s) => {
@@ -823,7 +838,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
 
             InstKind::Tuple(elems) => {
                 if elems.is_empty() {
-                    bail_glsl!("Empty tuple in GLSL lowering");
+                    bail_glsl_at!(self.blame_span(), "Empty tuple in GLSL lowering");
                 }
                 let parts: Result<Vec<_>> = elems.iter().map(|e| self.get_value_ref(*e)).collect();
                 let struct_name = self.ctx.type_to_glsl(result_ty.expect("Tuple must have result"));
@@ -859,7 +874,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 let base_val = self.get_value_ref(*base)?;
                 let base_ty = match base.as_ssa() {
                     Some(id) => self.body.get_value_type(id),
-                    None => bail_glsl!("Project base must be SSA value"),
+                    None => bail_glsl_at!(self.blame_span(), "Project base must be SSA value"),
                 };
 
                 // Check if it's a vector type - use swizzle
@@ -869,7 +884,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         1 => "y",
                         2 => "z",
                         3 => "w",
-                        _ => bail_glsl!("Invalid vector swizzle index: {}", index),
+                        _ => bail_glsl_at!(self.blame_span(), "Invalid vector swizzle index: {}", index),
                     };
                     Ok(format!("{}.{}", base_val, swizzle))
                 } else {
@@ -902,37 +917,49 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             }
 
             InstKind::ArrayRange { .. } => {
-                bail_glsl!("ArrayRange not supported in GLSL")
+                bail_glsl_at!(self.blame_span(), "ArrayRange not supported in GLSL")
             }
 
             InstKind::Global(name) => Ok(name.clone()),
 
             InstKind::Extern(linkage) => {
-                bail_glsl!("Extern functions not supported in GLSL: {}", linkage)
+                bail_glsl_at!(
+                    self.blame_span(),
+                    "Extern functions not supported in GLSL: {}",
+                    linkage
+                )
             }
 
             InstKind::Matrix(_) => {
-                bail_glsl!("Matrix literals not yet implemented in GLSL lowering")
+                bail_glsl_at!(
+                    self.blame_span(),
+                    "Matrix literals not yet implemented in GLSL lowering"
+                )
             }
 
             InstKind::StorageView { .. }
             | InstKind::StorageViewIndex { .. }
             | InstKind::StorageViewLen { .. } => {
-                bail_glsl!("Storage view operations not supported in GLSL")
+                bail_glsl_at!(self.blame_span(), "Storage view operations not supported in GLSL")
             }
 
             InstKind::Alloca { .. } | InstKind::Load { .. } => {
-                bail_glsl!("Memory operations not supported in GLSL")
+                bail_glsl_at!(self.blame_span(), "Memory operations not supported in GLSL")
             }
 
             InstKind::Store { ptr, value } => {
-                let ptr_id = ptr.as_ssa().ok_or_else(|| crate::err_glsl!("Store ptr must be SSA"))?;
+                let ptr_id = ptr
+                    .as_ssa()
+                    .ok_or_else(|| crate::err_glsl_at!(self.blame_span(), "Store ptr must be SSA"))?;
                 if let Some(out_name) = self.output_ptrs.get(&ptr_id) {
                     let val = self.get_value_ref(*value)?;
                     writeln!(_output, "{}{} = {};", self.ctx.indent_str(), out_name, val).unwrap();
                     Ok(String::new())
                 } else {
-                    bail_glsl!("Store to non-output pointer not supported in GLSL")
+                    bail_glsl_at!(
+                        self.blame_span(),
+                        "Store to non-output pointer not supported in GLSL"
+                    )
                 }
             }
 
@@ -943,12 +970,19 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     self.uses_output_ptrs = true;
                     Ok(name.clone())
                 } else {
-                    bail_glsl!("OutputPtr index {} has no corresponding GLSL output", index)
+                    bail_glsl_at!(
+                        self.blame_span(),
+                        "OutputPtr index {} has no corresponding GLSL output",
+                        index
+                    )
                 }
             }
 
             InstKind::Materialize { .. } | InstKind::DynamicExtract { .. } => {
-                bail_glsl!("Materialize/DynamicExtract not supported in GLSL (SPIR-V-specific lowering)")
+                bail_glsl_at!(
+                    self.blame_span(),
+                    "Materialize/DynamicExtract not supported in GLSL (SPIR-V-specific lowering)"
+                )
             }
         }
     }
@@ -957,7 +991,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         self.value_map
             .get(&val)
             .cloned()
-            .ok_or_else(|| crate::err_glsl!("Value {:?} not found in value_map", val))
+            .ok_or_else(|| crate::err_glsl_at!(self.blame_span(), "Value {:?} not found in value_map", val))
     }
 
     fn get_value_ref(&self, vr: ValueRef) -> Result<String> {
@@ -989,10 +1023,14 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         match impl_ {
             BuiltinImpl::PrimOp(op) => self.lower_primop(op, args, ret_ty),
             BuiltinImpl::Intrinsic(intr) => {
-                bail_glsl!("Intrinsic {:?} not supported in GLSL", intr)
+                bail_glsl_at!(self.blame_span(), "Intrinsic {:?} not supported in GLSL", intr)
             }
             BuiltinImpl::LinkedSpirv(name) => {
-                bail_glsl!("Linked SPIR-V function '{}' not supported in GLSL", name)
+                bail_glsl_at!(
+                    self.blame_span(),
+                    "Linked SPIR-V function '{}' not supported in GLSL",
+                    name
+                )
             }
         }
     }
@@ -1052,7 +1090,8 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 PolyType::Constructed(TypeName::Int(32), _) => Ok(format!("floatBitsToInt({})", args[0])),
                 PolyType::Constructed(TypeName::UInt(32), _) => Ok(format!("floatBitsToUint({})", args[0])),
                 PolyType::Constructed(TypeName::Float(32), _) => Ok(format!("intBitsToFloat({})", args[0])),
-                _ => bail_glsl!(
+                _ => bail_glsl_at!(
+                    self.blame_span(),
                     "Unsupported bitcast target type: {}",
                     self.ctx.type_to_glsl(ret_ty)
                 ),
@@ -1071,7 +1110,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         if let Some(impl_) = self.ctx.impl_source.get(name).cloned() {
             return self.lower_builtin_call(&impl_, args, ret_ty);
         }
-        bail_glsl!("Unknown intrinsic: {}", name)
+        bail_glsl_at!(self.blame_span(), "Unknown intrinsic: {}", name)
     }
 }
 

@@ -141,6 +141,13 @@ macro_rules! err_spirv_at {
 }
 
 #[macro_export]
+macro_rules! err_glsl_at {
+    ($span:expr, $($arg:tt)*) => {
+        $crate::error::CompilerError::GlslError(format!($($arg)*), Some($span))
+    };
+}
+
+#[macro_export]
 macro_rules! err_module_at {
     ($span:expr, $($arg:tt)*) => {
         $crate::error::CompilerError::ModuleError(format!($($arg)*), Some($span))
@@ -246,6 +253,13 @@ macro_rules! bail_undef_at {
 macro_rules! bail_spirv_at {
     ($span:expr, $($arg:tt)*) => {
         return Err($crate::err_spirv_at!($span, $($arg)*))
+    };
+}
+
+#[macro_export]
+macro_rules! bail_glsl_at {
+    ($span:expr, $($arg:tt)*) => {
+        return Err($crate::err_glsl_at!($span, $($arg)*))
     };
 }
 

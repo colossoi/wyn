@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::Hash;
 
+use crate::ast::Span;
+
 new_key_type! {
     pub struct BlockId;
     pub struct InstId;
@@ -31,6 +33,10 @@ pub struct InstNode<I> {
     pub data: I,
     pub result: Option<ValueId>,
     pub parent: BlockId,
+    /// Source span of the user expression that produced this instruction,
+    /// or `None` for synthesized instructions (block-param phis, builder
+    /// scratch). Used by backends to blame errors back to source.
+    pub span: Option<Span>,
 }
 
 #[derive(Clone, Debug)]
@@ -208,6 +214,10 @@ impl<I, T: Clone + Debug> Function<I, T> {
     }
 
     pub fn append_inst(&mut self, block: BlockId, data: I, ty: T) -> ValueId {
+        self.append_inst_with_span(block, data, ty, None)
+    }
+
+    pub fn append_inst_with_span(&mut self, block: BlockId, data: I, ty: T, span: Option<Span>) -> ValueId {
         let value = self.values.insert(ValueInfo {
             def: ValueDef::Param { block, index: 0 },
             ty,
@@ -216,6 +226,7 @@ impl<I, T: Clone + Debug> Function<I, T> {
             data,
             result: Some(value),
             parent: block,
+            span,
         });
         self.values[value].def = ValueDef::Inst { inst };
         self.blocks[block].insts.push(inst);
@@ -223,16 +234,32 @@ impl<I, T: Clone + Debug> Function<I, T> {
     }
 
     pub fn append_void_inst(&mut self, block: BlockId, data: I) -> InstId {
+        self.append_void_inst_with_span(block, data, None)
+    }
+
+    pub fn append_void_inst_with_span(&mut self, block: BlockId, data: I, span: Option<Span>) -> InstId {
         let inst = self.insts.insert(InstNode {
             data,
             result: None,
             parent: block,
+            span,
         });
         self.blocks[block].insts.push(inst);
         inst
     }
 
     pub fn insert_inst_at_index(&mut self, block: BlockId, index: usize, data: I, ty: T) -> ValueId {
+        self.insert_inst_at_index_with_span(block, index, data, ty, None)
+    }
+
+    pub fn insert_inst_at_index_with_span(
+        &mut self,
+        block: BlockId,
+        index: usize,
+        data: I,
+        ty: T,
+        span: Option<Span>,
+    ) -> ValueId {
         let value = self.values.insert(ValueInfo {
             def: ValueDef::Param { block, index: 0 },
             ty,
@@ -241,6 +268,7 @@ impl<I, T: Clone + Debug> Function<I, T> {
             data,
             result: Some(value),
             parent: block,
+            span,
         });
         self.values[value].def = ValueDef::Inst { inst };
         self.blocks[block].insts.insert(index, inst);
@@ -371,19 +399,36 @@ impl<I, T: Clone + Debug> FuncBuilder<I, T> {
     }
 
     pub fn push_inst(&mut self, data: I, ty: T) -> Result<ValueId, BuilderError> {
+        self.push_inst_with_span(data, ty, None)
+    }
+
+    pub fn push_inst_with_span(
+        &mut self,
+        data: I,
+        ty: T,
+        span: Option<Span>,
+    ) -> Result<ValueId, BuilderError> {
         let block = self.current_block.ok_or(BuilderError::NoCurrentBlock)?;
         if !matches!(self.func.blocks[block].term, Terminator::Unreachable) {
             return Err(BuilderError::BlockAlreadyTerminated(block));
         }
-        Ok(self.func.append_inst(block, data, ty))
+        Ok(self.func.append_inst_with_span(block, data, ty, span))
     }
 
     pub fn push_void_inst(&mut self, data: I) -> Result<InstId, BuilderError> {
+        self.push_void_inst_with_span(data, None)
+    }
+
+    pub fn push_void_inst_with_span(
+        &mut self,
+        data: I,
+        span: Option<Span>,
+    ) -> Result<InstId, BuilderError> {
         let block = self.current_block.ok_or(BuilderError::NoCurrentBlock)?;
         if !matches!(self.func.blocks[block].term, Terminator::Unreachable) {
             return Err(BuilderError::BlockAlreadyTerminated(block));
         }
-        Ok(self.func.append_void_inst(block, data))
+        Ok(self.func.append_void_inst_with_span(block, data, span))
     }
 
     pub fn terminate(&mut self, term: Terminator) -> Result<(), BuilderError> {

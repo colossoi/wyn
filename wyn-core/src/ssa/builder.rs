@@ -3,7 +3,7 @@
 //! Wraps wyn-ssa's generic FuncBuilder with wyn-specific convenience methods
 //! for constructing InstKind instructions and managing ControlHeaders.
 
-use crate::ast::TypeName;
+use crate::ast::{Span, TypeName};
 use polytype::Type;
 
 use super::types::{
@@ -117,9 +117,28 @@ impl FuncBuilder {
         self.inner.push_inst(kind, ty)
     }
 
+    /// Push an instruction with a source span attached for error blame.
+    pub fn push_inst_with_span(
+        &mut self,
+        kind: InstKind,
+        ty: Type<TypeName>,
+        span: Option<Span>,
+    ) -> Result<ValueId, BuilderError> {
+        self.inner.push_inst_with_span(kind, ty, span)
+    }
+
     /// Push an instruction that produces no value (e.g., Store).
     pub fn push_void_inst(&mut self, kind: InstKind) -> Result<InstId, BuilderError> {
         self.inner.push_void_inst(kind)
+    }
+
+    /// Push a void instruction with a source span attached.
+    pub fn push_void_inst_with_span(
+        &mut self,
+        kind: InstKind,
+        span: Option<Span>,
+    ) -> Result<InstId, BuilderError> {
+        self.inner.push_void_inst_with_span(kind, span)
     }
 
     /// Set the terminator for the current block.

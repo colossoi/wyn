@@ -240,7 +240,7 @@ impl<'a> Elaborator<'a> {
 
         if let Some(result_nid) = se.result {
             let ty = self.graph.types[&result_nid].clone();
-            let vid = self.emit_at(skel_bid, kind, ty);
+            let vid = self.emit_at(skel_bid, kind, ty, se.span);
             // Insert under the resolved id so demand_placed's `self.resolve(nid)
             // → get(&resolved)` path finds it. Today extract maps every
             // SideEffectResult to itself, but that's a brittle invariant —
@@ -249,7 +249,7 @@ impl<'a> Elaborator<'a> {
             self.elaborated.insert(resolved, (vid, skel_bid));
         } else {
             let out_bid = self.block_map[&skel_bid];
-            self.builder.func_mut().append_void_inst(out_bid, kind);
+            self.builder.func_mut().append_void_inst_with_span(out_bid, kind, se.span);
         }
     }
 
@@ -274,7 +274,8 @@ impl<'a> Elaborator<'a> {
                 let ty = self.graph.types[&resolved].clone();
                 let kind = const_to_inst_kind(c);
                 let placed = self.choose_placement(&[]);
-                let vid = self.emit_at(placed, kind, ty);
+                let span = self.graph.node_spans.get(&resolved).copied();
+                let vid = self.emit_at(placed, kind, ty, span);
                 self.record_placement(resolved, vid, placed);
                 (vid, placed)
             }
@@ -286,7 +287,8 @@ impl<'a> Elaborator<'a> {
                 let ty = self.graph.types[&resolved].clone();
                 let kind = pure_to_inst_kind(op, &args);
                 let placed = self.choose_placement(&arg_placements);
-                let vid = self.emit_at(placed, kind, ty);
+                let span = self.graph.node_spans.get(&resolved).copied();
+                let vid = self.emit_at(placed, kind, ty, span);
                 self.record_placement(resolved, vid, placed);
                 (vid, placed)
             }
@@ -366,9 +368,15 @@ impl<'a> Elaborator<'a> {
     /// Emit an instruction into `target_skel`'s output block, bypassing the
     /// "block already terminated" check. The insts list is stored separately
     /// from the terminator, so appending is still well-formed.
-    fn emit_at(&mut self, target_skel: SkelBlockId, kind: InstKind, ty: Type<TypeName>) -> ValueId {
+    fn emit_at(
+        &mut self,
+        target_skel: SkelBlockId,
+        kind: InstKind,
+        ty: Type<TypeName>,
+        span: Option<crate::ast::Span>,
+    ) -> ValueId {
         let out_bid = self.block_map[&target_skel];
-        self.builder.func_mut().append_inst(out_bid, kind, ty)
+        self.builder.func_mut().append_inst_with_span(out_bid, kind, ty, span)
     }
 
     /// Resolve a NodeId through the extraction map.

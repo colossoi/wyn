@@ -671,6 +671,7 @@ fn build_scan_into_loop(
         operand_nodes: smallvec![ptr_nid, new_acc_nid],
         result: None,
         effects: Some((eff_in, eff_out)),
+        span: None,
     });
 
     let next_i_nid = increment(graph, idx_nid);
@@ -742,6 +743,7 @@ fn build_map_into_loop(
         operand_nodes: smallvec![ptr_nid, y_nid],
         result: None,
         effects: Some((eff_in, eff_out)),
+        span: None,
     });
 
     let next_i_nid = increment(graph, idx_nid);
@@ -1128,6 +1130,7 @@ fn emit_read_element(
             operand_nodes: smallvec![ptr_nid],
             result: Some(load_result),
             effects: Some((eff_in, eff_out)),
+            span: None,
         });
         load_result
     } else if is_virtual_source(arr_ty) {
