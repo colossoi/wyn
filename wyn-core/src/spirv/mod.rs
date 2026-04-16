@@ -2548,8 +2548,12 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                             Ok(id)
                         }
                     }
-                    Intrinsic::ArrayWith => {
-                        // _w_array_with(array, index, value) - functional array update
+                    Intrinsic::ArrayWith | Intrinsic::ArrayWithInPlace => {
+                        // _w_array_with(array, index, value) - array update.
+                        // Same SPIR-V lowering for both flavors today — SPIR-V can
+                        // already express OpCompositeInsert (literal idx) or a
+                        // local-buffer round-trip (dynamic idx). An in-place
+                        // optimization for the dynamic case is left as future work.
                         if arg_ids.len() != 3 {
                             bail_spirv!("ArrayWith requires 3 arguments");
                         }

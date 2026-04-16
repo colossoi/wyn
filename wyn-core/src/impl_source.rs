@@ -110,9 +110,15 @@ pub enum Intrinsic {
     /// Uninitialized/poison value for allocation bootstrapping
     /// SAFETY: Must be fully overwritten before being read
     Uninit,
-    /// Functional array update: immutable copy-with-update
+    /// Functional array update: immutable copy-with-update. Backend must
+    /// preserve the source array (emit copy + patch). User-surface default.
     /// Note: Could be moved to prelude once array comprehensions or fold is implemented
     ArrayWith,
+    /// In-place variant of `ArrayWith`. Caller guarantees the source array
+    /// is dead after this operation (loop-carried phi, or alias-checker
+    /// proved released). Backend may mutate the source buffer directly
+    /// instead of copying.
+    ArrayWithInPlace,
     /// `_w_intrinsic_length(arr) -> i32` — array size, distinct from
     /// vector `magnitude` (which lowers through GlslExt(66)). Can't be a
     /// PrimOp because GLSL uses method-call syntax `arr.length()` and
@@ -728,6 +734,10 @@ impl ImplSource {
         self.register(
             "_w_intrinsic_array_with",
             BuiltinImpl::Intrinsic(Intrinsic::ArrayWith),
+        );
+        self.register(
+            "_w_intrinsic_array_with_inplace",
+            BuiltinImpl::Intrinsic(Intrinsic::ArrayWithInPlace),
         );
         self.register("_w_intrinsic_length", BuiltinImpl::Intrinsic(Intrinsic::Length));
     }

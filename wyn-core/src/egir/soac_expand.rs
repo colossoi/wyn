@@ -314,8 +314,11 @@ fn expand_one(
                     call_operands.extend(captures.iter().copied());
                     let y_nid =
                         graph.intern_pure(PureOp::Call(func.clone()), call_operands, out_elem_ty.clone());
+                    // Loop-carried phi kills the previous iteration's value
+                    // on the back-edge, so the in-place variant is always safe
+                    // for SOAC-generated output arrays.
                     let new_out = graph.intern_pure(
-                        PureOp::Call("_w_intrinsic_array_with".into()),
+                        PureOp::Call("_w_intrinsic_array_with_inplace".into()),
                         smallvec![out_nid, idx_nid, y_nid],
                         out_arr_ty.clone(),
                     );
@@ -812,9 +815,11 @@ fn build_scan_loop(
     call_operands.extend(spec.captures.iter().copied());
     let new_acc_nid = graph.intern_pure(PureOp::Call(spec.func), call_operands, spec.acc_ty);
 
-    // out' = array_with(out, i, new_acc)
+    // out' = array_with_inplace(out, i, new_acc)
+    // Loop-carried phi kills the previous iteration's value on the back-edge,
+    // so in-place mutation is always safe here.
     let new_out_nid = graph.intern_pure(
-        PureOp::Call("_w_intrinsic_array_with".into()),
+        PureOp::Call("_w_intrinsic_array_with_inplace".into()),
         smallvec![out_nid, idx_nid, new_acc_nid],
         spec.out_arr_ty,
     );

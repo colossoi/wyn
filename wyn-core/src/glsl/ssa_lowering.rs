@@ -637,6 +637,13 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             match node {
                 Node::Inst(inst_id) => {
                     let inst = self.body.get_inst(*inst_id);
+
+                    // Special-case the array-update intrinsics: they don't fit the
+                    // "one expression = one statement" model.
+                    if self.try_emit_array_intrinsic(inst, output)? {
+                        continue;
+                    }
+
                     let is_side_effect =
                         matches!(inst.data, InstKind::OutputPtr { .. } | InstKind::Store { .. });
                     let expr = self.lower_inst(inst, output)?;
@@ -668,6 +675,13 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 Node::Assign { target, value } => {
                     let val = self.get_value(*value)?;
                     let var_name = glsl_var(*target);
+                    // Elide redundant self-copies. The ArrayWithInPlace path
+                    // aliases the result's GLSL var to the source array's GLSL
+                    // var; the resulting `x = x;` is skipped here.
+                    if val == var_name {
+                        self.value_map.insert(*target, var_name);
+                        continue;
+                    }
                     if self.declared.contains(&var_name) {
                         writeln!(output, "{}{} = {};", self.ctx.indent_str(), var_name, val).unwrap();
                     } else {
@@ -1014,6 +1028,114 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         }
     }
 
+    /// Intercept the array-update intrinsics — `Uninit`, `ArrayWith`,
+    /// `ArrayWithInPlace` — which don't fit the expression-returns-a-string
+    /// model. They emit statements directly and alias the result's GLSL
+    /// variable to the source array (for ArrayWithInPlace) or to a freshly
+    /// declared local (for Uninit / ArrayWith).
+    ///
+    /// Returns `true` when the inst was handled (caller should skip the
+    /// generic path), `false` otherwise.
+    fn try_emit_array_intrinsic(&mut self, inst: &WynInstNode, output: &mut String) -> Result<bool> {
+        use crate::ssa::types::InstKind;
+        let (intrinsic_name, args) = match &inst.data {
+            InstKind::Call { func, args } => (func.as_str(), args),
+            _ => return Ok(false),
+        };
+        let intr = match intrinsic_name {
+            "_w_intrinsic_uninit" => Intrinsic::Uninit,
+            "_w_intrinsic_array_with" => Intrinsic::ArrayWith,
+            "_w_intrinsic_array_with_inplace" => Intrinsic::ArrayWithInPlace,
+            _ => return Ok(false),
+        };
+        let result = inst.result.ok_or_else(|| {
+            crate::err_glsl_at!(self.blame_span(), "Array intrinsic {:?} missing result", intr)
+        })?;
+        let var_name = glsl_var(result);
+        let result_ty = self.body.inner.value_type(result).clone();
+        let sized_decl_prefix =
+            self.sized_array_decl_prefix(&result_ty).unwrap_or_else(|| self.ctx.type_to_glsl(&result_ty));
+        match intr {
+            Intrinsic::Uninit => {
+                // GLSL ES 3.00+ allows uninitialized locals; matches SPIR-V
+                // Function-storage semantics (contents undefined until written).
+                // The SOAC contract is that the array is fully overwritten before
+                // it's read.
+                writeln!(
+                    output,
+                    "{}{} {};",
+                    self.ctx.indent_str(),
+                    sized_decl_prefix,
+                    var_name
+                )
+                .unwrap();
+                self.declared.insert(var_name.clone());
+                self.value_map.insert(result, var_name);
+                Ok(true)
+            }
+            Intrinsic::ArrayWithInPlace => {
+                // Alias the result's GLSL var to the source array's GLSL var:
+                // we're mutating in place. The subsequent Node::Assign that
+                // would have copied this result into the loop-carried variable
+                // becomes a self-copy and is elided.
+                if args.len() != 3 {
+                    bail_glsl_at!(self.blame_span(), "ArrayWithInPlace expects 3 args");
+                }
+                let arr = self.get_value_ref(args[0])?;
+                let idx = self.get_value_ref(args[1])?;
+                let val = self.get_value_ref(args[2])?;
+                writeln!(output, "{}{}[{}] = {};", self.ctx.indent_str(), arr, idx, val).unwrap();
+                self.value_map.insert(result, arr);
+                Ok(true)
+            }
+            Intrinsic::ArrayWith => {
+                // Functional update: declare a fresh local, copy the source
+                // array into it, then patch the one element.
+                if args.len() != 3 {
+                    bail_glsl_at!(self.blame_span(), "ArrayWith expects 3 args");
+                }
+                let arr = self.get_value_ref(args[0])?;
+                let idx = self.get_value_ref(args[1])?;
+                let val = self.get_value_ref(args[2])?;
+                writeln!(
+                    output,
+                    "{}{} {} = {};",
+                    self.ctx.indent_str(),
+                    sized_decl_prefix,
+                    var_name,
+                    arr
+                )
+                .unwrap();
+                writeln!(
+                    output,
+                    "{}{}[{}] = {};",
+                    self.ctx.indent_str(),
+                    var_name,
+                    idx,
+                    val
+                )
+                .unwrap();
+                self.declared.insert(var_name.clone());
+                self.value_map.insert(result, var_name);
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// Format a type as a GLSL array declaration prefix with known size,
+    /// e.g. `float[8]`. Returns `None` for non-sized or non-array types.
+    fn sized_array_decl_prefix(&mut self, ty: &PolyType<TypeName>) -> Option<String> {
+        use crate::types::TypeExt;
+        let size = ty.array_size()?;
+        let n = match size {
+            PolyType::Constructed(TypeName::Size(n), _) => *n as u32,
+            _ => return None,
+        };
+        let elem = ty.elem_type()?;
+        Some(format!("{}[{}]", self.ctx.type_to_glsl(elem), n))
+    }
+
     fn lower_builtin_call(
         &mut self,
         impl_: &BuiltinImpl,
@@ -1024,6 +1146,13 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             BuiltinImpl::PrimOp(op) => self.lower_primop(op, args, ret_ty),
             BuiltinImpl::Intrinsic(intr) => match intr {
                 Intrinsic::Length => Ok(format!("int({}.length())", args[0])),
+                Intrinsic::Uninit | Intrinsic::ArrayWith | Intrinsic::ArrayWithInPlace => {
+                    bail_glsl_at!(
+                        self.blame_span(),
+                        "Intrinsic {:?} must be handled at Node::Inst level",
+                        intr
+                    )
+                }
                 _ => bail_glsl_at!(self.blame_span(), "Intrinsic {:?} not supported in GLSL", intr),
             },
             BuiltinImpl::LinkedSpirv(name) => {
