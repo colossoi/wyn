@@ -104,11 +104,8 @@ cd viz && cargo run vf ../complete_shader_example.spv --vertex vertex_main --fra
            --output-tlc <FILE>
                Output typed lambda calculus representation
 
-           --output-init-ssa <FILE>
-               Output initial SSA (right after conversion from TLC, before optimization)
-
-           --output-opt-ssa <FILE>
-               Output optimized SSA (after optimization, before SOAC lowering)
+           --output-mir <FILE>
+               Output MIR (SSA post-EGIR, pre-backend-lowering)
 
        -v, --verbose
                Print verbose output

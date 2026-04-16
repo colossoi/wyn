@@ -62,13 +62,9 @@ enum Commands {
         #[arg(long, value_name = "FILE")]
         output_tlc: Option<PathBuf>,
 
-        /// Output initial SSA (right after conversion from TLC, before optimization)
+        /// Output MIR (SSA post-EGIR, pre-backend-lowering)
         #[arg(long, value_name = "FILE")]
-        output_init_ssa: Option<PathBuf>,
-
-        /// Output optimized SSA (after optimization, before SOAC lowering)
-        #[arg(long, value_name = "FILE")]
-        output_opt_ssa: Option<PathBuf>,
+        output_mir: Option<PathBuf>,
 
         /// Print verbose output
         #[arg(short, long)]
@@ -126,8 +122,7 @@ fn run(cli: Cli) -> Result<(), DriverError> {
             target,
             output_annotated,
             output_tlc,
-            output_init_ssa,
-            output_opt_ssa,
+            output_mir,
             verbose,
         } => {
             compile_file(
@@ -136,8 +131,7 @@ fn run(cli: Cli) -> Result<(), DriverError> {
                 target,
                 output_annotated,
                 output_tlc,
-                output_init_ssa,
-                output_opt_ssa,
+                output_mir,
                 verbose,
             )?;
         }
@@ -159,8 +153,7 @@ fn compile_file(
     target: Target,
     output_annotated: Option<PathBuf>,
     output_tlc: Option<PathBuf>,
-    output_init_ssa: Option<PathBuf>,
-    output_opt_ssa: Option<PathBuf>,
+    output_mir: Option<PathBuf>,
     verbose: bool,
 ) -> Result<(), DriverError> {
     if verbose {
@@ -262,19 +255,11 @@ fn compile_file(
         }),
     };
 
-    // Dump initial SSA if requested
-    if let Some(ref path) = output_init_ssa {
+    // Dump MIR if requested
+    if let Some(ref path) = output_mir {
         fs::write(path, wyn_core::ssa::print::format_program(&ssa.ssa))?;
         if verbose {
-            info!("Wrote initial SSA to {}", path.display());
-        }
-    }
-
-    // Dump optimized SSA if requested (EGIR has already optimized at this point)
-    if let Some(ref path) = output_opt_ssa {
-        fs::write(path, wyn_core::ssa::print::format_program(&ssa.ssa))?;
-        if verbose {
-            info!("Wrote optimized SSA to {}", path.display());
+            info!("Wrote MIR to {}", path.display());
         }
     }
 
