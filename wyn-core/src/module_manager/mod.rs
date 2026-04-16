@@ -1123,7 +1123,9 @@ impl ModuleManager {
                     param_bindings,
                 );
             }
-            ExprKind::ArrayWith { array, index, value } => {
+            ExprKind::ArrayWith {
+                array, index, value, ..
+            } => {
                 self.resolve_names_in_expr(
                     array,
                     module_name,

@@ -94,6 +94,16 @@ pub trait Visitor: Sized {
         walk_expr_array_index(self, array, index)
     }
 
+    fn visit_expr_array_with(
+        &mut self,
+        _id: NodeId,
+        array: &Expression,
+        index: &Expression,
+        value: &Expression,
+    ) -> ControlFlow<Self::Break> {
+        walk_expr_array_with(self, array, index, value)
+    }
+
     fn visit_expr_binary_op(
         &mut self,
         _id: NodeId,
@@ -355,11 +365,9 @@ pub fn walk_expression<V: Visitor>(v: &mut V, e: &Expression) -> ControlFlow<V::
         ExprKind::Identifier(quals, name) => v.visit_expr_identifier(id, quals, name),
         ExprKind::ArrayLiteral(elements) => v.visit_expr_array_literal(id, elements),
         ExprKind::ArrayIndex(array, index) => v.visit_expr_array_index(id, array, index),
-        ExprKind::ArrayWith { array, index, value } => {
-            v.visit_expression(array)?;
-            v.visit_expression(index)?;
-            v.visit_expression(value)
-        }
+        ExprKind::ArrayWith {
+            array, index, value, ..
+        } => v.visit_expr_array_with(id, array, index, value),
         ExprKind::BinaryOp(op, left, right) => v.visit_expr_binary_op(id, op, left, right),
         ExprKind::Tuple(elements) => v.visit_expr_tuple(id, elements),
         ExprKind::Lambda(lambda) => v.visit_expr_lambda(id, lambda),
@@ -418,6 +426,17 @@ pub fn walk_expr_array_index<V: Visitor>(
 ) -> ControlFlow<V::Break> {
     v.visit_expression(array)?;
     v.visit_expression(index)
+}
+
+pub fn walk_expr_array_with<V: Visitor>(
+    v: &mut V,
+    array: &Expression,
+    index: &Expression,
+    value: &Expression,
+) -> ControlFlow<V::Break> {
+    v.visit_expression(array)?;
+    v.visit_expression(index)?;
+    v.visit_expression(value)
 }
 
 pub fn walk_expr_binary_op<V: Visitor>(

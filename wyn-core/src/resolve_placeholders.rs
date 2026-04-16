@@ -342,7 +342,9 @@ impl PlaceholderResolver {
                 self.resolve_expression(array);
                 self.resolve_expression(index);
             }
-            ast::ExprKind::ArrayWith { array, index, value } => {
+            ast::ExprKind::ArrayWith {
+                array, index, value, ..
+            } => {
                 self.resolve_expression(array);
                 self.resolve_expression(index);
                 self.resolve_expression(value);

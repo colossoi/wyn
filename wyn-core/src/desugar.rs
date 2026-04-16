@@ -62,7 +62,9 @@ impl<'a> Desugarer<'a> {
                 self.desugar_expr(array)?;
                 self.desugar_expr(index)?;
             }
-            ExprKind::ArrayWith { array, index, value } => {
+            ExprKind::ArrayWith {
+                array, index, value, ..
+            } => {
                 self.desugar_expr(array)?;
                 self.desugar_expr(index)?;
                 self.desugar_expr(value)?;

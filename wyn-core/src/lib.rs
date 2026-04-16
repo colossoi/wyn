@@ -23,6 +23,7 @@ pub mod desugar;
 pub mod lowering_common;
 pub mod name_registry;
 pub mod tlc;
+pub mod uniqueness_promote;
 
 pub mod egir;
 pub mod glsl;
@@ -565,10 +566,15 @@ impl AliasChecked {
     /// `schemes` contains type schemes for all functions (populated during type_check)
     /// `module_manager` provides access to prelude declarations for TLC transformation
     pub fn to_tlc(
-        self,
+        mut self,
         schemes: &HashMap<String, types::TypeScheme>,
         module_manager: &module_manager::ModuleManager,
     ) -> TlcTransformed {
+        // Promote safe `a with [i] = v` nodes to the in-place variant using
+        // the alias checker's liveness info. Must run before TLC transform
+        // so the AST `inplace` flag is visible to `transform_expr`.
+        uniqueness_promote::run(&mut self.ast, &self.alias_result);
+
         // Build unified name registry — single source of truth for all top-level names.
         let registry =
             name_registry::NameRegistry::build(&self.ast, module_manager, &self.checker_builtins);

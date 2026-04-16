@@ -1696,11 +1696,21 @@ impl<'a> Transformer<'a> {
                 self.build_app("_w_index", vec![arr, idx], ty, span)
             }
 
-            ast::ExprKind::ArrayWith { array, index, value } => {
+            ast::ExprKind::ArrayWith {
+                array,
+                index,
+                value,
+                inplace,
+            } => {
                 let arr = self.transform_expr(array);
                 let idx = self.transform_expr(index);
                 let val = self.transform_expr(value);
-                self.build_app("_w_array_with", vec![arr, idx, val], ty, span)
+                // Route to the in-place intrinsic when the uniqueness pass
+                // promoted this node (source array proven dead after this
+                // expression); otherwise stick with the functional variant.
+                let fn_name =
+                    if *inplace { "_w_intrinsic_array_with_inplace" } else { "_w_intrinsic_array_with" };
+                self.build_app(fn_name, vec![arr, idx, val], ty, span)
             }
 
             ast::ExprKind::BinaryOp(op, lhs, rhs) => {

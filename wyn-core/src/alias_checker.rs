@@ -341,7 +341,7 @@ impl<'a> AliasChecker<'a> {
     fn is_array_type(&self, node_id: NodeId) -> bool {
         if let Some(scheme) = self.type_table.get(&node_id) {
             let ty = unwrap_scheme(scheme);
-            ty.is_array()
+            ty.strip_unique().is_array()
         } else {
             false
         }
@@ -732,6 +732,34 @@ impl<'a> Visitor for AliasChecker<'a> {
 
         ControlFlow::Continue(())
     }
+
+    fn visit_expr_array_with(
+        &mut self,
+        id: NodeId,
+        array: &Expression,
+        index: &Expression,
+        value: &Expression,
+    ) -> ControlFlow<Self::Break> {
+        // Visit operands so their results + liveness land in the maps.
+        self.visit_expression(array)?;
+        self.visit_expression(index)?;
+        self.visit_expression(value)?;
+
+        // Compute liveness for the source array operand; the uniqueness
+        // promotion pass reads this to decide whether the backend can
+        // mutate in place.
+        if self.is_array_type(array.h.id) {
+            let arr_info = self.get_result(array.h.id);
+            let alias_free = self.is_alias_free(&arr_info);
+            let released = self.expr_is_released(array);
+            self.liveness.insert(array.h.id, ExprLivenessInfo { alias_free, released });
+        }
+
+        // Result of `a with [i] = v` has the same backing stores as `a`.
+        let arr_info = self.get_result(array.h.id);
+        self.set_result(id, arr_info);
+        ControlFlow::Continue(())
+    }
 }
 
 // --- Helper functions for type checking ---
@@ -840,7 +868,9 @@ fn collect_variable_uses_in_expr(expr: &Expression, uses: &mut HashMap<String, V
             }
             collect_variable_uses_in_expr(&loop_expr.body, uses);
         }
-        ExprKind::ArrayWith { array, index, value } => {
+        ExprKind::ArrayWith {
+            array, index, value, ..
+        } => {
             collect_variable_uses_in_expr(array, uses);
             collect_variable_uses_in_expr(index, uses);
             collect_variable_uses_in_expr(value, uses);

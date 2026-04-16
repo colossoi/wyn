@@ -136,7 +136,9 @@ impl AstConstFolder {
                 self.fold_expr(idx);
             }
 
-            ExprKind::ArrayWith { array, index, value } => {
+            ExprKind::ArrayWith {
+                array, index, value, ..
+            } => {
                 self.fold_expr(array);
                 self.fold_expr(index);
                 self.fold_expr(value);

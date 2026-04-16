@@ -371,11 +371,15 @@ pub enum ExprKind {
     ArrayLiteral(Vec<Expression>),
     VecMatLiteral(Vec<Expression>), // @[...] - vector or matrix literal (type inferred from context)
     ArrayIndex(Box<Expression>, Box<Expression>),
-    /// In-place array update: `a with [i] = v` produces a copy of `a` with element `i` set to `v`
+    /// In-place array update: `a with [i] = v` produces a copy of `a` with element `i` set to `v`.
+    /// The `inplace` flag starts `false` at parse time; the `uniqueness_promote`
+    /// pass flips it to `true` when the alias checker proves `a` is dead
+    /// after this expression (allowing the backend to mutate in place).
     ArrayWith {
         array: Box<Expression>,
         index: Box<Expression>,
         value: Box<Expression>,
+        inplace: bool,
     },
     BinaryOp(BinaryOp, Box<Expression>, Box<Expression>),
     UnaryOp(UnaryOp, Box<Expression>), // Unary operations: -, !

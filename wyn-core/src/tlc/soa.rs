@@ -366,8 +366,8 @@ impl SoaTransformer {
                         }
                     }
 
-                    // _w_array_with(arr, i, val) where arr was [n](A,B)
-                    "_w_array_with" if args.len() == 3 => {
+                    // _w_intrinsic_array_with(arr, i, val) where arr was [n](A,B)
+                    "_w_intrinsic_array_with" | "_w_intrinsic_array_with_inplace" if args.len() == 3 => {
                         let arr_orig_ty = &args[0].ty;
                         if let Some(n) = is_array_of_tuple(arr_orig_ty) {
                             let (comp_tys, variant, size) = array_of_tuple_parts(arr_orig_ty).unwrap();
@@ -1027,7 +1027,7 @@ impl SoaTransformer {
         result_ty: Type<TypeName>,
         span: Span,
     ) -> Term {
-        let aw_sym = self.resolve_or_alloc("_w_array_with");
+        let aw_sym = self.resolve_or_alloc("_w_intrinsic_array_with");
         let t3 = Type::Constructed(TypeName::Arrow, vec![val.ty.clone(), result_ty.clone()]);
         let t2 = Type::Constructed(TypeName::Arrow, vec![idx.ty.clone(), t3.clone()]);
         let t1 = Type::Constructed(TypeName::Arrow, vec![arr.ty.clone(), t2.clone()]);

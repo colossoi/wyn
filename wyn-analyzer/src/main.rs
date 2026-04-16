@@ -575,7 +575,9 @@ fn find_in_expr(expr: &ast::Expression, line: usize, col: usize, best: &mut Opti
             find_in_expr(arr, line, col, best);
             find_in_expr(idx, line, col, best);
         }
-        ArrayWith { array, index, value } => {
+        ArrayWith {
+            array, index, value, ..
+        } => {
             find_in_expr(array, line, col, best);
             find_in_expr(index, line, col, best);
             find_in_expr(value, line, col, best);
@@ -927,7 +929,9 @@ fn find_name_in_expr(expr: &ast::Expression, line: usize, col: usize) -> Option<
             }
             return find_name_in_expr(idx, line, col);
         }
-        ArrayWith { array, index, value } => {
+        ArrayWith {
+            array, index, value, ..
+        } => {
             if let Some(name) = find_name_in_expr(array, line, col) {
                 return Some(name);
             }
@@ -1061,7 +1065,9 @@ fn collect_refs_in_expr(expr: &ast::Expression, target: &str, refs: &mut Vec<Spa
             collect_refs_in_expr(arr, target, refs);
             collect_refs_in_expr(idx, target, refs);
         }
-        ArrayWith { array, index, value } => {
+        ArrayWith {
+            array, index, value, ..
+        } => {
             collect_refs_in_expr(array, target, refs);
             collect_refs_in_expr(index, target, refs);
             collect_refs_in_expr(value, target, refs);
@@ -1229,7 +1235,9 @@ fn find_definition_in_expr(
         }
         ArrayIndex(arr, idx) => find_definition_in_expr(arr, line, col, bindings)
             .or_else(|| find_definition_in_expr(idx, line, col, bindings)),
-        ArrayWith { array, index, value } => find_definition_in_expr(array, line, col, bindings)
+        ArrayWith {
+            array, index, value, ..
+        } => find_definition_in_expr(array, line, col, bindings)
             .or_else(|| find_definition_in_expr(index, line, col, bindings))
             .or_else(|| find_definition_in_expr(value, line, col, bindings)),
         FieldAccess(base, _) => find_definition_in_expr(base, line, col, bindings),

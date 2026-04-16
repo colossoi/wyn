@@ -395,7 +395,9 @@ impl AstFormatter {
                 let idx_str = self.format_simple_expr(idx);
                 self.write_line(&format!("{}[{}]", arr_str, idx_str));
             }
-            ExprKind::ArrayWith { array, index, value } => {
+            ExprKind::ArrayWith {
+                array, index, value, ..
+            } => {
                 let arr_str = self.format_simple_expr(array);
                 let idx_str = self.format_simple_expr(index);
                 let val_str = self.format_simple_expr(value);
@@ -591,7 +593,9 @@ impl AstFormatter {
                     self.format_simple_expr(idx)
                 )
             }
-            ExprKind::ArrayWith { array, index, value } => {
+            ExprKind::ArrayWith {
+                array, index, value, ..
+            } => {
                 format!(
                     "{} with [{}] = {}",
                     self.format_simple_expr(array),

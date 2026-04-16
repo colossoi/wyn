@@ -135,7 +135,9 @@ fn resolve_expr(
             resolve_expr(arr, module_manager, scope)?;
             resolve_expr(idx, module_manager, scope)?;
         }
-        ExprKind::ArrayWith { array, index, value } => {
+        ExprKind::ArrayWith {
+            array, index, value, ..
+        } => {
             resolve_expr(array, module_manager, scope)?;
             resolve_expr(index, module_manager, scope)?;
             resolve_expr(value, module_manager, scope)?;

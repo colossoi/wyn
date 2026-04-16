@@ -1865,7 +1865,7 @@ impl<'a> TypeChecker<'a> {
 
                 Ok(elem_var.apply(&self.context))
             }
-            ExprKind::ArrayWith { array, index, value } => {
+            ExprKind::ArrayWith { array, index, value, .. } => {
                 // Type check: array must be Array[elem, addrspace, size], index must be i32, value must be elem
                 // Result type is Array[elem, addrspace, size]
                 let array_type = self.infer_expression(array)?;
