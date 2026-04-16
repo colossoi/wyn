@@ -3,6 +3,10 @@
 //! This module converts SSA programs to GLSL shader source code.
 //! It generates separate strings for vertex and fragment shaders.
 
+#[cfg(test)]
+#[path = "ssa_lowering_tests.rs"]
+mod ssa_lowering_tests;
+
 use crate::ast::{Span, TypeName};
 use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, Intrinsic, PrimOp};
@@ -55,6 +59,219 @@ struct LowerCtx<'a> {
     tuple_counter: usize,
     /// Cache from tuple type signature to struct name
     tuple_type_cache: HashMap<String, String>,
+    /// Tracks every compiler-internal name that's been mangled this
+    /// compilation (mangled → original). Detects collisions as a defensive
+    /// invariant — the sanitizer is injective by construction, but this
+    /// map catches bugs: missing escape cases, accidental double-mangling,
+    /// future scheme changes that violate assumptions.
+    mangled_names: HashMap<String, String>,
+}
+
+/// Sanitize a compiler-internal name into a legal, injective GLSL identifier.
+///
+/// GLSL identifiers match `[A-Za-z_][A-Za-z0-9_]*`. Our encoding uses `_` as
+/// the exclusive escape prefix — underscore never appears unescaped in the
+/// output — so every `_` is unambiguously the start of an escape sequence.
+///
+/// | Input char      | Output      | Purpose                                 |
+/// |-----------------|-------------|-----------------------------------------|
+/// | `A-Z a-z 0-9`   | self        | already legal                           |
+/// | `_`             | `_U`        | escape underscore itself                |
+/// | `.`             | `_D`        | module dot (e.g. `materials.foo`)       |
+/// | `$`             | `_S`        | specialization separator                |
+/// | other           | `_X<hex>_`  | fallback; terminated to bound hex digits|
+///
+/// Every mangled identifier is prefixed with `w_`, which guarantees
+/// first-char validity and keeps the output out of GLSL keyword space
+/// and the reserved `gl_` prefix.
+///
+/// The scheme is injective by construction: in the body, `_` always starts
+/// an escape, so prefix-free escape recognition is unambiguous. We don't
+/// decode — this is one-way, strictly for code generation.
+fn glsl_mangle(name: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(name.len() + 2);
+    out.push_str("w_");
+    for c in name.chars() {
+        match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' => out.push(c),
+            '_' => out.push_str("_U"),
+            '.' => out.push_str("_D"),
+            '$' => out.push_str("_S"),
+            _ => {
+                let _ = write!(out, "_X{:x}_", c as u32);
+            }
+        }
+    }
+    out
+}
+
+/// GLSL-reserved keywords and type names. Names in this set are rejected
+/// when they appear at an entry-point I/O site (where we preserve the
+/// user's spelling verbatim for host-contract reasons).
+fn glsl_keyword_set() -> &'static std::collections::HashSet<&'static str> {
+    use std::sync::OnceLock;
+    static SET: OnceLock<std::collections::HashSet<&'static str>> = OnceLock::new();
+    SET.get_or_init(|| {
+        [
+            // Storage qualifiers / layout
+            "attribute",
+            "const",
+            "uniform",
+            "varying",
+            "buffer",
+            "shared",
+            "coherent",
+            "volatile",
+            "restrict",
+            "readonly",
+            "writeonly",
+            "layout",
+            "centroid",
+            "flat",
+            "smooth",
+            "noperspective",
+            "patch",
+            "sample",
+            "invariant",
+            "precise",
+            "subroutine",
+            "in",
+            "out",
+            "inout",
+            // Control flow
+            "break",
+            "continue",
+            "do",
+            "for",
+            "while",
+            "switch",
+            "case",
+            "default",
+            "if",
+            "else",
+            "discard",
+            "return",
+            // Types
+            "void",
+            "bool",
+            "true",
+            "false",
+            "float",
+            "double",
+            "int",
+            "uint",
+            "vec2",
+            "vec3",
+            "vec4",
+            "dvec2",
+            "dvec3",
+            "dvec4",
+            "ivec2",
+            "ivec3",
+            "ivec4",
+            "uvec2",
+            "uvec3",
+            "uvec4",
+            "bvec2",
+            "bvec3",
+            "bvec4",
+            "mat2",
+            "mat3",
+            "mat4",
+            "mat2x2",
+            "mat2x3",
+            "mat2x4",
+            "mat3x2",
+            "mat3x3",
+            "mat3x4",
+            "mat4x2",
+            "mat4x3",
+            "mat4x4",
+            "dmat2",
+            "dmat3",
+            "dmat4",
+            "dmat2x2",
+            "dmat2x3",
+            "dmat2x4",
+            "dmat3x2",
+            "dmat3x3",
+            "dmat3x4",
+            "dmat4x2",
+            "dmat4x3",
+            "dmat4x4",
+            "atomic_uint",
+            "struct",
+            // Precision qualifiers
+            "lowp",
+            "mediump",
+            "highp",
+            "precision",
+            // Sampler & image types (enumerated where they matter; not exhaustive)
+            "sampler1D",
+            "sampler2D",
+            "sampler3D",
+            "samplerCube",
+            "sampler1DArray",
+            "sampler2DArray",
+            "sampler2DRect",
+            "samplerCubeArray",
+            "samplerBuffer",
+            "sampler2DMS",
+            "sampler2DMSArray",
+            "isampler1D",
+            "isampler2D",
+            "isampler3D",
+            "isamplerCube",
+            "usampler1D",
+            "usampler2D",
+            "usampler3D",
+            "usamplerCube",
+            "image1D",
+            "image2D",
+            "image3D",
+            "imageCube",
+            "image1DArray",
+            "image2DArray",
+        ]
+        .into_iter()
+        .collect()
+    })
+}
+
+/// Validate that a host-contract name (uniform / vertex attribute / fragment
+/// output) is a legal GLSL identifier. Used where we preserve user-written
+/// spelling rather than mangling — we reject at compile time rather than
+/// let GLSL fail downstream.
+fn validate_glsl_identifier(name: &str) -> core::result::Result<(), String> {
+    if name.is_empty() {
+        return Err("identifier must not be empty".to_string());
+    }
+    let mut chars = name.chars();
+    match chars.next().unwrap() {
+        'A'..='Z' | 'a'..='z' | '_' => {}
+        c => {
+            return Err(format!(
+                "identifier '{}' must start with a letter or underscore, got '{}'",
+                name, c
+            ));
+        }
+    }
+    for c in chars {
+        if !matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '_') {
+            return Err(format!(
+                "identifier '{}' contains illegal character '{}'",
+                name, c
+            ));
+        }
+    }
+    if name.starts_with("gl_") {
+        return Err(format!("identifier '{}' starts with reserved prefix 'gl_'", name));
+    }
+    if glsl_keyword_set().contains(name) {
+        return Err(format!("identifier '{}' is a GLSL keyword", name));
+    }
+    Ok(())
 }
 
 impl<'a> LowerCtx<'a> {
@@ -73,6 +290,7 @@ impl<'a> LowerCtx<'a> {
             tuple_structs: HashMap::new(),
             tuple_counter: 0,
             tuple_type_cache: HashMap::new(),
+            mangled_names: HashMap::new(),
         }
     }
 
@@ -204,8 +422,11 @@ impl<'a> LowerCtx<'a> {
 
         let mut code = String::new();
 
-        // Emit uniforms
+        // Emit uniforms. These names are host-contract (e.g. Shadertoy's
+        // `iResolution`) and must appear verbatim, so validate rather than
+        // mangle.
         for uniform in &self.program.uniforms {
+            self.validate_io_name(&uniform.name)?;
             writeln!(
                 code,
                 "layout(set = {}, binding = {}) uniform {} {};",
@@ -332,7 +553,8 @@ impl<'a> LowerCtx<'a> {
             body.params.iter().map(|(_, ty, name)| format!("{} {}", self.type_to_glsl(ty), name)).collect();
 
         let ret_ty = self.type_to_glsl(&body.return_ty);
-        writeln!(output, "{} {}({}) {{", ret_ty, func.name, params.join(", ")).unwrap();
+        let glsl_name = self.glsl_mangle_tracked(&func.name)?;
+        writeln!(output, "{} {}({}) {{", ret_ty, glsl_name, params.join(", ")).unwrap();
 
         self.indent += 1;
         let result = self.lower_body(body, func.span, output)?;
@@ -353,9 +575,12 @@ impl<'a> LowerCtx<'a> {
     ) -> Result<()> {
         let body = &entry.body;
 
-        // Emit input declarations
+        // Emit input declarations. Names are user-written (vertex attribute
+        // names, Shadertoy-style uniforms) and must remain verbatim, but we
+        // reject illegal chars / reserved names at compile time.
         let mut builtin_assignments = Vec::new();
         for input in &entry.inputs {
+            self.validate_io_name(&input.name)?;
             match &input.decoration {
                 Some(IoDecoration::Location(loc)) => {
                     writeln!(
@@ -561,6 +786,35 @@ impl<'a> LowerCtx<'a> {
 
     fn indent_str(&self) -> String {
         "    ".repeat(self.indent)
+    }
+
+    /// Mangle a compiler-internal name with collision detection.
+    ///
+    /// The sanitizer itself is injective, so two different originals should
+    /// never produce the same mangled output. If they do, it's a bug in the
+    /// scheme (or accidental double-mangling) and we bail loudly rather
+    /// than silently emit colliding GLSL.
+    fn glsl_mangle_tracked(&mut self, name: &str) -> Result<String> {
+        let mangled = glsl_mangle(name);
+        match self.mangled_names.get(&mangled) {
+            Some(prev) if prev != name => bail_glsl!(
+                "GLSL identifier collision: '{}' and '{}' both mangle to '{}'",
+                prev,
+                name,
+                mangled
+            ),
+            Some(_) => {}
+            None => {
+                self.mangled_names.insert(mangled.clone(), name.to_string());
+            }
+        }
+        Ok(mangled)
+    }
+
+    /// Validate a host-contract identifier; wraps [`validate_glsl_identifier`]
+    /// with a `GlslError` conversion.
+    fn validate_io_name(&self, name: &str) -> Result<()> {
+        validate_glsl_identifier(name).map_err(|msg| crate::err_glsl!("{}", msg))
     }
 }
 
@@ -915,7 +1169,8 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 if let Some(impl_) = self.ctx.impl_source.get(func).cloned() {
                     self.lower_builtin_call(&impl_, &arg_strs, result_ty.expect("Call must have result"))
                 } else {
-                    Ok(format!("{}({})", func, arg_strs.join(", ")))
+                    let mangled = self.ctx.glsl_mangle_tracked(func)?;
+                    Ok(format!("{}({})", mangled, arg_strs.join(", ")))
                 }
             }
 
