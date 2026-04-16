@@ -27,8 +27,11 @@ fn mangle_dollar() {
 
 #[test]
 fn mangle_underscore() {
+    // Inside a name, `_` → `_U`. At the very start of the input, the
+    // prefix contracts from `w_` to `w` so we never produce `__` at the
+    // prefix/body boundary.
     assert_eq!(glsl_mangle("a_b"), "w_a_Ub");
-    assert_eq!(glsl_mangle("_w_intrinsic_foo"), "w__Uw_Uintrinsic_Ufoo");
+    assert_eq!(glsl_mangle("_w_intrinsic_foo"), "w_Uw_Uintrinsic_Ufoo");
 }
 
 #[test]
@@ -38,15 +41,40 @@ fn mangle_mixed() {
 
 #[test]
 fn mangle_empty() {
-    // Empty input: body is empty, prefix alone. Still a legal identifier.
-    assert_eq!(glsl_mangle(""), "w_");
+    // Empty input: no leading char, so no prefix underscore. Prefix alone.
+    assert_eq!(glsl_mangle(""), "w");
 }
 
 #[test]
 fn mangle_fallback_hex() {
-    // Non-ASCII char exercises the `_X<hex>_` fallback.
+    // Non-ASCII char exercises the `_X<hex>_` fallback. Leading fallback
+    // also contracts the prefix since `-` is not alphanumeric.
     assert_eq!(glsl_mangle("a-b"), "w_a_X2d_b");
-    assert_eq!(glsl_mangle("a+b"), "w_a_X2b_b");
+    assert_eq!(glsl_mangle("-ab"), "w_X2d_ab");
+}
+
+#[test]
+fn mangle_no_double_underscore() {
+    // Key invariant: no mangled output ever contains `__`.
+    for input in [
+        "_w_lambda_13",
+        "_foo",
+        ".foo",
+        "$foo",
+        "foo",
+        "foo_bar",
+        "foo.bar",
+        "foo$0",
+        "materials.pbrDistributionGGX",
+    ] {
+        let mangled = glsl_mangle(input);
+        assert!(
+            !mangled.contains("__"),
+            "input '{}' produced '{}' which contains __",
+            input,
+            mangled
+        );
+    }
 }
 
 // ---------- glsl_mangle: injectivity property ----------

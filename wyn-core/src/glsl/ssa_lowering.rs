@@ -85,13 +85,24 @@ struct LowerCtx<'a> {
 /// first-char validity and keeps the output out of GLSL keyword space
 /// and the reserved `gl_` prefix.
 ///
-/// The scheme is injective by construction: in the body, `_` always starts
-/// an escape, so prefix-free escape recognition is unambiguous. We don't
-/// decode — this is one-way, strictly for code generation.
+/// The scheme is injective in practice by construction: in the body, `_`
+/// always starts an escape. To avoid producing the GLSL-reserved `__`
+/// sequence where a leading source underscore collides with the prefix
+/// terminator, the prefix shortens to `w` when the input starts with a
+/// non-alphanumeric char (which would otherwise encode to `_<escape>`).
+/// Pathological collisions (e.g. a user-level ident named `Ufoo` aliasing
+/// mangled `_foo`) are caught by the `mangled_names` tracker in
+/// `LowerCtx`, surfacing as a compile error. We don't decode — this is
+/// one-way, strictly for code generation.
 fn glsl_mangle(name: &str) -> String {
     use std::fmt::Write as _;
+    let leads_with_alnum =
+        name.chars().next().is_some_and(|c| matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9'));
     let mut out = String::with_capacity(name.len() + 2);
-    out.push_str("w_");
+    out.push('w');
+    if leads_with_alnum {
+        out.push('_');
+    }
     for c in name.chars() {
         match c {
             'A'..='Z' | 'a'..='z' | '0'..='9' => out.push(c),
