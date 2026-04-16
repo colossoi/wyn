@@ -832,8 +832,15 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
 
             InstKind::ArrayLit { elements } => {
                 let parts: Result<Vec<_>> = elements.iter().map(|e| self.get_value_ref(*e)).collect();
-                let ty = self.ctx.type_to_glsl(result_ty.expect("ArrayLit must have result"));
-                Ok(format!("{}[]({})", ty, parts?.join(", ")))
+                // GLSL array literal syntax is `ElemType[](v0, v1, ...)` —
+                // note the `[]` belongs to the literal, not the type. If
+                // we used type_to_glsl on the array type it would already
+                // include a `[]` suffix, producing `Elem[][](...)` which
+                // is arrays-of-arrays.
+                let arr_ty = result_ty.expect("ArrayLit must have result");
+                let elem_ty = arr_ty.elem_type().expect("ArrayLit result is an array");
+                let elem_str = self.ctx.type_to_glsl(elem_ty);
+                Ok(format!("{}[]({})", elem_str, parts?.join(", ")))
             }
 
             InstKind::Vector(elems) => {
