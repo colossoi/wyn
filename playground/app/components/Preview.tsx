@@ -3,7 +3,7 @@ import type { CompileResult, ErrorInfo } from "~/lib/wasm";
 import { createProgram, setupContext, startRenderLoop, wrapForWebGL2 } from "~/lib/webgl";
 import { IRTree } from "./IRTree";
 
-type Tab = "output" | "tlc" | "initial-mir" | "final-mir" | "glsl";
+type Tab = "output" | "tlc" | "mir" | "glsl";
 
 interface PreviewProps {
   result: CompileResult | null;
@@ -64,7 +64,7 @@ export function Preview({ result, errorInfo, onErrorClick }: PreviewProps) {
       <div className="resize-handle-h" />
       <div className="output-panel">
         <div className="tab-bar">
-          {(["output", "tlc", "initial-mir", "final-mir", "glsl"] as Tab[]).map((t) => (
+          {(["output", "tlc", "mir", "glsl"] as Tab[]).map((t) => (
             <div
               key={t}
               className={`tab ${activeTab === t ? "active" : ""}`}
@@ -79,8 +79,11 @@ export function Preview({ result, errorInfo, onErrorClick }: PreviewProps) {
             <OutputPane result={result} errorInfo={errorInfo} glError={glError} onErrorClick={onErrorClick} />
           )}
           {activeTab === "tlc" && <IRTree nodes={result?.tlc} />}
-          {activeTab === "initial-mir" && <IRTree nodes={result?.initial_mir} />}
-          {activeTab === "final-mir" && <IRTree nodes={result?.final_mir} />}
+          {activeTab === "mir" && (
+            <pre style={{ padding: "12px 16px", fontFamily: "'JetBrains Mono', monospace", fontSize: 12 }}>
+              {result?.mir ?? ""}
+            </pre>
+          )}
           {activeTab === "glsl" && (
             <pre style={{ padding: "12px 16px", fontFamily: "'JetBrains Mono', monospace", fontSize: 12 }}>
               {result?.glsl ?? ""}
@@ -96,8 +99,7 @@ function tabLabel(t: Tab): string {
   switch (t) {
     case "output": return "Output";
     case "tlc": return "TLC";
-    case "initial-mir": return "Initial MIR";
-    case "final-mir": return "Final MIR";
+    case "mir": return "MIR";
     case "glsl": return "GLSL";
   }
 }

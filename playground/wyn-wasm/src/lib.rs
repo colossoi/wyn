@@ -273,8 +273,7 @@ pub struct CompileResultWithIR {
     pub success: bool,
     pub glsl: Option<String>,
     pub tlc: Option<Vec<TreeNode>>,
-    pub initial_mir: Option<Vec<TreeNode>>,
-    pub final_mir: Option<Vec<TreeNode>>,
+    pub mir: Option<String>,
     pub error: Option<ErrorInfo>,
 }
 
@@ -308,8 +307,7 @@ impl CompileResultWithIR {
             success: false,
             glsl: None,
             tlc: None,
-            initial_mir: None,
-            final_mir: None,
+            mir: None,
             error: Some(ErrorInfo {
                 message: format_error(&e),
                 location: error_location(&e),
@@ -322,8 +320,7 @@ impl CompileResultWithIR {
             success: false,
             glsl: None,
             tlc: None,
-            initial_mir: None,
-            final_mir: None,
+            mir: None,
             error: Some(ErrorInfo { message, location: None }),
         }
     }
@@ -512,6 +509,7 @@ fn compile_with_ir_impl(source: &str) -> CompileResultWithIR {
         Err(e) => return CompileResultWithIR::err_msg(format!("SSA conversion error: {:?}", e)),
     };
     let ssa = raw.expand_soacs(false).optimize_skeleton().elaborate();
+    let mir = wyn_core::ssa::print::format_program(&ssa.ssa);
 
     // Lower to Shadertoy GLSL
     match ssa.lower_shadertoy() {
@@ -519,8 +517,7 @@ fn compile_with_ir_impl(source: &str) -> CompileResultWithIR {
             success: true,
             glsl: Some(glsl),
             tlc: Some(tlc_tree),
-            initial_mir: None, // MIR no longer in pipeline
-            final_mir: None,   // MIR no longer in pipeline
+            mir: Some(mir),
             error: None,
         },
         Err(e) => CompileResultWithIR::err(e),

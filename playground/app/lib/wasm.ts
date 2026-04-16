@@ -28,8 +28,7 @@ export interface CompileResult {
   success: boolean;
   glsl?: string;
   tlc?: IRTreeNode[];
-  initial_mir?: IRTreeNode[];
-  final_mir?: IRTreeNode[];
+  mir?: string;
   error?: ErrorInfo;
 }
 
