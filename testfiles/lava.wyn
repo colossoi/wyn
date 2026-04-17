@@ -5,7 +5,7 @@
 ------------------------------------------------------------
 -- Uniforms
 ------------------------------------------------------------
-#[uniform(set=1, binding=0)] def iResolution: vec2f32
+#[uniform(set=1, binding=0)] def iResolution: vec3f32
 #[uniform(set=1, binding=1)] def iTime: f32
 
 ------------------------------------------------------------
@@ -83,7 +83,7 @@ def raymarch(rayOri: vec3f32, rayDir: vec3f32) (f32, vec3f32) =
 entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
   -- Flip Y for Vulkan
   let coord = @[fragCoord.x, iResolution.y - fragCoord.y] in
-  let uv = coord / iResolution in
+  let uv = coord / iResolution.xy in
 
   -- Screen size is 6m x 6m
   let aspect = iResolution.x / iResolution.y in

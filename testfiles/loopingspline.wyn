@@ -1,7 +1,7 @@
 -- "Looping Spline" by Sébastien Bérubé, Wyn port of the Shadertoy shader.
 -- Cyclic Catmull-Rom spline over 8 control points + distance-field viz.
 
-#[uniform(set=1, binding=0)] def iResolution: vec2f32
+#[uniform(set=1, binding=0)] def iResolution: vec3f32
 #[uniform(set=1, binding=1)] def iTime: f32
 
 -- 8 control points. The original allowed iMouse to override p[2]; omitted.

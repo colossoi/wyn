@@ -238,8 +238,8 @@ enum Command {
 const TEST_PATTERN_SHADER: &str = r#"
 // Resolution uniform (16-byte aligned)
 struct Globals {
-    resolution: vec2<f32>,
-    _pad: vec2<f32>,
+    resolution: vec3<f32>,
+    _pad: f32,
 };
 
 @group(0) @binding(0)
@@ -259,7 +259,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<
 // Fragment shader - colored test pattern
 @fragment
 fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let res = globals.resolution;
+    let res = globals.resolution.xy;
     let fragCoord = pos.xy;
     let uv = fragCoord / res;
 
@@ -2366,12 +2366,13 @@ async fn run_compute_shader(
 // --- App state ---------------------------------------------------------------
 
 // Uniform buffers - one per shader uniform
-// iResolution: [2]f32 + [2]f32 padding for 16-byte alignment
+// iResolution: [3]f32 (x = width, y = height, z = device pixel ratio, default 1.0)
+// + 1 f32 padding for 16-byte std140 alignment of vec3.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct ResolutionUniform {
-    resolution: [f32; 2],
-    _pad: [f32; 2],
+    resolution: [f32; 3],
+    _pad: f32,
 }
 
 // iTime: f32
@@ -2704,8 +2705,8 @@ impl State {
                     std::mem::size_of::<ResolutionUniform>() as u64,
                 );
                 let initial = ResolutionUniform {
-                    resolution: [800.0, 600.0],
-                    _pad: [0.0, 0.0],
+                    resolution: [800.0, 600.0, 1.0],
+                    _pad: 0.0,
                 };
                 queue.write_buffer(&buf, 0, bytemuck::cast_slice(&[initial]));
                 buf
@@ -2898,8 +2899,8 @@ impl State {
                     mapped_at_creation: false,
                 });
                 let initial_res = ResolutionUniform {
-                    resolution: [config.width as f32, config.height as f32],
-                    _pad: [0.0, 0.0],
+                    resolution: [config.width as f32, config.height as f32, 1.0],
+                    _pad: 0.0,
                 };
                 queue.write_buffer(&res_buffer, 0, bytemuck::cast_slice(&[initial_res]));
 
@@ -3024,8 +3025,8 @@ impl State {
 
             // Update iResolution
             let resolution = ResolutionUniform {
-                resolution: [self.config.width as f32, self.config.height as f32],
-                _pad: [0.0, 0.0],
+                resolution: [self.config.width as f32, self.config.height as f32, 1.0],
+                _pad: 0.0,
             };
             self.queue.write_buffer(resolution_buffer, 0, bytemuck::cast_slice(&[resolution]));
 

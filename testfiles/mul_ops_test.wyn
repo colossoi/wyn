@@ -1,7 +1,7 @@
 -- Test: exercises all mixed-type * operator paths in SPIR-V lowering
 -- Cases: mat*mat, mat*vec, vec*mat, vec*scalar, scalar*vec, mat*scalar, scalar*mat
 
-#[uniform(set=1, binding=0)] def iResolution: vec2f32
+#[uniform(set=1, binding=0)] def iResolution: vec3f32
 #[uniform(set=1, binding=1)] def iTime: f32
 
 def verts: [3]vec4f32 =

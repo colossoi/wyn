@@ -6,7 +6,7 @@
 ------------------------------------------------------------
 -- Uniforms
 ------------------------------------------------------------
-#[uniform(set=0, binding=0)] def iResolution: vec2f32
+#[uniform(set=0, binding=0)] def iResolution: vec3f32
 #[uniform(set=0, binding=1)] def iTime: f32
 #[uniform(set=0, binding=5)] def iMouse: vec4f32
 
@@ -129,7 +129,7 @@ def raymarch(fragCoord: vec2f32, res: vec2f32, rotX: mat2f32, rotY: mat2f32, chr
 ------------------------------------------------------------
 #[fragment]
 entry fragment_main(#[builtin(position)] frag: vec4f32) #[location(0)] vec4f32 =
-  let res = iResolution in
+  let res = iResolution.xy in
   let uv = @[frag.x, res.y - frag.y] in
 
   -- Mouse control for rotation, or auto-rotate based on time

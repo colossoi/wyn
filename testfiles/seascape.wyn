@@ -6,7 +6,7 @@
 ------------------------------------------------------------
 -- Uniforms
 ------------------------------------------------------------
-#[uniform(set=0, binding=0)] def iResolution: vec2f32
+#[uniform(set=0, binding=0)] def iResolution: vec3f32
 #[uniform(set=0, binding=1)] def iTime: f32
 #[uniform(set=0, binding=5)] def iMouse: vec4f32
 
@@ -184,7 +184,7 @@ def heightMapTracing(ori: vec3f32, dir: vec3f32, time: f32) (f32, vec3f32) =
 ------------------------------------------------------------
 
 def getPixel(coord: vec2f32, time: f32) vec3f32 =
-  let uv = coord / iResolution in
+  let uv = coord / iResolution.xy in
   let uv2 = uv * 2.0 - 1.0 in
   let uv3 = @[uv2.x * iResolution.x / iResolution.y, uv2.y] in
 

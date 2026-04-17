@@ -3,7 +3,7 @@
 -- License: MIT (see original GLSL below)
 
 -- Uniforms from host
-#[uniform(set=1, binding=0)] def iResolution: vec2f32
+#[uniform(set=1, binding=0)] def iResolution: vec3f32
 #[uniform(set=1, binding=1)] def iTime: f32
 #[uniform(set=1, binding=5)] def iMouse: vec4f32
 

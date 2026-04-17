@@ -5,7 +5,7 @@
 ------------------------------------------------------------
 -- Uniforms
 ------------------------------------------------------------
-#[uniform(set=0, binding=0)] def iResolution: vec2f32
+#[uniform(set=0, binding=0)] def iResolution: vec3f32
 #[uniform(set=0, binding=1)] def iTime: f32
 #[uniform(set=0, binding=2)] def difficulty: i32
 #[uniform(set=0, binding=5)] def iMouse: vec4f32
@@ -311,7 +311,7 @@ def traceSample(fragCoord: vec4f32, offsetX: f32, offsetY: f32) vec3f32 =
   let aspect = iResolution.x / iResolution.y in
   let uv2 = @[uv.x * aspect, uv.y] in
 
-  let (camPos, forward, right, up) = getCamera(iTime, iMouse, iResolution) in
+  let (camPos, forward, right, up) = getCamera(iTime, iMouse, iResolution.xy) in
 
   let fov = 1.5 in
   let rd = normalize(@[forward.x + uv2.x * right.x / fov + uv2.y * up.x / fov,
