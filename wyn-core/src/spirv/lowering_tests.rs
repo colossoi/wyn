@@ -317,6 +317,103 @@ def hist_alias_test(dest: [3]i32, indices: [4]i32, values: [4]i32) [3]i32 =
 }
 
 #[test]
+fn test_filter_over_tuple_array() {
+    // Regression 1: filter over an array whose elements are tuples. The
+    // tlc::soa pass distributes `Array[Tuple, _, _]` into
+    // `Tuple(Array[Ti, _, _])`, so build_filter_loop sees an SoA tuple as
+    // input. Previously this panicked with "Filter input must be an array
+    // type, got Tuple(...)". After the SoA fix, filter allocates one
+    // composite buffer per SoA component and emits one AWI per component
+    // inside the body.
+    //
+    // Regression 2: the hash-cons of multiple `_w_intrinsic_uninit()`
+    // calls with different return types now correctly produces distinct
+    // nodes (previously collided into one because NodeKey didn't include
+    // the attached type).
+    let spirv = compile_to_spirv(
+        r#"
+def pairs: [4](i32, i32) = [(1, 2), (3, 4), (2, 5), (4, 8)]
+
+def is_big(p: (i32, i32)) bool = p.0 > 2
+
+#[fragment]
+entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
+    let big = filter(is_big, pairs) in
+    @[f32.i32(length(big)), f32.i32(big[0].0), f32.i32(big[0].1), 1.0]
+"#,
+    )
+    .unwrap();
+    assert!(!spirv.is_empty());
+    assert_eq!(spirv[0], 0x07230203);
+}
+
+#[test]
+fn test_map_producing_tuple_elements_soa_output() {
+    // Regression: Map whose lambda returns a tuple produces an Array of
+    // tuples, which tlc::soa distributes into a tuple of arrays. The Map
+    // lowering in egir::soac_expand previously allocated a single
+    // loop-carried buffer with tuple-of-arrays type and emitted one AWI
+    // per iteration on that tuple — SPIR-V's AWI backend can't handle
+    // that because the tuple is not a composite array. This pattern was
+    // previously hidden because raytrace.wyn's equivalent
+    // `intersectAllSpheres` fuses with the downstream `findClosestHit`
+    // reduce via fuse_maps, which bypasses the map's own output buffer.
+    //
+    // Here the map's output is consumed by indexing + length, so no
+    // fusion happens and the bug surfaces.
+    let spirv = compile_to_spirv(
+        r#"
+def pair_up(x: i32) (i32, i32) = (x, x * 2)
+
+def xs: [4]i32 = [1, 2, 3, 4]
+
+#[fragment]
+entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
+    let pairs = map(pair_up, xs) in
+    let n = length(pairs) in
+    let (a, b) = pairs[0] in
+    @[f32.i32(n), f32.i32(a), f32.i32(b), 1.0]
+"#,
+    )
+    .unwrap();
+    assert!(!spirv.is_empty());
+    assert_eq!(spirv[0], 0x07230203);
+}
+
+#[test]
+fn test_uninit_different_types_hash_cons_distinct() {
+    // Regression for NodeKey hash-consing: prior to including `ty` in the
+    // key, two `_w_intrinsic_uninit()` calls with different return types
+    // collapsed to one node (the first one's type stuck). The fallout
+    // showed up as filter producing a single "tuple" buffer instead of N
+    // per-component composite buffers, but the root cause is type-agnostic
+    // hash-consing of nullary pure ops.
+    //
+    // This test constructs a scenario where two filter results have
+    // different buffer types: one over [4]i32 (Composite<i32, 4>) and one
+    // over [6]f32 (Composite<f32, 6>). Both trigger uninit allocations;
+    // with the fix they're distinct nodes.
+    let spirv = compile_to_spirv(
+        r#"
+def xs: [4]i32 = [1, -2, 3, -4]
+def ys: [6]f32 = [0.1, -0.2, 0.3, -0.4, 0.5, -0.6]
+
+def pos_i(x: i32) bool = x > 0
+def pos_f(y: f32) bool = y > 0.0
+
+#[fragment]
+entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
+    let a = filter(pos_i, xs) in
+    let b = filter(pos_f, ys) in
+    @[f32.i32(length(a)), f32.i32(length(b)), 0.0, 1.0]
+"#,
+    )
+    .unwrap();
+    assert!(!spirv.is_empty());
+    assert_eq!(spirv[0], 0x07230203);
+}
+
+#[test]
 fn test_filter_reachable_entry() {
     // Entry-point test: filter lowers to an OwnedView struct; length() and
     // indexing on the result work via variant dispatch.

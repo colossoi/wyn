@@ -2722,12 +2722,16 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
 
                             // Get element type from array type.
                             // This will fail for virtual arrays (ranges) which can't be modified.
+                            let result_poly_ty = value_refs
+                                .first()
+                                .map(|vr| self.get_value_type_ref(*vr));
                             let elem_ty =
                                 self.constructor.get_array_element_type(result_ty).map_err(|_| {
                                     crate::err_spirv!(
                                         "ArrayWith: element type not found for array type ID {}. \
+                                     Source array polytype: {:?}. \
                                      Unsized or view arrays may not support indexed writes.",
-                                        result_ty
+                                        result_ty, result_poly_ty
                                     )
                                 })?;
                             let elem_ptr_ty = self.constructor.builder.type_pointer(

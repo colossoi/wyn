@@ -99,12 +99,18 @@ pub enum PureViewSource {
 // NodeKey — hash-cons key = operator + operands
 // ---------------------------------------------------------------------------
 
-/// The full identity of a pure node for hash-consing: the operator plus
-/// its operands (which are already-canonical `NodeId`s).
+/// The full identity of a pure node for hash-consing: the operator, its
+/// operands (already-canonical `NodeId`s), and its type.
+///
+/// Type is part of the key because type-polymorphic operations (like
+/// `_w_intrinsic_uninit`) take no operands and carry distinct types — two
+/// uninits with different return types are distinct nodes. For
+/// monomorphic ops the type is redundant but harmless.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct NodeKey {
     pub op: PureOp,
     pub operands: SmallVec<[NodeId; 4]>,
+    pub ty: Type<TypeName>,
 }
 
 // ---------------------------------------------------------------------------
@@ -426,6 +432,7 @@ impl EGraph {
         let key = NodeKey {
             op: op.clone(),
             operands: operands.clone(),
+            ty: ty.clone(),
         };
         if let Some(&existing) = self.hash_cons.get(&key) {
             return existing;

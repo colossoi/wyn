@@ -299,20 +299,50 @@ fn expand_one(
                 .collect();
             let len_input = (input_nids[0], arr_tys[0].clone());
 
-            let init_out_nid = graph.intern_pure(
-                PureOp::Call("_w_intrinsic_uninit".into()),
-                smallvec![],
-                out_arr_ty.clone(),
-            );
-            let carried = vec![(out_arr_ty.clone(), init_out_nid)];
-            let result = ResultBinding::Carried {
-                result_node: result_nid,
-                idx: 0,
+            // SoA output: distribute the output buffer per component. The
+            // lambda returns a tuple that we project once per component to
+            // get the per-buffer value. (`_w_intrinsic_array_with_inplace`
+            // expects composite targets, not tuple-of-arrays.)
+            let out_components: Vec<Type<TypeName>> = match as_soa_tuple(&out_arr_ty) {
+                Some(components) => components.to_vec(),
+                None => vec![out_arr_ty.clone()],
             };
-            // Don't allow unroll when output or any input is a SoA tuple:
-            // `_w_intrinsic_array_with` targets composite arrays only.
+
+            let init_out_nids: Vec<NodeId> = out_components
+                .iter()
+                .map(|ty| {
+                    graph.intern_pure(
+                        PureOp::Call("_w_intrinsic_uninit".into()),
+                        smallvec![],
+                        ty.clone(),
+                    )
+                })
+                .collect();
+            let carried: Vec<(Type<TypeName>, NodeId)> = out_components
+                .iter()
+                .zip(init_out_nids.iter())
+                .map(|(ty, init)| (ty.clone(), *init))
+                .collect();
+
+            // For the plain (non-SoA) case we can keep the old result shape
+            // (result_nid binds the single carried value). For SoA we must
+            // pack the carried buffers into a tuple at the exit block — use
+            // DummyBool + manual rebinding, like filter does.
+            let is_soa_out = out_components.len() > 1;
+            let result = if is_soa_out {
+                ResultBinding::DummyBool {
+                    result_node: result_nid,
+                }
+            } else {
+                ResultBinding::Carried {
+                    result_node: result_nid,
+                    idx: 0,
+                }
+            };
+            // Don't allow unroll when any SoA is in play: the unroll path
+            // drops into the simple single-buffer AWI model.
             let allow_unroll = unroll_maps
-                && as_soa_tuple(&out_arr_ty).is_none()
+                && !is_soa_out
                 && read_inputs.iter().all(|(_, a, _)| as_soa_tuple(a).is_none());
             expand_loop(
                 graph,
@@ -325,7 +355,6 @@ fn expand_one(
                 next_effect,
                 allow_unroll,
                 |graph, next_effect, body_bid, idx_nid, carried_nids| {
-                    let out_nid = carried_nids[0];
                     let mut call_operands: SmallVec<[NodeId; 4]> = SmallVec::new();
                     for (arr, arr_ty, elem_ty) in &read_inputs {
                         let elem_nid =
@@ -335,17 +364,57 @@ fn expand_one(
                     call_operands.extend(captures.iter().copied());
                     let y_nid =
                         graph.intern_pure(PureOp::Call(func.clone()), call_operands, out_elem_ty.clone());
-                    // Loop-carried phi kills the previous iteration's value
-                    // on the back-edge, so the in-place variant is always safe
-                    // for SOAC-generated output arrays.
-                    let new_out = graph.intern_pure(
-                        PureOp::Call("_w_intrinsic_array_with_inplace".into()),
-                        smallvec![out_nid, idx_nid, y_nid],
-                        out_arr_ty.clone(),
-                    );
-                    vec![new_out]
+
+                    // Write per component. For SoA, project y into each
+                    // component; for plain, use y directly.
+                    out_components
+                        .iter()
+                        .enumerate()
+                        .map(|(i, comp_ty)| {
+                            let value = if is_soa_out {
+                                // y is a tuple; pick its i-th field. The
+                                // field's type is the component array's elem.
+                                let field_ty = match &out_elem_ty {
+                                    Type::Constructed(TypeName::Tuple(_), components) => {
+                                        components[i].clone()
+                                    }
+                                    _ => panic!(
+                                        "Map SoA output expected tuple elem_ty, got {:?}",
+                                        out_elem_ty
+                                    ),
+                                };
+                                graph.intern_pure(
+                                    PureOp::Project { index: i as u32 },
+                                    smallvec![y_nid],
+                                    field_ty,
+                                )
+                            } else {
+                                y_nid
+                            };
+                            graph.intern_pure(
+                                PureOp::Call("_w_intrinsic_array_with_inplace".into()),
+                                smallvec![carried_nids[i], idx_nid, value],
+                                comp_ty.clone(),
+                            )
+                        })
+                        .collect()
                 },
             );
+
+            // For SoA output, `expand_loop` (via build_loop_skeleton) saw
+            // DummyBool so didn't bind result_nid nor thread carried to
+            // `after`. Install per-component after-block params, thread
+            // them from the header's else branch, and pack them into the
+            // output SoA tuple (rebinding result_nid).
+            if is_soa_out {
+                finalize_soa_tuple_result(
+                    graph,
+                    bid,
+                    &out_components,
+                    &out_arr_ty,
+                    result_nid,
+                );
+            }
         }
         SideEffectKind::Pending(PendingSoac::MapInto {
             func,
@@ -706,12 +775,21 @@ fn build_reduce_by_index_loop(
 
 /// Filter: sequential pass that writes each matching element of `input` into
 /// a fresh composite buffer at the running count, then packs the
-/// `(buffer, count)` pair into an `Array[A, N, OwnedView]` struct at exit.
+/// `(buffer, count)` pair into an `Array[A, N, OwnedView]` at exit.
 ///
-/// Two loop-carried values — a composite output buffer and an `i32` count.
-/// The predicate's result gates the counter bump via a structured if-then-else
-/// inside the body block; the buffer write is unconditional (writes past the
-/// final count are harmless because consumers only see `valid_len` entries).
+/// Handles both plain array input (single buffer) and SoA-distributed input
+/// (one buffer per component of the element tuple). The SoA case arises when
+/// the element type `A` is itself a tuple — the `tlc::soa` pass rewrites
+/// `Array[Tuple, _, _]` to `Tuple(Array[Ti, _, _])` before we reach egir,
+/// and filter's output type is distributed in the same shape: a tuple of
+/// OwnedViews, one per component.
+///
+/// Loop-carried state is `(buffers_0, ..., buffers_{k-1}, count)` — one
+/// buffer per SoA component plus a shared count. All component OwnedViews
+/// share the same count value at exit (they were written in lock-step).
+///
+/// Writes to each buffer are unconditional; the counter bump is gated by
+/// the predicate via a structured if-then-else inside the body block.
 struct FilterLoop {
     input: (NodeId, Type<TypeName>, Type<TypeName>),
     result_node: NodeId,
@@ -733,33 +811,58 @@ fn build_filter_loop(
     let func = spec.func;
     let captures = spec.captures;
     let result_nid = spec.result_node;
-    // The SOAC result type at EGIR level is Array[A, N, OwnedView]. We
-    // carry through (composite buffer, i32 count) separately and pack into
-    // that struct at exit.
     let owned_view_ty = graph.types[&result_nid].clone();
 
-    // Composite buffer of the same element type and size as the input.
-    let buffer_ty = match &input_ty {
-        Type::Constructed(TypeName::Array, args) if args.len() == 3 => Type::Constructed(
-            TypeName::Array,
-            vec![
-                args[0].clone(),
-                args[1].clone(),
-                Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
-            ],
-        ),
-        _ => panic!("Filter input must be an array type, got {:?}", input_ty),
+    // Classify input: plain Array vs SoA tuple of arrays. The output type
+    // must mirror that shape (a tuple-of-OwnedViews when input is SoA).
+    // For the SoA case we also need the pre-SoA element tuple so we know
+    // how to project each field out of the read-back element node.
+    let (n_components, owned_view_components) = match as_soa_tuple(&owned_view_ty) {
+        Some(components) => (components.len(), components.to_vec()),
+        None => (1, vec![owned_view_ty.clone()]),
     };
-    let init_buffer = graph.intern_pure(
-        PureOp::Call("_w_intrinsic_uninit".into()),
-        smallvec![],
-        buffer_ty.clone(),
-    );
+
+    // Composite buffer type for each output component — OwnedView → Composite.
+    let buffer_tys: Vec<Type<TypeName>> = owned_view_components
+        .iter()
+        .map(|ov_ty| match ov_ty {
+            Type::Constructed(TypeName::Array, args) if args.len() == 3 => Type::Constructed(
+                TypeName::Array,
+                vec![
+                    args[0].clone(),
+                    args[1].clone(),
+                    Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
+                ],
+            ),
+            _ => panic!(
+                "Filter output component must be Array[...], got {:?}",
+                ov_ty
+            ),
+        })
+        .collect();
+
+    // Per-component uninit buffers + shared count seed.
+    let init_buffers: Vec<NodeId> = buffer_tys
+        .iter()
+        .map(|bty| {
+            graph.intern_pure(
+                PureOp::Call("_w_intrinsic_uninit".into()),
+                smallvec![],
+                bty.clone(),
+            )
+        })
+        .collect();
     let zero = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty.clone());
 
-    // DummyBool for result binding — we rebind result_nid manually at exit to
-    // the packed OwnedView.
-    let carried = vec![(buffer_ty.clone(), init_buffer), (i32_ty.clone(), zero)];
+    // Carried state: [buffers..., count]. DummyBool for result binding — we
+    // rebind result_nid manually at exit to the packed OwnedView(s).
+    let mut carried: Vec<(Type<TypeName>, NodeId)> = buffer_tys
+        .iter()
+        .zip(init_buffers.iter())
+        .map(|(bty, init)| (bty.clone(), *init))
+        .collect();
+    carried.push((i32_ty.clone(), zero));
+
     let handles = build_loop_skeleton(
         graph,
         control_headers,
@@ -774,10 +877,11 @@ fn build_filter_loop(
         },
     );
     let idx_nid = handles.idx_nid;
-    let buffer_in = handles.carried[0];
-    let k_in = handles.carried[1];
+    let buffers_in: Vec<NodeId> = handles.carried[..n_components].to_vec();
+    let k_in = handles.carried[n_components];
 
-    // Read input[i], call pred, emit unconditional AWI into buffer at k.
+    // Read input[i] — emit_read_element already handles SoA tuples by
+    // projecting each component and reassembling a Tuple node.
     let elem_nid = emit_read_element(
         graph,
         handles.body,
@@ -787,14 +891,44 @@ fn build_filter_loop(
         &elem_ty,
         next_effect,
     );
+    // The predicate lambda expects the reassembled element (scalar or tuple)
+    // followed by any captures. This mirrors the Reduce / Map call shape.
     let mut call_operands: SmallVec<[NodeId; 4]> = smallvec![elem_nid];
     call_operands.extend(captures.iter().copied());
     let pred_val = graph.intern_pure(PureOp::Call(func), call_operands, bool_ty);
-    let buffer_new = graph.intern_pure(
-        PureOp::Call("_w_intrinsic_array_with_inplace".into()),
-        smallvec![buffer_in, k_in, elem_nid],
-        buffer_ty.clone(),
-    );
+
+    // For each output component, emit `buffer_i' = AWI(buffer_i, k, elem.i)`.
+    // For the plain (single-component) case, elem.i == elem; for SoA, we
+    // project field i out of the element tuple.
+    let buffers_new: Vec<NodeId> = buffer_tys
+        .iter()
+        .enumerate()
+        .map(|(i, bty)| {
+            let component_val = if n_components == 1 {
+                elem_nid
+            } else {
+                // elem_ty is the reassembled tuple type; its component i is
+                // the SoA input component's element type.
+                let component_ty = match &elem_ty {
+                    Type::Constructed(TypeName::Tuple(_), components) => components[i].clone(),
+                    _ => panic!(
+                        "Filter SoA case expected tuple elem_ty, got {:?}",
+                        elem_ty
+                    ),
+                };
+                graph.intern_pure(
+                    PureOp::Project { index: i as u32 },
+                    smallvec![elem_nid],
+                    component_ty,
+                )
+            };
+            graph.intern_pure(
+                PureOp::Call("_w_intrinsic_array_with_inplace".into()),
+                smallvec![buffers_in[i], k_in, component_val],
+                bty.clone(),
+            )
+        })
+        .collect();
 
     // Advance k only if the predicate held. body → condbranch(pred) →
     // [incr | skip] → merge(k_new) → header.
@@ -832,35 +966,136 @@ fn build_filter_loop(
     );
 
     let next_i_nid = increment(graph, idx_nid);
+    // Back-edge args: [buffers_new..., k_new, next_i].
+    let mut merge_args: Vec<NodeId> = buffers_new.clone();
+    merge_args.push(k_new);
+    merge_args.push(next_i_nid);
     graph.skeleton.blocks[merge_bid].term = SkeletonTerminator::Branch {
         target: handles.header,
-        args: vec![buffer_new, k_new, next_i_nid],
+        args: merge_args,
     };
 
-    // At loop exit (the `after` block already wired by build_loop_skeleton),
-    // pack the carried (buffer, k) into an OwnedView struct and rebind the
-    // original SOAC result NodeId to that packed value.
-    let after_bid = match &graph.skeleton.blocks[handles.header].term {
-        SkeletonTerminator::CondBranch { else_target, .. } => *else_target,
-        _ => panic!("expected CondBranch header from build_loop_skeleton"),
+    // At loop exit: take the carried buffers + count through the `after`
+    // block as params, pack each (buffer_i, count) into a component
+    // OwnedView, then wrap those into the outer tuple (for SoA) or use the
+    // single component directly. Rebind result_nid to the packed value.
+    let after_bid = handles.after;
+    let buffer_params: Vec<NodeId> = buffer_tys
+        .iter()
+        .enumerate()
+        .map(|(i, bty)| graph.add_block_param(after_bid, i, bty.clone()))
+        .collect();
+    let k_param = graph.add_block_param(after_bid, buffer_tys.len(), i32_ty.clone());
+    graph.skeleton.blocks[after_bid].params = {
+        let mut v = buffer_params.clone();
+        v.push(k_param);
+        v
     };
-    // DummyBool passed no carried values through the header's else branch;
-    // give `after` two params (buffer, k) and thread them from the header.
-    let buffer_param = graph.add_block_param(after_bid, 0, buffer_ty);
-    let k_param = graph.add_block_param(after_bid, 1, i32_ty);
-    graph.skeleton.blocks[after_bid].params = vec![buffer_param, k_param];
-    if let SkeletonTerminator::CondBranch { else_args, .. } =
-        &mut graph.skeleton.blocks[handles.header].term
-    {
-        *else_args = vec![handles.carried[0], handles.carried[1]];
+    match &mut graph.skeleton.blocks[handles.header].term {
+        SkeletonTerminator::CondBranch { else_args, .. } => {
+            *else_args = handles.carried.clone();
+        }
+        other => panic!(
+            "build_loop_skeleton must leave a CondBranch on the header, got {:?}",
+            other
+        ),
     }
+
+    // Pack each (buffer_i, count) into an OwnedView component.
+    let component_packed: Vec<NodeId> = buffer_params
+        .iter()
+        .enumerate()
+        .map(|(i, &bp)| {
+            graph.intern_pure(
+                PureOp::Tuple(2),
+                smallvec![bp, k_param],
+                owned_view_components[i].clone(),
+            )
+        })
+        .collect();
+
+    // Pack the components into the outer tuple (SoA) or use the single one.
+    let final_packed = if n_components == 1 {
+        component_packed[0]
+    } else {
+        let mut operands: SmallVec<[NodeId; 4]> = SmallVec::new();
+        operands.extend(component_packed.iter().copied());
+        graph.intern_pure(PureOp::Tuple(n_components), operands, owned_view_ty)
+    };
+
+    // Rebind result_nid to alias the final packed value (DummyBool set it
+    // to `Bool(false)`; overwrite).
+    let final_enode = graph.nodes[final_packed].clone();
+    graph.nodes[result_nid] = final_enode;
+}
+
+/// After a `build_loop_skeleton` loop with `DummyBool` result binding and
+/// an SoA-tuple output, pack the per-component carried buffers into the
+/// output tuple and rebind `result_nid` to it.
+///
+/// Extracts the `after` block from the header's CondBranch terminator,
+/// adds one block param per component, threads the header's carried
+/// values into the else-branch args, and emits a `PureOp::Tuple(N)` at
+/// the block's entry to pack the params.
+///
+/// `preheader_bid` is the block the SOAC expansion originally lived in —
+/// its terminator now points at the loop header. Every transform that
+/// uses this helper arrived here through `build_loop_skeleton`, which
+/// sets that terminator. The two `match` panics below fire if that
+/// contract ever changes — preferring loud over silent.
+fn finalize_soa_tuple_result(
+    graph: &mut EGraph,
+    preheader_bid: BlockId,
+    components: &[Type<TypeName>],
+    out_arr_ty: &Type<TypeName>,
+    result_nid: NodeId,
+) {
+    let header_bid = match &graph.skeleton.blocks[preheader_bid].term {
+        SkeletonTerminator::Branch { target, .. } => *target,
+        other => panic!(
+            "finalize_soa_tuple_result: preheader must branch to the loop header, got {:?}",
+            other
+        ),
+    };
+    let after_bid = match &graph.skeleton.blocks[header_bid].term {
+        SkeletonTerminator::CondBranch { else_target, .. } => *else_target,
+        other => panic!(
+            "finalize_soa_tuple_result: header must end with a CondBranch, got {:?}",
+            other
+        ),
+    };
+    // Snapshot the header's carried NodeIds — the first `components.len()`
+    // block params (the trailing param is the loop index).
+    let header_carried: Vec<NodeId> = graph.skeleton.blocks[header_bid]
+        .params
+        .iter()
+        .take(components.len())
+        .copied()
+        .collect();
+    let after_params: Vec<NodeId> = components
+        .iter()
+        .enumerate()
+        .map(|(i, ty)| graph.add_block_param(after_bid, i, ty.clone()))
+        .collect();
+    graph.skeleton.blocks[after_bid].params = after_params.clone();
+
+    match &mut graph.skeleton.blocks[header_bid].term {
+        SkeletonTerminator::CondBranch { else_args, .. } => {
+            *else_args = header_carried;
+        }
+        other => panic!(
+            "finalize_soa_tuple_result: header terminator mutated unexpectedly, got {:?}",
+            other
+        ),
+    }
+
+    let mut packed_operands: SmallVec<[NodeId; 4]> = SmallVec::new();
+    packed_operands.extend(after_params.iter().copied());
     let packed = graph.intern_pure(
-        PureOp::Tuple(2),
-        smallvec![buffer_param, k_param],
-        owned_view_ty,
+        PureOp::Tuple(components.len()),
+        packed_operands,
+        out_arr_ty.clone(),
     );
-    // Rebind result_nid to alias the tuple node (DummyBool set it to
-    // `Bool(false)`; overwrite with the OwnedView).
     let packed_enode = graph.nodes[packed].clone();
     graph.nodes[result_nid] = packed_enode;
 }
@@ -1356,6 +1591,11 @@ enum ResultBinding {
 struct LoopHandles {
     header: BlockId,
     body: BlockId,
+    /// The post-loop merge block — the `else` target of the header's
+    /// CondBranch. For `ResultBinding::Carried`, this block's only param
+    /// is the rebound `result_node`; for `DummyBool`, it has no params
+    /// and callers are free to install their own.
+    after: BlockId,
     /// One NodeId per loop-carried, matching the order in `spec.carried`.
     /// These are the header block-param NodeIds, available inside body and
     /// on the else branch into `after`.
@@ -1459,6 +1699,7 @@ fn build_loop_skeleton(
     LoopHandles {
         header,
         body,
+        after,
         carried: carried_nids,
         idx_nid,
     }

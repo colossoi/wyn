@@ -24,6 +24,13 @@ use super::types::{EGraph, ENode, NodeId, PureOp};
 /// Rewrite all dynamic Index nodes in the e-graph to Materialize +
 /// DynamicExtract. Called by the typestate transition
 /// `EGraphSoacExpanded::materialize`.
+///
+/// Skipped for arrays whose variant is `ArrayVariantOwnedView`: those live
+/// at runtime as a `{buffer: [N]T, valid_len: i32}` struct, and the
+/// backend's Index lowering already drills through the struct to access
+/// the inner buffer. A naive `Materialize` would spill the whole struct,
+/// after which `DynamicExtract`'s `AccessChain(struct_ptr, idx)` would try
+/// to select a struct field by a non-literal index — invalid SPIR-V.
 pub(crate) fn run(graph: &mut EGraph) {
     // Snapshot first; we'll mutate node entries and add new Materialize nodes.
     let targets: Vec<(NodeId, NodeId, NodeId)> = graph
@@ -36,7 +43,11 @@ pub(crate) fn run(graph: &mut EGraph) {
             } if operands.len() == 2 => {
                 let arr = operands[0];
                 let idx = operands[1];
-                if is_const_int(graph, idx) { None } else { Some((nid, arr, idx)) }
+                if is_const_int(graph, idx) || is_owned_view_array(graph, arr) {
+                    None
+                } else {
+                    Some((nid, arr, idx))
+                }
             }
             _ => None,
         })
@@ -70,4 +81,15 @@ fn is_const_int(graph: &EGraph, nid: NodeId) -> bool {
         } => true,
         _ => false,
     }
+}
+
+/// Does this NodeId carry an `ArrayVariantOwnedView` array type?
+fn is_owned_view_array(graph: &EGraph, nid: NodeId) -> bool {
+    use crate::types::TypeExt;
+    graph
+        .types
+        .get(&nid)
+        .and_then(|t| t.array_variant())
+        .map(crate::types::is_array_variant_owned_view)
+        .unwrap_or(false)
 }

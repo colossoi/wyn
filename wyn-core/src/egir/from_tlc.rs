@@ -1473,14 +1473,37 @@ impl<'a> Converter<'a> {
             inputs.iter().map(|ae| self.convert_array_expr_value(ae)).collect::<Result<_, _>>()?;
         let input_elem_types: Vec<Type<TypeName>> =
             inputs.iter().map(|ae| self.array_expr_elem_type(ae)).collect();
+        // The output array's element type. For a plain array output, this
+        // is `result_ty.elem_type()`. For an SoA tuple output (post-
+        // tlc::soa), reconstruct the original tuple element type by
+        // gathering each component array's elem — `[n](T1,T2)` becomes
+        // `Tuple(Array[T1,N,V], Array[T2,N,V])`, so elem type = `(T1, T2)`.
+        //
+        // Every other shape is an error: if the map's result type isn't a
+        // plain Array or a tuple-of-arrays, something upstream (SoA,
+        // monomorphize, fuse_maps) emitted a shape we don't know how to
+        // lower. Fail loudly rather than papering over the mismatch with
+        // `input_elem_types[0]` — a silent wrong type makes subsequent
+        // lowering errors far harder to diagnose.
         let output_elem_ty = if result_ty.is_array() {
             result_ty.elem_type().expect("Array has elem").clone()
-        } else if !input_elem_types.is_empty() {
-            input_elem_types[0].clone()
+        } else if let Type::Constructed(TypeName::Tuple(n), components) = &result_ty {
+            if !components.iter().all(|c| c.is_array()) {
+                return Err(ConvertError::GraphError(format!(
+                    "map: result tuple type must have all-array components (post-SoA), got {:?}",
+                    result_ty
+                )));
+            }
+            let comp_elems: Vec<Type<TypeName>> = components
+                .iter()
+                .map(|c| c.elem_type().expect("Array has elem").clone())
+                .collect();
+            Type::Constructed(TypeName::Tuple(*n), comp_elems)
         } else {
-            return Err(ConvertError::GraphError(
-                "map: cannot determine output elem type".into(),
-            ));
+            return Err(ConvertError::GraphError(format!(
+                "map: result must be an array or tuple-of-arrays, got {:?}",
+                result_ty
+            )));
         };
 
         let mut operands: SmallVec<[NodeId; 4]> = SmallVec::new();
@@ -1814,6 +1837,21 @@ impl<'a> Converter<'a> {
         match ae {
             ArrayExpr::Ref(t) => match &t.ty {
                 Type::Constructed(TypeName::Array, args) if !args.is_empty() => args[0].clone(),
+                // SoA post-tlc::soa: `Tuple(Array[T1,_,_], ..., Array[Tn,_,_])`
+                // represents an array whose original element type was
+                // `Tuple(T1, ..., Tn)`. Reassemble it so downstream code
+                // (e.g. `emit_read_element`) packs per-component reads
+                // back into the original element type.
+                Type::Constructed(TypeName::Tuple(n), components)
+                    if !components.is_empty()
+                        && components.iter().all(|c| c.is_array()) =>
+                {
+                    let comp_elems: Vec<Type<TypeName>> = components
+                        .iter()
+                        .map(|c| c.elem_type().expect("Array has elem").clone())
+                        .collect();
+                    Type::Constructed(TypeName::Tuple(*n), comp_elems)
+                }
                 _ => t.ty.clone(),
             },
             ArrayExpr::Zip(_) => unreachable!("Zip eliminated"),
