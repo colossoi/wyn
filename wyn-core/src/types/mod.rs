@@ -172,6 +172,10 @@ pub enum TypeName {
     ArrayVariantComposite,
     /// Virtual variant - computed on-the-fly (e.g., ranges). No storage.
     ArrayVariantVirtual,
+    /// OwnedView variant - struct {buffer: [N]elem, valid_len: i32}. Owns a
+    /// local composite buffer with a runtime length. Produced by `filter`
+    /// (fixed capacity, data-dependent count). Not user-writable.
+    ArrayVariantOwnedView,
     /// Array variant placeholder. Replaced with type variable before type checking.
     /// Entry point params are constrained to Storage, others remain polymorphic.
     AddressPlaceholder,
@@ -239,6 +243,7 @@ impl std::fmt::Display for TypeName {
             TypeName::ArrayVariantView => write!(f, "view"),
             TypeName::ArrayVariantComposite => write!(f, "composite"),
             TypeName::ArrayVariantVirtual => write!(f, "virtual"),
+            TypeName::ArrayVariantOwnedView => write!(f, "owned_view"),
             TypeName::AddressPlaceholder => write!(f, "?addrspace"),
             TypeName::Skolem(id) => write!(f, "{}", id),
             TypeName::Ignored => write!(f, "_"),
@@ -299,6 +304,7 @@ impl polytype::Name for TypeName {
             TypeName::ArrayVariantView => "view".to_string(),
             TypeName::ArrayVariantComposite => "composite".to_string(),
             TypeName::ArrayVariantVirtual => "virtual".to_string(),
+            TypeName::ArrayVariantOwnedView => "owned_view".to_string(),
             TypeName::AddressPlaceholder => "?variant".to_string(),
             TypeName::Skolem(id) => format!("{}", id),
             TypeName::Ignored => "_".to_string(),
@@ -600,6 +606,7 @@ impl TypeExt for Type {
                         TypeName::ArrayVariantComposite
                             | TypeName::ArrayVariantView
                             | TypeName::ArrayVariantVirtual
+                            | TypeName::ArrayVariantOwnedView
                             | TypeName::AddressPlaceholder,
                         _
                     ) | Type::Variable(_)
@@ -876,6 +883,16 @@ pub fn is_array_variant_virtual(ty: &Type) -> bool {
     matches!(ty, Type::Constructed(TypeName::ArrayVariantVirtual, _))
 }
 
+/// Check if a type is an owned-view variant (struct {buffer, valid_len})
+pub fn is_array_variant_owned_view(ty: &Type) -> bool {
+    matches!(ty, Type::Constructed(TypeName::ArrayVariantOwnedView, _))
+}
+
+/// Create an owned-view variant marker type
+pub fn array_variant_owned_view() -> Type {
+    Type::Constructed(TypeName::ArrayVariantOwnedView, vec![])
+}
+
 /// Get the array variant from an array type (returns the variant type argument)
 pub fn get_array_variant(ty: &Type) -> Option<&TypeName> {
     match ty.array_variant()? {
@@ -894,6 +911,7 @@ pub fn is_array_variant(ty: &Type) -> bool {
             TypeName::ArrayVariantView
                 | TypeName::ArrayVariantComposite
                 | TypeName::ArrayVariantVirtual
+                | TypeName::ArrayVariantOwnedView
                 | TypeName::AddressPlaceholder,
             _
         )

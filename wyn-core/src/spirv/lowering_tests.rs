@@ -1,5 +1,40 @@
 use crate::error::Result;
 
+fn compile_to_glsl(source: &str) -> Result<crate::glsl::GlslOutput> {
+    // Mirror compile_to_spirv through the `.lower_glsl()` terminal.
+    let mut frontend = crate::cached_frontend();
+    let parsed = crate::Compiler::parse(source, &mut frontend.node_counter).expect("Parsing failed");
+    let alias_checked = parsed
+        .desugar(&mut frontend.node_counter)
+        .expect("Desugaring failed")
+        .resolve(&mut frontend.module_manager)
+        .expect("Name resolution failed")
+        .fold_ast_constants()
+        .type_check(&mut frontend.module_manager, &mut frontend.schemes)
+        .expect("Type checking failed")
+        .alias_check()
+        .expect("Alias checking failed");
+
+    alias_checked
+        .to_tlc(&frontend.schemes, &frontend.module_manager)
+        .partial_eval()
+        .normalize_soacs()
+        .fuse_maps()
+        .defunctionalize()
+        .monomorphize()
+        .buffer_specialize()
+        .fold_generated_lambdas()
+        .inline_small()
+        .parallelize_soacs()
+        .filter_reachable()
+        .to_egraph()
+        .expect("SSA conversion failed")
+        .expand_soacs(false)
+        .optimize_skeleton()
+        .elaborate()
+        .lower_glsl()
+}
+
 fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
     // Use the typestate API to ensure proper compilation pipeline
     let mut frontend = crate::cached_frontend();
@@ -279,6 +314,50 @@ def hist_alias_test(dest: [3]i32, indices: [4]i32, values: [4]i32) [3]i32 =
     .unwrap();
     assert!(!spirv.is_empty());
     assert_eq!(spirv[0], 0x07230203);
+}
+
+#[test]
+fn test_filter_reachable_entry() {
+    // Entry-point test: filter lowers to an OwnedView struct; length() and
+    // indexing on the result work via variant dispatch.
+    let spirv = compile_to_spirv(
+        r#"
+def is_positive(x: i32) bool = x > 0
+
+def filter_demo(arr: [5]i32) = filter(is_positive, arr)
+
+#[fragment]
+entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
+    let r = filter_demo([1, -2, 3, -4, 5]) in
+    @[f32.i32(length(r)), f32.i32(r[0]), 0.0, 1.0]
+"#,
+    )
+    .unwrap();
+    assert!(!spirv.is_empty());
+    assert_eq!(spirv[0], 0x07230203);
+}
+
+#[test]
+fn test_filter_reachable_entry_glsl() {
+    // Same program as test_filter_reachable_entry, compiled to GLSL. Exercises
+    // the OwnedView struct emission + .valid_len / .buffer[i] dispatch.
+    let out = compile_to_glsl(
+        r#"
+def is_positive(x: i32) bool = x > 0
+
+def filter_demo(arr: [5]i32) = filter(is_positive, arr)
+
+#[fragment]
+entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
+    let r = filter_demo([1, -2, 3, -4, 5]) in
+    @[f32.i32(length(r)), f32.i32(r[0]), 0.0, 1.0]
+"#,
+    )
+    .unwrap();
+    let frag = out.fragment.expect("fragment shader");
+    assert!(frag.contains("struct OwnedView"), "expected OwnedView struct: {}", frag);
+    assert!(frag.contains(".valid_len"), "expected .valid_len access: {}", frag);
+    assert!(frag.contains(".buffer["), "expected .buffer[] access: {}", frag);
 }
 
 #[test]

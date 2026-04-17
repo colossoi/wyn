@@ -59,6 +59,14 @@ struct LowerCtx<'a> {
     tuple_counter: usize,
     /// Cache from tuple type signature to struct name
     tuple_type_cache: HashMap<String, String>,
+    /// OwnedView types that need struct definitions: struct_name →
+    /// (elem_glsl_type, buffer_size). Each emits a struct
+    /// `{elem_glsl_type buffer[n]; int valid_len;}`.
+    owned_view_structs: HashMap<String, (String, u32)>,
+    /// Counter for unique OwnedView struct names
+    owned_view_counter: usize,
+    /// Cache from (elem_glsl_type, size) → struct name
+    owned_view_type_cache: HashMap<(String, u32), String>,
     /// Tracks every compiler-internal name that's been mangled this
     /// compilation (mangled → original). Detects collisions as a defensive
     /// invariant — the sanitizer is injective by construction, but this
@@ -301,6 +309,9 @@ impl<'a> LowerCtx<'a> {
             tuple_structs: HashMap::new(),
             tuple_counter: 0,
             tuple_type_cache: HashMap::new(),
+            owned_view_structs: HashMap::new(),
+            owned_view_counter: 0,
+            owned_view_type_cache: HashMap::new(),
             mangled_names: HashMap::new(),
         }
     }
@@ -344,6 +355,9 @@ impl<'a> LowerCtx<'a> {
         self.tuple_structs.clear();
         self.tuple_type_cache.clear();
         self.tuple_counter = 0;
+        self.owned_view_structs.clear();
+        self.owned_view_type_cache.clear();
+        self.owned_view_counter = 0;
         self.lowered.clear();
 
         let mut code = String::new();
@@ -373,6 +387,17 @@ impl<'a> LowerCtx<'a> {
                 for (i, field_type) in field_types.iter().enumerate() {
                     writeln!(output, "    {} f{};", field_type, i).unwrap();
                 }
+                writeln!(output, "}};").unwrap();
+            }
+            writeln!(output).unwrap();
+        }
+
+        // Emit struct definitions for OwnedView types
+        if !self.owned_view_structs.is_empty() {
+            for (struct_name, (elem, n)) in &self.owned_view_structs {
+                writeln!(output, "struct {} {{", struct_name).unwrap();
+                writeln!(output, "    {} buffer[{}];", elem, n).unwrap();
+                writeln!(output, "    int valid_len;").unwrap();
                 writeln!(output, "}};").unwrap();
             }
             writeln!(output).unwrap();
@@ -434,6 +459,9 @@ impl<'a> LowerCtx<'a> {
         self.tuple_structs.clear();
         self.tuple_type_cache.clear();
         self.tuple_counter = 0;
+        self.owned_view_structs.clear();
+        self.owned_view_type_cache.clear();
+        self.owned_view_counter = 0;
         self.lowered.clear();
 
         let mut code = String::new();
@@ -488,6 +516,20 @@ impl<'a> LowerCtx<'a> {
                 for (i, field_type) in field_types.iter().enumerate() {
                     writeln!(output, "    {} f{};", field_type, i).unwrap();
                 }
+                writeln!(output, "}};").unwrap();
+            }
+            writeln!(output).unwrap();
+        }
+
+        // Emit OwnedView struct definitions
+        if !self.owned_view_structs.is_empty() {
+            writeln!(output, "// OwnedView struct definitions").unwrap();
+            let mut structs: Vec<_> = self.owned_view_structs.iter().collect();
+            structs.sort_by_key(|(name, _)| *name);
+            for (struct_name, (elem, n)) in structs {
+                writeln!(output, "struct {} {{", struct_name).unwrap();
+                writeln!(output, "    {} buffer[{}];", elem, n).unwrap();
+                writeln!(output, "    int valid_len;").unwrap();
                 writeln!(output, "}};").unwrap();
             }
             writeln!(output).unwrap();
@@ -790,6 +832,26 @@ impl<'a> LowerCtx<'a> {
                 }
                 TypeName::Array => {
                     let elem = self.type_to_glsl(ty.elem_type().expect("Array has elem"));
+                    let variant = ty.array_variant().expect("Array has variant");
+                    if crate::types::is_array_variant_owned_view(variant) {
+                        // OwnedView: emit a named struct {buffer[N], valid_len}.
+                        let n = match ty.array_size() {
+                            Some(PolyType::Constructed(TypeName::Size(n), _)) => *n as u32,
+                            other => panic!(
+                                "BUG: OwnedView array must have concrete Size, got {:?}",
+                                other
+                            ),
+                        };
+                        let key = (elem.clone(), n);
+                        if let Some(name) = self.owned_view_type_cache.get(&key) {
+                            return name.clone();
+                        }
+                        let struct_name = format!("OwnedView{}", self.owned_view_counter);
+                        self.owned_view_counter += 1;
+                        self.owned_view_structs.insert(struct_name.clone(), (elem, n));
+                        self.owned_view_type_cache.insert(key, struct_name.clone());
+                        return struct_name;
+                    }
                     // GLSL requires function-parameter arrays to be sized, and
                     // sized constructors need the size too. Emit `T[N]` when
                     // the array size is a concrete `Size(N)`; fall back to
@@ -1161,7 +1223,17 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             InstKind::Index { base, index } => {
                 let base_val = self.get_value_ref(*base)?;
                 let index_val = self.get_value_ref(*index)?;
-                Ok(format!("{}[{}]", base_val, index_val))
+                // OwnedView: index into the inner buffer field.
+                let base_ty = base.as_ssa().map(|id| self.body.inner.value_type(id));
+                let is_owned_view = base_ty
+                    .and_then(|t| t.array_variant())
+                    .map(crate::types::is_array_variant_owned_view)
+                    .unwrap_or(false);
+                if is_owned_view {
+                    Ok(format!("{}.buffer[{}]", base_val, index_val))
+                } else {
+                    Ok(format!("{}[{}]", base_val, index_val))
+                }
             }
 
             InstKind::Project { base, index } => {
@@ -1365,7 +1437,25 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 let arr = self.get_value_ref(args[0])?;
                 let idx = self.get_value_ref(args[1])?;
                 let val = self.get_value_ref(args[2])?;
-                writeln!(output, "{}{}[{}] = {};", self.ctx.indent_str(), arr, idx, val).unwrap();
+                // OwnedView: write into the inner buffer; valid_len stays.
+                let arr_ty = args[0].as_ssa().map(|id| self.body.inner.value_type(id));
+                let is_owned_view = arr_ty
+                    .and_then(|t| t.array_variant())
+                    .map(crate::types::is_array_variant_owned_view)
+                    .unwrap_or(false);
+                if is_owned_view {
+                    writeln!(
+                        output,
+                        "{}{}.buffer[{}] = {};",
+                        self.ctx.indent_str(),
+                        arr,
+                        idx,
+                        val
+                    )
+                    .unwrap();
+                } else {
+                    writeln!(output, "{}{}[{}] = {};", self.ctx.indent_str(), arr, idx, val).unwrap();
+                }
                 self.value_map.insert(result, arr);
                 Ok(true)
             }
@@ -1514,10 +1604,25 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         &mut self,
         name: &str,
         args: &[String],
-        _arg_ids: &[ValueId],
+        arg_ids: &[ValueId],
         ret_ty: &PolyType<TypeName>,
     ) -> Result<String> {
-        // Check ImplSource first (handles _w_intrinsic_* builtins)
+        // OwnedView-aware length: dispatch before the generic ImplSource path
+        // since `int(x.length())` only works on composite GLSL arrays, not on
+        // the OwnedView struct.
+        if name == "_w_intrinsic_length" {
+            if let Some(&ssa_id) = arg_ids.first() {
+                let ty = self.body.inner.value_type(ssa_id);
+                let is_owned_view = ty
+                    .array_variant()
+                    .map(crate::types::is_array_variant_owned_view)
+                    .unwrap_or(false);
+                if is_owned_view {
+                    return Ok(format!("{}.valid_len", args[0]));
+                }
+            }
+        }
+        // Check ImplSource (handles _w_intrinsic_* builtins)
         if let Some(impl_) = self.ctx.impl_source.get(name).cloned() {
             return self.lower_builtin_call(&impl_, args, ret_ty);
         }

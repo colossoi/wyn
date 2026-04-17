@@ -1083,17 +1083,19 @@ impl<'a> TypeChecker<'a> {
         );
         self.define_builtin("scan", Self::forall(&[a, n, s], body));
 
-        // filter: ∀a n s. (a -> bool) -> Array[a, s, n] -> ?k. Array[a, s, k]
+        // filter: ∀a n s. (a -> bool) -> Array[a, s, n] -> Array[a, n, OwnedView]
+        // Returns an OwnedView-variant array: sized buffer `[n]a` + runtime
+        // valid_len. Target languages don't allow unsized locals.
         let (a, n, s) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
         let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
         let pred_ty = Type::arrow(Self::var(a), bool_ty);
         let array_a = Self::array_ty(Self::var(a), s, n);
-        // Existential return type: ?k. Array[a, s, k]
-        let k = "k".to_string();
-        let k_var = Type::Constructed(TypeName::SizeVar(k.clone()), vec![]);
-        let result_array = Type::Constructed(TypeName::Array, vec![Self::var(a), k_var, Self::var(s)]);
-        let existential_result = Type::Constructed(TypeName::Existential(vec![k]), vec![result_array]);
-        let body = Self::arrow_chain(&[pred_ty, array_a], existential_result);
+        let owned_view_variant = Type::Constructed(TypeName::ArrayVariantOwnedView, vec![]);
+        let result_array = Type::Constructed(
+            TypeName::Array,
+            vec![Self::var(a), Self::var(n), owned_view_variant],
+        );
+        let body = Self::arrow_chain(&[pred_ty, array_a], result_array);
         self.define_builtin("filter", Self::forall(&[a, n, s], body));
 
         // scatter: ∀a n m s1 s2 s3. Array[a, s1, n] -> Array[i32, s2, m] -> Array[a, s3, m] -> Array[a, s1, n]

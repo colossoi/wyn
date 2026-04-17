@@ -409,21 +409,22 @@ impl IntrinsicSource {
         self.register_poly("_w_intrinsic_reduce", vec![op_type, a.clone(), array_a], a);
 
         // filter : ∀a n s. (a -> bool) -> Array[a, s, n] -> ?k. Array[a, s, k]
+        // filter : ∀a n s. (a -> bool) -> Array[a, s, n] -> Array[a, n, OwnedView]
+        // The result is an OwnedView-variant array: a sized buffer with a
+        // runtime `valid_len`. Target languages don't allow unsized locals,
+        // so this is the concrete representation of "a prefix of n elements".
         let a = ctx.new_variable();
         let n = ctx.new_variable();
         let s = ctx.new_variable();
         let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
         let pred_type = Type::arrow(a.clone(), bool_ty); // a -> bool
-        let array_a = Self::array_type(a.clone(), s.clone(), n);
-        // Existential return type: ?k. Array[a, s, k]
-        let k = "k".to_string();
-        let k_var = Type::Constructed(TypeName::SizeVar(k.clone()), vec![]);
-        let result_array = Self::array_type(a, s, k_var);
-        let existential_result = Type::Constructed(TypeName::Existential(vec![k]), vec![result_array]);
+        let array_a = Self::array_type(a.clone(), s, n.clone());
+        let owned_view_variant = Type::Constructed(TypeName::ArrayVariantOwnedView, vec![]);
+        let result_array = Self::array_type(a, owned_view_variant, n);
         self.register_poly(
             "_w_intrinsic_filter",
             vec![pred_type, array_a],
-            existential_result,
+            result_array,
         );
 
         // scan : ∀a n s. (a -> a -> a) -> a -> Array[a, s, n] -> Array[a, s, n]

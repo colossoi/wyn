@@ -268,6 +268,18 @@ pub enum PendingSoac {
         values_array_type: Type<TypeName>,
         elem_type: Type<TypeName>,
     },
+    /// `filter pred input` → OwnedView array.
+    ///
+    /// Lowered as a sequential loop that allocates a composite buffer of the
+    /// input's capacity, writes each matching element at the running count
+    /// position, and packs `(buffer, count)` into an OwnedView struct.
+    ///
+    /// Operands: `[input, ...pred_captures]`.
+    Filter {
+        func: String,
+        input_array_type: Type<TypeName>,
+        input_elem_type: Type<TypeName>,
+    },
 }
 
 /// Terminator using NodeIds for value references.

@@ -341,6 +341,19 @@ impl Constructor {
                             // Virtual variant: struct { start, step, len } for range representation
                             // Use the element type so u32 ranges get {u32, u32, u32}.
                             self.get_or_create_struct_type(vec![elem_type, elem_type, elem_type])
+                        } else if let PolyType::Constructed(TypeName::ArrayVariantOwnedView, _) = variant
+                        {
+                            // OwnedView variant: struct { buffer: [N]elem, valid_len: i32 }
+                            let PolyType::Constructed(TypeName::Size(n), _) = size else {
+                                panic!(
+                                    "BUG: OwnedView array must have a concrete Size, got {:?}",
+                                    size
+                                );
+                            };
+                            let size_const = self.const_u32(*n as u32);
+                            let buffer_type = self.builder.type_array(elem_type, size_const);
+                            self.array_elem_cache.insert(buffer_type, elem_type);
+                            self.get_or_create_struct_type(vec![buffer_type, self.i32_type])
                         } else {
                             // Composite variant (or placeholder): sized array value
                             match size {
@@ -422,6 +435,7 @@ impl Constructor {
                     }
                     TypeName::ArrayVariantComposite
                     | TypeName::ArrayVariantView
+                    | TypeName::ArrayVariantOwnedView
                     | TypeName::PointerFunction
                     | TypeName::PointerInput
                     | TypeName::PointerOutput
@@ -2106,6 +2120,11 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                             }
                         }
                     }
+                    // OwnedView: struct {buffer, valid_len: i32} — extract field 1.
+                    PolyType::Constructed(TypeName::ArrayVariantOwnedView, _) => Ok(self
+                        .constructor
+                        .builder
+                        .composite_extract(result_ty, None, args[0], [1u32])?),
                     _ => {
                         bail_spirv!("length: unknown array variant: {:?}", variant)
                     }
@@ -2389,6 +2408,50 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 } else if types::is_array_variant_virtual(variant) {
                     // Virtual variant: {start, step, len} - computed array
                     self.lower_virtual_index(base_id, index_id, result_ty)
+                } else if types::is_array_variant_owned_view(variant) {
+                    // OwnedView variant: {buffer: [N]elem, valid_len: i32}.
+                    // Extract the buffer and index into it (composite-style).
+                    let buffer_spirv_ty = {
+                        let elem_ty = self.constructor.polytype_to_spirv(elem);
+                        let size = base_ty.array_size().expect("OwnedView has size");
+                        let PolyType::Constructed(TypeName::Size(n), _) = size else {
+                            bail_spirv!("OwnedView array must have concrete Size, got {:?}", size);
+                        };
+                        let size_const = self.constructor.const_u32(*n as u32);
+                        self.constructor.builder.type_array(elem_ty, size_const)
+                    };
+                    let buffer_id = self.constructor.builder.composite_extract(
+                        buffer_spirv_ty,
+                        None,
+                        base_id,
+                        [0u32],
+                    )?;
+                    if let Some(const_idx) = self.try_resolve_const_index(index) {
+                        Ok(self.constructor.builder.composite_extract(
+                            result_ty,
+                            None,
+                            buffer_id,
+                            [const_idx],
+                        )?)
+                    } else {
+                        // Dynamic index into the extracted composite buffer.
+                        // We need a pointer to the buffer local; stash it in a
+                        // function-scope variable first.
+                        let tmp_var = self
+                            .constructor
+                            .declare_variable("owned_view_idx_tmp", buffer_spirv_ty)?;
+                        self.constructor.builder.store(tmp_var, buffer_id, None, [])?;
+                        let elem_ptr_ty = self
+                            .constructor
+                            .get_or_create_ptr_type(StorageClass::Function, result_ty);
+                        let elem_ptr = self.constructor.builder.access_chain(
+                            elem_ptr_ty,
+                            None,
+                            tmp_var,
+                            [index_id],
+                        )?;
+                        Ok(self.constructor.builder.load(result_ty, None, elem_ptr, None, [])?)
+                    }
                 } else {
                     // Composite variant: SPIR-V array value
                     // Check for compile-time constant index for OpCompositeExtract
@@ -2561,6 +2624,81 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         let arr = arg_ids[0];
                         let idx = arg_ids[1];
                         let val = arg_ids[2];
+
+                        // OwnedView: AWI writes into the inner buffer and
+                        // reassembles the struct with the original valid_len.
+                        let arr_ty = self.get_value_type_ref(value_refs[0]);
+                        if arr_ty
+                            .array_variant()
+                            .map(types::is_array_variant_owned_view)
+                            .unwrap_or(false)
+                        {
+                            let elem = arr_ty.elem_type().expect("OwnedView has elem");
+                            let elem_ty_spirv = self.constructor.polytype_to_spirv(elem);
+                            let size = arr_ty.array_size().expect("OwnedView has size");
+                            let PolyType::Constructed(TypeName::Size(n), _) = size else {
+                                bail_spirv!(
+                                    "ArrayWith: OwnedView must have concrete Size, got {:?}",
+                                    size
+                                );
+                            };
+                            let size_const = self.constructor.const_u32(*n as u32);
+                            let buffer_ty =
+                                self.constructor.builder.type_array(elem_ty_spirv, size_const);
+                            // Extract buffer, extract valid_len.
+                            let buffer_id = self.constructor.builder.composite_extract(
+                                buffer_ty,
+                                None,
+                                arr,
+                                [0u32],
+                            )?;
+                            let valid_len_id = self.constructor.builder.composite_extract(
+                                self.constructor.i32_type,
+                                None,
+                                arr,
+                                [1u32],
+                            )?;
+                            // Update buffer at index with val. Reuse the same
+                            // composite_insert / dynamic-store logic used for
+                            // composite arrays.
+                            let literal_idx = match value_refs.get(1).and_then(|vr| vr.as_const()) {
+                                Some(ConstantValue::I32(v)) => Some(v as i32),
+                                Some(ConstantValue::U32(v)) => Some(v as i32),
+                                _ => self.constructor.get_const_i32_value(idx),
+                            };
+                            let new_buffer = if let Some(literal_idx) = literal_idx {
+                                self.constructor.builder.composite_insert(
+                                    buffer_ty,
+                                    None,
+                                    val,
+                                    buffer_id,
+                                    [literal_idx as u32],
+                                )?
+                            } else {
+                                let arr_var = self
+                                    .constructor
+                                    .declare_variable("_owned_view_awi_tmp", buffer_ty)?;
+                                self.constructor.builder.store(arr_var, buffer_id, None, [])?;
+                                let elem_ptr_ty = self.constructor.get_or_create_ptr_type(
+                                    spirv::StorageClass::Function,
+                                    elem_ty_spirv,
+                                );
+                                let elem_ptr = self.constructor.builder.access_chain(
+                                    elem_ptr_ty,
+                                    None,
+                                    arr_var,
+                                    [idx],
+                                )?;
+                                self.constructor.builder.store(elem_ptr, val, None, [])?;
+                                self.constructor.builder.load(buffer_ty, None, arr_var, None, [])?
+                            };
+                            // Reassemble the struct: {new_buffer, valid_len}.
+                            return Ok(self.constructor.builder.composite_construct(
+                                result_ty,
+                                None,
+                                [new_buffer, valid_len_id],
+                            )?);
+                        }
 
                         // Try to get literal index for compile-time known indices
                         let literal_idx = match value_refs.get(1).and_then(|vr| vr.as_const()) {

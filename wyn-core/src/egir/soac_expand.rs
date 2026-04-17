@@ -107,6 +107,7 @@ fn is_handleable_soac(kind: &SideEffectKind) -> bool {
                 && is_plain_array_source(indices_array_type)
                 && is_plain_array_source(values_array_type)
         }
+        PendingSoac::Filter { input_array_type, .. } => is_plain_array_source(input_array_type),
     }
 }
 
@@ -486,6 +487,30 @@ fn expand_one(
                 next_effect,
             );
         }
+        SideEffectKind::Pending(PendingSoac::Filter {
+            func,
+            input_array_type,
+            input_elem_type,
+        }) => {
+            // Operand layout: [input, ...pred_captures].
+            let input_nid = se.operand_nodes[0];
+            let captures: Vec<NodeId> = se.operand_nodes[1..].to_vec();
+            let result_nid = se.result.expect("Filter has a result");
+
+            build_filter_loop(
+                graph,
+                control_headers,
+                bid,
+                idx,
+                FilterLoop {
+                    input: (input_nid, input_array_type.clone(), input_elem_type.clone()),
+                    result_node: result_nid,
+                    func: func.clone(),
+                    captures,
+                },
+                next_effect,
+            );
+        }
         SideEffectKind::Pending(PendingSoac::ReduceByIndex {
             func,
             dest_array_type,
@@ -677,6 +702,167 @@ fn build_reduce_by_index_loop(
             vec![new_out]
         },
     );
+}
+
+/// Filter: sequential pass that writes each matching element of `input` into
+/// a fresh composite buffer at the running count, then packs the
+/// `(buffer, count)` pair into an `Array[A, N, OwnedView]` struct at exit.
+///
+/// Two loop-carried values — a composite output buffer and an `i32` count.
+/// The predicate's result gates the counter bump via a structured if-then-else
+/// inside the body block; the buffer write is unconditional (writes past the
+/// final count are harmless because consumers only see `valid_len` entries).
+struct FilterLoop {
+    input: (NodeId, Type<TypeName>, Type<TypeName>),
+    result_node: NodeId,
+    func: String,
+    captures: Vec<NodeId>,
+}
+
+fn build_filter_loop(
+    graph: &mut EGraph,
+    control_headers: &mut HashMap<BlockId, ControlHeader>,
+    bid: BlockId,
+    idx_in_block: usize,
+    spec: FilterLoop,
+    next_effect: &mut u32,
+) {
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+    let (input_nid, input_ty, elem_ty) = spec.input;
+    let func = spec.func;
+    let captures = spec.captures;
+    let result_nid = spec.result_node;
+    // The SOAC result type at EGIR level is Array[A, N, OwnedView]. We
+    // carry through (composite buffer, i32 count) separately and pack into
+    // that struct at exit.
+    let owned_view_ty = graph.types[&result_nid].clone();
+
+    // Composite buffer of the same element type and size as the input.
+    let buffer_ty = match &input_ty {
+        Type::Constructed(TypeName::Array, args) if args.len() == 3 => Type::Constructed(
+            TypeName::Array,
+            vec![
+                args[0].clone(),
+                args[1].clone(),
+                Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
+            ],
+        ),
+        _ => panic!("Filter input must be an array type, got {:?}", input_ty),
+    };
+    let init_buffer = graph.intern_pure(
+        PureOp::Call("_w_intrinsic_uninit".into()),
+        smallvec![],
+        buffer_ty.clone(),
+    );
+    let zero = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty.clone());
+
+    // DummyBool for result binding — we rebind result_nid manually at exit to
+    // the packed OwnedView.
+    let carried = vec![(buffer_ty.clone(), init_buffer), (i32_ty.clone(), zero)];
+    let handles = build_loop_skeleton(
+        graph,
+        control_headers,
+        bid,
+        idx_in_block,
+        LoopSkeletonSpec {
+            carried,
+            result: ResultBinding::DummyBool {
+                result_node: result_nid,
+            },
+            len_input: (input_nid, input_ty.clone()),
+        },
+    );
+    let idx_nid = handles.idx_nid;
+    let buffer_in = handles.carried[0];
+    let k_in = handles.carried[1];
+
+    // Read input[i], call pred, emit unconditional AWI into buffer at k.
+    let elem_nid = emit_read_element(
+        graph,
+        handles.body,
+        input_nid,
+        idx_nid,
+        &input_ty,
+        &elem_ty,
+        next_effect,
+    );
+    let mut call_operands: SmallVec<[NodeId; 4]> = smallvec![elem_nid];
+    call_operands.extend(captures.iter().copied());
+    let pred_val = graph.intern_pure(PureOp::Call(func), call_operands, bool_ty);
+    let buffer_new = graph.intern_pure(
+        PureOp::Call("_w_intrinsic_array_with_inplace".into()),
+        smallvec![buffer_in, k_in, elem_nid],
+        buffer_ty.clone(),
+    );
+
+    // Advance k only if the predicate held. body → condbranch(pred) →
+    // [incr | skip] → merge(k_new) → header.
+    let incr_bid = graph.skeleton.create_block();
+    let skip_bid = graph.skeleton.create_block();
+    let merge_bid = graph.skeleton.create_block();
+
+    let one = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty.clone());
+    let k_plus_one = graph.intern_pure(
+        PureOp::BinOp("+".into()),
+        smallvec![k_in, one],
+        i32_ty.clone(),
+    );
+    graph.skeleton.blocks[incr_bid].term = SkeletonTerminator::Branch {
+        target: merge_bid,
+        args: vec![k_plus_one],
+    };
+    graph.skeleton.blocks[skip_bid].term = SkeletonTerminator::Branch {
+        target: merge_bid,
+        args: vec![k_in],
+    };
+    let k_new = graph.add_block_param(merge_bid, 0, i32_ty.clone());
+    graph.skeleton.blocks[merge_bid].params.push(k_new);
+
+    graph.skeleton.blocks[handles.body].term = SkeletonTerminator::CondBranch {
+        cond: pred_val,
+        then_target: incr_bid,
+        then_args: vec![],
+        else_target: skip_bid,
+        else_args: vec![],
+    };
+    control_headers.insert(
+        handles.body,
+        ControlHeader::Selection { merge: merge_bid },
+    );
+
+    let next_i_nid = increment(graph, idx_nid);
+    graph.skeleton.blocks[merge_bid].term = SkeletonTerminator::Branch {
+        target: handles.header,
+        args: vec![buffer_new, k_new, next_i_nid],
+    };
+
+    // At loop exit (the `after` block already wired by build_loop_skeleton),
+    // pack the carried (buffer, k) into an OwnedView struct and rebind the
+    // original SOAC result NodeId to that packed value.
+    let after_bid = match &graph.skeleton.blocks[handles.header].term {
+        SkeletonTerminator::CondBranch { else_target, .. } => *else_target,
+        _ => panic!("expected CondBranch header from build_loop_skeleton"),
+    };
+    // DummyBool passed no carried values through the header's else branch;
+    // give `after` two params (buffer, k) and thread them from the header.
+    let buffer_param = graph.add_block_param(after_bid, 0, buffer_ty);
+    let k_param = graph.add_block_param(after_bid, 1, i32_ty);
+    graph.skeleton.blocks[after_bid].params = vec![buffer_param, k_param];
+    if let SkeletonTerminator::CondBranch { else_args, .. } =
+        &mut graph.skeleton.blocks[handles.header].term
+    {
+        *else_args = vec![handles.carried[0], handles.carried[1]];
+    }
+    let packed = graph.intern_pure(
+        PureOp::Tuple(2),
+        smallvec![buffer_param, k_param],
+        owned_view_ty,
+    );
+    // Rebind result_nid to alias the tuple node (DummyBool set it to
+    // `Bool(false)`; overwrite with the OwnedView).
+    let packed_enode = graph.nodes[packed].clone();
+    graph.nodes[result_nid] = packed_enode;
 }
 
 /// Emit a real loop via `build_loop_skeleton`, invoking `emit_body` in the

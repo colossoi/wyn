@@ -1606,37 +1606,22 @@ impl<'a> Converter<'a> {
         let pred_name = self.lambda_fn_name(pred)?;
         let capture_nids: Vec<NodeId> =
             pred.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
+        let elem_ty = self.array_expr_elem_type(input);
+        let arr_ty = self.array_expr_type(input);
         let arr_nid = self.convert_array_expr_value(input)?;
-        let pred_ref = self.intern_pure(
-            PureOp::Global(pred_name),
-            smallvec![],
-            Type::Constructed(TypeName::Unit, vec![]),
-        );
 
-        let mut operands: SmallVec<[NodeId; 4]> = smallvec![pred_ref, arr_nid];
+        let mut operands: SmallVec<[NodeId; 4]> = smallvec![arr_nid];
         operands.extend(capture_nids.iter().copied());
 
-        // Filter isn't lowered by soac_expand yet — emit it as a plain
-        // effectful Intrinsic side-effect so the pipeline can still reach
-        // SSA. `compile_to_spirv` on a reachable filter result will fail
-        // because the existential return type carries an unresolved
-        // SizeVar; see the plan doc for the Filter follow-up work.
-        let dummy_vrefs: Vec<ValueRef> =
-            (0..operands.len()).map(|_| ValueRef::Ssa(Default::default())).collect();
-        let result_nid = self.graph.alloc_side_effect_result(result_ty);
-        let effect_in = EffectToken(0);
-        let effect_out = self.alloc_effect();
-        self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
-            kind: SideEffectKind::Inst(InstKind::Intrinsic {
-                name: "_w_intrinsic_filter".into(),
-                args: dummy_vrefs,
-            }),
-            operand_nodes: operands,
-            result: Some(result_nid),
-            effects: Some((effect_in, effect_out)),
-            span: self.current_span,
-        });
-        Ok(result_nid)
+        Ok(self.emit_soac(
+            PendingSoac::Filter {
+                func: pred_name,
+                input_array_type: arr_ty,
+                input_elem_type: elem_ty,
+            },
+            operands,
+            result_ty,
+        ))
     }
 
     /// Resolve a `Place::LocalArray` to the NodeId of its current value.

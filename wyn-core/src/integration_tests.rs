@@ -388,10 +388,10 @@ def reduce_tuple(hits: [4](f32, i32)) (f32, i32) =
 
 def is_positive(x: i32) bool = x > 0
 
-def filter_positive(arr: [5]i32) ?k. [k]i32 =
+def filter_positive(arr: [5]i32) =
     filter(is_positive, arr)
 
-def filter_lambda(arr: [4]i32) ?k. [k]i32 =
+def filter_lambda(arr: [4]i32) =
     filter(|x: i32| x % 2 == 0, arr)
 
 #[vertex]

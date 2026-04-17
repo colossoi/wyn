@@ -189,6 +189,7 @@ impl TypeKey {
                     TypeName::ArrayVariantComposite => "array_composite".to_string(),
                     TypeName::ArrayVariantView => "array_view".to_string(),
                     TypeName::ArrayVariantVirtual => "array_virtual".to_string(),
+                    TypeName::ArrayVariantOwnedView => "array_owned_view".to_string(),
                     TypeName::AddressPlaceholder => {
                         panic!("AddressPlaceholder should be resolved before monomorphization")
                     }
@@ -243,6 +244,7 @@ impl TypeKey {
                     "array_view" => TypeName::ArrayVariantView,
                     "array_composite" => TypeName::ArrayVariantComposite,
                     "array_virtual" => TypeName::ArrayVariantVirtual,
+                    "array_owned_view" => TypeName::ArrayVariantOwnedView,
                     s if s.starts_with("tuple") => {
                         let n: usize = s[5..]
                             .parse()
@@ -1081,6 +1083,7 @@ pub(crate) fn format_type_compact(ty: &Type<TypeName>) -> String {
         Type::Constructed(TypeName::ArrayVariantView, _) => "array_view".to_string(),
         Type::Constructed(TypeName::ArrayVariantComposite, _) => "array_composite".to_string(),
         Type::Constructed(TypeName::ArrayVariantVirtual, _) => "array_virtual".to_string(),
+        Type::Constructed(TypeName::ArrayVariantOwnedView, _) => "array_owned_view".to_string(),
         Type::Constructed(name, args) => {
             // Fallback for other constructed types
             let args_str = args.iter().map(format_type_compact).collect::<Vec<_>>().join("_");
