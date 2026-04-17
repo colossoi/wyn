@@ -72,7 +72,7 @@ The dev server hot-reloads the JS/TSX side automatically; only the WASM rebuild 
 ## Example shader
 
 ```wyn
-#[uniform(set=0, binding=0)] def iResolution: vec2f32
+#[uniform(set=0, binding=0)] def iResolution: vec3f32
 #[uniform(set=0, binding=1)] def iTime: f32
 
 def verts: [3]vec4f32 =
