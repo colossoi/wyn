@@ -87,6 +87,16 @@ fn is_handleable_soac(kind: &SideEffectKind) -> bool {
             input_array_types, ..
         } => input_array_types.iter().all(is_plain_array_source),
         PendingSoac::ScanInto { input_array_type, .. } => is_plain_array_source(input_array_type),
+        PendingSoac::Scatter {
+            dest_array_type,
+            indices_array_type,
+            values_array_type,
+            ..
+        } => {
+            is_plain_composite(dest_array_type)
+                && is_plain_array_source(indices_array_type)
+                && is_plain_array_source(values_array_type)
+        }
     }
 }
 
@@ -440,8 +450,105 @@ fn expand_one(
                 next_effect,
             );
         }
+        SideEffectKind::Pending(PendingSoac::Scatter {
+            dest_array_type,
+            indices_array_type,
+            values_array_type,
+            elem_type,
+        }) => {
+            // Operand layout: [dest, indices, values].
+            let dest_nid = se.operand_nodes[0];
+            let indices_nid = se.operand_nodes[1];
+            let values_nid = se.operand_nodes[2];
+            let result_nid = se.result.expect("Scatter has a result");
+
+            build_scatter_loop(
+                graph,
+                control_headers,
+                bid,
+                idx,
+                ScatterLoop {
+                    dest: (dest_nid, dest_array_type.clone()),
+                    indices: (indices_nid, indices_array_type.clone()),
+                    values: (values_nid, values_array_type.clone(), elem_type.clone()),
+                    result_node: result_nid,
+                },
+                next_effect,
+            );
+        }
         _ => unreachable!("is_handleable_soac filtered to supported variants"),
     }
+}
+
+/// Scatter: sequential write to `dest` via `array_with_inplace(out, indices[i], values[i])`.
+/// One loop-carried value (the output array); final carried value is the result.
+///
+/// No bounds guard: indices out of range are caller UB. Matching Futhark's
+/// "silently drop" semantics would require an `If` inside the body block;
+/// that's a future enhancement once GPU indexing cost is measured.
+struct ScatterLoop {
+    dest: (NodeId, Type<TypeName>),
+    indices: (NodeId, Type<TypeName>),
+    values: (NodeId, Type<TypeName>, Type<TypeName>),
+    result_node: NodeId,
+}
+
+fn build_scatter_loop(
+    graph: &mut EGraph,
+    control_headers: &mut HashMap<BlockId, ControlHeader>,
+    bid: BlockId,
+    idx_in_block: usize,
+    spec: ScatterLoop,
+    next_effect: &mut u32,
+) {
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+    let (dest_nid, dest_ty) = spec.dest;
+    let (indices_nid, indices_ty) = spec.indices;
+    let (values_nid, values_ty, elem_ty) = spec.values;
+
+    let carried = vec![(dest_ty.clone(), dest_nid)];
+    let result = ResultBinding::Carried {
+        result_node: spec.result_node,
+        idx: 0,
+    };
+    expand_loop(
+        graph,
+        control_headers,
+        bid,
+        idx_in_block,
+        &(indices_nid, indices_ty.clone()),
+        &carried,
+        &result,
+        next_effect,
+        false,
+        |graph, next_effect, body_bid, idx_nid, carried_nids| {
+            let out_nid = carried_nids[0];
+            let out_idx = emit_read_element(
+                graph,
+                body_bid,
+                indices_nid,
+                idx_nid,
+                &indices_ty,
+                &i32_ty,
+                next_effect,
+            );
+            let val = emit_read_element(
+                graph,
+                body_bid,
+                values_nid,
+                idx_nid,
+                &values_ty,
+                &elem_ty,
+                next_effect,
+            );
+            let new_out = graph.intern_pure(
+                PureOp::Call("_w_intrinsic_array_with_inplace".into()),
+                smallvec![out_nid, out_idx, val],
+                dest_ty.clone(),
+            );
+            vec![new_out]
+        },
+    );
 }
 
 /// Emit a real loop via `build_loop_skeleton`, invoking `emit_body` in the

@@ -232,6 +232,28 @@ def scatter_test(dest: [5]i32, indices: [2]i32, values: [2]i32) [5]i32 =
 }
 
 #[test]
+fn test_scatter_reachable_entry() {
+    // Entry-point test: scatter is actually reached by the compiler pipeline.
+    let spirv = compile_to_spirv(
+        r#"
+def scatter_demo(dest: [5]f32, indices: [2]i32, values: [2]f32) [5]f32 =
+    scatter(dest, indices, values)
+
+#[fragment]
+entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
+    let dest: [5]f32 = [0.0, 0.0, 0.0, 0.0, 0.0] in
+    let indices: [2]i32 = [1, 3] in
+    let values: [2]f32 = [7.0, 9.0] in
+    let r = scatter_demo(dest, indices, values) in
+    @[r[0], r[1], r[2], r[3]]
+"#,
+    )
+    .unwrap();
+    assert!(!spirv.is_empty());
+    assert_eq!(spirv[0], 0x07230203);
+}
+
+#[test]
 fn test_reduce_by_index() {
     // Histogram / reduce_by_index: accumulate values at indices using operator
     let spirv = compile_to_spirv(

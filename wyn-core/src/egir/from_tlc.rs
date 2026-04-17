@@ -14,7 +14,8 @@ use crate::ssa::framework::BlockId;
 use crate::ssa::types::ViewSource;
 use crate::ssa::types::{ControlHeader, FuncBody, Function, InstKind, ValueRef};
 use crate::tlc::{
-    ArrayExpr, Def as TlcDef, DefMeta, Lambda, LoopKind, Program as TlcProgram, SoacOp, Term, TermKind,
+    ArrayExpr, Def as TlcDef, DefMeta, Lambda, LoopKind, Place, Program as TlcProgram, SoacOp, Term,
+    TermKind,
 };
 use crate::types::TypeExt;
 use crate::{SymbolId, SymbolTable};
@@ -1411,7 +1412,11 @@ impl<'a> Converter<'a> {
             } => self.convert_soac_redomap(op, reduce_op, ne, inputs, ty),
             SoacOp::Scan { op, ne, input } => self.convert_soac_scan(op, ne, input, ty),
             SoacOp::Filter { pred, input } => self.convert_soac_filter(pred, input, ty),
-            SoacOp::Scatter { .. } => Err(ConvertError::Unsupported("SOAC scatter".into())),
+            SoacOp::Scatter {
+                dest,
+                indices,
+                values,
+            } => self.convert_soac_scatter(dest, indices, values, ty),
             SoacOp::ReduceByIndex { .. } => Err(ConvertError::Unsupported("SOAC reduce_by_index".into())),
         }
     }
@@ -1604,10 +1609,11 @@ impl<'a> Converter<'a> {
         let mut operands: SmallVec<[NodeId; 4]> = smallvec![pred_ref, arr_nid];
         operands.extend(capture_nids.iter().copied());
 
-        // Filter is not a SOAC that soac_expand handles; emit it as a regular
-        // effectful Intrinsic side-effect. (Upstream compilation typically
-        // lowers Filter before reaching here, but we keep the fallback for
-        // completeness.)
+        // Filter isn't lowered by soac_expand yet — emit it as a plain
+        // effectful Intrinsic side-effect so the pipeline can still reach
+        // SSA. `compile_to_spirv` on a reachable filter result will fail
+        // because the existential return type carries an unresolved
+        // SizeVar; see the plan doc for the Filter follow-up work.
         let dummy_vrefs: Vec<ValueRef> =
             (0..operands.len()).map(|_| ValueRef::Ssa(Default::default())).collect();
         let result_nid = self.graph.alloc_side_effect_result(result_ty);
@@ -1624,6 +1630,55 @@ impl<'a> Converter<'a> {
             span: self.current_span,
         });
         Ok(result_nid)
+    }
+
+    /// Resolve a `Place::LocalArray` to the NodeId of its current value.
+    fn resolve_place(&mut self, place: &Place) -> Result<NodeId, ConvertError> {
+        match place {
+            Place::LocalArray { id, .. } => {
+                if let Some(&nid) = self.locals.get(id) {
+                    Ok(nid)
+                } else {
+                    let name =
+                        self.symbols.get(*id).cloned().unwrap_or_else(|| "<unknown>".to_string());
+                    Err(ConvertError::Unsupported(format!(
+                        "scatter/reduce_by_index dest must be a local binding; got unbound symbol {}",
+                        name
+                    )))
+                }
+            }
+            Place::BufferSlice { .. } => Err(ConvertError::Unsupported(
+                "scatter/reduce_by_index into buffer slice (only local arrays supported)".into(),
+            )),
+        }
+    }
+
+    fn convert_soac_scatter(
+        &mut self,
+        dest: &Place,
+        indices: &ArrayExpr,
+        values: &ArrayExpr,
+        result_ty: Type<TypeName>,
+    ) -> Result<NodeId, ConvertError> {
+        let dest_nid = self.resolve_place(dest)?;
+        let indices_ty = self.array_expr_type(indices);
+        let values_ty = self.array_expr_type(values);
+        let elem_ty = self.array_expr_elem_type(values);
+        let indices_nid = self.convert_array_expr_value(indices)?;
+        let values_nid = self.convert_array_expr_value(values)?;
+
+        let operands: SmallVec<[NodeId; 4]> = smallvec![dest_nid, indices_nid, values_nid];
+
+        Ok(self.emit_soac(
+            PendingSoac::Scatter {
+                dest_array_type: result_ty.clone(),
+                indices_array_type: indices_ty,
+                values_array_type: values_ty,
+                elem_type: elem_ty,
+            },
+            operands,
+            result_ty,
+        ))
     }
 
     // ========================================================================

@@ -238,6 +238,20 @@ pub enum PendingSoac {
         input_array_types: Vec<Type<TypeName>>,
         input_elem_types: Vec<Type<TypeName>>,
     },
+    /// `scatter dest indices values` → functional array update.
+    ///
+    /// For each `i` in `0..m`, write `values[i]` into `dest[indices[i]]`.
+    /// Out-of-bounds indices are silently dropped (Futhark convention;
+    /// avoids GPU UB). Write-conflict resolution is "last write wins"
+    /// given the sequential loop we lower into.
+    ///
+    /// Operands: `[dest, indices, values]`.
+    Scatter {
+        dest_array_type: Type<TypeName>,
+        indices_array_type: Type<TypeName>,
+        values_array_type: Type<TypeName>,
+        elem_type: Type<TypeName>,
+    },
 }
 
 /// Terminator using NodeIds for value references.

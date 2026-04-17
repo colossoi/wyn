@@ -75,6 +75,7 @@ const SOAC_NAMES: &[&str] = &[
     "zip4",
     "zip5",
     "reduce_by_index",
+    "scatter",
 ];
 
 // =============================================================================
@@ -2010,6 +2011,7 @@ impl<'a> Transformer<'a> {
             "filter" => self.transform_soac_filter(args, ty, span),
             "zip" | "zip2" | "zip3" | "zip4" | "zip5" => self.transform_soac_zip(args, ty, span),
             "reduce_by_index" => self.transform_soac_reduce_by_index(args, ty, span),
+            "scatter" => self.transform_soac_scatter(args, ty, span),
             _ => unreachable!("Unknown SOAC: {}", name),
         }
     }
@@ -2097,6 +2099,39 @@ impl<'a> Transformer<'a> {
         let exprs: Vec<ArrayExpr> =
             args.iter().map(|a| ArrayExpr::Ref(Box::new(self.transform_expr(a)))).collect();
         self.mk_term(ty, span, TermKind::ArrayExpr(ArrayExpr::Zip(exprs)))
+    }
+
+    /// Transform `scatter(dest, indices, values)` → `Soac(Scatter { dest, indices, values })`.
+    fn transform_soac_scatter(
+        &mut self,
+        args: &[ast::Expression],
+        ty: Type<TypeName>,
+        span: Span,
+    ) -> Term {
+        assert_eq!(args.len(), 3, "scatter requires 3 arguments");
+        let dest_term = self.transform_expr(&args[0]);
+        let indices_term = self.transform_expr(&args[1]);
+        let values_term = self.transform_expr(&args[2]);
+
+        let dest_elem_ty = self.get_array_element_type(&dest_term.ty);
+        let dest = Place::LocalArray {
+            id: match &dest_term.kind {
+                TermKind::Var(sym) => *sym,
+                _ => self.define("_w_scatter_dest"),
+            },
+            shape: Shape(vec![]),
+            elem_ty: dest_elem_ty,
+        };
+
+        self.mk_term(
+            ty,
+            span,
+            TermKind::Soac(SoacOp::Scatter {
+                dest,
+                indices: ArrayExpr::Ref(Box::new(indices_term)),
+                values: ArrayExpr::Ref(Box::new(values_term)),
+            }),
+        )
     }
 
     /// Transform `reduce_by_index(dest, op, ne, indices, values)`.
