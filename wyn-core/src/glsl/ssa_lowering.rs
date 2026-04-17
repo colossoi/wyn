@@ -383,10 +383,19 @@ impl<'a> LowerCtx<'a> {
     }
 
     fn lower_shadertoy_entry_point(&mut self, entry: &EntryPoint, output: &mut String) -> Result<()> {
-        // Find the fragCoord parameter
+        // Find the fragCoord parameter. Both `position` and `frag_coord`
+        // Wyn-side builtin decorations map to the GLSL pixel-coordinate slot
+        // (`BuiltIn::Position` and `BuiltIn::FragCoord` respectively); accept
+        // either so the wrapper's `vec4 <name> = vec4(fc.x, iResolution.y -
+        // fc.y, 0.0, 1.0);` declaration always lands.
         let mut frag_coord_name = None;
         for input in &entry.inputs {
-            if let Some(IoDecoration::BuiltIn(spirv::BuiltIn::Position)) = &input.decoration {
+            if matches!(
+                &input.decoration,
+                Some(IoDecoration::BuiltIn(
+                    spirv::BuiltIn::Position | spirv::BuiltIn::FragCoord
+                ))
+            ) {
                 frag_coord_name = Some(input.name.clone());
             }
         }
