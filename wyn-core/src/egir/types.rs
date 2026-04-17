@@ -252,6 +252,22 @@ pub enum PendingSoac {
         values_array_type: Type<TypeName>,
         elem_type: Type<TypeName>,
     },
+    /// `reduce_by_index dest op ne indices values` → histogram / scattered
+    /// reduction.
+    ///
+    /// For each `i` in `0..m`, compute
+    /// `dest[indices[i]] := op(dest[indices[i]], values[i])`.
+    /// Unlike Scatter this reads-modifies-writes via the user-supplied
+    /// `op`. Sequential lowering today; parallel needs atomics.
+    ///
+    /// Operands: `[dest, ne, indices, values, ...op_captures]`.
+    ReduceByIndex {
+        func: String,
+        dest_array_type: Type<TypeName>,
+        indices_array_type: Type<TypeName>,
+        values_array_type: Type<TypeName>,
+        elem_type: Type<TypeName>,
+    },
 }
 
 /// Terminator using NodeIds for value references.

@@ -97,6 +97,16 @@ fn is_handleable_soac(kind: &SideEffectKind) -> bool {
                 && is_plain_array_source(indices_array_type)
                 && is_plain_array_source(values_array_type)
         }
+        PendingSoac::ReduceByIndex {
+            dest_array_type,
+            indices_array_type,
+            values_array_type,
+            ..
+        } => {
+            is_plain_composite(dest_array_type)
+                && is_plain_array_source(indices_array_type)
+                && is_plain_array_source(values_array_type)
+        }
     }
 }
 
@@ -476,6 +486,38 @@ fn expand_one(
                 next_effect,
             );
         }
+        SideEffectKind::Pending(PendingSoac::ReduceByIndex {
+            func,
+            dest_array_type,
+            indices_array_type,
+            values_array_type,
+            elem_type,
+        }) => {
+            // Operand layout: [dest, ne, indices, values, ...op_captures].
+            // `ne` is unused for the sequential lowering (dest itself is the
+            // accumulator; ne only matters for parallel bucket-init).
+            let dest_nid = se.operand_nodes[0];
+            let indices_nid = se.operand_nodes[2];
+            let values_nid = se.operand_nodes[3];
+            let captures: Vec<NodeId> = se.operand_nodes[4..].to_vec();
+            let result_nid = se.result.expect("ReduceByIndex has a result");
+
+            build_reduce_by_index_loop(
+                graph,
+                control_headers,
+                bid,
+                idx,
+                ReduceByIndexLoop {
+                    dest: (dest_nid, dest_array_type.clone()),
+                    indices: (indices_nid, indices_array_type.clone()),
+                    values: (values_nid, values_array_type.clone(), elem_type.clone()),
+                    result_node: result_nid,
+                    func: func.clone(),
+                    captures,
+                },
+                next_effect,
+            );
+        }
         _ => unreachable!("is_handleable_soac filtered to supported variants"),
     }
 }
@@ -544,6 +586,92 @@ fn build_scatter_loop(
             let new_out = graph.intern_pure(
                 PureOp::Call("_w_intrinsic_array_with_inplace".into()),
                 smallvec![out_nid, out_idx, val],
+                dest_ty.clone(),
+            );
+            vec![new_out]
+        },
+    );
+}
+
+/// ReduceByIndex: sequential histogram. Per iteration: read-modify-write via `func`.
+/// `dest[indices[i]] := func(dest[indices[i]], values[i], ...captures)`.
+///
+/// `ne` is unused here; see dispatch site comment. Parallel lowering with
+/// atomics is future work.
+struct ReduceByIndexLoop {
+    dest: (NodeId, Type<TypeName>),
+    indices: (NodeId, Type<TypeName>),
+    values: (NodeId, Type<TypeName>, Type<TypeName>),
+    result_node: NodeId,
+    func: String,
+    captures: Vec<NodeId>,
+}
+
+fn build_reduce_by_index_loop(
+    graph: &mut EGraph,
+    control_headers: &mut HashMap<BlockId, ControlHeader>,
+    bid: BlockId,
+    idx_in_block: usize,
+    spec: ReduceByIndexLoop,
+    next_effect: &mut u32,
+) {
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+    let (dest_nid, dest_ty) = spec.dest;
+    let (indices_nid, indices_ty) = spec.indices;
+    let (values_nid, values_ty, elem_ty) = spec.values;
+    let func = spec.func;
+    let captures = spec.captures;
+
+    let carried = vec![(dest_ty.clone(), dest_nid)];
+    let result = ResultBinding::Carried {
+        result_node: spec.result_node,
+        idx: 0,
+    };
+    expand_loop(
+        graph,
+        control_headers,
+        bid,
+        idx_in_block,
+        &(indices_nid, indices_ty.clone()),
+        &carried,
+        &result,
+        next_effect,
+        false,
+        |graph, next_effect, body_bid, idx_nid, carried_nids| {
+            let out_nid = carried_nids[0];
+            let out_idx = emit_read_element(
+                graph,
+                body_bid,
+                indices_nid,
+                idx_nid,
+                &indices_ty,
+                &i32_ty,
+                next_effect,
+            );
+            let val = emit_read_element(
+                graph,
+                body_bid,
+                values_nid,
+                idx_nid,
+                &values_ty,
+                &elem_ty,
+                next_effect,
+            );
+            let cur = graph.intern_pure(
+                PureOp::Index,
+                smallvec![out_nid, out_idx],
+                elem_ty.clone(),
+            );
+            let mut call_operands: SmallVec<[NodeId; 4]> = smallvec![cur, val];
+            call_operands.extend(captures.iter().copied());
+            let new_val = graph.intern_pure(
+                PureOp::Call(func.clone()),
+                call_operands,
+                elem_ty.clone(),
+            );
+            let new_out = graph.intern_pure(
+                PureOp::Call("_w_intrinsic_array_with_inplace".into()),
+                smallvec![out_nid, out_idx, new_val],
                 dest_ty.clone(),
             );
             vec![new_out]

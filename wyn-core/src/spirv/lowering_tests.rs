@@ -282,6 +282,28 @@ def hist_alias_test(dest: [3]i32, indices: [4]i32, values: [4]i32) [3]i32 =
 }
 
 #[test]
+fn test_reduce_by_index_reachable_entry() {
+    // Entry-point test: reduce_by_index is actually reached by the compiler pipeline.
+    let spirv = compile_to_spirv(
+        r#"
+def hist_demo(dest: [3]i32, indices: [4]i32, values: [4]i32) [3]i32 =
+    reduce_by_index(dest, |a: i32, b: i32| a + b, 0, indices, values)
+
+#[fragment]
+entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
+    let dest: [3]i32 = [0, 0, 0] in
+    let indices: [4]i32 = [0, 1, 0, 2] in
+    let values: [4]i32 = [10, 20, 30, 40] in
+    let r = hist_demo(dest, indices, values) in
+    @[f32.i32(r[0]), f32.i32(r[1]), f32.i32(r[2]), 1.0]
+"#,
+    )
+    .unwrap();
+    assert!(!spirv.is_empty());
+    assert_eq!(spirv[0], 0x07230203);
+}
+
+#[test]
 fn test_reduce_u32() {
     // Test reduce with u32 types - the initial value 0u32 must generate
     // an unsigned constant, not a signed one

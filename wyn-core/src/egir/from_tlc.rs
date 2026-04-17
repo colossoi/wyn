@@ -1417,7 +1417,14 @@ impl<'a> Converter<'a> {
                 indices,
                 values,
             } => self.convert_soac_scatter(dest, indices, values, ty),
-            SoacOp::ReduceByIndex { .. } => Err(ConvertError::Unsupported("SOAC reduce_by_index".into())),
+            SoacOp::ReduceByIndex {
+                dest,
+                op,
+                ne,
+                indices,
+                values,
+                ..
+            } => self.convert_soac_reduce_by_index(dest, op, ne, indices, values, ty),
         }
     }
 
@@ -1671,6 +1678,43 @@ impl<'a> Converter<'a> {
 
         Ok(self.emit_soac(
             PendingSoac::Scatter {
+                dest_array_type: result_ty.clone(),
+                indices_array_type: indices_ty,
+                values_array_type: values_ty,
+                elem_type: elem_ty,
+            },
+            operands,
+            result_ty,
+        ))
+    }
+
+    fn convert_soac_reduce_by_index(
+        &mut self,
+        dest: &Place,
+        op: &Lambda,
+        ne: &Term,
+        indices: &ArrayExpr,
+        values: &ArrayExpr,
+        result_ty: Type<TypeName>,
+    ) -> Result<NodeId, ConvertError> {
+        let op_name = self.lambda_fn_name(op)?;
+        let dest_nid = self.resolve_place(dest)?;
+        let indices_ty = self.array_expr_type(indices);
+        let values_ty = self.array_expr_type(values);
+        let elem_ty = self.array_expr_elem_type(values);
+        let indices_nid = self.convert_array_expr_value(indices)?;
+        let values_nid = self.convert_array_expr_value(values)?;
+        let ne_nid = self.convert_term(ne)?;
+        let capture_nids: Vec<NodeId> =
+            op.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
+
+        let mut operands: SmallVec<[NodeId; 4]> =
+            smallvec![dest_nid, ne_nid, indices_nid, values_nid];
+        operands.extend(capture_nids.iter().copied());
+
+        Ok(self.emit_soac(
+            PendingSoac::ReduceByIndex {
+                func: op_name,
                 dest_array_type: result_ty.clone(),
                 indices_array_type: indices_ty,
                 values_array_type: values_ty,
