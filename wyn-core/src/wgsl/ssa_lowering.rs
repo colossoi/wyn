@@ -18,7 +18,8 @@ use polytype::Type as PolyType;
 use crate::ast::{Span, TypeName};
 use crate::error::Result;
 use crate::ssa::types::{
-    EntryPoint, FuncBody, Function, InstKind, Program, ValueId, ValueRef, WynInstNode,
+    EntryPoint, ExecutionModel, FuncBody, Function, InstKind, IoDecoration, Program, ValueId, ValueRef,
+    WynInstNode,
 };
 use crate::types::TypeExt;
 
@@ -547,17 +548,160 @@ impl<'a> LowerCtx<'a> {
     }
 
     fn lower_entry_point(&mut self, entry: &EntryPoint, output: &mut String) -> Result<()> {
-        // v1: full entry-point support will land in a follow-up commit
-        // covering attribute emission, storage/uniform bindings, and
-        // compute workgroup sizes. For now, error loudly so the driver
-        // surfaces it.
-        let _ = entry;
-        let _ = output;
-        Err(crate::err_wgsl!(
-            "WGSL entry-point emission is not yet implemented (function '{}')",
-            entry.name
-        ))
+        let body = &entry.body;
+
+        // Build the entry attribute (`@vertex`, `@fragment`, `@compute ...`).
+        let entry_attr = match &entry.execution_model {
+            ExecutionModel::Vertex => "@vertex".to_string(),
+            ExecutionModel::Fragment => "@fragment".to_string(),
+            ExecutionModel::Compute { local_size } => format!(
+                "@compute @workgroup_size({}, {}, {})",
+                local_size.0, local_size.1, local_size.2
+            ),
+        };
+        let stage_is_fragment = matches!(entry.execution_model, ExecutionModel::Fragment);
+
+        // Parameters: one per entry input. Each gets an attribute based on
+        // its decoration (@builtin(...) or @location(N)). The SSA body's
+        // params[i] shares the user-written name; we mangle for WGSL.
+        let mut param_strs: Vec<String> = Vec::new();
+        for (i, input) in entry.inputs.iter().enumerate() {
+            let param_name =
+                body.params.get(i).map(|(_, _, n)| n.clone()).unwrap_or_else(|| input.name.clone());
+            let mangled_name = self.mangle_tracked(&param_name)?;
+            let ty_str = self.type_emitter.type_to_wgsl(&input.ty)?;
+            let attr = match &input.decoration {
+                Some(IoDecoration::BuiltIn(b)) => {
+                    let wgsl_b = map_builtin_to_wgsl(b, stage_is_fragment).ok_or_else(|| {
+                        crate::err_wgsl!(
+                            "entry input {}: WGSL has no @builtin mapping for {:?}",
+                            param_name,
+                            b
+                        )
+                    })?;
+                    format!("@builtin({}) ", wgsl_b)
+                }
+                Some(IoDecoration::Location(n)) => format!("@location({}) ", n),
+                None => String::new(),
+            };
+            param_strs.push(format!("{}{}: {}", attr, mangled_name, ty_str));
+        }
+
+        // Return type: either a single output with a decoration, or a
+        // generated struct for multi-output fragment shaders. Compute
+        // shaders have no return value.
+        let (ret_type_str, is_compute_void) = match entry.execution_model {
+            ExecutionModel::Compute { .. } => (String::new(), true),
+            _ => {
+                if entry.outputs.is_empty() {
+                    return Err(crate::err_wgsl!(
+                        "entry '{}' has no outputs but is not a compute shader",
+                        entry.name
+                    ));
+                }
+                if entry.outputs.len() == 1 {
+                    let out = &entry.outputs[0];
+                    let ty_str = self.type_emitter.type_to_wgsl(&out.ty)?;
+                    let attr = match &out.decoration {
+                        Some(IoDecoration::BuiltIn(b)) => {
+                            let wgsl_b = map_builtin_to_wgsl(b, stage_is_fragment).ok_or_else(|| {
+                                crate::err_wgsl!("entry output: WGSL has no @builtin mapping for {:?}", b)
+                            })?;
+                            format!("@builtin({}) ", wgsl_b)
+                        }
+                        Some(IoDecoration::Location(n)) => format!("@location({}) ", n),
+                        None => String::new(),
+                    };
+                    (format!("{}{}", attr, ty_str), false)
+                } else {
+                    return Err(crate::err_wgsl!(
+                        "entry '{}' has {} outputs; multi-output WGSL entries \
+                         (struct return with per-field attributes) are not yet implemented",
+                        entry.name,
+                        entry.outputs.len()
+                    ));
+                }
+            }
+        };
+
+        let name = self.mangle_tracked(&entry.name)?;
+        writeln!(output, "{}", entry_attr).unwrap();
+        if is_compute_void {
+            writeln!(output, "fn {}({}) {{", name, param_strs.join(", ")).unwrap();
+        } else {
+            writeln!(
+                output,
+                "fn {}({}) -> {} {{",
+                name,
+                param_strs.join(", "),
+                ret_type_str
+            )
+            .unwrap();
+        }
+
+        self.indent += 1;
+
+        // Pre-declare `var<function>` locals for each location-decorated
+        // output so the body's `OutputPtr` can alias into them. We only
+        // declare them for outputs that might be written via OutputPtr —
+        // in practice that's every `@location(N)` output. Builtin outputs
+        // (e.g. @builtin(position)) are returned directly, so we skip.
+        let mut output_locals: Vec<(usize, String, String)> = Vec::new(); // (index, name, wgsl_type)
+        if !is_compute_void {
+            for (i, out) in entry.outputs.iter().enumerate() {
+                let ty_str = self.type_emitter.type_to_wgsl(&out.ty)?;
+                let name = format!("_out{}", i);
+                writeln!(output, "{}var {}: {};", self.indent_str(), name, ty_str).unwrap();
+                output_locals.push((i, name, ty_str));
+            }
+        }
+
+        let mut body_ctx = BodyLowerCtx::new(self, body, entry.span);
+        let result = body_ctx.lower(output)?;
+        let uses_output_ptrs = body_ctx.uses_output_ptrs;
+
+        if !is_compute_void {
+            if uses_output_ptrs {
+                // OutputPtr-based return: for single output, return _out0.
+                // Multi-output WGSL would need a struct return; rejected
+                // earlier so only single-output reaches here.
+                if output_locals.len() == 1 {
+                    writeln!(output, "{}return _out0;", self.indent_str()).unwrap();
+                } else {
+                    return Err(crate::err_wgsl!(
+                        "multi-output entries with OutputPtr not yet implemented (entry '{}')",
+                        entry.name
+                    ));
+                }
+            } else {
+                writeln!(output, "{}return {};", self.indent_str(), result).unwrap();
+            }
+        }
+        self.indent -= 1;
+        writeln!(output, "}}").unwrap();
+        writeln!(output).unwrap();
+        Ok(())
     }
+}
+
+/// Map a SPIR-V `BuiltIn` decoration to its WGSL `@builtin(...)` spelling.
+/// Returns `None` for builtins WGSL doesn't expose (caller should error).
+fn map_builtin_to_wgsl(b: &spirv::BuiltIn, _stage_is_fragment: bool) -> Option<&'static str> {
+    Some(match b {
+        spirv::BuiltIn::Position => "position",
+        spirv::BuiltIn::FragCoord => "position",
+        spirv::BuiltIn::VertexIndex => "vertex_index",
+        spirv::BuiltIn::InstanceIndex => "instance_index",
+        spirv::BuiltIn::FrontFacing => "front_facing",
+        spirv::BuiltIn::FragDepth => "frag_depth",
+        spirv::BuiltIn::PointSize => return None, // no WGSL equivalent
+        spirv::BuiltIn::GlobalInvocationId => "global_invocation_id",
+        spirv::BuiltIn::LocalInvocationId => "local_invocation_id",
+        spirv::BuiltIn::LocalInvocationIndex => "local_invocation_index",
+        spirv::BuiltIn::WorkgroupId => "workgroup_id",
+        spirv::BuiltIn::NumWorkgroups => "num_workgroups",
+        _ => return None,
+    })
 }
 
 // -----------------------------------------------------------------------------
@@ -571,6 +715,18 @@ struct BodyLowerCtx<'a, 'b> {
     value_map: HashMap<ValueId, String>,
     /// Set of names declared with `let`/`var` in the current scope.
     declared: HashSet<String>,
+    /// OutputPtr bookkeeping: for an entry with `@location(N)` outputs we
+    /// declare a `var<function> _out{N}: T` at function entry and alias
+    /// the `OutputPtr` result's ValueId to that name. `Store` to such a
+    /// pointer becomes `_out{N} = value;`. At function exit the entry
+    /// lowering returns whichever output the entry produces (for
+    /// single-output entries, `_out0`).
+    output_ptrs: HashMap<ValueId, String>,
+    /// Set to `true` if at least one `OutputPtr` was lowered; the entry
+    /// wrapper then returns the declared `_out0` (or builds a return
+    /// struct for multi-output) instead of emitting a `return <expr>;`
+    /// from the body's terminator result.
+    uses_output_ptrs: bool,
     /// Span of the instruction currently being lowered.
     current_span: Option<Span>,
     func_span: Span,
@@ -583,6 +739,8 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             body,
             value_map: HashMap::new(),
             declared: HashSet::new(),
+            output_ptrs: HashMap::new(),
+            uses_output_ptrs: false,
             current_span: None,
             func_span,
         }
@@ -653,8 +811,29 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             match node {
                 Node::Inst(inst_id) => {
                     let inst = self.body.get_inst(*inst_id);
+                    // Handle Store-to-OutputPtr as an assignment statement
+                    // rather than a let-binding. All other Stores land in
+                    // lower_inst (which today errors for non-output ptrs).
+                    if let InstKind::Store { ptr, value } = &inst.data {
+                        if let Some(ptr_id) = ptr.as_ssa() {
+                            if let Some(out_name) = self.output_ptrs.get(&ptr_id).cloned() {
+                                self.current_span = inst.span;
+                                let val = self.get_value(*value)?;
+                                writeln!(output, "{}{} = {};", self.ctx.indent_str(), out_name, val)
+                                    .unwrap();
+                                continue;
+                            }
+                        }
+                    }
                     let expr = self.lower_inst(inst)?;
                     if let Some(result) = inst.result {
+                        // OutputPtr's "result" is an alias for a
+                        // `var<function>` that the entry wrapper declared;
+                        // record the alias and emit nothing.
+                        if matches!(inst.data, InstKind::OutputPtr { .. }) {
+                            self.value_map.insert(result, expr);
+                            continue;
+                        }
                         let var = wgsl_var(result);
                         if self.declared.contains(&var) {
                             writeln!(output, "{}{} = {};", self.ctx.indent_str(), var, expr).unwrap();
@@ -916,8 +1095,15 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
 
             InstKind::Call { func, args } => {
                 let arg_strs: Result<Vec<_>> = args.iter().map(|a| self.get_value(*a)).collect();
+                let arg_strs = arg_strs?;
+                // Route well-known builtins (type casts, math functions)
+                // through the same dispatch as `InstKind::Intrinsic`; fall
+                // back to a mangled user-function call.
+                if let Some(lowered) = try_lower_wgsl_builtin(func, &arg_strs) {
+                    return Ok(lowered);
+                }
                 let mangled = self.ctx.mangle_tracked(func)?;
-                Ok(format!("{}({})", mangled, arg_strs?.join(", ")))
+                Ok(format!("{}({})", mangled, arg_strs.join(", ")))
             }
 
             InstKind::Intrinsic { name, args } => {
@@ -941,13 +1127,45 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 "Matrix literals are not yet implemented in WGSL lowering"
             )),
 
-            InstKind::Alloca { .. }
-            | InstKind::Load { .. }
-            | InstKind::Store { .. }
-            | InstKind::OutputPtr { .. } => Err(crate::err_wgsl_at!(
+            InstKind::OutputPtr { index } => {
+                let result_id = inst.result.ok_or_else(|| {
+                    crate::err_wgsl_at!(self.blame_span(), "OutputPtr must have a result")
+                })?;
+                let name = format!("_out{}", index);
+                self.output_ptrs.insert(result_id, name.clone());
+                self.uses_output_ptrs = true;
+                // Nothing to emit: the `var<function>` declaration happens
+                // in the entry-point wrapper, not here.
+                Ok(name)
+            }
+
+            InstKind::Store { ptr, value } => {
+                // Two supported shapes:
+                //   1. Store to an OutputPtr → becomes `_outN = value;`.
+                //   2. Store to a local var (Alloca) — TODO, not yet
+                //      implemented; we'll land Alloca/Load/Store together
+                //      in the memory-ops commit.
+                let ptr_id = ptr.as_ssa().ok_or_else(|| {
+                    crate::err_wgsl_at!(self.blame_span(), "Store ptr must be an SSA value")
+                })?;
+                if let Some(out_name) = self.output_ptrs.get(&ptr_id).cloned() {
+                    let val = self.get_value(*value)?;
+                    return Err(crate::err_wgsl_at!(
+                        self.blame_span(),
+                        "Store to OutputPtr must be handled in emit_nodes, not lower_inst (internal bug): out={}, val={}",
+                        out_name,
+                        val
+                    ));
+                }
+                Err(crate::err_wgsl_at!(
+                    self.blame_span(),
+                    "Store to non-output pointer is not yet implemented in WGSL lowering"
+                ))
+            }
+
+            InstKind::Alloca { .. } | InstKind::Load { .. } => Err(crate::err_wgsl_at!(
                 self.blame_span(),
-                "memory operations ({:?}) are not yet implemented in WGSL lowering",
-                inst.data
+                "memory operations (Alloca/Load) are not yet implemented in WGSL lowering"
             )),
 
             InstKind::Materialize { .. } | InstKind::DynamicExtract { .. } => Err(crate::err_wgsl_at!(
@@ -970,72 +1188,102 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         &mut self,
         name: &str,
         args: &[String],
-        ret_ty: Option<&PolyType<TypeName>>,
+        _ret_ty: Option<&PolyType<TypeName>>,
     ) -> Result<String> {
-        // Minimal builtin dispatch: pass through a curated set of WGSL-
-        // equivalent built-ins. Extend as we port testfiles.
-        let direct_builtins = &[
-            "dot",
-            "cross",
-            "normalize",
-            "length",
-            "distance",
-            "sin",
-            "cos",
-            "tan",
-            "asin",
-            "acos",
-            "atan",
-            "atan2",
-            "exp",
-            "exp2",
-            "log",
-            "log2",
-            "sqrt",
-            "inverseSqrt",
-            "abs",
-            "sign",
-            "floor",
-            "ceil",
-            "fract",
-            "round",
-            "trunc",
-            "min",
-            "max",
-            "clamp",
-            "mix",
-            "step",
-            "smoothstep",
-            "pow",
-            "radians",
-            "degrees",
-            "reflect",
-            "refract",
-        ];
-        if direct_builtins.contains(&name) {
-            return Ok(format!("{}({})", name, args.join(", ")));
+        if let Some(lowered) = try_lower_wgsl_builtin(name, args) {
+            return Ok(lowered);
         }
-        // Explicit conversion intrinsics: `f32.i32(x)` maps to `f32(x)`, etc.
-        // Wyn spells these as intrinsic names like `f32.i32`. WGSL uses
-        // type-as-constructor.
-        if let Some((to, _from)) = name.split_once('.') {
-            match to {
-                "f32" | "i32" | "u32" | "bool" => {
-                    if args.len() == 1 {
-                        return Ok(format!("{}({})", to, args[0]));
-                    }
-                }
-                _ => {}
-            }
-        }
-        // Fall back to a user-level error rather than silently dropping.
-        let _ = ret_ty;
         Err(crate::err_wgsl_at!(
             self.blame_span(),
             "intrinsic '{}' is not yet implemented in WGSL lowering",
             name
         ))
     }
+}
+
+/// Map a Wyn builtin/intrinsic name to its WGSL emission. Returns `None`
+/// when the name isn't recognized (caller falls back to a mangled user
+/// function call or raises an error, per context).
+///
+/// Covers:
+///   - Scalar/vector math built-ins with 1:1 WGSL names (`dot`, `sin`, …).
+///   - Type-cast intrinsics of the form `f32.i32`/`i32.f32`/… → `f32(x)`.
+///   - A few names Wyn spells differently from WGSL (`f32.sqrt`, `f32.pi`, …).
+fn try_lower_wgsl_builtin(name: &str, args: &[String]) -> Option<String> {
+    // WGSL built-ins with matching names.
+    const DIRECT: &[&str] = &[
+        "dot",
+        "cross",
+        "normalize",
+        "length",
+        "distance",
+        "sin",
+        "cos",
+        "tan",
+        "asin",
+        "acos",
+        "atan",
+        "atan2",
+        "exp",
+        "exp2",
+        "log",
+        "log2",
+        "sqrt",
+        "inverseSqrt",
+        "abs",
+        "sign",
+        "floor",
+        "ceil",
+        "fract",
+        "round",
+        "trunc",
+        "min",
+        "max",
+        "clamp",
+        "mix",
+        "step",
+        "smoothstep",
+        "pow",
+        "radians",
+        "degrees",
+        "reflect",
+        "refract",
+    ];
+    if DIRECT.contains(&name) {
+        return Some(format!("{}({})", name, args.join(", ")));
+    }
+
+    // Type-cast intrinsics: `f32.i32(x)` → `f32(x)`. The source type in
+    // the suffix is informational; WGSL's constructor-style cast reads
+    // only the target type.
+    if let Some((to, _from)) = name.split_once('.') {
+        match to {
+            "f32" | "i32" | "u32" | "bool" => {
+                if args.len() == 1 {
+                    return Some(format!("{}({})", to, args[0]));
+                }
+            }
+            _ => {}
+        }
+
+        // Dotted math built-ins: Wyn spells many of these as `f32.sin`,
+        // `f32.sqrt`, etc. WGSL uses the bare name.
+        if matches!(to, "f32" | "f64") {
+            let bare = &name[to.len() + 1..];
+            if DIRECT.contains(&bare) {
+                return Some(format!("{}({})", bare, args.join(", ")));
+            }
+            // f32.pi / f32.e are constants in Wyn.
+            match bare {
+                "pi" => return Some("3.14159265358979323846f".to_string()),
+                "e" => return Some("2.71828182845904523536f".to_string()),
+                "max" | "min" => return Some(format!("{}({})", bare, args.join(", "))),
+                _ => {}
+            }
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]

@@ -261,3 +261,122 @@ fn lower_empty_program_succeeds() {
     let out = super::lower(&program).expect("empty program should lower");
     assert!(out.contains("WGSL backend"));
 }
+
+// ---------- naga-validated end-to-end ----------
+
+/// Parse + validate WGSL text through naga. Panics with naga's diagnostic
+/// message on failure so test output points directly at the offending
+/// line. Used by end-to-end tests that compile a `.wyn` source through
+/// the full pipeline to WGSL.
+fn validate_wgsl(source: &str) {
+    let module = naga::front::wgsl::parse_str(source)
+        .unwrap_or_else(|e| panic!("naga parse failed:\n{}\n\n--- source ---\n{}", e, source));
+    let mut validator = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    );
+    validator
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("naga validation failed:\n{:?}\n\n--- source ---\n{}", e, source));
+}
+
+/// Compile a Wyn source through the full pipeline to WGSL text.
+fn compile_to_wgsl(source: &str) -> crate::error::Result<String> {
+    let mut frontend = crate::cached_frontend();
+    let parsed = crate::Compiler::parse(source, &mut frontend.node_counter).expect("Parsing failed");
+    let alias_checked = parsed
+        .desugar(&mut frontend.node_counter)
+        .expect("Desugaring failed")
+        .resolve(&mut frontend.module_manager)
+        .expect("Name resolution failed")
+        .fold_ast_constants()
+        .type_check(&mut frontend.module_manager, &mut frontend.schemes)
+        .expect("Type checking failed")
+        .alias_check()
+        .expect("Alias checking failed");
+
+    alias_checked
+        .to_tlc(&frontend.schemes, &frontend.module_manager)
+        .partial_eval()
+        .normalize_soacs()
+        .fuse_maps()
+        .defunctionalize()
+        .monomorphize()
+        .buffer_specialize()
+        .fold_generated_lambdas()
+        .inline_small()
+        .parallelize_soacs(false)
+        .filter_reachable()
+        .to_egraph()
+        .expect("SSA conversion failed")
+        .expand_soacs(true)
+        .materialize()
+        .optimize_skeleton()
+        .elaborate()
+        .lower_wgsl()
+}
+
+#[test]
+fn wgsl_fragment_trivial() {
+    // Minimal reachable program: a fragment entry that returns a
+    // constant color. Exercises: entry-point wrapping, OutputPtr +
+    // Store, vector/array construction, scalar literals.
+    let wgsl = compile_to_wgsl(
+        r#"
+#[fragment]
+entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
+    @[1.0, 0.5, 0.0, 1.0]
+"#,
+    )
+    .expect("compile");
+    validate_wgsl(&wgsl);
+    assert!(wgsl.contains("@fragment"));
+    assert!(wgsl.contains("@builtin(position)"));
+    assert!(wgsl.contains("@location(0)"));
+}
+
+#[test]
+#[ignore = "dynamic indexing via Materialize/DynamicExtract lands in the next commit"]
+fn wgsl_vertex_full_screen_triangle() {
+    // Vertex entry that indexes into a constant array using the
+    // vertex_index builtin. Exercises: @vertex attribute mapping,
+    // vertex_index builtin, array literal, array indexing.
+    let wgsl = compile_to_wgsl(
+        r#"
+def verts: [3]vec4f32 =
+  [@[-1.0, -1.0, 0.0, 1.0],
+   @[ 3.0, -1.0, 0.0, 1.0],
+   @[-1.0,  3.0, 0.0, 1.0]]
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 =
+    verts[vertex_id]
+"#,
+    )
+    .expect("compile");
+    validate_wgsl(&wgsl);
+    assert!(wgsl.contains("@vertex"));
+    assert!(wgsl.contains("@builtin(vertex_index)"));
+}
+
+#[test]
+fn wgsl_fragment_with_helper_function() {
+    // User-defined helper called from the entry point. Exercises:
+    // function emission + call, parameter passing, return value.
+    let wgsl = compile_to_wgsl(
+        r#"
+def brighten(c: vec4f32, amount: f32) vec4f32 =
+    @[c.x + amount, c.y + amount, c.z + amount, c.w]
+
+#[fragment]
+entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
+    brighten(@[0.1, 0.2, 0.3, 1.0], 0.5)
+"#,
+    )
+    .expect("compile");
+    validate_wgsl(&wgsl);
+    // `brighten` may be inlined by `inline_small`; don't assert on its
+    // identifier appearing verbatim. The entry wrapper is always emitted.
+    assert!(wgsl.contains("@fragment"));
+    assert!(wgsl.contains("@location(0)"));
+}
