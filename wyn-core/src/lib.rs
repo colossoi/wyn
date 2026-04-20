@@ -30,6 +30,7 @@ pub mod glsl;
 pub mod pipeline_descriptor;
 pub mod resolve_placeholders;
 pub mod spirv;
+pub mod structured;
 
 #[cfg(test)]
 mod integration_tests;

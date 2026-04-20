@@ -904,13 +904,13 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         }
 
         // Convert CFG to structured control flow tree, then emit
-        let nodes = super::structured::structurize(self.body);
+        let nodes = crate::structured::structurize(self.body);
         self.emit_nodes(&nodes, output)
     }
 
     /// Emit structured control flow nodes as GLSL.
-    fn emit_nodes(&mut self, nodes: &[super::structured::Node], output: &mut String) -> Result<String> {
-        use super::structured::Node;
+    fn emit_nodes(&mut self, nodes: &[crate::structured::Node], output: &mut String) -> Result<String> {
+        use crate::structured::Node;
         let mut result_var = String::new();
 
         for node in nodes {
