@@ -413,6 +413,23 @@ fn wgsl_testfile_array_call_demo() {
     validate_testfile_wgsl("testfiles/array_call_demo.wyn");
 }
 
+#[test]
+fn wgsl_testfile_pc_echo_test() {
+    // Exercises push-constant-backed compute inputs — broadcast scalars
+    // and small arrays — routed through a synthesized storage-read
+    // block (WGSL uniform alignment would reject the array stride).
+    validate_testfile_wgsl("testfiles/pc_echo_test.wyn");
+}
+
+#[test]
+fn wgsl_testfile_reduce_compute() {
+    // Exercises the function-scope hoist of SSA inst-result `var`
+    // declarations. Without hoisting, a storage-view offset declared
+    // inside the reduction loop would be out-of-scope at the post-loop
+    // write site, which WGSL's textual block scoping rejects.
+    validate_testfile_wgsl("testfiles/reduce_compute.wyn");
+}
+
 /// Compile a source file from disk through the full pipeline to WGSL
 /// and naga-validate the result. Used for testfile sweeps. Resolves
 /// paths relative to the workspace root so tests work regardless of

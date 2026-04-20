@@ -80,6 +80,16 @@ for f in testfiles/*.wyn; do
         PASS=$((PASS + 1))
     elif [ "$MODE" = "wgsl" ]; then
         # WGSL mode: compile + validate via viz (naga in-process).
+        # Skip testfiles that depend on `impl_source`-linked SPIR-V
+        # helpers (e.g. sha256_compress) — WGSL has no equivalent
+        # linkage path, and reimplementing those helpers inline is a
+        # separate workstream.
+        if [ "$base" = "miner" ] || [ "$base" = "sha256_test" ]; then
+            printf "Skipping %s (depends on linked SPIR-V helpers)\n" "$f"
+            SKIP=$((SKIP + 1))
+            continue
+        fi
+
         out_path="${OUT_DIR}/${base}.wgsl"
         printf "Compiling %s → WGSL... " "$f"
 

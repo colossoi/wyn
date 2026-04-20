@@ -478,6 +478,25 @@ struct LowerCtx<'a> {
     /// wgsl_type) tuples.
     output_structs: HashMap<String, (String, Vec<(String, String, String)>)>,
     output_struct_counter: usize,
+    /// Push-constant block info per entry-point name. Compute entries
+    /// whose inputs carry `push_constant_offset` are backed by a uniform
+    /// block in WGSL (WebGPU has no push constants). Each block holds
+    /// one field per push-constant input; fields are keyed by the input
+    /// index in `entry.inputs` so `lower_entry_point` can route the
+    /// corresponding SSA `ValueId` to `<block_var>.<field_name>`.
+    pc_blocks: HashMap<String, PcBlock>,
+}
+
+/// Uniform-block stand-in for a compute entry's push-constant inputs.
+struct PcBlock {
+    struct_name: String,
+    var_name: String,
+    /// Synthesized `@group(set) @binding(binding)`.
+    set: u32,
+    binding: u32,
+    /// Per push-constant input: index into `entry.inputs`, the WGSL
+    /// field name, and the WGSL type string. Preserves input order.
+    fields: Vec<(usize, String, String)>,
 }
 
 impl<'a> LowerCtx<'a> {
@@ -490,6 +509,7 @@ impl<'a> LowerCtx<'a> {
             mangled_names: HashMap::new(),
             output_structs: HashMap::new(),
             output_struct_counter: 0,
+            pc_blocks: HashMap::new(),
         }
     }
 
@@ -550,17 +570,15 @@ impl<'a> LowerCtx<'a> {
         writeln!(output).unwrap();
 
         // Tuple struct declarations (cached from type_to_wgsl calls).
-        if !self.type_emitter.tuple_structs.is_empty() {
-            let mut structs: Vec<_> = self.type_emitter.tuple_structs.iter().collect();
-            structs.sort_by_key(|(name, _)| (*name).clone());
-            for (name, field_types) in structs {
-                writeln!(output, "struct {} {{", name).unwrap();
-                for (i, ft) in field_types.iter().enumerate() {
-                    writeln!(output, "    f{}: {},", i, ft).unwrap();
-                }
-                writeln!(output, "}}").unwrap();
-                writeln!(output).unwrap();
+        let mut structs: Vec<_> = self.type_emitter.tuple_structs.iter().collect();
+        structs.sort_by_key(|(name, _)| (*name).clone());
+        for (name, field_types) in structs {
+            writeln!(output, "struct {} {{", name).unwrap();
+            for (i, ft) in field_types.iter().enumerate() {
+                writeln!(output, "    f{}: {},", i, ft).unwrap();
             }
+            writeln!(output, "}}").unwrap();
+            writeln!(output).unwrap();
         }
 
         // Virtual-array range struct declarations (from ArrayRange
@@ -581,17 +599,40 @@ impl<'a> LowerCtx<'a> {
         // its `@builtin(...)` or `@location(N)` attribute inline,
         // since WGSL requires the decoration to sit on the struct
         // member rather than a free module-scope variable.
-        if !self.output_structs.is_empty() {
-            let mut structs: Vec<_> = self.output_structs.values().collect();
-            structs.sort_by_key(|(name, _)| name.clone());
-            for (name, fields) in structs {
-                writeln!(output, "struct {} {{", name).unwrap();
-                for (field_name, attr, ty) in fields {
-                    writeln!(output, "    {}{}: {},", attr, field_name, ty).unwrap();
-                }
-                writeln!(output, "}}").unwrap();
-                writeln!(output).unwrap();
+        let mut structs: Vec<_> = self.output_structs.values().collect();
+        structs.sort_by_key(|(name, _)| name.clone());
+        for (name, fields) in structs {
+            writeln!(output, "struct {} {{", name).unwrap();
+            for (field_name, attr, ty) in fields {
+                writeln!(output, "    {}{}: {},", attr, field_name, ty).unwrap();
             }
+            writeln!(output, "}}").unwrap();
+            writeln!(output).unwrap();
+        }
+
+        // Compute push-constant blocks — compiled to `var<storage, read>`
+        // bindings since WGSL has no push constants and its uniform
+        // address space imposes 16-byte array stride alignment (an
+        // `array<u32, N>` field would be rejected). Storage-read
+        // bindings accept natural scalar/array strides. Each compute
+        // entry with `push_constant_offset`-tagged inputs gets its own
+        // struct and binding. Sorted by binding for determinism.
+        let mut blocks: Vec<_> = self.pc_blocks.values().collect();
+        blocks.sort_by_key(|b| (b.set, b.binding));
+        for b in blocks {
+            writeln!(output, "struct {} {{", b.struct_name).unwrap();
+            for (_, field_name, ty_str) in &b.fields {
+                writeln!(output, "    {}: {},", field_name, ty_str).unwrap();
+            }
+            writeln!(output, "}}").unwrap();
+            writeln!(output).unwrap();
+            writeln!(
+                output,
+                "@group({}) @binding({}) var<storage, read> {}: {};",
+                b.set, b.binding, b.var_name, b.struct_name
+            )
+            .unwrap();
+            writeln!(output).unwrap();
         }
 
         // Uniform declarations: `@group(G) @binding(B) var<uniform> name: T;`.
@@ -606,8 +647,6 @@ impl<'a> LowerCtx<'a> {
                 u.set, u.binding, u.name, ty_str
             )
             .unwrap();
-        }
-        if !self.program.uniforms.is_empty() {
             writeln!(output).unwrap();
         }
 
@@ -721,11 +760,6 @@ impl<'a> LowerCtx<'a> {
                 set, binding, access, name, elem_ty
             )
             .unwrap();
-        }
-
-        if !self.program.storage.is_empty()
-            || self.program.entry_points.iter().any(|e| !e.storage_bindings.is_empty())
-        {
             writeln!(output).unwrap();
         }
 
@@ -798,10 +832,52 @@ impl<'a> LowerCtx<'a> {
         let mut param_strs: Vec<String> = Vec::new();
         // Each entry: (user_mangled_name, internal_name, user_ty_str).
         let mut builtin_casts: Vec<(String, String, String)> = Vec::new();
+        // Build a push-constant block for this entry if any input carries
+        // `push_constant_offset`. SPIR-V packs these into a PushConstant
+        // storage-class struct; WGSL has no push constants, so we emit
+        // a uniform block instead. Collected here so `lower_program`'s
+        // module-scope pass can emit the struct + `var<uniform>` decl.
+        let pc_inputs: Vec<(usize, &crate::ssa::types::EntryInput)> =
+            entry.inputs.iter().enumerate().filter(|(_, inp)| inp.push_constant_offset.is_some()).collect();
+        let pc_block: Option<PcBlock> = if !pc_inputs.is_empty() {
+            // Synthetic (set, binding) chosen to avoid colliding with
+            // user-declared storage/uniform bindings: set = 1 (user
+            // bindings conventionally sit at set 0), binding counts up
+            // per entry that needs a block.
+            let binding = self.pc_blocks.len() as u32;
+            let struct_name = format!("_PcBlock{}", binding);
+            let var_name = format!("_pc{}", binding);
+            let mut fields: Vec<(usize, String, String)> = Vec::new();
+            for (i, inp) in &pc_inputs {
+                let raw_name =
+                    body.params.get(*i).map(|(_, _, n)| n.clone()).unwrap_or_else(|| inp.name.clone());
+                // Mangle through the same pass the rest of the backend
+                // uses — raw user names may collide with WGSL reserved
+                // words like `target` or `loop`.
+                let field_name = self.mangle_tracked(&raw_name)?;
+                let ty_str = self.type_emitter.type_to_wgsl(&inp.ty)?;
+                fields.push((*i, field_name, ty_str));
+            }
+            Some(PcBlock {
+                struct_name,
+                var_name,
+                set: 1,
+                binding,
+                fields,
+            })
+        } else {
+            None
+        };
+
         for (i, input) in entry.inputs.iter().enumerate() {
             // Storage-backed inputs (compute shader runtime-sized array
             // params) become module-scope bindings, not function params.
             if input.storage_binding.is_some() {
+                continue;
+            }
+            // Push-constant inputs are routed through the synthesized
+            // uniform block — no function parameter emitted.
+            if input.push_constant_offset.is_some() {
                 continue;
             }
             let param_name =
@@ -1003,6 +1079,17 @@ impl<'a> LowerCtx<'a> {
         if let Some((_, index_to_field)) = &multi_output_struct {
             body_ctx.output_target_names = index_to_field.clone();
         }
+        // Pre-seed `value_map` for push-constant inputs so the body
+        // refers to them via `<pc_var>.<field>` instead of trying to
+        // use a function parameter that no longer exists.
+        if let Some(pc) = &pc_block {
+            for (input_idx, field_name, _) in &pc.fields {
+                if let Some((value_id, _, _)) = body.params.get(*input_idx) {
+                    let expr = format!("{}.{}", pc.var_name, field_name);
+                    body_ctx.value_map.insert(*value_id, expr);
+                }
+            }
+        }
         let result = body_ctx.lower(output)?;
         let uses_output_ptrs = body_ctx.uses_output_ptrs;
 
@@ -1027,6 +1114,11 @@ impl<'a> LowerCtx<'a> {
         self.indent -= 1;
         writeln!(output, "}}").unwrap();
         writeln!(output).unwrap();
+        // Register the PC block (after emitting the fn body so state
+        // additions can't accidentally leak into the fn emission).
+        if let Some(pc) = pc_block {
+            self.pc_blocks.insert(entry.name.clone(), pc);
+        }
         Ok(())
     }
 }
@@ -1237,11 +1329,58 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
     }
 
     fn lower(&mut self, output: &mut String) -> Result<String> {
-        // Seed parameter names into value_map.
+        // Seed parameter names into value_map. Callers (entry-point
+        // lowering) may have pre-inserted entries for params routed
+        // through module-scope bindings (e.g. push-constant inputs →
+        // `<block_var>.<field>`); skip those so the mangled name
+        // doesn't clobber the override.
         for (value_id, _, name) in &self.body.params {
+            if self.value_map.contains_key(value_id) {
+                continue;
+            }
             let mangled = self.ctx.mangle_tracked(name)?;
             self.value_map.insert(*value_id, mangled.clone());
             self.declared.insert(mangled);
+        }
+
+        // Hoist every non-alias SSA inst-result declaration to the top
+        // of the function. WGSL has textual block scoping — a `var`
+        // declared inside a loop or if-branch isn't visible at sibling
+        // or enclosing scopes — whereas SPIR-V's SSA ids are globally
+        // scoped. Some SSA ids (e.g. a literal `0u` used both inside a
+        // loop body and in a post-loop storage write) need to be
+        // readable across block boundaries; structurize can also emit
+        // the same inst twice when a merge block has multiple
+        // predecessors. Pre-declaring at function top side-steps both
+        // hazards: the existing emission paths fall into the "already
+        // declared → assignment" branch for subsequent visits.
+        for (_, inst) in self.body.inner.insts.iter() {
+            let result = match inst.result {
+                Some(r) => r,
+                None => continue,
+            };
+            // Alias-only insts never produce a local var — skip so we
+            // don't declare a dead name that shadows the alias.
+            match &inst.data {
+                InstKind::OutputPtr { .. }
+                | InstKind::StorageView { .. }
+                | InstKind::Load { .. }
+                | InstKind::Store { .. } => continue,
+                InstKind::Call { func, .. } if func == "_w_intrinsic_array_with_inplace" => continue,
+                _ => {}
+            }
+            let ty = self.body.get_value_type(result);
+            if matches!(ty, PolyType::Constructed(TypeName::Unit, _)) {
+                continue;
+            }
+            let ty_str = self.ctx.type_emitter.type_to_wgsl(ty)?;
+            let var = wgsl_var(result);
+            if self.declared.contains(&var) {
+                continue;
+            }
+            writeln!(output, "{}var {}: {};", self.ctx.indent_str(), var, ty_str).unwrap();
+            self.declared.insert(var.clone());
+            self.value_map.insert(result, var);
         }
 
         // Structured walk via the shared structurize pass.
@@ -1264,15 +1403,10 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     // them at the emit_nodes level.
                     match &inst.data {
                         // Alloca: `var<function> x: T;` — no initializer.
-                        InstKind::Alloca { elem_ty } => {
-                            let result_id = inst.result.ok_or_else(|| {
-                                crate::err_wgsl_at!(self.blame_span(), "Alloca must have a result")
-                            })?;
-                            let ty = self.ctx.type_emitter.type_to_wgsl(elem_ty)?;
-                            let var = wgsl_var(result_id);
-                            writeln!(output, "{}var {}: {};", self.ctx.indent_str(), var, ty).unwrap();
-                            self.declared.insert(var.clone());
-                            self.value_map.insert(result_id, var);
+                        // Hoist pass has already declared the var at
+                        // function scope and registered the value_map
+                        // entry; nothing to do here.
+                        InstKind::Alloca { .. } => {
                             continue;
                         }
 
@@ -1319,25 +1453,10 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         }
 
                         // `_w_intrinsic_uninit()` returns an
-                        // uninitialized composite. In WGSL that's just a
-                        // `var<function> x: T;` — no initializer, no
-                        // function call. Emit the declaration directly
-                        // rather than falling through to the Call
-                        // handler (which would mangle the intrinsic
-                        // name as if it were a user function).
+                        // uninitialized composite. In WGSL that's
+                        // exactly what the hoist-pass declaration
+                        // (`var v: T;`) gives us — no need to re-emit.
                         InstKind::Call { func, .. } if func == "_w_intrinsic_uninit" => {
-                            let result_id = inst.result.ok_or_else(|| {
-                                crate::err_wgsl_at!(
-                                    self.blame_span(),
-                                    "_w_intrinsic_uninit must have a result"
-                                )
-                            })?;
-                            let ty =
-                                self.ctx.type_emitter.type_to_wgsl(self.body.get_value_type(result_id))?;
-                            let var = wgsl_var(result_id);
-                            writeln!(output, "{}var {}: {};", self.ctx.indent_str(), var, ty).unwrap();
-                            self.declared.insert(var.clone());
-                            self.value_map.insert(result_id, var);
                             continue;
                         }
 
@@ -1379,47 +1498,34 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                     val
                                 )
                                 .unwrap();
+                                // Alias-only: the result is the
+                                // (now-mutated) source array.
                                 self.value_map.insert(result_id, arr_src);
                             } else {
-                                let ty = self
-                                    .ctx
-                                    .type_emitter
-                                    .type_to_wgsl(self.body.get_value_type(result_id))?;
+                                // Hoist pass already declared `var
+                                // v{id}: T;` — assign the copy then
+                                // patch the indexed element.
                                 let var = wgsl_var(result_id);
-                                writeln!(
-                                    output,
-                                    "{}var {}: {} = {};",
-                                    self.ctx.indent_str(),
-                                    var,
-                                    ty,
-                                    arr_src
-                                )
-                                .unwrap();
+                                writeln!(output, "{}{} = {};", self.ctx.indent_str(), var, arr_src)
+                                    .unwrap();
                                 writeln!(output, "{}{}[{}] = {};", self.ctx.indent_str(), var, idx, val)
                                     .unwrap();
-                                self.declared.insert(var.clone());
-                                self.value_map.insert(result_id, var);
                             }
                             continue;
                         }
 
-                        // Materialize: `var<function> x: T = expr;` so
-                        // the value becomes subscriptable via
-                        // DynamicExtract's `x[i]`. Distinct from the
-                        // normal `let` path because WGSL forbids
-                        // dynamic indexing of `let`-bound values.
+                        // Materialize: pre-declared `var v: T;` by the
+                        // hoist pass — assign the expression here.
+                        // WGSL forbids dynamic indexing of `let`-bound
+                        // values, which is why this needs to be a
+                        // `var` and not a `let`.
                         InstKind::Materialize { value } => {
                             let result_id = inst.result.ok_or_else(|| {
                                 crate::err_wgsl_at!(self.blame_span(), "Materialize must have a result")
                             })?;
-                            let ty =
-                                self.ctx.type_emitter.type_to_wgsl(self.body.get_value_type(result_id))?;
                             let var = wgsl_var(result_id);
                             let val = self.get_value(*value)?;
-                            writeln!(output, "{}var {}: {} = {};", self.ctx.indent_str(), var, ty, val)
-                                .unwrap();
-                            self.declared.insert(var.clone());
-                            self.value_map.insert(result_id, var);
+                            writeln!(output, "{}{} = {};", self.ctx.indent_str(), var, val).unwrap();
                             continue;
                         }
 
@@ -1529,22 +1635,30 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     cond_is_continue,
                     body,
                 } => {
-                    // Initialize loop state as `var`.
+                    // Initialize loop state as `var`. Pre-declared
+                    // names (either hoisted at function top or carried
+                    // over from an enclosing scope) become plain
+                    // assignments.
                     for (var, init) in state_vars.iter().zip(init_args.iter()) {
                         let init_val = self.get_value_ref(*init)?;
                         let var_name = wgsl_var(*var);
-                        let ty = self.ctx.type_emitter.type_to_wgsl(self.body.get_value_type(*var))?;
-                        writeln!(
-                            output,
-                            "{}var {}: {} = {};",
-                            self.ctx.indent_str(),
-                            var_name,
-                            ty,
-                            init_val
-                        )
-                        .unwrap();
-                        self.value_map.insert(*var, var_name.clone());
-                        self.declared.insert(var_name);
+                        if self.declared.contains(&var_name) {
+                            writeln!(output, "{}{} = {};", self.ctx.indent_str(), var_name, init_val)
+                                .unwrap();
+                        } else {
+                            let ty = self.ctx.type_emitter.type_to_wgsl(self.body.get_value_type(*var))?;
+                            writeln!(
+                                output,
+                                "{}var {}: {} = {};",
+                                self.ctx.indent_str(),
+                                var_name,
+                                ty,
+                                init_val
+                            )
+                            .unwrap();
+                            self.declared.insert(var_name.clone());
+                        }
+                        self.value_map.insert(*var, var_name);
                     }
                     writeln!(output, "{}loop {{", self.ctx.indent_str()).unwrap();
                     self.ctx.indent += 1;
@@ -1567,11 +1681,22 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                 continue;
                             }
                             let var = wgsl_var(result);
-                            let ty =
-                                self.ctx.type_emitter.type_to_wgsl(self.body.get_value_type(result))?;
-                            writeln!(output, "{}var {}: {} = {};", self.ctx.indent_str(), var, ty, expr)
+                            if self.declared.contains(&var) {
+                                writeln!(output, "{}{} = {};", self.ctx.indent_str(), var, expr).unwrap();
+                            } else {
+                                let ty =
+                                    self.ctx.type_emitter.type_to_wgsl(self.body.get_value_type(result))?;
+                                writeln!(
+                                    output,
+                                    "{}var {}: {} = {};",
+                                    self.ctx.indent_str(),
+                                    var,
+                                    ty,
+                                    expr
+                                )
                                 .unwrap();
-                            self.declared.insert(var.clone());
+                                self.declared.insert(var.clone());
+                            }
                             self.value_map.insert(result, var);
                         }
                     }
