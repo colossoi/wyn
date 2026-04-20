@@ -284,6 +284,7 @@ fn validate_wgsl(source: &str) {
 fn compile_to_wgsl(source: &str) -> crate::error::Result<String> {
     let mut frontend = crate::cached_frontend();
     let parsed = crate::Compiler::parse(source, &mut frontend.node_counter).expect("Parsing failed");
+    let parsed = parsed.elaborate_modules(&mut frontend.module_manager).expect("Module elaboration failed");
     let alias_checked = parsed
         .desugar(&mut frontend.node_counter)
         .expect("Desugaring failed")
@@ -356,6 +357,75 @@ entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] 
     validate_wgsl(&wgsl);
     assert!(wgsl.contains("@vertex"));
     assert!(wgsl.contains("@builtin(vertex_index)"));
+}
+
+/// Compile a source file from disk through the full pipeline to WGSL
+/// and naga-validate the result. Used for testfile sweeps. Resolves
+/// paths relative to the workspace root so tests work regardless of
+/// the crate under `-p`.
+#[allow(dead_code)]
+fn validate_testfile_wgsl(rel_path: &str) {
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let path = format!("{}/../{}", manifest, rel_path);
+    let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {}: {}", path, e));
+    let wgsl =
+        compile_to_wgsl(&src).unwrap_or_else(|e| panic!("wgsl compile failed for {}:\n{}", rel_path, e));
+    validate_wgsl(&wgsl);
+}
+
+#[test]
+fn wgsl_testfile_creation() {
+    validate_testfile_wgsl("testfiles/creation.wyn");
+}
+
+#[test]
+fn wgsl_testfile_lava() {
+    validate_testfile_wgsl("testfiles/lava.wyn");
+}
+
+#[test]
+fn wgsl_testfile_seascape() {
+    validate_testfile_wgsl("testfiles/seascape.wyn");
+}
+
+#[test]
+fn wgsl_testfile_raytrace() {
+    validate_testfile_wgsl("testfiles/raytrace.wyn");
+}
+
+#[test]
+#[ignore = "mandelbulb's structurize pass overflows the debug stack; run with RUST_MIN_STACK=8388608 once fixed"]
+fn wgsl_testfile_mandelbulb() {
+    validate_testfile_wgsl("testfiles/mandelbulb.wyn");
+}
+
+#[test]
+fn wgsl_testfile_da_rasterizer() {
+    validate_testfile_wgsl("testfiles/da_rasterizer.wyn");
+}
+
+#[test]
+fn wgsl_testfile_loopingspline() {
+    validate_testfile_wgsl("testfiles/loopingspline.wyn");
+}
+
+#[test]
+fn wgsl_uniforms_emit_bindings() {
+    // Uniforms become module-scope `@group(G) @binding(B)
+    // var<uniform> name: T;` declarations. Exercises the uniform
+    // emission path + Global reference resolution.
+    let wgsl = compile_to_wgsl(
+        r#"
+#[uniform(set=0, binding=0)] def iTime: f32
+
+#[fragment]
+entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
+    @[iTime, 0.0, 0.0, 1.0]
+"#,
+    )
+    .expect("compile");
+    validate_wgsl(&wgsl);
+    assert!(wgsl.contains("@group(0) @binding(0) var<uniform> iTime: f32;"));
 }
 
 #[test]
