@@ -231,6 +231,67 @@ impl BufferSpecializer {
             TermKind::App { func, args } => {
                 match &func.kind {
                     TermKind::Var(sym) => {
+                        let name = self.symbols.get(*sym).cloned().unwrap_or_default();
+
+                        // `_w_index(data, i)` where `data` is a buffer-backed
+                        // entry param: rewrite to
+                        // `_w_intrinsic_storage_index(set, binding, i)` so the
+                        // indexed load goes through the storage view path
+                        // rather than being lowered later as
+                        // `materialize + dynamic_extract` on a runtime-sized
+                        // buffer (which is invalid — runtime-sized storage
+                        // arrays aren't copyable into a local composite).
+                        if name == "_w_index" && args.len() == 2 {
+                            if let TermKind::Var(data_sym) = &args[0].kind {
+                                if let Some(binding) = self.buffer_map.get(data_sym).cloned() {
+                                    let span = term.span;
+                                    let u32_ty: Type<TypeName> =
+                                        Type::Constructed(TypeName::UInt(32), vec![]);
+                                    let idx = self.rewrite_term(&args[1]);
+                                    let set_lit =
+                                        self.make_int_lit(&binding.set.to_string(), u32_ty.clone(), span);
+                                    let binding_lit = self.make_int_lit(
+                                        &binding.binding.to_string(),
+                                        u32_ty.clone(),
+                                        span,
+                                    );
+                                    return self.make_app(
+                                        "_w_intrinsic_storage_index",
+                                        vec![set_lit, binding_lit, idx],
+                                        binding.elem_ty,
+                                        span,
+                                    );
+                                }
+                            }
+                        }
+
+                        // `_w_intrinsic_length(data)` on a buffer-backed entry
+                        // param: rewrite to `_w_intrinsic_storage_len(set,
+                        // binding)`, matching how the specialized-function
+                        // path handles view lengths.
+                        if name == "_w_intrinsic_length" && args.len() == 1 {
+                            if let TermKind::Var(data_sym) = &args[0].kind {
+                                if let Some(binding) = self.buffer_map.get(data_sym).cloned() {
+                                    let span = term.span;
+                                    let u32_ty: Type<TypeName> =
+                                        Type::Constructed(TypeName::UInt(32), vec![]);
+                                    let set_lit =
+                                        self.make_int_lit(&binding.set.to_string(), u32_ty.clone(), span);
+                                    let binding_lit = self.make_int_lit(
+                                        &binding.binding.to_string(),
+                                        u32_ty.clone(),
+                                        span,
+                                    );
+                                    return self.make_app(
+                                        "_w_intrinsic_storage_len",
+                                        vec![set_lit, binding_lit],
+                                        u32_ty,
+                                        span,
+                                    );
+                                }
+                            }
+                        }
+
                         // Check if any arguments are buffer-backed (clone to avoid borrow)
                         let arg_refs: Vec<&Term> = args.iter().collect();
                         let buffer_args: Vec<Option<BufferBinding>> = args
