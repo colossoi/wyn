@@ -245,11 +245,12 @@ fn type_tuple_distinct_shapes_distinct_structs() {
     assert_eq!(e.tuple_structs.len(), 2);
 }
 
-// ---------- end-to-end lowering (scaffold) ----------
+// ---------- end-to-end lowering ----------
 
 #[test]
-fn scaffold_lower_returns_error() {
-    // Until the real lowering lands, `lower` must error on any program.
+fn lower_empty_program_succeeds() {
+    // Empty program: no functions, no entries — lower emits just the
+    // header comment and returns a string.
     let program = crate::ssa::types::Program {
         functions: Vec::new(),
         entry_points: Vec::new(),
@@ -257,5 +258,6 @@ fn scaffold_lower_returns_error() {
         uniforms: Vec::new(),
         storage: Vec::new(),
     };
-    assert!(super::lower(&program).is_err());
+    let out = super::lower(&program).expect("empty program should lower");
+    assert!(out.contains("WGSL backend"));
 }
