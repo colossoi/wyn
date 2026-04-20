@@ -1790,6 +1790,7 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "clap",
+ "naga",
  "pollster",
  "rspirv",
  "serde",

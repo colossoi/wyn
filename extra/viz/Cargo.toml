@@ -7,6 +7,9 @@ edition = "2021"
 winit = "0.30"
 # Enable DirectX 12 on Windows and SPIR-V input
 wgpu = { version = "26.0.1", features = ["dx12", "spirv"] }
+# naga (pinned to wgpu's transitive version) for headless WGSL
+# parse+validate in the `validate` subcommand.
+naga = { version = "26.0", features = ["wgsl-in"] }
 pollster = "0.3"
 anyhow = "1"
 clap = { version = "4.5", features = ["derive"] }
