@@ -19,7 +19,7 @@ use crate::ast::{Span, TypeName};
 use crate::error::Result;
 use crate::ssa::types::{
     EntryPoint, ExecutionModel, FuncBody, Function, InstKind, IoDecoration, Program, ValueId, ValueRef,
-    WynInstNode,
+    ViewSource, WynInstNode,
 };
 use crate::types::TypeExt;
 
@@ -400,13 +400,14 @@ impl TypeEmitter {
                         ty.elem_type()
                             .ok_or_else(|| crate::err_wgsl!("Array type missing elem arg: {:?}", ty))?,
                     )?;
-                    if let Some(PolyType::Constructed(TypeName::Size(n), _)) = ty.array_size() {
-                        Ok(format!("array<{}, {}>", elem, n))
-                    } else {
-                        Err(crate::err_wgsl!(
-                            "WGSL array must have concrete size for standalone use: {:?}",
-                            ty
-                        ))
+                    match ty.array_size() {
+                        Some(PolyType::Constructed(TypeName::Size(n), _)) => {
+                            Ok(format!("array<{}, {}>", elem, n))
+                        }
+                        // Runtime-sized `array<T>`. Legal in WGSL only at
+                        // storage-binding sites; naga will reject it
+                        // elsewhere, which is the correct signal.
+                        _ => Ok(format!("array<{}>", elem)),
                     }
                 }
                 TypeName::Record(fields) => Err(crate::err_wgsl!(
@@ -523,9 +524,8 @@ impl<'a> LowerCtx<'a> {
             writeln!(output).unwrap();
         }
 
-        // Storage buffer declarations. Access mode becomes the second
-        // parameter of `var<storage, ...>`; layout is implicit in WGSL
-        // (the type system enforces storage class rules).
+        // Storage buffer declarations from user-declared `#[storage]`
+        // bindings. Access mode → second parameter of `var<storage, ...>`.
         for s in &self.program.storage {
             validate_wgsl_identifier(&s.name)
                 .map_err(|e| crate::err_wgsl!("storage buffer {}: {}", s.name, e))?;
@@ -542,7 +542,103 @@ impl<'a> LowerCtx<'a> {
             )
             .unwrap();
         }
-        if !self.program.storage.is_empty() {
+
+        // Compiler-introduced storage bindings + entry-level storage-
+        // backed I/O. WGSL needs these at module scope; dedupe by
+        // (set, binding) and coalesce access modes so an (in, out) pair
+        // on the same slot becomes `read_write`.
+        let mut synth: HashMap<(u32, u32), (String, String, bool, bool)> = HashMap::new();
+        // Key → (elem_ty_str, module_name, has_read, has_write).
+        let is_declared =
+            |set, binding| self.program.storage.iter().any(|s| s.set == set && s.binding == binding);
+        for entry in &self.program.entry_points {
+            // Explicit compiler-inserted bindings (e.g. parallelize's
+            // partial-sum buffer).
+            for sb in &entry.storage_bindings {
+                if is_declared(sb.set, sb.binding) {
+                    continue;
+                }
+                let key = (sb.set, sb.binding);
+                let ty_str = self.type_emitter.type_to_wgsl(&sb.elem_ty)?;
+                let entry_ref = synth.entry(key).or_insert_with(|| {
+                    let name = format!("_buf_{}_{}", sb.set, sb.binding);
+                    (ty_str.clone(), name, false, false)
+                });
+                match sb.role {
+                    crate::interface::StorageRole::Input => entry_ref.2 = true,
+                    crate::interface::StorageRole::Output => entry_ref.3 = true,
+                    crate::interface::StorageRole::Intermediate => {
+                        entry_ref.2 = true;
+                        entry_ref.3 = true;
+                    }
+                }
+            }
+            // Entry inputs marked with storage_binding — compute shader
+            // runtime-sized array parameters. The element type is the
+            // array element type; the WGSL binding holds the full
+            // `array<T>`.
+            for input in &entry.inputs {
+                if let Some((set, binding)) = input.storage_binding {
+                    if is_declared(set, binding) {
+                        continue;
+                    }
+                    let elem_ty = input
+                        .ty
+                        .elem_type()
+                        .ok_or_else(|| {
+                            crate::err_wgsl!("storage-bound input '{}' has no element type", input.name)
+                        })?
+                        .clone();
+                    let ty_str = self.type_emitter.type_to_wgsl(&elem_ty)?;
+                    let entry_ref = synth.entry((set, binding)).or_insert_with(|| {
+                        let name = format!("_buf_{}_{}", set, binding);
+                        (ty_str.clone(), name, false, false)
+                    });
+                    // Entry inputs are read by convention.
+                    entry_ref.2 = true;
+                }
+            }
+            // Entry outputs likewise. For scalar-valued compute outputs
+            // (e.g. reduce → f32), the user-level type isn't an array
+            // but the underlying binding still holds a runtime-sized
+            // array of that scalar — the SOAC parallelize pass packs
+            // the result into a single-element slot.
+            for out in &entry.outputs {
+                if let Some((set, binding)) = out.storage_binding {
+                    if is_declared(set, binding) {
+                        continue;
+                    }
+                    let elem_ty = out.ty.elem_type().cloned().unwrap_or_else(|| out.ty.clone());
+                    let ty_str = self.type_emitter.type_to_wgsl(&elem_ty)?;
+                    let entry_ref = synth.entry((set, binding)).or_insert_with(|| {
+                        let name = format!("_buf_{}_{}", set, binding);
+                        (ty_str.clone(), name, false, false)
+                    });
+                    entry_ref.3 = true;
+                }
+            }
+        }
+        // Sort for determinism.
+        let mut synth_sorted: Vec<_> = synth.into_iter().collect();
+        synth_sorted.sort_by_key(|((set, binding), _)| (*set, *binding));
+        for ((set, binding), (elem_ty, name, has_in, has_out)) in synth_sorted {
+            let access = match (has_in, has_out) {
+                (true, true) => "read_write",
+                (true, false) => "read",
+                (false, true) => "read_write", // write-only + WGSL needs read_write for Store
+                (false, false) => "read",
+            };
+            writeln!(
+                output,
+                "@group({}) @binding({}) var<storage, {}> {}: array<{}>;",
+                set, binding, access, name, elem_ty
+            )
+            .unwrap();
+        }
+
+        if !self.program.storage.is_empty()
+            || self.program.entry_points.iter().any(|e| !e.storage_bindings.is_empty())
+        {
             writeln!(output).unwrap();
         }
 
@@ -616,6 +712,11 @@ impl<'a> LowerCtx<'a> {
         // Each entry: (user_mangled_name, internal_name, user_ty_str).
         let mut builtin_casts: Vec<(String, String, String)> = Vec::new();
         for (i, input) in entry.inputs.iter().enumerate() {
+            // Storage-backed inputs (compute shader runtime-sized array
+            // params) become module-scope bindings, not function params.
+            if input.storage_binding.is_some() {
+                continue;
+            }
             let param_name =
                 body.params.get(i).map(|(_, _, n)| n.clone()).unwrap_or_else(|| input.name.clone());
             let mangled_name = self.mangle_tracked(&param_name)?;
@@ -655,18 +756,24 @@ impl<'a> LowerCtx<'a> {
 
         // Return type: either a single output with a decoration, or a
         // generated struct for multi-output fragment shaders. Compute
-        // shaders have no return value.
+        // shaders have no function-return value (outputs bind at module
+        // scope via `@group/@binding`).
+        //
+        // Filter out storage-backed outputs before counting — they're
+        // written via `Store` to module-scope bindings, not returned.
+        let non_storage_outputs: Vec<&crate::ssa::types::EntryOutput> =
+            entry.outputs.iter().filter(|o| o.storage_binding.is_none()).collect();
         let (ret_type_str, is_compute_void) = match entry.execution_model {
             ExecutionModel::Compute { .. } => (String::new(), true),
             _ => {
-                if entry.outputs.is_empty() {
+                if non_storage_outputs.is_empty() {
                     return Err(crate::err_wgsl!(
-                        "entry '{}' has no outputs but is not a compute shader",
+                        "entry '{}' has no non-storage outputs but is not a compute shader",
                         entry.name
                     ));
                 }
-                if entry.outputs.len() == 1 {
-                    let out = &entry.outputs[0];
+                if non_storage_outputs.len() == 1 {
+                    let out = non_storage_outputs[0];
                     let ty_str = self.type_emitter.type_to_wgsl(&out.ty)?;
                     let attr = match &out.decoration {
                         Some(IoDecoration::BuiltIn(b)) => {
@@ -681,10 +788,10 @@ impl<'a> LowerCtx<'a> {
                     (format!("{}{}", attr, ty_str), false)
                 } else {
                     return Err(crate::err_wgsl!(
-                        "entry '{}' has {} outputs; multi-output WGSL entries \
+                        "entry '{}' has {} non-storage outputs; multi-output WGSL entries \
                          (struct return with per-field attributes) are not yet implemented",
                         entry.name,
-                        entry.outputs.len()
+                        non_storage_outputs.len()
                     ));
                 }
             }
@@ -725,13 +832,15 @@ impl<'a> LowerCtx<'a> {
         }
 
         // Pre-declare `var<function>` locals for each location-decorated
-        // output so the body's `OutputPtr` can alias into them. We only
-        // declare them for outputs that might be written via OutputPtr —
-        // in practice that's every `@location(N)` output. Builtin outputs
-        // (e.g. @builtin(position)) are returned directly, so we skip.
+        // output so the body's `OutputPtr` can alias into them. Skip
+        // storage-bound outputs — those are written via direct Store
+        // to module-scope bindings, not returned through the function.
         let mut output_locals: Vec<(usize, String, String)> = Vec::new(); // (index, name, wgsl_type)
         if !is_compute_void {
             for (i, out) in entry.outputs.iter().enumerate() {
+                if out.storage_binding.is_some() {
+                    continue;
+                }
                 let ty_str = self.type_emitter.type_to_wgsl(&out.ty)?;
                 let name = format!("_out{}", i);
                 writeln!(output, "{}var {}: {};", self.indent_str(), name, ty_str).unwrap();
@@ -811,6 +920,18 @@ fn wgsl_builtin_type(b: &spirv::BuiltIn) -> Option<&'static str> {
 // Body-level lowering
 // -----------------------------------------------------------------------------
 
+/// A storage-view handle tracked per ValueId: the name of the underlying
+/// `@group @binding` storage declaration plus the offset and length
+/// expressions the view was created with. When a `StorageViewIndex` or
+/// `StorageViewLen` reaches lowering, we resolve the view's ValueId to
+/// one of these and emit `name[offset + idx]` or the recorded len expr.
+#[derive(Clone)]
+struct ViewHandle {
+    buffer_name: String,
+    offset_expr: String,
+    len_expr: String,
+}
+
 struct BodyLowerCtx<'a, 'b> {
     ctx: &'a mut LowerCtx<'b>,
     body: &'a FuncBody,
@@ -818,6 +939,8 @@ struct BodyLowerCtx<'a, 'b> {
     value_map: HashMap<ValueId, String>,
     /// Set of names declared with `let`/`var` in the current scope.
     declared: HashSet<String>,
+    /// Storage view handles keyed by their `StorageView` result ValueId.
+    view_handles: HashMap<ValueId, ViewHandle>,
     /// OutputPtr bookkeeping: for an entry with `@location(N)` outputs we
     /// declare a `var<function> _out{N}: T` at function entry and alias
     /// the `OutputPtr` result's ValueId to that name. `Store` to such a
@@ -842,11 +965,69 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             body,
             value_map: HashMap::new(),
             declared: HashSet::new(),
+            view_handles: HashMap::new(),
             output_ptrs: HashMap::new(),
             uses_output_ptrs: false,
             current_span: None,
             func_span,
         }
+    }
+
+    /// Resolve a ValueRef to a compile-time integer, if possible. Returns
+    /// None for runtime values. Used by storage-intrinsic dispatch where
+    /// `set` and `binding` must be compile-time constants.
+    fn resolve_const_u32(&self, v: ValueRef) -> Option<u32> {
+        match v {
+            ValueRef::Const(crate::ssa::types::ConstantValue::I32(n)) => Some(n as u32),
+            ValueRef::Const(crate::ssa::types::ConstantValue::U32(n)) => Some(n),
+            ValueRef::Ssa(id) => {
+                // Walk the body's insts looking for one whose result is
+                // `id` and whose data is a literal Int. Rare path —
+                // called only for `_w_intrinsic_storage_len`'s set and
+                // binding args, which monomorphization folds to constants.
+                for (_, inst) in self.body.inner.insts.iter() {
+                    if inst.result == Some(id) {
+                        if let InstKind::Int(s) = &inst.data {
+                            return s.parse::<u32>().ok();
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolve a storage binding (set, binding) to its module-scope name.
+    /// Checks user-declared `#[storage]` buffers first, falls back to the
+    /// synthesized `_buf_{set}_{binding}` naming used for compiler-
+    /// introduced compute-entry bindings.
+    fn storage_name(&self, set: u32, binding: u32) -> Result<String> {
+        if let Some(name) = self
+            .ctx
+            .program
+            .storage
+            .iter()
+            .find(|s| s.set == set && s.binding == binding)
+            .map(|s| s.name.clone())
+        {
+            return Ok(name);
+        }
+        // Synthesized binding — matches the naming in `lower_program`.
+        for entry in &self.ctx.program.entry_points {
+            if entry.storage_bindings.iter().any(|sb| sb.set == set && sb.binding == binding)
+                || entry.inputs.iter().any(|i| i.storage_binding == Some((set, binding)))
+                || entry.outputs.iter().any(|o| o.storage_binding == Some((set, binding)))
+            {
+                return Ok(format!("_buf_{}_{}", set, binding));
+            }
+        }
+        Err(crate::err_wgsl_at!(
+            self.blame_span(),
+            "no storage binding at (set={}, binding={})",
+            set,
+            binding
+        ))
     }
 
     fn blame_span(&self) -> Span {
@@ -1375,6 +1556,25 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             InstKind::Intrinsic { name, args } => {
                 let arg_strs: Result<Vec<_>> = args.iter().map(|a| self.get_value(*a)).collect();
                 let arg_strs = arg_strs?;
+                // `_w_intrinsic_storage_len(set, binding)` → runtime
+                // length of the storage buffer at those coordinates.
+                // Both args are compile-time integer constants.
+                if name == "_w_intrinsic_storage_len" && args.len() == 2 {
+                    let set = self.resolve_const_u32(args[0]);
+                    let binding = self.resolve_const_u32(args[1]);
+                    match (set, binding) {
+                        (Some(s), Some(b)) => {
+                            let name = self.storage_name(s, b)?;
+                            return Ok(format!("i32(arrayLength(&{}))", name));
+                        }
+                        _ => {
+                            return Err(crate::err_wgsl_at!(
+                                self.blame_span(),
+                                "_w_intrinsic_storage_len expects const set/binding args"
+                            ));
+                        }
+                    }
+                }
                 // `_w_intrinsic_length(arr)` is array length, semantically
                 // distinct from WGSL's vector-magnitude `length`. For a
                 // fixed-size composite array we emit the statically-known
@@ -1472,13 +1672,72 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 Ok(format!("{}[{}]", base_val, index_val))
             }
 
-            InstKind::StorageView { .. }
-            | InstKind::StorageViewIndex { .. }
-            | InstKind::StorageViewLen { .. } => Err(crate::err_wgsl_at!(
-                self.blame_span(),
-                "storage view operations ({:?}) are not yet implemented in WGSL lowering",
-                inst.data
-            )),
+            // Storage view: remember (buffer_name, offset, len) against
+            // the view's ValueId so subsequent StorageViewIndex /
+            // StorageViewLen can resolve through it. The "value" of a
+            // view node is the buffer name — uses outside of
+            // Index/Len (rare) get the binding directly.
+            InstKind::StorageView { source, offset, len } => {
+                let buffer_name = match source {
+                    ViewSource::Storage { set, binding } => self.storage_name(*set, *binding)?,
+                    ViewSource::Inherited { parent } => {
+                        // Inherit the parent view's underlying binding
+                        // name (offset/len come fresh from this Node).
+                        self.view_handles.get(parent).map(|h| h.buffer_name.clone()).ok_or_else(|| {
+                            crate::err_wgsl_at!(self.blame_span(), "Inherited view's parent has no handle")
+                        })?
+                    }
+                };
+                let offset_expr = self.get_value(*offset)?;
+                let len_expr = self.get_value(*len)?;
+                let result_id = inst.result.ok_or_else(|| {
+                    crate::err_wgsl_at!(self.blame_span(), "StorageView must have a result")
+                })?;
+                self.view_handles.insert(
+                    result_id,
+                    ViewHandle {
+                        buffer_name: buffer_name.clone(),
+                        offset_expr,
+                        len_expr,
+                    },
+                );
+                // Return the buffer name itself. Downstream uses resolve
+                // through view_handles for offset/len.
+                Ok(buffer_name)
+            }
+
+            InstKind::StorageViewIndex { view, index } => {
+                let view_id = view.as_ssa().ok_or_else(|| {
+                    crate::err_wgsl_at!(self.blame_span(), "StorageViewIndex view must be SSA")
+                })?;
+                let handle = self.view_handles.get(&view_id).cloned().ok_or_else(|| {
+                    crate::err_wgsl_at!(
+                        self.blame_span(),
+                        "StorageViewIndex references view without a known handle"
+                    )
+                })?;
+                let idx = self.get_value(*index)?;
+                // `buf[offset + idx]`. If offset is the constant 0 the
+                // `(0 + idx)` addition is a wash; leave it to the
+                // downstream optimizer (naga will fold).
+                Ok(format!(
+                    "{}[({} + {})]",
+                    handle.buffer_name, handle.offset_expr, idx
+                ))
+            }
+
+            InstKind::StorageViewLen { view } => {
+                let view_id = view.as_ssa().ok_or_else(|| {
+                    crate::err_wgsl_at!(self.blame_span(), "StorageViewLen view must be SSA")
+                })?;
+                let handle = self.view_handles.get(&view_id).cloned().ok_or_else(|| {
+                    crate::err_wgsl_at!(
+                        self.blame_span(),
+                        "StorageViewLen references view without a known handle"
+                    )
+                })?;
+                Ok(handle.len_expr)
+            }
         }
     }
 
