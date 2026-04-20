@@ -1343,46 +1343,6 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             self.declared.insert(mangled);
         }
 
-        // Hoist every non-alias SSA inst-result declaration to the top
-        // of the function. WGSL has textual block scoping — a `var`
-        // declared inside a loop or if-branch isn't visible at sibling
-        // or enclosing scopes — whereas SPIR-V's SSA ids are globally
-        // scoped. Some SSA ids (e.g. a literal `0u` used both inside a
-        // loop body and in a post-loop storage write) need to be
-        // readable across block boundaries; structurize can also emit
-        // the same inst twice when a merge block has multiple
-        // predecessors. Pre-declaring at function top side-steps both
-        // hazards: the existing emission paths fall into the "already
-        // declared → assignment" branch for subsequent visits.
-        for (_, inst) in self.body.inner.insts.iter() {
-            let result = match inst.result {
-                Some(r) => r,
-                None => continue,
-            };
-            // Alias-only insts never produce a local var — skip so we
-            // don't declare a dead name that shadows the alias.
-            match &inst.data {
-                InstKind::OutputPtr { .. }
-                | InstKind::StorageView { .. }
-                | InstKind::Load { .. }
-                | InstKind::Store { .. } => continue,
-                InstKind::Call { func, .. } if func == "_w_intrinsic_array_with_inplace" => continue,
-                _ => {}
-            }
-            let ty = self.body.get_value_type(result);
-            if matches!(ty, PolyType::Constructed(TypeName::Unit, _)) {
-                continue;
-            }
-            let ty_str = self.ctx.type_emitter.type_to_wgsl(ty)?;
-            let var = wgsl_var(result);
-            if self.declared.contains(&var) {
-                continue;
-            }
-            writeln!(output, "{}var {}: {};", self.ctx.indent_str(), var, ty_str).unwrap();
-            self.declared.insert(var.clone());
-            self.value_map.insert(result, var);
-        }
-
         // Structured walk via the shared structurize pass.
         let nodes = crate::structured::structurize(self.body);
         self.emit_nodes(&nodes, output)
@@ -1403,10 +1363,15 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     // them at the emit_nodes level.
                     match &inst.data {
                         // Alloca: `var<function> x: T;` — no initializer.
-                        // Hoist pass has already declared the var at
-                        // function scope and registered the value_map
-                        // entry; nothing to do here.
-                        InstKind::Alloca { .. } => {
+                        InstKind::Alloca { elem_ty } => {
+                            let result_id = inst.result.ok_or_else(|| {
+                                crate::err_wgsl_at!(self.blame_span(), "Alloca must have a result")
+                            })?;
+                            let ty = self.ctx.type_emitter.type_to_wgsl(elem_ty)?;
+                            let var = wgsl_var(result_id);
+                            writeln!(output, "{}var {}: {};", self.ctx.indent_str(), var, ty).unwrap();
+                            self.declared.insert(var.clone());
+                            self.value_map.insert(result_id, var);
                             continue;
                         }
 
@@ -1453,10 +1418,22 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         }
 
                         // `_w_intrinsic_uninit()` returns an
-                        // uninitialized composite. In WGSL that's
-                        // exactly what the hoist-pass declaration
-                        // (`var v: T;`) gives us — no need to re-emit.
+                        // uninitialized composite. In WGSL that's just a
+                        // `var<function> x: T;` — no initializer, no
+                        // function call.
                         InstKind::Call { func, .. } if func == "_w_intrinsic_uninit" => {
+                            let result_id = inst.result.ok_or_else(|| {
+                                crate::err_wgsl_at!(
+                                    self.blame_span(),
+                                    "_w_intrinsic_uninit must have a result"
+                                )
+                            })?;
+                            let ty =
+                                self.ctx.type_emitter.type_to_wgsl(self.body.get_value_type(result_id))?;
+                            let var = wgsl_var(result_id);
+                            writeln!(output, "{}var {}: {};", self.ctx.indent_str(), var, ty).unwrap();
+                            self.declared.insert(var.clone());
+                            self.value_map.insert(result_id, var);
                             continue;
                         }
 
@@ -1502,30 +1479,45 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                 // (now-mutated) source array.
                                 self.value_map.insert(result_id, arr_src);
                             } else {
-                                // Hoist pass already declared `var
-                                // v{id}: T;` — assign the copy then
-                                // patch the indexed element.
+                                let ty = self
+                                    .ctx
+                                    .type_emitter
+                                    .type_to_wgsl(self.body.get_value_type(result_id))?;
                                 let var = wgsl_var(result_id);
-                                writeln!(output, "{}{} = {};", self.ctx.indent_str(), var, arr_src)
-                                    .unwrap();
+                                writeln!(
+                                    output,
+                                    "{}var {}: {} = {};",
+                                    self.ctx.indent_str(),
+                                    var,
+                                    ty,
+                                    arr_src
+                                )
+                                .unwrap();
                                 writeln!(output, "{}{}[{}] = {};", self.ctx.indent_str(), var, idx, val)
                                     .unwrap();
+                                self.declared.insert(var.clone());
+                                self.value_map.insert(result_id, var);
                             }
                             continue;
                         }
 
-                        // Materialize: pre-declared `var v: T;` by the
-                        // hoist pass — assign the expression here.
-                        // WGSL forbids dynamic indexing of `let`-bound
-                        // values, which is why this needs to be a
-                        // `var` and not a `let`.
+                        // Materialize: `var<function> x: T = expr;` so
+                        // the value becomes subscriptable via
+                        // DynamicExtract's `x[i]`. WGSL forbids dynamic
+                        // indexing of `let`-bound values, so this must
+                        // be a `var`.
                         InstKind::Materialize { value } => {
                             let result_id = inst.result.ok_or_else(|| {
                                 crate::err_wgsl_at!(self.blame_span(), "Materialize must have a result")
                             })?;
+                            let ty =
+                                self.ctx.type_emitter.type_to_wgsl(self.body.get_value_type(result_id))?;
                             let var = wgsl_var(result_id);
                             let val = self.get_value(*value)?;
-                            writeln!(output, "{}{} = {};", self.ctx.indent_str(), var, val).unwrap();
+                            writeln!(output, "{}var {}: {} = {};", self.ctx.indent_str(), var, ty, val)
+                                .unwrap();
+                            self.declared.insert(var.clone());
+                            self.value_map.insert(result_id, var);
                             continue;
                         }
 
@@ -1549,23 +1541,10 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             continue;
                         }
                         let var = wgsl_var(result);
-                        if self.declared.contains(&var) {
-                            writeln!(output, "{}{} = {};", self.ctx.indent_str(), var, expr).unwrap();
-                        } else {
-                            // `var` (not `let`) because `structurize` can
-                            // emit a merge block's instructions twice —
-                            // once at the tail of the last arm and once
-                            // via the post-if fall-through in `lower_arm`.
-                            // GLSL's re-assignable function locals tolerate
-                            // that; WGSL's `let` is immutable, so we always
-                            // declare with `var` to allow a subsequent
-                            // same-value re-assignment.
-                            let ty =
-                                self.ctx.type_emitter.type_to_wgsl(self.body.get_value_type(result))?;
-                            writeln!(output, "{}var {}: {} = {};", self.ctx.indent_str(), var, ty, expr)
-                                .unwrap();
-                            self.declared.insert(var.clone());
-                        }
+                        let ty = self.ctx.type_emitter.type_to_wgsl(self.body.get_value_type(result))?;
+                        writeln!(output, "{}var {}: {} = {};", self.ctx.indent_str(), var, ty, expr)
+                            .unwrap();
+                        self.declared.insert(var.clone());
                         self.value_map.insert(result, var);
                     }
                 }
@@ -1635,29 +1614,21 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     cond_is_continue,
                     body,
                 } => {
-                    // Initialize loop state as `var`. Pre-declared
-                    // names (either hoisted at function top or carried
-                    // over from an enclosing scope) become plain
-                    // assignments.
+                    // Initialize loop state as `var`.
                     for (var, init) in state_vars.iter().zip(init_args.iter()) {
                         let init_val = self.get_value_ref(*init)?;
                         let var_name = wgsl_var(*var);
-                        if self.declared.contains(&var_name) {
-                            writeln!(output, "{}{} = {};", self.ctx.indent_str(), var_name, init_val)
-                                .unwrap();
-                        } else {
-                            let ty = self.ctx.type_emitter.type_to_wgsl(self.body.get_value_type(*var))?;
-                            writeln!(
-                                output,
-                                "{}var {}: {} = {};",
-                                self.ctx.indent_str(),
-                                var_name,
-                                ty,
-                                init_val
-                            )
-                            .unwrap();
-                            self.declared.insert(var_name.clone());
-                        }
+                        let ty = self.ctx.type_emitter.type_to_wgsl(self.body.get_value_type(*var))?;
+                        writeln!(
+                            output,
+                            "{}var {}: {} = {};",
+                            self.ctx.indent_str(),
+                            var_name,
+                            ty,
+                            init_val
+                        )
+                        .unwrap();
+                        self.declared.insert(var_name.clone());
                         self.value_map.insert(*var, var_name);
                     }
                     writeln!(output, "{}loop {{", self.ctx.indent_str()).unwrap();
@@ -1681,22 +1652,11 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                 continue;
                             }
                             let var = wgsl_var(result);
-                            if self.declared.contains(&var) {
-                                writeln!(output, "{}{} = {};", self.ctx.indent_str(), var, expr).unwrap();
-                            } else {
-                                let ty =
-                                    self.ctx.type_emitter.type_to_wgsl(self.body.get_value_type(result))?;
-                                writeln!(
-                                    output,
-                                    "{}var {}: {} = {};",
-                                    self.ctx.indent_str(),
-                                    var,
-                                    ty,
-                                    expr
-                                )
+                            let ty =
+                                self.ctx.type_emitter.type_to_wgsl(self.body.get_value_type(result))?;
+                            writeln!(output, "{}var {}: {} = {};", self.ctx.indent_str(), var, ty, expr)
                                 .unwrap();
-                                self.declared.insert(var.clone());
-                            }
+                            self.declared.insert(var.clone());
                             self.value_map.insert(result, var);
                         }
                     }
