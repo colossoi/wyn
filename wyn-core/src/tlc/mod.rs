@@ -2168,9 +2168,16 @@ impl<'a> Transformer<'a> {
                 );
                 let ret_ty = current;
 
-                // Create parameter symbols
-                let params: Vec<(SymbolId, Type<TypeName>)> =
-                    param_tys.iter().map(|ty| (self.define("_soac_arg"), ty.clone())).collect();
+                // Create parameter symbols. Display names must be distinct
+                // per-parameter — SPIR-V keys off numeric parameter ids so
+                // it survives duplicate names, but text-emitting backends
+                // (GLSL, WGSL) inherit the display name verbatim and reject
+                // a function whose parameter list repeats a name.
+                let params: Vec<(SymbolId, Type<TypeName>)> = param_tys
+                    .iter()
+                    .enumerate()
+                    .map(|(i, ty)| (self.define(&format!("_soac_arg_{}", i)), ty.clone()))
+                    .collect();
 
                 // Build flat App(f, [a, b, ...])
                 let span = term.span;
