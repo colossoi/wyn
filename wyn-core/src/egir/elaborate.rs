@@ -316,24 +316,24 @@ impl<'a> Elaborator<'a> {
     fn choose_placement(&self, operand_blocks: &[(ValueId, SkelBlockId)]) -> SkelBlockId {
         let current = self.current_skel_block.expect("current skel block unset");
         let mut candidate = current;
-        let is_nullary = operand_blocks.is_empty();
-        // Active loops contain the current block in their body.
+        // Active loops are the enclosing loops whose body contains the
+        // current block, innermost first.
         let active: SmallVec<[&LoopStackEntry; 4]> = self
             .loop_stack
             .iter()
             .rev()
             .filter(|f| self.loop_analysis.is_in_loop(current, f.header))
             .collect();
-        // For a nullary pure node (no operands), don't hoist all the way to
-        // function entry — cap at the outermost enclosing loop's preheader.
-        // Without this, every literal 0/1/constant gets dumped into the entry
-        // block, bloating it and potentially across other loops where it
-        // would be cleaner to keep them local.
-        let hoist_limit = if is_nullary { active.len().saturating_sub(1) } else { active.len() };
-        for (i, frame) in active.iter().enumerate() {
-            if i >= hoist_limit {
-                break;
-            }
+        // Walk outward one loop at a time. A pure node can hoist past a
+        // loop whose body contains no operand of the node — the operand's
+        // placement, by induction, is already at least as outer as the
+        // loop's preheader. Stop climbing the moment a loop holds an
+        // operand inside it (the node has to stay inside that loop to
+        // reference the operand). Textual-scope backends depend on this
+        // uniformly for all pure nodes, including nullary ones: the
+        // resulting placement is the LCA of the node's uses, which by
+        // construction dominates every use site.
+        for frame in active.iter() {
             let any_inside =
                 operand_blocks.iter().any(|&(_, b)| self.loop_analysis.is_in_loop(b, frame.header));
             if any_inside {

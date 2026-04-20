@@ -355,12 +355,6 @@ impl<'a> StructCtx<'a> {
                 });
             }
         }
-
-        // Emit merge block instructions (after the loop)
-        let merge_block = &self.body.inner.blocks[merge_id];
-        for &inst_id in &merge_block.insts {
-            nodes.push(Node::Inst(inst_id));
-        }
     }
 
     /// Check if `from` reaches `target` without going through `avoid`.
