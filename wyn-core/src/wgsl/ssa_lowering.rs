@@ -2294,6 +2294,12 @@ fn try_lower_wgsl_builtin(name: &str, args: &[String]) -> Option<String> {
         "acos",
         "atan",
         "atan2",
+        "sinh",
+        "cosh",
+        "tanh",
+        "asinh",
+        "acosh",
+        "atanh",
         "exp",
         "exp2",
         "log",
@@ -2323,21 +2329,25 @@ fn try_lower_wgsl_builtin(name: &str, args: &[String]) -> Option<String> {
         return Some(format!("{}({})", bare, args.join(", ")));
     }
 
-    // Type-cast intrinsics: `f32.i32(x)` → `f32(x)`. The source type in
-    // the suffix is informational; WGSL's constructor-style cast reads
-    // only the target type.
-    if let Some((to, _from)) = name.split_once('.') {
-        match to {
-            "f32" | "i32" | "u32" | "bool" => {
-                if args.len() == 1 {
-                    return Some(format!("{}({})", to, args[0]));
-                }
-            }
-            _ => {}
+    // Dotted built-ins come in two flavors:
+    //   * type casts — `f32.i32(x)` → `f32(x)` (the "from" half is a
+    //     type name; the suffix encodes the source type for the
+    //     dispatcher's benefit and has no runtime effect),
+    //   * math operations — `f32.cos(x)` → `cos(x)` (the "from" half
+    //     names the operation; WGSL uses the bare name).
+    // Check the math case first so we don't mis-route `f32.cos` through
+    // the cast arm just because `f32` is a recognized type.
+    if let Some((to, from)) = name.split_once('.') {
+        if matches!(to, "f32" | "f64") && DIRECT.contains(&from) {
+            return Some(format!("{}({})", from, args.join(", ")));
+        }
+        let is_type = |s| matches!(s, "f32" | "i32" | "u32" | "bool");
+        if is_type(to) && is_type(from) && args.len() == 1 {
+            return Some(format!("{}({})", to, args[0]));
         }
 
-        // Dotted math built-ins: Wyn spells many of these as `f32.sin`,
-        // `f32.sqrt`, etc. WGSL uses the bare name.
+        // Keep the legacy dotted-math fallback for any name we didn't
+        // list above — matches GLSL backend behavior.
         if matches!(to, "f32" | "f64") {
             let bare = &name[to.len() + 1..];
             if DIRECT.contains(&bare) {
