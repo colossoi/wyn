@@ -564,13 +564,21 @@ impl<'a> LowerCtx<'a> {
         // Parameters: one per entry input. Each gets an attribute based on
         // its decoration (@builtin(...) or @location(N)). The SSA body's
         // params[i] shares the user-written name; we mangle for WGSL.
+        //
+        // When a builtin's WGSL-mandated type differs from Wyn's declared
+        // type (e.g. vertex_index must be `u32`, but Wyn may declare it
+        // `i32`), we emit the param under an internal name with the WGSL
+        // type and queue a cast statement at the start of the body that
+        // binds the user's name to the converted value.
         let mut param_strs: Vec<String> = Vec::new();
+        // Each entry: (user_mangled_name, internal_name, user_ty_str).
+        let mut builtin_casts: Vec<(String, String, String)> = Vec::new();
         for (i, input) in entry.inputs.iter().enumerate() {
             let param_name =
                 body.params.get(i).map(|(_, _, n)| n.clone()).unwrap_or_else(|| input.name.clone());
             let mangled_name = self.mangle_tracked(&param_name)?;
-            let ty_str = self.type_emitter.type_to_wgsl(&input.ty)?;
-            let attr = match &input.decoration {
+            let user_ty_str = self.type_emitter.type_to_wgsl(&input.ty)?;
+            let (attr, param_ty_str, internal_name) = match &input.decoration {
                 Some(IoDecoration::BuiltIn(b)) => {
                     let wgsl_b = map_builtin_to_wgsl(b, stage_is_fragment).ok_or_else(|| {
                         crate::err_wgsl!(
@@ -579,12 +587,28 @@ impl<'a> LowerCtx<'a> {
                             b
                         )
                     })?;
-                    format!("@builtin({}) ", wgsl_b)
+                    let attr = format!("@builtin({}) ", wgsl_b);
+                    match wgsl_builtin_type(b) {
+                        Some(required) if required != user_ty_str => {
+                            let internal = format!("_builtin_{}", wgsl_b);
+                            builtin_casts.push((
+                                mangled_name.clone(),
+                                internal.clone(),
+                                user_ty_str.clone(),
+                            ));
+                            (attr, required.to_string(), internal)
+                        }
+                        _ => (attr, user_ty_str.clone(), mangled_name.clone()),
+                    }
                 }
-                Some(IoDecoration::Location(n)) => format!("@location({}) ", n),
-                None => String::new(),
+                Some(IoDecoration::Location(n)) => (
+                    format!("@location({}) ", n),
+                    user_ty_str.clone(),
+                    mangled_name.clone(),
+                ),
+                None => (String::new(), user_ty_str.clone(), mangled_name.clone()),
             };
-            param_strs.push(format!("{}{}: {}", attr, mangled_name, ty_str));
+            param_strs.push(format!("{}{}: {}", attr, internal_name, param_ty_str));
         }
 
         // Return type: either a single output with a decoration, or a
@@ -640,6 +664,23 @@ impl<'a> LowerCtx<'a> {
         }
 
         self.indent += 1;
+
+        // Emit builtin-type casts first — `let <user_name>: <user_ty> = <user_ty>(<internal>);`
+        // — so the body sees the user-declared name bound to the cast.
+        // Later code inside the body refers to the user's mangled name
+        // via its ValueId in value_map.
+        for (user_name, internal_name, user_ty_str) in &builtin_casts {
+            writeln!(
+                output,
+                "{}let {}: {} = {}({});",
+                self.indent_str(),
+                user_name,
+                user_ty_str,
+                user_ty_str,
+                internal_name
+            )
+            .unwrap();
+        }
 
         // Pre-declare `var<function>` locals for each location-decorated
         // output so the body's `OutputPtr` can alias into them. We only
@@ -700,6 +741,26 @@ fn map_builtin_to_wgsl(b: &spirv::BuiltIn, _stage_is_fragment: bool) -> Option<&
         spirv::BuiltIn::LocalInvocationIndex => "local_invocation_index",
         spirv::BuiltIn::WorkgroupId => "workgroup_id",
         spirv::BuiltIn::NumWorkgroups => "num_workgroups",
+        _ => return None,
+    })
+}
+
+/// The WGSL-mandated type for a given `@builtin(...)` parameter. WGSL
+/// fixes these by spec (vertex_index is always `u32`, position is always
+/// `vec4<f32>`, etc.). Wyn's user-level types may differ (e.g., `i32`
+/// for vertex_index); the entry-point wrapper inserts a cast when they
+/// don't match.
+fn wgsl_builtin_type(b: &spirv::BuiltIn) -> Option<&'static str> {
+    Some(match b {
+        spirv::BuiltIn::Position | spirv::BuiltIn::FragCoord => "vec4<f32>",
+        spirv::BuiltIn::VertexIndex | spirv::BuiltIn::InstanceIndex => "u32",
+        spirv::BuiltIn::LocalInvocationIndex => "u32",
+        spirv::BuiltIn::FrontFacing => "bool",
+        spirv::BuiltIn::FragDepth => "f32",
+        spirv::BuiltIn::GlobalInvocationId
+        | spirv::BuiltIn::LocalInvocationId
+        | spirv::BuiltIn::WorkgroupId
+        | spirv::BuiltIn::NumWorkgroups => "vec3<u32>",
         _ => return None,
     })
 }
@@ -811,20 +872,90 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             match node {
                 Node::Inst(inst_id) => {
                     let inst = self.body.get_inst(*inst_id);
-                    // Handle Store-to-OutputPtr as an assignment statement
-                    // rather than a let-binding. All other Stores land in
-                    // lower_inst (which today errors for non-output ptrs).
-                    if let InstKind::Store { ptr, value } = &inst.data {
-                        if let Some(ptr_id) = ptr.as_ssa() {
-                            if let Some(out_name) = self.output_ptrs.get(&ptr_id).cloned() {
-                                self.current_span = inst.span;
+                    self.current_span = inst.span;
+
+                    // Memory-style operations emit statements (not
+                    // expressions that bind into `let`), so we handle
+                    // them at the emit_nodes level.
+                    match &inst.data {
+                        // Alloca: `var<function> x: T;` — no initializer.
+                        InstKind::Alloca { elem_ty } => {
+                            let result_id = inst.result.ok_or_else(|| {
+                                crate::err_wgsl_at!(self.blame_span(), "Alloca must have a result")
+                            })?;
+                            let ty = self.ctx.type_emitter.type_to_wgsl(elem_ty)?;
+                            let var = wgsl_var(result_id);
+                            writeln!(output, "{}var {}: {};", self.ctx.indent_str(), var, ty).unwrap();
+                            self.declared.insert(var.clone());
+                            self.value_map.insert(result_id, var);
+                            continue;
+                        }
+
+                        // Load through a `var<function>` is reading the
+                        // variable by name — WGSL's function-scope
+                        // pointer model collapses pointer and value at
+                        // the syntactic level.
+                        InstKind::Load { ptr } => {
+                            let result_id = inst.result.ok_or_else(|| {
+                                crate::err_wgsl_at!(self.blame_span(), "Load must have a result")
+                            })?;
+                            let name = match ptr {
+                                ValueRef::Ssa(id) => self.get_value_ref(*id)?,
+                                ValueRef::Const(_) => {
+                                    return Err(crate::err_wgsl_at!(
+                                        self.blame_span(),
+                                        "Load from a constant pointer is not meaningful"
+                                    ));
+                                }
+                            };
+                            self.value_map.insert(result_id, name);
+                            continue;
+                        }
+
+                        // Store: `target = value;`. Target is either
+                        // `_outN` for an OutputPtr or the alloca'd
+                        // var<function> name.
+                        InstKind::Store { ptr, value } => {
+                            if let Some(ptr_id) = ptr.as_ssa() {
+                                let target = if let Some(out_name) = self.output_ptrs.get(&ptr_id).cloned()
+                                {
+                                    out_name
+                                } else {
+                                    self.get_value_ref(ptr_id)?
+                                };
                                 let val = self.get_value(*value)?;
-                                writeln!(output, "{}{} = {};", self.ctx.indent_str(), out_name, val)
-                                    .unwrap();
+                                writeln!(output, "{}{} = {};", self.ctx.indent_str(), target, val).unwrap();
                                 continue;
                             }
+                            return Err(crate::err_wgsl_at!(
+                                self.blame_span(),
+                                "Store ptr must be an SSA value"
+                            ));
                         }
+
+                        // Materialize: `var<function> x: T = expr;` so
+                        // the value becomes subscriptable via
+                        // DynamicExtract's `x[i]`. Distinct from the
+                        // normal `let` path because WGSL forbids
+                        // dynamic indexing of `let`-bound values.
+                        InstKind::Materialize { value } => {
+                            let result_id = inst.result.ok_or_else(|| {
+                                crate::err_wgsl_at!(self.blame_span(), "Materialize must have a result")
+                            })?;
+                            let ty =
+                                self.ctx.type_emitter.type_to_wgsl(self.body.get_value_type(result_id))?;
+                            let var = wgsl_var(result_id);
+                            let val = self.get_value(*value)?;
+                            writeln!(output, "{}var {}: {} = {};", self.ctx.indent_str(), var, ty, val)
+                                .unwrap();
+                            self.declared.insert(var.clone());
+                            self.value_map.insert(result_id, var);
+                            continue;
+                        }
+
+                        _ => {}
                     }
+
                     let expr = self.lower_inst(inst)?;
                     if let Some(result) = inst.result {
                         // OutputPtr's "result" is an alias for a
@@ -1163,16 +1294,28 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 ))
             }
 
+            // Alloca/Load/Store are handled specially in `emit_nodes` so
+            // they become `var<function>` declarations and assignments
+            // rather than let-bindings. Reaching lower_inst with one of
+            // these is an internal bug.
             InstKind::Alloca { .. } | InstKind::Load { .. } => Err(crate::err_wgsl_at!(
                 self.blame_span(),
-                "memory operations (Alloca/Load) are not yet implemented in WGSL lowering"
-            )),
-
-            InstKind::Materialize { .. } | InstKind::DynamicExtract { .. } => Err(crate::err_wgsl_at!(
-                self.blame_span(),
-                "dynamic indexing ({:?}) is not yet implemented in WGSL lowering",
+                "internal: {:?} should be handled in emit_nodes",
                 inst.data
             )),
+
+            // Materialize is handled in emit_nodes so it becomes a
+            // `var<function>` (subscriptable) instead of a `let`.
+            InstKind::Materialize { .. } => Err(crate::err_wgsl_at!(
+                self.blame_span(),
+                "internal: Materialize should be handled in emit_nodes"
+            )),
+
+            InstKind::DynamicExtract { base, index } => {
+                let base_val = self.get_value(*base)?;
+                let index_val = self.get_value(*index)?;
+                Ok(format!("{}[{}]", base_val, index_val))
+            }
 
             InstKind::StorageView { .. }
             | InstKind::StorageViewIndex { .. }

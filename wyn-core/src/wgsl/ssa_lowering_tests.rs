@@ -336,7 +336,6 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
 }
 
 #[test]
-#[ignore = "dynamic indexing via Materialize/DynamicExtract lands in the next commit"]
 fn wgsl_vertex_full_screen_triangle() {
     // Vertex entry that indexes into a constant array using the
     // vertex_index builtin. Exercises: @vertex attribute mapping,
