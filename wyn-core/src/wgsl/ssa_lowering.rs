@@ -503,11 +503,8 @@ impl<'a> LowerCtx<'a> {
         }
         let name = format!("VsOut{}", self.output_struct_counter);
         self.output_struct_counter += 1;
-        let numbered: Vec<(String, String, String)> = fields
-            .into_iter()
-            .enumerate()
-            .map(|(i, (attr, ty))| (format!("f{}", i), attr, ty))
-            .collect();
+        let numbered: Vec<(String, String, String)> =
+            fields.into_iter().enumerate().map(|(i, (attr, ty))| (format!("f{}", i), attr, ty)).collect();
         self.output_structs.insert(sig, (name.clone(), numbered));
         name
     }
@@ -854,12 +851,8 @@ impl<'a> LowerCtx<'a> {
         // Indices (into `entry.outputs`) of the non-storage outputs, so
         // we can route `OutputPtr { index: N }` to the right struct field
         // for multi-output entries.
-        let non_storage_outputs: Vec<(usize, &crate::ssa::types::EntryOutput)> = entry
-            .outputs
-            .iter()
-            .enumerate()
-            .filter(|(_, o)| o.storage_binding.is_none())
-            .collect();
+        let non_storage_outputs: Vec<(usize, &crate::ssa::types::EntryOutput)> =
+            entry.outputs.iter().enumerate().filter(|(_, o)| o.storage_binding.is_none()).collect();
         // For multi-output: the generated struct name and the per-output
         // field mapping (orig_index → field_name), used to pre-declare
         // `var _out_struct: VsOutN;` in the body prelude and to route
@@ -927,8 +920,7 @@ impl<'a> LowerCtx<'a> {
                     // position, which mirrors the order we pushed above
                     // (i.e. the order of `non_storage_outputs`).
                     for (pos, (orig_index, _)) in non_storage_outputs.iter().enumerate() {
-                        index_to_field
-                            .insert(*orig_index, format!("_out_struct.f{}", pos));
+                        index_to_field.insert(*orig_index, format!("_out_struct.f{}", pos));
                     }
                     multi_output_struct = Some((struct_name.clone(), index_to_field));
                     (struct_name, false)
@@ -944,9 +936,7 @@ impl<'a> LowerCtx<'a> {
         // so a fixed internal name is safe and keeps the intrinsic
         // lowering name-free.
         if matches!(entry.execution_model, ExecutionModel::Compute { .. }) {
-            param_strs.push(
-                "@builtin(global_invocation_id) _wgsl_gid: vec3<u32>".to_string(),
-            );
+            param_strs.push("@builtin(global_invocation_id) _wgsl_gid: vec3<u32>".to_string());
         }
 
         let name = self.mangle_tracked(&entry.name)?;
@@ -993,8 +983,7 @@ impl<'a> LowerCtx<'a> {
         if !is_compute_void {
             match &multi_output_struct {
                 Some((struct_name, _)) => {
-                    writeln!(output, "{}var _out_struct: {};", self.indent_str(), struct_name)
-                        .unwrap();
+                    writeln!(output, "{}var _out_struct: {};", self.indent_str(), struct_name).unwrap();
                 }
                 None => {
                     for (i, out) in entry.outputs.iter().enumerate() {
@@ -1623,9 +1612,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             //   load-bearing for subsequent uses.
             InstKind::Int(s) => match result_ty.as_ref() {
                 Some(PolyType::Constructed(TypeName::UInt(32), _)) => Ok(format!("{}u", s)),
-                Some(PolyType::Constructed(TypeName::Int(32), _)) | _ => {
-                    Ok(format!("{}i", s))
-                }
+                Some(PolyType::Constructed(TypeName::Int(32), _)) | _ => Ok(format!("{}i", s)),
             },
             InstKind::Float(s) => {
                 let suffix = "f";
@@ -1734,10 +1721,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     if let Some(PolyType::Constructed(TypeName::ArrayVariantVirtual, _)) =
                         base_ty.array_variant()
                     {
-                        return Ok(format!(
-                            "({}.f0 + {} * {}.f1)",
-                            base_val, index_val, base_val
-                        ));
+                        return Ok(format!("({}.f0 + {} * {}.f1)", base_val, index_val, base_val));
                     }
                 }
                 Ok(format!("{}[{}]", base_val, index_val))
@@ -1831,10 +1815,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         )
                     })?;
                     let result_ty_ref = result_ty.as_ref().ok_or_else(|| {
-                        crate::err_wgsl_at!(
-                            self.blame_span(),
-                            "_w_intrinsic_slice must have a result type"
-                        )
+                        crate::err_wgsl_at!(self.blame_span(), "_w_intrinsic_slice must have a result type")
                     })?;
                     let result_is_composite = matches!(
                         result_ty_ref.array_variant(),
@@ -1880,12 +1861,9 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                     "_w_intrinsic_slice must have a result"
                                 )
                             })?;
-                            let new_offset = format!(
-                                "(i32({}) + i32({}))",
-                                handle.offset_expr, arg_strs[1]
-                            );
-                            let new_len =
-                                format!("(i32({}) - i32({}))", arg_strs[2], arg_strs[1]);
+                            let new_offset =
+                                format!("(i32({}) + i32({}))", handle.offset_expr, arg_strs[1]);
+                            let new_len = format!("(i32({}) - i32({}))", arg_strs[2], arg_strs[1]);
                             self.view_handles.insert(
                                 result_id,
                                 ViewHandle {
@@ -1912,9 +1890,8 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             )
                         })?;
                         let ty_str = self.ctx.type_emitter.type_to_wgsl(result_ty_ref)?;
-                        let elems: Vec<String> = (start..end)
-                            .map(|i| format!("{}[{}i]", arg_strs[0], i))
-                            .collect();
+                        let elems: Vec<String> =
+                            (start..end).map(|i| format!("{}[{}i]", arg_strs[0], i)).collect();
                         return Ok(format!("{}({})", ty_str, elems.join(", ")));
                     }
                     return Err(crate::err_wgsl_at!(
@@ -1933,11 +1910,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             return Ok(format!("{}.f2", arg_strs[0]));
                         }
                         if let Some(PolyType::Constructed(TypeName::Size(n), _)) = ty.array_size() {
-                            return Ok(if wants_i32 {
-                                format!("{}i", n)
-                            } else {
-                                format!("{}u", n)
-                            });
+                            return Ok(if wants_i32 { format!("{}i", n) } else { format!("{}u", n) });
                         }
                         // Runtime-sized storage array: `arrayLength(&x)` is u32.
                         let expr = format!("arrayLength(&{})", arg_strs[0]);
