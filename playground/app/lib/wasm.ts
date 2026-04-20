@@ -32,10 +32,60 @@ export interface CompileResult {
   error?: ErrorInfo;
 }
 
+// -----------------------------------------------------------------------------
+// WGSL compilation output — includes a structured program interface the JS
+// side uses to drive WebGPU buffer/binding setup and the pipeline-viz panel.
+// -----------------------------------------------------------------------------
+
+export interface EntryBinding {
+  name: string;
+  ty: string;
+  /** "builtin(<name>)" / "location(<n>)" / "storage(<set>,<binding>)" / "push_constant(<off>)" */
+  decoration: string;
+}
+
+export interface EntryInterface {
+  name: string;
+  /** WGSL-mangled entry-point name — pass this as `entryPoint:` to
+   *  WebGPU's pipeline creation. */
+  wgsl_name: string;
+  /** "vertex" | "fragment" | "compute" */
+  kind: string;
+  /** `[x, y, z]` for compute entries; undefined otherwise. */
+  workgroup_size?: [number, number, number];
+  inputs: EntryBinding[];
+  outputs: EntryBinding[];
+}
+
+export interface ResourceBinding {
+  name: string;
+  set: number;
+  binding: number;
+  ty: string;
+  /** "read" / "write" / "read_write" for storage; empty for uniforms. */
+  access?: string;
+}
+
+export interface ProgramInterface {
+  entries: EntryInterface[];
+  uniforms: ResourceBinding[];
+  storage: ResourceBinding[];
+}
+
+export interface CompileResultWgsl {
+  success: boolean;
+  wgsl?: string;
+  interface?: ProgramInterface;
+  mir?: string;
+  tlc?: IRTreeNode[];
+  error?: ErrorInfo;
+}
+
 export interface WynWasm {
   version: () => string;
   compile_with_ir: (source: string) => CompileResult;
   compile_to_shadertoy: (source: string) => CompileResult;
+  compile_to_wgsl: (source: string) => CompileResultWgsl;
   get_example_program: () => string;
 }
 
@@ -57,6 +107,7 @@ export function initWasm(): Promise<WynWasm> {
         version: mod.version,
         compile_with_ir: mod.compile_with_ir,
         compile_to_shadertoy: mod.compile_to_shadertoy,
+        compile_to_wgsl: mod.compile_to_wgsl,
         get_example_program: mod.get_example_program,
       };
     })();
