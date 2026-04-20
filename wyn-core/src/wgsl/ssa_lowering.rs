@@ -324,6 +324,15 @@ pub struct TypeEmitter {
     tuple_type_cache: HashMap<String, String>,
     pub tuple_structs: HashMap<String, Vec<String>>,
     tuple_counter: usize,
+    /// Virtual-array range structs, cached by element type string. A
+    /// virtual array (produced by `ArrayRange`) lowers to a struct
+    /// `{ f0: T, f1: T, f2: T }` holding `(start, step, len)`. The `fN`
+    /// names match `Project`'s `.f{index}` emission so start/step/len
+    /// project naturally; `Index` and `_w_intrinsic_length` have
+    /// dedicated handling.
+    virtual_range_cache: HashMap<String, String>,
+    pub virtual_range_structs: Vec<(String, String)>, // (struct_name, elem_ty)
+    virtual_range_counter: usize,
 }
 
 impl Default for TypeEmitter {
@@ -338,7 +347,23 @@ impl TypeEmitter {
             tuple_type_cache: HashMap::new(),
             tuple_structs: HashMap::new(),
             tuple_counter: 0,
+            virtual_range_cache: HashMap::new(),
+            virtual_range_structs: Vec::new(),
+            virtual_range_counter: 0,
         }
+    }
+
+    /// Look up or create the WGSL struct name for a virtual-array range
+    /// whose start/step/len are all of `elem`'s WGSL type.
+    fn virtual_range_struct(&mut self, elem: &str) -> String {
+        if let Some(name) = self.virtual_range_cache.get(elem) {
+            return name.clone();
+        }
+        let name = format!("VirtRange{}", self.virtual_range_counter);
+        self.virtual_range_counter += 1;
+        self.virtual_range_cache.insert(elem.to_string(), name.clone());
+        self.virtual_range_structs.push((name.clone(), elem.to_string()));
+        name
     }
 
     pub fn type_to_wgsl(&mut self, ty: &PolyType<TypeName>) -> Result<String> {
@@ -400,6 +425,13 @@ impl TypeEmitter {
                         ty.elem_type()
                             .ok_or_else(|| crate::err_wgsl!("Array type missing elem arg: {:?}", ty))?,
                     )?;
+                    // Virtual arrays (ranges) are `{start, step, len}` triples
+                    // in the same elem type; lower to a generated struct.
+                    if let Some(PolyType::Constructed(TypeName::ArrayVariantVirtual, _)) =
+                        ty.array_variant()
+                    {
+                        return Ok(self.virtual_range_struct(&elem));
+                    }
                     match ty.array_size() {
                         Some(PolyType::Constructed(TypeName::Size(n), _)) => {
                             Ok(format!("array<{}, {}>", elem, n))
@@ -532,6 +564,20 @@ impl<'a> LowerCtx<'a> {
                 writeln!(output, "}}").unwrap();
                 writeln!(output).unwrap();
             }
+        }
+
+        // Virtual-array range struct declarations (from ArrayRange
+        // creation sites / `type_to_wgsl` on `Array[_, _, Virtual]`).
+        // Field layout mirrors the tuple layout (`f0`/`f1`/`f2`) so
+        // `Project` can emit `.fN` without special-casing, matching
+        // SPIR-V's `composite_extract` indices 0/1/2 for start/step/len.
+        for (name, elem) in &self.type_emitter.virtual_range_structs {
+            writeln!(output, "struct {} {{", name).unwrap();
+            writeln!(output, "    f0: {},", elem).unwrap();
+            writeln!(output, "    f1: {},", elem).unwrap();
+            writeln!(output, "    f2: {},", elem).unwrap();
+            writeln!(output, "}}").unwrap();
+            writeln!(output).unwrap();
         }
 
         // Entry-point output struct declarations — each field carries
@@ -889,6 +935,19 @@ impl<'a> LowerCtx<'a> {
                 }
             }
         };
+
+        // Compute shaders always get a synthetic
+        // `@builtin(global_invocation_id) _wgsl_gid: vec3<u32>` parameter
+        // so `_w_intrinsic_thread_id()` can read `_wgsl_gid.x`. Wyn's
+        // source surface never declares this builtin manually — it's
+        // only introduced by the `parallelize` pass via the intrinsic —
+        // so a fixed internal name is safe and keeps the intrinsic
+        // lowering name-free.
+        if matches!(entry.execution_model, ExecutionModel::Compute { .. }) {
+            param_strs.push(
+                "@builtin(global_invocation_id) _wgsl_gid: vec3<u32>".to_string(),
+            );
+        }
 
         let name = self.mangle_tracked(&entry.name)?;
         writeln!(output, "{}", entry_attr).unwrap();
@@ -1666,6 +1725,21 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             InstKind::Index { base, index } => {
                 let base_val = self.get_value(*base)?;
                 let index_val = self.get_value(*index)?;
+                // Virtual arrays are `{start, step, len}` triples in a
+                // generated struct; indexing computes `start + i*step`
+                // (matching SPIR-V's `lower_virtual_index`). Composite
+                // and view arrays just subscript normally.
+                if let Some(id) = base.as_ssa() {
+                    let base_ty = self.body.get_value_type(id);
+                    if let Some(PolyType::Constructed(TypeName::ArrayVariantVirtual, _)) =
+                        base_ty.array_variant()
+                    {
+                        return Ok(format!(
+                            "({}.f0 + {} * {}.f1)",
+                            base_val, index_val, base_val
+                        ));
+                    }
+                }
                 Ok(format!("{}[{}]", base_val, index_val))
             }
 
@@ -1711,6 +1785,14 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     result_ty.as_ref(),
                     Some(PolyType::Constructed(TypeName::Int(32), _))
                 );
+                // `_w_intrinsic_thread_id()` → `_wgsl_gid.x` from the
+                // compute entry's auto-injected builtin parameter. The
+                // SSA result type is always `u32` (see
+                // `parallelize::intrinsic_term(..., u32_ty)`), so no
+                // cast is needed.
+                if name == "_w_intrinsic_thread_id" && args.is_empty() {
+                    return Ok("_wgsl_gid.x".to_string());
+                }
                 if name == "_w_intrinsic_storage_len" && args.len() == 2 {
                     let set = self.resolve_const_u32(args[0]);
                     let binding = self.resolve_const_u32(args[1]);
@@ -1734,9 +1816,122 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 // size as a literal; runtime-sized (storage) arrays route
                 // through WGSL's `arrayLength(&x)` (u32). Cast only when
                 // the SSA result expects `i32`.
+                // `_w_intrinsic_slice(arr, start, end)` → sub-view or
+                // materialized sub-array. Three cases mirror SPIR-V's
+                // `"slice"` arm: view→view (new handle), view→composite
+                // (materialize a `array<T,N>(...)` literal), and
+                // composite→composite (also a literal). Start/end are
+                // constants for the materialization cases; runtime
+                // start/end are allowed for view→view.
+                if name == "_w_intrinsic_slice" && args.len() == 3 {
+                    let arr_id = args[0].as_ssa().ok_or_else(|| {
+                        crate::err_wgsl_at!(
+                            self.blame_span(),
+                            "_w_intrinsic_slice: array arg must be an SSA value"
+                        )
+                    })?;
+                    let result_ty_ref = result_ty.as_ref().ok_or_else(|| {
+                        crate::err_wgsl_at!(
+                            self.blame_span(),
+                            "_w_intrinsic_slice must have a result type"
+                        )
+                    })?;
+                    let result_is_composite = matches!(
+                        result_ty_ref.array_variant(),
+                        Some(PolyType::Constructed(TypeName::ArrayVariantComposite, _))
+                    );
+                    // Source is a view iff we've tracked a ViewHandle
+                    // for its SSA id.
+                    if let Some(handle) = self.view_handles.get(&arr_id).cloned() {
+                        if result_is_composite {
+                            // View → Composite: materialize as
+                            // `array<T,N>(buf[off+s], buf[off+s+1], ...)`.
+                            let start = self.resolve_const_u32(args[1]).ok_or_else(|| {
+                                crate::err_wgsl_at!(
+                                    self.blame_span(),
+                                    "_w_intrinsic_slice(view → composite): start must be a constant"
+                                )
+                            })?;
+                            let end = self.resolve_const_u32(args[2]).ok_or_else(|| {
+                                crate::err_wgsl_at!(
+                                    self.blame_span(),
+                                    "_w_intrinsic_slice(view → composite): end must be a constant"
+                                )
+                            })?;
+                            let ty_str = self.ctx.type_emitter.type_to_wgsl(result_ty_ref)?;
+                            let elems: Vec<String> = (start..end)
+                                .map(|i| {
+                                    format!(
+                                        "{}[(i32({}) + {}i)]",
+                                        handle.buffer_name, handle.offset_expr, i
+                                    )
+                                })
+                                .collect();
+                            return Ok(format!("{}({})", ty_str, elems.join(", ")));
+                        } else {
+                            // View → View: register a new handle whose
+                            // offset is `base_offset + start` and len is
+                            // `end - start`; return the buffer name so
+                            // downstream StorageViewIndex resolves
+                            // through the new handle.
+                            let result_id = inst.result.ok_or_else(|| {
+                                crate::err_wgsl_at!(
+                                    self.blame_span(),
+                                    "_w_intrinsic_slice must have a result"
+                                )
+                            })?;
+                            let new_offset = format!(
+                                "(i32({}) + i32({}))",
+                                handle.offset_expr, arg_strs[1]
+                            );
+                            let new_len =
+                                format!("(i32({}) - i32({}))", arg_strs[2], arg_strs[1]);
+                            self.view_handles.insert(
+                                result_id,
+                                ViewHandle {
+                                    buffer_name: handle.buffer_name.clone(),
+                                    offset_expr: new_offset,
+                                    len_expr: new_len,
+                                },
+                            );
+                            return Ok(handle.buffer_name);
+                        }
+                    }
+                    // Composite → Composite: `array<T,N>(arr[s], arr[s+1], ...)`.
+                    if result_is_composite {
+                        let start = self.resolve_const_u32(args[1]).ok_or_else(|| {
+                            crate::err_wgsl_at!(
+                                self.blame_span(),
+                                "_w_intrinsic_slice: start must be a constant for composite slice"
+                            )
+                        })?;
+                        let end = self.resolve_const_u32(args[2]).ok_or_else(|| {
+                            crate::err_wgsl_at!(
+                                self.blame_span(),
+                                "_w_intrinsic_slice: end must be a constant for composite slice"
+                            )
+                        })?;
+                        let ty_str = self.ctx.type_emitter.type_to_wgsl(result_ty_ref)?;
+                        let elems: Vec<String> = (start..end)
+                            .map(|i| format!("{}[{}i]", arg_strs[0], i))
+                            .collect();
+                        return Ok(format!("{}({})", ty_str, elems.join(", ")));
+                    }
+                    return Err(crate::err_wgsl_at!(
+                        self.blame_span(),
+                        "_w_intrinsic_slice: unsupported slice shape (src not view, dst not composite)"
+                    ));
+                }
                 if name == "_w_intrinsic_length" && args.len() == 1 {
                     if let Some(id) = args[0].as_ssa() {
                         let ty = self.body.get_value_type(id);
+                        // Virtual arrays carry their length in the `f2`
+                        // field of the range struct.
+                        if let Some(PolyType::Constructed(TypeName::ArrayVariantVirtual, _)) =
+                            ty.array_variant()
+                        {
+                            return Ok(format!("{}.f2", arg_strs[0]));
+                        }
                         if let Some(PolyType::Constructed(TypeName::Size(n), _)) = ty.array_size() {
                             return Ok(if wants_i32 {
                                 format!("{}i", n)
@@ -1762,10 +1957,36 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 linkage
             )),
 
-            InstKind::ArrayRange { .. } => Err(crate::err_wgsl_at!(
-                self.blame_span(),
-                "ArrayRange should be expanded before reaching WGSL lowering"
-            )),
+            InstKind::ArrayRange { start, len, step } => {
+                // Virtual array lowered as a `VirtRangeN` struct whose
+                // fields are (start, step, len) — field order matches
+                // SPIR-V's composite_construct so `Project { index: 0/1/2 }`
+                // extracts start/step/len naturally. Default step is `1`
+                // in the element's type when absent.
+                let start_s = self.get_value(*start)?;
+                let len_s = self.get_value(*len)?;
+                let ty = result_ty.as_ref().ok_or_else(|| {
+                    crate::err_wgsl_at!(self.blame_span(), "ArrayRange must have a result type")
+                })?;
+                let elem_ty = ty.elem_type().ok_or_else(|| {
+                    crate::err_wgsl_at!(self.blame_span(), "ArrayRange result missing elem type")
+                })?;
+                let elem_str = self.ctx.type_emitter.type_to_wgsl(elem_ty)?;
+                let struct_name = self.ctx.type_emitter.type_to_wgsl(ty)?;
+                let step_s = match step {
+                    Some(s) => self.get_value(*s)?,
+                    None => match elem_ty {
+                        PolyType::Constructed(TypeName::UInt(_), _) => "1u".to_string(),
+                        PolyType::Constructed(TypeName::Float(_), _) => "1.0f".to_string(),
+                        _ => "1i".to_string(),
+                    },
+                };
+                // Fields emit in struct order: f0=start, f1=step, f2=len.
+                // `elem_str` is used only for its existence (ensures the
+                // type is cached before constructor emits).
+                let _ = elem_str;
+                Ok(format!("{}({}, {}, {})", struct_name, start_s, step_s, len_s))
+            }
 
             InstKind::Matrix(_) => Err(crate::err_wgsl_at!(
                 self.blame_span(),

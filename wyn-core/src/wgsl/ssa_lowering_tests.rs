@@ -397,6 +397,22 @@ fn wgsl_testfile_red_triangle_curried() {
     validate_testfile_wgsl("testfiles/red_triangle_curried.wyn");
 }
 
+#[test]
+fn wgsl_testfile_map_iota() {
+    // Exercises ArrayRange lowering: `iota(10)` produces a virtual
+    // array that's consumed by `map`. Virtual arrays lower to a
+    // generated `VirtRange{N}` struct, indexed as start + i*step.
+    validate_testfile_wgsl("testfiles/map_iota.wyn");
+}
+
+#[test]
+fn wgsl_testfile_array_call_demo() {
+    // Exercises `_w_intrinsic_slice` view→composite materialization.
+    // `data[0..4]` with `data: []f32` slices a storage view down to
+    // a `[4]i32` composite that's passed to a user function.
+    validate_testfile_wgsl("testfiles/array_call_demo.wyn");
+}
+
 /// Compile a source file from disk through the full pipeline to WGSL
 /// and naga-validate the result. Used for testfile sweeps. Resolves
 /// paths relative to the workspace root so tests work regardless of
