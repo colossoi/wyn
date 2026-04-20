@@ -440,6 +440,12 @@ struct LowerCtx<'a> {
     indent: usize,
     /// Track mangled names for collision detection.
     mangled_names: HashMap<String, String>,
+    /// Entry-point output structs keyed by their field signature
+    /// ("attr0+ty0,attr1+ty1,..."). Maps sig → (struct_name, fields).
+    /// `fields` is an ordered list of (field_name, attribute_prefix,
+    /// wgsl_type) tuples.
+    output_structs: HashMap<String, (String, Vec<(String, String, String)>)>,
+    output_struct_counter: usize,
 }
 
 impl<'a> LowerCtx<'a> {
@@ -450,7 +456,28 @@ impl<'a> LowerCtx<'a> {
             lowered: HashSet::new(),
             indent: 0,
             mangled_names: HashMap::new(),
+            output_structs: HashMap::new(),
+            output_struct_counter: 0,
         }
+    }
+
+    /// Get or create an entry-output struct for a list of
+    /// `(attribute_prefix, wgsl_type)` pairs. Attribute prefix includes
+    /// the trailing space (e.g. `"@builtin(position) "`).
+    fn get_or_create_output_struct(&mut self, fields: Vec<(String, String)>) -> String {
+        let sig = fields.iter().map(|(a, t)| format!("{}{}", a, t)).collect::<Vec<_>>().join(",");
+        if let Some((name, _)) = self.output_structs.get(&sig) {
+            return name.clone();
+        }
+        let name = format!("VsOut{}", self.output_struct_counter);
+        self.output_struct_counter += 1;
+        let numbered: Vec<(String, String, String)> = fields
+            .into_iter()
+            .enumerate()
+            .map(|(i, (attr, ty))| (format!("f{}", i), attr, ty))
+            .collect();
+        self.output_structs.insert(sig, (name.clone(), numbered));
+        name
     }
 
     fn indent_str(&self) -> String {
@@ -501,6 +528,23 @@ impl<'a> LowerCtx<'a> {
                 writeln!(output, "struct {} {{", name).unwrap();
                 for (i, ft) in field_types.iter().enumerate() {
                     writeln!(output, "    f{}: {},", i, ft).unwrap();
+                }
+                writeln!(output, "}}").unwrap();
+                writeln!(output).unwrap();
+            }
+        }
+
+        // Entry-point output struct declarations — each field carries
+        // its `@builtin(...)` or `@location(N)` attribute inline,
+        // since WGSL requires the decoration to sit on the struct
+        // member rather than a free module-scope variable.
+        if !self.output_structs.is_empty() {
+            let mut structs: Vec<_> = self.output_structs.values().collect();
+            structs.sort_by_key(|(name, _)| name.clone());
+            for (name, fields) in structs {
+                writeln!(output, "struct {} {{", name).unwrap();
+                for (field_name, attr, ty) in fields {
+                    writeln!(output, "    {}{}: {},", attr, field_name, ty).unwrap();
                 }
                 writeln!(output, "}}").unwrap();
                 writeln!(output).unwrap();
@@ -761,8 +805,20 @@ impl<'a> LowerCtx<'a> {
         //
         // Filter out storage-backed outputs before counting — they're
         // written via `Store` to module-scope bindings, not returned.
-        let non_storage_outputs: Vec<&crate::ssa::types::EntryOutput> =
-            entry.outputs.iter().filter(|o| o.storage_binding.is_none()).collect();
+        // Indices (into `entry.outputs`) of the non-storage outputs, so
+        // we can route `OutputPtr { index: N }` to the right struct field
+        // for multi-output entries.
+        let non_storage_outputs: Vec<(usize, &crate::ssa::types::EntryOutput)> = entry
+            .outputs
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| o.storage_binding.is_none())
+            .collect();
+        // For multi-output: the generated struct name and the per-output
+        // field mapping (orig_index → field_name), used to pre-declare
+        // `var _out_struct: VsOutN;` in the body prelude and to route
+        // `OutputPtr` targets into its fields.
+        let mut multi_output_struct: Option<(String, HashMap<usize, String>)> = None;
         let (ret_type_str, is_compute_void) = match entry.execution_model {
             ExecutionModel::Compute { .. } => (String::new(), true),
             _ => {
@@ -773,7 +829,7 @@ impl<'a> LowerCtx<'a> {
                     ));
                 }
                 if non_storage_outputs.len() == 1 {
-                    let out = non_storage_outputs[0];
+                    let (_, out) = non_storage_outputs[0];
                     let ty_str = self.type_emitter.type_to_wgsl(&out.ty)?;
                     let attr = match &out.decoration {
                         Some(IoDecoration::BuiltIn(b)) => {
@@ -787,12 +843,49 @@ impl<'a> LowerCtx<'a> {
                     };
                     (format!("{}{}", attr, ty_str), false)
                 } else {
-                    return Err(crate::err_wgsl!(
-                        "entry '{}' has {} non-storage outputs; multi-output WGSL entries \
-                         (struct return with per-field attributes) are not yet implemented",
-                        entry.name,
-                        non_storage_outputs.len()
-                    ));
+                    // Multi-output: pack outputs into a generated struct.
+                    // Each field carries its own `@builtin(...)` or
+                    // `@location(N)` attribute (WGSL requires these on
+                    // struct members, not on the return type).
+                    let mut field_specs: Vec<(String, String)> = Vec::new();
+                    let mut index_to_field: HashMap<usize, String> = HashMap::new();
+                    for (orig_index, out) in &non_storage_outputs {
+                        let ty_str = self.type_emitter.type_to_wgsl(&out.ty)?;
+                        let attr = match &out.decoration {
+                            Some(IoDecoration::BuiltIn(b)) => {
+                                let wgsl_b =
+                                    map_builtin_to_wgsl(b, stage_is_fragment).ok_or_else(|| {
+                                        crate::err_wgsl!(
+                                            "entry output: WGSL has no @builtin mapping for {:?}",
+                                            b
+                                        )
+                                    })?;
+                                format!("@builtin({}) ", wgsl_b)
+                            }
+                            Some(IoDecoration::Location(n)) => format!("@location({}) ", n),
+                            None => {
+                                return Err(crate::err_wgsl!(
+                                    "entry '{}' output #{} has no decoration; multi-output \
+                                     WGSL entries require `@builtin(...)` or `@location(N)` on \
+                                     every field",
+                                    entry.name,
+                                    orig_index
+                                ));
+                            }
+                        };
+                        field_specs.push((attr, ty_str));
+                    }
+                    let struct_name = self.get_or_create_output_struct(field_specs);
+                    // Field names (`f0`, `f1`, ...) are assigned in
+                    // `get_or_create_output_struct` by struct-field
+                    // position, which mirrors the order we pushed above
+                    // (i.e. the order of `non_storage_outputs`).
+                    for (pos, (orig_index, _)) in non_storage_outputs.iter().enumerate() {
+                        index_to_field
+                            .insert(*orig_index, format!("_out_struct.f{}", pos));
+                    }
+                    multi_output_struct = Some((struct_name.clone(), index_to_field));
+                    (struct_name, false)
                 }
             }
         };
@@ -835,29 +928,43 @@ impl<'a> LowerCtx<'a> {
         // output so the body's `OutputPtr` can alias into them. Skip
         // storage-bound outputs — those are written via direct Store
         // to module-scope bindings, not returned through the function.
+        // Multi-output entries share a single `_out_struct` var and
+        // alias each `OutputPtr { index }` into a distinct field.
         let mut output_locals: Vec<(usize, String, String)> = Vec::new(); // (index, name, wgsl_type)
         if !is_compute_void {
-            for (i, out) in entry.outputs.iter().enumerate() {
-                if out.storage_binding.is_some() {
-                    continue;
+            match &multi_output_struct {
+                Some((struct_name, _)) => {
+                    writeln!(output, "{}var _out_struct: {};", self.indent_str(), struct_name)
+                        .unwrap();
                 }
-                let ty_str = self.type_emitter.type_to_wgsl(&out.ty)?;
-                let name = format!("_out{}", i);
-                writeln!(output, "{}var {}: {};", self.indent_str(), name, ty_str).unwrap();
-                output_locals.push((i, name, ty_str));
+                None => {
+                    for (i, out) in entry.outputs.iter().enumerate() {
+                        if out.storage_binding.is_some() {
+                            continue;
+                        }
+                        let ty_str = self.type_emitter.type_to_wgsl(&out.ty)?;
+                        let name = format!("_out{}", i);
+                        writeln!(output, "{}var {}: {};", self.indent_str(), name, ty_str).unwrap();
+                        output_locals.push((i, name, ty_str));
+                    }
+                }
             }
         }
 
         let mut body_ctx = BodyLowerCtx::new(self, body, entry.span);
+        if let Some((_, index_to_field)) = &multi_output_struct {
+            body_ctx.output_target_names = index_to_field.clone();
+        }
         let result = body_ctx.lower(output)?;
         let uses_output_ptrs = body_ctx.uses_output_ptrs;
 
         if !is_compute_void {
             if uses_output_ptrs {
-                // OutputPtr-based return: for single output, return _out0.
-                // Multi-output WGSL would need a struct return; rejected
-                // earlier so only single-output reaches here.
-                if output_locals.len() == 1 {
+                // OutputPtr-based return: single output returns `_out0`;
+                // multi-output returns the packed `_out_struct`.
+                if multi_output_struct.is_some() {
+                    writeln!(output, "{}return _out_struct;", self.indent_str()).unwrap();
+                } else if output_locals.len() == 1 {
                     writeln!(output, "{}return _out0;", self.indent_str()).unwrap();
                 } else {
                     return Err(crate::err_wgsl!(
@@ -953,6 +1060,12 @@ struct BodyLowerCtx<'a, 'b> {
     /// struct for multi-output) instead of emitting a `return <expr>;`
     /// from the body's terminator result.
     uses_output_ptrs: bool,
+    /// Override for the name each `OutputPtr { index }` resolves to. If an
+    /// index is present here, that name is used as the store target (and
+    /// cached in `output_ptrs`); otherwise the default `_out{index}` is
+    /// used. Populated by `lower_entry_point` when it's packing outputs
+    /// into a struct — then the name is `_out_struct.f{index}`.
+    output_target_names: HashMap<usize, String>,
     /// Span of the instruction currently being lowered.
     current_span: Option<Span>,
     func_span: Span,
@@ -968,6 +1081,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             view_handles: HashMap::new(),
             output_ptrs: HashMap::new(),
             uses_output_ptrs: false,
+            output_target_names: HashMap::new(),
             current_span: None,
             func_span,
         }
@@ -1266,10 +1380,17 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
 
                     let expr = self.lower_inst(inst)?;
                     if let Some(result) = inst.result {
-                        // OutputPtr's "result" is an alias for a
-                        // `var<function>` that the entry wrapper declared;
-                        // record the alias and emit nothing.
-                        if matches!(inst.data, InstKind::OutputPtr { .. }) {
+                        // Alias-only InstKinds — the `result` is a handle
+                        // pointing at something already declared at module
+                        // scope or elsewhere; we only record the alias in
+                        // value_map and emit nothing. Copying into a local
+                        // `var` would be nonsense (for StorageView, it'd
+                        // try to clone a runtime-sized storage array into
+                        // a function local, which WGSL rejects).
+                        if matches!(
+                            inst.data,
+                            InstKind::OutputPtr { .. } | InstKind::StorageView { .. }
+                        ) {
                             self.value_map.insert(result, expr);
                             continue;
                         }
@@ -1382,8 +1503,21 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     // Emit header insts (condition-test insts).
                     for inst_id in header_insts {
                         let inst = self.body.get_inst(*inst_id);
+                        self.current_span = inst.span;
                         let expr = self.lower_inst(inst)?;
                         if let Some(result) = inst.result {
+                            // Mirror the alias-only check from the
+                            // main per-inst dispatch: OutputPtr and
+                            // StorageView never produce a local
+                            // declaration — the expression text is
+                            // the handle.
+                            if matches!(
+                                inst.data,
+                                InstKind::OutputPtr { .. } | InstKind::StorageView { .. }
+                            ) {
+                                self.value_map.insert(result, expr);
+                                continue;
+                            }
                             let var = wgsl_var(result);
                             let ty =
                                 self.ctx.type_emitter.type_to_wgsl(self.body.get_value_type(result))?;
@@ -1424,7 +1558,16 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         self.current_span = inst.span;
 
         match &inst.data {
-            InstKind::Int(s) => Ok(format!("{}i", s)),
+            // Integer literals carry their type in the suffix:
+            //   `Nu` for `u32`, `Ni` for `i32`. WGSL has no implicit
+            //   int conversion, so respecting the SSA value's type is
+            //   load-bearing for subsequent uses.
+            InstKind::Int(s) => match result_ty.as_ref() {
+                Some(PolyType::Constructed(TypeName::UInt(32), _)) => Ok(format!("{}u", s)),
+                Some(PolyType::Constructed(TypeName::Int(32), _)) | _ => {
+                    Ok(format!("{}i", s))
+                }
+            },
             InstKind::Float(s) => {
                 let suffix = "f";
                 if s.contains('.') || s.contains('e') || s.contains('E') {
@@ -1559,13 +1702,23 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 // `_w_intrinsic_storage_len(set, binding)` → runtime
                 // length of the storage buffer at those coordinates.
                 // Both args are compile-time integer constants.
+                // WGSL's `arrayLength(&x)` returns `u32`. We cast to `i32`
+                // only when the result slot actually wants `i32`, which
+                // keeps the emitted declaration type consistent with the
+                // expression type (a mismatch is a naga parse error, not
+                // just a style issue).
+                let wants_i32 = matches!(
+                    result_ty.as_ref(),
+                    Some(PolyType::Constructed(TypeName::Int(32), _))
+                );
                 if name == "_w_intrinsic_storage_len" && args.len() == 2 {
                     let set = self.resolve_const_u32(args[0]);
                     let binding = self.resolve_const_u32(args[1]);
                     match (set, binding) {
                         (Some(s), Some(b)) => {
                             let name = self.storage_name(s, b)?;
-                            return Ok(format!("i32(arrayLength(&{}))", name));
+                            let expr = format!("arrayLength(&{})", name);
+                            return Ok(if wants_i32 { format!("i32({})", expr) } else { expr });
                         }
                         _ => {
                             return Err(crate::err_wgsl_at!(
@@ -1578,16 +1731,22 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 // `_w_intrinsic_length(arr)` is array length, semantically
                 // distinct from WGSL's vector-magnitude `length`. For a
                 // fixed-size composite array we emit the statically-known
-                // size as an `i32` literal; runtime-sized (storage) arrays
-                // route through WGSL's `arrayLength(&x)`.
+                // size as a literal; runtime-sized (storage) arrays route
+                // through WGSL's `arrayLength(&x)` (u32). Cast only when
+                // the SSA result expects `i32`.
                 if name == "_w_intrinsic_length" && args.len() == 1 {
                     if let Some(id) = args[0].as_ssa() {
                         let ty = self.body.get_value_type(id);
                         if let Some(PolyType::Constructed(TypeName::Size(n), _)) = ty.array_size() {
-                            return Ok(format!("{}i", n));
+                            return Ok(if wants_i32 {
+                                format!("{}i", n)
+                            } else {
+                                format!("{}u", n)
+                            });
                         }
-                        // Runtime-sized storage array: `arrayLength(&x)`.
-                        return Ok(format!("arrayLength(&{})", arg_strs[0]));
+                        // Runtime-sized storage array: `arrayLength(&x)` is u32.
+                        let expr = format!("arrayLength(&{})", arg_strs[0]);
+                        return Ok(if wants_i32 { format!("i32({})", expr) } else { expr });
                     }
                     return Err(crate::err_wgsl_at!(
                         self.blame_span(),
@@ -1617,7 +1776,11 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 let result_id = inst.result.ok_or_else(|| {
                     crate::err_wgsl_at!(self.blame_span(), "OutputPtr must have a result")
                 })?;
-                let name = format!("_out{}", index);
+                let name = self
+                    .output_target_names
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(|| format!("_out{}", index));
                 self.output_ptrs.insert(result_id, name.clone());
                 self.uses_output_ptrs = true;
                 // Nothing to emit: the `var<function>` declaration happens
@@ -1717,11 +1880,15 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     )
                 })?;
                 let idx = self.get_value(*index)?;
-                // `buf[offset + idx]`. If offset is the constant 0 the
-                // `(0 + idx)` addition is a wash; leave it to the
-                // downstream optimizer (naga will fold).
+                // `buf[i32(offset) + i32(idx)]`. Both operands are cast
+                // to `i32` because WGSL has no implicit int-int coercion
+                // and offset/idx can independently come in as either
+                // signed or unsigned (parallelize emits u32 offsets;
+                // Wyn indices are commonly i32). Casting both keeps the
+                // expression monomorphic; naga folds casts of literals
+                // at validation time.
                 Ok(format!(
-                    "{}[({} + {})]",
+                    "{}[(i32({}) + i32({}))]",
                     handle.buffer_name, handle.offset_expr, idx
                 ))
             }

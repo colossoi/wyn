@@ -359,6 +359,44 @@ entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] 
     assert!(wgsl.contains("@builtin(vertex_index)"));
 }
 
+#[test]
+fn wgsl_vertex_multi_output_struct() {
+    // Multi-output vertex entry must be packed into a generated
+    // struct whose members carry the `@builtin(...)` / `@location(N)`
+    // attributes (WGSL disallows these on module-scope vars and
+    // accepts them only on struct members).
+    let wgsl = compile_to_wgsl(
+        r#"
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] idx: i32)
+  (#[builtin(position)] vec4f32, #[location(0)] vec3f32) =
+    let p: vec4f32 = @[0.0, 0.0, 0.0, 1.0] in
+    let c: vec3f32 = @[1.0, 0.0, 0.0] in
+    (p, c)
+"#,
+    )
+    .expect("compile");
+    validate_wgsl(&wgsl);
+    assert!(wgsl.contains("struct VsOut0"));
+    assert!(wgsl.contains("@builtin(position) f0: vec4<f32>,"));
+    assert!(wgsl.contains("@location(0) f1: vec3<f32>,"));
+    assert!(wgsl.contains("-> VsOut0"));
+    assert!(wgsl.contains("var _out_struct: VsOut0;"));
+    assert!(wgsl.contains("_out_struct.f0 ="));
+    assert!(wgsl.contains("_out_struct.f1 ="));
+    assert!(wgsl.contains("return _out_struct;"));
+}
+
+#[test]
+fn wgsl_testfile_red_triangle() {
+    validate_testfile_wgsl("testfiles/red_triangle.wyn");
+}
+
+#[test]
+fn wgsl_testfile_red_triangle_curried() {
+    validate_testfile_wgsl("testfiles/red_triangle_curried.wyn");
+}
+
 /// Compile a source file from disk through the full pipeline to WGSL
 /// and naga-validate the result. Used for testfile sweeps. Resolves
 /// paths relative to the workspace root so tests work regardless of
