@@ -31,6 +31,7 @@ pub mod pipeline_descriptor;
 pub mod resolve_placeholders;
 pub mod spirv;
 pub mod structured;
+pub mod wgsl;
 
 #[cfg(test)]
 mod integration_tests;
@@ -1142,6 +1143,10 @@ impl SsaConverted {
 
     pub fn lower_shadertoy(self) -> error::Result<String> {
         glsl::lower_shadertoy(&self.ssa)
+    }
+
+    pub fn lower_wgsl(self) -> error::Result<String> {
+        wgsl::lower(&self.ssa)
     }
 }
 

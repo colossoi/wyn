@@ -17,6 +17,8 @@ enum Target {
     Glsl,
     /// GLSL for Shadertoy (fragment shader only, mainImage entry point)
     Shadertoy,
+    /// WGSL source code (WebGPU shading language)
+    Wgsl,
 }
 
 /// Times the execution of a closure and prints the elapsed time if verbose.
@@ -251,16 +253,18 @@ fn compile_file(
         tlc_parallel.filter_reachable()
     });
 
-    // Build the raw EGIR program, then chain the passes. SPIR-V needs
-    // `materialize` (rewrite dynamic Index → Materialize+DynamicExtract);
-    // GLSL skips it.
+    // Build the raw EGIR program, then chain the passes. SPIR-V and WGSL
+    // run `materialize` (rewrite dynamic Index → Materialize+DynamicExtract
+    // so dynamic subscripts go through `var<function>` locals); GLSL skips
+    // it because its backend can't express the result.
     let raw = time("to_egraph", verbose, || tlc_reachable.to_egraph())?;
-    // Unroll small Maps for SPIR-V; leave loops intact for GLSL (drivers
-    // unroll themselves and the structurizer is happier with real loops).
-    let unroll_maps = matches!(target, Target::Spirv);
+    // Unroll small Maps for SPIR-V and WGSL; leave loops intact for GLSL
+    // (drivers unroll themselves and the structurizer is happier with
+    // real loops).
+    let unroll_maps = matches!(target, Target::Spirv | Target::Wgsl);
     let expanded = time("expand_soacs", verbose, || raw.expand_soacs(unroll_maps));
     let ssa = match target {
-        Target::Spirv => time("egir_passes_spirv", verbose, || {
+        Target::Spirv | Target::Wgsl => time("egir_passes_full", verbose, || {
             expanded.materialize().optimize_skeleton().elaborate()
         }),
         Target::Glsl | Target::Shadertoy => time("egir_passes_glsl", verbose, || {
@@ -354,6 +358,21 @@ fn compile_file(
             });
 
             fs::write(&output_path, &glsl)?;
+
+            if verbose {
+                info!("Successfully compiled to {}", output_path.display());
+            }
+        }
+        Target::Wgsl => {
+            let wgsl = time("wgsl_lower", verbose, || wyn_core::wgsl::lower(&soac_lowered.ssa))?;
+
+            let output_path = output.unwrap_or_else(|| {
+                let mut path = input.clone();
+                path.set_extension("wgsl");
+                path
+            });
+
+            fs::write(&output_path, &wgsl)?;
 
             if verbose {
                 info!("Successfully compiled to {}", output_path.display());
