@@ -842,48 +842,28 @@ fn build_two_phase_entries(
         program,
     );
 
-    // Collect input bindings from the SOAC analysis.
-    let input_bindings = collect_soac_bindings(&analysis.soac);
-    let partials_idx = input_bindings.len();
-    let result_idx = input_bindings.len() + 1;
-
-    let mut all_bindings = input_bindings;
-    all_bindings.push(Binding::StorageBuffer {
-        set: partials_binding.0,
-        binding: partials_binding.1,
-        access: Access::ReadWrite,
-        usage: BufferUsage::Intermediate,
-        name: format!("{}_partials", entry_name),
-    });
-    all_bindings.push(Binding::StorageBuffer {
-        set: result_binding.0,
-        binding: result_binding.1,
-        access: Access::WriteOnly,
-        usage: BufferUsage::Output,
-        name: format!("{}_result", entry_name),
-    });
-
-    let input_indices: Vec<usize> = (0..partials_idx).collect();
+    let mut all_bindings = collect_soac_bindings(&analysis.soac);
+    let input_indices: Vec<usize> = (0..all_bindings.len()).collect();
+    let partials_idx = push_storage_binding(
+        &mut all_bindings,
+        partials_binding,
+        Access::ReadWrite,
+        BufferUsage::Intermediate,
+        format!("{}_partials", entry_name),
+    );
+    let result_idx = push_storage_binding(
+        &mut all_bindings,
+        result_binding,
+        Access::WriteOnly,
+        BufferUsage::Output,
+        format!("{}_result", entry_name),
+    );
 
     let pipeline = Pipeline::MultiCompute(MultiComputePipeline {
         bindings: all_bindings,
         stages: vec![
-            ComputeStage {
-                entry_point: phase1_name.clone(),
-                workgroup_size: LOCAL_SIZE,
-                dispatch_size: DispatchSize::DerivedFromInputLength {
-                    workgroup_size: TOTAL_THREADS,
-                },
-                reads: input_indices,
-                writes: vec![partials_idx],
-            },
-            ComputeStage {
-                entry_point: phase2_name.clone(),
-                workgroup_size: (1, 1, 1),
-                dispatch_size: DispatchSize::Fixed { x: 1, y: 1, z: 1 },
-                reads: vec![partials_idx],
-                writes: vec![result_idx],
-            },
+            derived_stage(phase1_name.clone(), input_indices, vec![partials_idx]),
+            fixed_stage(phase2_name.clone(), vec![partials_idx], vec![result_idx]),
         ],
     });
 
@@ -948,64 +928,36 @@ fn build_scan_entries(
 
     // Pipeline descriptor — indexes into a shared bindings Vec the host
     // uses to set up the WebGPU pipeline layout.
-    let input_bindings = collect_soac_bindings(&analysis.soac);
-    let output_idx = input_bindings.len();
-    let block_sums_idx = input_bindings.len() + 1;
-    let block_offsets_idx = input_bindings.len() + 2;
-
-    let mut all_bindings = input_bindings;
-    all_bindings.push(Binding::StorageBuffer {
-        set: output_binding.0,
-        binding: output_binding.1,
-        access: Access::ReadWrite,
-        usage: BufferUsage::Output,
-        name: format!("{}_output", entry_name),
-    });
-    all_bindings.push(Binding::StorageBuffer {
-        set: block_sums_binding.0,
-        binding: block_sums_binding.1,
-        access: Access::ReadWrite,
-        usage: BufferUsage::Intermediate,
-        name: format!("{}_block_sums", entry_name),
-    });
-    all_bindings.push(Binding::StorageBuffer {
-        set: block_offsets_binding.0,
-        binding: block_offsets_binding.1,
-        access: Access::ReadWrite,
-        usage: BufferUsage::Intermediate,
-        name: format!("{}_block_offsets", entry_name),
-    });
-
-    let input_indices: Vec<usize> = (0..output_idx).collect();
+    let mut all_bindings = collect_soac_bindings(&analysis.soac);
+    let input_indices: Vec<usize> = (0..all_bindings.len()).collect();
+    let output_idx = push_storage_binding(
+        &mut all_bindings,
+        output_binding,
+        Access::ReadWrite,
+        BufferUsage::Output,
+        format!("{}_output", entry_name),
+    );
+    let block_sums_idx = push_storage_binding(
+        &mut all_bindings,
+        block_sums_binding,
+        Access::ReadWrite,
+        BufferUsage::Intermediate,
+        format!("{}_block_sums", entry_name),
+    );
+    let block_offsets_idx = push_storage_binding(
+        &mut all_bindings,
+        block_offsets_binding,
+        Access::ReadWrite,
+        BufferUsage::Intermediate,
+        format!("{}_block_offsets", entry_name),
+    );
 
     let pipeline = Pipeline::MultiCompute(MultiComputePipeline {
         bindings: all_bindings,
         stages: vec![
-            ComputeStage {
-                entry_point: phase1_name,
-                workgroup_size: LOCAL_SIZE,
-                dispatch_size: DispatchSize::DerivedFromInputLength {
-                    workgroup_size: TOTAL_THREADS,
-                },
-                reads: input_indices,
-                writes: vec![output_idx, block_sums_idx],
-            },
-            ComputeStage {
-                entry_point: phase2_name,
-                workgroup_size: (1, 1, 1),
-                dispatch_size: DispatchSize::Fixed { x: 1, y: 1, z: 1 },
-                reads: vec![block_sums_idx],
-                writes: vec![block_offsets_idx],
-            },
-            ComputeStage {
-                entry_point: phase3_name,
-                workgroup_size: LOCAL_SIZE,
-                dispatch_size: DispatchSize::DerivedFromInputLength {
-                    workgroup_size: TOTAL_THREADS,
-                },
-                reads: vec![block_offsets_idx],
-                writes: vec![output_idx],
-            },
+            derived_stage(phase1_name, input_indices, vec![output_idx, block_sums_idx]),
+            fixed_stage(phase2_name, vec![block_sums_idx], vec![block_offsets_idx]),
+            derived_stage(phase3_name, vec![block_offsets_idx], vec![output_idx]),
         ],
     });
 
@@ -1305,6 +1257,47 @@ fn seq_unit_effect(first: Term, second: Term, span: ast::Span, program: &mut Pro
     let_term(dummy, unit_ty, first, second, span)
 }
 
+/// The load/combine/store/yield micro-pattern shared by every scan-phase
+/// body. Emits:
+///
+/// ```text
+/// let v   = load(src, index) in
+/// let new = combiner(<combine_args(v)>) in
+/// let _   = store(dst, index, new) in
+/// new
+/// ```
+///
+/// `combine_args(v_term)` builds the combiner's arg list — callers
+/// choose the order (`(acc, v)` for phase 1/2; `(v, off)` for phase 3).
+/// Returns a Term of type `elem_ty` usable as the loop body's new-acc.
+fn emit_load_combine_store(
+    src: &BufferRef,
+    dst: &BufferRef,
+    index: Term,
+    combine_args: impl FnOnce(/*v_var:*/ Term) -> Vec<Term>,
+    combiner: &Lambda,
+    elem_ty: &Type<TypeName>,
+    span: ast::Span,
+    program: &mut Program,
+) -> Term {
+    let v_sym = program.symbols.alloc("_lcs_v".into());
+    let new_sym = program.symbols.alloc("_lcs_new".into());
+
+    let v_load = emit_storage_load(src, index.clone(), span, program);
+    let v_var = var_term(v_sym, elem_ty.clone(), span);
+    let combiner_app = invoke_soac_lambda(combiner, combine_args(v_var), span);
+    let store = emit_storage_store(
+        dst,
+        index,
+        var_term(new_sym, elem_ty.clone(), span),
+        span,
+        program,
+    );
+    let tail = seq_unit_effect(store, var_term(new_sym, elem_ty.clone(), span), span, program);
+    let new_binding = let_term(new_sym, elem_ty.clone(), combiner_app, tail, span);
+    let_term(v_sym, elem_ty.clone(), v_load, new_binding, span)
+}
+
 /// Build a scan phase's Def. Dispatches on `ScanPhase` and returns
 /// `(Def, storage_bindings)` for `build_scan_entries` to collect.
 fn build_scan_phase_def(
@@ -1353,29 +1346,16 @@ fn build_scan_local_body(
         chunk.chunk_len(span),
         |acc_var, i_var, program| {
             let abs_idx = binop("+", chunk.chunk_start(span), i_var, u32_ty(), span);
-            let v_load = emit_storage_load(&plan.input, abs_idx.clone(), span, program);
-            let v_sym = program.symbols.alloc("_scan_v".into());
-            let new_acc_sym = program.symbols.alloc("_scan_new_acc".into());
-            let combiner_app = invoke_soac_lambda(
-                &plan.combiner,
-                vec![acc_var, var_term(v_sym, plan.elem_ty.clone(), span)],
-                span,
-            );
-            let store = emit_storage_store(
+            emit_load_combine_store(
+                &plan.input,
                 &plan.output,
                 abs_idx,
-                var_term(new_acc_sym, plan.elem_ty.clone(), span),
+                |v| vec![acc_var, v],
+                &plan.combiner,
+                &plan.elem_ty,
                 span,
                 program,
-            );
-            let tail = seq_unit_effect(
-                store,
-                var_term(new_acc_sym, plan.elem_ty.clone(), span),
-                span,
-                program,
-            );
-            let new_acc_binding = let_term(new_acc_sym, plan.elem_ty.clone(), combiner_app, tail, span);
-            let_term(v_sym, plan.elem_ty.clone(), v_load, new_acc_binding, span)
+            )
         },
         span,
         program,
@@ -1528,29 +1508,16 @@ fn build_scan_sums_body(
         plan.neutral.clone(),
         uint_lit(num_blocks, span),
         |acc_var, i_var, program| {
-            let v_load = emit_storage_load(&plan.block_sums, i_var.clone(), span, program);
-            let v_sym = program.symbols.alloc("_sums_v".into());
-            let new_acc_sym = program.symbols.alloc("_sums_new_acc".into());
-            let combiner_app = invoke_soac_lambda(
-                &plan.combiner,
-                vec![acc_var, var_term(v_sym, plan.elem_ty.clone(), span)],
-                span,
-            );
-            let store = emit_storage_store(
+            emit_load_combine_store(
+                &plan.block_sums,
                 &plan.block_offsets,
                 i_var,
-                var_term(new_acc_sym, plan.elem_ty.clone(), span),
+                |v| vec![acc_var, v],
+                &plan.combiner,
+                &plan.elem_ty,
                 span,
                 program,
-            );
-            let tail = seq_unit_effect(
-                store,
-                var_term(new_acc_sym, plan.elem_ty.clone(), span),
-                span,
-                program,
-            );
-            let new_acc_binding = let_term(new_acc_sym, plan.elem_ty.clone(), combiner_app, tail, span);
-            let_term(v_sym, plan.elem_ty.clone(), v_load, new_acc_binding, span)
+            )
         },
         span,
         program,
@@ -1599,37 +1566,18 @@ fn build_scan_apply_body(
         chunk.chunk_len(span),
         |_acc_var /* unused — phase 3 carries no cross-iter state */, i_var, program| {
             let abs_idx = binop("+", chunk.chunk_start(span), i_var, u32_ty(), span);
-            let prior_load = emit_storage_load(&plan.output, abs_idx.clone(), span, program);
-            let prior_sym = program.symbols.alloc("_apply_prior".into());
-            let combined_sym = program.symbols.alloc("_apply_combined".into());
-            let combiner_app = invoke_soac_lambda(
-                &plan.combiner,
-                vec![
-                    var_term(prior_sym, plan.elem_ty.clone(), span),
-                    var_term(off_sym, plan.elem_ty.clone(), span),
-                ],
-                span,
-            );
-            let store = emit_storage_store(
+            let off_var = var_term(off_sym, plan.elem_ty.clone(), span);
+            // Phase 3 combines (prior, off), not (acc, v) — the `v` from
+            // the load is this iteration's prior output element.
+            emit_load_combine_store(
+                &plan.output,
                 &plan.output,
                 abs_idx,
-                var_term(combined_sym, plan.elem_ty.clone(), span),
+                |v| vec![v, off_var],
+                &plan.combiner,
+                &plan.elem_ty,
                 span,
                 program,
-            );
-            let tail = seq_unit_effect(
-                store,
-                var_term(combined_sym, plan.elem_ty.clone(), span),
-                span,
-                program,
-            );
-            let combined_binding = let_term(combined_sym, plan.elem_ty.clone(), combiner_app, tail, span);
-            let_term(
-                prior_sym,
-                plan.elem_ty.clone(),
-                prior_load,
-                combined_binding,
-                span,
             )
         },
         span,
@@ -2007,6 +1955,57 @@ fn make_entry_def(
             body: dummy_expr,
         })),
         arity: required_params.len(),
+    }
+}
+
+// =============================================================================
+// Pipeline-descriptor construction helpers
+// =============================================================================
+
+/// Append a storage-buffer binding to `bindings` and return its index.
+fn push_storage_binding(
+    bindings: &mut Vec<Binding>,
+    (set, binding): (u32, u32),
+    access: Access,
+    usage: BufferUsage,
+    name: String,
+) -> usize {
+    let idx = bindings.len();
+    bindings.push(Binding::StorageBuffer {
+        set,
+        binding,
+        access,
+        usage,
+        name,
+    });
+    idx
+}
+
+/// A `ComputeStage` with the default workgroup + DerivedFromInputLength
+/// dispatch. Used by per-element phases (phase 1 of reduce; phases 1+3
+/// of scan).
+fn derived_stage(entry_point: String, reads: Vec<usize>, writes: Vec<usize>) -> ComputeStage {
+    ComputeStage {
+        entry_point,
+        workgroup_size: LOCAL_SIZE,
+        dispatch_size: DispatchSize::DerivedFromInputLength {
+            workgroup_size: TOTAL_THREADS,
+        },
+        reads,
+        writes,
+    }
+}
+
+/// A `ComputeStage` with a `(1, 1, 1)` workgroup and fixed `1×1×1`
+/// dispatch — used by single-threaded combine phases (phase 2 of
+/// reduce; phase 2 of scan).
+fn fixed_stage(entry_point: String, reads: Vec<usize>, writes: Vec<usize>) -> ComputeStage {
+    ComputeStage {
+        entry_point,
+        workgroup_size: (1, 1, 1),
+        dispatch_size: DispatchSize::Fixed { x: 1, y: 1, z: 1 },
+        reads,
+        writes,
     }
 }
 
