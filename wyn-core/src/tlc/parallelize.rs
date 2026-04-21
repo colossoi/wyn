@@ -720,6 +720,15 @@ fn maybe_hoist(
         return rhs;
     }
 
+    // TODO: polymorphic-size free vars (e.g. `iota(N)` in a fragment
+    // body where N is a Size type variable) pass the entry-param check
+    // because the size symbol isn't an entry param — but it's also not
+    // in scope in the lifted pre-pass either, so the emitted pre-pass
+    // references it as an undeclared `@size` global and fails backend
+    // validation. Detect and either (a) skip the lift for these, or (b)
+    // capture the size binding alongside the hoisted SOAC. For now the
+    // lift silently produces a broken pre-pass if iota is the input.
+
     // Pre-allocate the binding the fragment will load from. Stage B's
     // make_two_phase_plan will use this as the prepass's result_binding
     // (via the prepass_result_bindings map), so phase 2's final store
@@ -1289,6 +1298,11 @@ fn build_scan_entries(
 /// Reused by both `build_chunked_soac_body` (reduce/map/redomap) and
 /// `build_scan_phase_def` (scan phases 1 and 3).
 struct ChunkArithmetic {
+    /// Type of `total`, `input_len`, `chunk_size`, `chunk_start`,
+    /// `chunk_len`. `tid` is always u32 (from `_w_intrinsic_thread_id`)
+    /// and is cast to `index_ty` at the `chunk_start = tid * chunk_size`
+    /// site when the two types differ.
+    index_ty: Type<TypeName>,
     tid_sym: SymbolId,
     total_sym: SymbolId,
     input_len_sym: SymbolId,
@@ -1298,8 +1312,9 @@ struct ChunkArithmetic {
 }
 
 impl ChunkArithmetic {
-    fn alloc(program: &mut Program) -> Self {
+    fn alloc_for(index_ty: Type<TypeName>, program: &mut Program) -> Self {
         ChunkArithmetic {
+            index_ty,
             tid_sym: program.symbols.alloc("_par_tid".into()),
             total_sym: program.symbols.alloc("_par_total".into()),
             input_len_sym: program.symbols.alloc("_par_input_len".into()),
@@ -1309,103 +1324,145 @@ impl ChunkArithmetic {
         }
     }
 
-    fn tid(&self, span: ast::Span) -> Term {
+    /// The raw u32 thread-id. Use for storage-op indices (`partials[tid]`,
+    /// `block_sums[tid]`, etc.) since `_w_intrinsic_storage_store`'s
+    /// index arg is u32.
+    fn tid_u32(&self, span: ast::Span) -> Term {
         var_term(self.tid_sym, u32_ty(), span)
     }
     fn chunk_start(&self, span: ast::Span) -> Term {
-        var_term(self.chunk_start_sym, u32_ty(), span)
+        var_term(self.chunk_start_sym, self.index_ty.clone(), span)
     }
     fn chunk_len(&self, span: ast::Span) -> Term {
-        var_term(self.chunk_len_sym, u32_ty(), span)
+        var_term(self.chunk_len_sym, self.index_ty.clone(), span)
     }
 
-    /// Wrap `body` with the full chunk-arithmetic let-chain.
+    /// Wrap `body` with:
+    /// ```text
+    /// let tid         = _w_intrinsic_thread_id()  (u32)
+    /// let total       = TOTAL_THREADS             (index_ty)
+    /// let input_len   = <input_len_term>          (index_ty)
+    /// let chunk_size  = (input_len + total - 1) / total  (index_ty)
+    /// let chunk_start = cast(tid) * chunk_size    (index_ty)
+    /// let chunk_len   = min(chunk_size, input_len - chunk_start)  (index_ty)
+    /// ```
+    /// `cast(tid)` is the identity when `index_ty` is u32, otherwise an
+    /// `i32.u32` bitcast. `input_len_term` must already be typed as
+    /// `self.index_ty`; callers derive it from the SOAC input's length
+    /// term.
     fn wrap(&self, body: Term, input_len_term: Term, span: ast::Span, program: &mut Program) -> Term {
-        let u32_ty = u32_ty();
+        let ity = self.index_ty.clone();
         let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+        let one_lit = int_lit_of(1, &ity, span);
+        let total_lit = int_lit_of(TOTAL_THREADS as i64, &ity, span);
 
-        // chunk_len = if chunk_size < (input_len - chunk_start)
-        //             then chunk_size else (input_len - chunk_start)
         let len_minus_start = binop(
             "-",
-            var_term(self.input_len_sym, u32_ty.clone(), span),
-            var_term(self.chunk_start_sym, u32_ty.clone(), span),
-            u32_ty.clone(),
+            var_term(self.input_len_sym, ity.clone(), span),
+            var_term(self.chunk_start_sym, ity.clone(), span),
+            ity.clone(),
             span,
         );
         let cond = binop(
             "<",
-            var_term(self.chunk_size_sym, u32_ty.clone(), span),
+            var_term(self.chunk_size_sym, ity.clone(), span),
             len_minus_start.clone(),
             bool_ty,
             span,
         );
         let min_expr = Term {
             id: TermId(0),
-            ty: u32_ty.clone(),
+            ty: ity.clone(),
             span,
             kind: TermKind::If {
                 cond: Box::new(cond),
-                then_branch: Box::new(var_term(self.chunk_size_sym, u32_ty.clone(), span)),
+                then_branch: Box::new(var_term(self.chunk_size_sym, ity.clone(), span)),
                 else_branch: Box::new(len_minus_start),
             },
         };
-        let body = let_term(self.chunk_len_sym, u32_ty.clone(), min_expr, body, span);
+        let body = let_term(self.chunk_len_sym, ity.clone(), min_expr, body, span);
 
-        // chunk_start = tid * chunk_size
+        let tid_as_idx = if ity == u32_ty() {
+            var_term(self.tid_sym, u32_ty(), span)
+        } else {
+            intrinsic_term(
+                "i32.u32",
+                vec![var_term(self.tid_sym, u32_ty(), span)],
+                ity.clone(),
+                span,
+                program,
+            )
+        };
         let chunk_start_rhs = binop(
             "*",
-            var_term(self.tid_sym, u32_ty.clone(), span),
-            var_term(self.chunk_size_sym, u32_ty.clone(), span),
-            u32_ty.clone(),
+            tid_as_idx,
+            var_term(self.chunk_size_sym, ity.clone(), span),
+            ity.clone(),
             span,
         );
-        let body = let_term(self.chunk_start_sym, u32_ty.clone(), chunk_start_rhs, body, span);
+        let body = let_term(self.chunk_start_sym, ity.clone(), chunk_start_rhs, body, span);
 
-        // chunk_size = (input_len + total - 1) / total
         let total_minus_1 = binop(
             "-",
-            var_term(self.total_sym, u32_ty.clone(), span),
-            uint_lit(1, span),
-            u32_ty.clone(),
+            var_term(self.total_sym, ity.clone(), span),
+            one_lit,
+            ity.clone(),
             span,
         );
         let len_plus = binop(
             "+",
-            var_term(self.input_len_sym, u32_ty.clone(), span),
+            var_term(self.input_len_sym, ity.clone(), span),
             total_minus_1,
-            u32_ty.clone(),
+            ity.clone(),
             span,
         );
         let chunk_size_rhs = binop(
             "/",
             len_plus,
-            var_term(self.total_sym, u32_ty.clone(), span),
-            u32_ty.clone(),
+            var_term(self.total_sym, ity.clone(), span),
+            ity.clone(),
             span,
         );
-        let body = let_term(self.chunk_size_sym, u32_ty.clone(), chunk_size_rhs, body, span);
+        let body = let_term(self.chunk_size_sym, ity.clone(), chunk_size_rhs, body, span);
 
-        // input_len = <from provenance>
-        let body = let_term(self.input_len_sym, u32_ty.clone(), input_len_term, body, span);
+        let body = let_term(self.input_len_sym, ity.clone(), input_len_term, body, span);
+        let body = let_term(self.total_sym, ity, total_lit, body, span);
 
-        // total = TOTAL_THREADS
-        let body = let_term(
-            self.total_sym,
-            u32_ty.clone(),
-            uint_lit(TOTAL_THREADS as u64, span),
-            body,
-            span,
-        );
-
-        // tid = _w_intrinsic_thread_id()
-        let tid_rhs = intrinsic_term("_w_intrinsic_thread_id", vec![], u32_ty.clone(), span, program);
-        let_term(self.tid_sym, u32_ty, tid_rhs, body, span)
+        let tid_rhs = intrinsic_term("_w_intrinsic_thread_id", vec![], u32_ty(), span, program);
+        let_term(self.tid_sym, u32_ty(), tid_rhs, body, span)
     }
 }
 
 fn u32_ty() -> Type<TypeName> {
     Type::Constructed(TypeName::UInt(32), vec![])
+}
+
+/// Index type for `ChunkArithmetic` to use when chunking this SOAC.
+/// Range inputs carry their own index type (usually i32 from `0..<N`
+/// syntax); every other input kind (storage views, zips, generators,
+/// literals) is indexed by u32.
+fn soac_input_index_ty(soac: &SoacOp) -> Type<TypeName> {
+    let first = match soac {
+        SoacOp::Map { inputs, .. } | SoacOp::Redomap { inputs, .. } => inputs.first(),
+        SoacOp::Reduce { input, .. } | SoacOp::Scan { input, .. } => Some(input),
+        _ => None,
+    };
+    match first {
+        Some(ArrayExpr::Range { start, .. }) => start.ty.clone(),
+        _ => u32_ty(),
+    }
+}
+
+/// Integer literal term typed as `ty`. `ty` is expected to be one of
+/// `Int(32)` / `UInt(32)`; other widths/types aren't used by
+/// `ChunkArithmetic` today.
+fn int_lit_of(value: i64, ty: &Type<TypeName>, span: ast::Span) -> Term {
+    Term {
+        id: TermId(0),
+        ty: ty.clone(),
+        span,
+        kind: TermKind::IntLit(value.to_string()),
+    }
 }
 
 // =============================================================================
@@ -1641,7 +1698,7 @@ fn build_scan_local_body(
     span: ast::Span,
     program: &mut Program,
 ) -> (Term, Vec<interface::StorageBindingDecl>) {
-    let chunk = ChunkArithmetic::alloc(program);
+    let chunk = ChunkArithmetic::alloc_for(u32_ty(), program);
 
     let final_acc = emit_u32_counter_scan_loop(
         &plan.elem_ty,
@@ -1668,7 +1725,7 @@ fn build_scan_local_body(
     let final_acc_sym = program.symbols.alloc("_scan_final_acc".into());
     let store_block_sum = emit_storage_store(
         &plan.block_sums,
-        chunk.tid(span),
+        chunk.tid_u32(span),
         var_term(final_acc_sym, plan.elem_ty.clone(), span),
         span,
         program,
@@ -1840,7 +1897,7 @@ fn build_scan_apply_body(
     span: ast::Span,
     program: &mut Program,
 ) -> (Term, Vec<interface::StorageBindingDecl>) {
-    let chunk = ChunkArithmetic::alloc(program);
+    let chunk = ChunkArithmetic::alloc_for(u32_ty(), program);
     let off_sym = program.symbols.alloc("_apply_off".into());
 
     let final_acc = emit_u32_counter_scan_loop(
@@ -1872,7 +1929,7 @@ fn build_scan_apply_body(
     let loop_result_sym = program.symbols.alloc("_apply_loop_res".into());
     let terminal_store = emit_storage_store(
         &plan.block_offsets,
-        chunk.tid(span),
+        chunk.tid_u32(span),
         var_term(off_sym, plan.elem_ty.clone(), span),
         span,
         program,
@@ -1886,7 +1943,7 @@ fn build_scan_apply_body(
     );
 
     // Prepend: let off = block_offsets[tid]
-    let off_load = emit_storage_load(&plan.block_offsets, chunk.tid(span), span, program);
+    let off_load = emit_storage_load(&plan.block_offsets, chunk.tid_u32(span), span, program);
     let phase_body = let_term(
         off_sym,
         plan.elem_ty.clone(),
@@ -1930,13 +1987,16 @@ fn build_chunked_soac_body(
     // becomes Unit rather than `result_ty`.
     write_partial_to: Option<(u32, u32)>,
 ) -> Term {
-    let chunk = ChunkArithmetic::alloc(program);
+    // ChunkArithmetic's `index_ty` matches the SOAC input's index type:
+    // storage-view inputs use u32 (from `_w_intrinsic_storage_len`);
+    // range inputs use the range's declared `start.ty` (typically i32).
+    // This keeps `chunk_array_expr`'s rebuilt Range consistent with the
+    // original source-level types, avoiding a bitcast boundary.
+    let index_ty = soac_input_index_ty(&soac.original);
+    let chunk = ChunkArithmetic::alloc_for(index_ty, program);
     let chunk_start_var = chunk.chunk_start(span);
     let chunk_len_var = chunk.chunk_len(span);
 
-    // Rebuild the SOAC with inputs rebased to (chunk_start, chunk_len).
-    // Pattern-match on the original SoacOp — `analyze_soac` guarantees one
-    // of the parallel variants; scan is handled by `build_scan_phase_def`.
     let chunked_soac = match &soac.original {
         SoacOp::Map { lam, inputs } => {
             let chunked_inputs = inputs
@@ -1989,7 +2049,7 @@ fn build_chunked_soac_body(
     if let Some((set, binding)) = write_partial_to {
         let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
         let r_sym = program.symbols.alloc("_par_out".into());
-        let tid_var = chunk.tid(span);
+        let tid_var = chunk.tid_u32(span);
         let r_var = var_term(r_sym, result_ty.clone(), span);
         let store = intrinsic_term(
             "_w_intrinsic_storage_store",
@@ -2045,13 +2105,18 @@ fn chunk_array_expr(input: &ArrayExpr, chunk_start: &Term, chunk_len: &Term) -> 
             }
         }
         ArrayExpr::Range { start, len: _ } => {
-            // Range: chunk_start..chunk_len starting from original start
+            // Range: chunk_start..chunk_len starting from original start.
+            // Chunk values are u32 (from ChunkArithmetic); the original
+            // range is typically i32. Coercion to match the range's type
+            // happens at the caller — `chunk_array_expr` stays a simple
+            // structural rewrite.
+            let range_ty = start.ty.clone();
             let new_start = binop(
                 "+",
                 (**start).clone(),
                 chunk_start.clone(),
-                chunk_start.ty.clone(),
-                chunk_start.span,
+                range_ty.clone(),
+                start.span,
             );
             ArrayExpr::Range {
                 start: Box::new(new_start),
