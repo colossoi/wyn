@@ -406,7 +406,7 @@ fn compile_impl(source: &str) -> CompileResult {
         .buffer_specialize()
         .fold_generated_lambdas()
         .inline_small()
-        .parallelize_soacs()
+        .parallelize_soacs(false)
         .filter_reachable()
         .to_egraph()
     {
@@ -501,7 +501,7 @@ fn compile_with_ir_impl(source: &str) -> CompileResultWithIR {
         .buffer_specialize()
         .fold_generated_lambdas()
         .inline_small()
-        .parallelize_soacs()
+        .parallelize_soacs(false)
         .filter_reachable()
         .to_egraph()
     {

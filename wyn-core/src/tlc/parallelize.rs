@@ -510,7 +510,17 @@ pub struct ParallelizationResult {
 }
 
 /// Parallelize SOACs in compute entry points.
-pub fn run(mut program: Program) -> ParallelizationResult {
+///
+/// `disable` short-circuits the whole pass — every compute entry runs
+/// as a single sequential loop, graphical entries receive no pre-pass
+/// lifting, and the pipeline descriptor is built from the untouched
+/// program. Useful for debugging (keeps the SSA close to the source)
+/// and for backends that can't handle multi-entry pipelines.
+pub fn run(mut program: Program, disable: bool) -> ParallelizationResult {
+    if disable {
+        let pipeline = build_default_pipeline(&program);
+        return ParallelizationResult { program, pipeline };
+    }
     let analyses = analyze_program(&program);
 
     if analyses.is_empty() {

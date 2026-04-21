@@ -66,6 +66,12 @@ enum Commands {
         #[arg(long, value_name = "FILE")]
         output_mir: Option<PathBuf>,
 
+        /// Disable multi-stage SOAC parallelization. Compute SOACs emit
+        /// as a single sequential loop instead of chunk/combine phases;
+        /// graphical-entry SOACs are not lifted to pre-pass kernels.
+        #[arg(long)]
+        single_stage: bool,
+
         /// Print verbose output
         #[arg(short, long)]
         verbose: bool,
@@ -123,6 +129,7 @@ fn run(cli: Cli) -> Result<(), DriverError> {
             output_annotated,
             output_tlc,
             output_mir,
+            single_stage,
             verbose,
         } => {
             compile_file(
@@ -132,6 +139,7 @@ fn run(cli: Cli) -> Result<(), DriverError> {
                 output_annotated,
                 output_tlc,
                 output_mir,
+                single_stage,
                 verbose,
             )?;
         }
@@ -154,6 +162,7 @@ fn compile_file(
     output_annotated: Option<PathBuf>,
     output_tlc: Option<PathBuf>,
     output_mir: Option<PathBuf>,
+    single_stage: bool,
     verbose: bool,
 ) -> Result<(), DriverError> {
     if verbose {
@@ -230,8 +239,12 @@ fn compile_file(
     // Inline small user functions and constants at TLC level
     let tlc_inlined = time("tlc_inline_small", verbose, || tlc_folded.inline_small());
 
-    // Parallelize SOACs in compute shaders (structural decisions at TLC level)
-    let tlc_parallel = time("tlc_parallelize", verbose, || tlc_inlined.parallelize_soacs());
+    // Parallelize SOACs in compute shaders (structural decisions at TLC level).
+    // `--single-stage` disables this pass entirely; compute SOACs collapse
+    // to sequential loops and graphical entries are not restructured.
+    let tlc_parallel = time("tlc_parallelize", verbose, || {
+        tlc_inlined.parallelize_soacs(single_stage)
+    });
 
     // Eliminate dead TLC defs
     let tlc_reachable = time("tlc_filter_reachable", verbose, || {
