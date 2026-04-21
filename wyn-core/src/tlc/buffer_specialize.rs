@@ -299,16 +299,12 @@ impl BufferSpecializer {
                         if name == "_w_index" && args.len() == 2 {
                             if let Some(view) = self.try_resolve_view_expr(&args[0]) {
                                 let span = term.span;
-                                let u32_ty: Type<TypeName> =
-                                    Type::Constructed(TypeName::UInt(32), vec![]);
+                                let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
                                 let idx = self.rewrite_term(&args[1]);
                                 let set_lit =
                                     self.make_int_lit(&view.set.to_string(), u32_ty.clone(), span);
-                                let binding_lit = self.make_int_lit(
-                                    &view.binding.to_string(),
-                                    u32_ty.clone(),
-                                    span,
-                                );
+                                let binding_lit =
+                                    self.make_int_lit(&view.binding.to_string(), u32_ty.clone(), span);
                                 let offset_plus_idx = self.make_binop_app(
                                     ast::BinaryOp { op: "+".to_string() },
                                     view.offset,
@@ -813,7 +809,6 @@ impl BufferSpecializer {
         self.new_defs.push(spec_def);
         spec_sym
     }
-
 
     // =========================================================================
     // View expression resolution

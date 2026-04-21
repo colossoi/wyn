@@ -13,7 +13,9 @@ use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 use std::collections::{HashMap, HashSet};
 
-use super::{ArrayExpr, Def, DefMeta, Lambda, Program, ReduceProps, SoacOp, Term, TermId, TermKind};
+use super::{
+    ArrayExpr, Def, DefMeta, Lambda, LoopKind, Program, ReduceProps, SoacOp, Term, TermId, TermKind,
+};
 
 // =============================================================================
 // Analysis types
@@ -574,11 +576,8 @@ pub fn run(mut program: Program) -> ParallelizationResult {
     // user-declared `#[storage]` entries. Filtering only by
     // `program.storage` would collide fresh intermediates with input
     // buffers; see PLAN_scan_stage_b.md.
-    let mut next_binding: u32 = collect_all_used_bindings(&program)
-        .iter()
-        .map(|(_, b)| b + 1)
-        .max()
-        .unwrap_or(0);
+    let mut next_binding: u32 =
+        collect_all_used_bindings(&program).iter().map(|(_, b)| b + 1).max().unwrap_or(0);
 
     for (_sym, analysis) in &analyses {
         let entry_name = program.symbols.get(analysis.def_name).cloned().unwrap_or_default();
@@ -907,74 +906,46 @@ fn build_scan_entries(
 ) -> (Vec<Def>, Pipeline) {
     let span = ne.span;
 
-    // Phase 1: local scans per chunk.
-    let phase1_name = format!("{}_phase1_local_scans", entry_name);
-    let phase1_body = build_chunked_soac_body(
-        &analysis.soac,
-        &analysis.prefix_lets,
-        elem_type.clone(),
+    // Resolve the input BufferRef from the SOAC's storage provenance.
+    let input_buf = match analysis.soac.provenances.first() {
+        Some(ArrayProvenance::Storage {
+            set,
+            binding,
+            elem_ty,
+        }) => BufferRef {
+            set: *set,
+            binding: *binding,
+            elem_ty: elem_ty.clone(),
+        },
+        _ => panic!("BUG: build_scan_entries called with non-storage SOAC input"),
+    };
+
+    let plan = ScanPlan {
+        combiner: op.clone(),
+        neutral: ne.clone(),
+        elem_ty: elem_type.clone(),
+        input: input_buf,
+        output: BufferRef::from_tuple(output_binding, elem_type.clone()),
+        block_sums: BufferRef::from_tuple(block_sums_binding, elem_type.clone()),
+        block_offsets: BufferRef::from_tuple(block_offsets_binding, elem_type.clone()),
+        prefix_lets: analysis.prefix_lets.clone(),
+        required_params: analysis.required_params.clone(),
         span,
-        program,
-        None,
-    );
-    let phase1_def = make_entry_def(
-        &phase1_name,
-        phase1_body,
-        elem_type.clone(),
-        &analysis.required_params,
-        Vec::new(),
-        program,
-    );
+    };
 
-    // Phase 2: scan the block sums.
+    let phase1_name = format!("{}_phase1_local_scans", entry_name);
     let phase2_name = format!("{}_phase2_scan_sums", entry_name);
-    let block_sums_input = ArrayExpr::StorageBuffer {
-        set: block_sums_binding.0,
-        binding: block_sums_binding.1,
-        offset: Box::new(uint_lit(0, span)),
-        len: Box::new(uint_lit(TOTAL_THREADS as u64, span)),
-        elem_ty: elem_type.clone(),
-    };
-    let phase2_soac = SoacOp::Scan {
-        op: op.clone(),
-        ne: Box::new(ne.clone()),
-        input: block_sums_input,
-    };
-    let phase2_body = soac_term(phase2_soac, elem_type.clone(), span);
-    let phase2_def = make_entry_def(
-        &phase2_name,
-        phase2_body,
-        elem_type.clone(),
-        &analysis.required_params,
-        Vec::new(),
-        program,
-    );
-
-    // Phase 3: add block offsets to each element.
     let phase3_name = format!("{}_phase3_add_offsets", entry_name);
-    let output_input = ArrayExpr::StorageBuffer {
-        set: output_binding.0,
-        binding: output_binding.1,
-        offset: Box::new(uint_lit(0, span)),
-        len: Box::new(uint_lit(0, span)), // runtime length
-        elem_ty: elem_type.clone(),
-    };
-    // Phase 3 maps the scan op over the output, combining with block offsets.
-    let phase3_soac = SoacOp::Map {
-        lam: op.clone(),
-        inputs: vec![output_input],
-    };
-    let phase3_body = soac_term(phase3_soac, elem_type.clone(), span);
-    let phase3_def = make_entry_def(
-        &phase3_name,
-        phase3_body,
-        elem_type.clone(),
-        &analysis.required_params,
-        Vec::new(),
-        program,
-    );
 
-    // Pipeline.
+    let (phase1_def, _phase1_bindings) =
+        build_scan_phase_def(&plan, ScanPhase::LocalScan, &phase1_name, program);
+    let (phase2_def, _phase2_bindings) =
+        build_scan_phase_def(&plan, ScanPhase::SumsPrefixScan, &phase2_name, program);
+    let (phase3_def, _phase3_bindings) =
+        build_scan_phase_def(&plan, ScanPhase::ApplyBlockOffsets, &phase3_name, program);
+
+    // Pipeline descriptor — indexes into a shared bindings Vec the host
+    // uses to set up the WebGPU pipeline layout.
     let input_bindings = collect_soac_bindings(&analysis.soac);
     let output_idx = input_bindings.len();
     let block_sums_idx = input_bindings.len() + 1;
@@ -1009,23 +980,23 @@ fn build_scan_entries(
         bindings: all_bindings,
         stages: vec![
             ComputeStage {
-                entry_point: phase1_name.clone(),
+                entry_point: phase1_name,
                 workgroup_size: LOCAL_SIZE,
                 dispatch_size: DispatchSize::DerivedFromInputLength {
                     workgroup_size: TOTAL_THREADS,
                 },
-                reads: input_indices.clone(),
+                reads: input_indices,
                 writes: vec![output_idx, block_sums_idx],
             },
             ComputeStage {
-                entry_point: phase2_name.clone(),
+                entry_point: phase2_name,
                 workgroup_size: (1, 1, 1),
                 dispatch_size: DispatchSize::Fixed { x: 1, y: 1, z: 1 },
                 reads: vec![block_sums_idx],
                 writes: vec![block_offsets_idx],
             },
             ComputeStage {
-                entry_point: phase3_name.clone(),
+                entry_point: phase3_name,
                 workgroup_size: LOCAL_SIZE,
                 dispatch_size: DispatchSize::DerivedFromInputLength {
                     workgroup_size: TOTAL_THREADS,
@@ -1040,20 +1011,680 @@ fn build_scan_entries(
 }
 
 // =============================================================================
+// Shared per-thread chunk-arithmetic scaffolding
+// =============================================================================
+
+/// The fresh symbol set for a parallel entry's per-thread chunk arithmetic.
+/// One phase-entry body has a single `ChunkArithmetic` that `wrap()` turns
+/// into a let-chain outside the body:
+///
+/// ```text
+/// let tid         = _w_intrinsic_thread_id() in
+/// let total       = 64 in
+/// let input_len   = <input_len_term> in
+/// let chunk_size  = (input_len + total - 1) / total in
+/// let chunk_start = tid * chunk_size in
+/// let chunk_len   = if chunk_size < (input_len - chunk_start)
+///                     then chunk_size else (input_len - chunk_start) in
+/// <body>
+/// ```
+///
+/// Reused by both `build_chunked_soac_body` (reduce/map/redomap) and
+/// `build_scan_phase_def` (scan phases 1 and 3).
+struct ChunkArithmetic {
+    tid_sym: SymbolId,
+    total_sym: SymbolId,
+    input_len_sym: SymbolId,
+    chunk_size_sym: SymbolId,
+    chunk_start_sym: SymbolId,
+    chunk_len_sym: SymbolId,
+}
+
+impl ChunkArithmetic {
+    fn alloc(program: &mut Program) -> Self {
+        ChunkArithmetic {
+            tid_sym: program.symbols.alloc("_par_tid".into()),
+            total_sym: program.symbols.alloc("_par_total".into()),
+            input_len_sym: program.symbols.alloc("_par_input_len".into()),
+            chunk_size_sym: program.symbols.alloc("_par_chunk_size".into()),
+            chunk_start_sym: program.symbols.alloc("_par_chunk_start".into()),
+            chunk_len_sym: program.symbols.alloc("_par_chunk_len".into()),
+        }
+    }
+
+    fn tid(&self, span: ast::Span) -> Term {
+        var_term(self.tid_sym, u32_ty(), span)
+    }
+    fn chunk_start(&self, span: ast::Span) -> Term {
+        var_term(self.chunk_start_sym, u32_ty(), span)
+    }
+    fn chunk_len(&self, span: ast::Span) -> Term {
+        var_term(self.chunk_len_sym, u32_ty(), span)
+    }
+
+    /// Wrap `body` with the full chunk-arithmetic let-chain.
+    fn wrap(&self, body: Term, input_len_term: Term, span: ast::Span, program: &mut Program) -> Term {
+        let u32_ty = u32_ty();
+        let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+
+        // chunk_len = if chunk_size < (input_len - chunk_start)
+        //             then chunk_size else (input_len - chunk_start)
+        let len_minus_start = binop(
+            "-",
+            var_term(self.input_len_sym, u32_ty.clone(), span),
+            var_term(self.chunk_start_sym, u32_ty.clone(), span),
+            u32_ty.clone(),
+            span,
+        );
+        let cond = binop(
+            "<",
+            var_term(self.chunk_size_sym, u32_ty.clone(), span),
+            len_minus_start.clone(),
+            bool_ty,
+            span,
+        );
+        let min_expr = Term {
+            id: TermId(0),
+            ty: u32_ty.clone(),
+            span,
+            kind: TermKind::If {
+                cond: Box::new(cond),
+                then_branch: Box::new(var_term(self.chunk_size_sym, u32_ty.clone(), span)),
+                else_branch: Box::new(len_minus_start),
+            },
+        };
+        let body = let_term(self.chunk_len_sym, u32_ty.clone(), min_expr, body, span);
+
+        // chunk_start = tid * chunk_size
+        let chunk_start_rhs = binop(
+            "*",
+            var_term(self.tid_sym, u32_ty.clone(), span),
+            var_term(self.chunk_size_sym, u32_ty.clone(), span),
+            u32_ty.clone(),
+            span,
+        );
+        let body = let_term(self.chunk_start_sym, u32_ty.clone(), chunk_start_rhs, body, span);
+
+        // chunk_size = (input_len + total - 1) / total
+        let total_minus_1 = binop(
+            "-",
+            var_term(self.total_sym, u32_ty.clone(), span),
+            uint_lit(1, span),
+            u32_ty.clone(),
+            span,
+        );
+        let len_plus = binop(
+            "+",
+            var_term(self.input_len_sym, u32_ty.clone(), span),
+            total_minus_1,
+            u32_ty.clone(),
+            span,
+        );
+        let chunk_size_rhs = binop(
+            "/",
+            len_plus,
+            var_term(self.total_sym, u32_ty.clone(), span),
+            u32_ty.clone(),
+            span,
+        );
+        let body = let_term(self.chunk_size_sym, u32_ty.clone(), chunk_size_rhs, body, span);
+
+        // input_len = <from provenance>
+        let body = let_term(self.input_len_sym, u32_ty.clone(), input_len_term, body, span);
+
+        // total = TOTAL_THREADS
+        let body = let_term(
+            self.total_sym,
+            u32_ty.clone(),
+            uint_lit(TOTAL_THREADS as u64, span),
+            body,
+            span,
+        );
+
+        // tid = _w_intrinsic_thread_id()
+        let tid_rhs = intrinsic_term("_w_intrinsic_thread_id", vec![], u32_ty.clone(), span, program);
+        let_term(self.tid_sym, u32_ty, tid_rhs, body, span)
+    }
+}
+
+fn u32_ty() -> Type<TypeName> {
+    Type::Constructed(TypeName::UInt(32), vec![])
+}
+
+// =============================================================================
+// ScanPlan — first-class data representation of a parallelized scan
+// =============================================================================
+
+/// Reference to a buffer used by a scan phase. `set`/`binding` identify it
+/// inside shader entry metadata; `elem_ty` drives `StorageBindingDecl`.
+#[derive(Debug, Clone)]
+struct BufferRef {
+    set: u32,
+    binding: u32,
+    elem_ty: Type<TypeName>,
+}
+
+impl BufferRef {
+    fn from_tuple(t: (u32, u32), elem_ty: Type<TypeName>) -> Self {
+        BufferRef {
+            set: t.0,
+            binding: t.1,
+            elem_ty,
+        }
+    }
+
+    fn decl(&self, role: interface::StorageRole) -> interface::StorageBindingDecl {
+        interface::StorageBindingDecl {
+            set: self.set,
+            binding: self.binding,
+            role,
+            elem_ty: self.elem_ty.clone(),
+        }
+    }
+}
+
+/// Execution plan for a parallelized scan: every buffer, combiner, and
+/// the input-length source are fields. Per-phase builders consume it,
+/// each emitting a hand-rolled TLC body that writes to known buffers.
+/// No reliance on the from_tlc Map/Scan → MapInto/ScanInto auto-rewrite
+/// (which can't target a specific binding).
+struct ScanPlan {
+    combiner: Lambda,
+    neutral: Term,
+    elem_ty: Type<TypeName>,
+    input: BufferRef,
+    output: BufferRef,
+    block_sums: BufferRef,
+    block_offsets: BufferRef,
+    /// Let-bindings from the entry prefix that must wrap every phase body.
+    prefix_lets: Vec<(SymbolId, Type<TypeName>, Term)>,
+    /// Entry-level lambda params the phase bodies reference.
+    required_params: Vec<(SymbolId, Type<TypeName>)>,
+    span: ast::Span,
+}
+
+enum ScanPhase {
+    /// Phase 1: each thread scans its chunk of the input into the
+    /// corresponding slice of `output`, and writes its chunk total
+    /// to `block_sums[tid]`.
+    LocalScan,
+    /// Phase 2: a single sequential scan of `block_sums` into
+    /// `block_offsets` (replicated across threads; write is
+    /// idempotent). Dispatched with workgroup (1,1,1).
+    SumsPrefixScan,
+    /// Phase 3: each thread reads its `block_offsets[tid]` and
+    /// combines it with every already-written element in
+    /// `output[chunk_range]`, writing the final result back in place.
+    ApplyBlockOffsets,
+}
+
+/// Invoke a SOAC-op Lambda on explicit argument terms. After
+/// defunctionalize, the lambda's body is a `Var` naming the lifted
+/// function; the call is emitted as `App(body, args_with_captures)`
+/// following `from_tlc::convert_soac_*`'s convention that SOAC
+/// combiners accept their original params followed by their captures.
+fn invoke_soac_lambda(lambda: &Lambda, args: Vec<Term>, span: ast::Span) -> Term {
+    assert_eq!(
+        lambda.params.len(),
+        args.len(),
+        "BUG: parallelize invoking SOAC lambda: {} params vs {} args",
+        lambda.params.len(),
+        args.len()
+    );
+    let mut call_args = args;
+    // Trailing captures — `convert_soac_map`/`..._scan` pass them after
+    // the original-param args.
+    for (sym, ty, _val) in &lambda.captures {
+        call_args.push(var_term(*sym, ty.clone(), span));
+    }
+    Term {
+        id: TermId(0),
+        ty: lambda.ret_ty.clone(),
+        span,
+        kind: TermKind::App {
+            func: Box::new((*lambda.body).clone()),
+            args: call_args,
+        },
+    }
+}
+
+fn emit_storage_load(buf: &BufferRef, index: Term, span: ast::Span, program: &mut Program) -> Term {
+    intrinsic_term(
+        "_w_intrinsic_storage_index",
+        vec![
+            uint_lit(buf.set as u64, span),
+            uint_lit(buf.binding as u64, span),
+            index,
+        ],
+        buf.elem_ty.clone(),
+        span,
+        program,
+    )
+}
+
+fn emit_storage_store(
+    buf: &BufferRef,
+    index: Term,
+    value: Term,
+    span: ast::Span,
+    program: &mut Program,
+) -> Term {
+    let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
+    intrinsic_term(
+        "_w_intrinsic_storage_store",
+        vec![
+            uint_lit(buf.set as u64, span),
+            uint_lit(buf.binding as u64, span),
+            index,
+            value,
+        ],
+        unit_ty,
+        span,
+        program,
+    )
+}
+
+fn emit_storage_len(buf: &BufferRef, span: ast::Span, program: &mut Program) -> Term {
+    intrinsic_term(
+        "_w_intrinsic_storage_len",
+        vec![uint_lit(buf.set as u64, span), uint_lit(buf.binding as u64, span)],
+        u32_ty(),
+        span,
+        program,
+    )
+}
+
+/// Sequence two effects: `let _dummy = first in second`. `second`'s type
+/// is the result type of the whole expression; `first` must be
+/// Unit-typed (the body doesn't reference the let-bound var).
+fn seq_unit_effect(first: Term, second: Term, span: ast::Span, program: &mut Program) -> Term {
+    let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
+    let dummy = program.symbols.alloc("_par_seq".into());
+    let_term(dummy, unit_ty, first, second, span)
+}
+
+/// Build a scan phase's Def. Dispatches on `ScanPhase` and returns
+/// `(Def, storage_bindings)` for `build_scan_entries` to collect.
+fn build_scan_phase_def(
+    plan: &ScanPlan,
+    phase: ScanPhase,
+    entry_name: &str,
+    program: &mut Program,
+) -> (Def, Vec<interface::StorageBindingDecl>) {
+    let span = plan.span;
+    let (body, bindings) = match phase {
+        ScanPhase::LocalScan => build_scan_local_body(plan, span, program),
+        ScanPhase::SumsPrefixScan => build_scan_sums_body(plan, span, program),
+        ScanPhase::ApplyBlockOffsets => build_scan_apply_body(plan, span, program),
+    };
+    // Wrap with the entry's prefix_lets (outer-scope bindings the phase
+    // body may reference).
+    let body = plan.prefix_lets.iter().rev().fold(body, |acc, (name, ty, rhs)| {
+        let_term(*name, ty.clone(), rhs.clone(), acc, span)
+    });
+    let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
+    let def = make_entry_def(
+        entry_name,
+        body,
+        unit_ty,
+        &plan.required_params,
+        bindings.clone(),
+        program,
+    );
+    (def, bindings)
+}
+
+/// Phase 1 body: per-thread chunk scan writing to `output[chunk_range]`
+/// plus `block_sums[tid] = final_acc`. Uses a `while` loop so the u32
+/// counter type matches `chunk_len` (ForRange hardcodes i32 counters,
+/// which would clash with ChunkArithmetic's u32 chunk-size arithmetic).
+fn build_scan_local_body(
+    plan: &ScanPlan,
+    span: ast::Span,
+    program: &mut Program,
+) -> (Term, Vec<interface::StorageBindingDecl>) {
+    let chunk = ChunkArithmetic::alloc(program);
+
+    let final_acc = emit_u32_counter_scan_loop(
+        &plan.elem_ty,
+        plan.neutral.clone(),
+        chunk.chunk_len(span),
+        |acc_var, i_var, program| {
+            let abs_idx = binop("+", chunk.chunk_start(span), i_var, u32_ty(), span);
+            let v_load = emit_storage_load(&plan.input, abs_idx.clone(), span, program);
+            let v_sym = program.symbols.alloc("_scan_v".into());
+            let new_acc_sym = program.symbols.alloc("_scan_new_acc".into());
+            let combiner_app = invoke_soac_lambda(
+                &plan.combiner,
+                vec![acc_var, var_term(v_sym, plan.elem_ty.clone(), span)],
+                span,
+            );
+            let store = emit_storage_store(
+                &plan.output,
+                abs_idx,
+                var_term(new_acc_sym, plan.elem_ty.clone(), span),
+                span,
+                program,
+            );
+            let tail = seq_unit_effect(
+                store,
+                var_term(new_acc_sym, plan.elem_ty.clone(), span),
+                span,
+                program,
+            );
+            let new_acc_binding = let_term(new_acc_sym, plan.elem_ty.clone(), combiner_app, tail, span);
+            let_term(v_sym, plan.elem_ty.clone(), v_load, new_acc_binding, span)
+        },
+        span,
+        program,
+    );
+
+    // After the loop: store block_sums[tid] = final_acc.
+    let final_acc_sym = program.symbols.alloc("_scan_final_acc".into());
+    let store_block_sum = emit_storage_store(
+        &plan.block_sums,
+        chunk.tid(span),
+        var_term(final_acc_sym, plan.elem_ty.clone(), span),
+        span,
+        program,
+    );
+    let phase_body = let_term(
+        final_acc_sym,
+        plan.elem_ty.clone(),
+        final_acc,
+        store_block_sum,
+        span,
+    );
+
+    // Wrap with chunk arithmetic scaffolding.
+    let input_len_term = emit_storage_len(&plan.input, span, program);
+    let body = chunk.wrap(phase_body, input_len_term, span, program);
+
+    let bindings = vec![
+        plan.input.decl(interface::StorageRole::Input),
+        plan.output.decl(interface::StorageRole::Intermediate),
+        plan.block_sums.decl(interface::StorageRole::Intermediate),
+    ];
+    (body, bindings)
+}
+
+/// Emit a `while i < bound` loop with state `(acc: acc_ty, i: u32)`.
+/// `mk_body(acc_var, i_var, program)` returns the new `acc` value for
+/// the next iteration. The returned Term is `_w_tuple_proj(loop, 0)` —
+/// the final accumulator (projected out of the state tuple). Phase 2
+/// and phase 3 discard it; phase 1 uses it to write `block_sums[tid]`.
+fn emit_u32_counter_scan_loop(
+    acc_ty: &Type<TypeName>,
+    init_acc: Term,
+    bound: Term,
+    mk_body: impl FnOnce(/*acc_var:*/ Term, /*i_var:*/ Term, &mut Program) -> Term,
+    span: ast::Span,
+    program: &mut Program,
+) -> Term {
+    let u32_ty_v = u32_ty();
+    let state_ty = Type::Constructed(TypeName::Tuple(2), vec![acc_ty.clone(), u32_ty_v.clone()]);
+    let state_sym = program.symbols.alloc("_loop_state".into());
+    let acc_sym = program.symbols.alloc("_loop_acc".into());
+    let i_sym = program.symbols.alloc("_loop_i".into());
+
+    let init = intrinsic_term(
+        "_w_tuple",
+        vec![init_acc, uint_lit(0, span)],
+        state_ty.clone(),
+        span,
+        program,
+    );
+
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+    let mk_idx_lit = |n: &str| Term {
+        id: TermId(0),
+        ty: i32_ty.clone(),
+        span,
+        kind: TermKind::IntLit(n.into()),
+    };
+    let acc_proj = intrinsic_term(
+        "_w_tuple_proj",
+        vec![var_term(state_sym, state_ty.clone(), span), mk_idx_lit("0")],
+        acc_ty.clone(),
+        span,
+        program,
+    );
+    let i_proj = intrinsic_term(
+        "_w_tuple_proj",
+        vec![var_term(state_sym, state_ty.clone(), span), mk_idx_lit("1")],
+        u32_ty_v.clone(),
+        span,
+        program,
+    );
+
+    let cond = binop(
+        "<",
+        var_term(i_sym, u32_ty_v.clone(), span),
+        bound,
+        Type::Constructed(TypeName::Bool, vec![]),
+        span,
+    );
+
+    let new_acc = mk_body(
+        var_term(acc_sym, acc_ty.clone(), span),
+        var_term(i_sym, u32_ty_v.clone(), span),
+        program,
+    );
+    let new_acc_sym = program.symbols.alloc("_loop_new_acc".into());
+    let next_i = binop(
+        "+",
+        var_term(i_sym, u32_ty_v.clone(), span),
+        uint_lit(1, span),
+        u32_ty_v.clone(),
+        span,
+    );
+    let new_state_tuple = intrinsic_term(
+        "_w_tuple",
+        vec![var_term(new_acc_sym, acc_ty.clone(), span), next_i],
+        state_ty.clone(),
+        span,
+        program,
+    );
+    let body = let_term(new_acc_sym, acc_ty.clone(), new_acc, new_state_tuple, span);
+
+    let the_loop = Term {
+        id: TermId(0),
+        ty: state_ty.clone(),
+        span,
+        kind: TermKind::Loop {
+            loop_var: state_sym,
+            loop_var_ty: state_ty.clone(),
+            init: Box::new(init),
+            init_bindings: vec![(acc_sym, acc_ty.clone(), acc_proj), (i_sym, u32_ty_v, i_proj)],
+            kind: LoopKind::While { cond: Box::new(cond) },
+            body: Box::new(body),
+        },
+    };
+
+    // Return _w_tuple_proj(the_loop, 0) — the final accumulator.
+    intrinsic_term(
+        "_w_tuple_proj",
+        vec![the_loop, mk_idx_lit("0")],
+        acc_ty.clone(),
+        span,
+        program,
+    )
+}
+
+/// Phase 2 body: sequential scan over `block_sums` into `block_offsets`.
+/// Every thread runs the same computation; writes are idempotent.
+/// Dispatched with workgroup (1, 1, 1) so effectively a single thread.
+fn build_scan_sums_body(
+    plan: &ScanPlan,
+    span: ast::Span,
+    program: &mut Program,
+) -> (Term, Vec<interface::StorageBindingDecl>) {
+    let num_blocks = TOTAL_THREADS as u64;
+
+    let final_acc = emit_u32_counter_scan_loop(
+        &plan.elem_ty,
+        plan.neutral.clone(),
+        uint_lit(num_blocks, span),
+        |acc_var, i_var, program| {
+            let v_load = emit_storage_load(&plan.block_sums, i_var.clone(), span, program);
+            let v_sym = program.symbols.alloc("_sums_v".into());
+            let new_acc_sym = program.symbols.alloc("_sums_new_acc".into());
+            let combiner_app = invoke_soac_lambda(
+                &plan.combiner,
+                vec![acc_var, var_term(v_sym, plan.elem_ty.clone(), span)],
+                span,
+            );
+            let store = emit_storage_store(
+                &plan.block_offsets,
+                i_var,
+                var_term(new_acc_sym, plan.elem_ty.clone(), span),
+                span,
+                program,
+            );
+            let tail = seq_unit_effect(
+                store,
+                var_term(new_acc_sym, plan.elem_ty.clone(), span),
+                span,
+                program,
+            );
+            let new_acc_binding = let_term(new_acc_sym, plan.elem_ty.clone(), combiner_app, tail, span);
+            let_term(v_sym, plan.elem_ty.clone(), v_load, new_acc_binding, span)
+        },
+        span,
+        program,
+    );
+
+    // The loop body already wrote every block_offsets[i]. Use a
+    // harmless duplicate write of `final_acc` to block_offsets[N-1]
+    // (the loop's last iteration already put the same value there) as
+    // the Unit-typed tail of the phase body.
+    let final_acc_sym = program.symbols.alloc("_sums_final_acc".into());
+    let redundant_store = emit_storage_store(
+        &plan.block_offsets,
+        uint_lit(num_blocks - 1, span),
+        var_term(final_acc_sym, plan.elem_ty.clone(), span),
+        span,
+        program,
+    );
+    let body = let_term(
+        final_acc_sym,
+        plan.elem_ty.clone(),
+        final_acc,
+        redundant_store,
+        span,
+    );
+
+    let bindings = vec![
+        plan.block_sums.decl(interface::StorageRole::Intermediate),
+        plan.block_offsets.decl(interface::StorageRole::Intermediate),
+    ];
+    (body, bindings)
+}
+
+/// Phase 3 body: read `off = block_offsets[tid]`, then for each i in the
+/// chunk range apply `output[chunk_start + i] = combiner(output[chunk_start + i], off)`.
+fn build_scan_apply_body(
+    plan: &ScanPlan,
+    span: ast::Span,
+    program: &mut Program,
+) -> (Term, Vec<interface::StorageBindingDecl>) {
+    let chunk = ChunkArithmetic::alloc(program);
+    let off_sym = program.symbols.alloc("_apply_off".into());
+
+    let final_acc = emit_u32_counter_scan_loop(
+        &plan.elem_ty,
+        plan.neutral.clone(),
+        chunk.chunk_len(span),
+        |_acc_var /* unused — phase 3 carries no cross-iter state */, i_var, program| {
+            let abs_idx = binop("+", chunk.chunk_start(span), i_var, u32_ty(), span);
+            let prior_load = emit_storage_load(&plan.output, abs_idx.clone(), span, program);
+            let prior_sym = program.symbols.alloc("_apply_prior".into());
+            let combined_sym = program.symbols.alloc("_apply_combined".into());
+            let combiner_app = invoke_soac_lambda(
+                &plan.combiner,
+                vec![
+                    var_term(prior_sym, plan.elem_ty.clone(), span),
+                    var_term(off_sym, plan.elem_ty.clone(), span),
+                ],
+                span,
+            );
+            let store = emit_storage_store(
+                &plan.output,
+                abs_idx,
+                var_term(combined_sym, plan.elem_ty.clone(), span),
+                span,
+                program,
+            );
+            let tail = seq_unit_effect(
+                store,
+                var_term(combined_sym, plan.elem_ty.clone(), span),
+                span,
+                program,
+            );
+            let combined_binding = let_term(combined_sym, plan.elem_ty.clone(), combiner_app, tail, span);
+            let_term(
+                prior_sym,
+                plan.elem_ty.clone(),
+                prior_load,
+                combined_binding,
+                span,
+            )
+        },
+        span,
+        program,
+    );
+
+    // Loop result is discarded; wrap in a Unit-typed tail — idempotent
+    // write of `off` back to block_offsets[tid].
+    let loop_result_sym = program.symbols.alloc("_apply_loop_res".into());
+    let terminal_store = emit_storage_store(
+        &plan.block_offsets,
+        chunk.tid(span),
+        var_term(off_sym, plan.elem_ty.clone(), span),
+        span,
+        program,
+    );
+    let phase_body_after_loop = let_term(
+        loop_result_sym,
+        plan.elem_ty.clone(),
+        final_acc,
+        terminal_store,
+        span,
+    );
+
+    // Prepend: let off = block_offsets[tid]
+    let off_load = emit_storage_load(&plan.block_offsets, chunk.tid(span), span, program);
+    let phase_body = let_term(
+        off_sym,
+        plan.elem_ty.clone(),
+        off_load,
+        phase_body_after_loop,
+        span,
+    );
+
+    // Wrap with chunk arithmetic. Use output's length so phase 3 doesn't
+    // need to admit the input binding.
+    let input_len_term = emit_storage_len(&plan.output, span, program);
+    let body = chunk.wrap(phase_body, input_len_term, span, program);
+
+    let bindings = vec![
+        plan.output.decl(interface::StorageRole::Output),
+        plan.block_offsets.decl(interface::StorageRole::Intermediate),
+    ];
+    (body, bindings)
+}
+
+// =============================================================================
 // Chunked SOAC body builder
 // =============================================================================
 
-/// Build a chunked SOAC body for a parallel entry point.
+/// Build a chunked SOAC body for reduce/redomap/map phase 1. The SOAC's
+/// input is rebased to `(chunk_start, chunk_len)` (per-thread range), and
+/// the result is optionally stored into `partials[tid]`.
 ///
-/// Generates:
-/// ```text
-/// let tid = _w_intrinsic_thread_id() in
-/// let total = 64 in
-/// let chunk_size = (input_len + total - 1) / total in
-/// let chunk_start = tid * chunk_size in
-/// let chunk_len = u32.min(chunk_size, input_len - chunk_start) in
-/// <soac over chunked inputs>
-/// ```
+/// Scan is deliberately not handled here; `build_scan_phase_def` emits
+/// scan's phase bodies as hand-rolled TLC loops because scan's phases
+/// don't fit the "one SOAC = one entry" shape reduce/map do.
 fn build_chunked_soac_body(
     soac: &SoacAnalysis,
     prefix_lets: &[(SymbolId, Type<TypeName>, Term)],
@@ -1066,23 +1697,13 @@ fn build_chunked_soac_body(
     // becomes Unit rather than `result_ty`.
     write_partial_to: Option<(u32, u32)>,
 ) -> Term {
-    let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
-
-    // Allocate symbols for chunk arithmetic bindings.
-    let tid_sym = program.symbols.alloc("_par_tid".into());
-    let total_sym = program.symbols.alloc("_par_total".into());
-    let input_len_sym = program.symbols.alloc("_par_input_len".into());
-    let chunk_size_sym = program.symbols.alloc("_par_chunk_size".into());
-    let chunk_start_sym = program.symbols.alloc("_par_chunk_start".into());
-    let chunk_len_sym = program.symbols.alloc("_par_chunk_len".into());
-
-    // Build chunked input ArrayExprs (replace storage buffer offset/len with chunk range).
-    let chunk_start_var = var_term(chunk_start_sym, u32_ty.clone(), span);
-    let chunk_len_var = var_term(chunk_len_sym, u32_ty.clone(), span);
+    let chunk = ChunkArithmetic::alloc(program);
+    let chunk_start_var = chunk.chunk_start(span);
+    let chunk_len_var = chunk.chunk_len(span);
 
     // Rebuild the SOAC with inputs rebased to (chunk_start, chunk_len).
     // Pattern-match on the original SoacOp — `analyze_soac` guarantees one
-    // of the four parallel variants.
+    // of the parallel variants; scan is handled by `build_scan_phase_def`.
     let chunked_soac = match &soac.original {
         SoacOp::Map { lam, inputs } => {
             let chunked_inputs = inputs
@@ -1119,27 +1740,23 @@ fn build_chunked_soac_body(
                 props: props.clone(),
             }
         }
-        SoacOp::Scan { op, ne, input } => SoacOp::Scan {
-            op: op.clone(),
-            ne: ne.clone(),
-            input: chunk_array_expr(input, &chunk_start_var, &chunk_len_var),
-        },
+        SoacOp::Scan { .. } => {
+            unreachable!("Scan is lowered via build_scan_phase_def, not build_chunked_soac_body")
+        }
         _ => unreachable!("analyze_soac rejected non-parallelizable variants"),
     };
 
     // Get the input length term from the first input's provenance.
     let input_len_term = get_input_len(soac, span);
 
-    // Build the body bottom-up: SOAC first, then wrap with let bindings.
     let mut body = soac_term(chunked_soac, result_ty.clone(), span);
 
     // If requested, wrap the SOAC with `let r = <soac> in store(set, binding, tid, r)`
-    // so each thread's partial result lands in its own slot. tid_sym is bound
-    // further out in the let-chain and is in scope here.
+    // so each thread's partial result lands in its own slot.
     if let Some((set, binding)) = write_partial_to {
         let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
         let r_sym = program.symbols.alloc("_par_out".into());
-        let tid_var = var_term(tid_sym, u32_ty.clone(), span);
+        let tid_var = chunk.tid(span);
         let r_var = var_term(r_sym, result_ty.clone(), span);
         let store = intrinsic_term(
             "_w_intrinsic_storage_store",
@@ -1161,88 +1778,7 @@ fn build_chunked_soac_body(
         body = let_term(*name, ty.clone(), rhs.clone(), body, span);
     }
 
-    // Wrap with chunk arithmetic lets.
-    // chunk_len = if chunk_size < (input_len - chunk_start)
-    //             then chunk_size else (input_len - chunk_start)
-    // (inlined min — there is no backend-known `_w_u32_min` intrinsic).
-    let len_minus_start = binop(
-        "-",
-        var_term(input_len_sym, u32_ty.clone(), span),
-        var_term(chunk_start_sym, u32_ty.clone(), span),
-        u32_ty.clone(),
-        span,
-    );
-    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
-    let cond = binop(
-        "<",
-        var_term(chunk_size_sym, u32_ty.clone(), span),
-        len_minus_start.clone(),
-        bool_ty,
-        span,
-    );
-    let min_expr = Term {
-        id: TermId(0),
-        ty: u32_ty.clone(),
-        span,
-        kind: TermKind::If {
-            cond: Box::new(cond),
-            then_branch: Box::new(var_term(chunk_size_sym, u32_ty.clone(), span)),
-            else_branch: Box::new(len_minus_start),
-        },
-    };
-    body = let_term(chunk_len_sym, u32_ty.clone(), min_expr, body, span);
-
-    // chunk_start = tid * chunk_size
-    let chunk_start_rhs = binop(
-        "*",
-        var_term(tid_sym, u32_ty.clone(), span),
-        var_term(chunk_size_sym, u32_ty.clone(), span),
-        u32_ty.clone(),
-        span,
-    );
-    body = let_term(chunk_start_sym, u32_ty.clone(), chunk_start_rhs, body, span);
-
-    // chunk_size = (input_len + total - 1) / total
-    let total_minus_1 = binop(
-        "-",
-        var_term(total_sym, u32_ty.clone(), span),
-        uint_lit(1, span),
-        u32_ty.clone(),
-        span,
-    );
-    let len_plus = binop(
-        "+",
-        var_term(input_len_sym, u32_ty.clone(), span),
-        total_minus_1,
-        u32_ty.clone(),
-        span,
-    );
-    let chunk_size_rhs = binop(
-        "/",
-        len_plus,
-        var_term(total_sym, u32_ty.clone(), span),
-        u32_ty.clone(),
-        span,
-    );
-    body = let_term(chunk_size_sym, u32_ty.clone(), chunk_size_rhs, body, span);
-
-    // input_len = <from provenance>
-    body = let_term(input_len_sym, u32_ty.clone(), input_len_term, body, span);
-
-    // total = TOTAL_THREADS
-    body = let_term(
-        total_sym,
-        u32_ty.clone(),
-        uint_lit(TOTAL_THREADS as u64, span),
-        body,
-        span,
-    );
-
-    // tid = _w_intrinsic_thread_id()
-    let tid_rhs = intrinsic_term("_w_intrinsic_thread_id", vec![], u32_ty.clone(), span, program);
-    body = let_term(tid_sym, u32_ty.clone(), tid_rhs, body, span);
-
-    body
+    chunk.wrap(body, input_len_term, span, program)
 }
 
 /// Replace a storage buffer's offset/len with chunk-relative values.
@@ -1501,14 +2037,16 @@ fn input_storage_decls(soac: &SoacAnalysis) -> Vec<interface::StorageBindingDecl
     soac.provenances
         .iter()
         .filter_map(|p| match p {
-            ArrayProvenance::Storage { set, binding, elem_ty } => {
-                Some(interface::StorageBindingDecl {
-                    set: *set,
-                    binding: *binding,
-                    role: interface::StorageRole::Input,
-                    elem_ty: elem_ty.clone(),
-                })
-            }
+            ArrayProvenance::Storage {
+                set,
+                binding,
+                elem_ty,
+            } => Some(interface::StorageBindingDecl {
+                set: *set,
+                binding: *binding,
+                role: interface::StorageRole::Input,
+                elem_ty: elem_ty.clone(),
+            }),
             _ => None,
         })
         .collect()
@@ -1575,13 +2113,10 @@ fn collect_bindings_in_soac(op: &SoacOp, used: &mut HashSet<(u32, u32)>) {
                 collect_bindings_in_ae(ae, used);
             }
         }
-        SoacOp::Reduce { input, .. }
-        | SoacOp::Scan { input, .. }
-        | SoacOp::Filter { input, .. } => {
+        SoacOp::Reduce { input, .. } | SoacOp::Scan { input, .. } | SoacOp::Filter { input, .. } => {
             collect_bindings_in_ae(input, used);
         }
-        SoacOp::Scatter { indices, values, .. }
-        | SoacOp::ReduceByIndex { indices, values, .. } => {
+        SoacOp::Scatter { indices, values, .. } | SoacOp::ReduceByIndex { indices, values, .. } => {
             collect_bindings_in_ae(indices, used);
             collect_bindings_in_ae(values, used);
         }
