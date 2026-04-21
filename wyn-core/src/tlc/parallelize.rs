@@ -11,7 +11,7 @@ use crate::interface::{self, Attribute};
 use crate::pipeline_descriptor::*;
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::{ArrayExpr, Def, DefMeta, Lambda, Program, ReduceProps, SoacOp, Term, TermId, TermKind};
 
@@ -568,8 +568,17 @@ pub fn run(mut program: Program) -> ParallelizationResult {
         }
     }
 
-    // Track max binding across all storage decls for fresh binding allocation.
-    let mut next_binding: u32 = program.storage.iter().map(|s| s.binding + 1).max().unwrap_or(0);
+    // Track max binding across every `(set, binding)` the program already
+    // uses — including implicit `ArrayExpr::StorageBuffer` bindings
+    // introduced by buffer_specialize/mono for SOAC inputs, not just
+    // user-declared `#[storage]` entries. Filtering only by
+    // `program.storage` would collide fresh intermediates with input
+    // buffers; see PLAN_scan_stage_b.md.
+    let mut next_binding: u32 = collect_all_used_bindings(&program)
+        .iter()
+        .map(|(_, b)| b + 1)
+        .max()
+        .unwrap_or(0);
 
     for (_sym, analysis) in &analyses {
         let entry_name = program.symbols.get(analysis.def_name).cloned().unwrap_or_default();
@@ -755,13 +764,19 @@ fn build_two_phase_entries(
         Some(partials_binding),
     );
     // Phase 1 storage interface: reads whatever the input SOAC declares
-    // (those come in via the TLC body already), writes `partials` at `tid`.
-    let phase1_bindings = vec![interface::StorageBindingDecl {
+    // (Input role), writes `partials` at `tid` (Intermediate). Input
+    // bindings must be declared explicitly — the backend's storage-buffer
+    // validation lists the entry's `storage_bindings` as the allowlist
+    // for any `storage(set, binding)` reference in the body. Previously
+    // this worked only because `partials_binding` accidentally aliased
+    // the input buffer at (0, 0) under the too-shallow allocator.
+    let mut phase1_bindings = input_storage_decls(&analysis.soac);
+    phase1_bindings.push(interface::StorageBindingDecl {
         set: partials_binding.0,
         binding: partials_binding.1,
         role: interface::StorageRole::Intermediate,
         elem_ty: elem_type.clone(),
-    }];
+    });
     let phase1_def = make_entry_def(
         &phase1_name,
         phase1_body,
@@ -1477,6 +1492,102 @@ fn collect_soac_bindings(soac: &SoacAnalysis) -> Vec<Binding> {
 
 /// Program-level resource bindings (uniforms + read-only storage buffers).
 ///
+/// Build per-entry `StorageBindingDecl`s for every SOAC input backed by a
+/// storage buffer. These must land on each phase entry whose body reads
+/// from those buffers so the backend's binding allowlist admits the
+/// references. Shared helper between reduce's two-phase and scan's
+/// three-phase builders.
+fn input_storage_decls(soac: &SoacAnalysis) -> Vec<interface::StorageBindingDecl> {
+    soac.provenances
+        .iter()
+        .filter_map(|p| match p {
+            ArrayProvenance::Storage { set, binding, elem_ty } => {
+                Some(interface::StorageBindingDecl {
+                    set: *set,
+                    binding: *binding,
+                    role: interface::StorageRole::Input,
+                    elem_ty: elem_ty.clone(),
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Collect every `(set, binding)` pair already claimed anywhere in the
+/// program so `parallelize::run` can hand out fresh intermediate bindings
+/// that don't collide with anything. Includes user-declared resources
+/// (`program.storage`, `program.uniforms`) *and* implicit bindings
+/// attached by earlier passes as `ArrayExpr::StorageBuffer` inside SOAC
+/// inputs.
+///
+/// Without this, `parallelize::run` previously only consulted
+/// `program.storage`, so intermediates for reduce/scan could collide
+/// with view-param buffers that `buffer_specialize` had already
+/// installed. The reduce case was latent (SPIR-V/WGSL tolerate the
+/// same binding for both read and write); scan's three-way collision
+/// broke the emitted shader.
+fn collect_all_used_bindings(program: &Program) -> HashSet<(u32, u32)> {
+    let mut used: HashSet<(u32, u32)> = HashSet::new();
+    for u in &program.uniforms {
+        used.insert((u.set, u.binding));
+    }
+    for s in &program.storage {
+        used.insert((s.set, s.binding));
+    }
+    for def in &program.defs {
+        collect_bindings_in_term(&def.body, &mut used);
+    }
+    used
+}
+
+fn collect_bindings_in_term(term: &Term, used: &mut HashSet<(u32, u32)>) {
+    // At a TermKind wrapping ArrayExpr/Soac, inspect the wrapped shape so
+    // `StorageBuffer` bindings aren't skipped by `for_each_child` (which
+    // only visits Term children and can't extract u32 binding fields).
+    match &term.kind {
+        TermKind::ArrayExpr(ae) => collect_bindings_in_ae(ae, used),
+        TermKind::Soac(op) => collect_bindings_in_soac(op, used),
+        _ => {}
+    }
+    term.for_each_child(&mut |c| collect_bindings_in_term(c, used));
+}
+
+fn collect_bindings_in_ae(ae: &ArrayExpr, used: &mut HashSet<(u32, u32)>) {
+    if let ArrayExpr::StorageBuffer { set, binding, .. } = ae {
+        used.insert((*set, *binding));
+    }
+    match ae {
+        ArrayExpr::Zip(aes) => {
+            for a in aes {
+                collect_bindings_in_ae(a, used);
+            }
+        }
+        ArrayExpr::Soac(op) => collect_bindings_in_soac(op, used),
+        _ => {}
+    }
+}
+
+fn collect_bindings_in_soac(op: &SoacOp, used: &mut HashSet<(u32, u32)>) {
+    match op {
+        SoacOp::Map { inputs, .. } | SoacOp::Redomap { inputs, .. } => {
+            for ae in inputs {
+                collect_bindings_in_ae(ae, used);
+            }
+        }
+        SoacOp::Reduce { input, .. }
+        | SoacOp::Scan { input, .. }
+        | SoacOp::Filter { input, .. } => {
+            collect_bindings_in_ae(input, used);
+        }
+        SoacOp::Scatter { indices, values, .. }
+        | SoacOp::ReduceByIndex { indices, values, .. } => {
+            collect_bindings_in_ae(indices, used);
+            collect_bindings_in_ae(values, used);
+        }
+    }
+}
+
 /// Graphics pipelines and non-parallelized compute entries need to declare
 /// every resource the shader references so the host can build a matching
 /// pipeline layout. Without this, viz/wgpu rejects the pipeline with
