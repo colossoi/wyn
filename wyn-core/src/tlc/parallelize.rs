@@ -272,85 +272,57 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
 /// prefix_lets actually reference. Phase entries must re-declare these
 /// as their own params or the references leak out as undefined globals
 /// during SPIR-V emission.
+///
+/// Reuses `defunctionalize::collect_free_vars` with empty `top_level` /
+/// `known_defs` sets — no top-level filtering, just "bound vs free"
+/// within the fragment we walk.
 fn compute_required_params(
     soac: &SoacAnalysis,
     prefix_lets: &[(SymbolId, Type<TypeName>, Term)],
     captured_params: &[(SymbolId, Type<TypeName>)],
     symbols: &SymbolTable,
 ) -> Vec<(SymbolId, Type<TypeName>)> {
-    let mut fv = FreeVarSet::new();
+    use std::collections::HashSet;
+    let empty_top: HashSet<SymbolId> = HashSet::new();
+    let empty_defs: HashSet<String> = HashSet::new();
+    let mut bound: HashSet<SymbolId> = HashSet::new();
+    let mut free: Vec<Term> = Vec::new();
+    let mut seen: HashSet<SymbolId> = HashSet::new();
 
     // Each prefix RHS is evaluated with all *previous* prefix names in
     // scope. The SOAC sees the full prefix in scope.
     for (name, _ty, rhs) in prefix_lets {
-        fv.add_term(rhs, symbols);
-        fv.bind(*name);
-    }
-    fv.add_soac(&soac.original, symbols);
-
-    captured_params.iter().filter(|(s, _)| fv.contains(*s)).cloned().collect()
-}
-
-/// Thin wrapper around `defunctionalize::collect_free_vars` that
-/// accumulates user-level free SymbolIds — passing empty `top_level` and
-/// `known_defs` sets and stripping the `Term`s down to bare SymbolIds.
-/// `bind` mutates the in-scope set so subsequent `add_*` calls treat
-/// that name as bound.
-struct FreeVarSet {
-    bound: std::collections::HashSet<SymbolId>,
-    free_syms: std::collections::HashSet<SymbolId>,
-    free: Vec<Term>,                           // walker-required scratch
-    seen: std::collections::HashSet<SymbolId>, // walker-required scratch
-    top_level: std::collections::HashSet<SymbolId>,
-    known_defs: std::collections::HashSet<String>,
-}
-
-impl FreeVarSet {
-    fn new() -> Self {
-        FreeVarSet {
-            bound: std::collections::HashSet::new(),
-            free_syms: std::collections::HashSet::new(),
-            free: Vec::new(),
-            seen: std::collections::HashSet::new(),
-            top_level: std::collections::HashSet::new(),
-            known_defs: std::collections::HashSet::new(),
-        }
-    }
-    fn bind(&mut self, sym: SymbolId) {
-        self.bound.insert(sym);
-    }
-    fn contains(&self, sym: SymbolId) -> bool {
-        self.free_syms.contains(&sym)
-    }
-    fn add_term(&mut self, term: &Term, symbols: &SymbolTable) {
         super::defunctionalize::collect_free_vars(
-            term,
-            &self.bound,
-            &self.top_level,
-            &self.known_defs,
+            rhs,
+            &bound,
+            &empty_top,
+            &empty_defs,
             symbols,
-            &mut self.free,
-            &mut self.seen,
+            &mut free,
+            &mut seen,
         );
-        self.harvest();
+        bound.insert(*name);
     }
-    fn add_soac(&mut self, soac: &SoacOp, symbols: &SymbolTable) {
-        // Wrap in a throwaway Term so we can reuse `collect_free_vars`.
-        let term = Term {
-            id: TermId(0),
-            ty: Type::Variable(0),
-            span: ast::Span::new(0, 0, 0, 0),
-            kind: TermKind::Soac(soac.clone()),
-        };
-        self.add_term(&term, symbols);
-    }
-    fn harvest(&mut self) {
-        for t in self.free.drain(..) {
-            if let TermKind::Var(s) = &t.kind {
-                self.free_syms.insert(*s);
-            }
-        }
-    }
+    // Wrap the SOAC in a throwaway Term so we can reuse the same walker.
+    let soac_term = Term {
+        id: TermId(0),
+        ty: Type::Variable(0),
+        span: ast::Span::new(0, 0, 0, 0),
+        kind: TermKind::Soac(soac.original.clone()),
+    };
+    super::defunctionalize::collect_free_vars(
+        &soac_term,
+        &bound,
+        &empty_top,
+        &empty_defs,
+        symbols,
+        &mut free,
+        &mut seen,
+    );
+
+    let free_syms: HashSet<SymbolId> =
+        free.iter().filter_map(|t| if let TermKind::Var(s) = &t.kind { Some(*s) } else { None }).collect();
+    captured_params.iter().filter(|(s, _)| free_syms.contains(s)).cloned().collect()
 }
 
 /// Analyze a SOAC, rejecting non-parallelizable variants (Filter,
@@ -649,9 +621,7 @@ fn make_lowering_plan(
         SoacOp::Redomap { reduce_op, ne, .. } => {
             make_two_phase_plan(analysis, entry_name, reduce_op, ne, next_binding, program)
         }
-        SoacOp::Scan { op, ne, input } => {
-            make_scan_plan(analysis, entry_name, op, ne, input, next_binding, program)
-        }
+        SoacOp::Scan { op, ne, .. } => make_scan_plan(analysis, entry_name, op, ne, next_binding, program),
         _ => unreachable!("analyze_soac rejected non-parallelizable variants"),
     }
 }
@@ -708,7 +678,6 @@ fn make_scan_plan(
     entry_name: &str,
     op: &Lambda,
     ne: &Term,
-    input: &ArrayExpr,
     next_binding: u32,
     program: &mut Program,
 ) -> LoweringPlan {
@@ -721,7 +690,6 @@ fn make_scan_plan(
         analysis,
         op,
         ne,
-        input,
         &elem_type,
         output_binding,
         block_sums_binding,
@@ -879,7 +847,6 @@ fn build_scan_entries(
     analysis: &EntryAnalysis,
     op: &Lambda,
     ne: &Term,
-    _input: &ArrayExpr,
     elem_type: &Type<TypeName>,
     output_binding: (u32, u32),
     block_sums_binding: (u32, u32),
@@ -1409,31 +1376,18 @@ fn emit_u32_counter_scan_loop(
     let acc_sym = program.symbols.alloc("_loop_acc".into());
     let i_sym = program.symbols.alloc("_loop_i".into());
 
-    let init = intrinsic_term(
-        "_w_tuple",
-        vec![init_acc, uint_lit(0, span)],
-        state_ty.clone(),
-        span,
-        program,
-    );
+    let init = tuple_term(vec![init_acc, uint_lit(0, span)], state_ty.clone(), span, program);
 
-    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
-    let mk_idx_lit = |n: &str| Term {
-        id: TermId(0),
-        ty: i32_ty.clone(),
-        span,
-        kind: TermKind::IntLit(n.into()),
-    };
-    let acc_proj = intrinsic_term(
-        "_w_tuple_proj",
-        vec![var_term(state_sym, state_ty.clone(), span), mk_idx_lit("0")],
+    let acc_proj = tuple_proj(
+        var_term(state_sym, state_ty.clone(), span),
+        0,
         acc_ty.clone(),
         span,
         program,
     );
-    let i_proj = intrinsic_term(
-        "_w_tuple_proj",
-        vec![var_term(state_sym, state_ty.clone(), span), mk_idx_lit("1")],
+    let i_proj = tuple_proj(
+        var_term(state_sym, state_ty.clone(), span),
+        1,
         u32_ty_v.clone(),
         span,
         program,
@@ -1460,8 +1414,7 @@ fn emit_u32_counter_scan_loop(
         u32_ty_v.clone(),
         span,
     );
-    let new_state_tuple = intrinsic_term(
-        "_w_tuple",
+    let new_state_tuple = tuple_term(
         vec![var_term(new_acc_sym, acc_ty.clone(), span), next_i],
         state_ty.clone(),
         span,
@@ -1483,14 +1436,8 @@ fn emit_u32_counter_scan_loop(
         },
     };
 
-    // Return _w_tuple_proj(the_loop, 0) — the final accumulator.
-    intrinsic_term(
-        "_w_tuple_proj",
-        vec![the_loop, mk_idx_lit("0")],
-        acc_ty.clone(),
-        span,
-        program,
-    )
+    // The loop's value is the state tuple; project .0 for the final acc.
+    tuple_proj(the_loop, 0, acc_ty.clone(), span, program)
 }
 
 /// Phase 2 body: sequential scan over `block_sums` into `block_offsets`.
@@ -1866,6 +1813,37 @@ fn uint_lit(val: u64, span: ast::Span) -> Term {
         span,
         kind: TermKind::IntLit(val.to_string()),
     }
+}
+
+fn int_lit(val: i64, span: ast::Span) -> Term {
+    Term {
+        id: TermId(0),
+        ty: Type::Constructed(TypeName::Int(32), vec![]),
+        span,
+        kind: TermKind::IntLit(val.to_string()),
+    }
+}
+
+/// Construct a `_w_tuple(components…)` term with the given tuple type.
+fn tuple_term(components: Vec<Term>, ty: Type<TypeName>, span: ast::Span, program: &mut Program) -> Term {
+    intrinsic_term("_w_tuple", components, ty, span, program)
+}
+
+/// Project `base.index` via `_w_tuple_proj(base, IntLit(index))`.
+fn tuple_proj(
+    base: Term,
+    index: u32,
+    elem_ty: Type<TypeName>,
+    span: ast::Span,
+    program: &mut Program,
+) -> Term {
+    intrinsic_term(
+        "_w_tuple_proj",
+        vec![base, int_lit(index as i64, span)],
+        elem_ty,
+        span,
+        program,
+    )
 }
 
 fn make_entry_def(
