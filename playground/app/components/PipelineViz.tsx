@@ -32,7 +32,6 @@ export function PipelineViz({ iface }: PipelineVizProps) {
   }
   return (
     <div style={rootStyle}>
-      <Legend />
       <div style={entriesListStyle}>
         {iface.entries.map((e) => (
           <EntryCard key={e.name} entry={e} />
@@ -40,16 +39,6 @@ export function PipelineViz({ iface }: PipelineVizProps) {
       </div>
       <ResourceSection title="Uniforms" resources={iface.uniforms} />
       <ResourceSection title="Storage buffers" resources={iface.storage} />
-    </div>
-  );
-}
-
-function Legend() {
-  return (
-    <div style={legendStyle}>
-      <span style={{ ...kindBadge("vertex"), marginRight: 8 }}>vertex</span>
-      <span style={{ ...kindBadge("fragment"), marginRight: 8 }}>fragment</span>
-      <span style={{ ...kindBadge("compute"), marginRight: 8 }}>compute</span>
     </div>
   );
 }
@@ -131,9 +120,6 @@ const placeholderStyle: React.CSSProperties = {
   fontFamily: "'JetBrains Mono', monospace",
   fontSize: 12,
   color: "#888",
-};
-const legendStyle: React.CSSProperties = {
-  marginBottom: 12,
 };
 const entriesListStyle: React.CSSProperties = {
   display: "flex",

@@ -181,10 +181,13 @@ export function startRenderLoop(
   canvas: HTMLCanvasElement,
   res: RenderResources,
   onFps: (fps: number) => void,
+  onElapsed?: (seconds: number) => void,
+  isPaused?: () => boolean,
 ): RenderLoop {
   const { device, canvasContext } = ctx;
   let animationId: number | null = null;
-  const startTime = performance.now();
+  let startTime = performance.now();
+  let pausedAt: number | null = null;
   let frameCount = 0;
   let lastFpsUpdate = startTime;
 
@@ -193,7 +196,19 @@ export function startRenderLoop(
   const mouseBytes = new Float32Array(4);
 
   function tick(time: number) {
+    // Freeze elapsed time while paused; on resume, shift startTime so
+    // iTime keeps ticking seamlessly from where it was.
+    if (isPaused?.()) {
+      if (pausedAt === null) pausedAt = time;
+      animationId = requestAnimationFrame(tick);
+      return;
+    }
+    if (pausedAt !== null) {
+      startTime += time - pausedAt;
+      pausedAt = null;
+    }
     const currentTime = (time - startTime) / 1000;
+    onElapsed?.(currentTime);
 
     // Update recognized uniforms.
     if (res.shadertoy.iResolution) {
