@@ -49,14 +49,21 @@ pub struct SoacAnalysis {
     pub provenances: Vec<ArrayProvenance>,
 }
 
+/// Every input ArrayExpr a parallelizable SOAC consumes, in source order.
+/// Free-function form so callers (`analyze_soac`) can use it on a raw
+/// `SoacOp` without building a throwaway `SoacAnalysis`.
+fn soac_inputs(soac: &SoacOp) -> Vec<&ArrayExpr> {
+    match soac {
+        SoacOp::Map { inputs, .. } | SoacOp::Redomap { inputs, .. } => inputs.iter().collect(),
+        SoacOp::Reduce { input, .. } | SoacOp::Scan { input, .. } => vec![input],
+        _ => unreachable!("non-parallelizable SoacOp in SoacAnalysis"),
+    }
+}
+
 impl SoacAnalysis {
     /// Every input ArrayExpr the SOAC consumes, in source order.
     pub fn inputs(&self) -> Vec<&ArrayExpr> {
-        match &self.original {
-            SoacOp::Map { inputs, .. } | SoacOp::Redomap { inputs, .. } => inputs.iter().collect(),
-            SoacOp::Reduce { input, .. } | SoacOp::Scan { input, .. } => vec![input],
-            _ => unreachable!("non-parallelizable SoacOp in SoacAnalysis"),
-        }
+        soac_inputs(&self.original)
     }
 
     /// Neutral/initial value — present for Reduce/Redomap/Scan, `None` for Map.
@@ -397,17 +404,12 @@ fn analyze_soac(soac: &SoacOp, _result_ty: &Type<TypeName>, symbols: &SymbolTabl
         _ => return None,
     };
 
-    // Re-derive provenances from the normalized inputs. Build the analysis
-    // so its `inputs()` method is the single source of truth for "what are
-    // the inputs".
-    let analysis_stub = SoacAnalysis {
-        original: normalized,
-        provenances: Vec::new(),
-    };
+    // Re-derive provenances from the normalized inputs. `soac_inputs`
+    // is the single source of truth for "what are the inputs".
     let provenances: Vec<ArrayProvenance> =
-        analysis_stub.inputs().iter().map(|ae| classify_input(ae)).collect::<Option<Vec<_>>>()?;
+        soac_inputs(&normalized).iter().map(|ae| classify_input(ae)).collect::<Option<Vec<_>>>()?;
     Some(SoacAnalysis {
-        original: analysis_stub.original,
+        original: normalized,
         provenances,
     })
 }
@@ -2008,46 +2010,44 @@ fn make_entry_def(
     }
 }
 
-/// Collect storage buffer bindings from a SOAC's input provenances.
+/// Iterate over the SOAC's storage-backed inputs, yielding
+/// `(positional_index, set, binding, elem_ty)` for each. Provenances
+/// that aren't `ArrayProvenance::Storage` (e.g. ranges) are skipped.
+/// Single source of truth for the two adapters below.
+fn storage_inputs(soac: &SoacAnalysis) -> impl Iterator<Item = (usize, u32, u32, &Type<TypeName>)> + '_ {
+    soac.provenances.iter().enumerate().filter_map(|(i, p)| match p {
+        ArrayProvenance::Storage {
+            set,
+            binding,
+            elem_ty,
+        } => Some((i, *set, *binding, elem_ty)),
+        _ => None,
+    })
+}
+
+/// Pipeline-level `Binding` descriptors for the SOAC's storage inputs.
 fn collect_soac_bindings(soac: &SoacAnalysis) -> Vec<Binding> {
-    soac.provenances
-        .iter()
-        .enumerate()
-        .filter_map(|(i, p)| match p {
-            ArrayProvenance::Storage { set, binding, .. } => Some(Binding::StorageBuffer {
-                set: *set,
-                binding: *binding,
-                access: Access::ReadOnly,
-                usage: BufferUsage::Input,
-                name: format!("input_{}", i),
-            }),
-            _ => None,
+    storage_inputs(soac)
+        .map(|(i, set, binding, _)| Binding::StorageBuffer {
+            set,
+            binding,
+            access: Access::ReadOnly,
+            usage: BufferUsage::Input,
+            name: format!("input_{}", i),
         })
         .collect()
 }
 
-/// Program-level resource bindings (uniforms + read-only storage buffers).
-///
-/// Build per-entry `StorageBindingDecl`s for every SOAC input backed by a
-/// storage buffer. These must land on each phase entry whose body reads
-/// from those buffers so the backend's binding allowlist admits the
-/// references. Shared helper between reduce's two-phase and scan's
-/// three-phase builders.
+/// Per-entry `StorageBindingDecl`s for the SOAC's storage inputs. Every
+/// phase entry whose body reads those buffers must declare them so the
+/// backend's binding allowlist admits the references.
 fn input_storage_decls(soac: &SoacAnalysis) -> Vec<interface::StorageBindingDecl> {
-    soac.provenances
-        .iter()
-        .filter_map(|p| match p {
-            ArrayProvenance::Storage {
-                set,
-                binding,
-                elem_ty,
-            } => Some(interface::StorageBindingDecl {
-                set: *set,
-                binding: *binding,
-                role: interface::StorageRole::Input,
-                elem_ty: elem_ty.clone(),
-            }),
-            _ => None,
+    storage_inputs(soac)
+        .map(|(_, set, binding, elem_ty)| interface::StorageBindingDecl {
+            set,
+            binding,
+            role: interface::StorageRole::Input,
+            elem_ty: elem_ty.clone(),
         })
         .collect()
 }
