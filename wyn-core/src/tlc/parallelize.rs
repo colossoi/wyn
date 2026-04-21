@@ -421,6 +421,12 @@ fn normalize_range_ref(input: &ArrayExpr, symbols: &SymbolTable) -> Option<Array
         ArrayExpr::Ref(t) => t.as_ref(),
         _ => return None,
     };
+    // Peel off leading `let` wrappers so we can recognize `let N = 256 in
+    // _w_range(0, N, ...)` that inline_small doesn't always fold.
+    let mut inner = inner;
+    while let TermKind::Let { body, .. } = &inner.kind {
+        inner = body.as_ref();
+    }
     let (func, args) = match &inner.kind {
         TermKind::App { func, args } => (func, args),
         _ => return None,
@@ -509,6 +515,289 @@ pub struct ParallelizationResult {
     pub pipeline: PipelineDescriptor,
 }
 
+// =============================================================================
+// Graphical-entry SOAC lifting
+// =============================================================================
+
+/// For each graphical entry, walk its body's outer let-chain and hoist
+/// reduce/redomap bindings whose RHS is invariant with respect to the
+/// entry's per-invocation params. Each lift:
+///   * allocates a fresh storage buffer for the scalar result,
+///   * emits a compute pre-pass entry `<entry>_prepass_<n>` that
+///     evaluates the SOAC and stores the result at index 0,
+///   * rewrites the original let-binding's RHS to
+///     `_w_intrinsic_storage_index(set, binding, 0)`,
+///   * adds an `Input`-role `StorageBindingDecl` to the graphical
+///     entry's interface so the backend's binding allowlist admits
+///     the load.
+///
+/// The pre-pass entries land in `program.defs` and will be picked up
+/// by `analyze_program` + Stage B in the usual way, producing the
+/// two-phase compute pipeline that justifies "multi-stage" — one
+/// source file compiles to a chunk/combine pair plus the original
+/// vertex+fragment stages.
+///
+/// Scope (MVP): only reduce/redomap whose result is a scalar. Scan/Map
+/// (array results) and deeply nested lets are left for a follow-up.
+fn lift_graphical_invariant_soacs(
+    program: &mut Program,
+    next_binding: &mut u32,
+    prepass_result_bindings: &mut HashMap<SymbolId, (u32, u32)>,
+) {
+    use std::collections::HashSet;
+
+    // Snapshot indices of graphical entry defs — we'll mutate program.defs
+    // in the loop, but only the def at `idx` (its body + storage_bindings).
+    let indices: Vec<usize> = program
+        .defs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, d)| match &d.meta {
+            DefMeta::EntryPoint(decl) if !decl.entry_type.is_compute() => Some(i),
+            _ => None,
+        })
+        .collect();
+
+    let mut new_defs: Vec<Def> = Vec::new();
+
+    for idx in indices {
+        let entry_name = program.symbols.get(program.defs[idx].name).cloned().unwrap_or_default();
+        let entry_params: HashSet<SymbolId> = {
+            let (params, _) = peel_lambda_params(&program.defs[idx].body);
+            params.iter().map(|(s, _)| *s).collect()
+        };
+
+        let body = program.defs[idx].body.clone();
+        let mut added_decls: Vec<interface::StorageBindingDecl> = Vec::new();
+        let new_body = lift_in_term(
+            body,
+            &entry_name,
+            &entry_params,
+            next_binding,
+            &mut added_decls,
+            &mut new_defs,
+            prepass_result_bindings,
+            program,
+        );
+
+        program.defs[idx].body = new_body;
+        if let DefMeta::EntryPoint(ref mut decl) = program.defs[idx].meta {
+            decl.storage_bindings.extend(added_decls);
+        }
+    }
+
+    program.defs.extend(new_defs);
+}
+
+/// Return a `Term`'s (possibly-wrapped) lambda params by peeling
+/// outer `TermKind::Lambda` layers. Mirrors `extract_params` in
+/// `buffer_specialize.rs`.
+fn peel_lambda_params(term: &Term) -> (Vec<(SymbolId, Type<TypeName>)>, &Term) {
+    match &term.kind {
+        TermKind::Lambda(lam) => {
+            let (mut inner, body) = peel_lambda_params(&lam.body);
+            let mut params = lam.params.clone();
+            params.append(&mut inner);
+            (params, body)
+        }
+        _ => (vec![], term),
+    }
+}
+
+/// Walk outer `Lambda`s and `Let`s, hoisting eligible SOAC-RHSs. Stops
+/// descending at the first non-Lambda-non-Let term — that's the tail
+/// computation and isn't a lift site.
+fn lift_in_term(
+    term: Term,
+    entry_name: &str,
+    entry_params: &std::collections::HashSet<SymbolId>,
+    next_binding: &mut u32,
+    added_decls: &mut Vec<interface::StorageBindingDecl>,
+    new_defs: &mut Vec<Def>,
+    prepass_result_bindings: &mut HashMap<SymbolId, (u32, u32)>,
+    program: &mut Program,
+) -> Term {
+    match term.kind {
+        TermKind::Lambda(lam) => {
+            let Lambda {
+                params,
+                body,
+                ret_ty,
+                captures,
+            } = lam;
+            let new_body = lift_in_term(
+                *body,
+                entry_name,
+                entry_params,
+                next_binding,
+                added_decls,
+                new_defs,
+                prepass_result_bindings,
+                program,
+            );
+            Term {
+                id: term.id,
+                ty: term.ty,
+                span: term.span,
+                kind: TermKind::Lambda(Lambda {
+                    params,
+                    body: Box::new(new_body),
+                    ret_ty,
+                    captures,
+                }),
+            }
+        }
+        TermKind::Let {
+            name,
+            name_ty,
+            rhs,
+            body,
+        } => {
+            let new_rhs = maybe_hoist(
+                *rhs,
+                entry_name,
+                &name_ty,
+                entry_params,
+                next_binding,
+                added_decls,
+                new_defs,
+                prepass_result_bindings,
+                program,
+            );
+            let new_body = lift_in_term(
+                *body,
+                entry_name,
+                entry_params,
+                next_binding,
+                added_decls,
+                new_defs,
+                prepass_result_bindings,
+                program,
+            );
+            Term {
+                id: term.id,
+                ty: term.ty,
+                span: term.span,
+                kind: TermKind::Let {
+                    name,
+                    name_ty,
+                    rhs: Box::new(new_rhs),
+                    body: Box::new(new_body),
+                },
+            }
+        }
+        _ => term,
+    }
+}
+
+/// If `rhs` is a scalar-returning SOAC (reduce/redomap) whose free
+/// vars don't reference entry params, allocate a storage binding,
+/// emit a pre-pass compute entry, and replace `rhs` with a load of
+/// that binding. Otherwise return `rhs` unchanged.
+fn maybe_hoist(
+    rhs: Term,
+    entry_name: &str,
+    name_ty: &Type<TypeName>,
+    entry_params: &std::collections::HashSet<SymbolId>,
+    next_binding: &mut u32,
+    added_decls: &mut Vec<interface::StorageBindingDecl>,
+    new_defs: &mut Vec<Def>,
+    prepass_result_bindings: &mut HashMap<SymbolId, (u32, u32)>,
+    program: &mut Program,
+) -> Term {
+    // Only hoist scalar-result SOACs for now. Scan/Map (array result)
+    // deferred to a follow-up.
+    let is_scalar_soac = matches!(
+        &rhs.kind,
+        TermKind::Soac(SoacOp::Reduce { .. }) | TermKind::Soac(SoacOp::Redomap { .. })
+    );
+    if !is_scalar_soac {
+        return rhs;
+    }
+
+    // Invariance check: none of `rhs`'s free vars may be an entry param.
+    if rhs_references_entry_param(&rhs, entry_params, &program.symbols) {
+        return rhs;
+    }
+
+    // Pre-allocate the binding the fragment will load from. Stage B's
+    // make_two_phase_plan will use this as the prepass's result_binding
+    // (via the prepass_result_bindings map), so phase 2's final store
+    // goes exactly here.
+    let binding = (0u32, *next_binding);
+    *next_binding += 1;
+
+    let span = rhs.span;
+    let prepass_name = format!("{}_prepass_{}", entry_name, added_decls.len());
+    let prepass_def = build_prepass_def(&prepass_name, rhs, name_ty.clone(), program);
+    prepass_result_bindings.insert(prepass_def.name, binding);
+    new_defs.push(prepass_def);
+
+    added_decls.push(interface::StorageBindingDecl {
+        set: binding.0,
+        binding: binding.1,
+        role: interface::StorageRole::Input,
+        elem_ty: name_ty.clone(),
+    });
+
+    // Rewrite the let RHS to a storage load at position 0.
+    intrinsic_term(
+        "_w_intrinsic_storage_index",
+        vec![
+            uint_lit(binding.0 as u64, span),
+            uint_lit(binding.1 as u64, span),
+            uint_lit(0, span),
+        ],
+        name_ty.clone(),
+        span,
+        program,
+    )
+}
+
+/// True if `term` has any free SymbolId that names an entry param.
+/// Uses `defunctionalize::collect_free_vars` with empty
+/// `top_level`/`known_defs` sets (same style as
+/// `compute_required_params`).
+fn rhs_references_entry_param(
+    term: &Term,
+    entry_params: &std::collections::HashSet<SymbolId>,
+    symbols: &SymbolTable,
+) -> bool {
+    use std::collections::HashSet;
+    let bound: HashSet<SymbolId> = HashSet::new();
+    let empty_top: HashSet<SymbolId> = HashSet::new();
+    let empty_defs: HashSet<String> = HashSet::new();
+    let mut free: Vec<Term> = Vec::new();
+    let mut seen: HashSet<SymbolId> = HashSet::new();
+    super::defunctionalize::collect_free_vars(
+        term,
+        &bound,
+        &empty_top,
+        &empty_defs,
+        symbols,
+        &mut free,
+        &mut seen,
+    );
+    free.iter().any(|t| matches!(&t.kind, TermKind::Var(s) if entry_params.contains(s)))
+}
+
+/// Build a compute entry Def whose body is the bare `soac_term` at the
+/// tail. No input params, no output storage bindings declared —
+/// `run()` keeps a `prepass_result_bindings` map telling Stage B's
+/// `make_two_phase_plan` which result binding to use for this entry,
+/// so phase 2 writes to the binding the fragment reads from.
+///
+/// The tail-SOAC shape is important: `analyze_entry` recognizes it as
+/// a parallelizable entry and feeds it to Stage B for multi-staging.
+fn build_prepass_def(
+    entry_name: &str,
+    soac_term: Term,
+    elem_ty: Type<TypeName>,
+    program: &mut Program,
+) -> Def {
+    make_entry_def(entry_name, soac_term, elem_ty, &[], Vec::new(), program)
+}
+
 /// Parallelize SOACs in compute entry points.
 ///
 /// `disable` short-circuits the whole pass — every compute entry runs
@@ -521,6 +810,30 @@ pub fn run(mut program: Program, disable: bool) -> ParallelizationResult {
         let pipeline = build_default_pipeline(&program);
         return ParallelizationResult { program, pipeline };
     }
+
+    // Track max binding across every `(set, binding)` the program already
+    // uses — including implicit `ArrayExpr::StorageBuffer` bindings
+    // introduced by buffer_specialize/mono for SOAC inputs, not just
+    // user-declared `#[storage]` entries. Filtering only by
+    // `program.storage` would collide fresh intermediates with input
+    // buffers; see PLAN_scan_stage_b.md.
+    let mut next_binding: u32 =
+        collect_all_used_bindings(&program).iter().map(|(_, b)| b + 1).max().unwrap_or(0);
+
+    // Hoist invariant SOACs out of graphical entry bodies into generated
+    // compute pre-pass entries. Each pre-pass writes its SOAC result to
+    // a fresh storage buffer; the graphical entry's body is rewritten to
+    // read from that buffer. The pre-pass entries are added to
+    // `program.defs` so the compute Stage A/B analysis below picks them
+    // up and multi-stages them.
+    //
+    // `prepass_result_bindings` maps each hoisted pre-pass's def symbol
+    // to the storage binding the graphical entry reads from; Stage B's
+    // `make_two_phase_plan` consults this so phase 2's result store goes
+    // exactly there (instead of a freshly-allocated binding).
+    let mut prepass_result_bindings: HashMap<SymbolId, (u32, u32)> = HashMap::new();
+    lift_graphical_invariant_soacs(&mut program, &mut next_binding, &mut prepass_result_bindings);
+
     let analyses = analyze_program(&program);
 
     if analyses.is_empty() {
@@ -554,18 +867,10 @@ pub fn run(mut program: Program, disable: bool) -> ParallelizationResult {
         }
     }
 
-    // Track max binding across every `(set, binding)` the program already
-    // uses — including implicit `ArrayExpr::StorageBuffer` bindings
-    // introduced by buffer_specialize/mono for SOAC inputs, not just
-    // user-declared `#[storage]` entries. Filtering only by
-    // `program.storage` would collide fresh intermediates with input
-    // buffers; see PLAN_scan_stage_b.md.
-    let mut next_binding: u32 =
-        collect_all_used_bindings(&program).iter().map(|(_, b)| b + 1).max().unwrap_or(0);
-
     for (_sym, analysis) in &analyses {
         let entry_name = program.symbols.get(analysis.def_name).cloned().unwrap_or_default();
-        let plan = make_lowering_plan(analysis, &entry_name, next_binding, &mut program);
+        let forced = prepass_result_bindings.get(&analysis.def_name).copied();
+        let plan = make_lowering_plan(analysis, &entry_name, next_binding, forced, &mut program);
         next_binding += plan.extra_bindings_used;
         if let Some(removed) = plan.removed_entry {
             removed_entries.push(removed);
@@ -621,16 +926,29 @@ fn make_lowering_plan(
     analysis: &EntryAnalysis,
     entry_name: &str,
     next_binding: u32,
+    forced_result_binding: Option<(u32, u32)>,
     program: &mut Program,
 ) -> LoweringPlan {
     match &analysis.soac.original {
         SoacOp::Map { .. } => make_map_plan(analysis, entry_name),
-        SoacOp::Reduce { op, ne, .. } => {
-            make_two_phase_plan(analysis, entry_name, op, ne, next_binding, program)
-        }
-        SoacOp::Redomap { reduce_op, ne, .. } => {
-            make_two_phase_plan(analysis, entry_name, reduce_op, ne, next_binding, program)
-        }
+        SoacOp::Reduce { op, ne, .. } => make_two_phase_plan(
+            analysis,
+            entry_name,
+            op,
+            ne,
+            next_binding,
+            forced_result_binding,
+            program,
+        ),
+        SoacOp::Redomap { reduce_op, ne, .. } => make_two_phase_plan(
+            analysis,
+            entry_name,
+            reduce_op,
+            ne,
+            next_binding,
+            forced_result_binding,
+            program,
+        ),
         SoacOp::Scan { op, ne, .. } => make_scan_plan(analysis, entry_name, op, ne, next_binding, program),
         _ => unreachable!("analyze_soac rejected non-parallelizable variants"),
     }
@@ -660,10 +978,18 @@ fn make_two_phase_plan(
     reduce_op: &Lambda,
     ne: &Term,
     next_binding: u32,
+    forced_result_binding: Option<(u32, u32)>,
     program: &mut Program,
 ) -> LoweringPlan {
-    let partials_binding = (0, next_binding);
-    let result_binding = (0, next_binding + 1);
+    // Partials always consumes one fresh binding. When the caller has
+    // pre-allocated a result binding (graphical-entry lift), use it; the
+    // lift step also added the Input-role decl on the graphical entry,
+    // so this keeps the two sides in sync. Without a forced binding the
+    // plan allocates its own.
+    let (partials_binding, result_binding, extra_used) = match forced_result_binding {
+        Some(result) => ((0, next_binding), result, 1),
+        None => ((0, next_binding), (0, next_binding + 1), 2),
+    };
     let elem_type = analysis.soac.result_elem_type();
     let (entries, pipeline) = build_two_phase_entries(
         entry_name,
@@ -679,7 +1005,7 @@ fn make_two_phase_plan(
         removed_entry: Some(analysis.def_name),
         new_defs: entries,
         pipeline,
-        extra_bindings_used: 2,
+        extra_bindings_used: extra_used,
     }
 }
 
