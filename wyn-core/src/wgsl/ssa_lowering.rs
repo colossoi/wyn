@@ -2337,13 +2337,14 @@ fn try_lower_wgsl_builtin(name: &str, args: &[String]) -> Option<String> {
         return Some(format!("{}({})", bare, args.join(", ")));
     }
 
-    // Dotted built-ins come in two flavors:
-    //   * type casts — `f32.i32(x)` → `f32(x)` (the "from" half is a
-    //     type name; the suffix encodes the source type for the
-    //     dispatcher's benefit and has no runtime effect),
-    //   * math operations — `f32.cos(x)` → `cos(x)` (the "from" half
-    //     names the operation; WGSL uses the bare name).
-    // Check the math case first so we don't mis-route `f32.cos` through
+    // Dotted built-ins come in three flavors:
+    //   * math operations — `f32.cos(x)` → `cos(x)` (the "to" half
+    //     names the result type; WGSL takes the bare function name).
+    //   * type casts — `f32.i32(x)` → `f32(x)` (the suffix encodes
+    //     the source type for the dispatcher; WGSL's constructor
+    //     call is the bare target type).
+    //   * constants — `f32.pi`, `f32.e` — inline literal.
+    // Check math before casts so `f32.cos` doesn't mis-route through
     // the cast arm just because `f32` is a recognized type.
     if let Some((to, from)) = name.split_once('.') {
         if matches!(to, "f32" | "f64") && DIRECT.contains(&from) {
@@ -2353,19 +2354,10 @@ fn try_lower_wgsl_builtin(name: &str, args: &[String]) -> Option<String> {
         if is_type(to) && is_type(from) && args.len() == 1 {
             return Some(format!("{}({})", to, args[0]));
         }
-
-        // Dotted-math fallback for any name not in the explicit tables
-        // above — matches the GLSL backend's naming convention.
         if matches!(to, "f32" | "f64") {
-            let bare = &name[to.len() + 1..];
-            if DIRECT.contains(&bare) {
-                return Some(format!("{}({})", bare, args.join(", ")));
-            }
-            // f32.pi / f32.e are constants in Wyn.
-            match bare {
+            match from {
                 "pi" => return Some("3.14159265358979323846f".to_string()),
                 "e" => return Some("2.71828182845904523536f".to_string()),
-                "max" | "min" => return Some(format!("{}({})", bare, args.join(", "))),
                 _ => {}
             }
         }

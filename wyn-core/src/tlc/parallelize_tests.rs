@@ -12,7 +12,7 @@
 use super::analyze_entry;
 use crate::ast::{self, Span, TypeName};
 use crate::tlc::{
-    ArrayExpr, Def, DefMeta, Lambda, LoopKind, ReduceProps, SoacOp, Term, TermId, TermIdSource, TermKind,
+    ArrayExpr, Def, DefMeta, Lambda, LoopKind, SoacOp, Term, TermId, TermIdSource, TermKind,
 };
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
@@ -510,7 +510,3 @@ fn binding_registry_finds_nested_storage_buffers() {
     assert!(used.contains(&(0, 7)), "missing (0, 7): {:?}", used);
 }
 
-// Silence unused-import warnings for symbols that only appear in
-// `matches!` arms.
-#[allow(dead_code)]
-fn _unused(_: ReduceProps) {}

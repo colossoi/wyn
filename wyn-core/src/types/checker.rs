@@ -857,23 +857,9 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    /// Resolve type aliases in a type annotation.
-    ///
-    /// Note: SizeVar/UserVar substitution is now handled by the resolve_placeholders pass
-    /// before type checking, so this only needs to resolve type aliases.
-    fn normalize_annotation_type(&self, ty: &Type, module: Option<&str>) -> Type {
-        self.resolve_type_aliases_scoped(ty, module)
-    }
-
     /// Resolve type aliases in a type annotation. SizeVar/UserVar
-    /// substitution happens in the `resolve_placeholders` pass; the
-    /// `bindings` parameter is kept for API compatibility and ignored.
-    fn normalize_annotation_type_static(
-        &self,
-        ty: &Type,
-        module: Option<&str>,
-        _bindings: &HashMap<String, Type>,
-    ) -> Type {
+    /// substitution is handled upstream by `resolve_placeholders`.
+    fn normalize_annotation_type(&self, ty: &Type, module: Option<&str>) -> Type {
         self.resolve_type_aliases_scoped(ty, module)
     }
 
@@ -1249,15 +1235,13 @@ impl<'a> TypeChecker<'a> {
 
     /// Helper to type check a function body with parameters in scope
     /// Returns (param_types, body_type)
-    /// If type_param_bindings is provided, UserVars in parameter types will be substituted
     fn check_function_with_params(
         &mut self,
         params: &[Pattern],
         body: &Expression,
-        type_param_bindings: &HashMap<String, Type>,
         module_name: Option<&str>,
     ) -> Result<(Vec<Type>, Type)> {
-        self.check_function_with_params_inner(params, body, type_param_bindings, module_name, false)
+        self.check_function_with_params_inner(params, body, module_name, false)
     }
 
     fn check_entry_with_params(
@@ -1265,14 +1249,13 @@ impl<'a> TypeChecker<'a> {
         params: &[Pattern],
         body: &Expression,
     ) -> Result<(Vec<Type>, Type)> {
-        self.check_function_with_params_inner(params, body, &HashMap::new(), None, true)
+        self.check_function_with_params_inner(params, body, None, true)
     }
 
     fn check_function_with_params_inner(
         &mut self,
         params: &[Pattern],
         body: &Expression,
-        type_param_bindings: &HashMap<String, Type>,
         module_name: Option<&str>,
         is_entry: bool,
     ) -> Result<(Vec<Type>, Type)> {
@@ -1281,7 +1264,7 @@ impl<'a> TypeChecker<'a> {
             .iter()
             .map(|p| {
                 let ty = p.pattern_type().cloned().unwrap_or_else(|| self.context.new_variable());
-                self.normalize_annotation_type_static(&ty, module_name, type_param_bindings)
+                self.normalize_annotation_type(&ty, module_name)
             })
             .collect();
 
@@ -1616,7 +1599,6 @@ impl<'a> TypeChecker<'a> {
             let (param_types, body_type) = self.check_function_with_params(
                 &decl.params,
                 &decl.body,
-                &HashMap::new(), // substitution happens in resolve_placeholders
                 module_name,
             )?;
             debug!(
