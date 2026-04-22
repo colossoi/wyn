@@ -1,0 +1,86 @@
+-- "Ripples"
+--
+-- Three orbiting wave fronts summed into an interference field, colored
+-- through the Iñigo Quilez cosine palette. Brightness is modulated by a
+-- time-varying fragment-invariant reduction over 512 sample points —
+-- `breath` — which the graphical-entry lift pass (in
+-- `wyn-core/src/tlc/parallelize.rs::lift_graphical_invariant_soacs`)
+-- detects as invariant w.r.t. the fragment's per-invocation params and
+-- hoists into a generated compute pre-pass. The pre-pass is then
+-- multi-staged by Stage B into chunked + combine phases. One source
+-- file, four entry points in the emitted WGSL:
+--
+--     @vertex   w_vertex_Umain
+--     @fragment w_fragment_Umain                             (reads pre-pass scalar)
+--     @compute  w_fragment_Umain_Uprepass_U0_Uphase1_Uchunks (chunked Redomap)
+--     @compute  w_fragment_Umain_Uprepass_U0_Uphase2_Ucombine (reduce partials → scalar)
+--
+-- Pass `--single-stage` on the CLI to disable the lift; `breath` then
+-- evaluates inline in each fragment invocation (every pixel runs the
+-- 512-point reduce every frame — noticeably slower).
+
+------------------------------------------------------------
+-- Uniforms
+------------------------------------------------------------
+#[uniform(set=0, binding=0)] def iResolution: vec3f32
+#[uniform(set=0, binding=1)] def iTime: f32
+
+------------------------------------------------------------
+-- Iñigo Quilez cosine palette: a + b * cos(2pi * (c*t + d))
+------------------------------------------------------------
+def palette(t: f32) vec3f32 =
+  let a = @[0.5, 0.5, 0.5] in
+  let b = @[0.5, 0.5, 0.5] in
+  let c = @[1.0, 1.0, 1.0] in
+  let d = @[0.0, 0.33, 0.67] in
+  let k = 6.28318 * (c * t + d) in
+  a + b * @[f32.cos(k.x), f32.cos(k.y), f32.cos(k.z)]
+
+------------------------------------------------------------
+-- Vertex shader: full-screen triangle
+------------------------------------------------------------
+def verts: [3]vec4f32 =
+  [@[-1.0, -1.0, 0.0, 1.0],
+   @[3.0, -1.0, 0.0, 1.0],
+   @[-1.0, 3.0, 0.0, 1.0]]
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vid: i32)
+  #[builtin(position)] vec4f32 = verts[vid]
+
+------------------------------------------------------------
+-- Fragment shader: interference of three orbiting wave centers,
+-- brightness modulated by a fragment-invariant reduce (hoisted).
+------------------------------------------------------------
+#[fragment]
+entry fragment_main(#[builtin(position)] fragCoord: vec4f32)
+  #[location(0)] vec4f32 =
+  -- Fragment-invariant reduce: sums 512 cosines of time-shifted phases.
+  -- Let-bind the map producer so fuse_maps sees it as a separate
+  -- producer/consumer and fuses reduce-of-map into a Redomap — which
+  -- the lift pass can then hoist to a pre-pass (scalar result goes
+  -- into a storage buffer, fragment loads the scalar).
+  let samples = map(|i: i32| f32.cos(iTime * 0.37 + f32.i32(i) * 0.013), 0..<512) in
+  let breath = reduce(|a: f32, b: f32| a + b, 0.0, samples) in
+  let envelope = 0.5 + 0.005 * breath in
+
+  let coord = @[fragCoord.x, iResolution.y - fragCoord.y] in
+  let uv_raw = coord / iResolution.xy in
+  let uv = uv_raw * 2.0 - 1.0 in
+  let aspect = iResolution.x / iResolution.y in
+  let uv2 = @[uv.x * aspect, uv.y] in
+
+  let c1 = @[f32.cos(iTime * 0.37) * 0.7, f32.sin(iTime * 0.53) * 0.5] in
+  let c2 = @[f32.cos(iTime * 0.71 + 2.1) * 0.6, f32.sin(iTime * 0.29) * 0.6] in
+  let c3 = @[f32.sin(iTime * 0.47 + 4.2) * 0.8, f32.cos(iTime * 0.61) * 0.5] in
+
+  let d1 = magnitude(uv2 - c1) in
+  let d2 = magnitude(uv2 - c2) in
+  let d3 = magnitude(uv2 - c3) in
+
+  let w = f32.sin(d1 * 16.0 - iTime * 1.8)
+        + f32.sin(d2 * 11.0 - iTime * 1.2)
+        + f32.sin(d3 * 19.0 + iTime * 1.5) in
+
+  let color = palette(w * 0.12 + envelope) in
+  @[color.x * envelope, color.y * envelope, color.z * envelope, 1.0]
