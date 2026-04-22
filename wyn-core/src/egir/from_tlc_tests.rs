@@ -227,6 +227,42 @@ fn test_gvn_via_let() {
 }
 
 #[test]
+fn test_hash_cons_distinguishes_by_result_type() {
+    // Interning the same intrinsic with the same operands but different
+    // result types must produce distinct NodeIds — otherwise the
+    // first-inserted type silently wins at the merged node. Extends the
+    // 3b8cb24 Int/Uint-literal split to cover every pure op. Regression
+    // for the conway.wyn `_w_intrinsic_storage_len` i32/u32 collision.
+    use crate::egir::types::{EGraph, PureOp};
+    use smallvec::smallvec;
+
+    let mut g = EGraph::new();
+    let i32_ty = i32_ty();
+    let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+
+    let zero_u32 = g.intern_pure(
+        PureOp::Uint("0".into()),
+        smallvec::SmallVec::new(),
+        u32_ty.clone(),
+    );
+
+    let a = g.intern_pure(
+        PureOp::Intrinsic("_w_intrinsic_storage_len".into()),
+        smallvec![zero_u32, zero_u32],
+        i32_ty,
+    );
+    let b = g.intern_pure(
+        PureOp::Intrinsic("_w_intrinsic_storage_len".into()),
+        smallvec![zero_u32, zero_u32],
+        u32_ty,
+    );
+    assert_ne!(
+        a, b,
+        "different result types must not hash-cons to the same NodeId"
+    );
+}
+
+#[test]
 fn test_if_else_roundtrip() {
     // if cond then 1 else 0
     let mut symbols = crate::SymbolTable::new();
