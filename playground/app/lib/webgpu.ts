@@ -1,12 +1,19 @@
-// WebGPU render pipeline for WGSL previews.
+// WebGPU render + compute pipeline driver for WGSL previews.
 // Pure functions + a minimal RAF-loop builder; no React in here.
 //
-// The flow mirrors `webgl.ts`:
-//   setupContext → createRenderPipeline → startRenderLoop → stop()
+// Flow:
+//   setupContext → createPipelines → startRenderLoop → stop()
 //
 // Shadertoy-style uniforms (iResolution: vec3<f32>, iTime: f32,
 // iMouse: vec4<f32>) get auto-populated per frame; other uniforms are
 // left untouched (the backing buffer is zero-initialized).
+//
+// Storage buffers (both user-declared and compiler-introduced by the
+// parallelize pass for lifted pre-pass partials/results) are allocated
+// at a generous default size. Every compute entry becomes a compute
+// pipeline dispatched once per frame (single workgroup) before the
+// render pass — the parallelize pass emits 64-thread workgroups sized
+// to cover the whole problem in one dispatch.
 
 import type { ProgramInterface, ResourceBinding } from "./wasm";
 
@@ -17,7 +24,9 @@ export interface WebGPUContext {
 }
 
 /** Initialize a WebGPU adapter+device and configure the canvas context. */
-export async function setupContext(canvas: HTMLCanvasElement): Promise<WebGPUContext> {
+export async function setupContext(
+  canvas: HTMLCanvasElement,
+): Promise<WebGPUContext> {
   if (!navigator.gpu) {
     throw new Error("WebGPU not supported in this browser");
   }
@@ -43,12 +52,14 @@ export async function setupContext(canvas: HTMLCanvasElement): Promise<WebGPUCon
 // Pipeline + bind-group construction
 // -----------------------------------------------------------------------------
 
-/** Bytes a scalar/vector/matrix WGSL type occupies, for laying out uniform
- * buffers. Returns `null` for types we don't recognize — those bindings get
- * a zero-filled buffer sized by the declared type string is impossible, so
- * we allocate a minimum-size fallback. */
+/** Default allocation for every runtime-sized `array<T>` storage binding.
+ *  64 KiB handles parallelize's 64-element partials buffers and the
+ *  single-scalar result slot with plenty of headroom. */
+const STORAGE_BUFFER_BYTES = 64 * 1024;
+
+/** Bytes a scalar/vector/matrix WGSL type occupies. Returns `null` for
+ *  types we don't recognize — those bindings get a 16-byte fallback. */
 function uniformSizeBytes(ty: string): number {
-  // Strip spaces and be defensive about variations like "vec3f" vs "vec3<f32>".
   const t = ty.replace(/\s+/g, "");
   if (t === "f32" || t === "i32" || t === "u32") return 4;
   if (t === "vec2<f32>" || t === "vec2f") return 8;
@@ -57,7 +68,6 @@ function uniformSizeBytes(ty: string): number {
   if (t === "vec2<i32>" || t === "vec2<u32>") return 8;
   if (t === "vec3<i32>" || t === "vec3<u32>") return 12;
   if (t === "vec4<i32>" || t === "vec4<u32>") return 16;
-  // Fallback — WebGPU requires ≥ 4 bytes per uniform buffer.
   return 16;
 }
 
@@ -67,13 +77,30 @@ function pad16(n: number): number {
   return Math.max(16, Math.ceil(n / 16) * 16);
 }
 
+export interface ComputeDispatch {
+  pipeline: GPUComputePipeline;
+  workgroups: [number, number, number];
+}
+
 export interface RenderResources {
-  pipeline: GPURenderPipeline;
-  /** Map from `(set, binding)` key → GPUBuffer for every uniform binding. */
+  /** Render pipeline for the vertex+fragment pair, if the program has
+   *  both. Absent for compute-only programs. */
+  pipeline: GPURenderPipeline | null;
+  /** Every compute entry in dispatch order (interface order), dispatched
+   *  once per frame before the render pass. */
+  computeDispatches: ComputeDispatch[];
+  /** Bind groups for the render pipeline, keyed by `set`. Storage
+   *  bindings here are `read-only-storage`; WebGPU disallows writable
+   *  storage on vertex/fragment stages. */
+  renderBindGroups: Map<number, GPUBindGroup>;
+  /** Bind groups for compute pipelines, keyed by `set`. Storage
+   *  bindings here are read-write; visibility is COMPUTE-only. */
+  computeBindGroups: Map<number, GPUBindGroup>;
+  /** Uniform backing buffers keyed by `"set:binding"`. */
   uniformBuffers: Map<string, GPUBuffer>;
-  /** Bind groups keyed by descriptor set. */
-  bindGroups: Map<number, GPUBindGroup>;
-  /** Subset of uniforms we recognize and update per-frame. */
+  /** Storage backing buffers keyed by `"set:binding"`. */
+  storageBuffers: Map<string, GPUBuffer>;
+  /** Shortcut handles for auto-populated uniforms. */
   shadertoy: {
     iResolution?: GPUBuffer;
     iTime?: GPUBuffer;
@@ -85,28 +112,19 @@ function bindingKey(set: number, binding: number): string {
   return `${set}:${binding}`;
 }
 
-/** Build a render pipeline + bind groups from a compiled WGSL module.
- * Requires the program to have exactly one @vertex and one @fragment
- * entry; any compute entries are ignored for rendering (the pipeline-viz
- * panel still shows them). */
-export function createRenderPipeline(
+/** Build render + compute pipelines and the shared bind groups from a
+ *  compiled WGSL module. Every compute entry becomes a `ComputeDispatch`
+ *  issued once per frame before the render pass; if the program is
+ *  compute-only (no vertex+fragment pair), the render pipeline is null
+ *  and only the compute passes run. */
+export function createPipelines(
   ctx: WebGPUContext,
   wgsl: string,
   iface: ProgramInterface,
 ): RenderResources {
   const { device, format } = ctx;
-
   const module = device.createShaderModule({ code: wgsl });
 
-  const vertexEntry = iface.entries.find((e) => e.kind === "vertex");
-  const fragmentEntry = iface.entries.find((e) => e.kind === "fragment");
-  if (!vertexEntry || !fragmentEntry) {
-    throw new Error("WGSL render preview requires both a @vertex and a @fragment entry");
-  }
-
-  // Allocate a uniform buffer per `@group(G) @binding(B)` declaration.
-  // The Wyn WGSL backend emits one binding per uniform, so there's a
-  // 1:1 mapping between `iface.uniforms` and WGSL bindings.
   const uniformBuffers = new Map<string, GPUBuffer>();
   const shadertoy: RenderResources["shadertoy"] = {};
   for (const u of iface.uniforms) {
@@ -122,45 +140,198 @@ export function createRenderPipeline(
     else if (u.name === "iMouse") shadertoy.iMouse = buf;
   }
 
-  // Bind groups: one per distinct `set`, containing every uniform whose
-  // `set` matches. We let the shader-module reflection drive the layout
-  // (pipeline.getBindGroupLayout) so the descriptor matches whatever
-  // naga inferred from the WGSL source.
-  const pipeline = device.createRenderPipeline({
-    layout: "auto",
-    vertex: {
-      module,
-      entryPoint: vertexEntry.wgsl_name,
-    },
-    fragment: {
-      module,
-      entryPoint: fragmentEntry.wgsl_name,
-      targets: [{ format }],
-    },
-    primitive: { topology: "triangle-list" },
-  });
-
-  const bindGroups = new Map<number, GPUBindGroup>();
-  const setsInUse = new Set<number>();
-  for (const u of iface.uniforms) setsInUse.add(u.set);
-  for (const set of setsInUse) {
-    const entries = iface.uniforms
-      .filter((u) => u.set === set)
-      .map<GPUBindGroupEntry>((u) => ({
-        binding: u.binding,
-        resource: { buffer: uniformBuffers.get(bindingKey(u.set, u.binding))! },
-      }));
-    bindGroups.set(
-      set,
-      device.createBindGroup({
-        layout: pipeline.getBindGroupLayout(set),
-        entries,
-      }),
-    );
+  const storageBuffers = new Map<string, GPUBuffer>();
+  for (const s of iface.storage) {
+    const buf = device.createBuffer({
+      label: `storage ${s.name} @(${s.set},${s.binding})`,
+      size: STORAGE_BUFFER_BYTES,
+      usage:
+        GPUBufferUsage.STORAGE |
+        GPUBufferUsage.COPY_DST |
+        GPUBufferUsage.COPY_SRC,
+    });
+    storageBuffers.set(bindingKey(s.set, s.binding), buf);
   }
 
-  return { pipeline, uniformBuffers, bindGroups, shadertoy };
+  // Render and compute pipelines use separate bind group layouts over
+  // the same buffers because the layout type must match the shader's
+  // declared storage access (the WGSL emitter declares a slot
+  // `read_write` when any stage writes it, so `storage` is required
+  // everywhere), and WebGPU additionally forbids `storage` (read-write)
+  // on VERTEX visibility. Storage slots therefore appear in the render
+  // layout at FRAGMENT-only visibility; uniforms span VERTEX|FRAGMENT.
+  const setsInUse = new Set<number>();
+  for (const u of iface.uniforms) setsInUse.add(u.set);
+  for (const s of iface.storage) setsInUse.add(s.set);
+  const sortedSets = Array.from(setsInUse).sort((a, b) => a - b);
+
+  // Storage bindings referenced by any vertex/fragment entry — these
+  // must appear in the render layout as read-only-storage.
+  const renderStorageSlots = new Set<string>();
+  for (const e of iface.entries) {
+    if (e.kind !== "vertex" && e.kind !== "fragment") continue;
+    for (const b of e.inputs) {
+      const m = /^storage\((\d+),(\d+)\)$/.exec(b.decoration);
+      if (m) renderStorageSlots.add(bindingKey(Number(m[1]), Number(m[2])));
+    }
+    for (const b of e.outputs) {
+      const m = /^storage\((\d+),(\d+)\)$/.exec(b.decoration);
+      if (m) renderStorageSlots.add(bindingKey(Number(m[1]), Number(m[2])));
+    }
+  }
+
+  const uniformVis = GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT;
+  const renderStorageVis = GPUShaderStage.FRAGMENT;
+  const computeVis = GPUShaderStage.COMPUTE;
+
+  const renderLayouts: GPUBindGroupLayout[] = sortedSets.map((set) => {
+    const entries: GPUBindGroupLayoutEntry[] = [];
+    for (const u of iface.uniforms) {
+      if (u.set === set) {
+        entries.push({
+          binding: u.binding,
+          visibility: uniformVis,
+          buffer: { type: "uniform" },
+        });
+      }
+    }
+    for (const s of iface.storage) {
+      if (
+        s.set === set &&
+        renderStorageSlots.has(bindingKey(s.set, s.binding))
+      ) {
+        const type: GPUBufferBindingType =
+          s.access === "read" ? "read-only-storage" : "storage";
+        entries.push({
+          binding: s.binding,
+          visibility: renderStorageVis,
+          buffer: { type },
+        });
+      }
+    }
+    entries.sort((a, b) => a.binding - b.binding);
+    return device.createBindGroupLayout({ entries });
+  });
+
+  const computeLayouts: GPUBindGroupLayout[] = sortedSets.map((set) => {
+    const entries: GPUBindGroupLayoutEntry[] = [];
+    for (const u of iface.uniforms) {
+      if (u.set === set) {
+        entries.push({
+          binding: u.binding,
+          visibility: computeVis,
+          buffer: { type: "uniform" },
+        });
+      }
+    }
+    for (const s of iface.storage) {
+      if (s.set === set) {
+        entries.push({
+          binding: s.binding,
+          visibility: computeVis,
+          buffer: { type: "storage" },
+        });
+      }
+    }
+    entries.sort((a, b) => a.binding - b.binding);
+    return device.createBindGroupLayout({ entries });
+  });
+
+  const renderPipelineLayout = device.createPipelineLayout({
+    bindGroupLayouts: renderLayouts,
+  });
+  const computePipelineLayout = device.createPipelineLayout({
+    bindGroupLayouts: computeLayouts,
+  });
+
+  const makeBindGroups = (
+    layouts: GPUBindGroupLayout[],
+    includeStorage: (set: number, binding: number) => boolean,
+  ): Map<number, GPUBindGroup> => {
+    const out = new Map<number, GPUBindGroup>();
+    for (let i = 0; i < sortedSets.length; i++) {
+      const set = sortedSets[i];
+      const entries: GPUBindGroupEntry[] = [];
+      for (const u of iface.uniforms) {
+        if (u.set === set) {
+          entries.push({
+            binding: u.binding,
+            resource: {
+              buffer: uniformBuffers.get(bindingKey(u.set, u.binding))!,
+            },
+          });
+        }
+      }
+      for (const s of iface.storage) {
+        if (s.set === set && includeStorage(s.set, s.binding)) {
+          entries.push({
+            binding: s.binding,
+            resource: {
+              buffer: storageBuffers.get(bindingKey(s.set, s.binding))!,
+            },
+          });
+        }
+      }
+      entries.sort((a, b) => a.binding - b.binding);
+      out.set(set, device.createBindGroup({ layout: layouts[i], entries }));
+    }
+    return out;
+  };
+
+  const renderBindGroups = makeBindGroups(renderLayouts, (set, binding) =>
+    renderStorageSlots.has(bindingKey(set, binding)),
+  );
+  const computeBindGroups = makeBindGroups(computeLayouts, () => true);
+
+  const vertexEntry = iface.entries.find((e) => e.kind === "vertex");
+  const fragmentEntry = iface.entries.find((e) => e.kind === "fragment");
+  let pipeline: GPURenderPipeline | null = null;
+  if (vertexEntry && fragmentEntry) {
+    pipeline = device.createRenderPipeline({
+      layout: renderPipelineLayout,
+      vertex: {
+        module,
+        entryPoint: vertexEntry.wgsl_name,
+      },
+      fragment: {
+        module,
+        entryPoint: fragmentEntry.wgsl_name,
+        targets: [{ format }],
+      },
+      primitive: { topology: "triangle-list" },
+    });
+  }
+
+  const computeDispatches: ComputeDispatch[] = iface.entries
+    .filter((e) => e.kind === "compute")
+    .map((e) => ({
+      pipeline: device.createComputePipeline({
+        layout: computePipelineLayout,
+        compute: {
+          module,
+          entryPoint: e.wgsl_name,
+        },
+      }),
+      // parallelize emits 64-thread workgroups sized to cover the whole
+      // problem in one dispatch; keep the prototype simple by always
+      // dispatching a single workgroup. User-authored compute entries
+      // that need multiple workgroups aren't handled yet.
+      workgroups: [1, 1, 1],
+    }));
+
+  return {
+    pipeline,
+    computeDispatches,
+    renderBindGroups,
+    computeBindGroups,
+    uniformBuffers,
+    storageBuffers,
+    shadertoy,
+  };
 }
+
+/** Back-compat alias — older call sites import `createRenderPipeline`. */
+export const createRenderPipeline = createPipelines;
 
 // -----------------------------------------------------------------------------
 // Render loop
@@ -170,11 +341,11 @@ export interface RenderLoop {
   stop: () => void;
 }
 
-/** Drive the render pipeline once per RAF tick. Each frame:
+/** Drive pipelines once per RAF tick. Each frame:
  *   - update known Shadertoy uniforms (iResolution, iTime, iMouse)
- *   - encode a render pass drawing a 3-vertex full-screen triangle
- *     (we always draw 3 vertices; Wyn vertex entries typically use
- *     `vertex_index` to pick positions from a constant array)
+ *   - dispatch every compute entry (single workgroup each)
+ *   - encode a render pass drawing a 3-vertex full-screen triangle, if
+ *     the program has vertex+fragment entries
  *   - submit and loop. */
 export function startRenderLoop(
   ctx: WebGPUContext,
@@ -226,23 +397,44 @@ export function startRenderLoop(
     }
 
     const encoder = device.createCommandEncoder();
-    const view = canvasContext.getCurrentTexture().createView();
-    const pass = encoder.beginRenderPass({
-      colorAttachments: [
-        {
-          view,
-          clearValue: { r: 0, g: 0, b: 0, a: 1 },
-          loadOp: "clear",
-          storeOp: "store",
-        },
-      ],
-    });
-    pass.setPipeline(res.pipeline);
-    for (const [set, group] of res.bindGroups) {
-      pass.setBindGroup(set, group);
+
+    // One pass per dispatch so consecutive phases get a memory barrier
+    // — WebGPU guarantees ordering between passes in the same encoder,
+    // but dispatches within a single pass have no implicit barrier.
+    for (const cd of res.computeDispatches) {
+      const cpass = encoder.beginComputePass();
+      cpass.setPipeline(cd.pipeline);
+      for (const [set, group] of res.computeBindGroups) {
+        cpass.setBindGroup(set, group);
+      }
+      cpass.dispatchWorkgroups(
+        cd.workgroups[0],
+        cd.workgroups[1],
+        cd.workgroups[2],
+      );
+      cpass.end();
     }
-    pass.draw(3);
-    pass.end();
+
+    if (res.pipeline) {
+      const view = canvasContext.getCurrentTexture().createView();
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [
+          {
+            view,
+            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+            loadOp: "clear",
+            storeOp: "store",
+          },
+        ],
+      });
+      pass.setPipeline(res.pipeline);
+      for (const [set, group] of res.renderBindGroups) {
+        pass.setBindGroup(set, group);
+      }
+      pass.draw(3);
+      pass.end();
+    }
+
     device.queue.submit([encoder.finish()]);
 
     frameCount++;

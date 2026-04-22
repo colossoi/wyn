@@ -29,7 +29,10 @@ export function Preview({ result, errorInfo, onErrorClick }: PreviewProps) {
   const pausedRef = useRef(false);
   pausedRef.current = paused;
   const [pipelineOpen, setPipelineOpen] = useState(true);
-  const [resolution, setResolution] = useState<{ width: number; height: number }>({
+  const [resolution, setResolution] = useState<{
+    width: number;
+    height: number;
+  }>({
     width: 640,
     height: 360,
   });
@@ -81,17 +84,28 @@ export function Preview({ result, errorInfo, onErrorClick }: PreviewProps) {
   useEffect(() => {
     const ctx = ctxRef.current;
     const canvas = canvasRef.current;
-    if (!ctx || !canvas || !result?.success || !result.wgsl || !result.interface) return;
+    if (
+      !ctx ||
+      !canvas ||
+      !result?.success ||
+      !result.wgsl ||
+      !result.interface
+    )
+      return;
 
     let loop: RenderLoop | null = null;
     setGpuError(null);
     try {
       const res = createRenderPipeline(ctx, result.wgsl, result.interface);
-      loop = startRenderLoop(ctx, canvas, res, setFps, setElapsed, () => pausedRef.current);
+      loop = startRenderLoop(
+        ctx,
+        canvas,
+        res,
+        setFps,
+        setElapsed,
+        () => pausedRef.current,
+      );
     } catch (e) {
-      // Compute-only programs throw "requires @vertex and @fragment" — that's
-      // expected; the pipeline viz still shows the stages. Only surface the
-      // error in the Output pane (not as a render failure).
       setGpuError(e instanceof Error ? e.message : String(e));
     }
     return () => {
@@ -154,7 +168,8 @@ export function Preview({ result, errorInfo, onErrorClick }: PreviewProps) {
               onClick={() => {
                 const el = canvasRef.current;
                 if (!el) return;
-                if (document.fullscreenElement === el) document.exitFullscreen();
+                if (document.fullscreenElement === el)
+                  document.exitFullscreen();
                 else el.requestFullscreen();
               }}
             >
@@ -172,7 +187,9 @@ export function Preview({ result, errorInfo, onErrorClick }: PreviewProps) {
               <select
                 className="ctrl-select"
                 value={colorspace}
-                onChange={(e) => setColorspace(e.target.value as "srgb" | "display-p3")}
+                onChange={(e) =>
+                  setColorspace(e.target.value as "srgb" | "display-p3")
+                }
               >
                 <option value="srgb">sRGB</option>
                 <option value="display-p3">Display P3</option>
@@ -307,7 +324,8 @@ function OutputPane({
         >
           {errorInfo.location && (
             <div className="error-location">
-              Line {errorInfo.location.start_line}, Column {errorInfo.location.start_col}
+              Line {errorInfo.location.start_line}, Column{" "}
+              {errorInfo.location.start_col}
             </div>
           )}
           <div className="error-message">{errorInfo.message}</div>
@@ -328,7 +346,8 @@ function OutputPane({
     if (!renderable) {
       return (
         <div id="output" className="success">
-          Compile successful — compute-only program. See the Pipeline tab for stages.
+          Compile successful — compute-only program. See the Pipeline tab for
+          stages.
         </div>
       );
     }
@@ -338,5 +357,9 @@ function OutputPane({
       </div>
     );
   }
-  return <div id="output">Press "Compile &amp; Run" or Ctrl+Enter to compile your shader.</div>;
+  return (
+    <div id="output">
+      Press "Compile &amp; Run" or Ctrl+Enter to compile your shader.
+    </div>
+  );
 }

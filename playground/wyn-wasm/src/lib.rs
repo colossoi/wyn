@@ -404,6 +404,7 @@ fn entry_binding_from_output(idx: usize, output: &wyn_core::ssa::types::EntryOut
 fn program_interface(program: &wyn_core::ssa::types::Program) -> ProgramInterface {
     use wyn_core::interface::StorageAccess;
     use wyn_core::ssa::types::ExecutionModel;
+    use wyn_core::types::TypeExt;
     let entries = program
         .entry_points
         .iter()
@@ -460,7 +461,7 @@ fn program_interface(program: &wyn_core::ssa::types::Program) -> ProgramInterfac
             access: String::new(),
         })
         .collect();
-    let storage = program
+    let mut storage: Vec<ResourceBinding> = program
         .storage
         .iter()
         .map(|s| {
@@ -478,6 +479,69 @@ fn program_interface(program: &wyn_core::ssa::types::Program) -> ProgramInterfac
             }
         })
         .collect();
+
+    // Compiler-introduced storage bindings (e.g. parallelize's partials +
+    // result buffers). Coalesce across entries — a phase-1 writer and a
+    // phase-2 reader of the same slot yields `read_write`. Skip any slot
+    // the user already declared.
+    let is_user_declared = |set: u32, binding: u32| -> bool {
+        program.storage.iter().any(|s| s.set == set && s.binding == binding)
+    };
+    let mut synth: std::collections::BTreeMap<
+        (u32, u32),
+        (polytype::Type<wyn_core::ast::TypeName>, bool, bool),
+    > = std::collections::BTreeMap::new();
+    let mark = |synth: &mut std::collections::BTreeMap<_, _>,
+                set: u32,
+                binding: u32,
+                elem_ty: polytype::Type<wyn_core::ast::TypeName>,
+                reads: bool,
+                writes: bool| {
+        if is_user_declared(set, binding) {
+            return;
+        }
+        let e: &mut (_, bool, bool) =
+            synth.entry((set, binding)).or_insert_with(|| (elem_ty, false, false));
+        e.1 |= reads;
+        e.2 |= writes;
+    };
+    for entry in &program.entry_points {
+        for sb in &entry.storage_bindings {
+            let (r, w) = match sb.role {
+                wyn_core::interface::StorageRole::Input => (true, false),
+                wyn_core::interface::StorageRole::Output => (false, true),
+                wyn_core::interface::StorageRole::Intermediate => (true, true),
+            };
+            mark(&mut synth, sb.set, sb.binding, sb.elem_ty.clone(), r, w);
+        }
+        for input in &entry.inputs {
+            if let Some((set, binding)) = input.storage_binding {
+                let elem_ty = input.ty.elem_type().cloned().unwrap_or_else(|| input.ty.clone());
+                mark(&mut synth, set, binding, elem_ty, true, false);
+            }
+        }
+        for out in &entry.outputs {
+            if let Some((set, binding)) = out.storage_binding {
+                let elem_ty = out.ty.elem_type().cloned().unwrap_or_else(|| out.ty.clone());
+                mark(&mut synth, set, binding, elem_ty, false, true);
+            }
+        }
+    }
+    for ((set, binding), (elem_ty, has_read, has_write)) in synth {
+        let access = match (has_read, has_write) {
+            (true, true) | (false, true) => "read_write",
+            (true, false) => "read",
+            (false, false) => "read",
+        };
+        storage.push(ResourceBinding {
+            name: format!("_buf_{}_{}", set, binding),
+            set,
+            binding,
+            ty: wyn_core::diags::format_type(&elem_ty),
+            access: access.to_string(),
+        });
+    }
+
     ProgramInterface {
         entries,
         uniforms,
@@ -858,6 +922,10 @@ fn compile_with_ir_impl(source: &str) -> CompileResultWithIR {
         Err(e) => CompileResultWithIR::err(e),
     }
 }
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod lib_tests;
 
 /// Get a simple example program to start with
 #[wasm_bindgen]
