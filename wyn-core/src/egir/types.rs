@@ -96,15 +96,24 @@ pub enum PureViewSource {
 }
 
 // ---------------------------------------------------------------------------
-// NodeKey — hash-cons key = operator + operands
+// NodeKey — hash-cons key = operator + operands + result type
 // ---------------------------------------------------------------------------
 
-/// The full identity of a pure node for hash-consing: the operator plus
-/// its operands (which are already-canonical `NodeId`s).
+/// The full identity of a pure node for hash-consing: operator, operands
+/// (already-canonical `NodeId`s), and result type. `ty` is part of the
+/// key because two otherwise-equal pure ops with different result types
+/// are semantically different values — e.g.
+/// `_w_intrinsic_storage_len(0, 0)` can be retyped at a rewrite site
+/// from its registered `u32` to a caller-required `i32`, and collapsing
+/// those two interns into one node would silently let the first-inserted
+/// type win at the merged site. Mirrors the 3b8cb24 fix that split
+/// `PureOp::Int` / `PureOp::Uint` tags for literals, but uniformly for
+/// every pure op.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct NodeKey {
     pub op: PureOp,
     pub operands: SmallVec<[NodeId; 4]>,
+    pub ty: Type<TypeName>,
 }
 
 // ---------------------------------------------------------------------------
@@ -384,6 +393,7 @@ impl EGraph {
         let key = NodeKey {
             op: op.clone(),
             operands: operands.clone(),
+            ty: ty.clone(),
         };
         if let Some(&existing) = self.hash_cons.get(&key) {
             return existing;
