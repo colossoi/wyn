@@ -94,6 +94,7 @@ struct Constructor {
     ptr_type_cache: HashMap<(spirv::StorageClass, spirv::Word), spirv::Word>,
     runtime_array_cache: HashMap<(spirv::Word, u32), spirv::Word>, // (elem_type, stride) -> decorated type
     buffer_block_cache: HashMap<spirv::Word, spirv::Word>, // runtime_array_type -> Block-decorated struct
+    uniform_block_cache: HashMap<spirv::Word, spirv::Word>, // value_type -> Block-decorated struct
     interface_block_cache: HashMap<InterfaceBlockKey, spirv::Word>,
     array_elem_cache: HashMap<spirv::Word, spirv::Word>, // array_type -> element_type
 
@@ -184,6 +185,7 @@ impl Constructor {
             ptr_type_cache: HashMap::new(),
             runtime_array_cache: HashMap::new(),
             buffer_block_cache: HashMap::new(),
+            uniform_block_cache: HashMap::new(),
             interface_block_cache: HashMap::new(),
             array_elem_cache: HashMap::new(),
             entry_point_interfaces: HashMap::new(),
@@ -569,23 +571,25 @@ impl Constructor {
         ty
     }
 
-    /// Create a Block-decorated struct type for a uniform buffer.
-    /// Returns the struct type ID. Each uniform gets its own unique struct
-    /// (not cached) since Block structs shouldn't be shared.
+    /// Create (or reuse) a Block-decorated struct type for a uniform
+    /// buffer. Cached by `value_type` because rspirv's `type_struct`
+    /// dedupes anyway — without a cache, calling this twice with the
+    /// same value type emits `Block` / `MemberDecorate Offset 0` on
+    /// the same struct ID twice, which spirv-val rejects with "ID
+    /// decorated with Offset multiple times is not allowed".
     fn create_uniform_block_type(&mut self, value_type: spirv::Word) -> spirv::Word {
+        if let Some(&cached) = self.uniform_block_cache.get(&value_type) {
+            return cached;
+        }
         let block_struct = self.builder.type_struct(vec![value_type]);
-
-        // Decorate as Block (required for UBO in Vulkan)
         self.builder.decorate(block_struct, spirv::Decoration::Block, []);
-
-        // Decorate member 0 with Offset 0
         self.builder.member_decorate(
             block_struct,
             0,
             spirv::Decoration::Offset,
             [Operand::LiteralBit32(0)],
         );
-
+        self.uniform_block_cache.insert(value_type, block_struct);
         block_struct
     }
 
@@ -3126,10 +3130,26 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
         if let Some(&func_id) = constructor.functions.get(name) {
             let mut interfaces = constructor.entry_point_interfaces.get(name).cloned().unwrap_or_default();
 
-            // Add all uniform variables to the interface
+            // Add all uniform variables to the interface.
             for &uniform_var in constructor.uniform_variables.values() {
                 if !interfaces.contains(&uniform_var) {
                     interfaces.push(uniform_var);
+                }
+            }
+
+            // Add all module-scope `#[storage]` variables. These aren't
+            // in any entry's `inputs`/`outputs` list (those cover only
+            // auto-bound compute parameters) but a fragment/compute
+            // entry may still read one via `storage_board[i]`. Adding
+            // them unconditionally is over-permissive (an entry that
+            // doesn't reference a particular storage decl still lists
+            // it as an interface variable — harmless), but it
+            // guarantees we never emit an entry that uses a storage
+            // var without declaring it as interface (spirv-val rejects
+            // that).
+            for &storage_var in constructor.storage_variables.values() {
+                if !interfaces.contains(&storage_var) {
+                    interfaces.push(storage_var);
                 }
             }
 
