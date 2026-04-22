@@ -50,14 +50,31 @@ type SpecKey = Vec<Option<(u32, u32)>>;
 struct BufferSpecializer {
     symbols: SymbolTable,
     term_ids: TermIdSource,
-    /// Known buffer params in current scope: symbol → BufferBinding
+    /// Known buffer params in current scope: symbol → BufferBinding.
+    /// Populated per-def (from entry params or function params) and
+    /// cleared when switching defs.
     buffer_map: HashMap<SymbolId, BufferBinding>,
+    /// Module-scope `#[storage]` declarations: symbol → BufferBinding.
+    /// Populated once in `run()` from `program.storage` and treated as
+    /// always-in-scope — when the per-def `buffer_map` misses, we fall
+    /// back to this. Fragment/compute entries that read a module-scope
+    /// storage binding via `display_board[i]` route through here.
+    module_storage_map: HashMap<SymbolId, BufferBinding>,
     /// Cache: (original_def_sym, spec_key) → specialized_def_sym
     specializations: HashMap<(SymbolId, SpecKey), SymbolId>,
     /// Newly generated defs
     new_defs: Vec<Def>,
     /// All defs by symbol for lookup
     def_map: HashMap<SymbolId, Def>,
+}
+
+impl BufferSpecializer {
+    /// Resolve a symbol to a `BufferBinding`, consulting the per-def map
+    /// first (view params of the current function/entry), then falling
+    /// back to the module-scope storage map. Per-def wins on name shadow.
+    fn resolve_buffer(&self, sym: &SymbolId) -> Option<&BufferBinding> {
+        self.buffer_map.get(sym).or_else(|| self.module_storage_map.get(sym))
+    }
 }
 
 /// Check if a type is a view array (unsized, ArrayVariantView).
@@ -97,6 +114,7 @@ pub fn run(program: Program) -> Program {
         symbols: program.symbols,
         term_ids: TermIdSource::new(),
         buffer_map: HashMap::new(),
+        module_storage_map: HashMap::new(),
         specializations: HashMap::new(),
         new_defs: Vec::new(),
         def_map: HashMap::new(),
@@ -105,6 +123,26 @@ pub fn run(program: Program) -> Program {
     // Build def_map
     for def in &program.defs {
         specializer.def_map.insert(def.name, def.clone());
+    }
+
+    // Seed the module-scope storage map from `program.storage`. Each
+    // declaration resolves to a `SymbolId` via name lookup on the
+    // symbol table. These bindings are always in scope — any def's
+    // body that references them goes through `resolve_buffer` →
+    // fallback → specialization.
+    for storage in &program.storage {
+        let sym = specializer.symbols.iter().find(|(_, name)| *name == &storage.name).map(|(id, _)| *id);
+        if let Some(sym) = sym {
+            let elem_ty = array_elem_type(&storage.ty);
+            specializer.module_storage_map.insert(
+                sym,
+                BufferBinding {
+                    set: storage.set,
+                    binding: storage.binding,
+                    elem_ty,
+                },
+            );
+        }
     }
 
     // Process each def. Compute entry points populate `buffer_map` from
@@ -118,12 +156,19 @@ pub fn run(program: Program) -> Program {
     for def in &program.defs {
         match &def.meta {
             DefMeta::EntryPoint(entry) => {
-                if matches!(entry.entry_type, interface::Attribute::Compute) {
-                    let processed = specializer.process_entry_point(def, entry);
-                    processed_defs.push(processed);
+                // Compute entries seed the per-def `buffer_map` from
+                // their view-typed parameters (auto-bound to bindings
+                // 0, 1, …). Vertex and fragment entries don't have
+                // auto-bound params, but their bodies can still read
+                // module-scope `#[storage]` bindings — rewriting those
+                // reads requires walking the body. Both paths funnel
+                // through `rewrite_term` on the def body.
+                let processed = if matches!(entry.entry_type, interface::Attribute::Compute) {
+                    specializer.process_entry_point(def, entry)
                 } else {
-                    processed_defs.push(def.clone());
-                }
+                    specializer.rewrite_def_body(def)
+                };
+                processed_defs.push(processed);
             }
             DefMeta::Function => {
                 let processed = specializer.specialize_function_body(def);
@@ -174,6 +219,23 @@ impl BufferSpecializer {
 
         self.buffer_map = old_buffer_map;
 
+        Def {
+            body: new_body,
+            ..def.clone()
+        }
+    }
+
+    /// Rewrite a def body with no per-def `buffer_map` — used for
+    /// vertex/fragment entries that don't have auto-bound view
+    /// parameters but may still read module-scope `#[storage]`
+    /// bindings. The module-scope map is always in scope (populated
+    /// once in `run()`), so rewrites of `_w_index(storage_def, i)`
+    /// and `_w_intrinsic_length(storage_def)` still fire.
+    fn rewrite_def_body(&mut self, def: &Def) -> Def {
+        let old_buffer_map = self.buffer_map.clone();
+        self.buffer_map.clear();
+        let new_body = self.rewrite_term(&def.body);
+        self.buffer_map = old_buffer_map;
         Def {
             body: new_body,
             ..def.clone()
@@ -255,9 +317,12 @@ impl BufferSpecializer {
                 let new_rhs = self.rewrite_term(rhs);
 
                 // If the let-binding aliases a buffer-backed variable, propagate.
+                // Consult the module-scope storage map too — a `let local = board
+                // in ...` where `board` is a `#[storage]` def should propagate.
                 let was_buffer = if let TermKind::Var(sym) = &rhs.kind {
-                    if let Some(binding) = self.buffer_map.get(sym) {
-                        self.buffer_map.insert(*name, binding.clone());
+                    if let Some(binding) = self.resolve_buffer(sym) {
+                        let b = binding.clone();
+                        self.buffer_map.insert(*name, b);
                         true
                     } else {
                         false
@@ -298,7 +363,7 @@ impl BufferSpecializer {
                         // arrays aren't copyable into a local composite).
                         if name == "_w_index" && args.len() == 2 {
                             if let TermKind::Var(data_sym) = &args[0].kind {
-                                if let Some(binding) = self.buffer_map.get(data_sym).cloned() {
+                                if let Some(binding) = self.resolve_buffer(data_sym).cloned() {
                                     let span = term.span;
                                     let u32_ty: Type<TypeName> =
                                         Type::Constructed(TypeName::UInt(32), vec![]);
@@ -326,7 +391,7 @@ impl BufferSpecializer {
                         // path handles view lengths.
                         if name == "_w_intrinsic_length" && args.len() == 1 {
                             if let TermKind::Var(data_sym) = &args[0].kind {
-                                if let Some(binding) = self.buffer_map.get(data_sym).cloned() {
+                                if let Some(binding) = self.resolve_buffer(data_sym).cloned() {
                                     let span = term.span;
                                     let u32_ty: Type<TypeName> =
                                         Type::Constructed(TypeName::UInt(32), vec![]);
@@ -355,13 +420,16 @@ impl BufferSpecializer {
                             }
                         }
 
-                        // Check if any arguments are buffer-backed (clone to avoid borrow)
+                        // Check if any arguments are buffer-backed (clone to avoid borrow).
+                        // Consults both the per-def `buffer_map` (view params) and
+                        // the module-scope storage map so `helper(board, i)` where
+                        // `board` is a `#[storage]` def specializes correctly.
                         let arg_refs: Vec<&Term> = args.iter().collect();
                         let buffer_args: Vec<Option<BufferBinding>> = args
                             .iter()
                             .map(|a| {
                                 if let TermKind::Var(s) = &a.kind {
-                                    self.buffer_map.get(s).cloned()
+                                    self.resolve_buffer(s).cloned()
                                 } else {
                                     None
                                 }
@@ -882,7 +950,7 @@ impl BufferSpecializer {
                                             elem_ty: elem_ty.clone(),
                                         })
                                     } else {
-                                        self.buffer_map.get(s).cloned()
+                                        self.resolve_buffer(s).cloned()
                                     }
                                 } else {
                                     None
