@@ -402,16 +402,6 @@ impl BufferSpecializer {
                                         u32_ty.clone(),
                                         span,
                                     );
-                                    // Annotate the intrinsic with its actual u32
-                                    // return type (matches `OpArrayLength` /
-                                    // WGSL `arrayLength`), then cast to whatever
-                                    // the caller expected — usually i32, since
-                                    // `_w_intrinsic_length` is registered as
-                                    // returning i32. The explicit `i32.u32` cast
-                                    // replaces the previous practice of
-                                    // re-annotating the intrinsic's term.ty in
-                                    // place and relying on the SPIR-V backend
-                                    // to bitcast at lowering time.
                                     let storage_len = self.make_app(
                                         "_w_intrinsic_storage_len",
                                         vec![set_lit, binding_lit],
@@ -915,14 +905,9 @@ impl BufferSpecializer {
                                     self.make_int_lit(&view.set.to_string(), u32_ty.clone(), span);
                                 let binding_lit =
                                     self.make_int_lit(&view.binding.to_string(), u32_ty.clone(), span);
-                                // `view.offset` is u32 by construction;
-                                // `idx` follows the user's source type
-                                // (typically i32). Coerce idx to u32 with
-                                // an explicit `u32.i32` cast so the BinOp
-                                // operands match. WGSL rejects mixed-type
-                                // BinOps outright; SPIR-V's `IAdd` tolerates
-                                // the mix, but leaving it implicit hides the
-                                // type change inside the backend.
+                                // Coerce idx to match view.offset's u32
+                                // type; the downstream BinOp operands must
+                                // agree.
                                 let idx = if idx.ty == u32_ty {
                                     idx
                                 } else {
@@ -949,13 +934,7 @@ impl BufferSpecializer {
                             }
                         }
 
-                        // _w_intrinsic_length(arr_expr) where arr_expr resolves to a view.
-                        // `view.len` is u32 by construction (either a
-                        // `_w_intrinsic_storage_len` synth call or a slice
-                        // `end - start`); the caller's expected type is whatever
-                        // `_w_intrinsic_length` was registered with (i32).
-                        // Insert an explicit `i32.u32` cast so the types stay
-                        // honest through EGIR.
+                        // _w_intrinsic_length(arr_expr) where arr_expr resolves to a view
                         if name == "_w_intrinsic_length" && args.len() == 1 {
                             if let Some(view) = self.try_resolve_view_expr(&args[0], view_params) {
                                 if view.len.ty == term.ty {

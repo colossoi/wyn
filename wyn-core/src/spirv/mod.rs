@@ -2240,15 +2240,8 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     0, // Member index of the runtime array in the struct
                 )?;
 
-                // Bitcast to the caller-annotated result type. Kept for
-                // defense-in-depth only: every synthesis site now annotates
-                // the intrinsic with u32 (matching its registered return),
-                // so `result_ty == u32_type` in the common case and the
-                // bitcast is a no-op. If a future rewrite pass synthesizes
-                // a differently-typed storage_len node (e.g. i32 via the
-                // `i32.u32` cast intrinsic that `buffer_specialize` emits
-                // at the length-intrinsic rewrite boundary), the bitcast
-                // still produces the requested type.
+                // Defense-in-depth: caller's `result_ty` is u32 in every
+                // current synthesis path, so the bitcast is a no-op.
                 Ok(self.constructor.builder.bitcast(result_ty, None, len_u32)?)
             }
 

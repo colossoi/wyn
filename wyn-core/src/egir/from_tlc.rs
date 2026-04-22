@@ -579,10 +579,8 @@ impl<'a> Converter<'a> {
 
     /// Create a pure `StorageView(Storage { set, binding })` node. Builds the
     /// implicit `offset=0` and `len=_w_intrinsic_storage_len(set, binding)`
-    /// operands as pure ops. Both offset and len are u32 — matches WGSL's
-    /// `arrayLength` return and SPIR-V's `OpArrayLength` (see backend
-    /// lowerings). Callers that want an i32 length wrap in an `i32.u32`
-    /// cast at the rewrite site (`buffer_specialize::rewrite_term`).
+    /// operands as pure ops. Offset and len are u32 by contract; the
+    /// `debug_assert`s below catch future drift.
     fn emit_storage_view(&mut self, set: u32, binding: u32, view_ty: Type<TypeName>) -> NodeId {
         let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
         let set_nid = self.intern_u32(set);
