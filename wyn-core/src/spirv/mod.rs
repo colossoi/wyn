@@ -2236,7 +2236,25 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     0, // Member index of the runtime array in the struct
                 )?;
 
-                Ok(len_u32)
+                // Bitcast to whatever the caller's result type is (mirrors the
+                // sibling `"length"` arm above). Callers threading the length
+                // into an `i32` context (e.g. iota's range struct, which is
+                // typed i32) would otherwise see a u32 here and fail
+                // OpCompositeConstruct validation.
+                //
+                // This is a pragmatic fix, not necessarily the cleanest one:
+                // the real story is that `_w_intrinsic_storage_len` is
+                // registered as returning u32 in `intrinsics.rs` but gets
+                // *retyped to i32* when `buffer_specialize` substitutes it
+                // in for `_w_intrinsic_length(view) -> i32`. A more principled
+                // fix would emit an explicit cast at the rewrite site so
+                // the SSA itself stays honest about types; the downside is
+                // every caller of `_w_intrinsic_storage_len` would need to
+                // agree on a single return type and any i32-expecting path
+                // would need to insert its own cast. Bitcasting here keeps
+                // the intrinsic polymorphic over i32/u32 results while
+                // costing nothing at runtime (bitcast is a no-op on the GPU).
+                Ok(self.constructor.builder.bitcast(result_ty, None, len_u32)?)
             }
 
             "view_len" => {

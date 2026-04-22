@@ -107,7 +107,13 @@ pub fn run(program: Program) -> Program {
         specializer.def_map.insert(def.name, def.clone());
     }
 
-    // Process each entry point
+    // Process each def. Compute entry points populate `buffer_map` from
+    // their declared view-typed parameters; plain function defs do the
+    // same for their own parameters — this is essential for the defunc-
+    // tionalized lambda case, where a lifted lambda takes a buffer arg
+    // and calls a helper through it. Without walking function bodies,
+    // the helper call never gets specialized, and a runtime-sized view
+    // reaches `materialize` (→ SPIR-V can't type that).
     let mut processed_defs: Vec<Def> = Vec::new();
     for def in &program.defs {
         match &def.meta {
@@ -120,7 +126,8 @@ pub fn run(program: Program) -> Program {
                 }
             }
             DefMeta::Function => {
-                processed_defs.push(def.clone());
+                let processed = specializer.specialize_function_body(def);
+                processed_defs.push(processed);
             }
         }
     }
@@ -163,6 +170,54 @@ impl BufferSpecializer {
         }
 
         // Rewrite the body
+        let new_body = self.rewrite_term(&def.body);
+
+        self.buffer_map = old_buffer_map;
+
+        Def {
+            body: new_body,
+            ..def.clone()
+        }
+    }
+
+    /// Apply buffer specialization to a non-entry `DefMeta::Function`
+    /// body. Needed because `defunctionalize` lifts entry-point lambdas
+    /// into plain functions — a lifted lambda that captured a view-
+    /// typed entry parameter now takes that view as a regular function
+    /// parameter, and calls through it (e.g. `helper(view, i)`) must
+    /// still be specialized to `_w_intrinsic_storage_index(...)`.
+    ///
+    /// Mirrors `process_entry_point`: save the outer `buffer_map`,
+    /// seed a fresh one from this function's view-typed parameters,
+    /// rewrite the body, then restore. Environment is function-local;
+    /// no bindings leak across defs.
+    fn specialize_function_body(&mut self, def: &Def) -> Def {
+        let (params, _inner_body) = extract_params(&def.body);
+        let has_view_params = params.iter().any(|(_, ty)| is_view_array(ty));
+        if !has_view_params {
+            // No view params — nothing to specialize through this def.
+            return def.clone();
+        }
+
+        let old_buffer_map = self.buffer_map.clone();
+        self.buffer_map.clear();
+
+        let mut binding_num = 0u32;
+        for (sym, ty) in &params {
+            if is_view_array(ty) {
+                let elem_ty = array_elem_type(ty);
+                self.buffer_map.insert(
+                    *sym,
+                    BufferBinding {
+                        set: 0,
+                        binding: binding_num,
+                        elem_ty,
+                    },
+                );
+                binding_num += 1;
+            }
+        }
+
         let new_body = self.rewrite_term(&def.body);
 
         self.buffer_map = old_buffer_map;
@@ -282,10 +337,18 @@ impl BufferSpecializer {
                                         u32_ty.clone(),
                                         span,
                                     );
+                                    // Preserve the original call's return type
+                                    // (`_w_intrinsic_length` is registered as
+                                    // returning `i32`); the SPIR-V lowering of
+                                    // `_w_intrinsic_storage_len` bitcasts its
+                                    // internal u32 result to whatever the
+                                    // caller expects. Using `term.ty` keeps
+                                    // the type chain honest — any consumer
+                                    // that previously saw i32 still sees i32.
                                     return self.make_app(
                                         "_w_intrinsic_storage_len",
                                         vec![set_lit, binding_lit],
-                                        u32_ty,
+                                        term.ty.clone(),
                                         span,
                                     );
                                 }
