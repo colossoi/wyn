@@ -500,6 +500,75 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
 }
 
 #[test]
+fn wgsl_compute_reduce_writes_to_storage_buffer() {
+    // A parallelized `reduce` compute shader's terminal write must hit
+    // the storage buffer, not a local var. Regression guard: the lowering
+    // previously emitted
+    //
+    //     var v27_1: f32 = _buf_0_1[(i32(off) + i32(tid))];
+    //     v27_1 = v_accum;
+    //
+    // — which passes naga validation but is a no-op at runtime (the
+    // write targets the dead local `v27_1`). The correct emission writes
+    // the accumulator back into the buffer directly:
+    //
+    //     _buf_0_1[(i32(off) + i32(tid))] = v_accum;
+    let wgsl = compile_to_wgsl(
+        r#"
+#[compute]
+entry sum_array(#[size_hint(1024)] data: []f32) f32 =
+    reduce(|a: f32, b: f32| a + b, 0.0, data)
+"#,
+    )
+    .expect("compile");
+    validate_wgsl(&wgsl);
+
+    // The bug pattern: `var vNN: f32 = _buf_...[...];` immediately
+    // followed by `vNN = ...;` on the next non-blank line.
+    let lines: Vec<&str> = wgsl.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("var ") {
+            if let Some(eq_pos) = rest.find(" = ") {
+                let name = &rest[..eq_pos].split(':').next().unwrap_or("").trim();
+                let init = rest[eq_pos + 3..].trim_end_matches(';').trim();
+                if init.starts_with("_buf_") && init.contains('[') {
+                    // Look at the next non-blank line.
+                    if let Some(next) = lines[i + 1..].iter().find(|l| !l.trim().is_empty()) {
+                        let nt = next.trim();
+                        let expected_bug = format!("{} = ", name);
+                        assert!(
+                            !nt.starts_with(&expected_bug),
+                            "WGSL storage-write bug: `var {0}: ... = {1};` is followed by \
+                             `{0} = ...;` — the write targets a dead local instead of \
+                             the storage buffer.\n\n--- offending pair ---\n{2}\n{3}\n\n\
+                             --- full WGSL ---\n{4}",
+                            name,
+                            init,
+                            line,
+                            next,
+                            wgsl
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Positive assertion: at least one direct storage-buffer write must
+    // appear. The phase-1 terminal store writes the partial to
+    // `_buf_0_1[offset + tid]`.
+    assert!(
+        wgsl.lines().any(|l| {
+            let t = l.trim();
+            t.starts_with("_buf_") && t.contains("] = ") && !t.contains(" = _buf_")
+        }),
+        "expected at least one direct `_buf_N_M[idx] = val;` write in emitted WGSL:\n{}",
+        wgsl
+    );
+}
+
+#[test]
 fn wgsl_fragment_with_helper_function() {
     // User-defined helper called from the entry point. Exercises:
     // function emission + call, parameter passing, return value.

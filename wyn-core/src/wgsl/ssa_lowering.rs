@@ -1086,7 +1086,7 @@ impl<'a> LowerCtx<'a> {
             for (input_idx, field_name, _) in &pc.fields {
                 if let Some((value_id, _, _)) = body.params.get(*input_idx) {
                     let expr = format!("{}.{}", pc.var_name, field_name);
-                    body_ctx.value_map.insert(*value_id, expr);
+                    body_ctx.value_map.insert(*value_id, ValueBinding::Alias(expr));
                 }
             }
         }
@@ -1179,11 +1179,34 @@ struct ViewHandle {
     len_expr: String,
 }
 
+/// Value-category tag on each ValueId's emitted WGSL expression.
+/// `Alias` is safe to substitute into any rvalue context. `Place`
+/// names an lvalue whose read is side-effectful or expensive (a
+/// storage-buffer element, `buf[idx]`) and must be materialized on
+/// Load; Store writes through either variant directly.
+#[derive(Clone)]
+enum ValueBinding {
+    Alias(String),
+    Place(String),
+}
+
+impl ValueBinding {
+    fn expr(&self) -> &str {
+        match self {
+            ValueBinding::Alias(s) | ValueBinding::Place(s) => s,
+        }
+    }
+    fn is_place(&self) -> bool {
+        matches!(self, ValueBinding::Place(_))
+    }
+}
+
 struct BodyLowerCtx<'a, 'b> {
     ctx: &'a mut LowerCtx<'b>,
     body: &'a FuncBody,
-    /// Map from ValueId to WGSL expression text.
-    value_map: HashMap<ValueId, String>,
+    /// Emitted WGSL expression (or var name) per ValueId, tagged with
+    /// its value category (rvalue-safe alias vs. lvalue place).
+    value_map: HashMap<ValueId, ValueBinding>,
     /// Set of names declared with `let`/`var` in the current scope.
     declared: HashSet<String>,
     /// Storage view handles keyed by their `StorageView` result ValueId.
@@ -1298,7 +1321,11 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
     }
 
     fn get_value_ref(&self, id: ValueId) -> Result<String> {
-        self.value_map.get(&id).cloned().ok_or_else(|| {
+        self.binding(id).map(|b| b.expr().to_string())
+    }
+
+    fn binding(&self, id: ValueId) -> Result<&ValueBinding> {
+        self.value_map.get(&id).ok_or_else(|| {
             crate::err_wgsl_at!(self.blame_span(), "value {:?} not bound in WGSL value_map", id)
         })
     }
@@ -1339,7 +1366,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 continue;
             }
             let mangled = self.ctx.mangle_tracked(name)?;
-            self.value_map.insert(*value_id, mangled.clone());
+            self.value_map.insert(*value_id, ValueBinding::Alias(mangled.clone()));
             self.declared.insert(mangled);
         }
 
@@ -1371,20 +1398,21 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             let var = wgsl_var(result_id);
                             writeln!(output, "{}var {}: {};", self.ctx.indent_str(), var, ty).unwrap();
                             self.declared.insert(var.clone());
-                            self.value_map.insert(result_id, var);
+                            self.value_map.insert(result_id, ValueBinding::Alias(var));
                             continue;
                         }
 
-                        // Load through a `var<function>` is reading the
-                        // variable by name — WGSL's function-scope
-                        // pointer model collapses pointer and value at
-                        // the syntactic level.
+                        // Load: if the ptr is a Place, materialize the
+                        // read into a cached `var`. Otherwise alias the
+                        // result to the ptr's name (WGSL's function-
+                        // scope pointer model collapses pointer and
+                        // value at the syntactic level).
                         InstKind::Load { ptr } => {
                             let result_id = inst.result.ok_or_else(|| {
                                 crate::err_wgsl_at!(self.blame_span(), "Load must have a result")
                             })?;
-                            let name = match ptr {
-                                ValueRef::Ssa(id) => self.get_value_ref(*id)?,
+                            let ptr_id = match ptr {
+                                ValueRef::Ssa(id) => *id,
                                 ValueRef::Const(_) => {
                                     return Err(crate::err_wgsl_at!(
                                         self.blame_span(),
@@ -1392,20 +1420,42 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                     ));
                                 }
                             };
-                            self.value_map.insert(result_id, name);
+                            let ptr_binding = self.binding(ptr_id)?.clone();
+                            if ptr_binding.is_place() {
+                                let ty = self
+                                    .ctx
+                                    .type_emitter
+                                    .type_to_wgsl(self.body.get_value_type(result_id))?;
+                                let var = wgsl_var(result_id);
+                                writeln!(
+                                    output,
+                                    "{}var {}: {} = {};",
+                                    self.ctx.indent_str(),
+                                    var,
+                                    ty,
+                                    ptr_binding.expr()
+                                )
+                                .unwrap();
+                                self.declared.insert(var.clone());
+                                self.value_map.insert(result_id, ValueBinding::Alias(var));
+                            } else {
+                                self.value_map.insert(result_id, ptr_binding);
+                            }
                             continue;
                         }
 
-                        // Store: `target = value;`. Target is either
-                        // `_outN` for an OutputPtr or the alloca'd
-                        // var<function> name.
+                        // Store: `target = value;`. Target is an
+                        // OutputPtr (resolved via `output_ptrs` — e.g.
+                        // `_out0` or `_out_struct.f2`), or the ptr's
+                        // ValueBinding expression (var name for an
+                        // Alloca, `buf[idx]` for a StorageViewIndex).
                         InstKind::Store { ptr, value } => {
                             if let Some(ptr_id) = ptr.as_ssa() {
                                 let target = if let Some(out_name) = self.output_ptrs.get(&ptr_id).cloned()
                                 {
                                     out_name
                                 } else {
-                                    self.get_value_ref(ptr_id)?
+                                    self.binding(ptr_id)?.expr().to_string()
                                 };
                                 let val = self.get_value(*value)?;
                                 writeln!(output, "{}{} = {};", self.ctx.indent_str(), target, val).unwrap();
@@ -1433,7 +1483,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             let var = wgsl_var(result_id);
                             writeln!(output, "{}var {}: {};", self.ctx.indent_str(), var, ty).unwrap();
                             self.declared.insert(var.clone());
-                            self.value_map.insert(result_id, var);
+                            self.value_map.insert(result_id, ValueBinding::Alias(var));
                             continue;
                         }
 
@@ -1477,7 +1527,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                 .unwrap();
                                 // Alias-only: the result is the
                                 // (now-mutated) source array.
-                                self.value_map.insert(result_id, arr_src);
+                                self.value_map.insert(result_id, ValueBinding::Alias(arr_src));
                             } else {
                                 let ty = self
                                     .ctx
@@ -1496,7 +1546,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                 writeln!(output, "{}{}[{}] = {};", self.ctx.indent_str(), var, idx, val)
                                     .unwrap();
                                 self.declared.insert(var.clone());
-                                self.value_map.insert(result_id, var);
+                                self.value_map.insert(result_id, ValueBinding::Alias(var));
                             }
                             continue;
                         }
@@ -1517,7 +1567,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             writeln!(output, "{}var {}: {} = {};", self.ctx.indent_str(), var, ty, val)
                                 .unwrap();
                             self.declared.insert(var.clone());
-                            self.value_map.insert(result_id, var);
+                            self.value_map.insert(result_id, ValueBinding::Alias(var));
                             continue;
                         }
 
@@ -1526,18 +1576,18 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
 
                     let expr = self.lower_inst(inst)?;
                     if let Some(result) = inst.result {
-                        // Alias-only InstKinds — the `result` is a handle
-                        // pointing at something already declared at module
-                        // scope or elsewhere; we only record the alias in
-                        // value_map and emit nothing. Copying into a local
-                        // `var` would be nonsense (for StorageView, it'd
-                        // try to clone a runtime-sized storage array into
-                        // a function local, which WGSL rejects).
+                        // OutputPtr / StorageView: the result is a
+                        // handle naming a module-scope or entry-scope
+                        // binding; alias without emitting a local var.
                         if matches!(
                             inst.data,
                             InstKind::OutputPtr { .. } | InstKind::StorageView { .. }
                         ) {
-                            self.value_map.insert(result, expr);
+                            self.value_map.insert(result, ValueBinding::Alias(expr));
+                            continue;
+                        }
+                        if matches!(inst.data, InstKind::StorageViewIndex { .. }) {
+                            self.value_map.insert(result, ValueBinding::Place(expr));
                             continue;
                         }
                         let var = wgsl_var(result);
@@ -1545,7 +1595,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         writeln!(output, "{}var {}: {} = {};", self.ctx.indent_str(), var, ty, expr)
                             .unwrap();
                         self.declared.insert(var.clone());
-                        self.value_map.insert(result, var);
+                        self.value_map.insert(result, ValueBinding::Alias(var));
                     }
                 }
 
@@ -1560,7 +1610,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             .unwrap();
                         self.declared.insert(var.clone());
                     }
-                    self.value_map.insert(*target, var);
+                    self.value_map.insert(*target, ValueBinding::Alias(var));
                 }
 
                 Node::If {
@@ -1581,7 +1631,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             writeln!(output, "{}var {}: {};", self.ctx.indent_str(), var, ty).unwrap();
                             self.declared.insert(var.clone());
                         }
-                        self.value_map.insert(*param, var);
+                        self.value_map.insert(*param, ValueBinding::Alias(var));
                     }
 
                     let cond_val = self.get_value_ref(*cond)?;
@@ -1629,26 +1679,24 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         )
                         .unwrap();
                         self.declared.insert(var_name.clone());
-                        self.value_map.insert(*var, var_name);
+                        self.value_map.insert(*var, ValueBinding::Alias(var_name));
                     }
                     writeln!(output, "{}loop {{", self.ctx.indent_str()).unwrap();
                     self.ctx.indent += 1;
-                    // Emit header insts (condition-test insts).
                     for inst_id in header_insts {
                         let inst = self.body.get_inst(*inst_id);
                         self.current_span = inst.span;
                         let expr = self.lower_inst(inst)?;
                         if let Some(result) = inst.result {
-                            // Mirror the alias-only check from the
-                            // main per-inst dispatch: OutputPtr and
-                            // StorageView never produce a local
-                            // declaration — the expression text is
-                            // the handle.
                             if matches!(
                                 inst.data,
                                 InstKind::OutputPtr { .. } | InstKind::StorageView { .. }
                             ) {
-                                self.value_map.insert(result, expr);
+                                self.value_map.insert(result, ValueBinding::Alias(expr));
+                                continue;
+                            }
+                            if matches!(inst.data, InstKind::StorageViewIndex { .. }) {
+                                self.value_map.insert(result, ValueBinding::Place(expr));
                                 continue;
                             }
                             let var = wgsl_var(result);
@@ -1657,7 +1705,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             writeln!(output, "{}var {}: {} = {};", self.ctx.indent_str(), var, ty, expr)
                                 .unwrap();
                             self.declared.insert(var.clone());
-                            self.value_map.insert(result, var);
+                            self.value_map.insert(result, ValueBinding::Alias(var));
                         }
                     }
                     let cond_val = self.get_value_ref(*cond)?;
