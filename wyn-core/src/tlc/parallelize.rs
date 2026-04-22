@@ -2435,14 +2435,9 @@ fn input_storage_decls(soac: &SoacAnalysis) -> Vec<interface::StorageBindingDecl
 /// that don't collide with anything. Includes user-declared resources
 /// (`program.storage`, `program.uniforms`) *and* implicit bindings
 /// attached by earlier passes as `ArrayExpr::StorageBuffer` inside SOAC
-/// inputs.
-///
-/// Without this, `parallelize::run` previously only consulted
-/// `program.storage`, so intermediates for reduce/scan could collide
-/// with view-param buffers that `buffer_specialize` had already
-/// installed. The reduce case was latent (SPIR-V/WGSL tolerate the
-/// same binding for both read and write); scan's three-way collision
-/// broke the emitted shader.
+/// inputs. Consulting only `program.storage` would miss the implicit
+/// ones — scan's three-way collision (partials, result, input) would
+/// emit a broken shader.
 fn collect_all_used_bindings(program: &Program) -> HashSet<(u32, u32)> {
     let mut used: HashSet<(u32, u32)> = HashSet::new();
     for u in &program.uniforms {

@@ -114,7 +114,7 @@ impl NameRegistry {
         self.names.iter().map(|(k, v)| (k.as_str(), *v))
     }
 
-    /// Get the set of all names (for backward compatibility with known_defs).
+    /// Collect every registered name into an owned `HashSet`.
     pub fn name_set(&self) -> HashSet<String> {
         self.names.keys().cloned().collect()
     }

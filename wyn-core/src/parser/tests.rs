@@ -343,9 +343,6 @@ fn test_parse_tuple_attributed_return_type() {
 fn test_parse_unattributed_return_type() {
     let decl = single_decl("def helper: vec4 = vec4(1.0f32, 0.0f32, 0.0f32, 1.0f32)");
 
-    // Regular decl no longer has attributed_return_type field
-
-    // Should have a regular type
     let ty = decl.ty.as_ref().expect("Missing return type");
     assert_matches!(ty, Type::Constructed(TypeName::Named(name), _) if name == "vec4");
 }

@@ -1079,9 +1079,9 @@ impl<'a> LowerCtx<'a> {
         if let Some((_, index_to_field)) = &multi_output_struct {
             body_ctx.output_target_names = index_to_field.clone();
         }
-        // Pre-seed `value_map` for push-constant inputs so the body
-        // refers to them via `<pc_var>.<field>` instead of trying to
-        // use a function parameter that no longer exists.
+        // Pre-seed `value_map` for push-constant inputs. Push-constant
+        // fields don't appear as function parameters in the emitted
+        // WGSL; the body refers to them as `<pc_var>.<field>` instead.
         if let Some(pc) = &pc_block {
             for (input_idx, field_name, _) in &pc.fields {
                 if let Some((value_id, _, _)) = body.params.get(*input_idx) {
@@ -2354,8 +2354,8 @@ fn try_lower_wgsl_builtin(name: &str, args: &[String]) -> Option<String> {
             return Some(format!("{}({})", to, args[0]));
         }
 
-        // Keep the legacy dotted-math fallback for any name we didn't
-        // list above — matches GLSL backend behavior.
+        // Dotted-math fallback for any name not in the explicit tables
+        // above — matches the GLSL backend's naming convention.
         if matches!(to, "f32" | "f64") {
             let bare = &name[to.len() + 1..];
             if DIRECT.contains(&bare) {

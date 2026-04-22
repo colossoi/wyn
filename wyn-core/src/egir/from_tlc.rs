@@ -216,8 +216,7 @@ fn convert_function(
     )))
 }
 
-/// Convert an entry point directly via the EGraph Converter — one path, no
-/// round-trip through the legacy SSA builder.
+/// Convert an entry point directly via the EGraph Converter.
 fn convert_entry_point(
     def: &TlcDef,
     entry: &interface::EntryDecl,

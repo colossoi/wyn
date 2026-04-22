@@ -1181,7 +1181,7 @@ fn test_f32_min() {
 
 #[test]
 fn test_f32_min_partial() {
-    // Partial application is no longer supported - this test verifies it fails
+    // Wyn does not support partial application — this should type-error.
     let result = try_typecheck_program("def test: (f32 -> f32) = f32.min(1.0f32)");
     assert!(result.is_err(), "Partial application should fail");
 }

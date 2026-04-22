@@ -502,17 +502,16 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
 #[test]
 fn wgsl_compute_reduce_writes_to_storage_buffer() {
     // A parallelized `reduce` compute shader's terminal write must hit
-    // the storage buffer, not a local var. Regression guard: the lowering
-    // previously emitted
+    // the storage buffer directly:
+    //
+    //     _buf_0_1[(i32(off) + i32(tid))] = v_accum;
+    //
+    // Regression guard against the no-op form where the write targets
+    // a local `var` that mirrors the buffer slot — naga accepts it, but
+    // the buffer never changes at runtime:
     //
     //     var v27_1: f32 = _buf_0_1[(i32(off) + i32(tid))];
     //     v27_1 = v_accum;
-    //
-    // — which passes naga validation but is a no-op at runtime (the
-    // write targets the dead local `v27_1`). The correct emission writes
-    // the accumulator back into the buffer directly:
-    //
-    //     _buf_0_1[(i32(off) + i32(tid))] = v_accum;
     let wgsl = compile_to_wgsl(
         r#"
 #[compute]

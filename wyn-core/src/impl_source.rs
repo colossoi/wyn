@@ -196,9 +196,7 @@ impl ImplSource {
         None
     }
 
-    /// Register a builtin function (legacy method - converts to TypeScheme::Monotype)
-    /// This builds a function type from param_types -> return_type and wraps in Monotype
-    /// Register an implementation for a function
+    /// Register an implementation for a builtin function by name.
     fn register(&mut self, name: &str, implementation: BuiltinImpl) {
         self.impls.insert(name.to_string(), implementation);
     }

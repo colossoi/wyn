@@ -865,10 +865,9 @@ impl<'a> TypeChecker<'a> {
         self.resolve_type_aliases_scoped(ty, module)
     }
 
-    /// Resolve type aliases in a type annotation (bindings parameter is ignored).
-    ///
-    /// Note: SizeVar/UserVar substitution is now handled by the resolve_placeholders pass.
-    /// The bindings parameter is kept for API compatibility but is no longer used.
+    /// Resolve type aliases in a type annotation. SizeVar/UserVar
+    /// substitution happens in the `resolve_placeholders` pass; the
+    /// `bindings` parameter is kept for API compatibility and ignored.
     fn normalize_annotation_type_static(
         &self,
         ty: &Type,
@@ -1617,7 +1616,7 @@ impl<'a> TypeChecker<'a> {
             let (param_types, body_type) = self.check_function_with_params(
                 &decl.params,
                 &decl.body,
-                &HashMap::new(), // Bindings no longer needed - resolve_placeholders handles substitution
+                &HashMap::new(), // substitution happens in resolve_placeholders
                 module_name,
             )?;
             debug!(
@@ -1663,8 +1662,8 @@ impl<'a> TypeChecker<'a> {
                 }
             }
 
-            // Entry points are now handled separately via Declaration::Entry
-            // Regular Decl no longer has attributed return types
+            // Entry points go through `Declaration::Entry`; `Decl` has
+            // no attributed return types.
 
             // Update scope with inferred type using generalization
             let type_scheme = self.generalize(&func_type);
