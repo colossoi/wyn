@@ -11,9 +11,7 @@
 
 use super::analyze_entry;
 use crate::ast::{self, Span, TypeName};
-use crate::tlc::{
-    ArrayExpr, Def, DefMeta, Lambda, LoopKind, SoacOp, Term, TermId, TermIdSource, TermKind,
-};
+use crate::tlc::{ArrayExpr, Def, DefMeta, Lambda, LoopKind, SoacOp, Term, TermId, TermIdSource, TermKind};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 
@@ -509,4 +507,3 @@ fn binding_registry_finds_nested_storage_buffers() {
     assert!(used.contains(&(0, 5)), "missing (0, 5): {:?}", used);
     assert!(used.contains(&(0, 7)), "missing (0, 7): {:?}", used);
 }
-

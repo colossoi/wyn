@@ -889,6 +889,30 @@ impl<'a> TypeChecker<'a> {
         })
     }
 
+    /// Apply the checker's substitution context to the innermost
+    /// `Monotype` of a scheme, preserving the surrounding `Polytype`
+    /// shells. `forall` builds one shell per quantified variable, so a
+    /// scheme with N type variables walks through N `Polytype` cases
+    /// before reaching the `Monotype`.
+    fn apply_scheme(&self, scheme: &TypeScheme) -> TypeScheme {
+        match scheme {
+            TypeScheme::Monotype(ty) => TypeScheme::Monotype(ty.apply(&self.context)),
+            TypeScheme::Polytype { variable, body } => TypeScheme::Polytype {
+                variable: *variable,
+                body: Box::new(self.apply_scheme(body)),
+            },
+        }
+    }
+
+    /// Walk through any number of `Polytype` shells to the innermost
+    /// `Monotype` and return it with `self.context` applied.
+    fn scheme_inner(&self, scheme: &TypeScheme) -> Type {
+        match scheme {
+            TypeScheme::Monotype(ty) => ty.apply(&self.context),
+            TypeScheme::Polytype { body, .. } => self.scheme_inner(body),
+        }
+    }
+
     /// Build an array type: Array[elem, size, variant]
     fn array_ty(elem: Type, addrspace: polytype::Variable, size: polytype::Variable) -> Type {
         Type::Constructed(TypeName::Array, vec![elem, Self::var(size), Self::var(addrspace)])
@@ -1182,29 +1206,8 @@ impl<'a> TypeChecker<'a> {
         self.emit_hole_warnings();
 
         // Apply the context to all types in the type table to resolve type variables
-        let resolved_table: HashMap<crate::ast::NodeId, TypeScheme> = self
-            .type_table
-            .iter()
-            .map(|(node_id, scheme)| {
-                let resolved = match scheme {
-                    TypeScheme::Monotype(ty) => {
-                        let resolved_ty = ty.apply(&self.context);
-                        TypeScheme::Monotype(resolved_ty)
-                    }
-                    TypeScheme::Polytype { variable, body } => {
-                        // For polytypes, apply context to the body but preserve quantified variables
-                        TypeScheme::Polytype {
-                            variable: *variable,
-                            body: Box::new(match body.as_ref() {
-                                TypeScheme::Monotype(ty) => TypeScheme::Monotype(ty.apply(&self.context)),
-                                other => other.clone(), // Nested polytypes stay as-is for now
-                            }),
-                        }
-                    }
-                };
-                (*node_id, resolved)
-            })
-            .collect();
+        let resolved_table: HashMap<crate::ast::NodeId, TypeScheme> =
+            self.type_table.iter().map(|(node_id, scheme)| (*node_id, self.apply_scheme(scheme))).collect();
 
         Ok(resolved_table)
     }
@@ -1215,18 +1218,8 @@ impl<'a> TypeChecker<'a> {
         let holes = self.type_holes.clone();
         for (node_id, span) in holes {
             if let Some(hole_scheme) = self.type_table.get(&node_id) {
-                let resolved_type = match hole_scheme {
-                    TypeScheme::Monotype(ty) => ty.apply(&self.context),
-                    TypeScheme::Polytype { body, .. } => {
-                        // For polytypes, just show the body type
-                        match body.as_ref() {
-                            TypeScheme::Monotype(ty) => ty.apply(&self.context),
-                            _ => continue, // Skip nested polytypes for now
-                        }
-                    }
-                };
                 self.warnings.push(TypeWarning::TypeHoleFilled {
-                    inferred_type: resolved_type,
+                    inferred_type: self.scheme_inner(hole_scheme),
                     span,
                 });
             }
@@ -1596,11 +1589,8 @@ impl<'a> TypeChecker<'a> {
         } else {
             // Function declaration: let/def name param1 param2 = body
 
-            let (param_types, body_type) = self.check_function_with_params(
-                &decl.params,
-                &decl.body,
-                module_name,
-            )?;
+            let (param_types, body_type) =
+                self.check_function_with_params(&decl.params, &decl.body, module_name)?;
             debug!(
                 "Successfully inferred body type for '{}': {:?}",
                 decl.name, body_type

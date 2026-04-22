@@ -67,4 +67,3 @@ fn test_spec_key_with_subst() {
     let key = SpecKey::new(&subst);
     assert!(key.needs_specialization());
 }
-
