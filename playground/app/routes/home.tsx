@@ -3,7 +3,7 @@ import type { Route } from "./+types/home";
 import { Editor } from "~/components/Editor";
 import { Preview } from "~/components/Preview";
 import { StatusBar, type Status } from "~/components/StatusBar";
-import type { CompileResult, ErrorInfo, WynWasm } from "~/lib/wasm";
+import type { CompileResultWgsl, ErrorInfo, WynWasm } from "~/lib/wasm";
 import { initWasm } from "~/lib/wasm";
 
 export function meta({}: Route.MetaArgs) {
@@ -16,7 +16,7 @@ export function meta({}: Route.MetaArgs) {
 export default function Home() {
   const [wasm, setWasm] = useState<WynWasm | null>(null);
   const [source, setSource] = useState<string>("");
-  const [result, setResult] = useState<CompileResult | null>(null);
+  const [result, setResult] = useState<CompileResultWgsl | null>(null);
   const [errorInfo, setErrorInfo] = useState<ErrorInfo | null>(null);
   const [status, setStatus] = useState<Status>("loading");
   const [statusText, setStatusText] = useState<string>("Loading...");
@@ -49,7 +49,7 @@ export default function Home() {
     setStatus("compiling");
     setStatusText("Compiling...");
     try {
-      const r = w.compile_with_ir(src);
+      const r = w.compile_to_wgsl(src);
       setResult(r);
       if (!r.success) {
         const err = r.error || { message: "Unknown compilation error", location: null };

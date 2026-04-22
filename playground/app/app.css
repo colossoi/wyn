@@ -82,13 +82,18 @@
         flex: 1;
         display: flex;
         overflow: hidden;
+        padding: 12px;
+        gap: 12px;
       }
 
       .editor-panel {
-        width: 50%;
+        flex: 1;
         display: flex;
         flex-direction: column;
-        border-right: 1px solid var(--border);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        overflow: hidden;
+        background: var(--bg-darker);
       }
 
       .panel-header {
@@ -175,9 +180,21 @@
       }
 
       .preview-panel {
-        width: 50%;
+        flex: 1;
         display: flex;
         flex-direction: column;
+        min-width: 0;
+      }
+
+      .preview-window {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        overflow: hidden;
+        background: var(--bg-darker);
+        min-height: 0;
       }
 
       .canvas-container {
@@ -187,11 +204,13 @@
         align-items: center;
         justify-content: center;
         position: relative;
+        min-height: 0;
       }
 
       #canvas {
-        max-width: 100%;
-        max-height: 100%;
+        width: 100%;
+        height: 100%;
+        display: block;
       }
 
       .output-panel {
@@ -200,19 +219,310 @@
         background: var(--bg-darker);
         display: flex;
         flex-direction: column;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        overflow: hidden;
       }
 
       .resize-handle-h {
-        height: 6px;
-        background: var(--border);
+        height: 12px;
+        background: transparent;
         cursor: ns-resize;
         flex-shrink: 0;
+        position: relative;
+      }
+
+      .resize-handle-h::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 5px;
+        height: 2px;
+        border-radius: 1px;
+        background: var(--border);
         transition: background 0.2s;
       }
 
-      .resize-handle-h:hover,
-      .resize-handle-h.dragging {
+      .resize-handle-h:hover::before,
+      .resize-handle-h.dragging::before {
         background: var(--accent);
+      }
+
+      /* Status bar at the bottom of .preview-window, below the canvas:
+         FPS/elapsed on the left, transport controls in the middle,
+         resolution + fullscreen on the right. */
+      .canvas-bottom-bar {
+        padding: 8px 14px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        font-family: "JetBrains Mono", "Fira Code", monospace;
+        font-size: 0.75rem;
+        color: var(--text-primary);
+        background: var(--bg-darker);
+        border-top: 1px solid var(--border);
+        flex-shrink: 0;
+      }
+
+      .cbb-section {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .cbb-left {
+        flex: 1;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 2px;
+      }
+
+      .cbb-center {
+        flex: 1;
+        justify-content: center;
+      }
+
+      .cbb-right {
+        flex: 1;
+        justify-content: flex-end;
+      }
+
+      .cbb-btn {
+        width: 26px;
+        height: 26px;
+        border-radius: 50%;
+        border: none;
+        background: var(--bg-darker);
+        color: var(--text-primary);
+        font-size: 10px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        flex-shrink: 0;
+        line-height: 1;
+      }
+
+      .cbb-btn.pause {
+        background: var(--error);
+        color: #fff;
+      }
+
+      .cbb-btn.play {
+        background: var(--success);
+        color: #16162a;
+      }
+
+      .cbb-btn.reset {
+        background: var(--success);
+        color: #16162a;
+      }
+
+      .cbb-btn.rec {
+        background: var(--success);
+        color: #16162a;
+        font-weight: 700;
+        font-size: 8px;
+      }
+
+      .cbb-btn:disabled {
+        background: var(--border);
+        color: var(--text-secondary);
+        cursor: not-allowed;
+        opacity: 0.6;
+      }
+
+      .cbb-btn.fullscreen {
+        background: transparent;
+        color: var(--text-secondary);
+      }
+
+      .cbb-btn.fullscreen:hover {
+        color: var(--text-primary);
+      }
+
+      .resolution {
+        color: var(--text-primary);
+        display: inline-flex;
+        align-items: center;
+      }
+
+      /* Collapsible Pipeline widget — full-column width, sits between the
+         three tiles and the output pane. Header is a button; body is the
+         PipelineViz. */
+      .pipeline-widget {
+        margin-top: 12px;
+        background: var(--bg-darker);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        overflow: hidden;
+        flex-shrink: 0;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+      }
+
+      .pipeline-widget.open {
+        max-height: 280px;
+      }
+
+      .pipeline-widget-header {
+        background: var(--bg-darker);
+        color: var(--text-secondary);
+        border: none;
+        border-bottom: 1px solid transparent;
+        padding: 8px 12px;
+        font-size: 0.7rem;
+        text-transform: uppercase;
+        letter-spacing: 0.6px;
+        font-family: inherit;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        text-align: left;
+        border-radius: 0;
+        flex-shrink: 0;
+      }
+
+      .pipeline-widget.open .pipeline-widget-header {
+        border-bottom-color: var(--border);
+      }
+
+      .pipeline-widget-header:hover {
+        color: var(--text-primary);
+      }
+
+      .pipeline-widget-header .chevron {
+        font-size: 0.6rem;
+        color: var(--text-secondary);
+      }
+
+      .pipeline-widget-body {
+        overflow: auto;
+        min-height: 0;
+      }
+
+      /* Widget row — fixed-height tiles between the preview canvas and
+         the output pane (Settings / Entry points / Stats). Tiles are
+         not resizable. */
+      .widget-row {
+        display: flex;
+        gap: 12px;
+        flex-shrink: 0;
+        margin-top: 12px;
+      }
+
+      .widget {
+        flex: 1;
+        min-width: 0;
+        background: var(--bg-darker);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 10px 12px;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .widget-title {
+        font-size: 0.7rem;
+        color: var(--text-secondary);
+        text-transform: uppercase;
+        letter-spacing: 0.6px;
+        margin-bottom: 8px;
+      }
+
+      .widget-empty {
+        color: var(--text-secondary);
+        font-size: 0.8rem;
+      }
+
+      .settings-grid,
+      .stats-grid {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .settings-row,
+      .stats-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 0.8rem;
+        color: var(--text-primary);
+      }
+
+      .stats-row > span:last-child {
+        font-family: "JetBrains Mono", "Fira Code", monospace;
+        color: var(--text-secondary);
+      }
+
+      .entries-list {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .entry-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-family: "JetBrains Mono", "Fira Code", monospace;
+        font-size: 0.8rem;
+        color: var(--text-primary);
+      }
+
+      .entry-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+
+      .entry-dot.vertex {
+        background: #60a5fa;
+      }
+
+      .entry-dot.fragment {
+        background: var(--success);
+      }
+
+      .entry-dot.compute {
+        background: #fbbf24;
+      }
+
+      /* (Legacy) header-controls — still used if we inline controls in a
+         panel-header later. */
+      .header-controls {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .ctrl {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 0.75rem;
+        color: var(--text-secondary);
+      }
+
+      .ctrl-select {
+        background: var(--bg-editor);
+        color: var(--text-primary);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 2px 6px;
+        font-size: 0.75rem;
+        font-family: inherit;
+        cursor: pointer;
+      }
+
+      .ctrl-select:hover {
+        border-color: var(--accent);
       }
 
       /* Tabs */

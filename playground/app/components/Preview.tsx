@@ -1,12 +1,19 @@
 import { useEffect, useRef, useState } from "react";
-import type { CompileResult, ErrorInfo } from "~/lib/wasm";
-import { createProgram, setupContext, startRenderLoop, wrapForWebGL2 } from "~/lib/webgl";
+import type { CompileResultWgsl, ErrorInfo } from "~/lib/wasm";
+import {
+  createRenderPipeline,
+  setupContext,
+  startRenderLoop,
+  type RenderLoop,
+  type WebGPUContext,
+} from "~/lib/webgpu";
 import { IRTree } from "./IRTree";
+import { PipelineViz } from "./PipelineViz";
 
-type Tab = "output" | "tlc" | "mir" | "glsl";
+type Tab = "output" | "tlc" | "mir" | "wgsl";
 
 interface PreviewProps {
-  result: CompileResult | null;
+  result: CompileResultWgsl | null;
   errorInfo: ErrorInfo | null;
   /** Called when the user clicks an error item — jumps the editor cursor. */
   onErrorClick: (location: NonNullable<ErrorInfo["location"]>) => void;
@@ -14,57 +21,233 @@ interface PreviewProps {
 
 export function Preview({ result, errorInfo, onErrorClick }: PreviewProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const glRef = useRef<WebGL2RenderingContext | null>(null);
+  const ctxRef = useRef<WebGPUContext | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>("output");
   const [fps, setFps] = useState<number | null>(null);
-  const [glError, setGlError] = useState<string | null>(null);
+  const [elapsed, setElapsed] = useState<number>(0);
+  const [paused, setPaused] = useState(false);
+  const pausedRef = useRef(false);
+  pausedRef.current = paused;
+  const [pipelineOpen, setPipelineOpen] = useState(true);
+  const [resolution, setResolution] = useState<{
+    width: number;
+    height: number;
+  }>({
+    width: 640,
+    height: 360,
+  });
+  const [gpuError, setGpuError] = useState<string | null>(null);
+  // Unwired preview controls — visual only for now.
+  const [colorspace, setColorspace] = useState<"srgb" | "display-p3">("srgb");
 
-  // Init WebGL context once.
+  // Initialize WebGPU context once.
   useEffect(() => {
     if (!canvasRef.current) return;
-    const gl = setupContext(canvasRef.current);
-    if (!gl) {
-      setGlError("WebGL2 not supported");
-      return;
-    }
-    glRef.current = gl;
+    let cancelled = false;
+    setupContext(canvasRef.current)
+      .then((ctx) => {
+        if (cancelled) return;
+        ctxRef.current = ctx;
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setGpuError(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  // (Re)compile + run shader whenever the result.glsl changes.
+  // Track container size → drive canvas backing-store dimensions and the
+  // reported resolution. iResolution picks up the new size automatically
+  // because the render loop reads canvas.width/height each frame.
   useEffect(() => {
-    const gl = glRef.current;
     const canvas = canvasRef.current;
-    if (!gl || !canvas || !result?.success || !result.glsl) return;
+    const container = canvas?.parentElement;
+    if (!canvas || !container) return;
+    const apply = () => {
+      const w = Math.max(1, Math.floor(container.clientWidth));
+      const h = Math.max(1, Math.floor(container.clientHeight));
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w;
+        canvas.height = h;
+        setResolution({ width: w, height: h });
+      }
+    };
+    apply();
+    const ro = new ResizeObserver(apply);
+    ro.observe(container);
+    return () => ro.disconnect();
+  }, []);
 
-    let program: WebGLProgram | null = null;
-    let loop: ReturnType<typeof startRenderLoop> | null = null;
-    setGlError(null);
+  // (Re)create pipeline + run shader whenever the WGSL text changes.
+  useEffect(() => {
+    const ctx = ctxRef.current;
+    const canvas = canvasRef.current;
+    if (
+      !ctx ||
+      !canvas ||
+      !result?.success ||
+      !result.wgsl ||
+      !result.interface
+    )
+      return;
+
+    let loop: RenderLoop | null = null;
+    setGpuError(null);
     try {
-      program = createProgram(gl, wrapForWebGL2(result.glsl));
-      loop = startRenderLoop(gl, canvas, program, setFps);
+      const res = createRenderPipeline(ctx, result.wgsl, result.interface);
+      loop = startRenderLoop(
+        ctx,
+        canvas,
+        res,
+        setFps,
+        setElapsed,
+        () => pausedRef.current,
+      );
     } catch (e) {
-      setGlError(e instanceof Error ? e.message : String(e));
+      setGpuError(e instanceof Error ? e.message : String(e));
     }
-
     return () => {
       loop?.stop();
-      if (program && gl) gl.deleteProgram(program);
     };
-  }, [result?.glsl]);
+  }, [result?.wgsl]);
+
+  const renderableEntry = result?.interface?.entries.some(
+    (e) => e.kind === "vertex" || e.kind === "fragment",
+  );
 
   return (
     <div className="preview-panel">
-      <div className="panel-header">
-        <span>Preview</span>
+      <div className="preview-window">
+        <div className="panel-header">
+          <span>Preview</span>
+        </div>
+        <div className="canvas-container">
+          <canvas ref={canvasRef} id="canvas" />
+        </div>
+        <div className="canvas-bottom-bar">
+          <div className="cbb-section cbb-left">
+            <div>{fps !== null ? `${fps.toFixed(1)} FPS` : "-- FPS"}</div>
+            <div>{elapsed.toFixed(1)}s</div>
+          </div>
+          <div className="cbb-section cbb-center">
+            <button
+              type="button"
+              className={`cbb-btn ${paused ? "play" : "pause"}`}
+              title={paused ? "Play" : "Pause"}
+              onClick={() => setPaused((p) => !p)}
+            >
+              {paused ? "▶" : "❚❚"}
+            </button>
+            <button
+              type="button"
+              className="cbb-btn reset"
+              title="Reset (not wired)"
+              onClick={() => {}}
+            >
+              ↺
+            </button>
+            <button
+              type="button"
+              className="cbb-btn rec"
+              title="Recording not implemented yet"
+              disabled
+            >
+              REC
+            </button>
+          </div>
+          <div className="cbb-section cbb-right">
+            <div className="resolution">
+              {resolution.width}×{resolution.height}
+            </div>
+            <button
+              type="button"
+              className="cbb-btn fullscreen"
+              title="Fullscreen"
+              onClick={() => {
+                const el = canvasRef.current;
+                if (!el) return;
+                if (document.fullscreenElement === el)
+                  document.exitFullscreen();
+                else el.requestFullscreen();
+              }}
+            >
+              ⛶
+            </button>
+          </div>
+        </div>
       </div>
-      <div className="canvas-container">
-        <canvas ref={canvasRef} id="canvas" width={640} height={360} />
-        <div className="fps">{fps !== null ? `${fps} FPS` : "-- FPS"}</div>
+      <div className="widget-row">
+        <div className="widget">
+          <div className="widget-title">Settings</div>
+          <div className="settings-grid">
+            <div className="settings-row">
+              <span>HDR</span>
+              <select
+                className="ctrl-select"
+                value={colorspace}
+                onChange={(e) =>
+                  setColorspace(e.target.value as "srgb" | "display-p3")
+                }
+              >
+                <option value="srgb">sRGB</option>
+                <option value="display-p3">Display P3</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <div className="widget">
+          <div className="widget-title">Entry points</div>
+          <div className="entries-list">
+            {result?.interface?.entries.length ? (
+              result.interface.entries.map((e) => (
+                <div className="entry-row" key={e.name}>
+                  <span className={`entry-dot ${e.kind}`} />
+                  <span>{e.name}</span>
+                </div>
+              ))
+            ) : (
+              <div className="widget-empty">—</div>
+            )}
+          </div>
+        </div>
+        <div className="widget">
+          <div className="widget-title">Stats</div>
+          <div className="stats-grid">
+            <div className="stats-row">
+              <span>FPS</span>
+              <span>{fps ?? "—"}</span>
+            </div>
+            <div className="stats-row">
+              <span>Resolution</span>
+              <span>
+                {resolution.width}×{resolution.height}
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div className={`pipeline-widget ${pipelineOpen ? "open" : "closed"}`}>
+        <button
+          type="button"
+          className="pipeline-widget-header"
+          onClick={() => setPipelineOpen((o) => !o)}
+          aria-expanded={pipelineOpen}
+        >
+          <span className="chevron">{pipelineOpen ? "▼" : "▶"}</span>
+          <span>Pipeline</span>
+        </button>
+        {pipelineOpen && (
+          <div className="pipeline-widget-body">
+            <PipelineViz iface={result?.interface ?? null} />
+          </div>
+        )}
       </div>
       <div className="resize-handle-h" />
       <div className="output-panel">
         <div className="tab-bar">
-          {(["output", "tlc", "mir", "glsl"] as Tab[]).map((t) => (
+          {(["output", "tlc", "mir", "wgsl"] as Tab[]).map((t) => (
             <div
               key={t}
               className={`tab ${activeTab === t ? "active" : ""}`}
@@ -76,18 +259,20 @@ export function Preview({ result, errorInfo, onErrorClick }: PreviewProps) {
         </div>
         <div className="tab-content active">
           {activeTab === "output" && (
-            <OutputPane result={result} errorInfo={errorInfo} glError={glError} onErrorClick={onErrorClick} />
+            <OutputPane
+              result={result}
+              errorInfo={errorInfo}
+              gpuError={gpuError}
+              renderable={!!renderableEntry}
+              onErrorClick={onErrorClick}
+            />
           )}
           {activeTab === "tlc" && <IRTree nodes={result?.tlc} />}
           {activeTab === "mir" && (
-            <pre style={{ padding: "12px 16px", fontFamily: "'JetBrains Mono', monospace", fontSize: 12 }}>
-              {result?.mir ?? ""}
-            </pre>
+            <pre style={monoPanel}>{result?.mir ?? ""}</pre>
           )}
-          {activeTab === "glsl" && (
-            <pre style={{ padding: "12px 16px", fontFamily: "'JetBrains Mono', monospace", fontSize: 12 }}>
-              {result?.glsl ?? ""}
-            </pre>
+          {activeTab === "wgsl" && (
+            <pre style={monoPanel}>{result?.wgsl ?? ""}</pre>
           )}
         </div>
       </div>
@@ -95,23 +280,40 @@ export function Preview({ result, errorInfo, onErrorClick }: PreviewProps) {
   );
 }
 
+const monoPanel: React.CSSProperties = {
+  padding: "12px 16px",
+  fontFamily: "'JetBrains Mono', monospace",
+  fontSize: 12,
+};
+
 function tabLabel(t: Tab): string {
   switch (t) {
-    case "output": return "Output";
-    case "tlc": return "TLC";
-    case "mir": return "MIR";
-    case "glsl": return "GLSL";
+    case "output":
+      return "Output";
+    case "tlc":
+      return "TLC";
+    case "mir":
+      return "MIR";
+    case "wgsl":
+      return "WGSL";
   }
 }
 
 interface OutputPaneProps {
-  result: CompileResult | null;
+  result: CompileResultWgsl | null;
   errorInfo: ErrorInfo | null;
-  glError: string | null;
+  gpuError: string | null;
+  renderable: boolean;
   onErrorClick: (location: NonNullable<ErrorInfo["location"]>) => void;
 }
 
-function OutputPane({ result, errorInfo, glError, onErrorClick }: OutputPaneProps) {
+function OutputPane({
+  result,
+  errorInfo,
+  gpuError,
+  renderable,
+  onErrorClick,
+}: OutputPaneProps) {
   if (errorInfo) {
     return (
       <div id="output" className="error">
@@ -122,7 +324,8 @@ function OutputPane({ result, errorInfo, glError, onErrorClick }: OutputPaneProp
         >
           {errorInfo.location && (
             <div className="error-location">
-              Line {errorInfo.location.start_line}, Column {errorInfo.location.start_col}
+              Line {errorInfo.location.start_line}, Column{" "}
+              {errorInfo.location.start_col}
             </div>
           )}
           <div className="error-message">{errorInfo.message}</div>
@@ -130,17 +333,33 @@ function OutputPane({ result, errorInfo, glError, onErrorClick }: OutputPaneProp
       </div>
     );
   }
-  if (glError) {
+  if (gpuError && renderable) {
     return (
       <div id="output" className="error">
         <div className="error-item">
-          <div className="error-message">GLSL error: {glError}</div>
+          <div className="error-message">WebGPU error: {gpuError}</div>
         </div>
       </div>
     );
   }
   if (result?.success) {
-    return <div id="output" className="success">Compilation successful!</div>;
+    if (!renderable) {
+      return (
+        <div id="output" className="success">
+          Compile successful — compute-only program. See the Pipeline tab for
+          stages.
+        </div>
+      );
+    }
+    return (
+      <div id="output" className="success">
+        Compilation successful!
+      </div>
+    );
   }
-  return <div id="output">Press "Compile &amp; Run" or Ctrl+Enter to compile your shader.</div>;
+  return (
+    <div id="output">
+      Press "Compile &amp; Run" or Ctrl+Enter to compile your shader.
+    </div>
+  );
 }

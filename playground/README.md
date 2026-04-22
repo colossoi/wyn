@@ -1,6 +1,15 @@
 # Wyn Playground
 
-Browser-based playground for the Wyn shader language: write Wyn, compile to GLSL in-browser via WASM, see the shader run on a WebGL canvas in real time. Built on React Router v7 (SSR) deployed to Cloudflare Pages via a Worker.
+Browser-based playground for the Wyn shader language: write Wyn, compile
+to **WGSL** in-browser via WASM, see the shader run on a **WebGPU**
+canvas in real time. A *Pipeline* panel visualizes every entry point in
+the compiled program (vertex / fragment / compute) along with its
+uniform/storage bindings. Built on React Router v7 (SSR) deployed to
+Cloudflare Pages via a Worker.
+
+Requires a browser with WebGPU (Chrome 113+, Edge, Safari TP). WebGL
+fallback can be re-introduced if needed — the WGSL backend is the
+primary path.
 
 ## Prerequisites
 
@@ -47,8 +56,9 @@ playground/
 │   ├── root.tsx          # html shell + CodeMirror CDN script
 │   ├── routes/home.tsx   # playground orchestrator (state + flow)
 │   ├── components/       # Editor, Preview, IRTree, StatusBar
-│   ├── lib/wasm.ts       # WASM init + typed bindings
-│   ├── lib/webgl.ts      # shader compile + RAF loop
+│   ├── lib/wasm.ts       # WASM init + typed bindings (incl. ProgramInterface)
+│   ├── lib/webgpu.ts     # WebGPU context + pipeline + RAF loop
+│   ├── lib/webgl.ts      # (legacy — retained for reference)
 │   └── app.css           # global stylesheet
 ├── workers/app.ts        # Cloudflare Worker entry — runs the SSR handler
 ├── public/

@@ -3379,6 +3379,27 @@ impl ApplicationHandler for App {
     }
 }
 
+/// Parse and validate a WGSL source file via naga. Synchronous — naga
+/// doesn't need a GPU device, unlike the SPIR-V path.
+fn validate_wgsl_file(path: &Path, verbose: bool) -> Result<()> {
+    eprintln!("[validate] Loading {}", path.display());
+    let src = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let module =
+        naga::front::wgsl::parse_str(&src).map_err(|e| anyhow::anyhow!("WGSL parse error:\n{}", e))?;
+    if verbose {
+        for (_, ep) in module.entry_points.iter().enumerate() {
+            eprintln!("[validate] Entry point: {} ({:?})", ep.name, ep.stage);
+        }
+    }
+    let mut validator = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    );
+    validator.validate(&module).map_err(|e| anyhow::anyhow!("WGSL validation failed:\n{:?}", e))?;
+    eprintln!("[validate] OK — module parsed and validated");
+    Ok(())
+}
+
 async fn validate_spirv(path: &Path, verbose: bool) -> Result<()> {
     let instance = Instance::new(&InstanceDescriptor {
         flags: InstanceFlags::VALIDATION,
@@ -3620,7 +3641,18 @@ fn main() -> Result<()> {
             ))?;
         }
         Command::Validate { path, verbose } => {
-            pollster::block_on(validate_spirv(&path, verbose))?;
+            // Route by file extension: `.wgsl` → direct naga parse+validate,
+            // everything else → the existing SPIR-V path through wgpu.
+            let is_wgsl = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("wgsl"))
+                .unwrap_or(false);
+            if is_wgsl {
+                validate_wgsl_file(&path, verbose)?;
+            } else {
+                pollster::block_on(validate_spirv(&path, verbose))?;
+            }
             return Ok(());
         }
         Command::TestPattern { max_frames, verbose } => {

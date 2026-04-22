@@ -911,12 +911,7 @@ impl BufferSpecializer {
                                 let idx = if idx.ty == u32_ty {
                                     idx
                                 } else {
-                                    self.make_app(
-                                        "u32.i32",
-                                        vec![idx],
-                                        u32_ty.clone(),
-                                        span,
-                                    )
+                                    self.make_app("u32.i32", vec![idx], u32_ty.clone(), span)
                                 };
                                 let add_result = self.make_binop_app(
                                     ast::BinaryOp { op: "+".to_string() },
