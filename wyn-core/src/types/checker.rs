@@ -2733,14 +2733,14 @@ impl<'a> TypeChecker<'a> {
         }
 
         // 3. Vec swizzle: single-letter returns a scalar, 2–4-letter
-        //    returns a vec of that length. Valid letters are {x,y,z,w};
-        //    each letter must be in range for the source vec's length
-        //    (`.z` on a vec2 is a range error, caught here if the size
-        //    is known, otherwise only that the base is a vec).
-        if !field.is_empty()
-            && field.len() <= 4
-            && field.chars().all(|c| matches!(c, 'x' | 'y' | 'z' | 'w'))
-        {
+        //    returns a vec of that length. Each letter is drawn from
+        //    ONE of the two swizzle sets — `xyzw` (position) or `rgba`
+        //    (color, aliased to position: r=x, g=y, b=z, a=w). Mixing
+        //    sets (`.xg`) is rejected at the predicate level. Each
+        //    letter must also be in range for the source vec's length
+        //    (`.z` on a vec2 is a range error, caught here when the
+        //    size is known, otherwise only that the base is a vec).
+        if super::is_swizzle_field(field) {
             // Constrain base to some Vec<_, _>.
             let elem_var = self.context.new_variable();
             let size_var = self.context.new_variable();
@@ -2759,13 +2759,8 @@ impl<'a> TypeChecker<'a> {
             if let Type::Constructed(TypeName::Vec, args) = &resolved_base {
                 if let Some(Type::Constructed(TypeName::Size(n), _)) = args.get(1) {
                     for c in field.chars() {
-                        let idx = match c {
-                            'x' => 0,
-                            'y' => 1,
-                            'z' => 2,
-                            'w' => 3,
-                            _ => unreachable!(),
-                        };
+                        let idx = super::swizzle_component_index(c)
+                            .expect("is_swizzle_field already accepted this letter");
                         if idx >= *n {
                             bail_type_at!(
                                 *span,

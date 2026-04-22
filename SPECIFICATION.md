@@ -1408,6 +1408,38 @@ entry vertex_main() #[builtin(position)] vec4f32 =
   @[0.0, 0.0, 0.0, 1.0]
 ```
 
+### Vector Swizzles
+
+A vector's components are accessed with field syntax (`v.x`). Wyn
+supports WGSL-style swizzles: one to four letters drawn from a single
+"swizzle set". The two sets and their component indices are:
+
+| Set  | `0` | `1` | `2` | `3` |
+|------|-----|-----|-----|-----|
+| xyzw | `x` | `y` | `z` | `w` |
+| rgba | `r` | `g` | `b` | `a` |
+
+`rgba` is an alias set for `xyzw` (`r == x`, `g == y`, `b == z`,
+`a == w`) — the two sets address the same underlying components and
+produce identical values. Mixing letters from the two sets in one
+swizzle (`.xg`, `.rbw`) is a type error.
+
+A single-letter swizzle produces the scalar component; a 2-, 3-, or
+4-letter swizzle produces a new vector of that length. Letters may
+repeat and may be in any order.
+
+Each referenced component must lie within the source vector's length —
+`.z` (or `.b`) on a `vec2` is a type error.
+
+```wyn
+let v: vec4f32 = @[1.0, 2.0, 3.0, 4.0]
+let first: f32       = v.x        -- 1.0
+let alpha: f32       = v.a        -- 4.0   (same as v.w)
+let rgb:   vec3f32   = v.rgb      -- (1.0, 2.0, 3.0)
+let rev:   vec4f32   = v.wzyx     -- (4.0, 3.0, 2.0, 1.0)
+let splat: vec3f32   = v.xxx      -- (1.0, 1.0, 1.0)
+```
+
 ### Vector Constructors
 
 Vectors can be constructed in two ways:

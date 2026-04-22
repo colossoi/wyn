@@ -741,7 +741,20 @@ fn get_field_completions(scheme: &TypeScheme) -> Vec<CompletionItem> {
                 }
             }
             TypeName::Vec => {
-                for c in ["x", "y", "z", "w"] {
+                // Resolve the vec size if known; default to 4 so that
+                // completion on a type-unresolved vec offers everything.
+                let size = args
+                    .get(1)
+                    .and_then(|t| match t {
+                        Type::Constructed(TypeName::Size(n), _) => Some(*n),
+                        _ => None,
+                    })
+                    .unwrap_or(4)
+                    .min(4);
+                const XYZW: &[&str] = &["x", "y", "z", "w"];
+                const RGBA: &[&str] = &["r", "g", "b", "a"];
+                // Singletons (scalar component access).
+                for &c in XYZW.iter().take(size) {
                     items.push(CompletionItem {
                         label: c.to_string(),
                         kind: Some(CompletionItemKind::PROPERTY),
@@ -749,11 +762,35 @@ fn get_field_completions(scheme: &TypeScheme) -> Vec<CompletionItem> {
                         ..Default::default()
                     });
                 }
-                for c in ["r", "g", "b", "a"] {
+                for &c in RGBA.iter().take(size) {
                     items.push(CompletionItem {
                         label: c.to_string(),
                         kind: Some(CompletionItemKind::PROPERTY),
                         detail: Some("color component".to_string()),
+                        ..Default::default()
+                    });
+                }
+                // Identity multi-letter swizzles up to the vec's size —
+                // `.xy`, `.xyz`, `.xyzw` plus the `rgba` equivalents.
+                // Other 2-4-letter combinations are valid too (Wyn
+                // supports the full WGSL swizzle surface with per-letter
+                // repetition and reordering), but enumerating every
+                // permutation would make the completion list unreadable;
+                // the user can type the extras directly and they'll
+                // type-check.
+                for len in 2..=size {
+                    let xyzw_swz: String = XYZW[..len].concat();
+                    items.push(CompletionItem {
+                        label: xyzw_swz,
+                        kind: Some(CompletionItemKind::PROPERTY),
+                        detail: Some(format!("vec{} swizzle", len)),
+                        ..Default::default()
+                    });
+                    let rgba_swz: String = RGBA[..len].concat();
+                    items.push(CompletionItem {
+                        label: rgba_swz,
+                        kind: Some(CompletionItemKind::PROPERTY),
+                        detail: Some(format!("vec{} color swizzle", len)),
                         ..Default::default()
                     });
                 }

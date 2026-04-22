@@ -9,6 +9,32 @@ pub mod checker;
 
 use std::collections::HashMap;
 
+/// Map a swizzle letter to its component index. Supports both the
+/// `xyzw` (position) and `rgba` (color) sets, following WGSL — `r`/`g`/
+/// `b`/`a` are aliases for `x`/`y`/`z`/`w`. Returns `None` for any other
+/// character.
+pub fn swizzle_component_index(c: char) -> Option<usize> {
+    match c {
+        'x' | 'r' => Some(0),
+        'y' | 'g' => Some(1),
+        'z' | 'b' => Some(2),
+        'w' | 'a' => Some(3),
+        _ => None,
+    }
+}
+
+/// Predicate for a valid vector swizzle field: 1-4 characters, every
+/// character drawn from *one* of the two swizzle sets (`xyzw` or
+/// `rgba`) — mixing `.xg` is not a swizzle.
+pub fn is_swizzle_field(field: &str) -> bool {
+    if field.is_empty() || field.len() > 4 {
+        return false;
+    }
+    let all_xyzw = field.chars().all(|c| matches!(c, 'x' | 'y' | 'z' | 'w'));
+    let all_rgba = field.chars().all(|c| matches!(c, 'r' | 'g' | 'b' | 'a'));
+    all_xyzw || all_rgba
+}
+
 // Type aliases for polytype types specialized to our TypeName
 pub type Type = polytype::Type<TypeName>;
 pub type TypeScheme = polytype::TypeScheme<TypeName>;

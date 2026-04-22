@@ -1778,23 +1778,16 @@ impl<'a> Transformer<'a> {
 
             ast::ExprKind::FieldAccess(record, field) => {
                 let rec = self.transform_expr(record);
-                // Vec swizzle (1–4 letters of xyzw): build per-letter
-                // projections; single letter → scalar, multi → _w_vec_lit.
-                if !field.is_empty()
-                    && rec.ty.is_vec()
-                    && field.chars().all(|c| matches!(c, 'x' | 'y' | 'z' | 'w'))
-                {
+                // Vec swizzle (1–4 letters from a single swizzle set —
+                // `xyzw` or `rgba`): build per-letter projections;
+                // single letter → scalar, multi → _w_vec_lit.
+                if rec.ty.is_vec() && crate::types::is_swizzle_field(field) {
                     let elem_ty = rec.ty.elem_type().cloned().unwrap_or(ty.clone());
                     let components: Vec<Term> = field
                         .chars()
                         .map(|c| {
-                            let idx = match c {
-                                'x' => 0,
-                                'y' => 1,
-                                'z' => 2,
-                                'w' => 3,
-                                _ => unreachable!(),
-                            };
+                            let idx = crate::types::swizzle_component_index(c)
+                                .expect("is_swizzle_field already accepted this letter");
                             let idx_lit = self.mk_term(
                                 Type::Constructed(TypeName::Int(32), vec![]),
                                 span,
