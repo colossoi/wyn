@@ -44,9 +44,17 @@ for f in testfiles/*.wyn; do
     base=$(basename "$f" .wyn)
 
     if [ "$MODE" = "glsl" ]; then
-        # GLSL mode: compile to shadertoy, skip compute-only shaders
+        # GLSL mode: compile to shadertoy. Skip compute-only shaders
+        # and anything with module-scope `#[storage]` — Shadertoy
+        # GLSL is fragment-only with fixed iResolution/iTime/iMouse
+        # uniforms; custom storage bindings have no equivalent.
         if grep -q '#\[compute\]' "$f" && ! grep -q '#\[fragment\]' "$f"; then
             printf "Skipping %s (compute-only)\n" "$f"
+            SKIP=$((SKIP + 1))
+            continue
+        fi
+        if grep -q '#\[storage' "$f"; then
+            printf "Skipping %s (uses module-scope #[storage])\n" "$f"
             SKIP=$((SKIP + 1))
             continue
         fi
