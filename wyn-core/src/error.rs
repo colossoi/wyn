@@ -21,6 +21,9 @@ pub enum CompilerError {
     #[error("GLSL generation error: {0}")]
     GlslError(String, Option<Span>),
 
+    #[error("WGSL generation error: {0}")]
+    WgslError(String, Option<Span>),
+
     #[error("Module system error: {0}")]
     ModuleError(String, Option<Span>),
 
@@ -43,6 +46,7 @@ impl CompilerError {
             Self::AliasError(_, span) => *span,
             Self::SpirvError(_, span) => *span,
             Self::GlslError(_, span) => *span,
+            Self::WgslError(_, span) => *span,
             Self::ModuleError(_, span) => *span,
             Self::FlatteningError(_, span) => *span,
             Self::IoError(_) | Self::SpirvBuilderError(_) => None,
@@ -86,6 +90,13 @@ macro_rules! err_spirv {
 macro_rules! err_glsl {
     ($($arg:tt)*) => {
         $crate::error::CompilerError::GlslError(format!($($arg)*), None)
+    };
+}
+
+#[macro_export]
+macro_rules! err_wgsl {
+    ($($arg:tt)*) => {
+        $crate::error::CompilerError::WgslError(format!($($arg)*), None)
     };
 }
 
@@ -144,6 +155,13 @@ macro_rules! err_spirv_at {
 macro_rules! err_glsl_at {
     ($span:expr, $($arg:tt)*) => {
         $crate::error::CompilerError::GlslError(format!($($arg)*), Some($span))
+    };
+}
+
+#[macro_export]
+macro_rules! err_wgsl_at {
+    ($span:expr, $($arg:tt)*) => {
+        $crate::error::CompilerError::WgslError(format!($($arg)*), Some($span))
     };
 }
 

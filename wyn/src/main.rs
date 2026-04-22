@@ -17,6 +17,8 @@ enum Target {
     Glsl,
     /// GLSL for Shadertoy (fragment shader only, mainImage entry point)
     Shadertoy,
+    /// WGSL source code (WebGPU shading language)
+    Wgsl,
 }
 
 /// Times the execution of a closure and prints the elapsed time if verbose.
@@ -65,6 +67,12 @@ enum Commands {
         /// Output MIR (SSA post-EGIR, pre-backend-lowering)
         #[arg(long, value_name = "FILE")]
         output_mir: Option<PathBuf>,
+
+        /// Disable multi-stage SOAC parallelization. Compute SOACs emit
+        /// as a single sequential loop instead of chunk/combine phases;
+        /// graphical-entry SOACs are not lifted to pre-pass kernels.
+        #[arg(long)]
+        single_stage: bool,
 
         /// Print verbose output
         #[arg(short, long)]
@@ -123,6 +131,7 @@ fn run(cli: Cli) -> Result<(), DriverError> {
             output_annotated,
             output_tlc,
             output_mir,
+            single_stage,
             verbose,
         } => {
             compile_file(
@@ -132,6 +141,7 @@ fn run(cli: Cli) -> Result<(), DriverError> {
                 output_annotated,
                 output_tlc,
                 output_mir,
+                single_stage,
                 verbose,
             )?;
         }
@@ -154,6 +164,7 @@ fn compile_file(
     output_annotated: Option<PathBuf>,
     output_tlc: Option<PathBuf>,
     output_mir: Option<PathBuf>,
+    single_stage: bool,
     verbose: bool,
 ) -> Result<(), DriverError> {
     if verbose {
@@ -230,8 +241,13 @@ fn compile_file(
     // Inline small user functions and constants at TLC level
     let tlc_inlined = time("tlc_inline_small", verbose, || tlc_folded.inline_small());
 
-    // Parallelize SOACs in compute shaders (structural decisions at TLC level)
-    let tlc_parallel = time("tlc_parallelize", verbose, || tlc_inlined.parallelize_soacs());
+    // Parallelize SOACs in compute shaders (structural decisions at TLC
+    // level). `--single-stage` disables this pass entirely; compute SOACs
+    // collapse to sequential loops and graphical entries are not
+    // restructured.
+    let tlc_parallel = time("tlc_parallelize", verbose, || {
+        tlc_inlined.parallelize_soacs(single_stage)
+    });
 
     // Eliminate dead TLC defs
     let tlc_reachable = time("tlc_filter_reachable", verbose, || {
@@ -242,12 +258,13 @@ fn compile_file(
     // `materialize` (rewrite dynamic Index → Materialize+DynamicExtract);
     // GLSL skips it.
     let raw = time("to_egraph", verbose, || tlc_reachable.to_egraph())?;
-    // Unroll small Maps for SPIR-V; leave loops intact for GLSL (drivers
-    // unroll themselves and the structurizer is happier with real loops).
-    let unroll_maps = matches!(target, Target::Spirv);
+    // Unroll small Maps for SPIR-V and WGSL; leave loops intact for GLSL
+    // (drivers unroll themselves and the structurizer is happier with
+    // real loops).
+    let unroll_maps = matches!(target, Target::Spirv | Target::Wgsl);
     let expanded = time("expand_soacs", verbose, || raw.expand_soacs(unroll_maps));
     let ssa = match target {
-        Target::Spirv => time("egir_passes_spirv", verbose, || {
+        Target::Spirv | Target::Wgsl => time("egir_passes_full", verbose, || {
             expanded.materialize().optimize_skeleton().elaborate()
         }),
         Target::Glsl | Target::Shadertoy => time("egir_passes_glsl", verbose, || {
@@ -341,6 +358,21 @@ fn compile_file(
             });
 
             fs::write(&output_path, &glsl)?;
+
+            if verbose {
+                info!("Successfully compiled to {}", output_path.display());
+            }
+        }
+        Target::Wgsl => {
+            let wgsl = time("wgsl_lower", verbose, || wyn_core::wgsl::lower(&soac_lowered.ssa))?;
+
+            let output_path = output.unwrap_or_else(|| {
+                let mut path = input.clone();
+                path.set_extension("wgsl");
+                path
+            });
+
+            fs::write(&output_path, &wgsl)?;
 
             if verbose {
                 info!("Successfully compiled to {}", output_path.display());

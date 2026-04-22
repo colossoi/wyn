@@ -31,6 +31,7 @@ pub mod pipeline_descriptor;
 pub mod resolve_placeholders;
 pub mod spirv;
 pub mod structured;
+pub mod wgsl;
 
 #[cfg(test)]
 mod integration_tests;
@@ -274,7 +275,7 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 //       -> .buffer_specialize()                         -> TlcBufferSpecialized
 //       -> .fold_generated_lambdas()                    -> TlcGeneratedLambdasFolded
 //       -> .inline_small()                              -> TlcSmallInlined
-//       -> .parallelize_soacs()                         -> TlcParallelized
+//       -> .parallelize_soacs(false)                         -> TlcParallelized
 //       -> .filter_reachable()                          -> TlcReachable
 //       -> .to_egir()                                   -> SsaConverted
 //
@@ -878,9 +879,13 @@ impl std::ops::Deref for TlcSmallInlined {
 
 impl TlcSmallInlined {
     /// Parallelize SOACs in compute entry points at the TLC level.
-    pub fn parallelize_soacs(self) -> TlcParallelized {
+    /// `disable` turns the pass into an effective no-op — compute SOACs
+    /// remain as single-threaded sequential loops in their original
+    /// entries, graphical entries get no restructuring, and the pipeline
+    /// descriptor is built as if every entry runs in one stage.
+    pub fn parallelize_soacs(self, disable: bool) -> TlcParallelized {
         let TlcLateInner { tlc, type_table } = self.0;
-        let result = tlc::parallelize::run(tlc);
+        let result = tlc::parallelize::run(tlc, disable);
         TlcParallelized(TlcPipelineInner {
             tlc: result.program,
             pipeline: result.pipeline,
@@ -1138,6 +1143,10 @@ impl SsaConverted {
 
     pub fn lower_shadertoy(self) -> error::Result<String> {
         glsl::lower_shadertoy(&self.ssa)
+    }
+
+    pub fn lower_wgsl(self) -> error::Result<String> {
+        wgsl::lower(&self.ssa)
     }
 }
 

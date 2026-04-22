@@ -533,11 +533,13 @@ pub struct ParallelizationResult {
     pub pipeline: PipelineDescriptor,
 }
 
-/// Parallelize SOACs in compute entry points.
-pub fn run(mut program: Program) -> ParallelizationResult {
+/// Parallelize SOACs in compute entry points. `disable`: when true,
+/// skip the multi-stage restructuring and emit the default pipeline
+/// as if every entry runs in one stage.
+pub fn run(mut program: Program, disable: bool) -> ParallelizationResult {
     let analyses = analyze_program(&program);
 
-    if analyses.is_empty() {
+    if disable || analyses.is_empty() {
         let pipeline = build_default_pipeline(&program);
         return ParallelizationResult { program, pipeline };
     }
