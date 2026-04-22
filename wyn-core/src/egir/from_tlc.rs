@@ -579,7 +579,10 @@ impl<'a> Converter<'a> {
 
     /// Create a pure `StorageView(Storage { set, binding })` node. Builds the
     /// implicit `offset=0` and `len=_w_intrinsic_storage_len(set, binding)`
-    /// operands as pure ops.
+    /// operands as pure ops. Both offset and len are u32 — matches WGSL's
+    /// `arrayLength` return and SPIR-V's `OpArrayLength` (see backend
+    /// lowerings). Callers that want an i32 length wrap in an `i32.u32`
+    /// cast at the rewrite site (`buffer_specialize::rewrite_term`).
     fn emit_storage_view(&mut self, set: u32, binding: u32, view_ty: Type<TypeName>) -> NodeId {
         let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
         let set_nid = self.intern_u32(set);
@@ -587,9 +590,19 @@ impl<'a> Converter<'a> {
         let len_nid = self.intern_pure(
             PureOp::Intrinsic("_w_intrinsic_storage_len".into()),
             smallvec![set_nid, binding_nid],
-            u32_ty,
+            u32_ty.clone(),
         );
         let zero_nid = self.intern_u32(0);
+        debug_assert_eq!(
+            self.graph.types.get(&zero_nid),
+            Some(&u32_ty),
+            "StorageView offset operand must be u32"
+        );
+        debug_assert_eq!(
+            self.graph.types.get(&len_nid),
+            Some(&u32_ty),
+            "StorageView len operand must be u32"
+        );
         self.intern_pure(
             PureOp::StorageView(PureViewSource::Storage { set, binding }),
             smallvec![zero_nid, len_nid],
