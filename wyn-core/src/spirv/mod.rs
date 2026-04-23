@@ -3081,7 +3081,10 @@ fn lower_ssa_program_impl(program: &Program) -> Result<Vec<u32>> {
     // Now lower all function bodies
     for func in &program.functions {
         if func.linkage_name.is_some() {
-            // Extern function - skip for now (handled at call sites)
+            // Extern functions have no local body; the Import-linkage
+            // declaration emitted above is the full handling, and
+            // `InstKind::Extern` resolves them at call sites via
+            // `constructor.linked_functions`.
             continue;
         }
 
