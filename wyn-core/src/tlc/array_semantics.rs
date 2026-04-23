@@ -167,9 +167,6 @@ pub enum FusionKind {
     MapIntoReduce,
     /// Compose map into scan: scan(op, ne, map(f, a)) → scan(op∘f, ne, a)
     MapIntoScan,
-    /// Compose map into filter predicate: filter(p, map(f, a)) → filter(p∘f, a) then map(f, ...)
-    /// (only when pred doesn't use map's output value — deferred for now)
-    // MapIntoFilter,
     /// Inline a generator into an elementwise consumer
     GenerateIntoMap,
     /// Inline a range into an elementwise consumer
