@@ -47,6 +47,8 @@ module.exports = grammar({
   conflicts: $ => [
     [$.identifier, $.qualified_name],
     [$.call_expression, $.curry_expression],
+    [$.existential_type, $.function_type],
+    [$.binary_expression],
   ],
 
   rules: {
@@ -419,7 +421,7 @@ module.exports = grammar({
       $.match_expression,
       $.lambda_expression,
       $.array_with,
-      $._binary_expression,
+      $.binary_expression,
       $.unary_expression,
       $.field_expression,
       $.index_expression,
@@ -520,7 +522,7 @@ module.exports = grammar({
       field('body', $._expression),
     )),
 
-    _binary_expression: $ => choice(
+    binary_expression: $ => choice(
       // Logical OR (lowest precedence)
       prec.left(PREC.OR, seq(
         field('left', $._expression),
