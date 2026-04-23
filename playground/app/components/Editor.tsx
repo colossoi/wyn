@@ -1,12 +1,19 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useImperativeHandle, useRef } from "react";
+import { EditorState, StateEffect, StateField } from "@codemirror/state";
+import { EditorView, Decoration, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter } from "@codemirror/view";
+import type { DecorationSet } from "@codemirror/view";
+import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
+import { indentUnit } from "@codemirror/language";
+import { searchKeymap } from "@codemirror/search";
+import { monokai } from "@uiw/codemirror-theme-monokai";
 import type { ErrorLocation } from "~/lib/wasm";
 
-// CodeMirror 5 from CDN, set on window by the script tag injected via root.tsx links.
-// Hand-typed minimal interface for the bits we use.
-declare global {
-  interface Window {
-    CodeMirror?: any;
-  }
+export interface EditorHandle {
+  setValue(value: string): void;
+  setCursor(pos: { line: number; ch: number }): void;
+  focus(): void;
+  scrollIntoView(pos: { line: number; ch: number }, margin?: number): void;
+  view: EditorView;
 }
 
 interface EditorProps {
@@ -14,75 +21,139 @@ interface EditorProps {
   errorLocation: ErrorLocation | null;
   onChange: (value: string) => void;
   onCompile: () => void;
-  onMount: (editor: any) => void;
+  onMount: (handle: EditorHandle) => void;
 }
+
+// Convert a {line, ch} position (0-indexed) to an absolute document offset,
+// clamped to the document bounds.
+function posToOffset(view: EditorView, line: number, ch: number): number {
+  const doc = view.state.doc;
+  const lineNo = Math.max(1, Math.min(doc.lines, line + 1));
+  const l = doc.line(lineNo);
+  return Math.min(l.to, l.from + Math.max(0, ch));
+}
+
+// Error decorations: a line-background highlight plus a wavy underline on
+// the offending range. Driven by a StateEffect so React can push updates
+// without recreating the view.
+const setErrorEffect = StateEffect.define<ErrorLocation | null>();
+
+const errorField = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update(deco, tr) {
+    deco = deco.map(tr.changes);
+    for (const e of tr.effects) {
+      if (e.is(setErrorEffect)) {
+        const loc = e.value;
+        if (!loc) {
+          deco = Decoration.none;
+          continue;
+        }
+        const doc = tr.state.doc;
+        const startLine = Math.max(1, Math.min(doc.lines, loc.start_line));
+        const endLine = Math.max(1, Math.min(doc.lines, loc.end_line));
+        const startLineInfo = doc.line(startLine);
+        const endLineInfo = doc.line(endLine);
+        const from = Math.min(startLineInfo.to, startLineInfo.from + Math.max(0, loc.start_col - 1));
+        const to = Math.min(endLineInfo.to, endLineInfo.from + Math.max(0, loc.end_col - 1));
+        const builder = [
+          Decoration.line({ class: "cm-line-error" }).range(startLineInfo.from),
+        ];
+        if (to > from) {
+          builder.push(
+            Decoration.mark({ class: "cm-error-underline" }).range(from, to),
+          );
+        }
+        deco = Decoration.set(builder, /*sort=*/ true);
+      }
+    }
+    return deco;
+  },
+  provide: (f) => EditorView.decorations.from(f),
+});
 
 export function Editor({ initialValue, errorLocation, onChange, onCompile, onMount }: EditorProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const editorRef = useRef<any>(null);
+  const viewRef = useRef<EditorView | null>(null);
   const callbacksRef = useRef({ onChange, onCompile, onMount });
   callbacksRef.current = { onChange, onCompile, onMount };
 
-  // Mount CodeMirror once.
+  // Mount the editor once. initialValue is only used at first mount; later
+  // content updates happen via handle.setValue.
   useEffect(() => {
     if (!containerRef.current) return;
-    const CM = window.CodeMirror;
-    if (!CM) {
-      console.error("CodeMirror not loaded on window");
-      return;
-    }
-    const editor = CM(containerRef.current, {
-      value: initialValue,
-      mode: null,
-      theme: "monokai",
-      lineNumbers: true,
-      tabSize: 2,
-      indentWithTabs: false,
-      lineWrapping: false,
-      autofocus: true,
-      gutters: ["CodeMirror-linenumbers"],
-      scrollbarStyle: "native",
-    });
-    editor.setOption("extraKeys", {
-      "Ctrl-Enter": () => callbacksRef.current.onCompile(),
-      "Cmd-Enter": () => callbacksRef.current.onCompile(),
-    });
-    editor.on("change", (instance: any) => callbacksRef.current.onChange(instance.getValue()));
-    editorRef.current = editor;
-    callbacksRef.current.onMount(editor);
-    return () => {
-      // CodeMirror 5 has no destroy; clear container so React unmount is clean.
-      if (containerRef.current) containerRef.current.innerHTML = "";
-      editorRef.current = null;
+
+    const compileCmd = () => {
+      callbacksRef.current.onCompile();
+      return true;
     };
+
+    const state = EditorState.create({
+      doc: initialValue,
+      extensions: [
+        lineNumbers(),
+        highlightActiveLine(),
+        highlightActiveLineGutter(),
+        history(),
+        indentUnit.of("  "),
+        EditorState.tabSize.of(2),
+        keymap.of([
+          { key: "Mod-Enter", run: compileCmd },
+          indentWithTab,
+          ...defaultKeymap,
+          ...historyKeymap,
+          ...searchKeymap,
+        ]),
+        errorField,
+        EditorView.updateListener.of((u) => {
+          if (u.docChanged) callbacksRef.current.onChange(u.state.doc.toString());
+        }),
+        monokai,
+      ],
+    });
+
+    const view = new EditorView({ state, parent: containerRef.current });
+    viewRef.current = view;
+
+    const handle: EditorHandle = {
+      view,
+      setValue(value: string) {
+        view.dispatch({
+          changes: { from: 0, to: view.state.doc.length, insert: value },
+        });
+      },
+      setCursor(pos) {
+        const offset = posToOffset(view, pos.line, pos.ch);
+        view.dispatch({ selection: { anchor: offset } });
+      },
+      focus() {
+        view.focus();
+      },
+      scrollIntoView(pos, _margin) {
+        const offset = posToOffset(view, pos.line, pos.ch);
+        view.dispatch({ effects: EditorView.scrollIntoView(offset, { y: "center" }) });
+      },
+    };
+
+    view.focus();
+    callbacksRef.current.onMount(handle);
+
+    return () => {
+      view.destroy();
+      viewRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Mirror errorLocation onto the editor as line highlight + wavy underline.
+  // Push error-location changes into the editor via StateEffect.
   useEffect(() => {
-    const editor = editorRef.current;
-    if (!editor) return;
-
-    const markers: any[] = [];
-    const lineHandles: any[] = [];
-
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({ effects: setErrorEffect.of(errorLocation) });
     if (errorLocation) {
-      const startLine = errorLocation.start_line - 1;
-      const startCol = errorLocation.start_col - 1;
-      const endLine = errorLocation.end_line - 1;
-      const endCol = errorLocation.end_col - 1;
-      lineHandles.push(editor.addLineClass(startLine, "background", "line-error"));
-      markers.push(editor.markText(
-        { line: startLine, ch: startCol },
-        { line: endLine, ch: endCol },
-        { className: "cm-error-underline" },
-      ));
-      editor.scrollIntoView({ line: startLine, ch: 0 }, 100);
+      const offset = posToOffset(view, errorLocation.start_line - 1, 0);
+      view.dispatch({ effects: EditorView.scrollIntoView(offset, { y: "center" }) });
     }
-
-    return () => {
-      for (const m of markers) m.clear();
-      for (const h of lineHandles) editor.removeLineClass(h, "background", "line-error");
-    };
   }, [errorLocation]);
 
   return <div ref={containerRef} className="editor-container" />;

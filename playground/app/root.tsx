@@ -10,13 +10,6 @@ import {
 import type { Route } from "./+types/root";
 import "./app.css";
 
-const CM_VERSION = "5.65.16";
-
-export const links: Route.LinksFunction = () => [
-  { rel: "stylesheet", href: `https://cdnjs.cloudflare.com/ajax/libs/codemirror/${CM_VERSION}/codemirror.min.css` },
-  { rel: "stylesheet", href: `https://cdnjs.cloudflare.com/ajax/libs/codemirror/${CM_VERSION}/theme/monokai.min.css` },
-];
-
 export function Layout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
@@ -28,9 +21,6 @@ export function Layout({ children }: { children: React.ReactNode }) {
       </head>
       <body>
         {children}
-        {/* CodeMirror 5 is a UMD bundle that attaches to window. Load synchronously
-            so it's available when our Editor component mounts. */}
-        <script src={`https://cdnjs.cloudflare.com/ajax/libs/codemirror/${CM_VERSION}/codemirror.min.js`}></script>
         <ScrollRestoration />
         <Scripts />
       </body>
