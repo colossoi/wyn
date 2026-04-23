@@ -513,6 +513,43 @@ impl TypeChecked {
         }
     }
 
+    /// Reject programs that still contain `???` type holes. Each hole
+    /// is listed with its inferred type and source location; the
+    /// caller (the driver) maps `CompilerError::TypeHole` to a
+    /// distinct exit code so tooling can tell hole-errors apart from
+    /// generic compilation failures. Holes are a development aid —
+    /// they're not expected to reach the backend, so this is the
+    /// right place to bail.
+    pub fn reject_type_holes(self) -> Result<Self> {
+        use std::fmt::Write;
+        let mut nc = NodeCounter::new();
+        let mm = module_manager::ModuleManager::new(&mut nc);
+        let checker = type_checker::TypeChecker::new(&mm);
+        let holes: Vec<_> = self
+            .warnings
+            .iter()
+            .filter_map(|w| match w {
+                type_checker::TypeWarning::TypeHoleFilled { inferred_type, span } => {
+                    Some((inferred_type, span))
+                }
+            })
+            .collect();
+        if holes.is_empty() {
+            return Ok(self);
+        }
+        let mut msg = String::from("type hole(s) in program:\n");
+        for (ty, span) in &holes {
+            let _ = writeln!(
+                &mut msg,
+                "  at {}:{} — inferred `{}`",
+                span.start_line,
+                span.start_col,
+                checker.format_type(ty),
+            );
+        }
+        Err(err_type_hole!("{}", msg.trim_end()))
+    }
+
     /// Run alias checking analysis on the program
     pub fn alias_check(self) -> Result<AliasChecked> {
         let checker = alias_checker::AliasChecker::new(&self.type_table, &self.span_table);

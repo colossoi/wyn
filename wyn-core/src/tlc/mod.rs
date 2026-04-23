@@ -1899,7 +1899,10 @@ impl<'a> Transformer<'a> {
             }
 
             ast::ExprKind::TypeHole => {
-                todo!("Type holes")
+                unreachable!(
+                    "TypeHole should be rejected at type-check; see \
+                     TypeChecked::reject_type_holes"
+                )
             }
         }
     }

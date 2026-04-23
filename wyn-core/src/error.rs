@@ -30,6 +30,12 @@ pub enum CompilerError {
     #[error("Flattening error: {0}")]
     FlatteningError(String, Option<Span>),
 
+    /// Program contains unresolved `???` type holes. The payload is a
+    /// pre-formatted multi-line diagnostic listing each hole's
+    /// inferred type and source location.
+    #[error("{0}")]
+    TypeHole(String),
+
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 
@@ -49,6 +55,7 @@ impl CompilerError {
             Self::WgslError(_, span) => *span,
             Self::ModuleError(_, span) => *span,
             Self::FlatteningError(_, span) => *span,
+            Self::TypeHole(_) => None,
             Self::IoError(_) | Self::SpirvBuilderError(_) => None,
         }
     }
@@ -118,6 +125,13 @@ macro_rules! err_flatten {
 macro_rules! err_alias {
     ($($arg:tt)*) => {
         $crate::error::CompilerError::AliasError(format!($($arg)*), None)
+    };
+}
+
+#[macro_export]
+macro_rules! err_type_hole {
+    ($($arg:tt)*) => {
+        $crate::error::CompilerError::TypeHole(format!($($arg)*))
     };
 }
 

@@ -3,6 +3,7 @@ use log::info;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::time::Instant;
 use thiserror::Error;
 use wyn_core::Compiler;
@@ -99,7 +100,7 @@ enum DriverError {
     EgirConversionError(#[from] wyn_core::egir::from_tlc::ConvertError),
 }
 
-fn main() -> Result<(), DriverError> {
+fn main() -> ExitCode {
     env_logger::init();
     let cli = Cli::parse();
 
@@ -111,7 +112,22 @@ fn main() -> Result<(), DriverError> {
         .expect("Failed to spawn compiler thread")
         .join()
         .expect("Compiler thread panicked");
-    result
+
+    // Exit-code convention:
+    //   0 — success
+    //   1 — generic compilation failure (parse, type, alias, backend)
+    //   2 — program contains unresolved `???` type holes
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(DriverError::CompilationError(wyn_core::error::CompilerError::TypeHole(msg))) => {
+            eprintln!("{msg}");
+            ExitCode::from(2)
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 fn run(cli: Cli) -> Result<(), DriverError> {
@@ -179,6 +195,7 @@ fn compile_file(
     })?;
 
     type_checked.print_warnings();
+    let type_checked = type_checked.reject_type_holes()?;
 
     let alias_checked = time("alias_check", verbose, || type_checked.alias_check())?;
     if alias_checked.has_alias_errors() {
