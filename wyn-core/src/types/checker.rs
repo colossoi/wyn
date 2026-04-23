@@ -1689,7 +1689,6 @@ impl<'a> TypeChecker<'a> {
             ExprKind::IntLiteral(_) => Ok(i32()),
             ExprKind::FloatLiteral(_) => Ok(f32()),
             ExprKind::BoolLiteral(_) => Ok(bool_type()),
-            ExprKind::StringLiteral(_) => Ok(unit()),
             ExprKind::Unit => Ok(unit()),
             ExprKind::Identifier(quals, name) => {
                 let full_name = if quals.is_empty() {

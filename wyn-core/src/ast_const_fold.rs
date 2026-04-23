@@ -90,7 +90,6 @@ impl AstConstFolder {
             ExprKind::IntLiteral(_)
             | ExprKind::FloatLiteral(_)
             | ExprKind::BoolLiteral(_)
-            | ExprKind::StringLiteral(_)
             | ExprKind::Unit
             | ExprKind::TypeHole => {
                 // Leaf nodes, nothing to fold

@@ -120,7 +120,6 @@ impl PartialEvaluator {
             ),
             TermKind::FloatLit(f) => Value::Float(*f as f64),
             TermKind::BoolLit(b) => Value::Bool(*b),
-            TermKind::StringLit(_) => Value::Unknown(term.clone()),
 
             // Variable lookup
             TermKind::Var(sym) => {

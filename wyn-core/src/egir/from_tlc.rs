@@ -719,7 +719,6 @@ impl<'a> Converter<'a> {
             }
             TermKind::FloatLit(f) => Ok(self.intern_pure(PureOp::Float(f.to_string()), smallvec![], ty)),
             TermKind::BoolLit(b) => Ok(self.intern_pure(PureOp::Bool(*b), smallvec![], ty)),
-            TermKind::StringLit(s) => Ok(self.intern_pure(PureOp::StringLit(s.clone()), smallvec![], ty)),
 
             // --- Variables ---
             TermKind::Var(sym) => self.convert_var(*sym, ty),
@@ -1772,7 +1771,6 @@ fn is_purely_constant_body(body: &FuncBody) -> bool {
                 | InstKind::Float(_)
                 | InstKind::Bool(_)
                 | InstKind::Unit
-                | InstKind::String(_)
                 | InstKind::Tuple(_)
                 | InstKind::Vector(_)
                 | InstKind::Matrix(_)

@@ -1810,12 +1810,6 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(self.node_counter.mk_node(ExprKind::BoolLiteral(false), span))
             }
-            Some(Token::StringLiteral(s)) => {
-                let s = s.clone();
-                let span = self.current_span();
-                self.advance();
-                Ok(self.node_counter.mk_node(ExprKind::StringLiteral(s), span))
-            }
             Some(Token::Identifier(name)) => {
                 let name = name.clone();
                 let span = self.current_span();

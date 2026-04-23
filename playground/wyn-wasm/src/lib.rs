@@ -116,7 +116,6 @@ mod tlc_tree {
             TermKind::IntLit(s) => TreeNode::leaf(format!("Int({}) : {}", s, ty)),
             TermKind::FloatLit(f) => TreeNode::leaf(format!("Float({}) : {}", f, ty)),
             TermKind::BoolLit(b) => TreeNode::leaf(format!("Bool({}) : {}", b, ty)),
-            TermKind::StringLit(s) => TreeNode::leaf(format!("String({:?}) : {}", s, ty)),
             TermKind::Extern(link) => TreeNode::leaf(format!("Extern({}) : {}", link, ty)),
             TermKind::If {
                 cond,

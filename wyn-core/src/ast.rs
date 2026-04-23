@@ -357,7 +357,6 @@ pub enum ExprKind {
     IntLiteral(crate::lexer::IntString),
     FloatLiteral(f32),
     BoolLiteral(bool),
-    StringLiteral(String),
     Unit,
     Identifier(Vec<String>, String), // (qualifiers, name) - e.g., ([], "x") or (["f32"], "sin")
     ArrayLiteral(Vec<Expression>),

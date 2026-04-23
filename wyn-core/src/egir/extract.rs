@@ -71,7 +71,6 @@ fn op_cost(op: &PureOp) -> Cost {
         | PureOp::Float(_)
         | PureOp::Bool(_)
         | PureOp::Unit
-        | PureOp::StringLit(_)
         | PureOp::Global(_)
         | PureOp::Extern(_)
         | PureOp::Project { .. } => 0,

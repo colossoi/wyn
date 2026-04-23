@@ -1211,7 +1211,6 @@ impl ModuleManager {
             ExprKind::IntLiteral(_)
             | ExprKind::FloatLiteral(_)
             | ExprKind::BoolLiteral(_)
-            | ExprKind::StringLiteral(_)
             | ExprKind::Unit => {}
             // Other cases that might need handling
             _ => {}

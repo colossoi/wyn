@@ -174,7 +174,6 @@ fn apply_type_subst_to_term(term: &Term, subst: &TypeSubst, term_ids: &mut TermI
         TermKind::IntLit(s) => TermKind::IntLit(s.clone()),
         TermKind::FloatLit(f) => TermKind::FloatLit(*f),
         TermKind::BoolLit(b) => TermKind::BoolLit(*b),
-        TermKind::StringLit(s) => TermKind::StringLit(s.clone()),
         TermKind::Extern(linkage) => TermKind::Extern(linkage.clone()),
         TermKind::App { func, args } => TermKind::App {
             func: Box::new(apply_type_subst_to_term(func, subst, term_ids)),
@@ -534,7 +533,6 @@ pub(super) fn collect_free_vars(
         TermKind::IntLit(_)
         | TermKind::FloatLit(_)
         | TermKind::BoolLit(_)
-        | TermKind::StringLit(_)
         | TermKind::BinOp(_)
         | TermKind::UnOp(_)
         | TermKind::Extern(_) => {}
@@ -978,7 +976,6 @@ impl<'a> Defunctionalizer<'a> {
             TermKind::IntLit(_)
             | TermKind::FloatLit(_)
             | TermKind::BoolLit(_)
-            | TermKind::StringLit(_)
             | TermKind::BinOp(_)
             | TermKind::UnOp(_)
             | TermKind::Extern(_) => DefuncResult {
@@ -1754,7 +1751,6 @@ impl<'a> Defunctionalizer<'a> {
             | TermKind::IntLit(_)
             | TermKind::FloatLit(_)
             | TermKind::BoolLit(_)
-            | TermKind::StringLit(_)
             | TermKind::BinOp(_)
             | TermKind::UnOp(_)
             | TermKind::Extern(_) => term.clone(),

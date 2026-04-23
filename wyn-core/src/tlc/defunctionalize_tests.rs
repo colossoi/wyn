@@ -66,7 +66,6 @@ fn print_term(term: &Term, symbols: &SymbolTable, indent: usize) -> String {
         TermKind::IntLit(n) => format!("{}Int({})", pad, n),
         TermKind::FloatLit(f) => format!("{}Float({})", pad, f),
         TermKind::BoolLit(b) => format!("{}Bool({})", pad, b),
-        TermKind::StringLit(s) => format!("{}String({})", pad, s),
         TermKind::Lambda(Lambda { params, body, .. }) => {
             let names: Vec<&str> =
                 params.iter().map(|(p, _)| symbols.get(*p).unwrap_or(&unknown).as_str()).collect();

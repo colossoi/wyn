@@ -360,7 +360,6 @@ pub fn walk_expression<V: Visitor>(v: &mut V, e: &Expression) -> ControlFlow<V::
         ExprKind::IntLiteral(n) => v.visit_expr_int_literal(id, n),
         ExprKind::FloatLiteral(f) => v.visit_expr_float_literal(id, *f),
         ExprKind::BoolLiteral(b) => v.visit_expr_bool_literal(id, *b),
-        ExprKind::StringLiteral(_) => ControlFlow::Continue(()),
         ExprKind::Unit => ControlFlow::Continue(()),
         ExprKind::Identifier(quals, name) => v.visit_expr_identifier(id, quals, name),
         ExprKind::ArrayLiteral(elements) => v.visit_expr_array_literal(id, elements),

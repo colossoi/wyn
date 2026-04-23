@@ -188,8 +188,6 @@ pub enum InstKind {
     Bool(bool),
     /// Unit value.
     Unit,
-    /// String literal.
-    String(String),
 
     /// Binary operation.
     BinOp {
@@ -332,7 +330,6 @@ impl InstKind {
             | InstKind::Float(_)
             | InstKind::Bool(_)
             | InstKind::Unit
-            | InstKind::String(_)
             | InstKind::Global(_)
             | InstKind::Extern(_)
             | InstKind::Alloca { .. }
@@ -442,7 +439,6 @@ impl InstKind {
             | InstKind::Float(_)
             | InstKind::Bool(_)
             | InstKind::Unit
-            | InstKind::String(_)
             | InstKind::Global(_)
             | InstKind::Extern(_)
             | InstKind::Alloca { .. }

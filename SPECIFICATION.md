@@ -212,7 +212,11 @@ Functions are classified via function types, but they are not fully first class.
 
 #### String and Character Literals
 
-String literals are supported, but only as syntactic sugar for UTF-8 encoded arrays of `u8` values. There is no character type in Wyn, but character literals are interpreted as integers of the corresponding Unicode code point.
+Wyn has no first-class strings or character type. A string literal
+(`"..."`) is a lexical token accepted only in two non-expression
+positions: the path in `import "..."` and the linkage name in
+`#[linked("...")]`. Writing a string where a value is expected is a
+syntax error.
 
 #### Existential Size Quantifiers
 
@@ -464,8 +468,6 @@ The basic elements of expressions are called atoms, for example literals and var
 ```ebnf
 atom        ::= literal
                 | qualname ("." fieldid)*
-                | stringlit
-                | charlit
                 | "(" ")"
                 | "(" exp ")" ("." fieldid)*
                 | "(" exp ("," exp)+ [","] ")"
@@ -596,9 +598,6 @@ Evaluates to itself.
 
 #### qualname
 A variable name; evaluates to its value in the current environment.
-
-#### stringlit
-Evaluates to an array of type `[]u8` that contains the characters encoded as UTF-8.
 
 #### ()
 Evaluates to an empty tuple.

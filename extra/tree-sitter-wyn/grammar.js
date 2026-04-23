@@ -805,7 +805,6 @@ module.exports = grammar({
     _literal: $ => choice(
       $.integer_literal,
       $.float_literal,
-      $.string_literal,
       $.boolean_literal,
     ),
 

@@ -219,9 +219,6 @@ pub enum TermKind {
     /// Boolean literal.
     BoolLit(bool),
 
-    /// String literal.
-    StringLit(String),
-
     /// External function reference (linked SPIR-V).
     /// The string is the linkage name for spirv-link.
     /// The Wyn-visible name comes from the parent Def.
@@ -582,7 +579,6 @@ impl Term {
             | TermKind::IntLit(_)
             | TermKind::FloatLit(_)
             | TermKind::BoolLit(_)
-            | TermKind::StringLit(_)
             | TermKind::Extern(_) => self.kind,
 
             TermKind::App { func, args } => TermKind::App {
@@ -676,7 +672,6 @@ impl Term {
             | TermKind::IntLit(_)
             | TermKind::FloatLit(_)
             | TermKind::BoolLit(_)
-            | TermKind::StringLit(_)
             | TermKind::Extern(_) => {}
 
             TermKind::App { func, args } => {
@@ -1662,8 +1657,6 @@ impl<'a> Transformer<'a> {
             ast::ExprKind::FloatLiteral(f) => self.mk_term(ty, span, TermKind::FloatLit(*f)),
 
             ast::ExprKind::BoolLiteral(b) => self.mk_term(ty, span, TermKind::BoolLit(*b)),
-
-            ast::ExprKind::StringLiteral(s) => self.mk_term(ty, span, TermKind::StringLit(s.clone())),
 
             ast::ExprKind::Unit => {
                 // Unit value represented as _w_unit intrinsic call

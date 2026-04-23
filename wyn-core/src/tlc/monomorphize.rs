@@ -532,7 +532,6 @@ impl<'a> Monomorphizer<'a> {
             k @ (TermKind::IntLit(_)
             | TermKind::FloatLit(_)
             | TermKind::BoolLit(_)
-            | TermKind::StringLit(_)
             | TermKind::BinOp(_)
             | TermKind::UnOp(_)
             | TermKind::Extern(_)) => k.clone(),
@@ -792,7 +791,6 @@ impl<'a> Monomorphizer<'a> {
             TermKind::IntLit(s) => TermKind::IntLit(s.clone()),
             TermKind::FloatLit(f) => TermKind::FloatLit(*f),
             TermKind::BoolLit(b) => TermKind::BoolLit(*b),
-            TermKind::StringLit(s) => TermKind::StringLit(s.clone()),
             TermKind::BinOp(op) => TermKind::BinOp(op.clone()),
             TermKind::UnOp(op) => TermKind::UnOp(op.clone()),
             TermKind::Extern(s) => TermKind::Extern(s.clone()),

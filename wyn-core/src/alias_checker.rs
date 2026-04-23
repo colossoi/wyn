@@ -797,10 +797,7 @@ fn collect_variable_uses_in_expr(expr: &Expression, uses: &mut HashMap<String, V
                 uses.entry(name.clone()).or_default().push(expr.h.id);
             }
         }
-        ExprKind::IntLiteral(_)
-        | ExprKind::FloatLiteral(_)
-        | ExprKind::BoolLiteral(_)
-        | ExprKind::StringLiteral(_) => {}
+        ExprKind::IntLiteral(_) | ExprKind::FloatLiteral(_) | ExprKind::BoolLiteral(_) => {}
         ExprKind::ArrayLiteral(elems) => {
             for elem in elems {
                 collect_variable_uses_in_expr(elem, uses);

@@ -1109,7 +1109,6 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 }
             }
             InstKind::Bool(b) => Ok(if *b { "true" } else { "false" }.to_string()),
-            InstKind::String(s) => Ok(format!("\"{}\"", s)),
             InstKind::Unit => {
                 unreachable!(
                     "InstKind::Unit should never reach GLSL codegen; unit values are not materializable"

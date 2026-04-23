@@ -574,7 +574,6 @@ pub fn substitute_sym(term: Term, old: SymbolId, new: SymbolId, term_ids: &mut T
         | TermKind::IntLit(_)
         | TermKind::FloatLit(_)
         | TermKind::BoolLit(_)
-        | TermKind::StringLit(_)
         | TermKind::Extern(_) => term,
 
         // Lambda: stop if param shadows old

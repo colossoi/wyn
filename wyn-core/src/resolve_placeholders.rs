@@ -427,7 +427,6 @@ impl PlaceholderResolver {
             | ast::ExprKind::IntLiteral(_)
             | ast::ExprKind::FloatLiteral(_)
             | ast::ExprKind::BoolLiteral(_)
-            | ast::ExprKind::StringLiteral(_)
             | ast::ExprKind::Unit
             | ast::ExprKind::TypeHole => {}
         }

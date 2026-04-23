@@ -347,9 +347,6 @@ impl AstFormatter {
             ExprKind::BoolLiteral(b) => {
                 self.write_line(&b.to_string());
             }
-            ExprKind::StringLiteral(s) => {
-                self.write_line(&format!("{:?}", s));
-            }
             ExprKind::Unit => {
                 self.write_line("()");
             }
@@ -544,7 +541,6 @@ impl AstFormatter {
             ExprKind::IntLiteral(_)
                 | ExprKind::FloatLiteral(_)
                 | ExprKind::BoolLiteral(_)
-                | ExprKind::StringLiteral(_)
                 | ExprKind::Unit
                 | ExprKind::Identifier(_, _)
                 | ExprKind::TypeHole
@@ -556,7 +552,6 @@ impl AstFormatter {
             ExprKind::IntLiteral(n) => n.to_string(),
             ExprKind::FloatLiteral(f) => format!("{}", f),
             ExprKind::BoolLiteral(b) => b.to_string(),
-            ExprKind::StringLiteral(s) => format!("{:?}", s),
             ExprKind::Unit => "()".to_string(),
             ExprKind::Identifier(quals, name) => {
                 if quals.is_empty() {
@@ -757,7 +752,6 @@ impl tlc::Term {
             tlc::TermKind::IntLit(n) => write!(f, "{}", n),
             tlc::TermKind::FloatLit(n) => write!(f, "{}", n),
             tlc::TermKind::BoolLit(b) => write!(f, "{}", b),
-            tlc::TermKind::StringLit(s) => write!(f, "\"{}\"", s),
 
             tlc::TermKind::If {
                 cond,

@@ -539,7 +539,7 @@ fn find_in_expr(expr: &ast::Expression, line: usize, col: usize, best: &mut Opti
 
     use ast::ExprKind::*;
     match &expr.kind {
-        IntLiteral(_) | FloatLiteral(_) | BoolLiteral(_) | StringLiteral(_) | Unit => {}
+        IntLiteral(_) | FloatLiteral(_) | BoolLiteral(_) | Unit => {}
         Identifier(_, _) | TypeHole => {}
         Application(func, args) => {
             find_in_expr(func, line, col, best);

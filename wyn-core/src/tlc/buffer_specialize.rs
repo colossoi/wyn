@@ -587,7 +587,6 @@ impl BufferSpecializer {
             | TermKind::IntLit(_)
             | TermKind::FloatLit(_)
             | TermKind::BoolLit(_)
-            | TermKind::StringLit(_)
             | TermKind::Extern(_) => term.clone(),
         }
     }
@@ -1230,7 +1229,6 @@ impl BufferSpecializer {
             | TermKind::IntLit(_)
             | TermKind::FloatLit(_)
             | TermKind::BoolLit(_)
-            | TermKind::StringLit(_)
             | TermKind::Extern(_) => term.clone(),
         }
     }

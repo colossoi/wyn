@@ -1193,14 +1193,6 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 )
             }
 
-            InstKind::String(s) => {
-                bail_spirv_at!(
-                    self.blame_span(),
-                    "String literals not supported in SPIR-V: {}",
-                    s
-                )
-            }
-
             InstKind::BinOp { op, lhs, rhs } => {
                 let lhs_id = self.get_value_ref(*lhs)?;
                 let rhs_id = self.get_value_ref(*rhs)?;

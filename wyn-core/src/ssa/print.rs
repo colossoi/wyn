@@ -195,9 +195,6 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
         InstKind::Unit => {
             let _ = write!(out, "unit");
         }
-        InstKind::String(s) => {
-            let _ = write!(out, "string \"{s}\"");
-        }
         InstKind::BinOp { op, lhs, rhs } => {
             let _ = write!(out, "binop {op} {}, {}", format_ref(lhs), format_ref(rhs));
         }

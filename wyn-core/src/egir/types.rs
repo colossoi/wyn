@@ -49,7 +49,6 @@ pub enum PureOp {
     Float(String),
     Bool(bool),
     Unit,
-    StringLit(String),
     Global(String),
     Extern(String),
     BinOp(String),
@@ -439,7 +438,6 @@ pub fn extract_pure_op(kind: &InstKind, ty: &Type<TypeName>) -> Option<PureOp> {
         InstKind::Float(s) => Some(PureOp::Float(s.clone())),
         InstKind::Bool(b) => Some(PureOp::Bool(*b)),
         InstKind::Unit => Some(PureOp::Unit),
-        InstKind::String(s) => Some(PureOp::StringLit(s.clone())),
         InstKind::Global(s) => Some(PureOp::Global(s.clone())),
         InstKind::Extern(s) => Some(PureOp::Extern(s.clone())),
         InstKind::BinOp { op, .. } => Some(PureOp::BinOp(op.clone())),
@@ -494,7 +492,6 @@ pub fn rebuild_inst_kind(op: &PureOp, operands: &[crate::ssa::framework::ValueId
         PureOp::Float(s) => InstKind::Float(s.clone()),
         PureOp::Bool(b) => InstKind::Bool(*b),
         PureOp::Unit => InstKind::Unit,
-        PureOp::StringLit(s) => InstKind::String(s.clone()),
         PureOp::Global(s) => InstKind::Global(s.clone()),
         PureOp::Extern(s) => InstKind::Extern(s.clone()),
         PureOp::BinOp(op_name) => InstKind::BinOp {

@@ -1756,10 +1756,6 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 }
             }
             InstKind::Bool(b) => Ok((if *b { "true" } else { "false" }).to_string()),
-            InstKind::String(_) => Err(crate::err_wgsl_at!(
-                self.blame_span(),
-                "string literals aren't representable in WGSL"
-            )),
             InstKind::Unit => Err(crate::err_wgsl_at!(
                 self.blame_span(),
                 "unit values aren't materializable in WGSL"

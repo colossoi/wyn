@@ -199,7 +199,6 @@ impl SoaTransformer {
             | TermKind::IntLit(_)
             | TermKind::FloatLit(_)
             | TermKind::BoolLit(_)
-            | TermKind::StringLit(_)
             | TermKind::BinOp(_)
             | TermKind::UnOp(_)
             | TermKind::Extern(_) => self.mk_term(new_ty, span, term.kind.clone()),
