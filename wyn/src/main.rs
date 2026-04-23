@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::Instant;
 use thiserror::Error;
-use wyn_core::{Compiler, lexer, parser::Parser as WynParser};
+use wyn_core::Compiler;
 
 /// Target output format
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -56,10 +56,6 @@ enum Commands {
         #[arg(short, long, default_value = "spirv")]
         target: Target,
 
-        /// Output annotated source code with block IDs and locations
-        #[arg(long, value_name = "FILE")]
-        output_annotated: Option<PathBuf>,
-
         /// Output typed lambda calculus representation
         #[arg(long, value_name = "FILE")]
         output_tlc: Option<PathBuf>,
@@ -84,10 +80,6 @@ enum Commands {
         /// Input source file
         #[arg(value_name = "FILE")]
         input: PathBuf,
-
-        /// Output annotated source code with block IDs and locations
-        #[arg(long, value_name = "FILE")]
-        output_annotated: Option<PathBuf>,
 
         /// Print verbose output
         #[arg(short, long)]
@@ -128,7 +120,6 @@ fn run(cli: Cli) -> Result<(), DriverError> {
             input,
             output,
             target,
-            output_annotated,
             output_tlc,
             output_mir,
             single_stage,
@@ -138,19 +129,14 @@ fn run(cli: Cli) -> Result<(), DriverError> {
                 input,
                 output,
                 target,
-                output_annotated,
                 output_tlc,
                 output_mir,
                 single_stage,
                 verbose,
             )?;
         }
-        Commands::Check {
-            input,
-            output_annotated,
-            verbose,
-        } => {
-            check_file(input, output_annotated, verbose)?;
+        Commands::Check { input, verbose } => {
+            check_file(input, verbose)?;
         }
     }
 
@@ -161,7 +147,6 @@ fn compile_file(
     input: PathBuf,
     output: Option<PathBuf>,
     target: Target,
-    output_annotated: Option<PathBuf>,
     output_tlc: Option<PathBuf>,
     output_mir: Option<PathBuf>,
     single_stage: bool,
@@ -173,11 +158,6 @@ fn compile_file(
 
     // Read source file
     let source = fs::read_to_string(&input)?;
-
-    // Generate annotated source if requested
-    if let Some(ref annotated_path) = output_annotated {
-        generate_annotated_source(&source, annotated_path, verbose)?;
-    }
 
     // Compile through the pipeline
     // Create FrontEnd first - it owns the node counter and loads prelude
@@ -383,18 +363,13 @@ fn compile_file(
     Ok(())
 }
 
-fn check_file(input: PathBuf, output_annotated: Option<PathBuf>, verbose: bool) -> Result<(), DriverError> {
+fn check_file(input: PathBuf, verbose: bool) -> Result<(), DriverError> {
     if verbose {
         info!("Checking {}...", input.display());
     }
 
     // Read source file
     let source = fs::read_to_string(&input)?;
-
-    // Generate annotated source if requested
-    if let Some(ref annotated_path) = output_annotated {
-        generate_annotated_source(&source, annotated_path, verbose)?;
-    }
 
     // Type check and alias check, don't generate code
     let mut frontend = wyn_core::FrontEnd::new();
@@ -414,34 +389,6 @@ fn check_file(input: PathBuf, output_annotated: Option<PathBuf>, verbose: bool) 
 
     if verbose {
         info!("✓ {} is valid", input.display());
-    }
-
-    Ok(())
-}
-
-fn generate_annotated_source(
-    source: &str,
-    output_path: &PathBuf,
-    verbose: bool,
-) -> Result<(), DriverError> {
-    // Parse the source to get the AST
-    let tokens = lexer::tokenize(source).map_err(|e| wyn_core::err_parse!("{}", e))?;
-    let mut node_counter = wyn_core::ast::NodeCounter::new();
-    let mut parser = WynParser::new(tokens, &mut node_counter);
-    let _program = parser.parse()?;
-
-    // Generate annotated code - temporarily disabled
-    // let mut annotator = CodeAnnotator::new();
-    // let annotated = annotator.annotate_program(&program);
-
-    // Write annotated source
-    // fs::write(output_path, annotated)?;
-
-    // Temporary placeholder
-    fs::write(output_path, "// Annotated code generation temporarily disabled\n")?;
-
-    if verbose {
-        info!("Generated annotated source: {}", output_path.display());
     }
 
     Ok(())
