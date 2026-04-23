@@ -1473,6 +1473,11 @@ impl<'a> Converter<'a> {
             inputs.iter().map(|ae| self.array_expr_elem_type(ae)).collect();
         let output_elem_ty = if result_ty.is_array() {
             result_ty.elem_type().expect("Array has elem").clone()
+        } else if super::soac_expand::as_soa_tuple(&result_ty).is_some() {
+            // After `tlc::soa`, the map's output `[N](A, B)` becomes a
+            // SoA tuple `([N]A, [N]B)`. The per-iteration element type
+            // is the corresponding tuple-of-elements `(A, B)`.
+            super::soac_expand::soa_element_type(&result_ty)
         } else if !input_elem_types.is_empty() {
             input_elem_types[0].clone()
         } else {

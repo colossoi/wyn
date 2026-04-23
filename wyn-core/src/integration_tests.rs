@@ -1026,6 +1026,47 @@ entry compute_main(data: [4]f32) [4]f32 =
     compile_to_spirv(source).expect("Conditional array construction should compile to SPIR-V");
 }
 
+/// Regression: mapping a lambda whose return type is a mixed
+/// scalar/vector tuple. The SoA transform rewrites the output
+/// `[N](f32, i32, vec3f32)` into a tuple-of-arrays before EGIR
+/// conversion; `egir::soac_expand` must split the per-iteration
+/// ArrayWith into per-component ArrayWith calls + a Tuple repack.
+/// Without the split, SPIR-V lowering's runtime-index path hit a
+/// cache miss and failed with "element type not found".
+#[test]
+fn test_spirv_map_array_of_mixed_tuple() {
+    let source = r#"
+def build(xs: [8]f32) [8](f32, i32, vec3f32) =
+    map(|x: f32| (x + 1.0, 0, @[x, x, x]), xs)
+
+#[fragment]
+entry frag(c: vec4f32) vec4f32 =
+    let arr = build([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]) in
+    let (a, _, v) = arr[3] in
+    @[a, v.x, v.y, v.z]
+"#;
+    compile_to_spirv(source).expect("map over [N](f32, i32, vec3f32) should compile to SPIR-V");
+}
+
+/// Regression: nested SoA. The element type itself contains a
+/// composite array, so the SoA transform produces a tuple of
+/// arrays whose components are themselves arrays — exercising
+/// `emit_write_element`'s recursion through `soa_element_type`.
+#[test]
+fn test_spirv_map_array_of_nested_tuple() {
+    let source = r#"
+def build(xs: [4]f32) [4](f32, [3]f32) =
+    map(|x: f32| (x + 1.0, [x, x, x]), xs)
+
+#[fragment]
+entry frag(c: vec4f32) vec4f32 =
+    let arr = build([0.0, 1.0, 2.0, 3.0]) in
+    let (a, inner) = arr[2] in
+    @[a, inner[0], inner[1], inner[2]]
+"#;
+    compile_to_spirv(source).expect("map over [N](f32, [M]f32) should compile to SPIR-V");
+}
+
 /// Test the specific raytrace.wyn file compiles to SPIR-V.
 #[test]
 fn test_spirv_raytrace() {
