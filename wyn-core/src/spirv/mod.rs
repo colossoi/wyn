@@ -1343,7 +1343,6 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 self.lower_intrinsic(name, args, &arg_ids, result_ty, inst)?
             }
 
-            // Effectful operations - for now, just handle the simple cases
             InstKind::Alloca { elem_ty, .. } => {
                 let elem_spirv_ty = self.constructor.polytype_to_spirv(elem_ty);
                 self.constructor.declare_variable("_alloca", elem_spirv_ty)?
