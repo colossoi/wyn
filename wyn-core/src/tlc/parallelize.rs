@@ -705,8 +705,12 @@ fn maybe_hoist(
     prepass_result_bindings: &mut HashMap<SymbolId, (u32, u32)>,
     program: &mut Program,
 ) -> Term {
-    // Only hoist scalar-result SOACs for now. Scan/Map (array result)
-    // deferred to a follow-up.
+    // TODO: extend to array-result SOACs (Scan, Map). A pre-pass
+    // emitting an array would need to write N slots to storage, the
+    // fragment would read back by index instead of at position 0, and
+    // Stage B's two-phase plan would grow an array-sized output path.
+    // For the scalar-result cases (Reduce, Redomap) the single-slot
+    // shape already works end-to-end.
     let is_scalar_soac = matches!(
         &rhs.kind,
         TermKind::Soac(SoacOp::Reduce { .. }) | TermKind::Soac(SoacOp::Redomap { .. })
@@ -720,14 +724,16 @@ fn maybe_hoist(
         return rhs;
     }
 
-    // TODO: polymorphic-size free vars (e.g. `iota(N)` in a fragment
-    // body where N is a Size type variable) pass the entry-param check
-    // because the size symbol isn't an entry param — but it's also not
-    // in scope in the lifted pre-pass either, so the emitted pre-pass
-    // references it as an undeclared `@size` global and fails backend
-    // validation. Detect and either (a) skip the lift for these, or (b)
-    // capture the size binding alongside the hoisted SOAC. For now the
-    // lift silently produces a broken pre-pass if iota is the input.
+    // TODO: polymorphic-size free vars. Free vars whose type contains
+    // a Size type variable (e.g. `iota(N)` where `N` is a `<[n]>`
+    // parameter) pass the entry-param check — `N` isn't an entry
+    // param — but the generated pre-pass doesn't have `N` in scope
+    // either. Silently emitting the lift in that state produces a
+    // pre-pass that references `@size` as an undeclared global and
+    // fails backend validation. Panic loudly instead until the lift
+    // either (a) refuses the hoist when polymorphic sizes are present
+    // or (b) captures the size binding alongside the hoisted SOAC.
+    assert_hoist_free_vars_are_grounded(&rhs, entry_params, &program.symbols);
 
     // Pre-allocate the binding the fragment will load from. Stage B's
     // make_two_phase_plan will use this as the prepass's result_binding
@@ -788,6 +794,59 @@ fn rhs_references_entry_param(
         &mut seen,
     );
     free.iter().any(|t| matches!(&t.kind, TermKind::Var(s) if entry_params.contains(s)))
+}
+
+/// Panic if any free variable of `term` has a type that carries an
+/// unresolved Size type variable. See the TODO at `maybe_hoist` —
+/// these vars aren't in scope inside the generated pre-pass, and
+/// silently emitting the lift produces a broken shader.
+fn assert_hoist_free_vars_are_grounded(
+    term: &Term,
+    entry_params: &std::collections::HashSet<SymbolId>,
+    symbols: &SymbolTable,
+) {
+    use std::collections::HashSet;
+    let bound: HashSet<SymbolId> = HashSet::new();
+    let empty_top: HashSet<SymbolId> = HashSet::new();
+    let empty_defs: HashSet<String> = HashSet::new();
+    let mut free: Vec<Term> = Vec::new();
+    let mut seen: HashSet<SymbolId> = HashSet::new();
+    super::defunctionalize::collect_free_vars(
+        term,
+        &bound,
+        &empty_top,
+        &empty_defs,
+        symbols,
+        &mut free,
+        &mut seen,
+    );
+    for t in &free {
+        if let TermKind::Var(sym) = &t.kind {
+            if entry_params.contains(sym) {
+                continue;
+            }
+            if type_contains_type_variable(&t.ty) {
+                let name = symbols.get(*sym).map(|s| s.as_str()).unwrap_or("<unknown>");
+                panic!(
+                    "parallelize::maybe_hoist: hoisted SOAC references free var `{}` \
+                     whose type `{:?}` contains an unresolved Size type variable. \
+                     The generated pre-pass would reference an undeclared @size \
+                     global and fail backend validation. Fix the lift site before \
+                     enabling this path.",
+                    name, t.ty
+                );
+            }
+        }
+    }
+}
+
+/// True if `ty` transitively contains a `Type::Variable(_)` — the
+/// wyn representation of an unresolved Size (or other) type variable.
+fn type_contains_type_variable(ty: &Type<TypeName>) -> bool {
+    match ty {
+        Type::Variable(_) => true,
+        Type::Constructed(_, args) => args.iter().any(type_contains_type_variable),
+    }
 }
 
 /// Build a compute entry Def whose body is the bare `soac_term` at the
