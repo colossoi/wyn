@@ -9,6 +9,16 @@ import {
 
 import type { Route } from "./+types/root";
 import "./app.css";
+import { Header } from "~/components/Header";
+import { getSession } from "~/lib/session.server";
+
+// Root loader surfaces the current session to every route via
+// `useRouteLoaderData("root")` — in particular, `<Header>` consumes it to
+// decide between the Sign-in link and the user chip + sign-out form.
+export async function loader({ request, context }: Route.LoaderArgs) {
+  const session = await getSession(request, context.cloudflare.env);
+  return { session };
+}
 
 export function Layout({ children }: { children: React.ReactNode }) {
   return (
@@ -29,7 +39,12 @@ export function Layout({ children }: { children: React.ReactNode }) {
 }
 
 export default function App() {
-  return <Outlet />;
+  return (
+    <>
+      <Header />
+      <Outlet />
+    </>
+  );
 }
 
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
