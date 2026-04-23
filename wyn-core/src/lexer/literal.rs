@@ -5,14 +5,13 @@
 //! - Float literals: pointfloat, exponent notation, hexadecimal floats
 //! - Type suffixes: i8, i16, i32, i64, u8, u16, u32, u64, f16, f32, f64
 //! - String literals: "stringchar*"
-//! - Char literals: 'char'
 
 use nom::{
     IResult,
     branch::alt,
     bytes::complete::{tag, take_while},
-    character::complete::{char, digit1, hex_digit1, none_of, one_of},
-    combinator::{map, opt, recognize, verify},
+    character::complete::{char, digit1, hex_digit1, one_of},
+    combinator::{map, opt, recognize},
     multi::many1,
     sequence::{delimited, pair, tuple},
 };
@@ -221,16 +220,6 @@ pub fn parse_string_literal(input: &str) -> IResult<&str, Token> {
             char('"'),
         ),
         |s: &str| Token::StringLiteral(s.to_string()),
-    )(input)
-}
-
-// Char literal parser
-// charlit ::= "'" char "'"
-// char    ::= <any source character except "\" or newline or single quotes>
-pub fn parse_char_literal(input: &str) -> IResult<&str, Token> {
-    map(
-        delimited(char('\''), verify(none_of("'\\\n"), |_| true), char('\'')),
-        Token::CharLiteral,
     )(input)
 }
 

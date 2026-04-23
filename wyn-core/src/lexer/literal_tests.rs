@@ -158,34 +158,6 @@ fn test_string_rejects_newline() {
 }
 
 #[test]
-fn test_char_literals() {
-    assert_eq!(parse_char_literal("'a'"), Ok(("", Token::CharLiteral('a'))));
-    assert_eq!(parse_char_literal("'Z'"), Ok(("", Token::CharLiteral('Z'))));
-    assert_eq!(parse_char_literal("'0'"), Ok(("", Token::CharLiteral('0'))));
-    assert_eq!(parse_char_literal("' '"), Ok(("", Token::CharLiteral(' '))));
-    assert_eq!(parse_char_literal("'?'"), Ok(("", Token::CharLiteral('?'))));
-}
-
-#[test]
-fn test_char_rejects_backslash() {
-    // Chars with backslashes should fail (no escape sequences according to grammar)
-    assert!(parse_char_literal("'\\n'").is_err());
-    assert!(parse_char_literal("'\\''").is_err());
-}
-
-#[test]
-fn test_char_rejects_newline() {
-    // Chars with newlines should fail
-    assert!(parse_char_literal("'\n'").is_err());
-}
-
-#[test]
-fn test_char_rejects_empty() {
-    // Empty char literals should fail
-    assert!(parse_char_literal("''").is_err());
-}
-
-#[test]
 fn test_float_without_suffix() {
     // Float literals without suffix should parse as f32
     assert_eq!(parse_float_literal("3.14"), Ok(("", Token::FloatLiteral(3.14))));

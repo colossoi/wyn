@@ -621,7 +621,6 @@ impl AstFormatter {
             PatternKind::Literal(lit) => match lit {
                 PatternLiteral::Int(n) => n.to_string(),
                 PatternLiteral::Float(f) => format!("{}", f),
-                PatternLiteral::Char(c) => format!("'{}'", c),
                 PatternLiteral::Bool(b) => b.to_string(),
             },
             PatternKind::Tuple(patterns) => {

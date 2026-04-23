@@ -1506,7 +1506,7 @@ fn token_type_index(token: &lexer::Token) -> Option<u32> {
 
         IntLiteral(_) | FloatLiteral(_) | SuffixedLiteral(_, _) => Some(1), // NUMBER
 
-        StringLiteral(_) | CharLiteral(_) => Some(2), // STRING
+        StringLiteral(_) => Some(2), // STRING
 
         Comment(_) => Some(3), // COMMENT
 

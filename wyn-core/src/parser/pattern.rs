@@ -102,8 +102,7 @@ impl Parser<'_> {
             Some(Token::IntLiteral(_))
             | Some(Token::FloatLiteral(_))
             | Some(Token::True)
-            | Some(Token::False)
-            | Some(Token::CharLiteral(_)) => self.parse_pattern_literal(),
+            | Some(Token::False) => self.parse_pattern_literal(),
 
             Some(Token::Minus) => {
                 // Negative literal
@@ -229,7 +228,6 @@ impl Parser<'_> {
                 | Some(Token::LeftBrace)
                 | Some(Token::IntLiteral(_))
                 | Some(Token::FloatLiteral(_))
-                | Some(Token::CharLiteral(_))
                 | Some(Token::True)
                 | Some(Token::False)
                 | Some(Token::Minus)
@@ -253,7 +251,6 @@ impl Parser<'_> {
     /// ```text
     /// pat_literal ::= [ "-" ] intnumber
     ///               | [ "-" ] floatnumber
-    ///               | charlit
     ///               | "true"
     ///               | "false"
     /// ```
@@ -280,15 +277,6 @@ impl Parser<'_> {
                 let value = *f;
                 self.advance();
                 PatternLiteral::Float(if is_negative { -value } else { value })
-            }
-
-            Some(Token::CharLiteral(c)) => {
-                if is_negative {
-                    bail_parse!("Character literals cannot be negative");
-                }
-                let ch = *c;
-                self.advance();
-                PatternLiteral::Char(ch)
             }
 
             Some(Token::True) => {

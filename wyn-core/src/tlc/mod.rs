@@ -2547,14 +2547,6 @@ impl<'a> Transformer<'a> {
                 span,
                 TermKind::BoolLit(*b),
             ),
-            ast::PatternLiteral::Char(c) => {
-                // Represent char as int for now
-                self.mk_term(
-                    Type::Constructed(TypeName::Int(32), vec![]),
-                    span,
-                    TermKind::IntLit((*c as u32).to_string()),
-                )
-            }
         }
     }
 

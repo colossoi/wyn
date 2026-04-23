@@ -579,7 +579,6 @@ impl Pattern {
 pub enum PatternLiteral {
     Int(crate::lexer::IntString),
     Float(f32),
-    Char(char),
     Bool(bool),
 }
 

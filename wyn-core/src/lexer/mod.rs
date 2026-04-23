@@ -13,7 +13,7 @@ use nom::{
     sequence::{pair, preceded, terminated, tuple},
 };
 
-use literal::{parse_char_literal, parse_float_literal, parse_int_literal, parse_string_literal};
+use literal::{parse_float_literal, parse_int_literal, parse_string_literal};
 use std::num::ParseIntError;
 
 /// A string representation of an integer literal that can be converted to numeric types.
@@ -145,7 +145,6 @@ pub enum Token {
     IntLiteral(IntString),
     SuffixedLiteral(Box<Token>, String), // literal token with type suffix (e.g., "u32", "i64", "f64")
     FloatLiteral(f32),
-    CharLiteral(char),
     StringLiteral(String),
 
     // Boolean literals
@@ -357,7 +356,6 @@ fn parse_token(input: &str) -> IResult<&str, Token> {
         alt((
             parse_comment,
             parse_string_literal,
-            parse_char_literal,
             parse_keyword,
             parse_float_literal,
             parse_type_variable,
