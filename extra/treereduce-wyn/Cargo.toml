@@ -1,0 +1,12 @@
+[package]
+name = "treereduce-wyn"
+description = "Fast, parallel, syntax-aware program reducer for Wyn"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+keywords = ["program-reducer", "minimization", "test-case-reduction", "wyn"]
+
+[dependencies]
+anyhow = "1"
+treereduce = { version = "0.4", features = ["cli"] }
+tree-sitter-wyn = { path = "../tree-sitter-wyn" }
