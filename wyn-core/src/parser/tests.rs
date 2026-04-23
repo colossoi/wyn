@@ -1425,7 +1425,6 @@ fn test_parse_type_bind_simple() {
         _ => panic!("Expected TypeBind declaration"),
     };
     assert_eq!(bind.name, "Point");
-    assert_eq!(bind.kind, TypeBindKind::Normal);
     assert_eq!(bind.type_params.len(), 0);
 }
 
@@ -1504,7 +1503,7 @@ fn test_parse_module_signature_with_abstract_type() {
             match &mtb.definition {
                 ModuleTypeExpression::Signature(specs) => {
                     assert_eq!(specs.len(), 1);
-                    assert!(matches!(&specs[0], Spec::Type(_, name, _, None) if name == "t"));
+                    assert!(matches!(&specs[0], Spec::Type(name, _, None) if name == "t"));
                 }
                 _ => panic!("Expected Signature"),
             }
@@ -1522,7 +1521,7 @@ fn test_parse_module_signature_with_concrete_type() {
         Declaration::ModuleTypeBind(mtb) => match &mtb.definition {
             ModuleTypeExpression::Signature(specs) => {
                 assert_eq!(specs.len(), 1);
-                assert!(matches!(&specs[0], Spec::Type(_, name, _, Some(_)) if name == "t"));
+                assert!(matches!(&specs[0], Spec::Type(name, _, Some(_)) if name == "t"));
             }
             _ => panic!("Expected Signature"),
         },

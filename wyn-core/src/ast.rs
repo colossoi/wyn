@@ -279,17 +279,9 @@ pub struct ExternDecl {
 // Module system types
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeBind {
-    pub kind: TypeBindKind, // type, type^, or type~
     pub name: String,
     pub type_params: Vec<TypeParam>,
     pub definition: Type,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum TypeBindKind {
-    Normal, // type
-    Lifted, // type^
-    Size,   // type~
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -351,11 +343,11 @@ pub enum ModuleTypeExpression {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Spec {
-    Sig(String, Vec<TypeParam>, Type), // sig name type_params : type
-    SigOp(String, Type),               // sig (symbol) : type or sig symbol : type
-    Type(TypeBindKind, String, Vec<TypeParam>, Option<Type>), // type declarations with optional definition
-    Module(String, ModuleTypeExpression), // module name : mod_type_exp
-    Include(ModuleTypeExpression),     // include mod_type_exp
+    Sig(String, Vec<TypeParam>, Type),          // sig name type_params : type
+    SigOp(String, Type),                        // sig (symbol) : type or sig symbol : type
+    Type(String, Vec<TypeParam>, Option<Type>), // type declarations with optional definition
+    Module(String, ModuleTypeExpression),       // module name : mod_type_exp
+    Include(ModuleTypeExpression),              // include mod_type_exp
 }
 
 // We now use polytype::Type instead of our own Type enum

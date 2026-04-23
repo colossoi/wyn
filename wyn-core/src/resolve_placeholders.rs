@@ -166,10 +166,10 @@ impl PlaceholderResolver {
                 let qualified_name = format!("{}.{}", module_name, name);
                 self.spec_schemes.insert(qualified_name, TypeScheme::Monotype(ty.clone()));
             }
-            Spec::Type(_, _, _, Some(ty)) => {
+            Spec::Type(_, _, Some(ty)) => {
                 *ty = self.resolve_type(ty);
             }
-            Spec::Type(_, _, _, None) | Spec::Module(_, _) | Spec::Include(_) => {
+            Spec::Type(_, _, None) | Spec::Module(_, _) | Spec::Include(_) => {
                 // No types to resolve
             }
         }

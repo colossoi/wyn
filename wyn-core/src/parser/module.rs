@@ -13,14 +13,8 @@ impl Parser<'_> {
     pub fn parse_type_bind(&mut self) -> Result<TypeBind> {
         trace!("parse_type_bind: next token = {:?}", self.peek());
 
-        // Parse the type keyword variant
-        let kind = match self.peek() {
-            Some(Token::Type) => {
-                self.advance();
-                // Check for ^ or ~ suffix on the identifier that follows
-                // For simplicity, we'll just use TypeBindKind::Normal for now
-                TypeBindKind::Normal
-            }
+        match self.peek() {
+            Some(Token::Type) => self.advance(),
             _ => bail_parse!("Expected 'type' keyword"),
         };
 
@@ -33,7 +27,6 @@ impl Parser<'_> {
         let definition = self.parse_type()?;
 
         Ok(TypeBind {
-            kind,
             name,
             type_params,
             definition,
@@ -496,7 +489,6 @@ impl Parser<'_> {
 
             Some(Token::Type) => {
                 self.advance();
-                let kind = TypeBindKind::Normal; // Simplified
                 let name = self.expect_identifier()?;
 
                 // Parse type parameters: <[n], A>
@@ -509,7 +501,7 @@ impl Parser<'_> {
                     None
                 };
 
-                Ok(Spec::Type(kind, name, type_params, definition))
+                Ok(Spec::Type(name, type_params, definition))
             }
 
             Some(Token::Module) => {

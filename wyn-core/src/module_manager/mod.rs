@@ -474,9 +474,9 @@ impl ModuleManager {
                 let substituted_ty = self.substitute_in_type(ty, substitutions);
                 Spec::SigOp(op.clone(), substituted_ty)
             }
-            Spec::Type(kind, name, type_params, maybe_ty) => {
+            Spec::Type(name, type_params, maybe_ty) => {
                 let substituted_ty = maybe_ty.as_ref().map(|ty| self.substitute_in_type(ty, substitutions));
-                Spec::Type(kind.clone(), name.clone(), type_params.clone(), substituted_ty)
+                Spec::Type(name.clone(), type_params.clone(), substituted_ty)
             }
             Spec::Module(name, mte) => {
                 // Don't substitute in nested module signatures for now
