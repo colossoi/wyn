@@ -44,8 +44,10 @@ bindigit ::= "0" | "1"
 
 stringlit  ::= '"' stringchar* '"'
 stringchar ::= <any source character except "\" or newline or double quotes>
-charlit    ::= "'" char "'"
-char       ::= <any source character except "\" or newline or single quotes>
+
+-- Note: stringlit is a lexical token only, not an expression.  It appears
+-- solely in `"import" stringlit` and the `#[linked("...")]` attribute.
+-- Wyn has no character type.
 
 
 type ::= qualname
@@ -95,16 +97,14 @@ entry_bind   ::= "entry" name entry_params ["#[" attr "]"] [type] "=" exp
 entry_params ::= "(" ")" | "(" entry_param ("," entry_param)* [","] ")"
 entry_param  ::= ["#[" attr "]"] name ":" type
 
-type_bind  ::= ("type" | "type^" | "type~") name type_param* "=" type
-type_param ::= "[" name "]" | "'" name | "'~" name | "'^" name
+type_bind  ::= "type" name type_param* "=" type
+type_param ::= "[" name "]" | "'" name
 
 
 
 
 atom        ::= literal
                 | qualname ("." fieldid)*
-                | stringlit
-                | charlit
                 | "(" ")"
                 | "(" exp ")" ("." fieldid)*
                 | "(" exp ("," exp)+ [","] ")"
@@ -160,7 +160,6 @@ pat         ::= name
                 | "#[" attr "]" pat
 pat_literal ::= [ "-" ] intnumber
                 | [ "-" ] floatnumber
-                | charlit
                 | "true"
                 | "false"
 loopform    ::= "for" name "<" exp
@@ -196,8 +195,8 @@ mod_type_exp ::= qualname
 spec ::= "sig" name type_param* ":" type
          | "sig" "(" symbol ")" ":" type
          | "sig" symbol type_param* ":" type
-         | ("type" | "type^" | "type~") name type_param* "=" type
-         | ("type" | "type^" | "type~") name type_param*
+         | "type" name type_param* "=" type
+         | "type" name type_param*
          | "module" name ":" mod_type_exp
          | "include" mod_type_exp
          | "#[" attr "]" spec
