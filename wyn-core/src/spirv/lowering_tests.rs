@@ -16,7 +16,7 @@ fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
         .expect("Alias checking failed");
 
     let ssa = alias_checked
-        .to_tlc(&frontend.schemes, &frontend.module_manager)
+        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -346,7 +346,7 @@ fn compile_to_spirv_with_partial_eval(source: &str) -> Result<Vec<u32>> {
         .alias_check()
         .expect("Alias checking failed");
     let ssa = alias_checked
-        .to_tlc(&frontend.schemes, &frontend.module_manager)
+        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()

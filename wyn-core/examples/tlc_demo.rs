@@ -16,6 +16,7 @@ def compute(x:i32, y:i32) i32 =
     let typed =
         folded.type_check(&mut frontend.module_manager, &mut frontend.schemes).expect("type check failed");
 
-    let tlc_program = tlc::transform(&typed.ast, &typed.type_table);
+    let mut fill_hole_errors = Vec::new();
+    let tlc_program = tlc::transform(&typed.ast, &typed.type_table, false, &mut fill_hole_errors);
     println!("{}", tlc_program);
 }

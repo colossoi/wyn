@@ -20,7 +20,7 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .alias_check()?;
 
     alias_checked
-        .to_tlc(&frontend.schemes, &frontend.module_manager)
+        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -53,7 +53,7 @@ fn compile_through_ssa(input: &str) -> Result<Program, CompilerError> {
         .alias_check()?;
 
     let ssa = alias_checked
-        .to_tlc(&frontend.schemes, &frontend.module_manager)
+        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -536,7 +536,7 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
         .expect("alias_check");
     eprintln!("=== frontend OK ===");
 
-    let tlc = alias_checked.to_tlc(&frontend.schemes, &frontend.module_manager);
+    let tlc = alias_checked.to_tlc(&frontend.schemes, &frontend.module_manager, false);
     eprintln!("=== to_tlc OK ===");
 
     let tlc = tlc.partial_eval();
@@ -599,7 +599,7 @@ entry main(data: []i32) []i32 = [first(data)]
         .expect("alias_check");
     eprintln!("=== frontend OK ===");
 
-    let tlc = alias_checked.to_tlc(&frontend.schemes, &frontend.module_manager);
+    let tlc = alias_checked.to_tlc(&frontend.schemes, &frontend.module_manager, false);
     eprintln!("=== to_tlc OK ===");
 
     let tlc = tlc.partial_eval();

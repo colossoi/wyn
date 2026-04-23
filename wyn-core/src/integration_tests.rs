@@ -24,7 +24,7 @@ fn compile_to_ssa(input: &str) -> Program {
         .expect("Borrow checking failed");
 
     alias_checked
-        .to_tlc(&frontend.schemes, &frontend.module_manager)
+        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -75,7 +75,7 @@ fn compile_to_fused_tlc(input: &str) -> crate::tlc::Program {
         .alias_check()
         .expect("Borrow checking failed");
 
-    let tlc = alias_checked.to_tlc(&frontend.schemes, &frontend.module_manager);
+    let tlc = alias_checked.to_tlc(&frontend.schemes, &frontend.module_manager, false);
     let fused = tlc.partial_eval().normalize_soacs().fuse_maps();
     fused.0.tlc
 }
@@ -681,7 +681,7 @@ entry vertex_main() #[builtin(position)] vec4f32 =
         .expect("Failed before TLC transform");
 
     let result = alias_checked
-        .to_tlc(&frontend.schemes, &frontend.module_manager)
+        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -728,7 +728,7 @@ entry compute_main(data: []i32) i32 =
         .expect("Failed before TLC transform");
 
     let result = alias_checked
-        .to_tlc(&frontend.schemes, &frontend.module_manager)
+        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -777,7 +777,7 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
         .expect("Failed before TLC transform");
 
     let result = alias_checked
-        .to_tlc(&frontend.schemes, &frontend.module_manager)
+        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -870,7 +870,7 @@ fn compile_to_spirv(input: &str) -> Result<Vec<u32>, Box<dyn std::error::Error>>
         .alias_check()?;
 
     let result = alias_checked
-        .to_tlc(&frontend.schemes, &frontend.module_manager)
+        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -908,7 +908,7 @@ fn compile_to_ssa_with_modules(input: &str) -> Program {
         .expect("Alias check failed");
 
     alias_checked
-        .to_tlc(&frontend.schemes, &frontend.module_manager)
+        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -1125,7 +1125,7 @@ fn compile_to_ssa_with_inline_small(input: &str) -> Program {
         .expect("Borrow checking failed");
 
     alias_checked
-        .to_tlc(&frontend.schemes, &frontend.module_manager)
+        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -1186,4 +1186,79 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
             }
         }
     }
+}
+
+// ============================================================================
+// `--fill-holes`: type-hole default fill
+// ============================================================================
+
+/// Compile through TLC with `fill_holes = true`; return the resulting
+/// `TlcTransformed` so tests can inspect `fill_hole_errors` and the
+/// program shape.
+fn compile_tlc_with_fill_holes(input: &str) -> crate::TlcTransformed {
+    let mut frontend = crate::cached_frontend();
+    let parsed = crate::Compiler::parse(input, &mut frontend.node_counter).expect("parse");
+    let alias_checked = parsed
+        .desugar(&mut frontend.node_counter)
+        .expect("desugar")
+        .resolve(&mut frontend.module_manager)
+        .expect("resolve")
+        .fold_ast_constants()
+        .type_check(&mut frontend.module_manager, &mut frontend.schemes)
+        .expect("type_check")
+        .alias_check()
+        .expect("alias_check");
+    alias_checked.to_tlc(&frontend.schemes, &frontend.module_manager, true)
+}
+
+#[test]
+fn fill_holes_numeric_scalars_compile_clean() {
+    // Scalar holes (i32 / f32 / bool) default to 0 / 0.0 / false and
+    // compile through with no fill-hole errors.
+    for src in ["def x: i32 = ???", "def y: f32 = ???", "def z: bool = ???"] {
+        let tlc = compile_tlc_with_fill_holes(src);
+        assert!(
+            tlc.0.fill_hole_errors.is_empty(),
+            "scalar hole in `{}` should fill cleanly: {:?}",
+            src,
+            tlc.0.fill_hole_errors
+        );
+    }
+}
+
+#[test]
+fn fill_holes_vec_compiles_clean() {
+    let tlc = compile_tlc_with_fill_holes("def v: vec3f32 = ???");
+    assert!(
+        tlc.0.fill_hole_errors.is_empty(),
+        "vec3 hole should fill cleanly: {:?}",
+        tlc.0.fill_hole_errors
+    );
+}
+
+#[test]
+fn fill_holes_rejects_function_type() {
+    let tlc = compile_tlc_with_fill_holes("def f: i32 -> i32 = ???");
+    assert!(
+        !tlc.0.fill_hole_errors.is_empty(),
+        "function-typed hole should surface a fill-hole error"
+    );
+    let msg = format!("{:?}", tlc.0.fill_hole_errors[0]);
+    assert!(
+        msg.contains("function value") || msg.contains("Arrow"),
+        "error should mention function type: {}",
+        msg
+    );
+}
+
+#[test]
+fn fill_holes_respects_inferred_type_from_context() {
+    // Hole's type is inferred from the enclosing context (array
+    // element type here). Default-fill fires at the inferred type.
+    let tlc = compile_tlc_with_fill_holes("def arr: [3]i32 = [1i32, ???, 3i32]");
+    assert!(
+        tlc.0.fill_hole_errors.is_empty(),
+        "hole in i32 array should fill as i32 cleanly: {:?}",
+        tlc.0.fill_hole_errors
+    );
 }

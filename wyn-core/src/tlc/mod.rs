@@ -5,6 +5,7 @@
 
 pub mod array_semantics;
 pub mod buffer_specialize;
+pub mod defaults;
 pub mod defunctionalize;
 pub mod fusion;
 pub mod inline;
@@ -1044,6 +1045,19 @@ pub struct Transformer<'a> {
     /// Shared placeholder symbol for pattern matching scrutinees.
     /// Allocated once and reused to avoid polluting the symbol table.
     placeholder_sym: SymbolId,
+    /// When true, `ExprKind::TypeHole` nodes are replaced with a
+    /// default-valued term of the hole's inferred type. When false,
+    /// TypeHole nodes are invariant-rejected upstream at the
+    /// type-check boundary (`TypeChecked::reject_type_holes`), so
+    /// reaching one here is a bug — the arm panics.
+    fill_holes: bool,
+    /// Errors surfaced while defaulting `???` type holes. Populated
+    /// only when `fill_holes` is true and a hole's inferred type
+    /// can't be default-filled (e.g. a function type or an
+    /// unresolved type variable). Owned by the caller so errors
+    /// from every Transformer that runs during `to_tlc` accumulate
+    /// into one list.
+    fill_hole_errors: &'a mut Vec<crate::error::CompilerError>,
 }
 
 impl<'a> Transformer<'a> {
@@ -1051,6 +1065,8 @@ impl<'a> Transformer<'a> {
         type_table: &'a TypeTable,
         symbols: &'a mut SymbolTable,
         top_level_symbols: &'a mut HashMap<String, SymbolId>,
+        fill_holes: bool,
+        fill_hole_errors: &'a mut Vec<crate::error::CompilerError>,
     ) -> Self {
         let placeholder_sym = symbols.alloc("_w_placeholder".to_string());
         Self {
@@ -1061,6 +1077,8 @@ impl<'a> Transformer<'a> {
             top_level_symbols,
             namespace: None,
             placeholder_sym,
+            fill_holes,
+            fill_hole_errors,
         }
     }
 
@@ -1070,6 +1088,8 @@ impl<'a> Transformer<'a> {
         symbols: &'a mut SymbolTable,
         top_level_symbols: &'a mut HashMap<String, SymbolId>,
         namespace: &str,
+        fill_holes: bool,
+        fill_hole_errors: &'a mut Vec<crate::error::CompilerError>,
     ) -> Self {
         let placeholder_sym = symbols.alloc("_w_placeholder".to_string());
         Self {
@@ -1080,6 +1100,8 @@ impl<'a> Transformer<'a> {
             top_level_symbols,
             namespace: Some(namespace.to_string()),
             placeholder_sym,
+            fill_holes,
+            fill_hole_errors,
         }
     }
 
@@ -1899,10 +1921,15 @@ impl<'a> Transformer<'a> {
             }
 
             ast::ExprKind::TypeHole => {
-                unreachable!(
-                    "TypeHole should be rejected at type-check; see \
-                     TypeChecked::reject_type_holes"
-                )
+                if !self.fill_holes {
+                    unreachable!(
+                        "TypeHole should be rejected at type-check when \
+                         --fill-holes is not set; see \
+                         TypeChecked::reject_type_holes"
+                    );
+                }
+                let hole_ty = self.lookup_type(expr.h.id).unwrap_or(ty.clone());
+                defaults::default_term_for_type(self, &hole_ty, span)
             }
         }
     }
@@ -2709,11 +2736,26 @@ impl<'a> Transformer<'a> {
 // Public API
 // =============================================================================
 
-/// Transform an AST program to TLC.
-pub fn transform(program: &ast::Program, type_table: &TypeTable) -> Program {
+/// Transform an AST program to TLC. `fill_hole_errors` is populated
+/// if the program contains `???` type holes and the caller passed
+/// `fill_holes = true`; otherwise `fill_holes = false` and any hole
+/// reaching this path is a bug (panics via the `unreachable!` in
+/// `ExprKind::TypeHole`).
+pub fn transform(
+    program: &ast::Program,
+    type_table: &TypeTable,
+    fill_holes: bool,
+    fill_hole_errors: &mut Vec<crate::error::CompilerError>,
+) -> Program {
     let mut symbols = SymbolTable::new();
     let mut top_level_symbols = HashMap::new();
-    let mut transformer = Transformer::new(type_table, &mut symbols, &mut top_level_symbols);
+    let mut transformer = Transformer::new(
+        type_table,
+        &mut symbols,
+        &mut top_level_symbols,
+        fill_holes,
+        fill_hole_errors,
+    );
     let parts = transformer.transform_program(program);
     parts.with_symbols(symbols, top_level_symbols)
 }

@@ -297,7 +297,7 @@ fn compile_to_wgsl(source: &str) -> crate::error::Result<String> {
         .expect("Alias checking failed");
 
     alias_checked
-        .to_tlc(&frontend.schemes, &frontend.module_manager)
+        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()

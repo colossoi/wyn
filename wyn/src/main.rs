@@ -71,6 +71,16 @@ enum Commands {
         #[arg(long)]
         single_stage: bool,
 
+        /// Treat any `???` type hole as a default value of its inferred
+        /// type and continue compilation. Default: holes are a hard
+        /// error (exit code 2). Default fills: numeric 0, bool false,
+        /// tuples/vectors/arrays filled componentwise, unit `()`.
+        /// Types that can't be default-filled (unresolved type variables,
+        /// function types, view/virtual arrays, records) still produce
+        /// an error.
+        #[arg(long)]
+        fill_holes: bool,
+
         /// Print verbose output
         #[arg(short, long)]
         verbose: bool,
@@ -139,6 +149,7 @@ fn run(cli: Cli) -> Result<(), DriverError> {
             output_tlc,
             output_mir,
             single_stage,
+            fill_holes,
             verbose,
         } => {
             compile_file(
@@ -148,6 +159,7 @@ fn run(cli: Cli) -> Result<(), DriverError> {
                 output_tlc,
                 output_mir,
                 single_stage,
+                fill_holes,
                 verbose,
             )?;
         }
@@ -166,6 +178,7 @@ fn compile_file(
     output_tlc: Option<PathBuf>,
     output_mir: Option<PathBuf>,
     single_stage: bool,
+    fill_holes: bool,
     verbose: bool,
 ) -> Result<(), DriverError> {
     if verbose {
@@ -195,7 +208,12 @@ fn compile_file(
     })?;
 
     type_checked.print_warnings();
-    let type_checked = type_checked.reject_type_holes()?;
+    let type_checked = if fill_holes {
+        // `--fill-holes`: skip the hole-gate; TLC will default-fill.
+        type_checked
+    } else {
+        type_checked.reject_type_holes()?
+    };
 
     let alias_checked = time("alias_check", verbose, || type_checked.alias_check())?;
     if alias_checked.has_alias_errors() {
@@ -205,8 +223,19 @@ fn compile_file(
 
     // Transform to TLC (including prelude code - transformed here for consistent type variables)
     let tlc_transformed = time("to_tlc", verbose, || {
-        alias_checked.to_tlc(&frontend.schemes, &frontend.module_manager)
+        alias_checked.to_tlc(&frontend.schemes, &frontend.module_manager, fill_holes)
     });
+
+    // Surface any hole-fill errors collected during TLC transform.
+    // Aggregate into one multi-line error so the exit-code branch in
+    // `main` prints them once with code 2. Access the inner field
+    // directly (not through the Deref) so we can take ownership.
+    if !tlc_transformed.0.fill_hole_errors.is_empty() {
+        let mut tlc_transformed = tlc_transformed;
+        let msgs: Vec<String> =
+            tlc_transformed.0.fill_hole_errors.drain(..).map(|e| format!("{e}")).collect();
+        return Err(wyn_core::err_type_hole!("{}", msgs.join("\n")).into());
+    }
 
     // Output TLC if requested (before optimization)
     if let Some(ref tlc_path) = output_tlc {

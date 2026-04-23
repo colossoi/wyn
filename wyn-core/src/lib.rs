@@ -603,11 +603,18 @@ impl AliasChecked {
 
     /// Transform AST to TLC (new pipeline path)
     /// `schemes` contains type schemes for all functions (populated during type_check)
-    /// `module_manager` provides access to prelude declarations for TLC transformation
+    /// `module_manager` provides access to prelude declarations for TLC transformation.
+    /// `fill_holes` makes `???` type-hole expressions lower to a default
+    /// value of the inferred type rather than panicking. The driver
+    /// should call `TypeChecked::reject_type_holes` before `to_tlc`
+    /// when `fill_holes = false`; any unfillable hole types encountered
+    /// with `fill_holes = true` land in the returned program's
+    /// `fill_hole_errors`.
     pub fn to_tlc(
         mut self,
         schemes: &HashMap<String, types::TypeScheme>,
         module_manager: &module_manager::ModuleManager,
+        fill_holes: bool,
     ) -> TlcTransformed {
         // Promote safe `a with [i] = v` nodes to the in-place variant using
         // the alias checker's liveness info. Must run before TLC transform
@@ -626,6 +633,10 @@ impl AliasChecked {
             top_level_symbols.insert(name.to_string(), sym);
         }
 
+        // Shared accumulator for `--fill-holes` default-fill failures.
+        // Errors from every Transformer that runs below land here.
+        let mut fill_hole_errors: Vec<error::CompilerError> = Vec::new();
+
         // Transform prelude module declarations (f32.pi, rand.init, etc.)
         // All names already registered — no separate first pass needed.
         let mut prelude_tlc_defs = Vec::new();
@@ -635,6 +646,8 @@ impl AliasChecked {
                 &mut symbols,
                 &mut top_level_symbols,
                 module_name,
+                fill_holes,
+                &mut fill_hole_errors,
             );
             for item in &elaborated.items {
                 if let module_manager::ElaboratedItem::Decl(decl) = item {
@@ -647,8 +660,13 @@ impl AliasChecked {
 
         // Transform top-level prelude functions (unzip, all, any, etc.)
         {
-            let mut transformer =
-                tlc::Transformer::new(&self.type_table, &mut symbols, &mut top_level_symbols);
+            let mut transformer = tlc::Transformer::new(
+                &self.type_table,
+                &mut symbols,
+                &mut top_level_symbols,
+                fill_holes,
+                &mut fill_hole_errors,
+            );
             for decl in module_manager.get_prelude_function_declarations() {
                 if let Some(def) = transformer.transform_decl(decl) {
                     prelude_tlc_defs.push(def);
@@ -657,7 +675,13 @@ impl AliasChecked {
         }
 
         // Transform user program to TLC
-        let mut transformer = tlc::Transformer::new(&self.type_table, &mut symbols, &mut top_level_symbols);
+        let mut transformer = tlc::Transformer::new(
+            &self.type_table,
+            &mut symbols,
+            &mut top_level_symbols,
+            fill_holes,
+            &mut fill_hole_errors,
+        );
         let mut parts = transformer.transform_program(&self.ast);
 
         // Prepend prelude TLC defs
@@ -673,6 +697,7 @@ impl AliasChecked {
             type_table: self.type_table,
             known_defs: registry.name_set(),
             schemes: schemes.clone(),
+            fill_hole_errors,
         })
     }
 }
@@ -692,6 +717,13 @@ pub struct TlcEarlyInner {
     pub(crate) known_defs: std::collections::HashSet<String>,
     /// Type schemes for functions (for monomorphization)
     pub(crate) schemes: HashMap<String, types::TypeScheme>,
+    /// Errors surfaced while default-filling `???` type holes with
+    /// `--fill-holes`. Empty unless `to_tlc` was called with
+    /// `fill_holes = true` and some hole had a type that couldn't
+    /// be defaulted. The driver checks this before proceeding to
+    /// later TLC passes and turns a non-empty list into a
+    /// `CompilerError::TypeHole`.
+    pub fill_hole_errors: Vec<error::CompilerError>,
 }
 
 /// AST has been transformed to TLC
@@ -772,6 +804,7 @@ impl TlcFused {
             type_table,
             known_defs,
             schemes,
+            fill_hole_errors: _,
         } = self.0;
         let defunc = tlc::defunctionalize::run(tlc, &known_defs);
         defunc.assert_flat_apps();

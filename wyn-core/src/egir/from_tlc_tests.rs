@@ -30,7 +30,7 @@ fn compile_via_egir(src: &str) -> Program {
         .expect("Alias checking failed");
 
     let tlc = alias_checked
-        .to_tlc(&frontend.schemes, &frontend.module_manager)
+        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
