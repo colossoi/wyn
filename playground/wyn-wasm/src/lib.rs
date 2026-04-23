@@ -305,6 +305,7 @@ fn format_error(e: &CompilerError) -> String {
         CompilerError::FlatteningError(msg, _) => format!("Flatten error: {}", msg),
         CompilerError::IoError(err) => format!("IO error: {}", err),
         CompilerError::SpirvBuilderError(msg) => format!("SPIR-V builder error: {}", msg),
+        CompilerError::TypeHole(msg) => format!("Type hole: {}", msg),
     }
 }
 
@@ -650,7 +651,7 @@ fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
         return CompileResultWgsl::err_msg("Alias checking failed".to_string());
     }
 
-    let tlc_program = alias_checked.to_tlc(&frontend.schemes, &frontend.module_manager);
+    let tlc_program = alias_checked.to_tlc(&frontend.schemes, &frontend.module_manager, false);
     let tlc_after_partial_eval = tlc_program.partial_eval();
     let tlc_tree = tlc_tree::program_to_tree(&tlc_after_partial_eval.tlc);
 
@@ -795,7 +796,7 @@ fn compile_impl(source: &str) -> CompileResult {
     // Full TLC pipeline, then the EGIR chain (skipping `materialize` —
     // GLSL supports dynamic indexing natively).
     let raw = match alias_checked
-        .to_tlc(&frontend.schemes, &frontend.module_manager)
+        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
@@ -885,7 +886,7 @@ fn compile_with_ir_impl(source: &str) -> CompileResultWithIR {
     }
 
     // Transform to TLC
-    let tlc_program = alias_checked.to_tlc(&frontend.schemes, &frontend.module_manager);
+    let tlc_program = alias_checked.to_tlc(&frontend.schemes, &frontend.module_manager, false);
 
     // Capture TLC tree (after partial eval, before defunctionalization)
     let tlc_after_partial_eval = tlc_program.partial_eval();
