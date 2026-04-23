@@ -5,18 +5,15 @@
  * Tree-sitter grammar for the Wyn shader language.
  *
  * Tracks the lexer in `wyn-core/src/lexer/mod.rs` and the parser in
- * `wyn-core/src/parser.rs` (+ `wyn-core/src/parser/module.rs` for the
- * module system). Regenerate `src/parser.c` / `src/grammar.json` /
- * `src/node-types.json` via `tree-sitter generate` after editing.
+ * `wyn-core/src/parser.rs` (+ `wyn-core/src/parser/module.rs` and
+ * `wyn-core/src/parser/pattern.rs`). Regenerate `src/parser.c` /
+ * `src/grammar.json` / `src/node-types.json` via `tree-sitter
+ * generate` after editing.
  *
- * Not yet covered (features present in the parser but not in general
- * use — add when first demanded by a real testfile):
- *   * `a with [i] = v` array-update expressions.
- *   * Range step form `start..step..end`.
- *   * Existential types `?[n]. T`.
- *   * Uniqueness marker `*T`.
- *   * Constructor patterns and unit/typed/attributed patterns.
- *   * Type params `'~a` (size-lifted) and `'^a` (lifted).
+ * Not yet covered — features scaffolded in the AST but not actually
+ * emitted by the parser (dead variants; add when the parser starts
+ * producing them):
+ *   * Type params `'~a` (SizeType) and `'^a` (LiftedType).
  */
 
 const PREC = {
@@ -339,6 +336,8 @@ module.exports = grammar({
       $.tuple_type,
       $.record_type,
       $.function_type,
+      $.unique_type,
+      $.existential_type,
       $.type_variable,
       $.identifier,
       $.qualified_name,
@@ -346,6 +345,18 @@ module.exports = grammar({
     ),
 
     parenthesized_type: $ => seq('(', $._type, ')'),
+
+    // `*T` — uniqueness-consuming marker, Futhark-style.
+    unique_type: $ => prec.right(seq('*', field('inner', $._type))),
+
+    // `?k l m. T` — existential size quantifier, valid in return
+    // position. Binds one or more bare identifiers before the dot.
+    existential_type: $ => seq(
+      '?',
+      repeat1(field('size_var', $.identifier)),
+      '.',
+      field('inner', $._type),
+    ),
 
     primitive_type: $ => choice(
       'i8', 'i16', 'i32', 'i64',
@@ -407,6 +418,7 @@ module.exports = grammar({
       $.loop_expression,
       $.match_expression,
       $.lambda_expression,
+      $.array_with,
       $._binary_expression,
       $.unary_expression,
       $.field_expression,
@@ -416,6 +428,21 @@ module.exports = grammar({
       $.type_coercion,
       $._primary_expression,
     ),
+
+    // `arr with [i] = v` — produces a copy of `arr` with element `i`
+    // set to `v`. Left-associative chains: `a with [i]=x with [j]=y`
+    // parses as `(a with [i]=x) with [j]=y`. Precedence sits above
+    // binary operators so `a with [i] = b + c` reads as
+    // `a with [i] = (b + c)`.
+    array_with: $ => prec.left(10, seq(
+      field('array', $._expression),
+      'with',
+      '[',
+      field('index', $._expression),
+      ']',
+      '=',
+      field('value', $._expression),
+    )),
 
     let_expression: $ => prec.right(seq(
       'let',
@@ -548,7 +575,15 @@ module.exports = grammar({
         field('operator', '**'),
         field('right', $._expression),
       )),
-      // Range operators
+      // Range operators: `start .. end`, `start ..< end`, `start ..> end`,
+      // `start ... end`, and the three-part `start .. step ..<end` form.
+      prec.left(PREC.COMPARE, seq(
+        field('start', $._expression),
+        '..',
+        field('step', $._expression),
+        field('end_op', choice('..<', '..>', '...')),
+        field('end', $._expression),
+      )),
       prec.left(PREC.COMPARE, seq(
         field('left', $._expression),
         field('operator', choice('..', '..<', '..>', '...')),
@@ -671,9 +706,30 @@ module.exports = grammar({
     // ============================================
 
     _pattern: $ => choice(
+      $.attributed_pattern,
+      $.typed_pattern,
+      $._primary_pattern,
+    ),
+
+    // `#[attr] pat` — entry-point param attributes and similar.
+    attributed_pattern: $ => seq(
+      $.attribute,
+      field('pattern', $._primary_pattern),
+    ),
+
+    // `pat : type` — type-annotated pattern.
+    typed_pattern: $ => prec.left(1, seq(
+      field('pattern', $._primary_pattern),
+      ':',
+      field('type', $._type),
+    )),
+
+    _primary_pattern: $ => choice(
       $.identifier,
+      $.constructor_pattern,
       $.wildcard,
       $._literal,
+      $.unit_pattern,
       $.tuple_pattern,
       $.record_pattern,
       $.parenthesized_pattern,
@@ -682,6 +738,9 @@ module.exports = grammar({
     parenthesized_pattern: $ => seq('(', $._pattern, ')'),
 
     wildcard: $ => '_',
+
+    // Unit pattern `()`.
+    unit_pattern: $ => prec(1, seq('(', ')')),
 
     tuple_pattern: $ => seq(
       '(',
@@ -701,6 +760,18 @@ module.exports = grammar({
       field('name', $.identifier),
       optional(seq('=', field('pattern', $._pattern))),
     ),
+
+    // `Ctor pat*` — constructor applied to zero or more args. The
+    // parser distinguishes constructors from plain name bindings
+    // by the first-letter case (uppercase → constructor).
+    constructor_pattern: $ => prec.left(seq(
+      field('constructor', $.constructor_name),
+      repeat($._primary_pattern),
+    )),
+
+    // Uppercase-leading identifier — the syntactic signal for a
+    // constructor in pattern position.
+    constructor_name: $ => /[A-Z][a-zA-Z0-9_']*/,
 
     // ============================================
     // Attributes
