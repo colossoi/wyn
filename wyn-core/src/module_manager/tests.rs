@@ -1,10 +1,11 @@
 use super::{ElaboratedItem, ModuleManager};
-use crate::ast::{NodeCounter, Program, TypeName};
+use crate::ast::{ModuleTypeExpression, NodeCounter, Program, Spec, TypeName};
 use crate::lexer::tokenize;
 use crate::parser::Parser;
 use crate::resolve_placeholders::PlaceholderResolver;
 use crate::types::checker::TypeChecker;
 use polytype::Type;
+use std::collections::HashMap;
 
 use polytype::TypeScheme;
 
@@ -293,5 +294,78 @@ module i32_sum = sum_module(my_i32)
         body_str.contains("my_i32"),
         "sum3 body should have n.add resolved to my_i32.add: {}",
         body_str
+    );
+}
+
+/// Regression guard: when an outer signature has a `with t = i32`
+/// substitution, references to `t` inside a NESTED module signature
+/// must also be rewritten. Previously `substitute_in_spec`'s
+/// `Spec::Module` arm cloned the inner `ModuleTypeExpression`
+/// unchanged, leaving the nested `t` reference unresolved.
+///
+/// Build the signature directly:
+///
+///     {
+///       type t
+///       module M : { sig f : t -> t }
+///     }
+///
+/// ask `elaborate_module_type` to run with `{ t → i32 }`, then dig
+/// into `M`'s signature and check that its `f` sig sees `i32 -> i32`.
+#[test]
+fn test_substitute_into_nested_module_signature() {
+    let mm = ModuleManager::new_empty();
+
+    // Named type `t` — the thing we substitute away.
+    let t_ty = Type::Constructed(TypeName::Named("t".into()), vec![]);
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+
+    // Inner signature: `{ sig f : t -> t }`.
+    let inner_sig = ModuleTypeExpression::Signature(vec![Spec::Sig(
+        "f".into(),
+        vec![],
+        Type::arrow(t_ty.clone(), t_ty.clone()),
+    )]);
+
+    // Outer signature: `{ type t; module M : <inner_sig> }`.
+    let outer = ModuleTypeExpression::Signature(vec![
+        Spec::Type("t".into(), vec![], None),
+        Spec::Module("M".into(), inner_sig),
+    ]);
+
+    let mut substitutions = HashMap::new();
+    substitutions.insert("t".to_string(), i32_ty.clone());
+
+    let elaborated =
+        mm.elaborate_module_type(&outer, &substitutions).expect("elaborate_module_type should succeed");
+
+    // Find the nested `module M : { ... }` spec.
+    let nested_mte = elaborated
+        .iter()
+        .find_map(|spec| match spec {
+            Spec::Module(name, mte) if name == "M" => Some(mte),
+            _ => None,
+        })
+        .expect("outer signature should still contain `module M : ...`");
+
+    let nested_specs = match nested_mte {
+        ModuleTypeExpression::Signature(ss) => ss,
+        _ => panic!("nested M should be a signature, got {:?}", nested_mte),
+    };
+
+    // The nested `sig f : t -> t` must now read `sig f : i32 -> i32`.
+    let f_ty = nested_specs
+        .iter()
+        .find_map(|spec| match spec {
+            Spec::Sig(name, _, ty) if name == "f" => Some(ty),
+            _ => None,
+        })
+        .expect("nested signature should contain sig f");
+
+    let expected = Type::arrow(i32_ty.clone(), i32_ty);
+    assert_eq!(
+        f_ty, &expected,
+        "nested sig f's type should have t substituted to i32, got {:?}",
+        f_ty
     );
 }

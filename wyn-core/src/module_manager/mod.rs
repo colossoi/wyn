@@ -479,12 +479,40 @@ impl ModuleManager {
                 Spec::Type(name.clone(), type_params.clone(), substituted_ty)
             }
             Spec::Module(name, mte) => {
-                // Don't substitute in nested module signatures for now
-                Spec::Module(name.clone(), mte.clone())
+                let substituted_mte = self.substitute_in_module_type_expr(mte, substitutions);
+                Spec::Module(name.clone(), substituted_mte)
             }
             Spec::Include(_) => {
                 // Includes should have been expanded by now
                 spec.clone()
+            }
+        }
+    }
+
+    /// Apply type substitutions recursively through a
+    /// `ModuleTypeExpression`. Named module-type references and
+    /// functor bodies are cloned as-is — the former is a reference to
+    /// a registered type where substitution happens at the expansion
+    /// site, and the latter is out of scope for this pass.
+    fn substitute_in_module_type_expr(
+        &self,
+        mte: &ModuleTypeExpression,
+        substitutions: &HashMap<String, Type>,
+    ) -> ModuleTypeExpression {
+        match mte {
+            ModuleTypeExpression::Name(_) => mte.clone(),
+            ModuleTypeExpression::Signature(specs) => ModuleTypeExpression::Signature(
+                specs.iter().map(|s| self.substitute_in_spec(s, substitutions)).collect(),
+            ),
+            ModuleTypeExpression::With(inner, name, type_params, ty) => {
+                let inner_sub = self.substitute_in_module_type_expr(inner, substitutions);
+                let ty_sub = self.substitute_in_type(ty, substitutions);
+                ModuleTypeExpression::With(Box::new(inner_sub), name.clone(), type_params.clone(), ty_sub)
+            }
+            ModuleTypeExpression::Arrow(_, _, _) | ModuleTypeExpression::FunctorType(_, _) => {
+                // Functor types aren't supported elsewhere in this pass;
+                // leave them unchanged rather than descending blindly.
+                mte.clone()
             }
         }
     }
