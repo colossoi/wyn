@@ -2,9 +2,21 @@
 // @ts-check
 
 /**
- * Tree-sitter grammar for the Wyn shader language
+ * Tree-sitter grammar for the Wyn shader language.
  *
- * Based on the lexer (wyn-core/src/lexer/mod.rs) and parser (wyn-core/src/parser.rs)
+ * Tracks the lexer in `wyn-core/src/lexer/mod.rs` and the parser in
+ * `wyn-core/src/parser.rs` (+ `wyn-core/src/parser/module.rs` for the
+ * module system). Regenerate `src/parser.c` / `src/grammar.json` /
+ * `src/node-types.json` via `tree-sitter generate` after editing.
+ *
+ * Not yet covered (features present in the parser but not in general
+ * use — add when first demanded by a real testfile):
+ *   * `a with [i] = v` array-update expressions.
+ *   * Range step form `start..step..end`.
+ *   * Existential types `?[n]. T`.
+ *   * Uniqueness marker `*T`.
+ *   * Constructor patterns and unit/typed/attributed patterns.
+ *   * Type params `'~a` (size-lifted) and `'^a` (lifted).
  */
 
 const PREC = {
@@ -49,10 +61,12 @@ module.exports = grammar({
 
     _declaration: $ => choice(
       $.def_declaration,
+      $.binding_declaration,
       $.extern_declaration,
       $.entry_declaration,
       $.sig_declaration,
       $.type_declaration,
+      $.module_type_declaration,
       $.module_declaration,
       $.functor_declaration,
       $.open_declaration,
@@ -78,15 +92,48 @@ module.exports = grammar({
       field('body', $._expression),
     ),
 
-    // Extern declarations: uniform/storage bindings without body
-    // #[uniform(set=0, binding=0)] def name: type
-    // #[storage(set=0, binding=0)] def name: type
-    extern_declaration: $ => seq(
+    // Attribute-bound `def` with no body — uniform or storage buffer
+    // binding declared by attribute:
+    //   #[uniform(set=0, binding=0)] def name: type
+    //   #[storage(set=0, binding=0)] def name: type
+    binding_declaration: $ => seq(
       $.attribute,
       'def',
       field('name', $.identifier),
       ':',
       field('type', $._type),
+    ),
+
+    // `extern` FFI declarations — a linked SPIR-V function. The
+    // `#[linked("symbol")]` attribute is required.
+    //   #[linked("foo")] extern name<[n], 'a>(p: T, ...) ReturnType
+    extern_declaration: $ => seq(
+      $.attribute,
+      'extern',
+      field('name', $.identifier),
+      optional($.generic_params),
+      field('params', $.extern_params),
+      field('return_type', $._type),
+    ),
+
+    extern_params: $ => seq(
+      '(',
+      commaSep($.extern_param),
+      ')',
+    ),
+
+    extern_param: $ => seq(
+      field('name', $.identifier),
+      ':',
+      field('type', $._type),
+    ),
+
+    // `<[n], [m], 'a, 'b>` generic params for sig/extern/def forms
+    // with explicit quantification.
+    generic_params: $ => seq(
+      '<',
+      commaSep1(choice($.size_param, $.type_variable)),
+      '>',
     ),
 
     // Entry requires parentheses and explicit return type (see SPECIFICATION.md)
@@ -116,17 +163,31 @@ module.exports = grammar({
       field('definition', $._type),
     ),
 
+    // `module NAME [: SIG] = BODY` — signature ascription is optional.
     module_declaration: $ => seq(
       'module',
       field('name', $.identifier),
+      optional(seq(':', field('signature', $._module_type_expression))),
       '=',
       field('body', $.module_body),
     ),
 
+    // `module type NAME = MTE` — a named module-signature binding.
+    module_type_declaration: $ => seq(
+      'module',
+      'type',
+      field('name', $.identifier),
+      '=',
+      field('definition', $._module_type_expression),
+    ),
+
+    // `functor NAME (params) [: SIG] = BODY` — signature ascription
+    // is optional (applied to the body).
     functor_declaration: $ => seq(
       'functor',
       field('name', $.identifier),
       $.functor_params,
+      optional(seq(':', field('signature', $._module_type_expression))),
       '=',
       field('body', $.module_body),
     ),
@@ -140,7 +201,7 @@ module.exports = grammar({
     functor_param: $ => seq(
       field('name', $.identifier),
       ':',
-      field('type', $._type),
+      field('signature', $._module_type_expression),
     ),
 
     module_body: $ => seq(
@@ -149,6 +210,86 @@ module.exports = grammar({
       '}',
     ),
 
+    // Module-type expressions: named signatures, inline `{ spec* }`
+    // signatures, refinement via `with type t = T`, and arrow/functor
+    // signature types.
+    _module_type_expression: $ => choice(
+      $.signature_body,
+      $.module_type_with,
+      $.module_type_arrow,
+      $.qualified_name,
+      $.identifier,
+      $.parenthesized_module_type,
+    ),
+
+    parenthesized_module_type: $ => seq('(', $._module_type_expression, ')'),
+
+    signature_body: $ => seq(
+      '{',
+      repeat($._spec),
+      '}',
+    ),
+
+    // `MTE with qualname type_params = type`
+    module_type_with: $ => prec.left(seq(
+      field('base', $._module_type_expression),
+      'with',
+      field('name', choice($.identifier, $.qualified_name)),
+      optional($.type_params),
+      '=',
+      field('type', $._type),
+    )),
+
+    // `(name : MTE) -> MTE`  — dependent functor arrow, or
+    // `MTE -> MTE` — plain functor arrow.
+    module_type_arrow: $ => prec.right(seq(
+      choice(
+        seq('(', field('param_name', $.identifier), ':', field('param_sig', $._module_type_expression), ')'),
+        field('param_sig', $._module_type_expression),
+      ),
+      '->',
+      field('result', $._module_type_expression),
+    )),
+
+    // Specs inside a `{ ... }` signature body.
+    _spec: $ => choice(
+      $.spec_sig,
+      $.spec_type,
+      $.spec_module,
+      $.spec_include,
+    ),
+
+    spec_sig: $ => seq(
+      'sig',
+      field('name', choice($.identifier, $.operator_name)),
+      optional($.type_params),
+      ':',
+      field('type', $._type),
+    ),
+
+    // `type NAME [type_params] [= TYPE]` — the `= TYPE` half is
+    // optional (abstract type vs. concrete alias).
+    spec_type: $ => seq(
+      'type',
+      field('name', $.identifier),
+      optional($.type_params),
+      optional(seq('=', field('definition', $._type))),
+    ),
+
+    spec_module: $ => seq(
+      'module',
+      field('name', $.identifier),
+      ':',
+      field('signature', $._module_type_expression),
+    ),
+
+    spec_include: $ => seq(
+      'include',
+      field('source', $._module_type_expression),
+    ),
+
+    // `open` takes a module expression, which can be a qualified name
+    // or a module-expression application.
     open_declaration: $ => seq(
       'open',
       field('module', $.qualified_name),
@@ -591,7 +732,6 @@ module.exports = grammar({
     _literal: $ => choice(
       $.integer_literal,
       $.float_literal,
-      $.char_literal,
       $.string_literal,
       $.boolean_literal,
     ),
@@ -614,8 +754,6 @@ module.exports = grammar({
       optional(/f(16|32|64)/), // Type suffix
     )),
 
-    char_literal: $ => /'[^'\\]'/,
-
     string_literal: $ => /"[^"]*"/,
 
     boolean_literal: $ => choice('true', 'false'),
@@ -625,9 +763,6 @@ module.exports = grammar({
     // ============================================
 
     identifier: $ => /[a-zA-Z_][a-zA-Z0-9_']*/,
-
-    // Constructor names start with uppercase
-    constructor: $ => /[A-Z][a-zA-Z0-9_']*/,
 
     qualified_name: $ => prec.left(1, seq(
       $.identifier,
