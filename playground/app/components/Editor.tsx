@@ -6,6 +6,7 @@ import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirro
 import { indentUnit } from "@codemirror/language";
 import { searchKeymap } from "@codemirror/search";
 import { monokai } from "@uiw/codemirror-theme-monokai";
+import { wyn } from "~/lib/wyn-lang";
 import type { ErrorLocation } from "~/lib/wasm";
 
 export interface EditorHandle {
@@ -108,6 +109,9 @@ export function Editor({ initialValue, errorLocation, onChange, onCompile, onMou
         EditorView.updateListener.of((u) => {
           if (u.docChanged) callbacksRef.current.onChange(u.state.doc.toString());
         }),
+        // Language must come before the theme so syntax-tag styles can layer
+        // on top of the theme's defaults rather than being overwritten.
+        wyn(),
         monokai,
       ],
     });
