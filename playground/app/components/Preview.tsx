@@ -21,7 +21,11 @@ interface PreviewProps {
 
 export function Preview({ result, errorInfo, onErrorClick }: PreviewProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const ctxRef = useRef<WebGPUContext | null>(null);
+  // Store the WebGPU context in state (not a ref) so the pipeline-creation
+  // effect re-runs once the async `setupContext` resolves. A ref would race
+  // against the first `result.wgsl` update and leave the canvas black on
+  // cold start whenever the WASM compile finishes before the GPU adapter.
+  const [ctx, setCtx] = useState<WebGPUContext | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>("output");
   const [fps, setFps] = useState<number | null>(null);
   const [elapsed, setElapsed] = useState<number>(0);
@@ -45,9 +49,9 @@ export function Preview({ result, errorInfo, onErrorClick }: PreviewProps) {
     if (!canvasRef.current) return;
     let cancelled = false;
     setupContext(canvasRef.current)
-      .then((ctx) => {
+      .then((c) => {
         if (cancelled) return;
-        ctxRef.current = ctx;
+        setCtx(c);
       })
       .catch((e) => {
         if (cancelled) return;
@@ -80,9 +84,11 @@ export function Preview({ result, errorInfo, onErrorClick }: PreviewProps) {
     return () => ro.disconnect();
   }, []);
 
-  // (Re)create pipeline + run shader whenever the WGSL text changes.
+  // (Re)create pipeline + run shader whenever the WGSL text or the GPU
+  // context changes. `ctx` becoming non-null (setupContext's promise
+  // resolved) has to trigger a re-run even when the WGSL text is the one
+  // from a compile that finished before the adapter was ready.
   useEffect(() => {
-    const ctx = ctxRef.current;
     const canvas = canvasRef.current;
     if (
       !ctx ||
@@ -111,7 +117,7 @@ export function Preview({ result, errorInfo, onErrorClick }: PreviewProps) {
     return () => {
       loop?.stop();
     };
-  }, [result?.wgsl]);
+  }, [ctx, result?.wgsl]);
 
   const renderableEntry = result?.interface?.entries.some(
     (e) => e.kind === "vertex" || e.kind === "fragment",
