@@ -621,6 +621,14 @@ impl AliasChecked {
         // so the AST `inplace` flag is visible to `transform_expr`.
         uniqueness_promote::run(&mut self.ast, &self.alias_result);
 
+        // Under `--fill-holes`, rewrite any free type variable in the
+        // node-level type table to `i32` so holes whose type stayed
+        // unconstrained (no call-site or annotation pinned them) get a
+        // ground type instead of surfacing as a fill-hole error.
+        if fill_holes {
+            tlc::defaults::default_free_vars_in_table(self.type_table.values_mut());
+        }
+
         // Build unified name registry — single source of truth for all top-level names.
         let registry =
             name_registry::NameRegistry::build(&self.ast, module_manager, &self.checker_builtins);

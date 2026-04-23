@@ -15,7 +15,52 @@
 use super::{Term, TermKind, Transformer};
 use crate::ast::{Span, TypeName};
 use crate::err_type_hole;
+use crate::types::TypeScheme;
 use polytype::Type;
+
+/// Replace every free type variable in `ty` with `i32`. `bound` is
+/// the stack of ∀-quantified variable IDs that are in scope; they
+/// remain as variables.
+fn default_free_vars_in_type(ty: &mut Type<TypeName>, bound: &[usize]) {
+    match ty {
+        Type::Variable(v) if !bound.contains(v) => {
+            *ty = Type::Constructed(TypeName::Int(32), vec![]);
+        }
+        Type::Variable(_) => {}
+        Type::Constructed(_, args) => {
+            for a in args {
+                default_free_vars_in_type(a, bound);
+            }
+        }
+    }
+}
+
+fn default_free_vars_in_scheme_inner(scheme: &mut TypeScheme, bound: &mut Vec<usize>) {
+    match scheme {
+        TypeScheme::Monotype(ty) => default_free_vars_in_type(ty, bound),
+        TypeScheme::Polytype { variable, body } => {
+            bound.push(*variable);
+            default_free_vars_in_scheme_inner(body, bound);
+            bound.pop();
+        }
+    }
+}
+
+/// Rewrite each `TypeScheme` in place so that any free type variable
+/// (one not bound by an enclosing ∀) becomes `i32`. Called from
+/// `to_tlc` under `--fill-holes` to give the transformer a fully
+/// ground `TypeTable` — without this pass, type-inference variables
+/// that survived unsolved (e.g. `let x = ??? in ...` where no use
+/// pins x's type) surface as `Type::Variable` during
+/// `default_term_for_type` and would otherwise push a
+/// "unresolved type variable" fill-hole error.
+pub fn default_free_vars_in_table<'a>(schemes: impl IntoIterator<Item = &'a mut TypeScheme>) {
+    let mut bound = Vec::new();
+    for scheme in schemes {
+        default_free_vars_in_scheme_inner(scheme, &mut bound);
+        debug_assert!(bound.is_empty());
+    }
+}
 
 /// Extract a `usize` size from a type position that should be a
 /// size literal (e.g. `args[1]` of `Vec` or `args[1]` of `Array`).
