@@ -1867,23 +1867,26 @@ impl<'a> Transformer<'a> {
             }
 
             ast::ExprKind::Slice(slice) => {
-                // Transform slice to _w_slice(arr, start, end)
-                // This represents a view into the array - aliases the source
+                // Transform slice to _w_intrinsic_slice(arr, start, end).
+                // The slice aliases the source — it's a view, not a copy.
                 let arr = self.transform_expr(&slice.array);
 
-                // Default start to 0 if not specified
+                // Omitted start defaults to 0.
                 let start = slice
                     .start
                     .as_ref()
                     .map(|e| self.transform_expr(e))
                     .unwrap_or_else(|| self.mk_i32(0, span));
 
-                // End is required for now (would need array length otherwise)
-                let end = slice
-                    .end
-                    .as_ref()
-                    .map(|e| self.transform_expr(e))
-                    .expect("Slice without end not yet supported");
+                // Omitted end defaults to `length(arr)`. `_w_intrinsic_length`
+                // is registered as returning i32 and works on every array
+                // flavor (composite / view / virtual) — the subsequent
+                // `buffer_specialize` / SPIR-V passes rewrite it into the
+                // right per-flavor lowering.
+                let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+                let end = slice.end.as_ref().map(|e| self.transform_expr(e)).unwrap_or_else(|| {
+                    self.build_app("_w_intrinsic_length", vec![arr.clone()], i32_ty, span)
+                });
 
                 self.build_app("_w_intrinsic_slice", vec![arr, start, end], ty, span)
             }

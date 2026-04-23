@@ -113,6 +113,63 @@ entry vertex_main() #[builtin(position)] vec4f32 =
     );
 }
 
+#[test]
+fn test_slice_open_ended() {
+    // `arr[i..]` — end defaults to length(arr).
+    let source = r#"
+def slice_tail(arr: [10]i32) [7]i32 =
+    arr[3..]
+
+#[vertex]
+entry vertex_main() #[builtin(position)] vec4f32 =
+    let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] in
+    let sliced = slice_tail(arr) in
+    @[f32.i32(sliced[0]), f32.i32(sliced[1]), 0.0f32, 1.0f32]
+"#;
+    assert!(
+        compile_through_lowering(source).is_ok(),
+        "Open-ended slice (arr[i..]) should compile"
+    );
+}
+
+#[test]
+fn test_slice_from_start() {
+    // `arr[..j]` — start defaults to 0.
+    let source = r#"
+def slice_head(arr: [10]i32) [4]i32 =
+    arr[..4]
+
+#[vertex]
+entry vertex_main() #[builtin(position)] vec4f32 =
+    let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] in
+    let sliced = slice_head(arr) in
+    @[f32.i32(sliced[0]), f32.i32(sliced[3]), 0.0f32, 1.0f32]
+"#;
+    assert!(
+        compile_through_lowering(source).is_ok(),
+        "Slice without start (arr[..j]) should compile"
+    );
+}
+
+#[test]
+fn test_slice_full_array_syntax() {
+    // `arr[..]` — both bounds default (start=0, end=length(arr)).
+    let source = r#"
+def slice_all(arr: [10]i32) [10]i32 =
+    arr[..]
+
+#[vertex]
+entry vertex_main() #[builtin(position)] vec4f32 =
+    let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] in
+    let sliced = slice_all(arr) in
+    @[f32.i32(sliced[0]), f32.i32(sliced[9]), 0.0f32, 1.0f32]
+"#;
+    assert!(
+        compile_through_lowering(source).is_ok(),
+        "Full-array slice (arr[..]) should compile"
+    );
+}
+
 // Note: Slice step syntax (arr[i..j..s]) is not yet supported - deferred to future work
 
 // =============================================================================
