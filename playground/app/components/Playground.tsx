@@ -174,6 +174,7 @@ export function Playground({
               </button>
               <button
                 type="button"
+                className="btn-secondary"
                 onClick={handleSave}
                 disabled={!canSave || saving}
                 title={!canSave ? saveDisabledReason : undefined}
