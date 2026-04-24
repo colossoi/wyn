@@ -18,19 +18,50 @@ use crate::err_type_hole;
 use crate::types::TypeScheme;
 use polytype::Type;
 
-/// Replace every free type variable in `ty` with `i32`. `bound` is
-/// the stack of ∀-quantified variable IDs that are in scope; they
-/// remain as variables.
+/// Replace every free type variable in `ty` with a position-appropriate
+/// default: `i32` in ordinary type positions, `SizePlaceholder` in array
+/// size positions, and `ArrayVariantComposite` in array variant positions.
+/// Using a plain `i32` for every free var corrupts Array types — the size
+/// / variant axes carry kinds that `i32` cannot satisfy, and downstream
+/// passes (storage-binding detection, monomorphization, SoA) misbehave
+/// silently. `bound` is the stack of ∀-quantified variable IDs in scope;
+/// they remain as variables.
 fn default_free_vars_in_type(ty: &mut Type<TypeName>, bound: &[usize]) {
     match ty {
         Type::Variable(v) if !bound.contains(v) => {
             *ty = Type::Constructed(TypeName::Int(32), vec![]);
         }
         Type::Variable(_) => {}
+        Type::Constructed(TypeName::Array, args) if args.len() == 3 => {
+            default_free_vars_in_type(&mut args[0], bound);
+            default_free_vars_in_array_size(&mut args[1], bound);
+            default_free_vars_in_array_variant(&mut args[2], bound);
+        }
         Type::Constructed(_, args) => {
             for a in args {
                 default_free_vars_in_type(a, bound);
             }
+        }
+    }
+}
+
+/// Free variable sitting in an Array size position → `SizePlaceholder`,
+/// matching the convention used by parsing + entry-point storage-binding
+/// detection. Bound vars pass through unchanged.
+fn default_free_vars_in_array_size(ty: &mut Type<TypeName>, bound: &[usize]) {
+    if let Type::Variable(v) = ty {
+        if !bound.contains(v) {
+            *ty = Type::Constructed(TypeName::SizePlaceholder, vec![]);
+        }
+    }
+}
+
+/// Free variable in an Array variant position → `ArrayVariantComposite`,
+/// matching SoA's convention for unresolved variants.
+fn default_free_vars_in_array_variant(ty: &mut Type<TypeName>, bound: &[usize]) {
+    if let Type::Variable(v) = ty {
+        if !bound.contains(v) {
+            *ty = Type::Constructed(TypeName::ArrayVariantComposite, vec![]);
         }
     }
 }

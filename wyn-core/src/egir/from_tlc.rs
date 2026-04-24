@@ -231,9 +231,19 @@ fn convert_entry_point(
     let (inner_body, params) = extract_lambda_params(&def.body);
     let is_compute = matches!(entry.entry_type, interface::Attribute::Compute);
 
-    // Build entry inputs with IO decorations, storage bindings, push constants.
+    let ret_type = inner_body.ty.clone();
+    let param_info: Vec<(Type<TypeName>, String)> =
+        params.iter().map(|(sym, ty)| (ty.clone(), symbols.get(*sym).expect("BUG").clone())).collect();
+
+    let mut converter = Converter::new(top_level, constants_by_name, symbols, pure_constants.clone());
+
+    // Build entry inputs alongside the symbol → NodeId bindings. A compute
+    // entry param that's a tuple-of-unsized-arrays gets one storage binding
+    // per field (SoA lowered the source `[]T` of tuples into a tuple of
+    // `[]T`s, but entry I/O can't carry a tuple handle — each runtime-sized
+    // array needs its own buffer). The body still references the original
+    // tuple symbol, so we reconstruct it as a `Tuple(views…)` node.
     let mut inputs: Vec<EntryInput> = Vec::with_capacity(params.len());
-    let mut param_syms: Vec<SymbolId> = Vec::with_capacity(params.len());
     let mut binding_num: u32 = 0;
     let mut pc_offset: u32 = 0;
 
@@ -241,6 +251,45 @@ fn convert_entry_point(
         let name = symbols.get(*sym).expect("BUG: symbol not in table").clone();
         let decoration = entry.params.get(i).and_then(extract_io_decoration);
         let size_hint = entry.params.get(i).and_then(extract_size_hint);
+
+        // Always register a FuncParam placeholder so param indexing stays
+        // stable; the binding below may override it.
+        let fp_nid = converter.graph.add_func_param(i, ty.clone());
+        converter.locals.insert(*sym, fp_nid);
+
+        // Tuple-of-unsized-arrays: split into N EntryInputs + bind the
+        // symbol to a reconstructed tuple of the N storage views.
+        let tuple_of_views_fields: Option<&[Type<TypeName>]> = match ty {
+            Type::Constructed(TypeName::Tuple(_), field_tys)
+                if is_compute
+                    && !matches!(&decoration, Some(IoDecoration::BuiltIn(_)))
+                    && !field_tys.is_empty()
+                    && field_tys.iter().all(|t| is_unsized_array(t)) =>
+            {
+                Some(field_tys.as_slice())
+            }
+            _ => None,
+        };
+
+        if let Some(field_tys) = tuple_of_views_fields {
+            let mut view_nids: SmallVec<[NodeId; 4]> = SmallVec::new();
+            for (field_idx, field_ty) in field_tys.iter().enumerate() {
+                let set_binding = (0, binding_num);
+                binding_num += 1;
+                inputs.push(EntryInput {
+                    name: format!("{}_{}", name, field_idx),
+                    ty: field_ty.clone(),
+                    decoration: None,
+                    size_hint: None,
+                    storage_binding: Some(set_binding),
+                    push_constant_offset: None,
+                });
+                view_nids.push(converter.emit_storage_view(set_binding.0, set_binding.1, field_ty.clone()));
+            }
+            let tuple_nid = converter.intern_pure(PureOp::Tuple(view_nids.len()), view_nids, ty.clone());
+            converter.locals.insert(*sym, tuple_nid);
+            continue;
+        }
 
         let storage_binding = if is_compute && is_unsized_array(ty) {
             let b = (0, binding_num);
@@ -261,7 +310,11 @@ fn convert_entry_point(
             None
         };
 
-        param_syms.push(*sym);
+        if let Some((set, binding)) = storage_binding {
+            let view_nid = converter.emit_storage_view(set, binding, ty.clone());
+            converter.locals.insert(*sym, view_nid);
+        }
+
         inputs.push(EntryInput {
             name,
             ty: ty.clone(),
@@ -270,27 +323,6 @@ fn convert_entry_point(
             storage_binding,
             push_constant_offset,
         });
-    }
-
-    let ret_type = inner_body.ty.clone();
-    let param_info: Vec<(Type<TypeName>, String)> =
-        params.iter().map(|(sym, ty)| (ty.clone(), symbols.get(*sym).expect("BUG").clone())).collect();
-
-    let mut converter = Converter::new(top_level, constants_by_name, symbols, pure_constants.clone());
-
-    // Register function params as FuncParam NodeIds.
-    for (i, (sym, ty)) in params.iter().enumerate() {
-        let nid = converter.graph.add_func_param(i, ty.clone());
-        converter.locals.insert(*sym, nid);
-    }
-
-    // Wrap storage-buffer inputs in whole-buffer StorageViews so any direct use
-    // of the param sees a view rather than a raw buffer handle.
-    for (idx, input) in inputs.iter().enumerate() {
-        if let Some((set, binding)) = input.storage_binding {
-            let view_nid = converter.emit_storage_view(set, binding, input.ty.clone());
-            converter.locals.insert(param_syms[idx], view_nid);
-        }
     }
 
     let execution_model = match &entry.entry_type {
@@ -1806,9 +1838,19 @@ fn extract_lambda_params(term: &Term) -> (&Term, Vec<(SymbolId, Type<TypeName>)>
     (current, params)
 }
 
-/// Check if a type is an unsized array (runtime-sized storage buffer).
+/// Check if a type is an unsized array (runtime-sized storage buffer). At
+/// this pipeline stage a "runtime size" shows up as either an unresolved
+/// polytype variable or a `SizePlaceholder` (the latter is what
+/// `--fill-holes` leaves in size positions).
 fn is_unsized_array(ty: &Type<TypeName>) -> bool {
-    ty.array_size().map(|s| matches!(s, Type::Variable(_))).unwrap_or(false)
+    ty.array_size()
+        .map(|s| {
+            matches!(
+                s,
+                Type::Variable(_) | Type::Constructed(TypeName::SizePlaceholder, _)
+            )
+        })
+        .unwrap_or(false)
 }
 
 /// Extract an IO decoration (builtin or location attribute) from a pattern.
