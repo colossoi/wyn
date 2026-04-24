@@ -7,17 +7,24 @@ use polytype::Type;
 
 #[test]
 fn test_func_body_params() {
+    let i32_ty = || Type::Constructed(TypeName::Int(32), vec![]);
     let mut builder = FuncBuilder::new(
-        vec![
-            (Type::Constructed(TypeName::Int(32), vec![]), "x".to_string()),
-            (Type::Constructed(TypeName::Int(32), vec![]), "y".to_string()),
-        ],
-        Type::Constructed(TypeName::Int(32), vec![]),
+        vec![(i32_ty(), "x".to_string()), (i32_ty(), "y".to_string())],
+        i32_ty(),
     );
 
     let x = builder.get_param(0);
     let y = builder.get_param(1);
-    let sum = builder.push_binop("+", x, y, Type::Constructed(TypeName::Int(32), vec![])).unwrap();
+    let sum = builder
+        .push_inst(
+            InstKind::BinOp {
+                op: "+".to_string(),
+                lhs: ValueRef::Ssa(x),
+                rhs: ValueRef::Ssa(y),
+            },
+            i32_ty(),
+        )
+        .unwrap();
     builder.terminate(Terminator::Return(Some(sum))).unwrap();
 
     let body = builder.finish().unwrap();
