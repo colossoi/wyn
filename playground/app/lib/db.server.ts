@@ -15,6 +15,17 @@ export interface ShaderRow {
   owner_id: number;
   title: string | null;
   source: string;
+  thumbnail: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+/** Lightweight row for listing; excludes `source` (potentially large). */
+export interface ShaderListRow {
+  slug: string;
+  owner_id: number;
+  title: string | null;
+  thumbnail: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -58,7 +69,7 @@ export async function getUserByLogin(env: Env, login: string): Promise<UserRow |
 
 export async function getShader(env: Env, slug: string): Promise<ShaderRow | null> {
   const row = await env.DB.prepare(
-    `SELECT slug, owner_id, title, source, created_at, updated_at
+    `SELECT slug, owner_id, title, source, thumbnail, created_at, updated_at
      FROM shaders WHERE slug = ? LIMIT 1`,
   )
     .bind(slug)
@@ -69,13 +80,13 @@ export async function getShader(env: Env, slug: string): Promise<ShaderRow | nul
 export async function listShadersByOwner(
   env: Env,
   ownerId: number,
-): Promise<ShaderRow[]> {
+): Promise<ShaderListRow[]> {
   const result = await env.DB.prepare(
-    `SELECT slug, owner_id, title, source, created_at, updated_at
+    `SELECT slug, owner_id, title, thumbnail, created_at, updated_at
      FROM shaders WHERE owner_id = ? ORDER BY updated_at DESC`,
   )
     .bind(ownerId)
-    .all<ShaderRow>();
+    .all<ShaderListRow>();
   return result.results ?? [];
 }
 
@@ -85,14 +96,15 @@ export async function createShader(
   env: Env,
   ownerId: number,
   source: string,
+  thumbnail: string | null = null,
 ): Promise<string> {
   for (let attempt = 0; attempt < 5; attempt++) {
     const slug = generateSlug();
     try {
       await env.DB.prepare(
-        `INSERT INTO shaders (slug, owner_id, source) VALUES (?, ?, ?)`,
+        `INSERT INTO shaders (slug, owner_id, source, thumbnail) VALUES (?, ?, ?, ?)`,
       )
-        .bind(slug, ownerId, source)
+        .bind(slug, ownerId, source, thumbnail)
         .run();
       return slug;
     } catch (err) {
@@ -110,12 +122,23 @@ export async function updateShaderSource(
   env: Env,
   slug: string,
   source: string,
+  thumbnail: string | null | undefined = undefined,
 ): Promise<void> {
-  await env.DB.prepare(
-    `UPDATE shaders SET source = ?, updated_at = unixepoch() WHERE slug = ?`,
-  )
-    .bind(source, slug)
-    .run();
+  // If the caller didn't provide a thumbnail (undefined), leave the
+  // existing one in place. Passing explicit null clears it.
+  if (thumbnail === undefined) {
+    await env.DB.prepare(
+      `UPDATE shaders SET source = ?, updated_at = unixepoch() WHERE slug = ?`,
+    )
+      .bind(source, slug)
+      .run();
+  } else {
+    await env.DB.prepare(
+      `UPDATE shaders SET source = ?, thumbnail = ?, updated_at = unixepoch() WHERE slug = ?`,
+    )
+      .bind(source, thumbnail, slug)
+      .run();
+  }
 }
 
 // ----------------------------------------------------------------------------
