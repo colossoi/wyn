@@ -130,9 +130,12 @@ export function Playground({
 
   const saving = saveFetcher.state !== "idle";
 
-  const handleSave = useCallback(() => {
+  const handleSave = useCallback(async () => {
     if (!canSave || saving) return;
-    const body = JSON.stringify({ source: sourceRef.current });
+    const canvas = document.getElementById("canvas");
+    const thumbnail =
+      canvas instanceof HTMLCanvasElement ? await captureThumbnail(canvas) : null;
+    const body = JSON.stringify({ source: sourceRef.current, thumbnail });
     if (slug) {
       saveFetcher.submit(body, {
         method: "put",
@@ -199,4 +202,37 @@ export function Playground({
       </main>
     </>
   );
+}
+
+// Snapshot the preview canvas into a small JPEG data URL. Waits one RAF
+// so the capture samples a freshly-presented WebGPU frame, then
+// downscales via a 2D canvas so the payload stays a few KB.
+async function captureThumbnail(canvas: HTMLCanvasElement): Promise<string | null> {
+  try {
+    await new Promise<void>((r) => requestAnimationFrame(() => r()));
+    const W = 320;
+    const H = 180;
+    const off = document.createElement("canvas");
+    off.width = W;
+    off.height = H;
+    const g = off.getContext("2d");
+    if (!g) return null;
+    // Letterbox: preserve the source aspect inside the 16:9 target.
+    const srcAspect = canvas.width / canvas.height;
+    const dstAspect = W / H;
+    let dw = W, dh = H, dx = 0, dy = 0;
+    if (srcAspect > dstAspect) {
+      dh = Math.round(W / srcAspect);
+      dy = Math.round((H - dh) / 2);
+    } else if (srcAspect < dstAspect) {
+      dw = Math.round(H * srcAspect);
+      dx = Math.round((W - dw) / 2);
+    }
+    g.fillStyle = "#000";
+    g.fillRect(0, 0, W, H);
+    g.drawImage(canvas, dx, dy, dw, dh);
+    return off.toDataURL("image/jpeg", 0.7);
+  } catch {
+    return null;
+  }
 }

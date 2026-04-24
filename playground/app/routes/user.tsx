@@ -28,6 +28,7 @@ export async function loader({ params, context }: Route.LoaderArgs) {
     shaders: shaders.map((s) => ({
       slug: s.slug,
       title: s.title,
+      thumbnail: s.thumbnail,
       createdAt: s.created_at,
       updatedAt: s.updated_at,
     })),
@@ -82,6 +83,7 @@ export default function UserRoute({ loaderData }: Route.ComponentProps) {
               <ShaderCard
                 slug={s.slug}
                 title={s.title}
+                thumbnail={s.thumbnail}
                 createdAt={s.createdAt}
                 updatedAt={s.updatedAt}
               />
@@ -98,16 +100,20 @@ export default function UserRoute({ loaderData }: Route.ComponentProps) {
 interface ShaderCardProps {
   slug: string;
   title: string | null;
+  thumbnail: string | null;
   createdAt: number;
   updatedAt: number;
 }
 
-function ShaderCard({ slug, title, createdAt, updatedAt }: ShaderCardProps) {
+function ShaderCard({ slug, title, thumbnail, createdAt, updatedAt }: ShaderCardProps) {
   const displayTitle = title?.trim() || "Untitled shader";
   const edited = createdAt !== updatedAt;
   return (
     <Link to={`/s/${slug}`} className="shader-card">
-      <div className="shader-cover" style={coverStyle(slug)}>
+      <div className="shader-cover" style={thumbnail ? undefined : coverStyle(slug)}>
+        {thumbnail && (
+          <img src={thumbnail} alt="" className="shader-cover-img" loading="lazy" />
+        )}
         <div className="shader-cover-slug">{slug}</div>
       </div>
       <div className="shader-card-body">

@@ -15,6 +15,7 @@ import { getShader, updateShaderSource } from "~/lib/db.server";
 import { getSession } from "~/lib/session.server";
 
 const MAX_SOURCE_BYTES = 256 * 1024;
+const MAX_THUMBNAIL_BYTES = 64 * 1024;
 
 function originMatches(request: Request): boolean {
   const origin = request.headers.get("Origin");
@@ -64,6 +65,17 @@ export async function action({ request, params, context }: Route.ActionArgs) {
     return new Response("source too large", { status: 413 });
   }
 
-  await updateShaderSource(env, slug, source);
+  const thumbnailRaw = (body as { thumbnail?: unknown })?.thumbnail;
+  let thumbnail: string | null | undefined = undefined;
+  if (typeof thumbnailRaw === "string" && thumbnailRaw.startsWith("data:image/")) {
+    if (thumbnailRaw.length > MAX_THUMBNAIL_BYTES) {
+      return new Response("thumbnail too large", { status: 413 });
+    }
+    thumbnail = thumbnailRaw;
+  } else if (thumbnailRaw === null) {
+    thumbnail = null;
+  }
+
+  await updateShaderSource(env, slug, source, thumbnail);
   return Response.json({ slug });
 }

@@ -44,6 +44,9 @@ export async function setupContext(
     device,
     format,
     alphaMode: "opaque",
+    // COPY_SRC so the current frame is readable by `canvas.toBlob` /
+    // `drawImage` — needed to snapshot the preview for save-thumbnails.
+    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
   });
   return { device, canvasContext, format };
 }
