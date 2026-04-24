@@ -7,8 +7,10 @@ use crate::ast::{Span, TypeName};
 use polytype::Type;
 
 use super::types::{
-    BlockId, ControlHeader, FuncBody, InstId, InstKind, Terminator, ValueId, ValueRef, ViewSource,
+    BlockId, ControlHeader, FuncBody, InstId, InstKind, PlaceId, PlaceInfo, Terminator, ValueId, ValueRef,
+    ViewSource,
 };
+use slotmap::SlotMap;
 
 /// Error during function building.
 pub type BuilderError = crate::ssa::framework::BuilderError;
@@ -20,6 +22,7 @@ pub struct FuncBuilder {
     params: Vec<(ValueId, Type<TypeName>, String)>,
     return_ty: Type<TypeName>,
     dps_output: Option<ValueId>,
+    places: SlotMap<PlaceId, PlaceInfo>,
 }
 
 impl FuncBuilder {
@@ -40,6 +43,7 @@ impl FuncBuilder {
             params: func_params,
             return_ty,
             dps_output: None,
+            places: SlotMap::with_key(),
         }
     }
 
@@ -155,6 +159,7 @@ impl FuncBuilder {
             params: self.params,
             return_ty: self.return_ty,
             dps_output: self.dps_output,
+            places: self.places,
         })
     }
 
@@ -166,6 +171,7 @@ impl FuncBuilder {
             params: self.params,
             return_ty: self.return_ty,
             dps_output: self.dps_output,
+            places: self.places,
         }
     }
 
@@ -177,6 +183,14 @@ impl FuncBuilder {
     /// Access the underlying function (mutable).
     pub fn func_mut(&mut self) -> &mut crate::ssa::framework::Function<InstKind, Type<TypeName>> {
         self.inner.func_mut()
+    }
+
+    /// Allocate a fresh `PlaceId` with the given element type. Callers
+    /// elsewhere (`emit_output_slot`, `emit_view_index`, `emit_alloca`)
+    /// combine allocation + instruction emission; this exposes the raw
+    /// allocator for elaborate, which builds the instruction itself.
+    pub fn new_place(&mut self, elem_ty: Type<TypeName>) -> PlaceId {
+        self.places.insert(PlaceInfo { elem_ty })
     }
 
     // =========================================================================
@@ -316,27 +330,81 @@ impl FuncBuilder {
         self.push_inst(InstKind::Global(name.to_string()), ty)
     }
 
-    pub fn push_output_ptr(&mut self, index: usize, ty: Type<TypeName>) -> Result<ValueId, BuilderError> {
-        self.push_inst(InstKind::OutputPtr { index }, ty)
-    }
-
-    /// Push a load instruction. Returns the loaded value.
-    pub fn push_load(&mut self, ptr: ValueId, result_ty: Type<TypeName>) -> Result<ValueId, BuilderError> {
+    /// Emit an `OutputSlot` instruction producing a fresh place bound to
+    /// the entry-point output at `index`. `elem_ty` is the type of values
+    /// written through the place.
+    pub fn emit_output_slot(
+        &mut self,
+        index: usize,
+        elem_ty: Type<TypeName>,
+    ) -> Result<PlaceId, BuilderError> {
         let block = self.current_block().ok_or(BuilderError::NoCurrentBlock)?;
         if !matches!(self.inner.func().blocks[block].term, Terminator::Unreachable) {
             return Err(BuilderError::BlockAlreadyTerminated(block));
         }
-        Ok(self.inner.func_mut().append_inst(
+        let place = self.places.insert(PlaceInfo { elem_ty });
+        self.inner.func_mut().append_void_inst(block, InstKind::OutputSlot { index, result: place });
+        Ok(place)
+    }
+
+    /// Emit an `Alloca` instruction producing a fresh function-scope place.
+    pub fn emit_alloca(&mut self, elem_ty: Type<TypeName>) -> Result<PlaceId, BuilderError> {
+        let block = self.current_block().ok_or(BuilderError::NoCurrentBlock)?;
+        if !matches!(self.inner.func().blocks[block].term, Terminator::Unreachable) {
+            return Err(BuilderError::BlockAlreadyTerminated(block));
+        }
+        let place = self.places.insert(PlaceInfo {
+            elem_ty: elem_ty.clone(),
+        });
+        self.inner.func_mut().append_void_inst(
             block,
-            InstKind::Load {
-                ptr: ValueRef::from(ptr),
+            InstKind::Alloca {
+                elem_ty,
+                result: place,
             },
-            result_ty,
-        ))
+        );
+        Ok(place)
+    }
+
+    /// Emit a `ViewIndex` instruction producing a fresh place addressing
+    /// element `index` of `view`.
+    pub fn emit_view_index(
+        &mut self,
+        view: ValueId,
+        index: ValueId,
+        elem_ty: Type<TypeName>,
+    ) -> Result<PlaceId, BuilderError> {
+        let block = self.current_block().ok_or(BuilderError::NoCurrentBlock)?;
+        if !matches!(self.inner.func().blocks[block].term, Terminator::Unreachable) {
+            return Err(BuilderError::BlockAlreadyTerminated(block));
+        }
+        let place = self.places.insert(PlaceInfo { elem_ty });
+        self.inner.func_mut().append_void_inst(
+            block,
+            InstKind::ViewIndex {
+                view: ValueRef::from(view),
+                index: ValueRef::from(index),
+                result: place,
+            },
+        );
+        Ok(place)
+    }
+
+    /// Push a load instruction. Returns the loaded value.
+    pub fn push_load(
+        &mut self,
+        place: PlaceId,
+        result_ty: Type<TypeName>,
+    ) -> Result<ValueId, BuilderError> {
+        let block = self.current_block().ok_or(BuilderError::NoCurrentBlock)?;
+        if !matches!(self.inner.func().blocks[block].term, Terminator::Unreachable) {
+            return Err(BuilderError::BlockAlreadyTerminated(block));
+        }
+        Ok(self.inner.func_mut().append_inst(block, InstKind::Load { place }, result_ty))
     }
 
     /// Push a store instruction.
-    pub fn push_store(&mut self, ptr: ValueId, value: ValueId) -> Result<(), BuilderError> {
+    pub fn push_store(&mut self, place: PlaceId, value: ValueId) -> Result<(), BuilderError> {
         let block = self.current_block().ok_or(BuilderError::NoCurrentBlock)?;
         if !matches!(self.inner.func().blocks[block].term, Terminator::Unreachable) {
             return Err(BuilderError::BlockAlreadyTerminated(block));
@@ -344,7 +412,7 @@ impl FuncBuilder {
         self.inner.func_mut().append_void_inst(
             block,
             InstKind::Store {
-                ptr: ValueRef::from(ptr),
+                place,
                 value: ValueRef::from(value),
             },
         );
@@ -404,14 +472,8 @@ impl FuncBuilder {
         value: ValueId,
         elem_ty: Type<TypeName>,
     ) -> Result<(), BuilderError> {
-        let ptr = self.push_inst(
-            InstKind::StorageViewIndex {
-                view: ValueRef::from(view),
-                index: ValueRef::from(index),
-            },
-            elem_ty,
-        )?;
-        self.push_store(ptr, value)
+        let place = self.emit_view_index(view, index, elem_ty)?;
+        self.push_store(place, value)
     }
 
     // =========================================================================

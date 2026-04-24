@@ -653,17 +653,13 @@ fn build_scan_into_loop(
     call_operands.extend(spec.captures.iter().copied());
     let new_acc_nid = graph.intern_pure(PureOp::Call(spec.func), call_operands, spec.acc_ty.clone());
 
-    // view[i] = new_acc: StorageViewIndex (pure) + Store (effectful).
-    let ptr_nid = graph.intern_pure(
-        PureOp::StorageViewIndex,
-        smallvec![spec.view_nid, idx_nid],
-        spec.acc_ty,
-    );
+    // view[i] = new_acc: ViewIndex (pure, produces a PlaceId) + Store (effectful).
+    let ptr_nid = graph.intern_pure(PureOp::ViewIndex, smallvec![spec.view_nid, idx_nid], spec.acc_ty);
     let eff_in = alloc_effect(next_effect);
     let eff_out = alloc_effect(next_effect);
     graph.skeleton.blocks[handles.body].side_effects.push(SideEffect {
         kind: SideEffectKind::Inst(InstKind::Store {
-            ptr: ValueRef::Ssa(Default::default()),
+            place: Default::default(),
             value: ValueRef::Ssa(Default::default()),
         }),
         operand_nodes: smallvec![ptr_nid, new_acc_nid],
@@ -725,9 +721,9 @@ fn build_map_into_loop(
     call_operands.extend(spec.captures.iter().copied());
     let y_nid = graph.intern_pure(PureOp::Call(spec.func), call_operands, spec.out_elem_ty.clone());
 
-    // view[i] = y: StorageViewIndex (pure) + Store (effectful).
+    // view[i] = y: ViewIndex (pure, produces a PlaceId) + Store (effectful).
     let ptr_nid = graph.intern_pure(
-        PureOp::StorageViewIndex,
+        PureOp::ViewIndex,
         smallvec![spec.view_nid, idx_nid],
         spec.out_elem_ty,
     );
@@ -735,7 +731,7 @@ fn build_map_into_loop(
     let eff_out = alloc_effect(next_effect);
     graph.skeleton.blocks[handles.body].side_effects.push(SideEffect {
         kind: SideEffectKind::Inst(InstKind::Store {
-            ptr: ValueRef::Ssa(Default::default()),
+            place: Default::default(),
             value: ValueRef::Ssa(Default::default()),
         }),
         operand_nodes: smallvec![ptr_nid, y_nid],
@@ -1112,18 +1108,14 @@ fn emit_read_element(
         return graph.intern_pure(PureOp::Tuple(components.len()), elem_nids, elem_ty.clone());
     }
     if is_view_source(arr_ty) {
-        // View array: StorageViewIndex (pure) + Load (effectful).
-        let ptr_nid = graph.intern_pure(
-            PureOp::StorageViewIndex,
-            smallvec![arr_nid, idx_nid],
-            elem_ty.clone(),
-        );
+        // View array: ViewIndex (pure, PlaceId) + Load (effectful).
+        let ptr_nid = graph.intern_pure(PureOp::ViewIndex, smallvec![arr_nid, idx_nid], elem_ty.clone());
         let load_result = graph.alloc_side_effect_result(elem_ty.clone());
         let eff_in = alloc_effect(next_effect);
         let eff_out = alloc_effect(next_effect);
         graph.skeleton.blocks[body].side_effects.push(SideEffect {
             kind: SideEffectKind::Inst(InstKind::Load {
-                ptr: ValueRef::Ssa(Default::default()),
+                place: Default::default(),
             }),
             operand_nodes: smallvec![ptr_nid],
             result: Some(load_result),

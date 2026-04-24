@@ -499,27 +499,13 @@ fn emit_vertex_fragment_output_stores(
     outputs: &[crate::ssa::types::EntryOutput],
 ) {
     if outputs.len() == 1 {
-        let ptr_ty = Type::Constructed(
-            TypeName::Pointer,
-            vec![
-                outputs[0].ty.clone(),
-                Type::Constructed(TypeName::PointerOutput, vec![]),
-            ],
-        );
-        let ptr_nid = converter.emit_output_ptr(0, ptr_ty);
-        converter.emit_store(ptr_nid, result_nid);
+        let place_nid = converter.emit_output_slot(0, outputs[0].ty.clone());
+        converter.emit_store(place_nid, result_nid);
     } else {
         for (i, output) in outputs.iter().enumerate() {
             let component = converter.emit_project(result_nid, i as u32, output.ty.clone());
-            let ptr_ty = Type::Constructed(
-                TypeName::Pointer,
-                vec![
-                    output.ty.clone(),
-                    Type::Constructed(TypeName::PointerOutput, vec![]),
-                ],
-            );
-            let ptr_nid = converter.emit_output_ptr(i, ptr_ty);
-            converter.emit_store(ptr_nid, component);
+            let place_nid = converter.emit_output_slot(i, output.ty.clone());
+            converter.emit_store(place_nid, component);
         }
     }
 }
@@ -639,17 +625,18 @@ impl<'a> Converter<'a> {
         )
     }
 
-    /// Emit a `Store` side-effect in the current block, returning the new effect token.
-    fn emit_store(&mut self, ptr_nid: NodeId, value_nid: NodeId) -> EffectToken {
+    /// Emit a `Store` side-effect in the current block. `place_nid` must
+    /// be a place-producing pure op (`ViewIndex`, `OutputSlot`).
+    fn emit_store(&mut self, place_nid: NodeId, value_nid: NodeId) -> EffectToken {
         let effect_in = EffectToken(0); // placeholder; real chain is built by elaborate
         let effect_out = self.alloc_effect();
         let kind = InstKind::Store {
-            ptr: ValueRef::Ssa(Default::default()),
+            place: Default::default(),
             value: ValueRef::Ssa(Default::default()),
         };
         self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
             kind: SideEffectKind::Inst(kind),
-            operand_nodes: smallvec![ptr_nid, value_nid],
+            operand_nodes: smallvec![place_nid, value_nid],
             result: None,
             effects: Some((effect_in, effect_out)),
             span: self.current_span,
@@ -657,8 +644,8 @@ impl<'a> Converter<'a> {
         effect_out
     }
 
-    /// Emit a store through a StorageView at `index`. Pure `StorageViewIndex`
-    /// produces the pointer; the Store is effectful.
+    /// Emit a store through a StorageView at `index`. `ViewIndex` produces
+    /// the place; the Store consumes it.
     fn emit_storage_store(
         &mut self,
         view_nid: NodeId,
@@ -666,13 +653,13 @@ impl<'a> Converter<'a> {
         value_nid: NodeId,
         elem_ty: Type<TypeName>,
     ) {
-        let ptr_nid = self.intern_pure(PureOp::StorageViewIndex, smallvec![view_nid, index_nid], elem_ty);
-        let _ = self.emit_store(ptr_nid, value_nid);
+        let place_nid = self.intern_pure(PureOp::ViewIndex, smallvec![view_nid, index_nid], elem_ty);
+        let _ = self.emit_store(place_nid, value_nid);
     }
 
-    /// Emit a pure `OutputPtr(index)` node.
-    fn emit_output_ptr(&mut self, index: usize, ptr_ty: Type<TypeName>) -> NodeId {
-        self.intern_pure(PureOp::OutputPtr { index }, smallvec![], ptr_ty)
+    /// Emit a pure `OutputSlot(index)` node (produces a `PlaceId`).
+    fn emit_output_slot(&mut self, index: usize, elem_ty: Type<TypeName>) -> NodeId {
+        self.intern_pure(PureOp::OutputSlot { index }, smallvec![], elem_ty)
     }
 
     /// Emit a pure `Project(base, index)` node.
@@ -971,20 +958,17 @@ impl<'a> Converter<'a> {
                 };
                 let index_nid = self.convert_term(&args[2])?;
                 let view_nid = self.emit_storage_view(set, binding, ty.clone());
-                let ptr_nid = self.intern_pure(
-                    PureOp::StorageViewIndex,
-                    smallvec![view_nid, index_nid],
-                    ty.clone(),
-                );
+                let place_nid =
+                    self.intern_pure(PureOp::ViewIndex, smallvec![view_nid, index_nid], ty.clone());
                 // Load the element; Load is effectful.
                 let result_nid = self.graph.alloc_side_effect_result(ty.clone());
                 let effect_in = EffectToken(0);
                 let effect_out = self.alloc_effect();
                 self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
                     kind: SideEffectKind::Inst(InstKind::Load {
-                        ptr: ValueRef::Ssa(crate::ssa::types::ValueId::default()),
+                        place: Default::default(),
                     }),
-                    operand_nodes: smallvec![ptr_nid],
+                    operand_nodes: smallvec![place_nid],
                     result: Some(result_nid),
                     effects: Some((effect_in, effect_out)),
                     span: self.current_span,

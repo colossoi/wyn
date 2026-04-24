@@ -991,10 +991,14 @@ struct LowerCtx<'a, 'b> {
     /// Phi node info: (target_block, param_idx, value, source_block)
     /// Collected during terminator lowering, inserted after all blocks processed.
     phi_inputs: Vec<(BlockId, usize, spirv::Word, spirv::Word)>,
-    /// Map from SSA view ValueId to its buffer_id (u32 index into buffer_vars).
-    /// Populated when lowering StorageView instructions so StorageViewIndex can
-    /// resolve the buffer without relying on SPIR-V constant reverse lookups.
+    /// Map from a `StorageView` result ValueId to its buffer_id (index into
+    /// `buffer_vars`). Tracks the handle value's provenance so `ViewIndex`
+    /// can pick the right storage buffer for its `OpAccessChain`.
     view_buffer_id: HashMap<ValueId, u32>,
+    /// Map from a `PlaceId` to the SPIR-V pointer word that addresses it.
+    /// Populated by place-producing instructions (`OutputSlot`,
+    /// `ViewIndex`, `Alloca`) and read by `Load` / `Store`.
+    place_ptr_id: HashMap<crate::ssa::types::PlaceId, spirv::Word>,
     /// Span of the instruction currently being lowered (set by `lower_inst`).
     /// Consumed via `blame_span()` so backend errors blame the source line of
     /// the originating expression.
@@ -1019,9 +1023,23 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             block_indices: HashMap::new(),
             phi_inputs: Vec::new(),
             view_buffer_id: HashMap::new(),
+            place_ptr_id: HashMap::new(),
             current_span: None,
             func_span,
         }
+    }
+
+    /// SPIR-V pointer word for a `PlaceId` — set by the defining instruction
+    /// (`OutputSlot`, `ViewIndex`, `Alloca`), consumed by `Load` / `Store`.
+    fn place_ptr(&self, place: crate::ssa::types::PlaceId) -> Result<spirv::Word> {
+        self.place_ptr_id.get(&place).copied().ok_or_else(|| {
+            err_spirv_at!(
+                self.blame_span(),
+                "SPIR-V: place {:?} has no pointer — its defining instruction \
+                 was not lowered (or ran after a consumer)",
+                place
+            )
+        })
     }
 
     /// Source span used to blame an instruction's lowering errors. Falls back
@@ -1335,18 +1353,21 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 self.lower_intrinsic(name, args, &arg_ids, result_ty, inst)?
             }
 
-            InstKind::Alloca { elem_ty, .. } => {
+            InstKind::Alloca { elem_ty, result } => {
                 let elem_spirv_ty = self.constructor.polytype_to_spirv(elem_ty);
-                self.constructor.declare_variable("_alloca", elem_spirv_ty)?
+                let ptr = self.constructor.declare_variable("_alloca", elem_spirv_ty)?;
+                self.place_ptr_id.insert(*result, ptr);
+                // Void instruction — no value result; return a harmless dummy.
+                self.constructor.const_i32(0)
             }
 
-            InstKind::Load { ptr, .. } => {
-                let ptr_id = self.get_value_ref(*ptr)?;
+            InstKind::Load { place } => {
+                let ptr_id = self.place_ptr(*place)?;
                 self.constructor.builder.load(result_ty, None, ptr_id, None, [])?
             }
 
-            InstKind::Store { ptr, value, .. } => {
-                let ptr_id = self.get_value_ref(*ptr)?;
+            InstKind::Store { place, value } => {
+                let ptr_id = self.place_ptr(*place)?;
                 let val_id = self.get_value_ref(*value)?;
                 self.constructor.builder.store(ptr_id, val_id, None, [])?;
                 // Store doesn't produce a value, but we return dummy
@@ -1414,7 +1435,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 }
             }
 
-            InstKind::StorageViewIndex { view, index } => {
+            InstKind::ViewIndex { view, index, result } => {
                 let view_id = self.get_value_ref(*view)?;
                 let index_id = self.get_value_ref(*index)?;
                 let u32_ty = self.constructor.u32_type;
@@ -1425,29 +1446,36 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 let base_offset =
                     self.constructor.builder.composite_extract(u32_ty, None, view_id, [1u32])?;
 
-                // Try the SSA-level view_buffer_id map first (reliable), fall back to
-                // SPIR-V constant reverse lookup (works when buffer_id is directly
-                // extractable as a constant, e.g. in the same entry point scope).
-                let (buffer_var, _) =
+                // Recover buffer_var: prefer the SSA-level provenance map for
+                // views produced in this function; otherwise reverse-map the
+                // extracted buffer_id constant.
+                let (buffer_var, elem_spirv_ty) =
                     if let Some(&buf_id) = view.as_ssa().and_then(|id| self.view_buffer_id.get(&id)) {
                         self.constructor.buffer_vars.get(buf_id as usize).copied().ok_or_else(|| {
                             err_spirv_at!(self.blame_span(), "view_buffer_id: unknown buffer_id {}", buf_id)
                         })?
                     } else {
-                        self.constructor.resolve_buffer_by_id(buffer_id_val, "StorageViewIndex")?
+                        self.constructor.resolve_buffer_by_id(buffer_id_val, "ViewIndex")?
                     };
+                let _ = elem_spirv_ty;
 
                 let actual_index = self.constructor.builder.i_add(u32_ty, None, base_offset, index_id)?;
-
                 let zero = self.constructor.const_i32(0);
+                // Infer element SPIR-V type from the place's elem_ty — the
+                // place's type is what `Load` will return / `Store` writes.
+                let place_elem = self.body.place_elem_ty(*result).clone();
+                let elem_ty_id = self.constructor.polytype_to_spirv(&place_elem);
                 let elem_ptr_type =
-                    self.constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, result_ty);
-                self.constructor.builder.access_chain(
+                    self.constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_ty_id);
+                let ptr = self.constructor.builder.access_chain(
                     elem_ptr_type,
                     None,
                     buffer_var,
                     [zero, actual_index],
-                )?
+                )?;
+                self.place_ptr_id.insert(*result, ptr);
+                // Void instruction.
+                self.constructor.const_i32(0)
             }
 
             InstKind::StorageViewLen { view } => {
@@ -1456,18 +1484,21 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 self.constructor.builder.composite_extract(result_ty, None, view_id, [2u32])?
             }
 
-            InstKind::OutputPtr { index } => {
-                // Return the output variable pointer for this index
-                if *index < self.constructor.current_entry_outputs.len() {
-                    self.constructor.current_entry_outputs[*index]
-                } else {
+            InstKind::OutputSlot { index, result } => {
+                // Each output was wired up in `lower_ssa_entry_point`; bind
+                // the place to its output variable pointer.
+                if *index >= self.constructor.current_entry_outputs.len() {
                     bail_spirv_at!(
                         self.blame_span(),
                         "Output index {} out of bounds (have {} outputs)",
                         index,
                         self.constructor.current_entry_outputs.len()
-                    )
+                    );
                 }
+                let ptr = self.constructor.current_entry_outputs[*index];
+                self.place_ptr_id.insert(*result, ptr);
+                // Void instruction.
+                self.constructor.const_i32(0)
             }
 
             InstKind::Materialize { value } => {

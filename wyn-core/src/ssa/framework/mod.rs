@@ -11,6 +11,7 @@ new_key_type! {
     pub struct BlockId;
     pub struct InstId;
     pub struct ValueId;
+    pub struct PlaceId;
 }
 
 #[derive(Clone, Debug)]

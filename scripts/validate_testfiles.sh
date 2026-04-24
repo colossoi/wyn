@@ -7,6 +7,7 @@ set -e
 KEEP=false
 OUT_DIR="/tmp"
 MODE="spirv"
+PROFILE="debug"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -27,23 +28,39 @@ while [[ $# -gt 0 ]]; do
             MODE="wgsl"
             shift
             ;;
+        --release)
+            PROFILE="release"
+            shift
+            ;;
         *)
-            echo "Usage: $0 [--keep|-k] [--out-dir|-o DIR] [--glsl|--wgsl]"
+            echo "Usage: $0 [--keep|-k] [--out-dir|-o DIR] [--glsl|--wgsl] [--release]"
             echo "  --keep, -k       Keep generated files (in /tmp by default)"
             echo "  --out-dir, -o    Output directory (implies --keep)"
             echo "  --glsl           Compile to GLSL (shadertoy) instead of SPIR-V"
             echo "  --wgsl           Compile to WGSL and validate with 'viz validate'"
+            echo "  --release        Build wyn (and viz, for --wgsl) with --release"
+            echo "                   (default: debug — builds faster, runs slower)"
             exit 1
             ;;
     esac
 done
 
-echo "Building wyn (release)..."
-cargo build --release -p wyn
+if [ "$PROFILE" = "release" ]; then
+    CARGO_FLAG="--release"
+    WYN_BIN="./target/release/wyn"
+    VIZ_BIN="./extra/viz/target/release/viz"
+else
+    CARGO_FLAG=""
+    WYN_BIN="./target/debug/wyn"
+    VIZ_BIN="./extra/viz/target/debug/viz"
+fi
+
+echo "Building wyn ($PROFILE)..."
+cargo build $CARGO_FLAG -p wyn
 
 if [ "$MODE" = "wgsl" ]; then
-    echo "Building viz (for WGSL validation)..."
-    (cd extra/viz && cargo build --release --quiet)
+    echo "Building viz ($PROFILE) for WGSL validation..."
+    (cd extra/viz && cargo build $CARGO_FLAG --quiet)
 fi
 
 FAIL=0
@@ -81,7 +98,7 @@ for f in testfiles/*.wyn; do
         out_path="${OUT_DIR}/${base}.glsl"
         printf "Compiling %s → GLSL... " "$f"
 
-        if ! compile_err=$(./target/release/wyn compile "$f" -t shadertoy -o "$out_path" 2>&1); then
+        if ! compile_err=$("$WYN_BIN" compile "$f" -t shadertoy -o "$out_path" 2>&1); then
             echo "FAILED"
             echo "$compile_err"
             FAIL=$((FAIL + 1))
@@ -110,7 +127,7 @@ for f in testfiles/*.wyn; do
         out_path="${OUT_DIR}/${base}.wgsl"
         printf "Compiling %s → WGSL... " "$f"
 
-        if ! compile_err=$(./target/release/wyn compile "$f" -t wgsl -o "$out_path" 2>&1); then
+        if ! compile_err=$("$WYN_BIN" compile "$f" -t wgsl -o "$out_path" 2>&1); then
             echo "COMPILE FAILED"
             echo "$compile_err"
             FAIL=$((FAIL + 1))
@@ -119,7 +136,7 @@ for f in testfiles/*.wyn; do
 
         printf "validating... "
 
-        if ! val_err=$(./extra/viz/target/release/viz validate "$out_path" 2>&1); then
+        if ! val_err=$("$VIZ_BIN" validate "$out_path" 2>&1); then
             echo "VALIDATION FAILED"
             echo "$val_err"
             if [ "$KEEP" = false ]; then rm -f "$out_path"; fi
@@ -139,7 +156,7 @@ for f in testfiles/*.wyn; do
         spv_path="${OUT_DIR}/${base}.spv"
         printf "Compiling %s... " "$f"
 
-        if ! compile_err=$(./target/release/wyn compile "$f" -o "$spv_path" 2>&1); then
+        if ! compile_err=$("$WYN_BIN" compile "$f" -o "$spv_path" 2>&1); then
             echo "COMPILE FAILED"
             echo "$compile_err"
             FAIL=$((FAIL + 1))

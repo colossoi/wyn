@@ -31,10 +31,11 @@ use crate::ast::{Span, TypeName};
 use crate::interface;
 use polytype::Type;
 use rspirv::spirv;
+use slotmap::SlotMap;
 use std::collections::HashMap;
 
 // Re-export ID types from wyn-ssa.
-pub use crate::ssa::framework::{BlockId, InstId, ValueId};
+pub use crate::ssa::framework::{BlockId, InstId, PlaceId, ValueId};
 // Re-export Terminator from wyn-ssa.
 pub use crate::ssa::framework::Terminator;
 // Re-export BasicBlock from wyn-ssa.
@@ -258,19 +259,20 @@ pub enum InstKind {
     // =========================================================================
     // Effectful Operations (effects tracked on InstNode, not here)
     // =========================================================================
-    /// Allocate local storage (returns a pointer).
+    /// Allocate a local place (function-scope variable).
     Alloca {
         elem_ty: Type<TypeName>,
+        result: PlaceId,
     },
 
-    /// Load a value from a pointer.
+    /// Load a value from a place.
     Load {
-        ptr: ValueRef,
+        place: PlaceId,
     },
 
-    /// Store a value to a pointer.
+    /// Store a value to a place.
     Store {
-        ptr: ValueRef,
+        place: PlaceId,
         value: ValueRef,
     },
 
@@ -281,11 +283,12 @@ pub enum InstKind {
         len: ValueRef,
     },
 
-    /// Index into a storage view. SSA result type is the element type;
-    /// SPIR-V lowering wraps it in a StorageBuffer pointer internally.
-    StorageViewIndex {
+    /// Index into a storage view. Produces an addressable place
+    /// (see `PlaceId` — registered in `FuncBody.places` at emit time).
+    ViewIndex {
         view: ValueRef,
         index: ValueRef,
+        result: PlaceId,
     },
 
     /// Get the length of a storage view.
@@ -296,11 +299,12 @@ pub enum InstKind {
     // =========================================================================
     // Entry Point I/O
     // =========================================================================
-    /// Get a pointer to an entry point output variable.
-    /// Used in entry points to explicitly store results before returning.
-    OutputPtr {
+    /// An entry-point output slot — a Place that `Store` writes into before
+    /// returning. Registered in `FuncBody.places` at emit time.
+    OutputSlot {
         /// Index of the output (0 for single output, 0..n for tuple outputs).
         index: usize,
+        result: PlaceId,
     },
 
     // =========================================================================
@@ -324,6 +328,7 @@ pub enum InstKind {
 
 impl InstKind {
     /// Return all ValueRefs referenced by this instruction (read-only).
+    /// Place operands (see `place_uses`) are traversed separately.
     pub fn value_uses(&self) -> Vec<ValueRef> {
         match self {
             InstKind::Int(_)
@@ -333,7 +338,8 @@ impl InstKind {
             | InstKind::Global(_)
             | InstKind::Extern(_)
             | InstKind::Alloca { .. }
-            | InstKind::OutputPtr { .. } => vec![],
+            | InstKind::OutputSlot { .. }
+            | InstKind::Load { .. } => vec![],
 
             InstKind::BinOp { lhs, rhs, .. } => vec![*lhs, *rhs],
             InstKind::UnaryOp { operand, .. } => vec![*operand],
@@ -351,8 +357,7 @@ impl InstKind {
             InstKind::Project { base, .. } => vec![*base],
             InstKind::Index { base, index } => vec![*base, *index],
             InstKind::Call { args, .. } | InstKind::Intrinsic { args, .. } => args.clone(),
-            InstKind::Load { ptr, .. } => vec![*ptr],
-            InstKind::Store { ptr, value, .. } => vec![*ptr, *value],
+            InstKind::Store { value, .. } => vec![*value],
             InstKind::StorageView { source, offset, len } => {
                 let mut u = vec![*offset, *len];
                 if let ViewSource::Inherited { parent } = source {
@@ -360,10 +365,32 @@ impl InstKind {
                 }
                 u
             }
-            InstKind::StorageViewIndex { view, index } => vec![*view, *index],
+            InstKind::ViewIndex { view, index, .. } => vec![*view, *index],
             InstKind::StorageViewLen { view } => vec![*view],
             InstKind::Materialize { value } => vec![*value],
             InstKind::DynamicExtract { base, index } => vec![*base, *index],
+        }
+    }
+
+    /// Return all places *consumed* by this instruction — i.e. places that
+    /// appear as operands (the `place` field of `Load`/`Store`), not
+    /// the place this instruction *produces* (that's its result). Use
+    /// `place_result()` for the latter.
+    pub fn place_uses(&self) -> Vec<PlaceId> {
+        match self {
+            InstKind::Load { place } => vec![*place],
+            InstKind::Store { place, .. } => vec![*place],
+            _ => vec![],
+        }
+    }
+
+    /// The `PlaceId` this instruction *produces*, if any.
+    pub fn place_result(&self) -> Option<PlaceId> {
+        match self {
+            InstKind::Alloca { result, .. }
+            | InstKind::OutputSlot { result, .. }
+            | InstKind::ViewIndex { result, .. } => Some(*result),
+            _ => None,
         }
     }
 
@@ -402,11 +429,7 @@ impl InstKind {
                     sub(a);
                 }
             }
-            InstKind::Load { ptr, .. } => sub(ptr),
-            InstKind::Store { ptr, value, .. } => {
-                sub(ptr);
-                sub(value);
-            }
+            InstKind::Store { value, .. } => sub(value),
             InstKind::ArrayRange { start, len, step } => {
                 sub(start);
                 sub(len);
@@ -425,7 +448,7 @@ impl InstKind {
                 sub(offset);
                 sub(len);
             }
-            InstKind::StorageViewIndex { view, index } => {
+            InstKind::ViewIndex { view, index, .. } => {
                 sub(view);
                 sub(index);
             }
@@ -442,7 +465,21 @@ impl InstKind {
             | InstKind::Global(_)
             | InstKind::Extern(_)
             | InstKind::Alloca { .. }
-            | InstKind::OutputPtr { .. } => {}
+            | InstKind::OutputSlot { .. }
+            | InstKind::Load { .. } => {}
+        }
+    }
+
+    /// Apply a substitution function to every `PlaceId` referenced by this
+    /// instruction (both operand places and the `result` place, if any).
+    pub fn substitute_places(&mut self, sub: &mut impl FnMut(&mut PlaceId)) {
+        match self {
+            InstKind::Load { place } => sub(place),
+            InstKind::Store { place, .. } => sub(place),
+            InstKind::Alloca { result, .. }
+            | InstKind::OutputSlot { result, .. }
+            | InstKind::ViewIndex { result, .. } => sub(result),
+            _ => {}
         }
     }
 
@@ -457,6 +494,16 @@ impl InstKind {
         });
         result
     }
+}
+
+/// Metadata for a `PlaceId` — addressable locations that `Load` reads
+/// from and `Store` writes to. Places are identity-based (distinct
+/// places never alias); they never flow through block params. The
+/// defining instruction is found by scanning the IR; see
+/// `FuncBody::place_of_inst`.
+#[derive(Debug, Clone)]
+pub struct PlaceInfo {
+    pub elem_ty: Type<TypeName>,
 }
 
 /// Where a view array gets its data from.
@@ -500,6 +547,9 @@ pub struct FuncBody {
 
     /// DPS output parameter (if using destination-passing style).
     pub dps_output: Option<ValueId>,
+
+    /// Addressable places (`OutputSlot`, `ViewIndex`, `Alloca` results).
+    pub places: SlotMap<PlaceId, PlaceInfo>,
 }
 
 impl FuncBody {
@@ -541,6 +591,21 @@ impl FuncBody {
     /// Number of values in this function.
     pub fn num_values(&self) -> usize {
         self.inner.values.len()
+    }
+
+    /// Element type of the place (what `Load` returns / `Store` writes).
+    pub fn place_elem_ty(&self, place: PlaceId) -> &Type<TypeName> {
+        &self.places[place].elem_ty
+    }
+
+    /// `PlaceId` defined by the given instruction, if any.
+    pub fn place_of_inst(&self, inst: InstId) -> Option<PlaceId> {
+        match &self.inner.insts[inst].data {
+            InstKind::Alloca { result, .. }
+            | InstKind::OutputSlot { result, .. }
+            | InstKind::ViewIndex { result, .. } => Some(*result),
+            _ => None,
+        }
     }
 }
 

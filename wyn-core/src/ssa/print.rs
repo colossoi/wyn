@@ -68,6 +68,10 @@ fn fmt_val(v: ValueId) -> String {
     format!("%{:?}", v)
 }
 
+fn fmt_place(p: crate::ssa::types::PlaceId) -> String {
+    format!("@{:?}", p)
+}
+
 fn format_values(vals: &[ValueId]) -> String {
     vals.iter().map(|v| fmt_val(*v)).collect::<Vec<_>>().join(", ")
 }
@@ -244,14 +248,14 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
         InstKind::Intrinsic { name, args } => {
             let _ = write!(out, "intrinsic @{name}({})", format_refs(args));
         }
-        InstKind::Alloca { elem_ty } => {
-            let _ = write!(out, "alloca {}", format_type(elem_ty));
+        InstKind::Alloca { elem_ty, result } => {
+            let _ = write!(out, "alloca {} -> {}", format_type(elem_ty), fmt_place(*result));
         }
-        InstKind::Load { ptr } => {
-            let _ = write!(out, "load {}", format_ref(ptr));
+        InstKind::Load { place } => {
+            let _ = write!(out, "load {}", fmt_place(*place));
         }
-        InstKind::Store { ptr, value } => {
-            let _ = write!(out, "store {}, {}", format_ref(ptr), format_ref(value));
+        InstKind::Store { place, value } => {
+            let _ = write!(out, "store {}, {}", fmt_place(*place), format_ref(value));
         }
         InstKind::StorageView { source, offset, len } => {
             let src = match source {
@@ -265,19 +269,20 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
                 format_ref(len)
             );
         }
-        InstKind::StorageViewIndex { view, index } => {
+        InstKind::ViewIndex { view, index, result } => {
             let _ = write!(
                 out,
-                "storage_view_index {}[{}]",
+                "view_index {}[{}] -> {}",
                 format_ref(view),
-                format_ref(index)
+                format_ref(index),
+                fmt_place(*result)
             );
         }
         InstKind::StorageViewLen { view } => {
             let _ = write!(out, "storage_view_len {}", format_ref(view));
         }
-        InstKind::OutputPtr { index } => {
-            let _ = write!(out, "output_ptr {index}");
+        InstKind::OutputSlot { index, result } => {
+            let _ = write!(out, "output_slot {index} -> {}", fmt_place(*result));
         }
         InstKind::Materialize { value } => {
             let _ = write!(out, "materialize {}", format_ref(value));

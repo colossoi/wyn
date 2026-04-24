@@ -13,7 +13,7 @@
 use crate::ast::TypeName;
 use crate::ssa::builder::FuncBuilder;
 use crate::ssa::framework::BlockId as SkelBlockId;
-use crate::ssa::types::{BlockId, ControlHeader, FuncBody, InstKind, ValueId, ValueRef};
+use crate::ssa::types::{BlockId, ControlHeader, FuncBody, InstKind, PlaceId, ValueId, ValueRef};
 use polytype::Type;
 use smallvec::SmallVec;
 use std::collections::HashMap;
@@ -61,6 +61,7 @@ pub fn run(
         loop_analysis: &loop_analysis,
         loop_stack: SmallVec::new(),
         elaborated: ScopedMap::new(),
+        elaborated_places: ScopedMap::new(),
         builder: FuncBuilder::new(params.to_vec(), return_ty),
         block_map: HashMap::new(),
         current_block: None,
@@ -157,8 +158,16 @@ struct Elaborator<'a> {
     domtree: &'a DomTree,
     loop_analysis: &'a LoopAnalysis,
     loop_stack: SmallVec<[LoopStackEntry; 4]>,
-    /// NodeId → (ValueId, skeleton block where it was placed).
+    /// NodeId → (ValueId, skeleton block where it was placed) for
+    /// value-producing nodes.
     elaborated: ScopedMap<NodeId, (ValueId, SkelBlockId)>,
+    /// NodeId → (PlaceId, skeleton block) for place-producing nodes
+    /// (`ViewIndex`, `OutputSlot`). Separate from `elaborated` because
+    /// places are not interchangeable with values, and because identity
+    /// matters: two hashconsed `ViewIndex` nodes still get distinct places
+    /// when demanded from unrelated scopes (the `ScopedMap` already
+    /// handles that via its scope-depth pop).
+    elaborated_places: ScopedMap<NodeId, (PlaceId, SkelBlockId)>,
     builder: FuncBuilder,
     block_map: HashMap<SkelBlockId, BlockId>,
     current_block: Option<BlockId>,
@@ -228,15 +237,34 @@ impl<'a> Elaborator<'a> {
     /// their containing skeleton block — only the operands go through
     /// demand() where LICM may move them.
     fn elaborate_side_effect(&mut self, se: &SideEffect, skel_bid: SkelBlockId) {
-        let args: Vec<ValueId> = se.operand_nodes.iter().map(|&nid| self.demand(nid)).collect();
-
         let inst_kind = match &se.kind {
             super::types::SideEffectKind::Inst(k) => k,
             super::types::SideEffectKind::Pending(p) => {
                 panic!("elaborate: unexpanded PendingSoac in skeleton: {:?}", p)
             }
         };
-        let kind = rebuild_effectful_inst_kind(inst_kind, &args);
+
+        // Load/Store carry a PlaceId operand in `operand_nodes[0]` rather
+        // than a value; handle them explicitly so the place operand stays
+        // typed as `PlaceId`, not a ValueId.
+        let kind = match inst_kind {
+            InstKind::Load { .. } => {
+                let place = self.demand_place(se.operand_nodes[0]);
+                InstKind::Load { place }
+            }
+            InstKind::Store { .. } => {
+                let place = self.demand_place(se.operand_nodes[0]);
+                let value = self.demand(se.operand_nodes[1]);
+                InstKind::Store {
+                    place,
+                    value: ValueRef::Ssa(value),
+                }
+            }
+            _ => {
+                let args: Vec<ValueId> = se.operand_nodes.iter().map(|&nid| self.demand(nid)).collect();
+                rebuild_effectful_inst_kind(inst_kind, &args)
+            }
+        };
 
         if let Some(result_nid) = se.result {
             let ty = self.graph.types[&result_nid].clone();
@@ -256,6 +284,65 @@ impl<'a> Elaborator<'a> {
     /// Demand-driven elaboration: given a NodeId, produce a ValueId.
     fn demand(&mut self, nid: NodeId) -> ValueId {
         self.demand_placed(nid).0
+    }
+
+    /// Demand the place defined by `nid`. Only valid for nodes whose
+    /// `PureOp` produces a `PlaceId` (`ViewIndex`, `OutputSlot`).
+    fn demand_place(&mut self, nid: NodeId) -> PlaceId {
+        let resolved = self.resolve(nid);
+
+        if let Some((place, _)) = self.elaborated_places.get(&resolved) {
+            return place;
+        }
+
+        let node = self.graph.nodes[resolved].clone();
+        let ENode::Pure { op, operands } = &node else {
+            panic!(
+                "demand_place({:?}): expected a place-producing Pure node, got {:?}",
+                resolved, node
+            );
+        };
+
+        let (kind, placed) = match op {
+            PureOp::ViewIndex => {
+                let arg_placements: Vec<(ValueId, SkelBlockId)> =
+                    operands.iter().map(|&op_nid| self.demand_placed(op_nid)).collect();
+                let args: Vec<ValueId> = arg_placements.iter().map(|&(v, _)| v).collect();
+                let elem_ty = self.graph.types[&resolved].clone();
+                let place = self.builder.new_place(elem_ty);
+                let kind = InstKind::ViewIndex {
+                    view: ValueRef::Ssa(args[0]),
+                    index: ValueRef::Ssa(args[1]),
+                    result: place,
+                };
+                let placed = self.choose_placement(&arg_placements);
+                (kind, placed)
+            }
+            PureOp::OutputSlot { index } => {
+                let elem_ty = self.graph.types[&resolved].clone();
+                let place = self.builder.new_place(elem_ty);
+                let kind = InstKind::OutputSlot {
+                    index: *index,
+                    result: place,
+                };
+                let placed = self.choose_placement(&[]);
+                (kind, placed)
+            }
+            other => panic!(
+                "demand_place({:?}): {:?} does not produce a place",
+                resolved, other
+            ),
+        };
+
+        let place = match &kind {
+            InstKind::ViewIndex { result, .. } | InstKind::OutputSlot { result, .. } => *result,
+            _ => unreachable!(),
+        };
+        let span = self.graph.node_spans.get(&resolved).copied();
+        let out_bid = self.block_map[&placed];
+        self.builder.func_mut().append_void_inst_with_span(out_bid, kind, span);
+        self.elaborated_places.insert(resolved, (place, placed));
+        place
     }
 
     /// Demand a node and return both the ValueId and the skeleton block it
@@ -280,6 +367,13 @@ impl<'a> Elaborator<'a> {
                 (vid, placed)
             }
             ENode::Pure { op, operands } => {
+                if matches!(op, PureOp::ViewIndex | PureOp::OutputSlot { .. }) {
+                    panic!(
+                        "demand_placed({:?}): {:?} produces a PlaceId, not a ValueId — \
+                         its consumer (Load/Store/etc.) must call demand_place",
+                        resolved, op
+                    );
+                }
                 let arg_placements: Vec<(ValueId, SkelBlockId)> =
                     operands.iter().map(|&op_nid| self.demand_placed(op_nid)).collect();
                 let args: Vec<ValueId> = arg_placements.iter().map(|&(v, _)| v).collect();

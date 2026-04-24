@@ -465,6 +465,14 @@ fn wgsl_var(id: ValueId) -> String {
     format!("v{}_{}", idx, ver)
 }
 
+fn wgsl_place(id: crate::ssa::types::PlaceId) -> String {
+    use crate::ssa::framework::Key;
+    let ffi = id.data().as_ffi();
+    let idx = ffi & 0xFFFFFFFF;
+    let ver = ffi >> 32;
+    format!("p{}_{}", idx, ver)
+}
+
 struct LowerCtx<'a> {
     program: &'a Program,
     type_emitter: TypeEmitter,
@@ -1186,18 +1194,16 @@ struct ViewHandle {
 /// Load; Store writes through either variant directly.
 #[derive(Clone)]
 enum ValueBinding {
+    /// Either a local `let`/`var` name (`v3_1`) or a buffer identifier
+    /// that `ViewIndex` dereferences into a place expression.
     Alias(String),
-    Place(String),
 }
 
 impl ValueBinding {
     fn expr(&self) -> &str {
         match self {
-            ValueBinding::Alias(s) | ValueBinding::Place(s) => s,
+            ValueBinding::Alias(s) => s,
         }
-    }
-    fn is_place(&self) -> bool {
-        matches!(self, ValueBinding::Place(_))
     }
 }
 
@@ -1211,23 +1217,20 @@ struct BodyLowerCtx<'a, 'b> {
     declared: HashSet<String>,
     /// Storage view handles keyed by their `StorageView` result ValueId.
     view_handles: HashMap<ValueId, ViewHandle>,
-    /// OutputPtr bookkeeping: for an entry with `@location(N)` outputs we
-    /// declare a `var<function> _out{N}: T` at function entry and alias
-    /// the `OutputPtr` result's ValueId to that name. `Store` to such a
-    /// pointer becomes `_out{N} = value;`. At function exit the entry
-    /// lowering returns whichever output the entry produces (for
-    /// single-output entries, `_out0`).
-    output_ptrs: HashMap<ValueId, String>,
-    /// Set to `true` if at least one `OutputPtr` was lowered; the entry
+    /// WGSL place expression per `PlaceId` — output variable name,
+    /// `_alloca_N` for function-local `Alloca`s, or `buf[offset+idx]`
+    /// for `ViewIndex`. Consumed by `Load` / `Store` in `emit_nodes`.
+    place_targets: HashMap<crate::ssa::types::PlaceId, String>,
+    /// Set to `true` if at least one `OutputSlot` was lowered; the entry
     /// wrapper then returns the declared `_out0` (or builds a return
     /// struct for multi-output) instead of emitting a `return <expr>;`
     /// from the body's terminator result.
     uses_output_ptrs: bool,
-    /// Override for the name each `OutputPtr { index }` resolves to. If an
-    /// index is present here, that name is used as the store target (and
-    /// cached in `output_ptrs`); otherwise the default `_out{index}` is
-    /// used. Populated by `lower_entry_point` when it's packing outputs
-    /// into a struct — then the name is `_out_struct.f{index}`.
+    /// Override for the name each `OutputSlot { index }` resolves to. If
+    /// an index is present here, that name is used as the store target;
+    /// otherwise the default `_out{index}` is used. Populated by
+    /// `lower_entry_point` when it's packing outputs into a struct —
+    /// then the name is `_out_struct.f{index}`.
     output_target_names: HashMap<usize, String>,
     /// Span of the instruction currently being lowered.
     current_span: Option<Span>,
@@ -1242,7 +1245,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             value_map: HashMap::new(),
             declared: HashSet::new(),
             view_handles: HashMap::new(),
-            output_ptrs: HashMap::new(),
+            place_targets: HashMap::new(),
             uses_output_ptrs: false,
             output_target_names: HashMap::new(),
             current_span: None,
@@ -1389,82 +1392,100 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     // expressions that bind into `let`), so we handle
                     // them at the emit_nodes level.
                     match &inst.data {
-                        // Alloca: `var<function> x: T;` — no initializer.
-                        InstKind::Alloca { elem_ty } => {
-                            let result_id = inst.result.ok_or_else(|| {
-                                crate::err_wgsl_at!(self.blame_span(), "Alloca must have a result")
-                            })?;
+                        // Alloca: `var<function> x: T;` — register the
+                        // local var's name as the place expression.
+                        InstKind::Alloca { elem_ty, result } => {
                             let ty = self.ctx.type_emitter.type_to_wgsl(elem_ty)?;
-                            let var = wgsl_var(result_id);
+                            let var = wgsl_place(*result);
                             writeln!(output, "{}var {}: {};", self.ctx.indent_str(), var, ty).unwrap();
+                            self.declared.insert(var.clone());
+                            self.place_targets.insert(*result, var);
+                            continue;
+                        }
+
+                        // OutputSlot: bind the place to the entry's
+                        // output variable name (`_out0` or struct-field
+                        // override).
+                        InstKind::OutputSlot { index, result } => {
+                            let out_name = self
+                                .output_target_names
+                                .get(index)
+                                .cloned()
+                                .unwrap_or_else(|| format!("_out{}", index));
+                            self.uses_output_ptrs = true;
+                            self.place_targets.insert(*result, out_name);
+                            continue;
+                        }
+
+                        // ViewIndex: `buf[base_offset + idx]`.
+                        InstKind::ViewIndex { view, index, result } => {
+                            let view_id = view.as_ssa().ok_or_else(|| {
+                                crate::err_wgsl_at!(
+                                    self.blame_span(),
+                                    "ViewIndex: view operand must be an SSA value"
+                                )
+                            })?;
+                            let handle = self.view_handles.get(&view_id).ok_or_else(|| {
+                                crate::err_wgsl_at!(
+                                    self.blame_span(),
+                                    "ViewIndex: view {:?} not registered in view_handles",
+                                    view_id
+                                )
+                            })?;
+                            let idx = self.get_value(*index)?;
+                            let expr = format!(
+                                "{}[(i32({})) + (i32({}))]",
+                                handle.buffer_name, handle.offset_expr, idx
+                            );
+                            self.place_targets.insert(*result, expr);
+                            continue;
+                        }
+
+                        // Load: materialize the place's current value
+                        // into a cached `var` so subsequent uses go
+                        // through a stable binding.
+                        InstKind::Load { place } => {
+                            let result_id = inst.result.ok_or_else(|| {
+                                crate::err_wgsl_at!(self.blame_span(), "Load must have a result")
+                            })?;
+                            let target = self.place_targets.get(place).cloned().ok_or_else(|| {
+                                crate::err_wgsl_at!(
+                                    self.blame_span(),
+                                    "Load: place {:?} has no target expression",
+                                    place
+                                )
+                            })?;
+                            let ty =
+                                self.ctx.type_emitter.type_to_wgsl(self.body.get_value_type(result_id))?;
+                            let var = wgsl_var(result_id);
+                            writeln!(
+                                output,
+                                "{}var {}: {} = {};",
+                                self.ctx.indent_str(),
+                                var,
+                                ty,
+                                target
+                            )
+                            .unwrap();
                             self.declared.insert(var.clone());
                             self.value_map.insert(result_id, ValueBinding::Alias(var));
                             continue;
                         }
 
-                        // Load: if the ptr is a Place, materialize the
-                        // read into a cached `var`. Otherwise alias the
-                        // result to the ptr's name (WGSL's function-
-                        // scope pointer model collapses pointer and
-                        // value at the syntactic level).
-                        InstKind::Load { ptr } => {
-                            let result_id = inst.result.ok_or_else(|| {
-                                crate::err_wgsl_at!(self.blame_span(), "Load must have a result")
-                            })?;
-                            let ptr_id = match ptr {
-                                ValueRef::Ssa(id) => *id,
-                                ValueRef::Const(_) => {
-                                    return Err(crate::err_wgsl_at!(
-                                        self.blame_span(),
-                                        "Load from a constant pointer is not meaningful"
-                                    ));
-                                }
-                            };
-                            let ptr_binding = self.binding(ptr_id)?.clone();
-                            if ptr_binding.is_place() {
-                                let ty = self
-                                    .ctx
-                                    .type_emitter
-                                    .type_to_wgsl(self.body.get_value_type(result_id))?;
-                                let var = wgsl_var(result_id);
-                                writeln!(
-                                    output,
-                                    "{}var {}: {} = {};",
-                                    self.ctx.indent_str(),
-                                    var,
-                                    ty,
-                                    ptr_binding.expr()
+                        // Store: `target = value;` where target is the
+                        // place's WGSL expression (output var name,
+                        // alloca var, or `buf[idx]`).
+                        InstKind::Store { place, value } => {
+                            let target = self.place_targets.get(place).cloned().ok_or_else(|| {
+                                crate::err_wgsl_at!(
+                                    self.blame_span(),
+                                    "Store: place {:?} has no target expression",
+                                    place
                                 )
-                                .unwrap();
-                                self.declared.insert(var.clone());
-                                self.value_map.insert(result_id, ValueBinding::Alias(var));
-                            } else {
-                                self.value_map.insert(result_id, ptr_binding);
-                            }
+                            })?;
+                            let val = self.get_value(*value)?;
+                            writeln!(output, "{}{} = {};", self.ctx.indent_str(), target, val).unwrap();
                             continue;
-                        }
-
-                        // Store: `target = value;`. Target is an
-                        // OutputPtr (resolved via `output_ptrs` — e.g.
-                        // `_out0` or `_out_struct.f2`), or the ptr's
-                        // ValueBinding expression (var name for an
-                        // Alloca, `buf[idx]` for a StorageViewIndex).
-                        InstKind::Store { ptr, value } => {
-                            if let Some(ptr_id) = ptr.as_ssa() {
-                                let target = if let Some(out_name) = self.output_ptrs.get(&ptr_id).cloned()
-                                {
-                                    out_name
-                                } else {
-                                    self.binding(ptr_id)?.expr().to_string()
-                                };
-                                let val = self.get_value(*value)?;
-                                writeln!(output, "{}{} = {};", self.ctx.indent_str(), target, val).unwrap();
-                                continue;
-                            }
-                            return Err(crate::err_wgsl_at!(
-                                self.blame_span(),
-                                "Store ptr must be an SSA value"
-                            ));
                         }
 
                         // `_w_intrinsic_uninit()` returns an
@@ -1576,18 +1597,12 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
 
                     let expr = self.lower_inst(inst)?;
                     if let Some(result) = inst.result {
-                        // OutputPtr / StorageView: the result is a
-                        // handle naming a module-scope or entry-scope
-                        // binding; alias without emitting a local var.
-                        if matches!(
-                            inst.data,
-                            InstKind::OutputPtr { .. } | InstKind::StorageView { .. }
-                        ) {
+                        // StorageView: the result is a handle value whose
+                        // name captures the buffer identity; alias it so
+                        // later ViewIndex lookups can resolve via
+                        // `view_handles`.
+                        if matches!(inst.data, InstKind::StorageView { .. }) {
                             self.value_map.insert(result, ValueBinding::Alias(expr));
-                            continue;
-                        }
-                        if matches!(inst.data, InstKind::StorageViewIndex { .. }) {
-                            self.value_map.insert(result, ValueBinding::Place(expr));
                             continue;
                         }
                         let var = wgsl_var(result);
@@ -1688,15 +1703,8 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         self.current_span = inst.span;
                         let expr = self.lower_inst(inst)?;
                         if let Some(result) = inst.result {
-                            if matches!(
-                                inst.data,
-                                InstKind::OutputPtr { .. } | InstKind::StorageView { .. }
-                            ) {
+                            if matches!(inst.data, InstKind::StorageView { .. }) {
                                 self.value_map.insert(result, ValueBinding::Alias(expr));
-                                continue;
-                            }
-                            if matches!(inst.data, InstKind::StorageViewIndex { .. }) {
-                                self.value_map.insert(result, ValueBinding::Place(expr));
                                 continue;
                             }
                             let var = wgsl_var(result);
@@ -2095,51 +2103,15 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 "Matrix literals are not yet implemented in WGSL lowering"
             )),
 
-            InstKind::OutputPtr { index } => {
-                let result_id = inst.result.ok_or_else(|| {
-                    crate::err_wgsl_at!(self.blame_span(), "OutputPtr must have a result")
-                })?;
-                let name = self
-                    .output_target_names
-                    .get(index)
-                    .cloned()
-                    .unwrap_or_else(|| format!("_out{}", index));
-                self.output_ptrs.insert(result_id, name.clone());
-                self.uses_output_ptrs = true;
-                // Nothing to emit: the `var<function>` declaration happens
-                // in the entry-point wrapper, not here.
-                Ok(name)
-            }
-
-            InstKind::Store { ptr, value } => {
-                // Two supported shapes:
-                //   1. Store to an OutputPtr → becomes `_outN = value;`.
-                //   2. Store to a local var (Alloca) — TODO, not yet
-                //      implemented; we'll land Alloca/Load/Store together
-                //      in the memory-ops commit.
-                let ptr_id = ptr.as_ssa().ok_or_else(|| {
-                    crate::err_wgsl_at!(self.blame_span(), "Store ptr must be an SSA value")
-                })?;
-                if let Some(out_name) = self.output_ptrs.get(&ptr_id).cloned() {
-                    let val = self.get_value(*value)?;
-                    return Err(crate::err_wgsl_at!(
-                        self.blame_span(),
-                        "Store to OutputPtr must be handled in emit_nodes, not lower_inst (internal bug): out={}, val={}",
-                        out_name,
-                        val
-                    ));
-                }
-                Err(crate::err_wgsl_at!(
-                    self.blame_span(),
-                    "Store to non-output pointer is not yet implemented in WGSL lowering"
-                ))
-            }
-
-            // Alloca/Load/Store are handled specially in `emit_nodes` so
-            // they become `var<function>` declarations and assignments
-            // rather than let-bindings. Reaching lower_inst with one of
-            // these is an internal bug.
-            InstKind::Alloca { .. } | InstKind::Load { .. } => Err(crate::err_wgsl_at!(
+            // OutputSlot / Alloca / ViewIndex / Load / Store are all
+            // handled specially in `emit_nodes` (they produce places or
+            // emit statements, not let-binding expressions). Reaching
+            // lower_inst for any of them is an internal bug.
+            InstKind::OutputSlot { .. }
+            | InstKind::ViewIndex { .. }
+            | InstKind::Alloca { .. }
+            | InstKind::Load { .. }
+            | InstKind::Store { .. } => Err(crate::err_wgsl_at!(
                 self.blame_span(),
                 "internal: {:?} should be handled in emit_nodes",
                 inst.data
@@ -2190,30 +2162,6 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 // Return the buffer name itself. Downstream uses resolve
                 // through view_handles for offset/len.
                 Ok(buffer_name)
-            }
-
-            InstKind::StorageViewIndex { view, index } => {
-                let view_id = view.as_ssa().ok_or_else(|| {
-                    crate::err_wgsl_at!(self.blame_span(), "StorageViewIndex view must be SSA")
-                })?;
-                let handle = self.view_handles.get(&view_id).cloned().ok_or_else(|| {
-                    crate::err_wgsl_at!(
-                        self.blame_span(),
-                        "StorageViewIndex references view without a known handle"
-                    )
-                })?;
-                let idx = self.get_value(*index)?;
-                // `buf[i32(offset) + i32(idx)]`. Both operands are cast
-                // to `i32` because WGSL has no implicit int-int coercion
-                // and offset/idx can independently come in as either
-                // signed or unsigned (parallelize emits u32 offsets;
-                // Wyn indices are commonly i32). Casting both keeps the
-                // expression monomorphic; naga folds casts of literals
-                // at validation time.
-                Ok(format!(
-                    "{}[(i32({}) + i32({}))]",
-                    handle.buffer_name, handle.offset_expr, idx
-                ))
             }
 
             InstKind::StorageViewLen { view } => {

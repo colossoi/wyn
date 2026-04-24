@@ -75,9 +75,9 @@ pub enum PureOp {
     /// carried in the operands tail, not in this tag, so equivalent views
     /// with the same backing source hash-cons together.
     StorageView(PureViewSource),
-    StorageViewIndex,
+    ViewIndex,
     StorageViewLen,
-    OutputPtr {
+    OutputSlot {
         index: usize,
     },
 }
@@ -471,9 +471,9 @@ pub fn extract_pure_op(kind: &InstKind, ty: &Type<TypeName>) -> Option<PureOp> {
             };
             Some(PureOp::StorageView(src))
         }
-        InstKind::StorageViewIndex { .. } => Some(PureOp::StorageViewIndex),
+        InstKind::ViewIndex { .. } => Some(PureOp::ViewIndex),
         InstKind::StorageViewLen { .. } => Some(PureOp::StorageViewLen),
-        InstKind::OutputPtr { index } => Some(PureOp::OutputPtr { index: *index }),
+        InstKind::OutputSlot { index, .. } => Some(PureOp::OutputSlot { index: *index }),
         // Blacklist: the only truly effectful InstKinds. Everything else above
         // is treated as pure (hash-consable, hoistable).
         InstKind::Alloca { .. } | InstKind::Load { .. } | InstKind::Store { .. } => None,
@@ -563,12 +563,14 @@ pub fn rebuild_inst_kind(op: &PureOp, operands: &[crate::ssa::framework::ValueId
                 len: vr(1),
             }
         }
-        PureOp::StorageViewIndex => InstKind::StorageViewIndex {
-            view: vr(0),
-            index: vr(1),
-        },
         PureOp::StorageViewLen => InstKind::StorageViewLen { view: vr(0) },
-        PureOp::OutputPtr { index } => InstKind::OutputPtr { index: *index },
+        PureOp::ViewIndex | PureOp::OutputSlot { .. } => {
+            panic!(
+                "rebuild_inst_kind: place-producing op {:?} must be built via elaborate's \
+                 place-aware path (allocates a fresh PlaceId from FuncBody.places)",
+                op
+            );
+        }
     }
 }
 

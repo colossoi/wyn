@@ -868,8 +868,8 @@ entry compute_main(data: []i32) i32 =
                 crate::ssa::types::InstKind::StorageView { .. } => {
                     eprintln!("    inst {:?}: StorageView", inst.result);
                 }
-                crate::ssa::types::InstKind::StorageViewIndex { .. } => {
-                    eprintln!("    inst {:?}: StorageViewIndex", inst.result);
+                crate::ssa::types::InstKind::ViewIndex { .. } => {
+                    eprintln!("    inst {:?}: ViewIndex", inst.result);
                 }
                 _ => {}
             }

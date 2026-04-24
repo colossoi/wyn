@@ -862,7 +862,7 @@ struct BodyLowerCtx<'a, 'b> {
     /// Set of declared variables
     declared: HashSet<String>,
     /// Map from OutputPtr ValueIds to their GLSL output variable names.
-    output_ptrs: HashMap<ValueId, String>,
+    output_ptrs: HashMap<crate::ssa::types::PlaceId, String>,
     /// Map from output index to GLSL variable name (set by entry point lowering).
     entry_output_names: HashMap<usize, String>,
     /// Whether this body used OutputPtr+Store (so post-body assignment is skipped).
@@ -925,7 +925,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     }
 
                     let is_side_effect =
-                        matches!(inst.data, InstKind::OutputPtr { .. } | InstKind::Store { .. });
+                        matches!(inst.data, InstKind::OutputSlot { .. } | InstKind::Store { .. });
                     let expr = self.lower_inst(inst, output)?;
 
                     if let Some(result) = inst.result {
@@ -1231,42 +1231,43 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 )
             }
 
+            // TODO: GLSL backend does not support storage places today. To
+            // lift this, route `Alloca` to a function-scope GLSL array,
+            // teach `Load` / `Store` to walk `PlaceId` → place expression
+            // (mirror WGSL's `place_targets`), and implement StorageView
+            // via SSBO syntax. Until then the GLSL target rejects any
+            // view / Alloca / Load path.
             InstKind::StorageView { .. }
-            | InstKind::StorageViewIndex { .. }
-            | InstKind::StorageViewLen { .. } => {
-                bail_glsl_at!(self.blame_span(), "Storage view operations not supported in GLSL")
-            }
+            | InstKind::StorageViewLen { .. }
+            | InstKind::ViewIndex { .. }
+            | InstKind::Alloca { .. }
+            | InstKind::Load { .. } => bail_glsl_at!(
+                self.blame_span(),
+                "GLSL target does not support storage places (StorageView / ViewIndex / Alloca / Load)"
+            ),
 
-            InstKind::Alloca { .. } | InstKind::Load { .. } => {
-                bail_glsl_at!(self.blame_span(), "Memory operations not supported in GLSL")
-            }
-
-            InstKind::Store { ptr, value } => {
-                let ptr_id = ptr
-                    .as_ssa()
-                    .ok_or_else(|| crate::err_glsl_at!(self.blame_span(), "Store ptr must be SSA"))?;
-                if let Some(out_name) = self.output_ptrs.get(&ptr_id) {
+            InstKind::Store { place, value } => {
+                if let Some(out_name) = self.output_ptrs.get(place) {
                     let val = self.get_value_ref(*value)?;
                     writeln!(_output, "{}{} = {};", self.ctx.indent_str(), out_name, val).unwrap();
                     Ok(String::new())
                 } else {
                     bail_glsl_at!(
                         self.blame_span(),
-                        "Store to non-output pointer not supported in GLSL"
+                        "GLSL target: Store target is not an entry-point OutputSlot"
                     )
                 }
             }
 
-            InstKind::OutputPtr { index } => {
-                let result_id = inst.result.expect("OutputPtr must have result");
+            InstKind::OutputSlot { index, result } => {
                 if let Some(name) = self.entry_output_names.get(&(*index as usize)) {
-                    self.output_ptrs.insert(result_id, name.clone());
+                    self.output_ptrs.insert(*result, name.clone());
                     self.uses_output_ptrs = true;
-                    Ok(name.clone())
+                    Ok(String::new())
                 } else {
                     bail_glsl_at!(
                         self.blame_span(),
-                        "OutputPtr index {} has no corresponding GLSL output",
+                        "OutputSlot index {} has no corresponding GLSL output",
                         index
                     )
                 }
