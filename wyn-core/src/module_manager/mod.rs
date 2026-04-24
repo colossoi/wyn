@@ -900,36 +900,13 @@ impl ModuleManager {
         }
     }
 
-    /// Collect all bound names from a pattern
+    /// Collect all bound names from a pattern.
+    ///
+    /// Thin wrapper over the canonical walker in `crate::scope`; kept as a
+    /// method so existing `self.collect_pattern_names(...)` call sites don't
+    /// need touching.
     fn collect_pattern_names(&self, pattern: &Pattern) -> Vec<String> {
-        use crate::ast::PatternKind;
-        let mut names = Vec::new();
-        match &pattern.kind {
-            PatternKind::Name(name) => names.push(name.clone()),
-            PatternKind::Typed(inner, _) => names.extend(self.collect_pattern_names(inner)),
-            PatternKind::Tuple(pats) => {
-                for p in pats {
-                    names.extend(self.collect_pattern_names(p));
-                }
-            }
-            PatternKind::Constructor(_, pats) => {
-                for p in pats {
-                    names.extend(self.collect_pattern_names(p));
-                }
-            }
-            PatternKind::Record(fields) => {
-                for f in fields {
-                    if let Some(p) = &f.pattern {
-                        names.extend(self.collect_pattern_names(p));
-                    } else {
-                        names.push(f.field.clone());
-                    }
-                }
-            }
-            PatternKind::Attributed(_, inner) => names.extend(self.collect_pattern_names(inner)),
-            PatternKind::Wildcard | PatternKind::Unit | PatternKind::Literal(_) => {}
-        }
-        names
+        crate::scope::pattern_bound_names(pattern)
     }
 
     /// Apply type substitutions to a pattern

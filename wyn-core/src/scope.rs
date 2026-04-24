@@ -178,6 +178,50 @@ impl<T: Clone> ScopeStack<ScopeEntry<T>> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Pattern → bound-name walker
+// ---------------------------------------------------------------------------
+
+/// Invoke `f` once for each name introduced by `pattern`.
+///
+/// Central definition used by both the name-resolution pass and
+/// module-elaboration path; previously each kept its own hand-written copy.
+/// The visitor recurses through nested patterns (tuples, records,
+/// constructors, typed/attributed wrappers) and reports every leaf
+/// `PatternKind::Name`, plus shorthand record fields (`{ name }` binds
+/// `name`). Wildcards, unit, and literal patterns contribute no names.
+pub fn for_each_pattern_name(pattern: &crate::ast::Pattern, f: &mut impl FnMut(&str)) {
+    use crate::ast::PatternKind;
+    match &pattern.kind {
+        PatternKind::Name(name) => f(name),
+        PatternKind::Tuple(pats) | PatternKind::Constructor(_, pats) => {
+            for p in pats {
+                for_each_pattern_name(p, f);
+            }
+        }
+        PatternKind::Record(fields) => {
+            for field in fields {
+                match &field.pattern {
+                    Some(p) => for_each_pattern_name(p, f),
+                    // Shorthand `{ name }` binds `name`.
+                    None => f(&field.field),
+                }
+            }
+        }
+        PatternKind::Attributed(_, inner) | PatternKind::Typed(inner, _) => {
+            for_each_pattern_name(inner, f);
+        }
+        PatternKind::Wildcard | PatternKind::Unit | PatternKind::Literal(_) => {}
+    }
+}
+
+/// Collect all names bound by `pattern` into a fresh `Vec`.
+pub fn pattern_bound_names(pattern: &crate::ast::Pattern) -> Vec<String> {
+    let mut names = Vec::new();
+    for_each_pattern_name(pattern, &mut |name| names.push(name.to_string()));
+    names
+}
+
 #[cfg(test)]
 #[path = "scope_tests.rs"]
 mod scope_tests;

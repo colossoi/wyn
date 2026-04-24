@@ -4,37 +4,16 @@
 //!   FieldAccess(Identifier(module), field) -> QualifiedName([module], field)
 //! when `module` is a known module name.
 
-use crate::ast::{Declaration, ExprKind, Expression, PatternKind, Program};
+use crate::ast::{Declaration, ExprKind, Expression, Program};
 use crate::error::Result;
 use crate::module_manager::ModuleManager;
-use crate::scope::ScopeStack;
+use crate::scope::{ScopeStack, for_each_pattern_name};
 
-/// Collect bound names from a pattern into the scope
+/// Insert every name bound by `pattern` into `scope`.
 fn collect_pattern_bindings(pattern: &crate::ast::Pattern, scope: &mut ScopeStack<()>) {
-    match &pattern.kind {
-        PatternKind::Name(name) => {
-            scope.insert(name.clone(), ());
-        }
-        PatternKind::Tuple(patterns) | PatternKind::Constructor(_, patterns) => {
-            for p in patterns {
-                collect_pattern_bindings(p, scope);
-            }
-        }
-        PatternKind::Record(fields) => {
-            for field in fields {
-                if let Some(ref pat) = field.pattern {
-                    collect_pattern_bindings(pat, scope);
-                } else {
-                    // Shorthand: { name } binds `name`
-                    scope.insert(field.field.clone(), ());
-                }
-            }
-        }
-        PatternKind::Attributed(_, inner) | PatternKind::Typed(inner, _) => {
-            collect_pattern_bindings(inner, scope);
-        }
-        PatternKind::Wildcard | PatternKind::Unit | PatternKind::Literal(_) => {}
-    }
+    for_each_pattern_name(pattern, &mut |name| {
+        scope.insert(name.to_string(), ());
+    });
 }
 
 /// Resolve names in a program by rewriting FieldAccess -> QualifiedName
