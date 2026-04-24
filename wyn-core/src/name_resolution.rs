@@ -1,8 +1,13 @@
 //! Name resolution pass
 //!
 //! Resolves module-qualified names by rewriting:
-//!   FieldAccess(Identifier(module), field) -> QualifiedName([module], field)
+//!   `FieldAccess(Identifier(module), field)` → `Identifier([module], field)`
 //! when `module` is a known module name.
+//!
+//! The same AST-walking machinery is reused by the module-elaboration path
+//! (`module_manager::ModuleManager::resolve_names_in_expr`) — the walker is
+//! generic over a `ResolveContext` that decides what a given identifier /
+//! field-access means in the current mode. See `Resolver` below.
 
 use crate::ast::{Declaration, ExprKind, Expression, Program};
 use crate::error::Result;
@@ -10,174 +15,177 @@ use crate::module_manager::ModuleManager;
 use crate::scope::{ScopeStack, for_each_pattern_name};
 
 /// Insert every name bound by `pattern` into `scope`.
-fn collect_pattern_bindings(pattern: &crate::ast::Pattern, scope: &mut ScopeStack<()>) {
+pub(crate) fn collect_pattern_bindings(pattern: &crate::ast::Pattern, scope: &mut ScopeStack<()>) {
     for_each_pattern_name(pattern, &mut |name| {
         scope.insert(name.to_string(), ());
     });
 }
 
-/// Resolve names in a program by rewriting FieldAccess -> QualifiedName
-pub fn run(program: &mut Program, module_manager: &ModuleManager) -> Result<()> {
-    for decl in &mut program.declarations {
-        resolve_declaration(decl, module_manager)?;
+// ---------------------------------------------------------------------------
+// Visitor — shared AST traversal, mode-specific identifier / field-access
+// rewrites plugged in via `ResolveContext`.
+// ---------------------------------------------------------------------------
+
+/// Policy interface for a resolver pass. Consumers implement it to inject
+/// their mode-specific identifier- and field-access- rewrite logic. The
+/// walker handles everything else (recursion, scope push/pop, pattern
+/// binding collection).
+pub trait ResolveContext {
+    /// Called for each `ExprKind::Identifier(quals, name)` leaf. May mutate
+    /// `quals` / `name` in place (e.g. to qualify an intra-module ref). The
+    /// `scope` argument reflects locals visible at this expression — used
+    /// so intra-module rewrites don't shadow a lambda param of the same
+    /// name.
+    fn resolve_identifier(&self, _quals: &mut Vec<String>, _name: &mut String, _scope: &ScopeStack<()>) {}
+
+    /// Called for each `ExprKind::FieldAccess(obj, field)` where `obj` is
+    /// a plain `Identifier(obj_quals, obj_name)`. Return `Some(ExprKind)`
+    /// to replace the entire FieldAccess expression (typical case:
+    /// `mod.name` collapses to `Identifier([mod], name)`); return `None`
+    /// to leave the FieldAccess alone — the walker will then recurse into
+    /// `obj` as a regular expression.
+    fn resolve_field_access(
+        &self,
+        _obj_quals: &[String],
+        _obj_name: &str,
+        _field: &str,
+        _scope: &ScopeStack<()>,
+    ) -> Option<ExprKind> {
+        None
     }
-    Ok(())
 }
 
-/// Resolve names in a single Decl (for prelude functions)
-pub fn resolve_decl(decl: &mut crate::ast::Decl, module_manager: &ModuleManager) -> Result<()> {
-    let mut scope = ScopeStack::new();
-    resolve_expr(&mut decl.body, module_manager, &mut scope)
-}
-
-fn resolve_declaration(decl: &mut Declaration, module_manager: &ModuleManager) -> Result<()> {
-    let mut scope = ScopeStack::new();
-    match decl {
-        Declaration::Decl(d) => {
-            resolve_expr(&mut d.body, module_manager, &mut scope)?;
-        }
-        Declaration::Entry(entry) => {
-            resolve_expr(&mut entry.body, module_manager, &mut scope)?;
-        }
-        Declaration::Sig(_) => {
-            // SigDecl has no body, only a type signature
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn resolve_expr(
+/// Walk `expr` in place, applying `ctx`'s rewrite policies. `scope` is
+/// the set of locally-bound names visible at `expr`. Callers typically
+/// start with an empty `scope` at each declaration boundary.
+pub fn walk_expr<C: ResolveContext>(
     expr: &mut Expression,
-    module_manager: &ModuleManager,
+    ctx: &C,
     scope: &mut ScopeStack<()>,
 ) -> Result<()> {
     match &mut expr.kind {
+        ExprKind::Identifier(quals, name) => {
+            ctx.resolve_identifier(quals, name, scope);
+        }
         ExprKind::FieldAccess(obj, field) => {
-            // Check if this is module.name pattern
-            if let ExprKind::Identifier(quals, name) = &obj.kind {
-                if quals.is_empty() && module_manager.is_known_module(name) {
-                    // Build the qualified name
-                    let module = name.clone();
-                    let func_name = field.clone();
-
-                    // Rewrite to qualified Identifier
-                    expr.kind = ExprKind::Identifier(vec![module.clone()], func_name);
-                    return Ok(());
-                }
+            // Peek at obj to see if it's the `Identifier . name` shape the
+            // resolver hook wants to rewrite. If so, replace the whole
+            // expression; otherwise fall through and recurse into obj.
+            let rewrite = if let ExprKind::Identifier(obj_quals, obj_name) = &obj.kind {
+                ctx.resolve_field_access(obj_quals, obj_name, field, scope)
+            } else {
+                None
+            };
+            if let Some(new_kind) = rewrite {
+                expr.kind = new_kind;
+            } else {
+                walk_expr(obj, ctx, scope)?;
             }
-            // Otherwise, it's a real field access - recurse into object
-            resolve_expr(obj, module_manager, scope)?;
         }
         ExprKind::Application(func, args) => {
-            resolve_expr(func, module_manager, scope)?;
-            for arg in args {
-                resolve_expr(arg, module_manager, scope)?;
+            walk_expr(func, ctx, scope)?;
+            for a in args {
+                walk_expr(a, ctx, scope)?;
             }
         }
         ExprKind::Lambda(lambda) => {
-            // Lambda params create a new scope
             scope.push_scope();
-            for param in &lambda.params {
-                collect_pattern_bindings(param, scope);
+            for p in &lambda.params {
+                collect_pattern_bindings(p, scope);
             }
-            resolve_expr(&mut lambda.body, module_manager, scope)?;
+            walk_expr(&mut lambda.body, ctx, scope)?;
             scope.pop_scope();
         }
         ExprKind::LetIn(let_in) => {
-            // Resolve value in current scope
-            resolve_expr(&mut let_in.value, module_manager, scope)?;
-            // Add binding then resolve body
+            walk_expr(&mut let_in.value, ctx, scope)?;
             scope.push_scope();
             collect_pattern_bindings(&let_in.pattern, scope);
-            resolve_expr(&mut let_in.body, module_manager, scope)?;
+            walk_expr(&mut let_in.body, ctx, scope)?;
             scope.pop_scope();
         }
         ExprKind::If(if_expr) => {
-            resolve_expr(&mut if_expr.condition, module_manager, scope)?;
-            resolve_expr(&mut if_expr.then_branch, module_manager, scope)?;
-            resolve_expr(&mut if_expr.else_branch, module_manager, scope)?;
+            walk_expr(&mut if_expr.condition, ctx, scope)?;
+            walk_expr(&mut if_expr.then_branch, ctx, scope)?;
+            walk_expr(&mut if_expr.else_branch, ctx, scope)?;
         }
         ExprKind::BinaryOp(_, lhs, rhs) => {
-            resolve_expr(lhs, module_manager, scope)?;
-            resolve_expr(rhs, module_manager, scope)?;
+            walk_expr(lhs, ctx, scope)?;
+            walk_expr(rhs, ctx, scope)?;
         }
         ExprKind::UnaryOp(_, operand) => {
-            resolve_expr(operand, module_manager, scope)?;
+            walk_expr(operand, ctx, scope)?;
         }
         ExprKind::Tuple(exprs) | ExprKind::ArrayLiteral(exprs) | ExprKind::VecMatLiteral(exprs) => {
             for e in exprs {
-                resolve_expr(e, module_manager, scope)?;
+                walk_expr(e, ctx, scope)?;
             }
         }
         ExprKind::ArrayIndex(arr, idx) => {
-            resolve_expr(arr, module_manager, scope)?;
-            resolve_expr(idx, module_manager, scope)?;
+            walk_expr(arr, ctx, scope)?;
+            walk_expr(idx, ctx, scope)?;
         }
         ExprKind::ArrayWith {
             array, index, value, ..
         } => {
-            resolve_expr(array, module_manager, scope)?;
-            resolve_expr(index, module_manager, scope)?;
-            resolve_expr(value, module_manager, scope)?;
+            walk_expr(array, ctx, scope)?;
+            walk_expr(index, ctx, scope)?;
+            walk_expr(value, ctx, scope)?;
         }
         ExprKind::RecordLiteral(fields) => {
             for (_, e) in fields {
-                resolve_expr(e, module_manager, scope)?;
+                walk_expr(e, ctx, scope)?;
             }
         }
         ExprKind::Loop(loop_expr) => {
             scope.push_scope();
-            // Loop accumulator variable binding
             collect_pattern_bindings(&loop_expr.pattern, scope);
             if let Some(ref mut init) = loop_expr.init {
-                resolve_expr(init, module_manager, scope)?;
+                walk_expr(init, ctx, scope)?;
             }
             match &mut loop_expr.form {
                 crate::ast::LoopForm::While(cond) => {
-                    resolve_expr(cond, module_manager, scope)?;
+                    walk_expr(cond, ctx, scope)?;
                 }
                 crate::ast::LoopForm::For(idx_var, bound) => {
                     scope.insert(idx_var.clone(), ());
-                    resolve_expr(bound, module_manager, scope)?;
+                    walk_expr(bound, ctx, scope)?;
                 }
                 crate::ast::LoopForm::ForIn(elem_pat, iter) => {
                     collect_pattern_bindings(elem_pat, scope);
-                    resolve_expr(iter, module_manager, scope)?;
+                    walk_expr(iter, ctx, scope)?;
                 }
             }
-            resolve_expr(&mut loop_expr.body, module_manager, scope)?;
+            walk_expr(&mut loop_expr.body, ctx, scope)?;
             scope.pop_scope();
         }
         ExprKind::Match(match_expr) => {
-            resolve_expr(&mut match_expr.scrutinee, module_manager, scope)?;
+            walk_expr(&mut match_expr.scrutinee, ctx, scope)?;
             for case in &mut match_expr.cases {
                 scope.push_scope();
                 collect_pattern_bindings(&case.pattern, scope);
-                resolve_expr(&mut case.body, module_manager, scope)?;
+                walk_expr(&mut case.body, ctx, scope)?;
                 scope.pop_scope();
             }
         }
         ExprKind::TypeAscription(e, _) | ExprKind::TypeCoercion(e, _) => {
-            resolve_expr(e, module_manager, scope)?;
+            walk_expr(e, ctx, scope)?;
         }
         ExprKind::Range(range) => {
-            resolve_expr(&mut range.start, module_manager, scope)?;
-            resolve_expr(&mut range.end, module_manager, scope)?;
+            walk_expr(&mut range.start, ctx, scope)?;
+            walk_expr(&mut range.end, ctx, scope)?;
             if let Some(ref mut step) = range.step {
-                resolve_expr(step, module_manager, scope)?;
+                walk_expr(step, ctx, scope)?;
             }
         }
         ExprKind::Slice(slice) => {
-            resolve_expr(&mut slice.array, module_manager, scope)?;
+            walk_expr(&mut slice.array, ctx, scope)?;
             if let Some(ref mut start) = slice.start {
-                resolve_expr(start, module_manager, scope)?;
+                walk_expr(start, ctx, scope)?;
             }
             if let Some(ref mut end) = slice.end {
-                resolve_expr(end, module_manager, scope)?;
+                walk_expr(end, ctx, scope)?;
             }
         }
-        ExprKind::Identifier(_, _) => {}
         ExprKind::IntLiteral(_)
         | ExprKind::FloatLiteral(_)
         | ExprKind::BoolLiteral(_)
@@ -185,4 +193,60 @@ fn resolve_expr(
         | ExprKind::TypeHole => {}
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Program-mode resolver (top-level pass over user code)
+// ---------------------------------------------------------------------------
+
+/// Context used by the program-level name-resolution pass: rewrites
+/// `mod.name` to `Identifier([mod], name)` when `mod` is a registered
+/// module.
+struct ProgramResolver<'a> {
+    module_manager: &'a ModuleManager,
+}
+
+impl<'a> ResolveContext for ProgramResolver<'a> {
+    fn resolve_field_access(
+        &self,
+        obj_quals: &[String],
+        obj_name: &str,
+        field: &str,
+        _scope: &ScopeStack<()>,
+    ) -> Option<ExprKind> {
+        if obj_quals.is_empty() && self.module_manager.is_known_module(obj_name) {
+            Some(ExprKind::Identifier(
+                vec![obj_name.to_string()],
+                field.to_string(),
+            ))
+        } else {
+            None
+        }
+    }
+}
+
+/// Resolve names in a program by rewriting FieldAccess -> QualifiedName.
+pub fn run(program: &mut Program, module_manager: &ModuleManager) -> Result<()> {
+    for decl in &mut program.declarations {
+        resolve_declaration(decl, module_manager)?;
+    }
+    Ok(())
+}
+
+/// Resolve names in a single Decl (for prelude functions).
+pub fn resolve_decl(decl: &mut crate::ast::Decl, module_manager: &ModuleManager) -> Result<()> {
+    let ctx = ProgramResolver { module_manager };
+    let mut scope = ScopeStack::new();
+    walk_expr(&mut decl.body, &ctx, &mut scope)
+}
+
+fn resolve_declaration(decl: &mut Declaration, module_manager: &ModuleManager) -> Result<()> {
+    let ctx = ProgramResolver { module_manager };
+    let mut scope = ScopeStack::new();
+    match decl {
+        Declaration::Decl(d) => walk_expr(&mut d.body, &ctx, &mut scope),
+        Declaration::Entry(entry) => walk_expr(&mut entry.body, &ctx, &mut scope),
+        Declaration::Sig(_) => Ok(()),
+        _ => Ok(()),
+    }
 }

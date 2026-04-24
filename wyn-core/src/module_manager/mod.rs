@@ -964,234 +964,79 @@ impl ModuleManager {
         local_bindings: &HashSet<String>,
         param_bindings: &HashMap<String, ElaboratedModule>,
     ) {
-        use crate::ast::ExprKind;
-
-        match &mut expr.kind {
-            ExprKind::Identifier(quals, name) => {
-                // Check if this is an intra-module function reference (not shadowed by local binding)
-                if quals.is_empty() && !local_bindings.contains(name) && module_functions.contains(name) {
-                    // Convert to qualified identifier: next -> rand.next
-                    *quals = vec![module_name.to_string()];
-                }
-            }
-            ExprKind::FieldAccess(obj, field) => {
-                // Check if this is param.name pattern (parameter module reference)
-                if let ExprKind::Identifier(quals, name) = &obj.kind {
-                    if quals.is_empty() {
-                        // Check if it's a parameter reference
-                        if let Some(param_module) = param_bindings.get(name) {
-                            // Convert n.add to my_f32_num.add
-                            expr.kind =
-                                ExprKind::Identifier(vec![param_module.name.clone()], field.clone());
-                            return;
-                        }
-                        // Check if it's a known module
-                        if self.known_modules.contains(name) {
-                            // Convert to qualified Identifier
-                            expr.kind = ExprKind::Identifier(vec![name.clone()], field.clone());
-                            return;
-                        }
-                    }
-                }
-                // Otherwise recurse into object
-                self.resolve_names_in_expr(
-                    obj,
-                    module_name,
-                    module_functions,
-                    local_bindings,
-                    param_bindings,
-                );
-            }
-            ExprKind::Application(func, args) => {
-                self.resolve_names_in_expr(
-                    func,
-                    module_name,
-                    module_functions,
-                    local_bindings,
-                    param_bindings,
-                );
-                for arg in args {
-                    self.resolve_names_in_expr(
-                        arg,
-                        module_name,
-                        module_functions,
-                        local_bindings,
-                        param_bindings,
-                    );
-                }
-            }
-            ExprKind::Lambda(lambda) => {
-                // Collect lambda parameter names
-                let mut inner_bindings = local_bindings.clone();
-                for p in &lambda.params {
-                    inner_bindings.extend(self.collect_pattern_names(p));
-                }
-                self.resolve_names_in_expr(
-                    &mut lambda.body,
-                    module_name,
-                    module_functions,
-                    &inner_bindings,
-                    param_bindings,
-                );
-            }
-            ExprKind::LetIn(let_in) => {
-                self.resolve_names_in_expr(
-                    &mut let_in.value,
-                    module_name,
-                    module_functions,
-                    local_bindings,
-                    param_bindings,
-                );
-                // Collect let binding names
-                let mut inner_bindings = local_bindings.clone();
-                inner_bindings.extend(self.collect_pattern_names(&let_in.pattern));
-                self.resolve_names_in_expr(
-                    &mut let_in.body,
-                    module_name,
-                    module_functions,
-                    &inner_bindings,
-                    param_bindings,
-                );
-            }
-            ExprKind::If(if_expr) => {
-                self.resolve_names_in_expr(
-                    &mut if_expr.condition,
-                    module_name,
-                    module_functions,
-                    local_bindings,
-                    param_bindings,
-                );
-                self.resolve_names_in_expr(
-                    &mut if_expr.then_branch,
-                    module_name,
-                    module_functions,
-                    local_bindings,
-                    param_bindings,
-                );
-                self.resolve_names_in_expr(
-                    &mut if_expr.else_branch,
-                    module_name,
-                    module_functions,
-                    local_bindings,
-                    param_bindings,
-                );
-            }
-            ExprKind::BinaryOp(_, lhs, rhs) => {
-                self.resolve_names_in_expr(
-                    lhs,
-                    module_name,
-                    module_functions,
-                    local_bindings,
-                    param_bindings,
-                );
-                self.resolve_names_in_expr(
-                    rhs,
-                    module_name,
-                    module_functions,
-                    local_bindings,
-                    param_bindings,
-                );
-            }
-            ExprKind::UnaryOp(_, operand) => {
-                self.resolve_names_in_expr(
-                    operand,
-                    module_name,
-                    module_functions,
-                    local_bindings,
-                    param_bindings,
-                );
-            }
-            ExprKind::Tuple(exprs) | ExprKind::ArrayLiteral(exprs) | ExprKind::VecMatLiteral(exprs) => {
-                for e in exprs {
-                    self.resolve_names_in_expr(
-                        e,
-                        module_name,
-                        module_functions,
-                        local_bindings,
-                        param_bindings,
-                    );
-                }
-            }
-            ExprKind::ArrayIndex(arr, idx) => {
-                self.resolve_names_in_expr(
-                    arr,
-                    module_name,
-                    module_functions,
-                    local_bindings,
-                    param_bindings,
-                );
-                self.resolve_names_in_expr(
-                    idx,
-                    module_name,
-                    module_functions,
-                    local_bindings,
-                    param_bindings,
-                );
-            }
-            ExprKind::ArrayWith {
-                array, index, value, ..
-            } => {
-                self.resolve_names_in_expr(
-                    array,
-                    module_name,
-                    module_functions,
-                    local_bindings,
-                    param_bindings,
-                );
-                self.resolve_names_in_expr(
-                    index,
-                    module_name,
-                    module_functions,
-                    local_bindings,
-                    param_bindings,
-                );
-                self.resolve_names_in_expr(
-                    value,
-                    module_name,
-                    module_functions,
-                    local_bindings,
-                    param_bindings,
-                );
-            }
-            ExprKind::RecordLiteral(fields) => {
-                for (_, e) in fields {
-                    self.resolve_names_in_expr(
-                        e,
-                        module_name,
-                        module_functions,
-                        local_bindings,
-                        param_bindings,
-                    );
-                }
-            }
-            ExprKind::Match(match_expr) => {
-                self.resolve_names_in_expr(
-                    &mut match_expr.scrutinee,
-                    module_name,
-                    module_functions,
-                    local_bindings,
-                    param_bindings,
-                );
-                for case in &mut match_expr.cases {
-                    let mut inner_bindings = local_bindings.clone();
-                    inner_bindings.extend(self.collect_pattern_names(&case.pattern));
-                    self.resolve_names_in_expr(
-                        &mut case.body,
-                        module_name,
-                        module_functions,
-                        &inner_bindings,
-                        param_bindings,
-                    );
-                }
-            }
-            // Literals and unit don't contain references
-            ExprKind::IntLiteral(_)
-            | ExprKind::FloatLiteral(_)
-            | ExprKind::BoolLiteral(_)
-            | ExprKind::Unit => {}
-            // Other cases that might need handling
-            _ => {}
+        // Seed a ScopeStack from the caller-provided locals so the shared
+        // walker sees them as "visible locals that should shadow intra-module
+        // rewrites". All further pushes/pops happen inside the walker.
+        let mut scope = crate::scope::ScopeStack::new();
+        for name in local_bindings {
+            scope.insert(name.clone(), ());
         }
+        let ctx = ModuleElaborationResolver {
+            module_name,
+            module_functions,
+            param_bindings,
+            known_modules: &self.known_modules,
+        };
+        // walk_expr's signature is fallible for interface symmetry with the
+        // program pass; the elaboration resolver never fails, so unwrap.
+        crate::name_resolution::walk_expr(expr, &ctx, &mut scope)
+            .expect("module-elaboration resolver is infallible");
+    }
+}
+
+/// Resolve context used during module elaboration: rewrites intra-module
+/// function references to qualified form, param-module field access to the
+/// bound module's qualified name, and `known_module.name` to its qualified
+/// form — same three behaviors the former hand-written walker did,
+/// factored out so the shared `name_resolution::walk_expr` drives the tree
+/// descent and scope bookkeeping.
+struct ModuleElaborationResolver<'a> {
+    module_name: &'a str,
+    module_functions: &'a HashSet<String>,
+    param_bindings: &'a HashMap<String, ElaboratedModule>,
+    known_modules: &'a HashSet<String>,
+}
+
+impl<'a> crate::name_resolution::ResolveContext for ModuleElaborationResolver<'a> {
+    fn resolve_identifier(
+        &self,
+        quals: &mut Vec<String>,
+        name: &mut String,
+        scope: &crate::scope::ScopeStack<()>,
+    ) {
+        // Intra-module function reference: bare name that's in the current
+        // module's function set AND not shadowed by a local binding.
+        if quals.is_empty() && scope.lookup(name).is_none() && self.module_functions.contains(name) {
+            *quals = vec![self.module_name.to_string()];
+        }
+    }
+
+    fn resolve_field_access(
+        &self,
+        obj_quals: &[String],
+        obj_name: &str,
+        field: &str,
+        _scope: &crate::scope::ScopeStack<()>,
+    ) -> Option<crate::ast::ExprKind> {
+        if !obj_quals.is_empty() {
+            return None;
+        }
+        // Parameter-module reference: `n.add` where `n` is a functor param
+        // bound to an elaborated module.
+        if let Some(param_module) = self.param_bindings.get(obj_name) {
+            return Some(crate::ast::ExprKind::Identifier(
+                vec![param_module.name.clone()],
+                field.to_string(),
+            ));
+        }
+        // Known-module reference: `f32.sin`.
+        if self.known_modules.contains(obj_name) {
+            return Some(crate::ast::ExprKind::Identifier(
+                vec![obj_name.to_string()],
+                field.to_string(),
+            ));
+        }
+        None
     }
 }
 
