@@ -93,6 +93,41 @@ fn fv_type(ty: &Type) -> BTreeSet<usize> {
     out
 }
 
+/// Free type variables, skipping any that occur in the size or variant
+/// positions of Array types — so let-polymorphism cannot accidentally
+/// abstract over representation-critical array metadata. Size and
+/// variant are compile-time invariants that must be pinned by
+/// unification at the definition, not re-instantiated at every use.
+/// Without this, a sized array flowing through a let binding gets its
+/// size generalized, every use instantiates a fresh size var,
+/// unification pins the per-use var, and the original definition stays
+/// unresolved all the way into monomorphization / SPIR-V lowering.
+fn fv_type_generalizable(ty: &Type) -> BTreeSet<usize> {
+    let mut out = BTreeSet::new();
+    fn go(t: &Type, acc: &mut BTreeSet<usize>) {
+        match t {
+            Type::Variable(n) => {
+                acc.insert(*n);
+            }
+            Type::Constructed(TypeName::Array, args) => {
+                // Only element type position is generalizable. Wyn's Array layout
+                // is [elem, size, variant]; size and variant are compile-time
+                // invariants that must be concrete before monomorphization.
+                if let Some(elem) = args.first() {
+                    go(elem, acc);
+                }
+            }
+            Type::Constructed(_, args) => {
+                for a in args {
+                    go(a, acc);
+                }
+            }
+        }
+    }
+    go(ty, &mut out);
+    out
+}
+
 /// Compute free type variables in a TypeScheme
 fn fv_scheme(s: &TypeScheme) -> BTreeSet<usize> {
     match s {
@@ -438,8 +473,10 @@ impl<'a> TypeChecker<'a> {
             applied
         );
 
-        // Free vars in type
-        let mut fv_ty = fv_type(&applied);
+        // Free vars in type — but skip size / variant positions of Array
+        // types. Those are compile-time invariants that must be pinned by
+        // unification, not let-generalized (see `fv_type_generalizable`).
+        let mut fv_ty = fv_type_generalizable(&applied);
 
         // Free vars in environment
         let fv_env = self.env_free_type_vars();
@@ -1024,19 +1061,28 @@ impl<'a> TypeChecker<'a> {
         let body = Self::arrow_chain(&[Self::array_ty(Self::var(a), s, n)], i32());
         self.define_builtin("length", Self::forall(&[n, a, s], body));
 
-        // map: ∀a b n s. (a -> b) -> Array[a, s, n] -> Array[b, s, n]
+        // map: ∀a b n s. (a -> b) -> Array[a, s, n] -> Array[b, n, Composite]
+        //
+        // The output variant is pinned to Composite because `egir::soac_expand`
+        // always materializes the map result via `_w_intrinsic_uninit` +
+        // `_w_intrinsic_array_with_inplace`. Preserving the input variant `s`
+        // in the output type would be a lie: post-expand the representation
+        // is always a composite buffer. The lie leaked into loop back-edges
+        // — a loop carrying `map(…, iota(N))` ends up with a Virtual-variant
+        // block parameter that SPIR-V `ArrayWith` can't write to.
         let (a, b, n, s) = (
             self.fresh_var(),
             self.fresh_var(),
             self.fresh_var(),
             self.fresh_var(),
         );
+        let composite = Type::Constructed(TypeName::ArrayVariantComposite, vec![]);
         let body = Self::arrow_chain(
             &[
                 Type::arrow(Self::var(a), Self::var(b)),
                 Self::array_ty(Self::var(a), s, n),
             ],
-            Self::array_ty(Self::var(b), s, n),
+            Type::Constructed(TypeName::Array, vec![Self::var(b), Self::var(n), composite]),
         );
         self.define_builtin("map", Self::forall(&[a, b, n, s], body));
 
@@ -1083,24 +1129,28 @@ impl<'a> TypeChecker<'a> {
         );
         self.define_builtin("reduce", Self::forall(&[a, n, s], body));
 
-        // scan: ∀a n s. (a -> a -> a) -> a -> Array[a, s, n] -> Array[a, s, n]
+        // scan: ∀a n s. (a -> a -> a) -> a -> Array[a, s, n] -> Array[a, n, Composite]
+        // Output variant pinned to Composite for the same reason as `map` above.
         let (a, n, s) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
         let op_ty = Type::arrow(Self::var(a), Type::arrow(Self::var(a), Self::var(a)));
+        let composite = Type::Constructed(TypeName::ArrayVariantComposite, vec![]);
         let body = Self::arrow_chain(
             &[op_ty, Self::var(a), Self::array_ty(Self::var(a), s, n)],
-            Self::array_ty(Self::var(a), s, n),
+            Type::Constructed(TypeName::Array, vec![Self::var(a), Self::var(n), composite]),
         );
         self.define_builtin("scan", Self::forall(&[a, n, s], body));
 
-        // filter: ∀a n s. (a -> bool) -> Array[a, s, n] -> ?k. Array[a, s, k]
+        // filter: ∀a n s. (a -> bool) -> Array[a, s, n] -> ?k. Array[a, k, Composite]
+        // Output variant pinned to Composite for the same reason as `map` / `scan`.
         let (a, n, s) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
         let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
         let pred_ty = Type::arrow(Self::var(a), bool_ty);
         let array_a = Self::array_ty(Self::var(a), s, n);
-        // Existential return type: ?k. Array[a, s, k]
+        // Existential return type: ?k. Array[a, k, Composite]
         let k = "k".to_string();
         let k_var = Type::Constructed(TypeName::SizeVar(k.clone()), vec![]);
-        let result_array = Type::Constructed(TypeName::Array, vec![Self::var(a), k_var, Self::var(s)]);
+        let composite = Type::Constructed(TypeName::ArrayVariantComposite, vec![]);
+        let result_array = Type::Constructed(TypeName::Array, vec![Self::var(a), k_var, composite]);
         let existential_result = Type::Constructed(TypeName::Existential(vec![k]), vec![result_array]);
         let body = Self::arrow_chain(&[pred_ty, array_a], existential_result);
         self.define_builtin("filter", Self::forall(&[a, n, s], body));

@@ -495,6 +495,34 @@ def test: (i32 -> i32) =
     );
 }
 
+/// Companion to `test_spirv_loop_carrying_map_over_iota`, with the
+/// loop initialized from a composite ARRAY LITERAL rather than a
+/// `map(…, iota(…))` call. Before the fix these had asymmetric
+/// outcomes: literal-init produced a Composite variant, map-init
+/// produced a Virtual variant, and the loop back-edge unification
+/// failed with "Loop body type must match loop variable type:
+/// Failure(Virtual, Composite)". Now that `map`'s output variant is
+/// pinned to Composite, both styles compile.
+#[test]
+fn test_spirv_loop_carrying_literal_init() {
+    let source = r#"
+def f(seed: f32) [4]f32 =
+    let init: [4]f32 = [seed, seed, seed, seed] in
+    let (_, out) =
+        loop (i, arr) = (0, init) while i < 2 do
+            let arr' = map(|j: i32| arr[j] + 1.0, iota(4))
+            in (i + 1, arr')
+    in out
+
+#[compute]
+entry main(x: []f32) [4]f32 = f(x[0])
+"#;
+    compile_to_spirv(source).expect(
+        "loop back-edge carrying a literal-init array across a map(…, iota(…)) body \
+         should compile; both init and body variants are Composite",
+    );
+}
+
 // =============================================================================
 // Materialization Optimization
 // =============================================================================
@@ -1065,6 +1093,40 @@ entry frag(c: vec4f32) vec4f32 =
     @[a, inner[0], inner[1], inner[2]]
 "#;
     compile_to_spirv(source).expect("map over [N](f32, [M]f32) should compile to SPIR-V");
+}
+
+/// Regression: a loop that carries an array whose next-iteration
+/// value comes from `map(…, iota(N))`.
+///
+/// Before the fix, `map`'s type scheme claimed the output variant
+/// was the same as the input's. Since `iota` returns a Virtual
+/// array, `map`'s output was typed Virtual — but `egir::soac_expand`
+/// actually materializes the result via `_w_intrinsic_uninit` +
+/// `_w_intrinsic_array_with_inplace`, which is a Composite
+/// representation. That type/representation mismatch surfaced as
+/// a SPIR-V "ArrayWith: element type not found" cache miss when
+/// the loop back-edge carried what SSA thought was a Virtual
+/// array. Fix: pin `map` / `scan` / `filter` output variant to
+/// Composite in the type scheme, matching the runtime
+/// representation.
+#[test]
+fn test_spirv_loop_carrying_map_over_iota() {
+    let source = r#"
+def f(seed: f32) [4]f32 =
+  let init: [4]f32 = map(|j: i32| seed + f32.i32(j), iota(4)) in
+  let (_, out) =
+    loop (i, arr) = (0, init) while i < 2 do
+      let arr' = map(|j: i32| arr[j] + 1.0, iota(4))
+      in (i + 1, arr')
+  in out
+
+#[compute]
+entry main(x: []f32) [4]f32 = f(x[0])
+"#;
+    compile_to_spirv(source).expect(
+        "loop carrying `map(..., iota(N))` should compile; currently fails with \
+         ArrayWith cache miss because the back-edge array is Virtual variant",
+    );
 }
 
 /// Test the specific raytrace.wyn file compiles to SPIR-V.
