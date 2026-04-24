@@ -369,3 +369,121 @@ fn test_substitute_into_nested_module_signature() {
         f_ty
     );
 }
+
+// ---------------------------------------------------------------------------
+// Regression: intra-module rewriting must recurse into every ExprKind.
+//
+// The elaboration-time walker used to be a hand-written match with arms for
+// Application / Lambda / LetIn / If / BinaryOp / UnaryOp / Tuple / Array /
+// ArrayIndex / ArrayWith / RecordLiteral / Match and a catch-all `_ => {}`.
+// That meant intra-module refs buried inside Loop / Range / Slice /
+// TypeAscription / TypeCoercion / TypeHole silently escaped qualification.
+// After consolidating onto the shared `name_resolution::walk_expr`, every
+// ExprKind is visited. These tests guard that.
+//
+// Each case constructs a tiny module with an intra-module reference
+// inside the expression kind under test and asserts the elaborated
+// body contains a qualified identifier with the module name.
+// ---------------------------------------------------------------------------
+
+fn module_body_str(src: &str, module_name: &str, fn_name: &str) -> String {
+    let mm = module_manager_with(src);
+    let m = mm.get_elaborated_module(module_name).expect("module should exist");
+    let decl = m
+        .items
+        .iter()
+        .find_map(|item| match item {
+            ElaboratedItem::Decl(d) if d.name == fn_name => Some(d),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{} should have {} declaration", module_name, fn_name));
+    format!("{:?}", decl.body)
+}
+
+#[test]
+fn intra_module_ref_inside_loop_body_is_qualified() {
+    // `arr' = map(helper, …)` inside a loop body — the `helper` call is
+    // a bare identifier that should be rewritten to `foo.helper`.
+    let body = module_body_str(
+        r#"
+module foo = {
+    def helper(x: i32) i32 = x + 1
+    def main(seed: i32) i32 =
+        let (_, out) =
+            loop (i, acc) = (0i32, seed) while i < 2 do
+                (i + 1, helper(acc))
+        in out
+}
+        "#,
+        "foo",
+        "main",
+    );
+    assert!(
+        body.contains("[\"foo\"]"),
+        "helper inside a loop body should be qualified to foo.helper: {}",
+        body
+    );
+}
+
+#[test]
+fn intra_module_ref_inside_range_is_qualified() {
+    // Range expression `helper(0) ..< helper(n)`. Range was not in the old
+    // walker's match; the call sites inside its endpoints escaped
+    // qualification.
+    let body = module_body_str(
+        r#"
+module foo = {
+    def helper(x: i32) i32 = x + 1
+    def main(n: i32) [8]i32 =
+        map(|j: i32| j, helper(0) ..< helper(n))
+}
+        "#,
+        "foo",
+        "main",
+    );
+    assert!(
+        body.contains("Range") && body.contains("[\"foo\"]"),
+        "helper inside a Range expression should be qualified: {}",
+        body
+    );
+}
+
+#[test]
+fn intra_module_ref_inside_slice_is_qualified() {
+    // `arr[helper(0) : helper(n)]` — slice bounds contain intra-module calls.
+    let body = module_body_str(
+        r#"
+module foo = {
+    def helper(x: i32) i32 = x + 1
+    def main(arr: [16]i32, n: i32) [16]i32 = arr[helper(0) .. helper(n)]
+}
+        "#,
+        "foo",
+        "main",
+    );
+    assert!(
+        body.contains("[\"foo\"]"),
+        "helper inside slice bounds should be qualified: {}",
+        body
+    );
+}
+
+#[test]
+fn intra_module_ref_inside_type_ascription_is_qualified() {
+    // `helper(x) : i32` — the expression inside a type ascription.
+    let body = module_body_str(
+        r#"
+module foo = {
+    def helper(x: i32) i32 = x + 1
+    def main(x: i32) i32 = (helper(x) : i32)
+}
+        "#,
+        "foo",
+        "main",
+    );
+    assert!(
+        body.contains("[\"foo\"]"),
+        "helper inside a type ascription should be qualified: {}",
+        body
+    );
+}

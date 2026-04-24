@@ -67,3 +67,126 @@ fn test_manual_scope_management() {
     scope_stack.pop_scope();
     assert_eq!(scope_stack.lookup("x"), Some(&1));
 }
+
+// ---------------------------------------------------------------------------
+// pattern_bound_names — one walker shared by name resolution and module
+// elaboration. Covers every PatternKind variant directly so either caller
+// can't silently drift from the other.
+// ---------------------------------------------------------------------------
+
+mod pattern_bound_names {
+    use crate::ast::{Header, NodeId, Pattern, PatternKind, RecordPatternField, Span};
+    use crate::scope::pattern_bound_names;
+    use polytype::Type;
+
+    // Build Patterns without going through the parser. We use a shared
+    // fake NodeId of 0 — the walker never looks at it.
+    fn pat(kind: PatternKind) -> Pattern {
+        Pattern {
+            h: Header {
+                id: NodeId::new(0),
+                span: Span::new(0, 0, 0, 0),
+            },
+            kind,
+        }
+    }
+    fn name(s: &str) -> Pattern {
+        pat(PatternKind::Name(s.into()))
+    }
+    fn wild() -> Pattern {
+        pat(PatternKind::Wildcard)
+    }
+    fn i32_ty() -> Type<crate::ast::TypeName> {
+        Type::Constructed(crate::ast::TypeName::Int(32), vec![])
+    }
+
+    #[test]
+    fn name_pattern_yields_its_name() {
+        assert_eq!(pattern_bound_names(&name("x")), vec!["x".to_string()]);
+    }
+
+    #[test]
+    fn wildcard_unit_and_literal_yield_no_names() {
+        assert!(pattern_bound_names(&wild()).is_empty());
+        assert!(pattern_bound_names(&pat(PatternKind::Unit)).is_empty());
+        assert!(
+            pattern_bound_names(&pat(PatternKind::Literal(crate::ast::PatternLiteral::Bool(true))))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn tuple_pattern_recurses() {
+        let p = pat(PatternKind::Tuple(vec![name("a"), name("b"), wild(), name("c")]));
+        assert_eq!(pattern_bound_names(&p), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn constructor_pattern_recurses() {
+        let p = pat(PatternKind::Constructor("Some".into(), vec![name("x")]));
+        assert_eq!(pattern_bound_names(&p), vec!["x"]);
+    }
+
+    #[test]
+    fn typed_wrapper_recurses() {
+        let p = pat(PatternKind::Typed(Box::new(name("n")), i32_ty()));
+        assert_eq!(pattern_bound_names(&p), vec!["n"]);
+    }
+
+    #[test]
+    fn attributed_wrapper_recurses() {
+        let p = pat(PatternKind::Attributed(vec![], Box::new(name("x"))));
+        assert_eq!(pattern_bound_names(&p), vec!["x"]);
+    }
+
+    #[test]
+    fn record_pattern_with_explicit_patterns_recurses() {
+        let p = pat(PatternKind::Record(vec![
+            RecordPatternField {
+                field: "a".into(),
+                pattern: Some(name("alias_a")),
+            },
+            RecordPatternField {
+                field: "b".into(),
+                pattern: Some(name("alias_b")),
+            },
+        ]));
+        assert_eq!(pattern_bound_names(&p), vec!["alias_a", "alias_b"]);
+    }
+
+    #[test]
+    fn record_shorthand_binds_field_name() {
+        // `{ x }` binds the identifier `x`; the walker treats a field with no
+        // nested pattern as if the pattern were `Name(field)`.
+        let p = pat(PatternKind::Record(vec![
+            RecordPatternField {
+                field: "x".into(),
+                pattern: None,
+            },
+            RecordPatternField {
+                field: "y".into(),
+                pattern: Some(name("renamed_y")),
+            },
+        ]));
+        assert_eq!(pattern_bound_names(&p), vec!["x", "renamed_y"]);
+    }
+
+    #[test]
+    fn deeply_nested_pattern_visits_every_leaf() {
+        // `#[foo] (Some(x), {k}: i32, _)` — attributed + tuple + constructor +
+        // record-shorthand + typed + wildcard; all in one.
+        let inner = pat(PatternKind::Tuple(vec![
+            pat(PatternKind::Constructor("Some".into(), vec![name("x")])),
+            pat(PatternKind::Typed(
+                Box::new(pat(PatternKind::Record(vec![RecordPatternField {
+                    field: "k".into(),
+                    pattern: None,
+                }]))),
+                i32_ty(),
+            )),
+            wild(),
+        ]));
+        let p = pat(PatternKind::Attributed(vec![], Box::new(inner)));
+        assert_eq!(pattern_bound_names(&p), vec!["x", "k"]);
+    }
+}
