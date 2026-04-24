@@ -1760,6 +1760,13 @@ impl<'a> Converter<'a> {
         match ae {
             ArrayExpr::Ref(t) => match &t.ty {
                 Type::Constructed(TypeName::Array, args) if !args.is_empty() => args[0].clone(),
+                // After `tlc::soa`, `[N](A, B)` becomes `([N]A, [N]B)` — an
+                // SoA tuple. The per-iteration element type is the
+                // corresponding `(A, B)` element tuple, not the tuple
+                // itself.
+                ty if super::soac_expand::as_soa_tuple(ty).is_some() => {
+                    super::soac_expand::soa_element_type(ty)
+                }
                 _ => t.ty.clone(),
             },
             ArrayExpr::Zip(_) => unreachable!("Zip eliminated"),
