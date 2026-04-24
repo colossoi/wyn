@@ -42,7 +42,7 @@ function SignedIn({ session }: { session: Session }) {
         <span>{session.login}</span>
       </Link>
       <Form method="post" action="/auth/logout">
-        <button type="submit">Sign out</button>
+        <button type="submit" className="btn-ghost">Sign out</button>
       </Form>
     </div>
   );
