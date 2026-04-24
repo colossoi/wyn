@@ -295,43 +295,6 @@ impl SoaTransformer {
                 let new_inner = self.transform_term(inner);
                 self.mk_term(new_ty, span, TermKind::Force(Box::new(new_inner)))
             }
-
-            TermKind::Pack {
-                exists_ty,
-                dims,
-                value,
-            } => {
-                let new_value = self.transform_term(value);
-                self.mk_term(
-                    new_ty,
-                    span,
-                    TermKind::Pack {
-                        exists_ty: soa_type(exists_ty),
-                        dims: dims.clone(),
-                        value: Box::new(new_value),
-                    },
-                )
-            }
-
-            TermKind::Unpack {
-                scrut,
-                dim_binders,
-                value_binder,
-                body,
-            } => {
-                let new_scrut = self.transform_term(scrut);
-                let new_body = self.transform_term(body);
-                self.mk_term(
-                    new_ty,
-                    span,
-                    TermKind::Unpack {
-                        scrut: Box::new(new_scrut),
-                        dim_binders: dim_binders.clone(),
-                        value_binder: *value_binder,
-                        body: Box::new(new_body),
-                    },
-                )
-            }
         }
     }
 

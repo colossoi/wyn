@@ -202,10 +202,6 @@ impl PartialEvaluator {
 
             // SOAC nodes are opaque to partial evaluation — residualize
             TermKind::Soac(_) | TermKind::ArrayExpr(_) | TermKind::Force(_) => Value::Unknown(term.clone()),
-
-            TermKind::Pack { .. } | TermKind::Unpack { .. } => {
-                unreachable!("Pack/Unpack nodes not yet produced at this phase")
-            }
         }
     }
 

@@ -808,11 +808,7 @@ impl tlc::Term {
                 write!(f, "extern \"{}\"", linkage_name)
             }
 
-            tlc::TermKind::Soac(_)
-            | tlc::TermKind::ArrayExpr(_)
-            | tlc::TermKind::Force(_)
-            | tlc::TermKind::Pack { .. }
-            | tlc::TermKind::Unpack { .. } => {
+            tlc::TermKind::Soac(_) | tlc::TermKind::ArrayExpr(_) | tlc::TermKind::Force(_) => {
                 write!(f, "<soac>")
             }
         }

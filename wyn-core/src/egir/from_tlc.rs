@@ -795,9 +795,6 @@ impl<'a> Converter<'a> {
             TermKind::BinOp(_) | TermKind::UnOp(_) => {
                 panic!("ICE: bare operator in to_egir (should be inside App)")
             }
-            TermKind::Pack { .. } | TermKind::Unpack { .. } => Err(ConvertError::Unsupported(
-                "existentials not yet implemented".into(),
-            )),
         }
     }
 

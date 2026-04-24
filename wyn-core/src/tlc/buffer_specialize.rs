@@ -545,41 +545,6 @@ impl BufferSpecializer {
                 }
             }
 
-            TermKind::Pack {
-                exists_ty,
-                dims,
-                value,
-            } => {
-                let new_value = self.rewrite_term(value);
-                Term {
-                    kind: TermKind::Pack {
-                        exists_ty: exists_ty.clone(),
-                        dims: dims.clone(),
-                        value: Box::new(new_value),
-                    },
-                    ..term.clone()
-                }
-            }
-
-            TermKind::Unpack {
-                scrut,
-                dim_binders,
-                value_binder,
-                body,
-            } => {
-                let new_scrut = self.rewrite_term(scrut);
-                let new_body = self.rewrite_term(body);
-                Term {
-                    kind: TermKind::Unpack {
-                        scrut: Box::new(new_scrut),
-                        dim_binders: dim_binders.clone(),
-                        value_binder: *value_binder,
-                        body: Box::new(new_body),
-                    },
-                    ..term.clone()
-                }
-            }
-
             // Leaves — no rewriting needed
             TermKind::Var(_)
             | TermKind::BinOp(_)
@@ -1177,41 +1142,6 @@ impl BufferSpecializer {
                 let new_inner = self.rewrite_specialized_body(inner, view_params);
                 Term {
                     kind: TermKind::Force(Box::new(new_inner)),
-                    ..term.clone()
-                }
-            }
-
-            TermKind::Pack {
-                exists_ty,
-                dims,
-                value,
-            } => {
-                let new_value = self.rewrite_specialized_body(value, view_params);
-                Term {
-                    kind: TermKind::Pack {
-                        exists_ty: exists_ty.clone(),
-                        dims: dims.clone(),
-                        value: Box::new(new_value),
-                    },
-                    ..term.clone()
-                }
-            }
-
-            TermKind::Unpack {
-                scrut,
-                dim_binders,
-                value_binder,
-                body,
-            } => {
-                let new_scrut = self.rewrite_specialized_body(scrut, view_params);
-                let new_body = self.rewrite_specialized_body(body, view_params);
-                Term {
-                    kind: TermKind::Unpack {
-                        scrut: Box::new(new_scrut),
-                        dim_binders: dim_binders.clone(),
-                        value_binder: *value_binder,
-                        body: Box::new(new_body),
-                    },
                     ..term.clone()
                 }
             }

@@ -268,9 +268,6 @@ fn apply_type_subst_to_term(term: &Term, subst: &TypeSubst, term_ids: &mut TermI
         TermKind::Force(ref inner) => {
             TermKind::Force(Box::new(apply_type_subst_to_term(inner, subst, term_ids)))
         }
-        TermKind::Pack { .. } | TermKind::Unpack { .. } => {
-            unreachable!("Pack/Unpack nodes not yet produced at this phase")
-        }
     };
     Term {
         id: term_ids.next_id(),
@@ -544,9 +541,6 @@ pub(super) fn collect_free_vars(
         }
         TermKind::Force(ref inner) => {
             collect_free_vars(inner, bound, top_level, known_defs, symbols, free, seen);
-        }
-        TermKind::Pack { .. } | TermKind::Unpack { .. } => {
-            unreachable!("Pack/Unpack nodes not yet produced at this phase")
         }
     }
 }
@@ -998,10 +992,6 @@ impl<'a> Defunctionalizer<'a> {
                     },
                     sv: StaticVal::Dynamic,
                 }
-            }
-
-            TermKind::Pack { .. } | TermKind::Unpack { .. } => {
-                unreachable!("Pack/Unpack nodes not yet produced at this phase")
             }
         }
     }
@@ -1923,10 +1913,6 @@ impl<'a> Defunctionalizer<'a> {
                 span: term.span,
                 kind: TermKind::Force(Box::new(self.substitute_var(inner, old_sym, new_sym))),
             },
-
-            TermKind::Pack { .. } | TermKind::Unpack { .. } => {
-                unreachable!("Pack/Unpack nodes not yet produced at this phase")
-            }
         }
     }
 

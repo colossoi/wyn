@@ -256,21 +256,6 @@ pub enum TermKind {
 
     /// Materialization barrier — forces an array expression to be computed.
     Force(Box<Term>),
-
-    /// Existential introduction (pack a value with hidden dimension).
-    Pack {
-        exists_ty: Type<TypeName>,
-        dims: Vec<Dim>,
-        value: Box<Term>,
-    },
-
-    /// Existential elimination (unpack hidden dimensions from a value).
-    Unpack {
-        scrut: Box<Term>,
-        dim_binders: Vec<DimVarId>,
-        value_binder: SymbolId,
-        body: Box<Term>,
-    },
 }
 
 /// The kind of loop (mirrors MIR::LoopKind).
@@ -326,6 +311,25 @@ pub struct DimVarId(pub u32);
 pub struct Shape(pub Vec<Dim>);
 
 /// An array-producing expression.
+//
+// Two variants are phase-scoped — they're only valid in part of the
+// pipeline, with the boundaries enforced at runtime via `unreachable!`
+// in passes that can't see them:
+//
+// * `Zip` is constructed in `transform_soac_zip`, absorbed at
+//   `transform_soac_map`, and anything escaping as a standalone term is
+//   rewritten to `_w_tuple(...)` by `tlc::soa`. Post-SoA passes don't
+//   meaningfully encounter it.
+//
+// * `StorageBuffer` is introduced by `tlc::buffer_specialize`.
+//   Pre-buffer_specialize passes don't see it.
+//
+// A future refactor could narrow these via per-phase enum splits
+// (`PreSoaArrayExpr` / `PostSoaArrayExpr`, etc.) so the invariants are
+// type-enforced rather than runtime-checked. The cost is non-trivial —
+// `Term`/`TermKind`/`SoacOp`/`Lambda` would need a phase parameter, so
+// it cascades across the whole TLC pipeline. The current runtime checks
+// are fine until that pays for itself.
 #[derive(Debug, Clone)]
 pub enum ArrayExpr {
     /// A TLC term producing an array value.
@@ -631,28 +635,6 @@ impl Term {
             TermKind::ArrayExpr(ae) => TermKind::ArrayExpr(map_array_expr_children(ae, f)),
 
             TermKind::Force(inner) => TermKind::Force(Box::new(f(*inner))),
-
-            TermKind::Pack {
-                exists_ty,
-                dims,
-                value,
-            } => TermKind::Pack {
-                exists_ty,
-                dims,
-                value: Box::new(f(*value)),
-            },
-
-            TermKind::Unpack {
-                scrut,
-                dim_binders,
-                value_binder,
-                body,
-            } => TermKind::Unpack {
-                scrut: Box::new(f(*scrut)),
-                dim_binders,
-                value_binder,
-                body: Box::new(f(*body)),
-            },
         };
 
         Term { kind, ..self }
@@ -716,13 +698,6 @@ impl Term {
             TermKind::Soac(soac) => visit_soac_children(soac, f),
             TermKind::ArrayExpr(ae) => visit_array_expr_children(ae, f),
             TermKind::Force(inner) => f(inner),
-
-            TermKind::Pack { value, .. } => f(value),
-
-            TermKind::Unpack { scrut, body, .. } => {
-                f(scrut);
-                f(body);
-            }
         }
     }
 }
