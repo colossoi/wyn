@@ -82,6 +82,9 @@ pub enum PrimOp {
     ShiftLeftLogical,
     ShiftRightArithmetic,
     ShiftRightLogical,
+    // OpIsNan / OpIsInf.
+    IsNan,
+    IsInf,
     // Type conversions
     // Float to signed int
     FPToSI,
@@ -557,11 +560,8 @@ impl ImplSource {
         self.register_ternop(ty_name, "lerp", BuiltinImpl::PrimOp(PrimOp::GlslExt(46))); // FMix
         self.register_ternop(ty_name, "fma", BuiltinImpl::PrimOp(PrimOp::GlslExt(50))); // Fused multiply-add
 
-        // isnan, isinf
-        // TODO: Check these opcodes - 66/67 are Length/Distance in GLSL.std.450, not IsNan/IsInf
-        // IsNan should be 149, IsInf should be 148
-        self.register_bool_unop(ty_name, "isnan", BuiltinImpl::PrimOp(PrimOp::GlslExt(66)));
-        self.register_bool_unop(ty_name, "isinf", BuiltinImpl::PrimOp(PrimOp::GlslExt(67)));
+        self.register_bool_unop(ty_name, "isnan", BuiltinImpl::PrimOp(PrimOp::IsNan));
+        self.register_bool_unop(ty_name, "isinf", BuiltinImpl::PrimOp(PrimOp::IsInf));
 
         // ldexp: builds float from significand and exponent
         self.register_binop(ty_name, "ldexp", BuiltinImpl::PrimOp(PrimOp::GlslExt(53)));

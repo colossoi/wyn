@@ -2696,6 +2696,18 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 }
                 Ok(self.constructor.builder.bitcast(result_ty, None, arg_ids[0])?)
             }
+            PrimOp::IsNan => {
+                if arg_ids.len() != 1 {
+                    bail_spirv!("isnan requires 1 arg");
+                }
+                Ok(self.constructor.builder.is_nan(result_ty, None, arg_ids[0])?)
+            }
+            PrimOp::IsInf => {
+                if arg_ids.len() != 1 {
+                    bail_spirv!("isinf requires 1 arg");
+                }
+                Ok(self.constructor.builder.is_inf(result_ty, None, arg_ids[0])?)
+            }
             // Additional arithmetic ops
             PrimOp::FAdd | PrimOp::FSub | PrimOp::FMul | PrimOp::FDiv | PrimOp::FRem | PrimOp::FMod => {
                 if arg_ids.len() != 2 {

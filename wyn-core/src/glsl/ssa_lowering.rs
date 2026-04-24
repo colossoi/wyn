@@ -1496,6 +1496,8 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 let target = self.ctx.type_to_glsl(ret_ty);
                 Ok(format!("{}({})", target, args[0]))
             }
+            IsNan => Ok(format!("isnan({})", args[0])),
+            IsInf => Ok(format!("isinf({})", args[0])),
             Bitcast => match ret_ty {
                 PolyType::Constructed(TypeName::Int(32), _) => Ok(format!("floatBitsToInt({})", args[0])),
                 PolyType::Constructed(TypeName::UInt(32), _) => Ok(format!("floatBitsToUint({})", args[0])),
