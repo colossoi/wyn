@@ -473,6 +473,19 @@ fn wgsl_place(id: crate::ssa::types::PlaceId) -> String {
     format!("p{}_{}", idx, ver)
 }
 
+/// True if `ty` is a view-variant unsized array (i.e. backed by a
+/// storage buffer, accessed through a `@group @binding` global rather
+/// than a function parameter).
+fn is_view_array_ty(ty: &polytype::Type<TypeName>) -> bool {
+    let polytype::Type::Constructed(TypeName::Array, args) = ty else {
+        return false;
+    };
+    if args.len() != 3 {
+        return false;
+    }
+    crate::types::is_array_variant_view(&args[2])
+}
+
 struct LowerCtx<'a> {
     program: &'a Program,
     type_emitter: TypeEmitter,
@@ -790,9 +803,20 @@ impl<'a> LowerCtx<'a> {
         let body = &func.body;
         let name = self.mangle_tracked(&func.name)?;
         let ret_ty = self.type_emitter.type_to_wgsl(&body.return_ty)?;
+        // Skip params whose type is a view-array (`[?]T`). WGSL function
+        // signatures can't take bare `array<T>` — they'd need
+        // `ptr<storage, array<T>, read>`. In practice these params are
+        // dead: buffer_specialize either rewrote them into explicit
+        // (offset, len) tuples upstream, or the body was rewritten to
+        // reach the buffer through its `@group @binding` global and
+        // ignore the param entirely (e.g. a `map` lambda after
+        // partial-evaluation). If the body *did* reference it, a
+        // later name-lookup error at the reference site surfaces the
+        // bug cleanly.
         let params: Result<Vec<String>> = body
             .params
             .iter()
+            .filter(|(_, ty, _)| !is_view_array_ty(ty))
             .map(|(_, ty, pname)| {
                 let ty_str = self.type_emitter.type_to_wgsl(ty)?;
                 let pname = self.mangle_tracked(pname)?;
@@ -1327,6 +1351,38 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         self.binding(id).map(|b| b.expr().to_string())
     }
 
+    /// Resolve `v` to a WGSL expression, inserting an explicit scalar
+    /// cast if its type doesn't already match `result_ty`. Only coerces
+    /// between the scalar integer / float types — vectors, matrices,
+    /// and structs pass through unchanged (a non-scalar mismatch is a
+    /// real error, not a coercion target).
+    fn coerce_operand_to_result_ty(
+        &mut self,
+        v: ValueRef,
+        result_ty: Option<&polytype::Type<TypeName>>,
+    ) -> Result<String> {
+        let expr = self.get_value(v)?;
+        let (Some(result_ty), ValueRef::Ssa(id)) = (result_ty, v) else {
+            return Ok(expr);
+        };
+        let operand_ty = self.body.get_value_type(id);
+        if operand_ty == result_ty {
+            return Ok(expr);
+        }
+        let both_scalar = matches!(
+            result_ty,
+            polytype::Type::Constructed(TypeName::Int(_) | TypeName::UInt(_) | TypeName::Float(_), _)
+        ) && matches!(
+            operand_ty,
+            polytype::Type::Constructed(TypeName::Int(_) | TypeName::UInt(_) | TypeName::Float(_), _)
+        );
+        if !both_scalar {
+            return Ok(expr);
+        }
+        let cast_ty = self.ctx.type_emitter.type_to_wgsl(result_ty)?;
+        Ok(format!("{}({})", cast_ty, expr))
+    }
+
     fn binding(&self, id: ValueId) -> Result<&ValueBinding> {
         self.value_map.get(&id).ok_or_else(|| {
             crate::err_wgsl_at!(self.blame_span(), "value {:?} not bound in WGSL value_map", id)
@@ -1770,8 +1826,14 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             )),
 
             InstKind::BinOp { op, lhs, rhs } => {
-                let l = self.get_value(*lhs)?;
-                let r = self.get_value(*rhs)?;
+                // WGSL has no implicit numeric coercion (`i32 + u32` is an
+                // error), so when an operand's type doesn't match the
+                // BinOp's declared result type we wrap it in an explicit
+                // cast. This comes up e.g. when a slice's offset (i32
+                // literal) gets added to a parent `StorageView` offset
+                // (u32 arrayLength result).
+                let l = self.coerce_operand_to_result_ty(*lhs, result_ty.as_ref())?;
+                let r = self.coerce_operand_to_result_ty(*rhs, result_ty.as_ref())?;
                 match op.as_str() {
                     "**" => Ok(format!("pow({}, {})", l, r)),
                     _ => Ok(format!("({} {} {})", l, op, r)),
@@ -1879,14 +1941,30 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             }
 
             InstKind::Call { func, args } => {
-                let arg_strs: Result<Vec<_>> = args.iter().map(|a| self.get_value(*a)).collect();
-                let arg_strs = arg_strs?;
                 // Route well-known builtins (type casts, math functions)
                 // through the same dispatch as `InstKind::Intrinsic`; fall
                 // back to a mangled user-function call.
-                if let Some(lowered) = try_lower_wgsl_builtin(func, &arg_strs) {
+                let raw_strs: Result<Vec<_>> = args.iter().map(|a| self.get_value(*a)).collect();
+                let raw_strs = raw_strs?;
+                if let Some(lowered) = try_lower_wgsl_builtin(func, &raw_strs) {
                     return Ok(lowered);
                 }
+                // Mirror `lower_function`: drop arguments whose parameter
+                // slot on the callee is a view-array. The callee's
+                // signature has those params filtered out, so we skip
+                // the corresponding args here too.
+                let callee = self.ctx.program.functions.iter().find(|f| f.name == *func);
+                let arg_strs: Vec<String> = match callee {
+                    Some(f) => {
+                        args.iter()
+                            .zip(f.body.params.iter())
+                            .filter_map(|(arg, (_, pty, _))| {
+                                if is_view_array_ty(pty) { None } else { Some(self.get_value(*arg)) }
+                            })
+                            .collect::<Result<Vec<_>>>()?
+                    }
+                    None => raw_strs,
+                };
                 let mangled = self.ctx.mangle_tracked(func)?;
                 Ok(format!("{}({})", mangled, arg_strs.join(", ")))
             }
