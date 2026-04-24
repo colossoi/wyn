@@ -541,10 +541,6 @@ impl<'a> Monomorphizer<'a> {
             TermKind::ArrayExpr(ref ae) => TermKind::ArrayExpr(self.process_array_expr(ae)),
 
             TermKind::Force(ref inner) => TermKind::Force(Box::new(self.process_term(inner))),
-
-            TermKind::Pack { .. } | TermKind::Unpack { .. } => {
-                unreachable!("Pack/Unpack nodes not yet produced at this phase")
-            }
         };
 
         Term {
@@ -800,10 +796,6 @@ impl<'a> Monomorphizer<'a> {
             TermKind::ArrayExpr(ref ae) => TermKind::ArrayExpr(self.apply_subst_array_expr(ae, subst)),
 
             TermKind::Force(ref inner) => TermKind::Force(Box::new(self.apply_subst_term(inner, subst))),
-
-            TermKind::Pack { .. } | TermKind::Unpack { .. } => {
-                unreachable!("Pack/Unpack nodes not yet produced at this phase")
-            }
 
             TermKind::Lambda(Lambda {
                 params,

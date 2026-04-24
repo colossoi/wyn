@@ -256,21 +256,6 @@ pub enum TermKind {
 
     /// Materialization barrier — forces an array expression to be computed.
     Force(Box<Term>),
-
-    /// Existential introduction (pack a value with hidden dimension).
-    Pack {
-        exists_ty: Type<TypeName>,
-        dims: Vec<Dim>,
-        value: Box<Term>,
-    },
-
-    /// Existential elimination (unpack hidden dimensions from a value).
-    Unpack {
-        scrut: Box<Term>,
-        dim_binders: Vec<DimVarId>,
-        value_binder: SymbolId,
-        body: Box<Term>,
-    },
 }
 
 /// The kind of loop (mirrors MIR::LoopKind).
@@ -326,6 +311,34 @@ pub struct DimVarId(pub u32);
 pub struct Shape(pub Vec<Dim>);
 
 /// An array-producing expression.
+// TODO(types-sweep): two variants here span pipeline stages and leak as
+// scattered `unreachable!("X eliminated")` / `unreachable!("X not yet
+// produced")` panics across passes that provably can't see them. Narrow
+// via enum split at each phase boundary:
+//
+// 1. `Zip` is constructed in `tlc/mod.rs::transform_soac_zip`, absorbed
+//    at `transform_soac_map` (line ~2048), and anything that escapes
+//    into a standalone term is rewritten to `_w_tuple(...)` by
+//    `tlc::soa` (line ~781). It provably doesn't exist post-SoA — but
+//    every post-SoA pass (monomorphize, defunctionalize,
+//    buffer_specialize, parallelize, from_tlc) still has to either
+//    walk through it as a no-op or `unreachable!`. Introduce a
+//    `PostSoaArrayExpr` (or similar) without the `Zip` variant; have
+//    `tlc::soa::run` return the narrower type; update the ~20
+//    downstream touch sites. Kills the 3 unreachables in
+//    `egir/from_tlc.rs` at the type level.
+//
+// 2. `StorageBuffer` is introduced by `tlc::buffer_specialize`.
+//    Pre-buffer_specialize passes (partial_eval, monomorphize,
+//    defunctionalize) currently `unreachable!("StorageBuffer
+//    introduced after defunctionalization")`. Mirror of (1) in the
+//    other direction: pre-buffer_specialize passes consume an
+//    `ArrayExpr` *without* the `StorageBuffer` variant;
+//    buffer_specialize widens at its output. ~10 touch sites.
+//
+// Neither of these should ship a runtime fallback once type-narrowed;
+// the whole point is that the invariant becomes un-representable
+// rather than just un-executed.
 #[derive(Debug, Clone)]
 pub enum ArrayExpr {
     /// A TLC term producing an array value.
@@ -632,27 +645,6 @@ impl Term {
 
             TermKind::Force(inner) => TermKind::Force(Box::new(f(*inner))),
 
-            TermKind::Pack {
-                exists_ty,
-                dims,
-                value,
-            } => TermKind::Pack {
-                exists_ty,
-                dims,
-                value: Box::new(f(*value)),
-            },
-
-            TermKind::Unpack {
-                scrut,
-                dim_binders,
-                value_binder,
-                body,
-            } => TermKind::Unpack {
-                scrut: Box::new(f(*scrut)),
-                dim_binders,
-                value_binder,
-                body: Box::new(f(*body)),
-            },
         };
 
         Term { kind, ..self }
@@ -716,13 +708,6 @@ impl Term {
             TermKind::Soac(soac) => visit_soac_children(soac, f),
             TermKind::ArrayExpr(ae) => visit_array_expr_children(ae, f),
             TermKind::Force(inner) => f(inner),
-
-            TermKind::Pack { value, .. } => f(value),
-
-            TermKind::Unpack { scrut, body, .. } => {
-                f(scrut);
-                f(body);
-            }
         }
     }
 }

@@ -810,9 +810,7 @@ impl tlc::Term {
 
             tlc::TermKind::Soac(_)
             | tlc::TermKind::ArrayExpr(_)
-            | tlc::TermKind::Force(_)
-            | tlc::TermKind::Pack { .. }
-            | tlc::TermKind::Unpack { .. } => {
+            | tlc::TermKind::Force(_) => {
                 write!(f, "<soac>")
             }
         }
