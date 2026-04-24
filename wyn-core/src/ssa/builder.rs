@@ -338,31 +338,20 @@ impl FuncBuilder {
         index: usize,
         elem_ty: Type<TypeName>,
     ) -> Result<PlaceId, BuilderError> {
-        let block = self.current_block().ok_or(BuilderError::NoCurrentBlock)?;
-        if !matches!(self.inner.func().blocks[block].term, Terminator::Unreachable) {
-            return Err(BuilderError::BlockAlreadyTerminated(block));
-        }
         let place = self.places.insert(PlaceInfo { elem_ty });
-        self.inner.func_mut().append_void_inst(block, InstKind::OutputSlot { index, result: place });
+        self.inner.push_void_inst(InstKind::OutputSlot { index, result: place })?;
         Ok(place)
     }
 
     /// Emit an `Alloca` instruction producing a fresh function-scope place.
     pub fn emit_alloca(&mut self, elem_ty: Type<TypeName>) -> Result<PlaceId, BuilderError> {
-        let block = self.current_block().ok_or(BuilderError::NoCurrentBlock)?;
-        if !matches!(self.inner.func().blocks[block].term, Terminator::Unreachable) {
-            return Err(BuilderError::BlockAlreadyTerminated(block));
-        }
         let place = self.places.insert(PlaceInfo {
             elem_ty: elem_ty.clone(),
         });
-        self.inner.func_mut().append_void_inst(
-            block,
-            InstKind::Alloca {
-                elem_ty,
-                result: place,
-            },
-        );
+        self.inner.push_void_inst(InstKind::Alloca {
+            elem_ty,
+            result: place,
+        })?;
         Ok(place)
     }
 
@@ -374,19 +363,12 @@ impl FuncBuilder {
         index: ValueId,
         elem_ty: Type<TypeName>,
     ) -> Result<PlaceId, BuilderError> {
-        let block = self.current_block().ok_or(BuilderError::NoCurrentBlock)?;
-        if !matches!(self.inner.func().blocks[block].term, Terminator::Unreachable) {
-            return Err(BuilderError::BlockAlreadyTerminated(block));
-        }
         let place = self.places.insert(PlaceInfo { elem_ty });
-        self.inner.func_mut().append_void_inst(
-            block,
-            InstKind::ViewIndex {
-                view: ValueRef::from(view),
-                index: ValueRef::from(index),
-                result: place,
-            },
-        );
+        self.inner.push_void_inst(InstKind::ViewIndex {
+            view: ValueRef::from(view),
+            index: ValueRef::from(index),
+            result: place,
+        })?;
         Ok(place)
     }
 
@@ -396,26 +378,15 @@ impl FuncBuilder {
         place: PlaceId,
         result_ty: Type<TypeName>,
     ) -> Result<ValueId, BuilderError> {
-        let block = self.current_block().ok_or(BuilderError::NoCurrentBlock)?;
-        if !matches!(self.inner.func().blocks[block].term, Terminator::Unreachable) {
-            return Err(BuilderError::BlockAlreadyTerminated(block));
-        }
-        Ok(self.inner.func_mut().append_inst(block, InstKind::Load { place }, result_ty))
+        self.inner.push_inst(InstKind::Load { place }, result_ty)
     }
 
     /// Push a store instruction.
     pub fn push_store(&mut self, place: PlaceId, value: ValueId) -> Result<(), BuilderError> {
-        let block = self.current_block().ok_or(BuilderError::NoCurrentBlock)?;
-        if !matches!(self.inner.func().blocks[block].term, Terminator::Unreachable) {
-            return Err(BuilderError::BlockAlreadyTerminated(block));
-        }
-        self.inner.func_mut().append_void_inst(
-            block,
-            InstKind::Store {
-                place,
-                value: ValueRef::from(value),
-            },
-        );
+        self.inner.push_void_inst(InstKind::Store {
+            place,
+            value: ValueRef::from(value),
+        })?;
         Ok(())
     }
 
