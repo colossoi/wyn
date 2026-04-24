@@ -76,6 +76,97 @@ cargo run --bin wyn -- check test.wyn
 ```bash
 cd viz && cargo run vf ../complete_shader_example.spv --vertex vertex_main --fragment fragment_main
 ```
+
+### Minimizing a Failing Wyn Program (treereduce-wyn)
+
+When a Wyn test file triggers a compiler bug and the source is too
+large to debug directly, use **treereduce-wyn** to shrink it to the
+smallest program that still reproduces the bug. Source:
+`extra/treereduce-wyn/` (binary: `extra/treereduce-wyn/target/release/treereduce-wyn`).
+
+**Workflow:**
+
+1. **Build both the wyn compiler and the reducer** (one-time):
+   ```bash
+   cargo build --release                                                    # wyn → target/release/wyn
+   (cd extra/treereduce-wyn && cargo build --release)                       # reducer
+   ```
+
+2. **Write an interestingness script** that exits 0 iff the bug still
+   reproduces. It should pattern-match a stable substring of the
+   error, not the full message (line numbers and function names drift
+   during reduction). Save as e.g. `/tmp/interesting.sh`:
+   ```bash
+   #!/usr/bin/env bash
+   set -euo pipefail
+   WYN="${WYN:-./target/release/wyn}"
+   candidate="${1:--}"
+   if [[ "$candidate" == "-" ]]; then
+     tmp=$(mktemp /tmp/tr_wyn_XXXXXX.wyn)
+     trap 'rm -f "$tmp"' EXIT
+     cat > "$tmp"
+     candidate="$tmp"
+   fi
+   output=$("$WYN" compile --fill-holes "$candidate" -o /dev/null 2>&1 || true)
+   grep -q "STABLE_ERROR_SUBSTRING" <<< "$output"
+   ```
+   `chmod +x /tmp/interesting.sh`. Always test on the original file
+   (`bash /tmp/interesting.sh path/to/bug.wyn; echo $?` → 0) before
+   launching the reducer.
+
+   Always pass `--fill-holes` in the script; the reducer substitutes
+   `???` (type-hole) as the universal polymorphic replacement for
+   every candidate rewrite, and without `--fill-holes` the compiler
+   exits 2 at the type-check gate before the target bug can fire.
+
+3. **Run the reducer** from the repo root (so the script's default
+   `./target/release/wyn` resolves):
+   ```bash
+   ./extra/treereduce-wyn/target/release/treereduce-wyn \
+     -v --stable --stats \
+     -s path/to/bug.wyn \
+     -o /tmp/bug_min.wyn \
+     --on-parse-error ignore \
+     -j 4 \
+     -- bash /tmp/interesting.sh @@
+   ```
+   `--stable` iterates passes until a pass makes zero progress (true
+   fixpoint). `-j 4` parallelizes. `-v` is important — without it
+   treereduce only emits the final stats block, so a running job
+   looks stalled. Typical run: 2–10 minutes depending on input size
+   and how many rewrites the table allows.
+
+4. **Iterate on the replacement table** if the reducer's floor looks
+   too high. The table lives in
+   `extra/treereduce-wyn/src/main.rs` and maps tree-sitter node kinds
+   to replacement strings. Current vocabulary covers every expression
+   kind mapped to `???`, every pattern kind mapped to `_`, and
+   top-level `def_declaration` / `binding_declaration` mapped to `""`
+   (deletion). If a bug's minimum repro is structurally blocked (e.g.
+   the reducer can't delete a load-bearing def because removing it
+   breaks type-check), you may need to extend the table — **and
+   regenerate the parser** if you change `grammar.js`:
+   ```bash
+   (cd extra/tree-sitter-wyn && tree-sitter generate)       # rebuild parser.c
+   (cd extra/treereduce-wyn && cargo build --release)       # rebuild reducer
+   ```
+
+5. **The reducer has known limitations**:
+   - It can only *delete* and *substitute*, not *synthesize*. If the
+     bug requires a specific expression to remain reachable (e.g.
+     `f32.sqrt` for the sqrt-panic demo), any substitution that
+     disconnects the call graph from that expression will be rejected
+     by interestingness — leaving the call chain intact in the output.
+   - It deterministically hits a fixpoint; re-running with the same
+     table and interestingness produces the same output. To go
+     further: relax the interestingness signature, extend the table,
+     or do a manual polish pass.
+
+**See also:**
+- `extra/treereduce-wyn/interesting.sh` — the committed sqrt-panic
+  script; good template.
+- Prior reduction results for the sqrt-panic demo and SoA-tuple
+  ArrayWith bug yielded ~2KB repros from ~12KB sources.
 - Compile a source file to SPIR-V or GLSL
 
      Usage: wyn compile [OPTIONS] <FILE>
