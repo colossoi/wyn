@@ -52,5 +52,5 @@ export async function loader({ request, context }: Route.LoaderArgs) {
   headers.append("Set-Cookie", sessionCookie);
   headers.append("Set-Cookie", clearSignedCookie(STATE_COOKIE));
 
-  return redirect("/", { headers });
+  return redirect("/new", { headers });
 }

@@ -41,5 +41,14 @@
 			"database_name": "wyn",
 			"database_id": "1d1ae428-8c0e-433d-b73e-063500937e3e"
 		}
+	],
+	// Custom domain. The `finue.com` zone must already be on this
+	// Cloudflare account; the deploy auto-creates a CNAME for the
+	// subdomain and provisions a TLS cert (~1–2 min the first time).
+	"routes": [
+		{
+			"pattern": "playground.finue.com",
+			"custom_domain": true
+		}
 	]
 }
