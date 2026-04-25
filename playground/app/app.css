@@ -976,6 +976,92 @@
         opacity: 0.7;
       }
 
+      .landing-featured {
+        display: block;
+        max-width: 520px;
+        margin: 0 auto 24px;
+        text-decoration: none;
+        color: inherit;
+      }
+
+      .landing-featured-eyebrow {
+        font-size: 0.7rem;
+        text-transform: uppercase;
+        letter-spacing: 0.16em;
+        color: var(--text-secondary);
+        margin-bottom: 8px;
+        text-align: left;
+      }
+
+      .landing-featured-card {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 10px;
+        background: rgba(22, 22, 42, 0.7);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        transition: border-color 0.2s, transform 0.2s, box-shadow 0.2s;
+      }
+
+      .landing-featured:hover .landing-featured-card {
+        border-color: var(--accent);
+        transform: translateY(-1px);
+        box-shadow: 0 8px 22px rgba(99, 102, 241, 0.25);
+      }
+
+      .landing-featured-thumb {
+        width: 96px;
+        height: 54px;
+        border-radius: 6px;
+        object-fit: cover;
+        flex-shrink: 0;
+      }
+
+      .landing-featured-thumb-empty {
+        background: linear-gradient(
+          135deg,
+          var(--accent) 0%,
+          #a855f7 100%
+        );
+      }
+
+      .landing-featured-meta {
+        flex: 1;
+        min-width: 0;
+        text-align: left;
+      }
+
+      .landing-featured-title {
+        font-size: 0.95rem;
+        font-weight: 600;
+        color: var(--text-primary);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .landing-featured-slug {
+        font-family: "JetBrains Mono", monospace;
+        font-size: 0.72rem;
+        color: var(--text-secondary);
+        margin-top: 2px;
+      }
+
+      .landing-featured-arrow {
+        color: var(--text-secondary);
+        font-size: 1.2rem;
+        flex-shrink: 0;
+        transition: color 0.2s, transform 0.2s;
+      }
+
+      .landing-featured:hover .landing-featured-arrow {
+        color: var(--accent);
+        transform: translateX(2px);
+      }
+
       .landing-features {
         position: relative;
         z-index: 2;

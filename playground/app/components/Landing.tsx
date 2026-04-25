@@ -7,7 +7,19 @@
 
 import { useEffect, useRef } from "react";
 
-export function Landing() {
+export interface FeaturedShader {
+  slug: string;
+  title: string | null;
+  thumbnail: string | null;
+}
+
+interface LandingProps {
+  /** The latest publicly-saved shader, surfaced as a "Featured shader"
+   *  card in the hero. Null when the database has no shaders yet. */
+  featured: FeaturedShader | null;
+}
+
+export function Landing({ featured }: LandingProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -38,10 +50,42 @@ export function Landing() {
           <a href="/auth/github" className="landing-cta landing-cta-primary">
             Sign in with GitHub
           </a>
-          <a href="#features" className="landing-cta landing-cta-secondary">
-            Learn more
-          </a>
+          {featured ? (
+            <a
+              href={`/s/${featured.slug}`}
+              className="landing-cta landing-cta-secondary"
+            >
+              See an example →
+            </a>
+          ) : (
+            <a href="#features" className="landing-cta landing-cta-secondary">
+              Learn more
+            </a>
+          )}
         </div>
+        {featured && (
+          <a href={`/s/${featured.slug}`} className="landing-featured">
+            <div className="landing-featured-eyebrow">Featured shader</div>
+            <div className="landing-featured-card">
+              {featured.thumbnail ? (
+                <img
+                  src={featured.thumbnail}
+                  alt=""
+                  className="landing-featured-thumb"
+                />
+              ) : (
+                <div className="landing-featured-thumb landing-featured-thumb-empty" />
+              )}
+              <div className="landing-featured-meta">
+                <div className="landing-featured-title">
+                  {featured.title?.trim() || "Untitled shader"}
+                </div>
+                <div className="landing-featured-slug">/s/{featured.slug}</div>
+              </div>
+              <div className="landing-featured-arrow">→</div>
+            </div>
+          </a>
+        )}
         <p className="landing-note">
           Viewing a shared shader doesn't require an account — sign in is only
           needed to save your own.
