@@ -243,14 +243,22 @@
 
       .editor-container {
         flex: 1;
-        position: relative;
+        display: flex;
+        flex-direction: column;
         overflow: hidden;
+        min-height: 0;
       }
 
-      /* CodeMirror 6 customizations */
+      /* CodeMirror 6 customizations.
+         CM6 itself forces `.cm-editor { position: relative !important }`,
+         so `position: absolute` doesn't actually take effect — using a
+         flex-1 layout instead so .cm-editor (and its .cm-scroller child)
+         get a real height. Without this, .cm-scroller has no space to
+         scroll into and the mouse wheel does nothing. */
       .cm-editor {
-        position: absolute;
-        inset: 0;
+        flex: 1;
+        height: 100%;
+        min-height: 0;
         font-family:
           "JetBrains Mono", "Fira Code", "SF Mono", Monaco, "Consolas",
           monospace;

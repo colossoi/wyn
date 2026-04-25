@@ -199,10 +199,18 @@ export function createPipelines(
   // everywhere), and WebGPU additionally forbids `storage` (read-write)
   // on VERTEX visibility. Storage slots therefore appear in the render
   // layout at FRAGMENT-only visibility; uniforms span VERTEX|FRAGMENT.
+  // Pipeline-layout `bindGroupLayouts` is indexed by the `@group(N)`
+  // number in the shader, not by enumeration order. Build the array
+  // with one slot per set from 0 up to the highest in use, leaving
+  // `null` at any gap (e.g. a shader that uses `@group(1)` only).
+  // Without this, a single layout for set 1 lands at index 0 and
+  // `@group(1)` ends up unbound — the pipeline silently mismatches
+  // and the canvas renders black.
   const setsInUse = new Set<number>();
   for (const u of iface.uniforms) setsInUse.add(u.set);
   for (const s of iface.storage) setsInUse.add(s.set);
   const sortedSets = Array.from(setsInUse).sort((a, b) => a - b);
+  const maxSet = sortedSets.length > 0 ? sortedSets[sortedSets.length - 1] : -1;
 
   // Storage bindings referenced by any vertex/fragment entry — these
   // must appear in the render layout as read-only-storage.
@@ -223,7 +231,12 @@ export function createPipelines(
   const renderStorageVis = GPUShaderStage.FRAGMENT;
   const computeVis = GPUShaderStage.COMPUTE;
 
-  const renderLayouts: GPUBindGroupLayout[] = sortedSets.map((set) => {
+  const renderLayouts: (GPUBindGroupLayout | null)[] = [];
+  for (let set = 0; set <= maxSet; set++) {
+    if (!setsInUse.has(set)) {
+      renderLayouts.push(null);
+      continue;
+    }
     const entries: GPUBindGroupLayoutEntry[] = [];
     for (const u of iface.uniforms) {
       if (u.set === set) {
@@ -249,10 +262,15 @@ export function createPipelines(
       }
     }
     entries.sort((a, b) => a.binding - b.binding);
-    return device.createBindGroupLayout({ entries });
-  });
+    renderLayouts.push(device.createBindGroupLayout({ entries }));
+  }
 
-  const computeLayouts: GPUBindGroupLayout[] = sortedSets.map((set) => {
+  const computeLayouts: (GPUBindGroupLayout | null)[] = [];
+  for (let set = 0; set <= maxSet; set++) {
+    if (!setsInUse.has(set)) {
+      computeLayouts.push(null);
+      continue;
+    }
     const entries: GPUBindGroupLayoutEntry[] = [];
     for (const u of iface.uniforms) {
       if (u.set === set) {
@@ -273,8 +291,8 @@ export function createPipelines(
       }
     }
     entries.sort((a, b) => a.binding - b.binding);
-    return device.createBindGroupLayout({ entries });
-  });
+    computeLayouts.push(device.createBindGroupLayout({ entries }));
+  }
 
   const renderPipelineLayout = device.createPipelineLayout({
     bindGroupLayouts: renderLayouts,
@@ -284,12 +302,16 @@ export function createPipelines(
   });
 
   const makeBindGroups = (
-    layouts: GPUBindGroupLayout[],
+    layouts: (GPUBindGroupLayout | null)[],
     includeStorage: (set: number, binding: number) => boolean,
   ): Map<number, GPUBindGroup> => {
     const out = new Map<number, GPUBindGroup>();
-    for (let i = 0; i < sortedSets.length; i++) {
-      const set = sortedSets[i];
+    // `layouts` is indexed by set number with `null` at unused sets;
+    // iterate setsInUse so we only build bind groups where the layout
+    // and the actual bindings line up.
+    for (const set of sortedSets) {
+      const layout = layouts[set];
+      if (!layout) continue;
       const entries: GPUBindGroupEntry[] = [];
       for (const u of iface.uniforms) {
         if (u.set === set) {
@@ -312,7 +334,7 @@ export function createPipelines(
         }
       }
       entries.sort((a, b) => a.binding - b.binding);
-      out.set(set, device.createBindGroup({ layout: layouts[i], entries }));
+      out.set(set, device.createBindGroup({ layout, entries }));
     }
     return out;
   };

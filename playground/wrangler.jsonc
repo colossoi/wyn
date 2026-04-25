@@ -47,7 +47,7 @@
 	// subdomain and provisions a TLS cert (~1–2 min the first time).
 	"routes": [
 		{
-			"pattern": "playground.finue.com",
+			"pattern": "wyn.finue.com",
 			"custom_domain": true
 		}
 	]
