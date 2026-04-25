@@ -22,16 +22,17 @@ export function Landing() {
       <canvas ref={canvasRef} className="landing-bg" aria-hidden="true" />
       <div className="landing-overlay" />
       <section className="landing-hero">
-        <div className="landing-eyebrow">A GPU language for the browser</div>
+        <div className="landing-eyebrow">A functional GPU programming language</div>
         <h1 className="landing-title">
           Write shaders in <span className="landing-title-accent">Wyn</span>.
           <br />
           Run them on your GPU.
         </h1>
         <p className="landing-tagline">
-          Wyn is a Futhark-inspired language that compiles to WGSL and SPIR-V.
-          The playground gives you a live editor, multi-stage pipeline
-          visualization, and shareable links — all in your browser.
+          Wyn is a functional programming language for the GPU. It compiles
+          to WGSL and SPIR-V, and the playground gives you a live editor,
+          multi-stage pipeline visualization, and shareable links — all in
+          your browser.
         </p>
         <div className="landing-cta-row">
           <a href="/auth/github" className="landing-cta landing-cta-primary">
@@ -49,11 +50,12 @@ export function Landing() {
 
       <section id="features" className="landing-features">
         <div className="landing-feature">
-          <div className="landing-feature-icon">⚡</div>
-          <h3>Browser-native</h3>
+          <div className="landing-feature-icon">λ</div>
+          <h3>Functional, by design</h3>
           <p>
-            The compiler itself runs in WebAssembly — no server round-trip,
-            no install, no CLI to set up.
+            Higher-order functions, pattern matching, type inference, and
+            algebraic data types — write GPU code that reads like math
+            instead of plumbing buffers and indices by hand.
           </p>
         </div>
         <div className="landing-feature">
