@@ -15,5 +15,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 python3 scripts/split_spec.py
-mdbook build docs --dest-dir ../playground/public/spec
+# `--dest-dir` resolves relative to CWD (currently the repo root), not
+# to docs/, so use a path starting at the repo root rather than `../…`.
+mdbook build docs --dest-dir "$(pwd)/playground/public/spec"
 echo "built → playground/public/spec/index.html"

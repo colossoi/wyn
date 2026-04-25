@@ -2,7 +2,6 @@
 title = "The Wyn Language Specification"
 authors = ["Wyn Contributors"]
 language = "en"
-multilingual = false
 src = "src"
 
 [output.html]
