@@ -27,7 +27,7 @@
 		"GITHUB_CLIENT_ID": "Ov23lifGwLSg5YE1Arzc",
 		// Comma-separated GitHub logins with admin privileges (managing
 		// featured shaders, etc.). Case-insensitive.
-		"ADMIN_LOGINS": "collosi"
+		"ADMIN_LOGINS": "colossoi"
 	},
 	"kv_namespaces": [
 		{
