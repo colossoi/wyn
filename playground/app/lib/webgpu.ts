@@ -21,11 +21,30 @@ export interface WebGPUContext {
   device: GPUDevice;
   canvasContext: GPUCanvasContext;
   format: GPUTextureFormat;
+  /** The color space the canvas is currently configured with. Mutated by
+   *  `setColorSpace`; reading it lets the UI keep its `<select>` in sync. */
+  colorSpace: PredefinedColorSpace;
+}
+
+/** Color spaces this browser/display can render. WebGPU canvas only
+ *  accepts `"srgb"` and `"display-p3"`; the latter requires a display
+ *  with at least P3 gamut, probed via `(color-gamut: p3)` media query.
+ *  Always returns at least `"srgb"`. */
+export function availableColorSpaces(): PredefinedColorSpace[] {
+  const out: PredefinedColorSpace[] = ["srgb"];
+  if (
+    typeof window !== "undefined" &&
+    window.matchMedia?.("(color-gamut: p3)").matches
+  ) {
+    out.push("display-p3");
+  }
+  return out;
 }
 
 /** Initialize a WebGPU adapter+device and configure the canvas context. */
 export async function setupContext(
   canvas: HTMLCanvasElement,
+  colorSpace: PredefinedColorSpace = "srgb",
 ): Promise<WebGPUContext> {
   if (!navigator.gpu) {
     throw new Error("WebGPU not supported in this browser");
@@ -40,15 +59,32 @@ export async function setupContext(
     throw new Error("canvas.getContext('webgpu') returned null");
   }
   const format = navigator.gpu.getPreferredCanvasFormat();
-  canvasContext.configure({
-    device,
-    format,
+  const ctx: WebGPUContext = { device, canvasContext, format, colorSpace };
+  applyConfig(ctx);
+  return ctx;
+}
+
+/** Reconfigure the canvas context with a new color space. Cheap (just
+ *  a `configure` call); subsequent frames render in the new space. */
+export function setColorSpace(
+  ctx: WebGPUContext,
+  colorSpace: PredefinedColorSpace,
+): void {
+  if (ctx.colorSpace === colorSpace) return;
+  ctx.colorSpace = colorSpace;
+  applyConfig(ctx);
+}
+
+function applyConfig(ctx: WebGPUContext): void {
+  ctx.canvasContext.configure({
+    device: ctx.device,
+    format: ctx.format,
     alphaMode: "opaque",
+    colorSpace: ctx.colorSpace,
     // COPY_SRC so the current frame is readable by `canvas.toBlob` /
     // `drawImage` — needed to snapshot the preview for save-thumbnails.
     usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
   });
-  return { device, canvasContext, format };
 }
 
 // -----------------------------------------------------------------------------

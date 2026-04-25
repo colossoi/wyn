@@ -1,7 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { CompileResultWgsl, ErrorInfo } from "~/lib/wasm";
 import {
+  availableColorSpaces,
   createRenderPipeline,
+  setColorSpace,
   setupContext,
   startRenderLoop,
   type RenderLoop,
@@ -9,6 +11,11 @@ import {
 } from "~/lib/webgpu";
 import { IRTree } from "./IRTree";
 import { PipelineViz } from "./PipelineViz";
+
+const COLOR_SPACE_LABELS: Record<PredefinedColorSpace, string> = {
+  srgb: "sRGB",
+  "display-p3": "Display P3",
+};
 
 type Tab = "output" | "tlc" | "mir" | "wgsl";
 
@@ -41,8 +48,15 @@ export function Preview({ result, errorInfo, onErrorClick }: PreviewProps) {
     height: 360,
   });
   const [gpuError, setGpuError] = useState<string | null>(null);
-  // Unwired preview controls — visual only for now.
-  const [colorspace, setColorspace] = useState<"srgb" | "display-p3">("srgb");
+  const [colorspace, setColorspace] = useState<PredefinedColorSpace>("srgb");
+  // Probed once on mount — the dropdown only offers what the display
+  // can actually render. `availableColorSpaces` reads `matchMedia` and
+  // is safe to call repeatedly, but useMemo keeps the option list
+  // referentially stable for React reconciliation.
+  const colorSpaceOptions = useMemo<PredefinedColorSpace[]>(
+    () => availableColorSpaces(),
+    [],
+  );
 
   // Initialize WebGPU context once.
   useEffect(() => {
@@ -193,12 +207,18 @@ export function Preview({ result, errorInfo, onErrorClick }: PreviewProps) {
               <select
                 className="ctrl-select"
                 value={colorspace}
-                onChange={(e) =>
-                  setColorspace(e.target.value as "srgb" | "display-p3")
-                }
+                disabled={colorSpaceOptions.length < 2}
+                onChange={(e) => {
+                  const cs = e.target.value as PredefinedColorSpace;
+                  setColorspace(cs);
+                  if (ctx) setColorSpace(ctx, cs);
+                }}
               >
-                <option value="srgb">sRGB</option>
-                <option value="display-p3">Display P3</option>
+                {colorSpaceOptions.map((cs) => (
+                  <option key={cs} value={cs}>
+                    {COLOR_SPACE_LABELS[cs]}
+                  </option>
+                ))}
               </select>
             </div>
           </div>
