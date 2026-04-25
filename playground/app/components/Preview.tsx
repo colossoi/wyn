@@ -145,6 +145,7 @@ export function Preview({ result, errorInfo, onErrorClick }: PreviewProps) {
         </div>
         <div className="canvas-container">
           <canvas ref={canvasRef} id="canvas" />
+          {gpuError && !ctx && <WebGPUUnavailable message={gpuError} />}
         </div>
         <div className="canvas-bottom-bar">
           <div className="cbb-section cbb-left">
@@ -386,6 +387,41 @@ function OutputPane({
   return (
     <div id="output">
       Press "Compile &amp; Run" or Ctrl+Enter to compile your shader.
+    </div>
+  );
+}
+
+// Banner shown over the preview canvas when WebGPU init fails — most
+// commonly because the browser doesn't expose `navigator.gpu` at all.
+// Distinct from the OutputPane's small GPU-error text: this is the
+// front-and-center "your browser can't run this" message in the spot
+// the user is staring at.
+interface WebGPUUnavailableProps {
+  message: string;
+}
+
+function WebGPUUnavailable({ message }: WebGPUUnavailableProps) {
+  return (
+    <div className="webgpu-unavailable">
+      <div className="webgpu-unavailable-icon" aria-hidden="true">
+        ⚠
+      </div>
+      <h2>WebGPU not available</h2>
+      <p className="webgpu-unavailable-detail">{message}</p>
+      <p className="webgpu-unavailable-hint">
+        The Wyn playground needs WebGPU to render shaders.{" "}
+        <a
+          href="https://caniuse.com/webgpu"
+          target="_blank"
+          rel="noreferrer"
+          className="webgpu-unavailable-link"
+        >
+          Browser support
+        </a>{" "}
+        is widest in Chrome&nbsp;113+, Edge, and Safari&nbsp;18+. On
+        Firefox, enable <code>dom.webgpu.enabled</code> in
+        <code>about:config</code> (Nightly only).
+      </p>
     </div>
   );
 }

@@ -29,6 +29,8 @@ export interface PlaygroundProps {
   /** If provided, this source populates the editor on mount. Otherwise the
    *  WASM module's `get_example_program()` fallback is used. */
   initialSource?: string | null;
+  /** Saved shader title (null for fresh editors / never-titled shaders). */
+  initialTitle?: string | null;
   /** URL slug of the loaded shader, or null for a fresh editor. */
   slug?: string | null;
   /** Whether the current viewer can save changes. */
@@ -47,6 +49,7 @@ interface SaveResponse {
 
 export function Playground({
   initialSource = null,
+  initialTitle = null,
   slug = null,
   canSave,
   saveDisabledReason,
@@ -54,6 +57,7 @@ export function Playground({
 }: PlaygroundProps) {
   const [wasm, setWasm] = useState<WynWasm | null>(null);
   const [source, setSource] = useState<string>("");
+  const [title, setTitle] = useState<string>(initialTitle ?? "");
   const [result, setResult] = useState<CompileResultWgsl | null>(null);
   const [errorInfo, setErrorInfo] = useState<ErrorInfo | null>(null);
   const [status, setStatus] = useState<Status>("loading");
@@ -61,6 +65,8 @@ export function Playground({
   const editorRef = useRef<any>(null);
   const sourceRef = useRef<string>("");
   sourceRef.current = source;
+  const titleRef = useRef<string>("");
+  titleRef.current = title;
 
   const saveFetcher = useFetcher<SaveResponse>();
   const navigate = useNavigate();
@@ -146,7 +152,11 @@ export function Playground({
     const canvas = document.getElementById("canvas");
     const thumbnail =
       canvas instanceof HTMLCanvasElement ? await captureThumbnail(canvas) : null;
-    const body = JSON.stringify({ source: sourceRef.current, thumbnail });
+    const body = JSON.stringify({
+      source: sourceRef.current,
+      thumbnail,
+      title: titleRef.current,
+    });
     if (slug) {
       saveFetcher.submit(body, {
         method: "put",
@@ -191,7 +201,17 @@ export function Playground({
       <main className="main-content">
         <div className="editor-panel">
           <div className="panel-header">
-            <span>Wyn Source</span>
+            <input
+              type="text"
+              className="title-input"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="Untitled shader"
+              disabled={!canSave}
+              maxLength={120}
+              spellCheck={false}
+              aria-label="Shader title"
+            />
             <div className="panel-toolbar">
               <StatusBar status={status} text={statusText} />
               <button

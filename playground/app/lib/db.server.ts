@@ -97,14 +97,15 @@ export async function createShader(
   ownerId: number,
   source: string,
   thumbnail: string | null = null,
+  title: string | null = null,
 ): Promise<string> {
   for (let attempt = 0; attempt < 5; attempt++) {
     const slug = generateSlug();
     try {
       await env.DB.prepare(
-        `INSERT INTO shaders (slug, owner_id, source, thumbnail) VALUES (?, ?, ?, ?)`,
+        `INSERT INTO shaders (slug, owner_id, source, thumbnail, title) VALUES (?, ?, ?, ?, ?)`,
       )
-        .bind(slug, ownerId, source, thumbnail)
+        .bind(slug, ownerId, source, thumbnail, title)
         .run();
       return slug;
     } catch (err) {
@@ -118,27 +119,30 @@ export async function createShader(
   throw new Error("createShader: exhausted slug retries");
 }
 
+/** Update a saved shader. `undefined` for either optional field means
+ *  "leave the column untouched"; explicit `null` clears it. The
+ *  per-column UPDATE assembly keeps the SQL surface predictable. */
 export async function updateShaderSource(
   env: Env,
   slug: string,
   source: string,
   thumbnail: string | null | undefined = undefined,
+  title: string | null | undefined = undefined,
 ): Promise<void> {
-  // If the caller didn't provide a thumbnail (undefined), leave the
-  // existing one in place. Passing explicit null clears it.
-  if (thumbnail === undefined) {
-    await env.DB.prepare(
-      `UPDATE shaders SET source = ?, updated_at = unixepoch() WHERE slug = ?`,
-    )
-      .bind(source, slug)
-      .run();
-  } else {
-    await env.DB.prepare(
-      `UPDATE shaders SET source = ?, thumbnail = ?, updated_at = unixepoch() WHERE slug = ?`,
-    )
-      .bind(source, thumbnail, slug)
-      .run();
+  const sets: string[] = ["source = ?", "updated_at = unixepoch()"];
+  const binds: (string | null)[] = [source];
+  if (thumbnail !== undefined) {
+    sets.push("thumbnail = ?");
+    binds.push(thumbnail);
   }
+  if (title !== undefined) {
+    sets.push("title = ?");
+    binds.push(title);
+  }
+  binds.push(slug);
+  await env.DB.prepare(`UPDATE shaders SET ${sets.join(", ")} WHERE slug = ?`)
+    .bind(...binds)
+    .run();
 }
 
 // ----------------------------------------------------------------------------

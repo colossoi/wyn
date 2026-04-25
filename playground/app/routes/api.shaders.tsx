@@ -1,6 +1,6 @@
 // POST /api/shaders — create a new shader for the current user.
 //
-// Body: JSON { source: string }
+// Body: JSON { source: string, thumbnail?: string, title?: string }
 // Responses:
 //   200 { slug: "..." }  — created
 //   401                  — not logged in
@@ -71,6 +71,25 @@ export async function action({ request, context }: Route.ActionArgs) {
     thumbnail = thumbnailRaw;
   }
 
-  const slug = await createShader(env, session.userId, source, thumbnail);
+  const titleRaw = (body as { title?: unknown })?.title;
+  const title = typeof titleRaw === "string" ? sanitizeTitle(titleRaw) : null;
+
+  const slug = await createShader(
+    env,
+    session.userId,
+    source,
+    thumbnail,
+    title,
+  );
   return Response.json({ slug });
+}
+
+const MAX_TITLE_CHARS = 120;
+
+/** Trim, collapse whitespace, cap at MAX_TITLE_CHARS. Empty string → null
+ *  so the column is genuinely unset rather than an empty string. */
+function sanitizeTitle(t: string): string | null {
+  const trimmed = t.replace(/\s+/g, " ").trim();
+  if (!trimmed) return null;
+  return trimmed.slice(0, MAX_TITLE_CHARS);
 }

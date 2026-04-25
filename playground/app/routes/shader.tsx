@@ -48,6 +48,7 @@ export async function loader({ params, request, context }: Route.LoaderArgs) {
   return {
     slug: shader.slug,
     source: shader.source,
+    title: shader.title,
     isOwner,
     isSignedIn: !!session,
     isAdmin: admin,
@@ -56,13 +57,15 @@ export async function loader({ params, request, context }: Route.LoaderArgs) {
 }
 
 export default function ShaderRoute({ loaderData }: Route.ComponentProps) {
-  const { slug, source, isOwner, isSignedIn, isAdmin, isFeatured } = loaderData;
+  const { slug, source, title, isOwner, isSignedIn, isAdmin, isFeatured } =
+    loaderData;
   const saveDisabledReason = !isSignedIn
     ? "Sign in to save"
     : "Fork coming soon";
   return (
     <Playground
       initialSource={source}
+      initialTitle={title}
       slug={slug}
       canSave={isOwner}
       saveDisabledReason={saveDisabledReason}

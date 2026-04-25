@@ -1,6 +1,6 @@
 // PUT /api/shaders/:slug — update an existing shader. Owner-only.
 //
-// Body: JSON { source: string }
+// Body: JSON { source: string, thumbnail?: string | null, title?: string | null }
 // Responses:
 //   200 { slug }  — updated
 //   401           — not logged in
@@ -76,6 +76,17 @@ export async function action({ request, params, context }: Route.ActionArgs) {
     thumbnail = null;
   }
 
-  await updateShaderSource(env, slug, source, thumbnail);
+  // Same convention as thumbnail: undefined → leave column untouched,
+  // explicit null → clear, string → sanitize and set.
+  const titleRaw = (body as { title?: unknown })?.title;
+  let title: string | null | undefined = undefined;
+  if (typeof titleRaw === "string") {
+    const trimmed = titleRaw.replace(/\s+/g, " ").trim();
+    title = trimmed ? trimmed.slice(0, 120) : null;
+  } else if (titleRaw === null) {
+    title = null;
+  }
+
+  await updateShaderSource(env, slug, source, thumbnail, title);
   return Response.json({ slug });
 }

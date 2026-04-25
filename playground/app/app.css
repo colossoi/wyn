@@ -239,6 +239,46 @@
         display: flex;
         justify-content: space-between;
         align-items: center;
+        gap: 12px;
+      }
+
+      /* Editable shader title sitting where the static "Wyn Source"
+         label used to live. Looks like text by default; only reveals
+         input chrome on hover/focus so the read-only view stays calm.
+         When `disabled` (non-owner viewing), it's display-only. */
+      .title-input {
+        flex: 1;
+        min-width: 0;
+        background: transparent;
+        border: 1px solid transparent;
+        border-radius: 4px;
+        padding: 4px 8px;
+        font-family: inherit;
+        font-size: 0.95rem;
+        font-weight: 500;
+        color: var(--text-primary);
+        transition: background 0.15s, border-color 0.15s;
+      }
+
+      .title-input::placeholder {
+        color: var(--text-secondary);
+        font-weight: 400;
+        font-style: italic;
+      }
+
+      .title-input:hover:not(:disabled) {
+        border-color: var(--border);
+      }
+
+      .title-input:focus {
+        outline: none;
+        border-color: var(--accent);
+        background: rgba(255, 255, 255, 0.04);
+      }
+
+      .title-input:disabled {
+        cursor: default;
+        opacity: 1;
       }
 
       .editor-container {
@@ -335,6 +375,71 @@
         justify-content: center;
         position: relative;
         min-height: 0;
+      }
+
+      .webgpu-unavailable {
+        position: absolute;
+        inset: 0;
+        z-index: 2;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        padding: 32px 28px;
+        background: rgba(15, 15, 26, 0.95);
+        color: var(--text-primary);
+      }
+
+      .webgpu-unavailable-icon {
+        font-size: 2.5rem;
+        line-height: 1;
+        color: var(--accent);
+        margin-bottom: 12px;
+      }
+
+      .webgpu-unavailable h2 {
+        font-size: 1.2rem;
+        font-weight: 600;
+        margin-bottom: 10px;
+      }
+
+      .webgpu-unavailable-detail {
+        font-family: "JetBrains Mono", monospace;
+        font-size: 0.78rem;
+        color: var(--text-secondary);
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 6px 10px;
+        margin-bottom: 14px;
+        max-width: 90%;
+      }
+
+      .webgpu-unavailable-hint {
+        font-size: 0.85rem;
+        line-height: 1.55;
+        color: var(--text-secondary);
+        max-width: 380px;
+      }
+
+      .webgpu-unavailable-hint code {
+        font-family: "JetBrains Mono", monospace;
+        font-size: 0.78rem;
+        background: rgba(255, 255, 255, 0.06);
+        padding: 1px 6px;
+        border-radius: 3px;
+        margin: 0 1px;
+        color: var(--text-primary);
+      }
+
+      .webgpu-unavailable-link {
+        color: var(--accent);
+        text-decoration: none;
+      }
+
+      .webgpu-unavailable-link:hover {
+        text-decoration: underline;
       }
 
       #canvas {
