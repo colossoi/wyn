@@ -158,3 +158,77 @@ export function generateSlug(): string {
   }
   return out;
 }
+
+// ----------------------------------------------------------------------------
+// Featured shaders
+// ----------------------------------------------------------------------------
+
+export interface FeaturedRow {
+  slug: string;
+  title: string | null;
+  thumbnail: string | null;
+  rank: number;
+}
+
+/** Fetch up to `limit` featured shaders by `rank` ascending, joined to
+ *  the shaders table for title + thumbnail. */
+export async function listFeaturedShaders(
+  env: Env,
+  limit: number = 10,
+): Promise<FeaturedRow[]> {
+  const result = await env.DB.prepare(
+    `SELECT s.slug, s.title, s.thumbnail, f.rank
+     FROM featured_shaders f
+     JOIN shaders s ON s.slug = f.slug
+     ORDER BY f.rank ASC, f.added_at DESC
+     LIMIT ?`,
+  )
+    .bind(limit)
+    .all<FeaturedRow>();
+  return result.results ?? [];
+}
+
+/** Top-ranked featured shader, or null when nothing is featured. */
+export async function getTopFeaturedShader(env: Env): Promise<FeaturedRow | null> {
+  const rows = await listFeaturedShaders(env, 1);
+  return rows[0] ?? null;
+}
+
+/** Promote (or re-rank) a shader as featured. Idempotent — re-calling
+ *  with the same slug overwrites the rank. Errors if the slug doesn't
+ *  exist in `shaders` (FK constraint). */
+export async function setFeatured(
+  env: Env,
+  slug: string,
+  rank: number,
+  addedBy: number,
+): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO featured_shaders (slug, rank, added_by) VALUES (?, ?, ?)
+     ON CONFLICT(slug) DO UPDATE SET
+       rank      = excluded.rank,
+       added_at  = unixepoch(),
+       added_by  = excluded.added_by`,
+  )
+    .bind(slug, rank, addedBy)
+    .run();
+}
+
+export async function removeFeatured(env: Env, slug: string): Promise<void> {
+  await env.DB.prepare(`DELETE FROM featured_shaders WHERE slug = ?`).bind(slug).run();
+}
+
+// ----------------------------------------------------------------------------
+// Admin check
+// ----------------------------------------------------------------------------
+
+/** Comma-separated logins from the `ADMIN_LOGINS` env var have admin
+ *  privileges across the app — currently: managing the featured-shaders
+ *  table. Case-insensitive match against the GitHub login. Whitespace
+ *  around entries is tolerated. */
+export function isAdmin(env: Env, login: string | null | undefined): boolean {
+  if (!login) return false;
+  const list = (env.ADMIN_LOGINS ?? "").split(",");
+  const target = login.toLowerCase();
+  return list.some((entry) => entry.trim().toLowerCase() === target);
+}

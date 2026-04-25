@@ -23,6 +23,11 @@ export interface Env {
   // HMAC key (UTF-8 string) used to sign the short-lived `__oauth_state`
   // cookie. Injected via `wrangler secret put SESSION_COOKIE_SECRET`.
   SESSION_COOKIE_SECRET: string;
+
+  // Comma-separated list of GitHub logins that get admin privileges
+  // (e.g., managing the featured-shaders table). Case-insensitive.
+  // Public-safe — lives in `wrangler.jsonc :: vars`.
+  ADMIN_LOGINS: string;
 }
 
 declare module "react-router" {

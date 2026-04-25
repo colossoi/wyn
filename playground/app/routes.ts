@@ -9,4 +9,5 @@ export default [
   route("auth/logout", "routes/auth.logout.tsx"),
   route("api/shaders", "routes/api.shaders.tsx"),
   route("api/shaders/:slug", "routes/api.shader.tsx"),
+  route("api/featured", "routes/api.featured.tsx"),
 ] satisfies RouteConfig;

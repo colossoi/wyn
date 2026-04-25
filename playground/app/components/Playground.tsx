@@ -19,6 +19,12 @@ import { StatusBar, type Status } from "~/components/StatusBar";
 import type { CompileResultWgsl, ErrorInfo, WynWasm } from "~/lib/wasm";
 import { initWasm } from "~/lib/wasm";
 
+export interface AdminControls {
+  /** Whether this shader is currently in the featured_shaders table.
+   *  Drives the toggle's label + the request action when clicked. */
+  isFeatured: boolean;
+}
+
 export interface PlaygroundProps {
   /** If provided, this source populates the editor on mount. Otherwise the
    *  WASM module's `get_example_program()` fallback is used. */
@@ -29,6 +35,10 @@ export interface PlaygroundProps {
   canSave: boolean;
   /** Tooltip text when `canSave` is false (e.g., "Sign in to save"). */
   saveDisabledReason?: string;
+  /** When the viewer is an admin, render admin-only controls in the
+   *  toolbar (currently: feature/unfeature this shader). Null for
+   *  non-admin viewers and for the fresh-editor variant (no slug). */
+  adminControls?: AdminControls | null;
 }
 
 interface SaveResponse {
@@ -40,6 +50,7 @@ export function Playground({
   slug = null,
   canSave,
   saveDisabledReason,
+  adminControls = null,
 }: PlaygroundProps) {
   const [wasm, setWasm] = useState<WynWasm | null>(null);
   const [source, setSource] = useState<string>("");
@@ -160,6 +171,21 @@ export function Playground({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [saveFetcher.state, saveFetcher.data]);
 
+  // Admin: feature/unfeature this shader. Optimistically assumes the
+  // server accepts the request; the page reloads after to pick up the
+  // refreshed `isFeatured` from the loader.
+  const featureFetcher = useFetcher<{ slug?: string; action?: string }>();
+  const featuring = featureFetcher.state !== "idle";
+  const handleFeatureToggle = useCallback(() => {
+    if (!slug || !adminControls || featuring) return;
+    const action = adminControls.isFeatured ? "remove" : "set";
+    featureFetcher.submit(JSON.stringify({ slug, action, rank: 0 }), {
+      method: "post",
+      action: "/api/featured",
+      encType: "application/json",
+    });
+  }, [slug, adminControls, featuring, featureFetcher]);
+
   return (
     <>
       <main className="main-content">
@@ -184,6 +210,21 @@ export function Playground({
               >
                 {saving ? "Saving…" : "Save"}
               </button>
+              {adminControls && slug && (
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={handleFeatureToggle}
+                  disabled={featuring}
+                  title="Admin: toggle featured status on the landing page"
+                >
+                  {featuring
+                    ? "…"
+                    : adminControls.isFeatured
+                      ? "★ Featured"
+                      : "☆ Feature"}
+                </button>
+              )}
             </div>
           </div>
           <Editor

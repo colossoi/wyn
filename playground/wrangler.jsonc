@@ -24,7 +24,10 @@
 	// + prod) and put the client IDs below. The client secret and the
 	// session HMAC key are injected via `wrangler secret put`.
 	"vars": {
-		"GITHUB_CLIENT_ID": "Ov23lifGwLSg5YE1Arzc"
+		"GITHUB_CLIENT_ID": "Ov23lifGwLSg5YE1Arzc",
+		// Comma-separated GitHub logins with admin privileges (managing
+		// featured shaders, etc.). Case-insensitive.
+		"ADMIN_LOGINS": "collosi"
 	},
 	"kv_namespaces": [
 		{
