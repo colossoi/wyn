@@ -152,11 +152,9 @@ mod tlc_tree {
                 children.push(TreeNode::branch("body", vec![term_to_tree(body)]));
                 TreeNode::branch(label, children)
             }
-            TermKind::Soac(_)
-            | TermKind::ArrayExpr(_)
-            | TermKind::Force(_)
-            | TermKind::Pack { .. }
-            | TermKind::Unpack { .. } => TreeNode::leaf(format!("<soac> : {}", ty)),
+            TermKind::Soac(_) | TermKind::ArrayExpr(_) | TermKind::Force(_) => {
+                TreeNode::leaf(format!("<soac> : {}", ty))
+            }
         }
     }
 

@@ -20,7 +20,7 @@ fn compile_to_ssa(source: &str) -> wyn_core::ssa::types::Program {
         .alias_check()
         .expect("alias_check failed");
     let ssa = alias_checked
-        .to_tlc(&frontend.schemes, &frontend.module_manager)
+        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
         .fuse_maps()
