@@ -20,6 +20,15 @@ export function Header() {
         Wyn Playground
       </Link>
       <div className="header-right">
+        <nav className="header-nav">
+          <Link to="/" className="header-nav-link">
+            New shader
+          </Link>
+          <a href="/spec/" className="header-nav-link">
+            Spec
+          </a>
+          {/* Future: Docs, Tutorials, etc. drop in here. */}
+        </nav>
         {session ? <SignedIn session={session} /> : <SignedOut />}
       </div>
     </header>

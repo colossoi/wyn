@@ -1,0 +1,6 @@
+# Per-chapter Markdown files are split from the canonical SPECIFICATION.md
+# by scripts/split_spec.py. Run that before `mdbook build` / `mdbook serve`.
+src/
+
+# mdBook build output.
+book/

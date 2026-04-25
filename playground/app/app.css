@@ -37,6 +37,10 @@
         justify-content: space-between;
         border-bottom: 1px solid var(--border);
         min-height: 56px;
+        /* Above the landing page's full-viewport WebGL canvas + overlay
+           (z-index 0 / 1), which would otherwise paint over the header. */
+        position: relative;
+        z-index: 5;
       }
 
       .logo {
@@ -56,7 +60,28 @@
       .header-right {
         display: flex;
         align-items: center;
-        gap: 12px;
+        gap: 16px;
+      }
+
+      .header-nav {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+
+      .header-nav-link {
+        color: var(--text-secondary);
+        font-size: 0.85rem;
+        font-weight: 500;
+        text-decoration: none;
+        padding: 6px 10px;
+        border-radius: 6px;
+        transition: color 0.15s, background 0.15s;
+      }
+
+      .header-nav-link:hover {
+        color: var(--text-primary);
+        background: rgba(255, 255, 255, 0.06);
       }
 
       .header-user {
