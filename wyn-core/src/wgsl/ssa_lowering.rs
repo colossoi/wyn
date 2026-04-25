@@ -2295,9 +2295,20 @@ fn try_lower_wgsl_builtin(name: &str, args: &[String]) -> Option<String> {
             return Some(format!("length({})", args.join(", ")));
         }
         "mod" => {
-            // Wyn's `mod` is FMod. WGSL's `%` on floats is FMod too.
+            // Wyn's `mod` is GLSL-style `mod` (FMod): always non-negative
+            // when the divisor is positive. WGSL's `%` is FRem
+            // (sign follows the dividend), so a direct lowering would
+            // make `mod(-0.3, 1.0) = -0.3` instead of `0.7` and
+            // shaders that rely on positive wrap-around break for
+            // negative inputs. Lower to the math identity instead:
+            //
+            //   mod(x, y) = x - y * floor(x / y)
+            //
+            // Operands may be scalar or same-shape vectors; WGSL's
+            // `/`, `*`, and `floor` are all componentwise so the same
+            // expression works for either.
             if args.len() == 2 {
-                return Some(format!("({} % {})", args[0], args[1]));
+                return Some(format!("({0} - {1} * floor({0} / {1}))", args[0], args[1]));
             }
         }
         _ => {}
