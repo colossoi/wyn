@@ -21,7 +21,11 @@ export function Header() {
       </Link>
       <div className="header-right">
         <nav className="header-nav">
-          <Link to="/" className="header-nav-link">
+          {/* `reloadDocument` so clicking from anywhere — including
+              while already on `/` — always drops into a fresh editor.
+              Without it, the Playground component's once-only init
+              effect would leave the prior source loaded. */}
+          <Link to="/" reloadDocument className="header-nav-link">
             New shader
           </Link>
           <a href="/spec/" className="header-nav-link">
