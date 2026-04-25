@@ -219,6 +219,52 @@ export async function removeFeatured(env: Env, slug: string): Promise<void> {
 }
 
 // ----------------------------------------------------------------------------
+// Shader views (popularity counter)
+// ----------------------------------------------------------------------------
+
+export interface PopularRow {
+  slug: string;
+  title: string | null;
+  thumbnail: string | null;
+  views: number;
+}
+
+/** Increment the view count for a shader. Idempotent on missing rows
+ *  (UPSERT with `views = 1` on first hit). Caller should fire-and-
+ *  forget via `ctx.waitUntil` so the page render isn't blocked on the
+ *  D1 write. */
+export async function incrementShaderView(env: Env, slug: string): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO shader_views (slug, views) VALUES (?, 1)
+     ON CONFLICT(slug) DO UPDATE SET
+       views     = views + 1,
+       last_view = unixepoch()`,
+  )
+    .bind(slug)
+    .run();
+}
+
+/** Top `limit` shaders by view count, joined to the shaders table for
+ *  display metadata. LEFT JOIN so shaders that have never been viewed
+ *  still appear (with views=0) when the table is sparse — the
+ *  `idx_shader_views_count` index keeps the sort cheap. */
+export async function listPopularShaders(
+  env: Env,
+  limit: number = 24,
+): Promise<PopularRow[]> {
+  const result = await env.DB.prepare(
+    `SELECT s.slug, s.title, s.thumbnail, COALESCE(v.views, 0) as views
+     FROM shaders s
+     LEFT JOIN shader_views v ON s.slug = v.slug
+     ORDER BY COALESCE(v.views, 0) DESC, s.updated_at DESC
+     LIMIT ?`,
+  )
+    .bind(limit)
+    .all<PopularRow>();
+  return result.results ?? [];
+}
+
+// ----------------------------------------------------------------------------
 // Admin check
 // ----------------------------------------------------------------------------
 

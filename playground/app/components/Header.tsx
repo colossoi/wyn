@@ -29,6 +29,9 @@ export function Header() {
           <Link to="/new" reloadDocument className="header-nav-link">
             New shader
           </Link>
+          <Link to="/popular" className="header-nav-link">
+            Popular
+          </Link>
           <a href="/spec/" className="header-nav-link">
             Spec
           </a>

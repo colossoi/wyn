@@ -50,16 +50,15 @@ export function Landing({ featured }: LandingProps) {
           <a href="/auth/github" className="landing-cta landing-cta-primary">
             Sign in with GitHub
           </a>
-          {featured ? (
+          <a href="/popular" className="landing-cta landing-cta-secondary">
+            Popular shaders
+          </a>
+          {featured && (
             <a
               href={`/s/${featured.slug}`}
               className="landing-cta landing-cta-secondary"
             >
               See an example →
-            </a>
-          ) : (
-            <a href="#features" className="landing-cta landing-cta-secondary">
-              Learn more
             </a>
           )}
         </div>

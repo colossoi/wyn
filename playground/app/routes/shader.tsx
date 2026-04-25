@@ -2,7 +2,12 @@
 
 import type { Route } from "./+types/shader";
 import { Playground } from "~/components/Playground";
-import { getShader, isAdmin, listFeaturedShaders } from "~/lib/db.server";
+import {
+  getShader,
+  incrementShaderView,
+  isAdmin,
+  listFeaturedShaders,
+} from "~/lib/db.server";
 import { getSession } from "~/lib/session.server";
 
 export function meta({ data }: Route.MetaArgs) {
@@ -22,6 +27,12 @@ export async function loader({ params, request, context }: Route.LoaderArgs) {
   if (!shader) {
     throw new Response("not found", { status: 404 });
   }
+  // Bump the visit counter without blocking the response. `waitUntil`
+  // keeps the worker alive past the response so the D1 write can
+  // finish; the page renders immediately. Counts include duplicate
+  // tabs / refreshes — bot inflation is a TODO.
+  context.cloudflare.ctx.waitUntil(incrementShaderView(env, shader.slug));
+
   const session = await getSession(request, env);
   const isOwner = session?.userId === shader.owner_id;
   const admin = isAdmin(env, session?.login ?? null);
