@@ -12,3 +12,6 @@
 
 # Wrangler local state
 /.wrangler/
+
+# wrangler dev secrets (GITHUB_CLIENT_SECRET, SESSION_COOKIE_SECRET)
+.dev.vars
