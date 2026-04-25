@@ -5,7 +5,7 @@
   "scripts": {
     "build:wasm": "cd wyn-wasm && wasm-pack build --target web --out-dir ../app/lib/wasm-pkg",
     "build:spec": "bash ../scripts/spec_build.sh",
-    "build": "npm run build:wasm && react-router build && npm run build:spec",
+    "build": "npm run build:wasm && npm run build:spec && react-router build",
     "dev": "react-router dev",
     "preview": "wrangler dev",
     "deploy": "npm run build && wrangler deploy",
