@@ -39,7 +39,7 @@ export function Preview({ result, errorInfo, onErrorClick }: PreviewProps) {
   const [paused, setPaused] = useState(false);
   const pausedRef = useRef(false);
   pausedRef.current = paused;
-  const [pipelineOpen, setPipelineOpen] = useState(true);
+  const [pipelineOpen, setPipelineOpen] = useState(false);
   const [resolution, setResolution] = useState<{
     width: number;
     height: number;

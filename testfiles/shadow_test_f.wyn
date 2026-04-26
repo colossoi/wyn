@@ -1,0 +1,384 @@
+-- "Shadow Test F" — Wyn port of a TheArtOfCode-style raymarching demo.
+--
+-- Two rotating shapes (a torus and a sphere) sitting on a slightly
+-- bowled floor, lit by a moving point source, with reflective +
+-- refractive treatment of the shapes (IOR 1.5). The camera orbits
+-- around the origin while gently bobbing up and down.
+--
+-- Original GLSL (preserved as a comment block at the bottom) used
+-- two undefined helpers from a Shadertoy "Common" tab: `rot(a)` (a
+-- 2D rotation matrix) and `thc(a, b)` (a smooth oscillator). They're
+-- defined inline below — `thc(a, b) = tanh(a * cos(b))` matches the
+-- shape the GLSL uses it for (a [-1, 1]-bounded modulator).
+--
+-- The original `face()`, `sdBox()`, `hash()`, and `FK` helpers in the
+-- GLSL aren't reachable from `mainImage` — dropped here to keep the
+-- port tight.
+
+------------------------------------------------------------
+-- Uniforms
+------------------------------------------------------------
+#[uniform(set=0, binding=0)] def iResolution: vec3f32
+#[uniform(set=0, binding=1)] def iTime: f32
+#[uniform(set=0, binding=5)] def iMouse: vec4f32
+
+------------------------------------------------------------
+-- Constants
+------------------------------------------------------------
+def MAX_STEPS: i32 = 400
+def MAX_DIST:  f32 = 100.0
+def SURF_DIST: f32 = 0.001
+def IOR:       f32 = 1.5
+
+------------------------------------------------------------
+-- Vertex shader: full-screen triangle
+------------------------------------------------------------
+def verts: [3]vec4f32 =
+  [@[-1.0, -1.0, 0.0, 1.0],
+   @[ 3.0, -1.0, 0.0, 1.0],
+   @[-1.0,  3.0, 0.0, 1.0]]
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vertex_id: i32)
+  #[builtin(position)] vec4f32 = verts[vertex_id]
+
+------------------------------------------------------------
+-- 2D rotation matrix. Right-multiplying a row vector yields a
+-- rotation by `+a`, matching GLSL's `p.xz *= rot(a)` convention.
+------------------------------------------------------------
+def rot(a: f32) mat2f32 =
+  let c = f32.cos(a) in
+  let s = f32.sin(a) in
+  @[[c, s], [-s, c]]
+
+------------------------------------------------------------
+-- thc(a, b) — Shadertoy "Common" idiom; tanh-cos modulator.
+------------------------------------------------------------
+def thc(a: f32, b: f32) f32 =
+  f32.tanh(a * f32.cos(b))
+
+------------------------------------------------------------
+-- Scene SDF.
+--
+-- The whole world spins by `rot(0.5*iTime)` first; both shapes (and
+-- the ground) live in that frame. The torus additionally counter-
+-- rotates locally by `rot(-1.25*iTime)` so it appears to spin
+-- independently. The sphere sits one unit to the left of the
+-- world's origin, bobbing on `y = 0.25 * sin(iTime)`. The ground is
+-- a plane at y = -1 with a shallow upward bowl term.
+------------------------------------------------------------
+def getDist(p0: vec3f32) f32 =
+  let p_xz = @[p0.x, p0.z] * rot(0.5 * iTime) in
+  let p_a  = @[p_xz.x, p0.y, p_xz.y] in
+
+  -- Torus, centered at +1 on x in the rotated frame, then locally
+  -- counter-rotated.
+  let q_xz = @[p_a.x - 1.0, p_a.z] * rot(-1.25 * iTime) in
+  let q    = @[q_xz.x, p_a.y, q_xz.y] in
+  let r1 = 0.5 in
+  let r2 = 0.2 in
+  let td1 = magnitude(@[q.x, q.y]) - r1 in
+  let sd1 = magnitude(@[td1, q.z]) - r2 in
+
+  -- Sphere center sits at p_a = -(1, 0.25*sin(t), 0).
+  let sphereOff = @[1.0, 0.25 * f32.sin(iTime), 0.0] in
+  let sd2 = magnitude(p_a + sphereOff) - 0.5 in
+
+  -- Ground plane with a shallow upward bowl: y + 1 - 0.001 * (x² + z²).
+  let xz = @[p_a.x, p_a.z] in
+  let dGround = p_a.y + 1.0 - 0.001 * dot(xz, xz) in
+
+  f32.min(f32.min(dGround, sd1), sd2)
+
+------------------------------------------------------------
+-- Sphere-tracer with sign-flip step refinement: when the sign of
+-- `dS` flips relative to the previous step, halve the step length.
+-- Lets the original march re-enter the surface after overshooting.
+------------------------------------------------------------
+def rayMarch(ro: vec3f32, rd: vec3f32, z0: f32) f32 =
+  let s0 = f32.sign(z0) in
+  let result = loop (i, dO, z, s) = (0, 0.0, z0, s0) while i < MAX_STEPS do
+    let p = ro + rd * dO in
+    let dS = getDist(p) in
+    let dSsign = f32.sign(dS) in
+    let zs2 = if s != dSsign then (z * 0.5, dSsign) else (z, s) in
+    let z2 = zs2.0 in
+    let s2 = zs2.1 in
+    let stop = f32.abs(dS) < SURF_DIST || dO > MAX_DIST in
+    if stop then
+      (MAX_STEPS, dO, z2, s2)
+    else
+      (i + 1, dO + dS * z2, z2, s2)
+  in
+  f32.min(result.1, MAX_DIST)
+
+------------------------------------------------------------
+-- Central-difference normal estimation.
+------------------------------------------------------------
+def getNormal(p: vec3f32) vec3f32 =
+  let d = getDist(p) in
+  let e = 0.001 in
+  let nx = d - getDist(p - @[e, 0.0, 0.0]) in
+  let ny = d - getDist(p - @[0.0, e, 0.0]) in
+  let nz = d - getDist(p - @[0.0, 0.0, e]) in
+  normalize(@[nx, ny, nz])
+
+------------------------------------------------------------
+-- Camera basis: forward (toward target), right, up; project
+-- screen-space (uv) onto the basis at focal length z.
+------------------------------------------------------------
+def getRayDir(uv: vec2f32, p: vec3f32, l: vec3f32, z: f32) vec3f32 =
+  let f = normalize(l - p) in
+  let r = normalize(cross(@[0.0, 1.0, 0.0], f)) in
+  let u = cross(f, r) in
+  let c = f * z in
+  let i = c + r * uv.x + u * uv.y in
+  normalize(i)
+
+------------------------------------------------------------
+-- Fragment shader.
+------------------------------------------------------------
+#[fragment]
+entry fragment_main(#[builtin(position)] fragCoord: vec4f32)
+  #[location(0)] vec4f32 =
+  -- Flip Y for Vulkan / WebGPU.
+  let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
+  let uv = @[(fc.x - 0.5 * iResolution.x) / iResolution.y,
+             (fc.y - 0.5 * iResolution.y) / iResolution.y] in
+
+  -- Orbital camera at radius 4, bobbing gently in y.
+  let camR = 4.0 in
+  let camA = 0.15 * iTime in
+  let ro = @[camR * f32.cos(camA),
+             1.0 + 1.0 * f32.cos(0.4 * iTime),
+             camR * f32.sin(camA)] in
+
+  let rd = getRayDir(uv, ro, @[0.0, 0.0, 0.0], 1.0) in
+
+  let d = rayMarch(ro, rd, 1.0) in
+  let p = ro + rd * d in
+
+  if d >= MAX_DIST then
+    @[0.0, 0.0, 0.0, 1.0]
+  else
+    let n_raw = getNormal(p) in
+
+    -- Above y = -0.9 (i.e. on the shapes, not the floor), inflate
+    -- the normal before reflecting so highlights look "bumpier" the
+    -- closer they are to the origin.
+    let pxz = @[p.x, p.z] in
+    let pxz_len = magnitude(pxz) in
+    let r_norm = if p.y > -0.9 then
+                   n_raw * 50.0 * f32.exp(-3.0 * pxz_len)
+                 else n_raw in
+    let r = reflect(rd, r_norm) in
+
+    -- Inside-march: refract through the surface, march in the
+    -- opposite direction (z = -1) until we exit the geometry.
+    let pIn  = p - n_raw * (4.0 * SURF_DIST) in
+    let rdIn = refract(rd, n_raw, 1.0 / IOR) in
+    let dIn  = rayMarch(pIn, rdIn, -1.0) in
+    let pExit = pIn + rdIn * dIn in
+    let nExit = -getNormal(pExit) in
+
+    -- Re-march outward toward the exit point — gives a soft
+    -- "look-through" highlight on the back side of the geometry.
+    let p2  = p + n_raw * (4.0 * SURF_DIST) in
+    let cr  = normalize(p - pExit) in
+    let d2  = rayMarch(p2, cr, 1.0) in
+    let p3  = p2 + cr * d2 in
+    let n2  = getNormal(p3) in
+
+    -- Lighting.
+    let lightDir1 = normalize(@[0.5 * f32.cos(iTime), 1.0, 0.5 * f32.sin(iTime)]) in
+    let dif  = dot(n_raw, lightDir1) * 0.5 + 0.5 in
+    let dif2 = dot(n2, normalize(@[1.0, 2.0, 3.0])) * 0.5 + 0.5 in
+
+    let col0 = @[1.0, 1.0, 1.0] * dif in
+    let band = 0.5 + 0.5 * thc(4.0, 2.0 * iTime - 0.5 * pxz_len + 50.0 * f32.abs(dif)) in
+    let col1 = col0 * band in
+    let col2 = col1 * f32.exp(-0.5 * magnitude(p)) in
+    let col3 = col2 * (2.0 * dif2) in
+
+    -- Fresnel reflective mix.
+    let fres = pow(1.0 + dot(rd, n_raw), 5.0) in
+    let csh  = 1.0 / f32.cosh(0.2 * pxz_len) in
+    let col_clamped = @[clamp(col3.x, 0.0, 1.0),
+                        clamp(col3.y, 0.0, 1.0),
+                        clamp(col3.z, 0.0, 1.0)] in
+    let r_abs = @[f32.abs(r.x), f32.abs(r.y), f32.abs(r.z)] in
+    let col_mixed = mix(col_clamped, r_abs * csh, fres) in
+
+    -- Floor sparkle: an extra log-warped tanh streak under the
+    -- shapes, only on the floor (p.y < -0.9).
+    let col_final = if p.y < -0.9 then
+                      col_mixed + @[0.6, 0.6, 0.6] * thc(4.0, iTime + 6.0 * f32.log(pxz_len)) * csh
+                    else col_mixed in
+
+    -- Gamma 2.2 (componentwise pow(col, 0.4545)).
+    let g = 0.4545 in
+    @[pow(col_final.x, g),
+      pow(col_final.y, g),
+      pow(col_final.z, g),
+      1.0]
+
+------------------------------------------------------------
+-- Original GLSL (Shadertoy)
+------------------------------------------------------------
+
+-- #define MAX_STEPS 400
+-- #define MAX_DIST 100.
+-- #define SURF_DIST .001
+--
+-- // RayMarching from TheArtOfCode
+--
+-- // From BlackleMori
+-- #define FK(k) floatBitsToInt(k*k/7.)^floatBitsToInt(k)
+-- float hash(float a, float b) {
+--     int x = FK(a), y = FK(b);
+--     return float((x*x+y)*(y*y-x)-x)/2.14e9;
+-- }
+--
+-- vec3 erot(vec3 p, vec3 ax, float ro) {
+--   return mix(dot(ax, p)*ax, p, cos(ro)) + cross(ax,p)*sin(ro);
+-- }
+--
+-- vec3 face(vec3 p) {
+--      vec3 a = abs(p);
+--      return step(a.yzx, a.xyz)*step(a.zxy, a.xyz)*sign(p);
+-- }
+--
+-- float sdBox(vec3 p, vec3 s) {
+--     p = abs(p)-s;
+-- 	return length(max(p, 0.))+min(max(p.x, max(p.y, p.z)), 0.);
+-- }
+--
+-- float sdBox(in vec2 p, in vec2 b){
+--     vec2 d = abs(p)-b;
+--     return length(max(d,0.))+min(max(d.x,d.y),0.);
+-- }
+--
+-- vec3 GetRayOrigin() {
+--     vec2 m = iMouse.xy/iResolution.xy;
+--     float r = 4.;
+--     float a = 0.15 * iTime;
+--     vec3 ro = vec3(r * cos(a), 1. + 1. * cos(0.4 * iTime), r * sin(a));
+--     //ro.yz *= rot(-m.y*3.14+1.);
+--     //ro.xz *= rot(-m.x*6.2831);
+--     return ro;
+-- }
+--
+-- float GetDist(vec3 p) {
+--     p.xz *= rot(0.5 * iTime);
+--     p.x -= 1.;
+--     p.xz *= rot(-1.25 * iTime);
+--     float r1 = 0.5;
+--     float r2 = 0.2;
+--     float td1 = length(p.xy) - r1;
+--     float td2 = length(vec2(td1, p.z)) - r2;
+--
+--     float sd1 = td2;//sdBox(p - vec3(0,0.25 * cos(iTime),0), vec3(.6,.5,.2)) - 0.1;
+--     p.xz *= rot(1.25 * iTime);
+--     p.x += 1.;
+--     float sd2 = length(p + vec3(1,0.25 * sin(iTime),0)) - 0.5;
+--     float d = p.y + 1. - 0.001 * dot(p.xz,p.xz);
+--     d = min(d,sd1);
+--     d = min(d,sd2);
+--     return d;
+-- }
+--
+-- float RayMarch(vec3 ro, vec3 rd, float z) {
+--     float dO=0.;
+--     float s = sign(z);
+--     for(int i=0; i<MAX_STEPS; i++) {
+--     	vec3 p = ro + rd*dO;
+--         float dS = GetDist(p);
+--         if (s != sign(dS)) { z *= 0.5; s = sign(dS); }
+--         if(abs(dS)<SURF_DIST || dO>MAX_DIST) break;
+--         dO += dS*z;
+--     }
+--     return min(dO, MAX_DIST);
+-- }
+--
+-- vec3 GetNormal(vec3 p) {
+-- 	float d = GetDist(p);
+--     vec2 e = vec2(.001, 0);
+--
+--     vec3 n = d - vec3(
+--         GetDist(p-e.xyy),
+--         GetDist(p-e.yxy),
+--         GetDist(p-e.yyx));
+--
+--     return normalize(n);
+-- }
+--
+-- vec3 GetRayDir(vec2 uv, vec3 p, vec3 l, float z) {
+--     vec3 f = normalize(l-p),
+--         r = normalize(cross(vec3(0,1,0), f)),
+--         u = cross(f,r),
+--         c = f*z,
+--         i = c + uv.x*r + uv.y*u,
+--         d = normalize(i);
+--     return d;
+-- }
+--
+-- void mainImage( out vec4 fragColor, in vec2 fragCoord )
+-- {
+--     vec2 uv = (fragCoord-.5*iResolution.xy)/iResolution.y;
+--
+-- 	vec3 ro = GetRayOrigin();
+--
+--     vec3 rd = GetRayDir(uv, ro, vec3(0), 1.);
+--     vec3 col = vec3(0);
+--
+--     float d = RayMarch(ro, rd, 1.);
+--
+--     vec3 p = ro + rd * d;
+--     float IOR = 1.5;
+--     if(d<MAX_DIST) {
+--         vec3 n = GetNormal(p);
+--         vec3 r = reflect(rd, n);
+--         if (p.y > -0.9)
+--             r = reflect(rd, n * 50. * exp(-3. * length(p.xz)));
+--
+--         vec3 pIn = p - 4. * SURF_DIST * n;
+--         vec3 rdIn = refract(rd, n, 1./IOR);
+--         float dIn = RayMarch(pIn, rdIn, -1.);
+--
+--         vec3 pExit = pIn + dIn * rdIn;
+--         vec3 nExit = -GetNormal(pExit); // *-1.; ?
+--
+--         vec3 p2 = p + 4. * SURF_DIST * n;
+--         vec3 cr = normalize(p - pExit);
+--         float d2 = RayMarch(p2, cr, 1.);
+--         vec3 p3 = p2 + d2 * cr;
+--         vec3 n2 = GetNormal(p3);
+--
+--         float dif = dot(n, normalize(vec3(.5*cos(iTime),1,.5*sin(iTime))))*.5+.5;
+--         float dif2 = dot(n2, normalize(vec3(1,2,3)))*.5+.5;
+--         //dif2 = pow(dif2, 5.);
+--         col = vec3(1);
+--         col *= dif;
+--         float k = 0.35;
+--        // col *= smoothstep(-k, k, dif2 - 0.8);
+--         col *= 0.5 + 0.5 * thc(4., 2. * iTime - 0.5 * length(p.xz) + 50. * abs(dif));//* abs(2. * dif-dif2));
+--         col *= exp(-0.5 * length(p));
+--         col *= 2. * dif2;
+--         float fres = pow(1. + dot(rd, n), 5.);
+--         float fres2 = pow(1. + dot(rd, nExit), 4.);
+--         float fog = 1.-exp(-length(p));
+--
+--         float spec = pow(dif, 15.);
+--         float csh = 1. / cosh(0.2 * length(p.xz));
+--         col = clamp(col, 0., 1.);
+--         col = mix(col, vec3(abs(r)) * csh, fres);
+--         if (p.y < -0.9) {
+--             float tns = 1.;
+--             col += 0.6 * thc(4., iTime + 6. * log(length(p.xz))) * csh;
+--         }
+--     }
+--
+--     col = pow(col, vec3(.4545));	// gamma correction
+--
+--     fragColor = vec4(col,1.0);
+-- }
