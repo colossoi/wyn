@@ -29,8 +29,6 @@ Wyn programs consist of:
 - **Built-in function signatures**: Polymorphic functions defined with `val`
 - **Shader entry points**: `entry` declarations with `#[vertex]`, `#[fragment]`, or `#[compute]` attributes
 
-The language uses Futhark-style syntax for types and function calls, with array-first semantics optimized for GPU programming patterns.
-
 ## Grammar Notation
 
 This specification uses Extended Backus-Naur Form (EBNF) notation:
@@ -459,7 +457,7 @@ This is necessary when defining operators that take type or shape parameters.
 
 ## Expressions
 
-Expressions are the basic construct of any Futhark program. An expression has a statically determined type, and produces a value at runtime. Futhark is an eager/strict language ("call by value").
+Expressions are the basic construct of any Wyn program. An expression has a statically determined type, and produces a value at runtime. Wyn is an eager/strict language ("call by value").
 
 The basic elements of expressions are called atoms, for example literals and variables, but also more complicated forms.
 
@@ -542,7 +540,7 @@ index       ::= exp [":" [exp]] [":" [exp]]
 
 ### Description
 
-Some of the built-in expression forms have parallel semantics, but it is not guaranteed that the the parallel constructs in Futhark are evaluated in parallel, especially if they are nested in complicated ways. Their purpose is to give the compiler as much freedom and information is possible, in order to enable it to maximise the efficiency of the generated code.
+Some of the built-in expression forms have parallel semantics, but it is not guaranteed that the the parallel constructs in Wyn are evaluated in parallel, especially if they are nested in complicated ways. Their purpose is to give the compiler as much freedom and information is possible, in order to enable it to maximise the efficiency of the generated code.
 
 ### Resolving Ambiguities
 
@@ -674,14 +672,14 @@ Access field `f` of the expression `e`, which must be a record or tuple.
 Evaluate the expression `e` with the module `m` locally opened, as if by `open`. This can make some expressions easier to read and write, without polluting the global scope with a declaration-level `open`.
 
 #### x binop y
-Apply an operator to `x` and `y`. Operators are functions like any other, and can be user-defined. Futhark pre-defines certain "magical" overloaded operators that work on several types. Overloaded operators cannot be defined by the user. Both operands must have the same type. The predefined operators and their semantics are:
+Apply an operator to `x` and `y`. Operators are functions like any other, and can be user-defined. Wyn pre-defines certain "magical" overloaded operators that work on several types. Overloaded operators cannot be defined by the user. Both operands must have the same type. The predefined operators and their semantics are:
 
 - **`**`**: Power operator, defined for all numeric types.
 - **`//`, `%%`**: Division and remainder on integers, with rounding towards zero.
 - **`*`, `/`, `%`, `+`, `-`**: The usual arithmetic operators, defined for all numeric types. Note that `/` and `%` rounds towards negative infinity when used on integers - this is different from in C.
 - **`^`, `&`, `|`, `>>`, `<<`, `>>>`**: Bitwise operators, respectively bitwise xor, and, or, arithmetic shift right, left shift, and logical (unsigned) shift right. Shifting is undefined if the right operand is negative, or greater than or equal to the length in bits of the left operand.
 
-Note that, unlike in C, bitwise operators have higher priority than arithmetic operators. This means that `x & y == z` is understood as `(x & y) == z`, rather than `x & (y == z)` as it would in C. Note that the latter is a type error in Futhark anyhow.
+Note that, unlike in C, bitwise operators have higher priority than arithmetic operators. This means that `x & y == z` is understood as `(x & y) == z`, rather than `x & (y == z)` as it would in C. Note that the latter is a type error in Wyn anyhow.
 
 - **`==`, `!=`**: Compare any two values of builtin or compound type for equality.
 - **`<`, `<=`. `>`, `>=`**: Company any two values of numeric type for equality.
@@ -795,7 +793,7 @@ An operator section that is equivalent to `|x| x[i,j]`.
 
 ## Higher-order Functions
 
-At a high level, Futhark functions are values, and can be used as any other value. However, to ensure that the compiler is able to compile the higher-order functions efficiently via defunctionalisation, certain type-driven restrictions exist on how functions can be used. These also apply to any record or tuple containing a function (a functional type):
+At a high level, Wyn functions are values, and can be used as any other value. However, to ensure that the compiler is able to compile the higher-order functions efficiently via defunctionalisation, certain type-driven restrictions exist on how functions can be used. These also apply to any record or tuple containing a function (a functional type):
 
 - Arrays of functions are not permitted.
 - A function cannot be returned from an `if` expression.
@@ -854,7 +852,7 @@ The `$func(args...)` syntax:
 
 ## Type Inference
 
-Futhark supports Hindley-Milner-style type inference, so in many cases explicit type annotations can be left off. Record field projection cannot in isolation be fully inferred, and may need type annotations where their inputs are bound. The same goes when constructing sum types, as Futhark cannot assume that a given constructor only belongs to a single type. Further, consumed parameters (see In-place updates) must be explicitly annotated.
+Wyn supports Hindley-Milner-style type inference, so in many cases explicit type annotations can be left off. Record field projection cannot in isolation be fully inferred, and may need type annotations where their inputs are bound. The same goes when constructing sum types, as Wyn cannot assume that a given constructor only belongs to a single type. Further, consumed parameters (see In-place updates) must be explicitly annotated.
 
 Type inference processes top-level declared in top-down order, and the type of a top-level function must be completely inferred at its definition site. Specifically, if a top-level function uses overloaded arithmetic operators, the resolution of those overloads cannot be influenced by later uses of the function.
 
@@ -864,7 +862,7 @@ Local bindings made with `let` are not made polymorphic through let-generalisati
 
 ## Size Types
 
-Futhark supports a system of size-dependent types that statically checks that the sizes of arrays passed to a function are compatible.
+Wyn supports a system of size-dependent types that statically checks that the sizes of arrays passed to a function are compatible.
 
 Whenever a pattern occurs (in `let`, `loop`, and function parameters), as well as in return types, the types of the bindings express invariants about the shapes of arrays that are accepted or produced by the function. For example:
 
@@ -990,7 +988,7 @@ The following is not an error:
 def f [n] (g: [n]i32 -> [n]i32) = ...
 ```
 
-However, using this function comes with a constraint: whenever an application `f x` occurs, the value of the size parameter must be inferable. Specifically, this value must have been used as the size of an array before the `f x` application is encountered. The notion of "before" is subtle, as there is no evaluation ordering of a Futhark expression, except that a let-binding is always evaluated before its body, the argument to a function is always evaluated before the function itself, and the left operand to an operator is evaluated before the right.
+However, using this function comes with a constraint: whenever an application `f x` occurs, the value of the size parameter must be inferable. Specifically, this value must have been used as the size of an array before the `f x` application is encountered. The notion of "before" is subtle, as there is no evaluation ordering of a Wyn expression, except that a let-binding is always evaluated before its body, the argument to a function is always evaluated before the function itself, and the left operand to an operator is evaluated before the right.
 
 The causality restriction only occurs when a function has size parameters whose first use is not as a concrete array size. For example, it does not apply to uses of the following function:
 
@@ -1094,7 +1092,7 @@ For bulk in-place updates with multiple values, use the `scatter` function from 
 
 ### Alias Analysis
 
-The rules used by the Futhark compiler to determine aliasing are intuitive in the intra-procedural case. Aliases are associated with entire arrays. Aliases of a record are tuple are tracked for each element, not for the record or tuple itself. Most constructs produce fresh arrays, with no aliases. The main exceptions are `if`, `loop`, function calls, and variable literals.
+The rules used by the Wyn compiler to determine aliasing are intuitive in the intra-procedural case. Aliases are associated with entire arrays. Aliases of a record are tuple are tracked for each element, not for the record or tuple itself. Most constructs produce fresh arrays, with no aliases. The main exceptions are `if`, `loop`, function calls, and variable literals.
 
 After a binding `let a = b`, that simply assigns a new name to an existing variable, the variable `a` aliases `b`. Similarly for record projections and patterns.
 
@@ -1124,7 +1122,7 @@ mod_param     ::= "(" name ":" mod_type_exp ")"
 mod_type_bind ::= "module" "type" name "=" mod_type_exp
 ```
 
-Futhark supports an ML-style higher-order module system. Modules can contain types, functions, and other modules and module types. Module types are used to classify the contents of modules, and parametric modules are used to abstract over modules (essentially module-level functions). In Standard ML, modules, module types and parametric modules are called structs, signatures, and functors, respectively. Module names exist in the same name space as values, but module types are their own name space.
+Wyn supports an ML-style higher-order module system. Modules can contain types, functions, and other modules and module types. Module types are used to classify the contents of modules, and parametric modules are used to abstract over modules (essentially module-level functions). In Standard ML, modules, module types and parametric modules are called structs, signatures, and functors, respectively. Module names exist in the same name space as values, but module types are their own name space.
 
 ### Module Bindings
 
@@ -1221,7 +1219,7 @@ sig evens [n]: [n]i32 -> []i32
 
 ### Referencing Other Files
 
-You can refer to external files in a Futhark file like this:
+You can refer to external files in a Wyn file like this:
 
 ```wyn
 import "file"
