@@ -427,6 +427,65 @@ export function startRenderLoop(
   const timeBytes = new Float32Array(1);
   const mouseBytes = new Float32Array(4);
 
+  // Shadertoy-style iMouse:
+  //   .xy = current mouse position in framebuffer pixels (origin
+  //         bottom-left, matching iResolution's coord system) while
+  //         the primary button is held; "last known" position once
+  //         released.
+  //   .z  = positive when held (encodes the click x); negative once
+  //         released. Shaders branch on `iMouse.z > 0` to detect "is
+  //         the user currently dragging?" — see holodice/kuko.
+  //   .w  = mirror of .z for click y.
+  // All zero before the first click ever.
+  const mouseState = {
+    held: false,
+    curX: 0,
+    curY: 0,
+    clickX: 0,
+    clickY: 0,
+  };
+
+  // Translate a pointer event's clientX/clientY into framebuffer pixels.
+  // Two coord transforms: client-rect → CSS-pixel canvas-relative, then
+  // scale to backing-store pixels (devicePixelRatio + the resize
+  // observer's apply()). Y is flipped to match Shadertoy convention.
+  const eventToCanvas = (e: PointerEvent): [number, number] => {
+    const rect = canvas.getBoundingClientRect();
+    const sx = canvas.width / Math.max(1, rect.width);
+    const sy = canvas.height / Math.max(1, rect.height);
+    const x = (e.clientX - rect.left) * sx;
+    const y = canvas.height - (e.clientY - rect.top) * sy;
+    return [x, y];
+  };
+
+  const onPointerDown = (e: PointerEvent) => {
+    if (e.button !== 0) return; // primary only
+    canvas.setPointerCapture(e.pointerId);
+    mouseState.held = true;
+    const [x, y] = eventToCanvas(e);
+    mouseState.curX = x;
+    mouseState.curY = y;
+    mouseState.clickX = x;
+    mouseState.clickY = y;
+  };
+  const onPointerMove = (e: PointerEvent) => {
+    if (!mouseState.held) return;
+    const [x, y] = eventToCanvas(e);
+    mouseState.curX = x;
+    mouseState.curY = y;
+  };
+  const onPointerUp = (e: PointerEvent) => {
+    if (e.button !== 0) return;
+    if (canvas.hasPointerCapture(e.pointerId))
+      canvas.releasePointerCapture(e.pointerId);
+    mouseState.held = false;
+  };
+
+  canvas.addEventListener("pointerdown", onPointerDown);
+  canvas.addEventListener("pointermove", onPointerMove);
+  canvas.addEventListener("pointerup", onPointerUp);
+  canvas.addEventListener("pointercancel", onPointerUp);
+
   function tick(time: number) {
     // Freeze elapsed time while paused; on resume, shift startTime so
     // iTime keeps ticking seamlessly from where it was.
@@ -454,6 +513,12 @@ export function startRenderLoop(
       device.queue.writeBuffer(res.shadertoy.iTime, 0, timeBytes);
     }
     if (res.shadertoy.iMouse) {
+      mouseBytes[0] = mouseState.curX;
+      mouseBytes[1] = mouseState.curY;
+      // Sign of zw encodes "currently held": positive while down,
+      // negative once released (Shadertoy convention).
+      mouseBytes[2] = mouseState.held ? mouseState.clickX : -mouseState.clickX;
+      mouseBytes[3] = mouseState.held ? mouseState.clickY : -mouseState.clickY;
       device.queue.writeBuffer(res.shadertoy.iMouse, 0, mouseBytes);
     }
 
@@ -514,6 +579,10 @@ export function startRenderLoop(
         cancelAnimationFrame(animationId);
         animationId = null;
       }
+      canvas.removeEventListener("pointerdown", onPointerDown);
+      canvas.removeEventListener("pointermove", onPointerMove);
+      canvas.removeEventListener("pointerup", onPointerUp);
+      canvas.removeEventListener("pointercancel", onPointerUp);
     },
   };
 }
