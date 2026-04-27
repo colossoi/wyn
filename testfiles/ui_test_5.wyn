@@ -34,30 +34,30 @@ def seg_dp: i32 = 39
 
 -- 2D rotation matrix. GLSL `v *= Rot(a)` means `v = v * R`.
 def rot(a: f32) mat2f32 =
-  let c = f32.cos(a) in
-  let s = f32.sin(a) in
+  let c = cos(a) in
+  let s = sin(a) in
   @[[c, 0.0 - s], [s, c]]
 
 -- Pixel-scaled antialiasing width.
-def antialiasing(n: f32) f32 = n / f32.min(iResolution.y, iResolution.x)
+def antialiasing(n: f32) f32 = n / min(iResolution.y, iResolution.x)
 
 -- smoothstep with the antialiasing width as lower edge.
 def smoothAA(d: f32, b: f32) f32 = smoothstep(antialiasing(1.0), b, d)
 
 -- Axis-aligned box SDF.
 def box(p: vec2f32, s: vec2f32) f32 =
-  f32.max(f32.abs(p.x) - s.x, f32.abs(p.y) - s.y)
+  max(abs(p.x) - s.x, abs(p.y) - s.y)
 
 -- Triangle clip SDF from the original: box, then two half-plane cuts.
 def tri(p: vec2f32, s: vec2f32, a: f32) f32 =
-  let pa = dot(p, @[f32.cos(a), f32.sin(a)]) in
-  let pb = 0.0 - dot(p, @[f32.cos(0.0 - a), f32.sin(0.0 - a)]) in
-  let bx = f32.max(f32.abs(p.x) - s.x, f32.abs(p.y) - s.y) in
-  f32.max(pb, f32.max(pa, bx))
+  let pa = dot(p, @[cos(a), sin(a)]) in
+  let pb = 0.0 - dot(p, @[cos(0.0 - a), sin(0.0 - a)]) in
+  let bx = max(abs(p.x) - s.x, abs(p.y) - s.y) in
+  max(pb, max(pa, bx))
 
 -- Skews.
-def skewX(a: f32) mat2f32 = @[[1.0, f32.tan(a)], [0.0, 1.0]]
-def skewY(a: f32) mat2f32 = @[[1.0, 0.0], [f32.tan(a), 1.0]]
+def skewX(a: f32) mat2f32 = @[[1.0, tan(a)], [0.0, 1.0]]
+def skewY(a: f32) mat2f32 = @[[1.0, 0.0], [tan(a), 1.0]]
 
 -- Polar domain fold: length(a) * cos(folded_angle + vec2(0, 11)).
 def domainFold(a: vec2f32, b: f32) vec2f32 =
@@ -65,31 +65,31 @@ def domainFold(a: vec2f32, b: f32) vec2f32 =
   let ang = atan2(a.y, a.x) in
   let k   = 6.28 / (b * 8.0) in
   let fold = mod(ang + k, k * 2.0) + (b - 1.0) * k in
-  @[l * f32.cos(fold + 0.0), l * f32.cos(fold + 11.0)]
+  @[l * cos(fold + 0.0), l * cos(fold + 11.0)]
 
 ------------------------------------------------------------
 -- SDF combinators
 ------------------------------------------------------------
 
-def union(a: f32, b: f32) f32     = f32.min(a, b)
-def intersect(a: f32, b: f32) f32 = f32.max(a, b)
-def subtract(a: f32, b: f32) f32  = f32.max(0.0 - b, a)   -- a minus b
-def shell(d: f32, w: f32) f32     = f32.abs(d) - w         -- outline
+def union(a: f32, b: f32) f32     = min(a, b)
+def intersect(a: f32, b: f32) f32 = max(a, b)
+def subtract(a: f32, b: f32) f32  = max(0.0 - b, a)   -- a minus b
+def shell(d: f32, w: f32) f32     = abs(d) - w         -- outline
 
 -- Clip d with two opposite half-plane cuts at ±halfAngleDeg (keeps the
 -- inner wedge — points where both half-plane dots are ≤ 0).
 def clipWedge(p: vec2f32, d: f32, halfAngleDeg: f32) f32 =
   let a   = radians(halfAngleDeg) in
-  let pos = dot(p, @[f32.cos(a), f32.sin(a)]) in
-  let neg = dot(p, @[f32.cos(0.0 - a), f32.sin(0.0 - a)]) in
+  let pos = dot(p, @[cos(a), sin(a)]) in
+  let neg = dot(p, @[cos(0.0 - a), sin(0.0 - a)]) in
   intersect(intersect(d, pos), neg)
 
 -- Same but inverted: keeps the outer wedge (points where both half-plane
 -- dots are ≥ 0).
 def clipWedgeInverted(p: vec2f32, d: f32, halfAngleDeg: f32) f32 =
   let a   = radians(halfAngleDeg) in
-  let pos = 0.0 - dot(p, @[f32.cos(a), f32.sin(a)]) in
-  let neg = 0.0 - dot(p, @[f32.cos(0.0 - a), f32.sin(0.0 - a)]) in
+  let pos = 0.0 - dot(p, @[cos(a), sin(a)]) in
+  let neg = 0.0 - dot(p, @[cos(0.0 - a), sin(0.0 - a)]) in
   intersect(intersect(d, pos), neg)
 
 ------------------------------------------------------------
@@ -118,100 +118,100 @@ def segBase(p: vec2f32) f32 =
   let h = 0.05 * 5.0 in
   -- Grid cutout mask.
   let g = @[mod(p.x, 0.05) - 0.025, mod(p.y, 0.05) - 0.025] in
-  let gridMask = f32.min(f32.abs(g.x) - 0.005, f32.abs(g.y) - 0.005) in
+  let gridMask = min(abs(g.x) - 0.005, abs(g.y) - 0.005) in
   -- Outer frame + slanted corners.
   let d0 = box(p, @[w * 0.5, h * 0.5]) in
-  let pc = @[f32.abs(p.x) - 0.1, f32.abs(p.y) - 0.05] in
+  let pc = @[abs(p.x) - 0.1, abs(p.y) - 0.05] in
   let a = radians(45.0) in
-  let d1 = dot(pc, @[f32.cos(a), f32.sin(a)]) in
-  let d2 = f32.max(d1, d0) in
-  f32.max(0.0 - gridMask, d2)
+  let d1 = dot(pc, @[cos(a), sin(a)]) in
+  let d2 = max(d1, d0) in
+  max(0.0 - gridMask, d2)
 
 def seg0(p: vec2f32) f32 =
   let d = segBase(p) in
   let mask = box(p, @[0.03, 0.03 * 2.7]) in
-  f32.max(0.0 - mask, d)
+  max(0.0 - mask, d)
 
 def seg1(p: vec2f32) f32 =
   let d0 = segBase(p) in
   let p1 = @[p.x + 0.03, p.y + 0.03] in
   let mask1 = box(p1, @[0.06, 0.111]) in
-  let d1 = f32.max(0.0 - mask1, d0) in
+  let d1 = max(0.0 - mask1, d0) in
   let p2 = @[p.x + 0.054, p.y - 0.105] in
   let mask2 = box(p2, @[0.03, 0.03]) in
-  f32.max(0.0 - mask2, d1)
+  max(0.0 - mask2, d1)
 
 def seg2(p: vec2f32) f32 =
   let d0 = segBase(p) in
   let p1 = @[p.x + 0.03, p.y - 0.05] in
   let mask1 = box(p1, @[0.06, 0.03]) in
-  let d1 = f32.max(0.0 - mask1, d0) in
+  let d1 = max(0.0 - mask1, d0) in
   let p2 = @[p.x - 0.03, p.y + 0.05] in
   let mask2 = box(p2, @[0.06, 0.03]) in
-  f32.max(0.0 - mask2, d1)
+  max(0.0 - mask2, d1)
 
 def seg3(p: vec2f32) f32 =
   let d0 = segBase(p) in
-  let p1 = @[p.x + 0.03, f32.abs(p.y) - 0.05] in
+  let p1 = @[p.x + 0.03, abs(p.y) - 0.05] in
   let mask1 = box(p1, @[0.06, 0.03]) in
-  let d1 = f32.max(0.0 - mask1, d0) in
+  let d1 = max(0.0 - mask1, d0) in
   let p2 = @[p.x + 0.05, p.y] in
   let mask2 = box(p2, @[0.03, 0.03]) in
-  f32.max(0.0 - mask2, d1)
+  max(0.0 - mask2, d1)
 
 def seg4(p: vec2f32) f32 =
   let d0 = segBase(p) in
   let p1 = @[p.x + 0.03, p.y + 0.08] in
   let mask1 = box(p1, @[0.06, 0.06]) in
-  let d1 = f32.max(0.0 - mask1, d0) in
+  let d1 = max(0.0 - mask1, d0) in
   let p2 = @[p.x, p.y - 0.08] in
   let mask2 = box(p2, @[0.03, 0.06]) in
-  f32.max(0.0 - mask2, d1)
+  max(0.0 - mask2, d1)
 
 def seg5(p: vec2f32) f32 =
   let d0 = segBase(p) in
   let p1 = @[p.x - 0.03, p.y - 0.05] in
   let mask1 = box(p1, @[0.06, 0.03]) in
-  let d1 = f32.max(0.0 - mask1, d0) in
+  let d1 = max(0.0 - mask1, d0) in
   let p2 = @[p.x + 0.03, p.y + 0.05] in
   let mask2 = box(p2, @[0.06, 0.03]) in
-  f32.max(0.0 - mask2, d1)
+  max(0.0 - mask2, d1)
 
 def seg6(p: vec2f32) f32 =
   let d0 = segBase(p) in
   let p1 = @[p.x - 0.03, p.y - 0.05] in
   let mask1 = box(p1, @[0.06, 0.03]) in
-  let d1 = f32.max(0.0 - mask1, d0) in
+  let d1 = max(0.0 - mask1, d0) in
   let p2 = @[p.x, p.y + 0.05] in
   let mask2 = box(p2, @[0.03, 0.03]) in
-  f32.max(0.0 - mask2, d1)
+  max(0.0 - mask2, d1)
 
 def seg7(p: vec2f32) f32 =
   let d = segBase(p) in
   let p1 = @[p.x + 0.03, p.y + 0.03] in
   let mask = box(p1, @[0.06, 0.111]) in
-  f32.max(0.0 - mask, d)
+  max(0.0 - mask, d)
 
 def seg8(p: vec2f32) f32 =
   let d = segBase(p) in
-  let p1 = @[p.x, f32.abs(p.y) - 0.05] in
+  let p1 = @[p.x, abs(p.y) - 0.05] in
   let mask = box(p1, @[0.03, 0.03]) in
-  f32.max(0.0 - mask, d)
+  max(0.0 - mask, d)
 
 def seg9(p: vec2f32) f32 =
   let d0 = segBase(p) in
   let p1 = @[p.x, p.y - 0.05] in
   let mask1 = box(p1, @[0.03, 0.03]) in
-  let d1 = f32.max(0.0 - mask1, d0) in
+  let d1 = max(0.0 - mask1, d0) in
   let p2 = @[p.x + 0.03, p.y + 0.05] in
   let mask2 = box(p2, @[0.06, 0.03]) in
-  f32.max(0.0 - mask2, d1)
+  max(0.0 - mask2, d1)
 
 def segDP(p: vec2f32) f32 =
   let d = segBase(p) in
   let p1 = @[p.x, p.y + 0.1] in
   let mask = box(p1, @[0.028, 0.028]) in
-  f32.max(mask, d)
+  max(mask, d)
 
 def drawFont(p0: vec2f32, char: i32) f32 =
   let p = p0 * 2.0 in
@@ -240,33 +240,33 @@ def ring0(p0: vec2f32) f32 =
   -- Wedge cut 1 (using p1, not the df'd version)
   let a1a = radians(165.0) in
   let a1b = radians(0.0 - 165.0) in
-  let d1 = f32.max(dot(p1, @[f32.cos(a1a), f32.sin(a1a)]), d0) in
-  let d2 = f32.max(dot(p1, @[f32.cos(a1b), f32.sin(a1b)]), d1) in
+  let d1 = max(dot(p1, @[cos(a1a), sin(a1a)]), d0) in
+  let d2 = max(dot(p1, @[cos(a1b), sin(a1b)]), d1) in
   -- Inner arcs around 0.55 radius
   let p3 = p0 * rot(radians(iTime * 30.0 + 30.0)) in
-  let d3 = f32.abs(magnitude(p3) - 0.55) - 0.015 in
-  let d4 = f32.max(0.0 - (f32.abs(p3.x) - 0.4), d3) in
-  let d5 = f32.min(d2, d4) in
-  let d6 = f32.abs(magnitude(p0) - 0.55) - 0.001 in
-  let d7 = f32.min(d5, d6) in
+  let d3 = abs(magnitude(p3) - 0.55) - 0.015 in
+  let d4 = max(0.0 - (abs(p3.x) - 0.4), d3) in
+  let d5 = min(d2, d4) in
+  let d6 = abs(magnitude(p0) - 0.55) - 0.001 in
+  let d7 = min(d5, d6) in
   -- Wavy outer circle at 0.65
   let p4 = p0 * rot(radians(0.0 - iTime * 50.0 + 30.0)) in
-  let wave = @[f32.sin(p4.x * 25.0 - radians(iTime * 80.0)) * 0.01,
-               f32.sin(p4.y * 25.0 - radians(iTime * 80.0)) * 0.01] in
+  let wave = @[sin(p4.x * 25.0 - radians(iTime * 80.0)) * 0.01,
+               sin(p4.y * 25.0 - radians(iTime * 80.0)) * 0.01] in
   let p4w = p4 + wave in
-  let d8 = f32.abs(magnitude(p4w) - 0.65) - 0.0001 in
-  let d9 = f32.min(d7, d8) in
+  let d8 = abs(magnitude(p4w) - 0.65) - 0.0001 in
+  let d9 = min(d7, d8) in
   -- Two orbiting triangles
-  let aTri1 = radians(0.0 - f32.sin(iTime * 1.2) * 120.0) + radians(0.0 - 70.0) in
-  let pTri1 = @[p0.x + f32.cos(aTri1) * 0.58, p0.y + f32.sin(aTri1) * 0.58] in
+  let aTri1 = radians(0.0 - sin(iTime * 1.2) * 120.0) + radians(0.0 - 70.0) in
+  let pTri1 = @[p0.x + cos(aTri1) * 0.58, p0.y + sin(aTri1) * 0.58] in
   let pTri1r = pTri1 * rot(0.0 - aTri1) * rot(radians(90.0)) in
-  let dT1 = f32.abs(tri(pTri1r, @[0.03, 0.03], radians(45.0))) - 0.003 in
-  let d10 = f32.min(d9, dT1) in
-  let aTri2 = radians(f32.sin(iTime * 1.3) * 100.0) + radians(0.0 - 10.0) in
-  let pTri2 = @[p0.x + f32.cos(aTri2) * 0.58, p0.y + f32.sin(aTri2) * 0.58] in
+  let dT1 = abs(tri(pTri1r, @[0.03, 0.03], radians(45.0))) - 0.003 in
+  let d10 = min(d9, dT1) in
+  let aTri2 = radians(sin(iTime * 1.3) * 100.0) + radians(0.0 - 10.0) in
+  let pTri2 = @[p0.x + cos(aTri2) * 0.58, p0.y + sin(aTri2) * 0.58] in
   let pTri2r = pTri2 * rot(0.0 - aTri2) * rot(radians(90.0)) in
-  let dT2 = f32.abs(tri(pTri2r, @[0.03, 0.03], radians(45.0))) - 0.003 in
-  f32.min(d10, dT2)
+  let dT2 = abs(tri(pTri2r, @[0.03, 0.03], radians(45.0))) - 0.003 in
+  min(d10, dT2)
 
 def ring1(p0: vec2f32) f32 =
   let p1 = p0 * rot(radians(iTime * 60.0)) in
@@ -275,7 +275,7 @@ def ring1(p0: vec2f32) f32 =
     shell(magnitude(p0) - 0.45, 0.001))
 
 def ring2(p0: vec2f32) f32 =
-  let p1   = p0 * rot(0.0 - radians(f32.sin(iTime * 2.0) * 90.0)) in
+  let p1   = p0 * rot(0.0 - radians(sin(iTime * 2.0) * 90.0)) in
   let ring = shell(magnitude(p1) - 0.3, 0.02) in
   union(clipWedge(p1, ring, 120.0), clipWedgeInverted(p1, ring, 120.0))
 
@@ -301,8 +301,8 @@ def ring6(p0: vec2f32) f32 =
   let p1  = p0 * rot(radians(iTime * 72.0 + 110.0)) in
   let big = subtract(
               subtract(shell(magnitude(p1) - 0.95, 0.001),
-                       f32.abs(p1.x) - 0.4),
-              f32.abs(p1.y) - 0.4) in
+                       abs(p1.x) - 0.4),
+              abs(p1.y) - 0.4) in
   let p2  = p0 * rot(radians(0.0 - iTime * 30.0 + 50.0)) in
   let dfs = domainFold(p2, 16.0) - @[0.6, 0.6] in
   let pattern = box(dfs * rot(radians(45.0)), @[0.02, 0.03]) in
@@ -318,30 +318,30 @@ def bg(p0: vec2f32) f32 =
   let gv0 = @[fract(p1.x) - 0.5, fract(p1.y) - 0.5] in
   let gv2 = @[fract(p1.x * 3.0) - 0.5, fract(p1.y * 3.0) - 0.5] in
   let id  = @[p1.x - fract(p1.x), p1.y - fract(p1.y)] in
-  let d0  = f32.min(box(gv2, @[0.02, 0.09]), box(gv2, @[0.09, 0.02])) in
+  let d0  = min(box(gv2, @[0.02, 0.09]), box(gv2, @[0.09, 0.02])) in
   let n   = hash21(id) in
   let gv  = @[gv0.x + 0.166, gv0.y + 0.17] in
-  let d_base = f32.abs(box(gv, @[0.169, 0.169])) - 0.004 in
+  let d_base = abs(box(gv, @[0.169, 0.169])) - 0.004 in
   let d_branch =
     if n < 0.3 then
       let gvr = gv * rot(radians(iTime * 60.0)) in
-      let dx = f32.max(0.0 - (f32.abs(gvr.x) - 0.08), d_base) in
-      let dy = f32.max(0.0 - (f32.abs(gvr.y) - 0.08), dx) in
-      f32.min(d0, dy)
+      let dx = max(0.0 - (abs(gvr.x) - 0.08), d_base) in
+      let dy = max(0.0 - (abs(gvr.y) - 0.08), dx) in
+      min(d0, dy)
     else if n < 0.6 then
       let gvr = gv * rot(radians(0.0 - iTime * 60.0)) in
-      let dx = f32.max(0.0 - (f32.abs(gvr.x) - 0.08), d_base) in
-      let dy = f32.max(0.0 - (f32.abs(gvr.y) - 0.08), dx) in
-      f32.min(d0, dy)
+      let dx = max(0.0 - (abs(gvr.x) - 0.08), d_base) in
+      let dy = max(0.0 - (abs(gvr.y) - 0.08), dx) in
+      min(d0, dy)
     else
       let gvr = gv * rot(radians(iTime * 60.0) + n) in
-      let d_ring = f32.abs(magnitude(gvr) - 0.1) - 0.025 in
-      let d_ring2 = f32.max(0.0 - (f32.abs(gvr.x) - 0.03), d_ring) in
-      f32.min(d0, f32.abs(d_ring2) - 0.003) in
+      let d_ring = abs(magnitude(gvr) - 0.1) - 0.025 in
+      let d_ring2 = max(0.0 - (abs(gvr.x) - 0.03), d_ring) in
+      min(d0, abs(d_ring2) - 0.003) in
   -- Fine grid dots
   let p2 = @[mod(p_t.x, 0.02) - 0.01, mod(p_t.y, 0.02) - 0.01] in
   let d_dots = box(p2, @[0.001, 0.001]) in
-  f32.min(d_branch, d_dots)
+  min(d_branch, d_dots)
 
 ------------------------------------------------------------
 -- UI widgets
@@ -352,114 +352,114 @@ def numberWithCircleUI(p0: vec2f32) f32 =
   let n1 = i32.f32(mod(iTime * 6.0, 10.0)) in
   let d0 = drawFont(p - @[0.0 - 0.16, 0.0], n1) in
   let n2 = i32.f32(mod(iTime * 3.0, 10.0)) in
-  let d1 = f32.min(d0, drawFont(p - @[0.0 - 0.08, 0.0], n2)) in
-  let d2 = f32.min(d1, drawFont(p - @[0.0 - 0.02, 0.0], seg_dp)) in
+  let d1 = min(d0, drawFont(p - @[0.0 - 0.08, 0.0], n2)) in
+  let d2 = min(d1, drawFont(p - @[0.0 - 0.02, 0.0], seg_dp)) in
   let p_small = p * 1.5 in
   let n3 = i32.f32(mod(iTime * 10.0, 10.0)) in
-  let d3 = f32.min(d2, drawFont(p_small - @[0.04, 0.0 - 0.03], n3)) in
+  let d3 = min(d2, drawFont(p_small - @[0.04, 0.0 - 0.03], n3)) in
   let n4 = i32.f32(mod(iTime * 15.0, 10.0)) in
-  let d4 = f32.abs(f32.min(d3, drawFont(p_small - @[0.12, 0.0 - 0.03], n4))) - 0.002 in
+  let d4 = abs(min(d3, drawFont(p_small - @[0.12, 0.0 - 0.03], n4))) - 0.002 in
   -- Rotating cross mark
   let pc = p0 - @[0.07, 0.0] in
   let pcr = pc * rot(radians(0.0 - iTime * 50.0)) in
   let df1 = domainFold(pcr, 4.0) in
   let dfs = df1 - @[0.085, 0.085] in
   let dx0 = box(dfs * rot(radians(45.0)), @[0.015, 0.018]) in
-  let dx1 = f32.max(0.0 - box(p0, @[0.13, 0.07]), dx0) in
-  f32.min(d4, f32.abs(dx1) - 0.0005)
+  let dx1 = max(0.0 - box(p0, @[0.13, 0.07]), dx0) in
+  min(d4, abs(dx1) - 0.0005)
 
 def blockUI(p0: vec2f32) f32 =
-  let p1 = @[mod(p0.x + iTime * 0.05, 0.04) - 0.02, f32.abs(p0.y) - 0.02] in
+  let p1 = @[mod(p0.x + iTime * 0.05, 0.04) - 0.02, abs(p0.y) - 0.02] in
   let d0 = box(p1, @[0.0085, 0.0085]) in
-  let p2 = @[mod(p0.x + iTime * 0.05 + 0.02, 0.04) - 0.02, f32.abs(p0.y) - 0.02] in
-  let d1 = f32.min(d0, box(p2, @[0.0085, 0.0085])) in
-  let d2 = f32.max(f32.abs(p0.x) - 0.2, d1) in
-  f32.abs(d2) - 0.0002
+  let p2 = @[mod(p0.x + iTime * 0.05 + 0.02, 0.04) - 0.02, abs(p0.y) - 0.02] in
+  let d1 = min(d0, box(p2, @[0.0085, 0.0085])) in
+  let d2 = max(abs(p0.x) - 0.2, d1) in
+  abs(d2) - 0.0002
 
 def smallCircleUI(p_in: vec2f32) f32 =
   let p0 = p_in * 1.1 in
   let deg0 = 20.0 in
-  let p1 = p0 * rot(radians(f32.sin(iTime * 3.0) * 50.0)) in
-  let d0 = f32.abs(magnitude(p1) - 0.1) - 0.003 in
+  let p1 = p0 * rot(radians(sin(iTime * 3.0) * 50.0)) in
+  let d0 = abs(magnitude(p1) - 0.1) - 0.003 in
   let df1 = domainFold(p1, 0.75) in
   let dfs = df1 - @[0.02, 0.02] in
   let a_neg = radians(0.0 - deg0) in
   let a_pos = radians(deg0) in
-  let d1 = f32.max(0.0 - dot(dfs, @[f32.cos(a_neg), f32.sin(a_neg)]), d0) in
-  let d2 = f32.max(0.0 - dot(dfs, @[f32.cos(a_pos), f32.sin(a_pos)]), d1) in
-  let p2 = p0 * rot(radians(0.0 - f32.sin(iTime * 2.0) * 80.0)) in
-  let e0 = f32.abs(magnitude(p2) - 0.08) - 0.001 in
-  let e1 = f32.max(0.0 - p2.x, e0) in
-  let d3 = f32.min(d2, e1) in
+  let d1 = max(0.0 - dot(dfs, @[cos(a_neg), sin(a_neg)]), d0) in
+  let d2 = max(0.0 - dot(dfs, @[cos(a_pos), sin(a_pos)]), d1) in
+  let p2 = p0 * rot(radians(0.0 - sin(iTime * 2.0) * 80.0)) in
+  let e0 = abs(magnitude(p2) - 0.08) - 0.001 in
+  let e1 = max(0.0 - p2.x, e0) in
+  let d3 = min(d2, e1) in
   let p3 = p0 * rot(radians(0.0 - iTime * 50.0)) in
-  let f0 = f32.abs(magnitude(p3) - 0.05) - 0.015 in
+  let f0 = abs(magnitude(p3) - 0.05) - 0.015 in
   let deg1 = 170.0 in
   let b_pos = radians(deg1) in
   let b_neg = radians(0.0 - deg1) in
-  let f1 = f32.max(0.0 - dot(p3, @[f32.cos(b_pos), f32.sin(b_pos)]), f0) in
-  let f2 = f32.max(0.0 - dot(p3, @[f32.cos(b_neg), f32.sin(b_neg)]), f1) in
-  f32.min(d3, f32.abs(f2) - 0.0005)
+  let f1 = max(0.0 - dot(p3, @[cos(b_pos), sin(b_pos)]), f0) in
+  let f2 = max(0.0 - dot(p3, @[cos(b_neg), sin(b_neg)]), f1) in
+  min(d3, abs(f2) - 0.0005)
 
 def smallCircleUI2(p0: vec2f32) f32 =
-  let d0 = f32.abs(magnitude(p0) - 0.04) - 0.0001 in
+  let d0 = abs(magnitude(p0) - 0.04) - 0.0001 in
   let p1 = p0 * rot(radians(iTime * 30.0)) in
   let deg = 140.0 in
   let a_pos = radians(deg) in
   let a_neg = radians(0.0 - deg) in
   let e0 = magnitude(p1) - 0.03 in
-  let e1 = f32.max(0.0 - dot(p1, @[f32.cos(a_pos), f32.sin(a_pos)]), e0) in
-  let e2 = f32.max(0.0 - dot(p1, @[f32.cos(a_neg), f32.sin(a_neg)]), e1) in
-  let d1 = f32.min(d0, e2) in
+  let e1 = max(0.0 - dot(p1, @[cos(a_pos), sin(a_pos)]), e0) in
+  let e2 = max(0.0 - dot(p1, @[cos(a_neg), sin(a_neg)]), e1) in
+  let d1 = min(d0, e2) in
   let f0 = magnitude(p1) - 0.03 in
-  let f1 = f32.max(dot(p1, @[f32.cos(a_pos), f32.sin(a_pos)]), f0) in
-  let f2 = f32.max(dot(p1, @[f32.cos(a_neg), f32.sin(a_neg)]), f1) in
-  let d2 = f32.min(d1, f2) in
-  f32.max(0.0 - (magnitude(p1) - 0.02), d2)
+  let f1 = max(dot(p1, @[cos(a_pos), sin(a_pos)]), f0) in
+  let f2 = max(dot(p1, @[cos(a_neg), sin(a_neg)]), f1) in
+  let d2 = min(d1, f2) in
+  max(0.0 - (magnitude(p1) - 0.02), d2)
 
 def rectUI(p_in: vec2f32) f32 =
   let p0 = p_in * rot(radians(45.0)) in
-  let d0 = f32.abs(box(p0, @[0.12, 0.12])) - 0.003 in
+  let d0 = abs(box(p0, @[0.12, 0.12])) - 0.003 in
   let p1 = p0 * rot(radians(iTime * 60.0)) in
-  let d1 = f32.max(0.0 - (f32.abs(p1.x) - 0.05), d0) in
-  let d2 = f32.max(0.0 - (f32.abs(p1.y) - 0.05), d1) in
-  let d3 = f32.min(d2, f32.abs(box(p0, @[0.12, 0.12])) - 0.0005) in
-  let e0 = f32.abs(box(p0, @[0.09, 0.09])) - 0.003 in
+  let d1 = max(0.0 - (abs(p1.x) - 0.05), d0) in
+  let d2 = max(0.0 - (abs(p1.y) - 0.05), d1) in
+  let d3 = min(d2, abs(box(p0, @[0.12, 0.12])) - 0.0005) in
+  let e0 = abs(box(p0, @[0.09, 0.09])) - 0.003 in
   let p2 = p0 * rot(radians(0.0 - iTime * 50.0)) in
-  let e1 = f32.max(0.0 - (f32.abs(p2.x) - 0.03), e0) in
-  let e2 = f32.max(0.0 - (f32.abs(p2.y) - 0.03), e1) in
-  let d4 = f32.min(d3, e2) in
-  let d5 = f32.min(d4, f32.abs(box(p0, @[0.09, 0.09])) - 0.0005) in
+  let e1 = max(0.0 - (abs(p2.x) - 0.03), e0) in
+  let e2 = max(0.0 - (abs(p2.y) - 0.03), e1) in
+  let d4 = min(d3, e2) in
+  let d5 = min(d4, abs(box(p0, @[0.09, 0.09])) - 0.0005) in
   let p3 = p0 * rot(radians(0.0 - 45.0)) in
-  let p3y = @[p3.x, f32.abs(p3.y) - 0.07 - f32.sin(iTime * 3.0) * 0.01] in
-  let d6 = f32.min(d5, tri(p3y, @[0.02, 0.02], radians(45.0))) in
+  let p3y = @[p3.x, abs(p3.y) - 0.07 - sin(iTime * 3.0) * 0.01] in
+  let d6 = min(d5, tri(p3y, @[0.02, 0.02], radians(45.0))) in
   let p4 = p0 * rot(radians(45.0)) in
-  let p4y = @[p4.x, f32.abs(p4.y) - 0.07 - f32.sin(iTime * 3.0) * 0.01] in
-  let d7 = f32.min(d6, tri(p4y, @[0.02, 0.02], radians(45.0))) in
+  let p4y = @[p4.x, abs(p4.y) - 0.07 - sin(iTime * 3.0) * 0.01] in
+  let d7 = min(d6, tri(p4y, @[0.02, 0.02], radians(45.0))) in
   let p5 = p0 * rot(radians(45.0)) in
-  let g0 = f32.abs(box(p5, @[0.025, 0.025])) - 0.0005 in
-  let g1 = f32.max(0.0 - (f32.abs(p5.x) - 0.01), g0) in
-  let g2 = f32.max(0.0 - (f32.abs(p5.y) - 0.01), g1) in
-  f32.min(d7, g2)
+  let g0 = abs(box(p5, @[0.025, 0.025])) - 0.0005 in
+  let g1 = max(0.0 - (abs(p5.x) - 0.01), g0) in
+  let g2 = max(0.0 - (abs(p5.y) - 0.01), g1) in
+  min(d7, g2)
 
 def graphUI(p0: vec2f32) f32 =
   let p1 = @[p0.x + 0.5, (p0.y - iTime * 0.25) * 100.0] in
   let gv = @[fract(p1.x) - 0.5, fract(p1.y) - 0.5] in
   let id = @[p1.x - fract(p1.x), p1.y - fract(p1.y)] in
   let n  = hash21(id.yy) * 2.0 in
-  let w  = (f32.abs(f32.sin(iTime * n) + 0.25) * 0.03) * n * 0.5 in
+  let w  = (abs(sin(iTime * n) + 0.25) * 0.03) * n * 0.5 in
   let d0 = box(gv, @[w, 0.1]) in
-  let d1 = f32.max(f32.abs(p0.x) - 0.2, d0) in
-  f32.max(f32.abs(p0.y) - 0.2, d1)
+  let d1 = max(abs(p0.x) - 0.2, d0) in
+  max(abs(p0.y) - 0.2, d1)
 
 def staticUI(p0: vec2f32) f32 =
   let d0 = box(p0, @[0.005, 0.13]) in
   let p1 = (p0 - @[0.02, 0.0 - 0.147]) * rot(radians(0.0 - 45.0)) in
-  let d1 = f32.min(d0, box(p1, @[0.005, 0.028])) in
-  let d2 = f32.min(d1, box(p0 - @[0.04, 0.0 - 0.2135], @[0.005, 0.049])) in
+  let d1 = min(d0, box(p1, @[0.005, 0.028])) in
+  let d2 = min(d1, box(p0 - @[0.04, 0.0 - 0.2135], @[0.005, 0.049])) in
   let p2 = (p0 - @[0.02, 0.0 - 0.28]) * rot(radians(45.0)) in
-  let d3 = f32.min(d2, box(p2, @[0.005, 0.03])) in
-  let d4 = f32.min(d3, magnitude(p0 - @[0.0, 0.13]) - 0.012) in
-  f32.min(d4, magnitude(p0 - @[0.0, 0.0 - 0.3]) - 0.012)
+  let d3 = min(d2, box(p2, @[0.005, 0.03])) in
+  let d4 = min(d3, magnitude(p0 - @[0.0, 0.13]) - 0.012) in
+  min(d4, magnitude(p0 - @[0.0, 0.0 - 0.3]) - 0.012)
 
 def arrowUI(p0: vec2f32) f32 =
   let px = 0.0 - p0.x in
@@ -467,43 +467,43 @@ def arrowUI(p0: vec2f32) f32 =
   let p1 = @[px_t * 0.9, p0.y * 1.5] in
   let p2 = p1 * rot(radians(90.0)) in
   let t0 = tri(p2, @[0.05, 0.05], radians(45.0)) in
-  let t1 = f32.max(0.0 - tri(p2 - @[0.0, 0.0 - 0.03], @[0.05, 0.05], radians(45.0)), t0) in
-  let t2 = f32.abs(t1) - 0.0005 in
-  f32.max(f32.abs(p0.x) - 0.15, t2)
+  let t1 = max(0.0 - tri(p2 - @[0.0, 0.0 - 0.03], @[0.05, 0.05], radians(45.0)), t0) in
+  let t2 = abs(t1) - 0.0005 in
+  max(abs(p0.x) - 0.15, t2)
 
 def sideLine(p_in: vec2f32) f32 =
   let p0 = @[0.0 - p_in.x, p_in.y] in
-  let p1 = @[p0.x, f32.abs(p0.y) - 0.17] in
+  let p1 = @[p0.x, abs(p0.y) - 0.17] in
   let p2 = p1 * rot(radians(45.0)) in
   let d0 = box(p2, @[0.035, 0.01]) in
-  let d1 = f32.min(d0, box(p0 - @[0.0217, 0.0], @[0.01, 0.152])) in
-  f32.abs(d1) - 0.0005
+  let d1 = min(d0, box(p0 - @[0.0217, 0.0], @[0.01, 0.152])) in
+  abs(d1) - 0.0005
 
 def sideUI(p0: vec2f32) f32 =
   let p1 = @[0.0 - p0.x + 0.025, p0.y] in
   let d0 = sideLine(p1) in
-  let p2 = @[p0.x, f32.abs(p0.y) - 0.275] in
-  f32.min(d0, sideLine(p2))
+  let p2 = @[p0.x, abs(p0.y) - 0.275] in
+  min(d0, sideLine(p2))
 
 def overlayUI(p0: vec2f32) f32 =
   let d0 = numberWithCircleUI(p0 - @[0.56, 0.0 - 0.34]) in
-  let p_blk = @[f32.abs(p0.x) - 0.56, p0.y - 0.45] in
-  let d1 = f32.min(d0, blockUI(p_blk)) in
-  let p_sc2a = @[f32.abs(p0.x) - 0.72, p0.y - 0.35] in
-  let d2 = f32.min(d1, smallCircleUI2(p_sc2a)) in
-  let d3 = f32.min(d2, smallCircleUI2(p0 - @[0.0 - 0.39, 0.0 - 0.42])) in
-  let p_sc1 = @[p0.x - 0.58, f32.abs(p0.y - 0.07) - 0.12] in
-  let d4 = f32.min(d3, smallCircleUI(p_sc1)) in
-  let d5 = f32.min(d4, rectUI(p0 - @[0.0 - 0.58, 0.0 - 0.3])) in
+  let p_blk = @[abs(p0.x) - 0.56, p0.y - 0.45] in
+  let d1 = min(d0, blockUI(p_blk)) in
+  let p_sc2a = @[abs(p0.x) - 0.72, p0.y - 0.35] in
+  let d2 = min(d1, smallCircleUI2(p_sc2a)) in
+  let d3 = min(d2, smallCircleUI2(p0 - @[0.0 - 0.39, 0.0 - 0.42])) in
+  let p_sc1 = @[p0.x - 0.58, abs(p0.y - 0.07) - 0.12] in
+  let d4 = min(d3, smallCircleUI(p_sc1)) in
+  let d5 = min(d4, rectUI(p0 - @[0.0 - 0.58, 0.0 - 0.3])) in
   let p_graph_0 = p0 - @[0.0 - 0.58, 0.1] in
-  let p_graph = @[f32.abs(p_graph_0.x) - 0.05, p_graph_0.y] in
-  let d6 = f32.min(d5, graphUI(p_graph)) in
-  let p_stat = @[f32.abs(p0.x) - 0.72, p0.y - 0.13] in
-  let d7 = f32.min(d6, staticUI(p_stat)) in
-  let p_arrow = @[f32.abs(p0.x) - 0.51, p0.y - 0.35] in
-  let d8 = f32.min(d7, arrowUI(p_arrow)) in
-  let p_side = @[f32.abs(p0.x) - 0.82, p0.y] in
-  f32.min(d8, sideUI(p_side))
+  let p_graph = @[abs(p_graph_0.x) - 0.05, p_graph_0.y] in
+  let d6 = min(d5, graphUI(p_graph)) in
+  let p_stat = @[abs(p0.x) - 0.72, p0.y - 0.13] in
+  let d7 = min(d6, staticUI(p_stat)) in
+  let p_arrow = @[abs(p0.x) - 0.51, p0.y - 0.35] in
+  let d8 = min(d7, arrowUI(p_arrow)) in
+  let p_side = @[abs(p0.x) - 0.82, p0.y] in
+  min(d8, sideUI(p_side))
 
 ------------------------------------------------------------
 -- 3D ray-march scene
@@ -528,13 +528,13 @@ def getDist(p0: vec3f32) f32 =
   let xy = p.xy in
   -- Each slab is the intersection of its ring SDF with a thin Z slice.
   let slabs: [7]f32 = [
-    intersect(f32.abs(p.z)       - th, ring0(xy)),
-    intersect(f32.abs(p.z - 0.2) - th, ring1(xy)),
-    intersect(f32.abs(p.z - 0.4) - th, ring2(xy)),
-    intersect(f32.abs(p.z - 0.6) - th, ring3(xy)),
-    intersect(f32.abs(p.z - 0.8) - th, ring4(xy)),
-    intersect(f32.abs(p.z - 1.0) - th, ring5(xy)),
-    intersect(f32.abs(p.z - 1.2) - th, ring6(xy))
+    intersect(abs(p.z)       - th, ring0(xy)),
+    intersect(abs(p.z - 0.2) - th, ring1(xy)),
+    intersect(abs(p.z - 0.4) - th, ring2(xy)),
+    intersect(abs(p.z - 0.6) - th, ring3(xy)),
+    intersect(abs(p.z - 0.8) - th, ring4(xy)),
+    intersect(abs(p.z - 1.0) - th, ring5(xy)),
+    intersect(abs(p.z - 1.2) - th, ring6(xy))
   ] in
   reduce(|a: f32, b: f32| union(a, b), 10000.0, slabs)
 
@@ -548,7 +548,7 @@ def rayMarch(ro: vec3f32, rd: vec3f32) vec3f32 =
         let p   = ro + rd * t in
         let d   = getDist(p) in
         let da  = 1.0 - smoothstep(0.0, glowVal, d) in
-        let tn  = t + f32.max(0.0001, f32.abs(d) * 0.6) in
+        let tn  = t + max(0.0001, abs(d) * 0.6) in
         (i + 1, tn, a + da, f32.i32(i))
   in
   let norm = if steps > 0.0 then alpha / steps else 0.0 in
@@ -596,7 +596,7 @@ def cameraOrigin(uv: vec2f32) vec3f32 =
   let r1  = rot(radians(yz)) in
   let yz_in = ro0.yz * r1 in
   let ro1 = @[ro0.x, yz_in.x, yz_in.y] in
-  let r2  = rot(radians(f32.sin(iTime * 0.3) * animRXZ + ogRXZ)) in
+  let r2  = rot(radians(sin(iTime * 0.3) * animRXZ + ogRXZ)) in
   let xz_in = ro1.xz * r2 in
   @[xz_in.x, ro1.y, xz_in.y]
 

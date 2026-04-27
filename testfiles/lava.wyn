@@ -5,6 +5,8 @@
 ------------------------------------------------------------
 -- Uniforms
 ------------------------------------------------------------
+open f32
+
 #[uniform(set=1, binding=0)] def iResolution: vec3f32
 #[uniform(set=1, binding=1)] def iTime: f32
 
@@ -38,9 +40,9 @@ def sdfScene(p: vec3f32) f32 =
   let (_, d) = loop (i, d) = (0, 2.0) while i < 16 do
     let fi = f32.i32(i) in
     let time = iTime * (fract((fi * 412.531 + 0.513)) - 0.5) * 2.0 in
-    let offset = @[f32.sin((time + fi * 52.5126)) * 2.0,
-                   f32.sin((time + fi * 64.62744)) * 2.0,
-                   f32.sin((time + fi * 632.25)) * 0.8] in
+    let offset = @[sin((time + fi * 52.5126)) * 2.0,
+                   sin((time + fi * 64.62744)) * 2.0,
+                   sin((time + fi * 632.25)) * 0.8] in
     let sphere_p = p + offset in
     let radius = mix(0.5, 1.0, fract((fi * 412.531 + 0.5124))) in
     let d2 = opSmoothUnion(sdSphere(sphere_p, radius), d, 0.4) in
@@ -73,7 +75,7 @@ def raymarch(rayOri: vec3f32, rayDir: vec3f32) (f32, vec3f32) =
     let dist = sdfScene(p2) in
     if dist < 1e-6 then (64, depth, p2)  -- break
     else (i + 1, depth + dist, p2)
-  in (f32.min(6.0, depth), p)
+  in (min(6.0, depth), p)
 
 ------------------------------------------------------------
 -- Fragment shader
@@ -93,16 +95,16 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4
   let (depth, p) = raymarch(rayOri, rayDir) in
 
   let n = calcNormal(p) in
-  let b = f32.max(0.0, dot(n, @[0.577, 0.577, 0.577])) in
+  let b = max(0.0, dot(n, @[0.577, 0.577, 0.577])) in
 
   -- Colorful lava effect
   let phase = b + iTime * 3.0 in
-  let col_r = (0.5 + 0.5 * f32.cos((phase + uv.x * 2.0 + 0.0))) * (0.85 + b * 0.35) in
-  let col_g = (0.5 + 0.5 * f32.cos((phase + uv.y * 2.0 + 2.0))) * (0.85 + b * 0.35) in
-  let col_b = (0.5 + 0.5 * f32.cos((phase + uv.x * 2.0 + 4.0))) * (0.85 + b * 0.35) in
+  let col_r = (0.5 + 0.5 * cos((phase + uv.x * 2.0 + 0.0))) * (0.85 + b * 0.35) in
+  let col_g = (0.5 + 0.5 * cos((phase + uv.y * 2.0 + 2.0))) * (0.85 + b * 0.35) in
+  let col_b = (0.5 + 0.5 * cos((phase + uv.x * 2.0 + 4.0))) * (0.85 + b * 0.35) in
 
   -- Depth fog
-  let fog = f32.exp((0.0 - depth * 0.15)) in
+  let fog = exp((0.0 - depth * 0.15)) in
   let alpha = 1.0 - (depth - 0.5) / 2.0 in
 
   @[col_r * fog, col_g * fog, col_b * fog, alpha]

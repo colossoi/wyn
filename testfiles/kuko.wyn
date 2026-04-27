@@ -6,6 +6,8 @@
 ------------------------------------------------------------
 -- Uniforms
 ------------------------------------------------------------
+open f32
+
 #[uniform(set=0, binding=0)] def iResolution: vec3f32
 #[uniform(set=0, binding=1)] def iTime: f32
 #[uniform(set=0, binding=5)] def iMouse: vec4f32
@@ -27,25 +29,25 @@ entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] 
 -- Two by two rotation matrix constructor
 ------------------------------------------------------------
 def rot2D(a: f32) mat2f32 =
-  let c = f32.cos(a) in
-  let s = f32.sin(a) in
+  let c = cos(a) in
+  let s = sin(a) in
   @[[c, s], [0.0 - s, c]]
 
 ------------------------------------------------------------
 -- Hash functions for random sparkle generation
 ------------------------------------------------------------
 def hash(p: vec3f32) f32 =
-  fract(f32.sin(dot(p, @[127.1, 311.7, 74.7])) * 43758.5)
+  fract(sin(dot(p, @[127.1, 311.7, 74.7])) * 43758.5)
 
 def hash2(p: vec3f32) f32 =
-  fract(f32.sin(dot(p, @[43.7, 78.2, 123.4])) * 127.1)
+  fract(sin(dot(p, @[43.7, 78.2, 123.4])) * 127.1)
 
 ------------------------------------------------------------
 -- Camera path to move around
 ------------------------------------------------------------
 def camPath(t: f32) vec2f32 =
-  let s = f32.sin(t * 0.312) in
-  let c = f32.cos(t * 0.124) in
+  let s = sin(t * 0.312) in
+  let c = cos(t * 0.124) in
   @[c * 1.4 - s * 1.4, c * 1.7 + s * 2.5]
 
 ------------------------------------------------------------
@@ -53,10 +55,10 @@ def camPath(t: f32) vec2f32 =
 ------------------------------------------------------------
 def foilGyroid(p: vec3f32, t: f32) f32 =
   let ps = p * 0.6 in
-  let sinp = @[f32.sin(ps.x + t), f32.sin(ps.y + t), f32.sin(ps.z + t)] in
-  let cosp = @[f32.cos(ps.y + t), f32.cos(ps.z + t), f32.cos(ps.x + t)] in
+  let sinp = @[sin(ps.x + t), sin(ps.y + t), sin(ps.z + t)] in
+  let cosp = @[cos(ps.y + t), cos(ps.z + t), cos(ps.x + t)] in
   let gyroid = dot(sinp, cosp) in
-  f32.abs(gyroid) * 1.0
+  abs(gyroid) * 1.0
 
 ------------------------------------------------------------
 -- Main raymarching function with chromatic offset
@@ -86,10 +88,10 @@ def raymarch(fragCoord: vec2f32, res: vec2f32, rotX: mat2f32, rotY: mat2f32, chr
     -- Ray position
     let p = ro + rd2 * dt in
 
-    if f32.abs(p.x) > 9.0 then (FAR, dt, acc)
+    if abs(p.x) > 9.0 then (FAR, dt, acc)
     else
       -- Voxel grid for sparkles
-      let gridPos = @[f32.floor(p.x * 4.0), f32.floor(p.y * 4.0), f32.floor(p.z * 4.0)] in
+      let gridPos = @[floor(p.x * 4.0), floor(p.y * 4.0), floor(p.z * 4.0)] in
       let localPos = @[fract(p.x * 4.0) - 0.5, fract(p.y * 4.0) - 0.5, fract(p.z * 4.0) - 0.5] in
 
       -- Sparkle detection
@@ -101,24 +103,24 @@ def raymarch(fragCoord: vec2f32, res: vec2f32, rotX: mat2f32, rotY: mat2f32, chr
       -- Calculate distances
       let foilDist = foilGyroid(p, iTime * 0.01) in
       let cubeDist = foilGyroid(p, iTime * 0.04) in
-      let sineDist = magnitude(@[f32.sin(cubeDist), 0.0, 0.0]) - 0.13 in
+      let sineDist = magnitude(@[sin(cubeDist), 0.0, 0.0]) - 0.13 in
 
-      let combinedDist = f32.max(f32.max(cubeDist, foilDist - 0.1), sineDist)
+      let combinedDist = max(max(cubeDist, foilDist - 0.1), sineDist)
                          + chromatic * 0.001 - i / 130.0 in
 
-      let stepSize = 0.01 + 0.2 * f32.abs(combinedDist) in
+      let stepSize = 0.01 + 0.2 * abs(combinedDist) in
       let dt2 = dt + stepSize in
 
       -- Sparkle glow
-      let sparkGlow = sparkPlus * f32.sin(sparkHash + i * 0.04 + chromatic * 20.0) in
-      let sparkGlowClamped = f32.max(0.0, sparkGlow) in
+      let sparkGlow = sparkPlus * sin(sparkHash + i * 0.04 + chromatic * 20.0) in
+      let sparkGlowClamped = max(0.0, sparkGlow) in
 
       -- Volumetric glow contributions
       let shapeGlow = 3.5 / stepSize in
       let sparkBright = 15.0 / stepSize in
 
       -- Accumulate color
-      let contrib = shapeGlow * (0.3 + 0.23 * f32.sin(i * 0.33 + chromatic * 5.0)) +
+      let contrib = shapeGlow * (0.3 + 0.23 * sin(i * 0.33 + chromatic * 5.0)) +
                     sparkBright * sparkGlowClamped in
 
       (i + 1.0, dt2, acc + contrib)
@@ -151,9 +153,9 @@ entry fragment_main(#[builtin(position)] frag: vec4f32) #[location(0)] vec4f32 =
 
   -- Tone mapping: tanh(O * O / 1e7)
   let scale = 1.0 / 10000000.0 in
-  let r_out = f32.tanh(r_val * r_val * scale) in
-  let g_out = f32.tanh(g_val * g_val * scale) in
-  let b_out = f32.tanh(b_val * b_val * scale) in
+  let r_out = tanh(r_val * r_val * scale) in
+  let g_out = tanh(g_val * g_val * scale) in
+  let b_out = tanh(b_val * b_val * scale) in
 
   @[r_out, g_out, b_out, 1.0]
 

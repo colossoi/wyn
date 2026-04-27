@@ -177,6 +177,8 @@
 
 
 -- Uniforms from host
+open f32
+
 #[uniform(set=0, binding=0)] def iResolution: vec3f32
 #[uniform(set=0, binding=1)] def iTime: f32
 
@@ -206,8 +208,8 @@ def translation(p: vec3f32) mat4f32 =
   ]
 
 def rotation_euler(a: vec3f32) mat4f32 =
-  let s = [f32.sin(a.x), f32.sin(a.y), f32.sin(a.z)] in
-  let c = [f32.cos(a.x), f32.cos(a.y), f32.cos(a.z)] in
+  let s = [sin(a.x), sin(a.y), sin(a.z)] in
+  let c = [cos(a.x), cos(a.y), cos(a.z)] in
   @[
     [c[1]*c[2], c[1]*s[2], 0.0f32 - s[1], 0.0f32],
     [s[0]*s[1]*c[2] - c[0]*s[2], s[0]*s[1]*s[2] + c[0]*c[2], s[0]*c[1], 0.0f32],
@@ -232,13 +234,13 @@ def line(weight:f32, p:vec2f32, p0:vec2f32, p1:vec2f32, w:f32) f32 =
   let pdiff = p - proj in
   let dist = magnitude(pdiff) in
   let s = (if dist == 0.0 then 0.0 else (1.0 / dist)) * weight * w in
-  f32.min(s*s, 1.0)
+  min(s*s, 1.0)
 
 def circle(weight:f32, p:vec2f32, c:vec2f32, r:f32, w:f32) f32 =
   let diff = p - c in
-  let dist = f32.abs(magnitude(diff)) + r in
+  let dist = abs(magnitude(diff)) + r in
   let s = (if dist == 0.0 then 0.0 else (1.0 / dist)) * weight * w in
-  f32.min(s*s, 1.0)
+  min(s*s, 1.0)
 
 def edge_line(verts: [8]vec3f32, weight: f32, uv: vec2f32, line_width: f32, e: vec2i32) f32 =
   let a = verts[e.x] in
@@ -257,8 +259,8 @@ def mix3(a:vec3f32, b:vec3f32, c:vec3f32, t:f32) vec3f32 =
   else mix3v(a, b, t*2.0)
 
 def fragment(p:vec3f32, iTime:f32) vec3f32 =
-  let t = f32.sin(p.x*0.8 + iTime*0.5)*0.5 + 0.5 in
-  let fog = f32.min(p.z*p.z*p.z*400.0, 1.0) in
+  let t = sin(p.x*0.8 + iTime*0.5)*0.5 + 0.5 in
+  let fog = min(p.z*p.z*p.z*400.0, 1.0) in
   let col = mix3(red, green, blue, t) in
   col * fog
 
@@ -357,7 +359,7 @@ def main_image(iResolution:vec2f32, iTime:f32, fragCoord:vec2f32) vec4f32 =
       let i_sum = sum_edges(verts1, weight, uv, line_width, edge_indexes) in
 
       let shade = fragment(verts1[0], iTime) in
-      let intensity = f32.min(i_sum, 1.0) in
+      let intensity = min(i_sum, 1.0) in
       let shade_scaled = shade * intensity in
       let acc' = acc + shade_scaled in
       (idx + 1, acc') in

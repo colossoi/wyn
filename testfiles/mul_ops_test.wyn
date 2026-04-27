@@ -1,6 +1,8 @@
 -- Test: exercises all mixed-type * operator paths in SPIR-V lowering
 -- Cases: mat*mat, mat*vec, vec*mat, vec*scalar, scalar*vec, mat*scalar, scalar*mat
 
+open f32
+
 #[uniform(set=1, binding=0)] def iResolution: vec3f32
 #[uniform(set=1, binding=1)] def iTime: f32
 
@@ -14,14 +16,14 @@ entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] 
 
 -- Helper: build a 2x2 rotation matrix
 def rot2(a: f32) mat2f32 =
-  let c = f32.cos(a) in
-  let s = f32.sin(a) in
+  let c = cos(a) in
+  let s = sin(a) in
   @[[c, 0.0 - s], [s, c]]
 
 -- Helper: build a 3x3 rotation matrix around Z axis
 def rot3z(a: f32) mat3f32 =
-  let c = f32.cos(a) in
-  let s = f32.sin(a) in
+  let c = cos(a) in
+  let s = sin(a) in
   @[[c, 0.0 - s, 0.0],
     [s, c, 0.0],
     [0.0, 0.0, 1.0]]

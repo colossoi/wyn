@@ -6,6 +6,8 @@
 ------------------------------------------------------------
 -- Uniforms
 ------------------------------------------------------------
+open f32
+
 #[uniform(set=0, binding=0)] def iResolution: vec3f32
 #[uniform(set=0, binding=1)] def iTime: f32
 #[uniform(set=0, binding=5)] def iMouse: vec4f32
@@ -49,12 +51,12 @@ entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] 
 -- Hash function for noise
 def hash(p: vec2f32) f32 =
   let h = dot(p, @[127.1, 311.7]) in
-  fract(f32.sin(h) * 43758.5453123)
+  fract(sin(h) * 43758.5453123)
 
 -- 2D noise
 def noise(p: vec2f32) f32 =
-  let i = floor(p) in
-  let f = fract(p) in
+  let i = vec.floor(p) in
+  let f = vec.fract(p) in
   let u = f * f * (3.0 - 2.0 * f) in
   let h00 = hash(i) in
   let h10 = hash(@[i.x + 1.0, i.y]) in
@@ -66,9 +68,9 @@ def noise(p: vec2f32) f32 =
 
 -- Euler angles to rotation matrix
 def fromEuler(ang: vec3f32) mat3f32 =
-  let a1 = @[f32.sin(ang.x), f32.cos(ang.x)] in
-  let a2 = @[f32.sin(ang.y), f32.cos(ang.y)] in
-  let a3 = @[f32.sin(ang.z), f32.cos(ang.z)] in
+  let a1 = @[sin(ang.x), cos(ang.x)] in
+  let a2 = @[sin(ang.y), cos(ang.y)] in
+  let a3 = @[sin(ang.z), cos(ang.z)] in
   -- Row-major: m[row][col]
   @[[a1.y*a3.y + a1.x*a2.x*a3.x, a1.y*a2.x*a3.x + a3.y*a1.x, 0.0 - a2.y*a3.x],
     [0.0 - a2.y*a1.x, a1.y*a2.y, a2.x],
@@ -84,14 +86,14 @@ def diffuse(n: vec3f32, l: vec3f32, p: f32) f32 =
 def specular(n: vec3f32, l: vec3f32, e: vec3f32, s: f32) f32 =
   let nrm = (s + 8.0) / (PI * 8.0) in
   let refl = reflect(e, n) in
-  (f32.max(dot(refl, l), 0.0)) ** s * nrm
+  (max(dot(refl, l), 0.0)) ** s * nrm
 
 ------------------------------------------------------------
 -- Sky
 ------------------------------------------------------------
 
 def getSkyColor(e: vec3f32) vec3f32 =
-  let ey = (f32.max(e.y, 0.0) * 0.8 + 0.2) * 0.8 in
+  let ey = (max(e.y, 0.0) * 0.8 + 0.2) * 0.8 in
   let r = (1.0 - ey) ** 2.0 in
   let g = 1.0 - ey in
   let b = 0.6 + (1.0 - ey) * 0.4 in
@@ -103,8 +105,8 @@ def getSkyColor(e: vec3f32) vec3f32 =
 
 def sea_octave(uv: vec2f32, choppy: f32) f32 =
   let uv2 = uv + noise(uv) in
-  let wv = 1.0 - abs(vec.sin(uv2)) in
-  let swv = abs(vec.cos(uv2)) in
+  let wv = 1.0 - vec.abs(vec.sin(uv2)) in
+  let swv = vec.abs(vec.cos(uv2)) in
   let wv2 = mix(wv, swv, wv) in
   (1.0 - (wv2.x * wv2.y) ** 0.65) ** choppy
 
@@ -134,7 +136,7 @@ def map_detailed(p: vec3f32, time: f32) f32 =
 
 def getSeaColor(p: vec3f32, n: vec3f32, l: vec3f32, eye: vec3f32, dist: vec3f32) vec3f32 =
   let fresnel_raw = clamp(1.0 - dot(n, -eye), 0.0, 1.0) in
-  let fresnel = f32.min(fresnel_raw * fresnel_raw * fresnel_raw, 0.5) in
+  let fresnel = min(fresnel_raw * fresnel_raw * fresnel_raw, 0.5) in
 
   let reflected = getSkyColor(reflect(eye, n)) in
   let diff = diffuse(n, l, 80.0) in
@@ -142,10 +144,10 @@ def getSeaColor(p: vec3f32, n: vec3f32, l: vec3f32, eye: vec3f32, dist: vec3f32)
 
   let color = mix(refracted, reflected, fresnel) in
 
-  let atten = f32.max(1.0 - dot(dist, dist) * 0.001, 0.0) in
+  let atten = max(1.0 - dot(dist, dist) * 0.001, 0.0) in
   let color2 = color + SEA_WATER_COLOR * (p.y - SEA_HEIGHT) * 0.18 * atten in
 
-  let spec = specular(n, l, eye, 600.0 / f32.sqrt(dot(dist, dist))) in
+  let spec = specular(n, l, eye, 600.0 / sqrt(dot(dist, dist))) in
   color2 + spec
 
 ------------------------------------------------------------
@@ -171,7 +173,7 @@ def heightMapTracing(ori: vec3f32, dir: vec3f32, time: f32) (f32, vec3f32) =
         let tmid = mix(tm, tx, hm / (hm - hx)) in
         let p_mid = ori + dir * tmid in
         let hmid = heightMap(p_mid, time) in
-        if f32.abs(hmid) < EPSILON then (NUM_STEPS, tm, tx, hm, hx, p_mid)
+        if abs(hmid) < EPSILON then (NUM_STEPS, tm, tx, hm, hx, p_mid)
         else if hmid < 0.0 then (i + 1, tm, tmid, hm, hmid, p_mid)
         else (i + 1, tmid, tx, hmid, hx, p_mid)
     in
@@ -189,7 +191,7 @@ def getPixel(coord: vec2f32, time: f32) vec3f32 =
   let uv3 = @[uv2.x * iResolution.x / iResolution.y, uv2.y] in
 
   -- Ray setup
-  let ang = @[f32.sin(time * 3.0) * 0.1, f32.sin(time) * 0.2 + 0.3, time] in
+  let ang = @[sin(time * 3.0) * 0.1, sin(time) * 0.2 + 0.3, time] in
   let ori = @[0.0, 3.5, time * 5.0] in
   let dir_base = normalize(@[uv3.x, uv3.y, -2.0]) in
   let dir_z_adj = @[dir_base.x, dir_base.y, dir_base.z + magnitude(uv3.xy) * 0.14] in

@@ -15,8 +15,8 @@ open f32
 -- Rotate (p.x, p.z) by angle a around the y axis.
 ------------------------------------------------------------
 def ry(p: vec3f32, a: f32) vec3f32 =
-  let c = f32.cos(a) in
-  let s = f32.sin(a) in
+  let c = cos(a) in
+  let s = sin(a) in
   @[c * p.x + s * p.z, p.y, 0.0 - s * p.x + c * p.z]
 
 ------------------------------------------------------------
@@ -43,13 +43,13 @@ def mb(p_in: vec3f32) vec3f32 =
         let rn    = pow(r, power) in
         let th    = theta * power in
         let ph    = phi * power in
-        let zn = @[rn * f32.cos(th) * f32.cos(ph),
-                   rn * f32.sin(th) * f32.cos(ph),
-                   rn * f32.sin(ph)] + p in
-        (i + 1, zn, dr2, f32.min(t0, rn))
+        let zn = @[rn * cos(th) * cos(ph),
+                   rn * sin(th) * cos(ph),
+                   rn * sin(ph)] + p in
+        (i + 1, zn, dr2, min(t0, rn))
   in
   let r = magnitude(z_final) in
-  @[0.5 * f32.log(r) * r / dr_final, orbit_min, 0.0]
+  @[0.5 * log(r) * r / dr_final, orbit_min, 0.0]
 
 -- Wrap mb with a time-based rotation about Y.
 def scene(p: vec3f32) vec3f32 =
@@ -65,7 +65,7 @@ def softshadow(ro: vec3f32, rd: vec3f32, k: f32) f32 =
       let h = (scene(ro + rd * t)).x in
       if h < 0.001 then (50, t, 0.02)
       else
-        let akuma2 = f32.min(akuma, k * h / t) in
+        let akuma2 = min(akuma, k * h / t) in
         let tn     = t + clamp(h, 0.01, 2.0) in
         (i + 1, tn, akuma2)
   in res
@@ -145,8 +145,8 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4
   let pixel_size = 1.0 / (iResolution.x * 3.0) in
 
   -- Camera orbits using a sin/cos lissajous in (stime, ctime).
-  let stime = 0.7 + 0.3 * f32.sin(iTime * 0.4) in
-  let ctime = 0.7 + 0.3 * f32.cos(iTime * 0.4) in
+  let stime = 0.7 + 0.3 * sin(iTime * 0.4) in
+  let ctime = 0.7 + 0.3 * cos(iTime * 0.4) in
   let ta = @[0.0, 0.0, 0.0] in
   -- 3.5 (vs original's 3.0) pulls the camera back a bit so the
   -- fractal doesn't fill the whole frame in a 4:3 viewport.
@@ -162,7 +162,7 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4
   let sky    = @[0.6, 1.5, 1.0] in
 
   -- Background: vertical gradient + sun halo through fog
-  let bg0  = @[0.4, 1.6, 1.0] * f32.exp(uv.y - 2.0) in
+  let bg0  = @[0.4, 1.6, 1.0] * exp(uv.y - 2.0) in
   let halo = clamp(dot(normalize(@[0.0 - ro.x, 0.0 - ro.y, 0.0 - ro.z]), rd), 0.0, 1.0) in
   let col_bg = bg0 + @[1.0, 0.8, 0.4] * pow(halo, 17.0) in
 
@@ -173,20 +173,20 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4
       let p = ro + rd * res.x in
       let n = nor(p) in
       let sh = softshadow(p, sundir, 10.0) in
-      let dif = f32.max(0.0, dot(n, sundir)) in
-      let skyL = 0.6 + 0.4 * f32.max(0.0, dot(n, @[0.0, 1.0, 0.0])) in
-      let bac = f32.max(0.3 + 0.7 * dot(@[0.0 - sundir.x, 0.0 - 1.0, 0.0 - sundir.z], n), 0.0) in
-      let spe = f32.max(0.0, pow(clamp(dot(sundir, reflect(rd, n)), 0.0, 1.0), 10.0)) in
+      let dif = max(0.0, dot(n, sundir)) in
+      let skyL = 0.6 + 0.4 * max(0.0, dot(n, @[0.0, 1.0, 0.0])) in
+      let bac = max(0.3 + 0.7 * dot(@[0.0 - sundir.x, 0.0 - 1.0, 0.0 - sundir.z], n), 0.0) in
+      let spe = max(0.0, pow(clamp(dot(sundir, reflect(rd, n)), 0.0, 1.0), 10.0)) in
       let lin0 = sun * dif * sh * 4.5 in
       let lin1 = lin0 + sun * bac * 0.8 in
       let lin2 = lin1 + sky * skyL * sh * 0.6 in
       let lin3 = lin2 + @[spe, spe, spe] * sh * 3.0 in
       let y = pow(clamp(res.y, 0.0, 1.0), 0.55) in
       let phase = @[3.0 + 4.2 * y + 0.0, 3.0 + 4.2 * y + 0.5, 3.0 + 4.2 * y + 1.0] in
-      let tc0 = @[0.5, 0.5, 0.5] + @[f32.sin(phase.x), f32.sin(phase.y), f32.sin(phase.z)] * 0.5 in
+      let tc0 = @[0.5, 0.5, 0.5] + @[sin(phase.x), sin(phase.y), sin(phase.z)] * 0.5 in
       let base = lin3 * @[0.9, 0.8, 0.6] * 0.2 * tc0 in
       -- Fog toward the pure gradient (no halo), matching the GLSL.
-      let fog = 1.0 - f32.exp(0.0 - 0.001 * res.x * res.x) in
+      let fog = 1.0 - exp(0.0 - 0.001 * res.x * res.x) in
       mix(base, bg0, fog)
     else
       col_bg

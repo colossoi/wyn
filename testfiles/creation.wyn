@@ -4,6 +4,8 @@
 -- Original: https://www.pouet.net/prod.php?which=57245
 -- The original GLSL is preserved commented-out below.
 
+open f32
+
 #[uniform(set=1, binding=0)] def iResolution: vec3f32
 #[uniform(set=1, binding=1)] def iTime: f32
 
@@ -24,8 +26,8 @@ def iter(fragXY: vec2f32, z: f32) (f32, f32) =
   let p1    = p0 - @[0.5, 0.5] in
   let p     = @[p1.x * iResolution.x / iResolution.y, p1.y] in
   let l     = magnitude(p) in
-  let phase = f32.sin(z) + 1.0 in
-  let warp  = f32.abs(f32.sin(l * 9.0 - z - z)) in
+  let phase = sin(z) + 1.0 in
+  let warp  = abs(sin(l * 9.0 - z - z)) in
   let uv    = uv0 + p / l * phase * warp in
   let m     = vec.mod(uv, @[1.0, 1.0]) - @[0.5, 0.5] in
   (0.01 / magnitude(m), l)

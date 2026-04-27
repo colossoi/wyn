@@ -5,6 +5,8 @@
 ------------------------------------------------------------
 -- Uniforms
 ------------------------------------------------------------
+open f32
+
 #[uniform(set=0, binding=0)] def iResolution: vec3f32
 #[uniform(set=0, binding=1)] def iTime: f32
 #[uniform(set=0, binding=2)] def difficulty: i32
@@ -108,10 +110,10 @@ def pbrGeometrySmith(nDotV: f32, nDotL: f32, roughness: f32) f32 =
 
 def brdf(n: vec3f32, v: vec3f32, l: vec3f32, albedo: vec3f32, metallic: f32, roughness: f32) vec3f32 =
   let h = normalize(v + l) in
-  let nDotV = f32.max(dot(n, v), 0.0) in
-  let nDotL = f32.max(dot(n, l), 0.0) in
-  let nDotH = f32.max(dot(n, h), 0.0) in
-  let hDotV = f32.max(dot(h, v), 0.0) in
+  let nDotV = max(dot(n, v), 0.0) in
+  let nDotL = max(dot(n, l), 0.0) in
+  let nDotH = max(dot(n, h), 0.0) in
+  let hDotV = max(dot(h, v), 0.0) in
 
   let f0 = mix(@[0.04, 0.04, 0.04], albedo, metallic) in
 
@@ -141,7 +143,7 @@ def intersectSphere(ro: vec3f32, rd: vec3f32, center: vec3f32, radius: f32) f32 
   let discriminant = b * b - c in
   if discriminant < 0.0 then 0.0 - 1.0
   else
-    let sqrtD = f32.sqrt(discriminant) in
+    let sqrtD = sqrt(discriminant) in
     let t1 = 0.0 - b - sqrtD in
     let t2 = 0.0 - b + sqrtD in
     if t1 > epsilon then t1
@@ -150,7 +152,7 @@ def intersectSphere(ro: vec3f32, rd: vec3f32, center: vec3f32, radius: f32) f32 
 
 -- Ray-plane intersection (horizontal plane at y = 0)
 def intersectPlane(ro: vec3f32, rd: vec3f32) f32 =
-  if f32.abs(rd.y) < epsilon then 0.0 - 1.0
+  if abs(rd.y) < epsilon then 0.0 - 1.0
   else
     let t = (0.0 - ro.y) / rd.y in
     if t > epsilon then t else 0.0 - 1.0
@@ -204,7 +206,7 @@ def intersectScene(ro: vec3f32, rd: vec3f32) (f32, i32, vec3f32) =
 def getMaterial(matId: i32, hitPoint: vec3f32) (vec3f32, f32, f32, f32) =
   if matId == 1 then
     -- Ground: reflective checkerboard pattern
-    let checker = f32.floor(hitPoint.x) + f32.floor(hitPoint.z) in
+    let checker = floor(hitPoint.x) + floor(hitPoint.z) in
     let isWhite = fract(checker * 0.5) > 0.25 in
     let albedo = if isWhite then @[0.9, 0.9, 0.9] else @[0.1, 0.1, 0.1] in
     (albedo, 0.0, 0.3, 0.85)
@@ -281,14 +283,14 @@ def trace(ro: vec3f32, rd: vec3f32, maxBounces: i32) vec3f32 =
 ------------------------------------------------------------
 
 def getCamera(time: f32, mouse: vec4f32, resolution: vec2f32) (vec3f32, vec3f32, vec3f32, vec3f32) =
-  let mouseAngleX = if mouse.z > 0.0 then (mouse.x / resolution.x - 0.5) * f32.pi * 2.0 else 0.0 in
-  let mouseAngleY = if mouse.z > 0.0 then (mouse.y / resolution.y - 0.5) * f32.pi * 0.5 else 0.0 in
+  let mouseAngleX = if mouse.z > 0.0 then (mouse.x / resolution.x - 0.5) * pi * 2.0 else 0.0 in
+  let mouseAngleY = if mouse.z > 0.0 then (mouse.y / resolution.y - 0.5) * pi * 0.5 else 0.0 in
 
   let baseAngle = time * 0.3 in
   let angle = baseAngle + mouseAngleX in
   let camDist = 5.0 in
   let camHeight = 2.0 + mouseAngleY * 2.0 in
-  let camPos = @[f32.sin(angle) * camDist, camHeight, f32.cos(angle) * camDist] in
+  let camPos = @[sin(angle) * camDist, camHeight, cos(angle) * camDist] in
 
   let target = @[0.0, 0.5, 0.0] in
   let forward = normalize(target - camPos) in

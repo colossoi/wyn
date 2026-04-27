@@ -1,6 +1,8 @@
 -- "Looping Spline" by Sébastien Bérubé, Wyn port of the Shadertoy shader.
 -- Cyclic Catmull-Rom spline over 8 control points + distance-field viz.
 
+open f32
+
 #[uniform(set=1, binding=0)] def iResolution: vec3f32
 #[uniform(set=1, binding=1)] def iTime: f32
 
@@ -85,11 +87,11 @@ def debugDistanceField(uv: vec2f32) vec2f32 =
        pB,
        if better then x else bx,
        if better then d else md,
-       f32.min(x + primarySegLength, 0.99999))
+       min(x + primarySegLength, 0.99999))
   in
 
   -- Refinement: 14 samples around bestX1, covering 1.5× primarySegLength.
-  let x_start = f32.max(bestX1 - 1.25 * primarySegLength, 0.0) in
+  let x_start = max(bestX1 - 1.25 * primarySegLength, 0.0) in
   let step2   = 1.5 / 13.0 * primarySegLength in
   let pA2     = catmullRom(x_start) in
   let (_, _, _, minDist, _) =
@@ -101,7 +103,7 @@ def debugDistanceField(uv: vec2f32) vec2f32 =
        pB,
        if better then x else bx,
        if better then d else md,
-       f32.min(x + step2, 0.99999))
+       min(x + step2, 0.99999))
   in
   @[minDist, minRoughDist]
 
@@ -121,12 +123,12 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4
   let dSeg  = debugDistanceField(uv) in
 
   -- Background stripes
-  let stripes = smoothstep(0.20, 0.30, f32.abs(fract(dSeg.x * 20.0) - 0.5)) in
+  let stripes = smoothstep(0.20, 0.30, abs(fract(dSeg.x * 20.0) - 0.5)) in
   let base    = dSeg.x * 7.0 + stripes in
 
   -- Control-point dots: min distance over all 8 points
   let (_, minDistP) = loop (i, m) = (0, 10000.0) while i < 8 do
-    (i + 1, f32.min(m, magnitude(uv - ctrlPts[i])))
+    (i + 1, min(m, magnitude(uv - ctrlPts[i])))
   in
 
   -- Compose
