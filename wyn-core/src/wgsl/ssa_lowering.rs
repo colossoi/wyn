@@ -17,6 +17,7 @@ use polytype::Type as PolyType;
 
 use crate::ast::{Span, TypeName};
 use crate::error::Result;
+use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
 use crate::ssa::types::{
     EntryPoint, ExecutionModel, FuncBody, Function, InstKind, IoDecoration, Program, ValueId, ValueRef,
     ViewSource, WynInstNode,
@@ -493,6 +494,12 @@ struct LowerCtx<'a> {
     indent: usize,
     /// Track mangled names for collision detection.
     mangled_names: HashMap<String, String>,
+    /// Lookup for builtin impls by name. `f32.cos`, `vec.cos`,
+    /// `_w_intrinsic_cos` all resolve to the same
+    /// `BuiltinImpl::PrimOp(GlslExt(14))` here, so the WGSL emission
+    /// is decided by the structural `PrimOp` rather than the surface
+    /// name's qualifier prefix.
+    impl_source: ImplSource,
     /// Entry-point output structs keyed by their field signature
     /// ("attr0+ty0,attr1+ty1,..."). Maps sig → (struct_name, fields).
     /// `fields` is an ordered list of (field_name, attribute_prefix,
@@ -531,6 +538,7 @@ impl<'a> LowerCtx<'a> {
             output_structs: HashMap::new(),
             output_struct_counter: 0,
             pc_blocks: HashMap::new(),
+            impl_source: ImplSource::default(),
         }
     }
 
@@ -1946,6 +1954,15 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 // back to a mangled user-function call.
                 let raw_strs: Result<Vec<_>> = args.iter().map(|a| self.get_value(*a)).collect();
                 let raw_strs = raw_strs?;
+                // Structural dispatch first: if this name is registered
+                // in `impl_source`, route through the `BuiltinImpl` so
+                // the qualifier prefix doesn't matter (`f32.cos`,
+                // `vec.cos`, `_w_intrinsic_cos` all share a `PrimOp`).
+                if let Some(lowered) =
+                    self.try_lower_via_impl_source(func, &raw_strs, result_ty.as_ref())?
+                {
+                    return Ok(lowered);
+                }
                 if let Some(lowered) = try_lower_wgsl_builtin(func, &raw_strs) {
                     return Ok(lowered);
                 }
@@ -2261,8 +2278,11 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         &mut self,
         name: &str,
         args: &[String],
-        _ret_ty: Option<&PolyType<TypeName>>,
+        ret_ty: Option<&PolyType<TypeName>>,
     ) -> Result<String> {
+        if let Some(lowered) = self.try_lower_via_impl_source(name, args, ret_ty)? {
+            return Ok(lowered);
+        }
         if let Some(lowered) = try_lower_wgsl_builtin(name, args) {
             return Ok(lowered);
         }
@@ -2272,130 +2292,183 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             name
         ))
     }
+
+    /// Look up `name` in `impl_source` and, if it's a `PrimOp`, lower
+    /// it via `lower_primop_wgsl`. Returns `Ok(None)` when the name
+    /// isn't registered or the impl isn't a `PrimOp` we lower (linked
+    /// SPIR-V functions and `Intrinsic`s are out of scope here).
+    fn try_lower_via_impl_source(
+        &mut self,
+        name: &str,
+        args: &[String],
+        result_ty: Option<&PolyType<TypeName>>,
+    ) -> Result<Option<String>> {
+        let Some(builtin) = self.ctx.impl_source.get(name) else {
+            return Ok(None);
+        };
+        let prim_op = match builtin {
+            BuiltinImpl::PrimOp(p) => p.clone(),
+            BuiltinImpl::LinkedSpirv(_) | BuiltinImpl::Intrinsic(_) => return Ok(None),
+        };
+        let result_ty_str = match result_ty {
+            Some(ty) => Some(self.ctx.type_emitter.type_to_wgsl(ty)?),
+            None => None,
+        };
+        Ok(lower_primop_wgsl(&prim_op, args, result_ty_str.as_deref()))
+    }
 }
 
-/// Map a Wyn builtin/intrinsic name to its WGSL emission. Returns `None`
-/// when the name isn't recognized (caller falls back to a mangled user
-/// function call or raises an error, per context).
+/// Lower a `BuiltinImpl::PrimOp` to its WGSL expression. Mirrors the
+/// SPIR-V backend's `lower_primop` — both backends consume the same
+/// `BuiltinImpl` map from `impl_source`, so the qualifier prefix on the
+/// surface name (`f32.cos`, `vec.cos`, `_w_intrinsic_cos`) is invisible
+/// here: only the structural `PrimOp` matters.
 ///
-/// Covers:
-///   - Scalar/vector math built-ins with 1:1 WGSL names (`dot`, `sin`, …).
-///   - Type-cast intrinsics of the form `f32.i32`/`i32.f32`/… → `f32(x)`.
-///   - A few names Wyn spells differently from WGSL (`f32.sqrt`, `f32.pi`, …).
-fn try_lower_wgsl_builtin(name: &str, args: &[String]) -> Option<String> {
-    // Strip the `_w_intrinsic_` prefix so the per-op tables work on
-    // both "sin" and "_w_intrinsic_sin" inputs.
-    let stripped = name.strip_prefix("_w_intrinsic_").unwrap_or(name);
-
-    // Special-case aliases where the Wyn name differs from WGSL's.
-    match stripped {
-        "magnitude" => {
-            // `length` in WGSL (distinct from array length; called on
-            // vectors / scalars).
-            return Some(format!("length({})", args.join(", ")));
+/// `result_ty_str` is the WGSL spelling of the call's result type
+/// (e.g. `"f32"`, `"i32"`, `"vec3<f32>"`). Required for type-cast ops
+/// (`SIToFP`, `Bitcast`, …) where the cast target comes from the
+/// result slot, not the operand.
+///
+/// Returns `None` for `PrimOp`s without a defined WGSL emission (e.g.
+/// `IsNan`, `OuterProduct`); the caller surfaces an error or falls
+/// back to a user-function call.
+fn lower_primop_wgsl(prim_op: &PrimOp, args: &[String], result_ty_str: Option<&str>) -> Option<String> {
+    use PrimOp::*;
+    match prim_op {
+        // GLSL.std.450 ops with direct WGSL builtin equivalents.
+        // Numbers come from the GLSL.std.450 extended-instruction set;
+        // WGSL spells most of them identically (sin/cos/floor/…) and
+        // collapses signed/unsigned/float variants into a single
+        // overloaded builtin (FMin/UMin/SMin → `min`).
+        GlslExt(n) => {
+            let name = match n {
+                1 => "round",
+                3 => "trunc",
+                4 | 5 => "abs",
+                6 | 7 => "sign",
+                8 => "floor",
+                9 => "ceil",
+                10 => "fract",
+                11 => "radians",
+                12 => "degrees",
+                13 => "sin",
+                14 => "cos",
+                15 => "tan",
+                16 => "asin",
+                17 => "acos",
+                18 => "atan",
+                19 => "sinh",
+                20 => "cosh",
+                21 => "tanh",
+                22 => "asinh",
+                23 => "acosh",
+                24 => "atanh",
+                25 => "atan2",
+                26 => "pow",
+                27 => "exp",
+                28 => "log",
+                29 => "exp2",
+                30 => "log2",
+                31 => "sqrt",
+                32 => "inverseSqrt",
+                33 => "determinant",
+                34 => "inverse",
+                37 | 38 | 39 => "min",
+                40 | 41 | 42 => "max",
+                43 | 44 | 45 => "clamp",
+                46 => "mix",
+                49 => "smoothstep",
+                50 => "fma",
+                53 => "ldexp",
+                66 => "length",
+                67 => "distance",
+                68 => "cross",
+                69 => "normalize",
+                71 => "reflect",
+                72 => "refract",
+                _ => return None,
+            };
+            Some(format!("{}({})", name, args.join(", ")))
         }
-        "mod" => {
-            // Wyn's `mod` is GLSL-style `mod` (FMod): always non-negative
-            // when the divisor is positive. WGSL's `%` is FRem
-            // (sign follows the dividend), so a direct lowering would
-            // make `mod(-0.3, 1.0) = -0.3` instead of `0.7` and
-            // shaders that rely on positive wrap-around break for
-            // negative inputs. Lower to the math identity instead:
-            //
-            //   mod(x, y) = x - y * floor(x / y)
-            //
-            // Operands may be scalar or same-shape vectors; WGSL's
-            // `/`, `*`, and `floor` are all componentwise so the same
-            // expression works for either.
+
+        // Wyn's `mod` is GLSL-style FMod (always non-negative when the
+        // divisor is positive). WGSL has no direct equivalent — `%` is
+        // FRem semantics — so synthesize via the math identity:
+        //   mod(x, y) = x - y * floor(x / y)
+        // Works for scalar and same-shape vector operands (WGSL's `/`,
+        // `*`, and `floor` are all componentwise).
+        FMod => {
             if args.len() == 2 {
-                return Some(format!("({0} - {1} * floor({0} / {1}))", args[0], args[1]));
+                Some(format!("({0} - {1} * floor({0} / {1}))", args[0], args[1]))
+            } else {
+                None
             }
         }
-        _ => {}
-    }
 
-    // Strip a trailing type suffix like `_i32`, `_u32`, `_f32`, `_f64`,
-    // `_bool` so `_w_intrinsic_max_i32` dispatches as `max`.
-    let bare = {
-        let candidates = ["_i32", "_u32", "_f32", "_f64", "_bool"];
-        candidates.iter().find_map(|suf| stripped.strip_suffix(suf)).unwrap_or(stripped)
-    };
+        Dot => Some(format!("dot({})", args.join(", "))),
 
-    // WGSL built-ins with matching names.
-    const DIRECT: &[&str] = &[
-        "dot",
-        "cross",
-        "normalize",
-        "length",
-        "distance",
-        "sin",
-        "cos",
-        "tan",
-        "asin",
-        "acos",
-        "atan",
-        "atan2",
-        "sinh",
-        "cosh",
-        "tanh",
-        "asinh",
-        "acosh",
-        "atanh",
-        "exp",
-        "exp2",
-        "log",
-        "log2",
-        "sqrt",
-        "inverseSqrt",
-        "abs",
-        "sign",
-        "floor",
-        "ceil",
-        "fract",
-        "round",
-        "trunc",
-        "min",
-        "max",
-        "clamp",
-        "mix",
-        "step",
-        "smoothstep",
-        "pow",
-        "radians",
-        "degrees",
-        "reflect",
-        "refract",
-    ];
-    if DIRECT.contains(&bare) {
-        return Some(format!("{}({})", bare, args.join(", ")));
-    }
-
-    // Dotted built-ins come in three flavors:
-    //   * math operations — `f32.cos(x)` → `cos(x)` (the "to" half
-    //     names the result type; WGSL takes the bare function name).
-    //   * type casts — `f32.i32(x)` → `f32(x)` (the suffix encodes
-    //     the source type for the dispatcher; WGSL's constructor
-    //     call is the bare target type).
-    //   * constants — `f32.pi`, `f32.e` — inline literal.
-    // Check math before casts so `f32.cos` doesn't mis-route through
-    // the cast arm just because `f32` is a recognized type.
-    if let Some((to, from)) = name.split_once('.') {
-        if matches!(to, "f32" | "f64") && DIRECT.contains(&from) {
-            return Some(format!("{}({})", from, args.join(", ")));
-        }
-        let is_type = |s| matches!(s, "f32" | "i32" | "u32" | "bool");
-        if is_type(to) && is_type(from) && args.len() == 1 {
-            return Some(format!("{}({})", to, args[0]));
-        }
-        if matches!(to, "f32" | "f64") {
-            match from {
-                "pi" => return Some("3.14159265358979323846f".to_string()),
-                "e" => return Some("2.71828182845904523536f".to_string()),
-                _ => {}
+        // Matrix / vector multiplications: WGSL's `*` operator handles
+        // matrix×matrix, matrix×vector, vector×scalar, etc., picking
+        // the right overload from operand types.
+        MatrixTimesMatrix
+        | MatrixTimesVector
+        | VectorTimesMatrix
+        | VectorTimesScalar
+        | MatrixTimesScalar => {
+            if args.len() == 2 {
+                Some(format!("({} * {})", args[0], args[1]))
+            } else {
+                None
             }
         }
-    }
 
+        // Type conversions: WGSL spells the cast as `<target_ty>(x)`.
+        // `Bitcast` is special — WGSL needs explicit `bitcast<T>(x)`.
+        SIToFP | UIToFP | FPToSI | FPToUI | FPConvert | SConvert | UConvert => {
+            let result_ty = result_ty_str?;
+            if args.len() == 1 {
+                Some(format!("{}({})", result_ty, args[0]))
+            } else {
+                None
+            }
+        }
+        Bitcast => {
+            let result_ty = result_ty_str?;
+            if args.len() == 1 {
+                Some(format!("bitcast<{}>({})", result_ty, args[0]))
+            } else {
+                None
+            }
+        }
+
+        // `OuterProduct`, `IsNan`, `IsInf`, and the arithmetic /
+        // comparison / bitwise ops don't reach this path under current
+        // codegen (arithmetic flows through `InstKind::BinOp`/`UnaryOp`
+        // with infix emission; nan/inf and outer aren't used by any
+        // testfile yet). Return `None` so the caller can surface a
+        // clear "not yet implemented" error if one shows up.
+        _ => None,
+    }
+}
+
+/// Inline `f32.pi` / `f32.e` (and the `f64` analogues) as WGSL float
+/// literals. Those are prelude `def`s — not `PrimOp`s — so they can't
+/// dispatch through `lower_primop_wgsl`; without this shortcut they'd
+/// each compile to a mangled user-function call returning a constant.
+///
+/// All math ops, type casts, vector ops, etc. now route through
+/// `lower_primop_wgsl` via `impl_source.get(name)`; the surface name's
+/// qualifier prefix (`f32.cos`, `vec.cos`, `_w_intrinsic_cos`) is no
+/// longer load-bearing here.
+fn try_lower_wgsl_builtin(name: &str, _args: &[String]) -> Option<String> {
+    let (to, from) = name.split_once('.')?;
+    if matches!(to, "f32" | "f64") {
+        match from {
+            "pi" => return Some("3.14159265358979323846f".to_string()),
+            "e" => return Some("2.71828182845904523536f".to_string()),
+            _ => {}
+        }
+    }
     None
 }
 
