@@ -1,0 +1,57 @@
+-- Implied-volatility solver. Given a batch of (spot, strike, type, tte,
+-- market_price) rows, find σ such that the CRR-32 American-option
+-- pricer produces market_price for that row.
+--
+-- The root-finder is the generic `secant` defined in prelude/numerical.wyn —
+-- this file adds no numerical-methods code, only the per-option residual
+-- function `f(σ) = crr_price(σ) - market`.
+
+#[uniform(set=1, binding=0)] def now: f32
+#[uniform(set=1, binding=1)] def rfr: f32
+
+def N: i32 = 32
+
+def payoff(opt_type: i32, s: f32, k: f32) f32 =
+  if opt_type == 1 then f32.max(s - k, 0.0) else f32.max(k - s, 0.0)
+
+def crr_price(spot0: f32, strike: f32, opt_type: i32, tte: f32, sigma: f32) f32 =
+  let tau = f32.max(tte - now, 0.000001) in
+  let dt = tau / f32.i32(N) in
+  let vol_dt = sigma * f32.sqrt(dt) in
+  let u = f32.exp(vol_dt) in
+  let d = 1.0 / u in
+  let disc = f32.exp(-rfr * dt) in
+  let p = (f32.exp(rfr * dt) - d) / (u - d) in
+  let invp = 1.0 - p in
+
+  let terminal: [33]f32 =
+    map(|j: i32|
+          let exponent = vol_dt * f32.i32(2 * j - N) in
+          payoff(opt_type, spot0 * f32.exp(exponent), strike),
+        iota(33))
+  in
+
+  let (_, values) =
+    loop (i, arr) = (N - 1, terminal) while i >= 0 do
+      let arr' = map(|j: i32|
+          if j > i then 0.0
+          else
+            let cont = disc * (p * arr[j + 1] + invp * arr[j]) in
+            let exponent = vol_dt * f32.i32(2 * j - i) in
+            let intr = payoff(opt_type, spot0 * f32.exp(exponent), strike) in
+            f32.max(cont, intr),
+        iota(33))
+      in (i - 1, arr')
+  in values[0]
+
+-- Root-find for σ. The lambda captures the per-option inputs so the
+-- solver itself stays generic.
+def implied_vol(spot: f32, strike: f32, opt_type: i32, tte: f32, market: f32) f32 =
+  let g = |sigma: f32| crr_price(spot, strike, opt_type, tte, sigma) - market in
+  secant(g, 0.10, 0.30, 1.0e-4, 30)
+
+#[compute]
+entry implied_vols(opts: [](f32, f32, i32, f32, f32)) []f32 =
+  map(|(s, k, t, tte, mkt): (f32, f32, i32, f32, f32)|
+        implied_vol(s, k, t, tte, mkt),
+      opts)

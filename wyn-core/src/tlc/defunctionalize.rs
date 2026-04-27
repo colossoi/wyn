@@ -1363,10 +1363,20 @@ impl<'a> Defunctionalizer<'a> {
 
             TermKind::Var(sym) => {
                 let sym = *sym; // Copy out of the match to avoid borrow issues
-                // Get static value for the callee
+                // Get static value for the callee. Lookup mirrors
+                // `defunc_term`'s Var arm: env wins (binding-scoped),
+                // then known lifted-lambda captures, then top-level
+                // names. Without the `lifted_lambda_captures` step,
+                // calls to a lifted closure inside a specialized HOF
+                // body would fall through to `Dynamic` and lose the
+                // captures that need to be threaded through.
                 let callee_sv = self.env.get(&sym).cloned().unwrap_or_else(|| {
-                    // Top-level function reference - treat as Lambda with no captures
-                    if self.top_level.contains(&sym) && is_arrow_type(&base_func.ty) {
+                    if let Some(captures) = self.lifted_lambda_captures.get(&sym) {
+                        StaticVal::Lambda {
+                            lifted_name: sym,
+                            captures: captures.clone(),
+                        }
+                    } else if self.top_level.contains(&sym) && is_arrow_type(&base_func.ty) {
                         StaticVal::Lambda {
                             lifted_name: sym,
                             captures: vec![],
@@ -1673,7 +1683,7 @@ impl<'a> Defunctionalizer<'a> {
         let hof_name = self.symbols.get(hof_sym).expect("BUG: HOF symbol not in table");
         let specialized_name = format!("{}${}", hof_name, self.specialization_counter);
         self.specialization_counter += 1;
-        let specialized_sym = self.symbols.alloc(specialized_name);
+        let specialized_sym = self.symbols.alloc(specialized_name.clone());
 
         // Cache early to prevent infinite recursion on mutually recursive HOFs
         self.specialization_cache.insert(cache_key, specialized_sym);
@@ -1690,17 +1700,38 @@ impl<'a> Defunctionalizer<'a> {
         // Simple substitution in inner body: replace func_param_sym with lambda_sym
         let substituted_inner = self.substitute_var(&inner_body, func_param_sym, lambda_sym);
 
-        // Build new param list: remove function param at func_param_idx, add captures at end
+        // Build new param list: remove function param at func_param_idx, add captures at end.
+        //
+        // Captures are alpha-renamed: each outer-scope symbol used as a
+        // capture gets a fresh symbol id for its role as a parameter
+        // of the specialized HOF. Reusing the outer id directly is
+        // tempting (the term tree stays internally consistent) but
+        // brittle — downstream codegen classifies symbols against the
+        // original def/env/global tables, so an entry-point parameter
+        // captured into a lifted HOF still "looks like" the entry
+        // parameter to SPIR-V lowering and surfaces as
+        // `Unknown global`. Fresh local ids give the specialized
+        // function its own clean lexical scope.
+        //
+        // The substitution map is also applied to the defunced body
+        // below, so any reference to the outer capture (including
+        // those introduced by `apply_callable` when threading captures
+        // into a lifted closure call) routes through the fresh local
+        // parameter.
         let mut new_params: Vec<(SymbolId, Type<TypeName>)> =
             params.into_iter().enumerate().filter(|(i, _)| *i != func_param_idx).map(|(_, p)| p).collect();
 
-        // Add captures as trailing parameters (extract symbol from each capture Term)
+        let mut capture_subst: Vec<(SymbolId, SymbolId)> = Vec::with_capacity(captures.len());
         for cap_term in captures {
-            let cap_sym = match &cap_term.kind {
+            let outer_sym = match &cap_term.kind {
                 TermKind::Var(sym) => *sym,
                 _ => panic!("BUG: capture term is not a Var: {:?}", cap_term.kind),
             };
-            new_params.push((cap_sym, cap_term.ty.clone()));
+            let outer_name =
+                self.symbols.get(outer_sym).cloned().unwrap_or_else(|| format!("cap{}", outer_sym.0));
+            let fresh_sym = self.symbols.alloc(format!("{}__cap_{}", specialized_name, outer_name));
+            capture_subst.push((outer_sym, fresh_sym));
+            new_params.push((fresh_sym, cap_term.ty.clone()));
         }
 
         // Set up environment for defunc with new params as Dynamic
@@ -1713,7 +1744,17 @@ impl<'a> Defunctionalizer<'a> {
         // - Capture appending for calls to lambda_sym (via apply_callable + lifted_lambda_captures)
         // - Nested HOF calls with lambda args (triggers recursive specialization)
         // - New lambdas (get lifted)
-        let defunced_body = self.defunc_term(substituted_inner).term;
+        let mut defunced_body = self.defunc_term(substituted_inner).term;
+
+        // Rewrite outer capture symbols to the fresh local parameters.
+        // Done after defunc so the synthesized `f(x, outer_a, outer_b)`
+        // calls produced by `apply_callable` capture-threading also get
+        // rewritten to use the fresh params. `substitute_var` is
+        // binder-aware (Lambda / Let / Loop), so any inner shadowing
+        // is respected.
+        for (outer_sym, fresh_sym) in &capture_subst {
+            defunced_body = self.substitute_var(&defunced_body, *outer_sym, *fresh_sym);
+        }
 
         // Restore env
         self.env = old_env;
