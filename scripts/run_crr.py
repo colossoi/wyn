@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run testfiles/multi/crr.wyn end-to-end.
+"""Run testfiles/multi/price.wyn end-to-end.
 
 Compiles the Cox-Ross-Rubinstein 32-step American-option pricer,
 dispatches it via `viz compute`, and prints a per-option table pairing
@@ -26,9 +26,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WYN_BIN = REPO_ROOT / "target" / "release" / "wyn"
 VIZ_BIN = REPO_ROOT / "extra" / "viz" / "target" / "release" / "viz"
-SHADER = REPO_ROOT / "testfiles" / "multi" / "crr.wyn"
+SHADER = REPO_ROOT / "testfiles" / "multi" / "price.wyn"
 FIXTURES = REPO_ROOT / "testfiles" / "multi" / "crr_fixtures"
-SPV = Path("/tmp/crr.spv")
+SPV = Path("/tmp/price.spv")
 
 
 def ensure_built() -> None:

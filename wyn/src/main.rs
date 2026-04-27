@@ -195,6 +195,13 @@ fn compile_file(
     let parsed = time("parse", verbose, || {
         Compiler::parse(&source, &mut frontend.node_counter)
     })?;
+    // Resolve `import "..."` against the entry file's directory so
+    // user code can split across files. Imports are looked up
+    // relative to the file containing the import statement.
+    let base_dir = input.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
+    let parsed = time("resolve_imports", verbose, || {
+        parsed.resolve_imports(&base_dir, &mut frontend.node_counter)
+    })?;
     // Elaborate inline modules so they're available during resolution
     let parsed = time("elaborate_modules", verbose, || {
         parsed.elaborate_modules(&mut frontend.module_manager)
@@ -420,6 +427,8 @@ fn check_file(input: PathBuf, verbose: bool) -> Result<(), DriverError> {
     // Type check and alias check, don't generate code
     let mut frontend = wyn_core::FrontEnd::new();
     let parsed = Compiler::parse(&source, &mut frontend.node_counter)?;
+    let base_dir = input.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
+    let parsed = parsed.resolve_imports(&base_dir, &mut frontend.node_counter)?;
     let desugared = parsed.desugar(&mut frontend.node_counter)?;
     let resolved = desugared.resolve(&frontend.module_manager)?;
     let type_checked =

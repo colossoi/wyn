@@ -1,23 +1,20 @@
--- Cox-Ross-Rubinstein binomial-tree American-option pricer.
+-- Cox-Ross-Rubinstein binomial-tree American-option pricer (library).
 --
--- Given a list of options, compute each option's fair value via a
--- 32-step CRR tree with early-exercise tested at every node.
+-- No GPU-resource state: `now` and `rfr` are explicit parameters
+-- threaded in by the importing entry. The library is purely a
+-- function over its arguments — entry files are responsible for
+-- declaring whatever uniforms / storage they need and passing values
+-- in.
 --
--- Input row layout (one tuple per option):
---   (spot, strike, opt_type, tte, sigma)
---     spot      current stock price
---     strike    exercise price
---     opt_type  1 = call, 0 (or anything else) = put
---     tte       time to expiration, fractional years from issue date
---     sigma     annualized volatility (0.25 = 25%/yr)
---
--- Uniforms:
---   now   fractional years already elapsed; the effective time-to-expiry
---         used by the tree is max(tte - now, tiny_epsilon).
---   rfr   annualized continuously-compounded risk-free rate (e.g. 0.05).
-
-#[uniform(set=1, binding=0)] def now: f32
-#[uniform(set=1, binding=1)] def rfr: f32
+-- Per-option inputs (passed to `crr_price`):
+--   now       fractional years already elapsed; effective tte is
+--             max(tte - now, tiny_epsilon)
+--   rfr       annualized continuously-compounded risk-free rate
+--   spot      current stock price
+--   strike    exercise price
+--   opt_type  1 = call, 0 (or anything else) = put
+--   tte       time to expiration, fractional years from issue date
+--   sigma     annualized volatility (0.25 = 25%/yr)
 
 -- Tree depth. The node grid carries N+1 values at maturity.
 def N: i32 = 32
@@ -27,7 +24,10 @@ def payoff(opt_type: i32, s: f32, k: f32) f32 =
   if opt_type == 1 then f32.max(s - k, 0.0) else f32.max(k - s, 0.0)
 
 -- Price one American option via a 32-step CRR tree.
-def crr_price(spot0: f32, strike: f32, opt_type: i32, tte: f32, sigma: f32) f32 =
+def crr_price(
+  now: f32, rfr: f32,
+  spot0: f32, strike: f32, opt_type: i32, tte: f32, sigma: f32
+) f32 =
   -- Effective time to expiry, guarded against zero so downstream
   -- `dt = tau / N` is well-defined.
   let tau = f32.max(tte - now, 0.000001) in
@@ -67,9 +67,3 @@ def crr_price(spot0: f32, strike: f32, opt_type: i32, tte: f32, sigma: f32) f32 
         iota(33))
       in (i - 1, arr')
   in values[0]
-
-#[compute]
-entry price_options(opts: [](f32, f32, i32, f32, f32)) []f32 =
-  map(|(s, k, t, tte, sigma): (f32, f32, i32, f32, f32)|
-        crr_price(s, k, t, tte, sigma),
-      opts)

@@ -412,6 +412,31 @@ struct FrontInner {
 pub struct Parsed(FrontInner);
 
 impl Parsed {
+    /// Resolve `import "path"` declarations against the filesystem,
+    /// loading each referenced file relative to `base_dir`, parsing
+    /// it, recursively resolving its own imports, and prepending its
+    /// declarations into this program. The `Import` nodes themselves
+    /// are removed.
+    ///
+    /// Cycle / re-import safety: a file is loaded at most once per
+    /// compilation (keyed by canonical path). Diamond imports work
+    /// fine; cycles are silently broken (only the first encounter
+    /// loads decls).
+    ///
+    /// Path resolution: `import "foo"` looks for `<base_dir>/foo.wyn`.
+    /// Imports inside `foo.wyn` resolve relative to `foo.wyn`'s
+    /// directory.
+    pub fn resolve_imports(
+        mut self,
+        base_dir: &std::path::Path,
+        node_counter: &mut NodeCounter,
+    ) -> Result<Self> {
+        let mut visited: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+        self.0.ast.declarations =
+            resolve_imports_inner(self.0.ast.declarations, base_dir, node_counter, &mut visited)?;
+        Ok(self)
+    }
+
     /// Elaborate inline module declarations from the parsed program.
     /// This registers modules with the module_manager so they're available during resolution,
     /// then removes the Module declarations from the AST (they've been copied to module_manager).
@@ -434,6 +459,55 @@ impl Parsed {
     pub fn desugar(mut self, nc: &mut ast::NodeCounter) -> Result<Desugared> {
         desugar::run(&mut self.0.ast, nc).map(|()| Desugared(self.0))
     }
+}
+
+/// Recursively expand `Declaration::Import` nodes against the
+/// filesystem. Each imported file's declarations replace the import
+/// node in-place; transitive imports inside the loaded file are
+/// resolved relative to that file's directory. A canonical-path
+/// dedup set prevents infinite loops on cyclic imports and dedupes
+/// diamond imports.
+fn resolve_imports_inner(
+    decls: Vec<ast::Declaration>,
+    base_dir: &std::path::Path,
+    node_counter: &mut NodeCounter,
+    visited: &mut std::collections::HashSet<std::path::PathBuf>,
+) -> Result<Vec<ast::Declaration>> {
+    let mut out: Vec<ast::Declaration> = Vec::with_capacity(decls.len());
+    for decl in decls {
+        let ast::Declaration::Import(rel_path) = decl else {
+            out.push(decl);
+            continue;
+        };
+
+        // Resolve `import "foo"` to `<base_dir>/foo.wyn`. If the user
+        // already wrote a `.wyn` extension, don't double-add it.
+        let mut joined = base_dir.join(&rel_path);
+        if joined.extension().is_none() {
+            joined.set_extension("wyn");
+        }
+        let canonical = joined.canonicalize().map_err(|e| {
+            err_module!(
+                "import: cannot resolve `{}` (looked for `{}`): {}",
+                rel_path,
+                joined.display(),
+                e
+            )
+        })?;
+        if !visited.insert(canonical.clone()) {
+            // Already loaded — diamond import; silently dedupe.
+            continue;
+        }
+
+        let source = std::fs::read_to_string(&canonical)
+            .map_err(|e| err_module!("import: failed to read `{}`: {}", canonical.display(), e))?;
+        let imported = Compiler::parse(&source, node_counter)?;
+        let imported_dir = canonical.parent().unwrap_or(base_dir);
+        let resolved =
+            resolve_imports_inner(imported.0.ast.declarations, imported_dir, node_counter, visited)?;
+        out.extend(resolved);
+    }
+    Ok(out)
 }
 
 /// Range and slice expressions have been desugared to map/iota
