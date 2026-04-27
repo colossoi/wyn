@@ -25,7 +25,7 @@ use winit::window::{Window, WindowAttributes};
 
 use rspirv::binary::parse_words;
 use rspirv::dr::{Loader, Operand};
-use rspirv::spirv::ExecutionModel;
+use rspirv::spirv::{Decoration, ExecutionModel};
 
 // --- CLI ---------------------------------------------------------------------
 
@@ -143,11 +143,23 @@ enum Command {
         /// Number of workgroups to dispatch (Z dimension)
         #[arg(long, default_value = "1")]
         workgroups_z: u32,
-        /// Storage buffer: binding:size:type[:input.json]
-        /// Examples: "1:64:i32" (zeros), "1:64:i32:data.json" (from file)
+        /// Storage buffer. One of:
+        ///   `binding:size:type`                  - set 0 (back-compat short form)
+        ///   `set:binding:size:type`              - explicit set
+        ///   `set:binding:size:type:input.json`   - explicit set + input data
+        /// Examples: "1:64:i32" (set 0 binding 1, zeros),
+        ///           "0:1:64:i32" (explicit set 0),
+        ///           "1:0:64:f32" (set 1, binding 0),
+        ///           "0:0:8:f32:data.json" (set 0, from file).
         /// Type: i32, u32, f32. Repeat for multiple buffers.
         #[arg(long = "storage", value_name = "SPEC")]
         storage_buffers: Vec<String>,
+        /// Uniform buffer: set:binding:type=value[,value...]
+        /// Examples: "1:0:f32=0.5", "1:1:vec3f32=1920,1080,1", "0:2:i32=42".
+        /// Type: i32, u32, f32, vec2/3/4 of those.
+        /// Repeat for multiple uniforms.
+        #[arg(long = "uniform", value_name = "SPEC")]
+        uniforms: Vec<String>,
         /// Push constant: name:type=value
         /// Examples: "n:i32=64", "header_base:u32x19=0,0,0,..."
         /// Type: i32, u32, f32, i32xN, u32xN, f32xN
@@ -331,6 +343,91 @@ fn detect_entry_points(spirv_words: &[u32]) -> Result<Vec<(String, ExecutionMode
     }
 
     Ok(entry_points)
+}
+
+/// Access mode for a storage buffer at a given (set, binding), derived
+/// from `NonWritable` / `NonReadable` decorations in the SPIR-V module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpirvAccess {
+    ReadOnly,
+    ReadWrite,
+    WriteOnly,
+}
+
+/// Walk the SPIR-V annotations and produce a `(set, binding) → access`
+/// map for every `OpVariable` decorated with both `DescriptorSet` and
+/// `Binding`. The pipeline layout this drives must match the shader's
+/// declared access exactly — naga rejects pipelines that grant more
+/// access than the shader permits (e.g. `LOAD|STORE` pipeline against
+/// a `NonWritable` shader binding).
+fn detect_storage_access(spirv_words: &[u32]) -> Result<HashMap<(u32, u32), SpirvAccess>> {
+    let mut loader = Loader::new();
+    parse_words(spirv_words, &mut loader).map_err(|e| anyhow!("Failed to parse SPIR-V: {:?}", e))?;
+    let module = loader.module();
+
+    // First pass: per-id, collect (DescriptorSet, Binding, NonWritable, NonReadable).
+    #[derive(Default)]
+    struct Decor {
+        set: Option<u32>,
+        binding: Option<u32>,
+        non_writable: bool,
+        non_readable: bool,
+    }
+    let mut by_id: HashMap<u32, Decor> = HashMap::new();
+    for ann in &module.annotations {
+        // OpDecorate operands: [0] IdRef target, [1] Decoration, [2..] literals.
+        if ann.operands.len() < 2 {
+            continue;
+        }
+        let id = match ann.operands[0] {
+            Operand::IdRef(id) => id,
+            _ => continue,
+        };
+        let dec = match ann.operands[1] {
+            Operand::Decoration(d) => d,
+            _ => continue,
+        };
+        let entry = by_id.entry(id).or_default();
+        match dec {
+            Decoration::DescriptorSet => {
+                if let Some(Operand::LiteralBit32(n)) = ann.operands.get(2) {
+                    entry.set = Some(*n);
+                }
+            }
+            Decoration::Binding => {
+                if let Some(Operand::LiteralBit32(n)) = ann.operands.get(2) {
+                    entry.binding = Some(*n);
+                }
+            }
+            Decoration::NonWritable => entry.non_writable = true,
+            Decoration::NonReadable => entry.non_readable = true,
+            _ => {}
+        }
+    }
+
+    let mut out: HashMap<(u32, u32), SpirvAccess> = HashMap::new();
+    for d in by_id.values() {
+        let (Some(set), Some(binding)) = (d.set, d.binding) else {
+            continue;
+        };
+        let access = match (d.non_writable, d.non_readable) {
+            (true, false) => SpirvAccess::ReadOnly,
+            (false, true) => SpirvAccess::WriteOnly,
+            _ => SpirvAccess::ReadWrite,
+        };
+        // If the same (set, binding) is decorated by multiple `OpVariable`s
+        // (e.g. uniform and storage view of the same slot — shouldn't
+        // happen with the new descriptor-set convention, but be safe),
+        // narrow to the more permissive access.
+        out.entry((set, binding))
+            .and_modify(|existing| {
+                if access == SpirvAccess::ReadWrite {
+                    *existing = SpirvAccess::ReadWrite;
+                }
+            })
+            .or_insert(access);
+    }
+    Ok(out)
 }
 
 /// Resolve vertex and fragment entry point names.
@@ -612,6 +709,7 @@ impl GpuTimestamps {
 /// Storage buffer specification parsed from CLI
 #[derive(Debug, Clone)]
 struct StorageBufferSpec {
+    set: u32,
     binding: u32,
     size_elements: u32,
     element_type: StorageElementType,
@@ -626,38 +724,62 @@ enum StorageElementType {
     F32,
 }
 
+fn parse_storage_element_type(s: &str) -> Result<StorageElementType> {
+    match s.to_lowercase().as_str() {
+        "i32" => Ok(StorageElementType::I32),
+        "u32" => Ok(StorageElementType::U32),
+        "f32" => Ok(StorageElementType::F32),
+        other => Err(anyhow!(
+            "Unknown element type: {}. Expected i32, u32, or f32",
+            other
+        )),
+    }
+}
+
 impl StorageBufferSpec {
-    /// Parse from "binding:size:type[:input.json]" format
+    /// Parse one of:
+    ///   `binding:size:type`                  (set defaults to 0)
+    ///   `set:binding:size:type`              (explicit set)
+    ///   `set:binding:size:type:input.json`   (explicit set, with input)
+    ///
+    /// The 3-part form keeps backward-compat with old call sites that
+    /// pre-date the descriptor-set convention. To attach an input file,
+    /// the spec must include an explicit `set:` prefix — the
+    /// hypothetical 4-part `binding:size:type:input.json` form is
+    /// rejected because it collides with `set:binding:size:type`.
+    ///
     /// Examples:
-    ///   "1:64:i32"           - 64 i32s initialized to zero
-    ///   "1:64:i32:data.json" - 64 i32s loaded from data.json
+    ///   "1:64:i32"             - set 0, binding 1, 64 i32s, zero-initialized
+    ///   "0:1:64:i32"           - set 0, binding 1 (explicit)
+    ///   "1:0:64:f32"           - set 1, binding 0
+    ///   "0:0:8:f32:data.json"  - set 0, binding 0, 8 f32s from data.json
     fn parse(spec: &str) -> Result<Self> {
         let parts: Vec<&str> = spec.split(':').collect();
-        if parts.len() < 3 || parts.len() > 4 {
-            return Err(anyhow!(
-                "Invalid storage buffer spec '{}'. Expected format: binding:size:type[:input.json]",
-                spec
-            ));
-        }
-
-        let binding =
-            parts[0].parse::<u32>().map_err(|_| anyhow!("Invalid binding number: {}", parts[0]))?;
-        let size_elements = parts[1].parse::<u32>().map_err(|_| anyhow!("Invalid size: {}", parts[1]))?;
-        let element_type = match parts[2].to_lowercase().as_str() {
-            "i32" => StorageElementType::I32,
-            "u32" => StorageElementType::U32,
-            "f32" => StorageElementType::F32,
-            other => {
+        let (set, binding, size, ty_str, input_file) = match parts.len() {
+            3 => (0u32, parts[0], parts[1], parts[2], None),
+            4 => {
+                let set = parts[0].parse::<u32>().map_err(|_| anyhow!("Invalid set: {}", parts[0]))?;
+                (set, parts[1], parts[2], parts[3], None)
+            }
+            5 => {
+                let set = parts[0].parse::<u32>().map_err(|_| anyhow!("Invalid set: {}", parts[0]))?;
+                (set, parts[1], parts[2], parts[3], Some(parts[4]))
+            }
+            _ => {
                 return Err(anyhow!(
-                    "Unknown element type: {}. Expected i32, u32, or f32",
-                    other
+                    "Invalid storage buffer spec '{}'. Expected `binding:size:type`, `set:binding:size:type`, or `set:binding:size:type:input.json`",
+                    spec
                 ));
             }
         };
 
-        let input_file = if parts.len() == 4 { Some(PathBuf::from(parts[3])) } else { None };
+        let binding = binding.parse::<u32>().map_err(|_| anyhow!("Invalid binding: {}", binding))?;
+        let size_elements = size.parse::<u32>().map_err(|_| anyhow!("Invalid size: {}", size))?;
+        let element_type = parse_storage_element_type(ty_str)?;
+        let input_file = input_file.map(PathBuf::from);
 
         Ok(Self {
+            set,
             binding,
             size_elements,
             element_type,
@@ -834,11 +956,92 @@ fn parse_push_constant_value(ty: &str, value: &str) -> Result<Vec<u8>> {
     }
 }
 
+/// Uniform buffer specification parsed from CLI.
+///
+/// Format: `set:binding:type=value[,value...]`. The type is required —
+/// uniforms aren't sized like storage buffers; the type tells us how
+/// many bytes to allocate and how to encode the value.
+#[derive(Debug, Clone)]
+struct UniformSpec {
+    set: u32,
+    binding: u32,
+    /// Encoded little-endian bytes of the value, padded to the WGSL
+    /// std140-ish layout where vec3 occupies 16 bytes.
+    data: Vec<u8>,
+}
+
+impl UniformSpec {
+    /// Parse `set:binding:type=value[,value...]`.
+    ///
+    /// Examples:
+    ///   "1:0:f32=0.5"
+    ///   "1:1:vec3f32=1920,1080,1"
+    ///   "0:2:i32=42"
+    fn parse(spec: &str) -> Result<Self> {
+        let (head, value) =
+            spec.split_once('=').ok_or_else(|| anyhow!("Uniform spec must contain '=': {}", spec))?;
+        let head_parts: Vec<&str> = head.split(':').collect();
+        if head_parts.len() != 3 {
+            return Err(anyhow!(
+                "Uniform spec head must be set:binding:type, got '{}'",
+                head
+            ));
+        }
+        let set = head_parts[0].parse::<u32>().map_err(|_| anyhow!("Invalid set: {}", head_parts[0]))?;
+        let binding =
+            head_parts[1].parse::<u32>().map_err(|_| anyhow!("Invalid binding: {}", head_parts[1]))?;
+        let ty = head_parts[2];
+        let data = encode_uniform_value(ty, value)?;
+        Ok(Self { set, binding, data })
+    }
+}
+
+/// Encode a uniform value to little-endian bytes per WGSL std140-ish
+/// layout: scalars are 4 bytes; vec2 is 8; vec3 pads to 16; vec4 is 16.
+fn encode_uniform_value(ty: &str, value: &str) -> Result<Vec<u8>> {
+    let (base, count, pad_to_16): (&str, usize, bool) = match ty.to_lowercase().as_str() {
+        "i32" | "u32" | "f32" => (ty, 1, false),
+        "vec2i32" | "vec2u32" | "vec2f32" => (&ty[4..], 2, false),
+        "vec3i32" | "vec3u32" | "vec3f32" => (&ty[4..], 3, true),
+        "vec4i32" | "vec4u32" | "vec4f32" => (&ty[4..], 4, false),
+        other => {
+            return Err(anyhow!(
+                "Unknown uniform type '{}'. Expected i32/u32/f32 or vec[2-4]<…>",
+                other
+            ));
+        }
+    };
+    let parts: Vec<&str> = value.split(',').map(|s| s.trim()).collect();
+    if parts.len() != count {
+        return Err(anyhow!(
+            "Uniform type {} expects {} value(s), got {}",
+            ty,
+            count,
+            parts.len()
+        ));
+    }
+    let mut bytes = Vec::with_capacity(count * 4);
+    for v in parts {
+        let four = match base.to_lowercase().as_str() {
+            "i32" => v.parse::<i32>().map_err(|e| anyhow!("Invalid i32 '{}': {}", v, e))?.to_le_bytes(),
+            "u32" => v.parse::<u32>().map_err(|e| anyhow!("Invalid u32 '{}': {}", v, e))?.to_le_bytes(),
+            "f32" => v.parse::<f32>().map_err(|e| anyhow!("Invalid f32 '{}': {}", v, e))?.to_le_bytes(),
+            _ => unreachable!(),
+        };
+        bytes.extend_from_slice(&four);
+    }
+    // vec3 occupies 16 bytes per WGSL std140 / SPIR-V vec3 layout.
+    if pad_to_16 {
+        bytes.extend_from_slice(&[0u8; 4]);
+    }
+    Ok(bytes)
+}
+
 /// Print storage buffer contents
 fn print_storage_buffer(spec: &StorageBufferSpec, data: &[u8]) {
     println!(
-        "\n=== Storage Buffer (binding {}, {} elements) ===",
-        spec.binding, spec.size_elements
+        "\n=== Storage Buffer (set {}, binding {}, {} elements) ===",
+        spec.set, spec.binding, spec.size_elements
     );
 
     let u32_data: &[u32] = bytemuck::cast_slice(data);
@@ -2175,27 +2378,30 @@ async fn run_compute_shader(
     entry: String,
     workgroups: (u32, u32, u32),
     storage_specs: Vec<StorageBufferSpec>,
+    uniform_specs: Vec<UniformSpec>,
     push_constants: &[String],
     verbose: bool,
 ) -> Result<()> {
     let (device, queue) = create_headless_device(verbose).await?;
 
-    // Create storage buffers for each spec
+    // ---- Storage buffers --------------------------------------------------
+    // Per spec we keep (spec, gpu_buffer, staging_buffer); staging is used
+    // for the readback after dispatch.
     let mut storage_buffers: Vec<(StorageBufferSpec, wgpu::Buffer, wgpu::Buffer)> = Vec::new();
     for spec in &storage_specs {
         let buffer = device.create_buffer(&BufferDescriptor {
-            label: Some(&format!("storage_buffer_{}", spec.binding)),
+            label: Some(&format!("storage_buffer_set{}_b{}", spec.set, spec.binding)),
             size: spec.byte_size(),
             usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
-        // Initialize from JSON file or zeros
         let init_data = spec.load_initial_data()?;
         if verbose && spec.input_file.is_some() {
             println!(
-                "Loaded {} bytes for binding {} from {:?}",
+                "Loaded {} bytes for set {} binding {} from {:?}",
                 init_data.len(),
+                spec.set,
                 spec.binding,
                 spec.input_file
             );
@@ -2203,7 +2409,7 @@ async fn run_compute_shader(
         queue.write_buffer(&buffer, 0, &init_data);
 
         let staging = device.create_buffer(&BufferDescriptor {
-            label: Some(&format!("staging_buffer_{}", spec.binding)),
+            label: Some(&format!("staging_buffer_set{}_b{}", spec.set, spec.binding)),
             size: spec.byte_size(),
             usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -2212,48 +2418,121 @@ async fn run_compute_shader(
         storage_buffers.push((spec.clone(), buffer, staging));
     }
 
-    // Build bind group layout entries for storage buffers
-    let layout_entries: Vec<_> = storage_buffers
+    // ---- Uniform buffers --------------------------------------------------
+    let mut uniform_buffers: Vec<(UniformSpec, wgpu::Buffer)> = Vec::new();
+    for spec in &uniform_specs {
+        let buffer = device.create_buffer(&BufferDescriptor {
+            label: Some(&format!("uniform_buffer_set{}_b{}", spec.set, spec.binding)),
+            size: spec.data.len() as u64,
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&buffer, 0, &spec.data);
+        uniform_buffers.push((spec.clone(), buffer));
+    }
+
+    // ---- SPIR-V access discovery ------------------------------------------
+    // Pipeline-layout access must match the shader's `NonWritable` /
+    // `NonReadable` decorations exactly. Read them from the SPIR-V so the
+    // user doesn't have to spell out per-binding access in the CLI.
+    let spirv_bytes = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let spirv_words: Vec<u32> =
+        spirv_bytes.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    let access_by_binding = detect_storage_access(&spirv_words)?;
+
+    // ---- Per-set bind group construction ----------------------------------
+    // Group bindings by descriptor set, then build one BindGroupLayout +
+    // BindGroup per set. wgpu requires the pipeline layout to cover every
+    // set index from 0 to max contiguously, so any unused intermediate
+    // sets get an empty layout / group.
+    let max_set = storage_buffers
         .iter()
-        .map(|(spec, _, _)| BindGroupLayoutEntry {
-            binding: spec.binding,
-            visibility: ShaderStages::COMPUTE,
-            ty: BindingType::Buffer {
-                ty: BufferBindingType::Storage { read_only: false },
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        })
-        .collect();
+        .map(|(s, _, _)| s.set)
+        .chain(uniform_buffers.iter().map(|(u, _)| u.set))
+        .max()
+        .unwrap_or(0);
 
-    let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-        label: Some("compute_bind_group_layout"),
-        entries: &layout_entries,
-    });
+    let mut layouts: Vec<wgpu::BindGroupLayout> = Vec::with_capacity((max_set + 1) as usize);
+    let mut bind_groups: Vec<wgpu::BindGroup> = Vec::with_capacity((max_set + 1) as usize);
+    for set in 0..=max_set {
+        let mut layout_entries: Vec<BindGroupLayoutEntry> = Vec::new();
+        let mut group_entries: Vec<BindGroupEntry> = Vec::new();
 
-    // Build bind group entries
-    let bind_group_entries: Vec<_> = storage_buffers
-        .iter()
-        .map(|(spec, buffer, _)| BindGroupEntry {
-            binding: spec.binding,
-            resource: BindingResource::Buffer(wgpu::BufferBinding {
-                buffer,
-                offset: 0,
-                size: None,
-            }),
-        })
-        .collect();
+        for (spec, buf, _) in &storage_buffers {
+            if spec.set != set {
+                continue;
+            }
+            // Default to read-write if the shader has no opinion (e.g.
+            // a buffer the SPIR-V doesn't decorate). Read-only when
+            // `NonWritable` is present, write-only on `NonReadable`.
+            // wgpu's `BufferBindingType::Storage { read_only }` covers
+            // read-only and read-write; there's no separate write-only
+            // form, so `WriteOnly` falls back to `read_only: false`.
+            let read_only = matches!(
+                access_by_binding.get(&(spec.set, spec.binding)),
+                Some(SpirvAccess::ReadOnly)
+            );
+            layout_entries.push(BindGroupLayoutEntry {
+                binding: spec.binding,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Storage { read_only },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            });
+            group_entries.push(BindGroupEntry {
+                binding: spec.binding,
+                resource: BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: buf,
+                    offset: 0,
+                    size: None,
+                }),
+            });
+        }
+        for (spec, buf) in &uniform_buffers {
+            if spec.set != set {
+                continue;
+            }
+            layout_entries.push(BindGroupLayoutEntry {
+                binding: spec.binding,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            });
+            group_entries.push(BindGroupEntry {
+                binding: spec.binding,
+                resource: BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: buf,
+                    offset: 0,
+                    size: None,
+                }),
+            });
+        }
+        layout_entries.sort_by_key(|e| e.binding);
+        group_entries.sort_by_key(|e| e.binding);
 
-    let bind_group = device.create_bind_group(&BindGroupDescriptor {
-        label: Some("compute_bind_group"),
-        layout: &bind_group_layout,
-        entries: &bind_group_entries,
-    });
+        let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some(&format!("compute_bgl_set{}", set)),
+            entries: &layout_entries,
+        });
+        let group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some(&format!("compute_bg_set{}", set)),
+            layout: &layout,
+            entries: &group_entries,
+        });
+        layouts.push(layout);
+        bind_groups.push(group);
+    }
 
     let module = load_spirv_module(&device, &path)?;
 
-    // Parse and layout push constants
+    // ---- Push constants ---------------------------------------------------
     let mut pc_specs: Vec<PushConstantSpec> =
         push_constants.iter().map(|s| PushConstantSpec::parse(s)).collect::<Result<Vec<_>>>()?;
 
@@ -2292,15 +2571,16 @@ async fn run_compute_shader(
         vec![]
     };
 
-    let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+    let layout_refs: Vec<&wgpu::BindGroupLayout> = layouts.iter().collect();
+    let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
         label: Some("compute_layout"),
-        bind_group_layouts: &[&bind_group_layout],
+        bind_group_layouts: &layout_refs,
         push_constant_ranges: &pc_ranges,
     });
 
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("compute_pipeline"),
-        layout: Some(&layout),
+        layout: Some(&pipeline_layout),
         module: &module,
         entry_point: Some(&entry),
         compilation_options: Default::default(),
@@ -2314,8 +2594,14 @@ async fn run_compute_shader(
         );
         println!(
             "Storage buffers: {:?}",
-            storage_specs.iter().map(|s| s.binding).collect::<Vec<_>>()
+            storage_specs.iter().map(|s| (s.set, s.binding)).collect::<Vec<_>>()
         );
+        if !uniform_specs.is_empty() {
+            println!(
+                "Uniforms: {:?}",
+                uniform_specs.iter().map(|s| (s.set, s.binding)).collect::<Vec<_>>()
+            );
+        }
     }
 
     let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
@@ -2328,14 +2614,16 @@ async fn run_compute_shader(
             timestamp_writes: None,
         });
         cpass.set_pipeline(&pipeline);
-        cpass.set_bind_group(0, &bind_group, &[]);
+        for (set_idx, group) in bind_groups.iter().enumerate() {
+            cpass.set_bind_group(set_idx as u32, group, &[]);
+        }
         if !pc_bytes.is_empty() {
             cpass.set_push_constants(0, &pc_bytes);
         }
         cpass.dispatch_workgroups(workgroups.0, workgroups.1, workgroups.2);
     }
 
-    // Copy all buffers to staging
+    // Copy storage buffers to staging for readback
     for (spec, buffer, staging) in &storage_buffers {
         encoder.copy_buffer_to_buffer(buffer, 0, staging, 0, spec.byte_size());
     }
@@ -3564,6 +3852,7 @@ fn main() -> Result<()> {
             workgroups_y,
             workgroups_z,
             storage_buffers,
+            uniforms,
             push_constants,
             verbose,
         } => {
@@ -3574,15 +3863,18 @@ fn main() -> Result<()> {
                 })
             });
 
-            // Parse storage buffer specs
+            // Parse storage buffer + uniform specs
             let storage_specs: Vec<StorageBufferSpec> =
                 storage_buffers.iter().map(|s| StorageBufferSpec::parse(s)).collect::<Result<Vec<_>>>()?;
+            let uniform_specs: Vec<UniformSpec> =
+                uniforms.iter().map(|s| UniformSpec::parse(s)).collect::<Result<Vec<_>>>()?;
 
             pollster::block_on(run_compute_shader(
                 path,
                 entry_name,
                 (workgroups_x, workgroups_y, workgroups_z),
                 storage_specs,
+                uniform_specs,
                 &push_constants,
                 verbose,
             ))?;
