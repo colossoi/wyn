@@ -146,6 +146,7 @@ impl ImplSource {
         source.register_real_modules();
         source.register_float_modules();
         source.register_vector_operations();
+        source.register_vec_module_ops();
         source.register_polymorphic_intrinsics();
 
         source
@@ -745,6 +746,57 @@ impl ImplSource {
             BuiltinImpl::Intrinsic(Intrinsic::ArrayWithInPlace),
         );
         self.register("_w_intrinsic_length", BuiltinImpl::Intrinsic(Intrinsic::Length));
+    }
+
+    /// Register the `vec.*` module ops. Each maps to the same
+    /// GLSL.std.450 / FMod prim-op that the polymorphic
+    /// `_w_intrinsic_*` versions use today — the SPIR-V op handles
+    /// scalar AND vector shape natively, so the codegen is identical.
+    /// The split exists at the *type* level: the IntrinsicSource entry
+    /// for `vec.pow` requires vec args, so a scalar caller is rejected
+    /// at type-check time.
+    fn register_vec_module_ops(&mut self) {
+        use PrimOp::*;
+        let entries: &[(&str, BuiltinImpl)] = &[
+            ("vec.sin", BuiltinImpl::PrimOp(GlslExt(13))),
+            ("vec.cos", BuiltinImpl::PrimOp(GlslExt(14))),
+            ("vec.tan", BuiltinImpl::PrimOp(GlslExt(15))),
+            ("vec.asin", BuiltinImpl::PrimOp(GlslExt(16))),
+            ("vec.acos", BuiltinImpl::PrimOp(GlslExt(17))),
+            ("vec.atan", BuiltinImpl::PrimOp(GlslExt(18))),
+            ("vec.sinh", BuiltinImpl::PrimOp(GlslExt(19))),
+            ("vec.cosh", BuiltinImpl::PrimOp(GlslExt(20))),
+            ("vec.tanh", BuiltinImpl::PrimOp(GlslExt(21))),
+            ("vec.asinh", BuiltinImpl::PrimOp(GlslExt(22))),
+            ("vec.acosh", BuiltinImpl::PrimOp(GlslExt(23))),
+            ("vec.atanh", BuiltinImpl::PrimOp(GlslExt(24))),
+            ("vec.atan2", BuiltinImpl::PrimOp(GlslExt(25))),
+            ("vec.pow", BuiltinImpl::PrimOp(GlslExt(26))),
+            ("vec.exp", BuiltinImpl::PrimOp(GlslExt(27))),
+            ("vec.log", BuiltinImpl::PrimOp(GlslExt(28))),
+            ("vec.exp2", BuiltinImpl::PrimOp(GlslExt(29))),
+            ("vec.log2", BuiltinImpl::PrimOp(GlslExt(30))),
+            ("vec.sqrt", BuiltinImpl::PrimOp(GlslExt(31))),
+            ("vec.rsqrt", BuiltinImpl::PrimOp(GlslExt(32))),
+            ("vec.radians", BuiltinImpl::PrimOp(GlslExt(11))),
+            ("vec.degrees", BuiltinImpl::PrimOp(GlslExt(12))),
+            ("vec.floor", BuiltinImpl::PrimOp(GlslExt(8))),
+            ("vec.ceil", BuiltinImpl::PrimOp(GlslExt(9))),
+            ("vec.round", BuiltinImpl::PrimOp(GlslExt(1))),
+            ("vec.trunc", BuiltinImpl::PrimOp(GlslExt(3))),
+            ("vec.fract", BuiltinImpl::PrimOp(GlslExt(10))),
+            ("vec.abs", BuiltinImpl::PrimOp(GlslExt(4))),
+            ("vec.sign", BuiltinImpl::PrimOp(GlslExt(6))),
+            ("vec.min", BuiltinImpl::PrimOp(GlslExt(37))),
+            ("vec.max", BuiltinImpl::PrimOp(GlslExt(40))),
+            ("vec.clamp", BuiltinImpl::PrimOp(GlslExt(43))),
+            ("vec.mix", BuiltinImpl::PrimOp(GlslExt(46))),
+            ("vec.smoothstep", BuiltinImpl::PrimOp(GlslExt(49))),
+            ("vec.mod", BuiltinImpl::PrimOp(FMod)),
+        ];
+        for (name, impl_) in entries {
+            self.register(name, impl_.clone());
+        }
     }
 
     /// Register polymorphic intrinsics (no type suffix) that come from
