@@ -782,7 +782,7 @@ entry compute_main(data: []i32) i32 =
 fn test_full_pipeline_to_spirv() {
     // Verify the full pipeline compiles successfully to SPIR-V
     let source = r#"
-#[uniform(set=0, binding=0)] def iTime: f32
+#[uniform(set=1, binding=0)] def iTime: f32
 
 def compute(x: f32, y: f32) f32 =
     let a = f32.sin(x) in

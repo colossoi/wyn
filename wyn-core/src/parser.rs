@@ -581,6 +581,16 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_uniform_decl(&mut self, set: u32, binding: u32) -> Result<Declaration> {
+        let start_span = self.current_span();
+        // Set 0 is reserved for compiler-allocated storage (compute
+        // entry-input/output buffers, multi-stage SOAC partials,
+        // graphical-prepass results). User decls must use set 1+.
+        if set == 0 {
+            bail_parse_at!(
+                start_span,
+                "uniform decls must use set 1 or higher; set 0 is reserved for compiler-allocated storage"
+            );
+        }
         // Consume 'def' keyword
         self.expect(Token::Def)?;
 
@@ -598,11 +608,13 @@ impl<'a> Parser<'a> {
             );
         }
 
+        let span = start_span.merge(&self.previous_span());
         Ok(Declaration::Uniform(UniformDecl {
             name,
             ty,
             set,
             binding,
+            span,
         }))
     }
 
@@ -613,6 +625,16 @@ impl<'a> Parser<'a> {
         layout: StorageLayout,
         access: StorageAccess,
     ) -> Result<Declaration> {
+        let start_span = self.current_span();
+        // Set 0 is reserved for compiler-allocated storage (compute
+        // entry-input/output buffers, multi-stage SOAC partials,
+        // graphical-prepass results). User decls must use set 1+.
+        if set == 0 {
+            bail_parse_at!(
+                start_span,
+                "storage decls must use set 1 or higher; set 0 is reserved for compiler-allocated storage"
+            );
+        }
         // Consume 'def' keyword
         self.expect(Token::Def)?;
 
@@ -630,6 +652,7 @@ impl<'a> Parser<'a> {
             );
         }
 
+        let span = start_span.merge(&self.previous_span());
         Ok(Declaration::Storage(StorageDecl {
             name,
             ty,
@@ -637,6 +660,7 @@ impl<'a> Parser<'a> {
             binding,
             layout,
             access,
+            span,
         }))
     }
 
@@ -661,10 +685,12 @@ impl<'a> Parser<'a> {
                 Ok(Attribute::Compute)
             }
             "uniform" => {
-                // Parse uniform attribute: #[uniform(binding=N)] or #[uniform(set=M, binding=N)]
+                // Parse uniform attribute: #[uniform(binding=N)] or #[uniform(set=M, binding=N)].
+                // Default `set` is 1 — set 0 is reserved for compiler-allocated storage
+                // (see SPECIFICATION.md "Descriptor Set Layout"). Explicit `set=0` errors at decl construction.
                 self.expect(Token::LeftParen)?;
 
-                let mut set: u32 = 0;
+                let mut set: u32 = 1;
                 let mut binding: Option<u32> = None;
 
                 loop {
@@ -737,11 +763,13 @@ impl<'a> Parser<'a> {
                 Ok(Attribute::Location(location))
             }
             "storage" => {
-                // Parse storage attribute: #[storage(binding=N)] or #[storage(set=M, binding=N)]
-                // Optional: layout=std430|std140, access=read|write|readwrite
+                // Parse storage attribute: #[storage(binding=N)] or #[storage(set=M, binding=N)].
+                // Optional: layout=std430|std140, access=read|write|readwrite.
+                // Default `set` is 1 — set 0 is reserved for compiler-allocated storage
+                // (see SPECIFICATION.md "Descriptor Set Layout"). Explicit `set=0` errors at decl construction.
                 self.expect(Token::LeftParen)?;
 
-                let mut set: u32 = 0;
+                let mut set: u32 = 1;
                 let mut binding: Option<u32> = None;
                 let mut layout = StorageLayout::default();
                 let mut access = StorageAccess::default();

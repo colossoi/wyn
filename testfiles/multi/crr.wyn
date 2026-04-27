@@ -16,8 +16,8 @@
 --         used by the tree is max(tte - now, tiny_epsilon).
 --   rfr   annualized continuously-compounded risk-free rate (e.g. 0.05).
 
-#[uniform(set=0, binding=0)] def now: f32
-#[uniform(set=0, binding=1)] def rfr: f32
+#[uniform(set=1, binding=0)] def now: f32
+#[uniform(set=1, binding=1)] def rfr: f32
 
 -- Tree depth. The node grid carries N+1 values at maturity.
 def N: i32 = 32

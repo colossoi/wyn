@@ -315,11 +315,33 @@ impl IntrinsicSource {
     fn register_vec_module_ops(&mut self, ctx: &mut impl TypeVarGenerator) {
         // Unary: vec.f : ∀n a. vec<n,a> -> vec<n,a>
         for name in [
-            "vec.sin", "vec.cos", "vec.tan", "vec.asin", "vec.acos", "vec.atan",
-            "vec.sinh", "vec.cosh", "vec.tanh", "vec.asinh", "vec.acosh", "vec.atanh",
-            "vec.sqrt", "vec.rsqrt", "vec.exp", "vec.exp2", "vec.log", "vec.log2",
-            "vec.floor", "vec.ceil", "vec.round", "vec.trunc", "vec.fract",
-            "vec.abs", "vec.sign", "vec.radians", "vec.degrees",
+            "vec.sin",
+            "vec.cos",
+            "vec.tan",
+            "vec.asin",
+            "vec.acos",
+            "vec.atan",
+            "vec.sinh",
+            "vec.cosh",
+            "vec.tanh",
+            "vec.asinh",
+            "vec.acosh",
+            "vec.atanh",
+            "vec.sqrt",
+            "vec.rsqrt",
+            "vec.exp",
+            "vec.exp2",
+            "vec.log",
+            "vec.log2",
+            "vec.floor",
+            "vec.ceil",
+            "vec.round",
+            "vec.trunc",
+            "vec.fract",
+            "vec.abs",
+            "vec.sign",
+            "vec.radians",
+            "vec.degrees",
         ] {
             let n = ctx.new_variable();
             let a = ctx.new_variable();
@@ -332,11 +354,7 @@ impl IntrinsicSource {
             let n = ctx.new_variable();
             let a = ctx.new_variable();
             let vec_n_a = Type::Constructed(TypeName::Vec, vec![a, n]);
-            self.register_poly(
-                name,
-                vec![vec_n_a.clone(), vec_n_a.clone()],
-                vec_n_a,
-            );
+            self.register_poly(name, vec![vec_n_a.clone(), vec_n_a.clone()], vec_n_a);
         }
 
         // Ternary: vec.clamp : ∀n a. vec<n,a> -> vec<n,a> -> vec<n,a> -> vec<n,a>

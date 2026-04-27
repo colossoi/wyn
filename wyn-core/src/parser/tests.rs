@@ -802,6 +802,28 @@ fn test_uniform_with_initializer_error() {
 }
 
 #[test]
+fn test_uniform_set_zero_error() {
+    // Set 0 is reserved for compiler-allocated storage; user decls
+    // must use set 1 or higher (see SPECIFICATION.md "Descriptor Set
+    // Layout").
+    expect_parse_error("#[uniform(set=0, binding=0)] def x: f32", |error| match error {
+        CompilerError::ParseError(msg, _) if msg.contains("set 0 is reserved") => Ok(()),
+        _ => Err(format!("Expected set=0 error, got: {:?}", error)),
+    });
+}
+
+#[test]
+fn test_storage_set_zero_error() {
+    expect_parse_error(
+        "#[storage(set=0, binding=0)] def buf: []f32",
+        |error| match error {
+            CompilerError::ParseError(msg, _) if msg.contains("set 0 is reserved") => Ok(()),
+            _ => Err(format!("Expected set=0 error, got: {:?}", error)),
+        },
+    );
+}
+
+#[test]
 fn test_parse_multiple_shader_outputs() {
     let entry = single_entry(
         r#"

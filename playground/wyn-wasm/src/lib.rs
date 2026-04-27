@@ -934,8 +934,8 @@ pub fn get_example_program() -> String {
 ------------------------------------------------------------
 -- Uniforms
 ------------------------------------------------------------
-#[uniform(set=0, binding=0)] def iResolution: vec3f32
-#[uniform(set=0, binding=1)] def iTime: f32
+#[uniform(set=1, binding=0)] def iResolution: vec3f32
+#[uniform(set=1, binding=1)] def iTime: f32
 
 ------------------------------------------------------------
 -- Vertex shader: full-screen triangle

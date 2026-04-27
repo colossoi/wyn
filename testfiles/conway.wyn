@@ -65,10 +65,10 @@ entry step(board: []i32, width: i32, height: i32) []i32 =
 -- Fragment entry: render the current board
 -- ---------------------------------------------------------------
 
-#[uniform(set = 0, binding = 0)] def iResolution: vec3f32
-#[uniform(set = 0, binding = 1)] def grid_width: i32
-#[uniform(set = 0, binding = 2)] def grid_height: i32
-#[storage(set = 0, binding = 3, access = read)] def display_board: []i32
+#[uniform(set = 1, binding = 0)] def iResolution: vec3f32
+#[uniform(set = 1, binding = 1)] def grid_width: i32
+#[uniform(set = 1, binding = 2)] def grid_height: i32
+#[storage(set = 1, binding = 3, access = read)] def display_board: []i32
 
 def verts: [3]vec4f32 =
     [@[-1.0, -1.0, 0.0, 1.0],

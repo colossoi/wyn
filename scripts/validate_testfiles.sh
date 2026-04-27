@@ -67,6 +67,7 @@ FAIL=0
 PASS=0
 SKIP=0
 
+# Non-recursive: only files directly in testfiles/.
 for f in testfiles/*.wyn; do
     base=$(basename "$f" .wyn)
 

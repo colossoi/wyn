@@ -2410,10 +2410,7 @@ fn lower_primop_wgsl(prim_op: &PrimOp, args: &[String], result_ty_str: Option<&s
         // Matrix / vector multiplications: WGSL's `*` operator handles
         // matrix×matrix, matrix×vector, vector×scalar, etc., picking
         // the right overload from operand types.
-        MatrixTimesMatrix
-        | MatrixTimesVector
-        | VectorTimesMatrix
-        | VectorTimesScalar
+        MatrixTimesMatrix | MatrixTimesVector | VectorTimesMatrix | VectorTimesScalar
         | MatrixTimesScalar => {
             if args.len() == 2 {
                 Some(format!("({} * {})", args[0], args[1]))
@@ -2426,19 +2423,11 @@ fn lower_primop_wgsl(prim_op: &PrimOp, args: &[String], result_ty_str: Option<&s
         // `Bitcast` is special — WGSL needs explicit `bitcast<T>(x)`.
         SIToFP | UIToFP | FPToSI | FPToUI | FPConvert | SConvert | UConvert => {
             let result_ty = result_ty_str?;
-            if args.len() == 1 {
-                Some(format!("{}({})", result_ty, args[0]))
-            } else {
-                None
-            }
+            if args.len() == 1 { Some(format!("{}({})", result_ty, args[0])) } else { None }
         }
         Bitcast => {
             let result_ty = result_ty_str?;
-            if args.len() == 1 {
-                Some(format!("bitcast<{}>({})", result_ty, args[0]))
-            } else {
-                None
-            }
+            if args.len() == 1 { Some(format!("bitcast<{}>({})", result_ty, args[0])) } else { None }
         }
 
         // `OuterProduct`, `IsNan`, `IsInf`, and the arithmetic /

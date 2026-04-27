@@ -26,6 +26,18 @@ use super::types::*;
 use crate::pipeline_descriptor::PipelineDescriptor;
 
 // ============================================================================
+// Descriptor-set convention
+// ============================================================================
+
+/// Descriptor set reserved for compiler-allocated storage. Compute
+/// entry-input/output buffers (from SoA tuple splits), multi-stage SOAC
+/// intermediates, and graphical-invariant prepass results all live on this
+/// set. User-declared `#[uniform(...)]` and `#[storage(...)]` must use a
+/// higher set (the parser enforces `set >= 1`). See SPECIFICATION.md
+/// "Descriptor Set Layout" for the rationale.
+pub const AUTO_STORAGE_SET: u32 = 0;
+
+// ============================================================================
 // Error type
 // ============================================================================
 
@@ -56,7 +68,7 @@ impl std::error::Error for ConvertError {}
 /// point becomes a per-body `EGraph` + metadata, waiting for the caller to
 /// chain the pipeline (`expand_soacs → [materialize →] optimize_skeleton →
 /// elaborate`).
-pub fn run(program: &TlcProgram, pipeline: PipelineDescriptor) -> Result<EgirInner, ConvertError> {
+pub fn run(program: &TlcProgram, mut pipeline: PipelineDescriptor) -> Result<EgirInner, ConvertError> {
     let top_level: HashMap<SymbolId, &TlcDef> = program.defs.iter().map(|d| (d.name, d)).collect();
     let symbols = &program.symbols;
 
@@ -137,6 +149,14 @@ pub fn run(program: &TlcProgram, pipeline: PipelineDescriptor) -> Result<EgirInn
         }
     }
 
+    // Enrich the pipeline descriptor with auto-allocated bindings that
+    // `convert_entry_point` parked on each entry's `inputs`/`outputs`
+    // (compute SoA-split storage and unsized-array outputs). Without
+    // this, a host runtime reading the JSON sidecar sees only the
+    // user-declared uniforms/storage and is missing every buffer the
+    // compiler injected.
+    enrich_pipeline_with_auto_bindings(&mut pipeline, &entry_points);
+
     Ok(EgirInner::new(
         functions,
         externs,
@@ -146,6 +166,87 @@ pub fn run(program: &TlcProgram, pipeline: PipelineDescriptor) -> Result<EgirInn
         program.storage.clone(),
         pipeline,
     ))
+}
+
+/// Walk every compute entry and append `Binding::StorageBuffer` entries
+/// to its corresponding `Pipeline::Compute` for each auto-allocated
+/// `(set, binding)` recorded on the entry's `EntryInput`s and
+/// `EntryOutput`s. Bindings already present in the descriptor (e.g.
+/// from `MultiCompute` parallelization paths that pre-populate the
+/// list) are skipped to avoid duplicates.
+fn enrich_pipeline_with_auto_bindings(pipeline: &mut PipelineDescriptor, entries: &[EgirEntry]) {
+    use crate::pipeline_descriptor::{Access, Binding, BufferUsage, Pipeline};
+    use crate::ssa::types::ExecutionModel;
+
+    for entry in entries {
+        if !matches!(entry.execution_model, ExecutionModel::Compute { .. }) {
+            continue;
+        }
+
+        // Find the matching ComputePipeline. MultiCompute pipelines
+        // already carry their full binding list from parallelize and
+        // don't need enrichment.
+        let cp = pipeline.pipelines.iter_mut().find_map(|p| match p {
+            Pipeline::Compute(cp) if cp.entry_point == entry.name => Some(cp),
+            _ => None,
+        });
+        let Some(cp) = cp else {
+            continue;
+        };
+
+        // Snapshot existing (set, binding) keys so the appended
+        // entries don't duplicate slots that parallelize already
+        // surfaced.
+        let claimed: HashSet<(u32, u32)> = cp
+            .bindings
+            .iter()
+            .filter_map(|b| match b {
+                Binding::StorageBuffer { set, binding, .. } => Some((*set, *binding)),
+                Binding::Uniform { set, binding, .. } => Some((*set, *binding)),
+                _ => None,
+            })
+            .collect();
+
+        for input in &entry.inputs {
+            let Some((set, binding)) = input.storage_binding else {
+                continue;
+            };
+            if claimed.contains(&(set, binding)) {
+                continue;
+            }
+            cp.bindings.push(Binding::StorageBuffer {
+                set,
+                binding,
+                access: Access::ReadOnly,
+                usage: BufferUsage::Input,
+                name: input.name.clone(),
+            });
+        }
+
+        for (i, output) in entry.outputs.iter().enumerate() {
+            let Some((set, binding)) = output.storage_binding else {
+                continue;
+            };
+            if claimed.contains(&(set, binding)) {
+                continue;
+            }
+            // EntryOutput has no name field; synthesize from the entry
+            // name + position. Single-output is the common case and
+            // gets the cleaner `<entry>_output` form.
+            let name = if entry.outputs.len() == 1 {
+                format!("{}_output", entry.name)
+            } else {
+                format!("{}_output_{}", entry.name, i)
+            };
+            cp.bindings.push(Binding::StorageBuffer {
+                set,
+                binding,
+                access: Access::WriteOnly,
+                usage: BufferUsage::Output,
+                name,
+            });
+        }
+    }
 }
 
 enum ConvertedFunc {
@@ -274,7 +375,7 @@ fn convert_entry_point(
         if let Some(field_tys) = tuple_of_views_fields {
             let mut view_nids: SmallVec<[NodeId; 4]> = SmallVec::new();
             for (field_idx, field_ty) in field_tys.iter().enumerate() {
-                let set_binding = (0, binding_num);
+                let set_binding = (AUTO_STORAGE_SET, binding_num);
                 binding_num += 1;
                 inputs.push(EntryInput {
                     name: format!("{}_{}", name, field_idx),
@@ -292,7 +393,7 @@ fn convert_entry_point(
         }
 
         let storage_binding = if is_compute && is_unsized_array(ty) {
-            let b = (0, binding_num);
+            let b = (AUTO_STORAGE_SET, binding_num);
             binding_num += 1;
             Some(b)
         } else {
@@ -1904,7 +2005,7 @@ fn build_entry_outputs(
     let mut binding_num = binding_start;
     let mut storage_binding_for = |ty: &Type<TypeName>, is_compute: bool| -> Option<(u32, u32)> {
         if is_compute && !matches!(ty, Type::Constructed(TypeName::Unit, _)) {
-            let b = (0, binding_num);
+            let b = (AUTO_STORAGE_SET, binding_num);
             binding_num += 1;
             Some(b)
         } else {

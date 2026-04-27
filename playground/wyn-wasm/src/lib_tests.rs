@@ -56,7 +56,7 @@ fn compile_to_ssa(source: &str) -> wyn_core::ssa::types::Program {
 #[test]
 fn interface_surfaces_lifted_prepass_storage_bindings() {
     let src = r#"
-#[uniform(set=0, binding=0)] def iTime: f32
+#[uniform(set=1, binding=0)] def iTime: f32
 
 #[vertex]
 entry vertex_main(#[builtin(vertex_index)] vid: i32)

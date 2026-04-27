@@ -24,8 +24,8 @@
 ------------------------------------------------------------
 open f32
 
-#[uniform(set=0, binding=0)] def iResolution: vec3f32
-#[uniform(set=0, binding=1)] def iTime: f32
+#[uniform(set=1, binding=0)] def iResolution: vec3f32
+#[uniform(set=1, binding=1)] def iTime: f32
 
 ------------------------------------------------------------
 -- Iñigo Quilez cosine palette: a + b * cos(2pi * (c*t + d))

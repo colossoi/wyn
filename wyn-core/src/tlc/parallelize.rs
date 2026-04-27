@@ -7,6 +7,7 @@
 //! Loop creation and storage lowering stay in SSA (`to_ssa` + `soac_lower`).
 
 use crate::ast::{self, TypeName};
+use crate::egir::from_tlc::AUTO_STORAGE_SET;
 use crate::interface::{self, Attribute};
 use crate::pipeline_descriptor::*;
 use crate::{SymbolId, SymbolTable};
@@ -739,7 +740,7 @@ fn maybe_hoist(
     // make_two_phase_plan will use this as the prepass's result_binding
     // (via the prepass_result_bindings map), so phase 2's final store
     // goes exactly here.
-    let binding = (0u32, *next_binding);
+    let binding = (AUTO_STORAGE_SET, *next_binding);
     *next_binding += 1;
 
     let span = rhs.span;
@@ -1055,8 +1056,12 @@ fn make_two_phase_plan(
     // so this keeps the two sides in sync. Without a forced binding the
     // plan allocates its own.
     let (partials_binding, result_binding, extra_used) = match forced_result_binding {
-        Some(result) => ((0, next_binding), result, 1),
-        None => ((0, next_binding), (0, next_binding + 1), 2),
+        Some(result) => ((AUTO_STORAGE_SET, next_binding), result, 1),
+        None => (
+            (AUTO_STORAGE_SET, next_binding),
+            (AUTO_STORAGE_SET, next_binding + 1),
+            2,
+        ),
     };
     let elem_type = analysis.soac.result_elem_type();
     let (entries, pipeline) = build_two_phase_entries(

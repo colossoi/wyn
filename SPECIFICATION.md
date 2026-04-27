@@ -1473,6 +1473,94 @@ The attribute system is statically type-checked:
 
 ---
 
+## GPU Resources and Descriptor Set Layout
+
+Shaders read and write GPU memory through three kinds of bindings:
+**uniforms** (small, read-only constants), **storage buffers**
+(arbitrary-size, read or read-write arrays), and **push constants**
+(tiny, fast, write-once-per-dispatch). Wyn surfaces uniforms and
+storage buffers as top-level `def`s decorated with attributes; push
+constants are not user-declared (the compiler synthesizes them for
+non-array compute entry parameters that need to broadcast a scalar
+to every invocation).
+
+### Grammar
+
+```ebnf
+uniform_decl ::= "#[" "uniform" "(" set_param? "binding" "=" decimal ")" "]"
+                 "def" identifier ":" type
+set_param    ::= "set" "=" decimal ","
+storage_decl ::= "#[" "storage" "(" set_param? "binding" "=" decimal
+                 ("," "layout" "=" layout_kind)?
+                 ("," "access" "=" access_kind)?
+                 ")" "]"
+                 "def" identifier ":" type
+layout_kind  ::= "std430" | "std140"
+access_kind  ::= "read" | "write" | "readwrite"
+```
+
+Examples:
+
+```wyn
+#[uniform(set=1, binding=0)] def iResolution: vec3f32
+#[uniform(binding=1)]        def iTime: f32           -- set defaults to 1
+
+#[storage(set=2, binding=0, access=read)]
+def particles: []vec4f32
+```
+
+### Descriptor Set Layout
+
+Every binding lives in a numbered descriptor `set`; each set is a
+separate bind group at runtime. Wyn reserves the bottom of the set
+namespace for the compiler and gives the rest to the user:
+
+* **Set 0 is reserved for compiler-allocated storage.** Compute
+  entry-input and entry-output buffers (one per field of a tuple-of-
+  arrays input after SoA splitting), multi-stage SOAC intermediates
+  (e.g. partials buffers between phases of a parallelized `reduce`),
+  and graphical-entry-lift prepass results all live on set 0. The
+  compiler unconditionally allocates `(set=0, binding=N)` starting
+  at `binding=0`; it does not consult user state.
+* **Set 1 and higher are for user-declared `#[uniform]` and
+  `#[storage]`.** When `set` is omitted from one of those attributes,
+  it defaults to 1.
+* `#[uniform(set=0, ...)]` and `#[storage(set=0, ...)]` are
+  compile-time errors. The error names the offending decl's source
+  span.
+
+This split exists because the compiler's allocator and the user's
+decls are written without knowledge of each other. Splitting the set
+namespace removes the only failure mode where a host-runtime would
+silently bind two different resources to the same descriptor slot.
+
+The convention is enforced statically — there is no runtime fallback
+or "best-effort" behavior. The diagnostic guides users to renumber
+their decls; once the user keeps off set 0, no collision is possible.
+
+### Compiler-Allocated Bindings in the Pipeline Descriptor
+
+The JSON sidecar (`<shader>.json`) emitted alongside the SPIR-V
+module lists every binding the host runtime needs to wire up,
+including the compiler-allocated ones. For a compute shader with a
+tuple-of-arrays input like
+
+```wyn
+#[uniform(set=1, binding=0)] def now: f32
+#[uniform(set=1, binding=1)] def rfr: f32
+
+#[compute]
+entry price_options(opts: [](f32, f32, i32, f32, f32)) []f32 = ...
+```
+
+the descriptor reports the two uniforms on set 1 and six storage
+buffers on set 0 — five SoA-split inputs (`opts_0` through `opts_4`)
+and one output (`<entry>_output`). A host that reads the descriptor
+binds bind group 0 with the storage buffers it filled with input
+data plus an output buffer, and bind group 1 with its uniform values.
+
+---
+
 ## Appendix: Wyn Compared to Other Functional Languages
 
 This guide is intended for programmers who are familiar with other functional languages and want to start working with Wyn.
