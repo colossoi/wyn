@@ -25,6 +25,14 @@ use polytype::Type;
 use std::collections::HashMap;
 
 /// Non-SOAC builtins that still need intrinsic renaming.
+///
+/// Every entry here is a name that's polymorphic over scalar AND vector
+/// shape with no per-type module home — `magnitude`, `dot`, `cross`,
+/// `mix`, `clamp`, `floor`, `fract`, etc. The per-type scalar ops
+/// (`sin` → `f32.sin`, `pow` → `f32.pow`, …) and the vector-shaped ops
+/// (`sin` → `vec.sin`, `pow` → `vec.pow`, …) live in their own modules
+/// now and are reached via `open f32` / `open vec`, so they no longer
+/// need a top-level shortcut here.
 const INTRINSIC_RENAMES: &[(&str, &str)] = &[
     ("length", "_w_intrinsic_length"),
     ("replicate", "_w_intrinsic_replicate"),
@@ -44,23 +52,7 @@ const INTRINSIC_RENAMES: &[(&str, &str)] = &[
     ("determinant", "_w_intrinsic_determinant"),
     ("inverse", "_w_intrinsic_inverse"),
     ("outer", "_w_intrinsic_outer"),
-    // Unary math functions (scalar and vector)
-    ("sin", "_w_intrinsic_sin"),
-    ("cos", "_w_intrinsic_cos"),
-    ("tan", "_w_intrinsic_tan"),
-    ("sqrt", "_w_intrinsic_sqrt"),
     ("abs", "_w_intrinsic_abs"),
-    ("exp", "_w_intrinsic_exp"),
-    ("log", "_w_intrinsic_log"),
-    ("atan", "_w_intrinsic_atan"),
-    ("asin", "_w_intrinsic_asin"),
-    ("acos", "_w_intrinsic_acos"),
-    ("radians", "_w_intrinsic_radians"),
-    ("degrees", "_w_intrinsic_degrees"),
-    // Binary math functions
-    ("pow", "_w_intrinsic_pow"),
-    ("atan2", "_w_intrinsic_atan2"),
-    ("mod", "_w_intrinsic_mod"),
 ];
 
 /// SOAC names that are intercepted in transform_application and turned into

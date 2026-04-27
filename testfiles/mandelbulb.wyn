@@ -3,6 +3,8 @@
 -- shadows, and an analytic gradient normal. The original GLSL is
 -- preserved commented-out below.
 
+open f32
+
 ------------------------------------------------------------
 -- Uniforms
 ------------------------------------------------------------
@@ -191,7 +193,7 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4
   in
 
   -- Post-processing: gamma, contrast, desaturation, vignette.
-  let c0 = pow(clamp(col, @[0.0, 0.0, 0.0], @[1.0, 1.0, 1.0]), @[0.45, 0.45, 0.45]) in
+  let c0 = vec.pow(vec.clamp(col, @[0.0, 0.0, 0.0], @[1.0, 1.0, 1.0]), @[0.45, 0.45, 0.45]) in
   let c1 = c0 * 0.6 + c0 * c0 * (@[3.0, 3.0, 3.0] - c0 * 2.0) * 0.4 in
   let gray = dot(c1, @[0.33, 0.33, 0.33]) in
   let c2 = mix(c1, @[gray, gray, gray], 0.0 - 0.5) in

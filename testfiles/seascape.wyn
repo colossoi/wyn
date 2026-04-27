@@ -103,8 +103,8 @@ def getSkyColor(e: vec3f32) vec3f32 =
 
 def sea_octave(uv: vec2f32, choppy: f32) f32 =
   let uv2 = uv + noise(uv) in
-  let wv = 1.0 - abs(sin(uv2)) in
-  let swv = abs(cos(uv2)) in
+  let wv = 1.0 - abs(vec.sin(uv2)) in
+  let swv = abs(vec.cos(uv2)) in
   let wv2 = mix(wv, swv, wv) in
   (1.0 - (wv2.x * wv2.y) ** 0.65) ** choppy
 

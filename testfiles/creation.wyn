@@ -27,7 +27,7 @@ def iter(fragXY: vec2f32, z: f32) (f32, f32) =
   let phase = f32.sin(z) + 1.0 in
   let warp  = f32.abs(f32.sin(l * 9.0 - z - z)) in
   let uv    = uv0 + p / l * phase * warp in
-  let m     = mod(uv, @[1.0, 1.0]) - @[0.5, 0.5] in
+  let m     = vec.mod(uv, @[1.0, 1.0]) - @[0.5, 0.5] in
   (0.01 / magnitude(m), l)
 
 #[fragment]

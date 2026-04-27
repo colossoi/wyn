@@ -804,18 +804,11 @@ impl ImplSource {
     /// `_w_intrinsic_floor` (vs the typed `_w_intrinsic_floor_f32`).
     fn register_polymorphic_intrinsics(&mut self) {
         use PrimOp::*;
+        // Only names still listed in TLC's `INTRINSIC_RENAMES` need a
+        // polymorphic shim here — the per-type-or-vector ops
+        // (sin/cos/tan/.../pow/mod/radians/degrees) have moved into the
+        // `f32.*` and `vec.*` modules and are reached via `open`.
         let intrinsics: &[(&str, BuiltinImpl)] = &[
-            ("_w_intrinsic_sin", BuiltinImpl::PrimOp(GlslExt(13))),
-            ("_w_intrinsic_cos", BuiltinImpl::PrimOp(GlslExt(14))),
-            ("_w_intrinsic_tan", BuiltinImpl::PrimOp(GlslExt(15))),
-            ("_w_intrinsic_asin", BuiltinImpl::PrimOp(GlslExt(16))),
-            ("_w_intrinsic_acos", BuiltinImpl::PrimOp(GlslExt(17))),
-            ("_w_intrinsic_atan", BuiltinImpl::PrimOp(GlslExt(18))),
-            ("_w_intrinsic_atan2", BuiltinImpl::PrimOp(GlslExt(25))),
-            ("_w_intrinsic_radians", BuiltinImpl::PrimOp(GlslExt(11))),
-            ("_w_intrinsic_degrees", BuiltinImpl::PrimOp(GlslExt(12))),
-            ("_w_intrinsic_mod", BuiltinImpl::PrimOp(FMod)),
-            ("_w_intrinsic_sqrt", BuiltinImpl::PrimOp(GlslExt(31))),
             ("_w_intrinsic_abs", BuiltinImpl::PrimOp(GlslExt(4))),
             ("_w_intrinsic_floor", BuiltinImpl::PrimOp(GlslExt(8))),
             ("_w_intrinsic_ceil", BuiltinImpl::PrimOp(GlslExt(9))),
@@ -824,9 +817,6 @@ impl ImplSource {
             ("_w_intrinsic_max", BuiltinImpl::PrimOp(GlslExt(40))),
             ("_w_intrinsic_clamp", BuiltinImpl::PrimOp(GlslExt(43))),
             ("_w_intrinsic_mix", BuiltinImpl::PrimOp(GlslExt(46))),
-            ("_w_intrinsic_pow", BuiltinImpl::PrimOp(GlslExt(26))),
-            ("_w_intrinsic_exp", BuiltinImpl::PrimOp(GlslExt(27))),
-            ("_w_intrinsic_log", BuiltinImpl::PrimOp(GlslExt(28))),
             ("_w_intrinsic_smoothstep", BuiltinImpl::PrimOp(GlslExt(49))),
             ("_w_intrinsic_normalize", BuiltinImpl::PrimOp(GlslExt(69))),
             ("_w_intrinsic_cross", BuiltinImpl::PrimOp(GlslExt(68))),

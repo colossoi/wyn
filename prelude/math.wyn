@@ -32,6 +32,7 @@ module type numeric = {
   sig min : t -> t -> t
   sig abs : t -> t
   sig sign : t -> t
+  sig clamp : t -> t -> t -> t
   sig highest : t
   sig lowest : t
   sig sum<[n]> : [n]t -> t

@@ -3,6 +3,8 @@
 -- digits, arcs, arrows, graphs. The original GLSL is preserved
 -- commented-out below.
 
+open f32
+
 ------------------------------------------------------------
 -- Uniforms
 ------------------------------------------------------------
@@ -614,7 +616,7 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4
   let bg_d  = bg(uv) in
   let col0  = mix(@[0.0, 0.0, 0.0], @[1.0, 1.0, 1.0], smoothAA(bg_d, 0.0)) in
   let col1  = mix(col0, scene, 0.7) in
-  let col2  = pow(col1, @[0.9545, 0.9545, 0.9545]) in
+  let col2  = vec.pow(col1, @[0.9545, 0.9545, 0.9545]) in
   let ui_d  = overlayUI(uv) in
   let col3  = mix(col2, @[1.0, 1.0, 1.0], smoothAA(ui_d, 0.0)) in
   @[col3.x, col3.y, col3.z, 1.0]

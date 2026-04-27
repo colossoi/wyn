@@ -1194,25 +1194,19 @@ impl<'a> TypeChecker<'a> {
         let body = Self::arrow_chain(&[vec.clone(), vec], Self::var(t));
         self.define_builtin("dot", Self::forall(&[n, t], body));
 
-        // Math functions: ∀t. t -> t (works on f32, vec2f32, vec3f32, vec4f32)
+        // Math functions: ∀t. t -> t (works on f32, vec2f32, vec3f32, vec4f32).
+        // `sqrt`/`abs`/`floor`/`ceil`/`fract` keep a top-level binding because
+        // they're still in `INTRINSIC_RENAMES` (no per-type-only home).
         let t = self.fresh_var();
         let math_unary = Self::forall(&[t], Type::arrow(Self::var(t), Self::var(t)));
-        for name in &[
-            "sin", "cos", "tan", "sqrt", "abs", "floor", "ceil", "fract", "exp", "log", "atan", "asin",
-            "acos", "radians", "degrees",
-        ] {
+        for name in &["abs", "floor", "ceil", "fract"] {
             self.define_builtin(name, math_unary.clone());
         }
-
-        // Binary math functions: ∀t. t -> t -> t
-        let t = self.fresh_var();
-        let math_binary = Self::forall(
-            &[t],
-            Self::arrow_chain(&[Self::var(t), Self::var(t)], Self::var(t)),
-        );
-        for name in &["pow", "atan2", "mod"] {
-            self.define_builtin(name, math_binary.clone());
-        }
+        // sin/cos/tan/asin/acos/atan/sqrt/exp/log/radians/degrees and the
+        // binary `pow`/`atan2`/`mod` no longer have top-level bindings —
+        // bare names only resolve via `open f32` (scalar) or `open vec`
+        // (vector). The schemes for `f32.cos`/`vec.cos`/etc. come from
+        // prelude module sigs and `IntrinsicSource::register_vec_module_ops`.
 
         // Register vector field mappings
         self.register_vector_fields();
