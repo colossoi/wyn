@@ -549,6 +549,13 @@ impl ImplSource {
         self.register_unop(ty_name, "log2", BuiltinImpl::PrimOp(PrimOp::GlslExt(30)));
         self.register_binop(ty_name, "pow", BuiltinImpl::PrimOp(PrimOp::GlslExt(26)));
 
+        // Angle conversions
+        self.register_unop(ty_name, "radians", BuiltinImpl::PrimOp(PrimOp::GlslExt(11)));
+        self.register_unop(ty_name, "degrees", BuiltinImpl::PrimOp(PrimOp::GlslExt(12)));
+
+        // Modulo (floating-point remainder)
+        self.register_binop(ty_name, "mod", BuiltinImpl::PrimOp(PrimOp::FMod));
+
         // Rounding functions
         self.register_unop(ty_name, "floor", BuiltinImpl::PrimOp(PrimOp::GlslExt(8)));
         self.register_unop(ty_name, "ceil", BuiltinImpl::PrimOp(PrimOp::GlslExt(9)));

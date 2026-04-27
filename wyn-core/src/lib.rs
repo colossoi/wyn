@@ -28,6 +28,7 @@ pub mod uniqueness_promote;
 pub mod egir;
 pub mod glsl;
 pub mod pipeline_descriptor;
+pub mod resolve_opens;
 pub mod resolve_placeholders;
 pub mod spirv;
 pub mod structured;
@@ -468,6 +469,15 @@ impl AstConstFoldedEarly {
         let mut resolver = resolve_placeholders::PlaceholderResolver::new();
         resolver.resolve(module_manager, &mut self.0.ast);
         let (context, spec_schemes) = resolver.into_parts();
+
+        // `open M` name resolution. Builds the open index from the
+        // union of (a) module-spec schemes (keyed `M.name`) and (b)
+        // ImplSource's per-type registrations (`f32.cos`, `i32.abs`,
+        // …), then rewrites bare names that uniquely match one open.
+        let impl_source = crate::impl_source::ImplSource::new();
+        let scheme_keys = spec_schemes.keys().cloned();
+        let impl_keys = impl_source.all_names().into_iter();
+        resolve_opens::run(&mut self.0.ast, scheme_keys.chain(impl_keys))?;
 
         let mut checker =
             type_checker::TypeChecker::with_context_and_schemes(module_manager, context, spec_schemes);

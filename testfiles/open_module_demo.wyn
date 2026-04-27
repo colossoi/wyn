@@ -1,0 +1,20 @@
+-- Demonstrates `open M` name resolution: bare `cos`, `sin`, `tanh`,
+-- `radians` resolve to their `f32.*` counterparts because `open f32`
+-- is in scope. `min` and `max` stay polymorphic via INTRINSIC_RENAMES,
+-- so they keep working with both scalar and vector args.
+
+open f32
+
+#[vertex] entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 =
+  if vid == 0 then @[-1.0, -1.0, 0.0, 1.0]
+  else if vid == 1 then @[3.0, -1.0, 0.0, 1.0]
+  else @[-1.0, 3.0, 0.0, 1.0]
+
+#[fragment] entry fragment_main() #[location(0)] vec4f32 =
+  let a = radians(45.0) in
+  let r = cos(a) in
+  let g = sin(a) in
+  let b = tanh(a) in
+  let lo = min(r, g) in
+  let hi = max(r, g) in
+  @[lo, hi, b, 1.0]

@@ -87,8 +87,13 @@ module type real = {
   sig log1p : t -> t
   sig ceil : t -> t
   sig floor : t -> t
+  sig fract : t -> t
   sig trunc : t -> t
   sig round : t -> t
+  sig pow : t -> t -> t
+  sig mod : t -> t -> t
+  sig radians : t -> t
+  sig degrees : t -> t
   sig mad : (a: t) -> (b: t) -> (c: t) -> t
   sig fma : (a: t) -> (b: t) -> (c: t) -> t
   sig isinf : t -> bool
