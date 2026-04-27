@@ -1365,3 +1365,112 @@ fn fill_holes_respects_inferred_type_from_context() {
         tlc.0.fill_hole_errors
     );
 }
+
+// =============================================================================
+// Known-failing tests for higher-order-function defunctionalization gaps
+// =============================================================================
+//
+// Both currently fail. Keep them as guards: when the underlying bugs in
+// defunctionalization / SPIR-V lowering are fixed, these tests start
+// passing and the cleanup will be obvious.
+
+/// Bug 1: A closure with captured free variables, passed to a user-
+/// defined HOF, produces SPIR-V that fails `spirv-val` with
+/// `OpFunctionCall Function <id>'s parameter count does not match the
+/// argument count`. Defunc/mono specializes both the HOF and the
+/// closure body correctly (each gets the captured-env params it
+/// needs), but the call-sites for the function-typed parameter inside
+/// the HOF body still pass only the original arguments — the captured
+/// env never gets threaded through.
+///
+/// Minimal repro: a 2-arg HOF that calls its f-arg twice, with a
+/// closure capturing two scalars from the entry's params.
+#[test]
+fn hof_closure_with_captures_lowers_to_valid_spirv() {
+    let src = r#"
+def apply2(f: f32 -> f32, x0: f32, x1: f32) f32 = f(x0) + f(x1)
+
+#[compute]
+entry test(a: f32, b: f32) f32 =
+  let g = |y: f32| y * y + a + b in
+  apply2(g, 1.0f32, 2.0f32)
+"#;
+    let spirv = compile_to_spirv(src).expect("compile");
+    assert_spirv_call_arities_match(&spirv);
+}
+
+/// Bug 2: An inline lambda with no captures, called from inside a
+/// `map` body, panics in SPIR-V lowering with "BUG: Unknown type
+/// reached lowering: Ignored". The HOF passed the lambda survives
+/// type checking but the elaborated function's signature carries an
+/// `Ignored` placeholder where the lambda's argument type should be —
+/// presumably defunctionalization or the elaborator is leaving the
+/// inner call's type unresolved.
+///
+/// Minimal repro: a HOF taking `f32 -> f32`, called inside a `map`
+/// over `[]f32`, with a closure-free inline lambda.
+#[test]
+fn hof_no_capture_lambda_in_map_body_lowers_without_panic() {
+    let src = r#"
+def apply2(f: f32 -> f32, x0: f32, x1: f32) f32 = f(x0) + f(x1)
+
+#[compute]
+entry test(in_arr: []f32) []f32 =
+  map(|x: f32| apply2(|y: f32| y * y, x, x + 1.0f32), in_arr)
+"#;
+    // catch_unwind because the bug surfaces as a panic in
+    // spirv/mod.rs (not a Result::Err).
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compile_to_spirv(src)));
+    let bytes = result.expect("compilation panicked — see Bug 2 docstring").expect("compile returned Err");
+    assert_spirv_call_arities_match(&bytes);
+}
+
+/// Walk every `OpFunctionCall` in a SPIR-V module and assert each
+/// call's argument count matches the called function's declared
+/// parameter count. The arity-mismatch class of bug above produces
+/// SPIR-V that round-trips through rspirv but fails this invariant.
+fn assert_spirv_call_arities_match(spirv_words: &[u32]) {
+    use rspirv::binary::parse_words;
+    use rspirv::dr::{Loader, Operand};
+    use rspirv::spirv::Op;
+
+    let mut loader = Loader::new();
+    parse_words(spirv_words, &mut loader).expect("parse spirv");
+    let module = loader.module();
+
+    // Map function id → declared parameter count.
+    let mut arities: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+    for func in &module.functions {
+        if let Some(def) = &func.def {
+            if let Some(Operand::IdRef(_)) = def.result_id.map(Operand::IdRef) {}
+            if let Some(id) = def.result_id {
+                arities.insert(id, func.parameters.len());
+            }
+        }
+    }
+
+    // Walk every block's instructions for OpFunctionCall.
+    for func in &module.functions {
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                if inst.class.opcode == Op::FunctionCall {
+                    // Operands: [0] callee IdRef, [1..] argument IdRefs.
+                    let callee = match inst.operands.first() {
+                        Some(Operand::IdRef(id)) => *id,
+                        _ => continue,
+                    };
+                    let arg_count = inst.operands.len() - 1;
+                    let expected = match arities.get(&callee) {
+                        Some(n) => *n,
+                        None => continue, // external call (e.g. GlslExt)
+                    };
+                    assert_eq!(
+                        arg_count, expected,
+                        "OpFunctionCall to function %{} passes {} args but the function declares {} parameters",
+                        callee, arg_count, expected
+                    );
+                }
+            }
+        }
+    }
+}

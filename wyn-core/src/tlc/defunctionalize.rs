@@ -1035,6 +1035,9 @@ impl<'a> Defunctionalizer<'a> {
 
         // Record captures for this lifted lambda (used during HOF specialization)
         self.lifted_lambda_captures.insert(lifted_sym, captures.clone());
+        // Register as top-level so subsequent free-var passes don't
+        // mis-classify it as a capture of an enclosing lambda.
+        self.top_level.insert(lifted_sym);
 
         if captures.is_empty() {
             // No captures: lift as-is
@@ -1473,6 +1476,13 @@ impl<'a> Defunctionalizer<'a> {
     }
 
     /// Build App(Var(sym), [a1, a2, a3, ...]).
+    ///
+    /// The constructed `func` sub-term carries a real curried-arrow type
+    /// (`a1_ty -> a2_ty -> ... -> result_ty`). Earlier this used a
+    /// `TypeName::Ignored` sentinel under the assumption "intermediate
+    /// values' types don't matter," but downstream passes — most
+    /// notably SPIR-V lowering — *do* inspect the type and panicked on
+    /// the sentinel.
     fn build_app_call(
         &mut self,
         func_sym: SymbolId,
@@ -1480,9 +1490,13 @@ impl<'a> Defunctionalizer<'a> {
         result_ty: Type<TypeName>,
         span: Span,
     ) -> Term {
+        let mut fn_ty = result_ty.clone();
+        for arg in args.iter().rev() {
+            fn_ty = Type::arrow(arg.ty.clone(), fn_ty);
+        }
         let func_term = Term {
             id: self.term_ids.next_id(),
-            ty: Type::Constructed(TypeName::Ignored, vec![]),
+            ty: fn_ty,
             span,
             kind: TermKind::Var(func_sym),
         };
@@ -1720,7 +1734,11 @@ impl<'a> Defunctionalizer<'a> {
             arity: new_params.len(),
         };
 
-        // Register
+        // Register the specialized HOF as top-level so an enclosing
+        // lambda's free-var pass doesn't pick it up as a capture (it
+        // wasn't in `top_level` at startup because it's a fresh symbol
+        // produced by this pass).
+        self.top_level.insert(specialized_sym);
         self.lifted_defs.push(specialized_def);
 
         // Build call to specialized function

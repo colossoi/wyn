@@ -207,9 +207,6 @@ pub enum TypeName {
     /// Created when opening existential types (?k. T). Unlike unification variables,
     /// skolems only unify with themselves (same ID), enforcing opacity.
     Skolem(SkolemId),
-    /// Ignored/placeholder type for intermediate values whose types are never inspected.
-    /// Used in defunctionalization for intermediate values whose types don't matter.
-    Ignored,
 }
 
 impl std::fmt::Display for TypeName {
@@ -267,7 +264,6 @@ impl std::fmt::Display for TypeName {
             TypeName::ArrayVariantVirtual => write!(f, "virtual"),
             TypeName::AddressPlaceholder => write!(f, "?addrspace"),
             TypeName::Skolem(id) => write!(f, "{}", id),
-            TypeName::Ignored => write!(f, "_"),
         }
     }
 }
@@ -327,7 +323,6 @@ impl polytype::Name for TypeName {
             TypeName::ArrayVariantVirtual => "virtual".to_string(),
             TypeName::AddressPlaceholder => "?variant".to_string(),
             TypeName::Skolem(id) => format!("{}", id),
-            TypeName::Ignored => "_".to_string(),
         }
     }
 }
