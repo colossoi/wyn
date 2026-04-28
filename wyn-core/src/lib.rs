@@ -27,7 +27,10 @@ pub mod uniqueness_promote;
 
 pub mod egir;
 pub mod glsl;
-pub mod pipeline_descriptor;
+/// Re-export of the pipeline descriptor format. Lives in its own
+/// crate so host runtimes (e.g. `extra/viz`) can deserialize the
+/// JSON without pulling in the whole compiler.
+pub use wyn_pipeline_descriptor as pipeline_descriptor;
 pub mod resolve_opens;
 pub mod resolve_placeholders;
 pub mod spirv;

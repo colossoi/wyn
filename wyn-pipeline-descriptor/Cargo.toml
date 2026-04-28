@@ -1,0 +1,10 @@
+[package]
+name = "wyn-pipeline-descriptor"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Pipeline descriptor format emitted by the wyn compiler and consumed by host runtimes."
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }

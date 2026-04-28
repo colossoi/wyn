@@ -1517,6 +1517,14 @@ dependencies = [
  "smallvec",
  "spirv",
  "thiserror 1.0.69",
+ "wyn-pipeline-descriptor",
+]
+
+[[package]]
+name = "wyn-pipeline-descriptor"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

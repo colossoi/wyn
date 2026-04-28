@@ -5,20 +5,21 @@
 //! what order, and what GPU resources (buffers, uniforms, push constants) each
 //! stage uses.
 //!
-//! A generic host runtime reads this descriptor and sets up the Vulkan/WebGPU
-//! pipeline accordingly. All algorithm knowledge lives in the compiler.
+//! A generic host runtime (e.g. `viz`) reads this descriptor and sets up the
+//! Vulkan/WebGPU pipeline accordingly. All algorithm knowledge lives in the
+//! compiler.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Top-level pipeline descriptor. One per compiled program.
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct PipelineDescriptor {
     /// Individual pipelines in this program (one per top-level entry or multi-dispatch SOAC).
     pub pipelines: Vec<Pipeline>,
 }
 
 /// A single pipeline within the program.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Pipeline {
     /// Single compute dispatch (Map, Scatter, simple compute).
@@ -30,7 +31,7 @@ pub enum Pipeline {
 }
 
 /// Single-dispatch compute pipeline.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComputePipeline {
     pub entry_point: String,
     pub workgroup_size: (u32, u32, u32),
@@ -39,7 +40,7 @@ pub struct ComputePipeline {
 }
 
 /// Multi-dispatch compute pipeline.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultiComputePipeline {
     /// All bindings used across all stages.
     pub bindings: Vec<Binding>,
@@ -48,7 +49,7 @@ pub struct MultiComputePipeline {
 }
 
 /// A single stage in a multi-dispatch compute pipeline.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComputeStage {
     pub entry_point: String,
     pub workgroup_size: (u32, u32, u32),
@@ -60,7 +61,7 @@ pub struct ComputeStage {
 }
 
 /// Graphics pipeline (vertex + fragment stages).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphicsPipeline {
     pub stages: Vec<GraphicsStage>,
     pub bindings: Vec<Binding>,
@@ -69,14 +70,14 @@ pub struct GraphicsPipeline {
 }
 
 /// A stage in a graphics pipeline.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphicsStage {
     pub entry_point: String,
     pub stage: ShaderStage,
 }
 
 /// Shader stage type.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShaderStage {
     Vertex,
@@ -84,7 +85,7 @@ pub enum ShaderStage {
 }
 
 /// How to determine the compute dispatch grid size.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DispatchSize {
     /// Fixed dispatch grid.
@@ -100,7 +101,7 @@ pub enum DispatchSize {
 }
 
 /// A GPU resource binding used by the pipeline.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Binding {
     /// Storage buffer (descriptor set binding).
@@ -125,8 +126,32 @@ pub enum Binding {
     },
 }
 
+impl Binding {
+    /// Descriptor-set binding number for storage / uniform bindings.
+    /// Panics on `PushConstant`, which has no binding number — push
+    /// constants live in their own range and are addressed by offset.
+    pub fn wgpu_binding(&self) -> u32 {
+        match self {
+            Binding::StorageBuffer { binding, .. } => *binding,
+            Binding::Uniform { binding, .. } => *binding,
+            Binding::PushConstant { .. } => panic!("PushConstant has no binding number"),
+        }
+    }
+
+    /// True iff this is a storage buffer marked as a host-supplied input.
+    pub fn is_input(&self) -> bool {
+        matches!(
+            self,
+            Binding::StorageBuffer {
+                usage: BufferUsage::Input,
+                ..
+            }
+        )
+    }
+}
+
 /// Access mode for a storage buffer.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Access {
     ReadOnly,
@@ -135,7 +160,7 @@ pub enum Access {
 }
 
 /// How a buffer is used in the pipeline.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BufferUsage {
     /// Read-only input from the host.
@@ -147,14 +172,14 @@ pub enum BufferUsage {
 }
 
 /// Vertex input attribute.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VertexAttribute {
     pub location: u32,
     pub name: String,
 }
 
 /// Fragment output.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FragmentOutput {
     pub location: u32,
     pub name: String,

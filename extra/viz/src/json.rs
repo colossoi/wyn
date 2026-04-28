@@ -1,184 +1,19 @@
-//! JSON I/O: pipeline descriptor parsing (mirrors
-//! `wyn-core/src/pipeline_descriptor.rs`) and f32 array load/save used
-//! by the descriptor-driven `pipeline` mode.
+//! Re-export of the shared `wyn_pipeline_descriptor` types plus the
+//! f32-array I/O used by the descriptor-driven `pipeline` mode.
+//!
+//! The descriptor schema lives in its own crate so the compiler
+//! (which serializes it) and host runtimes (which deserialize it)
+//! share a single source of truth.
 
 use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
-use serde::Deserialize;
 
-#[derive(Debug, Deserialize)]
-pub struct PipelineDescriptor {
-    pub pipelines: Vec<Pipeline>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Pipeline {
-    Compute(ComputePipeline),
-    MultiCompute(MultiComputePipeline),
-    Graphics(GraphicsPipeline),
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ComputePipeline {
-    pub entry_point: String,
-    pub workgroup_size: (u32, u32, u32),
-    pub dispatch_size: DispatchSize,
-    pub bindings: Vec<Binding>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct MultiComputePipeline {
-    pub bindings: Vec<Binding>,
-    pub stages: Vec<ComputeStage>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ComputeStage {
-    pub entry_point: String,
-    pub workgroup_size: (u32, u32, u32),
-    pub dispatch_size: DispatchSize,
-    pub reads: Vec<usize>,
-    pub writes: Vec<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct GraphicsPipeline {
-    pub stages: Vec<GraphicsStage>,
-    pub bindings: Vec<Binding>,
-    pub vertex_inputs: Vec<VertexAttribute>,
-    pub fragment_outputs: Vec<FragmentOutput>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct GraphicsStage {
-    pub entry_point: String,
-    pub stage: ShaderStage,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ShaderStage {
-    Vertex,
-    Fragment,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum DispatchSize {
-    Fixed {
-        x: u32,
-        y: u32,
-        z: u32,
-    },
-    DerivedFromInputLength {
-        workgroup_size: u32,
-    },
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum Binding {
-    StorageBuffer {
-        set: u32,
-        binding: u32,
-        access: Access,
-        usage: BufferUsage,
-        name: String,
-    },
-    Uniform {
-        set: u32,
-        binding: u32,
-        name: String,
-    },
-    PushConstant {
-        offset: u32,
-        size: u32,
-        name: String,
-    },
-}
-
-#[derive(Debug, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum Access {
-    ReadOnly,
-    WriteOnly,
-    ReadWrite,
-}
-
-#[derive(Debug, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum BufferUsage {
-    Input,
-    Output,
-    Intermediate,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct VertexAttribute {
-    pub location: u32,
-    pub name: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct FragmentOutput {
-    pub location: u32,
-    pub name: String,
-}
-
-impl Binding {
-    pub fn name(&self) -> &str {
-        match self {
-            Binding::StorageBuffer { name, .. } => name,
-            Binding::Uniform { name, .. } => name,
-            Binding::PushConstant { name, .. } => name,
-        }
-    }
-
-    pub fn wgpu_binding(&self) -> u32 {
-        match self {
-            Binding::StorageBuffer { binding, .. } => *binding,
-            Binding::Uniform { binding, .. } => *binding,
-            Binding::PushConstant { .. } => panic!("PushConstant has no binding number"),
-        }
-    }
-
-    pub fn is_storage(&self) -> bool {
-        matches!(self, Binding::StorageBuffer { .. })
-    }
-
-    pub fn is_input(&self) -> bool {
-        matches!(
-            self,
-            Binding::StorageBuffer {
-                usage: BufferUsage::Input,
-                ..
-            }
-        )
-    }
-
-    pub fn is_output(&self) -> bool {
-        matches!(
-            self,
-            Binding::StorageBuffer {
-                usage: BufferUsage::Output,
-                ..
-            }
-        )
-    }
-
-    pub fn is_read_only(&self) -> bool {
-        matches!(
-            self,
-            Binding::StorageBuffer {
-                access: Access::ReadOnly,
-                ..
-            }
-        )
-    }
-}
+pub use wyn_pipeline_descriptor::{
+    Access, Binding, BufferUsage, ComputePipeline, DispatchSize, MultiComputePipeline, Pipeline,
+    PipelineDescriptor,
+};
 
 pub fn load_f32_json(path: &Path) -> Result<Vec<f32>> {
     let content =
