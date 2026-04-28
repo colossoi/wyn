@@ -23,34 +23,41 @@ use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowAttributes};
 
-use crate::json::pipeline_desc;
+use crate::json::{Binding, Pipeline, PipelineDescriptor};
 use crate::spirv::load_spirv_module;
 
 
 // --- Pipeline spec passed to the app -----------------------------------------
 
-pub enum PipelineSpec {
-    VertexFragment {
-        path: PathBuf,
-        vertex: String,
-        fragment: String,
-        shadertoy: bool,
-        max_frames: Option<u32>,
-        verbose: bool,
-        validate: bool,
-        present_mode: PresentMode,
-        difficulty: i32,
-        size: Option<(u32, u32)>,
-    },
-    TestPattern {
-        /// WGSL source to compile. The `testpattern` mode passes its
-        /// embedded built-in shader; nothing else uses this variant
-        /// today, but threading the source through here keeps app.rs
-        /// agnostic of the mode-specific WGSL string.
-        shader_source: &'static str,
-        max_frames: Option<u32>,
-        verbose: bool,
-    },
+/// Configuration for the interactive viewer. Both `vf` and `testpattern`
+/// modes flow through this struct — they only differ in `shader` and a
+/// few fixed-default fields (testpattern uses Fifo, validate=true, etc.).
+pub struct PipelineSpec {
+    pub shader: Shader,
+    pub vertex_entry: String,
+    pub fragment_entry: String,
+    /// Bind shadertoy-style uniforms (iResolution, iTime, iMouse,
+    /// difficulty) discovered from the SPIR-V's JSON sidecar. Only
+    /// meaningful for `Shader::Spirv`; ignored for `Shader::Wgsl`,
+    /// which uses its own hardcoded resolution uniform.
+    pub shadertoy: bool,
+    pub max_frames: Option<u32>,
+    pub verbose: bool,
+    pub validate: bool,
+    pub present_mode: PresentMode,
+    pub difficulty: i32,
+    pub size: Option<(u32, u32)>,
+}
+
+/// Where the WGSL/SPIR-V module comes from.
+pub enum Shader {
+    /// Load SPIR-V from disk; entry-point names come from
+    /// `PipelineSpec.{vertex_entry, fragment_entry}`.
+    Spirv(PathBuf),
+    /// Embedded WGSL source compiled in-place. Used by the built-in
+    /// test pattern; `vertex_entry` / `fragment_entry` must name
+    /// functions inside `source`.
+    Wgsl(&'static str),
 }
 
 /// Single shadertoy-style uniform binding declared in a wyn pipeline
@@ -72,16 +79,16 @@ fn load_sidecar_uniforms(spv_path: &Path) -> Vec<UniformDecl> {
     let Ok(content) = fs::read_to_string(&json_path) else {
         return Vec::new();
     };
-    let Ok(desc) = serde_json::from_str::<pipeline_desc::PipelineDescriptor>(&content) else {
+    let Ok(desc) = serde_json::from_str::<PipelineDescriptor>(&content) else {
         return Vec::new();
     };
     for p in &desc.pipelines {
-        if let pipeline_desc::Pipeline::Graphics(g) = p {
+        if let Pipeline::Graphics(g) = p {
             return g
                 .bindings
                 .iter()
                 .filter_map(|b| {
-                    if let pipeline_desc::Binding::Uniform { set, binding, name } = b {
+                    if let Binding::Uniform { set, binding, name } = b {
                         Some(UniformDecl {
                             set: *set,
                             binding: *binding,
@@ -189,10 +196,7 @@ impl State {
 impl State {
     async fn new(window: Arc<Window>, spec: &PipelineSpec) -> Result<Self> {
         // Extract validation flag from spec (validation is ON by default)
-        let validate = match spec {
-            PipelineSpec::VertexFragment { validate, .. } => *validate,
-            PipelineSpec::TestPattern { .. } => true, // always validate for test pattern
-        };
+        let validate = spec.validate;
 
         // Create instance with validation layers (enabled by default)
         let instance_flags = if validate {
@@ -221,10 +225,7 @@ impl State {
             .context("request_adapter failed")?;
 
         // Extract verbose flag from spec
-        let verbose = match spec {
-            PipelineSpec::VertexFragment { verbose, .. } => *verbose,
-            PipelineSpec::TestPattern { verbose, .. } => *verbose,
-        };
+        let verbose = spec.verbose;
 
         // Print adapter info when verbose
         if verbose {
@@ -301,10 +302,7 @@ impl State {
         let size = window.inner_size();
 
         // Extract present mode from spec (default to Fifo for TestPattern)
-        let present_mode = match spec {
-            PipelineSpec::VertexFragment { present_mode, .. } => *present_mode,
-            PipelineSpec::TestPattern { .. } => PresentMode::Fifo,
-        };
+        let present_mode = spec.present_mode;
 
         if verbose {
             eprintln!("[viz] Present mode: {:?}", present_mode);
@@ -341,13 +339,8 @@ impl State {
             uniform_bind_group,
             uniform_bind_group_layout,
             uniform_bind_group_set,
-        ) = if let PipelineSpec::VertexFragment {
-            shadertoy: true,
-            path,
-            difficulty,
-            ..
-        } = spec
-        {
+        ) = if let (true, Shader::Spirv(path)) = (spec.shadertoy, &spec.shader) {
+            let difficulty = &spec.difficulty;
             // Map each well-known Shadertoy name to a slot on its preferred
             // (legacy) binding. The sidecar, if present, overrides the
             // binding and set number to match the shader's declarations.
@@ -550,25 +543,14 @@ impl State {
         let mut resolution_buffer = resolution_buffer;
         let mut uniform_bind_group = uniform_bind_group;
 
-        // Extract max_frames and verbose from spec
-        let (max_frames, verbose) = match spec {
-            PipelineSpec::VertexFragment {
-                max_frames, verbose, ..
-            } => (*max_frames, *verbose),
-            PipelineSpec::TestPattern {
-                max_frames, verbose, ..
-            } => (*max_frames, *verbose),
-        };
+        let max_frames = spec.max_frames;
 
-        // === Build pipeline from the chosen mode ==============================
-        let pipeline = match spec {
-            PipelineSpec::VertexFragment {
-                path,
-                vertex,
-                fragment,
-                shadertoy,
-                ..
-            } => {
+        // === Build pipeline from the chosen shader source ====================
+        let pipeline = match &spec.shader {
+            Shader::Spirv(path) => {
+                let vertex = &spec.vertex_entry;
+                let fragment = &spec.fragment_entry;
+                let shadertoy = &spec.shadertoy;
                 let module = load_spirv_module(&device, path)
                     .with_context(|| format!("load SPIR-V module {:?}", path))?;
 
@@ -620,7 +602,7 @@ impl State {
                     cache: None,
                 })
             }
-            PipelineSpec::TestPattern { shader_source, .. } => {
+            Shader::Wgsl(shader_source) => {
                 eprintln!("[viz] Loading built-in test pattern shader (WGSL)");
 
                 // Create resolution uniform buffer for test pattern
@@ -901,10 +883,7 @@ impl App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let window_size = match &self.spec {
-            PipelineSpec::VertexFragment { size, .. } => *size,
-            PipelineSpec::TestPattern { .. } => None,
-        };
+        let window_size = self.spec.size;
         let mut attrs = WindowAttributes::default().with_title("wgpu + SPIR-V");
         if let Some((w, h)) = window_size {
             attrs = attrs.with_inner_size(PhysicalSize::new(w, h));

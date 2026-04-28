@@ -14,7 +14,7 @@ use wgpu::{
 };
 
 use crate::gpu::{GpuTimestamps, build_bind_group, create_headless_device};
-use crate::json::pipeline_desc;
+use crate::json::{Binding, BufferUsage, Pipeline, PipelineDescriptor};
 use crate::spirv::{detect_entry_points, load_spirv_module};
 
 pub async fn run_miner(
@@ -52,11 +52,11 @@ pub async fn run_miner(
             descriptor_path.display()
         )
     })?;
-    let descriptor: pipeline_desc::PipelineDescriptor = serde_json::from_str(&descriptor_json)
+    let descriptor: PipelineDescriptor = serde_json::from_str(&descriptor_json)
         .with_context(|| "Failed to parse pipeline descriptor JSON")?;
 
     let mp = match descriptor.pipelines.first() {
-        Some(pipeline_desc::Pipeline::MultiCompute(mp)) => mp,
+        Some(Pipeline::MultiCompute(mp)) => mp,
         _ => return Err(anyhow!("Expected multi_compute pipeline in descriptor")),
     };
 
@@ -90,7 +90,7 @@ pub async fn run_miner(
             .bindings
             .iter()
             .filter_map(|b| {
-                if let pipeline_desc::Binding::StorageBuffer { binding, .. } = b {
+                if let Binding::StorageBuffer { binding, .. } = b {
                     Some(*binding)
                 } else {
                     None
@@ -121,7 +121,7 @@ pub async fn run_miner(
             .bindings
             .iter()
             .filter_map(|b| {
-                if let pipeline_desc::Binding::PushConstant { offset, size, .. } = b {
+                if let Binding::PushConstant { offset, size, .. } = b {
                     Some(offset + size)
                 } else {
                     None
@@ -147,13 +147,13 @@ pub async fn run_miner(
 
     let mut buffers: HashMap<u32, (wgpu::Buffer, u64)> = HashMap::new();
     for binding in &mp.bindings {
-        if let pipeline_desc::Binding::StorageBuffer {
+        if let Binding::StorageBuffer {
             binding: b, usage, ..
         } = binding
         {
             let size = match usage {
-                pipeline_desc::BufferUsage::Intermediate => partials_size,
-                pipeline_desc::BufferUsage::Output => result_size,
+                BufferUsage::Intermediate => partials_size,
+                BufferUsage::Output => result_size,
                 _ => continue,
             };
             let buffer = device.create_buffer(&BufferDescriptor {
@@ -228,9 +228,9 @@ pub async fn run_miner(
         .bindings
         .iter()
         .find_map(|b| {
-            if let pipeline_desc::Binding::StorageBuffer {
+            if let Binding::StorageBuffer {
                 binding,
-                usage: pipeline_desc::BufferUsage::Output,
+                usage: BufferUsage::Output,
                 ..
             } = b
             {
@@ -244,9 +244,9 @@ pub async fn run_miner(
         .bindings
         .iter()
         .find_map(|b| {
-            if let pipeline_desc::Binding::StorageBuffer {
+            if let Binding::StorageBuffer {
                 binding,
-                usage: pipeline_desc::BufferUsage::Intermediate,
+                usage: BufferUsage::Intermediate,
                 ..
             } = b
             {

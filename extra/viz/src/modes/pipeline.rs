@@ -14,7 +14,7 @@ use crate::gpu::{
     build_bind_group, build_push_constant_bytes, create_binding_buffers, create_headless_device,
     readback_buffer, resolve_dispatch_size,
 };
-use crate::json::{pipeline_desc, write_f32_json};
+use crate::json::{Binding, BufferUsage, ComputePipeline, MultiComputePipeline, Pipeline, PipelineDescriptor, write_f32_json};
 use crate::spirv::load_spirv_module;
 
 pub async fn run_pipeline(
@@ -27,7 +27,7 @@ pub async fn run_pipeline(
 ) -> Result<()> {
     let desc_json = fs::read_to_string(&pipeline_path)
         .with_context(|| format!("Failed to read pipeline descriptor: {}", pipeline_path.display()))?;
-    let desc: pipeline_desc::PipelineDescriptor =
+    let desc: PipelineDescriptor =
         serde_json::from_str(&desc_json).with_context(|| "Failed to parse pipeline descriptor JSON")?;
 
     if desc.pipelines.is_empty() {
@@ -39,7 +39,7 @@ pub async fn run_pipeline(
 
     for (pi, pipeline) in desc.pipelines.iter().enumerate() {
         match pipeline {
-            pipeline_desc::Pipeline::Compute(cp) => {
+            Pipeline::Compute(cp) => {
                 run_single_compute(
                     &device,
                     &queue,
@@ -52,7 +52,7 @@ pub async fn run_pipeline(
                 )
                 .with_context(|| format!("Pipeline {} (compute) failed", pi))?;
             }
-            pipeline_desc::Pipeline::MultiCompute(mp) => {
+            Pipeline::MultiCompute(mp) => {
                 run_multi_compute(
                     &device,
                     &queue,
@@ -65,7 +65,7 @@ pub async fn run_pipeline(
                 )
                 .with_context(|| format!("Pipeline {} (multi_compute) failed", pi))?;
             }
-            pipeline_desc::Pipeline::Graphics(_) => {
+            Pipeline::Graphics(_) => {
                 eprintln!(
                     "Pipeline {} is a graphics pipeline (not yet supported by `run`)",
                     pi
@@ -83,7 +83,7 @@ fn run_single_compute(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     module: &wgpu::ShaderModule,
-    cp: &pipeline_desc::ComputePipeline,
+    cp: &ComputePipeline,
     inputs: &HashMap<String, PathBuf>,
     outputs: &HashMap<String, PathBuf>,
     push_constants: &[String],
@@ -158,7 +158,7 @@ fn run_multi_compute(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     module: &wgpu::ShaderModule,
-    mp: &pipeline_desc::MultiComputePipeline,
+    mp: &MultiComputePipeline,
     inputs: &HashMap<String, PathBuf>,
     outputs: &HashMap<String, PathBuf>,
     push_constants: &[String],
@@ -263,19 +263,19 @@ fn print_f32_data(name: &str, data: &[f32]) {
 fn output_results(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    bindings: &[pipeline_desc::Binding],
+    bindings: &[Binding],
     buffers: &HashMap<u32, (wgpu::Buffer, u64)>,
     outputs: &HashMap<String, PathBuf>,
 ) -> Result<()> {
     for b in bindings {
-        if let pipeline_desc::Binding::StorageBuffer {
+        if let Binding::StorageBuffer {
             binding, name, usage, ..
         } = b
         {
             // Only read back output and intermediate buffers (skip inputs unless
             // explicitly requested via --output)
             let should_output =
-                *usage != pipeline_desc::BufferUsage::Input || outputs.contains_key(name.as_str());
+                *usage != BufferUsage::Input || outputs.contains_key(name.as_str());
 
             if !should_output {
                 continue;

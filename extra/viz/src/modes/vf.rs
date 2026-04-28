@@ -8,7 +8,7 @@ use anyhow::{Context, Result, anyhow};
 use wgpu::PresentMode;
 use winit::event_loop::EventLoop;
 
-use crate::app::{App, PipelineSpec};
+use crate::app::{App, PipelineSpec, Shader};
 
 pub fn run_vertex_fragment(
     path: PathBuf,
@@ -22,10 +22,10 @@ pub fn run_vertex_fragment(
     difficulty: i32,
     size: Option<(u32, u32)>,
 ) -> Result<()> {
-    let spec = PipelineSpec::VertexFragment {
-        path,
-        vertex,
-        fragment,
+    let spec = PipelineSpec {
+        shader: Shader::Spirv(path),
+        vertex_entry: vertex,
+        fragment_entry: fragment,
         shadertoy,
         max_frames,
         verbose,

@@ -1,6 +1,6 @@
 //! Headless GPU helpers shared across compute / run / miner / validate /
 //! info modes: device acquisition, GPU timestamp profiling, generic
-//! buffer & bind-group construction over `pipeline_desc::Binding`,
+//! buffer & bind-group construction over `Binding`,
 //! readback, push-constant assembly, and the `--shadertoy`-style
 //! sidecar uniform declarations.
 
@@ -15,7 +15,7 @@ use wgpu::{
     RequestAdapterOptions, ShaderStages, Trace,
 };
 
-use crate::json::{load_f32_json, pipeline_desc};
+use crate::json::{Access, Binding, BufferUsage, DispatchSize, load_f32_json};
 use crate::specs::PushConstantSpec;
 
 pub async fn create_headless_device(verbose: bool) -> Result<(wgpu::Device, wgpu::Queue)> {
@@ -168,14 +168,14 @@ impl GpuTimestamps {
 pub fn create_binding_buffers(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    bindings: &[pipeline_desc::Binding],
+    bindings: &[Binding],
     inputs: &HashMap<String, PathBuf>,
     verbose: bool,
 ) -> Result<HashMap<u32, (wgpu::Buffer, u64)>> {
     let mut buffers = HashMap::new();
 
     for b in bindings {
-        if let pipeline_desc::Binding::StorageBuffer {
+        if let Binding::StorageBuffer {
             binding, name, usage, ..
         } = b
         {
@@ -187,7 +187,7 @@ pub fn create_binding_buffers(
                     println!("Loaded {} elements for '{}' from {}", count, name, path.display());
                 }
                 (bytes, count)
-            } else if *usage == pipeline_desc::BufferUsage::Input {
+            } else if *usage == BufferUsage::Input {
                 return Err(anyhow!(
                     "No input file provided for '{}'. Use --input {}:<file.json>",
                     name,
@@ -224,15 +224,15 @@ pub fn create_binding_buffers(
 /// Build a bind group layout + bind group from binding descriptors.
 pub fn build_bind_group(
     device: &wgpu::Device,
-    bindings: &[pipeline_desc::Binding],
+    bindings: &[Binding],
     buffers: &HashMap<u32, (wgpu::Buffer, u64)>,
 ) -> Result<(wgpu::BindGroupLayout, BindGroup)> {
     let mut layout_entries = Vec::new();
     let mut group_entries = Vec::new();
 
     for b in bindings {
-        if let pipeline_desc::Binding::StorageBuffer { binding, access, .. } = b {
-            let read_only = *access == pipeline_desc::Access::ReadOnly;
+        if let Binding::StorageBuffer { binding, access, .. } = b {
+            let read_only = *access == Access::ReadOnly;
             layout_entries.push(BindGroupLayoutEntry {
                 binding: *binding,
                 visibility: ShaderStages::COMPUTE,
@@ -273,14 +273,14 @@ pub fn build_bind_group(
 
 /// Compute dispatch dimensions from a DispatchSize spec.
 pub fn resolve_dispatch_size(
-    dispatch: &pipeline_desc::DispatchSize,
+    dispatch: &DispatchSize,
     buffers: &HashMap<u32, (wgpu::Buffer, u64)>,
-    bindings: &[pipeline_desc::Binding],
+    bindings: &[Binding],
     reads: Option<&[usize]>,
 ) -> (u32, u32, u32) {
     match dispatch {
-        pipeline_desc::DispatchSize::Fixed { x, y, z } => (*x, *y, *z),
-        pipeline_desc::DispatchSize::DerivedFromInputLength { workgroup_size } => {
+        DispatchSize::Fixed { x, y, z } => (*x, *y, *z),
+        DispatchSize::DerivedFromInputLength { workgroup_size } => {
             // Find the first input binding to derive length from
             let input_binding = reads
                 .and_then(|r| r.first())
@@ -342,7 +342,7 @@ pub fn readback_buffer(
 /// Build push constant bytes from descriptor PushConstant bindings + CLI --push-constant args.
 /// The descriptor provides the layout (offsets and sizes); the CLI provides values by name.
 pub fn build_push_constant_bytes(
-    bindings: &[pipeline_desc::Binding],
+    bindings: &[Binding],
     push_constants: &[String],
     verbose: bool,
 ) -> Result<Vec<u8>> {
@@ -350,7 +350,7 @@ pub fn build_push_constant_bytes(
     let pc_bindings: Vec<_> = bindings
         .iter()
         .filter_map(|b| {
-            if let pipeline_desc::Binding::PushConstant { offset, size, name } = b {
+            if let Binding::PushConstant { offset, size, name } = b {
                 Some((name.as_str(), *offset, *size))
             } else {
                 None

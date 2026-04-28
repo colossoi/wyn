@@ -4,7 +4,9 @@
 use anyhow::{Context, Result, anyhow};
 use winit::event_loop::EventLoop;
 
-use crate::app::{App, PipelineSpec};
+use wgpu::PresentMode;
+
+use crate::app::{App, PipelineSpec, Shader};
 
 const TEST_PATTERN_SHADER: &str = r#"
 // Resolution uniform (16-byte aligned)
@@ -52,10 +54,17 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 
 pub fn run_test_pattern(max_frames: Option<u32>, verbose: bool) -> Result<()> {
     eprintln!("[viz] Test pattern mode - built-in WGSL shader");
-    let spec = PipelineSpec::TestPattern {
-        shader_source: TEST_PATTERN_SHADER,
+    let spec = PipelineSpec {
+        shader: Shader::Wgsl(TEST_PATTERN_SHADER),
+        vertex_entry: "vs_main".to_string(),
+        fragment_entry: "fs_main".to_string(),
+        shadertoy: false,
         max_frames,
         verbose,
+        validate: true,
+        present_mode: PresentMode::Fifo,
+        difficulty: 0,
+        size: None,
     };
     let event_loop = EventLoop::new().context("failed to create event loop")?;
     let mut app = App::new(spec);
