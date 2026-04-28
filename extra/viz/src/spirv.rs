@@ -342,4 +342,3 @@ pub fn load_spirv_module(device: &wgpu::Device, path: &Path) -> Result<wgpu::Sha
         Ok(shader_module)
     }
 }
-

@@ -10,8 +10,8 @@ use anyhow::{Context, Result};
 use rspirv::binary::parse_words;
 use rspirv::dr::{Loader, Operand};
 use wgpu::{
-    DeviceDescriptor, Instance, InstanceDescriptor, InstanceFlags, PowerPreference,
-    RequestAdapterOptions, Trace,
+    DeviceDescriptor, Instance, InstanceDescriptor, InstanceFlags, PowerPreference, RequestAdapterOptions,
+    Trace,
 };
 
 use crate::spirv::load_spirv_module;

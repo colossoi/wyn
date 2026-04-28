@@ -7,9 +7,9 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use wgpu::{
-    BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
-    BindingResource, BindingType, BufferBindingType, BufferDescriptor, BufferUsages,
-    CommandEncoderDescriptor, PipelineLayoutDescriptor, ShaderStages,
+    BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource,
+    BindingType, BufferBindingType, BufferDescriptor, BufferUsages, CommandEncoderDescriptor,
+    PipelineLayoutDescriptor, ShaderStages,
 };
 
 use crate::gpu::create_headless_device;

@@ -338,4 +338,3 @@ fn encode_uniform_value(ty: &str, value: &str) -> Result<Vec<u8>> {
     }
     Ok(bytes)
 }
-

@@ -8,7 +8,6 @@ use std::path::Path;
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
-
 #[derive(Debug, Deserialize)]
 pub struct PipelineDescriptor {
     pub pipelines: Vec<Pipeline>,
@@ -200,5 +199,3 @@ pub fn write_f32_json(path: &Path, data: &[f32]) -> Result<()> {
         serde_json::to_string_pretty(&data.iter().map(|&f| serde_json::json!(f)).collect::<Vec<_>>())?;
     fs::write(path, json).with_context(|| format!("Failed to write: {}", path.display()))
 }
-
-

@@ -12,10 +12,9 @@ use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
     BindingResource, BindingType, BufferBindingType, BufferDescriptor, BufferUsages, Color,
     ColorTargetState, CommandEncoderDescriptor, DeviceDescriptor, FragmentState, Instance,
-    InstanceDescriptor, InstanceFlags, LoadOp, MultisampleState, Operations,
-    PipelineLayoutDescriptor, PowerPreference, PresentMode, PrimitiveState, RenderPipeline,
-    RequestAdapterOptions, ShaderStages, StoreOp, SurfaceConfiguration, TextureUsages, Trace,
-    VertexState,
+    InstanceDescriptor, InstanceFlags, LoadOp, MultisampleState, Operations, PipelineLayoutDescriptor,
+    PowerPreference, PresentMode, PrimitiveState, RenderPipeline, RequestAdapterOptions, ShaderStages,
+    StoreOp, SurfaceConfiguration, TextureUsages, Trace, VertexState,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
@@ -25,7 +24,6 @@ use winit::window::{Window, WindowAttributes};
 
 use crate::json::{Binding, Pipeline, PipelineDescriptor};
 use crate::spirv::load_spirv_module;
-
 
 // --- Pipeline spec passed to the app -----------------------------------------
 
@@ -868,7 +866,6 @@ impl State {
         }
     }
 }
-
 
 pub struct App {
     state: Option<State>,

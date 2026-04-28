@@ -9,9 +9,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow};
-use wgpu::{
-    BufferDescriptor, BufferUsages, CommandEncoderDescriptor, PipelineLayoutDescriptor,
-};
+use wgpu::{BufferDescriptor, BufferUsages, CommandEncoderDescriptor, PipelineLayoutDescriptor};
 
 use crate::gpu::{GpuTimestamps, build_bind_group, create_headless_device};
 use crate::json::{Binding, BufferUsage, Pipeline, PipelineDescriptor};
@@ -86,17 +84,13 @@ pub async fn run_miner(
             spv_bytes.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
         let entry_points = detect_entry_points(&spv_words)?;
         let descriptor_entries: Vec<&str> = mp.stages.iter().map(|s| s.entry_point.as_str()).collect();
-        let descriptor_bindings: Vec<u32> = mp
-            .bindings
-            .iter()
-            .filter_map(|b| {
-                if let Binding::StorageBuffer { binding, .. } = b {
-                    Some(*binding)
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let descriptor_bindings: Vec<u32> =
+            mp.bindings
+                .iter()
+                .filter_map(|b| {
+                    if let Binding::StorageBuffer { binding, .. } = b { Some(*binding) } else { None }
+                })
+                .collect();
 
         if verbose {
             println!(
@@ -121,11 +115,7 @@ pub async fn run_miner(
             .bindings
             .iter()
             .filter_map(|b| {
-                if let Binding::PushConstant { offset, size, .. } = b {
-                    Some(offset + size)
-                } else {
-                    None
-                }
+                if let Binding::PushConstant { offset, size, .. } = b { Some(offset + size) } else { None }
             })
             .max()
             .unwrap_or(0);
@@ -533,4 +523,3 @@ fn decode_compact_target(bits: u32) -> [u32; 8] {
 fn format_u256_hex(words: &[u32; 8]) -> String {
     words.iter().map(|w| format!("{:08x}", w)).collect()
 }
-

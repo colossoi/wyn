@@ -14,7 +14,10 @@ use crate::gpu::{
     build_bind_group, build_push_constant_bytes, create_binding_buffers, create_headless_device,
     readback_buffer, resolve_dispatch_size,
 };
-use crate::json::{Binding, BufferUsage, ComputePipeline, MultiComputePipeline, Pipeline, PipelineDescriptor, write_f32_json};
+use crate::json::{
+    Binding, BufferUsage, ComputePipeline, MultiComputePipeline, Pipeline, PipelineDescriptor,
+    write_f32_json,
+};
 use crate::spirv::load_spirv_module;
 
 pub async fn run_pipeline(
@@ -274,8 +277,7 @@ fn output_results(
         {
             // Only read back output and intermediate buffers (skip inputs unless
             // explicitly requested via --output)
-            let should_output =
-                *usage != BufferUsage::Input || outputs.contains_key(name.as_str());
+            let should_output = *usage != BufferUsage::Input || outputs.contains_key(name.as_str());
 
             if !should_output {
                 continue;

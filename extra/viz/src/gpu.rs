@@ -164,7 +164,6 @@ impl GpuTimestamps {
     }
 }
 
-
 pub fn create_binding_buffers(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -429,5 +428,3 @@ pub fn build_push_constant_bytes(
 
     Ok(bytes)
 }
-
-
