@@ -146,7 +146,7 @@ impl StorageBufferSpec {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PushConstantSpec {
     pub name: String,
     pub offset: u32,
@@ -174,6 +174,21 @@ impl PushConstantSpec {
 
     pub fn byte_size(&self) -> u32 {
         self.data.len() as u32
+    }
+
+    /// Assign sequential offsets across `specs` (each one immediately
+    /// after the previous, no padding) and return the total byte
+    /// size of the laid-out range. For the descriptor-driven path the
+    /// offsets come from the descriptor; for the `compute` mode (no
+    /// descriptor), the caller must lay them out before calling
+    /// `build_push_constant_bytes`.
+    pub fn lay_out_sequential(specs: &mut [PushConstantSpec]) -> u32 {
+        let mut offset = 0u32;
+        for spec in specs {
+            spec.offset = offset;
+            offset += spec.byte_size();
+        }
+        offset
     }
 }
 

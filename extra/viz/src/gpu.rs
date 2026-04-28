@@ -16,7 +16,8 @@ use wgpu::{
 };
 
 use crate::json::{Access, Binding, BufferUsage, DispatchSize, load_f32_json};
-use crate::specs::PushConstantSpec;
+use crate::specs::{PushConstantSpec, StorageBufferSpec, UniformSpec};
+use crate::spirv::SpirvAccess;
 
 pub async fn create_headless_device(verbose: bool) -> Result<(wgpu::Device, wgpu::Queue)> {
     let instance = Instance::new(&InstanceDescriptor::default());
@@ -342,7 +343,7 @@ pub fn readback_buffer(
 /// The descriptor provides the layout (offsets and sizes); the CLI provides values by name.
 pub fn build_push_constant_bytes(
     bindings: &[Binding],
-    push_constants: &[String],
+    push_constants: &[PushConstantSpec],
     verbose: bool,
 ) -> Result<Vec<u8>> {
     // Collect PushConstant bindings from the descriptor
@@ -361,26 +362,21 @@ pub fn build_push_constant_bytes(
         return Ok(vec![]);
     }
 
-    // If we have CLI push constants but no descriptor bindings, use sequential layout
+    // No descriptor bindings: pack sequentially using the offsets the
+    // caller assigned via `PushConstantSpec::lay_out_sequential`. The
+    // helper guarantees specs are in offset-ascending order, so the
+    // last one tells us the total range.
     if pc_bindings.is_empty() && !push_constants.is_empty() {
-        let mut pc_specs: Vec<PushConstantSpec> =
-            push_constants.iter().map(|s| PushConstantSpec::parse(s)).collect::<Result<Vec<_>>>()?;
-
-        let mut offset = 0u32;
-        for spec in &mut pc_specs {
-            spec.offset = offset;
-            offset += spec.byte_size();
-        }
-        let total = offset as usize;
+        let total = push_constants.last().map(|s| s.offset + s.byte_size()).unwrap_or(0) as usize;
         let mut bytes = vec![0u8; total];
-        for spec in &pc_specs {
+        for spec in push_constants {
             let start = spec.offset as usize;
             let end = start + spec.data.len();
             bytes[start..end].copy_from_slice(&spec.data);
         }
         if verbose {
             println!("Push constants ({} bytes, sequential layout):", total);
-            for spec in &pc_specs {
+            for spec in push_constants {
                 println!(
                     "  {} @ offset {}: {} bytes",
                     spec.name,
@@ -392,14 +388,9 @@ pub fn build_push_constant_bytes(
         return Ok(bytes);
     }
 
-    // Parse CLI push constants into a map by name
-    let cli_specs: HashMap<String, PushConstantSpec> = push_constants
-        .iter()
-        .map(|s| {
-            let spec = PushConstantSpec::parse(s)?;
-            Ok((spec.name.clone(), spec))
-        })
-        .collect::<Result<HashMap<_, _>>>()?;
+    // Index CLI push constants by name for descriptor-driven layout
+    let cli_specs: HashMap<&str, &PushConstantSpec> =
+        push_constants.iter().map(|spec| (spec.name.as_str(), spec)).collect();
 
     // Compute total size from descriptor
     let total_size = pc_bindings.iter().map(|(_, offset, size)| offset + size).max().unwrap_or(0) as usize;
@@ -427,4 +418,145 @@ pub fn build_push_constant_bytes(
     }
 
     Ok(bytes)
+}
+
+/// Allocate the storage + staging buffer pair for each `StorageBufferSpec`,
+/// upload its initial data (zeros, or the JSON file the spec points at),
+/// and return tuples for the bind-group + readback steps.
+pub fn prepare_storage_buffers(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    specs: Vec<StorageBufferSpec>,
+    verbose: bool,
+) -> Result<Vec<(StorageBufferSpec, wgpu::Buffer, wgpu::Buffer)>> {
+    let mut out = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let buffer = device.create_buffer(&BufferDescriptor {
+            label: Some(&format!("storage_buffer_set{}_b{}", spec.set, spec.binding)),
+            size: spec.byte_size(),
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let init_data = spec.load_initial_data()?;
+        if verbose && spec.input_file.is_some() {
+            println!(
+                "Loaded {} bytes for set {} binding {} from {:?}",
+                init_data.len(),
+                spec.set,
+                spec.binding,
+                spec.input_file
+            );
+        }
+        queue.write_buffer(&buffer, 0, &init_data);
+
+        let staging = device.create_buffer(&BufferDescriptor {
+            label: Some(&format!("staging_buffer_set{}_b{}", spec.set, spec.binding)),
+            size: spec.byte_size(),
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        out.push((spec, buffer, staging));
+    }
+    Ok(out)
+}
+
+/// Build one BindGroupLayout + BindGroup per descriptor set spanning
+/// `storage_buffers` and `uniform_buffers`, indexed by set number.
+/// wgpu requires set indices in the pipeline layout to be contiguous
+/// from 0, so any unused intermediate sets get an empty layout/group.
+///
+/// Storage-buffer access mode is read from `access_by_binding`
+/// (extracted from the SPIR-V's `NonWritable` / `NonReadable`
+/// decorations); the pipeline layout must match exactly.
+pub fn build_per_set_bind_groups(
+    device: &wgpu::Device,
+    storage_buffers: &[(StorageBufferSpec, wgpu::Buffer, wgpu::Buffer)],
+    uniform_buffers: &[(UniformSpec, wgpu::Buffer)],
+    access_by_binding: &HashMap<(u32, u32), SpirvAccess>,
+) -> (Vec<wgpu::BindGroupLayout>, Vec<BindGroup>) {
+    let max_set = storage_buffers
+        .iter()
+        .map(|(s, _, _)| s.set)
+        .chain(uniform_buffers.iter().map(|(u, _)| u.set))
+        .max()
+        .unwrap_or(0);
+
+    let mut layouts: Vec<wgpu::BindGroupLayout> = Vec::with_capacity((max_set + 1) as usize);
+    let mut bind_groups: Vec<BindGroup> = Vec::with_capacity((max_set + 1) as usize);
+    for set in 0..=max_set {
+        let mut layout_entries: Vec<BindGroupLayoutEntry> = Vec::new();
+        let mut group_entries: Vec<BindGroupEntry> = Vec::new();
+
+        for (spec, buf, _) in storage_buffers {
+            if spec.set != set {
+                continue;
+            }
+            // Default to read-write if the shader has no opinion. Read-only
+            // when `NonWritable` is set; `WriteOnly` falls back to
+            // read_only=false because wgpu's `Storage { read_only }` has
+            // no separate write-only form.
+            let read_only = matches!(
+                access_by_binding.get(&(spec.set, spec.binding)),
+                Some(SpirvAccess::ReadOnly)
+            );
+            layout_entries.push(BindGroupLayoutEntry {
+                binding: spec.binding,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Storage { read_only },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            });
+            group_entries.push(BindGroupEntry {
+                binding: spec.binding,
+                resource: BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: buf,
+                    offset: 0,
+                    size: None,
+                }),
+            });
+        }
+        for (spec, buf) in uniform_buffers {
+            if spec.set != set {
+                continue;
+            }
+            layout_entries.push(BindGroupLayoutEntry {
+                binding: spec.binding,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            });
+            group_entries.push(BindGroupEntry {
+                binding: spec.binding,
+                resource: BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: buf,
+                    offset: 0,
+                    size: None,
+                }),
+            });
+        }
+        layout_entries.sort_by_key(|e| e.binding);
+        group_entries.sort_by_key(|e| e.binding);
+
+        let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some(&format!("compute_bgl_set{}", set)),
+            entries: &layout_entries,
+        });
+        let group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some(&format!("compute_bg_set{}", set)),
+            layout: &layout,
+            entries: &group_entries,
+        });
+        layouts.push(layout);
+        bind_groups.push(group);
+    }
+    (layouts, bind_groups)
 }

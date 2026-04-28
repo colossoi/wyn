@@ -18,6 +18,7 @@ use crate::json::{
     Binding, BufferUsage, ComputePipeline, MultiComputePipeline, Pipeline, PipelineDescriptor,
     write_f32_json,
 };
+use crate::specs::PushConstantSpec;
 use crate::spirv::load_spirv_module;
 
 pub async fn run_pipeline(
@@ -25,7 +26,7 @@ pub async fn run_pipeline(
     pipeline_path: PathBuf,
     inputs: HashMap<String, PathBuf>,
     outputs: HashMap<String, PathBuf>,
-    push_constants: &[String],
+    push_constants: &[PushConstantSpec],
     verbose: bool,
 ) -> Result<()> {
     let desc_json = fs::read_to_string(&pipeline_path)
@@ -89,7 +90,7 @@ fn run_single_compute(
     cp: &ComputePipeline,
     inputs: &HashMap<String, PathBuf>,
     outputs: &HashMap<String, PathBuf>,
-    push_constants: &[String],
+    push_constants: &[PushConstantSpec],
     verbose: bool,
 ) -> Result<()> {
     if verbose {
@@ -164,7 +165,7 @@ fn run_multi_compute(
     mp: &MultiComputePipeline,
     inputs: &HashMap<String, PathBuf>,
     outputs: &HashMap<String, PathBuf>,
-    push_constants: &[String],
+    push_constants: &[PushConstantSpec],
     verbose: bool,
 ) -> Result<()> {
     if verbose {

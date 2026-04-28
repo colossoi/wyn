@@ -16,7 +16,7 @@ mod modes;
 mod specs;
 mod spirv;
 
-use crate::specs::{StorageBufferSpec, UniformSpec};
+use crate::specs::{PushConstantSpec, StorageBufferSpec, UniformSpec};
 use crate::spirv::{auto_detect_compute_entry_point, resolve_entry_points};
 
 #[derive(Parser, Debug)]
@@ -157,8 +157,8 @@ enum Command {
         ///   "0:1:64:i32"           - explicit set 0
         ///   "1:0:64:f32"           - set 1, binding 0
         ///   "0:0:8:f32:data.json"  - set 0 binding 0, 8 f32s from data.json
-        #[arg(long = "storage", value_name = "SPEC", verbatim_doc_comment)]
-        storage_buffers: Vec<String>,
+        #[arg(long = "storage", value_name = "SPEC", verbatim_doc_comment, value_parser = StorageBufferSpec::parse)]
+        storage_buffers: Vec<StorageBufferSpec>,
         /// Uniform buffer binding (repeatable).
         ///
         /// Format: `set:binding:type=value[,value...]`. Type is one of
@@ -168,8 +168,8 @@ enum Command {
         ///   "1:0:f32=0.5"
         ///   "1:1:vec3f32=1920,1080,1"
         ///   "0:2:i32=42"
-        #[arg(long = "uniform", value_name = "SPEC", verbatim_doc_comment)]
-        uniforms: Vec<String>,
+        #[arg(long = "uniform", value_name = "SPEC", verbatim_doc_comment, value_parser = UniformSpec::parse)]
+        uniforms: Vec<UniformSpec>,
         /// Push constant (repeatable).
         ///
         /// Format: `name:type=value`. Type is one of i32, u32, f32,
@@ -178,8 +178,8 @@ enum Command {
         /// Examples:
         ///   "n:i32=64"
         ///   "header_base:u32x19=0,0,0,..."
-        #[arg(long = "push-constant", value_name = "SPEC", verbatim_doc_comment)]
-        push_constants: Vec<String>,
+        #[arg(long = "push-constant", value_name = "SPEC", verbatim_doc_comment, value_parser = PushConstantSpec::parse)]
+        push_constants: Vec<PushConstantSpec>,
         /// Print verbose output
         #[arg(short, long)]
         verbose: bool,
@@ -206,8 +206,8 @@ enum Command {
         /// Examples:
         ///   "n:i32=64"
         ///   "header_base:u32x19=0,0,0,..."
-        #[arg(long = "push-constant", value_name = "SPEC", verbatim_doc_comment)]
-        push_constants: Vec<String>,
+        #[arg(long = "push-constant", value_name = "SPEC", verbatim_doc_comment, value_parser = PushConstantSpec::parse)]
+        push_constants: Vec<PushConstantSpec>,
         /// Print verbose output
         #[arg(short, long)]
         verbose: bool,
@@ -315,18 +315,13 @@ fn main() -> Result<()> {
                 })
             });
 
-            let storage_specs: Vec<StorageBufferSpec> =
-                storage_buffers.iter().map(|s| StorageBufferSpec::parse(s)).collect::<Result<Vec<_>>>()?;
-            let uniform_specs: Vec<UniformSpec> =
-                uniforms.iter().map(|s| UniformSpec::parse(s)).collect::<Result<Vec<_>>>()?;
-
             pollster::block_on(modes::compute::run_compute_shader(
                 path,
                 entry_name,
                 (workgroups_x, workgroups_y, workgroups_z),
-                storage_specs,
-                uniform_specs,
-                &push_constants,
+                storage_buffers,
+                uniforms,
+                push_constants,
                 verbose,
             ))?;
         }
