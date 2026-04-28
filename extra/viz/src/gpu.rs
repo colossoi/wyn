@@ -9,65 +9,147 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow};
 use wgpu::{
-    BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
-    BindingResource, BindingType, BufferBindingType, BufferDescriptor, BufferUsages,
-    CommandEncoderDescriptor, DeviceDescriptor, Instance, InstanceDescriptor, PowerPreference,
-    RequestAdapterOptions, ShaderStages, Trace,
+    Adapter, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
+    BindGroupLayoutEntry, BindingResource, BindingType, BufferBindingType, BufferDescriptor, BufferUsages,
+    CommandEncoderDescriptor, Device, DeviceDescriptor, Features, Instance, InstanceDescriptor,
+    InstanceFlags, Limits, MemoryHints, PowerPreference, Queue, RequestAdapterOptions, ShaderStages,
+    Surface, Trace,
 };
 
 use crate::json::{Access, Binding, BufferUsage, DispatchSize, load_f32_json};
 use crate::specs::{PushConstantSpec, StorageBufferSpec, UniformSpec};
 use crate::spirv::SpirvAccess;
 
-pub async fn create_headless_device(verbose: bool) -> Result<(wgpu::Device, wgpu::Queue)> {
-    let instance = Instance::new(&InstanceDescriptor::default());
+/// Bundle of the wgpu objects produced by a single
+/// `Instance::request_adapter` + `Adapter::request_device` cycle.
+/// `surface` is `Some` only when the caller asked for one (the
+/// interactive `vf` / `testpattern` modes); headless callers see `None`.
+pub struct GpuContext {
+    pub adapter: Adapter,
+    pub device: Device,
+    pub queue: Queue,
+    pub surface: Option<Surface<'static>>,
+}
 
-    let adapter = instance
-        .request_adapter(&RequestAdapterOptions {
-            power_preference: PowerPreference::HighPerformance,
-            compatible_surface: None,
-            force_fallback_adapter: false,
+impl GpuContext {
+    /// Discard the adapter / instance / surface and return just the
+    /// device + queue. Convenience for headless callers that don't
+    /// need to inspect the adapter after construction.
+    pub fn into_device_queue(self) -> (Device, Queue) {
+        (self.device, self.queue)
+    }
+
+    /// Build a `GpuContext` from a `DeviceRequest`. The features
+    /// declared in `desired_features` are intersected with the
+    /// adapter's actual support before being requested, so callers
+    /// can ask for everything they'd like to use without erroring on
+    /// adapters that lack one or another extension.
+    pub async fn request(req: DeviceRequest<'_>) -> Result<Self> {
+        let instance = Instance::new(&InstanceDescriptor {
+            flags: req.instance_flags,
+            ..Default::default()
+        });
+
+        let surface = match req.surface_target {
+            Some(make) => Some(make(&instance)?),
+            None => None,
+        };
+
+        let adapter = instance
+            .request_adapter(&RequestAdapterOptions {
+                power_preference: PowerPreference::HighPerformance,
+                compatible_surface: surface.as_ref(),
+                force_fallback_adapter: false,
+            })
+            .await
+            .context("request_adapter failed")?;
+
+        let supported_features = adapter.features() & req.desired_features;
+
+        let mut limits = Limits::default();
+        if let Some(overlay) = req.limits_overlay {
+            overlay(&mut limits, &adapter);
+        }
+
+        let (device, queue) = adapter
+            .request_device(&DeviceDescriptor {
+                label: None,
+                required_features: supported_features,
+                required_limits: limits,
+                memory_hints: MemoryHints::Performance,
+                trace: Trace::Off,
+            })
+            .await
+            .context("failed to create logical device")?;
+
+        Ok(Self {
+            adapter,
+            device,
+            queue,
+            surface,
         })
-        .await
-        .context("request_adapter failed")?;
+    }
+}
 
-    let adapter_features = adapter.features();
-    let spirv_passthrough_supported = adapter_features.contains(wgpu::Features::SPIRV_SHADER_PASSTHROUGH);
+/// Knobs for `GpuContext::request`. Callers fill in only the fields
+/// they care about — `..Default::default()` covers the rest.
+pub struct DeviceRequest<'a> {
+    /// Wgpu instance flags (e.g. `VALIDATION`, `DEBUG`). Defaults to empty.
+    pub instance_flags: InstanceFlags,
+    /// Features the caller would like to use. The actual
+    /// `required_features` passed to `request_device` is this set
+    /// intersected with the adapter's support — features the
+    /// adapter lacks are silently dropped.
+    pub desired_features: Features,
+    /// Optional callback to mutate a default `Limits` in place
+    /// (e.g. raise `max_push_constant_size` to the adapter's
+    /// reported maximum). Receives the `Adapter` so callers can
+    /// query its limits.
+    pub limits_overlay: Option<Box<dyn FnOnce(&mut Limits, &Adapter) + 'a>>,
+    /// Optional surface-creation callback. `Some` produces a
+    /// `Surface<'static>` and routes it through the adapter request
+    /// as the compatibility hint; `None` means a headless setup.
+    pub surface_target: Option<Box<dyn FnOnce(&Instance) -> Result<Surface<'static>> + 'a>>,
+}
+
+impl Default for DeviceRequest<'_> {
+    fn default() -> Self {
+        Self {
+            instance_flags: InstanceFlags::empty(),
+            desired_features: Features::empty(),
+            limits_overlay: None,
+            surface_target: None,
+        }
+    }
+}
+
+/// Headless device + queue with the feature set every compute / pipeline /
+/// miner / validate / info path expects: SPIR-V passthrough, push
+/// constants, and timestamp queries (each conditional on adapter
+/// support), plus the adapter's max push-constant size as the limit.
+pub async fn create_headless_device(verbose: bool) -> Result<(Device, Queue)> {
+    let ctx = GpuContext::request(DeviceRequest {
+        desired_features: Features::SPIRV_SHADER_PASSTHROUGH
+            | Features::PUSH_CONSTANTS
+            | Features::TIMESTAMP_QUERY,
+        limits_overlay: Some(Box::new(|limits, adapter| {
+            limits.max_push_constant_size = adapter.limits().max_push_constant_size;
+        })),
+        ..Default::default()
+    })
+    .await?;
 
     if verbose {
-        let info = adapter.get_info();
+        let info = ctx.adapter.get_info();
         println!("GPU: {} ({:?})", info.name, info.backend);
         println!("Driver: {} {}", info.driver, info.driver_info);
         println!(
             "SPIRV_SHADER_PASSTHROUGH supported: {}",
-            spirv_passthrough_supported
+            ctx.device.features().contains(Features::SPIRV_SHADER_PASSTHROUGH)
         );
     }
 
-    let mut required_features = wgpu::Features::empty();
-    if spirv_passthrough_supported {
-        required_features |= wgpu::Features::SPIRV_SHADER_PASSTHROUGH;
-    }
-    if adapter_features.contains(wgpu::Features::PUSH_CONSTANTS) {
-        required_features |= wgpu::Features::PUSH_CONSTANTS;
-    }
-    if adapter_features.contains(wgpu::Features::TIMESTAMP_QUERY) {
-        required_features |= wgpu::Features::TIMESTAMP_QUERY;
-    }
-
-    let mut limits = wgpu::Limits::default();
-    limits.max_push_constant_size = adapter.limits().max_push_constant_size;
-
-    adapter
-        .request_device(&DeviceDescriptor {
-            label: None,
-            required_features,
-            required_limits: limits,
-            memory_hints: wgpu::MemoryHints::Performance,
-            trace: Trace::Off,
-        })
-        .await
-        .context("failed to create logical device")
+    Ok(ctx.into_device_queue())
 }
 
 /// GPU timestamp profiler for compute passes.

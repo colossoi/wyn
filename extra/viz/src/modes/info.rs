@@ -1,25 +1,16 @@
 //! `info` subcommand — print adapter info, supported features, and
 //! limits for the default GPU.
 
-use anyhow::{Context, Result};
-use wgpu::{Instance, InstanceDescriptor, PowerPreference, RequestAdapterOptions};
+use anyhow::Result;
+
+use crate::gpu::{DeviceRequest, GpuContext};
 
 pub async fn show_device_info() -> Result<()> {
-    let instance = Instance::new(&InstanceDescriptor::default());
+    let ctx = GpuContext::request(DeviceRequest::default()).await?;
 
-    // Try to get an adapter
-    let adapter = instance
-        .request_adapter(&RequestAdapterOptions {
-            power_preference: PowerPreference::HighPerformance,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        })
-        .await
-        .context("No suitable adapter found")?;
-
-    let info = adapter.get_info();
-    let features = adapter.features();
-    let limits = adapter.limits();
+    let info = ctx.adapter.get_info();
+    let features = ctx.adapter.features();
+    let limits = ctx.adapter.limits();
 
     println!("GPU Device Information:");
     println!("  Name: {}", info.name);

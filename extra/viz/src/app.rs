@@ -11,10 +11,9 @@ use anyhow::{Context, Result, anyhow};
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
     BindingResource, BindingType, BufferBindingType, BufferDescriptor, BufferUsages, Color,
-    ColorTargetState, CommandEncoderDescriptor, DeviceDescriptor, FragmentState, Instance,
-    InstanceDescriptor, InstanceFlags, LoadOp, MultisampleState, Operations, PipelineLayoutDescriptor,
-    PowerPreference, PresentMode, PrimitiveState, RenderPipeline, RequestAdapterOptions, ShaderStages,
-    StoreOp, SurfaceConfiguration, TextureUsages, Trace, VertexState,
+    ColorTargetState, CommandEncoderDescriptor, FragmentState, InstanceFlags, LoadOp, MultisampleState,
+    Operations, PipelineLayoutDescriptor, PresentMode, PrimitiveState, RenderPipeline, ShaderStages,
+    StoreOp, SurfaceConfiguration, TextureUsages, VertexState,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
@@ -22,6 +21,7 @@ use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowAttributes};
 
+use crate::gpu::{DeviceRequest, GpuContext};
 use crate::json::{Binding, Pipeline, PipelineDescriptor};
 use crate::spirv::load_spirv_module;
 
@@ -193,75 +193,44 @@ impl State {
 
 impl State {
     async fn new(window: Arc<Window>, spec: &PipelineSpec) -> Result<Self> {
-        // Extract validation flag from spec (validation is ON by default)
         let validate = spec.validate;
-
-        // Create instance with validation layers (enabled by default)
-        let instance_flags = if validate {
+        if validate {
             eprintln!("[viz] Validation layers ENABLED");
-            InstanceFlags::VALIDATION | InstanceFlags::DEBUG
         } else {
             eprintln!("[viz] Validation layers DISABLED");
-            InstanceFlags::empty()
-        };
+        }
 
-        let instance = Instance::new(&InstanceDescriptor {
-            flags: instance_flags,
+        let win = window.clone();
+        let ctx = GpuContext::request(DeviceRequest {
+            instance_flags: if validate {
+                InstanceFlags::VALIDATION | InstanceFlags::DEBUG
+            } else {
+                InstanceFlags::empty()
+            },
+            desired_features: wgpu::Features::SPIRV_SHADER_PASSTHROUGH,
+            surface_target: Some(Box::new(move |inst| {
+                inst.create_surface(win).context("failed to create wgpu surface")
+            })),
             ..Default::default()
-        });
+        })
+        .await?;
 
-        let surface = instance.create_surface(window.clone()).context("failed to create wgpu surface")?;
+        let surface = ctx.surface.expect("surface_target was Some, surface must be present");
+        let adapter = ctx.adapter;
+        let device = ctx.device;
+        let queue = ctx.queue;
 
-        // v26: returns Result<Adapter, RequestAdapterError>
-        let adapter = instance
-            .request_adapter(&RequestAdapterOptions {
-                power_preference: PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            })
-            .await
-            .context("request_adapter failed")?;
-
-        // Extract verbose flag from spec
         let verbose = spec.verbose;
-
-        // Print adapter info when verbose
         if verbose {
             let info = adapter.get_info();
             eprintln!("[viz] Adapter: {} ({:?})", info.name, info.backend);
             eprintln!("[viz] Driver: {}", info.driver);
             eprintln!("[viz] Driver info: {}", info.driver_info);
-        }
-
-        // Check if SPIRV_SHADER_PASSTHROUGH is supported
-        let adapter_features = adapter.features();
-        let spirv_passthrough_supported =
-            adapter_features.contains(wgpu::Features::SPIRV_SHADER_PASSTHROUGH);
-
-        if verbose {
             eprintln!(
                 "[viz] SPIRV_SHADER_PASSTHROUGH supported: {}",
-                spirv_passthrough_supported
+                device.features().contains(wgpu::Features::SPIRV_SHADER_PASSTHROUGH)
             );
         }
-
-        // Build required features
-        let mut required_features = wgpu::Features::empty();
-        if spirv_passthrough_supported {
-            required_features |= wgpu::Features::SPIRV_SHADER_PASSTHROUGH;
-        }
-
-        // v26: request_device takes a single descriptor; trace is in the descriptor
-        let (device, queue) = adapter
-            .request_device(&DeviceDescriptor {
-                label: None,
-                required_features,
-                required_limits: wgpu::Limits::default(),
-                memory_hints: wgpu::MemoryHints::Performance,
-                trace: Trace::Off,
-            })
-            .await
-            .context("failed to create logical device")?;
 
         // Set up uncaptured error handler to catch GPU errors at runtime
         device.on_uncaptured_error(Box::new(|error| {

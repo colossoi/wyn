@@ -9,11 +9,9 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use rspirv::binary::parse_words;
 use rspirv::dr::{Loader, Operand};
-use wgpu::{
-    DeviceDescriptor, Instance, InstanceDescriptor, InstanceFlags, PowerPreference, RequestAdapterOptions,
-    Trace,
-};
+use wgpu::InstanceFlags;
 
+use crate::gpu::{DeviceRequest, GpuContext};
 use crate::spirv::load_spirv_module;
 
 /// Parse and validate a WGSL source file via naga. Synchronous — naga
@@ -38,35 +36,17 @@ pub fn validate_wgsl_file(path: &Path, verbose: bool) -> Result<()> {
 }
 
 pub async fn validate_spirv(path: &Path, verbose: bool) -> Result<()> {
-    let instance = Instance::new(&InstanceDescriptor {
-        flags: InstanceFlags::VALIDATION,
+    let ctx = GpuContext::request(DeviceRequest {
+        instance_flags: InstanceFlags::VALIDATION,
         ..Default::default()
-    });
-
-    let adapter = instance
-        .request_adapter(&RequestAdapterOptions {
-            power_preference: PowerPreference::HighPerformance,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        })
-        .await
-        .context("No suitable GPU adapter found")?;
+    })
+    .await
+    .context("No suitable GPU adapter found")?;
 
     if verbose {
-        let info = adapter.get_info();
+        let info = ctx.adapter.get_info();
         eprintln!("[validate] Adapter: {} ({:?})", info.name, info.backend);
     }
-
-    let (device, _queue) = adapter
-        .request_device(&DeviceDescriptor {
-            label: None,
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::default(),
-            memory_hints: wgpu::MemoryHints::Performance,
-            trace: Trace::Off,
-        })
-        .await
-        .context("Failed to create GPU device")?;
 
     if verbose {
         // Show detected entry points
@@ -95,7 +75,7 @@ pub async fn validate_spirv(path: &Path, verbose: bool) -> Result<()> {
     }
 
     eprintln!("[validate] Loading {}", path.display());
-    match load_spirv_module(&device, path) {
+    match load_spirv_module(&ctx.device, path) {
         Ok(_) => {
             eprintln!("[validate] OK — shader module created successfully");
             Ok(())
