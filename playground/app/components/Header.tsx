@@ -21,15 +21,15 @@ export function Header() {
       </Link>
       <div className="header-right">
         <nav className="header-nav">
-          {/* `reloadDocument` so clicking from another /new view — or
-              from /s/<slug> with the same Playground component still
+          {/* `reloadDocument` so clicking from another /p/new view — or
+              from /p/s/<slug> with the same Playground component still
               mounted — always drops into a fresh editor. Without the
               full reload, Playground's once-only init effect would
               leave the prior source loaded. */}
-          <Link to="/new" reloadDocument className="header-nav-link">
+          <Link to="/p/new" reloadDocument className="header-nav-link">
             New shader
           </Link>
-          <Link to="/popular" className="header-nav-link">
+          <Link to="/p/popular" className="header-nav-link">
             Popular
           </Link>
           <a href="/spec/" className="header-nav-link">

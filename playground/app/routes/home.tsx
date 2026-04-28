@@ -1,5 +1,5 @@
 // `/` — logged-out viewers see the landing page; logged-in viewers
-// redirect to /new (the fresh-editor route), so the canonical
+// redirect to /p/new (the fresh-editor route), so the canonical
 // "compose a new shader" URL stays the same regardless of session
 // state.
 
@@ -26,7 +26,7 @@ export async function loader({ request, context }: Route.LoaderArgs) {
     // Signed-in viewers skip the marketing page — bounce to the
     // fresh-editor route. Same target as the Header's "New shader"
     // link, so the post-login destination is consistent.
-    throw redirect("/new");
+    throw redirect("/p/new");
   }
 
   // Featured-shader resolution: consult the curated `featured_shaders`

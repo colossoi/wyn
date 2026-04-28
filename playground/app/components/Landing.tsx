@@ -50,12 +50,12 @@ export function Landing({ featured }: LandingProps) {
           <a href="/auth/github" className="landing-cta landing-cta-primary">
             Sign in with GitHub
           </a>
-          <a href="/popular" className="landing-cta landing-cta-secondary">
+          <a href="/p/popular" className="landing-cta landing-cta-secondary">
             Popular shaders
           </a>
           {featured && (
             <a
-              href={`/s/${featured.slug}`}
+              href={`/p/s/${featured.slug}`}
               className="landing-cta landing-cta-secondary"
             >
               See an example →
@@ -63,7 +63,7 @@ export function Landing({ featured }: LandingProps) {
           )}
         </div>
         {featured && (
-          <a href={`/s/${featured.slug}`} className="landing-featured">
+          <a href={`/p/s/${featured.slug}`} className="landing-featured">
             <div className="landing-featured-eyebrow">Featured shader</div>
             <div className="landing-featured-card">
               {featured.thumbnail ? (
@@ -79,7 +79,7 @@ export function Landing({ featured }: LandingProps) {
                 <div className="landing-featured-title">
                   {featured.title?.trim() || "Untitled shader"}
                 </div>
-                <div className="landing-featured-slug">/s/{featured.slug}</div>
+                <div className="landing-featured-slug">/p/s/{featured.slug}</div>
               </div>
               <div className="landing-featured-arrow">→</div>
             </div>

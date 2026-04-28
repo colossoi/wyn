@@ -109,7 +109,7 @@ function ShaderCard({ slug, title, thumbnail, createdAt, updatedAt }: ShaderCard
   const displayTitle = title?.trim() || "Untitled shader";
   const edited = createdAt !== updatedAt;
   return (
-    <Link to={`/s/${slug}`} className="shader-card">
+    <Link to={`/p/s/${slug}`} className="shader-card">
       <div className="shader-cover" style={thumbnail ? undefined : coverStyle(slug)}>
         {thumbnail && (
           <img src={thumbnail} alt="" className="shader-cover-img" loading="lazy" />

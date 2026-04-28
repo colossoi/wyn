@@ -1,7 +1,7 @@
-// /popular — top N shaders by view count, no pagination.
+// /p/popular — top N shaders by view count, no pagination.
 //
 // View counts come from the `shader_views` table (incremented on every
-// /s/:slug visit). LEFT JOIN'd to shaders so the grid always fills out
+// /p/s/:slug visit). LEFT JOIN'd to shaders so the grid always fills out
 // even when the counter table is sparse — never-viewed shaders fall to
 // the bottom by `updated_at DESC`.
 
@@ -76,7 +76,7 @@ interface PopularCardProps {
 function PopularCard({ slug, title, thumbnail, views }: PopularCardProps) {
   const displayTitle = title?.trim() || "Untitled shader";
   return (
-    <Link to={`/s/${slug}`} className="shader-card">
+    <Link to={`/p/s/${slug}`} className="shader-card">
       <div className="shader-cover" style={thumbnail ? undefined : coverStyle(slug)}>
         {thumbnail && (
           <img src={thumbnail} alt="" className="shader-cover-img" loading="lazy" />

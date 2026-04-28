@@ -5,7 +5,7 @@
 //     is null, `canSave` is true.
 //   - `routes/shader.tsx`: starts on the loaded shader source; `slug` is the
 //     URL slug; `canSave` is true iff the viewer owns the shader.
-//   - Anonymous viewers of `/s/:slug` hit the same `shader.tsx` path with
+//   - Anonymous viewers of `/p/s/:slug` hit the same `shader.tsx` path with
 //     `canSave=false`.
 //
 // The WASM compiler runs client-only. If `initialSource` is provided it's
@@ -178,7 +178,7 @@ export function Playground({
   useEffect(() => {
     const data = saveFetcher.data;
     if (saveFetcher.state === "idle" && data?.slug && !slug) {
-      navigate(`/s/${data.slug}`);
+      navigate(`/p/s/${data.slug}`);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [saveFetcher.state, saveFetcher.data]);

@@ -1,4 +1,4 @@
-// /s/:slug — view (and optionally edit) a saved shader.
+// /p/s/:slug — view (and optionally edit) a saved shader.
 
 import type { Route } from "./+types/shader";
 import { Playground } from "~/components/Playground";
