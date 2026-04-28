@@ -1488,3 +1488,137 @@
       .user-empty-cta:hover {
         background: var(--accent-hover);
       }
+
+      /* ------------------------------------------------------------ */
+      /* Report dialog                                                */
+      /* ------------------------------------------------------------ */
+
+      .report-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.55);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 100;
+        padding: 24px;
+      }
+
+      .report-dialog {
+        background: var(--bg-darker);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        width: 100%;
+        max-width: 560px;
+        max-height: 90vh;
+        display: flex;
+        flex-direction: column;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+      }
+
+      .report-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 14px 18px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .report-header h2 {
+        font-size: 1.05rem;
+        font-weight: 600;
+        color: var(--text-primary);
+      }
+
+      .report-body {
+        padding: 16px 18px;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        overflow-y: auto;
+      }
+
+      .report-field {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      .report-label {
+        font-size: 0.8rem;
+        color: var(--text-secondary);
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+      }
+
+      .report-count {
+        font-size: 0.75rem;
+        color: var(--text-secondary);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .report-select,
+      .report-textarea {
+        background: var(--bg-editor);
+        color: var(--text-primary);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 8px 10px;
+        font-size: 0.9rem;
+        font-family: inherit;
+        outline: none;
+      }
+
+      .report-textarea {
+        resize: vertical;
+        min-height: 120px;
+        line-height: 1.4;
+      }
+
+      .report-select:focus,
+      .report-textarea:focus {
+        border-color: var(--accent);
+      }
+
+      .report-screenshot-toggle {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 0.85rem;
+        color: var(--text-primary);
+        cursor: pointer;
+      }
+
+      .report-screenshot-toggle input[type="checkbox"] {
+        cursor: pointer;
+      }
+
+      .report-screenshot-preview {
+        margin-top: 8px;
+        max-width: 100%;
+        max-height: 200px;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        background: #000;
+        object-fit: contain;
+      }
+
+      .report-meta {
+        font-size: 0.75rem;
+        color: var(--text-secondary);
+      }
+
+      .report-footer {
+        display: flex;
+        justify-content: flex-end;
+        gap: 10px;
+        padding: 12px 18px;
+        border-top: 1px solid var(--border);
+      }
+
+      .report-success {
+        color: var(--success);
+        font-size: 0.9rem;
+        align-self: center;
+      }

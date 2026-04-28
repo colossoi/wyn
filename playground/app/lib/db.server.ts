@@ -269,6 +269,49 @@ export async function listPopularShaders(
 }
 
 // ----------------------------------------------------------------------------
+// Reports (user-submitted bug reports / feedback)
+// ----------------------------------------------------------------------------
+
+export type ReportCategory = "compiler" | "playground" | "other";
+
+export interface NewReport {
+  category: ReportCategory;
+  comment: string;
+  source: string;
+  screenshot: string | null;
+  userId: number | null;
+  userLogin: string | null;
+  shaderSlug: string | null;
+  userAgent: string | null;
+}
+
+export async function createReport(env: Env, r: NewReport): Promise<number> {
+  const result = await env.DB.prepare(
+    `INSERT INTO reports
+       (category, comment, source, screenshot, user_id, user_login, shader_slug, user_agent)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      r.category,
+      r.comment,
+      r.source,
+      r.screenshot,
+      r.userId,
+      r.userLogin,
+      r.shaderSlug,
+      r.userAgent,
+    )
+    .run();
+  // D1 surfaces the inserted rowid via `meta.last_row_id`.
+  const id = (result as unknown as { meta?: { last_row_id?: number } }).meta
+    ?.last_row_id;
+  if (typeof id !== "number") {
+    throw new Error("createReport: D1 did not return last_row_id");
+  }
+  return id;
+}
+
+// ----------------------------------------------------------------------------
 // Admin check
 // ----------------------------------------------------------------------------
 

@@ -15,6 +15,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useFetcher, useNavigate } from "react-router";
 import { Editor } from "~/components/Editor";
 import { Preview } from "~/components/Preview";
+import { ReportDialog } from "~/components/ReportDialog";
 import { StatusBar, type Status } from "~/components/StatusBar";
 import type { CompileResultWgsl, ErrorInfo, WynWasm } from "~/lib/wasm";
 import { initWasm } from "~/lib/wasm";
@@ -70,6 +71,7 @@ export function Playground({
 
   const saveFetcher = useFetcher<SaveResponse>();
   const navigate = useNavigate();
+  const [reportOpen, setReportOpen] = useState(false);
 
   // Bootstrap WASM, load initial source (prop or fallback), auto-compile.
   useEffect(() => {
@@ -245,6 +247,14 @@ export function Playground({
                       : "☆ Feature"}
                 </button>
               )}
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => setReportOpen(true)}
+                title="Report a compiler or playground issue"
+              >
+                Report
+              </button>
             </div>
           </div>
           <Editor
@@ -261,6 +271,12 @@ export function Playground({
           onErrorClick={handleErrorClick}
         />
       </main>
+      <ReportDialog
+        open={reportOpen}
+        onClose={() => setReportOpen(false)}
+        getSource={() => sourceRef.current}
+        slug={slug}
+      />
     </>
   );
 }
