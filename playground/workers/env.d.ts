@@ -28,6 +28,16 @@ export interface Env {
   // (e.g., managing the featured-shaders table). Case-insensitive.
   // Public-safe — lives in `wrangler.jsonc :: vars`.
   ADMIN_LOGINS: string;
+
+  // From address + display name for transactional mail (login codes).
+  // The address's domain must be configured under Cloudflare Email
+  // Routing for this account; the binding refuses mail otherwise.
+  LOGIN_FROM_EMAIL: string;
+  LOGIN_FROM_NAME: string;
+
+  // Cloudflare Email Workers binding (outbound). Configured in
+  // wrangler.jsonc with no `destination_address`, i.e. unrestricted.
+  MAILER: SendEmail;
 }
 
 declare module "react-router" {

@@ -35,22 +35,84 @@ export interface ShaderListRow {
 // ----------------------------------------------------------------------------
 
 // Upsert the user row that mirrors the GitHub profile. Called from the
-// OAuth callback after `fetchUser`. `login` and `avatar_url` may change over
-// time; `id` is the GitHub numeric id and never changes.
+// OAuth callback. `login` and `avatar_url` may change on GitHub over
+// time; `github_id` is stable. Returns the *internal* user id (the
+// autoincrement primary key) — distinct from `github_id` for users
+// created post-migration. Caller stores the internal id in the session.
 export async function upsertUser(
   env: Env,
   user: { id: number; login: string; avatarUrl: string | null },
-): Promise<void> {
+): Promise<number> {
   await env.DB.prepare(
-    `INSERT INTO users (id, login, avatar_url)
+    `INSERT INTO users (github_id, login, avatar_url)
      VALUES (?, ?, ?)
-     ON CONFLICT(id) DO UPDATE SET
+     ON CONFLICT(github_id) DO UPDATE SET
        login      = excluded.login,
        avatar_url = excluded.avatar_url,
        updated_at = unixepoch()`,
   )
     .bind(user.id, user.login, user.avatarUrl)
     .run();
+  const row = await env.DB.prepare(
+    `SELECT id FROM users WHERE github_id = ? LIMIT 1`,
+  )
+    .bind(user.id)
+    .first<{ id: number }>();
+  if (!row) throw new Error("upsertUser: row vanished after insert");
+  return row.id;
+}
+
+// Find-or-create the user row keyed by email. The `login` for new
+// rows is derived from the email local part and de-duplicated against
+// the existing `login` UNIQUE column with a short random suffix.
+// Returns { id, login } — id is stored in the session, login is used
+// for /u/:login URLs.
+export async function upsertUserByEmail(
+  env: Env,
+  email: string,
+): Promise<{ id: number; login: string }> {
+  const existing = await env.DB.prepare(
+    `SELECT id, login FROM users WHERE email = ? COLLATE NOCASE LIMIT 1`,
+  )
+    .bind(email)
+    .first<{ id: number; login: string }>();
+  if (existing) return existing;
+
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const candidate = candidateLogin(email, attempt);
+    try {
+      const result = await env.DB.prepare(
+        `INSERT INTO users (email, login) VALUES (?, ?)`,
+      )
+        .bind(email, candidate)
+        .run();
+      const id = (result as unknown as { meta?: { last_row_id?: number } }).meta
+        ?.last_row_id;
+      if (typeof id !== "number") {
+        throw new Error("upsertUserByEmail: D1 did not return last_row_id");
+      }
+      return { id, login: candidate };
+    } catch (err) {
+      const msg = (err as Error).message ?? "";
+      if (/unique|constraint/i.test(msg)) continue;
+      throw err;
+    }
+  }
+  throw new Error("upsertUserByEmail: exhausted login candidates");
+}
+
+// Slugify the email's local part down to [a-z0-9-]; on retry, append a
+// 4-char random suffix so the next candidate has a fresh address space.
+function candidateLogin(email: string, attempt: number): string {
+  const at = email.indexOf("@");
+  const local = (at > 0 ? email.slice(0, at) : email).toLowerCase();
+  const slug = local.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "user";
+  const trimmed = slug.slice(0, 24);
+  if (attempt === 0) return trimmed;
+  const bytes = new Uint8Array(2);
+  crypto.getRandomValues(bytes);
+  const suffix = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  return `${trimmed}-${suffix}`;
 }
 
 export async function getUserByLogin(env: Env, login: string): Promise<UserRow | null> {

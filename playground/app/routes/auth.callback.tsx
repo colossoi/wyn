@@ -38,10 +38,10 @@ export async function loader({ request, context }: Route.LoaderArgs) {
   const accessToken = await exchangeCode(env, code, redirectUri);
   const user = await fetchUser(accessToken);
 
-  await upsertUser(env, user);
+  const internalId = await upsertUser(env, user);
 
   const sessionCookie = await createSession(env, {
-    userId: user.id,
+    userId: internalId,
     login: user.login,
     avatarUrl: user.avatarUrl,
     createdAt: Math.floor(Date.now() / 1000),

@@ -27,8 +27,23 @@
 		"GITHUB_CLIENT_ID": "Ov23lifGwLSg5YE1Arzc",
 		// Comma-separated GitHub logins with admin privileges (managing
 		// featured shaders, etc.). Case-insensitive.
-		"ADMIN_LOGINS": "colossoi"
+		"ADMIN_LOGINS": "colossoi",
+		// From-address for transactional mail (login codes). Must be on a
+		// domain that's set up under Cloudflare Email Routing for this
+		// account, with DKIM/SPF records published — otherwise the
+		// `send_email` binding will refuse the message.
+		"LOGIN_FROM_EMAIL": "no-reply@finue.com",
+		"LOGIN_FROM_NAME": "Wyn Playground"
 	},
+	// Outbound mail via Cloudflare Email Workers. Omitting
+	// `destination_address` puts the binding in unrestricted mode — the
+	// recipient can be any address. Requires DKIM on the sender domain
+	// (configured in the Email Routing dashboard for the FROM domain).
+	"send_email": [
+		{
+			"name": "MAILER"
+		}
+	],
 	"kv_namespaces": [
 		{
 			"binding": "SESSIONS",

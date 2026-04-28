@@ -67,8 +67,8 @@ function SignedIn({ session }: { session: Session }) {
 
 function SignedOut() {
   return (
-    <a href="/auth/github" className="signin-link">
-      Sign in with GitHub
+    <a href="/auth/login" className="signin-link">
+      Sign in
     </a>
   );
 }

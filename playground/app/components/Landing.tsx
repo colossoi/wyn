@@ -47,8 +47,8 @@ export function Landing({ featured }: LandingProps) {
           your browser.
         </p>
         <div className="landing-cta-row">
-          <a href="/auth/github" className="landing-cta landing-cta-primary">
-            Sign in with GitHub
+          <a href="/auth/login" className="landing-cta landing-cta-primary">
+            Sign in
           </a>
           <a href="/p/popular" className="landing-cta landing-cta-secondary">
             Popular shaders
