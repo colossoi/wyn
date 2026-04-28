@@ -11,8 +11,8 @@ use anyhow::{Context, Result, anyhow};
 use wgpu::{CommandEncoderDescriptor, PipelineLayoutDescriptor};
 
 use crate::gpu::{
-    build_bind_group, build_push_constant_bytes, create_binding_buffers, create_headless_device,
-    readback_buffer, resolve_dispatch_size,
+    ComputeExecutor, build_bind_group, build_push_constant_bytes, create_binding_buffers,
+    create_headless_device, readback_buffer, resolve_dispatch_size,
 };
 use crate::json::{
     Binding, BufferUsage, ComputePipeline, MultiComputePipeline, Pipeline, PipelineDescriptor,
@@ -136,18 +136,15 @@ fn run_single_compute(
     let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
         label: Some("compute_encoder"),
     });
-    {
-        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("compute_pass"),
-            timestamp_writes: None,
-        });
-        cpass.set_pipeline(&pipeline);
-        cpass.set_bind_group(0, &bind_group, &[]);
-        if !pc_bytes.is_empty() {
-            cpass.set_push_constants(0, &pc_bytes);
-        }
-        cpass.dispatch_workgroups(dispatch.0, dispatch.1, dispatch.2);
+    ComputeExecutor {
+        label: "compute_pass",
+        pipeline: &pipeline,
+        bind_groups: &[&bind_group],
+        push_constant_bytes: &pc_bytes,
+        dispatch,
+        timestamps: None,
     }
+    .record(&mut encoder);
     queue.submit(Some(encoder.finish()));
     let _ = device.poll(wgpu::PollType::Wait);
 
@@ -223,18 +220,16 @@ fn run_multi_compute(
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some(&format!("stage_{}_encoder", si)),
         });
-        {
-            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some(&format!("stage_{}", si)),
-                timestamp_writes: None,
-            });
-            cpass.set_pipeline(&pipeline);
-            cpass.set_bind_group(0, &bind_group, &[]);
-            if !pc_bytes.is_empty() {
-                cpass.set_push_constants(0, &pc_bytes);
-            }
-            cpass.dispatch_workgroups(dispatch.0, dispatch.1, dispatch.2);
+        let stage_label = format!("stage_{}", si);
+        ComputeExecutor {
+            label: &stage_label,
+            pipeline: &pipeline,
+            bind_groups: &[&bind_group],
+            push_constant_bytes: &pc_bytes,
+            dispatch,
+            timestamps: None,
         }
+        .record(&mut encoder);
         queue.submit(Some(encoder.finish()));
         let _ = device.poll(wgpu::PollType::Wait);
     }

@@ -123,6 +123,43 @@ impl Default for DeviceRequest<'_> {
     }
 }
 
+/// Description of a single compute-pass dispatch — pipeline,
+/// bind-group set, push-constant bytes, dispatch dims, optional
+/// timestamp writes. `record` encodes the
+/// `begin_compute_pass → set_pipeline/groups/constants/dispatch → end`
+/// sequence into the caller's encoder. Encoder lifecycle, queue
+/// submit, polling, and any readback all stay at the call site,
+/// which keeps multi-stage / chunked / per-stage-encoder flows
+/// (pipeline mode, miner) free to drive multiple passes per encoder
+/// or split encoders mid-loop.
+pub struct ComputeExecutor<'a> {
+    pub label: &'a str,
+    pub pipeline: &'a wgpu::ComputePipeline,
+    /// Bind groups in set order — `bind_groups[i]` binds at set `i`.
+    pub bind_groups: &'a [&'a BindGroup],
+    /// Empty slice means "don't call `set_push_constants`".
+    pub push_constant_bytes: &'a [u8],
+    pub dispatch: (u32, u32, u32),
+    pub timestamps: Option<wgpu::ComputePassTimestampWrites<'a>>,
+}
+
+impl ComputeExecutor<'_> {
+    pub fn record(self, encoder: &mut wgpu::CommandEncoder) {
+        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some(self.label),
+            timestamp_writes: self.timestamps,
+        });
+        cpass.set_pipeline(self.pipeline);
+        for (i, bg) in self.bind_groups.iter().enumerate() {
+            cpass.set_bind_group(i as u32, *bg, &[]);
+        }
+        if !self.push_constant_bytes.is_empty() {
+            cpass.set_push_constants(0, self.push_constant_bytes);
+        }
+        cpass.dispatch_workgroups(self.dispatch.0, self.dispatch.1, self.dispatch.2);
+    }
+}
+
 /// Headless device + queue with the feature set every compute / pipeline /
 /// miner / validate / info path expects: SPIR-V passthrough, push
 /// constants, and timestamp queries (each conditional on adapter

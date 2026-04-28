@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, anyhow};
 use wgpu::{BufferDescriptor, BufferUsages, CommandEncoderDescriptor, PipelineLayoutDescriptor};
 
-use crate::gpu::{GpuTimestamps, build_bind_group, create_headless_device};
+use crate::gpu::{ComputeExecutor, GpuTimestamps, build_bind_group, create_headless_device};
 use crate::json::{Binding, BufferUsage, Pipeline, PipelineDescriptor};
 use crate::spirv::{detect_entry_points, load_spirv_module};
 
@@ -299,16 +299,15 @@ pub async fn run_miner(
         });
 
         // Phase 1: each thread hashes its chunk, writes partial to partials buffer
-        {
-            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("miner_phase1"),
-                timestamp_writes: gpu_phase1.as_ref().map(|t| t.writes_for(chunk_idx)),
-            });
-            cpass.set_pipeline(&phase1_pipeline);
-            cpass.set_bind_group(0, &bind_group, &[]);
-            cpass.set_push_constants(0, &pc_bytes);
-            cpass.dispatch_workgroups(num_workgroups, 1, 1);
+        ComputeExecutor {
+            label: "miner_phase1",
+            pipeline: &phase1_pipeline,
+            bind_groups: &[&bind_group],
+            push_constant_bytes: &pc_bytes,
+            dispatch: (num_workgroups, 1, 1),
+            timestamps: gpu_phase1.as_ref().map(|t| t.writes_for(chunk_idx)),
         }
+        .record(&mut encoder);
 
         // Debug: dump partials after phase 1
         if verbose {
@@ -350,16 +349,15 @@ pub async fn run_miner(
         }
 
         // Phase 2: single thread combines partials → result
-        {
-            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("miner_phase2"),
-                timestamp_writes: gpu_phase2.as_ref().map(|t| t.writes_for(chunk_idx)),
-            });
-            cpass.set_pipeline(&phase2_pipeline);
-            cpass.set_bind_group(0, &bind_group, &[]);
-            cpass.set_push_constants(0, &pc_bytes);
-            cpass.dispatch_workgroups(1, 1, 1);
+        ComputeExecutor {
+            label: "miner_phase2",
+            pipeline: &phase2_pipeline,
+            bind_groups: &[&bind_group],
+            push_constant_bytes: &pc_bytes,
+            dispatch: (1, 1, 1),
+            timestamps: gpu_phase2.as_ref().map(|t| t.writes_for(chunk_idx)),
         }
+        .record(&mut encoder);
 
         // Copy result to staging
         let (result_buf, _) = &buffers[&result_binding];

@@ -9,7 +9,8 @@ use anyhow::{Context, Result};
 use wgpu::{BufferDescriptor, BufferUsages, CommandEncoderDescriptor, PipelineLayoutDescriptor};
 
 use crate::gpu::{
-    build_per_set_bind_groups, build_push_constant_bytes, create_headless_device, prepare_storage_buffers,
+    ComputeExecutor, build_per_set_bind_groups, build_push_constant_bytes, create_headless_device,
+    prepare_storage_buffers,
 };
 use crate::specs::{PushConstantSpec, StorageBufferSpec, StorageElementType, UniformSpec};
 use crate::spirv::{detect_storage_access, load_spirv_module};
@@ -161,20 +162,16 @@ pub async fn run_compute_shader(
         label: Some("compute_encoder"),
     });
 
-    {
-        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("compute_pass"),
-            timestamp_writes: None,
-        });
-        cpass.set_pipeline(&pipeline);
-        for (set_idx, group) in bind_groups.iter().enumerate() {
-            cpass.set_bind_group(set_idx as u32, group, &[]);
-        }
-        if !pc_bytes.is_empty() {
-            cpass.set_push_constants(0, &pc_bytes);
-        }
-        cpass.dispatch_workgroups(workgroups.0, workgroups.1, workgroups.2);
+    let bind_group_refs: Vec<&wgpu::BindGroup> = bind_groups.iter().collect();
+    ComputeExecutor {
+        label: "compute_pass",
+        pipeline: &pipeline,
+        bind_groups: &bind_group_refs,
+        push_constant_bytes: &pc_bytes,
+        dispatch: workgroups,
+        timestamps: None,
     }
+    .record(&mut encoder);
 
     // Copy storage buffers to staging for readback
     for (spec, buffer, staging) in &storage_buffers {
