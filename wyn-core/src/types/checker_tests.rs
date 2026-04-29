@@ -1700,13 +1700,11 @@ fn test_tuple_field_access_on_non_tuple() {
     assert!(result.is_err(), "Expected type error for .0 on non-tuple type");
 }
 
-// ---- Spec example: record-projection ambiguity ---------------------------
+// ---- Spec examples: structural sum-type and record-projection ambiguity --
 //
-// SPECIFICATION.md "Record Types" cites this as a working form — a bare
-// `r.x` is ambiguous, but with the type pinned by an annotation it
-// type-checks. (The companion sum-type ambiguity prose is in the spec
-// but not yet exercisable: value-level constructor expressions like
-// `#left 3` aren't lexable today.)
+// SPECIFICATION.md "Sum Types" and "Record Types" sections cite these as
+// the working forms — a bare `#left(3)` or `r.x` is ambiguous in
+// isolation, but with the type pinned by an annotation each type-checks.
 
 #[test]
 fn test_record_projection_with_annotation() {
@@ -1716,5 +1714,199 @@ def get_x: f32 =
     let r: { x: f32, y: f32 } = {x: 1.0f32, y: 2.0f32} in
     r.x
         "#,
+    );
+}
+
+#[test]
+fn test_sum_constructor_with_annotation() {
+    typecheck_program("let x: #left(i32) | #right(f32) = #left(3)");
+}
+
+#[test]
+fn test_sum_constructor_nullary() {
+    typecheck_program("let x: #some(i32) | #none = #none");
+}
+
+#[test]
+fn test_sum_constructor_multi_arg() {
+    typecheck_program("let p: #point(i32, i32) | #origin = #point(3, 4)");
+}
+
+#[test]
+fn test_sum_constructor_ambiguous_without_annotation() {
+    let result = try_typecheck_program("let x = #left(3)");
+    assert!(
+        matches!(result, Err(CompilerError::TypeError(_, _))),
+        "expected type error for ambiguous constructor, got {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_sum_constructor_arity_mismatch() {
+    let result = try_typecheck_program("let x: #left(i32) | #right(f32) = #left(3, 4)");
+    assert!(
+        matches!(result, Err(CompilerError::TypeError(_, _))),
+        "expected arity-mismatch type error, got {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_sum_constructor_unknown_variant() {
+    let result = try_typecheck_program("let x: #left(i32) | #right(f32) = #middle(3)");
+    assert!(
+        matches!(result, Err(CompilerError::TypeError(_, _))),
+        "expected unknown-variant type error, got {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_sum_constructor_payload_type_mismatch() {
+    let result = try_typecheck_program("let x: #left(i32) | #right(f32) = #left(1.5f32)");
+    assert!(
+        matches!(result, Err(CompilerError::TypeError(_, _))),
+        "expected payload-type-mismatch error, got {:?}",
+        result
+    );
+}
+
+// Match expressions can't run end-to-end yet (Phase C lowering hasn't
+// landed), but the type checker should accept a well-typed match and
+// reject obvious shape violations. The tests below stop after
+// type-checking, before the AST→TLC step that would panic.
+
+#[test]
+fn test_match_well_typed() {
+    typecheck_program(
+        r#"
+def pick(v: #left(i32) | #right(i32)) i32 =
+    match v
+    case #left(x) -> x
+    case #right(y) -> y
+        "#,
+    );
+}
+
+#[test]
+fn test_match_non_exhaustive() {
+    let result = try_typecheck_program(
+        r#"
+def pick(v: #left(i32) | #right(i32)) i32 =
+    match v
+    case #left(x) -> x
+        "#,
+    );
+    assert!(
+        matches!(result, Err(CompilerError::TypeError(_, _))),
+        "expected non-exhaustive-match error, got {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_match_arm_type_mismatch() {
+    let result = try_typecheck_program(
+        r#"
+def pick(v: #left(i32) | #right(f32)) i32 =
+    match v
+    case #left(x) -> x
+    case #right(y) -> y
+        "#,
+    );
+    assert!(
+        matches!(result, Err(CompilerError::TypeError(_, _))),
+        "expected arm-result-mismatch error, got {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_match_scrutinee_not_a_sum() {
+    let result = try_typecheck_program(
+        r#"
+def pick(v: i32) i32 =
+    match v
+    case #zero -> 0
+        "#,
+    );
+    assert!(
+        matches!(result, Err(CompilerError::TypeError(_, _))),
+        "expected scrutinee-not-a-sum error, got {:?}",
+        result
+    );
+}
+
+// Unit tests targeting bind_pattern's PatternKind::Constructor arm.
+// Distinct from the constructor-expression tests above: these exercise
+// the pattern side, where args are sub-patterns to be bound, not
+// expressions to be checked.
+
+#[test]
+fn test_match_pattern_arity_mismatch() {
+    // Pattern #left(x, y) against scrutinee variant #left(i32) — arity
+    // mismatch must be caught by bind_pattern's args.len() check.
+    let result = try_typecheck_program(
+        r#"
+def pick(v: #left(i32) | #right(i32)) i32 =
+    match v
+    case #left(x, y) -> x
+    case #right(z) -> z
+        "#,
+    );
+    assert!(
+        matches!(result, Err(CompilerError::TypeError(_, _))),
+        "expected pattern arity-mismatch error, got {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_match_pattern_unknown_variant() {
+    // Pattern #middle against a sum that has no #middle variant — must
+    // be caught by bind_pattern's variants.iter().find() lookup.
+    let result = try_typecheck_program(
+        r#"
+def pick(v: #left(i32) | #right(i32)) i32 =
+    match v
+    case #left(x) -> x
+    case #middle(y) -> y
+        "#,
+    );
+    assert!(
+        matches!(result, Err(CompilerError::TypeError(_, _))),
+        "expected pattern unknown-variant error, got {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_match_pattern_binds_payload_type() {
+    // The variable bound by a constructor pattern must take the
+    // payload type, so an arm body that uses it as f32 should
+    // type-check when the payload is f32, and fail when the payload
+    // is i32. This exercises bind_pattern's recursive call into the
+    // sub-pattern with payload_ty.
+    typecheck_program(
+        r#"
+def pick(v: #left(f32) | #right(f32)) f32 =
+    match v
+    case #left(x) -> x + 1.0f32
+    case #right(y) -> y
+        "#,
+    );
+    let result = try_typecheck_program(
+        r#"
+def pick(v: #left(i32) | #right(i32)) f32 =
+    match v
+    case #left(x) -> x + 1.0f32
+    case #right(y) -> 0.0f32
+        "#,
+    );
+    assert!(
+        matches!(result, Err(CompilerError::TypeError(_, _))),
+        "expected type-mismatch on bound payload, got {:?}",
+        result
     );
 }

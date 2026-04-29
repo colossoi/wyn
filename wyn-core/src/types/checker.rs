@@ -780,6 +780,48 @@ impl<'a> TypeChecker<'a> {
                 self.type_table.insert(pattern.h.id, TypeScheme::Monotype(unit_type.apply(&self.context)));
                 Ok(unit_type)
             }
+            PatternKind::Constructor(name, args) => {
+                // The expected type must be a sum that contains this
+                // constructor at matching payload arity.
+                let expected_applied = expected_type.apply(&self.context);
+                match expected_applied {
+                    Type::Constructed(TypeName::Sum(ref variants), _) => {
+                        let payload_types = match variants.iter().find(|(n, _)| n == name) {
+                            Some((_, payload)) => payload,
+                            None => bail_type_at!(
+                                pattern.h.span,
+                                "constructor `#{}` not found in sum type {}",
+                                name,
+                                self.format_type(&expected_applied)
+                            ),
+                        };
+                        if args.len() != payload_types.len() {
+                            bail_type_at!(
+                                pattern.h.span,
+                                "constructor `#{}` expects {} payload value{}, got {}",
+                                name,
+                                payload_types.len(),
+                                if payload_types.len() == 1 { "" } else { "s" },
+                                args.len()
+                            );
+                        }
+                        for (sub_pattern, payload_ty) in args.iter().zip(payload_types.iter()) {
+                            self.bind_pattern(sub_pattern, payload_ty, generalize)?;
+                        }
+                        self.type_table.insert(
+                            pattern.h.id,
+                            TypeScheme::Monotype(expected_type.apply(&self.context)),
+                        );
+                        Ok(expected_type.clone())
+                    }
+                    _ => Err(err_type_at!(
+                        pattern.h.span,
+                        "constructor pattern `#{}` requires a sum-typed scrutinee, got {}",
+                        name,
+                        self.format_type(&expected_applied)
+                    )),
+                }
+            }
             _ => {
                 // Other patterns not yet supported in lambda parameters
                 Err(err_type_at!(
@@ -878,6 +920,45 @@ impl<'a> TypeChecker<'a> {
                 }
             }
             ExprKind::Lambda(lambda) => self.type_lambda(lambda, Some(expected_type), expr),
+            // Sum-type constructor application uses the expected type to
+            // resolve which sum type the constructor belongs to.
+            // Bare-inference (`infer_expression`) can't disambiguate.
+            ExprKind::Constructor(name, args) => {
+                let applied = expected_type.apply(&self.context);
+                let variants = match &applied {
+                    Type::Constructed(TypeName::Sum(variants), _) => variants,
+                    _ => bail_type_at!(
+                        expr.h.span,
+                        "constructor `#{}` requires a sum type from context, but expected {}",
+                        name,
+                        self.format_type(&applied)
+                    ),
+                };
+                let payload_types = match variants.iter().find(|(n, _)| n == name) {
+                    Some((_, payload)) => payload,
+                    None => bail_type_at!(
+                        expr.h.span,
+                        "constructor `#{}` not found in sum type {}",
+                        name,
+                        self.format_type(&applied)
+                    ),
+                };
+                if args.len() != payload_types.len() {
+                    bail_type_at!(
+                        expr.h.span,
+                        "constructor `#{}` expects {} payload value{}, got {}",
+                        name,
+                        payload_types.len(),
+                        if payload_types.len() == 1 { "" } else { "s" },
+                        args.len()
+                    );
+                }
+                for (arg, expected_arg_ty) in args.iter().zip(payload_types.iter()) {
+                    self.check_expression(arg, expected_arg_ty)?;
+                }
+                self.type_table.insert(expr.h.id, TypeScheme::Monotype(expected_type.clone()));
+                Ok(expected_type.clone())
+            }
             _ => {
                 // For non-lambdas, infer and unify with expected
                 let actual_type = self.infer_expression(expr)?;
@@ -2378,19 +2459,76 @@ impl<'a> TypeChecker<'a> {
                 Ok(loop_var_type)
             }
 
-            ExprKind::Match(_) => {
-                Err(err_type_at!(
-                    expr.h.span,
-                    "match expressions are not yet supported"
-                ))
+            ExprKind::Match(match_expr) => {
+                // Type the scrutinee. It must resolve to a sum type so we
+                // can check arms against its variants.
+                let scrutinee_ty = self.infer_expression(&match_expr.scrutinee)?;
+                let scrutinee_applied = scrutinee_ty.apply(&self.context);
+                let variants = match &scrutinee_applied {
+                    Type::Constructed(TypeName::Sum(variants), _) => variants,
+                    _ => bail_type_at!(
+                        match_expr.scrutinee.h.span,
+                        "match scrutinee must be a sum type, got {}",
+                        self.format_type(&scrutinee_applied)
+                    ),
+                };
+
+                // All arms produce the same type; pick a fresh variable
+                // and unify each arm's body against it.
+                let result_var = self.context.new_variable();
+
+                let mut covered: std::collections::HashSet<&str> =
+                    std::collections::HashSet::new();
+                for case in &match_expr.cases {
+                    self.scope_stack.push_scope();
+
+                    // Track top-level constructor coverage for the
+                    // exhaustiveness check below. (Wildcards / nested
+                    // patterns aren't supported yet, so anything other
+                    // than a top-level Constructor pattern is rejected.)
+                    match &case.pattern.kind {
+                        PatternKind::Constructor(name, _) => {
+                            covered.insert(name.as_str());
+                        }
+                        _ => bail_type_at!(
+                            case.pattern.h.span,
+                            "match arms must be top-level `#name(...)` constructor patterns"
+                        ),
+                    }
+
+                    self.bind_pattern(&case.pattern, &scrutinee_ty, false)?;
+                    self.check_expression(&case.body, &result_var)?;
+
+                    self.scope_stack.pop_scope();
+                }
+
+                // Exhaustiveness: every constructor in the scrutinee's
+                // sum type must appear in some arm.
+                for (name, _) in variants {
+                    if !covered.contains(name.as_str()) {
+                        bail_type_at!(
+                            expr.h.span,
+                            "non-exhaustive match: missing constructor `#{}`",
+                            name
+                        );
+                    }
+                }
+
+                Ok(result_var)
             }
 
-            ExprKind::Constructor(_, _) => {
-                Err(err_type_at!(
-                    expr.h.span,
-                    "sum-type constructor expressions are not yet supported"
-                ))
-            }
+            // A bare `#name(args)` doesn't pin down which sum type it
+            // belongs to — `#some(3)` is a value of any sum type that
+            // declares a `#some` variant carrying an `i32` payload.
+            // Use a type ascription, an annotated `let`, or context
+            // (function argument, return type) to disambiguate, which
+            // routes through `check_expression`'s Constructor arm.
+            ExprKind::Constructor(name, _) => Err(err_type_at!(
+                expr.h.span,
+                "ambiguous constructor `#{}`: cannot determine which sum type it belongs to. \
+                 Add a type annotation or use it where a sum type is expected.",
+                name
+            )),
 
             ExprKind::Range(range) => {
                 // Range expressions produce an array of integers
