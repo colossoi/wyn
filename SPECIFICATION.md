@@ -783,8 +783,8 @@ Short-circuiting logical disjunction; both operands must be of type `bool`.
 #### f x
 Apply the function `f` to the argument `x`.
 
-#### #c x y z
-Apply the sum type constructor `#c` to the payload `x`, `y`, and `z`. A constructor application is always assumed to be saturated, i.e. its entire payload provided. This means that constructors may not be partially applied.
+#### #c(x, y, z)
+Apply the sum type constructor `#c` to the payload `x`, `y`, and `z`. A constructor application is always assumed to be saturated, i.e. its entire payload provided. This means that constructors may not be partially applied. A nullary constructor is written bare, with no parentheses (`#c`).
 
 #### e : t
 Annotate that `e` is expected to be of type `t`, failing with a type error if it is not. If `t` is an array with shape declarations, the correctness of the shape declarations is checked at run-time.
@@ -998,7 +998,7 @@ An unknown size is created in some cases when the a type references a name that 
 
 ```wyn
 match ...
-case #some c -> replicate c 0
+case #some(c) -> replicate c 0
 ```
 
 The type of `replicate c 0` is `[c]i32`, but since `c` is locally bound, the type of the entire expression is `[k]i32` for some fresh `k`.
@@ -1105,10 +1105,10 @@ The result is a type error.
 When constructing a value of a sum type, the compiler must still be able to determine the size of the constructors that are not used. This is illegal:
 
 ```wyn
-type sum = #foo ([]i32) | #bar ([]i32)
+type sum = #foo([]i32) | #bar([]i32)
 
-def main (xs: *[]i32) =
-  let v : sum = #foo xs
+def main(xs: *[]i32) =
+  let v: sum = #foo(xs)
   in xs
 ```
 
@@ -1692,7 +1692,7 @@ All types can be combined in tuples as usual, as well as in structurally typed r
 
 If a variable `foo` is a record of type `{a: i32, b: bool}`, then we access field `a` with dot notation: `foo.a`. Tuples are a special case of records, where all the fields have a 0-indexed numeric label. For example, `(i32, bool)` is the same as `{0: i32, 1: bool}`, and can be indexed as `foo.1`.
 
-Sum types are defined as constructors separated by a vertical bar (`|`). Constructor names always start with a `#`. For example, `#red | #blue i32` is a sum type with the constructors `#red` and `#blue`, where the latter has an `i32` as payload. The terms `#red` and `#blue 2` produce values of this type. Constructor applications must always be fully saturated. Due to the structural type system, type annotations are sometimes necessary to resolve ambiguities. For example, the term `#blue 2` can produce a value of any type that has an appropriate constructor.
+Sum types are defined as constructors separated by a vertical bar (`|`). Constructor names always start with a `#`. For example, `#red | #blue(i32)` is a sum type with the constructors `#red` and `#blue`, where the latter has an `i32` as payload. The terms `#red` and `#blue(2)` produce values of this type. Constructor applications must always be fully saturated. Due to the structural type system, type annotations are sometimes necessary to resolve ambiguities. For example, the term `#blue(2)` can produce a value of any type that has an appropriate constructor.
 
 Function types are written with the usual `a -> b` notation, and functions can be passed as arguments to other functions. However, there are some restrictions:
 
@@ -1735,9 +1735,9 @@ type pair 'a 'b = (a, b)
 As with everything else, they are structurally typed, so the types `pair i32 bool` and `(i32, bool)` are entirely interchangeable. Most unusually, this is also the case for sum types. The following two types are entirely interchangeable:
 
 ```wyn
-type maybe 'a = #just a | #nothing
+type maybe 'a = #just(a) | #nothing
 
-type option 'a = #nothing | #just a
+type option 'a = #nothing | #just(a)
 ```
 
 Only for abstract types, where the definition has been hidden via the module system, do type names have any significance.
