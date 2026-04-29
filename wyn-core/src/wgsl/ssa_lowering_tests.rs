@@ -476,6 +476,15 @@ fn wgsl_testfile_da_rasterizer() {
 }
 
 #[test]
+fn wgsl_testfile_sum_demo() {
+    // Structural sum types lowered into flattened tuples at the
+    // AST→TLC boundary. Mixed-arity variants, including a nullary
+    // case, exercise the dead-slot zero-fill path and the
+    // tag-checked match dispatch.
+    validate_testfile_wgsl("testfiles/sum_demo.wyn");
+}
+
+#[test]
 fn wgsl_testfile_loopingspline() {
     validate_testfile_wgsl("testfiles/loopingspline.wyn");
 }

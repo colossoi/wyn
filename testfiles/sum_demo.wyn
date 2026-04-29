@@ -1,0 +1,31 @@
+-- End-to-end demo of structural sum types: build a sum value with
+-- a constructor expression, dispatch on it via match, and use the
+-- result to color a triangle. Exercises the AST→TLC lowering of
+-- sum types into flattened tuples — the surface syntax surfaces in
+-- the lexer/parser/checker, and after AST→TLC nothing downstream
+-- ever sees a `Sum` type again.
+
+def verts: [3]vec4f32 =
+  [@[-1.0f32, -1.0f32, 0.0f32, 1.0f32],
+   @[3.0f32, -1.0f32, 0.0f32, 1.0f32],
+   @[-1.0f32, 3.0f32, 0.0f32, 1.0f32]]
+
+#[vertex]
+entry vertex_main(#[builtin(vertex_index)] vertex_id: i32) #[builtin(position)] vec4f32 =
+  verts[vertex_id]
+
+-- Mixed-arity sum: two-payload, one-payload, and nullary variants.
+-- The flattened-no-sharing layout puts the tag in slot 0 and packs
+-- every variant's payload into its own non-overlapping slot range.
+def shade(t: #left(f32, f32) | #right(f32) | #middle) f32 =
+  match t
+  case #left(x, y) -> x + y
+  case #right(z)   -> z * 2.0f32
+  case #middle     -> 0.5f32
+
+#[fragment]
+entry fragment_main(#[builtin(position)] fragCoord: vec4f32) #[location(0)] vec4f32 =
+  let r = shade(#left(0.25f32, 0.25f32)) in
+  let g = shade(#right(0.4f32)) in
+  let b = shade(#middle) in
+  @[r, g, b, 1.0f32]

@@ -224,7 +224,8 @@ tuple_type ::= "(" ")" | "(" type ("," type)+ [","] ")"
 
 array_type ::= "[" [exp] "]" type
 
-sum_type ::= constructor type* ("|" constructor type*)*
+sum_type ::= sum_variant ("|" sum_variant)*
+sum_variant ::= constructor [ "(" type ("," type)* [","] ")" ]
 
 record_type ::= "{" "}" | "{" fieldid ":" type ("," fieldid ":" type)* [","] "}"
 
@@ -260,20 +261,20 @@ As an example, an array of three integers could be written as `[1, 2, 3]`, and h
 
 #### Sum Types
 
-Sum types are anonymous in Wyn, and are written as the constructors separated by vertical bars. Each constructor consists of a `#`-prefixed name, followed by zero or more types, called its payload.
+Sum types are anonymous in Wyn, and are written as the constructors separated by vertical bars. Each constructor consists of a `#`-prefixed name and an optional parenthesised payload — a comma-separated list of payload types (or sub-patterns / sub-expressions, depending on the syntactic position). A constructor with no payload is written bare, with no parentheses.
 
 Because sum types are structural, constructor names are not globally
 unique — they are tags inside a sum type, not declarations. The same
 name `#left` belongs to infinitely many possible sum types
-(`#left i32 | #right f32`, `#left bool | #middle | #right`, …), so
-a bare constructor expression like `#left 3` is ambiguous in
+(`#left(i32) | #right(f32)`, `#left(bool) | #middle | #right`, …), so
+a bare constructor expression like `#left(3)` is ambiguous in
 isolation. The type checker resolves it from context — the expected
 type at the use site, the type of an argument it's being passed as,
 or an explicit annotation. When context doesn't pin a single sum
 type down, an annotation is required:
 
 ```wyn
-let x: #left i32 | #right f32 = #left 3
+let x: #left(i32) | #right(f32) = #left(3)
 ```
 
 **Note:** The current implementation of sum types is fairly inefficient, in that all possible constructors of a sum-typed value will be resident in memory. Avoid using sum types where multiple constructors have large payloads.
@@ -577,7 +578,7 @@ exp         ::= atom
                 | exp exp
                 | "!" exp
                 | "-" exp
-                | constructor exp*
+                | constructor [ "(" exp ("," exp)* [","] ")" ]
                 | exp ":" type
                 | exp ":>" type
                 | exp [ ".." exp ] "..." exp
@@ -609,7 +610,7 @@ pat         ::= name
                 | "(" pat ("," pat)+ [","] ")"
                 | "{" "}"
                 | "{" fieldid ["=" pat] ("," fieldid ["=" pat])* [","] "}"
-                | constructor pat*
+                | constructor [ "(" pat ("," pat)* [","] ")" ]
                 | pat ":" type
                 | "#[" attr "]" pat
 
@@ -650,8 +651,6 @@ An expression `(-x)` is parsed as the variable `x` negated and enclosed in paren
 Prefix operators bind more tightly than infix operators. Note that the only prefix operators are the builtin `!` and `-`, and more cannot be defined. In particular, a user-defined operator beginning with `!` binds as `!=`, as on the table below, not as the prefix operator `!`.
 
 Function and type application binds more tightly than infix operators.
-
-`#foo #bar` is interpreted as a constructor with a `#bar` payload, not as applying `#foo` to `#bar` (the latter would be semantically invalid anyway).
 
 Attributes bind less tightly than any other syntactic construct.
 
