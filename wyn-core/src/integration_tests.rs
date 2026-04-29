@@ -1425,6 +1425,52 @@ entry test(in_arr: []f32) []f32 =
     assert_spirv_call_arities_match(&bytes);
 }
 
+// =============================================================================
+// Sum-type lowering (Phase C) integration tests
+// =============================================================================
+
+/// Build a sum value with one constructor and select on it. Exercises
+/// constructor-expression → flattened-tuple lowering and match →
+/// tag-checked if-chain lowering, end-to-end through SPIR-V.
+#[test]
+fn sum_type_lowering_compiles_to_spirv() {
+    let src = r#"
+def pick(v: #left(f32) | #right(f32)) f32 =
+    match v
+    case #left(x) -> x + 1.0f32
+    case #right(y) -> y * 2.0f32
+
+#[fragment]
+entry main() #[location(0)] vec4f32 =
+    let a = pick(#left(0.5f32)) in
+    let b = pick(#right(0.25f32)) in
+    @[a, b, 0.0f32, 1.0f32]
+"#;
+    let spirv = compile_to_spirv(src).expect("sum-type program should compile to SPIR-V");
+    assert_spirv_call_arities_match(&spirv);
+}
+
+/// Multi-payload constructor with mixed arities: `#point(f32, f32)`
+/// and a nullary `#origin`. Verifies that the flattened-no-sharing
+/// layout zero-fills dead slots in the nullary case.
+#[test]
+fn sum_type_multi_payload_compiles_to_spirv() {
+    let src = r#"
+def length_sq(p: #point(f32, f32) | #origin) f32 =
+    match p
+    case #point(x, y) -> x * x + y * y
+    case #origin -> 0.0f32
+
+#[fragment]
+entry main() #[location(0)] vec4f32 =
+    let a = length_sq(#point(3.0f32, 4.0f32)) in
+    let b = length_sq(#origin) in
+    @[a, b, 0.0f32, 1.0f32]
+"#;
+    let spirv = compile_to_spirv(src).expect("multi-payload sum should compile to SPIR-V");
+    assert_spirv_call_arities_match(&spirv);
+}
+
 /// Walk every `OpFunctionCall` in a SPIR-V module and assert each
 /// call's argument count matches the called function's declared
 /// parameter count. The arity-mismatch class of bug above produces

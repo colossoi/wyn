@@ -3026,6 +3026,24 @@ impl<'a> TypeChecker<'a> {
                 lambda_expected_types[i] = Some(expected_lambda_type);
 
                 func_type = result_type;
+            } else if matches!(&arg.kind, ExprKind::Constructor(_, _)) {
+                // Constructor expressions need bidirectional checking against
+                // the expected parameter type to disambiguate which sum type
+                // they belong to — `infer_expression` produces an "ambiguous
+                // constructor" error.
+                let param_var = self.context.new_variable();
+                let result_var = self.context.new_variable();
+                let arrow_type = Type::arrow(param_var.clone(), result_var.clone());
+                self.context.unify(&func_type, &arrow_type).map_err(|_| {
+                    err_type_at!(
+                        arg.h.span,
+                        "Cannot apply {} as a function",
+                        self.format_type(&func_type)
+                    )
+                })?;
+                let expected_param = param_var.apply(&self.context);
+                self.check_expression(arg, &expected_param)?;
+                func_type = result_var;
             } else {
                 // For non-lambda argument: infer type and unify with expected param
                 let arg_type = self.infer_expression(arg)?;
