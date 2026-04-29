@@ -123,7 +123,7 @@ mod pattern_bound_names {
 
     #[test]
     fn constructor_pattern_recurses() {
-        let p = pat(PatternKind::Constructor("Some".into(), vec![name("x")]));
+        let p = pat(PatternKind::Constructor("some".into(), vec![name("x")]));
         assert_eq!(pattern_bound_names(&p), vec!["x"]);
     }
 
@@ -173,10 +173,10 @@ mod pattern_bound_names {
 
     #[test]
     fn deeply_nested_pattern_visits_every_leaf() {
-        // `#[foo] (Some(x), {k}: i32, _)` — attributed + tuple + constructor +
+        // `#[foo] (#some(x), {k}: i32, _)` — attributed + tuple + constructor +
         // record-shorthand + typed + wildcard; all in one.
         let inner = pat(PatternKind::Tuple(vec![
-            pat(PatternKind::Constructor("Some".into(), vec![name("x")])),
+            pat(PatternKind::Constructor("some".into(), vec![name("x")])),
             pat(PatternKind::Typed(
                 Box::new(pat(PatternKind::Record(vec![RecordPatternField {
                     field: "k".into(),

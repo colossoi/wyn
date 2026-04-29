@@ -373,6 +373,11 @@ impl PlaceholderResolver {
                     self.resolve_expression(elem);
                 }
             }
+            ast::ExprKind::Constructor(_, args) => {
+                for arg in args {
+                    self.resolve_expression(arg);
+                }
+            }
             ast::ExprKind::RecordLiteral(fields) => {
                 for (_, value) in fields {
                     self.resolve_expression(value);

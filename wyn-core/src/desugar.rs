@@ -81,6 +81,11 @@ impl<'a> Desugarer<'a> {
                     self.desugar_expr(elem)?;
                 }
             }
+            ExprKind::Constructor(_, args) => {
+                for arg in args {
+                    self.desugar_expr(arg)?;
+                }
+            }
             ExprKind::RecordLiteral(fields) => {
                 for (_, field_expr) in fields {
                     self.desugar_expr(field_expr)?;

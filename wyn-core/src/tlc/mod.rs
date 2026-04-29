@@ -1819,6 +1819,18 @@ impl<'a> Transformer<'a> {
 
             ast::ExprKind::Match(match_expr) => self.transform_match(match_expr, ty, span),
 
+            ast::ExprKind::Constructor(name, _) => {
+                // Phase C of the sum-types plan will lower constructor
+                // applications into tuple builds (with a tag field +
+                // flattened payload slots). Until then, the AST→TLC
+                // transformer rejects them so nobody can sneak a sum
+                // value past the type-checker.
+                panic!(
+                    "AST→TLC: sum-type constructor `#{}` is not yet lowered (Phase C TODO)",
+                    name
+                )
+            }
+
             ast::ExprKind::Range(range) => {
                 // Transform range to _w_range intrinsic
                 let start = self.transform_expr(&range.start);

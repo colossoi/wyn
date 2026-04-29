@@ -408,6 +408,12 @@ pub fn walk_expression<V: Visitor>(v: &mut V, e: &Expression) -> ControlFlow<V::
             }
             ControlFlow::Continue(())
         }
+        ExprKind::Constructor(_, args) => {
+            for arg in args {
+                v.visit_expression(arg)?;
+            }
+            ControlFlow::Continue(())
+        }
     } // NEWCASESHERE - add new cases before this closing brace
 }
 

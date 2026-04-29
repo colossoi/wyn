@@ -187,6 +187,10 @@ pub enum Token {
     // Attributes
     AttributeStart, // #[
 
+    // Anonymous-sum-type constructor name (e.g. `#some`, `#none`).
+    // The `#` is consumed; the `String` holds just the name.
+    Constructor(String),
+
     // Vector/Matrix literals
     AtBracket, // @[ for vector/matrix literals
 
@@ -350,6 +354,23 @@ fn parse_delimiter(input: &str) -> IResult<&str, Token> {
     ))(input)
 }
 
+/// Sum-type constructor: `#` followed by an identifier (e.g. `#some`,
+/// `#none`, `#left`). Must be tried after `parse_delimiter` so the
+/// attribute-start sequence `#[` is recognized as a delimiter rather
+/// than the constructor `#` followed by `[`.
+fn parse_constructor(input: &str) -> IResult<&str, Token> {
+    map(
+        preceded(
+            char('#'),
+            recognize(pair(
+                alt((alpha1, tag("_"))),
+                many0(alt((alphanumeric1, tag("_"), tag("'")))),
+            )),
+        ),
+        |name: &str| Token::Constructor(name.to_string()),
+    )(input)
+}
+
 fn parse_token(input: &str) -> IResult<&str, Token> {
     preceded(
         multispace0,
@@ -361,7 +382,8 @@ fn parse_token(input: &str) -> IResult<&str, Token> {
             parse_type_variable,
             parse_identifier,
             parse_int_literal,
-            parse_delimiter, // Must come before parse_operator to match @[ before @
+            parse_delimiter,   // Must come before parse_operator to match @[ before @
+            parse_constructor, // After parse_delimiter so `#[` stays as AttributeStart
             parse_operator,
         )),
     )(input)

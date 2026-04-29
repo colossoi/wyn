@@ -1299,16 +1299,12 @@ impl<'a> Parser<'a> {
                     return Ok(Type::Constructed(TypeName::Named(qualified), vec![]));
                 }
 
-                // All-caps: type variable (T, UV, R1). CamelCase: sum type (Some, None)
-                let is_type_var = name.chars().all(|c| c.is_uppercase() || c.is_ascii_digit());
-                if is_type_var {
-                    Ok(Type::Constructed(TypeName::UserVar(name), vec![]))
-                } else {
-                    // Back up for parse_sum_type which expects to see the identifier
-                    self.current -= 1;
-                    self.parse_sum_type()
-                }
+                // Uppercase identifiers in type position are type variables
+                // (e.g. `T`, `UV`). Sum types use `#name` constructors and
+                // dispatch via the Token::Constructor arm below.
+                Ok(Type::Constructed(TypeName::UserVar(name), vec![]))
             }
+            Some(Token::Constructor(_)) => self.parse_sum_type(),
             _ => {
                 let span = self.current_span();
                 Err(err_parse_at!(span, "Expected type"))
@@ -1363,49 +1359,38 @@ impl<'a> Parser<'a> {
         let mut variants = Vec::new();
 
         loop {
-            // Parse constructor name (uppercase identifier)
+            // `#name` constructor token from the lexer.
             let constructor_name = match self.peek() {
-                Some(Token::Identifier(name)) if name.chars().next().unwrap().is_uppercase() => {
+                Some(Token::Constructor(name)) => {
                     let n = name.clone();
                     self.advance();
                     n
                 }
-                _ => bail_parse_at!(self.current_span(), "Expected constructor name"),
+                _ => bail_parse_at!(self.current_span(), "Expected `#name` constructor"),
             };
 
-            // Parse zero or more type arguments for this constructor
+            // Optional payload list: `#name(t1, t2, ...)`. A bare `#name`
+            // (no parens) is a nullary constructor.
             let mut arg_types = Vec::new();
-            while !self.check(&Token::Pipe)
-                && !self.check(&Token::RightParen)
-                && !self.check(&Token::RightBracket)
-                && !self.check(&Token::RightBrace)
-                && !self.check(&Token::Comma)
-                && !self.check(&Token::Arrow)
-                && self.current < self.tokens.len()
-            {
-                // Try to parse a type argument
-                // This is tricky - we need to avoid consuming tokens that aren't part of the sum type
-                // For now, we'll be conservative and only parse simple types
-                match self.peek() {
-                    Some(Token::Identifier(_))
-                    | Some(Token::LeftParen)
-                    | Some(Token::LeftBrace)
-                    | Some(Token::LeftBracket)
-                    | Some(Token::LeftBracketSpaced) => {
-                        arg_types.push(self.parse_array_or_base_type()?);
+            if self.check(&Token::LeftParen) {
+                self.advance(); // consume `(`
+                if !self.check(&Token::RightParen) {
+                    loop {
+                        arg_types.push(self.parse_type()?);
+                        if self.check(&Token::Comma) {
+                            self.advance();
+                        } else {
+                            break;
+                        }
                     }
-                    Some(Token::BinOp(op)) if op == "*" => {
-                        arg_types.push(self.parse_array_or_base_type()?);
-                    }
-                    _ => break,
                 }
+                self.expect(Token::RightParen)?;
             }
 
             variants.push((constructor_name, arg_types));
 
-            // Check for more variants
             if self.check(&Token::Pipe) {
-                self.advance(); // consume '|'
+                self.advance(); // consume `|`
             } else {
                 break;
             }
@@ -1843,6 +1828,29 @@ impl<'a> Parser<'a> {
                 let span = self.current_span();
                 self.advance();
                 Ok(self.node_counter.mk_node(ExprKind::Identifier(vec![], name), span))
+            }
+            Some(Token::Constructor(name)) => {
+                let name = name.clone();
+                let span = self.current_span();
+                self.advance();
+                // Optional payload: `#name(arg1, arg2, ...)`. A bare
+                // `#name` is a nullary constructor.
+                let mut args = Vec::new();
+                if self.check(&Token::LeftParen) {
+                    self.advance(); // consume `(`
+                    if !self.check(&Token::RightParen) {
+                        loop {
+                            args.push(self.parse_expression()?);
+                            if self.check(&Token::Comma) {
+                                self.advance();
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    self.expect(Token::RightParen)?;
+                }
+                Ok(self.node_counter.mk_node(ExprKind::Constructor(name, args), span))
             }
             Some(Token::LeftBracket) | Some(Token::LeftBracketSpaced) => self.parse_array_literal(),
             Some(Token::AtBracket) => self.parse_vec_mat_literal(),

@@ -1296,14 +1296,14 @@ fn test_parse_pattern_record_mixed() {
 
 #[test]
 fn test_parse_pattern_constructor_no_args() {
-    let tokens = tokenize("None").expect("Failed to tokenize");
+    let tokens = tokenize("#none").expect("Failed to tokenize");
     let mut nc = NodeCounter::new();
     let mut parser = Parser::new(tokens, &mut nc);
     let pattern = parser.parse_pattern().expect("Failed to parse pattern");
 
     match pattern.kind {
         PatternKind::Constructor(name, args) => {
-            assert_eq!(name, "None");
+            assert_eq!(name, "none");
             assert_eq!(args.len(), 0, "Expected no arguments");
         }
         _ => panic!("Expected Constructor pattern, got {:?}", pattern.kind),
@@ -1312,14 +1312,14 @@ fn test_parse_pattern_constructor_no_args() {
 
 #[test]
 fn test_parse_pattern_constructor_with_args() {
-    let tokens = tokenize("Some x").expect("Failed to tokenize");
+    let tokens = tokenize("#some(x)").expect("Failed to tokenize");
     let mut nc = NodeCounter::new();
     let mut parser = Parser::new(tokens, &mut nc);
     let pattern = parser.parse_pattern().expect("Failed to parse pattern");
 
     match pattern.kind {
         PatternKind::Constructor(name, args) => {
-            assert_eq!(name, "Some");
+            assert_eq!(name, "some");
             assert_eq!(args.len(), 1, "Expected 1 argument");
 
             match &args[0].kind {
@@ -1333,14 +1333,14 @@ fn test_parse_pattern_constructor_with_args() {
 
 #[test]
 fn test_parse_pattern_constructor_multiple_args() {
-    let tokens = tokenize("Point x y").expect("Failed to tokenize");
+    let tokens = tokenize("#point(x, y)").expect("Failed to tokenize");
     let mut nc = NodeCounter::new();
     let mut parser = Parser::new(tokens, &mut nc);
     let pattern = parser.parse_pattern().expect("Failed to parse pattern");
 
     match pattern.kind {
         PatternKind::Constructor(name, args) => {
-            assert_eq!(name, "Point");
+            assert_eq!(name, "point");
             assert_eq!(args.len(), 2, "Expected 2 arguments");
 
             match &args[0].kind {
@@ -1359,19 +1359,19 @@ fn test_parse_pattern_constructor_multiple_args() {
 
 #[test]
 fn test_parse_pattern_constructor_nested() {
-    let tokens = tokenize("Just (Some x)").expect("Failed to tokenize");
+    let tokens = tokenize("#just(#some(x))").expect("Failed to tokenize");
     let mut nc = NodeCounter::new();
     let mut parser = Parser::new(tokens, &mut nc);
     let pattern = parser.parse_pattern().expect("Failed to parse pattern");
 
     match pattern.kind {
         PatternKind::Constructor(name, args) => {
-            assert_eq!(name, "Just");
+            assert_eq!(name, "just");
             assert_eq!(args.len(), 1, "Expected 1 argument");
 
             match &args[0].kind {
                 PatternKind::Constructor(inner_name, inner_args) => {
-                    assert_eq!(inner_name, "Some");
+                    assert_eq!(inner_name, "some");
                     assert_eq!(inner_args.len(), 1);
 
                     match &inner_args[0].kind {
@@ -1684,28 +1684,28 @@ fn test_parse_record_type_multiple_fields() {
 
 #[test]
 fn test_parse_sum_type_simple() {
-    // Test sum type: Option i32
-    let decl = single_decl("let x: Some i32 | None = ???");
+    // Anonymous structural sum: payload list in parens, `#` prefix.
+    let decl = single_decl("let x: #some(i32) | #none = ???");
 
     assert_eq!(decl.name, "x");
     assert!(
         matches!(&decl.ty, Some(Type::Constructed(TypeName::Sum(variants), _))
-        if variants.len() == 2 && variants[0].0 == "Some" && variants[0].1.len() == 1
-        && variants[1].0 == "None" && variants[1].1.len() == 0)
+        if variants.len() == 2 && variants[0].0 == "some" && variants[0].1.len() == 1
+        && variants[1].0 == "none" && variants[1].1.len() == 0)
     );
 }
 
 #[test]
 fn test_parse_sum_type_multiple_args() {
-    // Test sum type with multiple type arguments
-    let decl = single_decl("let x: Result i32 f32 | Error | Ok = ???");
+    // Multi-arg payload comes through as a comma-separated list inside parens.
+    let decl = single_decl("let x: #result(i32, f32) | #error | #ok = ???");
 
     assert_eq!(decl.name, "x");
     assert!(
         matches!(&decl.ty, Some(Type::Constructed(TypeName::Sum(variants), _))
-        if variants.len() == 3 && variants[0].0 == "Result" && variants[0].1.len() == 2
-        && variants[1].0 == "Error" && variants[1].1.len() == 0
-        && variants[2].0 == "Ok" && variants[2].1.len() == 0)
+        if variants.len() == 3 && variants[0].0 == "result" && variants[0].1.len() == 2
+        && variants[1].0 == "error" && variants[1].1.len() == 0
+        && variants[2].0 == "ok" && variants[2].1.len() == 0)
     );
 }
 

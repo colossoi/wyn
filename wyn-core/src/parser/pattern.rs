@@ -2,7 +2,7 @@ use crate::ast::*;
 use crate::error::Result;
 use crate::lexer::Token;
 use crate::parser::Parser;
-use crate::{bail_parse, err_parse};
+use crate::{bail_parse, bail_parse_at, err_parse};
 use log::trace;
 
 impl Parser<'_> {
@@ -87,17 +87,15 @@ impl Parser<'_> {
 
             Some(Token::LeftBrace) => self.parse_record_pattern(),
 
-            Some(Token::Identifier(name)) => {
-                // Check if it's a constructor (starts with uppercase)
-                if name.chars().next().is_some_and(|c| c.is_uppercase()) {
-                    self.parse_constructor_pattern()
-                } else {
-                    // Simple name binding
-                    let span = self.current_span();
-                    let name = self.expect_identifier()?;
-                    Ok(self.node_counter.mk_node(PatternKind::Name(name), span))
-                }
+            Some(Token::Identifier(_)) => {
+                // Simple name binding. (Sum-type constructor patterns
+                // start with `Token::Constructor`, not an identifier.)
+                let span = self.current_span();
+                let name = self.expect_identifier()?;
+                Ok(self.node_counter.mk_node(PatternKind::Name(name), span))
             }
+
+            Some(Token::Constructor(_)) => self.parse_constructor_pattern(),
 
             Some(Token::IntLiteral(_))
             | Some(Token::FloatLiteral(_))
@@ -201,18 +199,35 @@ impl Parser<'_> {
 
     fn parse_constructor_pattern(&mut self) -> Result<Pattern> {
         let start_span = self.current_span();
-        let constructor = self.expect_identifier()?;
+        let constructor = match self.peek() {
+            Some(Token::Constructor(name)) => {
+                let n = name.clone();
+                self.advance();
+                n
+            }
+            other => bail_parse_at!(self.current_span(), "Expected `#name`, got {:?}", other),
+        };
 
-        // Parse constructor arguments (zero or more patterns)
+        // Optional payload list: `#name(p1, p2, ...)`. Bare `#name` is
+        // a nullary constructor pattern.
         let mut args = Vec::new();
         let mut end_span = start_span;
-
-        // Keep parsing patterns as long as the next token can start a pattern
-        // but stop if we see tokens that indicate the end of the constructor pattern
-        while self.can_start_pattern() && !self.is_pattern_terminator() {
-            let arg = self.parse_pattern_without_attributes()?;
-            end_span = arg.h.span;
-            args.push(arg);
+        if self.check(&Token::LeftParen) {
+            self.advance(); // consume `(`
+            if !self.check(&Token::RightParen) {
+                loop {
+                    let arg = self.parse_pattern()?;
+                    end_span = arg.h.span;
+                    args.push(arg);
+                    if self.check(&Token::Comma) {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            end_span = self.current_span();
+            self.expect(Token::RightParen)?;
         }
 
         let span = start_span.merge(&end_span);

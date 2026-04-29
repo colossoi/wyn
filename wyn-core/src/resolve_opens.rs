@@ -300,6 +300,11 @@ impl<'a> OpenResolver<'a> {
                     self.resolve_expression(e)?;
                 }
             }
+            ExprKind::Constructor(_, args) => {
+                for arg in args {
+                    self.resolve_expression(arg)?;
+                }
+            }
             ExprKind::RecordLiteral(fields) => {
                 for (_, v) in fields {
                     self.resolve_expression(v)?;

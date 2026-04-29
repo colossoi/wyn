@@ -379,10 +379,13 @@ pub enum ExprKind {
     Lambda(LambdaExpr),
     Application(Box<Expression>, Vec<Expression>), // Function application
     LetIn(LetInExpr),
-    FieldAccess(Box<Expression>, String),  // e.g. v.x, v.y
-    If(IfExpr),                            // if-then-else expression
-    Loop(LoopExpr),                        // loop expression
-    Match(MatchExpr),                      // match expression
+    FieldAccess(Box<Expression>, String), // e.g. v.x, v.y
+    If(IfExpr),                           // if-then-else expression
+    Loop(LoopExpr),                       // loop expression
+    Match(MatchExpr),                     // match expression
+    /// Sum-type constructor application: `#name arg1 arg2 ...`. With
+    /// no args (`#none`), `args` is empty.
+    Constructor(String, Vec<Expression>),
     Range(RangeExpr),                      // range expressions: a..b, a..<b, a..>b, a...b
     Slice(SliceExpr),                      // array slicing: a[i:j:s]
     TypeAscription(Box<Expression>, Type), // exp : type

@@ -2385,6 +2385,13 @@ impl<'a> TypeChecker<'a> {
                 ))
             }
 
+            ExprKind::Constructor(_, _) => {
+                Err(err_type_at!(
+                    expr.h.span,
+                    "sum-type constructor expressions are not yet supported"
+                ))
+            }
+
             ExprKind::Range(range) => {
                 // Range expressions produce an array of integers
                 // All operands must be the same integer type

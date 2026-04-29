@@ -186,6 +186,11 @@ pub fn walk_expr<C: ResolveContext>(
                 walk_expr(end, ctx, scope)?;
             }
         }
+        ExprKind::Constructor(_, args) => {
+            for a in args {
+                walk_expr(a, ctx, scope)?;
+            }
+        }
         ExprKind::IntLiteral(_)
         | ExprKind::FloatLiteral(_)
         | ExprKind::BoolLiteral(_)

@@ -896,6 +896,11 @@ fn collect_variable_uses_in_expr(expr: &Expression, uses: &mut HashMap<String, V
                 collect_variable_uses_in_expr(elem, uses);
             }
         }
+        ExprKind::Constructor(_, args) => {
+            for arg in args {
+                collect_variable_uses_in_expr(arg, uses);
+            }
+        }
         ExprKind::Unit | ExprKind::TypeHole => {}
     }
 }

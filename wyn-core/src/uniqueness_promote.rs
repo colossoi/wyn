@@ -98,6 +98,11 @@ impl<'a> Promoter<'a> {
                     self.visit_expr(elem);
                 }
             }
+            ExprKind::Constructor(_, args) => {
+                for arg in args {
+                    self.visit_expr(arg);
+                }
+            }
             ExprKind::RecordLiteral(fields) => {
                 for (_, v) in fields {
                     self.visit_expr(v);

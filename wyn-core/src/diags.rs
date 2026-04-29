@@ -412,6 +412,14 @@ impl AstFormatter {
                 let items: Vec<String> = elems.iter().map(|e| self.format_simple_expr(e)).collect();
                 self.write_line(&format!("({})", items.join(", ")));
             }
+            ExprKind::Constructor(name, args) => {
+                if args.is_empty() {
+                    self.write_line(&format!("#{}", name));
+                } else {
+                    let items: Vec<String> = args.iter().map(|a| self.format_simple_expr(a)).collect();
+                    self.write_line(&format!("#{}({})", name, items.join(", ")));
+                }
+            }
             ExprKind::RecordLiteral(fields) => {
                 let items: Vec<String> = fields
                     .iter()
@@ -563,6 +571,14 @@ impl AstFormatter {
             ExprKind::Tuple(elems) => {
                 let items: Vec<String> = elems.iter().map(|e| self.format_simple_expr(e)).collect();
                 format!("({})", items.join(", "))
+            }
+            ExprKind::Constructor(name, args) => {
+                if args.is_empty() {
+                    format!("#{}", name)
+                } else {
+                    let items: Vec<String> = args.iter().map(|a| self.format_simple_expr(a)).collect();
+                    format!("#{}({})", name, items.join(", "))
+                }
             }
             ExprKind::BinaryOp(op, lhs, rhs) => {
                 format!(

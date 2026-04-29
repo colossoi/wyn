@@ -149,6 +149,12 @@ impl AstConstFolder {
                 }
             }
 
+            ExprKind::Constructor(_, args) => {
+                for arg in args {
+                    self.fold_expr(arg);
+                }
+            }
+
             ExprKind::RecordLiteral(fields) => {
                 for (_name, value) in fields {
                     self.fold_expr(value);

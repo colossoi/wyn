@@ -571,6 +571,11 @@ fn find_in_expr(expr: &ast::Expression, line: usize, col: usize, best: &mut Opti
                 find_in_expr(elem, line, col, best);
             }
         }
+        Constructor(_, args) => {
+            for arg in args {
+                find_in_expr(arg, line, col, best);
+            }
+        }
         ArrayIndex(arr, idx) => {
             find_in_expr(arr, line, col, best);
             find_in_expr(idx, line, col, best);
@@ -697,6 +702,13 @@ fn find_application_in_expr(expr: &ast::Expression, line: usize, col: usize) -> 
         Tuple(elems) | ArrayLiteral(elems) | VecMatLiteral(elems) => {
             for elem in elems {
                 if let Some(r) = find_application_in_expr(elem, line, col) {
+                    return Some(r);
+                }
+            }
+        }
+        Constructor(_, args) => {
+            for arg in args {
+                if let Some(r) = find_application_in_expr(arg, line, col) {
                     return Some(r);
                 }
             }
@@ -960,6 +972,13 @@ fn find_name_in_expr(expr: &ast::Expression, line: usize, col: usize) -> Option<
                 }
             }
         }
+        Constructor(_, args) => {
+            for arg in args {
+                if let Some(name) = find_name_in_expr(arg, line, col) {
+                    return Some(name);
+                }
+            }
+        }
         ArrayIndex(arr, idx) => {
             if let Some(name) = find_name_in_expr(arr, line, col) {
                 return Some(name);
@@ -1096,6 +1115,11 @@ fn collect_refs_in_expr(expr: &ast::Expression, target: &str, refs: &mut Vec<Spa
         Tuple(elems) | ArrayLiteral(elems) | VecMatLiteral(elems) => {
             for elem in elems {
                 collect_refs_in_expr(elem, target, refs);
+            }
+        }
+        Constructor(_, args) => {
+            for arg in args {
+                collect_refs_in_expr(arg, target, refs);
             }
         }
         ArrayIndex(arr, idx) => {
@@ -1265,6 +1289,14 @@ fn find_definition_in_expr(
         Tuple(elems) | ArrayLiteral(elems) | VecMatLiteral(elems) => {
             for elem in elems {
                 if let Some(s) = find_definition_in_expr(elem, line, col, bindings) {
+                    return Some(s);
+                }
+            }
+            None
+        }
+        Constructor(_, args) => {
+            for arg in args {
+                if let Some(s) = find_definition_in_expr(arg, line, col, bindings) {
                     return Some(s);
                 }
             }
