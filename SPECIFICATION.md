@@ -2,32 +2,96 @@
 
 ## Introduction
 
-Wyn is a minimal functional programming language designed for GPU shader programming. It generates SPIR-V code for use with modern graphics APIs like Vulkan and WebGPU. The language draws inspiration from Futhark's array-oriented programming model while maintaining simplicity and focusing specifically on shader development.
+Wyn is a functional, array-centric language for GPU programming. It
+compiles higher-order functions away via defunctionalization,
+producing code that runs on GPU targets without first-class function
+pointers. Its array surface abstracts over the several incompatible
+array kinds a GPU exposes — function-local arrays, vectors, storage
+buffers — a single paradigm for all of them.
 
 ### Design Goals
 
-- **Shader-focused**: Designed specifically for vertex, fragment, and compute shader programming
+- **GPU-targeted**: language constraints (regular arrays, no recursion, no first-class function pointers) keep programs compatible with massively parallel hardware
 - **Array-oriented**: First-class support for multi-dimensional arrays and array operations
 - **Type-safe**: Static type checking with explicit type annotations
-- **SPIR-V target**: Direct compilation to SPIR-V for maximum compatibility
 - **Functional**: Immutable data structures and expression-based computation
-- **Minimal**: Small, focused language with essential features for shader development
 
 ### Key Features
 
 - Multi-dimensional array types with literal syntax
-- Built-in functions for array-to-vector conversion (SPIR-V compatibility)
+- Built-in functions for array-to-vector conversion
 - Entry point declarations for vertex and fragment shaders
-- Automatic semantic mapping (e.g., `[4]f32` → `gl_Position` for vertex shaders)
+- Automatic semantic mapping (e.g., a `[4]f32` return is the vertex position output)
 - Static type checking with type inference
-- Integration with GPU built-in variables (`gl_VertexIndex`, etc.)
+- Integration with GPU built-in variables (vertex index, fragment coordinates, etc.)
 
-### Language Overview
+### Program Structure
 
-Wyn programs consist of:
-- **Global declarations**: Constants and arrays defined with `let` or `def`
-- **Built-in function signatures**: Polymorphic functions defined with `val`
-- **Shader entry points**: `entry` declarations with `#[vertex]`, `#[fragment]`, or `#[compute]` attributes
+A Wyn program is a sequence of declarations. The smallest interesting
+program is a single compute entry point:
+
+```wyn
+#[compute]
+entry double(arr: []f32) []f32 = map(|x| x * 2.0, arr)
+```
+
+`entry` marks a function as visible to the host runtime; the
+`#[compute]` attribute (or `#[vertex]` / `#[fragment]`) selects the
+GPU pipeline stage. Anything that's not an entry point is an
+ordinary function or value, defined with `def`:
+
+```wyn
+def gravity: f32 = 9.81
+
+def step(dt: f32, v: f32) f32 = v + gravity * dt
+```
+
+Functions are first-class within the program — they can be passed to
+higher-order operators like `map` and `reduce` — but they don't escape
+into runtime values. The compiler defunctionalizes them away during
+lowering.
+
+Type inference fills in argument and return types when context allows;
+the explicit annotations above are illustrative, not required:
+
+```wyn
+def step(dt, v) = v + gravity * dt
+```
+
+Arrays are the primary aggregate. Sizes participate in the type
+system, so a function that takes an `[n]f32` returns an array whose
+length is bound to that same `n`:
+
+```wyn
+def normalize(xs: [n]f32) [n]f32 =
+  let total = reduce(|a, b| a + b, 0.0, xs) in
+  map(|x| x / total, xs)
+```
+
+A graphics program splits across two entry points — a vertex stage
+that emits per-vertex position and varyings, and a fragment stage
+that consumes the matched varyings and writes a color:
+
+```wyn
+#[vertex]
+entry vs(#[builtin(vertex_index)] i: i32)
+  (#[builtin(position)] vec4f32, #[location(0)] vec3f32) =
+  let pos = if i == 0 then @[-0.5, -0.5, 0.0, 1.0]
+            else if i == 1 then @[ 0.5, -0.5, 0.0, 1.0]
+            else                 @[ 0.0,  0.5, 0.0, 1.0] in
+  let color: vec3f32 = @[1.0, 0.0, 0.0] in
+  (pos, color)
+
+#[fragment]
+entry fs(#[location(0)] color: vec3f32) #[location(0)] vec4f32 =
+  @[color.x, color.y, color.z, 1.0]
+```
+
+The two entry points communicate through `#[location(n)]` — the
+vertex output at location 0 flows into the fragment input at the same
+location. Built-ins (vertex index, fragment position, etc.) are
+addressed by `#[builtin(...)]` instead, with a fixed set of names per
+stage.
 
 ## Grammar Notation
 
@@ -1277,7 +1341,7 @@ Wyn supports an attribute system for shader interface specification. Attributes 
 
 ### Shader Interface Attributes
 
-Wyn uses attributes to define the interface between vertex and fragment shaders, using SPIR-V builtin names for GPU built-in variables.
+Wyn uses attributes to define the interface between shader stages and the GPU pipeline.
 
 #### Shader Identification
 
@@ -1304,18 +1368,18 @@ entry compute_main(data: []f32) []f32 = map(|x| x * 2.0, data)
 **`#[builtin(builtin_name)]`** - Maps parameters and return values to GPU built-in variables
 
 **Vertex Shader Built-ins:**
-- `#[builtin(vertex_index)]` - Vertex index (SPIR-V: `VertexIndex`)
-- `#[builtin(instance_index)]` - Instance index (SPIR-V: `InstanceIndex`) 
-- `#[builtin(position)]` - Output position (SPIR-V: `Position`)
+- `#[builtin(vertex_index)]` - Vertex index
+- `#[builtin(instance_index)]` - Instance index
+- `#[builtin(position)]` - Output position
 
 **Fragment Shader Built-ins:**
-- `#[builtin(frag_coord)]` - Fragment coordinates (SPIR-V: `FragCoord`)
-- `#[builtin(front_facing)]` - Front-facing status (SPIR-V: `FrontFacing`)
-- `#[builtin(frag_depth)]` - Fragment depth output (SPIR-V: `FragDepth`)
+- `#[builtin(frag_coord)]` - Fragment coordinates
+- `#[builtin(front_facing)]` - Front-facing status
+- `#[builtin(frag_depth)]` - Fragment depth output
 
 **Compute Shader Built-ins:**
-- `#[builtin(global_invocation_id)]` - Global thread ID (SPIR-V: `GlobalInvocationId`)
-- `#[builtin(local_invocation_id)]` - Local thread ID within workgroup (SPIR-V: `LocalInvocationId`)
+- `#[builtin(global_invocation_id)]` - Global thread ID
+- `#[builtin(local_invocation_id)]` - Local thread ID within workgroup
 
 #### Location-based Interface
 
@@ -1369,13 +1433,14 @@ entry process_data(
     map(|x| x * factor, input)
 ```
 
-## SPIR-V Compatibility Types
+## Vector Types
 
-In addition to arrays, Wyn provides vector types that directly correspond to SPIR-V/GLSL types. These are distinct types optimized for GPU operations and are required for certain shader interfaces and built-in variables.
+In addition to arrays, Wyn provides fixed-width vector types. They are
+distinct from arrays — they have a fixed component count, different
+semantics, and are required for certain shader interfaces and built-in
+variables.
 
-### Vector Types
-
-Wyn supports vector types using the naming convention `vecNT` where:
+Vector types use the naming convention `vecNT` where:
 - `N` is the number of components (2, 3, or 4)
 - `T` is the element type (i32, f32, etc.)
 
@@ -1408,7 +1473,7 @@ entry vertex_main() #[builtin(position)] vec4f32 =
 ### Vector Swizzles
 
 A vector's components are accessed with field syntax (`v.x`). Wyn
-supports WGSL-style swizzles: one to four letters drawn from a single
+also supports swizzles: one to four letters drawn from a single
 "swizzle set". The two sets and their component indices are:
 
 | Set  | `0` | `1` | `2` | `3` |
@@ -1455,13 +1520,10 @@ let v2: vec4f32 = vec4 1.0f32 2.0f32 3.0f32 4.0f32
 
 The element type is inferred from the arguments or the context.
 
-### Implementation Details
+### Constraints
 
-- Attributes are parsed directly into SPIR-V enum values for type safety
-- Built-in names follow SPIR-V specification (e.g., `VertexIndex`, `Position`)
 - Location numbers must be non-negative integers
 - Each shader stage has specific allowed built-ins
-- The compiler automatically generates appropriate SPIR-V decorations
 
 ### Type Safety
 
@@ -1538,12 +1600,11 @@ The convention is enforced statically — there is no runtime fallback
 or "best-effort" behavior. The diagnostic guides users to renumber
 their decls; once the user keeps off set 0, no collision is possible.
 
-### Compiler-Allocated Bindings in the Pipeline Descriptor
+### Compiler-Allocated Bindings
 
-The JSON sidecar (`<shader>.json`) emitted alongside the SPIR-V
-module lists every binding the host runtime needs to wire up,
-including the compiler-allocated ones. For a compute shader with a
-tuple-of-arrays input like
+Set 0 holds the bindings derived from each entry point's parameters
+and return value. A tuple-of-arrays input is split into one binding
+per element. For example,
 
 ```wyn
 #[uniform(set=1, binding=0)] def now: f32
@@ -1553,11 +1614,9 @@ tuple-of-arrays input like
 entry price_options(opts: [](f32, f32, i32, f32, f32)) []f32 = ...
 ```
 
-the descriptor reports the two uniforms on set 1 and six storage
-buffers on set 0 — five SoA-split inputs (`opts_0` through `opts_4`)
-and one output (`<entry>_output`). A host that reads the descriptor
-binds bind group 0 with the storage buffers it filled with input
-data plus an output buffer, and bind group 1 with its uniform values.
+allocates five storage bindings on set 0 for the SoA-split input
+(`opts_0` through `opts_4`) and one for the output (`<entry>_output`).
+The two user-declared uniforms remain on set 1 as written.
 
 ---
 
