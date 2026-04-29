@@ -262,11 +262,37 @@ As an example, an array of three integers could be written as `[1, 2, 3]`, and h
 
 Sum types are anonymous in Wyn, and are written as the constructors separated by vertical bars. Each constructor consists of a `#`-prefixed name, followed by zero or more types, called its payload.
 
+Because sum types are structural, constructor names are not globally
+unique — they are tags inside a sum type, not declarations. The same
+name `#left` belongs to infinitely many possible sum types
+(`#left i32 | #right f32`, `#left bool | #middle | #right`, …), so
+a bare constructor expression like `#left 3` is ambiguous in
+isolation. The type checker resolves it from context — the expected
+type at the use site, the type of an argument it's being passed as,
+or an explicit annotation. When context doesn't pin a single sum
+type down, an annotation is required:
+
+```wyn
+let x: #left i32 | #right f32 = #left 3
+```
+
 **Note:** The current implementation of sum types is fairly inefficient, in that all possible constructors of a sum-typed value will be resident in memory. Avoid using sum types where multiple constructors have large payloads.
 
 #### Record Types
 
 Records are mappings from field names to values, with the field names known statically. A tuple behaves in all respects like a record with numeric field names starting from zero, and vice versa. It is an error for a record type to name the same field twice. A trailing comma is permitted.
+
+Records are structural: a field name `x` does not identify a single
+record type, so a bare projection `r.x` does not fully determine
+`r`'s type by itself. As with sum constructors, the type checker
+uses context — the inferred type of `r` from the surrounding
+expression, or an explicit annotation on `r` — to pick a single
+record type. When context doesn't suffice, an annotation is
+required:
+
+```wyn
+let r: { x: f32, y: f32 } = make_point() in r.x
+```
 
 #### Function Types
 

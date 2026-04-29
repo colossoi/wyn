@@ -1699,3 +1699,22 @@ fn test_tuple_field_access_on_non_tuple() {
     let result = try_typecheck_program("def x(n: i32) i32 = n.0");
     assert!(result.is_err(), "Expected type error for .0 on non-tuple type");
 }
+
+// ---- Spec example: record-projection ambiguity ---------------------------
+//
+// SPECIFICATION.md "Record Types" cites this as a working form — a bare
+// `r.x` is ambiguous, but with the type pinned by an annotation it
+// type-checks. (The companion sum-type ambiguity prose is in the spec
+// but not yet exercisable: value-level constructor expressions like
+// `#left 3` aren't lexable today.)
+
+#[test]
+fn test_record_projection_with_annotation() {
+    typecheck_program(
+        r#"
+def get_x: f32 =
+    let r: { x: f32, y: f32 } = {x: 1.0f32, y: 2.0f32} in
+    r.x
+        "#,
+    );
+}
