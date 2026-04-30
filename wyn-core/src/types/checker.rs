@@ -1997,6 +1997,16 @@ impl<'a> TypeChecker<'a> {
                 // Return the array type (same type as input)
                 Ok(array_type.apply(&self.context))
             }
+            ExprKind::VecWith { .. } => {
+                // Phase B of the swizzle-with plan will type-check
+                // VecWith. Until then, the type checker rejects it
+                // so nobody can sneak a swizzle update past the
+                // checker.
+                Err(err_type_at!(
+                    expr.h.span,
+                    "vec swizzle update is not yet supported (Phase B TODO)"
+                ))
+            }
             ExprKind::BinaryOp(op, left, right) => {
                 let left_type = self.infer_expression(left)?;
                 let right_type = self.infer_expression(right)?;

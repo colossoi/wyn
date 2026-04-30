@@ -3332,6 +3332,83 @@ fn test_numeric_field_access_on_literal_tuple() {
     let _program = parse_ok(src);
 }
 
+// =============================================================================
+// `with .swizzle` parser tests (Phase A of swizzle-with plan)
+// =============================================================================
+
+#[test]
+fn test_parse_vec_with_swizzle_yz() {
+    let src = "def f(v: vec3f32, e: vec2f32) vec3f32 = v with .yz = e";
+    let _program = parse_ok(src);
+}
+
+#[test]
+fn test_parse_vec_with_swizzle_xz_non_contiguous() {
+    let src = "def f(v: vec3f32, e: vec2f32) vec3f32 = v with .xz = e";
+    let _program = parse_ok(src);
+}
+
+#[test]
+fn test_parse_vec_with_swizzle_single_component() {
+    let src = "def f(v: vec3f32, e: f32) vec3f32 = v with .x = e";
+    let _program = parse_ok(src);
+}
+
+#[test]
+fn test_parse_vec_with_swizzle_compound_mul() {
+    let src = "def f(v: vec3f32, m: mat2f32) vec3f32 = v with .yz *= m";
+    let _program = parse_ok(src);
+}
+
+#[test]
+fn test_parse_vec_with_swizzle_compound_add() {
+    let src = "def f(v: vec3f32, e: vec2f32) vec3f32 = v with .yz += e";
+    let _program = parse_ok(src);
+}
+
+#[test]
+fn test_parse_vec_with_swizzle_chained() {
+    // The four-step rotation pattern parses left-associatively as
+    // (((v with .yz = a) with .xz = b) with .yz = c) with .xz = d.
+    let src = r#"
+def f(v: vec3f32, m: mat2f32) vec3f32 =
+    let v1 = v with .yz *= m in
+    let v2 = v1 with .xz *= m in
+    let v3 = v2 with .yz *= m in
+    v3 with .xz *= m
+"#;
+    let _program = parse_ok(src);
+}
+
+#[test]
+fn test_parse_vec_with_swizzle_duplicate_components_rejected() {
+    let src = "def f(v: vec3f32, e: vec2f32) vec3f32 = v with .xx = e";
+    expect_parse_error(src, |err| match err {
+        CompilerError::ParseError(msg, _) if msg.contains("repeats component") => Ok(()),
+        other => Err(format!("expected repeated-component error, got {:?}", other)),
+    });
+}
+
+#[test]
+fn test_parse_vec_with_swizzle_invalid_letters_rejected() {
+    // `.q` is not in {xyzw, rgba}.
+    let src = "def f(v: vec3f32, e: f32) vec3f32 = v with .q = e";
+    expect_parse_error(src, |err| match err {
+        CompilerError::ParseError(msg, _) if msg.contains("not a valid swizzle") => Ok(()),
+        other => Err(format!("expected invalid-swizzle error, got {:?}", other)),
+    });
+}
+
+#[test]
+fn test_parse_vec_with_after_with_requires_brace_or_dot() {
+    // `with` followed by neither `[` nor `.` is a parse error.
+    let src = "def f(v: vec3f32) vec3f32 = v with foo = 1.0f32";
+    expect_parse_error(src, |err| match err {
+        CompilerError::ParseError(msg, _) if msg.contains("Expected `[` or `.swizzle`") => Ok(()),
+        other => Err(format!("expected with-LHS error, got {:?}", other)),
+    });
+}
+
 #[test]
 fn test_functor_param_module_function_call() {
     // Calling a function from a functor parameter module: R.f64(x)

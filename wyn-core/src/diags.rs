@@ -13,6 +13,21 @@ use std::fmt::Write;
 ///
 /// Converts `Constructed(Str("f32"), [])` to `"f32"`,
 /// `Constructed(Array, [Size(3), Str("f32")])` to `"[3]f32"`, etc.
+/// Render a swizzle component list (slot indices 0..=3) as a string like
+/// `xy`, `yz`, `xyzw`. Used when printing `VecWith` expressions.
+fn format_swizzle(components: &[u8]) -> String {
+    components
+        .iter()
+        .map(|c| match c {
+            0 => 'x',
+            1 => 'y',
+            2 => 'z',
+            3 => 'w',
+            _ => '?',
+        })
+        .collect()
+}
+
 pub fn format_type(ty: &PolyType<TypeName>) -> String {
     // Handle unique types first via dedicated API
     if let Some(inner) = ty.as_unique_inner() {
@@ -399,6 +414,21 @@ impl AstFormatter {
                 let val_str = self.format_simple_expr(value);
                 self.write_line(&format!("{} with [{}] = {}", arr_str, idx_str, val_str));
             }
+            ExprKind::VecWith {
+                target,
+                components,
+                op,
+                value,
+            } => {
+                let tgt_str = self.format_simple_expr(target);
+                let val_str = self.format_simple_expr(value);
+                let swiz = format_swizzle(components);
+                let op_str = match op {
+                    Some(o) => format!("{}=", o),
+                    None => "=".to_string(),
+                };
+                self.write_line(&format!("{} with .{} {} {}", tgt_str, swiz, op_str, val_str));
+            }
             ExprKind::BinaryOp(op, lhs, rhs) => {
                 let lhs_str = self.format_simple_expr(lhs);
                 let rhs_str = self.format_simple_expr(rhs);
@@ -610,6 +640,24 @@ impl AstFormatter {
                     "{} with [{}] = {}",
                     self.format_simple_expr(array),
                     self.format_simple_expr(index),
+                    self.format_simple_expr(value)
+                )
+            }
+            ExprKind::VecWith {
+                target,
+                components,
+                op,
+                value,
+            } => {
+                let op_str = match op {
+                    Some(o) => format!("{}=", o),
+                    None => "=".to_string(),
+                };
+                format!(
+                    "{} with .{} {} {}",
+                    self.format_simple_expr(target),
+                    format_swizzle(components),
+                    op_str,
                     self.format_simple_expr(value)
                 )
             }

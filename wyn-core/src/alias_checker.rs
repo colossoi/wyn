@@ -872,6 +872,10 @@ fn collect_variable_uses_in_expr(expr: &Expression, uses: &mut HashMap<String, V
             collect_variable_uses_in_expr(index, uses);
             collect_variable_uses_in_expr(value, uses);
         }
+        ExprKind::VecWith { target, value, .. } => {
+            collect_variable_uses_in_expr(target, uses);
+            collect_variable_uses_in_expr(value, uses);
+        }
         ExprKind::Range(range) => {
             collect_variable_uses_in_expr(&range.start, uses);
             collect_variable_uses_in_expr(&range.end, uses);

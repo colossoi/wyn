@@ -372,6 +372,20 @@ pub enum ExprKind {
         value: Box<Expression>,
         inplace: bool,
     },
+    /// Vec swizzle update: `v with .yz = e` produces a copy of `v`
+    /// with positions y and z replaced by e.x and e.y. Compound
+    /// forms `*= += -= /=` desugar to `target.swizzle <op> rhs` at
+    /// AST→TLC time, with the target evaluated once.
+    VecWith {
+        target: Box<Expression>,
+        /// Slot indices in source order: x→0, y→1, z→2, w→3
+        /// (rgba aliased). Distinctness is enforced at parse time.
+        components: Vec<u8>,
+        /// `None` for plain `=`. `Some(op)` for compound `op=`,
+        /// where `op` is one of `"*"`, `"+"`, `"-"`, `"/"`.
+        op: Option<String>,
+        value: Box<Expression>,
+    },
     BinaryOp(BinaryOp, Box<Expression>, Box<Expression>),
     UnaryOp(UnaryOp, Box<Expression>), // Unary operations: -, !
     Tuple(Vec<Expression>),

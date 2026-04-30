@@ -286,6 +286,10 @@ impl<'a> OpenResolver<'a> {
                 self.resolve_expression(index)?;
                 self.resolve_expression(value)?;
             }
+            ExprKind::VecWith { target, value, .. } => {
+                self.resolve_expression(target)?;
+                self.resolve_expression(value)?;
+            }
             ExprKind::Slice(slice) => {
                 self.resolve_expression(&mut slice.array)?;
                 if let Some(s) = &mut slice.start {

@@ -1708,6 +1708,14 @@ impl<'a> Transformer<'a> {
                 self.build_app(fn_name, vec![arr, idx, val], ty, span)
             }
 
+            ast::ExprKind::VecWith { .. } => {
+                // Phase C of the swizzle-with plan will lower
+                // VecWith into a vec-build expression. The Phase B
+                // type checker rejects VecWith expressions so this
+                // arm should never run today.
+                panic!("AST→TLC: vec swizzle update is not yet lowered (Phase C TODO)")
+            }
+
             ast::ExprKind::BinaryOp(op, lhs, rhs) => {
                 let l = self.transform_expr(lhs);
                 let r = self.transform_expr(rhs);

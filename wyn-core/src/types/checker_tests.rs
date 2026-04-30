@@ -1962,7 +1962,6 @@ def update(v: vec3f32, e: vec3f32) vec3f32 =
 }
 
 #[test]
-#[ignore = "un-ignore once Phase A (parser distinctness check) lands"]
 fn test_vec_with_swizzle_duplicate_components() {
     // `.xx` writes the same slot twice — caller intent is ambiguous;
     // parser rejects at distinctness check.

@@ -143,6 +143,11 @@ impl AstConstFolder {
                 self.fold_expr(value);
             }
 
+            ExprKind::VecWith { target, value, .. } => {
+                self.fold_expr(target);
+                self.fold_expr(value);
+            }
+
             ExprKind::Tuple(elements) => {
                 for elem in elements {
                     self.fold_expr(elem);

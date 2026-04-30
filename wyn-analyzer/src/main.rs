@@ -587,6 +587,10 @@ fn find_in_expr(expr: &ast::Expression, line: usize, col: usize, best: &mut Opti
             find_in_expr(index, line, col, best);
             find_in_expr(value, line, col, best);
         }
+        VecWith { target, value, .. } => {
+            find_in_expr(target, line, col, best);
+            find_in_expr(value, line, col, best);
+        }
         FieldAccess(base, _) => {
             find_in_expr(base, line, col, best);
         }
@@ -996,6 +1000,12 @@ fn find_name_in_expr(expr: &ast::Expression, line: usize, col: usize) -> Option<
             }
             return find_name_in_expr(value, line, col);
         }
+        VecWith { target, value, .. } => {
+            if let Some(name) = find_name_in_expr(target, line, col) {
+                return Some(name);
+            }
+            return find_name_in_expr(value, line, col);
+        }
         FieldAccess(base, _) => {
             return find_name_in_expr(base, line, col);
         }
@@ -1131,6 +1141,12 @@ fn collect_refs_in_expr(expr: &ast::Expression, target: &str, refs: &mut Vec<Spa
         } => {
             collect_refs_in_expr(array, target, refs);
             collect_refs_in_expr(index, target, refs);
+            collect_refs_in_expr(value, target, refs);
+        }
+        VecWith {
+            target: tgt, value, ..
+        } => {
+            collect_refs_in_expr(tgt, target, refs);
             collect_refs_in_expr(value, target, refs);
         }
         FieldAccess(base, _) => {
@@ -1308,6 +1324,8 @@ fn find_definition_in_expr(
             array, index, value, ..
         } => find_definition_in_expr(array, line, col, bindings)
             .or_else(|| find_definition_in_expr(index, line, col, bindings))
+            .or_else(|| find_definition_in_expr(value, line, col, bindings)),
+        VecWith { target, value, .. } => find_definition_in_expr(target, line, col, bindings)
             .or_else(|| find_definition_in_expr(value, line, col, bindings)),
         FieldAccess(base, _) => find_definition_in_expr(base, line, col, bindings),
         Loop(loop_expr) => {

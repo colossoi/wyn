@@ -79,6 +79,13 @@ impl<'a> Promoter<'a> {
                     }
                 }
             }
+            ExprKind::VecWith { target, value, .. } => {
+                // Vec swizzle update is purely functional — we always
+                // build a fresh vec, so there's no in-place flag to
+                // promote. Just recurse.
+                self.visit_expr(target);
+                self.visit_expr(value);
+            }
             ExprKind::ArrayLiteral(elements) | ExprKind::VecMatLiteral(elements) => {
                 for elem in elements {
                     self.visit_expr(elem);

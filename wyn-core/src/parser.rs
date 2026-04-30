@@ -1538,37 +1538,119 @@ impl<'a> Parser<'a> {
 
         loop {
             // Handle 'with' as a special left-associative operator
-            // with has precedence 10 (dominates all binary operators)
-            // arr with [i] = v with [j] = w parses as ((arr with [i] = v) with [j] = w)
+            // with has precedence 10 (dominates all binary operators).
+            // Two LHS forms are accepted:
+            //   array form:    a with [i] = e
+            //   swizzle form:  v with .yz = e   (or `.yz *= e` for compound)
             if self.check(&Token::With) && dominated_by <= 10 {
                 let start_span = left.h.span;
                 self.advance(); // consume 'with'
 
-                // Accept either LeftBracket or LeftBracketSpaced after 'with'
                 if self.check(&Token::LeftBracket) || self.check(&Token::LeftBracketSpaced) {
                     self.advance();
+                    let index = self.parse_expression()?;
+                    self.expect(Token::RightBracket)?;
+                    self.expect(Token::Assign)?;
+
+                    // Parse value dominated by 11 for left-associativity
+                    let value = self.parse_binary_expression_with_precedence(11)?;
+                    let end_span = self.previous_span();
+                    let span = start_span.merge(&end_span);
+
+                    left = self.node_counter.mk_node(
+                        ExprKind::ArrayWith {
+                            array: Box::new(left),
+                            index: Box::new(index),
+                            value: Box::new(value),
+                            inplace: false,
+                        },
+                        span,
+                    );
+                    continue;
+                } else if self.check(&Token::Dot) {
+                    self.advance(); // consume '.'
+                    let (swizzle_str, swizzle_span) = match self.peek() {
+                        Some(Token::Identifier(s)) => (s.clone(), self.current_span()),
+                        _ => bail_parse_at!(
+                            self.current_span(),
+                            "Expected swizzle (e.g. `.xy`) after `with .`"
+                        ),
+                    };
+                    self.advance();
+                    if !crate::types::is_swizzle_field(&swizzle_str) {
+                        bail_parse_at!(
+                            swizzle_span,
+                            "`.{}` is not a valid swizzle (must be 1-4 chars from `xyzw` or `rgba`)",
+                            swizzle_str
+                        );
+                    }
+                    let mut components: Vec<u8> = Vec::with_capacity(swizzle_str.len());
+                    for c in swizzle_str.chars() {
+                        let idx = crate::types::swizzle_component_index(c)
+                            .expect("is_swizzle_field accepted this letter");
+                        if components.contains(&(idx as u8)) {
+                            bail_parse_at!(
+                                swizzle_span,
+                                "swizzle `.{}` repeats component `{}` — \
+                                 distinct components are required on the left of `with`",
+                                swizzle_str,
+                                c
+                            );
+                        }
+                        components.push(idx as u8);
+                    }
+
+                    // After the swizzle: either plain `=`, or a
+                    // compound form. The lexer keeps `*=` etc. as
+                    // two adjacent tokens (`BinOp("*")` then
+                    // `Assign`), so peek at the operator first and
+                    // only consume it when an `=` follows.
+                    let op = match self.peek() {
+                        Some(Token::Assign) => {
+                            self.advance();
+                            None
+                        }
+                        _ if {
+                            // Look ahead for compound `op=` form.
+                            matches!(
+                                self.peek2(),
+                                Some((Token::BinOp(s), Token::Assign))
+                                    if matches!(s.as_str(), "*" | "+" | "-" | "/")
+                            )
+                        } =>
+                        {
+                            let prefix = match self.peek() {
+                                Some(Token::BinOp(s)) => s.clone(),
+                                _ => unreachable!("peek2 just matched BinOp"),
+                            };
+                            self.advance(); // consume binop
+                            self.advance(); // consume `=`
+                            Some(prefix)
+                        }
+                        _ => bail_parse_at!(
+                            self.current_span(),
+                            "Expected `=`, `*=`, `+=`, `-=`, or `/=` after `with .{}`",
+                            swizzle_str
+                        ),
+                    };
+
+                    let value = self.parse_binary_expression_with_precedence(11)?;
+                    let end_span = self.previous_span();
+                    let span = start_span.merge(&end_span);
+
+                    left = self.node_counter.mk_node(
+                        ExprKind::VecWith {
+                            target: Box::new(left),
+                            components,
+                            op,
+                            value: Box::new(value),
+                        },
+                        span,
+                    );
+                    continue;
                 } else {
-                    bail_parse_at!(self.current_span(), "Expected '[' after 'with'");
+                    bail_parse_at!(self.current_span(), "Expected `[` or `.swizzle` after `with`");
                 }
-                let index = self.parse_expression()?;
-                self.expect(Token::RightBracket)?;
-                self.expect(Token::Assign)?;
-
-                // Parse value dominated by 11 for left-associativity
-                let value = self.parse_binary_expression_with_precedence(11)?;
-                let end_span = self.previous_span();
-                let span = start_span.merge(&end_span);
-
-                left = self.node_counter.mk_node(
-                    ExprKind::ArrayWith {
-                        array: Box::new(left),
-                        index: Box::new(index),
-                        value: Box::new(value),
-                        inplace: false,
-                    },
-                    span,
-                );
-                continue;
             }
 
             // Check if we have a binary operator or pipe operator
