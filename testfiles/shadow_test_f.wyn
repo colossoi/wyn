@@ -107,10 +107,8 @@ def rayMarch(ro: vec3f32, rd: vec3f32, z0: f32) f32 =
     let z2 = zs2.0 in
     let s2 = zs2.1 in
     let stop = abs(dS) < SURF_DIST || dO > MAX_DIST in
-    if stop then
-      (MAX_STEPS, dO, z2, s2)
-    else
-      (i + 1, dO + dS * z2, z2, s2)
+    if stop then (MAX_STEPS, dO, z2, s2)
+    else (i + 1, dO + dS * z2, z2, s2)
   in
   min(result.1, MAX_DIST)
 
@@ -170,9 +168,7 @@ entry fragment_main(#[builtin(position)] fragCoord: vec4f32)
     -- closer they are to the origin.
     let pxz = @[p.x, p.z] in
     let pxz_len = magnitude(pxz) in
-    let r_norm = if p.y > -0.9 then
-                   n_raw * 50.0 * exp(-3.0 * pxz_len)
-                 else n_raw in
+    let r_norm = if p.y > -0.9 then n_raw * 50.0 * exp(-3.0 * pxz_len) else n_raw in
     let r = reflect(rd, r_norm) in
 
     -- Inside-march: refract through the surface, march in the

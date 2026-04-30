@@ -20,9 +20,7 @@ def secant(f: f32 -> f32, x0: f32, x1: f32, tol: f32, max_iter: i32) f32 =
   let r = loop (i, xp, xc, fp, fc) = (0, x0, x1, f0, f1)
     while i < max_iter && f32.abs(fc) > tol do
       let denom = fc - fp in
-      let x_new = if f32.abs(denom) < 1.0e-12f32
-                  then xc
-                  else xc - fc * (xc - xp) / denom in
+      let x_new = if f32.abs(denom) < 1.0e-12f32 then xc else xc - fc * (xc - xp) / denom in
       let f_new = f(x_new) in
       (i + 1, xc, x_new, fc, f_new)
   in r.2

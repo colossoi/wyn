@@ -71,9 +71,7 @@ def sdTorus(p:vec3f32, t:vec2f32) f32 =
 
 def sdCappedTorus(p:vec3f32, sc:vec2f32, ra:f32, rb:f32) f32 =
   let px = f32.abs(p.x) in
-  let k = if sc.y * px > sc.x * p.y
-          then dot(@[px, p.y], sc)
-          else magnitude(@[px, p.y]) in
+  let k = if sc.y * px > sc.x * p.y then dot(@[px, p.y], sc) else magnitude(@[px, p.y]) in
   f32.sqrt(dot2(p) + ra*ra - 2.0*ra*k) - rb
 
 def sdCapsule(p:vec3f32, a:vec3f32, b:vec3f32, r:f32) f32 =

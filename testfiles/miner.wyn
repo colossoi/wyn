@@ -107,8 +107,7 @@ def NO_HIT: (u32, [8]u32) =
                      0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32])
 
 def pick_better(a: (u32, [8]u32), b: (u32, [8]u32)) (u32, [8]u32) =
-    if a.0 == 0xFFFFFFFFu32 then b
-    else a
+    if a.0 == 0xFFFFFFFFu32 then b else a
 
 ------------------------------------------------------------
 -- Compute shader entry point
@@ -119,7 +118,6 @@ def pick_better(a: (u32, [8]u32), b: (u32, [8]u32)) (u32, [8]u32) =
 entry mine(header_base: [19]u32, target: [8]u32, n: u32, nonce_offset: u32) (u32, [8]u32) =
     let candidates = map(|nonce: u32|
         let hash = mine_nonce(header_base, nonce + nonce_offset) in
-        if hash_below_target(hash, target) then (nonce + nonce_offset, hash)
-        else NO_HIT,
+        if hash_below_target(hash, target) then (nonce + nonce_offset, hash) else NO_HIT,
     0u32..<n) in
     reduce(pick_better, NO_HIT, candidates)

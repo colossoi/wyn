@@ -50,8 +50,7 @@ def step_cell(board: []i32, width: i32, height: i32, i: i32) i32 =
     let alive = board[i] == 1 in
     if alive then
         if n == 2 || n == 3 then 1 else 0
-    else
-        if n == 3 then 1 else 0
+    else if n == 3 then 1 else 0
 
 -- ---------------------------------------------------------------
 -- Compute entry: one Conway step over the whole grid
