@@ -17,7 +17,7 @@ open f32
 def ry(p: vec3f32, a: f32) vec3f32 =
   let c = cos(a) in
   let s = sin(a) in
-  @[c * p.x + s * p.z, p.y, 0.0 - s * p.x + c * p.z]
+  p with .xz *= @[[c, s], [0.0 - s, c]]
 
 ------------------------------------------------------------
 -- Mandelbulb distance estimator (power 8).

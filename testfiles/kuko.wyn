@@ -77,13 +77,8 @@ def raymarch(fragCoord: vec2f32, res: vec2f32, rotX: mat2f32, rotY: mat2f32, chr
     let rd = rd_raw / rd_len in
 
     -- Apply rotation to ray direction based on mouse
-    let rd2 = if use_mouse > 0.5 then
-      let yz = rd.yz * rotY in
-      @[rd.x, yz.x, yz.y]
-    else
-      let xy = rd.xy * rotX in
-      @[xy.x, xy.y, rd.z]
-    in
+    let rd2 = if use_mouse > 0.5 then rd with .yz *= rotY
+              else rd with .xy *= rotX in
 
     -- Ray position
     let p = ro + rd2 * dt in

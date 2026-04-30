@@ -70,13 +70,13 @@ def thc(a: f32, b: f32) f32 =
 -- a plane at y = -1 with a shallow upward bowl term.
 ------------------------------------------------------------
 def getDist(p0: vec3f32) f32 =
-  let p_xz = @[p0.x, p0.z] * rot(0.5 * iTime) in
-  let p_a  = @[p_xz.x, p0.y, p_xz.y] in
+  let p_a = p0 with .xz *= rot(0.5 * iTime) in
 
   -- Torus, centered at +1 on x in the rotated frame, then locally
-  -- counter-rotated.
-  let q_xz = @[p_a.x - 1.0, p_a.z] * rot(-1.25 * iTime) in
-  let q    = @[q_xz.x, p_a.y, q_xz.y] in
+  -- counter-rotated. The `-1.0` shift on the x component means we
+  -- can't use plain `.xz *=` here — we have to spell out the
+  -- translated-then-rotated vec2 on the RHS.
+  let q = p_a with .xz = (@[p_a.x - 1.0, p_a.z] * rot(-1.25 * iTime)) in
   let r1 = 0.5 in
   let r2 = 0.2 in
   let td1 = magnitude(@[q.x, q.y]) - r1 in
