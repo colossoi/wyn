@@ -1708,13 +1708,12 @@ impl<'a> Transformer<'a> {
                 self.build_app(fn_name, vec![arr, idx, val], ty, span)
             }
 
-            ast::ExprKind::VecWith { .. } => {
-                // Phase C of the swizzle-with plan will lower
-                // VecWith into a vec-build expression. The Phase B
-                // type checker rejects VecWith expressions so this
-                // arm should never run today.
-                panic!("AST→TLC: vec swizzle update is not yet lowered (Phase C TODO)")
-            }
+            ast::ExprKind::VecWith {
+                target,
+                components,
+                op,
+                value,
+            } => self.transform_vec_with(target, components, op.as_deref(), value, ty, span),
 
             ast::ExprKind::BinaryOp(op, lhs, rhs) => {
                 let l = self.transform_expr(lhs);
@@ -2432,6 +2431,157 @@ impl<'a> Transformer<'a> {
             .filter(|_| ty.is_array())
             .cloned()
             .unwrap_or_else(|| panic!("BUG: Expected array type, got {:?}", ty))
+    }
+
+    /// Lower `target with .swizzle [op]= value` into a let-bound
+    /// vec-build:
+    ///
+    /// ```text
+    ///   let _t = target in
+    ///   let _r = value (or _t.swizzle <op> value, for compound) in
+    ///   _w_vec_lit(_t.0, ..., _r.0 or _t.i, ..., _t.{N-1})
+    /// ```
+    ///
+    /// `_t` and `_r` are bound to fresh symbols so the inputs evaluate
+    /// once even when they're arbitrary expressions.
+    fn transform_vec_with(
+        &mut self,
+        target: &ast::Expression,
+        components: &[u8],
+        op: Option<&str>,
+        value: &ast::Expression,
+        result_ty: Type<TypeName>,
+        span: Span,
+    ) -> Term {
+        let t_term = self.transform_expr(target);
+        let target_ty = t_term.ty.clone();
+        let elem_ty = target_ty.elem_type().cloned().expect("VecWith target must be a vec by type-check");
+        let vec_size = target_ty.vec_size().expect("VecWith target must have known size");
+
+        // Bind `_t = target` so each per-slot projection reads the
+        // same evaluated value.
+        let t_id = self.term_ids.next_id().0;
+        let t_sym = self.define(&format!("_w_vw_t_{}", t_id));
+        let t_var = self.mk_term(target_ty.clone(), span, TermKind::Var(t_sym));
+
+        // Compute the RHS term. For plain `=`, that's just `value`.
+        // For compound `op=`, build `_t.swizzle <op> value` so the
+        // existing binary-op machinery handles vec-vec / vec-mat /
+        // vec-scalar dispatch identically to a hand-written
+        // `t.swizzle op rhs`.
+        let v_term_raw = self.transform_expr(value);
+        let rhs_term = match op {
+            None => v_term_raw,
+            Some(binop_str) => {
+                let swizzle_read = self.build_swizzle_read(&t_var, components, &elem_ty, span);
+                let result_slot_ty = swizzle_read.ty.clone();
+                self.build_binop(
+                    ast::BinaryOp {
+                        op: binop_str.to_string(),
+                    },
+                    swizzle_read,
+                    v_term_raw,
+                    result_slot_ty,
+                    span,
+                )
+            }
+        };
+
+        // Bind `_r = <rhs>` so per-slot reads share one evaluation.
+        let r_id = self.term_ids.next_id().0;
+        let r_sym = self.define(&format!("_w_vw_r_{}", r_id));
+        let r_var = self.mk_term(rhs_term.ty.clone(), span, TermKind::Var(r_sym));
+
+        // Locate each component's position in `components` so we know
+        // which RHS slot supplies each target slot.
+        let component_pos: Vec<Option<usize>> =
+            (0..vec_size).map(|slot| components.iter().position(|&c| c as usize == slot)).collect();
+
+        // Build per-slot terms: RHS slot for swizzle positions,
+        // original target slot otherwise.
+        let single_component = components.len() == 1;
+        let slot_terms: Vec<Term> = component_pos
+            .iter()
+            .enumerate()
+            .map(|(slot, found)| match found {
+                Some(rhs_pos) => {
+                    if single_component {
+                        // RHS is the elem type itself, not a vec.
+                        r_var.clone()
+                    } else {
+                        self.build_proj(&r_var, *rhs_pos, &elem_ty, span)
+                    }
+                }
+                None => self.build_proj(&t_var, slot, &elem_ty, span),
+            })
+            .collect();
+
+        let body = self.build_vec_lit_from_terms(&slot_terms, result_ty.clone(), span);
+
+        // Wrap: let _t = target in let _r = rhs in body.
+        let inner = self.mk_term(
+            result_ty.clone(),
+            span,
+            TermKind::Let {
+                name: r_sym,
+                name_ty: rhs_term.ty.clone(),
+                rhs: Box::new(rhs_term),
+                body: Box::new(body),
+            },
+        );
+        self.mk_term(
+            result_ty,
+            span,
+            TermKind::Let {
+                name: t_sym,
+                name_ty: target_ty,
+                rhs: Box::new(t_term),
+                body: Box::new(inner),
+            },
+        )
+    }
+
+    /// Build a swizzle read on a Var term: emits per-letter
+    /// `_w_tuple_proj` calls and assembles them with
+    /// `_w_vec_lit_from_terms` (or returns the single term when
+    /// `components.len() == 1`).
+    fn build_swizzle_read(
+        &mut self,
+        target_var: &Term,
+        components: &[u8],
+        elem_ty: &Type<TypeName>,
+        span: Span,
+    ) -> Term {
+        let projs: Vec<Term> =
+            components.iter().map(|&c| self.build_proj(target_var, c as usize, elem_ty, span)).collect();
+        if projs.len() == 1 {
+            projs.into_iter().next().unwrap()
+        } else {
+            let result_ty = Type::Constructed(
+                TypeName::Vec,
+                vec![
+                    elem_ty.clone(),
+                    Type::Constructed(TypeName::Size(components.len()), vec![]),
+                ],
+            );
+            self.build_vec_lit_from_terms(&projs, result_ty, span)
+        }
+    }
+
+    /// Build `_w_tuple_proj(target, idx)` returning `result_ty`. Thin
+    /// wrapper that handles the index-literal Term construction.
+    fn build_proj(&mut self, target: &Term, idx: usize, result_ty: &Type<TypeName>, span: Span) -> Term {
+        let idx_lit = self.mk_term(
+            Type::Constructed(TypeName::Int(32), vec![]),
+            span,
+            TermKind::IntLit(idx.to_string()),
+        );
+        self.build_app(
+            "_w_tuple_proj",
+            vec![target.clone(), idx_lit],
+            result_ty.clone(),
+            span,
+        )
     }
 
     fn transform_match(&mut self, match_expr: &ast::MatchExpr, ty: Type<TypeName>, span: Span) -> Term {

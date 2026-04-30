@@ -1471,6 +1471,67 @@ entry main() #[location(0)] vec4f32 =
     assert_spirv_call_arities_match(&spirv);
 }
 
+// =============================================================================
+// Swizzle-with lowering (Phase C) integration tests
+// =============================================================================
+
+/// Plain `=` swizzle update: write `e` into v.yz, leaving v.x intact.
+#[test]
+fn swizzle_with_plain_assign_compiles_to_spirv() {
+    let src = r#"
+def update(v: vec3f32, e: vec2f32) vec3f32 = v with .yz = e
+
+#[fragment]
+entry main() #[location(0)] vec4f32 =
+    let v = update(@[1.0f32, 2.0f32, 3.0f32], @[20.0f32, 30.0f32]) in
+    @[v.x, v.y, v.z, 1.0f32]
+"#;
+    let spirv = compile_to_spirv(src).expect("plain swizzle-with should compile to SPIR-V");
+    assert_spirv_call_arities_match(&spirv);
+}
+
+/// Compound `*=` swizzle update: vec2 × mat2 multiply, written into
+/// v.yz. Exercises the binary-op path inside transform_vec_with.
+#[test]
+fn swizzle_with_compound_mul_compiles_to_spirv() {
+    let src = r#"
+def update(v: vec3f32, m: mat2f32) vec3f32 = v with .yz *= m
+
+#[fragment]
+entry main() #[location(0)] vec4f32 =
+    let m: mat2f32 = @[[1.0f32, 0.0f32], [0.0f32, 1.0f32]] in
+    let v = update(@[1.0f32, 2.0f32, 3.0f32], m) in
+    @[v.x, v.y, v.z, 1.0f32]
+"#;
+    let spirv = compile_to_spirv(src).expect("compound swizzle-with should compile to SPIR-V");
+    assert_spirv_call_arities_match(&spirv);
+}
+
+/// The full GLSL pattern from the original request: four chained
+/// `with .swizzle *= mat2` rotations on a direction vector.
+#[test]
+fn swizzle_with_chained_rotations_compiles_to_spirv() {
+    let src = r#"
+def rot(a: f32) mat2f32 =
+    let c = f32.cos(a) in
+    let s = f32.sin(a) in
+    @[[c, s], [0.0f32 - s, c]]
+
+def transform(dir0: vec3f32, mx: f32, my: f32) vec3f32 =
+    let d1 = dir0 with .yz *= rot(my) in
+    let d2 = d1 with .xz *= rot(mx) in
+    let d3 = d2 with .yz *= rot(my) in
+    d3 with .xz *= rot(mx)
+
+#[fragment]
+entry main() #[location(0)] vec4f32 =
+    let d = transform(@[0.0f32, 0.0f32, 1.0f32], 0.5f32, 0.3f32) in
+    @[d.x, d.y, d.z, 1.0f32]
+"#;
+    let spirv = compile_to_spirv(src).expect("chained swizzle-with rotations should compile");
+    assert_spirv_call_arities_match(&spirv);
+}
+
 /// Walk every `OpFunctionCall` in a SPIR-V module and assert each
 /// call's argument count matches the called function's declared
 /// parameter count. The arity-mismatch class of bug above produces
