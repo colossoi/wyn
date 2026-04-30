@@ -13,6 +13,23 @@ use super::{
     as_arrow, bool_type, f32, function, i32, mat, record, sized_array, strip_unique, tuple, unit, vec,
 };
 
+/// Render a single swizzle slot index as its `xyzw` letter. Used by
+/// VecWith diagnostics so error messages match the user's source.
+fn swizzle_letter(idx: u8) -> char {
+    match idx {
+        0 => 'x',
+        1 => 'y',
+        2 => 'z',
+        3 => 'w',
+        _ => '?',
+    }
+}
+
+/// Render a swizzle component list (`[1, 2]`) as `yz`.
+fn format_swizzle_str(components: &[u8]) -> String {
+    components.iter().map(|&c| swizzle_letter(c)).collect()
+}
+
 /// Trait for generating fresh type variables
 pub trait TypeVarGenerator {
     fn new_variable(&mut self) -> Type;
@@ -1997,196 +2014,103 @@ impl<'a> TypeChecker<'a> {
                 // Return the array type (same type as input)
                 Ok(array_type.apply(&self.context))
             }
-            ExprKind::VecWith { .. } => {
-                // Phase B of the swizzle-with plan will type-check
-                // VecWith. Until then, the type checker rejects it
-                // so nobody can sneak a swizzle update past the
-                // checker.
-                Err(err_type_at!(
-                    expr.h.span,
-                    "vec swizzle update is not yet supported (Phase B TODO)"
-                ))
+            ExprKind::VecWith {
+                target,
+                components,
+                op,
+                value,
+            } => {
+                // Target must resolve to a Vec<elem, size>.
+                let target_type = self.infer_expression(target)?;
+                let elem_var = self.context.new_variable();
+                let size_var = self.context.new_variable();
+                let want_vec =
+                    Type::Constructed(TypeName::Vec, vec![elem_var.clone(), size_var.clone()]);
+                self.context.unify(&target_type, &want_vec).map_err(|_| {
+                    err_type_at!(
+                        target.h.span,
+                        "`with .swizzle` requires a vector target, got {}",
+                        self.format_type(&target_type.apply(&self.context))
+                    )
+                })?;
+
+                // Range-check components against the resolved vec size,
+                // when known. (Parser already enforced distinctness.)
+                let resolved_target = target_type.apply(&self.context);
+                if let Type::Constructed(TypeName::Vec, args) = &resolved_target {
+                    if let Some(Type::Constructed(TypeName::Size(n), _)) = args.get(1) {
+                        for &c in components {
+                            if (c as usize) >= *n {
+                                bail_type_at!(
+                                    expr.h.span,
+                                    "swizzle component `{}` is out of range for vec{}",
+                                    swizzle_letter(c),
+                                    n
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // What type does `target.swizzle` have? Single-component
+                // is the elem type; multi-component is a vec of swizzle
+                // length. This is what the lhs slot reads/writes.
+                let elem_ty = elem_var.apply(&self.context);
+                let swizzle_ty = if components.len() == 1 {
+                    elem_ty.clone()
+                } else {
+                    Type::Constructed(
+                        TypeName::Vec,
+                        vec![
+                            elem_ty.clone(),
+                            Type::Constructed(TypeName::Size(components.len()), vec![]),
+                        ],
+                    )
+                };
+
+                let rhs_type = self.infer_expression(value)?;
+
+                match op {
+                    None => {
+                        // Plain `=`: rhs must match the swizzle slot's type.
+                        self.context.unify(&rhs_type, &swizzle_ty).map_err(|_| {
+                            err_type_at!(
+                                value.h.span,
+                                "`with .{}` expects {}, got {}",
+                                format_swizzle_str(components),
+                                self.format_type(&swizzle_ty),
+                                self.format_type(&rhs_type.apply(&self.context))
+                            )
+                        })?;
+                    }
+                    Some(binop) => {
+                        // Compound `op=`: type `swizzle_ty <op> rhs` and
+                        // require the result to equal swizzle_ty.
+                        let combined = self.infer_binop_result(
+                            binop,
+                            swizzle_ty.clone(),
+                            rhs_type,
+                            expr.h.span,
+                        )?;
+                        self.context.unify(&combined, &swizzle_ty).map_err(|_| {
+                            err_type_at!(
+                                expr.h.span,
+                                "compound `with .{} {}=` must produce {}, got {}",
+                                format_swizzle_str(components),
+                                binop,
+                                self.format_type(&swizzle_ty),
+                                self.format_type(&combined.apply(&self.context))
+                            )
+                        })?;
+                    }
+                }
+
+                Ok(target_type.apply(&self.context))
             }
             ExprKind::BinaryOp(op, left, right) => {
                 let left_type = self.infer_expression(left)?;
                 let right_type = self.infer_expression(right)?;
-
-                // Determine return type based on operator
-                match op.op.as_str() {
-                    "==" | "!=" | "<" | ">" | "<=" | ">=" => {
-                        // Comparison operators - unify operands, return boolean
-                        self.context.unify(&left_type, &right_type).map_err(|_| {
-                            err_type_at!(
-                                expr.h.span,
-                                "Binary operator '{}' requires operands of the same type, got {} and {}",
-                                op.op,
-                                left_type,
-                                right_type
-                            )
-                        })?;
-                        Ok(Type::Constructed(TypeName::Bool, vec![]))
-                    }
-                    "&&" | "||" => {
-                        // Logical operators require boolean operands and return boolean
-                        let bool_type = Type::Constructed(TypeName::Bool, vec![]);
-                        self.context.unify(&left_type, &bool_type).map_err(|_| {
-                            err_type_at!(
-                                expr.h.span,
-                                "Logical operator '{}' requires boolean operands, got {}",
-                                op.op,
-                                self.format_type(&left_type)
-                            )
-                        })?;
-                        self.context.unify(&right_type, &bool_type).map_err(|_| {
-                            err_type_at!(
-                                expr.h.span,
-                                "Logical operator '{}' requires boolean operands, got {}",
-                                op.op,
-                                self.format_type(&right_type)
-                            )
-                        })?;
-                        Ok(bool_type)
-                    }
-                    "+" | "-" | "*" | "/" | "%" | "**" => {
-                        // Arithmetic operators: support scalar-scalar, vec-vec, vec-scalar, and mat ops (* only)
-                        let left_resolved = left_type.apply(&self.context);
-                        let right_resolved = right_type.apply(&self.context);
-
-                        // Matrix multiplication (only for "*")
-                        let mat_result = if op.op == "*" {
-                            match (&left_resolved, &right_resolved) {
-                                // Mat * Mat → unify inner dims + elem → Mat
-                                (l, r) if l.is_mat() && r.is_mat() => {
-                                    self.context.unify(l.mat_rows_type().expect("Mat has rows"), r.mat_cols_type().expect("Mat has cols")).map_err(|_| {
-                                        err_type_at!(expr.h.span, "Matrix multiply inner dimensions must match, got {} and {}", self.format_type(l.mat_rows_type().expect("Mat has rows")), self.format_type(r.mat_cols_type().expect("Mat has cols")))
-                                    })?;
-                                    self.context.unify(l.elem_type().expect("Mat has elem"), r.elem_type().expect("Mat has elem")).map_err(|_| {
-                                        err_type_at!(expr.h.span, "Matrix multiply element types must match, got {} and {}", self.format_type(l.elem_type().expect("Mat has elem")), self.format_type(r.elem_type().expect("Mat has elem")))
-                                    })?;
-                                    Some(Type::Constructed(TypeName::Mat, vec![l.elem_type().expect("Mat has elem").clone(), l.mat_cols_type().expect("Mat has cols").clone(), r.mat_rows_type().expect("Mat has rows").clone()]))
-                                }
-                                // Mat * Vec → unify mat rows = vec size, elem → Vec
-                                (l, r) if l.is_mat() && r.is_vec() => {
-                                    self.context.unify(l.mat_rows_type().expect("Mat has rows"), r.vec_size_type().expect("Vec has size")).map_err(|_| {
-                                        err_type_at!(expr.h.span, "Matrix-vector multiply: matrix columns must match vector size, got {} and {}", self.format_type(l.mat_rows_type().expect("Mat has rows")), self.format_type(r.vec_size_type().expect("Vec has size")))
-                                    })?;
-                                    self.context.unify(l.elem_type().expect("Mat has elem"), r.elem_type().expect("Vec has elem")).map_err(|_| {
-                                        err_type_at!(expr.h.span, "Matrix-vector multiply element types must match, got {} and {}", self.format_type(l.elem_type().expect("Mat has elem")), self.format_type(r.elem_type().expect("Vec has elem")))
-                                    })?;
-                                    Some(Type::Constructed(TypeName::Vec, vec![l.elem_type().expect("Mat has elem").clone(), l.mat_cols_type().expect("Mat has cols").clone()]))
-                                }
-                                // Vec * Mat → unify vec size = mat cols, elem → Vec
-                                (l, r) if l.is_vec() && r.is_mat() => {
-                                    self.context.unify(l.vec_size_type().expect("Vec has size"), r.mat_cols_type().expect("Mat has cols")).map_err(|_| {
-                                        err_type_at!(expr.h.span, "Vector-matrix multiply: vector size must match matrix rows, got {} and {}", self.format_type(l.vec_size_type().expect("Vec has size")), self.format_type(r.mat_cols_type().expect("Mat has cols")))
-                                    })?;
-                                    self.context.unify(l.elem_type().expect("Vec has elem"), r.elem_type().expect("Mat has elem")).map_err(|_| {
-                                        err_type_at!(expr.h.span, "Vector-matrix multiply element types must match, got {} and {}", self.format_type(l.elem_type().expect("Vec has elem")), self.format_type(r.elem_type().expect("Mat has elem")))
-                                    })?;
-                                    Some(Type::Constructed(TypeName::Vec, vec![l.elem_type().expect("Vec has elem").clone(), r.mat_rows_type().expect("Mat has rows").clone()]))
-                                }
-                                // Mat * scalar → unify elem = scalar → Mat
-                                (l, _) if l.is_mat() => {
-                                    self.context.unify(l.elem_type().expect("Mat has elem"), &right_resolved).map_err(|_| {
-                                        err_type_at!(expr.h.span, "Matrix-scalar multiply: element type must match scalar, got {} and {}", self.format_type(l.elem_type().expect("Mat has elem")), self.format_type(&right_resolved))
-                                    })?;
-                                    Some(left_resolved.clone())
-                                }
-                                // scalar * Mat → unify scalar = elem → Mat
-                                (_, r) if r.is_mat() => {
-                                    self.context.unify(&left_resolved, r.elem_type().expect("Mat has elem")).map_err(|_| {
-                                        err_type_at!(expr.h.span, "Scalar-matrix multiply: scalar must match element type, got {} and {}", self.format_type(&left_resolved), self.format_type(r.elem_type().expect("Mat has elem")))
-                                    })?;
-                                    Some(right_resolved.clone())
-                                }
-                                _ => None,
-                            }
-                        } else {
-                            None
-                        };
-
-                        if let Some(ty) = mat_result {
-                            Ok(ty)
-                        } else {
-                            // Check for vec-scalar or scalar-vec operations
-                            let (vec_type, scalar_type, is_vec_op) = match (&left_resolved, &right_resolved) {
-                                (l, r) if l.is_vec() && r.is_vec() => {
-                                    // vec op vec - unify types and return vec
-                                    self.context.unify(&left_type, &right_type).map_err(|_| {
-                                        err_type_at!(
-                                            expr.h.span,
-                                            "Vector arithmetic requires matching vector types, got {} and {}",
-                                            self.format_type(&left_resolved),
-                                            self.format_type(&right_resolved)
-                                        )
-                                    })?;
-                                    (left_resolved.clone(), l.elem_type().cloned(), true)
-                                }
-                                (l, scalar) if l.is_vec() => {
-                                    // vec op scalar - result is vec type
-                                    let elem = l.elem_type().expect("Vec has elem type");
-                                    self.context.unify(elem, scalar).map_err(|_| {
-                                        err_type_at!(
-                                            expr.h.span,
-                                            "Vector-scalar operation requires matching element type, got {} and {}",
-                                            self.format_type(elem),
-                                            self.format_type(scalar)
-                                        )
-                                    })?;
-                                    (left_resolved.clone(), Some(right_resolved.clone()), true)
-                                }
-                                (scalar, r) if r.is_vec() => {
-                                    // scalar op vec - result is vec type
-                                    let elem = r.elem_type().expect("Vec has elem type");
-                                    self.context.unify(scalar, elem).map_err(|_| {
-                                        err_type_at!(
-                                            expr.h.span,
-                                            "Scalar-vector operation requires matching element type, got {} and {}",
-                                            self.format_type(scalar),
-                                            self.format_type(elem)
-                                        )
-                                    })?;
-                                    (right_resolved.clone(), Some(left_resolved.clone()), true)
-                                }
-                                _ => {
-                                    // scalar op scalar - unify types
-                                    self.context.unify(&left_type, &right_type).map_err(|_| {
-                                        err_type_at!(
-                                            expr.h.span,
-                                            "Binary operator '{}' requires operands of the same type, got {} and {}",
-                                            op.op,
-                                            left_type,
-                                            right_type
-                                        )
-                                    })?;
-                                    (left_resolved.clone(), None, false)
-                                }
-                            };
-
-                            // Check that operands are numeric
-                            let check_type = if is_vec_op {
-                                scalar_type.as_ref().unwrap_or(&vec_type)
-                            } else {
-                                &vec_type
-                            };
-                            if let Some(false) = Self::is_numeric_type(check_type) {
-                                return Err(err_type_at!(
-                                    expr.h.span,
-                                    "Arithmetic operator '{}' requires numeric operands, got {}",
-                                    op.op,
-                                    self.format_type(check_type)
-                                ));
-                            }
-
-                            if is_vec_op {
-                                Ok(vec_type)
-                            } else {
-                                Ok(left_resolved)
-                            }
-                        }
-                    }
-                    _ => Err(err_type_at!(expr.h.span, "Unknown binary operator: {}", op.op)),
-                }
+                self.infer_binop_result(&op.op, left_type, right_type, expr.h.span)
             }
             ExprKind::Tuple(elements) => {
                 let elem_types: Result<Vec<Type>> =
@@ -2766,6 +2690,197 @@ impl<'a> TypeChecker<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Unify two types or produce a "<context>, got A and B" type error.
+    fn unify_or_err(&mut self, a: &Type, b: &Type, span: Span, ctx: &str) -> Result<()> {
+        self.context.unify(a, b).map_err(|_| {
+            err_type_at!(
+                span,
+                "{}, got {} and {}",
+                ctx,
+                self.format_type(&a.apply(&self.context)),
+                self.format_type(&b.apply(&self.context))
+            )
+        })
+    }
+
+    /// Destructure a `Mat` type into `(elem, cols, rows)`. None for non-Mat.
+    fn mat_parts(t: &Type) -> Option<(&Type, &Type, &Type)> {
+        match t {
+            Type::Constructed(TypeName::Mat, args) if args.len() == 3 => {
+                Some((&args[0], &args[1], &args[2]))
+            }
+            _ => None,
+        }
+    }
+
+    /// Destructure a `Vec` type into `(elem, size)`. None for non-Vec.
+    fn vec_parts(t: &Type) -> Option<(&Type, &Type)> {
+        match t {
+            Type::Constructed(TypeName::Vec, args) if args.len() == 2 => Some((&args[0], &args[1])),
+            _ => None,
+        }
+    }
+
+    /// Compute the result type of a binary operator given pre-inferred
+    /// operand types. Shared between `ExprKind::BinaryOp` and the
+    /// compound-form arm of `ExprKind::VecWith`, which needs to know
+    /// the type of `target.swizzle <op> rhs` without rebuilding an AST.
+    fn infer_binop_result(
+        &mut self,
+        op: &str,
+        left_type: Type,
+        right_type: Type,
+        span: Span,
+    ) -> Result<Type> {
+        let bool_ty = || Type::Constructed(TypeName::Bool, vec![]);
+
+        match op {
+            "==" | "!=" | "<" | ">" | "<=" | ">=" => {
+                self.unify_or_err(
+                    &left_type,
+                    &right_type,
+                    span,
+                    &format!("Operator '{}' requires same-typed operands", op),
+                )?;
+                Ok(bool_ty())
+            }
+            "&&" | "||" => {
+                let bt = bool_ty();
+                let ctx = format!("Logical operator '{}' requires bool operands", op);
+                self.unify_or_err(&left_type, &bt, span, &ctx)?;
+                self.unify_or_err(&right_type, &bt, span, &ctx)?;
+                Ok(bt)
+            }
+            "+" | "-" | "*" | "/" | "%" | "**" => {
+                self.infer_arith_op_result(op, left_type, right_type, span)
+            }
+            _ => Err(err_type_at!(span, "Unknown binary operator: {}", op)),
+        }
+    }
+
+    /// Result type for arithmetic operators (`+ - * / % **`). Handles
+    /// matrix-mul (only for `*`), vec-vec / vec-scalar / scalar-scalar
+    /// dispatch, and the numeric-elem check.
+    fn infer_arith_op_result(
+        &mut self,
+        op: &str,
+        left_type: Type,
+        right_type: Type,
+        span: Span,
+    ) -> Result<Type> {
+        let l = left_type.apply(&self.context);
+        let r = right_type.apply(&self.context);
+
+        // `*` covers matrix products that don't reduce to plain
+        // component-wise arithmetic. Try those first.
+        if op == "*" {
+            if let Some(ty) = self.try_mat_mul(&l, &r, span)? {
+                return Ok(ty);
+            }
+        }
+
+        // Vec-vec, vec-scalar, scalar-vec, or scalar-scalar.
+        let result = match (Self::vec_parts(&l), Self::vec_parts(&r)) {
+            (Some(_), Some(_)) => {
+                self.unify_or_err(
+                    &left_type,
+                    &right_type,
+                    span,
+                    "Vector arithmetic requires matching vector types",
+                )?;
+                l.clone()
+            }
+            (Some((le, _)), None) => {
+                self.unify_or_err(le, &r, span, "Vector-scalar element type must match scalar")?;
+                l.clone()
+            }
+            (None, Some((re, _))) => {
+                self.unify_or_err(&l, re, span, "Scalar-vector scalar must match element type")?;
+                r.clone()
+            }
+            (None, None) => {
+                self.unify_or_err(
+                    &left_type,
+                    &right_type,
+                    span,
+                    &format!("Operator '{}' requires same-typed operands", op),
+                )?;
+                l.clone()
+            }
+        };
+
+        // Operands (or vec elements) must be numeric.
+        let check = Self::vec_parts(&result).map(|(e, _)| e).unwrap_or(&result);
+        if let Some(false) = Self::is_numeric_type(check) {
+            return Err(err_type_at!(
+                span,
+                "Arithmetic operator '{}' requires numeric operands, got {}",
+                op,
+                self.format_type(check)
+            ));
+        }
+
+        Ok(result)
+    }
+
+    /// Try the matrix-product family for `*`. Returns `Ok(Some(_))` if
+    /// the operands match a Mat-Mat / Mat-Vec / Vec-Mat / Mat-scalar /
+    /// scalar-Mat case (with unification performed); `Ok(None)` if
+    /// neither operand is a Mat, leaving the caller to dispatch to
+    /// component-wise arithmetic.
+    fn try_mat_mul(&mut self, l: &Type, r: &Type, span: Span) -> Result<Option<Type>> {
+        let lm = Self::mat_parts(l);
+        let rm = Self::mat_parts(r);
+        let lv = Self::vec_parts(l);
+        let rv = Self::vec_parts(r);
+
+        let result = match (lm, rm, lv, rv) {
+            // Mat × Mat: inner dims must match (left rows = right cols).
+            (Some((le, lc, lr)), Some((re, rc, rr)), _, _) => {
+                self.unify_or_err(lr, rc, span, "Matrix multiply inner dimensions must match")?;
+                self.unify_or_err(le, re, span, "Matrix multiply element types must match")?;
+                Some(Type::Constructed(
+                    TypeName::Mat,
+                    vec![le.clone(), lc.clone(), rr.clone()],
+                ))
+            }
+            // Mat × Vec: matrix rows must equal vec size; result is Vec[cols].
+            (Some((le, lc, lr)), _, _, Some((re, rs))) => {
+                self.unify_or_err(
+                    lr,
+                    rs,
+                    span,
+                    "Matrix-vector multiply: matrix rows must match vector size",
+                )?;
+                self.unify_or_err(le, re, span, "Matrix-vector multiply element types must match")?;
+                Some(Type::Constructed(TypeName::Vec, vec![le.clone(), lc.clone()]))
+            }
+            // Vec × Mat: vec size must equal matrix cols; result is Vec[rows].
+            (_, Some((re, rc, rr)), Some((le, ls)), _) => {
+                self.unify_or_err(
+                    ls,
+                    rc,
+                    span,
+                    "Vector-matrix multiply: vector size must match matrix cols",
+                )?;
+                self.unify_or_err(le, re, span, "Vector-matrix multiply element types must match")?;
+                Some(Type::Constructed(TypeName::Vec, vec![le.clone(), rr.clone()]))
+            }
+            // Mat × scalar / scalar × Mat: element types must match.
+            (Some((le, _, _)), None, _, None) => {
+                self.unify_or_err(le, r, span, "Matrix-scalar element type must match scalar")?;
+                Some(l.clone())
+            }
+            (None, Some((re, _, _)), None, _) => {
+                self.unify_or_err(l, re, span, "Scalar-matrix scalar must match element type")?;
+                Some(r.clone())
+            }
+            _ => None,
+        };
+
+        Ok(result)
     }
 
     /// Peel one arrow from a function type and unify an argument with the expected param.

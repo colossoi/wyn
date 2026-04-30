@@ -1897,7 +1897,6 @@ def pick(v: #left(i32) | #right(i32)) i32 =
 // --- Swizzle-with ---
 
 #[test]
-#[ignore = "un-ignore once Phase B (type checker for VecWith) lands"]
 fn test_vec_with_swizzle_yz() {
     typecheck_program(
         r#"
@@ -1908,7 +1907,6 @@ def update(v: vec3f32, e: vec2f32) vec3f32 =
 }
 
 #[test]
-#[ignore = "un-ignore once Phase B (type checker for VecWith) lands"]
 fn test_vec_with_swizzle_xz() {
     // Non-contiguous swizzle (.x and .z, skipping .y) must work.
     typecheck_program(
@@ -1920,7 +1918,6 @@ def update(v: vec3f32, e: vec2f32) vec3f32 =
 }
 
 #[test]
-#[ignore = "un-ignore once Phase B (type checker for VecWith) lands"]
 fn test_vec_with_swizzle_single_component() {
     // One-component LHS: RHS is scalar (elem type), not vec1.
     typecheck_program(
@@ -1932,7 +1929,6 @@ def update(v: vec3f32, e: f32) vec3f32 =
 }
 
 #[test]
-#[ignore = "un-ignore once Phase B (type checker for VecWith) lands"]
 fn test_vec_with_swizzle_compound_mul() {
     // Compound `*=` desugars to `v with .yz = v.yz * m` and must
     // match against vec2 * mat2 → vec2.
@@ -1945,7 +1941,6 @@ def update(v: vec3f32, m: mat2f32) vec3f32 =
 }
 
 #[test]
-#[ignore = "un-ignore once Phase B (type checker for VecWith) lands"]
 fn test_vec_with_swizzle_arity_mismatch() {
     // `.yz` swizzle requires a vec2 RHS; passing vec3 is wrong.
     let result = try_typecheck_program(
@@ -1979,7 +1974,6 @@ def update(v: vec3f32, e: vec2f32) vec3f32 =
 }
 
 #[test]
-#[ignore = "un-ignore once Phase B (type checker for VecWith) lands"]
 fn test_vec_with_swizzle_out_of_range() {
     // `.w` is slot 3, but a vec3 only has slots 0-2.
     let result = try_typecheck_program(
@@ -1996,7 +1990,6 @@ def update(v: vec3f32, e: f32) vec3f32 =
 }
 
 #[test]
-#[ignore = "un-ignore once Phase B (type checker for VecWith) lands"]
 fn test_vec_with_swizzle_non_vec_target() {
     // Target must be a vec; passing an i32 should error.
     let result = try_typecheck_program(
@@ -2013,7 +2006,6 @@ def update(v: i32, e: f32) i32 =
 }
 
 #[test]
-#[ignore = "un-ignore once Phase C (AST→TLC lowering for VecWith) lands"]
 fn test_vec_with_swizzle_chained_rotations() {
     // The exact GLSL pattern from the original request, in Wyn:
     //   dir.yz *= rot(mouse.y); dir.xz *= rot(mouse.x); ...
