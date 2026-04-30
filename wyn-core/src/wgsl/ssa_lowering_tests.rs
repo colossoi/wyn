@@ -485,6 +485,14 @@ fn wgsl_testfile_sum_demo() {
 }
 
 #[test]
+fn wgsl_testfile_swizzle_with_demo() {
+    // GLSL-style chained `dir.yz *= mat2` rotations expressed via
+    // `with .swizzle *= m`. Lowers to let-bound vec rebuilds at
+    // AST→TLC; SSA / WGSL never see VecWith.
+    validate_testfile_wgsl("testfiles/swizzle_with_demo.wyn");
+}
+
+#[test]
 fn wgsl_testfile_loopingspline() {
     validate_testfile_wgsl("testfiles/loopingspline.wyn");
 }

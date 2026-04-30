@@ -595,7 +595,11 @@ exp         ::= atom
                 | "assert" atom atom
                 | exp "with" slice "=" exp
                 | exp "with" fieldid ("." fieldid)* "=" exp
+                | exp "with" "." swizzle assign_op exp
                 | "match" exp ("case" pat "->" exp)+
+
+assign_op   ::= "=" | "*=" | "+=" | "-=" | "/="
+swizzle     ::= [xyzw]+    -- or [rgba]+; one set, distinct chars, len 1..4
 
 slice       ::= "[" index ("," index)* [","] "]"
 field       ::= fieldid "=" exp
@@ -1526,6 +1530,26 @@ let rgb:   vec3f32   = v.rgb      -- (1.0, 2.0, 3.0)
 let rev:   vec4f32   = v.wzyx     -- (4.0, 3.0, 2.0, 1.0)
 let splat: vec3f32   = v.xxx      -- (1.0, 1.0, 1.0)
 ```
+
+#### Swizzle Update via `with`
+
+Wyn extends the `with` operator to vec swizzles, so the GLSL idiom
+`dir.yz *= rot(angle)` translates directly:
+
+```wyn
+let v1 = v0 with .yz = e          -- replace v0.y, v0.z with e.x, e.y
+let v2 = v1 with .yz *= m         -- compound: same as `with .yz = v1.yz * m`
+let v3 = v2 with .x = scalar      -- single-component LHS takes a scalar RHS
+```
+
+The compound forms `*= += -= /=` desugar to
+`target with .swizzle = target.swizzle <op> rhs`, with `target`
+evaluated once. The result is always a fresh vec — wyn is
+immutable, the original target is unchanged. Components on the
+LHS must be **distinct** (`v with .xx = e` is rejected); the RHS
+arity must match the swizzle length (a `vec2` for `.yz`, a scalar
+for `.x`); and each component must be in range for the target's
+size.
 
 ### Vector Constructors
 
