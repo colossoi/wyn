@@ -60,6 +60,41 @@ fn has_function(ssa: &Program, name: &str) -> bool {
     ssa.functions.iter().any(|f| f.name == name)
 }
 
+/// Count `InstKind::Intrinsic { name }` instructions across every
+/// function, entry point, and constant body in an SSA program. Used
+/// by uniqueness/in-place tests to count direct calls to
+/// `_w_intrinsic_array_with` / `_w_intrinsic_array_with_inplace`
+/// without grepping backend text.
+fn count_intrinsic_calls(ssa: &Program, intrinsic_name: &str) -> usize {
+    use crate::ssa::types::{FuncBody, InstKind};
+
+    fn count_in_body(body: &FuncBody, name: &str) -> usize {
+        let mut n = 0;
+        for (_block_id, block) in body.inner.blocks.iter() {
+            for &inst_id in &block.insts {
+                if let InstKind::Intrinsic { name: iname, .. } = &body.inner.insts[inst_id].data {
+                    if iname == name {
+                        n += 1;
+                    }
+                }
+            }
+        }
+        n
+    }
+
+    let mut total = 0;
+    for f in &ssa.functions {
+        total += count_in_body(&f.body, intrinsic_name);
+    }
+    for e in &ssa.entry_points {
+        total += count_in_body(&e.body, intrinsic_name);
+    }
+    for c in &ssa.constants {
+        total += count_in_body(&c.body, intrinsic_name);
+    }
+    total
+}
+
 /// Helper to compile up through TLC fusion (stops before defunctionalization).
 fn compile_to_fused_tlc(input: &str) -> crate::tlc::Program {
     let mut frontend = crate::cached_frontend();
@@ -1580,4 +1615,60 @@ fn assert_spirv_call_arities_match(spirv_words: &[u32]) {
             }
         }
     }
+}
+
+// =============================================================================
+// Uniqueness → in-place ArrayWith promotion (SSA-level)
+// =============================================================================
+//
+// `uniqueness_promote_tests.rs` already verifies the AST `inplace`
+// flag flips for the right reasons. These tests confirm that the flag
+// survives lowering: when promotion fires at the AST level, the SSA
+// program contains a `_w_intrinsic_array_with_inplace` call (and
+// crucially, *no* `_w_intrinsic_array_with` call). When promotion
+// can't fire, the inverse holds.
+
+#[test]
+fn ssa_entry_array_with_uses_in_place_intrinsic() {
+    let ssa = compile_to_ssa(
+        r#"
+#[compute]
+entry main(data: [4]i32) [4]i32 = data with [0] = 99
+"#,
+    );
+    assert_eq!(
+        count_intrinsic_calls(&ssa, "_w_intrinsic_array_with_inplace"),
+        1,
+        "expected exactly one in-place ArrayWith intrinsic"
+    );
+    assert_eq!(
+        count_intrinsic_calls(&ssa, "_w_intrinsic_array_with"),
+        0,
+        "expected no functional ArrayWith intrinsic when promotion fires"
+    );
+}
+
+#[test]
+fn ssa_aliased_source_uses_functional_intrinsic() {
+    let ssa = compile_to_ssa(
+        r#"
+def f(a: [4]i32) ([4]i32, [4]i32) =
+    let b = a with [0] = 99 in (a, b)
+
+#[compute]
+entry main(data: [4]i32) i32 =
+    let (orig, updated) = f(data) in
+    orig[0] + updated[0]
+"#,
+    );
+    assert_eq!(
+        count_intrinsic_calls(&ssa, "_w_intrinsic_array_with"),
+        1,
+        "expected one functional ArrayWith when promotion can't fire"
+    );
+    assert_eq!(
+        count_intrinsic_calls(&ssa, "_w_intrinsic_array_with_inplace"),
+        0,
+        "expected no in-place intrinsic when source escapes through tuple"
+    );
 }
