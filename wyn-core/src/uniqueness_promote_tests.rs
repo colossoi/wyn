@@ -283,6 +283,41 @@ entry main(data: [4]i32) [4]i32 = data with [0] = 99
 }
 
 #[test]
+fn entry_params_treated_as_unique_for_consumption() {
+    // An entry param without `*` is passed to a `*T`-expecting
+    // consumer. The alias checker should treat the entry param as
+    // having a backing store that gets consumed at the call. After
+    // the call, using the param again is illegal — confirming that
+    // the entry-param-implicitly-unique rule is in effect.
+    let src = r#"
+def consume(arr: *[4]i32) i32 = arr[0]
+
+#[compute]
+entry main(data: [4]i32) i32 =
+    let _ = consume(data) in
+    data[0]
+"#;
+    use crate::alias_checker::AliasChecker;
+    let mut frontend = crate::FrontEnd::new();
+    let parsed = crate::Compiler::parse(src, &mut frontend.node_counter).expect("parse");
+    let parsed = parsed.elaborate_modules(&mut frontend.module_manager).expect("elaborate");
+    let type_checked = parsed
+        .desugar(&mut frontend.node_counter)
+        .expect("desugar")
+        .resolve(&frontend.module_manager)
+        .expect("resolve")
+        .fold_ast_constants()
+        .type_check(&mut frontend.module_manager, &mut frontend.schemes)
+        .expect("type-check");
+    let checker = AliasChecker::new(&type_checked.type_table, &type_checked.span_table);
+    let result = checker.check_program(&type_checked.ast).expect("alias-check infra");
+    assert!(
+        result.has_errors(),
+        "expected use-after-move: data was consumed by `consume`, then read again"
+    );
+}
+
+#[test]
 fn promotes_loop_body_array_with_on_carry() {
     // Loop carries `acc` and replaces it on each iteration via
     // `with`. The body's `with` source (`acc`) is dead by the end of

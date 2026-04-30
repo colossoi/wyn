@@ -1605,16 +1605,16 @@ impl<'a> TypeChecker<'a> {
                 // Resolve type aliases (e.g., rand.state -> f32)
                 let expected_type = self.resolve_type_aliases_scoped(&expected_type, None);
 
-                // Validate body type matches declared outputs
-                self.context.unify(&body_type, &expected_type).map_err(|_| {
-                    err_type_at!(
-                        entry.body.h.span,
-                        "Entry point '{}' return type mismatch: declared {}, inferred {}",
-                        entry.name,
-                        self.format_type(&expected_type),
-                        self.format_type(&body_type)
-                    )
-                })?;
+                // Validate body type matches declared outputs. Body may
+                // be `*T` while the declaration is `T` — entry parameters
+                // are implicitly unique, so a body that just returns one
+                // of them produces `*T`. Weaken at the boundary.
+                self.unify_or_err_weakening(
+                    &body_type,
+                    &expected_type,
+                    entry.body.h.span,
+                    &format!("Entry point '{}' return type mismatch", entry.name),
+                )?;
 
                 Ok(())
             }
