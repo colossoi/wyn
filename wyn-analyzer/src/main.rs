@@ -1565,7 +1565,7 @@ fn token_type_index(token: &lexer::Token) -> Option<u32> {
 
         Identifier(_) => Some(5), // VARIABLE
 
-        AttributeStart => Some(6), // DECORATOR
+        AttributeStart | Constructor(_) => Some(6), // DECORATOR
 
         _ => None,
     }
