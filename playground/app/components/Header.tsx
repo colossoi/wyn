@@ -3,21 +3,30 @@
 //
 // Reads the current session (if any) from the root route's loader data.
 
-import { useRouteLoaderData, Link, Form } from "react-router";
+import { useRouteLoaderData, useLocation, Link, Form } from "react-router";
 import type { Session } from "~/lib/session.server";
 
 interface RootData {
   session: Session | null;
 }
 
+// "Wyn Playground" earns its name only on the editor routes (`/new`,
+// `/s/<slug>`). Elsewhere — landing, popular, user profile — the
+// header reads just "Wyn".
+function isPlaygroundRoute(pathname: string): boolean {
+  return pathname === "/new" || pathname.startsWith("/s/");
+}
+
 export function Header() {
   const data = useRouteLoaderData("root") as RootData | undefined;
   const session = data?.session ?? null;
+  const { pathname } = useLocation();
+  const logoText = isPlaygroundRoute(pathname) ? "Wyn Playground" : "Wyn";
 
   return (
     <header>
       <Link to="/" className="logo">
-        Wyn Playground
+        {logoText}
       </Link>
       <div className="header-right">
         <nav className="header-nav">
