@@ -314,10 +314,6 @@ def main: i32 = consume([1, 2, 3, 4])
 }
 
 #[test]
-#[ignore = "TODO: missing `*T → T` weakening in return position. \
-            step2 returns `*[4]i32` but main's declared return is `[4]i32` — \
-            this should typecheck (uniqueness can always be discarded), \
-            but the type checker currently rejects it."]
 fn test_unique_chain_through_calls() {
     // Receive unique, hand off to another unique consumer.
     // The interesting bit isn't the chain — it's that the final
@@ -349,10 +345,6 @@ def main: i32 = combine([1, 2, 3, 4], [5, 6, 7, 8])
 }
 
 #[test]
-#[ignore = "TODO: missing `*T → T` weakening when constructing tuples. \
-            arr is `*[4]i32` but main's tuple return type wants a `[4]i32` \
-            element — uniqueness should be discardable here, but the type \
-            checker rejects."]
 fn test_unique_used_then_returned() {
     // Read from `arr` (allowed), then return it. No consumption
     // happens, so the read of `arr[0]` and the return of `arr` are
