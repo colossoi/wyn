@@ -29,6 +29,38 @@ pub enum StoreState {
     },
 }
 
+/// Where a backing store came from. Decides whether in-place
+/// mutation is sound: only stores the function exclusively owns can
+/// be mutated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// Created locally — array literal, vec literal, or a function
+    /// returning `*T` (which promises freshness). Mutable.
+    Fresh,
+    /// Bound from a `*T` parameter. The caller surrendered
+    /// ownership; mutable.
+    UniqueParam,
+    /// Bound from a `T` parameter. The caller still owns the
+    /// memory; **not** mutable.
+    NonUniqueParam,
+    /// Bound from an entry parameter (implicitly unique — the host
+    /// hands exclusive ownership for the dispatch). Mutable.
+    Entry,
+}
+
+impl Origin {
+    /// True if a store with this origin can be mutated in place.
+    /// Only locally-fresh stores and stores whose ownership has
+    /// been transferred to this function may be mutated; stores
+    /// the caller still observes via a non-`*T` parameter must not.
+    pub fn is_mutable(self) -> bool {
+        match self {
+            Origin::Fresh | Origin::UniqueParam | Origin::Entry => true,
+            Origin::NonUniqueParam => false,
+        }
+    }
+}
+
 /// What an expression evaluates to in terms of aliasing
 #[derive(Debug, Clone, Default)]
 pub struct AliasInfo {
@@ -98,6 +130,9 @@ pub struct AliasChecker<'a> {
     span_table: &'a SpanTable,
     /// All backing stores and their states
     stores: HashMap<BackingStoreId, StoreState>,
+    /// Origin for each backing store. Read by the promotion check
+    /// to reject mutation of caller-owned memory.
+    store_origins: HashMap<BackingStoreId, Origin>,
     /// Stack of scopes, each mapping variable names to their backing stores
     scopes: Vec<HashMap<String, HashSet<BackingStoreId>>>,
     /// Reverse mapping: backing store -> variables that reference it
@@ -120,6 +155,7 @@ impl<'a> AliasChecker<'a> {
             type_table,
             span_table,
             stores: HashMap::new(),
+            store_origins: HashMap::new(),
             scopes: vec![HashMap::new()],
             store_to_vars: HashMap::new(),
             next_store_id: 0,
@@ -135,11 +171,12 @@ impl<'a> AliasChecker<'a> {
         self.span_table.get(&id).copied().unwrap_or_else(|| Span::new(0, 0, 0, 0))
     }
 
-    /// Create a new backing store and return its ID
-    fn new_store(&mut self) -> BackingStoreId {
+    /// Create a new backing store with the given origin and return its ID.
+    fn new_store(&mut self, origin: Origin) -> BackingStoreId {
         let id = BackingStoreId(self.next_store_id);
         self.next_store_id += 1;
         self.stores.insert(id, StoreState::Live);
+        self.store_origins.insert(id, origin);
         id
     }
 
@@ -267,9 +304,11 @@ impl<'a> AliasChecker<'a> {
     fn check_decl(&mut self, decl: &Decl) {
         self.push_scope();
 
-        // Bind parameters - each gets a fresh backing store if non-copy
+        // Bind parameters - each gets a fresh backing store if non-copy.
+        // Origin tracks `*T` vs `T` so the promotion check can reject
+        // mutation of caller-owned (NonUniqueParam) memory.
         for param in &decl.params {
-            self.bind_pattern_params(param);
+            self.bind_pattern_params(param, false);
         }
 
         // Check the body using visitor
@@ -281,8 +320,11 @@ impl<'a> AliasChecker<'a> {
     fn check_entry(&mut self, entry: &EntryDecl) {
         self.push_scope();
 
+        // Entry parameters are implicitly unique — the host hands exclusive
+        // ownership for the dispatch. Origin::Entry permits in-place
+        // mutation regardless of the surface annotation.
         for param in &entry.params {
-            self.bind_pattern_params(param);
+            self.bind_pattern_params(param, true);
         }
 
         let _ = self.visit_expression(&entry.body);
@@ -290,14 +332,33 @@ impl<'a> AliasChecker<'a> {
         self.pop_scope();
     }
 
-    /// Bind pattern parameters, creating fresh backing stores for non-copy types
-    fn bind_pattern_params(&mut self, pattern: &Pattern) {
+    /// Bind pattern parameters, creating fresh backing stores for non-copy types.
+    /// `is_entry` decides the origin: entry parameters are implicitly unique
+    /// (the host has handed exclusive ownership for the dispatch); `def`
+    /// parameters take their origin from the `*T` annotation in the type.
+    fn bind_pattern_params(&mut self, pattern: &Pattern, is_entry: bool) {
         let names = pattern.collect_names();
         for name in names {
             if !self.node_is_copy_type(pattern.h.id) {
-                let store_id = self.new_store();
+                let origin = if is_entry {
+                    Origin::Entry
+                } else if self.node_type_is_unique(pattern.h.id) {
+                    Origin::UniqueParam
+                } else {
+                    Origin::NonUniqueParam
+                };
+                let store_id = self.new_store(origin);
                 self.bind_variable(&name, &AliasInfo::fresh(store_id));
             }
+        }
+    }
+
+    /// Check if a node's type carries a `*T` (unique) wrapper.
+    fn node_type_is_unique(&self, node_id: NodeId) -> bool {
+        if let Some(scheme) = self.type_table.get(&node_id) {
+            unwrap_scheme(scheme).is_unique()
+        } else {
+            false
         }
     }
 
@@ -330,13 +391,46 @@ impl<'a> AliasChecker<'a> {
         }
     }
 
-    /// Check if an expression has no aliases (only one variable references its backing stores)
-    fn is_alias_free(&self, info: &AliasInfo) -> bool {
+    /// True if every store the expression references is *mutable* per its
+    /// `Origin`. Stores from `T` (non-unique) parameters are caller-owned
+    /// and may not be mutated even if no other in-function variable
+    /// aliases them.
+    fn stores_are_mutable(&self, info: &AliasInfo) -> bool {
         info.stores
             .iter()
-            .all(|store_id| self.store_to_vars.get(store_id).map(|vars| vars.len() <= 1).unwrap_or(true))
+            .all(|s| self.store_origins.get(s).copied().map(Origin::is_mutable).unwrap_or(false))
     }
 
+    /// True if any pre-with binding to one of the source's stores has
+    /// a use after this with's NodeId. "Pre-with" means: bound BEFORE
+    /// the with's evaluation (so the with's own result-bind doesn't
+    /// count). The check walks `store_to_vars` for each source store
+    /// and consults `var_uses` for each aliasing variable.
+    ///
+    /// NodeId-comparison caveat: this works for sequential code
+    /// (NodeIds are allocated in DFS-LR parse order = evaluation
+    /// order). Lambda bodies and loop bodies have references with
+    /// NodeIds *smaller* than their creation site but executing
+    /// *later*; phase 5 (capture rules) folds those cases in
+    /// explicitly.
+    fn any_alias_used_after(&self, info: &AliasInfo, with_node: NodeId) -> bool {
+        for store_id in &info.stores {
+            let aliases = match self.store_to_vars.get(store_id) {
+                Some(s) => s,
+                None => continue,
+            };
+            for var in aliases {
+                if let Some(uses) = self.var_uses.get(var) {
+                    if uses.iter().any(|&use_id| use_id.0 > with_node.0) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Check if an expression has no aliases (only one variable references its backing stores)
     /// Check if a node's type is an array type
     fn is_array_type(&self, node_id: NodeId) -> bool {
         if let Some(scheme) = self.type_table.get(&node_id) {
@@ -345,84 +439,6 @@ impl<'a> AliasChecker<'a> {
         } else {
             false
         }
-    }
-
-    /// Collect all array-typed variable names used in an expression
-    fn collect_array_vars_in_expr(&self, expr: &Expression) -> HashSet<String> {
-        let mut vars = HashSet::new();
-        self.collect_array_vars_recursive(expr, &mut vars);
-        vars
-    }
-
-    fn collect_array_vars_recursive(&self, expr: &Expression, vars: &mut HashSet<String>) {
-        match &expr.kind {
-            ExprKind::Identifier(quals, name) => {
-                if quals.is_empty() && self.is_array_type(expr.h.id) {
-                    vars.insert(name.clone());
-                }
-            }
-            ExprKind::ArrayLiteral(elems) => {
-                for elem in elems {
-                    self.collect_array_vars_recursive(elem, vars);
-                }
-            }
-            ExprKind::ArrayIndex(arr, idx) => {
-                self.collect_array_vars_recursive(arr, vars);
-                self.collect_array_vars_recursive(idx, vars);
-            }
-            ExprKind::BinaryOp(_, left, right) => {
-                self.collect_array_vars_recursive(left, vars);
-                self.collect_array_vars_recursive(right, vars);
-            }
-            ExprKind::UnaryOp(_, operand) => {
-                self.collect_array_vars_recursive(operand, vars);
-            }
-            ExprKind::Tuple(elems) => {
-                for elem in elems {
-                    self.collect_array_vars_recursive(elem, vars);
-                }
-            }
-            ExprKind::Application(func, args) => {
-                self.collect_array_vars_recursive(func, vars);
-                for arg in args {
-                    self.collect_array_vars_recursive(arg, vars);
-                }
-            }
-            ExprKind::LetIn(let_in) => {
-                self.collect_array_vars_recursive(&let_in.value, vars);
-                self.collect_array_vars_recursive(&let_in.body, vars);
-            }
-            ExprKind::If(if_expr) => {
-                self.collect_array_vars_recursive(&if_expr.condition, vars);
-                self.collect_array_vars_recursive(&if_expr.then_branch, vars);
-                self.collect_array_vars_recursive(&if_expr.else_branch, vars);
-            }
-            ExprKind::Lambda(lambda) => {
-                self.collect_array_vars_recursive(&lambda.body, vars);
-            }
-            ExprKind::FieldAccess(expr, _) => {
-                self.collect_array_vars_recursive(expr, vars);
-            }
-            _ => {}
-        }
-    }
-
-    /// Check if all array variables in an expression are at their last use
-    fn expr_is_released(&self, expr: &Expression) -> bool {
-        let array_vars = self.collect_array_vars_in_expr(expr);
-        array_vars.iter().all(|var| {
-            if let Some(uses) = self.var_uses.get(var) {
-                // Find the current use position
-                if let Some(pos) = uses.iter().position(|&id| id == expr.h.id) {
-                    pos == uses.len() - 1
-                } else {
-                    // This expression ID not found in uses - conservative: not released
-                    false
-                }
-            } else {
-                false // No tracked uses - conservative: not released
-            }
-        })
     }
 }
 
@@ -487,8 +503,8 @@ impl<'a> Visitor for AliasChecker<'a> {
         for elem in elements {
             self.visit_expression(elem)?;
         }
-        // Array literal creates a fresh backing store
-        let store_id = self.new_store();
+        // Array literal creates a fresh backing store.
+        let store_id = self.new_store(Origin::Fresh);
         self.set_result(id, AliasInfo::fresh(store_id));
         ControlFlow::Continue(())
     }
@@ -595,8 +611,12 @@ impl<'a> Visitor for AliasChecker<'a> {
     fn visit_expr_lambda(&mut self, id: NodeId, lambda: &LambdaExpr) -> ControlFlow<Self::Break> {
         self.push_scope();
 
+        // Lambda parameters are fresh per-call. Treating them as Fresh for
+        // origin purposes is correct: each invocation produces new bindings
+        // that the lambda body owns. (Capture-of-outer-uniques is checked
+        // separately in phase 5.)
         for param in &lambda.params {
-            self.bind_pattern_params(param);
+            self.bind_pattern_params(param, false);
         }
 
         self.visit_expression(&lambda.body)?;
@@ -627,10 +647,17 @@ impl<'a> Visitor for AliasChecker<'a> {
             self.visit_expression(arg)?;
             let arg_info = self.get_result(arg.h.id);
 
-            // Compute liveness info for array-typed arguments
+            // Compute liveness info for array-typed arguments. The
+            // promotion pass consults both flags. `alias_free` is the
+            // origin check: only stores this function exclusively owns
+            // can be mutated (rejects caller-owned memory). `released`
+            // is the cross-alias check: no variable currently aliasing
+            // any of the store(s) has a use after this expression. The
+            // pre-existing `is_alias_free` snapshot is subsumed by
+            // `released` — a "dead alias" doesn't block promotion.
             if self.is_array_type(arg.h.id) {
-                let alias_free = self.is_alias_free(&arg_info);
-                let released = self.expr_is_released(arg);
+                let alias_free = self.stores_are_mutable(&arg_info);
+                let released = !self.any_alias_used_after(&arg_info, arg.h.id);
                 self.liveness.insert(arg.h.id, ExprLivenessInfo { alias_free, released });
             }
 
@@ -657,9 +684,11 @@ impl<'a> Visitor for AliasChecker<'a> {
             }
         }
 
-        // Check if return type is alias-free (*T)
+        // Check if return type is alias-free (*T). A function returning
+        // `*T` promises a fresh result that doesn't alias any input —
+        // the resulting store is `Origin::Fresh`.
         if self.return_is_fresh(func.h.id) {
-            let store_id = self.new_store();
+            let store_id = self.new_store(Origin::Fresh);
             self.set_result(id, AliasInfo::fresh(store_id));
         } else if observing_stores.is_empty() {
             self.set_result(id, AliasInfo::copy());
@@ -715,7 +744,7 @@ impl<'a> Visitor for AliasChecker<'a> {
         self.visit_expression(&range.end)?;
 
         // Ranges are desugared to iota/map which creates a fresh array.
-        let store_id = self.new_store();
+        let store_id = self.new_store(Origin::Fresh);
         self.set_result(id, AliasInfo::fresh(store_id));
         ControlFlow::Continue(())
     }
@@ -745,13 +774,18 @@ impl<'a> Visitor for AliasChecker<'a> {
         self.visit_expression(index)?;
         self.visit_expression(value)?;
 
-        // Compute liveness for the source array operand; the uniqueness
-        // promotion pass reads this to decide whether the backend can
-        // mutate in place.
+        // Compute liveness for the source array operand. `alias_free`
+        // is the origin check (only stores this function exclusively
+        // owns can be mutated; rejects caller-owned memory).
+        // `released` is the cross-alias check: no variable currently
+        // aliasing the source's store has a use after this with's
+        // NodeId. Together they close both promotion gaps — origin
+        // catches non-unique-param mutation, cross-alias catches
+        // `let alias = a in let b = a with [...]`.
         if self.is_array_type(array.h.id) {
             let arr_info = self.get_result(array.h.id);
-            let alias_free = self.is_alias_free(&arr_info);
-            let released = self.expr_is_released(array);
+            let alias_free = self.stores_are_mutable(&arr_info);
+            let released = !self.any_alias_used_after(&arr_info, array.h.id);
             self.liveness.insert(array.h.id, ExprLivenessInfo { alias_free, released });
         }
 

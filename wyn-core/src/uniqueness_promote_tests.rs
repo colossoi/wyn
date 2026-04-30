@@ -386,12 +386,6 @@ def f(a: [4]i32) ([4]i32, i32 -> i32) =
 // --- D. Chained promotion across passes ------------------------------------
 
 #[test]
-#[ignore = "compiler gap: in `let b = a with [0] = 1 in let c = b with [1] \
-            = 2 in c`, both links should promote — each intermediate is \
-            consumed exactly once. The promoter today flips inplace=true on \
-            the first link but leaves the second false. Likely cause: the \
-            uniqueness_promote pass doesn't yet see the second `with`'s \
-            source (`b`) as last-used through the second binding."]
 fn promotes_when_inplace_chain_outputs_last_use() {
     // `let b = a with [0] = 1 in let c = b with [1] = 2 in c` — both
     // links can promote: each intermediate is used only once by the
@@ -413,14 +407,6 @@ def f(a: *[4]i32) *[4]i32 =
 }
 
 #[test]
-#[ignore = "compiler bug (unsafe promotion): in `let b = a with [0] = 1 in \
-            let c = b with [1] = 2 in (b, c)`, `b` aliases `a`'s backing \
-            store and `b` is returned in the tuple — promoting the first \
-            `with` to in-place would let the caller observe the mutation \
-            through `a` (or any alias they still hold). The promoter today \
-            sets inplace=true here, which is unsound. The check needs to \
-            include aliases created by the `with` itself, not just \
-            pre-existing ones."]
 fn does_not_promote_first_link_when_intermediate_escapes() {
     // `b` is returned alongside `c`, so the first `with` is *not* a
     // last use of `a`'s memory (b aliases it). The first link should
