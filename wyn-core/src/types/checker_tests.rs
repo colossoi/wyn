@@ -1881,6 +1881,212 @@ def pick(v: #left(i32) | #right(i32)) i32 =
     );
 }
 
+// =============================================================================
+// `with` expression tests: swizzle (new), array (existing), record (deferred)
+// =============================================================================
+//
+// Three families track the three LHS forms `with` accepts:
+//
+//   - swizzle:  `v with .yz = e`         (this plan, Phases A–C)
+//   - array:    `a with [i] = e`         (already implemented; regression)
+//   - record:   `r with field = e`       (spec'd, never built — `#[ignore]`d)
+//
+// Swizzle tests are `#[ignore]`d until the matching phase lands; record
+// tests stay `#[ignore]`d until somebody picks up that work.
+
+// --- Swizzle-with ---
+
+#[test]
+#[ignore = "un-ignore once Phase B (type checker for VecWith) lands"]
+fn test_vec_with_swizzle_yz() {
+    typecheck_program(
+        r#"
+def update(v: vec3f32, e: vec2f32) vec3f32 =
+    v with .yz = e
+        "#,
+    );
+}
+
+#[test]
+#[ignore = "un-ignore once Phase B (type checker for VecWith) lands"]
+fn test_vec_with_swizzle_xz() {
+    // Non-contiguous swizzle (.x and .z, skipping .y) must work.
+    typecheck_program(
+        r#"
+def update(v: vec3f32, e: vec2f32) vec3f32 =
+    v with .xz = e
+        "#,
+    );
+}
+
+#[test]
+#[ignore = "un-ignore once Phase B (type checker for VecWith) lands"]
+fn test_vec_with_swizzle_single_component() {
+    // One-component LHS: RHS is scalar (elem type), not vec1.
+    typecheck_program(
+        r#"
+def update(v: vec3f32, e: f32) vec3f32 =
+    v with .x = e
+        "#,
+    );
+}
+
+#[test]
+#[ignore = "un-ignore once Phase B (type checker for VecWith) lands"]
+fn test_vec_with_swizzle_compound_mul() {
+    // Compound `*=` desugars to `v with .yz = v.yz * m` and must
+    // match against vec2 * mat2 → vec2.
+    typecheck_program(
+        r#"
+def update(v: vec3f32, m: mat2f32) vec3f32 =
+    v with .yz *= m
+        "#,
+    );
+}
+
+#[test]
+#[ignore = "un-ignore once Phase B (type checker for VecWith) lands"]
+fn test_vec_with_swizzle_arity_mismatch() {
+    // `.yz` swizzle requires a vec2 RHS; passing vec3 is wrong.
+    let result = try_typecheck_program(
+        r#"
+def update(v: vec3f32, e: vec3f32) vec3f32 =
+    v with .yz = e
+        "#,
+    );
+    assert!(
+        matches!(result, Err(CompilerError::TypeError(_, _))),
+        "expected arity-mismatch error, got {:?}",
+        result
+    );
+}
+
+#[test]
+#[ignore = "un-ignore once Phase A (parser distinctness check) lands"]
+fn test_vec_with_swizzle_duplicate_components() {
+    // `.xx` writes the same slot twice — caller intent is ambiguous;
+    // parser rejects at distinctness check.
+    let result = try_typecheck_program(
+        r#"
+def update(v: vec3f32, e: vec2f32) vec3f32 =
+    v with .xx = e
+        "#,
+    );
+    assert!(
+        result.is_err(),
+        "expected error for duplicate components, got {:?}",
+        result
+    );
+}
+
+#[test]
+#[ignore = "un-ignore once Phase B (type checker for VecWith) lands"]
+fn test_vec_with_swizzle_out_of_range() {
+    // `.w` is slot 3, but a vec3 only has slots 0-2.
+    let result = try_typecheck_program(
+        r#"
+def update(v: vec3f32, e: f32) vec3f32 =
+    v with .w = e
+        "#,
+    );
+    assert!(
+        matches!(result, Err(CompilerError::TypeError(_, _))),
+        "expected out-of-range error, got {:?}",
+        result
+    );
+}
+
+#[test]
+#[ignore = "un-ignore once Phase B (type checker for VecWith) lands"]
+fn test_vec_with_swizzle_non_vec_target() {
+    // Target must be a vec; passing an i32 should error.
+    let result = try_typecheck_program(
+        r#"
+def update(v: i32, e: f32) i32 =
+    v with .x = e
+        "#,
+    );
+    assert!(
+        matches!(result, Err(CompilerError::TypeError(_, _))),
+        "expected non-vec target error, got {:?}",
+        result
+    );
+}
+
+#[test]
+#[ignore = "un-ignore once Phase C (AST→TLC lowering for VecWith) lands"]
+fn test_vec_with_swizzle_chained_rotations() {
+    // The exact GLSL pattern from the original request, in Wyn:
+    //   dir.yz *= rot(mouse.y); dir.xz *= rot(mouse.x); ...
+    typecheck_program(
+        r#"
+def rot(a: f32) mat2f32 =
+    let c = f32.cos(a) in
+    let s = f32.sin(a) in
+    @[[c, s], [0.0f32 - s, c]]
+
+def transform(dir0: vec3f32, mx: f32, my: f32, rotview1: mat2f32, rotview2: mat2f32) vec3f32 =
+    let dir1 = dir0 with .yz *= rot(my) in
+    let dir2 = dir1 with .xz *= rot(mx) in
+    let dir3 = dir2 with .yz *= rotview2 in
+    dir3 with .xz *= rotview1
+        "#,
+    );
+}
+
+// (Array-with already has 11 tests starting at `test_array_with_basic`,
+//  covering basic / variable-index / preserves-size / chained / in-let /
+//  nested / wrong-value / wrong-index / non-array / in-function / in-loop.
+//  No new array-with tests added here.)
+
+// --- Record-with (spec'd in SPECIFICATION.md but never built) ---
+
+#[test]
+#[ignore = "TODO: implement record-with (`r with field = e`); spec'd but unbuilt"]
+fn test_record_with_field() {
+    typecheck_program(
+        r#"
+def update(r: { x: i32, y: i32 }) { x: i32, y: i32 } =
+    r with x = 99
+        "#,
+    );
+}
+
+#[test]
+#[ignore = "TODO: implement record-with"]
+fn test_record_with_nested_field() {
+    typecheck_program(
+        r#"
+def update(r: { a: { x: i32 } }) { a: { x: i32 } } =
+    r with a.x = 99
+        "#,
+    );
+}
+
+#[test]
+#[ignore = "TODO: implement record-with"]
+fn test_record_with_unknown_field() {
+    let result = try_typecheck_program(
+        r#"
+def update(r: { x: i32 }) { x: i32 } =
+    r with z = 99
+        "#,
+    );
+    assert!(result.is_err(), "expected unknown-field error, got {:?}", result);
+}
+
+#[test]
+#[ignore = "TODO: implement record-with"]
+fn test_record_with_value_type_mismatch() {
+    let result = try_typecheck_program(
+        r#"
+def update(r: { x: i32 }) { x: i32 } =
+    r with x = 1.5f32
+        "#,
+    );
+    assert!(result.is_err(), "expected value-type mismatch, got {:?}", result);
+}
+
 #[test]
 fn test_match_pattern_binds_payload_type() {
     // The variable bound by a constructor pattern must take the
