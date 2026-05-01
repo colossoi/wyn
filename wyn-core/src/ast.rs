@@ -364,7 +364,7 @@ pub enum ExprKind {
     ArrayIndex(Box<Expression>, Box<Expression>),
     /// Array update: `a with [i] = v`. At AST level this is always
     /// the functional form (returns a fresh array). The TLC ownership
-    /// pass (`tlc::ownership::promote_inplace`) decides post-lowering
+    /// pass (`tlc::ownership::apply_ownership`) decides post-lowering
     /// whether the call should become the in-place intrinsic.
     ArrayWith {
         array: Box<Expression>,

@@ -22,9 +22,9 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
         .to_tlc(&frontend.schemes, &frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
-        .promote_inplace()
-        .expect("promote_inplace")
         .fuse_maps()
+        .apply_ownership()
+        .expect("apply_ownership")
         .defunctionalize()
         .monomorphize()
         .buffer_specialize()
@@ -56,9 +56,9 @@ fn compile_through_ssa(input: &str) -> Result<Program, CompilerError> {
         .to_tlc(&frontend.schemes, &frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
-        .promote_inplace()
-        .expect("promote_inplace")
         .fuse_maps()
+        .apply_ownership()
+        .expect("apply_ownership")
         .defunctionalize()
         .monomorphize()
         .buffer_specialize()
@@ -542,7 +542,7 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     let tlc = tlc.partial_eval();
     eprintln!("=== partial_eval OK ===");
 
-    let tlc = tlc.normalize_soacs().promote_inplace().expect("promote_inplace").fuse_maps();
+    let tlc = tlc.normalize_soacs().fuse_maps().apply_ownership().expect("apply_ownership");
     eprintln!("=== fuse_maps OK ===");
 
     let tlc = tlc.defunctionalize();
@@ -603,7 +603,7 @@ entry main(data: []i32) []i32 = [first(data)]
     let tlc = tlc.partial_eval();
     eprintln!("=== partial_eval OK ===");
 
-    let tlc = tlc.normalize_soacs().promote_inplace().expect("promote_inplace").fuse_maps();
+    let tlc = tlc.normalize_soacs().fuse_maps().apply_ownership().expect("apply_ownership");
     eprintln!("=== fuse_maps OK ===");
 
     let tlc = tlc.defunctionalize();
