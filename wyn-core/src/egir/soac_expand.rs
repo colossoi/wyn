@@ -369,6 +369,66 @@ fn expand_one(
                         next_effect,
                     );
                 }
+                SoacDestination::InputBuffer => {
+                    // Operand layout: [input_0, ..., input_{n-1}, ...captures] —
+                    // identical to Fresh. The difference is the loop carries
+                    // `inputs[0]` instead of a fresh uninit allocation, so
+                    // the result aliases the input buffer.
+                    let captures: Vec<NodeId> = se.operand_nodes[n_inputs..].to_vec();
+                    let buf_nid = input_nids[0];
+                    let buf_arr_ty = arr_tys[0].clone();
+
+                    let carried = vec![(buf_arr_ty.clone(), buf_nid)];
+                    let result = ResultBinding::Carried {
+                        result_node: result_nid,
+                        idx: 0,
+                    };
+                    let allow_unroll = unroll_maps
+                        && as_soa_tuple(&buf_arr_ty).is_none()
+                        && read_inputs.iter().all(|(_, a, _)| as_soa_tuple(a).is_none());
+                    expand_loop(
+                        graph,
+                        control_headers,
+                        bid,
+                        idx,
+                        &len_input,
+                        &carried,
+                        &result,
+                        next_effect,
+                        allow_unroll,
+                        |graph, next_effect, body_bid, idx_nid, carried_nids| {
+                            let cur_buf = carried_nids[0];
+                            let mut call_operands: SmallVec<[NodeId; 4]> = SmallVec::new();
+                            for (arr, arr_ty, elem_ty) in &read_inputs {
+                                let elem_nid = emit_read_element(
+                                    graph,
+                                    body_bid,
+                                    *arr,
+                                    idx_nid,
+                                    arr_ty,
+                                    elem_ty,
+                                    next_effect,
+                                );
+                                call_operands.push(elem_nid);
+                            }
+                            call_operands.extend(captures.iter().copied());
+                            let y_nid = graph.intern_pure(
+                                PureOp::Call(func.clone()),
+                                call_operands,
+                                out_elem_ty.clone(),
+                            );
+                            let new_buf = emit_write_element(
+                                graph,
+                                cur_buf,
+                                idx_nid,
+                                y_nid,
+                                &buf_arr_ty,
+                                &out_elem_ty,
+                            );
+                            vec![new_buf]
+                        },
+                    );
+                }
             }
         }
         SideEffectKind::Pending(PendingSoac::ScanInto {

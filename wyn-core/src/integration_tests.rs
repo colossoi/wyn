@@ -84,6 +84,20 @@ fn compile_to_fused_tlc(input: &str) -> crate::tlc::Program {
 // =============================================================================
 
 #[test]
+fn consuming_map_compiles_end_to_end() {
+    // `*[N]T` map whose input is dead-after: the ownership pass
+    // sets `consumes_input = true`, EGIR conversion produces
+    // `SoacDestination::InputBuffer`, and `soac_expand` emits the
+    // in-place loop. Compiling end-to-end through SSA exercises
+    // every layer.
+    let _ssa = compile_to_ssa(
+        r#"
+def f(a: *[8]i32) [8]i32 = map(|x: i32| x + 1, a)
+"#,
+    );
+}
+
+#[test]
 fn test_map_reduce_fusion_end_to_end() {
     let source = r#"
 def globalArr: [4]f32 = [10.0, 20.0, 30.0, 40.0]

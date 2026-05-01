@@ -207,6 +207,14 @@ pub enum SoacDestination {
     /// ABI). Operand layout:
     /// `[input_0, ..., input_{n-1}, ...captures, output_view]`.
     OutputView,
+    /// Mutate `inputs[0]` in place at each index, return the input
+    /// buffer as the result. Set by the ownership pass when the
+    /// input is dead-after, mutable, and the body is pointwise.
+    /// Operand layout:
+    /// `[input_0, ..., input_{n-1}, ...captures]` — same as
+    /// `Fresh`, but the result aliases `inputs[0]` instead of a
+    /// fresh allocation.
+    InputBuffer,
 }
 
 /// An unexpanded SOAC operation held in the skeleton until `soac_expand` rewrites
