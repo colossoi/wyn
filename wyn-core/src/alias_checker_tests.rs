@@ -475,11 +475,6 @@ def main(grid: [3][4]i32) i32 =
 // --- D. Lambdas and higher-order functions ----------------------------------
 
 #[test]
-#[ignore = "compiler gap: a lambda body that consumes a captured unique \
-            value should be rejected — the lambda could be invoked \
-            zero or more times, which makes a single-consumption \
-            guarantee impossible. Today the alias checker accepts the \
-            program."]
 fn test_lambda_body_consumes_capture() {
     // A lambda that consumes a captured variable. This is conceptually
     // tricky: the lambda might be called more than once, which would be
@@ -553,12 +548,6 @@ def main(arr: *[4]i32) i32 =
 }
 
 #[test]
-#[ignore = "compiler gap: a loop body that consumes a non-loop-carried \
-            unique value should be rejected — the body runs every \
-            iteration, so the second iteration would re-consume. The \
-            alias checker should treat anything captured by a loop body \
-            the same way it treats lambda captures (a closure invoked \
-            from inside the loop)."]
 fn test_loop_body_consumes_outer_unique() {
     // Body consumes `outside`, but the body runs N times — second
     // iteration would re-consume.

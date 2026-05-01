@@ -147,6 +147,12 @@ pub struct AliasChecker<'a> {
     liveness: HashMap<NodeId, ExprLivenessInfo>,
     /// Pre-computed variable uses for determining "last use" (ordered by program order)
     var_uses: HashMap<String, Vec<NodeId>>,
+    /// Stack of "no-consume" frames. Each frame is the set of stores
+    /// captured by the enclosing lambda or loop body. A consumption
+    /// of any of these inside the body is rejected, because the
+    /// body may run zero, one, or many times — a single
+    /// consumption in source becomes N consumptions at execution.
+    no_consume_frames: Vec<HashSet<BackingStoreId>>,
 }
 
 impl<'a> AliasChecker<'a> {
@@ -163,6 +169,7 @@ impl<'a> AliasChecker<'a> {
             errors: Vec::new(),
             liveness: HashMap::new(),
             var_uses: HashMap::new(),
+            no_consume_frames: Vec::new(),
         }
     }
 
@@ -254,6 +261,29 @@ impl<'a> AliasChecker<'a> {
 
     /// Consume all given backing stores
     fn consume_stores(&mut self, stores: &HashSet<BackingStoreId>, at: NodeId, var_name: &str) {
+        // Reject consumption of stores captured by an enclosing
+        // lambda or loop body. A single source-level consumption in a
+        // closure body becomes N consumptions at execution, which is
+        // unsound. Captures exclude the bindings the closure itself
+        // introduced (lambda params, loop-carry pattern), which can
+        // be consumed once per invocation/iteration.
+        for store_id in stores {
+            for frame in &self.no_consume_frames {
+                if frame.contains(store_id) {
+                    let aliases = self.get_aliases(stores, var_name);
+                    self.errors.push(AliasError {
+                        kind: AliasErrorKind::UseAfterMove {
+                            variable: var_name.to_string(),
+                            consumed_var: var_name.to_string(),
+                            consumed_at: at,
+                            aliases,
+                        },
+                        span: self.get_span(at),
+                    });
+                    return;
+                }
+            }
+        }
         for store_id in stores {
             self.stores.insert(
                 *store_id,
@@ -263,6 +293,19 @@ impl<'a> AliasChecker<'a> {
                 },
             );
         }
+    }
+
+    /// Collect every store currently visible through any in-scope
+    /// variable. Used to compute the capture set for closure and
+    /// loop bodies.
+    fn captured_stores(&self) -> HashSet<BackingStoreId> {
+        let mut captures = HashSet::new();
+        for scope in &self.scopes {
+            for stores in scope.values() {
+                captures.extend(stores.iter().copied());
+            }
+        }
+        captures
     }
 
     /// Store the result for a node
@@ -616,18 +659,63 @@ impl<'a> Visitor for AliasChecker<'a> {
         ControlFlow::Continue(())
     }
 
-    fn visit_expr_lambda(&mut self, id: NodeId, lambda: &LambdaExpr) -> ControlFlow<Self::Break> {
+    fn visit_expr_loop(&mut self, _id: NodeId, loop_expr: &LoopExpr) -> ControlFlow<Self::Break> {
+        // Visit the init / iterator / condition in the OUTER scope —
+        // they're not part of the body.
+        if let Some(init) = &loop_expr.init {
+            self.visit_expression(init)?;
+        }
+        match &loop_expr.form {
+            LoopForm::For(_, bound) | LoopForm::ForIn(_, bound) => self.visit_expression(bound)?,
+            LoopForm::While(cond) => self.visit_expression(cond)?,
+        }
+
+        // Snapshot captures BEFORE binding the loop's pattern. Stores
+        // bound by the loop pattern (the loop carry) are *not*
+        // captures — they're fresh-per-iteration in the same way
+        // function parameters are fresh-per-call, and may be
+        // consumed inside the body.
+        let captures = self.captured_stores();
+
         self.push_scope();
 
-        // Lambda parameters are fresh per-call. Treating them as Fresh for
-        // origin purposes is correct: each invocation produces new bindings
-        // that the lambda body owns. (Capture-of-outer-uniques is checked
-        // separately in phase 5.)
+        // Bind the loop carry pattern. If init has stores, the
+        // pattern aliases them; if the form is ForIn, the pattern
+        // binds an element of the iterator (typically a fresh value).
+        let init_info = loop_expr.init.as_ref().map(|init| self.get_result(init.h.id)).unwrap_or_default();
+        if !init_info.stores.is_empty() {
+            // The loop pattern aliases the init's stores for the
+            // first iteration. Subsequent iterations re-use the
+            // pattern's name with the body's last value, so the
+            // store identity is stable across iterations.
+            let names = loop_expr.pattern.collect_names();
+            for name in names {
+                self.bind_variable(&name, &init_info);
+            }
+        }
+
+        self.no_consume_frames.push(captures);
+        let _ = self.visit_expression(&loop_expr.body);
+        self.no_consume_frames.pop();
+
+        self.pop_scope();
+        ControlFlow::Continue(())
+    }
+
+    fn visit_expr_lambda(&mut self, id: NodeId, lambda: &LambdaExpr) -> ControlFlow<Self::Break> {
+        // Capture the set of stores visible to the lambda body
+        // BEFORE pushing the parameter scope. Lambda parameters are
+        // fresh per-call and not captures.
+        let captures = self.captured_stores();
+
+        self.push_scope();
         for param in &lambda.params {
             self.bind_pattern_params(param, false);
         }
 
-        self.visit_expression(&lambda.body)?;
+        self.no_consume_frames.push(captures);
+        let _ = self.visit_expression(&lambda.body);
+        self.no_consume_frames.pop();
 
         self.pop_scope();
 

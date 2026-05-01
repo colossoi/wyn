@@ -166,6 +166,10 @@ pub trait Visitor: Sized {
         walk_expr_if(self, if_expr)
     }
 
+    fn visit_expr_loop(&mut self, _id: NodeId, loop_expr: &LoopExpr) -> ControlFlow<Self::Break> {
+        walk_expr_loop(self, loop_expr)
+    }
+
     fn visit_expr_slice(&mut self, _id: NodeId, slice: &SliceExpr) -> ControlFlow<Self::Break> {
         walk_expr_slice(self, slice)
     }
@@ -387,19 +391,7 @@ pub fn walk_expression<V: Visitor>(v: &mut V, e: &Expression) -> ControlFlow<V::
 
         ExprKind::TypeHole => ControlFlow::Continue(()),
         ExprKind::UnaryOp(_, operand) => v.visit_expression(operand),
-        ExprKind::Loop(loop_expr) => {
-            // Visit the loop condition/iterator
-            match &loop_expr.form {
-                LoopForm::For(_, iterator) => v.visit_expression(iterator)?,
-                LoopForm::ForIn(pattern, iterator) => {
-                    v.visit_pattern(pattern)?;
-                    v.visit_expression(iterator)?
-                }
-                LoopForm::While(condition) => v.visit_expression(condition)?,
-            }
-            // Visit the loop body
-            v.visit_expression(&loop_expr.body)
-        }
+        ExprKind::Loop(loop_expr) => v.visit_expr_loop(id, loop_expr),
         ExprKind::Match(match_expr) => {
             v.visit_expression(&match_expr.scrutinee)?;
             for case in &match_expr.cases {
@@ -529,6 +521,21 @@ pub fn walk_expr_if<V: Visitor>(v: &mut V, if_expr: &IfExpr) -> ControlFlow<V::B
     v.visit_expression(&if_expr.condition)?;
     v.visit_expression(&if_expr.then_branch)?;
     v.visit_expression(&if_expr.else_branch)
+}
+
+pub fn walk_expr_loop<V: Visitor>(v: &mut V, loop_expr: &LoopExpr) -> ControlFlow<V::Break> {
+    if let Some(init) = &loop_expr.init {
+        v.visit_expression(init)?;
+    }
+    match &loop_expr.form {
+        LoopForm::For(_, iterator) => v.visit_expression(iterator)?,
+        LoopForm::ForIn(pattern, iterator) => {
+            v.visit_pattern(pattern)?;
+            v.visit_expression(iterator)?
+        }
+        LoopForm::While(condition) => v.visit_expression(condition)?,
+    }
+    v.visit_expression(&loop_expr.body)
 }
 
 pub fn walk_expr_slice<V: Visitor>(v: &mut V, slice: &SliceExpr) -> ControlFlow<V::Break> {
