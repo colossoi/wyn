@@ -8,6 +8,7 @@ fn origin_mutability() {
     assert!(Origin::UniqueParam.is_mutable());
     assert!(Origin::Entry.is_mutable());
     assert!(!Origin::NonUniqueParam.is_mutable());
+    assert!(!Origin::Borrowed.is_mutable());
 }
 
 #[test]
@@ -602,4 +603,159 @@ def main(arr: *[4]i32) i32 =
     arr[0]
 "#;
     assert!(has_use_after_move(source));
+}
+
+// =============================================================================
+// Aliasing intrinsics + Borrowed origin
+// =============================================================================
+
+/// Walk `f`'s body looking for a `Let { name, ... }` whose name's
+/// symbol resolves to `var_name`, and return that name's owner +
+/// origin. Scoping the search inside the named def avoids
+/// false-positive matches against prelude symbols with the same
+/// surface name.
+fn binder_origin(program: &Program, fn_name: &str, var_name: &str) -> (super::OwnerId, Origin) {
+    fn find_let_sym(t: &Term, var_name: &str, program: &Program) -> Option<crate::SymbolId> {
+        if let TermKind::Let { name, .. } = &t.kind {
+            if program.symbols.get(*name).map(|s| s.as_str()) == Some(var_name) {
+                return Some(*name);
+            }
+        }
+        let mut found = None;
+        match &t.kind {
+            TermKind::Let { rhs, body, .. } => {
+                found =
+                    find_let_sym(rhs, var_name, program).or_else(|| find_let_sym(body, var_name, program));
+            }
+            TermKind::App { func, args } => {
+                found = find_let_sym(func, var_name, program);
+                for a in args {
+                    if found.is_some() {
+                        break;
+                    }
+                    found = find_let_sym(a, var_name, program);
+                }
+            }
+            TermKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                found = find_let_sym(cond, var_name, program)
+                    .or_else(|| find_let_sym(then_branch, var_name, program))
+                    .or_else(|| find_let_sym(else_branch, var_name, program));
+            }
+            TermKind::Lambda(lam) => {
+                found = find_let_sym(&lam.body, var_name, program);
+            }
+            TermKind::Loop { init, body, .. } => {
+                found =
+                    find_let_sym(init, var_name, program).or_else(|| find_let_sym(body, var_name, program));
+            }
+            TermKind::Force(inner) => {
+                found = find_let_sym(inner, var_name, program);
+            }
+            _ => {}
+        }
+        found
+    }
+
+    let f_def = find_def(program, fn_name);
+    let model = build(program);
+    let sym = find_let_sym(&f_def.body, var_name, program).unwrap_or_else(|| {
+        panic!(
+            "no let-binding named `{}` in `{}` (partial_eval may have inlined it)",
+            var_name, fn_name
+        )
+    });
+    let owner = model
+        .owner_of(sym)
+        .unwrap_or_else(|| panic!("`{}` should have an owner in `{}`", var_name, fn_name));
+    let origin =
+        model.origin(owner).unwrap_or_else(|| panic!("owner of `{}` should have an origin", var_name));
+    (owner, origin)
+}
+
+#[test]
+fn array_index_aliases_base_when_result_is_non_copy() {
+    // `let row = grid[i]` — row should share grid's owner because
+    // `_w_index` returns a view, not a fresh allocation.
+    let program = compile_to_tlc(
+        r#"
+def f(grid: *[3][4]i32, i: i32) i32 =
+    let row = grid[i] in row[0]
+"#,
+    );
+    let model = build(&program);
+
+    let f_def = find_def(&program, "f");
+    let lam = match &f_def.body.kind {
+        TermKind::Lambda(l) => l,
+        _ => panic!(),
+    };
+    let grid_sym = lam.params[0].0;
+    let grid_owner = model.owner_of(grid_sym).unwrap();
+
+    let row_sym = program
+        .symbols
+        .iter()
+        .find_map(|(s, n)| if n == "row" { Some(*s) } else { None })
+        .expect("symbol `row` not found");
+    let row_owner = model.owner_of(row_sym).expect("`row` should have an owner");
+
+    assert_eq!(grid_owner, row_owner, "row = grid[i] should alias grid's owner",);
+}
+
+#[test]
+fn unrecognized_call_returning_non_copy_is_borrowed() {
+    // `view` returns its arg; we don't track that interprocedurally,
+    // so `r = view(arr)` must be Borrowed (immutable) — refusing
+    // promotion is sound under-approximation.
+    let program = compile_to_tlc(
+        r#"
+def view(a: [4]i32) [4]i32 = a
+def main(arr: [4]i32) i32 =
+    let r = view(arr) in r[0]
+"#,
+    );
+    let (_, origin) = binder_origin(&program, "main", "r");
+    assert_eq!(
+        origin,
+        Origin::Borrowed,
+        "result of an unrecognized non-copy call should be Borrowed",
+    );
+}
+
+#[test]
+fn unique_returning_call_is_fresh() {
+    // A function that declares `*[4]i32` return is fresh by Wyn's
+    // uniqueness contract — no inter-procedural analysis required.
+    let program = compile_to_tlc(
+        r#"
+def bump(a: *[4]i32) *[4]i32 = a with [0] = 1
+def main(a: *[4]i32) i32 =
+    let r = bump(a) in r[0]
+"#,
+    );
+    let (_, origin) = binder_origin(&program, "main", "r");
+    assert_eq!(
+        origin,
+        Origin::Fresh,
+        "result of a `*T`-returning call should be Fresh",
+    );
+}
+
+#[test]
+fn array_literal_let_is_fresh() {
+    // `_w_array_lit` is a recognized fresh-producer, so promotion
+    // stays open downstream. Two distinct indices keep partial_eval
+    // from inlining the let away.
+    let program = compile_to_tlc(
+        r#"
+def main(i: i32, j: i32) i32 =
+    let arr = [1, 2, 3, 4] in arr[i] + arr[j]
+"#,
+    );
+    let (_, origin) = binder_origin(&program, "main", "arr");
+    assert_eq!(origin, Origin::Fresh);
 }

@@ -67,11 +67,18 @@ pub enum Origin {
     NonUniqueParam,
     /// Entry parameter — implicitly unique.
     Entry,
+    /// Result of an unrecognized non-copy producer (e.g. a user
+    /// function whose body might return an alias of one of its args,
+    /// or a lambda whose body returns a capture). Without
+    /// inter-procedural summaries we can't know what this aliases,
+    /// so promotion treats it as immutable. Sound under-approximation
+    /// of "borrowing" — refusing the optimization is always safe.
+    Borrowed,
 }
 
 impl Origin {
     pub fn is_mutable(self) -> bool {
-        !matches!(self, Origin::NonUniqueParam)
+        matches!(self, Origin::Fresh | Origin::UniqueParam | Origin::Entry)
     }
 }
 
@@ -134,23 +141,25 @@ pub fn analyze(program: &Program) -> OwnershipModel {
 /// `live_out` empty. Exposed for testing the build step in isolation;
 /// production code should call `analyze` instead.
 pub fn build(program: &Program) -> OwnershipModel {
-    let mut builder = Builder::new();
+    let mut builder = Builder::new(program);
     for def in &program.defs {
         builder.visit_def(def);
     }
     builder.model
 }
 
-struct Builder {
+struct Builder<'p> {
     model: OwnershipModel,
     next_owner: u32,
+    program: &'p Program,
 }
 
-impl Builder {
-    fn new() -> Self {
+impl<'p> Builder<'p> {
+    fn new(program: &'p Program) -> Self {
         Self {
             model: OwnershipModel::new(),
             next_owner: 0,
+            program,
         }
     }
 
@@ -222,7 +231,8 @@ impl Builder {
                     let owner = match self.alias_target(rhs) {
                         Some(target) => target,
                         None => {
-                            let fresh = self.fresh_owner(Origin::Fresh);
+                            let origin = self.origin_for_unaliased(rhs);
+                            let fresh = self.fresh_owner(origin);
                             self.model.defs.entry(term.id).or_default().insert(fresh);
                             fresh
                         }
@@ -265,7 +275,8 @@ impl Builder {
                     let owner = match self.alias_target(init) {
                         Some(target) => target,
                         None => {
-                            let fresh = self.fresh_owner(Origin::Fresh);
+                            let origin = self.origin_for_unaliased(init);
+                            let fresh = self.fresh_owner(origin);
                             self.model.defs.entry(term.id).or_default().insert(fresh);
                             fresh
                         }
@@ -281,7 +292,8 @@ impl Builder {
                         let owner = match self.alias_target(extract) {
                             Some(target) => target,
                             None => {
-                                let fresh = self.fresh_owner(Origin::Fresh);
+                                let origin = self.origin_for_unaliased(extract);
+                                let fresh = self.fresh_owner(origin);
                                 self.model.defs.entry(term.id).or_default().insert(fresh);
                                 fresh
                             }
@@ -419,16 +431,88 @@ impl Builder {
         }
     }
 
-    /// If a term is a direct alias of an existing tracked owner
-    /// (`Var(v)` where `v` has an owner), return that owner. Returns
-    /// `None` for fresh allocations and unhandled compound RHSs;
-    /// the caller treats those as needing a new owner.
+    /// If a term is a direct alias of an existing tracked owner,
+    /// return that owner. Two patterns count as direct aliases:
+    ///
+    /// - `Var(v)` where `v` is bound to an owner.
+    /// - `App(intrinsic, args)` for a known aliasing intrinsic
+    ///   (`_w_index`, `_w_tuple_proj`, `_w_intrinsic_array_with_inplace`):
+    ///   recurse into the arg position the intrinsic aliases.
+    ///   Handles nesting like `grid[i][j]` naturally.
+    ///
+    /// Returns `None` for fresh allocations and unrecognized compound
+    /// RHSs. The caller decides what owner/origin to mint based on
+    /// whether the rhs is a recognized fresh-producer.
     fn alias_target(&self, term: &Term) -> Option<OwnerId> {
         match &term.kind {
             TermKind::Var(sym) => self.model.owner_of(*sym),
+            TermKind::App { func, args } => {
+                let TermKind::Var(s) = &func.kind else {
+                    return None;
+                };
+                let name = self.program.symbols.get(*s)?;
+                let i = intrinsic_aliasing_arg(name)?;
+                self.alias_target(args.get(i)?)
+            }
             _ => None,
         }
     }
+
+    /// The origin to assign when a Let / Loop binder produces a fresh
+    /// owner (i.e., `alias_target` returned `None`). `Fresh` for
+    /// recognized producers (literals, ranges, generators, fresh
+    /// intrinsics, calls returning `*T`); `Borrowed` for anything we
+    /// can't classify (user function returning non-unique non-copy,
+    /// lambda invocation, etc.).
+    fn origin_for_unaliased(&self, rhs: &Term) -> Origin {
+        if types::is_unique(&rhs.ty) {
+            return Origin::Fresh;
+        }
+        if rhs_is_fresh_producer(rhs, self.program) {
+            return Origin::Fresh;
+        }
+        Origin::Borrowed
+    }
+}
+
+/// Intrinsics whose result aliases one of their arguments. The
+/// returned index is the arg position the result aliases.
+fn intrinsic_aliasing_arg(name: &str) -> Option<usize> {
+    match name {
+        // arr[i] — view into arr
+        "_w_index" => Some(0),
+        // tuple_proj(t, idx) — projection into t
+        "_w_tuple_proj" => Some(0),
+        // in-place with returns the same buffer it consumed
+        "_w_intrinsic_array_with_inplace" => Some(0),
+        _ => None,
+    }
+}
+
+/// Recognize forms that *definitely* produce a fresh non-copy value.
+/// Used by `origin_for_unaliased` to keep promotion paths open for
+/// known fresh-producers while staying conservative about unknowns.
+fn rhs_is_fresh_producer(term: &Term, program: &Program) -> bool {
+    match &term.kind {
+        TermKind::ArrayExpr(_) => true,
+        TermKind::App { func, .. } => {
+            let TermKind::Var(s) = &func.kind else {
+                return false;
+            };
+            program.symbols.get(*s).map(|name| is_fresh_producer_intrinsic(name)).unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
+/// Compiler-internal intrinsics that build a fresh non-copy value.
+/// Functional `with` allocates a new array; aliasing intrinsics like
+/// `_w_index` are deliberately absent.
+fn is_fresh_producer_intrinsic(name: &str) -> bool {
+    matches!(
+        name,
+        "_w_array_lit" | "_w_vec_lit" | "_w_tuple" | "_w_intrinsic_array_with"
+    )
 }
 
 /// Walk a curried function type `a1 -> a2 -> ... -> aN -> ret`, returning
