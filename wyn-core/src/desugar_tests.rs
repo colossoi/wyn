@@ -12,17 +12,18 @@ use crate::ssa::types::Program;
 fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
     let mut frontend = crate::cached_frontend();
     let parsed = crate::Compiler::parse(input, &mut frontend.node_counter)?;
-    let alias_checked = parsed
+    let type_checked = parsed
         .desugar(&mut frontend.node_counter)?
         .resolve(&mut frontend.module_manager)?
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager, &mut frontend.schemes)?
-        .alias_check()?;
+        .type_check(&mut frontend.module_manager, &mut frontend.schemes)?;
 
-    alias_checked
+    type_checked
         .to_tlc(&frontend.schemes, &frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
+        .promote_inplace()
+        .expect("promote_inplace")
         .fuse_maps()
         .defunctionalize()
         .monomorphize()
@@ -45,17 +46,18 @@ fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
 fn compile_through_ssa(input: &str) -> Result<Program, CompilerError> {
     let mut frontend = crate::cached_frontend();
     let parsed = crate::Compiler::parse(input, &mut frontend.node_counter)?;
-    let alias_checked = parsed
+    let type_checked = parsed
         .desugar(&mut frontend.node_counter)?
         .resolve(&mut frontend.module_manager)?
         .fold_ast_constants()
-        .type_check(&mut frontend.module_manager, &mut frontend.schemes)?
-        .alias_check()?;
+        .type_check(&mut frontend.module_manager, &mut frontend.schemes)?;
 
-    let ssa = alias_checked
+    let ssa = type_checked
         .to_tlc(&frontend.schemes, &frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
+        .promote_inplace()
+        .expect("promote_inplace")
         .fuse_maps()
         .defunctionalize()
         .monomorphize()
@@ -524,25 +526,23 @@ entry fragment_main(#[builtin(position)] pos: vec4f32) #[location(0)] vec4f32 =
     let parsed = crate::Compiler::parse(source, &mut frontend.node_counter).expect("parse");
     eprintln!("=== parse OK ===");
 
-    let alias_checked = parsed
+    let type_checked = parsed
         .desugar(&mut frontend.node_counter)
         .expect("desugar")
         .resolve(&mut frontend.module_manager)
         .expect("resolve")
         .fold_ast_constants()
         .type_check(&mut frontend.module_manager, &mut frontend.schemes)
-        .expect("typecheck")
-        .alias_check()
-        .expect("alias_check");
+        .expect("typecheck");
     eprintln!("=== frontend OK ===");
 
-    let tlc = alias_checked.to_tlc(&frontend.schemes, &frontend.module_manager, false);
+    let tlc = type_checked.to_tlc(&frontend.schemes, &frontend.module_manager, false);
     eprintln!("=== to_tlc OK ===");
 
     let tlc = tlc.partial_eval();
     eprintln!("=== partial_eval OK ===");
 
-    let tlc = tlc.normalize_soacs().fuse_maps();
+    let tlc = tlc.normalize_soacs().promote_inplace().expect("promote_inplace").fuse_maps();
     eprintln!("=== fuse_maps OK ===");
 
     let tlc = tlc.defunctionalize();
@@ -587,25 +587,23 @@ entry main(data: []i32) []i32 = [first(data)]
     let parsed = crate::Compiler::parse(source, &mut frontend.node_counter).expect("parse");
     eprintln!("=== parse OK ===");
 
-    let alias_checked = parsed
+    let type_checked = parsed
         .desugar(&mut frontend.node_counter)
         .expect("desugar")
         .resolve(&mut frontend.module_manager)
         .expect("resolve")
         .fold_ast_constants()
         .type_check(&mut frontend.module_manager, &mut frontend.schemes)
-        .expect("typecheck")
-        .alias_check()
-        .expect("alias_check");
+        .expect("typecheck");
     eprintln!("=== frontend OK ===");
 
-    let tlc = alias_checked.to_tlc(&frontend.schemes, &frontend.module_manager, false);
+    let tlc = type_checked.to_tlc(&frontend.schemes, &frontend.module_manager, false);
     eprintln!("=== to_tlc OK ===");
 
     let tlc = tlc.partial_eval();
     eprintln!("=== partial_eval OK ===");
 
-    let tlc = tlc.normalize_soacs().fuse_maps();
+    let tlc = tlc.normalize_soacs().promote_inplace().expect("promote_inplace").fuse_maps();
     eprintln!("=== fuse_maps OK ===");
 
     let tlc = tlc.defunctionalize();

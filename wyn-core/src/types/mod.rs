@@ -853,6 +853,36 @@ pub fn is_unique(ty: &Type) -> bool {
     matches!(ty, Type::Constructed(TypeName::Unique, _))
 }
 
+/// Whether a type's runtime values are pure value-semantics (cheap to
+/// copy, no backing-store identity). The complement is "non-copy" — the
+/// alias and ownership systems track only non-copy values.
+///
+/// `*T` is non-copy regardless of `T`'s shape: uniqueness implies
+/// ownership tracking even for primitives (the `*` is a contract about
+/// the slot, not the value's structure).
+pub fn is_copy(ty: &Type) -> bool {
+    if is_unique(ty) {
+        return false;
+    }
+    match ty {
+        Type::Constructed(name, args) => match name {
+            TypeName::Int(_)
+            | TypeName::UInt(_)
+            | TypeName::Float(_)
+            | TypeName::Bool
+            | TypeName::Unit
+            | TypeName::Vec
+            | TypeName::Mat
+            | TypeName::Arrow => true,
+            TypeName::Array => false,
+            TypeName::Tuple(_) => args.iter().all(is_copy),
+            TypeName::Unique => unreachable!("handled above by is_unique"),
+            _ => true,
+        },
+        Type::Variable(_) => true,
+    }
+}
+
 /// Strip uniqueness marker from a type, returning the inner type
 pub fn strip_unique(ty: &Type) -> Type {
     match ty {

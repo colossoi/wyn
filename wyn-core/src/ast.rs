@@ -362,15 +362,14 @@ pub enum ExprKind {
     ArrayLiteral(Vec<Expression>),
     VecMatLiteral(Vec<Expression>), // @[...] - vector or matrix literal (type inferred from context)
     ArrayIndex(Box<Expression>, Box<Expression>),
-    /// In-place array update: `a with [i] = v` produces a copy of `a` with element `i` set to `v`.
-    /// The `inplace` flag starts `false` at parse time; the `uniqueness_promote`
-    /// pass flips it to `true` when the alias checker proves `a` is dead
-    /// after this expression (allowing the backend to mutate in place).
+    /// Array update: `a with [i] = v`. At AST level this is always
+    /// the functional form (returns a fresh array). The TLC ownership
+    /// pass (`tlc::ownership::promote_inplace`) decides post-lowering
+    /// whether the call should become the in-place intrinsic.
     ArrayWith {
         array: Box<Expression>,
         index: Box<Expression>,
         value: Box<Expression>,
-        inplace: bool,
     },
     /// Vec swizzle update: `v with .yz = e` produces a copy of `v`
     /// with positions y and z replaced by e.x and e.y. Compound

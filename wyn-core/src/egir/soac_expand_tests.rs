@@ -26,7 +26,7 @@ use polytype::Type;
 /// introspect node structure.
 fn compile_to_expanded_egraph(input: &str) -> crate::egir::types::EGraph {
     let mut frontend = crate::cached_frontend();
-    let alias_checked = Compiler::parse(input, &mut frontend.node_counter)
+    let type_checked = Compiler::parse(input, &mut frontend.node_counter)
         .expect("parse")
         .elaborate_modules(&mut frontend.module_manager)
         .expect("elaborate")
@@ -36,14 +36,14 @@ fn compile_to_expanded_egraph(input: &str) -> crate::egir::types::EGraph {
         .expect("resolve")
         .fold_ast_constants()
         .type_check(&mut frontend.module_manager, &mut frontend.schemes)
-        .expect("type check")
-        .alias_check()
-        .expect("alias check");
+        .expect("type check");
 
-    let expanded = alias_checked
+    let expanded = type_checked
         .to_tlc(&frontend.schemes, &frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
+        .promote_inplace()
+        .expect("promote_inplace")
         .fuse_maps()
         .defunctionalize()
         .monomorphize()

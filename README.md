@@ -55,7 +55,7 @@ What you get "for free":
 | **Resolved** | `name_resolution` | Name resolution and module imports |
 | **AstConstFoldedEarly** | `ast_const_fold` | Compile-time integer constant folding |
 | **TypeChecked** | `types::checker` | Hindley-Milner type inference and checking |
-| **AliasChecked** | `alias_checker` | Uniqueness/alias analysis for in-place updates |
+| **AliasChecked** | `alias_checker` | Use-after-move diagnostic (transient: ownership/liveness moving fully to `tlc::ownership`) |
 
 ### TLC (Typed Lambda Calculus)
 | Stage | Module | Description |
