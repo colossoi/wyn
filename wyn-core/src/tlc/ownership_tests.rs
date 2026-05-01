@@ -1065,3 +1065,232 @@ def f(a: [3][4]i32) [3][4]i32 = map(|row| row, a)
         "Map over non-unique input should keep consumes_input = false",
     );
 }
+
+// =============================================================================
+// Lambda captures with their own SymbolId (post-defunc shape)
+// =============================================================================
+
+/// Build a TLC program shaped like the post-defunc form of:
+///
+/// ```text
+/// def main: i32 =
+///     let outer: *[4]i32 = [1, 2, 3, 4] in
+///     let f: *[4]i32 -> i32 = lambda<captures=[(cap, *[4]i32, outer)]>
+///         |_x: i32| consume(cap)
+///     in
+///     f(0)
+/// ```
+///
+/// The lambda body references `Var(cap_sym)` — a fresh symbol distinct
+/// from `outer_sym`. `Lambda::captures` carries the binding
+/// `(cap_sym, *[4]i32, Var(outer_sym))`. This is what
+/// `tlc::defunctionalize` produces after lifting; today the
+/// production pipeline runs `apply_ownership` *before* defunc so
+/// captures are empty in practice — but the analysis must remain
+/// sound if that ordering ever changes.
+fn synth_program_with_populated_lambda_captures() -> Program {
+    use crate::ast::{Span, TypeName};
+    use crate::tlc::{Def, DefMeta, Lambda, Term, TermIdSource, TermKind};
+    use polytype::Type;
+
+    let mut symbols = crate::SymbolTable::new();
+    let mut ids = TermIdSource::new();
+    let mut def_syms = std::collections::HashMap::new();
+
+    // Top-level symbols
+    let consume_sym = symbols.alloc("consume".to_string());
+    def_syms.insert("consume".to_string(), consume_sym);
+    let main_sym = symbols.alloc("main".to_string());
+    def_syms.insert("main".to_string(), main_sym);
+
+    // Local symbols
+    let consume_arg_sym = symbols.alloc("x".to_string());
+    let outer_sym = symbols.alloc("outer".to_string());
+    let f_sym = symbols.alloc("f".to_string());
+    let lambda_param_sym = symbols.alloc("_x".to_string());
+    let cap_sym = symbols.alloc("cap".to_string()); // post-defunc capture-local sym
+
+    // Types
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+    let arr_ty = Type::Constructed(TypeName::Array, vec![i32_ty.clone()]);
+    let unique_arr_ty = Type::Constructed(TypeName::Unique, vec![arr_ty.clone()]);
+    let consume_ty = Type::Constructed(TypeName::Arrow, vec![unique_arr_ty.clone(), i32_ty.clone()]);
+    let lam_ty = Type::Constructed(TypeName::Arrow, vec![i32_ty.clone(), i32_ty.clone()]);
+
+    // ---- consume(x: *[4]i32) i32 = 0  (body irrelevant; only type matters)
+    let consume_body = Term {
+        id: ids.next_id(),
+        ty: i32_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::IntLit("0".to_string()),
+    };
+    let consume_lam = Lambda {
+        params: vec![(consume_arg_sym, unique_arr_ty.clone())],
+        body: Box::new(consume_body),
+        ret_ty: i32_ty.clone(),
+        captures: vec![],
+    };
+    let consume_lam_term = Term {
+        id: ids.next_id(),
+        ty: consume_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::Lambda(consume_lam),
+    };
+    let consume_def = Def {
+        name: consume_sym,
+        ty: consume_ty.clone(),
+        body: consume_lam_term,
+        meta: DefMeta::Function,
+        arity: 1,
+    };
+
+    // ---- main's body
+    // Innermost: consume(cap)
+    let var_consume = Term {
+        id: ids.next_id(),
+        ty: consume_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::Var(consume_sym),
+    };
+    let var_cap = Term {
+        id: ids.next_id(),
+        ty: unique_arr_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::Var(cap_sym),
+    };
+    let consume_call = Term {
+        id: ids.next_id(),
+        ty: i32_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::App {
+            func: Box::new(var_consume),
+            args: vec![var_cap],
+        },
+    };
+
+    // Var(outer) — the capture's carrier term
+    let var_outer = Term {
+        id: ids.next_id(),
+        ty: unique_arr_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::Var(outer_sym),
+    };
+
+    // Lambda with populated captures
+    let lambda = Lambda {
+        params: vec![(lambda_param_sym, i32_ty.clone())],
+        body: Box::new(consume_call),
+        ret_ty: i32_ty.clone(),
+        captures: vec![(cap_sym, unique_arr_ty.clone(), var_outer)],
+    };
+    let lambda_term = Term {
+        id: ids.next_id(),
+        ty: lam_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::Lambda(lambda),
+    };
+
+    // Body of inner let: f(0)
+    let var_f = Term {
+        id: ids.next_id(),
+        ty: lam_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::Var(f_sym),
+    };
+    let zero_lit = Term {
+        id: ids.next_id(),
+        ty: i32_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::IntLit("0".to_string()),
+    };
+    let f_call = Term {
+        id: ids.next_id(),
+        ty: i32_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::App {
+            func: Box::new(var_f),
+            args: vec![zero_lit],
+        },
+    };
+
+    // let f = lambda in f(0)
+    let inner_let = Term {
+        id: ids.next_id(),
+        ty: i32_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::Let {
+            name: f_sym,
+            name_ty: lam_ty.clone(),
+            rhs: Box::new(lambda_term),
+            body: Box::new(f_call),
+        },
+    };
+
+    // Array literal `[1, 2, 3, 4]` for outer's rhs
+    fn int_lit(ids: &mut TermIdSource, n: &str) -> Term {
+        Term {
+            id: ids.next_id(),
+            ty: Type::Constructed(TypeName::Int(32), vec![]),
+            span: Span::dummy(),
+            kind: TermKind::IntLit(n.to_string()),
+        }
+    }
+    let arr_lit_app = Term {
+        id: ids.next_id(),
+        ty: unique_arr_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::ArrayExpr(crate::tlc::ArrayExpr::Literal(vec![
+            int_lit(&mut ids, "1"),
+            int_lit(&mut ids, "2"),
+            int_lit(&mut ids, "3"),
+            int_lit(&mut ids, "4"),
+        ])),
+    };
+
+    // let outer = [1,2,3,4] in <inner_let>
+    let outer_let = Term {
+        id: ids.next_id(),
+        ty: i32_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::Let {
+            name: outer_sym,
+            name_ty: unique_arr_ty.clone(),
+            rhs: Box::new(arr_lit_app),
+            body: Box::new(inner_let),
+        },
+    };
+
+    let main_def = Def {
+        name: main_sym,
+        ty: i32_ty.clone(),
+        body: outer_let,
+        meta: DefMeta::Function,
+        arity: 0,
+    };
+
+    Program {
+        defs: vec![consume_def, main_def],
+        uniforms: vec![],
+        storage: vec![],
+        symbols,
+        def_syms,
+    }
+}
+
+#[test]
+fn lambda_with_populated_captures_detects_capture_kill() {
+    // Hand-built post-defunc shape: the lambda body uses
+    // `Var(cap_sym)` (a fresh capture-local symbol), and
+    // `Lambda::captures` carries `(cap_sym, *[4]i32, Var(outer_sym))`.
+    // The body kills `cap` via consume — that should propagate to
+    // `outer`'s owner and be flagged as use-after-move (the lambda
+    // can be invoked any number of times, including never, but if
+    // it is, it consumes a store the outer scope still owns).
+    let program = synth_program_with_populated_lambda_captures();
+    let result = super::check(&program);
+    assert!(
+        result.is_err(),
+        "lambda body that consumes a populated capture should be rejected; got {:?}",
+        result,
+    );
+}
