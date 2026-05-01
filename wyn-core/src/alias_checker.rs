@@ -517,9 +517,17 @@ impl<'a> Visitor for AliasChecker<'a> {
     ) -> ControlFlow<Self::Break> {
         self.visit_expression(array)?;
         self.visit_expression(index)?;
-        // In GPU/SPIR-V context, all values are copied - no heap or references.
-        // Array indexing always produces a fresh copy of the element.
-        self.set_result(id, AliasInfo::copy());
+        // For copy element types (scalars, vec, mat), `arr[i]` is a
+        // value copy with no aliasing. For non-copy elements (the 2D
+        // case, `grid[i]` returning an inner array; or arrays of
+        // records), the result aliases the outer array's stores —
+        // consuming the inner row consumes the outer too.
+        if self.node_is_copy_type(id) {
+            self.set_result(id, AliasInfo::copy());
+        } else {
+            let arr_info = self.get_result(array.h.id);
+            self.set_result(id, AliasInfo::references(arr_info.stores));
+        }
         ControlFlow::Continue(())
     }
 
@@ -792,6 +800,33 @@ impl<'a> Visitor for AliasChecker<'a> {
         // Result of `a with [i] = v` has the same backing stores as `a`.
         let arr_info = self.get_result(array.h.id);
         self.set_result(id, arr_info);
+        ControlFlow::Continue(())
+    }
+
+    fn visit_expr_vec_with(
+        &mut self,
+        id: NodeId,
+        target: &Expression,
+        value: &Expression,
+    ) -> ControlFlow<Self::Break> {
+        // Mirror `visit_expr_array_with`: vec-with mutates the target
+        // (potentially in-place) and the result aliases the target's
+        // stores. Vecs are copy types in wyn so the alias model
+        // typically sees no stores at all here, but if a `*vec3`
+        // crosses an entry boundary or comes from a record field, the
+        // store-tracking still applies.
+        self.visit_expression(target)?;
+        self.visit_expression(value)?;
+
+        let target_info = self.get_result(target.h.id);
+        if !target_info.stores.is_empty() {
+            let alias_free = self.stores_are_mutable(&target_info);
+            let released = !self.any_alias_used_after(&target_info, target.h.id);
+            self.liveness.insert(target.h.id, ExprLivenessInfo { alias_free, released });
+        }
+
+        // Result of `v with .swizzle = e` has the same stores as `v`.
+        self.set_result(id, target_info);
         ControlFlow::Continue(())
     }
 }

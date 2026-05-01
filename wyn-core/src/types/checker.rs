@@ -2008,13 +2008,16 @@ impl<'a> TypeChecker<'a> {
                 let size_var = self.context.new_variable();
                 let want_vec =
                     Type::Constructed(TypeName::Vec, vec![elem_var.clone(), size_var.clone()]);
-                self.context.unify(&target_type, &want_vec).map_err(|_| {
-                    err_type_at!(
-                        target.h.span,
-                        "`with .swizzle` requires a vector target, got {}",
-                        self.format_type(&target_type.apply(&self.context))
-                    )
-                })?;
+                // Weakening: `*vec3` is acceptable as a swizzle target — the
+                // unique wrapper just licenses in-place mutation, which is
+                // exactly what `with .swizzle` does. Strip `*` from the
+                // actual side before unifying with the bare `Vec` shape.
+                self.unify_or_err_weakening(
+                    &target_type,
+                    &want_vec,
+                    target.h.span,
+                    "`with .swizzle` requires a vector target",
+                )?;
 
                 // Range-check components against the resolved vec size,
                 // when known. (Parser already enforced distinctness.)
