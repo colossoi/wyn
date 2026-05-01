@@ -816,11 +816,21 @@ impl<'m> Liveness<'m> {
     /// Reuse the SOAC-body fixed-point: captures stay live across
     /// hypothetical re-invocations, and a body that kills a capture
     /// is detected because the kill conflicts with the still-live
-    /// owner. The result feeds into the parent's live_in at the
-    /// lambda creation site.
+    /// owner.
+    ///
+    /// Capture terms are program points themselves — they may
+    /// contain reads or kills that need to land at the lambda
+    /// creation site. We thread liveness through them in reverse
+    /// (last-evaluated first under backward dataflow), starting
+    /// from the post-body live set so any uses inside a capture
+    /// term flow back to the parent's live_in.
     fn analyze_lambda(&mut self, lam: &Lambda, live_after: LiveSet) -> LiveSet {
         let live_in_body = self.lambda_body_fixed_point(lam);
-        union(&live_after, &live_in_body)
+        let mut live = union(&live_after, &live_in_body);
+        for (_, _, capture_term) in lam.captures.iter().rev() {
+            live = self.analyze(capture_term, live);
+        }
+        live
     }
 
     fn analyze_soac(&mut self, op: &SoacOp, live_after: LiveSet, _soac_id: TermId) -> LiveSet {
