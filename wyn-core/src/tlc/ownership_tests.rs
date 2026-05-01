@@ -569,16 +569,12 @@ def main(x: i32) i32 =
     assert!(!has_use_after_move(source));
 }
 
-// Inner shadowed `x` should be its own owner; the outer `x` is
-// untouched by `consume(inner_x)`. Currently a false positive: the
-// AST→TLC transformer (`tlc::Transformer::define`) overwrites
-// `scope[name]` without push/pop, so the trailing `x[0]` resolves
-// to the inner `x`'s SymbolId and the consume looks like it kills
-// the still-live outer slot. Fix is in the transformer's scope
-// management, not in this pass — pinning the case here so the bug
-// has a home.
+// Inner shadowed `x` is its own owner; the outer `x` is untouched
+// by `consume(inner_x)`. The TLC transformer's `LetIn` arm
+// snapshots and restores `scope` around the body so the inner
+// `let x` doesn't leak out and pollute the outer body's `Var(x)`
+// resolution.
 #[test]
-#[ignore = "TLC transform doesn't push/pop scope for nested let — see comment"]
 fn shadowing_does_not_violate() {
     let source = r#"
 def consume(arr: *[4]i32) i32 = arr[0]
