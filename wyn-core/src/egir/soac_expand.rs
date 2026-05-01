@@ -81,11 +81,23 @@ fn is_handleable_soac(kind: &SideEffectKind) -> bool {
         PendingSoac::Redomap {
             input_array_types, ..
         } => input_array_types.iter().all(is_plain_array_source),
-        PendingSoac::Scan { input_array_type, .. } => is_plain_composite(input_array_type),
+        PendingSoac::Scan {
+            input_array_type,
+            destination,
+            ..
+        } => match destination {
+            // Fresh allocates a composite output via array_with; only
+            // composite inputs work for the read path today.
+            SoacDestination::Fresh => is_plain_composite(input_array_type),
+            // OutputView writes through the bound view; input may be
+            // any plain array source (composite, view, or SoA tuple).
+            SoacDestination::OutputView => is_plain_array_source(input_array_type),
+            // InputBuffer not yet supported for Scan.
+            SoacDestination::InputBuffer => false,
+        },
         PendingSoac::Map {
             input_array_types, ..
         } => input_array_types.iter().all(is_plain_array_source),
-        PendingSoac::ScanInto { input_array_type, .. } => is_plain_array_source(input_array_type),
     }
 }
 
@@ -431,76 +443,73 @@ fn expand_one(
                 }
             }
         }
-        SideEffectKind::Pending(PendingSoac::ScanInto {
-            func,
-            input_array_type,
-            input_elem_type,
-            ..
-        }) => {
-            let func = func.clone();
-            let arr_ty = input_array_type.clone();
-            let elem_ty = input_elem_type.clone();
-
-            // Operand layout: [input, init, ...captures, output_view].
-            let arr_nid = se.operand_nodes[0];
-            let init_nid = se.operand_nodes[1];
-            let view_nid = *se.operand_nodes.last().expect("ScanInto has output_view");
-            let captures: Vec<NodeId> = se.operand_nodes[2..se.operand_nodes.len() - 1].to_vec();
-            let result_nid = se.result.expect("ScanInto has a (dummy) result");
-
-            build_scan_into_loop(
-                graph,
-                control_headers,
-                bid,
-                idx,
-                ScanIntoLoop {
-                    len_input: (arr_nid, arr_ty.clone()),
-                    input: (arr_nid, arr_ty, elem_ty.clone()),
-                    init_acc: init_nid,
-                    acc_ty: elem_ty,
-                    view_nid,
-                    result_node: result_nid,
-                    func,
-                    captures,
-                },
-                next_effect,
-            );
-        }
         SideEffectKind::Pending(PendingSoac::Scan {
             func,
             input_array_type,
             input_elem_type,
-            ..
+            destination,
         }) => {
             let func = func.clone();
             let arr_ty = input_array_type.clone();
             let elem_ty = input_elem_type.clone();
+            let destination = *destination;
 
-            // Operand layout for Scan: [input, init, ...captures].
             let arr_nid = se.operand_nodes[0];
             let init_nid = se.operand_nodes[1];
-            let captures: Vec<NodeId> = se.operand_nodes[2..].to_vec();
             let result_nid = se.result.expect("Scan has a result");
-            // Scan's result is the output array; its type lives on result_nid.
-            let out_arr_ty = graph.types[&result_nid].clone();
 
-            build_scan_loop(
-                graph,
-                control_headers,
-                bid,
-                idx,
-                ScanLoop {
-                    len_input: (arr_nid, arr_ty.clone()),
-                    input: (arr_nid, arr_ty, elem_ty.clone()),
-                    init_acc: init_nid,
-                    acc_ty: elem_ty,
-                    out_arr_ty,
-                    result_node: result_nid,
-                    func,
-                    captures,
-                },
-                next_effect,
-            );
+            match destination {
+                SoacDestination::Fresh => {
+                    // Operand layout: [input, init, ...captures].
+                    let captures: Vec<NodeId> = se.operand_nodes[2..].to_vec();
+                    // Result type lives on the result node — it's the
+                    // output array (allocated fresh inside the loop).
+                    let out_arr_ty = graph.types[&result_nid].clone();
+                    build_scan_loop(
+                        graph,
+                        control_headers,
+                        bid,
+                        idx,
+                        ScanLoop {
+                            len_input: (arr_nid, arr_ty.clone()),
+                            input: (arr_nid, arr_ty, elem_ty.clone()),
+                            init_acc: init_nid,
+                            acc_ty: elem_ty,
+                            out_arr_ty,
+                            result_node: result_nid,
+                            func,
+                            captures,
+                        },
+                        next_effect,
+                    );
+                }
+                SoacDestination::OutputView => {
+                    // Operand layout: [input, init, ...captures, output_view].
+                    let view_nid =
+                        *se.operand_nodes.last().expect("Scan[OutputView] has output_view operand");
+                    let captures: Vec<NodeId> = se.operand_nodes[2..se.operand_nodes.len() - 1].to_vec();
+                    build_scan_into_loop(
+                        graph,
+                        control_headers,
+                        bid,
+                        idx,
+                        ScanIntoLoop {
+                            len_input: (arr_nid, arr_ty.clone()),
+                            input: (arr_nid, arr_ty, elem_ty.clone()),
+                            init_acc: init_nid,
+                            acc_ty: elem_ty,
+                            view_nid,
+                            result_node: result_nid,
+                            func,
+                            captures,
+                        },
+                        next_effect,
+                    );
+                }
+                SoacDestination::InputBuffer => {
+                    panic!("Scan[InputBuffer] not yet supported");
+                }
+            }
         }
         _ => unreachable!("is_handleable_soac filtered to supported variants"),
     }
@@ -664,8 +673,9 @@ where
     true
 }
 
-/// ScanInto: `new_acc = func(acc, elem, ...caps); view[i] = new_acc` per iteration.
-/// One loop-carried value (scalar accumulator). Writes are effectful.
+/// `Scan[OutputView]`: `new_acc = func(acc, elem, ...caps); view[i] = new_acc`
+/// per iteration. One loop-carried value (scalar accumulator). Writes are
+/// effectful so the SOAC's `result_node` is bound to a dummy.
 struct ScanIntoLoop {
     len_input: (NodeId, Type<TypeName>),
     input: (NodeId, Type<TypeName>, Type<TypeName>),
@@ -700,8 +710,8 @@ fn build_scan_into_loop(
         },
     );
 
-    // ScanInto's result is dummy but scalar acc is still threaded; override
-    // the header's else-branch to carry acc (build_loop_skeleton defaults to
+    // The result is dummy but scalar acc is still threaded; override the
+    // header's else-branch to carry acc (build_loop_skeleton defaults to
     // empty for DummyBool, which is correct when there are no carried values,
     // but here we DO have carried — DummyBool just says "don't pass to after").
     // The after block has no params in the dummy case; we drop the acc at exit.
@@ -981,8 +991,9 @@ enum ResultBinding {
         idx: usize,
     },
     /// Rebind `result_node` as a constant `Bool(false)` (dummy) — the SOAC
-    /// produces no consumed value (MapInto/ScanInto's writes are effectful
-    /// and the "result" is discarded by the entry-point finalize step).
+    /// produces no consumed value (the OutputView destination's writes
+    /// are effectful and the "result" is discarded by the entry-point
+    /// finalize step).
     DummyBool {
         result_node: NodeId,
     },

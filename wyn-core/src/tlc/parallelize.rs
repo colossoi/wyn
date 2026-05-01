@@ -1572,7 +1572,7 @@ impl BufferRef {
 /// Execution plan for a parallelized scan: every buffer, combiner, and
 /// the input-length source are fields. Per-phase builders consume it,
 /// each emitting a hand-rolled TLC body that writes to known buffers.
-/// No reliance on the from_tlc Map/Scan → MapInto/ScanInto auto-rewrite
+/// No reliance on the from_tlc Map/Scan → OutputView auto-rewrite
 /// (which can't target a specific binding).
 struct ScanPlan {
     combiner: Lambda,
