@@ -7,6 +7,7 @@ fn origin_mutability() {
     assert!(Origin::Fresh.is_mutable());
     assert!(Origin::UniqueParam.is_mutable());
     assert!(Origin::Entry.is_mutable());
+    assert!(Origin::BorrowedMutableElement.is_mutable());
     assert!(!Origin::NonUniqueParam.is_mutable());
     assert!(!Origin::Borrowed.is_mutable());
 }
@@ -246,9 +247,10 @@ def main(a: *[4]i32) i32 = borrow(a)
 }
 
 #[test]
-fn soac_element_param_gets_fresh_owner_when_non_copy() {
+fn soac_element_param_gets_borrowed_mutable_element_when_non_copy() {
     // Map over a 2D array — the lambda's element param has type [4]i32
-    // (non-copy), so it should be tracked as a fresh per-iteration owner.
+    // (non-copy), so it should be tracked as a per-iteration view of a
+    // mutable input.
     let program = compile_to_tlc(
         r#"
 def f(rows: *[3][4]i32) [3][4]i32 = map(|row| row, rows)
@@ -256,15 +258,13 @@ def f(rows: *[3][4]i32) [3][4]i32 = map(|row| row, rows)
     );
     let model = build(&program);
 
-    // The model should contain at least one Origin::Fresh that's
-    // distinct from the rows' UniqueParam. (If the lambda body had no
-    // tracked references, the per-iteration owner is still allocated.)
-    let fresh_count = model.origins.values().filter(|o| **o == super::Origin::Fresh).count();
+    let elem_count =
+        model.origins.values().filter(|o| **o == super::Origin::BorrowedMutableElement).count();
     let unique_count = model.origins.values().filter(|o| **o == super::Origin::UniqueParam).count();
     assert!(unique_count >= 1, "expected at least one UniqueParam owner");
     assert!(
-        fresh_count >= 1,
-        "expected at least one Fresh owner for the SOAC element param"
+        elem_count >= 1,
+        "expected at least one BorrowedMutableElement owner for the SOAC element param"
     );
 }
 
