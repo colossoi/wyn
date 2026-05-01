@@ -370,6 +370,12 @@ pub enum SoacOp {
         lam: Lambda,
         /// Parallel inputs. `inputs.len() == lam.params.len()`.
         inputs: Vec<ArrayExpr>,
+        /// Set by the ownership pass when the map's primary input
+        /// is mutable, dead-after, pointwise, and not bound to a
+        /// compute-shader output. Read by `egir::from_tlc` to lower
+        /// the map to an in-place loop instead of allocating a
+        /// fresh output buffer.
+        consumes_input: bool,
     },
     Reduce {
         op: Lambda,
@@ -717,7 +723,7 @@ where
     F: FnMut(&Term),
 {
     match soac {
-        SoacOp::Map { lam, inputs } => {
+        SoacOp::Map { lam, inputs, .. } => {
             visit_lambda_children(lam, f);
             for ae in inputs {
                 visit_array_expr_children(ae, f);
@@ -846,9 +852,14 @@ where
     F: FnMut(Term) -> Term,
 {
     match soac {
-        SoacOp::Map { lam, inputs } => SoacOp::Map {
+        SoacOp::Map {
+            lam,
+            inputs,
+            consumes_input,
+        } => SoacOp::Map {
             lam: map_lambda_children(lam, f),
             inputs: inputs.into_iter().map(|ae| map_array_expr_children(ae, f)).collect(),
+            consumes_input,
         },
         SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
             op: map_lambda_children(op, f),
@@ -2075,7 +2086,15 @@ impl<'a> Transformer<'a> {
             _ => vec![ArrayExpr::Ref(Box::new(arr_term))],
         };
 
-        self.mk_term(ty, span, TermKind::Soac(SoacOp::Map { lam, inputs }))
+        self.mk_term(
+            ty,
+            span,
+            TermKind::Soac(SoacOp::Map {
+                lam,
+                inputs,
+                consumes_input: false,
+            }),
+        )
     }
 
     /// Transform `reduce(op, ne, arr)` → `Soac(Reduce { op, ne, input, props })`.

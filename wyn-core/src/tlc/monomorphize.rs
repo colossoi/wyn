@@ -566,9 +566,14 @@ impl<'a> Monomorphizer<'a> {
 
     fn process_soac(&mut self, soac: &SoacOp) -> SoacOp {
         match soac {
-            SoacOp::Map { lam, inputs } => SoacOp::Map {
+            SoacOp::Map {
+                lam,
+                inputs,
+                consumes_input,
+            } => SoacOp::Map {
                 lam: self.process_lambda(lam),
                 inputs: inputs.iter().map(|ae| self.process_array_expr(ae)).collect(),
+                consumes_input: *consumes_input,
             },
             SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
                 op: self.process_lambda(op),
@@ -906,9 +911,14 @@ impl<'a> Monomorphizer<'a> {
 
     fn apply_subst_soac(&mut self, soac: &SoacOp, subst: &Substitution) -> SoacOp {
         match soac {
-            SoacOp::Map { lam, inputs } => SoacOp::Map {
+            SoacOp::Map {
+                lam,
+                inputs,
+                consumes_input,
+            } => SoacOp::Map {
                 lam: self.apply_subst_lambda(lam, subst),
                 inputs: inputs.iter().map(|ae| self.apply_subst_array_expr(ae, subst)).collect(),
+                consumes_input: *consumes_input,
             },
             SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
                 op: self.apply_subst_lambda(op, subst),

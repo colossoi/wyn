@@ -113,6 +113,7 @@ impl B {
             TermKind::Soac(SoacOp::Map {
                 lam,
                 inputs: vec![input],
+                consumes_input: false,
             }),
             arr_i32_ty(),
         )
@@ -383,6 +384,7 @@ fn t11_required_params_closure() {
         TermKind::Soac(SoacOp::Map {
             lam,
             inputs: vec![input],
+            consumes_input: false,
         }),
         arr_i32_ty(),
     );
@@ -450,6 +452,7 @@ fn binding_registry_finds_storage_buffer_in_soac_input() {
         TermKind::Soac(SoacOp::Map {
             lam,
             inputs: vec![input],
+            consumes_input: false,
         }),
         arr_i32_ty(),
     );
@@ -498,6 +501,7 @@ fn binding_registry_finds_nested_storage_buffers() {
         TermKind::Soac(SoacOp::Map {
             lam: inner_lam,
             inputs: vec![zip],
+            consumes_input: false,
         }),
         arr_i32_ty(),
     );

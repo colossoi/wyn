@@ -1527,7 +1527,7 @@ impl<'a> Converter<'a> {
 
     fn convert_soac(&mut self, soac: &SoacOp, ty: Type<TypeName>) -> Result<NodeId, ConvertError> {
         match soac {
-            SoacOp::Map { lam, inputs } => self.convert_soac_map(lam, inputs, ty),
+            SoacOp::Map { lam, inputs, .. } => self.convert_soac_map(lam, inputs, ty),
             SoacOp::Reduce { op, ne, input, .. } => self.convert_soac_reduce(op, ne, input, ty),
             SoacOp::Redomap {
                 op,

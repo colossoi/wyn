@@ -362,7 +362,7 @@ fn compose_map_into_op(
 /// Extract ArraySemantics from a SoacOp, preserving ArrayExpr inputs with types.
 pub fn classify_soac(soac: &SoacOp) -> ArraySemantics {
     match soac {
-        SoacOp::Map { lam, inputs } => ArraySemantics::Elementwise {
+        SoacOp::Map { lam, inputs, .. } => ArraySemantics::Elementwise {
             inputs: inputs.clone(),
             body: lam.clone(),
         },

@@ -389,7 +389,7 @@ impl<'p> Builder<'p> {
     /// per-iteration output — Fresh.
     fn visit_soac(&mut self, op: &SoacOp) {
         match op {
-            SoacOp::Map { lam, inputs } => {
+            SoacOp::Map { lam, inputs, .. } => {
                 for ae in inputs {
                     self.visit_array_expr(ae);
                 }
@@ -808,7 +808,7 @@ impl<'m> Liveness<'m> {
 
     fn analyze_soac(&mut self, op: &SoacOp, live_after: LiveSet, _soac_id: TermId) -> LiveSet {
         match op {
-            SoacOp::Map { lam, inputs } => {
+            SoacOp::Map { lam, inputs, .. } => {
                 let live_in_lam = self.lambda_body_fixed_point(lam);
                 let mut live = union(&live_after, &live_in_lam);
                 for ae in inputs.iter().rev() {
@@ -961,23 +961,28 @@ pub fn apply_ownership(mut program: Program) -> crate::error::Result<Program> {
     if let Some(err) = check_use_after_move(&program, &model) {
         return Err(err);
     }
-    let functional_sym = match program.def_syms.get(crate::intrinsics::INTRINSIC_ARRAY_WITH).copied() {
-        Some(s) => s,
-        None => return Ok(program),
-    };
-    let inplace_sym = match program.def_syms.get(crate::intrinsics::INTRINSIC_ARRAY_WITH_INPLACE).copied() {
-        Some(s) => s,
-        None => {
-            let s = program.symbols.alloc(crate::intrinsics::INTRINSIC_ARRAY_WITH_INPLACE.to_string());
-            program.def_syms.insert(crate::intrinsics::INTRINSIC_ARRAY_WITH_INPLACE.to_string(), s);
-            s
-        }
+    let consuming_soacs: HashSet<TermId> = eligible_consuming_soacs(&program, &model).into_iter().collect();
+
+    let functional_sym = program.def_syms.get(crate::intrinsics::INTRINSIC_ARRAY_WITH).copied();
+    let inplace_sym = match (functional_sym, consuming_soacs.is_empty()) {
+        // No array_with calls and no consuming SOACs to mark — nothing to do.
+        (None, true) => return Ok(program),
+        _ => match program.def_syms.get(crate::intrinsics::INTRINSIC_ARRAY_WITH_INPLACE).copied() {
+            Some(s) => Some(s),
+            None if functional_sym.is_some() => {
+                let s = program.symbols.alloc(crate::intrinsics::INTRINSIC_ARRAY_WITH_INPLACE.to_string());
+                program.def_syms.insert(crate::intrinsics::INTRINSIC_ARRAY_WITH_INPLACE.to_string(), s);
+                Some(s)
+            }
+            None => None,
+        },
     };
 
     let mut rewriter = Rewriter {
         model: &model,
         functional_sym,
         inplace_sym,
+        consuming_soacs: &consuming_soacs,
     };
     let new_defs: Vec<Def> = program
         .defs
@@ -1039,35 +1044,50 @@ fn check_use_after_move(program: &Program, model: &OwnershipModel) -> Option<cra
 
 struct Rewriter<'m> {
     model: &'m OwnershipModel,
-    functional_sym: SymbolId,
-    inplace_sym: SymbolId,
+    functional_sym: Option<SymbolId>,
+    inplace_sym: Option<SymbolId>,
+    consuming_soacs: &'m HashSet<TermId>,
 }
 
 impl<'m> Rewriter<'m> {
     fn rewrite(&mut self, term: Term) -> Term {
-        if let TermKind::App { func, args } = &term.kind {
-            let calls_functional = matches!(&func.kind, TermKind::Var(s) if *s == self.functional_sym);
-            if calls_functional && args.len() == 3 && self.is_promotable(term.id, &args[0]) {
-                let TermKind::App { func, args } = term.kind else {
-                    unreachable!()
-                };
-                let new_func = Term {
-                    kind: TermKind::Var(self.inplace_sym),
-                    ..*func
-                };
-                let new_args: Vec<Term> = args.into_iter().map(|a| self.rewrite(a)).collect();
-                return Term {
-                    id: term.id,
-                    ty: term.ty,
-                    span: term.span,
-                    kind: TermKind::App {
-                        func: Box::new(new_func),
-                        args: new_args,
-                    },
-                };
+        // array_with → array_with_inplace: rewrite the App's `func`
+        // before descending, since the rewrite swaps the function
+        // var.
+        if let (Some(functional_sym), Some(inplace_sym)) = (self.functional_sym, self.inplace_sym) {
+            if let TermKind::App { func, args } = &term.kind {
+                let calls_functional = matches!(&func.kind, TermKind::Var(s) if *s == functional_sym);
+                if calls_functional && args.len() == 3 && self.is_promotable(term.id, &args[0]) {
+                    let TermKind::App { func, args } = term.kind else {
+                        unreachable!()
+                    };
+                    let new_func = Term {
+                        kind: TermKind::Var(inplace_sym),
+                        ..*func
+                    };
+                    let new_args: Vec<Term> = args.into_iter().map(|a| self.rewrite(a)).collect();
+                    return Term {
+                        id: term.id,
+                        ty: term.ty,
+                        span: term.span,
+                        kind: TermKind::App {
+                            func: Box::new(new_func),
+                            args: new_args,
+                        },
+                    };
+                }
             }
         }
-        term.map_children(&mut |child| self.rewrite(child))
+        // Recurse children first; any consuming-Map mark is a leaf
+        // mutation on the SOAC node itself.
+        let id = term.id;
+        let mut rewritten = term.map_children(&mut |child| self.rewrite(child));
+        if self.consuming_soacs.contains(&id) {
+            if let TermKind::Soac(SoacOp::Map { consumes_input, .. }) = &mut rewritten.kind {
+                *consumes_input = true;
+            }
+        }
+        rewritten
     }
 
     fn is_promotable(&self, call_id: TermId, source_arg: &Term) -> bool {
@@ -1176,7 +1196,7 @@ fn walk_for_eligible_maps(
     entry_output_soacs: &HashSet<TermId>,
     out: &mut Vec<TermId>,
 ) {
-    if let TermKind::Soac(SoacOp::Map { lam, inputs }) = &term.kind {
+    if let TermKind::Soac(SoacOp::Map { lam, inputs, .. }) = &term.kind {
         if map_is_eligible(term.id, lam, inputs, model, entry_output_soacs) {
             out.push(term.id);
         }

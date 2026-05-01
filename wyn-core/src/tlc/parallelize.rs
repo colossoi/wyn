@@ -337,11 +337,16 @@ fn compute_required_params(
 /// input.
 fn analyze_soac(soac: &SoacOp, _result_ty: &Type<TypeName>, symbols: &SymbolTable) -> Option<SoacAnalysis> {
     let normalized: SoacOp = match soac {
-        SoacOp::Map { lam, inputs } => {
+        SoacOp::Map {
+            lam,
+            inputs,
+            consumes_input,
+        } => {
             let (norm_inputs, _) = classify_inputs(inputs, symbols)?;
             SoacOp::Map {
                 lam: lam.clone(),
                 inputs: norm_inputs,
+                consumes_input: *consumes_input,
             }
         }
         SoacOp::Reduce { op, ne, input, props } => {
@@ -2065,7 +2070,11 @@ fn build_chunked_soac_body(
     let chunk_len_var = chunk.chunk_len(span);
 
     let chunked_soac = match &soac.original {
-        SoacOp::Map { lam, inputs } => {
+        SoacOp::Map {
+            lam,
+            inputs,
+            consumes_input,
+        } => {
             let chunked_inputs = inputs
                 .iter()
                 .map(|input| chunk_array_expr(input, &chunk_start_var, &chunk_len_var))
@@ -2073,6 +2082,7 @@ fn build_chunked_soac_body(
             SoacOp::Map {
                 lam: lam.clone(),
                 inputs: chunked_inputs,
+                consumes_input: *consumes_input,
             }
         }
         SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
