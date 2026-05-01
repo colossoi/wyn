@@ -229,6 +229,7 @@ fn build_fused_from_semantics(
                 kind: TermKind::Soac(SoacOp::Map {
                     lam: composed,
                     inputs: input_exprs,
+                    consumes_input: false,
                 }),
             })
         }
@@ -387,7 +388,12 @@ fn fuse_inline_maps(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermId
 
     // Check if this is a Map with any Map inputs
     if let TermKind::Soac(SoacOp::Map { .. }) = &term.kind {
-        let TermKind::Soac(SoacOp::Map { lam, inputs }) = term.kind else {
+        let TermKind::Soac(SoacOp::Map {
+            lam,
+            inputs,
+            consumes_input,
+        }) = term.kind
+        else {
             unreachable!()
         };
 
@@ -404,7 +410,11 @@ fn fuse_inline_maps(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermId
         }
 
         return Term {
-            kind: TermKind::Soac(SoacOp::Map { lam, inputs }),
+            kind: TermKind::Soac(SoacOp::Map {
+                lam,
+                inputs,
+                consumes_input,
+            }),
             ..term
         };
     }
@@ -436,7 +446,7 @@ fn fuse_inline_map_inputs(
                 _ => unreachable!(),
             };
             let (inner_lam, inner_inputs) = match inner_term.kind {
-                TermKind::Soac(SoacOp::Map { lam, inputs }) => (lam, inputs),
+                TermKind::Soac(SoacOp::Map { lam, inputs, .. }) => (lam, inputs),
                 _ => unreachable!(),
             };
 
@@ -473,6 +483,7 @@ fn fuse_inline_map_inputs(
             captures: vec![],
         },
         inputs: new_inputs,
+        consumes_input: false,
     }
 }
 

@@ -41,6 +41,7 @@ fn mk_map(lam: Lambda, input: Term, result_ty: Type<TypeName>, term_ids: &mut Te
         TermKind::Soac(SoacOp::Map {
             lam,
             inputs: vec![ArrayExpr::Ref(Box::new(input))],
+            consumes_input: false,
         }),
         result_ty,
         term_ids,
@@ -204,7 +205,7 @@ fn test_simple_map_fusion() {
 
     // The result should be a single Map (no Let binding)
     match &fused.defs[0].body.kind {
-        TermKind::Soac(SoacOp::Map { lam, inputs }) => {
+        TermKind::Soac(SoacOp::Map { lam, inputs, .. }) => {
             // Input should be 'a' (the original array)
             assert_eq!(inputs.len(), 1);
             match &inputs[0] {
@@ -320,7 +321,7 @@ fn test_chain_of_three_maps() {
 
     // Should be a single Map with a's input (all three fused)
     match &fused.defs[0].body.kind {
-        TermKind::Soac(SoacOp::Map { inputs, lam }) => {
+        TermKind::Soac(SoacOp::Map { inputs, lam, .. }) => {
             assert_eq!(inputs.len(), 1);
             match &inputs[0] {
                 ArrayExpr::Ref(t) => assert!(matches!(&t.kind, TermKind::Var(s) if *s == a_sym)),
@@ -442,6 +443,7 @@ fn test_zip_fused_producer() {
         TermKind::Soac(SoacOp::Map {
             lam: f,
             inputs: vec![ArrayExpr::Ref(Box::new(a)), ArrayExpr::Ref(Box::new(b))],
+            consumes_input: false,
         }),
         array_ty(i32_ty()),
         &mut term_ids,
@@ -489,7 +491,7 @@ fn test_zip_fused_producer() {
 
     // Should be a Map with [a, b] inputs (producer's multi-inputs preserved)
     match &fused.defs[0].body.kind {
-        TermKind::Soac(SoacOp::Map { lam, inputs }) => {
+        TermKind::Soac(SoacOp::Map { lam, inputs, .. }) => {
             assert_eq!(inputs.len(), 2);
             // Lambda should have f's params (x1, x2)
             assert_eq!(lam.params.len(), 2);
@@ -540,6 +542,7 @@ fn test_consumer_multi_input_no_fusion() {
         TermKind::Soac(SoacOp::Map {
             lam: g,
             inputs: vec![ArrayExpr::Ref(Box::new(b_ref)), ArrayExpr::Ref(Box::new(other))],
+            consumes_input: false,
         }),
         array_ty(i32_ty()),
         &mut term_ids,
@@ -609,6 +612,7 @@ fn test_inline_map_fusion() {
         TermKind::Soac(SoacOp::Map {
             lam: f,
             inputs: vec![ArrayExpr::Ref(Box::new(inner_map))],
+            consumes_input: false,
         }),
         array_ty(i32_ty()),
         &mut term_ids,
@@ -632,7 +636,7 @@ fn test_inline_map_fusion() {
 
     // Should be a single Map with a's input, param x (inner g's param)
     match &fused.defs[0].body.kind {
-        TermKind::Soac(SoacOp::Map { lam, inputs }) => {
+        TermKind::Soac(SoacOp::Map { lam, inputs, .. }) => {
             assert_eq!(inputs.len(), 1);
             match &inputs[0] {
                 ArrayExpr::Ref(t) => assert!(matches!(&t.kind, TermKind::Var(s) if *s == a_sym)),
@@ -680,6 +684,7 @@ fn test_inline_chain_of_three() {
         TermKind::Soac(SoacOp::Map {
             lam: g,
             inputs: vec![ArrayExpr::Ref(Box::new(inner))],
+            consumes_input: false,
         }),
         array_ty(i32_ty()),
         &mut term_ids,
@@ -696,6 +701,7 @@ fn test_inline_chain_of_three() {
         TermKind::Soac(SoacOp::Map {
             lam: f,
             inputs: vec![ArrayExpr::Ref(Box::new(middle))],
+            consumes_input: false,
         }),
         array_ty(i32_ty()),
         &mut term_ids,
@@ -719,7 +725,7 @@ fn test_inline_chain_of_three() {
 
     // All three fused into one Map over a
     match &fused.defs[0].body.kind {
-        TermKind::Soac(SoacOp::Map { lam, inputs }) => {
+        TermKind::Soac(SoacOp::Map { lam, inputs, .. }) => {
             assert_eq!(inputs.len(), 1);
             match &inputs[0] {
                 ArrayExpr::Ref(t) => assert!(matches!(&t.kind, TermKind::Var(s) if *s == a_sym)),
@@ -774,6 +780,7 @@ fn test_zip_fused_consumer_inline() {
                 ArrayExpr::Ref(Box::new(inner_map)), // will be fused
                 ArrayExpr::Ref(Box::new(b)),         // stays as-is
             ],
+            consumes_input: false,
         }),
         array_ty(i32_ty()),
         &mut term_ids,
@@ -798,7 +805,7 @@ fn test_zip_fused_consumer_inline() {
     // The inner map should be fused: y1's slot replaced by g's param x,
     // input[0] is now Ref(a), input[1] is Ref(b)
     match &fused.defs[0].body.kind {
-        TermKind::Soac(SoacOp::Map { lam, inputs }) => {
+        TermKind::Soac(SoacOp::Map { lam, inputs, .. }) => {
             assert_eq!(inputs.len(), 2);
             // First input: a (was map(g, a), now fused)
             match &inputs[0] {
@@ -871,6 +878,7 @@ fn test_map_zip_map() {
                 ArrayExpr::Ref(Box::new(map_g_a)),
                 ArrayExpr::Ref(Box::new(map_h_b)),
             ],
+            consumes_input: false,
         }),
         array_ty(i32_ty()),
         &mut term_ids,
@@ -893,7 +901,7 @@ fn test_map_zip_map() {
     let fused = run(program);
 
     match &fused.defs[0].body.kind {
-        TermKind::Soac(SoacOp::Map { lam, inputs }) => {
+        TermKind::Soac(SoacOp::Map { lam, inputs, .. }) => {
             // Both intermediates eliminated: inputs are [a, b]
             assert_eq!(inputs.len(), 2);
             match &inputs[0] {

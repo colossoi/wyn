@@ -992,3 +992,76 @@ entry double(arr: []i32) []i32 = map(|x: i32| x + 1, arr)
         eligible,
     );
 }
+
+// =============================================================================
+// `consumes_input` flag flipping by apply_ownership (Phase C)
+// =============================================================================
+
+/// Drive the program through to `TlcOwnershipApplied` (post-fusion,
+/// post-apply_ownership). Returns the post-rewrite Program for
+/// inspecting `SoacOp::Map { consumes_input, .. }`.
+fn compile_to_owned(source: &str) -> Program {
+    let mut frontend = crate::cached_frontend();
+    let parsed = Compiler::parse(source, &mut frontend.node_counter).expect("parse");
+    let type_checked = parsed
+        .desugar(&mut frontend.node_counter)
+        .expect("desugar")
+        .resolve(&mut frontend.module_manager)
+        .expect("resolve")
+        .fold_ast_constants()
+        .type_check(&mut frontend.module_manager, &mut frontend.schemes)
+        .expect("type_check");
+    let owned = type_checked
+        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
+        .partial_eval()
+        .normalize_soacs()
+        .fuse_maps()
+        .apply_ownership()
+        .expect("apply_ownership");
+    owned.0.tlc
+}
+
+fn map_consumes_input(program: &Program, fn_name: &str) -> Option<bool> {
+    fn walk(t: &Term) -> Option<bool> {
+        if let TermKind::Soac(crate::tlc::SoacOp::Map { consumes_input, .. }) = &t.kind {
+            return Some(*consumes_input);
+        }
+        let mut found = None;
+        t.for_each_child(&mut |child| {
+            if found.is_none() {
+                found = walk(child);
+            }
+        });
+        found
+    }
+    let def = find_def(program, fn_name);
+    walk(&def.body)
+}
+
+#[test]
+fn consumes_input_flag_set_for_eligible_map() {
+    let program = compile_to_owned(
+        r#"
+def f(a: *[3][4]i32) [3][4]i32 = map(|row| row, a)
+"#,
+    );
+    assert_eq!(
+        map_consumes_input(&program, "f"),
+        Some(true),
+        "eligible Map should have consumes_input = true after apply_ownership",
+    );
+}
+
+#[test]
+fn consumes_input_flag_not_set_for_non_unique_input() {
+    let program = compile_to_owned(
+        r#"
+def f(a: [3][4]i32) [3][4]i32 = map(|row| row, a)
+"#,
+    );
+    assert_eq!(
+        map_consumes_input(&program, "f"),
+        Some(false),
+        "Map over non-unique input should keep consumes_input = false",
+    );
+}

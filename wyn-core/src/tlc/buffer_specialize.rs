@@ -579,9 +579,14 @@ impl BufferSpecializer {
 
     fn rewrite_soac(&mut self, soac: &SoacOp) -> SoacOp {
         match soac {
-            SoacOp::Map { lam, inputs } => SoacOp::Map {
+            SoacOp::Map {
+                lam,
+                inputs,
+                consumes_input,
+            } => SoacOp::Map {
                 lam: self.rewrite_lambda(lam),
                 inputs: inputs.iter().map(|ae| self.rewrite_array_expr(ae)).collect(),
+                consumes_input: *consumes_input,
             },
             SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
                 op: self.rewrite_lambda(op),
@@ -1194,12 +1199,17 @@ impl BufferSpecializer {
         view_params: &HashMap<SymbolId, (SymbolId, SymbolId, u32, u32, Type<TypeName>)>,
     ) -> SoacOp {
         match soac {
-            SoacOp::Map { lam, inputs } => SoacOp::Map {
+            SoacOp::Map {
+                lam,
+                inputs,
+                consumes_input,
+            } => SoacOp::Map {
                 lam: self.rewrite_specialized_lambda(lam, view_params),
                 inputs: inputs
                     .iter()
                     .map(|ae| self.rewrite_specialized_array_expr(ae, view_params))
                     .collect(),
+                consumes_input: *consumes_input,
             },
             SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
                 op: self.rewrite_specialized_lambda(op, view_params),

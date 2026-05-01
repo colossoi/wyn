@@ -286,7 +286,11 @@ impl SoaTransformer {
                 let new_soac = self.transform_soac(soac);
                 // Try to normalize Map+Zip after SoA transform
                 let new_soac = match new_soac {
-                    SoacOp::Map { lam, inputs } => self.try_normalize_map(lam, inputs),
+                    SoacOp::Map {
+                        lam,
+                        inputs,
+                        consumes_input,
+                    } => self.try_normalize_map(lam, inputs, consumes_input),
                     other => other,
                 };
                 self.mk_term(new_ty, span, TermKind::Soac(new_soac))
@@ -564,13 +568,18 @@ impl SoaTransformer {
 
     fn transform_soac(&mut self, soac: &SoacOp) -> SoacOp {
         match soac {
-            SoacOp::Map { lam, inputs } => {
+            SoacOp::Map {
+                lam,
+                inputs,
+                consumes_input,
+            } => {
                 let new_lam = self.transform_lambda(lam);
                 let new_inputs: Vec<ArrayExpr> =
                     inputs.iter().map(|ae| self.transform_array_expr(ae)).collect();
                 SoacOp::Map {
                     lam: new_lam,
                     inputs: new_inputs,
+                    consumes_input: *consumes_input,
                 }
             }
             SoacOp::Reduce { op, ne, input, props } => {
@@ -809,9 +818,13 @@ impl SoaTransformer {
 
     /// If the Map has multiple inputs but a single tuple-typed lambda param,
     /// split the param into N separate params and substitute.
-    fn try_normalize_map(&mut self, lam: Lambda, inputs: Vec<ArrayExpr>) -> SoacOp {
+    fn try_normalize_map(&mut self, lam: Lambda, inputs: Vec<ArrayExpr>, consumes_input: bool) -> SoacOp {
         if inputs.len() <= 1 || lam.params.len() != 1 {
-            return SoacOp::Map { lam, inputs };
+            return SoacOp::Map {
+                lam,
+                inputs,
+                consumes_input,
+            };
         }
 
         let (old_param, ref param_ty) = lam.params[0];
@@ -819,11 +832,21 @@ impl SoaTransformer {
         // Must be a concrete tuple type matching the input count.
         let flat_types = match param_ty {
             Type::Constructed(TypeName::Tuple(_), types) if !types.is_empty() => flatten_tuple_types(types),
-            _ => return SoacOp::Map { lam, inputs },
+            _ => {
+                return SoacOp::Map {
+                    lam,
+                    inputs,
+                    consumes_input,
+                };
+            }
         };
 
         if flat_types.len() != inputs.len() || has_type_variables(param_ty) {
-            return SoacOp::Map { lam, inputs };
+            return SoacOp::Map {
+                lam,
+                inputs,
+                consumes_input,
+            };
         }
 
         // Create N fresh params.
@@ -847,6 +870,7 @@ impl SoaTransformer {
                 captures: lam.captures,
             },
             inputs,
+            consumes_input,
         }
     }
 

@@ -298,9 +298,14 @@ fn apply_type_subst_to_lambda(lam: &Lambda, subst: &TypeSubst, term_ids: &mut Te
 
 fn apply_type_subst_to_soac(soac: &SoacOp, subst: &TypeSubst, term_ids: &mut TermIdSource) -> SoacOp {
     match soac {
-        SoacOp::Map { lam, inputs } => SoacOp::Map {
+        SoacOp::Map {
+            lam,
+            inputs,
+            consumes_input,
+        } => SoacOp::Map {
             lam: apply_type_subst_to_lambda(lam, subst, term_ids),
             inputs: inputs.iter().map(|ae| apply_type_subst_to_array_expr(ae, subst, term_ids)).collect(),
+            consumes_input: *consumes_input,
         },
         SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
             op: apply_type_subst_to_lambda(op, subst, term_ids),
@@ -582,7 +587,7 @@ pub(super) fn collect_free_vars_soac(
     seen: &mut HashSet<SymbolId>,
 ) {
     match soac {
-        SoacOp::Map { lam, inputs } => {
+        SoacOp::Map { lam, inputs, .. } => {
             collect_free_vars_lambda(lam, bound, top_level, known_defs, symbols, free, seen);
             for input in inputs {
                 collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
@@ -1096,10 +1101,18 @@ impl<'a> Defunctionalizer<'a> {
     /// Defunctionalize a SOAC node: lift lambdas inside, resolve captures.
     fn defunc_soac(&mut self, soac: SoacOp, ty: Type<TypeName>, span: Span) -> DefuncResult {
         let new_soac = match soac {
-            SoacOp::Map { lam, inputs } => {
+            SoacOp::Map {
+                lam,
+                inputs,
+                consumes_input,
+            } => {
                 let lam = self.defunc_lambda_in_soac(lam, span);
                 let inputs = inputs.into_iter().map(|ae| self.defunc_array_expr(ae)).collect();
-                SoacOp::Map { lam, inputs }
+                SoacOp::Map {
+                    lam,
+                    inputs,
+                    consumes_input,
+                }
             }
             SoacOp::Reduce { op, ne, input, props } => {
                 let op = self.defunc_lambda_in_soac(op, span);
@@ -1994,12 +2007,17 @@ impl<'a> Defunctionalizer<'a> {
 
     fn substitute_var_soac(&mut self, soac: &SoacOp, old_sym: SymbolId, new_sym: SymbolId) -> SoacOp {
         match soac {
-            SoacOp::Map { lam, inputs } => SoacOp::Map {
+            SoacOp::Map {
+                lam,
+                inputs,
+                consumes_input,
+            } => SoacOp::Map {
                 lam: self.substitute_var_lambda(lam, old_sym, new_sym),
                 inputs: inputs
                     .iter()
                     .map(|ae| self.substitute_var_array_expr(ae, old_sym, new_sym))
                     .collect(),
+                consumes_input: *consumes_input,
             },
             SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
                 op: self.substitute_var_lambda(op, old_sym, new_sym),
