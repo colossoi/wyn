@@ -1,4 +1,4 @@
-use super::{Origin, OwnershipModel, analyze, build};
+use super::{Origin, OwnershipModel, analyze, build, eligible_consuming_soacs};
 use crate::Compiler;
 use crate::tlc::{Program, Term, TermKind};
 
@@ -867,5 +867,128 @@ def main(arr: [3][4]i32) [3][4]i32 = map(|row| row, arr)
         !row_origin.is_mutable(),
         "map's element param over non-unique input should be immutable; got {:?}",
         row_origin,
+    );
+}
+
+// =============================================================================
+// Consuming-SOAC eligibility query (Phase B)
+// =============================================================================
+
+#[test]
+fn eligible_consuming_map_when_input_dead_and_unique() {
+    // `*[N]T` input, no further use after the map. Should qualify.
+    let program = compile_to_tlc(
+        r#"
+def f(a: *[3][4]i32) [3][4]i32 = map(|row| row, a)
+"#,
+    );
+    let model = analyze(&program);
+    let eligible = eligible_consuming_soacs(&program, &model);
+    assert_eq!(
+        eligible.len(),
+        1,
+        "expected exactly one eligible Map; got {}: {:?}",
+        eligible.len(),
+        eligible,
+    );
+}
+
+#[test]
+fn not_eligible_when_input_non_unique() {
+    // Same shape but with a non-unique input. Element view is
+    // Borrowed (caller still owns), so the input owner isn't
+    // mutable from this function's perspective.
+    let program = compile_to_tlc(
+        r#"
+def f(a: [3][4]i32) [3][4]i32 = map(|row| row, a)
+"#,
+    );
+    let model = analyze(&program);
+    let eligible = eligible_consuming_soacs(&program, &model);
+    assert!(
+        eligible.is_empty(),
+        "non-unique input should not be eligible; got {:?}",
+        eligible,
+    );
+}
+
+#[test]
+fn not_eligible_when_input_used_after() {
+    // `*[N]T` input but a borrowing function reads `a` after the
+    // map, so the input is live after the SOAC's term.
+    let program = compile_to_tlc(
+        r#"
+def borrow(b: [3][4]i32) i32 = b[0][0]
+def f(a: *[3][4]i32) i32 =
+    let m = map(|row| row, a) in
+    borrow(a) + m[0][0]
+"#,
+    );
+    let model = analyze(&program);
+    let eligible = eligible_consuming_soacs(&program, &model);
+    assert!(
+        eligible.is_empty(),
+        "input still alive after map should not be eligible; got {:?}",
+        eligible,
+    );
+}
+
+#[test]
+fn not_eligible_when_body_changes_element_type() {
+    // Output element type (bool) differs from input element type
+    // (i32). In-place rewrite cannot apply — different size, can't
+    // reuse the buffer.
+    let program = compile_to_tlc(
+        r#"
+def f(a: *[8]i32) [8]bool = map(|x: i32| x > 0, a)
+"#,
+    );
+    let model = analyze(&program);
+    let eligible = eligible_consuming_soacs(&program, &model);
+    assert!(
+        eligible.is_empty(),
+        "element-type-changing map should not be eligible; got {:?}",
+        eligible,
+    );
+}
+
+#[test]
+fn not_eligible_when_body_reads_input_outside_elem_param() {
+    // Stencil pattern: `map(|x| x + a[i-1], a)`. In-place mutation
+    // at index i would change later iterations' reads of `a[j]` for
+    // j > i. The pointwise check rejects.
+    let program = compile_to_tlc(
+        r#"
+def f(a: *[8]i32) [8]i32 =
+    map(|x: i32| x + a[0], a)
+"#,
+    );
+    let model = analyze(&program);
+    let eligible = eligible_consuming_soacs(&program, &model);
+    assert!(
+        eligible.is_empty(),
+        "map with capture-read of input should not be eligible; got {:?}",
+        eligible,
+    );
+}
+
+#[test]
+fn not_eligible_when_soac_is_entry_output() {
+    // Compute entry whose result is a Map and is bound to a
+    // storage output. The output-side rewrite handles this; an
+    // input-side rewrite would clobber the runtime output buffer.
+    // Conservative skip.
+    let program = compile_to_tlc(
+        r#"
+#[compute]
+entry double(arr: []i32) []i32 = map(|x: i32| x + 1, arr)
+"#,
+    );
+    let model = analyze(&program);
+    let eligible = eligible_consuming_soacs(&program, &model);
+    assert!(
+        eligible.is_empty(),
+        "entry-output Map should not be eligible (output-side rewrite handles it); got {:?}",
+        eligible,
     );
 }

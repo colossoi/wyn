@@ -1094,6 +1094,171 @@ impl<'m> Rewriter<'m> {
     }
 }
 
+// =============================================================================
+// Consuming-SOAC eligibility (input-side DPS)
+// =============================================================================
+
+/// Return the term ids of `Map` SOACs that are eligible for input-side
+/// destination-passing — i.e. the Map could mutate its input buffer in
+/// place rather than allocating a fresh output.
+///
+/// A Map qualifies only when *all* of:
+///
+/// 1. The input is a single `ArrayExpr::Ref(Var(sym))` whose owner is
+///    mutable and absent from `live_out` at the SOAC's term.
+/// 2. The lambda body's return type matches the lambda's element-param
+///    type (pointwise: same shape in, same shape out).
+/// 3. The body does not read the input owner outside of the element
+///    parameter — no captured stencil reads. `map(|x| x + a[i-1], a)`
+///    is rejected because in-place mutation at index `i` would change
+///    later iterations' reads.
+/// 4. The Map is not in tail position of an `EntryPoint` def with
+///    compute outputs. The output-side rewrite handles those, and
+///    in-place input mutation would clobber the runtime contract on
+///    the output buffer. Sound under-approximation; the overlap case
+///    is a separate rewrite.
+///
+/// Pure analysis. Does not mutate the program. The caller decides
+/// whether to act on the result.
+pub fn eligible_consuming_soacs(program: &Program, model: &OwnershipModel) -> Vec<TermId> {
+    let entry_output_soacs = collect_entry_output_soac_ids(program);
+    let mut out = Vec::new();
+    for def in &program.defs {
+        walk_for_eligible_maps(&def.body, model, program, &entry_output_soacs, &mut out);
+    }
+    out
+}
+
+fn collect_entry_output_soac_ids(program: &Program) -> HashSet<TermId> {
+    let mut out = HashSet::new();
+    for def in &program.defs {
+        let entry = match &def.meta {
+            DefMeta::EntryPoint(e) => e,
+            _ => continue,
+        };
+        // Compute entries with bound storage outputs are the targets
+        // of the output-side rewrite. Drill through the def body to
+        // any tail-position SOAC and collect its term id.
+        if entry.entry_type.is_compute() && !entry.outputs.is_empty() {
+            let body = match &def.body.kind {
+                TermKind::Lambda(lam) => &*lam.body,
+                _ => &def.body,
+            };
+            collect_tail_soac_ids(body, &mut out);
+        }
+    }
+    out
+}
+
+fn collect_tail_soac_ids(term: &Term, out: &mut HashSet<TermId>) {
+    match &term.kind {
+        TermKind::Soac(_) => {
+            out.insert(term.id);
+        }
+        TermKind::Let { body, .. } => collect_tail_soac_ids(body, out),
+        TermKind::Force(inner) => collect_tail_soac_ids(inner, out),
+        TermKind::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_tail_soac_ids(then_branch, out);
+            collect_tail_soac_ids(else_branch, out);
+        }
+        _ => {}
+    }
+}
+
+fn walk_for_eligible_maps(
+    term: &Term,
+    model: &OwnershipModel,
+    program: &Program,
+    entry_output_soacs: &HashSet<TermId>,
+    out: &mut Vec<TermId>,
+) {
+    if let TermKind::Soac(SoacOp::Map { lam, inputs }) = &term.kind {
+        if map_is_eligible(term.id, lam, inputs, model, entry_output_soacs) {
+            out.push(term.id);
+        }
+    }
+    term.for_each_child(&mut |child| {
+        walk_for_eligible_maps(child, model, program, entry_output_soacs, out)
+    });
+}
+
+fn map_is_eligible(
+    soac_id: TermId,
+    lam: &Lambda,
+    inputs: &[ArrayExpr],
+    model: &OwnershipModel,
+    entry_output_soacs: &HashSet<TermId>,
+) -> bool {
+    // 4 — output-bound check first: cheap.
+    if entry_output_soacs.contains(&soac_id) {
+        return false;
+    }
+    // 1 — single Var input, owner mutable, dead-after.
+    if inputs.len() != 1 {
+        return false;
+    }
+    let input_term = match &inputs[0] {
+        ArrayExpr::Ref(t) => &**t,
+        _ => return false,
+    };
+    let input_sym = match &input_term.kind {
+        TermKind::Var(s) => *s,
+        _ => return false,
+    };
+    let owner = match model.owner_of(input_sym) {
+        Some(o) => o,
+        None => return false,
+    };
+    let origin = match model.origin(owner) {
+        Some(o) => o,
+        None => return false,
+    };
+    if !origin.is_mutable() {
+        return false;
+    }
+    let live_out = match model.live_out.get(&soac_id) {
+        Some(l) => l,
+        None => return false,
+    };
+    if live_out.contains(&owner) {
+        return false;
+    }
+    // 2 — body type matches element param.
+    if lam.params.len() != 1 {
+        return false;
+    }
+    if lam.params[0].1 != lam.ret_ty {
+        return false;
+    }
+    // 3 — pointwise: body does not reference the input symbol
+    //     outside the element-param substitution. Since the element
+    //     param has its own SymbolId distinct from `input_sym`,
+    //     scanning for any `Var(input_sym)` in the body suffices.
+    if body_references_sym(&lam.body, input_sym) {
+        return false;
+    }
+    true
+}
+
+fn body_references_sym(term: &Term, sym: SymbolId) -> bool {
+    if let TermKind::Var(s) = &term.kind {
+        if *s == sym {
+            return true;
+        }
+    }
+    let mut found = false;
+    term.for_each_child(&mut |child| {
+        if !found {
+            found = body_references_sym(child, sym);
+        }
+    });
+    found
+}
+
 #[cfg(test)]
 #[path = "ownership_tests.rs"]
 mod ownership_tests;
