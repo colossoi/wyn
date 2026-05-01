@@ -17,13 +17,11 @@ pub mod visitor;
 // Re-export type_checker from its new location for backwards compatibility
 pub use types::checker as type_checker;
 
-pub mod alias_checker;
 pub mod ast_const_fold;
 pub mod desugar;
 pub mod lowering_common;
 pub mod name_registry;
 pub mod tlc;
-pub mod uniqueness_promote;
 
 pub mod egir;
 pub mod glsl;
@@ -267,7 +265,6 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 //       -> .resolve(&frontend.module_manager)           -> Resolved
 //       -> .fold_ast_constants()                        -> AstConstFoldedEarly
 //       -> .type_check(&frontend.module_manager)        -> TypeChecked
-//       -> .alias_check()                               -> AliasChecked
 //
 // TLC Pipeline (AST -> SSA):
 //       -> .to_tlc()                                    -> TlcTransformed
@@ -637,77 +634,20 @@ impl TypeChecked {
         Err(err_type_hole!("{}", msg.trim_end()))
     }
 
-    /// Run alias checking analysis on the program
-    pub fn alias_check(self) -> Result<AliasChecked> {
-        let checker = alias_checker::AliasChecker::new(&self.type_table, &self.span_table);
-        let alias_result = checker.check_program(&self.ast)?;
-
-        Ok(AliasChecked {
-            ast: self.ast,
-            type_table: self.type_table,
-            span_table: self.span_table,
-            warnings: self.warnings,
-            alias_result,
-            checker_builtins: self.checker_builtins,
-        })
-    }
-}
-
-/// Program has been alias checked
-pub struct AliasChecked {
-    pub ast: ast::Program,
-    pub type_table: TypeTable,
-    pub span_table: SpanTable,
-    pub warnings: Vec<type_checker::TypeWarning>,
-    pub alias_result: alias_checker::AliasCheckResult,
-    pub checker_builtins: Vec<String>,
-}
-
-impl AliasChecked {
-    /// Print warnings to stderr (convenience method)
-    pub fn print_warnings(&self) {
-        let mut nc = NodeCounter::new();
-        let mm = module_manager::ModuleManager::new(&mut nc);
-        let checker = type_checker::TypeChecker::new(&mm);
-        for warning in &self.warnings {
-            eprintln!(
-                "Warning: {} at {:?}",
-                warning.message(&|t| checker.format_type(t)),
-                warning.span()
-            );
-        }
-    }
-
-    /// Check if alias checking found any errors
-    pub fn has_alias_errors(&self) -> bool {
-        self.alias_result.has_errors()
-    }
-
-    /// Print alias errors to stderr
-    pub fn print_alias_errors(&self) {
-        self.alias_result.print_errors();
-    }
-
-    /// Transform AST to TLC (new pipeline path)
-    /// `schemes` contains type schemes for all functions (populated during type_check)
-    /// `module_manager` provides access to prelude declarations for TLC transformation.
-    /// `fill_holes` makes `???` type-hole expressions lower to a default
-    /// value of the inferred type rather than panicking. The driver
-    /// should call `TypeChecked::reject_type_holes` before `to_tlc`
-    /// when `fill_holes = false`; any unfillable hole types encountered
-    /// with `fill_holes = true` land in the returned program's
-    /// `fill_hole_errors`.
+    /// Transform AST to TLC. `schemes` contains type schemes for all
+    /// functions (populated during type_check). `module_manager`
+    /// provides access to prelude declarations. `fill_holes` makes
+    /// `???` type-hole expressions lower to a default value of the
+    /// inferred type rather than panicking. The driver should call
+    /// `reject_type_holes` first when `fill_holes = false`;
+    /// unfillable hole types under `fill_holes = true` land in the
+    /// returned program's `fill_hole_errors`.
     pub fn to_tlc(
         mut self,
         schemes: &HashMap<String, types::TypeScheme>,
         module_manager: &module_manager::ModuleManager,
         fill_holes: bool,
     ) -> TlcTransformed {
-        // Promote safe `a with [i] = v` nodes to the in-place variant using
-        // the alias checker's liveness info. Must run before TLC transform
-        // so the AST `inplace` flag is visible to `transform_expr`.
-        uniqueness_promote::run(&mut self.ast, &self.alias_result);
-
         // Under `--fill-holes`, rewrite any free type variable in the
         // node-level type table to `i32` so holes whose type stayed
         // unconstrained (no call-site or annotation pinned them) get a
@@ -842,6 +782,28 @@ impl TlcTransformed {
     }
 }
 
+#[cfg(test)]
+impl TlcTransformed {
+    /// Test-only: run the canonical TLC optimization pipeline to
+    /// `TlcReachable` without the per-stage `time(...)` wrappers the
+    /// driver uses. `parallelize_compute = false` matches the
+    /// `--single-stage` driver mode.
+    pub fn optimize_for_test(self, parallelize_compute: bool) -> TlcReachable {
+        self.partial_eval()
+            .normalize_soacs()
+            .promote_inplace()
+            .expect("promote_inplace")
+            .fuse_maps()
+            .defunctionalize()
+            .monomorphize()
+            .buffer_specialize()
+            .fold_generated_lambdas()
+            .inline_small()
+            .parallelize_soacs(parallelize_compute)
+            .filter_reachable()
+    }
+}
+
 /// TLC after partial evaluation
 pub struct TlcPartialEvaled(pub TlcEarlyInner);
 
@@ -873,6 +835,28 @@ impl std::ops::Deref for TlcSoaNormalized {
 }
 
 impl TlcSoaNormalized {
+    /// Run the TLC ownership/liveness analysis. Reports use-after-move
+    /// errors and rewrites eligible `_w_intrinsic_array_with` calls to
+    /// `_w_intrinsic_array_with_inplace`.
+    pub fn promote_inplace(self) -> Result<TlcPromoted> {
+        let mut inner = self.0;
+        inner.tlc = tlc::ownership::promote_inplace(inner.tlc)?;
+        Ok(TlcPromoted(inner))
+    }
+}
+
+/// TLC after ownership-driven `array_with` promotion. All `with` calls
+/// have settled on either the functional or in-place intrinsic.
+pub struct TlcPromoted(pub TlcEarlyInner);
+
+impl std::ops::Deref for TlcPromoted {
+    type Target = TlcEarlyInner;
+    fn deref(&self) -> &TlcEarlyInner {
+        &self.0
+    }
+}
+
+impl TlcPromoted {
     /// Fuse consecutive SOAC operations to eliminate intermediate arrays.
     pub fn fuse_maps(self) -> TlcFused {
         let mut inner = self.0;

@@ -262,15 +262,9 @@ fn compile_file(
         type_checked.reject_type_holes()?
     };
 
-    let alias_checked = time("alias_check", verbose, || type_checked.alias_check())?;
-    if alias_checked.has_alias_errors() {
-        alias_checked.print_alias_errors();
-        return Err(wyn_core::err_alias!("alias checking failed").into());
-    }
-
     // Transform to TLC (including prelude code - transformed here for consistent type variables)
     let tlc_transformed = time("to_tlc", verbose, || {
-        alias_checked.to_tlc(&frontend.schemes, &frontend.module_manager, fill_holes)
+        type_checked.to_tlc(&frontend.schemes, &frontend.module_manager, fill_holes)
     });
 
     // Surface any hole-fill errors collected during TLC transform.
@@ -294,10 +288,12 @@ fn compile_file(
 
     let tlc_optimized = time("tlc_partial_eval", verbose, || tlc_transformed.partial_eval());
 
-    // Fuse consecutive map operations
-    let tlc_fused = time("fuse_maps", verbose, || {
-        tlc_optimized.normalize_soacs().fuse_maps()
-    });
+    // SOA + SOAC normalize, then ownership-driven array_with promotion,
+    // then map fusion. Each is its own pipeline step so timing breaks
+    // down per pass in verbose mode.
+    let tlc_normed = time("normalize_soacs", verbose, || tlc_optimized.normalize_soacs());
+    let tlc_promoted = time("promote_inplace", verbose, || tlc_normed.promote_inplace())?;
+    let tlc_fused = time("fuse_maps", verbose, || tlc_promoted.fuse_maps());
 
     // Defunctionalize: lift lambdas and flatten SOAC captures
     let tlc_defunc = time("defunctionalize", verbose, || tlc_fused.defunctionalize());
@@ -476,11 +472,11 @@ fn check_file(input: PathBuf, verbose: bool) -> Result<(), DriverError> {
 
     type_checked.print_warnings();
 
-    let alias_checked = type_checked.alias_check()?;
-    if alias_checked.has_alias_errors() {
-        alias_checked.print_alias_errors();
-        return Err(wyn_core::err_alias!("alias checking failed").into());
-    }
+    let tlc_after_norm = type_checked
+        .to_tlc(&frontend.schemes, &frontend.module_manager, false)
+        .partial_eval()
+        .normalize_soacs();
+    wyn_core::tlc::ownership::check(&tlc_after_norm.0.tlc)?;
 
     if verbose {
         info!("✓ {} is valid", input.display());

@@ -11,6 +11,7 @@ pub mod fusion;
 pub mod inline;
 pub mod monomorphize;
 pub mod normalize;
+pub mod ownership;
 pub mod parallelize;
 pub mod partial_eval;
 pub mod producer_graph;
@@ -20,11 +21,11 @@ pub mod specialize;
 use crate::ast::{self, NodeId, Span, TypeName};
 use crate::interface;
 use crate::intrinsics::{
-    INTRINSIC_ABS, INTRINSIC_ARRAY_WITH, INTRINSIC_ARRAY_WITH_INPLACE, INTRINSIC_CEIL, INTRINSIC_CLAMP,
-    INTRINSIC_CROSS, INTRINSIC_DETERMINANT, INTRINSIC_DISTANCE, INTRINSIC_DOT, INTRINSIC_FLOOR,
-    INTRINSIC_FRACT, INTRINSIC_INVERSE, INTRINSIC_LENGTH, INTRINSIC_MAGNITUDE, INTRINSIC_MIX,
-    INTRINSIC_NORMALIZE, INTRINSIC_OUTER, INTRINSIC_REFLECT, INTRINSIC_REFRACT, INTRINSIC_REPLICATE,
-    INTRINSIC_SLICE, INTRINSIC_SMOOTHSTEP,
+    INTRINSIC_ABS, INTRINSIC_ARRAY_WITH, INTRINSIC_CEIL, INTRINSIC_CLAMP, INTRINSIC_CROSS,
+    INTRINSIC_DETERMINANT, INTRINSIC_DISTANCE, INTRINSIC_DOT, INTRINSIC_FLOOR, INTRINSIC_FRACT,
+    INTRINSIC_INVERSE, INTRINSIC_LENGTH, INTRINSIC_MAGNITUDE, INTRINSIC_MIX, INTRINSIC_NORMALIZE,
+    INTRINSIC_OUTER, INTRINSIC_REFLECT, INTRINSIC_REFRACT, INTRINSIC_REPLICATE, INTRINSIC_SLICE,
+    INTRINSIC_SMOOTHSTEP,
 };
 use crate::types::TypeExt;
 use crate::{SymbolId, SymbolTable, TypeTable};
@@ -1699,19 +1700,12 @@ impl<'a> Transformer<'a> {
             }
 
             ast::ExprKind::ArrayWith {
-                array,
-                index,
-                value,
-                inplace,
+                array, index, value, ..
             } => {
                 let arr = self.transform_expr(array);
                 let idx = self.transform_expr(index);
                 let val = self.transform_expr(value);
-                // Route to the in-place intrinsic when the uniqueness pass
-                // promoted this node (source array proven dead after this
-                // expression); otherwise stick with the functional variant.
-                let fn_name = if *inplace { INTRINSIC_ARRAY_WITH_INPLACE } else { INTRINSIC_ARRAY_WITH };
-                self.build_app(fn_name, vec![arr, idx, val], ty, span)
+                self.build_app(INTRINSIC_ARRAY_WITH, vec![arr, idx, val], ty, span)
             }
 
             ast::ExprKind::VecWith {

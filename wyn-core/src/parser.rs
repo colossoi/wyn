@@ -1562,7 +1562,6 @@ impl<'a> Parser<'a> {
                             array: Box::new(left),
                             index: Box::new(index),
                             value: Box::new(value),
-                            inplace: false,
                         },
                         span,
                     );

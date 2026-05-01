@@ -4,21 +4,21 @@ fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
     // Use the typestate API to ensure proper compilation pipeline
     let mut frontend = crate::cached_frontend();
     let parsed = crate::Compiler::parse(source, &mut frontend.node_counter).expect("Parsing failed");
-    let alias_checked = parsed
+    let type_checked = parsed
         .desugar(&mut frontend.node_counter)
         .expect("Desugaring failed")
         .resolve(&mut frontend.module_manager)
         .expect("Name resolution failed")
         .fold_ast_constants()
         .type_check(&mut frontend.module_manager, &mut frontend.schemes)
-        .expect("Type checking failed")
-        .alias_check()
-        .expect("Alias checking failed");
+        .expect("Type checking failed");
 
-    let ssa = alias_checked
+    let ssa = type_checked
         .to_tlc(&frontend.schemes, &frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
+        .promote_inplace()
+        .expect("promote_inplace")
         .fuse_maps()
         .defunctionalize()
         .monomorphize()
@@ -335,20 +335,20 @@ def test(x: f32) f32 =
 fn compile_to_spirv_with_partial_eval(source: &str) -> Result<Vec<u32>> {
     let mut frontend = crate::cached_frontend();
     let parsed = crate::Compiler::parse(source, &mut frontend.node_counter).expect("Parsing failed");
-    let alias_checked = parsed
+    let type_checked = parsed
         .desugar(&mut frontend.node_counter)
         .expect("Desugaring failed")
         .resolve(&mut frontend.module_manager)
         .expect("Name resolution failed")
         .fold_ast_constants()
         .type_check(&mut frontend.module_manager, &mut frontend.schemes)
-        .expect("Type checking failed")
-        .alias_check()
-        .expect("Alias checking failed");
-    let ssa = alias_checked
+        .expect("Type checking failed");
+    let ssa = type_checked
         .to_tlc(&frontend.schemes, &frontend.module_manager, false)
         .partial_eval()
         .normalize_soacs()
+        .promote_inplace()
+        .expect("promote_inplace")
         .fuse_maps()
         .defunctionalize()
         .monomorphize()
