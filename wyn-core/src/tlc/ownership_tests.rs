@@ -1423,3 +1423,31 @@ fn lambda_capture_term_is_analyzed_for_liveness() {
          capture term's id should be populated",
     );
 }
+
+// =============================================================================
+// SOAC body fixed-point: per-iteration locals must not loop back
+// =============================================================================
+
+#[test]
+fn map_body_consuming_element_param_is_accepted() {
+    // Each iteration of `map` receives a fresh element. A body
+    // that consumes that element via a `*T` call is sound: the
+    // consumption applies to one runtime value per iteration, and
+    // the next iteration receives a different value.
+    //
+    // This test is the false-positive case for an over-conservative
+    // SOAC fixed-point: if `lambda_body_fixed_point` doesn't
+    // subtract the element-param owner from the loop-back set, it
+    // treats the param as carried across iterations and the
+    // body's kill conflicts with the carried-live owner.
+    let source = r#"
+def consume(x: *[4]i32) i32 = x[0]
+def main(rows: *[3][4]i32) [3]i32 = map(|row: [4]i32| consume(row), rows)
+"#;
+    assert!(
+        !has_use_after_move(source),
+        "SOAC body consuming its per-iteration element param is sound \
+         (each iteration's element is a fresh runtime value); \
+         analysis should accept",
+    );
+}
