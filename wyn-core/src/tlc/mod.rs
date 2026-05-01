@@ -1760,10 +1760,15 @@ impl<'a> Transformer<'a> {
             ast::ExprKind::Application(func, args) => self.transform_application(func, args, ty, span),
 
             ast::ExprKind::LetIn(let_in) => {
+                // Snapshot scope so a nested let's bindings don't leak past
+                // the body. Without this, `let x = ... in let x = ... in ...; ... x ...`
+                // resolves the trailing `x` to the inner SymbolId because
+                // the inner `define` overwrote `scope["x"]`.
+                let saved_scope = self.scope.clone();
                 // Check pattern kind to avoid redundant transforms for simple patterns
                 let simple_name = self.simple_pattern_name(&let_in.pattern);
 
-                if let Some(name_str) = simple_name {
+                let result = if let Some(name_str) = simple_name {
                     // Simple Name/Wildcard pattern - single Let binding
                     let rhs = self.transform_expr(&let_in.value);
                     // Define the name (adds to scope) before transforming body
@@ -1786,7 +1791,9 @@ impl<'a> Transformer<'a> {
                     // Note: bindings already added names to scope via define() in compute_pattern_bindings
                     let body = self.transform_expr(&let_in.body);
                     self.apply_bindings_around(bindings, body, span)
-                }
+                };
+                self.scope = saved_scope;
+                result
             }
 
             ast::ExprKind::FieldAccess(record, field) => {
