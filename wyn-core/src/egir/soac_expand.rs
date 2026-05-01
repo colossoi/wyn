@@ -21,6 +21,7 @@ use crate::types::{is_array_variant_composite, is_array_variant_view, is_virtual
 
 use super::types::{
     EGraph, ENode, NodeId, PendingSoac, PureOp, SideEffect, SideEffectKind, SkeletonTerminator,
+    SoacDestination,
 };
 
 /// Expand every `SideEffectKind::Pending(PendingSoac::...)` in the skeleton.
@@ -82,9 +83,6 @@ fn is_handleable_soac(kind: &SideEffectKind) -> bool {
         } => input_array_types.iter().all(is_plain_array_source),
         PendingSoac::Scan { input_array_type, .. } => is_plain_composite(input_array_type),
         PendingSoac::Map {
-            input_array_types, ..
-        } => input_array_types.iter().all(is_plain_array_source),
-        PendingSoac::MapInto {
             input_array_types, ..
         } => input_array_types.iter().all(is_plain_array_source),
         PendingSoac::ScanInto { input_array_type, .. } => is_plain_array_source(input_array_type),
@@ -258,19 +256,17 @@ fn expand_one(
             input_array_types,
             input_elem_types,
             output_elem_type,
-            ..
+            destination,
         }) => {
             let func = func.clone();
             let arr_tys = input_array_types.clone();
             let elem_tys = input_elem_types.clone();
             let out_elem_ty = output_elem_type.clone();
+            let destination = *destination;
 
-            // Operand layout for Map: [input_0, ..., input_{n-1}, ...captures].
             let n_inputs = arr_tys.len();
             let input_nids: Vec<NodeId> = se.operand_nodes[..n_inputs].to_vec();
-            let captures: Vec<NodeId> = se.operand_nodes[n_inputs..].to_vec();
             let result_nid = se.result.expect("Map has a result");
-            let out_arr_ty = graph.types[&result_nid].clone();
 
             let read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)> = input_nids
                 .iter()
@@ -279,95 +275,101 @@ fn expand_one(
                 .collect();
             let len_input = (input_nids[0], arr_tys[0].clone());
 
-            let init_out_nid = graph.intern_pure(
-                PureOp::Call(INTRINSIC_UNINIT.into()),
-                smallvec![],
-                out_arr_ty.clone(),
-            );
-            let carried = vec![(out_arr_ty.clone(), init_out_nid)];
-            let result = ResultBinding::Carried {
-                result_node: result_nid,
-                idx: 0,
-            };
-            // Don't allow unroll when output or any input is a SoA tuple:
-            // `_w_intrinsic_array_with` targets composite arrays only.
-            let allow_unroll = unroll_maps
-                && as_soa_tuple(&out_arr_ty).is_none()
-                && read_inputs.iter().all(|(_, a, _)| as_soa_tuple(a).is_none());
-            expand_loop(
-                graph,
-                control_headers,
-                bid,
-                idx,
-                &len_input,
-                &carried,
-                &result,
-                next_effect,
-                allow_unroll,
-                |graph, next_effect, body_bid, idx_nid, carried_nids| {
-                    let out_nid = carried_nids[0];
-                    let mut call_operands: SmallVec<[NodeId; 4]> = SmallVec::new();
-                    for (arr, arr_ty, elem_ty) in &read_inputs {
-                        let elem_nid =
-                            emit_read_element(graph, body_bid, *arr, idx_nid, arr_ty, elem_ty, next_effect);
-                        call_operands.push(elem_nid);
-                    }
-                    call_operands.extend(captures.iter().copied());
-                    let y_nid =
-                        graph.intern_pure(PureOp::Call(func.clone()), call_operands, out_elem_ty.clone());
-                    // Loop-carried phi kills the previous iteration's value
-                    // on the back-edge, so the in-place variant is always safe
-                    // for SOAC-generated output arrays. For SoA-tuple outputs,
-                    // `emit_write_element` splits the update into per-component
-                    // ArrayWith calls plus a Tuple repack.
-                    let new_out =
-                        emit_write_element(graph, out_nid, idx_nid, y_nid, &out_arr_ty, &out_elem_ty);
-                    vec![new_out]
-                },
-            );
-        }
-        SideEffectKind::Pending(PendingSoac::MapInto {
-            func,
-            input_array_types,
-            input_elem_types,
-            output_elem_type,
-            ..
-        }) => {
-            let func = func.clone();
-            let arr_tys = input_array_types.clone();
-            let elem_tys = input_elem_types.clone();
-            let out_elem_ty = output_elem_type.clone();
+            match destination {
+                SoacDestination::Fresh => {
+                    // Operand layout: [input_0, ..., input_{n-1}, ...captures].
+                    let captures: Vec<NodeId> = se.operand_nodes[n_inputs..].to_vec();
+                    let out_arr_ty = graph.types[&result_nid].clone();
 
-            // Operand layout: [input_0, ..., input_{n-1}, ...captures, output_view].
-            let n_inputs = arr_tys.len();
-            let input_nids: Vec<NodeId> = se.operand_nodes[..n_inputs].to_vec();
-            let view_nid = *se.operand_nodes.last().expect("MapInto has output_view operand");
-            let captures: Vec<NodeId> = se.operand_nodes[n_inputs..se.operand_nodes.len() - 1].to_vec();
-            let result_nid = se.result.expect("MapInto has a (dummy) result");
+                    let init_out_nid = graph.intern_pure(
+                        PureOp::Call(INTRINSIC_UNINIT.into()),
+                        smallvec![],
+                        out_arr_ty.clone(),
+                    );
+                    let carried = vec![(out_arr_ty.clone(), init_out_nid)];
+                    let result = ResultBinding::Carried {
+                        result_node: result_nid,
+                        idx: 0,
+                    };
+                    // Don't allow unroll when output or any input is a SoA tuple:
+                    // `_w_intrinsic_array_with` targets composite arrays only.
+                    let allow_unroll = unroll_maps
+                        && as_soa_tuple(&out_arr_ty).is_none()
+                        && read_inputs.iter().all(|(_, a, _)| as_soa_tuple(a).is_none());
+                    expand_loop(
+                        graph,
+                        control_headers,
+                        bid,
+                        idx,
+                        &len_input,
+                        &carried,
+                        &result,
+                        next_effect,
+                        allow_unroll,
+                        |graph, next_effect, body_bid, idx_nid, carried_nids| {
+                            let out_nid = carried_nids[0];
+                            let mut call_operands: SmallVec<[NodeId; 4]> = SmallVec::new();
+                            for (arr, arr_ty, elem_ty) in &read_inputs {
+                                let elem_nid = emit_read_element(
+                                    graph,
+                                    body_bid,
+                                    *arr,
+                                    idx_nid,
+                                    arr_ty,
+                                    elem_ty,
+                                    next_effect,
+                                );
+                                call_operands.push(elem_nid);
+                            }
+                            call_operands.extend(captures.iter().copied());
+                            let y_nid = graph.intern_pure(
+                                PureOp::Call(func.clone()),
+                                call_operands,
+                                out_elem_ty.clone(),
+                            );
+                            // Loop-carried phi kills the previous iteration's
+                            // value on the back-edge, so the in-place variant
+                            // is always safe for SOAC-generated output arrays.
+                            // For SoA-tuple outputs, `emit_write_element` splits
+                            // the update into per-component ArrayWith calls
+                            // plus a Tuple repack.
+                            let new_out = emit_write_element(
+                                graph,
+                                out_nid,
+                                idx_nid,
+                                y_nid,
+                                &out_arr_ty,
+                                &out_elem_ty,
+                            );
+                            vec![new_out]
+                        },
+                    );
+                }
+                SoacDestination::OutputView => {
+                    // Operand layout: [input_0, ..., input_{n-1}, ...captures, output_view].
+                    let view_nid =
+                        *se.operand_nodes.last().expect("Map[OutputView] has output_view operand");
+                    let captures: Vec<NodeId> =
+                        se.operand_nodes[n_inputs..se.operand_nodes.len() - 1].to_vec();
 
-            let read_inputs: Vec<(NodeId, Type<TypeName>, Type<TypeName>)> = input_nids
-                .iter()
-                .zip(arr_tys.iter().zip(elem_tys.iter()))
-                .map(|(n, (a, e))| (*n, a.clone(), e.clone()))
-                .collect();
-            let len_input = (input_nids[0], arr_tys[0].clone());
-
-            build_map_into_loop(
-                graph,
-                control_headers,
-                bid,
-                idx,
-                MapIntoLoop {
-                    len_input,
-                    read_inputs,
-                    view_nid,
-                    out_elem_ty,
-                    result_node: result_nid,
-                    func,
-                    captures,
-                },
-                next_effect,
-            );
+                    build_map_into_loop(
+                        graph,
+                        control_headers,
+                        bid,
+                        idx,
+                        MapIntoLoop {
+                            len_input,
+                            read_inputs,
+                            view_nid,
+                            out_elem_ty,
+                            result_node: result_nid,
+                            func,
+                            captures,
+                        },
+                        next_effect,
+                    );
+                }
+            }
         }
         SideEffectKind::Pending(PendingSoac::ScanInto {
             func,
