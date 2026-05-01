@@ -74,11 +74,21 @@ pub enum Origin {
     /// so promotion treats it as immutable. Sound under-approximation
     /// of "borrowing" — refusing the optimization is always safe.
     Borrowed,
+    /// Per-iteration element view of a mutable-input SOAC body.
+    /// The element is loaded into a local each iteration; mutations
+    /// stay local. Mutable like `Fresh` for promotion purposes, but
+    /// distinguished so future code can tell "I own an array" from
+    /// "I have a per-iteration view into a mutable array I'm
+    /// iterating over."
+    BorrowedMutableElement,
 }
 
 impl Origin {
     pub fn is_mutable(self) -> bool {
-        matches!(self, Origin::Fresh | Origin::UniqueParam | Origin::Entry)
+        matches!(
+            self,
+            Origin::Fresh | Origin::UniqueParam | Origin::Entry | Origin::BorrowedMutableElement
+        )
     }
 }
 
@@ -547,19 +557,19 @@ impl<'p> Builder<'p> {
             ArrayExpr::Ref(t) => {
                 if let Some(owner) = self.alias_target(t) {
                     if self.model.origin(owner).map(|o| o.is_mutable()).unwrap_or(false) {
-                        return Origin::Fresh;
+                        return Origin::BorrowedMutableElement;
                     }
                     return Origin::Borrowed;
                 }
                 // No tracked owner — fall back to the term's static type.
-                if types::is_unique(&t.ty) { Origin::Fresh } else { Origin::Borrowed }
+                if types::is_unique(&t.ty) { Origin::BorrowedMutableElement } else { Origin::Borrowed }
             }
             // Fresh-producer ArrayExprs: literal/generate/range/soac
             // synthesize a new array, so element views are mutable.
             ArrayExpr::Literal(_)
             | ArrayExpr::Generate { .. }
             | ArrayExpr::Range { .. }
-            | ArrayExpr::Soac(_) => Origin::Fresh,
+            | ArrayExpr::Soac(_) => Origin::BorrowedMutableElement,
             // Storage-buffer-backed views: conservative borrow.
             ArrayExpr::StorageBuffer { .. } => Origin::Borrowed,
             // Zip is a phase-scoped sentinel that should be absorbed
