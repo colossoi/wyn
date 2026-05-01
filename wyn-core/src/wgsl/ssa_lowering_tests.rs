@@ -465,7 +465,6 @@ fn wgsl_testfile_raytrace() {
 }
 
 #[test]
-#[ignore = "mandelbulb's structurize pass overflows the debug stack; run with RUST_MIN_STACK=8388608 once fixed"]
 fn wgsl_testfile_mandelbulb() {
     validate_testfile_wgsl("testfiles/mandelbulb.wyn");
 }
