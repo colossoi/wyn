@@ -1844,7 +1844,10 @@ impl<'a> Converter<'a> {
 
     fn array_expr_type(&self, ae: &ArrayExpr) -> Type<TypeName> {
         match ae {
-            ArrayExpr::Ref(t) => t.ty.clone(),
+            // Strip `*` at the EGIR boundary — uniqueness is a TLC
+            // concern; downstream array-shape checks (composite vs
+            // view vs virtual) operate on the bare array type.
+            ArrayExpr::Ref(t) => crate::types::strip_unique(&t.ty),
             ArrayExpr::Zip(_) => unreachable!("Zip eliminated"),
             ArrayExpr::Soac(_) => Type::Constructed(TypeName::Unit, vec![]),
             ArrayExpr::Generate { elem_ty, .. } => elem_ty.clone(),

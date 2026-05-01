@@ -97,6 +97,73 @@ def f(a: *[8]i32) [8]i32 = map(|x: i32| x + 1, a)
     );
 }
 
+/// Count `_w_intrinsic_uninit` calls across the entire SSA program
+/// (functions + entry points). `Fresh` Map destinations introduce
+/// one per allocation; the `InputBuffer` destination should
+/// introduce zero. Aggregating across all bodies sidesteps
+/// inlining choices that move the map's body between functions.
+fn count_uninit_in_program(ssa: &Program) -> usize {
+    let mut count = 0;
+    let bodies = ssa
+        .functions
+        .iter()
+        .map(|f| &f.body.inner.insts)
+        .chain(ssa.entry_points.iter().map(|e| &e.body.inner.insts));
+    for insts in bodies {
+        for (_id, inst) in insts {
+            match &inst.data {
+                crate::ssa::types::InstKind::Call { func: f, .. }
+                | crate::ssa::types::InstKind::Intrinsic { name: f, .. } => {
+                    if f == "_w_intrinsic_uninit" {
+                        count += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    count
+}
+
+#[test]
+fn consuming_map_skips_fresh_allocation() {
+    // For an input-side DPS Map, the loop's carried buffer starts
+    // as the input parameter — no `_w_intrinsic_uninit` call
+    // should be emitted. Compare against a non-consuming Map
+    // (caller-borrowed input) which falls back to Fresh and
+    // emits at least one uninit allocation.
+    let consuming_ssa = compile_to_ssa(
+        r#"
+def bump(a: *[8]i32) [8]i32 = map(|x: i32| x + 1, a)
+
+#[fragment]
+entry frag(c: vec4f32) vec4f32 =
+    let r = bump([1, 2, 3, 4, 5, 6, 7, 8]) in
+    @[f32.i32(r[0]), f32.i32(r[1]), 0.0, 0.0]
+"#,
+    );
+    assert_eq!(
+        count_uninit_in_program(&consuming_ssa),
+        0,
+        "consuming map (`*[N]T` input, dead-after) should not allocate a fresh buffer",
+    );
+
+    let borrowing_ssa = compile_to_ssa(
+        r#"
+def bump(a: [8]i32) [8]i32 = map(|x: i32| x + 1, a)
+
+#[fragment]
+entry frag(c: vec4f32) vec4f32 =
+    let r = bump([1, 2, 3, 4, 5, 6, 7, 8]) in
+    @[f32.i32(r[0]), f32.i32(r[1]), 0.0, 0.0]
+"#,
+    );
+    assert!(
+        count_uninit_in_program(&borrowing_ssa) >= 1,
+        "non-consuming map (caller-borrowed input) should allocate a fresh buffer",
+    );
+}
+
 #[test]
 fn test_map_reduce_fusion_end_to_end() {
     let source = r#"
