@@ -279,7 +279,7 @@ impl<'p> Builder<'p> {
                 }
             }
             TermKind::Lambda(lam) => self.visit_lambda(lam),
-            TermKind::Soac(op) => self.visit_soac(op),
+            TermKind::Soac(op) => self.visit_soac(op, term.id),
             TermKind::ArrayExpr(ae) => self.visit_array_expr(ae),
             TermKind::Loop {
                 loop_var,
@@ -404,7 +404,13 @@ impl<'p> Builder<'p> {
     /// from the single input (Reduce/Scan/Filter/ReduceByIndex).
     /// Accumulator params (Reduce/Scan/Redomap) are the body's
     /// per-iteration output — Fresh.
-    fn visit_soac(&mut self, op: &SoacOp) {
+    ///
+    /// Each per-iteration owner introduced here is also recorded
+    /// under `defs[soac_id]` so the liveness fixed-point can
+    /// subtract them from the loop-back set: a body that consumes
+    /// its own element/accumulator param consumes a *fresh* runtime
+    /// value each iteration, not a value carried across.
+    fn visit_soac(&mut self, op: &SoacOp, soac_id: TermId) {
         match op {
             SoacOp::Map { lam, inputs, .. } => {
                 for ae in inputs {
@@ -415,6 +421,7 @@ impl<'p> Builder<'p> {
                         let origin = self.element_origin_from_input(input);
                         let owner = self.fresh_owner(origin);
                         self.bind(*sym, owner);
+                        self.record_per_call_def(soac_id, owner);
                     }
                 }
                 self.visit_lambda_body(lam);
@@ -422,13 +429,13 @@ impl<'p> Builder<'p> {
             SoacOp::Reduce { op, ne, input, .. } => {
                 self.visit_term(ne);
                 self.visit_array_expr(input);
-                self.bind_reducer_params(op, input);
+                self.bind_reducer_params(op, input, soac_id);
                 self.visit_lambda_body(op);
             }
             SoacOp::Scan { op, ne, input } => {
                 self.visit_term(ne);
                 self.visit_array_expr(input);
-                self.bind_reducer_params(op, input);
+                self.bind_reducer_params(op, input, soac_id);
                 self.visit_lambda_body(op);
             }
             SoacOp::Filter { pred, input } => {
@@ -438,6 +445,7 @@ impl<'p> Builder<'p> {
                         let origin = self.element_origin_from_input(input);
                         let owner = self.fresh_owner(origin);
                         self.bind(*sym, owner);
+                        self.record_per_call_def(soac_id, owner);
                     }
                 }
                 self.visit_lambda_body(pred);
@@ -456,7 +464,7 @@ impl<'p> Builder<'p> {
                 self.visit_term(ne);
                 self.visit_array_expr(indices);
                 self.visit_array_expr(values);
-                self.bind_reducer_params(op, values);
+                self.bind_reducer_params(op, values, soac_id);
                 self.visit_lambda_body(op);
             }
             SoacOp::Redomap {
@@ -476,12 +484,14 @@ impl<'p> Builder<'p> {
                     if !types::is_copy(acc_ty) {
                         let owner = self.fresh_owner(Origin::Fresh);
                         self.bind(*acc_sym, owner);
+                        self.record_per_call_def(soac_id, owner);
                     }
                     for ((sym, ty), input) in elem_params.iter().zip(inputs.iter()) {
                         if !types::is_copy(ty) {
                             let origin = self.element_origin_from_input(input);
                             let owner = self.fresh_owner(origin);
                             self.bind(*sym, owner);
+                            self.record_per_call_def(soac_id, owner);
                         }
                     }
                 }
@@ -492,6 +502,7 @@ impl<'p> Builder<'p> {
                     if !types::is_copy(ty) {
                         let owner = self.fresh_owner(Origin::Fresh);
                         self.bind(*sym, owner);
+                        self.record_per_call_def(soac_id, owner);
                     }
                 }
                 self.visit_lambda_body(reduce_op);
@@ -499,15 +510,22 @@ impl<'p> Builder<'p> {
         }
     }
 
+    fn record_per_call_def(&mut self, soac_id: TermId, owner: OwnerId) {
+        self.model.defs.entry(soac_id).or_default().insert(owner);
+    }
+
     /// Bind a reducer lambda's two params: (acc, elem). `acc` is the
     /// body's per-iteration output (Fresh). `elem` inherits
-    /// mutability from the input.
-    fn bind_reducer_params(&mut self, op: &Lambda, input: &ArrayExpr) {
+    /// mutability from the input. Both are per-call, recorded under
+    /// `defs[soac_id]` so the liveness fixed-point doesn't carry
+    /// them across iterations.
+    fn bind_reducer_params(&mut self, op: &Lambda, input: &ArrayExpr, soac_id: TermId) {
         let mut params = op.params.iter();
         if let Some((sym, ty)) = params.next() {
             if !types::is_copy(ty) {
                 let owner = self.fresh_owner(Origin::Fresh);
                 self.bind(*sym, owner);
+                self.record_per_call_def(soac_id, owner);
             }
         }
         if let Some((sym, ty)) = params.next() {
@@ -515,6 +533,7 @@ impl<'p> Builder<'p> {
                 let origin = self.element_origin_from_input(input);
                 let owner = self.fresh_owner(origin);
                 self.bind(*sym, owner);
+                self.record_per_call_def(soac_id, owner);
             }
         }
     }
@@ -558,7 +577,12 @@ impl<'p> Builder<'p> {
                     self.visit_array_expr(ae);
                 }
             }
-            ArrayExpr::Soac(op) => self.visit_soac(op),
+            // Nested SOAC inside an ArrayExpr: there is no
+            // dedicated TermId for it (the SOAC isn't wrapped in a
+            // Term here), so per-call defs land under a sentinel.
+            // `lambda_body_fixed_point` looks up by the call site's
+            // own id, so this sentinel collision is harmless.
+            ArrayExpr::Soac(op) => self.visit_soac(op, TermId(u32::MAX)),
             ArrayExpr::Generate { index_fn, .. } => self.visit_lambda(index_fn),
             ArrayExpr::Literal(terms) => {
                 for t in terms {
@@ -825,7 +849,11 @@ impl<'m> Liveness<'m> {
     /// from the post-body live set so any uses inside a capture
     /// term flow back to the parent's live_in.
     fn analyze_lambda(&mut self, lam: &Lambda, live_after: LiveSet) -> LiveSet {
-        let live_in_body = self.lambda_body_fixed_point(lam);
+        // Free-standing lambdas have no per-iteration locals to
+        // exclude — every reference inside the body must remain
+        // live across hypothetical re-invocations.
+        let no_per_call_defs = LiveSet::new();
+        let live_in_body = self.lambda_body_fixed_point(lam, &no_per_call_defs);
         let mut live = union(&live_after, &live_in_body);
         for (_, _, capture_term) in lam.captures.iter().rev() {
             live = self.analyze(capture_term, live);
@@ -833,10 +861,11 @@ impl<'m> Liveness<'m> {
         live
     }
 
-    fn analyze_soac(&mut self, op: &SoacOp, live_after: LiveSet, _soac_id: TermId) -> LiveSet {
+    fn analyze_soac(&mut self, op: &SoacOp, live_after: LiveSet, soac_id: TermId) -> LiveSet {
+        let per_call_defs = self.model.defs.get(&soac_id).cloned().unwrap_or_default();
         match op {
             SoacOp::Map { lam, inputs, .. } => {
-                let live_in_lam = self.lambda_body_fixed_point(lam);
+                let live_in_lam = self.lambda_body_fixed_point(lam, &per_call_defs);
                 let mut live = union(&live_after, &live_in_lam);
                 for ae in inputs.iter().rev() {
                     live = self.analyze_array_expr(ae, live);
@@ -844,19 +873,19 @@ impl<'m> Liveness<'m> {
                 live
             }
             SoacOp::Reduce { op, ne, input, .. } => {
-                let live_in_op = self.lambda_body_fixed_point(op);
+                let live_in_op = self.lambda_body_fixed_point(op, &per_call_defs);
                 let after_input = union(&live_after, &live_in_op);
                 let after_ne = self.analyze_array_expr(input, after_input);
                 self.analyze(ne, after_ne)
             }
             SoacOp::Scan { op, ne, input } => {
-                let live_in_op = self.lambda_body_fixed_point(op);
+                let live_in_op = self.lambda_body_fixed_point(op, &per_call_defs);
                 let after_input = union(&live_after, &live_in_op);
                 let after_ne = self.analyze_array_expr(input, after_input);
                 self.analyze(ne, after_ne)
             }
             SoacOp::Filter { pred, input } => {
-                let live_in_pred = self.lambda_body_fixed_point(pred);
+                let live_in_pred = self.lambda_body_fixed_point(pred, &per_call_defs);
                 let after_input = union(&live_after, &live_in_pred);
                 self.analyze_array_expr(input, after_input)
             }
@@ -871,7 +900,7 @@ impl<'m> Liveness<'m> {
                 values,
                 ..
             } => {
-                let live_in_op = self.lambda_body_fixed_point(op);
+                let live_in_op = self.lambda_body_fixed_point(op, &per_call_defs);
                 let after_values = union(&live_after, &live_in_op);
                 let after_indices = self.analyze_array_expr(values, after_values);
                 let after_ne = self.analyze_array_expr(indices, after_indices);
@@ -884,8 +913,8 @@ impl<'m> Liveness<'m> {
                 inputs,
                 ..
             } => {
-                let live_in_op = self.lambda_body_fixed_point(op);
-                let live_in_reduce = self.lambda_body_fixed_point(reduce_op);
+                let live_in_op = self.lambda_body_fixed_point(op, &per_call_defs);
+                let live_in_reduce = self.lambda_body_fixed_point(reduce_op, &per_call_defs);
                 let mut live = union(&union(&live_after, &live_in_op), &live_in_reduce);
                 for ae in inputs.iter().rev() {
                     live = self.analyze_array_expr(ae, live);
@@ -895,16 +924,22 @@ impl<'m> Liveness<'m> {
         }
     }
 
-    /// SOAC bodies iterate. Run a fixed-point over the body so any
-    /// owner used in iteration N+1 stays live across iteration N.
-    fn lambda_body_fixed_point(&mut self, lam: &Lambda) -> LiveSet {
+    /// SOAC / lambda bodies iterate (or may be invoked multiple
+    /// times). Run a fixed-point over the body so any owner used in
+    /// iteration N+1 stays live across iteration N — *except*
+    /// `per_call_defs`, which are owners freshly produced each
+    /// invocation (SOAC element/accumulator params, loop_var). For
+    /// free-standing lambdas with no per-call locals to subtract,
+    /// pass an empty set.
+    fn lambda_body_fixed_point(&mut self, lam: &Lambda, per_call_defs: &LiveSet) -> LiveSet {
         let mut live_after_body = LiveSet::new();
         loop {
             let live_in_body = self.analyze(&lam.body, live_after_body.clone());
-            if live_in_body == live_after_body {
+            let next = sub(&live_in_body, per_call_defs);
+            if next == live_after_body {
                 break;
             }
-            live_after_body = live_in_body;
+            live_after_body = next;
         }
         // Final pass to lock in the recorded live_outs.
         self.analyze(&lam.body, live_after_body.clone())
