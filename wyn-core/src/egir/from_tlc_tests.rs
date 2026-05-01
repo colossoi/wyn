@@ -5,6 +5,7 @@
 use super::{Converter, run};
 use crate::SymbolId;
 use crate::ast::TypeName;
+use crate::intrinsics::INTRINSIC_STORAGE_LEN;
 use crate::pipeline_descriptor::PipelineDescriptor;
 use crate::ssa::types::{FuncBody, InstKind, Program};
 use crate::tlc::{Term, TermKind};
@@ -247,12 +248,12 @@ fn test_hash_cons_distinguishes_by_result_type() {
     );
 
     let a = g.intern_pure(
-        PureOp::Intrinsic("_w_intrinsic_storage_len".into()),
+        PureOp::Intrinsic(INTRINSIC_STORAGE_LEN.into()),
         smallvec![zero_u32, zero_u32],
         i32_ty,
     );
     let b = g.intern_pure(
-        PureOp::Intrinsic("_w_intrinsic_storage_len".into()),
+        PureOp::Intrinsic(INTRINSIC_STORAGE_LEN.into()),
         smallvec![zero_u32, zero_u32],
         u32_ty,
     );

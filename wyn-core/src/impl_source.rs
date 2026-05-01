@@ -3,6 +3,13 @@
 // Types for functions are provided by modules or PolymorphicBuiltins
 
 use crate::ast::{Type, TypeName};
+use crate::intrinsics::{
+    INTRINSIC_ABS, INTRINSIC_ARRAY_WITH, INTRINSIC_ARRAY_WITH_INPLACE, INTRINSIC_CEIL, INTRINSIC_CLAMP,
+    INTRINSIC_CROSS, INTRINSIC_DETERMINANT, INTRINSIC_DISTANCE, INTRINSIC_DOT, INTRINSIC_FLOOR,
+    INTRINSIC_FRACT, INTRINSIC_INVERSE, INTRINSIC_LENGTH, INTRINSIC_MAGNITUDE, INTRINSIC_MIX,
+    INTRINSIC_NORMALIZE, INTRINSIC_OUTER, INTRINSIC_REFLECT, INTRINSIC_REFRACT, INTRINSIC_SMOOTHSTEP,
+    INTRINSIC_UNINIT,
+};
 use std::collections::HashMap;
 
 /// Implementation strategy for a builtin function
@@ -736,16 +743,13 @@ impl ImplSource {
     }
 
     fn register_vector_operations(&mut self) {
-        self.register("_w_intrinsic_uninit", BuiltinImpl::Intrinsic(Intrinsic::Uninit));
+        self.register(INTRINSIC_UNINIT, BuiltinImpl::Intrinsic(Intrinsic::Uninit));
+        self.register(INTRINSIC_ARRAY_WITH, BuiltinImpl::Intrinsic(Intrinsic::ArrayWith));
         self.register(
-            "_w_intrinsic_array_with",
-            BuiltinImpl::Intrinsic(Intrinsic::ArrayWith),
-        );
-        self.register(
-            "_w_intrinsic_array_with_inplace",
+            INTRINSIC_ARRAY_WITH_INPLACE,
             BuiltinImpl::Intrinsic(Intrinsic::ArrayWithInPlace),
         );
-        self.register("_w_intrinsic_length", BuiltinImpl::Intrinsic(Intrinsic::Length));
+        self.register(INTRINSIC_LENGTH, BuiltinImpl::Intrinsic(Intrinsic::Length));
     }
 
     /// Register the `vec.*` module ops. Each maps to the same
@@ -809,25 +813,25 @@ impl ImplSource {
         // (sin/cos/tan/.../pow/mod/radians/degrees) have moved into the
         // `f32.*` and `vec.*` modules and are reached via `open`.
         let intrinsics: &[(&str, BuiltinImpl)] = &[
-            ("_w_intrinsic_abs", BuiltinImpl::PrimOp(GlslExt(4))),
-            ("_w_intrinsic_floor", BuiltinImpl::PrimOp(GlslExt(8))),
-            ("_w_intrinsic_ceil", BuiltinImpl::PrimOp(GlslExt(9))),
-            ("_w_intrinsic_fract", BuiltinImpl::PrimOp(GlslExt(10))),
+            (INTRINSIC_ABS, BuiltinImpl::PrimOp(GlslExt(4))),
+            (INTRINSIC_FLOOR, BuiltinImpl::PrimOp(GlslExt(8))),
+            (INTRINSIC_CEIL, BuiltinImpl::PrimOp(GlslExt(9))),
+            (INTRINSIC_FRACT, BuiltinImpl::PrimOp(GlslExt(10))),
             ("_w_intrinsic_min", BuiltinImpl::PrimOp(GlslExt(37))),
             ("_w_intrinsic_max", BuiltinImpl::PrimOp(GlslExt(40))),
-            ("_w_intrinsic_clamp", BuiltinImpl::PrimOp(GlslExt(43))),
-            ("_w_intrinsic_mix", BuiltinImpl::PrimOp(GlslExt(46))),
-            ("_w_intrinsic_smoothstep", BuiltinImpl::PrimOp(GlslExt(49))),
-            ("_w_intrinsic_normalize", BuiltinImpl::PrimOp(GlslExt(69))),
-            ("_w_intrinsic_cross", BuiltinImpl::PrimOp(GlslExt(68))),
-            ("_w_intrinsic_distance", BuiltinImpl::PrimOp(GlslExt(67))),
-            ("_w_intrinsic_reflect", BuiltinImpl::PrimOp(GlslExt(71))),
-            ("_w_intrinsic_refract", BuiltinImpl::PrimOp(GlslExt(72))),
-            ("_w_intrinsic_determinant", BuiltinImpl::PrimOp(GlslExt(33))),
-            ("_w_intrinsic_inverse", BuiltinImpl::PrimOp(GlslExt(34))),
-            ("_w_intrinsic_dot", BuiltinImpl::PrimOp(Dot)),
-            ("_w_intrinsic_outer", BuiltinImpl::PrimOp(OuterProduct)),
-            ("_w_intrinsic_magnitude", BuiltinImpl::PrimOp(GlslExt(66))),
+            (INTRINSIC_CLAMP, BuiltinImpl::PrimOp(GlslExt(43))),
+            (INTRINSIC_MIX, BuiltinImpl::PrimOp(GlslExt(46))),
+            (INTRINSIC_SMOOTHSTEP, BuiltinImpl::PrimOp(GlslExt(49))),
+            (INTRINSIC_NORMALIZE, BuiltinImpl::PrimOp(GlslExt(69))),
+            (INTRINSIC_CROSS, BuiltinImpl::PrimOp(GlslExt(68))),
+            (INTRINSIC_DISTANCE, BuiltinImpl::PrimOp(GlslExt(67))),
+            (INTRINSIC_REFLECT, BuiltinImpl::PrimOp(GlslExt(71))),
+            (INTRINSIC_REFRACT, BuiltinImpl::PrimOp(GlslExt(72))),
+            (INTRINSIC_DETERMINANT, BuiltinImpl::PrimOp(GlslExt(33))),
+            (INTRINSIC_INVERSE, BuiltinImpl::PrimOp(GlslExt(34))),
+            (INTRINSIC_DOT, BuiltinImpl::PrimOp(Dot)),
+            (INTRINSIC_OUTER, BuiltinImpl::PrimOp(OuterProduct)),
+            (INTRINSIC_MAGNITUDE, BuiltinImpl::PrimOp(GlslExt(66))),
         ];
         for (name, impl_) in intrinsics {
             self.register(name, impl_.clone());

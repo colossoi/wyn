@@ -19,6 +19,13 @@ pub mod specialize;
 
 use crate::ast::{self, NodeId, Span, TypeName};
 use crate::interface;
+use crate::intrinsics::{
+    INTRINSIC_ABS, INTRINSIC_ARRAY_WITH, INTRINSIC_ARRAY_WITH_INPLACE, INTRINSIC_CEIL, INTRINSIC_CLAMP,
+    INTRINSIC_CROSS, INTRINSIC_DETERMINANT, INTRINSIC_DISTANCE, INTRINSIC_DOT, INTRINSIC_FLOOR,
+    INTRINSIC_FRACT, INTRINSIC_INVERSE, INTRINSIC_LENGTH, INTRINSIC_MAGNITUDE, INTRINSIC_MIX,
+    INTRINSIC_NORMALIZE, INTRINSIC_OUTER, INTRINSIC_REFLECT, INTRINSIC_REFRACT, INTRINSIC_REPLICATE,
+    INTRINSIC_SLICE, INTRINSIC_SMOOTHSTEP,
+};
 use crate::types::TypeExt;
 use crate::{SymbolId, SymbolTable, TypeTable};
 use polytype::Type;
@@ -34,25 +41,25 @@ use std::collections::HashMap;
 /// now and are reached via `open f32` / `open vec`, so they no longer
 /// need a top-level shortcut here.
 const INTRINSIC_RENAMES: &[(&str, &str)] = &[
-    ("length", "_w_intrinsic_length"),
-    ("replicate", "_w_intrinsic_replicate"),
-    ("magnitude", "_w_intrinsic_magnitude"),
-    ("normalize", "_w_intrinsic_normalize"),
-    ("dot", "_w_intrinsic_dot"),
-    ("cross", "_w_intrinsic_cross"),
-    ("distance", "_w_intrinsic_distance"),
-    ("reflect", "_w_intrinsic_reflect"),
-    ("refract", "_w_intrinsic_refract"),
-    ("floor", "_w_intrinsic_floor"),
-    ("ceil", "_w_intrinsic_ceil"),
-    ("fract", "_w_intrinsic_fract"),
-    ("mix", "_w_intrinsic_mix"),
-    ("smoothstep", "_w_intrinsic_smoothstep"),
-    ("clamp", "_w_intrinsic_clamp"),
-    ("determinant", "_w_intrinsic_determinant"),
-    ("inverse", "_w_intrinsic_inverse"),
-    ("outer", "_w_intrinsic_outer"),
-    ("abs", "_w_intrinsic_abs"),
+    ("length", INTRINSIC_LENGTH),
+    ("replicate", INTRINSIC_REPLICATE),
+    ("magnitude", INTRINSIC_MAGNITUDE),
+    ("normalize", INTRINSIC_NORMALIZE),
+    ("dot", INTRINSIC_DOT),
+    ("cross", INTRINSIC_CROSS),
+    ("distance", INTRINSIC_DISTANCE),
+    ("reflect", INTRINSIC_REFLECT),
+    ("refract", INTRINSIC_REFRACT),
+    ("floor", INTRINSIC_FLOOR),
+    ("ceil", INTRINSIC_CEIL),
+    ("fract", INTRINSIC_FRACT),
+    ("mix", INTRINSIC_MIX),
+    ("smoothstep", INTRINSIC_SMOOTHSTEP),
+    ("clamp", INTRINSIC_CLAMP),
+    ("determinant", INTRINSIC_DETERMINANT),
+    ("inverse", INTRINSIC_INVERSE),
+    ("outer", INTRINSIC_OUTER),
+    ("abs", INTRINSIC_ABS),
 ];
 
 /// SOAC names that are intercepted in transform_application and turned into
@@ -1703,8 +1710,7 @@ impl<'a> Transformer<'a> {
                 // Route to the in-place intrinsic when the uniqueness pass
                 // promoted this node (source array proven dead after this
                 // expression); otherwise stick with the functional variant.
-                let fn_name =
-                    if *inplace { "_w_intrinsic_array_with_inplace" } else { "_w_intrinsic_array_with" };
+                let fn_name = if *inplace { INTRINSIC_ARRAY_WITH_INPLACE } else { INTRINSIC_ARRAY_WITH };
                 self.build_app(fn_name, vec![arr, idx, val], ty, span)
             }
 
@@ -1924,11 +1930,12 @@ impl<'a> Transformer<'a> {
                 // `buffer_specialize` / SPIR-V passes rewrite it into the
                 // right per-flavor lowering.
                 let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
-                let end = slice.end.as_ref().map(|e| self.transform_expr(e)).unwrap_or_else(|| {
-                    self.build_app("_w_intrinsic_length", vec![arr.clone()], i32_ty, span)
-                });
+                let end =
+                    slice.end.as_ref().map(|e| self.transform_expr(e)).unwrap_or_else(|| {
+                        self.build_app(INTRINSIC_LENGTH, vec![arr.clone()], i32_ty, span)
+                    });
 
-                self.build_app("_w_intrinsic_slice", vec![arr, start, end], ty, span)
+                self.build_app(INTRINSIC_SLICE, vec![arr, start, end], ty, span)
             }
 
             ast::ExprKind::TypeAscription(inner, _) => self.transform_expr(inner),

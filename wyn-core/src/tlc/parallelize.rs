@@ -9,6 +9,9 @@
 use crate::ast::{self, TypeName};
 use crate::egir::from_tlc::AUTO_STORAGE_SET;
 use crate::interface::{self, Attribute};
+use crate::intrinsics::{
+    INTRINSIC_STORAGE_INDEX, INTRINSIC_STORAGE_LEN, INTRINSIC_STORAGE_STORE, INTRINSIC_THREAD_ID,
+};
 use crate::pipeline_descriptor::*;
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
@@ -758,7 +761,7 @@ fn maybe_hoist(
 
     // Rewrite the let RHS to a storage load at position 0.
     intrinsic_term(
-        "_w_intrinsic_storage_index",
+        INTRINSIC_STORAGE_INDEX,
         vec![
             uint_lit(binding.0 as u64, span),
             uint_lit(binding.1 as u64, span),
@@ -1182,7 +1185,7 @@ fn build_two_phase_entries(
     let phase2_soac_term = soac_term(phase2_soac, elem_type.clone(), span);
     let r_sym = program.symbols.alloc("_par_out".into());
     let phase2_store = intrinsic_term(
-        "_w_intrinsic_storage_store",
+        INTRINSIC_STORAGE_STORE,
         vec![
             uint_lit(result_binding.0 as u64, span),
             uint_lit(result_binding.1 as u64, span),
@@ -1492,7 +1495,7 @@ impl ChunkArithmetic {
         let body = let_term(self.input_len_sym, ity.clone(), input_len_term, body, span);
         let body = let_term(self.total_sym, ity, total_lit, body, span);
 
-        let tid_rhs = intrinsic_term("_w_intrinsic_thread_id", vec![], u32_ty(), span, program);
+        let tid_rhs = intrinsic_term(INTRINSIC_THREAD_ID, vec![], u32_ty(), span, program);
         let_term(self.tid_sym, u32_ty(), tid_rhs, body, span)
     }
 }
@@ -1628,7 +1631,7 @@ fn invoke_soac_lambda(lambda: &Lambda, args: Vec<Term>, span: ast::Span) -> Term
 
 fn emit_storage_load(buf: &BufferRef, index: Term, span: ast::Span, program: &mut Program) -> Term {
     intrinsic_term(
-        "_w_intrinsic_storage_index",
+        INTRINSIC_STORAGE_INDEX,
         vec![
             uint_lit(buf.set as u64, span),
             uint_lit(buf.binding as u64, span),
@@ -1649,7 +1652,7 @@ fn emit_storage_store(
 ) -> Term {
     let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
     intrinsic_term(
-        "_w_intrinsic_storage_store",
+        INTRINSIC_STORAGE_STORE,
         vec![
             uint_lit(buf.set as u64, span),
             uint_lit(buf.binding as u64, span),
@@ -1664,7 +1667,7 @@ fn emit_storage_store(
 
 fn emit_storage_len(buf: &BufferRef, span: ast::Span, program: &mut Program) -> Term {
     intrinsic_term(
-        "_w_intrinsic_storage_len",
+        INTRINSIC_STORAGE_LEN,
         vec![uint_lit(buf.set as u64, span), uint_lit(buf.binding as u64, span)],
         u32_ty(),
         span,
@@ -2116,7 +2119,7 @@ fn build_chunked_soac_body(
         let tid_var = chunk.tid_u32(span);
         let r_var = var_term(r_sym, result_ty.clone(), span);
         let store = intrinsic_term(
-            "_w_intrinsic_storage_store",
+            INTRINSIC_STORAGE_STORE,
             vec![
                 uint_lit(set as u64, span),
                 uint_lit(binding as u64, span),

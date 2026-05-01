@@ -14,6 +14,7 @@ use smallvec::{SmallVec, smallvec};
 
 use super::types::EffectToken;
 use crate::ast::TypeName;
+use crate::intrinsics::{INTRINSIC_ARRAY_WITH_INPLACE, INTRINSIC_LENGTH, INTRINSIC_UNINIT};
 use crate::ssa::types::{ControlHeader, InstKind, ValueRef};
 use crate::types::TypeExt;
 use crate::types::{is_array_variant_composite, is_array_variant_view, is_virtual_array};
@@ -279,7 +280,7 @@ fn expand_one(
             let len_input = (input_nids[0], arr_tys[0].clone());
 
             let init_out_nid = graph.intern_pure(
-                PureOp::Call("_w_intrinsic_uninit".into()),
+                PureOp::Call(INTRINSIC_UNINIT.into()),
                 smallvec![],
                 out_arr_ty.clone(),
             );
@@ -773,7 +774,7 @@ fn build_scan_loop(
     // returning an array of the result type. The per-iteration array_with chain
     // fills it. (The SPIR-V backend recognizes the pattern for in-place update.)
     let init_out_nid = graph.intern_pure(
-        PureOp::Call("_w_intrinsic_uninit".into()),
+        PureOp::Call(INTRINSIC_UNINIT.into()),
         smallvec![],
         spec.out_arr_ty.clone(),
     );
@@ -1062,7 +1063,7 @@ fn emit_length(
         return emit_length(graph, first_arr, &components[0], i32_ty);
     }
     graph.intern_pure(
-        PureOp::Intrinsic("_w_intrinsic_length".into()),
+        PureOp::Intrinsic(INTRINSIC_LENGTH.into()),
         smallvec![arr_nid],
         i32_ty.clone(),
     )
@@ -1214,7 +1215,7 @@ fn emit_write_element(
     }
 
     graph.intern_pure(
-        PureOp::Call("_w_intrinsic_array_with_inplace".into()),
+        PureOp::Call(INTRINSIC_ARRAY_WITH_INPLACE.into()),
         smallvec![arr_nid, idx_nid, val_nid],
         arr_ty.clone(),
     )

@@ -10,6 +10,7 @@ mod ssa_lowering_tests;
 use crate::ast::{Span, TypeName};
 use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, Intrinsic, PrimOp};
+use crate::intrinsics::{INTRINSIC_ARRAY_WITH, INTRINSIC_ARRAY_WITH_INPLACE, INTRINSIC_UNINIT};
 use crate::lowering_common::ShaderStage;
 use crate::ssa::types::{ConstantValue, FuncBody, InstKind, ValueId, ValueRef, WynInstNode};
 use crate::ssa::types::{EntryPoint, ExecutionModel, Function, IoDecoration, Program};
@@ -1324,9 +1325,9 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             _ => return Ok(false),
         };
         let intr = match intrinsic_name {
-            "_w_intrinsic_uninit" => Intrinsic::Uninit,
-            "_w_intrinsic_array_with" => Intrinsic::ArrayWith,
-            "_w_intrinsic_array_with_inplace" => Intrinsic::ArrayWithInPlace,
+            INTRINSIC_UNINIT => Intrinsic::Uninit,
+            INTRINSIC_ARRAY_WITH => Intrinsic::ArrayWith,
+            INTRINSIC_ARRAY_WITH_INPLACE => Intrinsic::ArrayWithInPlace,
             _ => return Ok(false),
         };
         let result = inst.result.ok_or_else(|| {

@@ -16,6 +16,9 @@
 use super::{ArrayExpr, Def, Lambda, LoopKind, Place, Program, SoacOp, Term, TermIdSource, TermKind};
 use crate::SymbolTable;
 use crate::ast::{Span, TypeName};
+use crate::intrinsics::{
+    INTRINSIC_ARRAY_WITH, INTRINSIC_ARRAY_WITH_INPLACE, INTRINSIC_LENGTH, INTRINSIC_UNINIT,
+};
 use crate::types::TypeExt;
 use polytype::Type;
 
@@ -329,7 +332,7 @@ impl SoaTransformer {
                     }
 
                     // _w_intrinsic_array_with(arr, i, val) where arr was [n](A,B)
-                    "_w_intrinsic_array_with" | "_w_intrinsic_array_with_inplace" if args.len() == 3 => {
+                    INTRINSIC_ARRAY_WITH | INTRINSIC_ARRAY_WITH_INPLACE if args.len() == 3 => {
                         let arr_orig_ty = &args[0].ty;
                         if let Some(n) = is_array_of_tuple(arr_orig_ty) {
                             let (comp_tys, variant, size) = array_of_tuple_parts(arr_orig_ty).unwrap();
@@ -354,7 +357,7 @@ impl SoaTransformer {
                     }
 
                     // _w_intrinsic_uninit() where result was [n](A,B)
-                    "_w_intrinsic_uninit" if args.is_empty() => {
+                    INTRINSIC_UNINIT if args.is_empty() => {
                         if is_array_of_tuple(orig_result_ty).is_some() {
                             let soa_ty = soa_type(orig_result_ty);
                             return self.rewrite_uninit_aot(&soa_ty, *sym, span);
@@ -362,7 +365,7 @@ impl SoaTransformer {
                     }
 
                     // _w_intrinsic_length(arr) where arr was [n](A,B)
-                    "_w_intrinsic_length" if args.len() == 1 => {
+                    INTRINSIC_LENGTH if args.len() == 1 => {
                         let arr_orig_ty = &args[0].ty;
                         if is_array_of_tuple(arr_orig_ty).is_some() {
                             let new_arr = self.transform_term(&args[0]);
@@ -989,7 +992,7 @@ impl SoaTransformer {
         result_ty: Type<TypeName>,
         span: Span,
     ) -> Term {
-        let aw_sym = self.resolve_or_alloc("_w_intrinsic_array_with");
+        let aw_sym = self.resolve_or_alloc(INTRINSIC_ARRAY_WITH);
         let t3 = Type::Constructed(TypeName::Arrow, vec![val.ty.clone(), result_ty.clone()]);
         let t2 = Type::Constructed(TypeName::Arrow, vec![idx.ty.clone(), t3.clone()]);
         let t1 = Type::Constructed(TypeName::Arrow, vec![arr.ty.clone(), t2.clone()]);

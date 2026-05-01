@@ -18,6 +18,7 @@
 use crate::Compiler;
 use crate::ast::TypeName;
 use crate::egir::types::{ENode, PureOp};
+use crate::intrinsics::INTRINSIC_ARRAY_WITH_INPLACE;
 use polytype::Type;
 
 /// Compile source through the pipeline to just-past `expand_soacs`,
@@ -73,7 +74,7 @@ fn array_with_nodes(graph: &crate::egir::types::EGraph) -> Vec<crate::egir::type
             ENode::Pure {
                 op: PureOp::Call(name),
                 ..
-            } if name == "_w_intrinsic_array_with_inplace" => Some(id),
+            } if name == INTRINSIC_ARRAY_WITH_INPLACE => Some(id),
             _ => None,
         })
         .collect()

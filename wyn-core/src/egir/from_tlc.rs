@@ -10,6 +10,10 @@ use std::collections::{HashMap, HashSet};
 use super::types::EffectToken;
 use crate::ast::{Span, TypeName};
 use crate::interface;
+use crate::intrinsics::{
+    INTRINSIC_FILTER, INTRINSIC_LENGTH, INTRINSIC_STORAGE_INDEX, INTRINSIC_STORAGE_LEN,
+    INTRINSIC_STORAGE_STORE,
+};
 use crate::ssa::framework::BlockId;
 use crate::ssa::types::ViewSource;
 use crate::ssa::types::{ControlHeader, FuncBody, Function, InstKind, ValueRef};
@@ -704,7 +708,7 @@ impl<'a> Converter<'a> {
         let set_nid = self.intern_u32(set);
         let binding_nid = self.intern_u32(binding);
         let len_nid = self.intern_pure(
-            PureOp::Intrinsic("_w_intrinsic_storage_len".into()),
+            PureOp::Intrinsic(INTRINSIC_STORAGE_LEN.into()),
             smallvec![set_nid, binding_nid],
             u32_ty.clone(),
         );
@@ -1033,7 +1037,7 @@ impl<'a> Converter<'a> {
             // _w_intrinsic_storage_index(set_const, binding_const, index) → load
             // from a storage view. Emitted by buffer_specialize for functions
             // that index directly into a bound buffer.
-            "_w_intrinsic_storage_index" if args.len() == 3 => {
+            INTRINSIC_STORAGE_INDEX if args.len() == 3 => {
                 let set = match &args[0].kind {
                     TermKind::IntLit(s) => s.parse::<u32>().map_err(|_| {
                         ConvertError::GraphError("_w_intrinsic_storage_index: set not a u32".into())
@@ -1077,7 +1081,7 @@ impl<'a> Converter<'a> {
             // Store into storage_view(set, binding) at `index`. Emitted by
             // parallelize.rs for phase-entry output writes where index depends
             // on thread_id (and can't be expressed as a Map→MapInto).
-            "_w_intrinsic_storage_store" if args.len() == 4 => {
+            INTRINSIC_STORAGE_STORE if args.len() == 4 => {
                 let set = match &args[0].kind {
                     TermKind::IntLit(s) => s.parse::<u32>().map_err(|_| {
                         ConvertError::GraphError("_w_intrinsic_storage_store: set not a u32".into())
@@ -1468,7 +1472,7 @@ impl<'a> Converter<'a> {
 
         // Length intrinsic
         let len_nid = self.intern_pure(
-            PureOp::UnaryOp("_w_intrinsic_length".into()),
+            PureOp::UnaryOp(INTRINSIC_LENGTH.into()),
             smallvec![iter_nid],
             i32_ty.clone(),
         );
@@ -1743,7 +1747,7 @@ impl<'a> Converter<'a> {
         let effect_out = self.alloc_effect();
         self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
             kind: SideEffectKind::Inst(InstKind::Intrinsic {
-                name: "_w_intrinsic_filter".into(),
+                name: INTRINSIC_FILTER.into(),
                 args: dummy_vrefs,
             }),
             operand_nodes: operands,

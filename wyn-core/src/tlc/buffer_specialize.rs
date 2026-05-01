@@ -18,6 +18,9 @@ use super::{
 };
 use crate::ast::{self, Span, TypeName};
 use crate::interface;
+use crate::intrinsics::{
+    INTRINSIC_LENGTH, INTRINSIC_SLICE, INTRINSIC_STORAGE_INDEX, INTRINSIC_STORAGE_LEN,
+};
 use crate::types::TypeExt;
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
@@ -376,7 +379,7 @@ impl BufferSpecializer {
                                         span,
                                     );
                                     return self.make_app(
-                                        "_w_intrinsic_storage_index",
+                                        INTRINSIC_STORAGE_INDEX,
                                         vec![set_lit, binding_lit, idx],
                                         binding.elem_ty,
                                         span,
@@ -389,7 +392,7 @@ impl BufferSpecializer {
                         // param: rewrite to `_w_intrinsic_storage_len(set,
                         // binding)`, matching how the specialized-function
                         // path handles view lengths.
-                        if name == "_w_intrinsic_length" && args.len() == 1 {
+                        if name == INTRINSIC_LENGTH && args.len() == 1 {
                             if let TermKind::Var(data_sym) = &args[0].kind {
                                 if let Some(binding) = self.resolve_buffer(data_sym).cloned() {
                                     let span = term.span;
@@ -403,7 +406,7 @@ impl BufferSpecializer {
                                         span,
                                     );
                                     let storage_len = self.make_app(
-                                        "_w_intrinsic_storage_len",
+                                        INTRINSIC_STORAGE_LEN,
                                         vec![set_lit, binding_lit],
                                         u32_ty.clone(),
                                         span,
@@ -739,7 +742,7 @@ impl BufferSpecializer {
                 let set_lit = self.make_int_lit(&binding.set.to_string(), u32_ty.clone(), span);
                 let binding_lit = self.make_int_lit(&binding.binding.to_string(), u32_ty.clone(), span);
                 let storage_len = self.make_app(
-                    "_w_intrinsic_storage_len",
+                    INTRINSIC_STORAGE_LEN,
                     vec![set_lit, binding_lit],
                     u32_ty.clone(),
                     span,
@@ -885,7 +888,7 @@ impl BufferSpecializer {
                                     span,
                                 );
                                 return self.make_app(
-                                    "_w_intrinsic_storage_index",
+                                    INTRINSIC_STORAGE_INDEX,
                                     vec![set_lit, binding_lit, add_result],
                                     view.elem_ty,
                                     span,
@@ -894,7 +897,7 @@ impl BufferSpecializer {
                         }
 
                         // _w_intrinsic_length(arr_expr) where arr_expr resolves to a view
-                        if name == "_w_intrinsic_length" && args.len() == 1 {
+                        if name == INTRINSIC_LENGTH && args.len() == 1 {
                             if let Some(view) = self.try_resolve_view_expr(&args[0], view_params) {
                                 if view.len.ty == term.ty {
                                     return view.len;
@@ -1409,7 +1412,7 @@ impl BufferSpecializer {
                 // Check for _w_intrinsic_slice(expr, start, end)
                 if let TermKind::Var(sym) = &func.kind {
                     let name = self.symbols.get(*sym).cloned().unwrap_or_default();
-                    if name == "_w_intrinsic_slice" && args.len() == 3 {
+                    if name == INTRINSIC_SLICE && args.len() == 3 {
                         let parent = self.try_resolve_view_expr(&args[0], view_params)?;
                         let span = term.span;
                         let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);

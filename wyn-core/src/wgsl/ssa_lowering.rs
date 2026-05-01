@@ -18,6 +18,10 @@ use polytype::Type as PolyType;
 use crate::ast::{Span, TypeName};
 use crate::error::Result;
 use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
+use crate::intrinsics::{
+    INTRINSIC_ARRAY_WITH, INTRINSIC_ARRAY_WITH_INPLACE, INTRINSIC_LENGTH, INTRINSIC_SLICE,
+    INTRINSIC_STORAGE_LEN, INTRINSIC_THREAD_ID, INTRINSIC_UNINIT,
+};
 use crate::ssa::types::{
     EntryPoint, ExecutionModel, FuncBody, Function, InstKind, IoDecoration, Program, ValueId, ValueRef,
     ViewSource, WynInstNode,
@@ -1556,7 +1560,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         // uninitialized composite. In WGSL that's just a
                         // `var<function> x: T;` — no initializer, no
                         // function call.
-                        InstKind::Call { func, .. } if func == "_w_intrinsic_uninit" => {
+                        InstKind::Call { func, .. } if func == INTRINSIC_UNINIT => {
                             let result_id = inst.result.ok_or_else(|| {
                                 crate::err_wgsl_at!(
                                     self.blame_span(),
@@ -1583,8 +1587,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         // functional update. Declare a fresh `var` copy
                         // of the source, then patch the one element.
                         InstKind::Call { func, args }
-                            if func == "_w_intrinsic_array_with_inplace"
-                                || func == "_w_intrinsic_array_with" =>
+                            if func == INTRINSIC_ARRAY_WITH_INPLACE || func == INTRINSIC_ARRAY_WITH =>
                         {
                             if args.len() != 3 {
                                 return Err(crate::err_wgsl_at!(
@@ -1600,7 +1603,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             let result_id = inst.result.ok_or_else(|| {
                                 crate::err_wgsl_at!(self.blame_span(), "{} must have a result", func)
                             })?;
-                            if func == "_w_intrinsic_array_with_inplace" {
+                            if func == INTRINSIC_ARRAY_WITH_INPLACE {
                                 writeln!(
                                     output,
                                     "{}{}[{}] = {};",
@@ -2006,10 +2009,10 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 // SSA result type is always `u32` (see
                 // `parallelize::intrinsic_term(..., u32_ty)`), so no
                 // cast is needed.
-                if name == "_w_intrinsic_thread_id" && args.is_empty() {
+                if name == INTRINSIC_THREAD_ID && args.is_empty() {
                     return Ok("_wgsl_gid.x".to_string());
                 }
-                if name == "_w_intrinsic_storage_len" && args.len() == 2 {
+                if name == INTRINSIC_STORAGE_LEN && args.len() == 2 {
                     let set = self.resolve_const_u32(args[0]);
                     let binding = self.resolve_const_u32(args[1]);
                     match (set, binding) {
@@ -2039,7 +2042,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 // composite→composite (also a literal). Start/end are
                 // constants for the materialization cases; runtime
                 // start/end are allowed for view→view.
-                if name == "_w_intrinsic_slice" && args.len() == 3 {
+                if name == INTRINSIC_SLICE && args.len() == 3 {
                     let arr_id = args[0].as_ssa().ok_or_else(|| {
                         crate::err_wgsl_at!(
                             self.blame_span(),
@@ -2131,7 +2134,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         "_w_intrinsic_slice: unsupported slice shape (src not view, dst not composite)"
                     ));
                 }
-                if name == "_w_intrinsic_length" && args.len() == 1 {
+                if name == INTRINSIC_LENGTH && args.len() == 1 {
                     if let Some(id) = args[0].as_ssa() {
                         let ty = self.body.get_value_type(id);
                         // Virtual arrays carry their length in the `f2`
