@@ -271,6 +271,7 @@ pub fn build_span_table(program: &ast::Program) -> SpanTable {
 //       -> .partial_eval()                              -> TlcPartialEvaled
 //       -> .normalize_soacs()                             -> TlcSoaNormalized
 //       -> .fuse_maps()                                 -> TlcFused
+//       -> .apply_ownership()                           -> TlcOwnershipApplied
 //       -> .defunctionalize()                           -> TlcDefunctionalized
 //       -> .monomorphize()                              -> TlcMonomorphized
 //       -> .buffer_specialize()                         -> TlcBufferSpecialized
@@ -791,9 +792,9 @@ impl TlcTransformed {
     pub fn optimize_for_test(self, parallelize_compute: bool) -> TlcReachable {
         self.partial_eval()
             .normalize_soacs()
-            .promote_inplace()
-            .expect("promote_inplace")
             .fuse_maps()
+            .apply_ownership()
+            .expect("apply_ownership")
             .defunctionalize()
             .monomorphize()
             .buffer_specialize()
@@ -835,28 +836,6 @@ impl std::ops::Deref for TlcSoaNormalized {
 }
 
 impl TlcSoaNormalized {
-    /// Run the TLC ownership/liveness analysis. Reports use-after-move
-    /// errors and rewrites eligible `_w_intrinsic_array_with` calls to
-    /// `_w_intrinsic_array_with_inplace`.
-    pub fn promote_inplace(self) -> Result<TlcPromoted> {
-        let mut inner = self.0;
-        inner.tlc = tlc::ownership::promote_inplace(inner.tlc)?;
-        Ok(TlcPromoted(inner))
-    }
-}
-
-/// TLC after ownership-driven `array_with` promotion. All `with` calls
-/// have settled on either the functional or in-place intrinsic.
-pub struct TlcPromoted(pub TlcEarlyInner);
-
-impl std::ops::Deref for TlcPromoted {
-    type Target = TlcEarlyInner;
-    fn deref(&self) -> &TlcEarlyInner {
-        &self.0
-    }
-}
-
-impl TlcPromoted {
     /// Fuse consecutive SOAC operations to eliminate intermediate arrays.
     pub fn fuse_maps(self) -> TlcFused {
         let mut inner = self.0;
@@ -876,6 +855,31 @@ impl std::ops::Deref for TlcFused {
 }
 
 impl TlcFused {
+    /// Run the TLC ownership/liveness analysis on the post-fusion IR.
+    /// Reports use-after-move errors and applies ownership-driven
+    /// rewrites: `_w_intrinsic_array_with` → `_w_intrinsic_array_with_inplace`
+    /// where the source is mutable and dead-after, and (in subsequent
+    /// phases) consuming-input marking on eligible Map SOACs.
+    pub fn apply_ownership(self) -> Result<TlcOwnershipApplied> {
+        let mut inner = self.0;
+        inner.tlc = tlc::ownership::apply_ownership(inner.tlc)?;
+        Ok(TlcOwnershipApplied(inner))
+    }
+}
+
+/// TLC after ownership-driven rewrites. All `with` calls have
+/// settled on either the functional or in-place intrinsic; eligible
+/// SOACs (Phase C+) carry the consuming-input flag.
+pub struct TlcOwnershipApplied(pub TlcEarlyInner);
+
+impl std::ops::Deref for TlcOwnershipApplied {
+    type Target = TlcEarlyInner;
+    fn deref(&self) -> &TlcEarlyInner {
+        &self.0
+    }
+}
+
+impl TlcOwnershipApplied {
     /// Defunctionalize: lift lambdas and flatten SOAC closure captures.
     pub fn defunctionalize(self) -> TlcDefunctionalized {
         let TlcEarlyInner {

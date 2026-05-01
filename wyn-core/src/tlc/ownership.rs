@@ -956,7 +956,7 @@ fn sub(a: &LiveSet, b: &LiveSet) -> LiveSet {
 /// Returns an error if the analysis detects a use-after-move: a
 /// `*T` consumption at a program point where the consumed owner is
 /// still in `live_out`.
-pub fn promote_inplace(mut program: Program) -> crate::error::Result<Program> {
+pub fn apply_ownership(mut program: Program) -> crate::error::Result<Program> {
     let model = analyze(&program);
     if let Some(err) = check_use_after_move(&program, &model) {
         return Err(err);

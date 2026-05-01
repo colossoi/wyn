@@ -288,15 +288,15 @@ fn compile_file(
 
     let tlc_optimized = time("tlc_partial_eval", verbose, || tlc_transformed.partial_eval());
 
-    // SOA + SOAC normalize, then ownership-driven array_with promotion,
-    // then map fusion. Each is its own pipeline step so timing breaks
-    // down per pass in verbose mode.
+    // SOA + SOAC normalize, map fusion, then ownership-driven rewrites.
+    // Each is its own pipeline step so timing breaks down per pass in
+    // verbose mode.
     let tlc_normed = time("normalize_soacs", verbose, || tlc_optimized.normalize_soacs());
-    let tlc_promoted = time("promote_inplace", verbose, || tlc_normed.promote_inplace())?;
-    let tlc_fused = time("fuse_maps", verbose, || tlc_promoted.fuse_maps());
+    let tlc_fused = time("fuse_maps", verbose, || tlc_normed.fuse_maps());
+    let tlc_owned = time("apply_ownership", verbose, || tlc_fused.apply_ownership())?;
 
     // Defunctionalize: lift lambdas and flatten SOAC captures
-    let tlc_defunc = time("defunctionalize", verbose, || tlc_fused.defunctionalize());
+    let tlc_defunc = time("defunctionalize", verbose, || tlc_owned.defunctionalize());
 
     // Monomorphize polymorphic functions at TLC level
     let tlc_mono = time("tlc_monomorphize", verbose, || tlc_defunc.monomorphize());
