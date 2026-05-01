@@ -1294,3 +1294,132 @@ fn lambda_with_populated_captures_detects_capture_kill() {
         result,
     );
 }
+
+#[test]
+fn lambda_capture_term_is_analyzed_for_liveness() {
+    // The capture term itself is a sub-expression with its own
+    // TermId. Liveness must flow through it, otherwise reads/kills
+    // inside the capture term go unchecked. We assert this by
+    // building a program with a capture term and confirming
+    // `live_out` is populated for the capture term's id after
+    // `analyze`.
+    use crate::ast::{Span, TypeName};
+    use crate::tlc::{Def, DefMeta, Lambda, Term, TermIdSource, TermKind};
+    use polytype::Type;
+
+    let mut symbols = crate::SymbolTable::new();
+    let mut ids = TermIdSource::new();
+
+    let main_sym = symbols.alloc("main".to_string());
+    let outer_sym = symbols.alloc("outer".to_string());
+    let f_sym = symbols.alloc("f".to_string());
+    let cap_sym = symbols.alloc("cap".to_string());
+    let lambda_param_sym = symbols.alloc("_x".to_string());
+
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+    let arr_ty = Type::Constructed(TypeName::Array, vec![i32_ty.clone()]);
+    let lam_ty = Type::Constructed(TypeName::Arrow, vec![i32_ty.clone(), i32_ty.clone()]);
+
+    // Capture term: Var(outer)
+    let var_outer = Term {
+        id: ids.next_id(),
+        ty: arr_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::Var(outer_sym),
+    };
+    let capture_term_id = var_outer.id;
+
+    // Lambda body: just 0 (we don't care about the body for this test)
+    let body_zero = Term {
+        id: ids.next_id(),
+        ty: i32_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::IntLit("0".to_string()),
+    };
+
+    let lambda = Lambda {
+        params: vec![(lambda_param_sym, i32_ty.clone())],
+        body: Box::new(body_zero),
+        ret_ty: i32_ty.clone(),
+        captures: vec![(cap_sym, arr_ty.clone(), var_outer)],
+    };
+    let lambda_term = Term {
+        id: ids.next_id(),
+        ty: lam_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::Lambda(lambda),
+    };
+
+    // let f = lambda in 0
+    let zero_body = Term {
+        id: ids.next_id(),
+        ty: i32_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::IntLit("0".to_string()),
+    };
+    let inner_let = Term {
+        id: ids.next_id(),
+        ty: i32_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::Let {
+            name: f_sym,
+            name_ty: lam_ty.clone(),
+            rhs: Box::new(lambda_term),
+            body: Box::new(zero_body),
+        },
+    };
+
+    fn int_lit(ids: &mut TermIdSource, n: &str) -> Term {
+        Term {
+            id: ids.next_id(),
+            ty: Type::Constructed(TypeName::Int(32), vec![]),
+            span: Span::dummy(),
+            kind: TermKind::IntLit(n.to_string()),
+        }
+    }
+    let arr_lit = Term {
+        id: ids.next_id(),
+        ty: arr_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::ArrayExpr(crate::tlc::ArrayExpr::Literal(vec![
+            int_lit(&mut ids, "1"),
+            int_lit(&mut ids, "2"),
+            int_lit(&mut ids, "3"),
+            int_lit(&mut ids, "4"),
+        ])),
+    };
+    let outer_let = Term {
+        id: ids.next_id(),
+        ty: i32_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::Let {
+            name: outer_sym,
+            name_ty: arr_ty.clone(),
+            rhs: Box::new(arr_lit),
+            body: Box::new(inner_let),
+        },
+    };
+
+    let main_def = Def {
+        name: main_sym,
+        ty: i32_ty.clone(),
+        body: outer_let,
+        meta: DefMeta::Function,
+        arity: 0,
+    };
+
+    let program = Program {
+        defs: vec![main_def],
+        uniforms: vec![],
+        storage: vec![],
+        symbols,
+        def_syms: Default::default(),
+    };
+
+    let model = analyze(&program);
+    assert!(
+        model.live_out.contains_key(&capture_term_id),
+        "liveness should analyze capture terms — `live_out` for the \
+         capture term's id should be populated",
+    );
+}
