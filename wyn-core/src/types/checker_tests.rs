@@ -82,6 +82,35 @@ fn test_zip_arrays() {
 }
 
 #[test]
+fn weakening_unique_return_into_non_unique_declared() {
+    // step2 returns `*[4]i32`; main's declared return is `[4]i32`.
+    // Uniqueness can be discarded at the return boundary, so this
+    // should typecheck via one-directional `*T → T` weakening.
+    typecheck_program(
+        r#"
+def step1(x: *[4]i32) *[4]i32 = x with [0] = 1
+def step2(x: *[4]i32) *[4]i32 = x with [1] = 2
+
+def main(arr: *[4]i32) [4]i32 = step2(step1(arr))
+"#,
+    );
+}
+
+#[test]
+fn weakening_unique_into_non_unique_tuple_element() {
+    // (arr, x) has type (*[4]i32, i32) but main's declared return is
+    // ([4]i32, i32). The recursive strip in `unify_or_err_weakening`
+    // pushes the * removal down into the tuple, so this typechecks.
+    typecheck_program(
+        r#"
+def main(arr: *[4]i32) ([4]i32, i32) =
+    let x = arr[0] in
+    (arr, x)
+"#,
+    );
+}
+
+#[test]
 fn test_mul_concrete_matrix_types() {
     // This test verifies that polymorphic mul works with concrete matrix types
     typecheck_program(
