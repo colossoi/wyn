@@ -54,8 +54,7 @@ What you get "for free":
 | **Desugared** | `desugar` | Range/slice expressions desugared; SOAC names rewritten to intrinsics |
 | **Resolved** | `name_resolution` | Name resolution and module imports |
 | **AstConstFoldedEarly** | `ast_const_fold` | Compile-time integer constant folding |
-| **TypeChecked** | `types::checker` | Hindley-Milner type inference and checking |
-| **AliasChecked** | `alias_checker` | Use-after-move diagnostic (transient: ownership/liveness moving fully to `tlc::ownership`) |
+| **TypeChecked** | `types::checker` | Hindley-Milner type inference and checking, plus one-directional `*T → T` weakening at coercion sites (return position, let ascription) |
 
 ### TLC (Typed Lambda Calculus)
 | Stage | Module | Description |
@@ -63,6 +62,7 @@ What you get "for free":
 | **TlcTransformed** | `tlc::transform` | AST converted to minimal typed lambda calculus |
 | **TlcPartialEvaled** | `tlc::partial_eval` | Constant folding and algebraic simplifications |
 | **TlcSoaNormalized** | `tlc::soa` | SoA transform (`[n](A,B)` → `([n]A, [n]B)`) + Map+Zip flattening + standalone Zip elimination |
+| **TlcPromoted** | `tlc::ownership` | Backward ownership-liveness analysis with fixed-point over loops/SOAC bodies. Reports use-after-move; rewrites `_w_intrinsic_array_with` → `_w_intrinsic_array_with_inplace` where the source's owner is mutable and dead-after the call |
 | **TlcFused** | `tlc::fusion` | SOAC fusion: map-map, interprocedural producer-consumer |
 | **TlcDefunctionalized** | `tlc::defunctionalize` | Lambda lifting + SOAC capture flattening |
 | **TlcMonomorphized** | `tlc::specialize`, `tlc::monomorphize` | Polymorphic intrinsics specialized; user functions monomorphized |
