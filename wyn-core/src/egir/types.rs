@@ -196,24 +196,28 @@ pub enum SideEffectKind {
     Pending(PendingSoac),
 }
 
-/// Where a `Map`'s per-iteration result is written.
+/// Where an array-producing SOAC's per-iteration result is written.
+/// Applies to `Map` and `Scan`; `Reduce` returns a scalar and has no
+/// destination, `Redomap` has its own per-iteration handling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SoacDestination {
     /// Allocate a fresh output buffer, accumulate via the loop's
-    /// carried value, return the buffer. Operand layout:
-    /// `[input_0, ..., input_{n-1}, ...captures]`.
+    /// carried value, return the buffer. Operand layout (for Map):
+    /// `[input_0, ..., input_{n-1}, ...captures]`. For Scan:
+    /// `[input, init, ...captures]`.
     Fresh,
     /// Write to a separately-bound output view (compute-shader
-    /// ABI). Operand layout:
-    /// `[input_0, ..., input_{n-1}, ...captures, output_view]`.
+    /// ABI). The view is appended as the last operand. The SOAC's
+    /// own result is unit-valued (writes are effectful). Operand
+    /// layout (Map): `[input_0, ..., ...captures, output_view]`.
+    /// Operand layout (Scan): `[input, init, ...captures, output_view]`.
     OutputView,
     /// Mutate `inputs[0]` in place at each index, return the input
     /// buffer as the result. Set by the ownership pass when the
     /// input is dead-after, mutable, and the body is pointwise.
-    /// Operand layout:
-    /// `[input_0, ..., input_{n-1}, ...captures]` — same as
-    /// `Fresh`, but the result aliases `inputs[0]` instead of a
-    /// fresh allocation.
+    /// Operand layout matches `Fresh`; the difference is that the
+    /// result aliases `inputs[0]` instead of a fresh allocation.
+    /// Currently implemented for `Map` only.
     InputBuffer,
 }
 
@@ -241,19 +245,16 @@ pub enum PendingSoac {
         input_array_type: Type<TypeName>,
         input_elem_type: Type<TypeName>,
     },
-    /// `scan f init input` → composite output array.
-    /// Operands: `[input, init, ...captures]`.
+    /// `scan f init input` → output array. The `destination` picks
+    /// where the per-iteration accumulator is written:
+    /// `Fresh` → fresh allocation; `OutputView` → bound view
+    /// (compute-shader ABI; result is dummy/unit). Operand layout
+    /// depends on the destination — see `SoacDestination`.
     Scan {
         func: String,
         input_array_type: Type<TypeName>,
         input_elem_type: Type<TypeName>,
-    },
-    /// `scan_into f init input view` → writes to storage view (unit-valued).
-    /// Operands: `[input, init, ...captures, output_view]`.
-    ScanInto {
-        func: String,
-        input_array_type: Type<TypeName>,
-        input_elem_type: Type<TypeName>,
+        destination: SoacDestination,
     },
     /// Fused map+reduce: per iteration `acc = func(acc, x1, ..., xn, ...caps)`.
     /// Operands: `[input_0, ..., input_{n-1}, init, ...captures, ...reduce_captures]`.

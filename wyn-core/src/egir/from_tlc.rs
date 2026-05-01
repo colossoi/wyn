@@ -464,10 +464,11 @@ fn convert_entry_point(
     if is_unit_return {
         converter.set_return(None);
     } else if is_compute && !outputs.is_empty() {
-        // Map/Scan producing an array → rewrite to MapInto/ScanInto so the
-        // streaming writes land directly in the output view. Everything
-        // else (Reduce/Redomap returning a scalar or tuple, or a plain
-        // expression) → compute the value, then store it explicitly.
+        // Map/Scan producing an array → flip the destination to
+        // OutputView so the streaming writes land directly in the
+        // bound view. Everything else (Reduce/Redomap returning a
+        // scalar or tuple, or a plain expression) → compute the
+        // value, then store it explicitly.
         let soac_produces_array = result_soac_is_map_or_scan(&converter.graph, result_nid);
         if let (true, Some(output_view_nid)) = (soac_produces_array, compute_output_view) {
             rewrite_map_scan_to_into(&mut converter.graph, result_nid, output_view_nid);
@@ -499,9 +500,6 @@ fn convert_entry_point(
     ))
 }
 
-/// Rewrite a `Soac::Map` / `Soac::Scan` skeleton side-effect whose result is
-/// `target_result` into the corresponding `MapInto` / `ScanInto` variant
-/// writing to `output_view`.
 /// True iff the side-effect producing `result` is a Map or Scan SOAC —
 /// i.e. a SOAC that streams elements to an output array. Reduce/Redomap
 /// produce a scalar/tuple instead.
@@ -548,11 +546,13 @@ fn rewrite_map_scan_to_into(graph: &mut EGraph, target_result: NodeId, output_vi
                     func,
                     input_array_type,
                     input_elem_type,
+                    destination: _,
                 }) => {
-                    se.kind = SideEffectKind::Pending(PendingSoac::ScanInto {
+                    se.kind = SideEffectKind::Pending(PendingSoac::Scan {
                         func,
                         input_array_type,
                         input_elem_type,
+                        destination: SoacDestination::OutputView,
                     });
                     se.operand_nodes.push(output_view);
                 }
@@ -1721,6 +1721,7 @@ impl<'a> Converter<'a> {
                 func: op_name,
                 input_array_type: arr_ty,
                 input_elem_type: elem_ty,
+                destination: SoacDestination::Fresh,
             },
             operands,
             result_ty,
