@@ -1744,36 +1744,18 @@ impl<'a> TypeChecker<'a> {
                 .rev()
                 .fold(body_type.clone(), |acc, param_ty| function(param_ty, acc));
 
-            // Check against declared type if provided
+            // Check against declared type if provided. The body's
+            // inferred type may be `*T` while the declaration is `T` —
+            // uniqueness can be discarded at the return boundary, so
+            // weaken the actual side before unifying.
             if let Some(declared_type) = &decl.ty {
                 let normalized_return_type = self.normalize_annotation_type(declared_type, module_name);
-
-                // When a function has parameters, decl.ty is just the return type annotation
-                // Unify the body type with the declared return type
-                if !decl.params.is_empty() {
-                    self.context.unify(&body_type, &normalized_return_type).map_err(|e| {
-                        err_type_at!(
-                            decl.body.h.span,
-                            "Function return type mismatch for '{}': {}",
-                            decl.name,
-                            e
-                        )
-                    })?;
+                let ctx = if !decl.params.is_empty() {
+                    format!("Function return type mismatch for '{}'", decl.name)
                 } else {
-                    // For functions without parameters, ty should be the full type
-                    // But currently we're storing just the value type
-                    // Since func_type for parameterless functions is just the body type,
-                    // we can just check body_type against substituted declared_type
-                    self.context.unify(&body_type, &normalized_return_type).map_err(|_| {
-                        err_type_at!(
-                            decl.body.h.span,
-                            "Type mismatch for '{}': declared {}, inferred {}",
-                            decl.name,
-                            self.format_type(declared_type),
-                            self.format_type(&body_type)
-                        )
-                    })?;
-                }
+                    format!("Type mismatch for '{}'", decl.name)
+                };
+                self.unify_or_err_weakening(&body_type, &normalized_return_type, decl.body.h.span, &ctx)?;
             }
 
             // Entry points go through `Declaration::Entry`; `Decl` has
@@ -2128,14 +2110,12 @@ impl<'a> TypeChecker<'a> {
                     .as_ref()
                     .map(|ty| self.normalize_annotation_type(ty, self.current_module.as_deref()));
                 if let Some(declared_type) = &resolved_annotation {
-                    self.context.unify(&value_type, declared_type).map_err(|_| {
-                        err_type_at!(
-                            let_in.value.h.span,
-                            "Type mismatch in let binding: expected {}, got {}",
-                            self.format_type(declared_type),
-                            self.format_type(&value_type)
-                        )
-                    })?;
+                    self.unify_or_err_weakening(
+                        &value_type,
+                        declared_type,
+                        let_in.value.h.span,
+                        "Type mismatch in let binding",
+                    )?;
                 }
 
                 // Push new scope and bind pattern
@@ -2703,6 +2683,38 @@ impl<'a> TypeChecker<'a> {
                 self.format_type(&b.apply(&self.context))
             )
         })
+    }
+
+    /// One-directional `*T → T` weakening: unify `actual` with `expected`,
+    /// stripping `*` from `actual` only when `expected` is *not* unique.
+    /// Uniqueness is information that can be discarded but not
+    /// manufactured.
+    ///
+    ///   - expected `T`,  actual `*T`  → strip actual, unify (the weakening)
+    ///   - expected `*T`, actual `*T`  → no strip, unify directly
+    ///   - expected `T`,  actual `T`   → no strip, unify directly
+    ///   - expected `*T`, actual `T`   → no strip; unification fails
+    ///
+    /// Use this only at coercion sites where `expected` is a contract
+    /// and `actual` is a value being coerced to it. Symmetric
+    /// unifications (two branch results, two array elements unifying
+    /// to a common type) must use plain `unify_or_err` so neither
+    /// side silently loses uniqueness.
+    fn unify_or_err_weakening(
+        &mut self,
+        actual: &Type,
+        expected: &Type,
+        span: Span,
+        ctx: &str,
+    ) -> Result<()> {
+        let coerced_actual: Type;
+        let actual_to_unify = if super::is_unique(expected) {
+            actual
+        } else {
+            coerced_actual = super::strip_unique(actual);
+            &coerced_actual
+        };
+        self.unify_or_err(actual_to_unify, expected, span, ctx)
     }
 
     /// Destructure a `Mat` type into `(elem, cols, rows)`. None for non-Mat.
