@@ -196,18 +196,35 @@ pub enum SideEffectKind {
     Pending(PendingSoac),
 }
 
+/// Where a `Map`'s per-iteration result is written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SoacDestination {
+    /// Allocate a fresh output buffer, accumulate via the loop's
+    /// carried value, return the buffer. Operand layout:
+    /// `[input_0, ..., input_{n-1}, ...captures]`.
+    Fresh,
+    /// Write to a separately-bound output view (compute-shader
+    /// ABI). Operand layout:
+    /// `[input_0, ..., input_{n-1}, ...captures, output_view]`.
+    OutputView,
+}
+
 /// An unexpanded SOAC operation held in the skeleton until `soac_expand` rewrites
 /// it into an explicit loop. All operand NodeIds live in `SideEffect.operand_nodes`
 /// with a variant-specific layout (documented per-variant in `soac_expand`).
 #[derive(Clone, Debug)]
 pub enum PendingSoac {
-    /// `map f inputs` → composite output array.
-    /// Operands: `[input_0, ..., input_{n-1}, ...captures]`.
+    /// `map f inputs` → composite output array. The `destination`
+    /// kind picks where the per-iteration result is written:
+    /// allocate fresh or write to a bound output view (compute-
+    /// shader ABI). Operand layout depends on the destination —
+    /// see `SoacDestination`.
     Map {
         func: String,
         input_array_types: Vec<Type<TypeName>>,
         input_elem_types: Vec<Type<TypeName>>,
         output_elem_type: Type<TypeName>,
+        destination: SoacDestination,
     },
     /// `reduce f init input` → scalar accumulator.
     /// Operands: `[input, init, ...captures]`.
@@ -222,14 +239,6 @@ pub enum PendingSoac {
         func: String,
         input_array_type: Type<TypeName>,
         input_elem_type: Type<TypeName>,
-    },
-    /// `map_into f inputs view` → writes to storage view (unit-valued).
-    /// Operands: `[input_0, ..., input_{n-1}, ...captures, output_view]`.
-    MapInto {
-        func: String,
-        input_array_types: Vec<Type<TypeName>>,
-        input_elem_types: Vec<Type<TypeName>>,
-        output_elem_type: Type<TypeName>,
     },
     /// `scan_into f init input view` → writes to storage view (unit-valued).
     /// Operands: `[input, init, ...captures, output_view]`.

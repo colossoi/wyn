@@ -533,12 +533,14 @@ fn rewrite_map_scan_to_into(graph: &mut EGraph, target_result: NodeId, output_vi
                     input_array_types,
                     input_elem_types,
                     output_elem_type,
+                    destination: _,
                 }) => {
-                    se.kind = SideEffectKind::Pending(PendingSoac::MapInto {
+                    se.kind = SideEffectKind::Pending(PendingSoac::Map {
                         func,
                         input_array_types,
                         input_elem_types,
                         output_elem_type,
+                        destination: SoacDestination::OutputView,
                     });
                     se.operand_nodes.push(output_view);
                 }
@@ -1613,6 +1615,7 @@ impl<'a> Converter<'a> {
                 input_array_types: input_arr_types,
                 input_elem_types,
                 output_elem_type: output_elem_ty,
+                destination: SoacDestination::Fresh,
             },
             operands,
             result_ty,
