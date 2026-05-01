@@ -43,13 +43,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Compile a source file to SPIR-V or GLSL
+    /// Compile one or more source files to SPIR-V or GLSL
     Compile {
-        /// Input source file
-        #[arg(value_name = "FILE")]
-        input: PathBuf,
+        /// Input source file(s). When multiple files are given, each
+        /// is compiled in turn within a single process — useful for
+        /// batch compilation and profiling.
+        #[arg(value_name = "FILE", required = true)]
+        inputs: Vec<PathBuf>,
 
-        /// Output file (defaults to input name with .spv or .glsl extension)
+        /// Output file (only valid with a single input; multi-input
+        /// runs auto-derive each output's name from its input).
         #[arg(short, long, value_name = "FILE")]
         output: Option<PathBuf>,
 
@@ -143,7 +146,7 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<(), DriverError> {
     match cli.command {
         Commands::Compile {
-            input,
+            inputs,
             output,
             target,
             output_tlc,
@@ -152,16 +155,53 @@ fn run(cli: Cli) -> Result<(), DriverError> {
             fill_holes,
             verbose,
         } => {
-            compile_file(
-                input,
-                output,
-                target,
-                output_tlc,
-                output_mir,
-                single_stage,
-                fill_holes,
-                verbose,
-            )?;
+            // Output handling for multi-input:
+            //   omitted     → each output written next to its input
+            //   directory   → DIR/<input-stem>.<ext> per file
+            //   regular file → only valid with a single input
+            let out_dir: Option<PathBuf> = match (inputs.len(), &output) {
+                (n, Some(p)) if n > 1 => {
+                    if p.is_dir() {
+                        Some(p.clone())
+                    } else {
+                        eprintln!(
+                            "error: --output must be an existing directory when compiling multiple files (got {})",
+                            p.display()
+                        );
+                        std::process::exit(1);
+                    }
+                }
+                _ => None,
+            };
+            for (i, input) in inputs.iter().enumerate() {
+                let per_output = match (inputs.len(), &out_dir, &output) {
+                    (1, _, opt) => opt.clone(),
+                    (_, Some(dir), _) => {
+                        let stem =
+                            input.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
+                        let ext = match target {
+                            Target::Spirv => "spv",
+                            Target::Glsl | Target::Shadertoy => "glsl",
+                            Target::Wgsl => "wgsl",
+                        };
+                        Some(dir.join(format!("{stem}.{ext}")))
+                    }
+                    _ => None,
+                };
+                if verbose && inputs.len() > 1 {
+                    eprintln!("[{}/{}] {}", i + 1, inputs.len(), input.display());
+                }
+                compile_file(
+                    input.clone(),
+                    per_output,
+                    target,
+                    output_tlc.clone(),
+                    output_mir.clone(),
+                    single_stage,
+                    fill_holes,
+                    verbose,
+                )?;
+            }
         }
         Commands::Check { input, verbose } => {
             check_file(input, verbose)?;
