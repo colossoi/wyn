@@ -594,6 +594,37 @@ def main(arr: *[4]i32) i32 =
 }
 
 #[test]
+fn self_aliasing_in_unique_args() {
+    // Passing the same backing store to two `*T` parameters in the
+    // same call consumes it twice. Sound treatment is to reject.
+    let source = r#"
+def both(a: *[4]i32, b: *[4]i32) i32 = a[0] + b[0]
+def main(arr: *[4]i32) i32 = both(arr, arr)
+"#;
+    assert!(
+        has_use_after_move(source),
+        "passing arr to two `*T` params in one call should be rejected"
+    );
+}
+
+#[test]
+fn lambda_kill_of_capture() {
+    // Lambdas may be invoked any number of times. A body that kills
+    // a captured store turns one consumption into N. Sound treatment
+    // is to reject any kill of a capture.
+    let source = r#"
+def consume(arr: *[4]i32) i32 = arr[0]
+def main(arr: *[4]i32) i32 =
+    let f = |x: i32| consume(arr) in
+    f(0) + f(1)
+"#;
+    assert!(
+        has_use_after_move(source),
+        "a lambda body that consumes a capture should be rejected"
+    );
+}
+
+#[test]
 fn use_after_move_consume_alias_use_original() {
     let source = r#"
 def consume(arr: *[4]i32) i32 = arr[0]
@@ -758,4 +789,83 @@ def main(i: i32, j: i32) i32 =
     );
     let (_, origin) = binder_origin(&program, "main", "arr");
     assert_eq!(origin, Origin::Fresh);
+}
+
+#[test]
+fn map_element_param_mutable_when_input_unique() {
+    // Symmetric to the gap test: map over a `*` 2D array. The
+    // element view aliases mutable memory the caller surrendered, so
+    // the element param is itself mutable — preserves promotion of
+    // an inner `with` inside the body for in-place SOACs.
+    //
+    // The declared return is `[3][4]i32`, not `*[3][4]i32`, because
+    // map's polymorphic signature currently strips `*` at the
+    // parameter site, so `map(|row| row, *arr)` infers a non-unique
+    // result. Once DPS codegen for in-place SOACs preserves `*` on
+    // the output (or the type checker grows uniqueness inference
+    // through SOACs), the return type here can become `*[3][4]i32`.
+    let program = compile_to_tlc(
+        r#"
+def main(arr: *[3][4]i32) [3][4]i32 = map(|row| row, arr)
+"#,
+    );
+    let model = build(&program);
+    let main_def = find_def(&program, "main");
+    fn first_map_elem_param(t: &Term) -> Option<crate::SymbolId> {
+        if let TermKind::Soac(crate::tlc::SoacOp::Map { lam, .. }) = &t.kind {
+            return Some(lam.params[0].0);
+        }
+        let mut found = None;
+        t.for_each_child(&mut |child| {
+            if found.is_none() {
+                found = first_map_elem_param(child);
+            }
+        });
+        found
+    }
+    let row_sym = first_map_elem_param(&main_def.body).expect("expected a Map SOAC");
+    let row_owner = model.owner_of(row_sym).expect("row should have an owner");
+    let row_origin = model.origin(row_owner).expect("origin");
+    assert!(
+        row_origin.is_mutable(),
+        "map's element param over `*` input should be mutable; got {:?}",
+        row_origin,
+    );
+}
+
+#[test]
+fn map_element_param_inherits_input_mutability() {
+    // Map over a non-unique 2D array. The element param `row` IS
+    // a slot in the caller's `arr` — mutating it would clobber the
+    // caller's data. Element-param origin must reflect arr's
+    // non-mutability (Borrowed), not bare Fresh.
+    let program = compile_to_tlc(
+        r#"
+def main(arr: [3][4]i32) [3][4]i32 = map(|row| row, arr)
+"#,
+    );
+    let model = build(&program);
+    let main_def = find_def(&program, "main");
+    // Walk main's body looking for a Soac::Map and inspect its
+    // first lambda param's owner.
+    fn first_map_elem_param(t: &Term) -> Option<crate::SymbolId> {
+        if let TermKind::Soac(crate::tlc::SoacOp::Map { lam, .. }) = &t.kind {
+            return Some(lam.params[0].0);
+        }
+        let mut found = None;
+        t.for_each_child(&mut |child| {
+            if found.is_none() {
+                found = first_map_elem_param(child);
+            }
+        });
+        found
+    }
+    let row_sym = first_map_elem_param(&main_def.body).expect("expected a Map SOAC in main's body");
+    let row_owner = model.owner_of(row_sym).expect("row should have an owner");
+    let row_origin = model.origin(row_owner).expect("row owner should have an origin");
+    assert!(
+        !row_origin.is_mutable(),
+        "map's element param over non-unique input should be immutable; got {:?}",
+        row_origin,
+    );
 }

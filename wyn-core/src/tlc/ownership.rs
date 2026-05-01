@@ -109,6 +109,12 @@ pub struct OwnershipModel {
     pub defs: HashMap<TermId, HashSet<OwnerId>>,
     /// Per-term: live-out set. Empty until liveness runs.
     pub live_out: HashMap<TermId, HashSet<OwnerId>>,
+    /// Diagnostics detected during the build walk that don't fall
+    /// out of the standard `kills ∩ live_out` check. Currently
+    /// intra-call duplicate consumption (`f(arr, arr)` to two `*T`
+    /// params). Stored as (message, span) so we don't need
+    /// `CompilerError: Clone`; the check function reconstructs.
+    pub build_errors: Vec<(String, Option<Span>)>,
 }
 
 impl OwnershipModel {
@@ -244,10 +250,29 @@ impl<'p> Builder<'p> {
             TermKind::App { func, args } => {
                 self.visit_term(func);
                 let param_tys = collect_param_types(&func.ty, args.len());
+                let mut killed_this_call: HashSet<OwnerId> = HashSet::new();
                 for (arg, param_ty) in args.iter().zip(&param_tys) {
                     self.visit_term(arg);
                     if types::is_unique(param_ty) {
                         if let Some(owner) = self.alias_target(arg) {
+                            // A second `*T` arg resolving to the same
+                            // owner consumes a store the prior arg
+                            // already moved — use-after-move within
+                            // this call. Record at the offending
+                            // arg's term so the diagnostic span
+                            // points at the second occurrence.
+                            if !killed_this_call.insert(owner) {
+                                let var_name = self
+                                    .model
+                                    .owner_to_var
+                                    .get(&owner)
+                                    .and_then(|s| self.program.symbols.get(*s).cloned())
+                                    .unwrap_or_else(|| "<value>".to_string());
+                                let span = self.model.term_spans.get(&arg.id).copied();
+                                self.model
+                                    .build_errors
+                                    .push((format!("use of moved value `{}`", var_name), span));
+                            }
                             self.model.kills.entry(term.id).or_default().insert(owner);
                         }
                     }
@@ -332,45 +357,73 @@ impl<'p> Builder<'p> {
         }
     }
 
-    /// Bind every non-copy lambda param to a fresh per-call owner,
-    /// then visit the body. Captures' carrier terms are visited so
-    /// they record uses on the closure value's parent scope.
+    /// Free-standing lambda binding: without a SOAC context to tie
+    /// param mutability to a specific input, every non-copy param
+    /// defaults to `Borrowed`. Sound under-approximation — a
+    /// free-standing lambda might be called with caller-owned data,
+    /// so the body must not mutate its params in place.
     fn visit_lambda(&mut self, lam: &Lambda) {
         for (sym, ty) in &lam.params {
             if !types::is_copy(ty) {
-                let owner = self.fresh_owner(Origin::Fresh);
+                let owner = self.fresh_owner(Origin::Borrowed);
                 self.bind(*sym, owner);
             }
         }
+        self.visit_lambda_body(lam);
+    }
+
+    /// Visit a lambda's captures + body. Used by both `visit_lambda`
+    /// (after defaulting param origins to `Borrowed`) and the SOAC
+    /// arms (after binding params with input-derived origins).
+    fn visit_lambda_body(&mut self, lam: &Lambda) {
         for (_, _, capture_term) in &lam.captures {
             self.visit_term(capture_term);
         }
         self.visit_term(&lam.body);
     }
 
-    /// SOACs: each input array contributes uses; each lambda's element
-    /// param gets a fresh per-iteration owner.
+    /// SOACs: each input array contributes uses; element params
+    /// inherit mutability from their matched input (Map/Redomap), or
+    /// from the single input (Reduce/Scan/Filter/ReduceByIndex).
+    /// Accumulator params (Reduce/Scan/Redomap) are the body's
+    /// per-iteration output — Fresh.
     fn visit_soac(&mut self, op: &SoacOp) {
         match op {
             SoacOp::Map { lam, inputs } => {
                 for ae in inputs {
                     self.visit_array_expr(ae);
                 }
-                self.visit_lambda(lam);
+                for ((sym, ty), input) in lam.params.iter().zip(inputs.iter()) {
+                    if !types::is_copy(ty) {
+                        let origin = self.element_origin_from_input(input);
+                        let owner = self.fresh_owner(origin);
+                        self.bind(*sym, owner);
+                    }
+                }
+                self.visit_lambda_body(lam);
             }
             SoacOp::Reduce { op, ne, input, .. } => {
                 self.visit_term(ne);
                 self.visit_array_expr(input);
-                self.visit_lambda(op);
+                self.bind_reducer_params(op, input);
+                self.visit_lambda_body(op);
             }
             SoacOp::Scan { op, ne, input } => {
                 self.visit_term(ne);
                 self.visit_array_expr(input);
-                self.visit_lambda(op);
+                self.bind_reducer_params(op, input);
+                self.visit_lambda_body(op);
             }
             SoacOp::Filter { pred, input } => {
                 self.visit_array_expr(input);
-                self.visit_lambda(pred);
+                if let Some((sym, ty)) = pred.params.first() {
+                    if !types::is_copy(ty) {
+                        let origin = self.element_origin_from_input(input);
+                        let owner = self.fresh_owner(origin);
+                        self.bind(*sym, owner);
+                    }
+                }
+                self.visit_lambda_body(pred);
             }
             SoacOp::Scatter { indices, values, .. } => {
                 self.visit_array_expr(indices);
@@ -386,7 +439,8 @@ impl<'p> Builder<'p> {
                 self.visit_term(ne);
                 self.visit_array_expr(indices);
                 self.visit_array_expr(values);
-                self.visit_lambda(op);
+                self.bind_reducer_params(op, values);
+                self.visit_lambda_body(op);
             }
             SoacOp::Redomap {
                 op,
@@ -399,9 +453,83 @@ impl<'p> Builder<'p> {
                 for ae in inputs {
                     self.visit_array_expr(ae);
                 }
-                self.visit_lambda(op);
-                self.visit_lambda(reduce_op);
+                // op has shape (acc, x1, ..., xN). Bind acc as Fresh,
+                // each xi from inputs[i].
+                if let Some(((acc_sym, acc_ty), elem_params)) = op.params.split_first() {
+                    if !types::is_copy(acc_ty) {
+                        let owner = self.fresh_owner(Origin::Fresh);
+                        self.bind(*acc_sym, owner);
+                    }
+                    for ((sym, ty), input) in elem_params.iter().zip(inputs.iter()) {
+                        if !types::is_copy(ty) {
+                            let origin = self.element_origin_from_input(input);
+                            let owner = self.fresh_owner(origin);
+                            self.bind(*sym, owner);
+                        }
+                    }
+                }
+                self.visit_lambda_body(op);
+                // reduce_op is the parallel-phase combiner: (acc, acc) → acc.
+                // Both params are accumulator-typed; Fresh per call.
+                for (sym, ty) in &reduce_op.params {
+                    if !types::is_copy(ty) {
+                        let owner = self.fresh_owner(Origin::Fresh);
+                        self.bind(*sym, owner);
+                    }
+                }
+                self.visit_lambda_body(reduce_op);
             }
+        }
+    }
+
+    /// Bind a reducer lambda's two params: (acc, elem). `acc` is the
+    /// body's per-iteration output (Fresh). `elem` inherits
+    /// mutability from the input.
+    fn bind_reducer_params(&mut self, op: &Lambda, input: &ArrayExpr) {
+        let mut params = op.params.iter();
+        if let Some((sym, ty)) = params.next() {
+            if !types::is_copy(ty) {
+                let owner = self.fresh_owner(Origin::Fresh);
+                self.bind(*sym, owner);
+            }
+        }
+        if let Some((sym, ty)) = params.next() {
+            if !types::is_copy(ty) {
+                let origin = self.element_origin_from_input(input);
+                let owner = self.fresh_owner(origin);
+                self.bind(*sym, owner);
+            }
+        }
+    }
+
+    /// Decide the origin to give a SOAC element param given the
+    /// input ArrayExpr it iterates over. Mutable inputs
+    /// (Fresh-allocated arrays, `*T`-typed array refs) yield mutable
+    /// element views; everything else borrows.
+    fn element_origin_from_input(&self, ae: &ArrayExpr) -> Origin {
+        match ae {
+            ArrayExpr::Ref(t) => {
+                if let Some(owner) = self.alias_target(t) {
+                    if self.model.origin(owner).map(|o| o.is_mutable()).unwrap_or(false) {
+                        return Origin::Fresh;
+                    }
+                    return Origin::Borrowed;
+                }
+                // No tracked owner — fall back to the term's static type.
+                if types::is_unique(&t.ty) { Origin::Fresh } else { Origin::Borrowed }
+            }
+            // Fresh-producer ArrayExprs: literal/generate/range/soac
+            // synthesize a new array, so element views are mutable.
+            ArrayExpr::Literal(_)
+            | ArrayExpr::Generate { .. }
+            | ArrayExpr::Range { .. }
+            | ArrayExpr::Soac(_) => Origin::Fresh,
+            // Storage-buffer-backed views: conservative borrow.
+            ArrayExpr::StorageBuffer { .. } => Origin::Borrowed,
+            // Zip is a phase-scoped sentinel that should be absorbed
+            // by `tlc::soa::run` before we get here. If one survives,
+            // be conservative.
+            ArrayExpr::Zip(_) => Origin::Borrowed,
         }
     }
 
@@ -564,7 +692,18 @@ impl<'m> Liveness<'m> {
         // body's perspective, no owners need to outlive the return.
         // Uses of the returned value are recorded at the body's leaf
         // Var(s), which is enough for promotion checks within the body.
-        self.analyze(&def.body, LiveSet::new());
+        //
+        // Walk the Lambda's inner body directly — bypassing
+        // `analyze_lambda` and its fixed-point. A top-level Def is
+        // not a stored lambda value: each call gets fresh args, so
+        // captures-across-invocations doesn't apply at this level.
+        // Nested lambdas (let-bound, returned, etc.) still go through
+        // `analyze_lambda` and pick up the fixed-point.
+        let body = match &def.body.kind {
+            TermKind::Lambda(lam) => &*lam.body,
+            _ => &def.body,
+        };
+        self.analyze(body, LiveSet::new());
     }
 
     /// Analyze a term in reverse: given the live-out set, return the
@@ -655,21 +794,15 @@ impl<'m> Liveness<'m> {
         }
     }
 
-    /// A lambda value carries its captures: any owner referenced in the
-    /// body that isn't bound by the body itself is live at the lambda
-    /// creation site. We compute this by analyzing the body with
-    /// `live_after = ∅`; the result is the body's live_in, which (after
-    /// removing locally-bound owners — in practice fresh per-iteration
-    /// params recorded under `defs`) gives the captures. The lambda's
-    /// own term contributes those captures to its parent's live_in.
+    /// A lambda value can be invoked any number of times after
+    /// creation, so the body must be analyzed as if it could iterate.
+    /// Reuse the SOAC-body fixed-point: captures stay live across
+    /// hypothetical re-invocations, and a body that kills a capture
+    /// is detected because the kill conflicts with the still-live
+    /// owner. The result feeds into the parent's live_in at the
+    /// lambda creation site.
     fn analyze_lambda(&mut self, lam: &Lambda, live_after: LiveSet) -> LiveSet {
-        let live_in_body = self.analyze(&lam.body, LiveSet::new());
-        // The body's live_in includes any owner the body references.
-        // Locally-bound owners (lambda params) are tracked under their
-        // own ids; they don't appear in live_in_body if no Var leaf
-        // outside the body's scope references them — and Var leaves
-        // *inside* the body use the locally-bound symbols. Treat the
-        // result as captures-needed.
+        let live_in_body = self.lambda_body_fixed_point(lam);
         union(&live_after, &live_in_body)
     }
 
@@ -879,6 +1012,9 @@ pub fn check(program: &Program) -> crate::error::Result<()> {
 /// compile is consistent with how the rest of the pipeline reports).
 fn check_use_after_move(program: &Program, model: &OwnershipModel) -> Option<crate::error::CompilerError> {
     use crate::error::CompilerError;
+    if let Some((msg, span)) = model.build_errors.first() {
+        return Some(CompilerError::AliasError(msg.clone(), *span));
+    }
     let mut violations: Vec<(TermId, OwnerId)> = model
         .kills
         .iter()
