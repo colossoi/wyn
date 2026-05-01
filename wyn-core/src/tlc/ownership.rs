@@ -375,9 +375,26 @@ impl<'p> Builder<'p> {
     /// Visit a lambda's captures + body. Used by both `visit_lambda`
     /// (after defaulting param origins to `Borrowed`) and the SOAC
     /// arms (after binding params with input-derived origins).
+    ///
+    /// Captures pre-defunctionalization are empty — the body
+    /// references outer SymbolIds directly and the existing scope
+    /// resolves them. Post-defunc, each capture has its own
+    /// `(capture_sym, ty, capture_term)`: the body is rewritten to
+    /// reference `capture_sym`, which we must bind here so its
+    /// reads/kills connect back to the outer owner. Without this,
+    /// a body that consumes a captured store would record no kill
+    /// (the capture-local sym is not in `var_to_owner`) and the
+    /// analysis would silently approve a use-after-move.
     fn visit_lambda_body(&mut self, lam: &Lambda) {
-        for (_, _, capture_term) in &lam.captures {
+        for (capture_sym, capture_ty, capture_term) in &lam.captures {
             self.visit_term(capture_term);
+            if !types::is_copy(capture_ty) {
+                let owner = match self.alias_target(capture_term) {
+                    Some(target) => target,
+                    None => self.fresh_owner(self.origin_for_unaliased(capture_term)),
+                };
+                self.bind(*capture_sym, owner);
+            }
         }
         self.visit_term(&lam.body);
     }
