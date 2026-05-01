@@ -1451,3 +1451,217 @@ def main(rows: *[3][4]i32) [3]i32 = map(|row: [4]i32| consume(row), rows)
          analysis should accept",
     );
 }
+
+// =============================================================================
+// `_w_intrinsic_array_with` promotion threads through aliasing intrinsics
+// =============================================================================
+
+/// Synthesize a TLC program shaped like:
+///
+/// ```text
+/// def f(grid: *[2][4]i32) [4]i32 =
+///     _w_intrinsic_array_with(_w_index(grid, 0), 0, 99)
+/// ```
+///
+/// The functional `_w_intrinsic_array_with`'s source-arg is *not* a
+/// plain `Var(sym)` — it's an aliasing intrinsic application
+/// (`_w_index(grid, 0)`). The build pass's `alias_target` recognizes
+/// `_w_index` and threads through it to grid's owner. Promotion at
+/// the with-call must do the same query if it is to remain consistent
+/// with the rest of the model: the underlying owner is `grid`, which
+/// is `UniqueParam` (mutable), and it's dead after the call (the
+/// function returns the with's result). So the call should rewrite
+/// to `_w_intrinsic_array_with_inplace`.
+fn synth_program_with_with_through_index() -> Program {
+    use crate::ast::{Span, TypeName};
+    use crate::tlc::{Def, DefMeta, Lambda, Term, TermIdSource, TermKind};
+    use polytype::Type;
+
+    let mut symbols = crate::SymbolTable::new();
+    let mut def_syms = std::collections::HashMap::new();
+    let mut ids = TermIdSource::new();
+
+    // Top-level symbols
+    let f_sym = symbols.alloc("f".to_string());
+    def_syms.insert("f".to_string(), f_sym);
+    let with_sym = symbols.alloc(crate::intrinsics::ARRAY_WITH.to_string());
+    def_syms.insert(crate::intrinsics::ARRAY_WITH.to_string(), with_sym);
+    let index_sym = symbols.alloc("_w_index".to_string());
+    def_syms.insert("_w_index".to_string(), index_sym);
+
+    // Local symbols
+    let grid_sym = symbols.alloc("grid".to_string());
+
+    // Types
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+    let inner_arr_ty = Type::Constructed(TypeName::Array, vec![i32_ty.clone()]);
+    let outer_arr_ty = Type::Constructed(TypeName::Array, vec![inner_arr_ty.clone()]);
+    let unique_outer_ty = Type::Constructed(TypeName::Unique, vec![outer_arr_ty.clone()]);
+
+    // _w_index : *[2][4]i32 -> i32 -> [4]i32
+    let index_fn_ty = Type::Constructed(
+        TypeName::Arrow,
+        vec![
+            unique_outer_ty.clone(),
+            Type::Constructed(TypeName::Arrow, vec![i32_ty.clone(), inner_arr_ty.clone()]),
+        ],
+    );
+    // _w_intrinsic_array_with : [4]i32 -> i32 -> i32 -> [4]i32
+    let with_fn_ty = Type::Constructed(
+        TypeName::Arrow,
+        vec![
+            inner_arr_ty.clone(),
+            Type::Constructed(
+                TypeName::Arrow,
+                vec![
+                    i32_ty.clone(),
+                    Type::Constructed(TypeName::Arrow, vec![i32_ty.clone(), inner_arr_ty.clone()]),
+                ],
+            ),
+        ],
+    );
+
+    // _w_index(grid, 0)
+    let var_index = Term {
+        id: ids.next_id(),
+        ty: index_fn_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::Var(index_sym),
+    };
+    let var_grid = Term {
+        id: ids.next_id(),
+        ty: unique_outer_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::Var(grid_sym),
+    };
+    let zero_idx = Term {
+        id: ids.next_id(),
+        ty: i32_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::IntLit("0".to_string()),
+    };
+    let index_call = Term {
+        id: ids.next_id(),
+        ty: inner_arr_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::App {
+            func: Box::new(var_index),
+            args: vec![var_grid, zero_idx],
+        },
+    };
+
+    // _w_intrinsic_array_with(index_call, 0, 99)
+    let var_with = Term {
+        id: ids.next_id(),
+        ty: with_fn_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::Var(with_sym),
+    };
+    let zero_with_idx = Term {
+        id: ids.next_id(),
+        ty: i32_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::IntLit("0".to_string()),
+    };
+    let val_99 = Term {
+        id: ids.next_id(),
+        ty: i32_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::IntLit("99".to_string()),
+    };
+    let with_call = Term {
+        id: ids.next_id(),
+        ty: inner_arr_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::App {
+            func: Box::new(var_with),
+            args: vec![index_call, zero_with_idx, val_99],
+        },
+    };
+
+    // Lambda(grid: *[2][4]i32) -> [4]i32 = with_call
+    let lambda = Lambda {
+        params: vec![(grid_sym, unique_outer_ty.clone())],
+        body: Box::new(with_call),
+        ret_ty: inner_arr_ty.clone(),
+        captures: vec![],
+    };
+    let f_ty = Type::Constructed(
+        TypeName::Arrow,
+        vec![unique_outer_ty.clone(), inner_arr_ty.clone()],
+    );
+    let lambda_term = Term {
+        id: ids.next_id(),
+        ty: f_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::Lambda(lambda),
+    };
+    let f_def = Def {
+        name: f_sym,
+        ty: f_ty,
+        body: lambda_term,
+        meta: DefMeta::Function,
+        arity: 1,
+    };
+
+    Program {
+        defs: vec![f_def],
+        uniforms: vec![],
+        storage: vec![],
+        symbols,
+        def_syms,
+    }
+}
+
+#[test]
+fn array_with_promotes_when_source_is_aliasing_intrinsic() {
+    // Pre-rewrite: the body's outer App is `_w_intrinsic_array_with(...)`.
+    // Post-rewrite: `apply_ownership` should rewrite the func var to
+    // `_w_intrinsic_array_with_inplace` because the source's underlying
+    // owner (grid) is mutable and dead-after.
+    let program = synth_program_with_with_through_index();
+
+    // Sanity: pre-rewrite uses the functional form.
+    let pre_func_name = {
+        let f_def = find_def(&program, "f");
+        let lam = match &f_def.body.kind {
+            TermKind::Lambda(l) => l,
+            _ => panic!("f's body is not a lambda"),
+        };
+        let TermKind::App { func, .. } = &lam.body.kind else {
+            panic!("expected lambda body to be an App");
+        };
+        let TermKind::Var(s) = &func.kind else {
+            panic!("expected App's func to be a Var");
+        };
+        program.symbols.get(*s).cloned().unwrap_or_default()
+    };
+    assert_eq!(
+        pre_func_name,
+        crate::intrinsics::ARRAY_WITH,
+        "test setup: outer App must call the functional with intrinsic"
+    );
+
+    let rewritten = super::apply_ownership(program).expect("apply_ownership");
+    let f_def = find_def(&rewritten, "f");
+    let lam = match &f_def.body.kind {
+        TermKind::Lambda(l) => l,
+        _ => panic!("f's body is not a lambda"),
+    };
+    let TermKind::App { func, .. } = &lam.body.kind else {
+        panic!("expected lambda body to be an App after rewrite");
+    };
+    let TermKind::Var(s) = &func.kind else {
+        panic!("expected rewritten App's func to be a Var");
+    };
+    let post_func_name = rewritten.symbols.get(*s).cloned().unwrap_or_default();
+    assert_eq!(
+        post_func_name,
+        crate::intrinsics::ARRAY_WITH_INPLACE,
+        "promotion must thread through `_w_index` to grid's owner — \
+         source-arg is `_w_index(grid, 0)`, which aliases grid \
+         (UniqueParam, dead-after); is_promotable should follow \
+         alias_target and rewrite, not bail because the source arg \
+         isn't a bare Var",
+    );
+}

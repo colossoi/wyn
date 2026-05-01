@@ -610,31 +610,8 @@ impl<'p> Builder<'p> {
         }
     }
 
-    /// If a term is a direct alias of an existing tracked owner,
-    /// return that owner. Two patterns count as direct aliases:
-    ///
-    /// - `Var(v)` where `v` is bound to an owner.
-    /// - `App(intrinsic, args)` for a known aliasing intrinsic
-    ///   (`_w_index`, `_w_tuple_proj`, `_w_intrinsic_array_with_inplace`):
-    ///   recurse into the arg position the intrinsic aliases.
-    ///   Handles nesting like `grid[i][j]` naturally.
-    ///
-    /// Returns `None` for fresh allocations and unrecognized compound
-    /// RHSs. The caller decides what owner/origin to mint based on
-    /// whether the rhs is a recognized fresh-producer.
     fn alias_target(&self, term: &Term) -> Option<OwnerId> {
-        match &term.kind {
-            TermKind::Var(sym) => self.model.owner_of(*sym),
-            TermKind::App { func, args } => {
-                let TermKind::Var(s) = &func.kind else {
-                    return None;
-                };
-                let name = self.program.symbols.get(*s)?;
-                let i = intrinsic_aliasing_arg(name)?;
-                self.alias_target(args.get(i)?)
-            }
-            _ => None,
-        }
+        alias_target_of(term, &self.model, self.program)
     }
 
     /// The origin to assign when a Let / Loop binder produces a fresh
@@ -651,6 +628,35 @@ impl<'p> Builder<'p> {
             return Origin::Fresh;
         }
         Origin::Borrowed
+    }
+}
+
+/// If `term` is a direct alias of an existing tracked owner, return
+/// that owner. Two patterns count as direct aliases:
+///
+/// - `Var(v)` where `v` is bound to an owner.
+/// - `App(intrinsic, args)` for a known aliasing intrinsic
+///   (`_w_index`, `_w_tuple_proj`, `_w_intrinsic_array_with_inplace`):
+///   recurse into the arg position the intrinsic aliases. Handles
+///   nesting like `grid[i][j]` naturally.
+///
+/// Returns `None` for fresh allocations and unrecognized compound
+/// terms. Used during build (to thread aliasing through let/loop
+/// binders) and during promotion (to identify the underlying owner
+/// of an `_w_intrinsic_array_with` source that's a projection or
+/// indexing expression rather than a plain `Var`).
+pub(super) fn alias_target_of(term: &Term, model: &OwnershipModel, program: &Program) -> Option<OwnerId> {
+    match &term.kind {
+        TermKind::Var(sym) => model.owner_of(*sym),
+        TermKind::App { func, args } => {
+            let TermKind::Var(s) = &func.kind else {
+                return None;
+            };
+            let name = program.symbols.get(*s)?;
+            let i = intrinsic_aliasing_arg(name)?;
+            alias_target_of(args.get(i)?, model, program)
+        }
+        _ => None,
     }
 }
 
@@ -1050,24 +1056,24 @@ pub fn apply_ownership(mut program: Program) -> crate::error::Result<Program> {
         },
     };
 
+    let defs_in = std::mem::take(&mut program.defs);
     let mut rewriter = Rewriter {
         model: &model,
+        program: &program,
         functional_sym,
         inplace_sym,
         consuming_soacs: &consuming_soacs,
     };
-    let new_defs: Vec<Def> = program
-        .defs
+    let new_defs: Vec<Def> = defs_in
         .into_iter()
         .map(|def| Def {
             body: rewriter.rewrite(def.body),
             ..def
         })
         .collect();
-    Ok(Program {
-        defs: new_defs,
-        ..program
-    })
+    drop(rewriter);
+    program.defs = new_defs;
+    Ok(program)
 }
 
 /// Run the ownership analysis and report a use-after-move error if
@@ -1116,6 +1122,7 @@ fn check_use_after_move(program: &Program, model: &OwnershipModel) -> Option<cra
 
 struct Rewriter<'m> {
     model: &'m OwnershipModel,
+    program: &'m Program,
     functional_sym: Option<SymbolId>,
     inplace_sym: Option<SymbolId>,
     consuming_soacs: &'m HashSet<TermId>,
@@ -1163,10 +1170,7 @@ impl<'m> Rewriter<'m> {
     }
 
     fn is_promotable(&self, call_id: TermId, source_arg: &Term) -> bool {
-        let TermKind::Var(sym) = &source_arg.kind else {
-            return false;
-        };
-        let Some(owner) = self.model.owner_of(*sym) else {
+        let Some(owner) = alias_target_of(source_arg, self.model, self.program) else {
             return false;
         };
         let Some(origin) = self.model.origin(owner) else {
