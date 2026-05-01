@@ -1529,7 +1529,11 @@ impl<'a> Converter<'a> {
 
     fn convert_soac(&mut self, soac: &SoacOp, ty: Type<TypeName>) -> Result<NodeId, ConvertError> {
         match soac {
-            SoacOp::Map { lam, inputs, .. } => self.convert_soac_map(lam, inputs, ty),
+            SoacOp::Map {
+                lam,
+                inputs,
+                consumes_input,
+            } => self.convert_soac_map(lam, inputs, *consumes_input, ty),
             SoacOp::Reduce { op, ne, input, .. } => self.convert_soac_reduce(op, ne, input, ty),
             SoacOp::Redomap {
                 op,
@@ -1579,6 +1583,7 @@ impl<'a> Converter<'a> {
         &mut self,
         lam: &Lambda,
         inputs: &[ArrayExpr],
+        consumes_input: bool,
         result_ty: Type<TypeName>,
     ) -> Result<NodeId, ConvertError> {
         let f_name = self.lambda_fn_name(lam)?;
@@ -1609,13 +1614,15 @@ impl<'a> Converter<'a> {
         operands.extend_from_slice(&input_nids);
         operands.extend_from_slice(&capture_nids);
 
+        let destination =
+            if consumes_input { SoacDestination::InputBuffer } else { SoacDestination::Fresh };
         Ok(self.emit_soac(
             PendingSoac::Map {
                 func: f_name,
                 input_array_types: input_arr_types,
                 input_elem_types,
                 output_elem_type: output_elem_ty,
-                destination: SoacDestination::Fresh,
+                destination,
             },
             operands,
             result_ty,
