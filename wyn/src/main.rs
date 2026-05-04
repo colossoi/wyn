@@ -177,8 +177,7 @@ fn run(cli: Cli) -> Result<(), DriverError> {
                 let per_output = match (inputs.len(), &out_dir, &output) {
                     (1, _, opt) => opt.clone(),
                     (_, Some(dir), _) => {
-                        let stem =
-                            input.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
+                        let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
                         let ext = match target {
                             Target::Spirv => "spv",
                             Target::Glsl | Target::Shadertoy => "glsl",
