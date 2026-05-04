@@ -148,6 +148,11 @@ impl AstConstFolder {
                 self.fold_expr(value);
             }
 
+            ExprKind::RecordWith { record, value, .. } => {
+                self.fold_expr(record);
+                self.fold_expr(value);
+            }
+
             ExprKind::Tuple(elements) => {
                 for elem in elements {
                     self.fold_expr(elem);

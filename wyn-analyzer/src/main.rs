@@ -591,6 +591,10 @@ fn find_in_expr(expr: &ast::Expression, line: usize, col: usize, best: &mut Opti
             find_in_expr(target, line, col, best);
             find_in_expr(value, line, col, best);
         }
+        RecordWith { record, value, .. } => {
+            find_in_expr(record, line, col, best);
+            find_in_expr(value, line, col, best);
+        }
         FieldAccess(base, _) => {
             find_in_expr(base, line, col, best);
         }

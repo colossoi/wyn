@@ -73,6 +73,10 @@ impl<'a> Desugarer<'a> {
                 self.desugar_expr(target)?;
                 self.desugar_expr(value)?;
             }
+            ExprKind::RecordWith { record, value, .. } => {
+                self.desugar_expr(record)?;
+                self.desugar_expr(value)?;
+            }
             ExprKind::BinaryOp(_, left, right) => {
                 self.desugar_expr(left)?;
                 self.desugar_expr(right)?;

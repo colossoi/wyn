@@ -353,6 +353,10 @@ impl PlaceholderResolver {
                 self.resolve_expression(target);
                 self.resolve_expression(value);
             }
+            ast::ExprKind::RecordWith { record, value, .. } => {
+                self.resolve_expression(record);
+                self.resolve_expression(value);
+            }
             ast::ExprKind::Slice(slice) => {
                 self.resolve_expression(&mut slice.array);
                 if let Some(ref mut s) = slice.start {

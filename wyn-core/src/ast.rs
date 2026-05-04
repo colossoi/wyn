@@ -385,6 +385,15 @@ pub enum ExprKind {
         op: Option<String>,
         value: Box<Expression>,
     },
+    /// Record field update: `r with x = e` or `r with a.x = e`.
+    /// Lowers in TLC to a fresh record built from the original's
+    /// fields with the path target replaced; nested paths recurse.
+    RecordWith {
+        record: Box<Expression>,
+        /// Field names from outer to inner. Length ≥ 1.
+        path: Vec<String>,
+        value: Box<Expression>,
+    },
     BinaryOp(BinaryOp, Box<Expression>, Box<Expression>),
     UnaryOp(UnaryOp, Box<Expression>), // Unary operations: -, !
     Tuple(Vec<Expression>),

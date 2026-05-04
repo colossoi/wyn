@@ -290,6 +290,10 @@ impl<'a> OpenResolver<'a> {
                 self.resolve_expression(target)?;
                 self.resolve_expression(value)?;
             }
+            ExprKind::RecordWith { record, value, .. } => {
+                self.resolve_expression(record)?;
+                self.resolve_expression(value)?;
+            }
             ExprKind::Slice(slice) => {
                 self.resolve_expression(&mut slice.array)?;
                 if let Some(s) = &mut slice.start {

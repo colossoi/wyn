@@ -1996,6 +1996,46 @@ impl<'a> TypeChecker<'a> {
                 // Return the array type (same type as input)
                 Ok(array_type.apply(&self.context))
             }
+            ExprKind::RecordWith { record, path, value } => {
+                // Walk `path` segment-by-segment through nested records
+                // to find the inner field's type, unify the RHS against
+                // it, and return the outer record's type unchanged.
+                let outer_ty = self.infer_expression(record)?;
+                let mut current_ty = outer_ty.clone();
+                for segment in path {
+                    let resolved = current_ty.apply(&self.context);
+                    let stripped = strip_unique(&resolved);
+                    let (fields, field_types) = match &stripped {
+                        Type::Constructed(TypeName::Record(fs), tys) => (fs, tys),
+                        _ => bail_type_at!(
+                            expr.h.span,
+                            "`with` field path requires a record type, got {}",
+                            self.format_type(&resolved)
+                        ),
+                    };
+                    let Some(field_index) = fields.get_index(segment) else {
+                        bail_type_at!(
+                            expr.h.span,
+                            "Record type has no field '{}'. Available: {}",
+                            segment,
+                            fields.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                        );
+                    };
+                    current_ty = field_types[field_index].clone();
+                }
+
+                let value_ty = self.infer_expression(value)?;
+                self.context.unify(&value_ty, &current_ty).map_err(|_| {
+                    err_type_at!(
+                        value.h.span,
+                        "Record field type mismatch: expected {}, got {}",
+                        self.format_type(&current_ty.apply(&self.context)),
+                        self.format_type(&value_ty.apply(&self.context))
+                    )
+                })?;
+
+                Ok(outer_ty.apply(&self.context))
+            }
             ExprKind::VecWith {
                 target,
                 components,

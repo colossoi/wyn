@@ -3400,11 +3400,18 @@ fn test_parse_vec_with_swizzle_invalid_letters_rejected() {
 }
 
 #[test]
-fn test_parse_vec_with_after_with_requires_brace_or_dot() {
-    // `with` followed by neither `[` nor `.` is a parse error.
-    let src = "def f(v: vec3f32) vec3f32 = v with foo = 1.0f32";
+fn test_parse_with_lhs_must_be_index_swizzle_or_field() {
+    // `with` followed by something that isn't `[`, `.swizzle`, or
+    // a field path is a parse error. (Bare identifiers like `foo`
+    // are accepted as record-with field paths and resolved at
+    // type-check time.)
+    let src = "def f(v: vec3f32) vec3f32 = v with 5 = 1.0f32";
     expect_parse_error(src, |err| match err {
-        CompilerError::ParseError(msg, _) if msg.contains("Expected `[` or `.swizzle`") => Ok(()),
+        CompilerError::ParseError(msg, _)
+            if msg.contains("Expected `[`, `.swizzle`, or `field` after `with`") =>
+        {
+            Ok(())
+        }
         other => Err(format!("expected with-LHS error, got {:?}", other)),
     });
 }

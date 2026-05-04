@@ -1647,8 +1647,50 @@ impl<'a> Parser<'a> {
                         span,
                     );
                     continue;
+                } else if matches!(self.peek(), Some(Token::Identifier(_))) {
+                    // Record field path: `r with x = e` or `r with a.x = e`.
+                    // Spec grammar: `exp "with" fieldid ("." fieldid)* "=" exp`
+                    // (SPECIFICATION.md:597). Distinguished from
+                    // swizzle-with by the absence of a leading dot.
+                    let mut path: Vec<String> = Vec::new();
+                    let Some(Token::Identifier(first)) = self.peek().cloned() else {
+                        unreachable!("matched Token::Identifier above")
+                    };
+                    path.push(first);
+                    self.advance();
+                    while self.check(&Token::Dot) {
+                        self.advance();
+                        match self.peek().cloned() {
+                            Some(Token::Identifier(s)) => {
+                                path.push(s);
+                                self.advance();
+                            }
+                            _ => bail_parse_at!(
+                                self.current_span(),
+                                "Expected field name after `.` in `with` field path"
+                            ),
+                        }
+                    }
+                    self.expect(Token::Assign)?;
+
+                    let value = self.parse_binary_expression_with_precedence(11)?;
+                    let end_span = self.previous_span();
+                    let span = start_span.merge(&end_span);
+
+                    left = self.node_counter.mk_node(
+                        ExprKind::RecordWith {
+                            record: Box::new(left),
+                            path,
+                            value: Box::new(value),
+                        },
+                        span,
+                    );
+                    continue;
                 } else {
-                    bail_parse_at!(self.current_span(), "Expected `[` or `.swizzle` after `with`");
+                    bail_parse_at!(
+                        self.current_span(),
+                        "Expected `[`, `.swizzle`, or `field` after `with`"
+                    );
                 }
             }
 

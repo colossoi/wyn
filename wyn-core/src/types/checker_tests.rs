@@ -1911,17 +1911,14 @@ def pick(v: #left(i32) | #right(i32)) i32 =
 }
 
 // =============================================================================
-// `with` expression tests: swizzle (new), array (existing), record (deferred)
+// `with` expression tests: swizzle, array, record
 // =============================================================================
 //
 // Three families track the three LHS forms `with` accepts:
 //
-//   - swizzle:  `v with .yz = e`         (this plan, Phases A–C)
-//   - array:    `a with [i] = e`         (already implemented; regression)
-//   - record:   `r with field = e`       (spec'd, never built — `#[ignore]`d)
-//
-// Swizzle tests are `#[ignore]`d until the matching phase lands; record
-// tests stay `#[ignore]`d until somebody picks up that work.
+//   - swizzle:  `v with .yz = e`
+//   - array:    `a with [i] = e`
+//   - record:   `r with field = e` (single-level and nested `r with a.x = e`)
 
 // --- Swizzle-with ---
 
@@ -2062,7 +2059,6 @@ def transform(dir0: vec3f32, mx: f32, my: f32, rotview1: mat2f32, rotview2: mat2
 // --- Record-with (spec'd in SPECIFICATION.md but never built) ---
 
 #[test]
-#[ignore = "TODO: implement record-with (`r with field = e`); spec'd but unbuilt"]
 fn test_record_with_field() {
     typecheck_program(
         r#"
@@ -2073,7 +2069,6 @@ def update(r: { x: i32, y: i32 }) { x: i32, y: i32 } =
 }
 
 #[test]
-#[ignore = "TODO: implement record-with"]
 fn test_record_with_nested_field() {
     typecheck_program(
         r#"
@@ -2084,7 +2079,6 @@ def update(r: { a: { x: i32 } }) { a: { x: i32 } } =
 }
 
 #[test]
-#[ignore = "TODO: implement record-with"]
 fn test_record_with_unknown_field() {
     let result = try_typecheck_program(
         r#"
@@ -2096,7 +2090,6 @@ def update(r: { x: i32 }) { x: i32 } =
 }
 
 #[test]
-#[ignore = "TODO: implement record-with"]
 fn test_record_with_value_type_mismatch() {
     let result = try_typecheck_program(
         r#"

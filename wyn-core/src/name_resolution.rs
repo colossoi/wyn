@@ -135,6 +135,10 @@ pub fn walk_expr<C: ResolveContext>(
             walk_expr(target, ctx, scope)?;
             walk_expr(value, ctx, scope)?;
         }
+        ExprKind::RecordWith { record, value, .. } => {
+            walk_expr(record, ctx, scope)?;
+            walk_expr(value, ctx, scope)?;
+        }
         ExprKind::RecordLiteral(fields) => {
             for (_, e) in fields {
                 walk_expr(e, ctx, scope)?;

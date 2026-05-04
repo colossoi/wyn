@@ -1726,6 +1726,10 @@ impl<'a> Transformer<'a> {
                 value,
             } => self.transform_vec_with(target, components, op.as_deref(), value, ty, span),
 
+            ast::ExprKind::RecordWith { record, path, value } => {
+                self.transform_record_with(record, path, value, ty, span)
+            }
+
             ast::ExprKind::BinaryOp(op, lhs, rhs) => {
                 let l = self.transform_expr(lhs);
                 let r = self.transform_expr(rhs);
@@ -2566,6 +2570,93 @@ impl<'a> Transformer<'a> {
                 body: Box::new(inner),
             },
         )
+    }
+
+    /// Lower `r with field = e` (single-level) and `r with a.x = e`
+    /// (nested) by binding the record to a fresh symbol and rebuilding
+    /// it via `_w_tuple` with the path target replaced. Each level of
+    /// the path produces its own bind-and-rebuild; nested paths chain
+    /// inside the outer rebuild's replacement slot.
+    fn transform_record_with(
+        &mut self,
+        record: &ast::Expression,
+        path: &[String],
+        value: &ast::Expression,
+        result_ty: Type<TypeName>,
+        span: Span,
+    ) -> Term {
+        let r_term = self.transform_expr(record);
+        let record_ty = r_term.ty.clone();
+        let new_value = self.transform_expr(value);
+
+        let r_id = self.term_ids.next_id().0;
+        let r_sym = self.define(&format!("_w_rw_r_{}", r_id));
+        let r_var = self.mk_term(record_ty.clone(), span, TermKind::Var(r_sym));
+
+        let body = self.build_record_with_body(&r_var, &record_ty, path, new_value, span);
+
+        self.mk_term(
+            result_ty,
+            span,
+            TermKind::Let {
+                name: r_sym,
+                name_ty: record_ty,
+                rhs: Box::new(r_term),
+                body: Box::new(body),
+            },
+        )
+    }
+
+    /// Recursive builder for `transform_record_with`. `target` is a
+    /// Var term referring to the record at this level of the path.
+    fn build_record_with_body(
+        &mut self,
+        target: &Term,
+        record_ty: &Type<TypeName>,
+        path: &[String],
+        new_value: Term,
+        span: Span,
+    ) -> Term {
+        let (fields, field_types) = match record_ty {
+            Type::Constructed(TypeName::Record(fs), tys) => (fs, tys),
+            _ => panic!("BUG: record-with target must be a record type at lowering"),
+        };
+        let head = &path[0];
+        let idx = fields.get_index(head).expect("BUG: typeck verified record field exists");
+
+        let replacement = if path.len() == 1 {
+            new_value
+        } else {
+            let inner_ty = field_types[idx].clone();
+            let inner_proj = self.build_proj(target, idx, &inner_ty, span);
+            let inner_id = self.term_ids.next_id().0;
+            let inner_sym = self.define(&format!("_w_rw_inner_{}", inner_id));
+            let inner_var = self.mk_term(inner_ty.clone(), span, TermKind::Var(inner_sym));
+            let inner_body =
+                self.build_record_with_body(&inner_var, &inner_ty, &path[1..], new_value, span);
+            self.mk_term(
+                inner_ty.clone(),
+                span,
+                TermKind::Let {
+                    name: inner_sym,
+                    name_ty: inner_ty,
+                    rhs: Box::new(inner_proj),
+                    body: Box::new(inner_body),
+                },
+            )
+        };
+
+        let field_terms: Vec<Term> = (0..fields.len())
+            .map(|i| {
+                if i == idx {
+                    replacement.clone()
+                } else {
+                    self.build_proj(target, i, &field_types[i], span)
+                }
+            })
+            .collect();
+
+        self.build_call("_w_tuple", &field_terms, record_ty.clone(), span)
     }
 
     /// Build a swizzle read on a Var term: emits per-letter

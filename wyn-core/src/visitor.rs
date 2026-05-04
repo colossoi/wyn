@@ -113,6 +113,15 @@ pub trait Visitor: Sized {
         walk_expr_vec_with(self, target, value)
     }
 
+    fn visit_expr_record_with(
+        &mut self,
+        _id: NodeId,
+        record: &Expression,
+        value: &Expression,
+    ) -> ControlFlow<Self::Break> {
+        walk_expr_record_with(self, record, value)
+    }
+
     fn visit_expr_binary_op(
         &mut self,
         _id: NodeId,
@@ -377,6 +386,7 @@ pub fn walk_expression<V: Visitor>(v: &mut V, e: &Expression) -> ControlFlow<V::
             array, index, value, ..
         } => v.visit_expr_array_with(id, array, index, value),
         ExprKind::VecWith { target, value, .. } => v.visit_expr_vec_with(id, target, value),
+        ExprKind::RecordWith { record, value, .. } => v.visit_expr_record_with(id, record, value),
         ExprKind::BinaryOp(op, left, right) => v.visit_expr_binary_op(id, op, left, right),
         ExprKind::Tuple(elements) => v.visit_expr_tuple(id, elements),
         ExprKind::Lambda(lambda) => v.visit_expr_lambda(id, lambda),
@@ -460,6 +470,15 @@ pub fn walk_expr_vec_with<V: Visitor>(
     value: &Expression,
 ) -> ControlFlow<V::Break> {
     v.visit_expression(target)?;
+    v.visit_expression(value)
+}
+
+pub fn walk_expr_record_with<V: Visitor>(
+    v: &mut V,
+    record: &Expression,
+    value: &Expression,
+) -> ControlFlow<V::Break> {
+    v.visit_expression(record)?;
     v.visit_expression(value)
 }
 

@@ -429,6 +429,12 @@ impl AstFormatter {
                 };
                 self.write_line(&format!("{} with .{} {} {}", tgt_str, swiz, op_str, val_str));
             }
+            ExprKind::RecordWith { record, path, value } => {
+                let rec_str = self.format_simple_expr(record);
+                let val_str = self.format_simple_expr(value);
+                let path_str = path.join(".");
+                self.write_line(&format!("{} with {} = {}", rec_str, path_str, val_str));
+            }
             ExprKind::BinaryOp(op, lhs, rhs) => {
                 let lhs_str = self.format_simple_expr(lhs);
                 let rhs_str = self.format_simple_expr(rhs);
@@ -659,6 +665,14 @@ impl AstFormatter {
                     format_swizzle(components),
                     op_str,
                     self.format_simple_expr(value)
+                )
+            }
+            ExprKind::RecordWith { record, path, value } => {
+                format!(
+                    "{} with {} = {}",
+                    self.format_simple_expr(record),
+                    path.join("."),
+                    self.format_simple_expr(value),
                 )
             }
             ExprKind::FieldAccess(obj, field) => {
