@@ -19,6 +19,7 @@
 
 use super::{Program, Term, TermKind};
 use crate::SymbolId;
+use std::collections::HashMap;
 
 #[derive(Debug)]
 pub enum ClosureCallsLowerError {
@@ -29,28 +30,57 @@ pub enum ClosureCallsLowerError {
         def: SymbolId,
         func_kind: &'static str,
     },
+    /// An `App { Var(target), args }` has the wrong arg count for its
+    /// target. After defunctionalize + monomorphize + buffer_specialize,
+    /// every direct call must be fully applied.
+    ArityMismatch {
+        def: SymbolId,
+        target: SymbolId,
+        expected: usize,
+        actual: usize,
+    },
 }
 
 pub fn verify_closure_calls_lowered(program: &Program) -> Result<(), ClosureCallsLowerError> {
+    // Build an arity map for direct-call targets. Intrinsics and
+    // anything not in `program.defs` are skipped — backends own their
+    // own arity expectations for those.
+    let arities: HashMap<SymbolId, usize> = program.defs.iter().map(|d| (d.name, d.arity)).collect();
     for def in &program.defs {
-        walk(&def.body, def.name)?;
+        walk(&def.body, def.name, &arities)?;
     }
     Ok(())
 }
 
-fn walk(term: &Term, def: SymbolId) -> Result<(), ClosureCallsLowerError> {
-    if let TermKind::App { func, .. } = &term.kind {
+fn walk(
+    term: &Term,
+    def: SymbolId,
+    arities: &HashMap<SymbolId, usize>,
+) -> Result<(), ClosureCallsLowerError> {
+    if let TermKind::App { func, args } = &term.kind {
         if !is_static_func(&func.kind) {
             return Err(ClosureCallsLowerError::IndirectCall {
                 def,
                 func_kind: discriminant_name(&func.kind),
             });
         }
+        if let TermKind::Var(target) = &func.kind {
+            if let Some(&expected) = arities.get(target) {
+                if expected != args.len() {
+                    return Err(ClosureCallsLowerError::ArityMismatch {
+                        def,
+                        target: *target,
+                        expected,
+                        actual: args.len(),
+                    });
+                }
+            }
+        }
     }
     let mut result = Ok(());
     term.for_each_child(&mut |child| {
         if result.is_ok() {
-            result = walk(child, def);
+            result = walk(child, def, arities);
         }
     });
     result

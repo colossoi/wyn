@@ -55,6 +55,46 @@ fn direct_call_passes() {
 }
 
 #[test]
+fn arity_mismatch_fails() {
+    let mut p = empty_program();
+    let f = p.symbols.alloc("f".into());
+    let g = p.symbols.alloc("g".into());
+    // g is a defined function with arity 2.
+    p.defs.push(Def {
+        name: g,
+        ty: unit_ty(),
+        body: term(TermKind::IntLit("0".into())),
+        meta: DefMeta::Function,
+        arity: 2,
+    });
+    // f calls g with only 1 arg — wrong.
+    let body = term(TermKind::App {
+        func: Box::new(term(TermKind::Var(g))),
+        args: vec![term(TermKind::IntLit("0".into()))],
+    });
+    p.defs.push(Def {
+        name: f,
+        ty: unit_ty(),
+        body,
+        meta: DefMeta::Function,
+        arity: 0,
+    });
+    let err = verify_closure_calls_lowered(&p).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ClosureCallsLowerError::ArityMismatch {
+                expected: 2,
+                actual: 1,
+                ..
+            }
+        ),
+        "got {:?}",
+        err
+    );
+}
+
+#[test]
 fn nested_app_in_func_position_fails() {
     let mut p = empty_program();
     let f = p.symbols.alloc("f".into());

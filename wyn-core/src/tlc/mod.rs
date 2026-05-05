@@ -548,6 +548,23 @@ impl Program {
 // =============================================================================
 
 impl Term {
+    /// If this term is `App { func: Var(sym), args }` — a direct named
+    /// call — return `Some((sym, args))`. Returns `None` for operator
+    /// dispatch (`App { BinOp/UnOp/Extern, .. }`), partial applications,
+    /// non-call terms, etc.
+    ///
+    /// Use this in post-defunctionalize passes and backends to one-step
+    /// destructure named calls instead of nesting two `match`es.
+    pub fn as_direct_call(&self) -> Option<(SymbolId, &[Term])> {
+        match &self.kind {
+            TermKind::App { func, args } => match &func.kind {
+                TermKind::Var(sym) => Some((*sym, args.as_slice())),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// Assert that no App node in this tree has a func that is itself an App.
     pub fn assert_flat_apps(&self) {
         self.assert_flat_apps_in("<unknown>");
