@@ -9,6 +9,7 @@ pub mod closure_convert;
 pub mod defaults;
 pub mod defunctionalize;
 pub mod fusion;
+pub mod hof_specialize;
 pub mod inline;
 pub mod monomorphize;
 pub mod normalize;
