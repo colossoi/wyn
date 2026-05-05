@@ -247,13 +247,17 @@ fn test_hash_cons_distinguishes_by_result_type() {
         u32_ty.clone(),
     );
 
+    let storage_len_id = crate::builtins::catalog()
+        .lookup_by_any_name(INTRINSIC_STORAGE_LEN)
+        .expect("INTRINSIC_STORAGE_LEN missing from catalog")
+        .id;
     let a = g.intern_pure(
-        PureOp::Intrinsic(INTRINSIC_STORAGE_LEN.into()),
+        PureOp::Intrinsic(storage_len_id),
         smallvec![zero_u32, zero_u32],
         i32_ty,
     );
     let b = g.intern_pure(
-        PureOp::Intrinsic(INTRINSIC_STORAGE_LEN.into()),
+        PureOp::Intrinsic(storage_len_id),
         smallvec![zero_u32, zero_u32],
         u32_ty,
     );

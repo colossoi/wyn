@@ -9,10 +9,11 @@ use crate::builtins::scheme::{
 use crate::impl_source::PrimOp;
 use crate::intrinsics::{
     INTRINSIC_ABS, INTRINSIC_ARRAY_WITH, INTRINSIC_ARRAY_WITH_INPLACE, INTRINSIC_CEIL, INTRINSIC_CLAMP,
-    INTRINSIC_CROSS, INTRINSIC_DETERMINANT, INTRINSIC_DISTANCE, INTRINSIC_DOT, INTRINSIC_FLOOR,
-    INTRINSIC_FRACT, INTRINSIC_INVERSE, INTRINSIC_LENGTH, INTRINSIC_MAGNITUDE, INTRINSIC_MIX,
-    INTRINSIC_NORMALIZE, INTRINSIC_OUTER, INTRINSIC_REFLECT, INTRINSIC_REFRACT, INTRINSIC_SMOOTHSTEP,
-    INTRINSIC_UNINIT,
+    INTRINSIC_COS, INTRINSIC_CROSS, INTRINSIC_DETERMINANT, INTRINSIC_DISTANCE, INTRINSIC_DOT,
+    INTRINSIC_FLOOR, INTRINSIC_FRACT, INTRINSIC_INVERSE, INTRINSIC_LENGTH, INTRINSIC_MAGNITUDE,
+    INTRINSIC_MIX, INTRINSIC_NORMALIZE, INTRINSIC_OUTER, INTRINSIC_REFLECT, INTRINSIC_REFRACT,
+    INTRINSIC_SLICE, INTRINSIC_SMOOTHSTEP, INTRINSIC_STORAGE_INDEX, INTRINSIC_STORAGE_LEN,
+    INTRINSIC_STORAGE_STORE, INTRINSIC_THREAD_ID, INTRINSIC_UNINIT,
 };
 
 // ---------------------------------------------------------------------------
@@ -530,6 +531,77 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         purity: Purity::Pure,
         overloads: &[BuiltinOverload {
             scheme: crate::builtins::scheme::u32_binary,
+            lowering: BuiltinLowering::Intrinsic(crate::impl_source::Intrinsic::Placeholder),
+        }],
+    },
+    // ---- Compiler-internal intrinsics: emitted by the codegen pipeline,
+    // not user-facing. They have no published scheme (the compiler
+    // synthesises type-correct calls) and lowering is special-cased per
+    // backend. Their presence in the catalog gives every PureOp::Intrinsic
+    // emission a `BuiltinId`. ----
+    BuiltinDefRaw {
+        surface_name: INTRINSIC_STORAGE_LEN,
+        intrinsic_source_names: &[],
+        impl_source_names: &[],
+        kind: BuiltinKind::InternalIntrinsic,
+        purity: Purity::Pure,
+        overloads: &[BuiltinOverload {
+            scheme: dummy_scheme,
+            lowering: BuiltinLowering::Intrinsic(crate::impl_source::Intrinsic::Placeholder),
+        }],
+    },
+    BuiltinDefRaw {
+        surface_name: INTRINSIC_STORAGE_INDEX,
+        intrinsic_source_names: &[],
+        impl_source_names: &[],
+        kind: BuiltinKind::InternalIntrinsic,
+        purity: Purity::Pure,
+        overloads: &[BuiltinOverload {
+            scheme: dummy_scheme,
+            lowering: BuiltinLowering::Intrinsic(crate::impl_source::Intrinsic::Placeholder),
+        }],
+    },
+    BuiltinDefRaw {
+        surface_name: INTRINSIC_STORAGE_STORE,
+        intrinsic_source_names: &[],
+        impl_source_names: &[],
+        kind: BuiltinKind::InternalIntrinsic,
+        purity: Purity::Effectful,
+        overloads: &[BuiltinOverload {
+            scheme: dummy_scheme,
+            lowering: BuiltinLowering::Intrinsic(crate::impl_source::Intrinsic::Placeholder),
+        }],
+    },
+    BuiltinDefRaw {
+        surface_name: INTRINSIC_SLICE,
+        intrinsic_source_names: &[],
+        impl_source_names: &[],
+        kind: BuiltinKind::InternalIntrinsic,
+        purity: Purity::Pure,
+        overloads: &[BuiltinOverload {
+            scheme: dummy_scheme,
+            lowering: BuiltinLowering::Intrinsic(crate::impl_source::Intrinsic::Placeholder),
+        }],
+    },
+    BuiltinDefRaw {
+        surface_name: INTRINSIC_THREAD_ID,
+        intrinsic_source_names: &[],
+        impl_source_names: &[],
+        kind: BuiltinKind::InternalIntrinsic,
+        purity: Purity::Pure,
+        overloads: &[BuiltinOverload {
+            scheme: dummy_scheme,
+            lowering: BuiltinLowering::Intrinsic(crate::impl_source::Intrinsic::Placeholder),
+        }],
+    },
+    BuiltinDefRaw {
+        surface_name: INTRINSIC_COS,
+        intrinsic_source_names: &[],
+        impl_source_names: &[],
+        kind: BuiltinKind::InternalIntrinsic,
+        purity: Purity::Pure,
+        overloads: &[BuiltinOverload {
+            scheme: dummy_scheme,
             lowering: BuiltinLowering::Intrinsic(crate::impl_source::Intrinsic::Placeholder),
         }],
     },

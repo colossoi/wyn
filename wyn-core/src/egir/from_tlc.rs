@@ -709,8 +709,12 @@ impl<'a> Converter<'a> {
         let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
         let set_nid = self.intern_u32(set);
         let binding_nid = self.intern_u32(binding);
+        let storage_len_id = crate::builtins::catalog()
+            .lookup_by_any_name(INTRINSIC_STORAGE_LEN)
+            .expect("INTRINSIC_STORAGE_LEN missing from catalog")
+            .id;
         let len_nid = self.intern_pure(
-            PureOp::Intrinsic(INTRINSIC_STORAGE_LEN.into()),
+            PureOp::Intrinsic(storage_len_id),
             smallvec![set_nid, binding_nid],
             u32_ty.clone(),
         );
@@ -1121,7 +1125,11 @@ impl<'a> Converter<'a> {
                 // branch; at present all remaining intrinsics are pure.
                 let arg_nids: SmallVec<[NodeId; 4]> =
                     args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
-                Ok(self.intern_pure(PureOp::Intrinsic(name.to_string()), arg_nids, ty))
+                let id = crate::builtins::catalog()
+                    .lookup_by_any_name(name)
+                    .unwrap_or_else(|| panic!("intrinsic `{}` missing from catalog", name))
+                    .id;
+                Ok(self.intern_pure(PureOp::Intrinsic(id), arg_nids, ty))
             }
             _ => {
                 // Function call
@@ -1758,7 +1766,10 @@ impl<'a> Converter<'a> {
         let effect_out = self.alloc_effect();
         self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
             kind: SideEffectKind::Inst(InstKind::Intrinsic {
-                name: INTRINSIC_FILTER.into(),
+                id: crate::builtins::catalog()
+                    .lookup_by_any_name(INTRINSIC_FILTER)
+                    .expect("INTRINSIC_FILTER missing from catalog")
+                    .id,
                 args: dummy_vrefs,
             }),
             operand_nodes: operands,

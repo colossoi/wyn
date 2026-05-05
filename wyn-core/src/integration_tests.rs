@@ -112,9 +112,14 @@ fn count_uninit_in_program(ssa: &Program) -> usize {
     for insts in bodies {
         for (_id, inst) in insts {
             match &inst.data {
-                crate::ssa::types::InstKind::Call { func: f, .. }
-                | crate::ssa::types::InstKind::Intrinsic { name: f, .. } => {
+                crate::ssa::types::InstKind::Call { func: f, .. } => {
                     if f == "_w_intrinsic_uninit" {
+                        count += 1;
+                    }
+                }
+                crate::ssa::types::InstKind::Intrinsic { id, .. } => {
+                    let name = crate::builtins::catalog().get(*id).raw.surface_name;
+                    if name == "_w_intrinsic_uninit" {
                         count += 1;
                     }
                 }

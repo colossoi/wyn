@@ -252,7 +252,7 @@ pub enum InstKind {
 
     /// Compiler intrinsic call.
     Intrinsic {
-        name: String,
+        id: crate::builtins::BuiltinId,
         args: Vec<ValueRef>,
     },
 

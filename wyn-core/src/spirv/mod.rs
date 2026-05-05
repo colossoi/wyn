@@ -1348,8 +1348,9 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 .copied()
                 .ok_or_else(|| err_spirv_at!(self.blame_span(), "Unknown extern: {}", linkage_name))?,
 
-            InstKind::Intrinsic { name, args } => {
+            InstKind::Intrinsic { id, args } => {
                 let arg_ids: Vec<_> = args.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
+                let name = crate::builtins::catalog().get(*id).dispatch_name();
                 self.lower_intrinsic(name, args, &arg_ids, result_ty, inst)?
             }
 

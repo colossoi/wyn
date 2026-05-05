@@ -1135,11 +1135,11 @@ fn emit_length(
         );
         return emit_length(graph, first_arr, &components[0], i32_ty);
     }
-    graph.intern_pure(
-        PureOp::Intrinsic(INTRINSIC_LENGTH.into()),
-        smallvec![arr_nid],
-        i32_ty.clone(),
-    )
+    let length_id = crate::builtins::catalog()
+        .lookup_by_any_name(INTRINSIC_LENGTH)
+        .expect("INTRINSIC_LENGTH missing from catalog")
+        .id;
+    graph.intern_pure(PureOp::Intrinsic(length_id), smallvec![arr_nid], i32_ty.clone())
 }
 
 /// Emit a per-iteration read of `arr[idx]` at the given body block.

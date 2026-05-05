@@ -87,6 +87,15 @@ impl BuiltinDef {
     pub fn overloads(&self) -> &'static [BuiltinOverload] {
         self.raw.overloads
     }
+
+    /// The name backends key dispatch on. For polymorphic intrinsics
+    /// (`magnitude` → `_w_intrinsic_magnitude`) this is the internal
+    /// `_w_intrinsic_*` form; for entries whose surface name is already
+    /// internal (e.g. `_w_intrinsic_storage_len`, `vec.sin`) it's the
+    /// surface name.
+    pub fn dispatch_name(&self) -> &'static str {
+        self.raw.impl_source_names.first().copied().unwrap_or(self.raw.surface_name)
+    }
 }
 
 /// Indexed view over the catalog table. Built once at program startup
@@ -140,6 +149,12 @@ impl BuiltinCatalog {
     /// `surface_name`, which is reachable via `lookup_by_surface_name`).
     pub fn lookup_by_internal_name(&self, name: &str) -> Option<&BuiltinDef> {
         self.by_internal_name.get(name).map(|id| &self.defs[id.as_index()])
+    }
+
+    /// Convenience: try surface, then internal — useful for IR emission
+    /// sites that just have a string and need a `BuiltinId`.
+    pub fn lookup_by_any_name(&self, name: &str) -> Option<&BuiltinDef> {
+        self.lookup_by_surface_name(name).or_else(|| self.lookup_by_internal_name(name))
     }
 
     pub fn get(&self, id: BuiltinId) -> &BuiltinDef {

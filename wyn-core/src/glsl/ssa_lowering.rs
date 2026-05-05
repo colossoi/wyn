@@ -1200,9 +1200,10 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 }
             }
 
-            InstKind::Intrinsic { name, args } => {
+            InstKind::Intrinsic { id, args } => {
                 let arg_strs: Result<Vec<_>> = args.iter().map(|a| self.get_value_ref(*a)).collect();
                 let ssa_args: Vec<ValueId> = args.iter().filter_map(|a| a.as_ssa()).collect();
+                let name = crate::builtins::catalog().get(*id).dispatch_name();
                 self.lower_intrinsic(
                     name,
                     &arg_strs?,
