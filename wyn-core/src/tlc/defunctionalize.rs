@@ -422,7 +422,8 @@ impl<'a> Defunctionalizer<'a> {
         );
 
         // Rebuild nested lambdas from inside out
-        let rebuilt_lam = self.rebuild_nested_lam(&params, body_result.term, span);
+        let rebuilt_lam =
+            super::closure_convert::rebuild_nested_lam(&params, body_result.term, span, &mut self.term_ids);
 
         // Lift to top-level
         let lifted_sym = self.fresh_symbol();
@@ -459,7 +460,12 @@ impl<'a> Defunctionalizer<'a> {
         } else {
             // Has captures: append captures as additional parameters at the end
             // Build: |original_params...| |captures...| body
-            let wrapped = self.append_capture_params(rebuilt_lam, &captures, span);
+            let wrapped = super::closure_convert::append_capture_params(
+                rebuilt_lam,
+                &captures,
+                span,
+                &mut self.term_ids,
+            );
             let arity = params.len() + captures.len();
 
             self.lifted_defs.push(Def {
@@ -937,71 +943,6 @@ impl<'a> Defunctionalizer<'a> {
         super::extract_lambda_params(&term)
     }
 
-    /// Build a single flat lambda from params and body.
-    fn rebuild_nested_lam(
-        &mut self,
-        params: &[(SymbolId, Type<TypeName>)],
-        body: Term,
-        span: Span,
-    ) -> Term {
-        let ret_ty = body.ty.clone();
-        let mut lam_ty = ret_ty.clone();
-        for (_, param_ty) in params.iter().rev() {
-            lam_ty = Type::Constructed(TypeName::Arrow, vec![param_ty.clone(), lam_ty]);
-        }
-        Term {
-            id: self.term_ids.next_id(),
-            ty: lam_ty,
-            span,
-            kind: TermKind::Lambda(Lambda {
-                params: params.to_vec(),
-                body: Box::new(body),
-                ret_ty,
-                captures: vec![],
-            }),
-        }
-    }
-
-    /// Append capture parameters to a lambda (captures at end).
-    /// Given `|x, y| body` and captures [a, b], produces `|x, y, a, b| body`.
-    fn append_capture_params(&mut self, lam: Term, captures: &[Term], span: Span) -> Term {
-        // Extract all params from possibly nested lambdas
-        let (orig_params, inner_body) = super::extract_lambda_params(&lam);
-
-        // Build capture params
-        let cap_params: Vec<(SymbolId, Type<TypeName>)> = captures
-            .iter()
-            .map(|cap_term| {
-                let cap_sym = match &cap_term.kind {
-                    TermKind::Var(sym) => *sym,
-                    _ => panic!("BUG: capture term is not a Var: {:?}", cap_term.kind),
-                };
-                (cap_sym, cap_term.ty.clone())
-            })
-            .collect();
-
-        // Build a single flat lambda with all params + captures
-        let mut all_params = orig_params;
-        all_params.extend(cap_params);
-
-        let ret_ty = inner_body.ty.clone();
-        let mut lam_ty = ret_ty.clone();
-        for (_, param_ty) in all_params.iter().rev() {
-            lam_ty = Type::Constructed(TypeName::Arrow, vec![param_ty.clone(), lam_ty]);
-        }
-        Term {
-            id: self.term_ids.next_id(),
-            ty: lam_ty,
-            span,
-            kind: TermKind::Lambda(Lambda {
-                params: all_params,
-                body: Box::new(inner_body),
-                ret_ty,
-                captures: vec![],
-            }),
-        }
-    }
-
     // =========================================================================
     // HOF Handling (User-defined and Intrinsic)
     // =========================================================================
@@ -1167,7 +1108,12 @@ impl<'a> Defunctionalizer<'a> {
             new_params.into_iter().map(|(sym, ty)| (sym, apply_type_subst(&ty, &type_subst))).collect();
 
         // Rebuild nested lambdas with substituted params
-        let rebuilt = self.rebuild_nested_lam(&new_params, defunced_body, hof_def.body.span);
+        let rebuilt = super::closure_convert::rebuild_nested_lam(
+            &new_params,
+            defunced_body,
+            hof_def.body.span,
+            &mut self.term_ids,
+        );
 
         let specialized_def = Def {
             name: specialized_sym,

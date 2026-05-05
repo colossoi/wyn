@@ -13,9 +13,95 @@
 //! lambda lifting and free-variable analysis. HOF specialization and
 //! call-site capture threading are downstream concerns (phases 2 and 3).
 
-use super::{ArrayExpr, Def, Lambda, LoopKind, Program, SoacOp, Term, TermKind};
+use super::{ArrayExpr, Def, Lambda, LoopKind, Program, SoacOp, Term, TermIdSource, TermKind};
+use crate::ast::{Span, TypeName};
 use crate::{SymbolId, SymbolTable};
+use polytype::Type;
 use std::collections::HashSet;
+
+// =============================================================================
+// Lambda construction helpers
+// =============================================================================
+//
+// Pure constructors used by the lambda-lifting logic. Take an explicit
+// `&mut TermIdSource` so they can live outside `Defunctionalizer`'s
+// state. Operate on the standalone `TermKind::Lambda` form: produce a
+// term with a fresh ID and a curried-arrow type built from the
+// supplied params.
+
+/// Build a single nested-lambda term from a parameter list and body.
+/// The returned term's type is the curried arrow over `params` ending
+/// at `body.ty`.
+pub fn rebuild_nested_lam(
+    params: &[(SymbolId, Type<TypeName>)],
+    body: Term,
+    span: Span,
+    term_ids: &mut TermIdSource,
+) -> Term {
+    let ret_ty = body.ty.clone();
+    let mut lam_ty = ret_ty.clone();
+    for (_, param_ty) in params.iter().rev() {
+        lam_ty = Type::Constructed(TypeName::Arrow, vec![param_ty.clone(), lam_ty]);
+    }
+    Term {
+        id: term_ids.next_id(),
+        ty: lam_ty,
+        span,
+        kind: TermKind::Lambda(Lambda {
+            params: params.to_vec(),
+            body: Box::new(body),
+            ret_ty,
+            captures: vec![],
+        }),
+    }
+}
+
+/// Append capture parameters to a (possibly nested-Lambda) term and
+/// re-flatten into a single Lambda. Each capture term must be a
+/// `TermKind::Var`; the symbol/type pair is used as the new
+/// parameter slot.
+///
+/// Given `|x, y| body` and captures `[a, b]` (Var-shaped terms),
+/// produces `|x, y, a, b| body`.
+pub fn append_capture_params(
+    lam: Term,
+    captures: &[Term],
+    span: Span,
+    term_ids: &mut TermIdSource,
+) -> Term {
+    let (orig_params, inner_body) = super::extract_lambda_params(&lam);
+
+    let cap_params: Vec<(SymbolId, Type<TypeName>)> = captures
+        .iter()
+        .map(|cap_term| {
+            let cap_sym = match &cap_term.kind {
+                TermKind::Var(sym) => *sym,
+                _ => panic!("BUG: capture term is not a Var: {:?}", cap_term.kind),
+            };
+            (cap_sym, cap_term.ty.clone())
+        })
+        .collect();
+
+    let mut all_params = orig_params;
+    all_params.extend(cap_params);
+
+    let ret_ty = inner_body.ty.clone();
+    let mut lam_ty = ret_ty.clone();
+    for (_, param_ty) in all_params.iter().rev() {
+        lam_ty = Type::Constructed(TypeName::Arrow, vec![param_ty.clone(), lam_ty]);
+    }
+    Term {
+        id: term_ids.next_id(),
+        ty: lam_ty,
+        span,
+        kind: TermKind::Lambda(Lambda {
+            params: all_params,
+            body: Box::new(inner_body),
+            ret_ty,
+            captures: vec![],
+        }),
+    }
+}
 
 // =============================================================================
 // Free-variable analysis
