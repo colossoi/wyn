@@ -9,6 +9,7 @@
 pub mod catalog;
 pub mod defs;
 pub mod lowering;
+pub mod overload;
 pub mod scheme;
 
 pub use catalog::{BuiltinCatalog, BuiltinDef, BuiltinId, BuiltinKind, BuiltinOverload, Purity};

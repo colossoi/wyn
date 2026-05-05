@@ -894,40 +894,6 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    /// Try to unify an overload's function type with the given argument types
-    /// Returns the return type if successful, None if unification fails
-    fn try_unify_overload(
-        func_type: &Type,
-        arg_types: &[Type],
-        ctx: &mut Context<TypeName>,
-    ) -> Option<Type> {
-        let mut current_type = func_type.clone();
-
-        for arg_type in arg_types {
-            // Decompose the function type: should be param_ty -> rest
-            let param_ty = ctx.new_variable();
-            let rest_ty = ctx.new_variable();
-            let expected_arrow = Type::arrow(param_ty.clone(), rest_ty.clone());
-
-            // Unify current function type with the expected arrow type
-            if ctx.unify(&current_type, &expected_arrow).is_err() {
-                return None;
-            }
-
-            // Unify the parameter type with the argument type
-            let param_ty = param_ty.apply(ctx);
-            if ctx.unify(&param_ty, arg_type).is_err() {
-                return None;
-            }
-
-            // Continue with the rest of the function type
-            current_type = rest_ty.apply(ctx);
-        }
-
-        // After processing all arguments, current_type should be the return type
-        Some(current_type)
-    }
-
     /// Check an expression against an expected type (bidirectional checking mode)
     /// Returns the actual type (which should unify with expected_type)
     fn check_expression(&mut self, expr: &Expression, expected_type: &Type) -> Result<Type> {
@@ -2231,38 +2197,35 @@ impl<'a> TypeChecker<'a> {
                         arg_types.push(self.infer_expression(arg)?);
                     }
 
-                    // Try each overload with backtracking
-                    for cand in callee.candidates {
-                        let checkpoint = self.context.len();
-
-                        if let Some(result_ty) =
-                            Self::try_unify_overload(&cand.ty, &arg_types, &mut self.context)
-                        {
-                            // Check for partial application
-                            if self.ensure_not_partial(&result_ty, &expr.h.span).is_ok() {
-                                // Store resolved type (always apply substitutions)
-                                let resolved_func_ty = cand.ty.apply(&self.context);
-                                self.type_table
-                                    .insert(func.h.id, TypeScheme::Monotype(resolved_func_ty));
-                                self.type_table
-                                    .insert(expr.h.id, TypeScheme::Monotype(result_ty.clone()));
-                                return Ok(result_ty);
-                            }
-                        }
-
-                        self.context.rollback(checkpoint);
-                    }
-
-                    bail_type_at!(
-                        expr.h.span,
-                        "No matching overload for '{}' with argument types: {}",
-                        callee.display_name,
-                        arg_types
-                            .iter()
-                            .map(|t| self.format_type(t))
-                            .collect::<Vec<_>>()
-                            .join(", ")
+                    let candidate_tys: Vec<Type> =
+                        callee.candidates.iter().map(|c| c.ty.clone()).collect();
+                    let span = expr.h.span;
+                    let resolved = crate::builtins::overload::resolve_overload(
+                        &candidate_tys,
+                        &arg_types,
+                        &mut self.context,
                     );
+                    match resolved {
+                        Ok(r) => {
+                            self.ensure_not_partial(&r.return_type, &span)?;
+                            let resolved_func_ty = candidate_tys[r.winner_index].apply(&self.context);
+                            self.type_table
+                                .insert(func.h.id, TypeScheme::Monotype(resolved_func_ty));
+                            self.type_table
+                                .insert(expr.h.id, TypeScheme::Monotype(r.return_type.clone()));
+                            return Ok(r.return_type);
+                        }
+                        Err(_) => bail_type_at!(
+                            expr.h.span,
+                            "No matching overload for '{}' with argument types: {}",
+                            callee.display_name,
+                            arg_types
+                                .iter()
+                                .map(|t| self.format_type(t))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    }
                 }
             }
             ExprKind::FieldAccess(inner_expr, field) => {
