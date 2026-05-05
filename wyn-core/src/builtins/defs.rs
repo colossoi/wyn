@@ -422,4 +422,107 @@ pub static ALL_BUILTINS: &[BuiltinDefRaw] = &[
             lowering: BuiltinLowering::Intrinsic(crate::impl_source::Intrinsic::ArrayWithInPlace),
         }],
     },
+    // ---- HOF intrinsics: replicate, reduce, filter, scan, map, map_into,
+    // scatter, hist_1d, rotr32. These have IntrinsicSource schemes but no
+    // ImplSource lowering — they're handled in TLC (SOACs) or specialized
+    // earlier in the pipeline. ----
+    BuiltinDefRaw {
+        surface_name: "_w_intrinsic_replicate",
+        intrinsic_source_names: &["_w_intrinsic_replicate"],
+        impl_source_names: &[],
+        kind: BuiltinKind::InternalIntrinsic,
+        purity: Purity::Pure,
+        overloads: &[BuiltinOverload {
+            scheme: crate::builtins::scheme::replicate_scheme,
+            lowering: BuiltinLowering::Intrinsic(crate::impl_source::Intrinsic::Placeholder),
+        }],
+    },
+    BuiltinDefRaw {
+        surface_name: "_w_intrinsic_reduce",
+        intrinsic_source_names: &["_w_intrinsic_reduce"],
+        impl_source_names: &[],
+        kind: BuiltinKind::InternalIntrinsic,
+        purity: Purity::Pure,
+        overloads: &[BuiltinOverload {
+            scheme: crate::builtins::scheme::reduce_scheme,
+            lowering: BuiltinLowering::Intrinsic(crate::impl_source::Intrinsic::Placeholder),
+        }],
+    },
+    BuiltinDefRaw {
+        surface_name: "_w_intrinsic_filter",
+        intrinsic_source_names: &["_w_intrinsic_filter"],
+        impl_source_names: &[],
+        kind: BuiltinKind::InternalIntrinsic,
+        purity: Purity::Pure,
+        overloads: &[BuiltinOverload {
+            scheme: crate::builtins::scheme::filter_scheme,
+            lowering: BuiltinLowering::Intrinsic(crate::impl_source::Intrinsic::Placeholder),
+        }],
+    },
+    BuiltinDefRaw {
+        surface_name: "_w_intrinsic_scan",
+        intrinsic_source_names: &["_w_intrinsic_scan"],
+        impl_source_names: &[],
+        kind: BuiltinKind::InternalIntrinsic,
+        purity: Purity::Pure,
+        overloads: &[BuiltinOverload {
+            scheme: crate::builtins::scheme::scan_scheme,
+            lowering: BuiltinLowering::Intrinsic(crate::impl_source::Intrinsic::Placeholder),
+        }],
+    },
+    BuiltinDefRaw {
+        surface_name: "_w_intrinsic_map",
+        intrinsic_source_names: &["_w_intrinsic_map"],
+        impl_source_names: &[],
+        kind: BuiltinKind::InternalIntrinsic,
+        purity: Purity::Pure,
+        overloads: &[BuiltinOverload {
+            scheme: crate::builtins::scheme::map_scheme,
+            lowering: BuiltinLowering::Intrinsic(crate::impl_source::Intrinsic::Placeholder),
+        }],
+    },
+    BuiltinDefRaw {
+        surface_name: "_w_intrinsic_map_into",
+        intrinsic_source_names: &["_w_intrinsic_map_into"],
+        impl_source_names: &[],
+        kind: BuiltinKind::InternalIntrinsic,
+        purity: Purity::Effectful,
+        overloads: &[BuiltinOverload {
+            scheme: crate::builtins::scheme::map_into_scheme,
+            lowering: BuiltinLowering::Intrinsic(crate::impl_source::Intrinsic::Placeholder),
+        }],
+    },
+    BuiltinDefRaw {
+        surface_name: "_w_intrinsic_scatter",
+        intrinsic_source_names: &["_w_intrinsic_scatter"],
+        impl_source_names: &[],
+        kind: BuiltinKind::InternalIntrinsic,
+        purity: Purity::Pure,
+        overloads: &[BuiltinOverload {
+            scheme: crate::builtins::scheme::scatter_scheme,
+            lowering: BuiltinLowering::Intrinsic(crate::impl_source::Intrinsic::Placeholder),
+        }],
+    },
+    BuiltinDefRaw {
+        surface_name: "_w_intrinsic_hist_1d",
+        intrinsic_source_names: &["_w_intrinsic_hist_1d"],
+        impl_source_names: &[],
+        kind: BuiltinKind::InternalIntrinsic,
+        purity: Purity::Pure,
+        overloads: &[BuiltinOverload {
+            scheme: crate::builtins::scheme::hist_1d_scheme,
+            lowering: BuiltinLowering::Intrinsic(crate::impl_source::Intrinsic::Placeholder),
+        }],
+    },
+    BuiltinDefRaw {
+        surface_name: "_w_intrinsic_rotr32",
+        intrinsic_source_names: &["_w_intrinsic_rotr32"],
+        impl_source_names: &[],
+        kind: BuiltinKind::InternalIntrinsic,
+        purity: Purity::Pure,
+        overloads: &[BuiltinOverload {
+            scheme: crate::builtins::scheme::u32_binary,
+            lowering: BuiltinLowering::Intrinsic(crate::impl_source::Intrinsic::Placeholder),
+        }],
+    },
 ];
