@@ -25,29 +25,6 @@ use crate::intrinsics::{
 // `&[BuiltinOverload {..}]`) and Rust's const promotion only kicks in
 // at the static-initializer site — not inside a `const fn` body.
 
-macro_rules! vec_module_unary {
-    ($name:literal, $glsl_ext:expr) => {
-        vec_module_op!(
-            $name,
-            vec_unary_same,
-            BuiltinLowering::PrimOp(PrimOp::GlslExt($glsl_ext))
-        )
-    };
-}
-macro_rules! vec_module_binary {
-    ($name:literal, $lowering:expr) => {
-        vec_module_op!($name, vec_binary_same, $lowering)
-    };
-}
-macro_rules! vec_module_ternary {
-    ($name:literal, $glsl_ext:expr) => {
-        vec_module_op!(
-            $name,
-            vec_ternary_same,
-            BuiltinLowering::PrimOp(PrimOp::GlslExt($glsl_ext))
-        )
-    };
-}
 macro_rules! vec_module_op {
     ($name:literal, $scheme:expr, $lowering:expr) => {
         BuiltinDefRaw {
@@ -72,24 +49,6 @@ macro_rules! polymorphic_intrinsic {
             surface_name: $surface,
             intrinsic_source_names: &[$surface],
             impl_source_names: &[$internal],
-            kind: BuiltinKind::UserVisible,
-            purity: Purity::Pure,
-            overloads: &[BuiltinOverload {
-                scheme: $scheme,
-                lowering: $lowering,
-            }],
-        }
-    };
-}
-
-// Polymorphic intrinsic registered under a single name (no separate
-// internal alias).
-macro_rules! scalar_polymorphic {
-    ($surface:literal, $scheme:expr, $lowering:expr) => {
-        BuiltinDefRaw {
-            surface_name: $surface,
-            intrinsic_source_names: &[$surface],
-            impl_source_names: &[],
             kind: BuiltinKind::UserVisible,
             purity: Purity::Pure,
             overloads: &[BuiltinOverload {
@@ -140,24 +99,6 @@ macro_rules! compiler_internal {
     };
 }
 
-// Internal intrinsic with a real backend lowering. Used by `length`,
-// `uninit`, `array_with`.
-macro_rules! internal_intrinsic_with_lowering {
-    ($name:expr, $scheme:expr, $lowering:expr) => {
-        BuiltinDefRaw {
-            surface_name: $name,
-            intrinsic_source_names: &[$name],
-            impl_source_names: &[$name],
-            kind: BuiltinKind::InternalIntrinsic,
-            purity: Purity::Pure,
-            overloads: &[BuiltinOverload {
-                scheme: $scheme,
-                lowering: $lowering,
-            }],
-        }
-    };
-}
-
 pub fn all_builtins() -> Vec<BuiltinDefRaw> {
     let mut defs: Vec<BuiltinDefRaw> = STATIC_BUILTINS.to_vec();
     defs.extend(generate_per_type_ops());
@@ -166,47 +107,183 @@ pub fn all_builtins() -> Vec<BuiltinDefRaw> {
 
 static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
     // ---- vec.* trig ----
-    vec_module_unary!("vec.sin", 13),
-    vec_module_unary!("vec.cos", 14),
-    vec_module_unary!("vec.tan", 15),
-    vec_module_unary!("vec.asin", 16),
-    vec_module_unary!("vec.acos", 17),
-    vec_module_unary!("vec.atan", 18),
+    vec_module_op!(
+        "vec.sin",
+        vec_unary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(13))
+    ),
+    vec_module_op!(
+        "vec.cos",
+        vec_unary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(14))
+    ),
+    vec_module_op!(
+        "vec.tan",
+        vec_unary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(15))
+    ),
+    vec_module_op!(
+        "vec.asin",
+        vec_unary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(16))
+    ),
+    vec_module_op!(
+        "vec.acos",
+        vec_unary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(17))
+    ),
+    vec_module_op!(
+        "vec.atan",
+        vec_unary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(18))
+    ),
     // ---- vec.* hyperbolic ----
-    vec_module_unary!("vec.sinh", 19),
-    vec_module_unary!("vec.cosh", 20),
-    vec_module_unary!("vec.tanh", 21),
-    vec_module_unary!("vec.asinh", 22),
-    vec_module_unary!("vec.acosh", 23),
-    vec_module_unary!("vec.atanh", 24),
+    vec_module_op!(
+        "vec.sinh",
+        vec_unary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(19))
+    ),
+    vec_module_op!(
+        "vec.cosh",
+        vec_unary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(20))
+    ),
+    vec_module_op!(
+        "vec.tanh",
+        vec_unary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(21))
+    ),
+    vec_module_op!(
+        "vec.asinh",
+        vec_unary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(22))
+    ),
+    vec_module_op!(
+        "vec.acosh",
+        vec_unary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(23))
+    ),
+    vec_module_op!(
+        "vec.atanh",
+        vec_unary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(24))
+    ),
     // ---- vec.* exp/log/roots ----
-    vec_module_unary!("vec.sqrt", 31),
-    vec_module_unary!("vec.rsqrt", 32),
-    vec_module_unary!("vec.exp", 27),
-    vec_module_unary!("vec.exp2", 29),
-    vec_module_unary!("vec.log", 28),
-    vec_module_unary!("vec.log2", 30),
+    vec_module_op!(
+        "vec.sqrt",
+        vec_unary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(31))
+    ),
+    vec_module_op!(
+        "vec.rsqrt",
+        vec_unary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(32))
+    ),
+    vec_module_op!(
+        "vec.exp",
+        vec_unary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(27))
+    ),
+    vec_module_op!(
+        "vec.exp2",
+        vec_unary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(29))
+    ),
+    vec_module_op!(
+        "vec.log",
+        vec_unary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(28))
+    ),
+    vec_module_op!(
+        "vec.log2",
+        vec_unary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(30))
+    ),
     // ---- vec.* rounding/sign ----
-    vec_module_unary!("vec.floor", 8),
-    vec_module_unary!("vec.ceil", 9),
-    vec_module_unary!("vec.round", 1),
-    vec_module_unary!("vec.trunc", 3),
-    vec_module_unary!("vec.fract", 10),
-    vec_module_unary!("vec.abs", 4),
-    vec_module_unary!("vec.sign", 6),
+    vec_module_op!(
+        "vec.floor",
+        vec_unary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(8))
+    ),
+    vec_module_op!(
+        "vec.ceil",
+        vec_unary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(9))
+    ),
+    vec_module_op!(
+        "vec.round",
+        vec_unary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(1))
+    ),
+    vec_module_op!(
+        "vec.trunc",
+        vec_unary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(3))
+    ),
+    vec_module_op!(
+        "vec.fract",
+        vec_unary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(10))
+    ),
+    vec_module_op!(
+        "vec.abs",
+        vec_unary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(4))
+    ),
+    vec_module_op!(
+        "vec.sign",
+        vec_unary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(6))
+    ),
     // ---- vec.* angle conversion ----
-    vec_module_unary!("vec.radians", 11),
-    vec_module_unary!("vec.degrees", 12),
+    vec_module_op!(
+        "vec.radians",
+        vec_unary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(11))
+    ),
+    vec_module_op!(
+        "vec.degrees",
+        vec_unary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(12))
+    ),
     // ---- vec.* binary ----
-    vec_module_binary!("vec.pow", BuiltinLowering::PrimOp(PrimOp::GlslExt(26))),
-    vec_module_binary!("vec.atan2", BuiltinLowering::PrimOp(PrimOp::GlslExt(25))),
-    vec_module_binary!("vec.mod", BuiltinLowering::PrimOp(PrimOp::FMod)),
-    vec_module_binary!("vec.min", BuiltinLowering::PrimOp(PrimOp::GlslExt(37))),
-    vec_module_binary!("vec.max", BuiltinLowering::PrimOp(PrimOp::GlslExt(40))),
+    vec_module_op!(
+        "vec.pow",
+        vec_binary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(26))
+    ),
+    vec_module_op!(
+        "vec.atan2",
+        vec_binary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(25))
+    ),
+    vec_module_op!("vec.mod", vec_binary_same, BuiltinLowering::PrimOp(PrimOp::FMod)),
+    vec_module_op!(
+        "vec.min",
+        vec_binary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(37))
+    ),
+    vec_module_op!(
+        "vec.max",
+        vec_binary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(40))
+    ),
     // ---- vec.* ternary ----
-    vec_module_ternary!("vec.clamp", 43),
-    vec_module_ternary!("vec.mix", 46),
-    vec_module_ternary!("vec.smoothstep", 49),
+    vec_module_op!(
+        "vec.clamp",
+        vec_ternary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(43))
+    ),
+    vec_module_op!(
+        "vec.mix",
+        vec_ternary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(46))
+    ),
+    vec_module_op!(
+        "vec.smoothstep",
+        vec_ternary_same,
+        BuiltinLowering::PrimOp(PrimOp::GlslExt(49))
+    ),
     // -----------------------------------------------------------------------
     // Polymorphic intrinsics — surface name (e.g. "magnitude") published
     // for type-check-time resolution; `_w_intrinsic_*` form (e.g.
@@ -302,7 +379,19 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         scalar_unary,
         BuiltinLowering::PrimOp(PrimOp::GlslExt(4))
     ),
-    scalar_polymorphic!("sign", scalar_unary, BuiltinLowering::PrimOp(PrimOp::GlslExt(6))),
+    // `sign` — UserVisible polymorphic, surface name only (no
+    // `_w_intrinsic_sign` alias is needed by anything today).
+    BuiltinDefRaw {
+        surface_name: "sign",
+        intrinsic_source_names: &["sign"],
+        impl_source_names: &[],
+        kind: BuiltinKind::UserVisible,
+        purity: Purity::Pure,
+        overloads: &[BuiltinOverload {
+            scheme: scalar_unary,
+            lowering: BuiltinLowering::PrimOp(PrimOp::GlslExt(6)),
+        }],
+    },
     polymorphic_intrinsic!(
         "floor",
         INTRINSIC_FLOOR,
@@ -385,21 +474,39 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         ],
     },
     // ---- Internal intrinsics with real backend lowerings ----
-    internal_intrinsic_with_lowering!(
-        INTRINSIC_LENGTH,
-        array_to_i32,
-        BuiltinLowering::Intrinsic(crate::impl_source::Intrinsic::Length)
-    ),
-    internal_intrinsic_with_lowering!(
-        INTRINSIC_UNINIT,
-        unit_to_t,
-        BuiltinLowering::Intrinsic(crate::impl_source::Intrinsic::Uninit)
-    ),
-    internal_intrinsic_with_lowering!(
-        INTRINSIC_ARRAY_WITH,
-        crate::builtins::scheme::array_index_value_to_array,
-        BuiltinLowering::Intrinsic(crate::impl_source::Intrinsic::ArrayWith)
-    ),
+    BuiltinDefRaw {
+        surface_name: INTRINSIC_LENGTH,
+        intrinsic_source_names: &[INTRINSIC_LENGTH],
+        impl_source_names: &[INTRINSIC_LENGTH],
+        kind: BuiltinKind::InternalIntrinsic,
+        purity: Purity::Pure,
+        overloads: &[BuiltinOverload {
+            scheme: array_to_i32,
+            lowering: BuiltinLowering::Intrinsic(crate::impl_source::Intrinsic::Length),
+        }],
+    },
+    BuiltinDefRaw {
+        surface_name: INTRINSIC_UNINIT,
+        intrinsic_source_names: &[INTRINSIC_UNINIT],
+        impl_source_names: &[INTRINSIC_UNINIT],
+        kind: BuiltinKind::InternalIntrinsic,
+        purity: Purity::Pure,
+        overloads: &[BuiltinOverload {
+            scheme: unit_to_t,
+            lowering: BuiltinLowering::Intrinsic(crate::impl_source::Intrinsic::Uninit),
+        }],
+    },
+    BuiltinDefRaw {
+        surface_name: INTRINSIC_ARRAY_WITH,
+        intrinsic_source_names: &[INTRINSIC_ARRAY_WITH],
+        impl_source_names: &[INTRINSIC_ARRAY_WITH],
+        kind: BuiltinKind::InternalIntrinsic,
+        purity: Purity::Pure,
+        overloads: &[BuiltinOverload {
+            scheme: crate::builtins::scheme::array_index_value_to_array,
+            lowering: BuiltinLowering::Intrinsic(crate::impl_source::Intrinsic::ArrayWith),
+        }],
+    },
     BuiltinDefRaw {
         surface_name: INTRINSIC_ARRAY_WITH_INPLACE,
         intrinsic_source_names: &[],
