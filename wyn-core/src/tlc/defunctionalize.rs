@@ -151,12 +151,7 @@ impl<'a> Defunctionalizer<'a> {
     /// Defunctionalize but preserve outermost parameter lambdas (for entry points).
     fn defunc_preserving_params(&mut self, term: Term) -> Term {
         match term.kind {
-            TermKind::Lambda(Lambda {
-                params,
-                body,
-                ret_ty,
-                captures,
-            }) => {
+            TermKind::Lambda(Lambda { params, body, ret_ty }) => {
                 // Mark all params as Dynamic in env
                 for (param, _) in &params {
                     self.env.insert(*param, StaticVal::Dynamic);
@@ -175,7 +170,6 @@ impl<'a> Defunctionalizer<'a> {
                         params,
                         body: Box::new(defunc_body),
                         ret_ty,
-                        captures,
                     }),
                 }
             }
@@ -492,13 +486,15 @@ impl<'a> Defunctionalizer<'a> {
 
     /// Defunctionalize a SOAC node: lift lambdas inside, resolve captures.
     fn defunc_soac(&mut self, soac: SoacOp, ty: Type<TypeName>, span: Span) -> DefuncResult {
+        // Pre-defunc, SoacBody.captures is empty; we drop it and the
+        // call below re-derives captures during lambda lifting.
         let new_soac = match soac {
             SoacOp::Map {
                 lam,
                 inputs,
                 consumes_input,
             } => {
-                let lam = self.defunc_lambda_in_soac(lam, span);
+                let lam = self.defunc_lambda_in_soac(lam.lam, span);
                 let inputs = inputs.into_iter().map(|ae| self.defunc_array_expr(ae)).collect();
                 SoacOp::Map {
                     lam,
@@ -507,19 +503,19 @@ impl<'a> Defunctionalizer<'a> {
                 }
             }
             SoacOp::Reduce { op, ne, input, props } => {
-                let op = self.defunc_lambda_in_soac(op, span);
+                let op = self.defunc_lambda_in_soac(op.lam, span);
                 let ne = Box::new(self.defunc_term(*ne).term);
                 let input = self.defunc_array_expr(input);
                 SoacOp::Reduce { op, ne, input, props }
             }
             SoacOp::Scan { op, ne, input } => {
-                let op = self.defunc_lambda_in_soac(op, span);
+                let op = self.defunc_lambda_in_soac(op.lam, span);
                 let ne = Box::new(self.defunc_term(*ne).term);
                 let input = self.defunc_array_expr(input);
                 SoacOp::Scan { op, ne, input }
             }
             SoacOp::Filter { pred, input } => {
-                let pred = self.defunc_lambda_in_soac(pred, span);
+                let pred = self.defunc_lambda_in_soac(pred.lam, span);
                 let input = self.defunc_array_expr(input);
                 SoacOp::Filter { pred, input }
             }
@@ -544,7 +540,7 @@ impl<'a> Defunctionalizer<'a> {
                 values,
                 props,
             } => {
-                let op = self.defunc_lambda_in_soac(op, span);
+                let op = self.defunc_lambda_in_soac(op.lam, span);
                 let ne = Box::new(self.defunc_term(*ne).term);
                 let indices = self.defunc_array_expr(indices);
                 let values = self.defunc_array_expr(values);
@@ -564,8 +560,8 @@ impl<'a> Defunctionalizer<'a> {
                 inputs,
                 props,
             } => {
-                let op = self.defunc_lambda_in_soac(op, span);
-                let reduce_op = self.defunc_lambda_in_soac(reduce_op, span);
+                let op = self.defunc_lambda_in_soac(op.lam, span);
+                let reduce_op = self.defunc_lambda_in_soac(reduce_op.lam, span);
                 let ne = Box::new(self.defunc_term(*ne).term);
                 let inputs = inputs.into_iter().map(|ae| self.defunc_array_expr(ae)).collect();
                 SoacOp::Redomap {
@@ -591,9 +587,10 @@ impl<'a> Defunctionalizer<'a> {
     /// Defunctionalize a lambda within a SOAC node.
     ///
     /// This lifts the lambda body to a top-level Def (same mechanism as defunc_lambda)
-    /// and fills `Lambda.captures` with the resolved capture terms. The resulting Lambda
-    /// has its body replaced with a reference to the lifted function and captures populated.
-    fn defunc_lambda_in_soac(&mut self, lam: Lambda, span: Span) -> Lambda {
+    /// and fills `SoacBody.captures` with the resolved capture terms. The resulting
+    /// SoacBody has its body replaced with a reference to the lifted function and
+    /// captures populated.
+    fn defunc_lambda_in_soac(&mut self, lam: Lambda, span: Span) -> super::SoacBody {
         // Build a term from the lambda so we can use defunc_lambda
         let lam_ty = if lam.params.len() == 1 {
             Type::Constructed(TypeName::Arrow, vec![lam.params[0].1.clone(), lam.ret_ty.clone()])
@@ -681,10 +678,12 @@ impl<'a> Defunctionalizer<'a> {
             Type::Constructed(TypeName::Unit, vec![])
         };
 
-        Lambda {
-            params,
-            body: Box::new(body),
-            ret_ty,
+        super::SoacBody {
+            lam: Lambda {
+                params,
+                body: Box::new(body),
+                ret_ty,
+            },
             captures,
         }
     }
@@ -713,7 +712,8 @@ impl<'a> Defunctionalizer<'a> {
                 index_fn,
                 elem_ty,
             } => {
-                let index_fn = self.defunc_lambda_in_soac(index_fn, Span::new(0, 0, 0, 0));
+                // Pre-defunc, captures are empty: drop them and re-defunc the lambda.
+                let index_fn = self.defunc_lambda_in_soac(index_fn.lam, Span::new(0, 0, 0, 0));
                 ArrayExpr::Generate {
                     shape,
                     index_fn,

@@ -51,7 +51,6 @@ pub fn rebuild_nested_lam(
             params: params.to_vec(),
             body: Box::new(body),
             ret_ty,
-            captures: vec![],
         }),
     }
 }
@@ -160,7 +159,6 @@ pub fn append_capture_params(
             params: all_params,
             body: Box::new(inner_body),
             ret_ty,
-            captures: vec![],
         }),
     }
 }
@@ -317,7 +315,19 @@ pub fn collect_free_vars_lambda(
         free,
         seen,
     );
-    for (_, _, cap_term) in &lam.captures {
+}
+
+pub fn collect_free_vars_soac_body(
+    sb: &super::SoacBody,
+    bound: &HashSet<SymbolId>,
+    top_level: &HashSet<SymbolId>,
+    known_defs: &HashSet<String>,
+    symbols: &SymbolTable,
+    free: &mut Vec<Term>,
+    seen: &mut HashSet<SymbolId>,
+) {
+    collect_free_vars_lambda(&sb.lam, bound, top_level, known_defs, symbols, free, seen);
+    for (_, _, cap_term) in &sb.captures {
         collect_free_vars(cap_term, bound, top_level, known_defs, symbols, free, seen);
     }
 }
@@ -333,23 +343,23 @@ pub fn collect_free_vars_soac(
 ) {
     match soac {
         SoacOp::Map { lam, inputs, .. } => {
-            collect_free_vars_lambda(lam, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars_soac_body(lam, bound, top_level, known_defs, symbols, free, seen);
             for input in inputs {
                 collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
             }
         }
         SoacOp::Reduce { op, ne, input, .. } => {
-            collect_free_vars_lambda(op, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars_soac_body(op, bound, top_level, known_defs, symbols, free, seen);
             collect_free_vars(ne, bound, top_level, known_defs, symbols, free, seen);
             collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
         }
         SoacOp::Scan { op, ne, input } => {
-            collect_free_vars_lambda(op, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars_soac_body(op, bound, top_level, known_defs, symbols, free, seen);
             collect_free_vars(ne, bound, top_level, known_defs, symbols, free, seen);
             collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
         }
         SoacOp::Filter { pred, input } => {
-            collect_free_vars_lambda(pred, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars_soac_body(pred, bound, top_level, known_defs, symbols, free, seen);
             collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
         }
         SoacOp::Scatter { indices, values, .. } => {
@@ -363,13 +373,13 @@ pub fn collect_free_vars_soac(
             values,
             ..
         } => {
-            collect_free_vars_lambda(op, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars_soac_body(op, bound, top_level, known_defs, symbols, free, seen);
             collect_free_vars(ne, bound, top_level, known_defs, symbols, free, seen);
             collect_free_vars_array_expr(indices, bound, top_level, known_defs, symbols, free, seen);
             collect_free_vars_array_expr(values, bound, top_level, known_defs, symbols, free, seen);
         }
         SoacOp::Redomap { op, ne, inputs, .. } => {
-            collect_free_vars_lambda(op, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars_soac_body(op, bound, top_level, known_defs, symbols, free, seen);
             collect_free_vars(ne, bound, top_level, known_defs, symbols, free, seen);
             for input in inputs {
                 collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
@@ -398,7 +408,7 @@ pub fn collect_free_vars_array_expr(
             collect_free_vars_soac(op, bound, top_level, known_defs, symbols, free, seen)
         }
         ArrayExpr::Generate { index_fn, .. } => {
-            collect_free_vars_lambda(index_fn, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars_soac_body(index_fn, bound, top_level, known_defs, symbols, free, seen);
         }
         ArrayExpr::Literal(terms) => {
             for t in terms {
@@ -493,7 +503,7 @@ fn check_soac_envelopes(
     def_name: SymbolId,
     top_level: &HashSet<SymbolId>,
 ) -> Result<(), ClosureConvertError> {
-    let lambdas: Vec<&Lambda> = match soac {
+    let bodies: Vec<&super::SoacBody> = match soac {
         SoacOp::Map { lam, .. } => vec![lam],
         SoacOp::Reduce { op, .. } => vec![op],
         SoacOp::Scan { op, .. } => vec![op],
@@ -502,8 +512,8 @@ fn check_soac_envelopes(
         SoacOp::Redomap { op, reduce_op, .. } => vec![op, reduce_op],
         SoacOp::Scatter { .. } => vec![],
     };
-    for lam in lambdas {
-        if !is_lifted_body(&lam.body, top_level) {
+    for sb in bodies {
+        if !is_lifted_body(&sb.lam.body, top_level) {
             return Err(ClosureConvertError::SoacLambdaNotLifted { def: def_name });
         }
     }
@@ -516,7 +526,7 @@ fn check_array_expr_envelopes(
     top_level: &HashSet<SymbolId>,
 ) -> Result<(), ClosureConvertError> {
     if let ArrayExpr::Generate { index_fn, .. } = ae {
-        if !is_lifted_body(&index_fn.body, top_level) {
+        if !is_lifted_body(&index_fn.lam.body, top_level) {
             return Err(ClosureConvertError::SoacLambdaNotLifted { def: def_name });
         }
     }

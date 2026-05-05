@@ -361,7 +361,6 @@ fn test_function_inlining() {
             params: vec![(a_sym, int_ty.clone()), (b_sym, int_ty.clone())],
             body: Box::new(a_plus_b),
             ret_ty: int_ty.clone(),
-            captures: vec![],
         }),
     };
 
@@ -459,7 +458,6 @@ fn test_function_alias_inlining() {
                 kind: TermKind::Var(y_sym),
             }),
             ret_ty: int_ty(),
-            captures: vec![],
         }),
     };
 
@@ -569,7 +567,6 @@ fn test_function_alias_partial_application() {
                 kind: TermKind::Var(x_sym),
             }),
             ret_ty: int_ty(),
-            captures: vec![],
         }),
     };
 

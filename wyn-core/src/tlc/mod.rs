@@ -286,13 +286,20 @@ pub enum LoopKind {
 // SOAC Types
 // =============================================================================
 
-/// A structured lambda with explicit parameters, return type, and captures.
+/// A structured lambda with explicit parameters and return type.
 #[derive(Debug, Clone)]
 pub struct Lambda {
     pub params: Vec<(SymbolId, Type<TypeName>)>,
     pub body: Box<Term>,
     pub ret_ty: Type<TypeName>,
-    /// Captured variables. Empty before defunctionalization; filled after.
+}
+
+/// Lambda + captures bundle used as a SOAC envelope or `Generate` body.
+/// The captures are the closure environment threaded into the body at
+/// SOAC lowering time. Empty before defunctionalization; filled after.
+#[derive(Debug, Clone)]
+pub struct SoacBody {
+    pub lam: Lambda,
     pub captures: Vec<(SymbolId, Type<TypeName>, Term)>,
 }
 
@@ -344,7 +351,7 @@ pub enum ArrayExpr {
     /// Generator: `elem = index_fn(i)` for `i` in `0..shape`.
     Generate {
         shape: Shape,
-        index_fn: Lambda,
+        index_fn: SoacBody,
         elem_ty: Type<TypeName>,
     },
     /// Literal small array.
@@ -370,8 +377,8 @@ pub enum ArrayExpr {
 #[derive(Debug, Clone)]
 pub enum SoacOp {
     Map {
-        lam: Lambda,
-        /// Parallel inputs. `inputs.len() == lam.params.len()`.
+        lam: SoacBody,
+        /// Parallel inputs. `inputs.len() == lam.lam.params.len()`.
         inputs: Vec<ArrayExpr>,
         /// Set by the ownership pass when the map's primary input
         /// is mutable, dead-after, pointwise, and not bound to a
@@ -381,7 +388,7 @@ pub enum SoacOp {
         consumes_input: bool,
     },
     Reduce {
-        op: Lambda,
+        op: SoacBody,
         ne: Box<Term>,
         input: ArrayExpr,
         props: ReduceProps,
@@ -392,9 +399,9 @@ pub enum SoacOp {
     Redomap {
         /// Combined operator: `(acc, x1, ..., xn) -> acc'`
         /// First param is the accumulator, rest are elements from each input.
-        op: Lambda,
+        op: SoacBody,
         /// Pure reduce combiner: `(acc, acc) -> acc` for parallel phase 2.
-        reduce_op: Lambda,
+        reduce_op: SoacBody,
         /// Initial accumulator value.
         ne: Box<Term>,
         /// Parallel input arrays (one per element param in op).
@@ -402,12 +409,12 @@ pub enum SoacOp {
         props: ReduceProps,
     },
     Scan {
-        op: Lambda,
+        op: SoacBody,
         ne: Box<Term>,
         input: ArrayExpr,
     },
     Filter {
-        pred: Lambda,
+        pred: SoacBody,
         input: ArrayExpr,
     },
     Scatter {
@@ -417,7 +424,7 @@ pub enum SoacOp {
     },
     ReduceByIndex {
         dest: Place,
-        op: Lambda,
+        op: SoacBody,
         ne: Box<Term>,
         indices: ArrayExpr,
         values: ArrayExpr,
@@ -733,7 +740,14 @@ where
     F: FnMut(&Term),
 {
     f(&lam.body);
-    for (_, _, e) in &lam.captures {
+}
+
+fn visit_soac_body_children<F>(sb: &SoacBody, f: &mut F)
+where
+    F: FnMut(&Term),
+{
+    visit_lambda_children(&sb.lam, f);
+    for (_, _, e) in &sb.captures {
         f(e);
     }
 }
@@ -744,23 +758,23 @@ where
 {
     match soac {
         SoacOp::Map { lam, inputs, .. } => {
-            visit_lambda_children(lam, f);
+            visit_soac_body_children(lam, f);
             for ae in inputs {
                 visit_array_expr_children(ae, f);
             }
         }
         SoacOp::Reduce { op, ne, input, .. } => {
-            visit_lambda_children(op, f);
+            visit_soac_body_children(op, f);
             f(ne);
             visit_array_expr_children(input, f);
         }
         SoacOp::Scan { op, ne, input } => {
-            visit_lambda_children(op, f);
+            visit_soac_body_children(op, f);
             f(ne);
             visit_array_expr_children(input, f);
         }
         SoacOp::Filter { pred, input } => {
-            visit_lambda_children(pred, f);
+            visit_soac_body_children(pred, f);
             visit_array_expr_children(input, f);
         }
         SoacOp::Scatter {
@@ -781,7 +795,7 @@ where
             ..
         } => {
             visit_place_children(dest, f);
-            visit_lambda_children(op, f);
+            visit_soac_body_children(op, f);
             f(ne);
             visit_array_expr_children(indices, f);
             visit_array_expr_children(values, f);
@@ -793,8 +807,8 @@ where
             inputs,
             ..
         } => {
-            visit_lambda_children(op, f);
-            visit_lambda_children(reduce_op, f);
+            visit_soac_body_children(op, f);
+            visit_soac_body_children(reduce_op, f);
             f(ne);
             for ae in inputs {
                 visit_array_expr_children(ae, f);
@@ -815,7 +829,7 @@ where
             }
         }
         ArrayExpr::Soac(op) => visit_soac_children(op, f),
-        ArrayExpr::Generate { index_fn, .. } => visit_lambda_children(index_fn, f),
+        ArrayExpr::Generate { index_fn, .. } => visit_soac_body_children(index_fn, f),
         ArrayExpr::Literal(terms) => {
             for t in terms {
                 f(t);
@@ -862,8 +876,17 @@ where
 {
     Lambda {
         body: Box::new(f(*lam.body)),
-        captures: lam.captures.into_iter().map(|(s, t, e)| (s, t, f(e))).collect(),
         ..lam
+    }
+}
+
+fn map_soac_body_children<F>(sb: SoacBody, f: &mut F) -> SoacBody
+where
+    F: FnMut(Term) -> Term,
+{
+    SoacBody {
+        lam: map_lambda_children(sb.lam, f),
+        captures: sb.captures.into_iter().map(|(s, t, e)| (s, t, f(e))).collect(),
     }
 }
 
@@ -877,23 +900,23 @@ where
             inputs,
             consumes_input,
         } => SoacOp::Map {
-            lam: map_lambda_children(lam, f),
+            lam: map_soac_body_children(lam, f),
             inputs: inputs.into_iter().map(|ae| map_array_expr_children(ae, f)).collect(),
             consumes_input,
         },
         SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
-            op: map_lambda_children(op, f),
+            op: map_soac_body_children(op, f),
             ne: Box::new(f(*ne)),
             input: map_array_expr_children(input, f),
             props,
         },
         SoacOp::Scan { op, ne, input } => SoacOp::Scan {
-            op: map_lambda_children(op, f),
+            op: map_soac_body_children(op, f),
             ne: Box::new(f(*ne)),
             input: map_array_expr_children(input, f),
         },
         SoacOp::Filter { pred, input } => SoacOp::Filter {
-            pred: map_lambda_children(pred, f),
+            pred: map_soac_body_children(pred, f),
             input: map_array_expr_children(input, f),
         },
         SoacOp::Scatter {
@@ -914,7 +937,7 @@ where
             props,
         } => SoacOp::ReduceByIndex {
             dest: map_place_children(dest, f),
-            op: map_lambda_children(op, f),
+            op: map_soac_body_children(op, f),
             ne: Box::new(f(*ne)),
             indices: map_array_expr_children(indices, f),
             values: map_array_expr_children(values, f),
@@ -927,8 +950,8 @@ where
             inputs,
             props,
         } => SoacOp::Redomap {
-            op: map_lambda_children(op, f),
-            reduce_op: map_lambda_children(reduce_op, f),
+            op: map_soac_body_children(op, f),
+            reduce_op: map_soac_body_children(reduce_op, f),
             ne: Box::new(f(*ne)),
             inputs: inputs.into_iter().map(|ae| map_array_expr_children(ae, f)).collect(),
             props,
@@ -952,7 +975,7 @@ where
             elem_ty,
         } => ArrayExpr::Generate {
             shape,
-            index_fn: map_lambda_children(index_fn, f),
+            index_fn: map_soac_body_children(index_fn, f),
             elem_ty,
         },
         ArrayExpr::Literal(terms) => ArrayExpr::Literal(terms.into_iter().map(f).collect()),
@@ -1403,7 +1426,6 @@ impl<'a> Transformer<'a> {
                 params: all_params,
                 ret_ty,
                 body: Box::new(result),
-                captures: vec![],
             }),
         );
 
@@ -2239,11 +2261,15 @@ impl<'a> Transformer<'a> {
         )
     }
 
-    /// Convert a term to a Lambda. If it's already a Lambda, extract it.
+    /// Convert a term to a SoacBody. If it's already a Lambda, wrap it.
     /// Otherwise, eta-expand all parameters: `f : A -> B -> C` → `|a, b| f(a)(b)`.
-    fn term_to_lambda(&mut self, term: Term) -> Lambda {
+    /// Captures are always empty here — this runs pre-defunctionalization.
+    fn term_to_lambda(&mut self, term: Term) -> SoacBody {
         match term.kind {
-            TermKind::Lambda(lam) => lam,
+            TermKind::Lambda(lam) => SoacBody {
+                lam,
+                captures: vec![],
+            },
             _ => {
                 // Decompose the full arrow chain: A -> B -> C gives ([A, B], C)
                 let mut param_tys = Vec::new();
@@ -2289,10 +2315,12 @@ impl<'a> Transformer<'a> {
                     },
                 );
 
-                Lambda {
-                    params,
-                    body: Box::new(body),
-                    ret_ty,
+                SoacBody {
+                    lam: Lambda {
+                        params,
+                        body: Box::new(body),
+                        ret_ty,
+                    },
                     captures: vec![],
                 }
             }

@@ -298,14 +298,11 @@ impl BufferSpecializer {
         match &term.kind {
             TermKind::Lambda(lam) => {
                 let new_body = self.rewrite_term(&lam.body);
-                let new_captures: Vec<_> =
-                    lam.captures.iter().map(|(s, t, e)| (*s, t.clone(), self.rewrite_term(e))).collect();
                 Term {
                     kind: TermKind::Lambda(Lambda {
                         params: lam.params.clone(),
                         body: Box::new(new_body),
                         ret_ty: lam.ret_ty.clone(),
-                        captures: new_captures,
                     }),
                     ..term.clone()
                 }
@@ -584,23 +581,23 @@ impl BufferSpecializer {
                 inputs,
                 consumes_input,
             } => SoacOp::Map {
-                lam: self.rewrite_lambda(lam),
+                lam: self.rewrite_soac_body(lam),
                 inputs: inputs.iter().map(|ae| self.rewrite_array_expr(ae)).collect(),
                 consumes_input: *consumes_input,
             },
             SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
-                op: self.rewrite_lambda(op),
+                op: self.rewrite_soac_body(op),
                 ne: Box::new(self.rewrite_term(ne)),
                 input: self.rewrite_array_expr(input),
                 props: props.clone(),
             },
             SoacOp::Scan { op, ne, input } => SoacOp::Scan {
-                op: self.rewrite_lambda(op),
+                op: self.rewrite_soac_body(op),
                 ne: Box::new(self.rewrite_term(ne)),
                 input: self.rewrite_array_expr(input),
             },
             SoacOp::Filter { pred, input } => SoacOp::Filter {
-                pred: self.rewrite_lambda(pred),
+                pred: self.rewrite_soac_body(pred),
                 input: self.rewrite_array_expr(input),
             },
             SoacOp::Scatter {
@@ -621,7 +618,7 @@ impl BufferSpecializer {
                 props,
             } => SoacOp::ReduceByIndex {
                 dest: self.rewrite_place(dest),
-                op: self.rewrite_lambda(op),
+                op: self.rewrite_soac_body(op),
                 ne: Box::new(self.rewrite_term(ne)),
                 indices: self.rewrite_array_expr(indices),
                 values: self.rewrite_array_expr(values),
@@ -634,8 +631,8 @@ impl BufferSpecializer {
                 inputs,
                 props,
             } => SoacOp::Redomap {
-                op: self.rewrite_lambda(op),
-                reduce_op: self.rewrite_lambda(reduce_op),
+                op: self.rewrite_soac_body(op),
+                reduce_op: self.rewrite_soac_body(reduce_op),
                 ne: Box::new(self.rewrite_term(ne)),
                 inputs: inputs.iter().map(|ae| self.rewrite_array_expr(ae)).collect(),
                 props: props.clone(),
@@ -648,7 +645,13 @@ impl BufferSpecializer {
             params: lam.params.clone(),
             body: Box::new(self.rewrite_term(&lam.body)),
             ret_ty: lam.ret_ty.clone(),
-            captures: lam.captures.iter().map(|(s, t, e)| (*s, t.clone(), self.rewrite_term(e))).collect(),
+        }
+    }
+
+    fn rewrite_soac_body(&mut self, sb: &super::SoacBody) -> super::SoacBody {
+        super::SoacBody {
+            lam: self.rewrite_lambda(&sb.lam),
+            captures: sb.captures.iter().map(|(s, t, e)| (*s, t.clone(), self.rewrite_term(e))).collect(),
         }
     }
 
@@ -663,7 +666,7 @@ impl BufferSpecializer {
                 elem_ty,
             } => ArrayExpr::Generate {
                 shape: shape.clone(),
-                index_fn: self.rewrite_lambda(index_fn),
+                index_fn: self.rewrite_soac_body(index_fn),
                 elem_ty: elem_ty.clone(),
             },
             ArrayExpr::Literal(terms) => {
@@ -996,17 +999,11 @@ impl BufferSpecializer {
 
             TermKind::Lambda(lam) => {
                 let new_body = self.rewrite_specialized_body(&lam.body, view_params);
-                let new_captures: Vec<_> = lam
-                    .captures
-                    .iter()
-                    .map(|(s, t, e)| (*s, t.clone(), self.rewrite_specialized_body(e, view_params)))
-                    .collect();
                 Term {
                     kind: TermKind::Lambda(Lambda {
                         params: lam.params.clone(),
                         body: Box::new(new_body),
                         ret_ty: lam.ret_ty.clone(),
-                        captures: new_captures,
                     }),
                     ..term.clone()
                 }
@@ -1204,7 +1201,7 @@ impl BufferSpecializer {
                 inputs,
                 consumes_input,
             } => SoacOp::Map {
-                lam: self.rewrite_specialized_lambda(lam, view_params),
+                lam: self.rewrite_specialized_soac_body(lam, view_params),
                 inputs: inputs
                     .iter()
                     .map(|ae| self.rewrite_specialized_array_expr(ae, view_params))
@@ -1212,18 +1209,18 @@ impl BufferSpecializer {
                 consumes_input: *consumes_input,
             },
             SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
-                op: self.rewrite_specialized_lambda(op, view_params),
+                op: self.rewrite_specialized_soac_body(op, view_params),
                 ne: Box::new(self.rewrite_specialized_body(ne, view_params)),
                 input: self.rewrite_specialized_array_expr(input, view_params),
                 props: props.clone(),
             },
             SoacOp::Scan { op, ne, input } => SoacOp::Scan {
-                op: self.rewrite_specialized_lambda(op, view_params),
+                op: self.rewrite_specialized_soac_body(op, view_params),
                 ne: Box::new(self.rewrite_specialized_body(ne, view_params)),
                 input: self.rewrite_specialized_array_expr(input, view_params),
             },
             SoacOp::Filter { pred, input } => SoacOp::Filter {
-                pred: self.rewrite_specialized_lambda(pred, view_params),
+                pred: self.rewrite_specialized_soac_body(pred, view_params),
                 input: self.rewrite_specialized_array_expr(input, view_params),
             },
             SoacOp::Scatter {
@@ -1244,7 +1241,7 @@ impl BufferSpecializer {
                 props,
             } => SoacOp::ReduceByIndex {
                 dest: self.rewrite_specialized_place(dest, view_params),
-                op: self.rewrite_specialized_lambda(op, view_params),
+                op: self.rewrite_specialized_soac_body(op, view_params),
                 ne: Box::new(self.rewrite_specialized_body(ne, view_params)),
                 indices: self.rewrite_specialized_array_expr(indices, view_params),
                 values: self.rewrite_specialized_array_expr(values, view_params),
@@ -1257,8 +1254,8 @@ impl BufferSpecializer {
                 inputs,
                 props,
             } => SoacOp::Redomap {
-                op: self.rewrite_specialized_lambda(op, view_params),
-                reduce_op: self.rewrite_specialized_lambda(reduce_op, view_params),
+                op: self.rewrite_specialized_soac_body(op, view_params),
+                reduce_op: self.rewrite_specialized_soac_body(reduce_op, view_params),
                 ne: Box::new(self.rewrite_specialized_body(ne, view_params)),
                 inputs: inputs
                     .iter()
@@ -1278,7 +1275,17 @@ impl BufferSpecializer {
             params: lam.params.clone(),
             body: Box::new(self.rewrite_specialized_body(&lam.body, view_params)),
             ret_ty: lam.ret_ty.clone(),
-            captures: lam
+        }
+    }
+
+    fn rewrite_specialized_soac_body(
+        &mut self,
+        sb: &super::SoacBody,
+        view_params: &HashMap<SymbolId, (SymbolId, SymbolId, u32, u32, Type<TypeName>)>,
+    ) -> super::SoacBody {
+        super::SoacBody {
+            lam: self.rewrite_specialized_lambda(&sb.lam, view_params),
+            captures: sb
                 .captures
                 .iter()
                 .map(|(s, t, e)| (*s, t.clone(), self.rewrite_specialized_body(e, view_params)))
@@ -1330,7 +1337,7 @@ impl BufferSpecializer {
                 elem_ty,
             } => ArrayExpr::Generate {
                 shape: shape.clone(),
-                index_fn: self.rewrite_specialized_lambda(index_fn, view_params),
+                index_fn: self.rewrite_specialized_soac_body(index_fn, view_params),
                 elem_ty: elem_ty.clone(),
             },
             ArrayExpr::Literal(terms) => ArrayExpr::Literal(
@@ -1552,7 +1559,6 @@ fn wrap_in_lambdas(body: Term, params: &[(SymbolId, Type<TypeName>)], term_ids: 
             params: params.to_vec(),
             body: Box::new(body),
             ret_ty,
-            captures: vec![],
         }),
     }
 }

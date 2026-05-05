@@ -301,17 +301,25 @@ fn subst_in_semantics(
         }
     }
 
-    fn sub_lam(lam: Lambda, old: SymbolId, new: SymbolId, ids: &mut TermIdSource) -> Lambda {
-        Lambda {
-            body: Box::new(substitute_sym(*lam.body, old, new, ids)),
-            ..lam
+    fn sub_sb(
+        sb: super::SoacBody,
+        old: SymbolId,
+        new: SymbolId,
+        ids: &mut TermIdSource,
+    ) -> super::SoacBody {
+        super::SoacBody {
+            lam: Lambda {
+                body: Box::new(substitute_sym(*sb.lam.body, old, new, ids)),
+                ..sb.lam
+            },
+            captures: sb.captures,
         }
     }
 
     match sem {
         ArraySemantics::Elementwise { inputs, body } => ArraySemantics::Elementwise {
             inputs: inputs.into_iter().map(|ae| sub_ae(ae, old, new, term_ids)).collect(),
-            body: sub_lam(body, old, new, term_ids),
+            body: sub_sb(body, old, new, term_ids),
         },
         ArraySemantics::Reduction {
             input,
@@ -320,18 +328,18 @@ fn subst_in_semantics(
             props,
         } => ArraySemantics::Reduction {
             input: sub_ae(input, old, new, term_ids),
-            op: sub_lam(op, old, new, term_ids),
+            op: sub_sb(op, old, new, term_ids),
             init,
             props,
         },
         ArraySemantics::PrefixScan { input, op, init } => ArraySemantics::PrefixScan {
             input: sub_ae(input, old, new, term_ids),
-            op: sub_lam(op, old, new, term_ids),
+            op: sub_sb(op, old, new, term_ids),
             init,
         },
         ArraySemantics::Filter { input, pred } => ArraySemantics::Filter {
             input: sub_ae(input, old, new, term_ids),
-            pred: sub_lam(pred, old, new, term_ids),
+            pred: sub_sb(pred, old, new, term_ids),
         },
         other => other,
     }

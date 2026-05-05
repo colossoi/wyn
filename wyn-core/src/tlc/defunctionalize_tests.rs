@@ -184,7 +184,6 @@ fn test_defunc_simple_lambda_no_capture() {
                 kind: TermKind::Var(x_sym),
             }),
             ret_ty: i32_ty(),
-            captures: vec![],
         }),
     };
 
@@ -248,7 +247,6 @@ fn test_defunc_lambda_with_capture() {
                 },
             }),
             ret_ty: i32_ty(),
-            captures: vec![],
         }),
     };
 
@@ -279,7 +277,6 @@ fn test_defunc_lambda_with_capture() {
             params: vec![(y_sym, i32_ty())],
             body: Box::new(let_expr),
             ret_ty: arrow(i32_ty(), i32_ty()),
-            captures: vec![],
         }),
     };
 
@@ -372,7 +369,6 @@ fn test_nested_hof_passthrough() {
             params: vec![(f_sym, arrow(i32_ty(), i32_ty())), (x_sym, i32_ty())],
             body: Box::new(hof_inner_body),
             ret_ty: i32_ty(),
-            captures: vec![],
         }),
     };
 
@@ -414,7 +410,6 @@ fn test_nested_hof_passthrough() {
             params: vec![(g_sym, arrow(i32_ty(), i32_ty())), (y_sym, i32_ty())],
             body: Box::new(hof_inner_call),
             ret_ty: i32_ty(),
-            captures: vec![],
         }),
     };
 
@@ -455,7 +450,6 @@ fn test_nested_hof_passthrough() {
             params: vec![(a_sym, i32_ty())],
             body: Box::new(a_plus_cap),
             ret_ty: i32_ty(),
-            captures: vec![],
         }),
     };
 
@@ -490,7 +484,6 @@ fn test_nested_hof_passthrough() {
             params: vec![(cap_sym, i32_ty())],
             body: Box::new(main_body),
             ret_ty: i32_ty(),
-            captures: vec![],
         }),
     };
 

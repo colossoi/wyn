@@ -39,7 +39,7 @@ fn array_ty(elem: Type<TypeName>) -> Type<TypeName> {
 fn mk_map(lam: Lambda, input: Term, result_ty: Type<TypeName>, term_ids: &mut TermIdSource) -> Term {
     mk_term(
         TermKind::Soac(SoacOp::Map {
-            lam,
+            lam: mk_soac_body(lam),
             inputs: vec![ArrayExpr::Ref(Box::new(input))],
             consumes_input: false,
         }),
@@ -54,7 +54,6 @@ fn mk_lambda1(param: SymbolId, param_ty: Type<TypeName>, body: Term, ret_ty: Typ
         params: vec![(param, param_ty)],
         body: Box::new(body),
         ret_ty,
-        captures: vec![],
     }
 }
 
@@ -71,6 +70,13 @@ fn mk_lambda2(
         params: vec![(p1, p1_ty), (p2, p2_ty)],
         body: Box::new(body),
         ret_ty,
+    }
+}
+
+/// Wrap a Lambda in a SoacBody with empty captures (test helper).
+fn mk_soac_body(lam: Lambda) -> crate::tlc::SoacBody {
+    crate::tlc::SoacBody {
+        lam,
         captures: vec![],
     }
 }
@@ -85,7 +91,7 @@ fn mk_reduce(
 ) -> Term {
     mk_term(
         TermKind::Soac(SoacOp::Reduce {
-            op,
+            op: mk_soac_body(op),
             ne: Box::new(ne),
             input: ArrayExpr::Ref(Box::new(input)),
             props: ReduceProps::default(),
@@ -113,7 +119,6 @@ fn mk_func_def(
                 params: params.clone(),
                 body: Box::new(body),
                 ret_ty: ret_ty.clone(),
-                captures: vec![],
             }),
         }
     };
@@ -217,12 +222,12 @@ fn test_simple_map_fusion() {
             }
 
             // Lambda should have f's param (x)
-            assert_eq!(lam.params.len(), 1);
-            assert_eq!(lam.params[0].0, x_sym);
+            assert_eq!(lam.lam.params.len(), 1);
+            assert_eq!(lam.lam.params[0].0, x_sym);
 
             // Body should be: let _fused = x in _fused
             // (g's body is y, substituted to _fused; f's body is x)
-            match &lam.body.kind {
+            match &lam.lam.body.kind {
                 TermKind::Let { rhs, body, .. } => {
                     // rhs is f's body (Var(x))
                     assert!(matches!(&rhs.kind, TermKind::Var(s) if *s == x_sym));
@@ -328,7 +333,7 @@ fn test_chain_of_three_maps() {
                 other => panic!("Expected Ref(a), got {:?}", other),
             }
             // Lambda param should be f's original param (x)
-            assert_eq!(lam.params[0].0, x_sym);
+            assert_eq!(lam.lam.params[0].0, x_sym);
         }
         other => panic!("Expected fully fused Map, got {:?}", other),
     }
@@ -433,7 +438,6 @@ fn test_zip_fused_producer() {
         params: vec![(x1_sym, i32_ty()), (x2_sym, f32_ty())],
         body: Box::new(mk_term(TermKind::Var(x1_sym), i32_ty(), &mut term_ids)),
         ret_ty: i32_ty(),
-        captures: vec![],
     };
 
     // Producer: map(f, [a, b]) with zip-fused inputs
@@ -441,7 +445,7 @@ fn test_zip_fused_producer() {
     let b = mk_term(TermKind::Var(b_sym), array_ty(f32_ty()), &mut term_ids);
     let producer = mk_term(
         TermKind::Soac(SoacOp::Map {
-            lam: f,
+            lam: mk_soac_body(f),
             inputs: vec![ArrayExpr::Ref(Box::new(a)), ArrayExpr::Ref(Box::new(b))],
             consumes_input: false,
         }),
@@ -494,9 +498,9 @@ fn test_zip_fused_producer() {
         TermKind::Soac(SoacOp::Map { lam, inputs, .. }) => {
             assert_eq!(inputs.len(), 2);
             // Lambda should have f's params (x1, x2)
-            assert_eq!(lam.params.len(), 2);
-            assert_eq!(lam.params[0].0, x1_sym);
-            assert_eq!(lam.params[1].0, x2_sym);
+            assert_eq!(lam.lam.params.len(), 2);
+            assert_eq!(lam.lam.params[0].0, x1_sym);
+            assert_eq!(lam.lam.params[1].0, x2_sym);
         }
         other => panic!("Expected fused Map with 2 inputs, got {:?}", other),
     }
@@ -532,7 +536,6 @@ fn test_consumer_multi_input_no_fusion() {
         params: vec![(y1_sym, i32_ty()), (y2_sym, i32_ty())],
         body: Box::new(mk_term(TermKind::Var(y1_sym), i32_ty(), &mut term_ids)),
         ret_ty: i32_ty(),
-        captures: vec![],
     };
 
     // Consumer: map(g, [b, other]) — b plus another array
@@ -540,7 +543,7 @@ fn test_consumer_multi_input_no_fusion() {
     let other = mk_term(TermKind::Var(other_sym), array_ty(i32_ty()), &mut term_ids);
     let consumer = mk_term(
         TermKind::Soac(SoacOp::Map {
-            lam: g,
+            lam: mk_soac_body(g),
             inputs: vec![ArrayExpr::Ref(Box::new(b_ref)), ArrayExpr::Ref(Box::new(other))],
             consumes_input: false,
         }),
@@ -610,7 +613,7 @@ fn test_inline_map_fusion() {
     );
     let outer = mk_term(
         TermKind::Soac(SoacOp::Map {
-            lam: f,
+            lam: mk_soac_body(f),
             inputs: vec![ArrayExpr::Ref(Box::new(inner_map))],
             consumes_input: false,
         }),
@@ -643,8 +646,8 @@ fn test_inline_map_fusion() {
                 other => panic!("Expected Ref(a), got {:?}", other),
             }
             // Lambda should have g's param (x), not f's param (y)
-            assert_eq!(lam.params.len(), 1);
-            assert_eq!(lam.params[0].0, x_sym);
+            assert_eq!(lam.lam.params.len(), 1);
+            assert_eq!(lam.lam.params[0].0, x_sym);
         }
         other => panic!("Expected fused Map, got {:?}", other),
     }
@@ -682,7 +685,7 @@ fn test_inline_chain_of_three() {
     );
     let middle = mk_term(
         TermKind::Soac(SoacOp::Map {
-            lam: g,
+            lam: mk_soac_body(g),
             inputs: vec![ArrayExpr::Ref(Box::new(inner))],
             consumes_input: false,
         }),
@@ -699,7 +702,7 @@ fn test_inline_chain_of_three() {
     );
     let outer = mk_term(
         TermKind::Soac(SoacOp::Map {
-            lam: f,
+            lam: mk_soac_body(f),
             inputs: vec![ArrayExpr::Ref(Box::new(middle))],
             consumes_input: false,
         }),
@@ -732,8 +735,8 @@ fn test_inline_chain_of_three() {
                 other => panic!("Expected Ref(a), got {:?}", other),
             }
             // Innermost param (h's param x) should be the lambda param
-            assert_eq!(lam.params.len(), 1);
-            assert_eq!(lam.params[0].0, x_sym);
+            assert_eq!(lam.lam.params.len(), 1);
+            assert_eq!(lam.lam.params[0].0, x_sym);
         }
         other => panic!("Expected fully fused Map, got {:?}", other),
     }
@@ -770,12 +773,11 @@ fn test_zip_fused_consumer_inline() {
         params: vec![(y1_sym, i32_ty()), (y2_sym, f32_ty())],
         body: Box::new(mk_term(TermKind::Var(y1_sym), i32_ty(), &mut term_ids)),
         ret_ty: i32_ty(),
-        captures: vec![],
     };
     let b = mk_term(TermKind::Var(b_sym), array_ty(f32_ty()), &mut term_ids);
     let outer = mk_term(
         TermKind::Soac(SoacOp::Map {
-            lam: f,
+            lam: mk_soac_body(f),
             inputs: vec![
                 ArrayExpr::Ref(Box::new(inner_map)), // will be fused
                 ArrayExpr::Ref(Box::new(b)),         // stays as-is
@@ -818,9 +820,9 @@ fn test_zip_fused_consumer_inline() {
                 other => panic!("Expected Ref(b), got {:?}", other),
             }
             // Params: x (from g), y2 (from f — kept)
-            assert_eq!(lam.params.len(), 2);
-            assert_eq!(lam.params[0].0, x_sym);
-            assert_eq!(lam.params[1].0, y2_sym);
+            assert_eq!(lam.lam.params.len(), 2);
+            assert_eq!(lam.lam.params[0].0, x_sym);
+            assert_eq!(lam.lam.params[1].0, y2_sym);
         }
         other => panic!("Expected fused Map with 2 inputs, got {:?}", other),
     }
@@ -867,13 +869,12 @@ fn test_map_zip_map() {
         params: vec![(y1_sym, i32_ty()), (y2_sym, f32_ty())],
         body: Box::new(mk_term(TermKind::Var(y1_sym), i32_ty(), &mut term_ids)),
         ret_ty: i32_ty(),
-        captures: vec![],
     };
 
     // map(f, zip(map(g, a), map(h, b))) — zip absorbed
     let outer = mk_term(
         TermKind::Soac(SoacOp::Map {
-            lam: f,
+            lam: mk_soac_body(f),
             inputs: vec![
                 ArrayExpr::Ref(Box::new(map_g_a)),
                 ArrayExpr::Ref(Box::new(map_h_b)),
@@ -913,9 +914,9 @@ fn test_map_zip_map() {
                 other => panic!("Expected Ref(b), got {:?}", other),
             }
             // Params: x (from g), w (from h)
-            assert_eq!(lam.params.len(), 2);
-            assert_eq!(lam.params[0].0, x_sym);
-            assert_eq!(lam.params[1].0, w_sym);
+            assert_eq!(lam.lam.params.len(), 2);
+            assert_eq!(lam.lam.params[0].0, x_sym);
+            assert_eq!(lam.lam.params[1].0, w_sym);
         }
         other => panic!("Expected fused Map, got {:?}", other),
     }
@@ -993,8 +994,8 @@ fn test_raytrace_step1_local_map_reduce() {
                 other => panic!("Expected Ref(xs), got {:?}", other),
             }
             // Redomap op has (acc, x) params — acc from reduce, x from map
-            assert_eq!(op.params.len(), 2);
-            assert_eq!(op.params[0].0, acc_sym);
+            assert_eq!(op.lam.params.len(), 2);
+            assert_eq!(op.lam.params[0].0, acc_sym);
         }
         other => panic!("Expected fused Redomap, got {:?}", other),
     }
@@ -1092,7 +1093,7 @@ fn test_raytrace_step2_interprocedural_reduce_consumer() {
                 ArrayExpr::Ref(t) => assert!(matches!(&t.kind, TermKind::Var(s) if *s == arr_sym)),
                 other => panic!("Expected Ref(arr), got {:?}", other),
             }
-            assert_eq!(op.params.len(), 2);
+            assert_eq!(op.lam.params.len(), 2);
         }
         other => panic!("Expected fused Redomap in main, got {:?}", other),
     }
@@ -1194,7 +1195,7 @@ fn test_raytrace_step3_interprocedural_map_producer() {
                 ArrayExpr::Ref(t) => assert!(matches!(&t.kind, TermKind::Var(s) if *s == arr_sym)),
                 other => panic!("Expected Ref(arr), got {:?}", other),
             }
-            assert_eq!(op.params.len(), 2);
+            assert_eq!(op.lam.params.len(), 2);
         }
         other => panic!("Expected fused Redomap in main, got {:?}", other),
     }
@@ -1313,7 +1314,7 @@ fn test_raytrace_step4_both_interprocedural() {
                 ArrayExpr::Ref(t) => assert!(matches!(&t.kind, TermKind::Var(s) if *s == arr_sym)),
                 other => panic!("Expected Ref(arr), got {:?}", other),
             }
-            assert_eq!(op.params.len(), 2);
+            assert_eq!(op.lam.params.len(), 2);
         }
         other => panic!("Expected fused Redomap in main, got {:?}", other),
     }
@@ -1436,7 +1437,7 @@ fn test_raytrace_step5_globals_pattern_fused() {
     // Should fuse: intersectAll produces a Map (ProducesMap summary)
     match &main.body.kind {
         TermKind::Soac(SoacOp::Redomap { op, .. }) => {
-            assert_eq!(op.params.len(), 2);
+            assert_eq!(op.lam.params.len(), 2);
         }
         other => panic!("Expected fused Redomap, got {:?}", other),
     }

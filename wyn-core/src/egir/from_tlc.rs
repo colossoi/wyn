@@ -1589,14 +1589,14 @@ impl<'a> Converter<'a> {
 
     fn convert_soac_map(
         &mut self,
-        lam: &Lambda,
+        sb: &super::super::tlc::SoacBody,
         inputs: &[ArrayExpr],
         consumes_input: bool,
         result_ty: Type<TypeName>,
     ) -> Result<NodeId, ConvertError> {
-        let f_name = self.lambda_fn_name(lam)?;
+        let f_name = self.lambda_fn_name(&sb.lam)?;
         let capture_nids: Vec<NodeId> =
-            lam.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
+            sb.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
         let input_arr_types: Vec<Type<TypeName>> =
             inputs.iter().map(|ae| self.array_expr_type(ae)).collect();
         let input_nids: Vec<NodeId> =
@@ -1639,12 +1639,12 @@ impl<'a> Converter<'a> {
 
     fn convert_soac_reduce(
         &mut self,
-        op: &Lambda,
+        op: &super::super::tlc::SoacBody,
         ne: &Term,
         input: &ArrayExpr,
         result_ty: Type<TypeName>,
     ) -> Result<NodeId, ConvertError> {
-        let op_name = self.lambda_fn_name(op)?;
+        let op_name = self.lambda_fn_name(&op.lam)?;
         let capture_nids: Vec<NodeId> =
             op.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
         let elem_ty = self.array_expr_elem_type(input);
@@ -1668,14 +1668,14 @@ impl<'a> Converter<'a> {
 
     fn convert_soac_redomap(
         &mut self,
-        op: &Lambda,
-        reduce_op: &Lambda,
+        op: &super::super::tlc::SoacBody,
+        reduce_op: &super::super::tlc::SoacBody,
         ne: &Term,
         inputs: &[ArrayExpr],
         result_ty: Type<TypeName>,
     ) -> Result<NodeId, ConvertError> {
-        let op_name = self.lambda_fn_name(op)?;
-        let reduce_func_name = self.lambda_fn_name(reduce_op)?;
+        let op_name = self.lambda_fn_name(&op.lam)?;
+        let reduce_func_name = self.lambda_fn_name(&reduce_op.lam)?;
         let capture_nids: Vec<NodeId> =
             op.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
         let reduce_capture_nids: Vec<NodeId> =
@@ -1708,12 +1708,12 @@ impl<'a> Converter<'a> {
 
     fn convert_soac_scan(
         &mut self,
-        op: &Lambda,
+        op: &super::super::tlc::SoacBody,
         ne: &Term,
         input: &ArrayExpr,
         result_ty: Type<TypeName>,
     ) -> Result<NodeId, ConvertError> {
-        let op_name = self.lambda_fn_name(op)?;
+        let op_name = self.lambda_fn_name(&op.lam)?;
         let capture_nids: Vec<NodeId> =
             op.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
         let elem_ty = self.array_expr_elem_type(input);
@@ -1738,11 +1738,11 @@ impl<'a> Converter<'a> {
 
     fn convert_soac_filter(
         &mut self,
-        pred: &Lambda,
+        pred: &super::super::tlc::SoacBody,
         input: &ArrayExpr,
         result_ty: Type<TypeName>,
     ) -> Result<NodeId, ConvertError> {
-        let pred_name = self.lambda_fn_name(pred)?;
+        let pred_name = self.lambda_fn_name(&pred.lam)?;
         let capture_nids: Vec<NodeId> =
             pred.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
         let arr_nid = self.convert_array_expr_value(input)?;

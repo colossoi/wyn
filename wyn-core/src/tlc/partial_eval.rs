@@ -186,7 +186,6 @@ impl PartialEvaluator {
                         params: lam.params.clone(),
                         body: Box::new(body),
                         ret_ty: lam.ret_ty.clone(),
-                        captures: lam.captures.clone(),
                     }),
                 ))
             }
@@ -486,7 +485,6 @@ impl PartialEvaluator {
                         params: lam.params.clone(),
                         body: Box::new(body),
                         ret_ty: lam.ret_ty.clone(),
-                        captures: lam.captures.clone(),
                     }),
                 )
             }

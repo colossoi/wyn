@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use super::{
-    ArrayExpr, Def, Lambda, Place, Program, ReduceProps, Shape, SoacOp, Term, TermKind,
+    ArrayExpr, Def, Lambda, Place, Program, ReduceProps, Shape, SoacBody, SoacOp, Term, TermKind,
     extract_lambda_params,
 };
 use crate::SymbolId;
@@ -27,13 +27,13 @@ pub enum ArraySemantics {
     /// Elementwise: output[i] = f(inputs[i]...) — shape-preserving, parallelizable.
     Elementwise {
         inputs: Vec<ArrayExpr>,
-        body: Lambda,
+        body: SoacBody,
     },
 
     /// Reduction: scalar = fold(op, init, input).
     Reduction {
         input: ArrayExpr,
-        op: Lambda,
+        op: SoacBody,
         init: Box<Term>,
         props: ReduceProps,
     },
@@ -41,14 +41,14 @@ pub enum ArraySemantics {
     /// Prefix scan: output[i] = fold(op, init, input[0..=i]).
     PrefixScan {
         input: ArrayExpr,
-        op: Lambda,
+        op: SoacBody,
         init: Box<Term>,
     },
 
     /// Filter: output = input where pred(elem) — shape-changing.
     Filter {
         input: ArrayExpr,
-        pred: Lambda,
+        pred: SoacBody,
     },
 
     /// Scatter: dest[indices[i]] = values[i] — indexed writes.
@@ -63,7 +63,7 @@ pub enum ArraySemantics {
         dest: PlaceSource,
         indices: ArrayExpr,
         values: ArrayExpr,
-        op: Lambda,
+        op: SoacBody,
         init: Box<Term>,
         props: ReduceProps,
     },
@@ -74,7 +74,7 @@ pub enum ArraySemantics {
     /// Generated sequence: output[i] = index_fn(i).
     Generate {
         shape: Shape,
-        index_fn: Lambda,
+        index_fn: SoacBody,
     },
 
     /// Range/iota: output[i] = start + i (with implicit step of 1).
@@ -287,34 +287,37 @@ pub fn compose_map_into_scan(
 /// Compose two lambda bodies: g∘f where f maps input→intermediate, g maps intermediate→output.
 /// Result lambda has f's params and g's return type.
 fn compose_lambda_bodies(
-    f: &Lambda,
-    g: &Lambda,
+    f: &SoacBody,
+    g: &SoacBody,
     symbols: &mut crate::SymbolTable,
     term_ids: &mut super::TermIdSource,
-) -> Lambda {
+) -> SoacBody {
     let fresh_sym = symbols.alloc("_fused".to_string());
-    let intermediate_ty = f.ret_ty.clone();
+    let intermediate_ty = f.lam.ret_ty.clone();
 
     // Substitute g's first parameter with the fresh symbol in g's body
-    let g_param = g.params[0].0;
-    let g_body_substituted = super::fusion::substitute_sym(*g.body.clone(), g_param, fresh_sym, term_ids);
+    let g_param = g.lam.params[0].0;
+    let g_body_substituted =
+        super::fusion::substitute_sym(*g.lam.body.clone(), g_param, fresh_sym, term_ids);
 
     let composed_body = Term {
         id: term_ids.next_id(),
-        ty: g.ret_ty.clone(),
-        span: f.body.span,
+        ty: g.lam.ret_ty.clone(),
+        span: f.lam.body.span,
         kind: TermKind::Let {
             name: fresh_sym,
             name_ty: intermediate_ty,
-            rhs: f.body.clone(),
+            rhs: f.lam.body.clone(),
             body: Box::new(g_body_substituted),
         },
     };
 
-    Lambda {
-        params: f.params.clone(),
-        body: Box::new(composed_body),
-        ret_ty: g.ret_ty.clone(),
+    SoacBody {
+        lam: Lambda {
+            params: f.lam.params.clone(),
+            body: Box::new(composed_body),
+            ret_ty: g.lam.ret_ty.clone(),
+        },
         captures: vec![],
     }
 }
@@ -322,35 +325,37 @@ fn compose_lambda_bodies(
 /// Compose a map body into a reduce/scan operator.
 /// map_body: A → B, op: (Acc, B) → Acc → composed: (Acc, A) → Acc
 fn compose_map_into_op(
-    map_body: &Lambda,
-    op: &Lambda,
+    map_body: &SoacBody,
+    op: &SoacBody,
     symbols: &mut crate::SymbolTable,
     term_ids: &mut super::TermIdSource,
-) -> Lambda {
+) -> SoacBody {
     let fresh_sym = symbols.alloc("_fused".to_string());
-    let intermediate_ty = map_body.ret_ty.clone();
+    let intermediate_ty = map_body.lam.ret_ty.clone();
 
     // The op has params [acc, elem]. Substitute elem with fresh.
-    let elem_param = op.params[1].0;
+    let elem_param = op.lam.params[1].0;
     let op_body_substituted =
-        super::fusion::substitute_sym(*op.body.clone(), elem_param, fresh_sym, term_ids);
+        super::fusion::substitute_sym(*op.lam.body.clone(), elem_param, fresh_sym, term_ids);
 
     let composed_body = Term {
         id: term_ids.next_id(),
-        ty: op.ret_ty.clone(),
-        span: map_body.body.span,
+        ty: op.lam.ret_ty.clone(),
+        span: map_body.lam.body.span,
         kind: TermKind::Let {
             name: fresh_sym,
             name_ty: intermediate_ty,
-            rhs: map_body.body.clone(),
+            rhs: map_body.lam.body.clone(),
             body: Box::new(op_body_substituted),
         },
     };
 
-    Lambda {
-        params: vec![op.params[0].clone(), map_body.params[0].clone()],
-        body: Box::new(composed_body),
-        ret_ty: op.ret_ty.clone(),
+    SoacBody {
+        lam: Lambda {
+            params: vec![op.lam.params[0].clone(), map_body.lam.params[0].clone()],
+            body: Box::new(composed_body),
+            ret_ty: op.lam.ret_ty.clone(),
+        },
         captures: vec![],
     }
 }

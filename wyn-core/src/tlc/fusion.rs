@@ -189,7 +189,6 @@ fn fuse_def_body(
                     params,
                     body: Box::new(fused_inner),
                     ret_ty,
-                    captures: vec![],
                 }),
             }
         };
@@ -214,20 +213,26 @@ fn build_fused_from_semantics(
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
 ) -> Option<Term> {
+    // Fusion runs pre-defunctionalize, so SoacBody.captures is always
+    // empty here — extract the inner Lambda for composition.
     let (prod_lam, input_exprs) = match producer {
-        ArraySemantics::Elementwise { body, inputs } => (body, inputs.clone()),
+        ArraySemantics::Elementwise { body, inputs } => (&body.lam, inputs.clone()),
         _ => return None,
     };
 
     match (fusion_kind, consumer) {
         (FusionKind::ComposeElementwise, ArraySemantics::Elementwise { body: cons_body, .. }) => {
-            let composed = compose_lambdas(prod_lam.clone(), cons_body.clone(), span, symbols, term_ids);
+            let composed =
+                compose_lambdas(prod_lam.clone(), cons_body.lam.clone(), span, symbols, term_ids);
             Some(Term {
                 id: term_ids.next_id(),
                 ty: consumer_ty,
                 span,
                 kind: TermKind::Soac(SoacOp::Map {
-                    lam: composed,
+                    lam: super::SoacBody {
+                        lam: composed,
+                        captures: vec![],
+                    },
                     inputs: input_exprs,
                     consumes_input: false,
                 }),
@@ -235,16 +240,19 @@ fn build_fused_from_semantics(
         }
 
         (FusionKind::MapIntoReduce, ArraySemantics::Reduction { op, init, props, .. }) => {
-            if op.params.len() != 2 {
+            if op.lam.params.len() != 2 {
                 return None;
             }
-            let composed_op = compose_map_reduce(prod_lam.clone(), op.clone(), span, symbols, term_ids);
+            let composed_op = compose_map_reduce(prod_lam.clone(), op.lam.clone(), span, symbols, term_ids);
             Some(Term {
                 id: term_ids.next_id(),
                 ty: consumer_ty,
                 span,
                 kind: TermKind::Soac(SoacOp::Redomap {
-                    op: composed_op,
+                    op: super::SoacBody {
+                        lam: composed_op,
+                        captures: vec![],
+                    },
                     reduce_op: op.clone(),
                     ne: init.clone(),
                     inputs: input_exprs,
@@ -257,13 +265,16 @@ fn build_fused_from_semantics(
             if input_exprs.len() != 1 {
                 return None;
             }
-            let composed_op = compose_map_reduce(prod_lam.clone(), op.clone(), span, symbols, term_ids);
+            let composed_op = compose_map_reduce(prod_lam.clone(), op.lam.clone(), span, symbols, term_ids);
             Some(Term {
                 id: term_ids.next_id(),
                 ty: consumer_ty,
                 span,
                 kind: TermKind::Soac(SoacOp::Scan {
-                    op: composed_op,
+                    op: super::SoacBody {
+                        lam: composed_op,
+                        captures: vec![],
+                    },
                     ne: init.clone(),
                     input: input_exprs[0].clone(),
                 }),
@@ -424,11 +435,13 @@ fn fuse_inline_maps(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermId
 
 /// Fuse inline nested Maps from a Map's inputs.
 fn fuse_inline_map_inputs(
-    lam: Lambda,
+    lam: super::SoacBody,
     inputs: Vec<ArrayExpr>,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
 ) -> SoacOp {
+    // Pre-defunc, captures are empty — operate on the inner Lambda.
+    let lam = lam.lam;
     let mut new_params = Vec::new();
     let mut new_inputs = Vec::new();
     let mut body = *lam.body;
@@ -445,10 +458,11 @@ fn fuse_inline_map_inputs(
                 ArrayExpr::Ref(t) => *t,
                 _ => unreachable!(),
             };
-            let (inner_lam, inner_inputs) = match inner_term.kind {
+            let (inner_sb, inner_inputs) = match inner_term.kind {
                 TermKind::Soac(SoacOp::Map { lam, inputs, .. }) => (lam, inputs),
                 _ => unreachable!(),
             };
+            let inner_lam = inner_sb.lam;
 
             let fresh = symbols.alloc("_fused".to_string());
             let outer_param = lam.params[i].0;
@@ -476,10 +490,12 @@ fn fuse_inline_map_inputs(
     }
 
     SoacOp::Map {
-        lam: Lambda {
-            params: new_params,
-            body: Box::new(body),
-            ret_ty: lam.ret_ty,
+        lam: super::SoacBody {
+            lam: Lambda {
+                params: new_params,
+                body: Box::new(body),
+                ret_ty: lam.ret_ty,
+            },
             captures: vec![],
         },
         inputs: new_inputs,
@@ -522,7 +538,6 @@ fn compose_lambdas(
         params: f.params,
         body: Box::new(composed_body),
         ret_ty: g.ret_ty,
-        captures: vec![],
     }
 }
 
@@ -561,7 +576,6 @@ fn compose_map_reduce(
         params,
         body: Box::new(composed_body),
         ret_ty: reduce_op.ret_ty,
-        captures: vec![],
     }
 }
 

@@ -191,25 +191,10 @@ pub(super) fn apply_type_subst_to_term(
             func: Box::new(apply_type_subst_to_term(func, subst, term_ids)),
             args: args.iter().map(|a| apply_type_subst_to_term(a, subst, term_ids)).collect(),
         },
-        TermKind::Lambda(Lambda {
-            params,
-            body,
-            ret_ty,
-            captures,
-        }) => TermKind::Lambda(Lambda {
+        TermKind::Lambda(Lambda { params, body, ret_ty }) => TermKind::Lambda(Lambda {
             params: params.iter().map(|(p, ty)| (*p, apply_type_subst(ty, subst))).collect(),
             body: Box::new(apply_type_subst_to_term(body, subst, term_ids)),
             ret_ty: apply_type_subst(ret_ty, subst),
-            captures: captures
-                .iter()
-                .map(|(s, ty, t)| {
-                    (
-                        *s,
-                        apply_type_subst(ty, subst),
-                        apply_type_subst_to_term(t, subst, term_ids),
-                    )
-                })
-                .collect(),
         }),
         TermKind::Let {
             name,
@@ -296,7 +281,17 @@ pub(super) fn apply_type_subst_to_lambda(
         params: lam.params.iter().map(|(p, ty)| (*p, apply_type_subst(ty, subst))).collect(),
         body: Box::new(apply_type_subst_to_term(&lam.body, subst, term_ids)),
         ret_ty: apply_type_subst(&lam.ret_ty, subst),
-        captures: lam
+    }
+}
+
+pub(super) fn apply_type_subst_to_soac_body(
+    sb: &super::SoacBody,
+    subst: &TypeSubst,
+    term_ids: &mut TermIdSource,
+) -> super::SoacBody {
+    super::SoacBody {
+        lam: apply_type_subst_to_lambda(&sb.lam, subst, term_ids),
+        captures: sb
             .captures
             .iter()
             .map(|(s, ty, t)| {
@@ -321,23 +316,23 @@ pub(super) fn apply_type_subst_to_soac(
             inputs,
             consumes_input,
         } => SoacOp::Map {
-            lam: apply_type_subst_to_lambda(lam, subst, term_ids),
+            lam: apply_type_subst_to_soac_body(lam, subst, term_ids),
             inputs: inputs.iter().map(|ae| apply_type_subst_to_array_expr(ae, subst, term_ids)).collect(),
             consumes_input: *consumes_input,
         },
         SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
-            op: apply_type_subst_to_lambda(op, subst, term_ids),
+            op: apply_type_subst_to_soac_body(op, subst, term_ids),
             ne: Box::new(apply_type_subst_to_term(ne, subst, term_ids)),
             input: apply_type_subst_to_array_expr(input, subst, term_ids),
             props: props.clone(),
         },
         SoacOp::Scan { op, ne, input } => SoacOp::Scan {
-            op: apply_type_subst_to_lambda(op, subst, term_ids),
+            op: apply_type_subst_to_soac_body(op, subst, term_ids),
             ne: Box::new(apply_type_subst_to_term(ne, subst, term_ids)),
             input: apply_type_subst_to_array_expr(input, subst, term_ids),
         },
         SoacOp::Filter { pred, input } => SoacOp::Filter {
-            pred: apply_type_subst_to_lambda(pred, subst, term_ids),
+            pred: apply_type_subst_to_soac_body(pred, subst, term_ids),
             input: apply_type_subst_to_array_expr(input, subst, term_ids),
         },
         SoacOp::Scatter {
@@ -358,7 +353,7 @@ pub(super) fn apply_type_subst_to_soac(
             props,
         } => SoacOp::ReduceByIndex {
             dest: apply_type_subst_to_place(dest, subst, term_ids),
-            op: apply_type_subst_to_lambda(op, subst, term_ids),
+            op: apply_type_subst_to_soac_body(op, subst, term_ids),
             ne: Box::new(apply_type_subst_to_term(ne, subst, term_ids)),
             indices: apply_type_subst_to_array_expr(indices, subst, term_ids),
             values: apply_type_subst_to_array_expr(values, subst, term_ids),
@@ -371,8 +366,8 @@ pub(super) fn apply_type_subst_to_soac(
             inputs,
             props,
         } => SoacOp::Redomap {
-            op: apply_type_subst_to_lambda(op, subst, term_ids),
-            reduce_op: apply_type_subst_to_lambda(reduce_op, subst, term_ids),
+            op: apply_type_subst_to_soac_body(op, subst, term_ids),
+            reduce_op: apply_type_subst_to_soac_body(reduce_op, subst, term_ids),
             ne: Box::new(apply_type_subst_to_term(ne, subst, term_ids)),
             inputs: inputs.iter().map(|ae| apply_type_subst_to_array_expr(ae, subst, term_ids)).collect(),
             props: props.clone(),
@@ -397,7 +392,7 @@ pub(super) fn apply_type_subst_to_array_expr(
             elem_ty,
         } => ArrayExpr::Generate {
             shape: shape.clone(),
-            index_fn: apply_type_subst_to_lambda(index_fn, subst, term_ids),
+            index_fn: apply_type_subst_to_soac_body(index_fn, subst, term_ids),
             elem_ty: apply_type_subst(elem_ty, subst),
         },
         ArrayExpr::Literal(terms) => {
@@ -675,12 +670,23 @@ fn substitute_var_lambda(
             params: lam.params.clone(),
             body: Box::new(substitute_var(&lam.body, old_sym, new_sym, term_ids)),
             ret_ty: lam.ret_ty.clone(),
-            captures: lam
-                .captures
-                .iter()
-                .map(|(s, ty, t)| (*s, ty.clone(), substitute_var(t, old_sym, new_sym, term_ids)))
-                .collect(),
         }
+    }
+}
+
+fn substitute_var_soac_body(
+    sb: &super::SoacBody,
+    old_sym: SymbolId,
+    new_sym: SymbolId,
+    term_ids: &mut TermIdSource,
+) -> super::SoacBody {
+    super::SoacBody {
+        lam: substitute_var_lambda(&sb.lam, old_sym, new_sym, term_ids),
+        captures: sb
+            .captures
+            .iter()
+            .map(|(s, ty, t)| (*s, ty.clone(), substitute_var(t, old_sym, new_sym, term_ids)))
+            .collect(),
     }
 }
 
@@ -696,7 +702,7 @@ fn substitute_var_soac(
             inputs,
             consumes_input,
         } => SoacOp::Map {
-            lam: substitute_var_lambda(lam, old_sym, new_sym, term_ids),
+            lam: substitute_var_soac_body(lam, old_sym, new_sym, term_ids),
             inputs: inputs
                 .iter()
                 .map(|ae| substitute_var_array_expr(ae, old_sym, new_sym, term_ids))
@@ -704,18 +710,18 @@ fn substitute_var_soac(
             consumes_input: *consumes_input,
         },
         SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
-            op: substitute_var_lambda(op, old_sym, new_sym, term_ids),
+            op: substitute_var_soac_body(op, old_sym, new_sym, term_ids),
             ne: Box::new(substitute_var(ne, old_sym, new_sym, term_ids)),
             input: substitute_var_array_expr(input, old_sym, new_sym, term_ids),
             props: props.clone(),
         },
         SoacOp::Scan { op, ne, input } => SoacOp::Scan {
-            op: substitute_var_lambda(op, old_sym, new_sym, term_ids),
+            op: substitute_var_soac_body(op, old_sym, new_sym, term_ids),
             ne: Box::new(substitute_var(ne, old_sym, new_sym, term_ids)),
             input: substitute_var_array_expr(input, old_sym, new_sym, term_ids),
         },
         SoacOp::Filter { pred, input } => SoacOp::Filter {
-            pred: substitute_var_lambda(pred, old_sym, new_sym, term_ids),
+            pred: substitute_var_soac_body(pred, old_sym, new_sym, term_ids),
             input: substitute_var_array_expr(input, old_sym, new_sym, term_ids),
         },
         SoacOp::Scatter {
@@ -736,7 +742,7 @@ fn substitute_var_soac(
             props,
         } => SoacOp::ReduceByIndex {
             dest: dest.clone(),
-            op: substitute_var_lambda(op, old_sym, new_sym, term_ids),
+            op: substitute_var_soac_body(op, old_sym, new_sym, term_ids),
             ne: Box::new(substitute_var(ne, old_sym, new_sym, term_ids)),
             indices: substitute_var_array_expr(indices, old_sym, new_sym, term_ids),
             values: substitute_var_array_expr(values, old_sym, new_sym, term_ids),
@@ -749,8 +755,8 @@ fn substitute_var_soac(
             inputs,
             props,
         } => SoacOp::Redomap {
-            op: substitute_var_lambda(op, old_sym, new_sym, term_ids),
-            reduce_op: substitute_var_lambda(reduce_op, old_sym, new_sym, term_ids),
+            op: substitute_var_soac_body(op, old_sym, new_sym, term_ids),
+            reduce_op: substitute_var_soac_body(reduce_op, old_sym, new_sym, term_ids),
             ne: Box::new(substitute_var(ne, old_sym, new_sym, term_ids)),
             inputs: inputs
                 .iter()
@@ -781,7 +787,7 @@ fn substitute_var_array_expr(
             elem_ty,
         } => ArrayExpr::Generate {
             shape: shape.clone(),
-            index_fn: substitute_var_lambda(index_fn, old_sym, new_sym, term_ids),
+            index_fn: substitute_var_soac_body(index_fn, old_sym, new_sym, term_ids),
             elem_ty: elem_ty.clone(),
         },
         ArrayExpr::Literal(terms) => ArrayExpr::Literal(

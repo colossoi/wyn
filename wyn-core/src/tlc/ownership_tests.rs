@@ -150,7 +150,6 @@ fn synth_program_with_alias_let() -> (Program, crate::SymbolId, crate::SymbolId)
         params: vec![(a_sym, unique_arr_ty.clone())],
         body: Box::new(let_term),
         ret_ty: i32_ty.clone(),
-        captures: vec![],
     };
     let lambda_term = Term {
         id: ids.next_id(),
@@ -809,7 +808,7 @@ def main(arr: *[3][4]i32) [3][4]i32 = map(|row| row, arr)
     let main_def = find_def(&program, "main");
     fn first_map_elem_param(t: &Term) -> Option<crate::SymbolId> {
         if let TermKind::Soac(crate::tlc::SoacOp::Map { lam, .. }) = &t.kind {
-            return Some(lam.params[0].0);
+            return Some(lam.lam.params[0].0);
         }
         let mut found = None;
         t.for_each_child(&mut |child| {
@@ -846,7 +845,7 @@ def main(arr: [3][4]i32) [3][4]i32 = map(|row| row, arr)
     // first lambda param's owner.
     fn first_map_elem_param(t: &Term) -> Option<crate::SymbolId> {
         if let TermKind::Soac(crate::tlc::SoacOp::Map { lam, .. }) = &t.kind {
-            return Some(lam.params[0].0);
+            return Some(lam.lam.params[0].0);
         }
         let mut found = None;
         t.for_each_child(&mut |child| {
@@ -1063,362 +1062,18 @@ def f(a: [3][4]i32) [3][4]i32 = map(|row| row, a)
 }
 
 // =============================================================================
-// Lambda captures with their own SymbolId (post-defunc shape)
+// SoacBody captures (SOAC envelope shape)
 // =============================================================================
-
-/// Build a TLC program shaped like the post-defunc form of:
-///
-/// ```text
-/// def main: i32 =
-///     let outer: *[4]i32 = [1, 2, 3, 4] in
-///     let f: *[4]i32 -> i32 = lambda<captures=[(cap, *[4]i32, outer)]>
-///         |_x: i32| consume(cap)
-///     in
-///     f(0)
-/// ```
-///
-/// The lambda body references `Var(cap_sym)` — a fresh symbol distinct
-/// from `outer_sym`. `Lambda::captures` carries the binding
-/// `(cap_sym, *[4]i32, Var(outer_sym))`. This is what
-/// `tlc::defunctionalize` produces after lifting; today the
-/// production pipeline runs `apply_ownership` *before* defunc so
-/// captures are empty in practice — but the analysis must remain
-/// sound if that ordering ever changes.
-fn synth_program_with_populated_lambda_captures() -> Program {
-    use crate::ast::{Span, TypeName};
-    use crate::tlc::{Def, DefMeta, Lambda, Term, TermIdSource, TermKind};
-    use polytype::Type;
-
-    let mut symbols = crate::SymbolTable::new();
-    let mut ids = TermIdSource::new();
-    let mut def_syms = std::collections::HashMap::new();
-
-    // Top-level symbols
-    let consume_sym = symbols.alloc("consume".to_string());
-    def_syms.insert("consume".to_string(), consume_sym);
-    let main_sym = symbols.alloc("main".to_string());
-    def_syms.insert("main".to_string(), main_sym);
-
-    // Local symbols
-    let consume_arg_sym = symbols.alloc("x".to_string());
-    let outer_sym = symbols.alloc("outer".to_string());
-    let f_sym = symbols.alloc("f".to_string());
-    let lambda_param_sym = symbols.alloc("_x".to_string());
-    let cap_sym = symbols.alloc("cap".to_string()); // post-defunc capture-local sym
-
-    // Types
-    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
-    let arr_ty = Type::Constructed(TypeName::Array, vec![i32_ty.clone()]);
-    let unique_arr_ty = Type::Constructed(TypeName::Unique, vec![arr_ty.clone()]);
-    let consume_ty = Type::Constructed(TypeName::Arrow, vec![unique_arr_ty.clone(), i32_ty.clone()]);
-    let lam_ty = Type::Constructed(TypeName::Arrow, vec![i32_ty.clone(), i32_ty.clone()]);
-
-    // ---- consume(x: *[4]i32) i32 = 0  (body irrelevant; only type matters)
-    let consume_body = Term {
-        id: ids.next_id(),
-        ty: i32_ty.clone(),
-        span: Span::dummy(),
-        kind: TermKind::IntLit("0".to_string()),
-    };
-    let consume_lam = Lambda {
-        params: vec![(consume_arg_sym, unique_arr_ty.clone())],
-        body: Box::new(consume_body),
-        ret_ty: i32_ty.clone(),
-        captures: vec![],
-    };
-    let consume_lam_term = Term {
-        id: ids.next_id(),
-        ty: consume_ty.clone(),
-        span: Span::dummy(),
-        kind: TermKind::Lambda(consume_lam),
-    };
-    let consume_def = Def {
-        name: consume_sym,
-        ty: consume_ty.clone(),
-        body: consume_lam_term,
-        meta: DefMeta::Function,
-        arity: 1,
-    };
-
-    // ---- main's body
-    // Innermost: consume(cap)
-    let var_consume = Term {
-        id: ids.next_id(),
-        ty: consume_ty.clone(),
-        span: Span::dummy(),
-        kind: TermKind::Var(consume_sym),
-    };
-    let var_cap = Term {
-        id: ids.next_id(),
-        ty: unique_arr_ty.clone(),
-        span: Span::dummy(),
-        kind: TermKind::Var(cap_sym),
-    };
-    let consume_call = Term {
-        id: ids.next_id(),
-        ty: i32_ty.clone(),
-        span: Span::dummy(),
-        kind: TermKind::App {
-            func: Box::new(var_consume),
-            args: vec![var_cap],
-        },
-    };
-
-    // Var(outer) — the capture's carrier term
-    let var_outer = Term {
-        id: ids.next_id(),
-        ty: unique_arr_ty.clone(),
-        span: Span::dummy(),
-        kind: TermKind::Var(outer_sym),
-    };
-
-    // Lambda with populated captures
-    let lambda = Lambda {
-        params: vec![(lambda_param_sym, i32_ty.clone())],
-        body: Box::new(consume_call),
-        ret_ty: i32_ty.clone(),
-        captures: vec![(cap_sym, unique_arr_ty.clone(), var_outer)],
-    };
-    let lambda_term = Term {
-        id: ids.next_id(),
-        ty: lam_ty.clone(),
-        span: Span::dummy(),
-        kind: TermKind::Lambda(lambda),
-    };
-
-    // Body of inner let: f(0)
-    let var_f = Term {
-        id: ids.next_id(),
-        ty: lam_ty.clone(),
-        span: Span::dummy(),
-        kind: TermKind::Var(f_sym),
-    };
-    let zero_lit = Term {
-        id: ids.next_id(),
-        ty: i32_ty.clone(),
-        span: Span::dummy(),
-        kind: TermKind::IntLit("0".to_string()),
-    };
-    let f_call = Term {
-        id: ids.next_id(),
-        ty: i32_ty.clone(),
-        span: Span::dummy(),
-        kind: TermKind::App {
-            func: Box::new(var_f),
-            args: vec![zero_lit],
-        },
-    };
-
-    // let f = lambda in f(0)
-    let inner_let = Term {
-        id: ids.next_id(),
-        ty: i32_ty.clone(),
-        span: Span::dummy(),
-        kind: TermKind::Let {
-            name: f_sym,
-            name_ty: lam_ty.clone(),
-            rhs: Box::new(lambda_term),
-            body: Box::new(f_call),
-        },
-    };
-
-    // Array literal `[1, 2, 3, 4]` for outer's rhs
-    fn int_lit(ids: &mut TermIdSource, n: &str) -> Term {
-        Term {
-            id: ids.next_id(),
-            ty: Type::Constructed(TypeName::Int(32), vec![]),
-            span: Span::dummy(),
-            kind: TermKind::IntLit(n.to_string()),
-        }
-    }
-    let arr_lit_app = Term {
-        id: ids.next_id(),
-        ty: unique_arr_ty.clone(),
-        span: Span::dummy(),
-        kind: TermKind::ArrayExpr(crate::tlc::ArrayExpr::Literal(vec![
-            int_lit(&mut ids, "1"),
-            int_lit(&mut ids, "2"),
-            int_lit(&mut ids, "3"),
-            int_lit(&mut ids, "4"),
-        ])),
-    };
-
-    // let outer = [1,2,3,4] in <inner_let>
-    let outer_let = Term {
-        id: ids.next_id(),
-        ty: i32_ty.clone(),
-        span: Span::dummy(),
-        kind: TermKind::Let {
-            name: outer_sym,
-            name_ty: unique_arr_ty.clone(),
-            rhs: Box::new(arr_lit_app),
-            body: Box::new(inner_let),
-        },
-    };
-
-    let main_def = Def {
-        name: main_sym,
-        ty: i32_ty.clone(),
-        body: outer_let,
-        meta: DefMeta::Function,
-        arity: 0,
-    };
-
-    Program {
-        defs: vec![consume_def, main_def],
-        uniforms: vec![],
-        storage: vec![],
-        symbols,
-        def_syms,
-    }
-}
-
-#[test]
-fn lambda_with_populated_captures_detects_capture_kill() {
-    // Hand-built post-defunc shape: the lambda body uses
-    // `Var(cap_sym)` (a fresh capture-local symbol), and
-    // `Lambda::captures` carries `(cap_sym, *[4]i32, Var(outer_sym))`.
-    // The body kills `cap` via consume — that should propagate to
-    // `outer`'s owner and be flagged as use-after-move (the lambda
-    // can be invoked any number of times, including never, but if
-    // it is, it consumes a store the outer scope still owns).
-    let program = synth_program_with_populated_lambda_captures();
-    let result = super::check(&program);
-    assert!(
-        result.is_err(),
-        "lambda body that consumes a populated capture should be rejected; got {:?}",
-        result,
-    );
-}
-
-#[test]
-fn lambda_capture_term_is_analyzed_for_liveness() {
-    // The capture term itself is a sub-expression with its own
-    // TermId. Liveness must flow through it, otherwise reads/kills
-    // inside the capture term go unchecked. We assert this by
-    // building a program with a capture term and confirming
-    // `live_out` is populated for the capture term's id after
-    // `analyze`.
-    use crate::ast::{Span, TypeName};
-    use crate::tlc::{Def, DefMeta, Lambda, Term, TermIdSource, TermKind};
-    use polytype::Type;
-
-    let mut symbols = crate::SymbolTable::new();
-    let mut ids = TermIdSource::new();
-
-    let main_sym = symbols.alloc("main".to_string());
-    let outer_sym = symbols.alloc("outer".to_string());
-    let f_sym = symbols.alloc("f".to_string());
-    let cap_sym = symbols.alloc("cap".to_string());
-    let lambda_param_sym = symbols.alloc("_x".to_string());
-
-    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
-    let arr_ty = Type::Constructed(TypeName::Array, vec![i32_ty.clone()]);
-    let lam_ty = Type::Constructed(TypeName::Arrow, vec![i32_ty.clone(), i32_ty.clone()]);
-
-    // Capture term: Var(outer)
-    let var_outer = Term {
-        id: ids.next_id(),
-        ty: arr_ty.clone(),
-        span: Span::dummy(),
-        kind: TermKind::Var(outer_sym),
-    };
-    let capture_term_id = var_outer.id;
-
-    // Lambda body: just 0 (we don't care about the body for this test)
-    let body_zero = Term {
-        id: ids.next_id(),
-        ty: i32_ty.clone(),
-        span: Span::dummy(),
-        kind: TermKind::IntLit("0".to_string()),
-    };
-
-    let lambda = Lambda {
-        params: vec![(lambda_param_sym, i32_ty.clone())],
-        body: Box::new(body_zero),
-        ret_ty: i32_ty.clone(),
-        captures: vec![(cap_sym, arr_ty.clone(), var_outer)],
-    };
-    let lambda_term = Term {
-        id: ids.next_id(),
-        ty: lam_ty.clone(),
-        span: Span::dummy(),
-        kind: TermKind::Lambda(lambda),
-    };
-
-    // let f = lambda in 0
-    let zero_body = Term {
-        id: ids.next_id(),
-        ty: i32_ty.clone(),
-        span: Span::dummy(),
-        kind: TermKind::IntLit("0".to_string()),
-    };
-    let inner_let = Term {
-        id: ids.next_id(),
-        ty: i32_ty.clone(),
-        span: Span::dummy(),
-        kind: TermKind::Let {
-            name: f_sym,
-            name_ty: lam_ty.clone(),
-            rhs: Box::new(lambda_term),
-            body: Box::new(zero_body),
-        },
-    };
-
-    fn int_lit(ids: &mut TermIdSource, n: &str) -> Term {
-        Term {
-            id: ids.next_id(),
-            ty: Type::Constructed(TypeName::Int(32), vec![]),
-            span: Span::dummy(),
-            kind: TermKind::IntLit(n.to_string()),
-        }
-    }
-    let arr_lit = Term {
-        id: ids.next_id(),
-        ty: arr_ty.clone(),
-        span: Span::dummy(),
-        kind: TermKind::ArrayExpr(crate::tlc::ArrayExpr::Literal(vec![
-            int_lit(&mut ids, "1"),
-            int_lit(&mut ids, "2"),
-            int_lit(&mut ids, "3"),
-            int_lit(&mut ids, "4"),
-        ])),
-    };
-    let outer_let = Term {
-        id: ids.next_id(),
-        ty: i32_ty.clone(),
-        span: Span::dummy(),
-        kind: TermKind::Let {
-            name: outer_sym,
-            name_ty: arr_ty.clone(),
-            rhs: Box::new(arr_lit),
-            body: Box::new(inner_let),
-        },
-    };
-
-    let main_def = Def {
-        name: main_sym,
-        ty: i32_ty.clone(),
-        body: outer_let,
-        meta: DefMeta::Function,
-        arity: 0,
-    };
-
-    let program = Program {
-        defs: vec![main_def],
-        uniforms: vec![],
-        storage: vec![],
-        symbols,
-        def_syms: Default::default(),
-    };
-
-    let model = analyze(&program);
-    assert!(
-        model.live_out.contains_key(&capture_term_id),
-        "liveness should analyze capture terms — `live_out` for the \
-         capture term's id should be populated",
-    );
-}
+//
+// `Lambda` no longer carries captures — those live on the `SoacBody`
+// envelope used by SOAC nodes. The previous test harness here built a
+// hand-rolled "post-defunc free-standing lambda" with populated
+// `Lambda::captures` to exercise the analysis seam; that shape is
+// architecturally unrepresentable now, so the harness and its two
+// tests are gone. The SOAC-side capture handling is exercised by the
+// end-to-end SOAC tests (e.g. `compute_shader_*` in the integration
+// suite) that lower a Map / Reduce with closures through defunc into
+// `SoacBody { captures: [...] }`.
 
 // =============================================================================
 // SOAC body fixed-point: per-iteration locals must not loop back
@@ -1580,7 +1235,6 @@ fn synth_program_with_with_through_index() -> Program {
         params: vec![(grid_sym, unique_outer_ty.clone())],
         body: Box::new(with_call),
         ret_ty: inner_arr_ty.clone(),
-        captures: vec![],
     };
     let f_ty = Type::Constructed(
         TypeName::Arrow,
@@ -1659,5 +1313,363 @@ fn array_with_promotes_when_source_is_aliasing_intrinsic() {
          (UniqueParam, dead-after); is_promotable should follow \
          alias_target and rewrite, not bail because the source arg \
          isn't a bare Var",
+    );
+}
+
+// =============================================================================
+// SoacBody captures (SOAC envelope shape, post-defunc)
+// =============================================================================
+//
+// Captures live on the SoacBody wrapper (alongside the inner Lambda),
+// not on the Lambda struct itself. These tests construct a
+// SoacOp::Map whose `lam: SoacBody` carries a populated `captures`
+// list, then exercise the ownership analysis to confirm capture-kill
+// detection and capture-term liveness propagate through.
+
+fn synth_program_with_populated_soac_captures() -> Program {
+    use crate::ast::{Span, TypeName};
+    use crate::tlc::{Def, DefMeta, Lambda, SoacBody, Term, TermIdSource, TermKind};
+    use polytype::Type;
+
+    let mut symbols = crate::SymbolTable::new();
+    let mut ids = TermIdSource::new();
+    let mut def_syms = std::collections::HashMap::new();
+
+    let consume_sym = symbols.alloc("consume".to_string());
+    def_syms.insert("consume".to_string(), consume_sym);
+    let main_sym = symbols.alloc("main".to_string());
+    def_syms.insert("main".to_string(), main_sym);
+
+    let consume_arg_sym = symbols.alloc("x".to_string());
+    let outer_sym = symbols.alloc("outer".to_string());
+    let f_sym = symbols.alloc("f".to_string());
+    let lambda_param_sym = symbols.alloc("_x".to_string());
+    let cap_sym = symbols.alloc("cap".to_string());
+
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+    let arr_ty = Type::Constructed(TypeName::Array, vec![i32_ty.clone()]);
+    let unique_arr_ty = Type::Constructed(TypeName::Unique, vec![arr_ty.clone()]);
+    let consume_ty = Type::Constructed(TypeName::Arrow, vec![unique_arr_ty.clone(), i32_ty.clone()]);
+
+    let consume_body = Term {
+        id: ids.next_id(),
+        ty: i32_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::IntLit("0".to_string()),
+    };
+    let consume_lam = Lambda {
+        params: vec![(consume_arg_sym, unique_arr_ty.clone())],
+        body: Box::new(consume_body),
+        ret_ty: i32_ty.clone(),
+    };
+    let consume_lam_term = Term {
+        id: ids.next_id(),
+        ty: consume_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::Lambda(consume_lam),
+    };
+    let consume_def = Def {
+        name: consume_sym,
+        ty: consume_ty.clone(),
+        body: consume_lam_term,
+        meta: DefMeta::Function,
+        arity: 1,
+    };
+
+    let var_consume = Term {
+        id: ids.next_id(),
+        ty: consume_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::Var(consume_sym),
+    };
+    let var_cap = Term {
+        id: ids.next_id(),
+        ty: unique_arr_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::Var(cap_sym),
+    };
+    let consume_call = Term {
+        id: ids.next_id(),
+        ty: i32_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::App {
+            func: Box::new(var_consume),
+            args: vec![var_cap],
+        },
+    };
+
+    let var_outer = Term {
+        id: ids.next_id(),
+        ty: unique_arr_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::Var(outer_sym),
+    };
+
+    let lambda = Lambda {
+        params: vec![(lambda_param_sym, i32_ty.clone())],
+        body: Box::new(consume_call),
+        ret_ty: i32_ty.clone(),
+    };
+
+    let zero_lit = Term {
+        id: ids.next_id(),
+        ty: i32_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::IntLit("0".to_string()),
+    };
+    let one_lit = Term {
+        id: ids.next_id(),
+        ty: i32_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::IntLit("1".to_string()),
+    };
+    let range_input = crate::tlc::ArrayExpr::Range {
+        start: Box::new(zero_lit),
+        len: Box::new(one_lit),
+    };
+
+    // SoacBody carries (cap_sym, *[4]i32, Var(outer_sym)) — the capture
+    // local plus the outer term that supplies its value at SOAC creation.
+    let map_term = Term {
+        id: ids.next_id(),
+        ty: Type::Constructed(TypeName::Array, vec![i32_ty.clone()]),
+        span: Span::dummy(),
+        kind: TermKind::Soac(crate::tlc::SoacOp::Map {
+            lam: SoacBody {
+                lam: lambda,
+                captures: vec![(cap_sym, unique_arr_ty.clone(), var_outer)],
+            },
+            inputs: vec![range_input],
+            consumes_input: false,
+        }),
+    };
+
+    let inner_let_body = Term {
+        id: ids.next_id(),
+        ty: i32_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::IntLit("0".to_string()),
+    };
+    let inner_let = Term {
+        id: ids.next_id(),
+        ty: i32_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::Let {
+            name: f_sym,
+            name_ty: Type::Constructed(TypeName::Array, vec![i32_ty.clone()]),
+            rhs: Box::new(map_term),
+            body: Box::new(inner_let_body),
+        },
+    };
+
+    fn int_lit(ids: &mut TermIdSource, n: &str) -> Term {
+        Term {
+            id: ids.next_id(),
+            ty: Type::Constructed(TypeName::Int(32), vec![]),
+            span: Span::dummy(),
+            kind: TermKind::IntLit(n.to_string()),
+        }
+    }
+    let arr_lit = Term {
+        id: ids.next_id(),
+        ty: unique_arr_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::ArrayExpr(crate::tlc::ArrayExpr::Literal(vec![
+            int_lit(&mut ids, "1"),
+            int_lit(&mut ids, "2"),
+            int_lit(&mut ids, "3"),
+            int_lit(&mut ids, "4"),
+        ])),
+    };
+    let outer_let = Term {
+        id: ids.next_id(),
+        ty: i32_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::Let {
+            name: outer_sym,
+            name_ty: unique_arr_ty.clone(),
+            rhs: Box::new(arr_lit),
+            body: Box::new(inner_let),
+        },
+    };
+
+    let main_def = Def {
+        name: main_sym,
+        ty: i32_ty.clone(),
+        body: outer_let,
+        meta: DefMeta::Function,
+        arity: 0,
+    };
+
+    Program {
+        defs: vec![consume_def, main_def],
+        uniforms: vec![],
+        storage: vec![],
+        symbols,
+        def_syms,
+    }
+}
+
+#[test]
+fn soac_with_populated_captures_detects_capture_kill() {
+    // SOAC envelope shape: SoacOp::Map { lam: SoacBody { lam, captures }, .. }.
+    // The lambda body consumes `cap` (a populated capture); analysis must
+    // propagate the kill to `outer`'s owner and reject the program — a
+    // SOAC body that consumes a capture across hypothetical re-invocations
+    // is a use-after-move.
+    let program = synth_program_with_populated_soac_captures();
+    let result = super::check(&program);
+    assert!(
+        result.is_err(),
+        "SOAC body that consumes a populated capture should be rejected; got {:?}",
+        result,
+    );
+}
+
+#[test]
+fn soac_capture_term_is_analyzed_for_liveness() {
+    // The capture term itself is a sub-expression with its own
+    // TermId. Liveness must flow through it — otherwise reads/kills
+    // inside the capture term go unchecked. We assert by building a
+    // program with a populated capture and confirming `live_out` is
+    // populated for the capture term's id after `analyze`.
+    use crate::ast::{Span, TypeName};
+    use crate::tlc::{Def, DefMeta, Lambda, SoacBody, Term, TermIdSource, TermKind};
+    use polytype::Type;
+
+    let mut symbols = crate::SymbolTable::new();
+    let mut ids = TermIdSource::new();
+
+    let main_sym = symbols.alloc("main".to_string());
+    let outer_sym = symbols.alloc("outer".to_string());
+    let f_sym = symbols.alloc("f".to_string());
+    let cap_sym = symbols.alloc("cap".to_string());
+    let lambda_param_sym = symbols.alloc("_x".to_string());
+
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+    let arr_ty = Type::Constructed(TypeName::Array, vec![i32_ty.clone()]);
+
+    let var_outer = Term {
+        id: ids.next_id(),
+        ty: arr_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::Var(outer_sym),
+    };
+    let capture_term_id = var_outer.id;
+
+    let body_zero = Term {
+        id: ids.next_id(),
+        ty: i32_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::IntLit("0".to_string()),
+    };
+
+    let lambda = Lambda {
+        params: vec![(lambda_param_sym, i32_ty.clone())],
+        body: Box::new(body_zero),
+        ret_ty: i32_ty.clone(),
+    };
+
+    let zero_lit = Term {
+        id: ids.next_id(),
+        ty: i32_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::IntLit("0".to_string()),
+    };
+    let one_lit = Term {
+        id: ids.next_id(),
+        ty: i32_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::IntLit("1".to_string()),
+    };
+    let range_input = crate::tlc::ArrayExpr::Range {
+        start: Box::new(zero_lit),
+        len: Box::new(one_lit),
+    };
+
+    let map_term = Term {
+        id: ids.next_id(),
+        ty: arr_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::Soac(crate::tlc::SoacOp::Map {
+            lam: SoacBody {
+                lam: lambda,
+                captures: vec![(cap_sym, arr_ty.clone(), var_outer)],
+            },
+            inputs: vec![range_input],
+            consumes_input: false,
+        }),
+    };
+
+    let zero_body = Term {
+        id: ids.next_id(),
+        ty: i32_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::IntLit("0".to_string()),
+    };
+    let inner_let = Term {
+        id: ids.next_id(),
+        ty: i32_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::Let {
+            name: f_sym,
+            name_ty: arr_ty.clone(),
+            rhs: Box::new(map_term),
+            body: Box::new(zero_body),
+        },
+    };
+
+    fn int_lit(ids: &mut TermIdSource, n: &str) -> Term {
+        Term {
+            id: ids.next_id(),
+            ty: Type::Constructed(TypeName::Int(32), vec![]),
+            span: Span::dummy(),
+            kind: TermKind::IntLit(n.to_string()),
+        }
+    }
+    let arr_lit = Term {
+        id: ids.next_id(),
+        ty: arr_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::ArrayExpr(crate::tlc::ArrayExpr::Literal(vec![
+            int_lit(&mut ids, "1"),
+            int_lit(&mut ids, "2"),
+            int_lit(&mut ids, "3"),
+            int_lit(&mut ids, "4"),
+        ])),
+    };
+    let outer_let = Term {
+        id: ids.next_id(),
+        ty: i32_ty.clone(),
+        span: Span::dummy(),
+        kind: TermKind::Let {
+            name: outer_sym,
+            name_ty: arr_ty.clone(),
+            rhs: Box::new(arr_lit),
+            body: Box::new(inner_let),
+        },
+    };
+
+    let main_def = Def {
+        name: main_sym,
+        ty: i32_ty.clone(),
+        body: outer_let,
+        meta: DefMeta::Function,
+        arity: 0,
+    };
+
+    let program = Program {
+        defs: vec![main_def],
+        uniforms: vec![],
+        storage: vec![],
+        symbols,
+        def_syms: std::collections::HashMap::new(),
+    };
+
+    let model = super::analyze(&program);
+    assert!(
+        model.live_out.contains_key(&capture_term_id),
+        "capture term's TermId should appear in live_out after analyze — \
+         otherwise reads/kills inside the capture term aren't being walked",
     );
 }

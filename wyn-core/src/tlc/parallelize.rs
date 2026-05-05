@@ -83,7 +83,7 @@ impl SoacAnalysis {
     /// per-element lambda's ret_ty); Reduce/Redomap acc type (from `ne.ty`).
     pub fn result_elem_type(&self) -> Type<TypeName> {
         match &self.original {
-            SoacOp::Map { lam, .. } => lam.ret_ty.clone(),
+            SoacOp::Map { lam, .. } => lam.lam.ret_ty.clone(),
             SoacOp::Reduce { ne, .. } | SoacOp::Redomap { ne, .. } | SoacOp::Scan { ne, .. } => {
                 ne.ty.clone()
             }
@@ -628,12 +628,7 @@ fn lift_in_term(
 ) -> Term {
     match term.kind {
         TermKind::Lambda(lam) => {
-            let Lambda {
-                params,
-                body,
-                ret_ty,
-                captures,
-            } = lam;
+            let Lambda { params, body, ret_ty } = lam;
             let new_body = lift_in_term(
                 *body,
                 entry_name,
@@ -652,7 +647,6 @@ fn lift_in_term(
                     params,
                     body: Box::new(new_body),
                     ret_ty,
-                    captures,
                 }),
             }
         }
@@ -1052,7 +1046,7 @@ fn make_map_plan(analysis: &EntryAnalysis, entry_name: &str) -> LoweringPlan {
 fn make_two_phase_plan(
     analysis: &EntryAnalysis,
     entry_name: &str,
-    reduce_op: &Lambda,
+    reduce_op: &super::SoacBody,
     ne: &Term,
     next_binding: u32,
     forced_result_binding: Option<(u32, u32)>,
@@ -1093,7 +1087,7 @@ fn make_two_phase_plan(
 fn make_scan_plan(
     analysis: &EntryAnalysis,
     entry_name: &str,
-    op: &Lambda,
+    op: &super::SoacBody,
     ne: &Term,
     next_binding: u32,
     program: &mut Program,
@@ -1128,7 +1122,7 @@ fn make_scan_plan(
 fn build_two_phase_entries(
     entry_name: &str,
     analysis: &EntryAnalysis,
-    reduce_op: &Lambda,
+    reduce_op: &super::SoacBody,
     ne: &Term,
     elem_type: &Type<TypeName>,
     partials_binding: (u32, u32),
@@ -1262,7 +1256,7 @@ fn build_two_phase_entries(
 fn build_scan_entries(
     entry_name: &str,
     analysis: &EntryAnalysis,
-    op: &Lambda,
+    op: &super::SoacBody,
     ne: &Term,
     elem_type: &Type<TypeName>,
     output_binding: (u32, u32),
@@ -1575,7 +1569,7 @@ impl BufferRef {
 /// No reliance on the from_tlc Map/Scan → OutputView auto-rewrite
 /// (which can't target a specific binding).
 struct ScanPlan {
-    combiner: Lambda,
+    combiner: super::SoacBody,
     neutral: Term,
     elem_ty: Type<TypeName>,
     input: BufferRef,
@@ -1604,31 +1598,31 @@ enum ScanPhase {
     ApplyBlockOffsets,
 }
 
-/// Invoke a SOAC-op Lambda on explicit argument terms. After
+/// Invoke a SOAC-op SoacBody on explicit argument terms. After
 /// defunctionalize, the lambda's body is a `Var` naming the lifted
 /// function; the call is emitted as `App(body, args_with_captures)`
 /// following `from_tlc::convert_soac_*`'s convention that SOAC
 /// combiners accept their original params followed by their captures.
-fn invoke_soac_lambda(lambda: &Lambda, args: Vec<Term>, span: ast::Span) -> Term {
+fn invoke_soac_lambda(sb: &super::SoacBody, args: Vec<Term>, span: ast::Span) -> Term {
     assert_eq!(
-        lambda.params.len(),
+        sb.lam.params.len(),
         args.len(),
         "BUG: parallelize invoking SOAC lambda: {} params vs {} args",
-        lambda.params.len(),
+        sb.lam.params.len(),
         args.len()
     );
     let mut call_args = args;
     // Trailing captures — `convert_soac_map`/`..._scan` pass them after
     // the original-param args.
-    for (sym, ty, _val) in &lambda.captures {
+    for (sym, ty, _val) in &sb.captures {
         call_args.push(var_term(*sym, ty.clone(), span));
     }
     Term {
         id: TermId(0),
-        ty: lambda.ret_ty.clone(),
+        ty: sb.lam.ret_ty.clone(),
         span,
         kind: TermKind::App {
-            func: Box::new((*lambda.body).clone()),
+            func: Box::new((*sb.lam.body).clone()),
             args: call_args,
         },
     }
@@ -1707,7 +1701,7 @@ fn emit_load_combine_store(
     dst: &BufferRef,
     index: Term,
     combine_args: impl FnOnce(/*v_var:*/ Term) -> Vec<Term>,
-    combiner: &Lambda,
+    combiner: &super::SoacBody,
     elem_ty: &Type<TypeName>,
     span: ast::Span,
     program: &mut Program,
@@ -2361,7 +2355,6 @@ fn make_entry_def(
                 params: required_params.to_vec(),
                 body: Box::new(body),
                 ret_ty: return_ty.clone(),
-                captures: vec![],
             }),
         };
         (ty, lam_body)

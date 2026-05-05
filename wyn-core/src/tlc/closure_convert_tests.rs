@@ -63,7 +63,6 @@ fn unlifted_lambda_in_body_fails_verifier() {
             params: vec![],
             body: Box::new(term(TermKind::IntLit("0".into()), unit_ty())),
             ret_ty: unit_ty(),
-            captures: vec![],
         }),
         unit_ty(),
     );
@@ -98,7 +97,6 @@ fn param_spine_lambdas_are_skipped() {
             params: vec![(p, unit_ty())],
             body: Box::new(inner),
             ret_ty: unit_ty(),
-            captures: vec![],
         }),
         unit_ty(),
     );

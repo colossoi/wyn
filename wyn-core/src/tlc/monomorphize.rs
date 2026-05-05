@@ -454,19 +454,10 @@ impl<'a> Monomorphizer<'a> {
                 TermKind::Var(sym)
             }
 
-            TermKind::Lambda(Lambda {
-                params,
-                body,
-                ret_ty,
-                captures,
-            }) => TermKind::Lambda(Lambda {
+            TermKind::Lambda(Lambda { params, body, ret_ty }) => TermKind::Lambda(Lambda {
                 params: params.clone(),
                 body: Box::new(self.process_term(body)),
                 ret_ty: ret_ty.clone(),
-                captures: captures
-                    .iter()
-                    .map(|(s, ty, t)| (*s, ty.clone(), self.process_term(t)))
-                    .collect(),
             }),
 
             TermKind::Let {
@@ -556,11 +547,13 @@ impl<'a> Monomorphizer<'a> {
             params: lam.params.clone(),
             body: Box::new(self.process_term(&lam.body)),
             ret_ty: lam.ret_ty.clone(),
-            captures: lam
-                .captures
-                .iter()
-                .map(|(s, ty, t)| (*s, ty.clone(), self.process_term(t)))
-                .collect(),
+        }
+    }
+
+    fn process_soac_body(&mut self, sb: &super::SoacBody) -> super::SoacBody {
+        super::SoacBody {
+            lam: self.process_lambda(&sb.lam),
+            captures: sb.captures.iter().map(|(s, ty, t)| (*s, ty.clone(), self.process_term(t))).collect(),
         }
     }
 
@@ -571,23 +564,23 @@ impl<'a> Monomorphizer<'a> {
                 inputs,
                 consumes_input,
             } => SoacOp::Map {
-                lam: self.process_lambda(lam),
+                lam: self.process_soac_body(lam),
                 inputs: inputs.iter().map(|ae| self.process_array_expr(ae)).collect(),
                 consumes_input: *consumes_input,
             },
             SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
-                op: self.process_lambda(op),
+                op: self.process_soac_body(op),
                 ne: Box::new(self.process_term(ne)),
                 input: self.process_array_expr(input),
                 props: props.clone(),
             },
             SoacOp::Scan { op, ne, input } => SoacOp::Scan {
-                op: self.process_lambda(op),
+                op: self.process_soac_body(op),
                 ne: Box::new(self.process_term(ne)),
                 input: self.process_array_expr(input),
             },
             SoacOp::Filter { pred, input } => SoacOp::Filter {
-                pred: self.process_lambda(pred),
+                pred: self.process_soac_body(pred),
                 input: self.process_array_expr(input),
             },
             SoacOp::Scatter {
@@ -608,7 +601,7 @@ impl<'a> Monomorphizer<'a> {
                 props,
             } => SoacOp::ReduceByIndex {
                 dest: dest.clone(),
-                op: self.process_lambda(op),
+                op: self.process_soac_body(op),
                 ne: Box::new(self.process_term(ne)),
                 indices: self.process_array_expr(indices),
                 values: self.process_array_expr(values),
@@ -621,8 +614,8 @@ impl<'a> Monomorphizer<'a> {
                 inputs,
                 props,
             } => SoacOp::Redomap {
-                op: self.process_lambda(op),
-                reduce_op: self.process_lambda(reduce_op),
+                op: self.process_soac_body(op),
+                reduce_op: self.process_soac_body(reduce_op),
                 ne: Box::new(self.process_term(ne)),
                 inputs: inputs.iter().map(|ae| self.process_array_expr(ae)).collect(),
                 props: props.clone(),
@@ -643,7 +636,7 @@ impl<'a> Monomorphizer<'a> {
                 elem_ty,
             } => ArrayExpr::Generate {
                 shape: shape.clone(),
-                index_fn: self.process_lambda(index_fn),
+                index_fn: self.process_soac_body(index_fn),
                 elem_ty: elem_ty.clone(),
             },
             ArrayExpr::Literal(terms) => {
@@ -802,19 +795,10 @@ impl<'a> Monomorphizer<'a> {
 
             TermKind::Force(ref inner) => TermKind::Force(Box::new(self.apply_subst_term(inner, subst))),
 
-            TermKind::Lambda(Lambda {
-                params,
-                body,
-                ret_ty,
-                captures,
-            }) => TermKind::Lambda(Lambda {
+            TermKind::Lambda(Lambda { params, body, ret_ty }) => TermKind::Lambda(Lambda {
                 params: params.iter().map(|(p, ty)| (*p, apply_subst(ty, subst))).collect(),
                 body: Box::new(self.apply_subst_term(body, subst)),
                 ret_ty: apply_subst(ret_ty, subst),
-                captures: captures
-                    .iter()
-                    .map(|(s, ty, t)| (*s, apply_subst(ty, subst), self.apply_subst_term(t, subst)))
-                    .collect(),
             }),
 
             TermKind::App { func, args } => TermKind::App {
@@ -901,7 +885,13 @@ impl<'a> Monomorphizer<'a> {
             params: lam.params.iter().map(|(p, ty)| (*p, apply_subst(ty, subst))).collect(),
             body: Box::new(self.apply_subst_term(&lam.body, subst)),
             ret_ty: apply_subst(&lam.ret_ty, subst),
-            captures: lam
+        }
+    }
+
+    fn apply_subst_soac_body(&mut self, sb: &super::SoacBody, subst: &Substitution) -> super::SoacBody {
+        super::SoacBody {
+            lam: self.apply_subst_lambda(&sb.lam, subst),
+            captures: sb
                 .captures
                 .iter()
                 .map(|(s, ty, t)| (*s, apply_subst(ty, subst), self.apply_subst_term(t, subst)))
@@ -916,23 +906,23 @@ impl<'a> Monomorphizer<'a> {
                 inputs,
                 consumes_input,
             } => SoacOp::Map {
-                lam: self.apply_subst_lambda(lam, subst),
+                lam: self.apply_subst_soac_body(lam, subst),
                 inputs: inputs.iter().map(|ae| self.apply_subst_array_expr(ae, subst)).collect(),
                 consumes_input: *consumes_input,
             },
             SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
-                op: self.apply_subst_lambda(op, subst),
+                op: self.apply_subst_soac_body(op, subst),
                 ne: Box::new(self.apply_subst_term(ne, subst)),
                 input: self.apply_subst_array_expr(input, subst),
                 props: props.clone(),
             },
             SoacOp::Scan { op, ne, input } => SoacOp::Scan {
-                op: self.apply_subst_lambda(op, subst),
+                op: self.apply_subst_soac_body(op, subst),
                 ne: Box::new(self.apply_subst_term(ne, subst)),
                 input: self.apply_subst_array_expr(input, subst),
             },
             SoacOp::Filter { pred, input } => SoacOp::Filter {
-                pred: self.apply_subst_lambda(pred, subst),
+                pred: self.apply_subst_soac_body(pred, subst),
                 input: self.apply_subst_array_expr(input, subst),
             },
             SoacOp::Scatter {
@@ -953,7 +943,7 @@ impl<'a> Monomorphizer<'a> {
                 props,
             } => SoacOp::ReduceByIndex {
                 dest: dest.clone(),
-                op: self.apply_subst_lambda(op, subst),
+                op: self.apply_subst_soac_body(op, subst),
                 ne: Box::new(self.apply_subst_term(ne, subst)),
                 indices: self.apply_subst_array_expr(indices, subst),
                 values: self.apply_subst_array_expr(values, subst),
@@ -966,8 +956,8 @@ impl<'a> Monomorphizer<'a> {
                 inputs,
                 props,
             } => SoacOp::Redomap {
-                op: self.apply_subst_lambda(op, subst),
-                reduce_op: self.apply_subst_lambda(reduce_op, subst),
+                op: self.apply_subst_soac_body(op, subst),
+                reduce_op: self.apply_subst_soac_body(reduce_op, subst),
                 ne: Box::new(self.apply_subst_term(ne, subst)),
                 inputs: inputs.iter().map(|ae| self.apply_subst_array_expr(ae, subst)).collect(),
                 props: props.clone(),
@@ -988,7 +978,7 @@ impl<'a> Monomorphizer<'a> {
                 elem_ty,
             } => ArrayExpr::Generate {
                 shape: shape.clone(),
-                index_fn: self.apply_subst_lambda(index_fn, subst),
+                index_fn: self.apply_subst_soac_body(index_fn, subst),
                 elem_ty: apply_subst(elem_ty, subst),
             },
             ArrayExpr::Literal(terms) => {

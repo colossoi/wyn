@@ -101,7 +101,6 @@ impl B {
             params: vec![(x, i32_ty())],
             body: Box::new(body),
             ret_ty: i32_ty(),
-            captures: vec![],
         };
         let start = self.int_lit(0);
         let len = self.int_lit(8);
@@ -111,7 +110,10 @@ impl B {
         };
         self.term(
             TermKind::Soac(SoacOp::Map {
-                lam,
+                lam: crate::tlc::SoacBody {
+                    lam,
+                    captures: vec![],
+                },
                 inputs: vec![input],
                 consumes_input: false,
             }),
@@ -128,7 +130,6 @@ impl B {
                 params,
                 body: Box::new(body),
                 ret_ty: body_ty.clone(),
-                captures: vec![],
             }),
             body_ty.clone(),
         );
@@ -372,7 +373,6 @@ fn t11_required_params_closure() {
         params: vec![(x, i32_ty())],
         body: Box::new(plus_body),
         ret_ty: i32_ty(),
-        captures: vec![],
     };
     let start = b.int_lit(0);
     let len = b.int_lit(8);
@@ -382,7 +382,10 @@ fn t11_required_params_closure() {
     };
     let body = b.term(
         TermKind::Soac(SoacOp::Map {
-            lam,
+            lam: crate::tlc::SoacBody {
+                lam,
+                captures: vec![],
+            },
             inputs: vec![input],
             consumes_input: false,
         }),
@@ -437,7 +440,6 @@ fn binding_registry_finds_storage_buffer_in_soac_input() {
         params: vec![(x, i32_ty())],
         body: Box::new(b.var(x, i32_ty())),
         ret_ty: i32_ty(),
-        captures: vec![],
     };
     let offset = b.term(TermKind::IntLit("0".into()), u32_ty_v.clone());
     let len = b.term(TermKind::IntLit("16".into()), u32_ty_v);
@@ -450,7 +452,10 @@ fn binding_registry_finds_storage_buffer_in_soac_input() {
     };
     let soac = b.term(
         TermKind::Soac(SoacOp::Map {
-            lam,
+            lam: crate::tlc::SoacBody {
+                lam,
+                captures: vec![],
+            },
             inputs: vec![input],
             consumes_input: false,
         }),
@@ -492,14 +497,16 @@ fn binding_registry_finds_nested_storage_buffers() {
         params: vec![(x, i32_ty()), (y, i32_ty())],
         body: Box::new(b.var(x, i32_ty())),
         ret_ty: i32_ty(),
-        captures: vec![],
     };
     let sb_a = mk_sb(&mut b, 5);
     let sb_b = mk_sb(&mut b, 7);
     let zip = ArrayExpr::Zip(vec![sb_a, sb_b]);
     let soac = b.term(
         TermKind::Soac(SoacOp::Map {
-            lam: inner_lam,
+            lam: crate::tlc::SoacBody {
+                lam: inner_lam,
+                captures: vec![],
+            },
             inputs: vec![zip],
             consumes_input: false,
         }),

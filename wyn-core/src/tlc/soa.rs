@@ -573,7 +573,7 @@ impl SoaTransformer {
                 inputs,
                 consumes_input,
             } => {
-                let new_lam = self.transform_lambda(lam);
+                let new_lam = self.transform_soac_body(lam);
                 let new_inputs: Vec<ArrayExpr> =
                     inputs.iter().map(|ae| self.transform_array_expr(ae)).collect();
                 SoacOp::Map {
@@ -583,7 +583,7 @@ impl SoaTransformer {
                 }
             }
             SoacOp::Reduce { op, ne, input, props } => {
-                let new_op = self.transform_lambda(op);
+                let new_op = self.transform_soac_body(op);
                 let new_ne = self.transform_term(ne);
                 let new_input = self.transform_array_expr(input);
                 SoacOp::Reduce {
@@ -594,7 +594,7 @@ impl SoaTransformer {
                 }
             }
             SoacOp::Scan { op, ne, input } => {
-                let new_op = self.transform_lambda(op);
+                let new_op = self.transform_soac_body(op);
                 let new_ne = self.transform_term(ne);
                 let new_input = self.transform_array_expr(input);
                 SoacOp::Scan {
@@ -604,7 +604,7 @@ impl SoaTransformer {
                 }
             }
             SoacOp::Filter { pred, input } => {
-                let new_pred = self.transform_lambda(pred);
+                let new_pred = self.transform_soac_body(pred);
                 let new_input = self.transform_array_expr(input);
                 SoacOp::Filter {
                     pred: new_pred,
@@ -634,7 +634,7 @@ impl SoaTransformer {
                 props,
             } => {
                 let new_dest = self.transform_place(dest);
-                let new_op = self.transform_lambda(op);
+                let new_op = self.transform_soac_body(op);
                 let new_ne = self.transform_term(ne);
                 let new_indices = self.transform_array_expr(indices);
                 let new_values = self.transform_array_expr(values);
@@ -654,8 +654,8 @@ impl SoaTransformer {
                 inputs,
                 props,
             } => {
-                let new_op = self.transform_lambda(op);
-                let new_reduce_op = self.transform_lambda(reduce_op);
+                let new_op = self.transform_soac_body(op);
+                let new_reduce_op = self.transform_soac_body(reduce_op);
                 let new_ne = self.transform_term(ne);
                 let new_inputs: Vec<ArrayExpr> =
                     inputs.iter().map(|ae| self.transform_array_expr(ae)).collect();
@@ -716,7 +716,7 @@ impl SoaTransformer {
                 elem_ty,
             } => ArrayExpr::Generate {
                 shape: shape.clone(),
-                index_fn: self.transform_lambda(index_fn),
+                index_fn: self.transform_soac_body(index_fn),
                 elem_ty: soa_type(elem_ty),
             },
             ArrayExpr::Literal(terms) => {
@@ -781,15 +781,22 @@ impl SoaTransformer {
         let new_params: Vec<(crate::SymbolId, Type<TypeName>)> =
             lam.params.iter().map(|(sym, ty)| (*sym, soa_type(ty))).collect();
         let new_body = self.transform_term(&lam.body);
-        let new_captures: Vec<(crate::SymbolId, Type<TypeName>, Term)> = lam
-            .captures
-            .iter()
-            .map(|(sym, ty, term)| (*sym, soa_type(ty), self.transform_term(term)))
-            .collect();
         Lambda {
             params: new_params,
             body: Box::new(new_body),
             ret_ty: soa_type(&lam.ret_ty),
+        }
+    }
+
+    fn transform_soac_body(&mut self, sb: &super::SoacBody) -> super::SoacBody {
+        let new_lam = self.transform_lambda(&sb.lam);
+        let new_captures: Vec<(crate::SymbolId, Type<TypeName>, Term)> = sb
+            .captures
+            .iter()
+            .map(|(sym, ty, term)| (*sym, soa_type(ty), self.transform_term(term)))
+            .collect();
+        super::SoacBody {
+            lam: new_lam,
             captures: new_captures,
         }
     }
@@ -818,36 +825,43 @@ impl SoaTransformer {
 
     /// If the Map has multiple inputs but a single tuple-typed lambda param,
     /// split the param into N separate params and substitute.
-    fn try_normalize_map(&mut self, lam: Lambda, inputs: Vec<ArrayExpr>, consumes_input: bool) -> SoacOp {
-        if inputs.len() <= 1 || lam.params.len() != 1 {
+    fn try_normalize_map(
+        &mut self,
+        sb: super::SoacBody,
+        inputs: Vec<ArrayExpr>,
+        consumes_input: bool,
+    ) -> SoacOp {
+        if inputs.len() <= 1 || sb.lam.params.len() != 1 {
             return SoacOp::Map {
-                lam,
+                lam: sb,
                 inputs,
                 consumes_input,
             };
         }
 
-        let (old_param, ref param_ty) = lam.params[0];
+        let (old_param, param_ty) = (sb.lam.params[0].0, sb.lam.params[0].1.clone());
 
         // Must be a concrete tuple type matching the input count.
-        let flat_types = match param_ty {
+        let flat_types = match &param_ty {
             Type::Constructed(TypeName::Tuple(_), types) if !types.is_empty() => flatten_tuple_types(types),
             _ => {
                 return SoacOp::Map {
-                    lam,
+                    lam: sb,
                     inputs,
                     consumes_input,
                 };
             }
         };
 
-        if flat_types.len() != inputs.len() || has_type_variables(param_ty) {
+        if flat_types.len() != inputs.len() || has_type_variables(&param_ty) {
             return SoacOp::Map {
-                lam,
+                lam: sb,
                 inputs,
                 consumes_input,
             };
         }
+
+        let super::SoacBody { lam, captures } = sb;
 
         // Create N fresh params.
         let new_params: Vec<(crate::SymbolId, Type<TypeName>)> = flat_types
@@ -860,14 +874,16 @@ impl SoaTransformer {
         // reconstructed with the original tuple type. Downstream simplification
         // (partial eval / project folding) will reduce proj(tuple(...), i) -> pi.
         let span = lam.body.span;
-        let rewritten_body = self.substitute_param(*lam.body, old_param, &new_params, param_ty, span);
+        let rewritten_body = self.substitute_param(*lam.body, old_param, &new_params, &param_ty, span);
 
         SoacOp::Map {
-            lam: Lambda {
-                params: new_params,
-                body: Box::new(rewritten_body),
-                ret_ty: lam.ret_ty,
-                captures: lam.captures,
+            lam: super::SoacBody {
+                lam: Lambda {
+                    params: new_params,
+                    body: Box::new(rewritten_body),
+                    ret_ty: lam.ret_ty,
+                },
+                captures,
             },
             inputs,
             consumes_input,
