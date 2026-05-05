@@ -157,11 +157,6 @@ impl ImplSource {
         }
     }
 
-    /// Check if a name is a registered implementation
-    pub fn is_builtin(&self, name: &str) -> bool {
-        self.impls.contains_key(name)
-    }
-
     /// Get all implementation names as a HashSet (for use in flattening to exclude from capture)
     pub fn all_names(&self) -> std::collections::HashSet<String> {
         self.impls.keys().cloned().collect()

@@ -75,20 +75,12 @@ pub struct BuiltinDef {
 }
 
 impl BuiltinDef {
-    pub fn surface_name(&self) -> &'static str {
-        self.raw.surface_name
-    }
-
     pub fn intrinsic_source_names(&self) -> &'static [&'static str] {
         self.raw.intrinsic_source_names
     }
 
     pub fn impl_source_names(&self) -> &'static [&'static str] {
         self.raw.impl_source_names
-    }
-
-    pub fn kind(&self) -> BuiltinKind {
-        self.raw.kind
     }
 
     pub fn overloads(&self) -> &'static [BuiltinOverload] {
@@ -151,9 +143,5 @@ impl BuiltinCatalog {
 
     pub fn get(&self, id: BuiltinId) -> &BuiltinDef {
         &self.defs[id.as_index()]
-    }
-
-    pub fn iter_by_kind(&self, kind: BuiltinKind) -> impl Iterator<Item = &BuiltinDef> {
-        self.defs.iter().filter(move |d| d.raw.kind == kind)
     }
 }

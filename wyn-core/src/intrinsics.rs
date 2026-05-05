@@ -312,17 +312,6 @@ impl IntrinsicSource {
     pub fn all_names(&self) -> std::collections::HashSet<String> {
         self.intrinsics.keys().cloned().collect()
     }
-
-    /// Get the arity of an intrinsic by name (for validation)
-    /// Returns None if the intrinsic doesn't exist
-    pub fn get_arity(&self, name: &str) -> Option<usize> {
-        self.intrinsics.get(name).map(|entries| entries[0].arity())
-    }
-
-    /// Get all intrinsic arities as a map (for use in to_mir)
-    pub fn all_arities(&self) -> HashMap<String, usize> {
-        self.intrinsics.iter().map(|(name, entries)| (name.clone(), entries[0].arity())).collect()
-    }
 }
 
 impl Default for IntrinsicSource {
