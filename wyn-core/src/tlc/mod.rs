@@ -5,6 +5,7 @@
 
 pub mod array_semantics;
 pub mod buffer_specialize;
+pub mod closure_calls_lower;
 pub mod closure_convert;
 pub mod defaults;
 pub mod defunctionalize;

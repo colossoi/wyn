@@ -906,6 +906,12 @@ impl TlcOwnershipApplied {
                 e
             )
         });
+        tlc::closure_calls_lower::verify_closure_calls_lowered(&defunc).unwrap_or_else(|e| {
+            panic!(
+                "closure-calls-lowered verifier failed after defunctionalize: {:?}",
+                e
+            )
+        });
         TlcDefunctionalized {
             tlc: defunc,
             type_table,
