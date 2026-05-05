@@ -17,7 +17,7 @@ use polytype::Type as PolyType;
 
 use crate::ast::{Span, TypeName};
 use crate::error::Result;
-use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
+use crate::impl_source::{BuiltinImpl, PrimOp};
 use crate::intrinsics::{
     INTRINSIC_ARRAY_WITH, INTRINSIC_ARRAY_WITH_INPLACE, INTRINSIC_LENGTH, INTRINSIC_SLICE,
     INTRINSIC_STORAGE_LEN, INTRINSIC_THREAD_ID, INTRINSIC_UNINIT,
@@ -498,12 +498,6 @@ struct LowerCtx<'a> {
     indent: usize,
     /// Track mangled names for collision detection.
     mangled_names: HashMap<String, String>,
-    /// Lookup for builtin impls by name. `f32.cos`, `vec.cos`,
-    /// `_w_intrinsic_cos` all resolve to the same
-    /// `BuiltinImpl::PrimOp(GlslExt(14))` here, so the WGSL emission
-    /// is decided by the structural `PrimOp` rather than the surface
-    /// name's qualifier prefix.
-    impl_source: ImplSource,
     /// Entry-point output structs keyed by their field signature
     /// ("attr0+ty0,attr1+ty1,..."). Maps sig → (struct_name, fields).
     /// `fields` is an ordered list of (field_name, attribute_prefix,
@@ -542,7 +536,6 @@ impl<'a> LowerCtx<'a> {
             output_structs: HashMap::new(),
             output_struct_counter: 0,
             pc_blocks: HashMap::new(),
-            impl_source: ImplSource::default(),
         }
     }
 

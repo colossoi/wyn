@@ -74,7 +74,6 @@ pub struct TypeChecker<'a> {
     scope_stack: ScopeStack<ScopeEntry<TypeScheme>>,
     context: Context<TypeName>, // Polytype unification context
     record_field_map: HashMap<(String, String), Type>, // Map (type_name, field_name) -> field_type
-    impl_source: crate::impl_source::ImplSource, // Implementation source for code generation
     module_manager: &'a crate::module_manager::ModuleManager, // Lazy module loading
     type_table: HashMap<crate::ast::NodeId, TypeScheme>, // Maps NodeId to type scheme
     warnings: Vec<TypeWarning>, // Collected warnings
@@ -683,13 +682,10 @@ impl<'a> TypeChecker<'a> {
         type_table: HashMap<NodeId, TypeScheme>,
         spec_schemes: HashMap<String, TypeScheme>,
     ) -> Self {
-        let impl_source = crate::impl_source::ImplSource::new();
-
         TypeChecker {
             scope_stack: ScopeStack::new(),
             context,
             record_field_map: HashMap::new(),
-            impl_source,
             module_manager,
             type_table,
             warnings: Vec::new(),
@@ -3131,7 +3127,7 @@ impl<'a> TypeChecker<'a> {
                 }
             };
 
-            if let Some(field_type) = self.impl_source.get_field_type(&type_name_str, field) {
+            if let Some(field_type) = crate::impl_source::vec_field_type(&type_name_str, field) {
                 return Ok(field_type);
             }
             if let Some(field_type) = self.record_field_map.get(&(type_name_str.clone(), field.to_string()))

@@ -3,7 +3,6 @@
 // Types for functions are provided by modules or PolymorphicBuiltins
 
 use crate::ast::{Type, TypeName};
-use std::collections::HashMap;
 
 /// Implementation strategy for a builtin function
 ///
@@ -129,85 +128,31 @@ pub enum Intrinsic {
     Length,
 }
 
-/// Implementation source for all builtin functions and intrinsics
-pub struct ImplSource {
-    /// Maps function name to implementation
-    impls: HashMap<String, BuiltinImpl>,
-}
-
-impl ImplSource {
-    pub fn new() -> Self {
-        let mut source = ImplSource {
-            impls: HashMap::new(),
-        };
-        source.populate_from_catalog(crate::builtins::catalog());
-        source
+/// Look up a vec component field type. `type_name` is a name like
+/// `vec3f32`; `field_name` is one of `x`/`y`/`z`/`w` (validated against
+/// the vec size). Returns the element type if the field is in range.
+pub fn vec_field_type(type_name: &str, field_name: &str) -> Option<Type> {
+    if !type_name.starts_with("vec") {
+        return None;
     }
-
-    /// Walk every catalog entry and register its lowering under each
-    /// of the entry's `impl_source_names`.
-    fn populate_from_catalog(&mut self, catalog: &crate::builtins::BuiltinCatalog) {
-        for def in catalog.defs() {
-            for ovld in def.overloads() {
-                let impl_kind = ovld.lowering.to_builtin_impl();
-                for &name in def.impl_source_names() {
-                    self.register(name, impl_kind.clone());
-                }
-            }
-        }
+    let size = type_name.chars().nth(3)?.to_digit(10)? as usize;
+    let valid = matches!(
+        (size, field_name),
+        (2, "x" | "y") | (3, "x" | "y" | "z") | (4, "x" | "y" | "z" | "w")
+    );
+    if !valid {
+        return None;
     }
-
-    /// Get all implementation names as a HashSet (for use in flattening to exclude from capture)
-    pub fn all_names(&self) -> std::collections::HashSet<String> {
-        self.impls.keys().cloned().collect()
-    }
-
-    /// Get the implementation for a function by name
-    pub fn get(&self, name: &str) -> Option<&BuiltinImpl> {
-        self.impls.get(name)
-    }
-
-    /// Get the type of a field on a given type (e.g., vec3f32.x returns f32)
-    pub fn get_field_type(&self, type_name: &str, field_name: &str) -> Option<Type> {
-        // Parse vector types like vec2f32, vec3i32, vec4bool
-        if type_name.starts_with("vec") {
-            // Extract size: vec2f32 -> 2, vec3i32 -> 3, vec4bool -> 4
-            let size = type_name.chars().nth(3)?.to_digit(10)? as usize;
-
-            // Check if field is valid for this vector size
-            let valid_field = matches!(
-                (size, field_name),
-                (2, "x" | "y") | (3, "x" | "y" | "z") | (4, "x" | "y" | "z" | "w")
-            );
-
-            if valid_field {
-                // Extract element type: vec2f32 -> f32, vec3i32 -> i32, vec4u32 -> u32
-                let elem_type_str = &type_name[4..];
-                let elem_type_name = match elem_type_str {
-                    "f32" => TypeName::Float(32),
-                    "f64" => TypeName::Float(64),
-                    "i32" => TypeName::Int(32),
-                    "i64" => TypeName::Int(64),
-                    "u32" => TypeName::UInt(32),
-                    "u64" => TypeName::UInt(64),
-                    "bool" => TypeName::Bool,
-                    other => TypeName::Named(other.to_string()),
-                };
-                return Some(Type::Constructed(elem_type_name, vec![]));
-            }
-        }
-
-        None
-    }
-
-    /// Register an implementation for a builtin function by name.
-    fn register(&mut self, name: &str, implementation: BuiltinImpl) {
-        self.impls.insert(name.to_string(), implementation);
-    }
-}
-
-impl Default for ImplSource {
-    fn default() -> Self {
-        Self::new()
-    }
+    let elem_type_str = &type_name[4..];
+    let elem_type_name = match elem_type_str {
+        "f32" => TypeName::Float(32),
+        "f64" => TypeName::Float(64),
+        "i32" => TypeName::Int(32),
+        "i64" => TypeName::Int(64),
+        "u32" => TypeName::UInt(32),
+        "u64" => TypeName::UInt(64),
+        "bool" => TypeName::Bool,
+        other => TypeName::Named(other.to_string()),
+    };
+    Some(Type::Constructed(elem_type_name, vec![]))
 }

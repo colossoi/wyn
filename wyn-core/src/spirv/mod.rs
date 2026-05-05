@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use crate::ast::Span;
 use crate::ast::TypeName;
 use crate::error::Result;
-use crate::impl_source::{BuiltinImpl, ImplSource, PrimOp};
+use crate::impl_source::{BuiltinImpl, PrimOp};
 use crate::ssa::layout::{buffer_array_strides, type_byte_size};
 use crate::ssa::types::{
     BlockId, ConstantValue, ControlHeader, FuncBody, InstKind, Terminator, ValueId, ValueRef, ViewSource,
@@ -112,9 +112,6 @@ struct Constructor {
     extract_cache: HashMap<(spirv::Word, u32), spirv::Word>, // CSE for OpCompositeExtract
     null_const_cache: HashMap<spirv::Word, spirv::Word>, // type -> OpConstantNull id
 
-    // Builtin function registry
-    impl_source: ImplSource,
-
     /// Storage buffers for compute shaders: (set, binding) -> (buffer_var, elem_type_id, buffer_ptr_type)
     storage_buffers: HashMap<(u32, u32), (spirv::Word, spirv::Word, spirv::Word)>,
 
@@ -196,7 +193,6 @@ impl Constructor {
             storage_elem_types: HashMap::new(),
             extract_cache: HashMap::new(),
             null_const_cache: HashMap::new(),
-            impl_source: ImplSource::default(),
             storage_buffers: HashMap::new(),
             global_invocation_id: None,
             push_constant_var: None,

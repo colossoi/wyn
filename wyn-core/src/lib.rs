@@ -542,12 +542,22 @@ impl AstConstFoldedEarly {
 
         // `open M` name resolution. Builds the open index from the
         // union of (a) module-spec schemes (keyed `M.name`) and (b)
-        // ImplSource's per-type registrations (`f32.cos`, `i32.abs`,
-        // …), then rewrites bare names that uniquely match one open.
-        let impl_source = crate::impl_source::ImplSource::new();
+        // catalog per-type and per-intrinsic names (`f32.cos`,
+        // `_w_intrinsic_*`, …), then rewrites bare names that uniquely
+        // match one open.
         let scheme_keys = spec_schemes.keys().cloned();
-        let impl_keys = impl_source.all_names().into_iter();
-        resolve_opens::run(&mut self.0.ast, scheme_keys.chain(impl_keys))?;
+        let catalog_keys: Vec<String> = crate::builtins::catalog()
+            .defs()
+            .iter()
+            .flat_map(|d| {
+                d.impl_source_names()
+                    .iter()
+                    .copied()
+                    .chain(d.intrinsic_source_names().iter().copied())
+                    .map(|s| s.to_string())
+            })
+            .collect();
+        resolve_opens::run(&mut self.0.ast, scheme_keys.chain(catalog_keys))?;
 
         let mut checker =
             type_checker::TypeChecker::with_context_and_schemes(module_manager, context, spec_schemes);

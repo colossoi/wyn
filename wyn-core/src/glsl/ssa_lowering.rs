@@ -9,7 +9,7 @@ mod ssa_lowering_tests;
 
 use crate::ast::{Span, TypeName};
 use crate::error::Result;
-use crate::impl_source::{BuiltinImpl, ImplSource, Intrinsic, PrimOp};
+use crate::impl_source::{BuiltinImpl, Intrinsic, PrimOp};
 use crate::intrinsics::{INTRINSIC_ARRAY_WITH, INTRINSIC_ARRAY_WITH_INPLACE, INTRINSIC_UNINIT};
 use crate::lowering_common::ShaderStage;
 use crate::ssa::types::{ConstantValue, FuncBody, InstKind, ValueId, ValueRef, WynInstNode};
@@ -50,8 +50,6 @@ struct LowerCtx<'a> {
     func_index: HashMap<String, usize>,
     /// Functions that have been lowered
     lowered: HashSet<String>,
-    /// Builtin implementations
-    impl_source: ImplSource,
     /// Current indentation level
     indent: usize,
     /// Tuple types that need struct definitions (keyed by struct name)
@@ -297,7 +295,6 @@ impl<'a> LowerCtx<'a> {
             program,
             func_index,
             lowered: HashSet::new(),
-            impl_source: ImplSource::default(),
             indent: 0,
             tuple_structs: HashMap::new(),
             tuple_counter: 0,
