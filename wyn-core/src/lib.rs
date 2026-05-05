@@ -900,6 +900,12 @@ impl TlcOwnershipApplied {
         } = self.0;
         let defunc = tlc::defunctionalize::run(tlc, &known_defs);
         defunc.assert_flat_apps();
+        tlc::closure_convert::verify_closure_converted(&defunc).unwrap_or_else(|e| {
+            panic!(
+                "closure-conversion verifier failed after defunctionalize: {:?}",
+                e
+            )
+        });
         TlcDefunctionalized {
             tlc: defunc,
             type_table,
