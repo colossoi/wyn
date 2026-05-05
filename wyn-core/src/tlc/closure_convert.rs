@@ -13,9 +13,261 @@
 //! lambda lifting and free-variable analysis. HOF specialization and
 //! call-site capture threading are downstream concerns (phases 2 and 3).
 
-use super::{ArrayExpr, Def, Lambda, Program, SoacOp, Term, TermKind};
-use crate::SymbolId;
+use super::{ArrayExpr, Def, Lambda, LoopKind, Program, SoacOp, Term, TermKind};
+use crate::{SymbolId, SymbolTable};
 use std::collections::HashSet;
+
+// =============================================================================
+// Free-variable analysis
+// =============================================================================
+//
+// These helpers walk a term and collect references that aren't bound locally
+// or globally. They're pure — no transformation, no allocation of new
+// symbols — so closure_convert and `parallelize` (which also needs FV
+// analysis for its outlining work) can share them.
+
+/// Compute the free variables of a term given explicit `bound`/`top_level`
+/// sets and the registry of intrinsic-style names. Returns one `Term` per
+/// distinct free SymbolId (preserving type and span from its first
+/// occurrence).
+pub fn compute_free_vars(
+    term: &Term,
+    bound: &HashSet<SymbolId>,
+    top_level: &HashSet<SymbolId>,
+    known_defs: &HashSet<String>,
+    symbols: &SymbolTable,
+) -> Vec<Term> {
+    let mut free = Vec::new();
+    let mut seen = HashSet::new();
+    collect_free_vars(term, bound, top_level, known_defs, symbols, &mut free, &mut seen);
+    free
+}
+
+pub fn collect_free_vars(
+    term: &Term,
+    bound: &HashSet<SymbolId>,
+    top_level: &HashSet<SymbolId>,
+    known_defs: &HashSet<String>,
+    symbols: &SymbolTable,
+    free: &mut Vec<Term>,
+    seen: &mut HashSet<SymbolId>,
+) {
+    match &term.kind {
+        TermKind::Var(sym) => {
+            let name = symbols.get(*sym).expect("BUG: symbol not in table");
+            if !bound.contains(sym)
+                && !top_level.contains(sym)
+                && !known_defs.contains(name)
+                && !name.starts_with("_w_")
+                && !seen.contains(sym)
+            {
+                seen.insert(*sym);
+                free.push(term.clone());
+            }
+        }
+        TermKind::Let { name, rhs, body, .. } => {
+            collect_free_vars(rhs, bound, top_level, known_defs, symbols, free, seen);
+            let mut inner_bound = bound.clone();
+            inner_bound.insert(*name);
+            collect_free_vars(body, &inner_bound, top_level, known_defs, symbols, free, seen);
+        }
+        TermKind::Lambda(Lambda { params, body, .. }) => {
+            let mut inner_bound = bound.clone();
+            for (p, _) in params {
+                inner_bound.insert(*p);
+            }
+            collect_free_vars(body, &inner_bound, top_level, known_defs, symbols, free, seen);
+        }
+        TermKind::App { func, args } => {
+            collect_free_vars(func, bound, top_level, known_defs, symbols, free, seen);
+            for arg in args {
+                collect_free_vars(arg, bound, top_level, known_defs, symbols, free, seen);
+            }
+        }
+        TermKind::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_free_vars(cond, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars(then_branch, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars(else_branch, bound, top_level, known_defs, symbols, free, seen);
+        }
+        TermKind::Loop {
+            loop_var,
+            init,
+            init_bindings,
+            kind,
+            body,
+            ..
+        } => {
+            collect_free_vars(init, bound, top_level, known_defs, symbols, free, seen);
+            let mut inner_bound = bound.clone();
+            inner_bound.insert(*loop_var);
+            for (name, _, _) in init_bindings {
+                inner_bound.insert(*name);
+            }
+            match kind {
+                LoopKind::For { var, iter, .. } => {
+                    collect_free_vars(iter, bound, top_level, known_defs, symbols, free, seen);
+                    inner_bound.insert(*var);
+                }
+                LoopKind::ForRange {
+                    var,
+                    bound: bound_expr,
+                    ..
+                } => {
+                    collect_free_vars(bound_expr, bound, top_level, known_defs, symbols, free, seen);
+                    inner_bound.insert(*var);
+                }
+                LoopKind::While { cond } => {
+                    collect_free_vars(cond, &inner_bound, top_level, known_defs, symbols, free, seen);
+                }
+            }
+            for (_, _, expr) in init_bindings {
+                collect_free_vars(expr, &inner_bound, top_level, known_defs, symbols, free, seen);
+            }
+            collect_free_vars(body, &inner_bound, top_level, known_defs, symbols, free, seen);
+        }
+        TermKind::IntLit(_)
+        | TermKind::FloatLit(_)
+        | TermKind::BoolLit(_)
+        | TermKind::BinOp(_)
+        | TermKind::UnOp(_)
+        | TermKind::Extern(_) => {}
+        TermKind::Soac(soac) => {
+            collect_free_vars_soac(soac, bound, top_level, known_defs, symbols, free, seen);
+        }
+        TermKind::ArrayExpr(ae) => {
+            collect_free_vars_array_expr(ae, bound, top_level, known_defs, symbols, free, seen);
+        }
+        TermKind::Force(inner) => {
+            collect_free_vars(inner, bound, top_level, known_defs, symbols, free, seen);
+        }
+    }
+}
+
+pub fn collect_free_vars_lambda(
+    lam: &Lambda,
+    bound: &HashSet<SymbolId>,
+    top_level: &HashSet<SymbolId>,
+    known_defs: &HashSet<String>,
+    symbols: &SymbolTable,
+    free: &mut Vec<Term>,
+    seen: &mut HashSet<SymbolId>,
+) {
+    let mut inner_bound = bound.clone();
+    for (p, _) in &lam.params {
+        inner_bound.insert(*p);
+    }
+    collect_free_vars(
+        &lam.body,
+        &inner_bound,
+        top_level,
+        known_defs,
+        symbols,
+        free,
+        seen,
+    );
+    for (_, _, cap_term) in &lam.captures {
+        collect_free_vars(cap_term, bound, top_level, known_defs, symbols, free, seen);
+    }
+}
+
+pub fn collect_free_vars_soac(
+    soac: &SoacOp,
+    bound: &HashSet<SymbolId>,
+    top_level: &HashSet<SymbolId>,
+    known_defs: &HashSet<String>,
+    symbols: &SymbolTable,
+    free: &mut Vec<Term>,
+    seen: &mut HashSet<SymbolId>,
+) {
+    match soac {
+        SoacOp::Map { lam, inputs, .. } => {
+            collect_free_vars_lambda(lam, bound, top_level, known_defs, symbols, free, seen);
+            for input in inputs {
+                collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
+            }
+        }
+        SoacOp::Reduce { op, ne, input, .. } => {
+            collect_free_vars_lambda(op, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars(ne, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
+        }
+        SoacOp::Scan { op, ne, input } => {
+            collect_free_vars_lambda(op, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars(ne, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
+        }
+        SoacOp::Filter { pred, input } => {
+            collect_free_vars_lambda(pred, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
+        }
+        SoacOp::Scatter { indices, values, .. } => {
+            collect_free_vars_array_expr(indices, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars_array_expr(values, bound, top_level, known_defs, symbols, free, seen);
+        }
+        SoacOp::ReduceByIndex {
+            op,
+            ne,
+            indices,
+            values,
+            ..
+        } => {
+            collect_free_vars_lambda(op, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars(ne, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars_array_expr(indices, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars_array_expr(values, bound, top_level, known_defs, symbols, free, seen);
+        }
+        SoacOp::Redomap { op, ne, inputs, .. } => {
+            collect_free_vars_lambda(op, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars(ne, bound, top_level, known_defs, symbols, free, seen);
+            for input in inputs {
+                collect_free_vars_array_expr(input, bound, top_level, known_defs, symbols, free, seen);
+            }
+        }
+    }
+}
+
+pub fn collect_free_vars_array_expr(
+    ae: &ArrayExpr,
+    bound: &HashSet<SymbolId>,
+    top_level: &HashSet<SymbolId>,
+    known_defs: &HashSet<String>,
+    symbols: &SymbolTable,
+    free: &mut Vec<Term>,
+    seen: &mut HashSet<SymbolId>,
+) {
+    match ae {
+        ArrayExpr::Ref(t) => collect_free_vars(t, bound, top_level, known_defs, symbols, free, seen),
+        ArrayExpr::Zip(exprs) => {
+            for e in exprs {
+                collect_free_vars_array_expr(e, bound, top_level, known_defs, symbols, free, seen);
+            }
+        }
+        ArrayExpr::Soac(op) => {
+            collect_free_vars_soac(op, bound, top_level, known_defs, symbols, free, seen)
+        }
+        ArrayExpr::Generate { index_fn, .. } => {
+            collect_free_vars_lambda(index_fn, bound, top_level, known_defs, symbols, free, seen);
+        }
+        ArrayExpr::Literal(terms) => {
+            for t in terms {
+                collect_free_vars(t, bound, top_level, known_defs, symbols, free, seen);
+            }
+        }
+        ArrayExpr::Range { start, len } => {
+            collect_free_vars(start, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars(len, bound, top_level, known_defs, symbols, free, seen);
+        }
+        ArrayExpr::StorageBuffer { offset, len, .. } => {
+            // set/binding are compile-time u32s; only offset/len carry refs.
+            collect_free_vars(offset, bound, top_level, known_defs, symbols, free, seen);
+            collect_free_vars(len, bound, top_level, known_defs, symbols, free, seen);
+        }
+    }
+}
 
 // =============================================================================
 // Verifier

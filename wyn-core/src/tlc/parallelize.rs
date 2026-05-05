@@ -277,7 +277,7 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
 /// as their own params or the references leak out as undefined globals
 /// during SPIR-V emission.
 ///
-/// Reuses `defunctionalize::collect_free_vars` with empty `top_level` /
+/// Reuses `closure_convert::collect_free_vars` with empty `top_level` /
 /// `known_defs` sets — no top-level filtering, just "bound vs free"
 /// within the fragment we walk.
 fn compute_required_params(
@@ -296,7 +296,7 @@ fn compute_required_params(
     // Each prefix RHS is evaluated with all *previous* prefix names in
     // scope. The SOAC sees the full prefix in scope.
     for (name, _ty, rhs) in prefix_lets {
-        super::defunctionalize::collect_free_vars(
+        super::closure_convert::collect_free_vars(
             rhs,
             &bound,
             &empty_top,
@@ -314,7 +314,7 @@ fn compute_required_params(
         span: ast::Span::new(0, 0, 0, 0),
         kind: TermKind::Soac(soac.original.clone()),
     };
-    super::defunctionalize::collect_free_vars(
+    super::closure_convert::collect_free_vars(
         &soac_term,
         &bound,
         &empty_top,
@@ -779,7 +779,7 @@ fn maybe_hoist(
 }
 
 /// True if `term` has any free SymbolId that names an entry param.
-/// Uses `defunctionalize::collect_free_vars` with empty
+/// Uses `closure_convert::collect_free_vars` with empty
 /// `top_level`/`known_defs` sets (same style as
 /// `compute_required_params`).
 fn rhs_references_entry_param(
@@ -793,7 +793,7 @@ fn rhs_references_entry_param(
     let empty_defs: HashSet<String> = HashSet::new();
     let mut free: Vec<Term> = Vec::new();
     let mut seen: HashSet<SymbolId> = HashSet::new();
-    super::defunctionalize::collect_free_vars(
+    super::closure_convert::collect_free_vars(
         term,
         &bound,
         &empty_top,
@@ -820,7 +820,7 @@ fn assert_hoist_free_vars_are_grounded(
     let empty_defs: HashSet<String> = HashSet::new();
     let mut free: Vec<Term> = Vec::new();
     let mut seen: HashSet<SymbolId> = HashSet::new();
-    super::defunctionalize::collect_free_vars(
+    super::closure_convert::collect_free_vars(
         term,
         &bound,
         &empty_top,
