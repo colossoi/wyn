@@ -19,8 +19,9 @@ use std::sync::OnceLock;
 
 static CATALOG: OnceLock<BuiltinCatalog> = OnceLock::new();
 
-/// Process-wide builtin catalog. Constructed lazily on first call from
-/// the static `defs::ALL_BUILTINS` table.
+/// Process-wide builtin catalog. Constructed lazily on first call by
+/// concatenating the static catalog table with runtime-generated
+/// per-type op entries (whose names are leaked once at startup).
 pub fn catalog() -> &'static BuiltinCatalog {
-    CATALOG.get_or_init(|| BuiltinCatalog::from_raw(defs::ALL_BUILTINS))
+    CATALOG.get_or_init(|| BuiltinCatalog::build(defs::all_builtins()))
 }

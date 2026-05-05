@@ -71,7 +71,7 @@ pub struct BuiltinDefRaw {
 #[derive(Debug, Clone)]
 pub struct BuiltinDef {
     pub id: BuiltinId,
-    pub raw: &'static BuiltinDefRaw,
+    pub raw: BuiltinDefRaw,
 }
 
 impl BuiltinDef {
@@ -96,8 +96,8 @@ impl BuiltinDef {
     }
 }
 
-/// Indexed view over the static `ALL_BUILTINS` table. Built once at
-/// program startup (via `OnceLock`); consumers take a `&BuiltinCatalog`.
+/// Indexed view over the catalog table. Built once at program startup
+/// (via `OnceLock`); consumers take a `&BuiltinCatalog`.
 #[derive(Debug)]
 pub struct BuiltinCatalog {
     defs: Vec<BuiltinDef>,
@@ -106,15 +106,16 @@ pub struct BuiltinCatalog {
 }
 
 impl BuiltinCatalog {
-    /// Construct from a static slice of raw definitions. Each entry's
-    /// `BuiltinId` is its position in the slice.
-    pub fn from_raw(raw_defs: &'static [BuiltinDefRaw]) -> Self {
+    /// Build a catalog from a vector of raw definitions. Each entry's
+    /// `BuiltinId` is its position in the slice. Per-type op entries
+    /// generated at startup leak their names via `Box::leak`, giving
+    /// every catalog name a `&'static str` lifetime.
+    pub fn build(raw_defs: Vec<BuiltinDefRaw>) -> Self {
         let mut defs = Vec::with_capacity(raw_defs.len());
         let mut by_surface_name = HashMap::with_capacity(raw_defs.len());
         let mut by_internal_name = HashMap::new();
-        for (i, raw) in raw_defs.iter().enumerate() {
+        for (i, raw) in raw_defs.into_iter().enumerate() {
             let id = BuiltinId::new(i as u32);
-            defs.push(BuiltinDef { id, raw });
             if by_surface_name.insert(raw.surface_name, id).is_some() {
                 panic!("duplicate surface_name in builtin catalog: {}", raw.surface_name);
             }
@@ -123,6 +124,7 @@ impl BuiltinCatalog {
                     panic!("duplicate impl_source_name in builtin catalog: {}", impl_name);
                 }
             }
+            defs.push(BuiltinDef { id, raw });
         }
         BuiltinCatalog {
             defs,

@@ -67,7 +67,13 @@ macro_rules! vec_ternary {
     };
 }
 
-pub static ALL_BUILTINS: &[BuiltinDefRaw] = &[
+pub fn all_builtins() -> Vec<BuiltinDefRaw> {
+    let mut defs: Vec<BuiltinDefRaw> = STATIC_BUILTINS.to_vec();
+    defs.extend(generate_per_type_ops());
+    defs
+}
+
+static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
     // ---- vec.* trig ----
     vec_unary!("vec.sin", 13),
     vec_unary!("vec.cos", 14),
@@ -526,3 +532,296 @@ pub static ALL_BUILTINS: &[BuiltinDefRaw] = &[
         }],
     },
 ];
+
+// ---------------------------------------------------------------------------
+// Per-type operator generation
+// ---------------------------------------------------------------------------
+//
+// Per-type ops (`f32.+`, `i32.<`, `f32.sin`, etc.) get their type
+// schemes from prelude module signatures, so `intrinsic_source_names` is
+// empty. They're registered in ImplSource under both the surface form
+// (`f32.+`) and a polymorphic-suffix form (`_w_intrinsic_+_f32`) for
+// prelude-module use. Names are leaked via `Box::leak` to give them
+// `&'static str` lifetimes — the catalog is built once at startup so
+// each name leaks once.
+
+fn leak_str(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
+}
+
+fn leak_two(a: &'static str, b: &'static str) -> &'static [&'static str] {
+    Box::leak(Box::new([a, b]))
+}
+
+fn leak_one(a: &'static str) -> &'static [&'static str] {
+    Box::leak(Box::new([a]))
+}
+
+fn dummy_scheme(_: &mut dyn crate::type_checker::TypeVarGenerator) -> crate::ast::TypeScheme {
+    crate::ast::TypeScheme::Monotype(crate::ast::Type::Constructed(crate::ast::TypeName::Unit, vec![]))
+}
+
+fn per_type_op(ty: &str, op: &str, internal_op: &str, lowering: BuiltinLowering) -> BuiltinDefRaw {
+    let surface = leak_str(format!("{}.{}", ty, op));
+    let internal = leak_str(format!("_w_intrinsic_{}_{}", internal_op, ty));
+    BuiltinDefRaw {
+        surface_name: surface,
+        intrinsic_source_names: &[],
+        impl_source_names: leak_two(surface, internal),
+        kind: BuiltinKind::Operator,
+        purity: Purity::Pure,
+        overloads: Box::leak(Box::new([BuiltinOverload {
+            scheme: dummy_scheme,
+            lowering,
+        }])),
+    }
+}
+
+fn per_type_conv(ty: &str, source_ty: &str, lowering: BuiltinLowering) -> BuiltinDefRaw {
+    // User-facing conversions use a single name like `f32.i32`.
+    let surface = leak_str(format!("{}.{}", ty, source_ty));
+    BuiltinDefRaw {
+        surface_name: surface,
+        intrinsic_source_names: &[],
+        impl_source_names: leak_one(surface),
+        kind: BuiltinKind::ModuleBuiltin,
+        purity: Purity::Pure,
+        overloads: Box::leak(Box::new([BuiltinOverload {
+            scheme: dummy_scheme,
+            lowering,
+        }])),
+    }
+}
+
+fn intrinsic_only(name: &'static str, lowering: BuiltinLowering) -> BuiltinDefRaw {
+    // Names emitted only as `_w_intrinsic_*_<ty>` (no user-facing form),
+    // used internally for things like float-from/to-int conversions.
+    BuiltinDefRaw {
+        surface_name: name,
+        intrinsic_source_names: &[],
+        impl_source_names: leak_one(name),
+        kind: BuiltinKind::InternalIntrinsic,
+        purity: Purity::Pure,
+        overloads: Box::leak(Box::new([BuiltinOverload {
+            scheme: dummy_scheme,
+            lowering,
+        }])),
+    }
+}
+
+fn generate_per_type_ops() -> Vec<BuiltinDefRaw> {
+    use BuiltinLowering::PrimOp as L;
+    use PrimOp::*;
+    let mut defs = Vec::new();
+
+    let signed_ints: &[&str] = &["i8", "i16", "i32", "i64"];
+    let unsigned_ints: &[&str] = &["u8", "u16", "u32", "u64"];
+    let floats: &[&str] = &["f16", "f32", "f64"];
+
+    // ---- numeric_modules: arithmetic, comparison, min/max/abs/sign/clamp ----
+    for &ty in floats {
+        for (op, prim) in [
+            ("+", FAdd),
+            ("-", FSub),
+            ("*", FMul),
+            ("/", FDiv),
+            ("%", FRem),
+            ("**", GlslExt(26)),
+        ] {
+            defs.push(per_type_op(ty, op, op, L(prim)));
+        }
+        for (op, prim) in [
+            ("<", FOrdLessThan),
+            ("==", FOrdEqual),
+            ("!=", FOrdNotEqual),
+            (">", FOrdGreaterThan),
+            ("<=", FOrdLessThanEqual),
+            (">=", FOrdGreaterThanEqual),
+        ] {
+            defs.push(per_type_op(ty, op, op, L(prim)));
+        }
+        defs.push(per_type_op(ty, "min", "min", L(GlslExt(37)))); // FMin
+        defs.push(per_type_op(ty, "max", "max", L(GlslExt(40)))); // FMax
+        defs.push(per_type_op(ty, "abs", "abs", L(GlslExt(4)))); // FAbs
+        defs.push(per_type_op(ty, "sign", "sign", L(GlslExt(6)))); // FSign
+        defs.push(per_type_op(ty, "clamp", "clamp", L(GlslExt(43)))); // FClamp
+    }
+    for &ty in signed_ints {
+        for (op, prim) in [("+", IAdd), ("-", ISub), ("*", IMul), ("/", SDiv), ("%", SRem)] {
+            defs.push(per_type_op(ty, op, op, L(prim)));
+        }
+        for (op, prim) in [
+            ("<", SLessThan),
+            ("==", IEqual),
+            ("!=", INotEqual),
+            (">", SGreaterThan),
+            ("<=", SLessThanEqual),
+            (">=", SGreaterThanEqual),
+        ] {
+            defs.push(per_type_op(ty, op, op, L(prim)));
+        }
+        defs.push(per_type_op(ty, "min", "min", L(GlslExt(39)))); // SMin
+        defs.push(per_type_op(ty, "max", "max", L(GlslExt(42)))); // SMax
+        defs.push(per_type_op(ty, "abs", "abs", L(GlslExt(5)))); // SAbs
+        defs.push(per_type_op(ty, "sign", "sign", L(GlslExt(7)))); // SSign
+        defs.push(per_type_op(ty, "clamp", "clamp", L(GlslExt(45)))); // SClamp
+    }
+    for &ty in unsigned_ints {
+        for (op, prim) in [("+", IAdd), ("-", ISub), ("*", IMul), ("/", UDiv), ("%", UMod)] {
+            defs.push(per_type_op(ty, op, op, L(prim)));
+        }
+        for (op, prim) in [
+            ("<", ULessThan),
+            ("==", IEqual),
+            ("!=", INotEqual),
+            (">", UGreaterThan),
+            ("<=", ULessThanEqual),
+            (">=", UGreaterThanEqual),
+        ] {
+            defs.push(per_type_op(ty, op, op, L(prim)));
+        }
+        defs.push(per_type_op(ty, "min", "min", L(GlslExt(38)))); // UMin
+        defs.push(per_type_op(ty, "max", "max", L(GlslExt(41)))); // UMax
+        defs.push(per_type_op(ty, "clamp", "clamp", L(GlslExt(44)))); // UClamp
+    }
+
+    // ---- integral_modules: bitwise + shifts ----
+    for &ty in signed_ints.iter().chain(unsigned_ints.iter()) {
+        defs.push(per_type_op(ty, "&", "&", L(BitwiseAnd)));
+        defs.push(per_type_op(ty, "|", "|", L(BitwiseOr)));
+        defs.push(per_type_op(ty, "^", "^", L(BitwiseXor)));
+        defs.push(per_type_op(ty, "<<", "<<", L(ShiftLeftLogical)));
+        let right_shift = if ty.starts_with('i') { ShiftRightArithmetic } else { ShiftRightLogical };
+        defs.push(per_type_op(ty, ">>", ">>", L(right_shift)));
+    }
+
+    // ---- integral_modules: float-to-int + int-to-int conversions ----
+    for &target in signed_ints {
+        for &source in floats {
+            defs.push(per_type_conv(target, source, L(FPToSI)));
+        }
+    }
+    for &target in unsigned_ints {
+        for &source in floats {
+            defs.push(per_type_conv(target, source, L(FPToUI)));
+        }
+    }
+    for &target in signed_ints {
+        for &source in signed_ints {
+            if target != source {
+                defs.push(per_type_conv(target, source, L(SConvert)));
+            }
+        }
+    }
+    for &target in unsigned_ints {
+        for &source in unsigned_ints {
+            if target != source {
+                defs.push(per_type_conv(target, source, L(UConvert)));
+            }
+        }
+    }
+    for (i, &s_ty) in signed_ints.iter().enumerate() {
+        for (j, &u_ty) in unsigned_ints.iter().enumerate() {
+            let same_width = i == j;
+            defs.push(per_type_conv(
+                s_ty,
+                u_ty,
+                if same_width { L(Bitcast) } else { L(SConvert) },
+            ));
+            defs.push(per_type_conv(
+                u_ty,
+                s_ty,
+                if same_width { L(Bitcast) } else { L(UConvert) },
+            ));
+        }
+    }
+
+    // ---- real_modules: trig, hyperbolic, exp/log, rounding, lerp/fma, isnan/isinf, ldexp ----
+    for &ty in floats {
+        for (op, glsl) in [
+            ("sin", 13),
+            ("cos", 14),
+            ("tan", 15),
+            ("asin", 16),
+            ("acos", 17),
+            ("atan", 18),
+            ("sinh", 19),
+            ("cosh", 20),
+            ("tanh", 21),
+            ("asinh", 22),
+            ("acosh", 23),
+            ("atanh", 24),
+            ("sqrt", 31),
+            ("rsqrt", 32),
+            ("exp", 27),
+            ("log", 28),
+            ("log2", 30),
+            ("radians", 11),
+            ("degrees", 12),
+            ("floor", 8),
+            ("ceil", 9),
+            ("round", 1),
+            ("trunc", 3),
+            ("fract", 10),
+        ] {
+            defs.push(per_type_op(ty, op, op, L(GlslExt(glsl))));
+        }
+        defs.push(per_type_op(ty, "atan2", "atan2", L(GlslExt(25))));
+        defs.push(per_type_op(ty, "pow", "pow", L(GlslExt(26))));
+        defs.push(per_type_op(ty, "mod", "mod", L(FMod)));
+        defs.push(per_type_op(ty, "lerp", "lerp", L(GlslExt(46)))); // FMix
+        defs.push(per_type_op(ty, "fma", "fma", L(GlslExt(50))));
+        defs.push(per_type_op(ty, "isnan", "isnan", L(IsNan)));
+        defs.push(per_type_op(ty, "isinf", "isinf", L(IsInf)));
+        defs.push(per_type_op(ty, "ldexp", "ldexp", L(GlslExt(53))));
+    }
+
+    // ---- float_modules: conversions ----
+    for &ty in floats {
+        for &source in signed_ints {
+            defs.push(per_type_conv(ty, source, L(SIToFP)));
+            defs.push(intrinsic_only(
+                leak_str(format!("_w_intrinsic_{}_from_{}", ty, source)),
+                L(SIToFP),
+            ));
+        }
+        for &source in unsigned_ints {
+            defs.push(per_type_conv(ty, source, L(UIToFP)));
+            defs.push(intrinsic_only(
+                leak_str(format!("_w_intrinsic_{}_from_{}", ty, source)),
+                L(UIToFP),
+            ));
+        }
+        for &source in floats {
+            if source != ty {
+                defs.push(per_type_conv(ty, source, L(FPConvert)));
+                defs.push(intrinsic_only(
+                    leak_str(format!("_w_intrinsic_{}_from_{}", ty, source)),
+                    L(FPConvert),
+                ));
+            }
+        }
+        for &target in signed_ints {
+            defs.push(intrinsic_only(
+                leak_str(format!("_w_intrinsic_{}_to_{}", ty, target)),
+                L(FPToSI),
+            ));
+        }
+        for &target in unsigned_ints {
+            defs.push(intrinsic_only(
+                leak_str(format!("_w_intrinsic_{}_to_{}", ty, target)),
+                L(FPToUI),
+            ));
+        }
+        defs.push(intrinsic_only(
+            leak_str(format!("_w_intrinsic_{}_from_bits", ty)),
+            L(Bitcast),
+        ));
+        defs.push(intrinsic_only(
+            leak_str(format!("_w_intrinsic_{}_to_bits", ty)),
+            L(Bitcast),
+        ));
+    }
+
+    defs
+}
