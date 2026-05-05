@@ -544,8 +544,8 @@ impl ModuleManager {
     /// Builtin/intrinsic modules that shouldn't be type-checked
     /// (their implementations use internal _w_intrinsic_* functions).
     /// `vec` is the polymorphic vector-only counterpart to the per-type
-    /// `f32` / `f64` modules; its members live in `IntrinsicSource` and
-    /// `impl_source` rather than a prelude file.
+    /// `f32` / `f64` modules; its members live in the catalog rather
+    /// than a prelude file.
     const BUILTIN_MODULES: &'static [&'static str] = &[
         "f32",
         "f64",

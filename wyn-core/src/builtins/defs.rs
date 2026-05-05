@@ -117,9 +117,11 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
     vec_ternary!("vec.mix", 46),
     vec_ternary!("vec.smoothstep", 49),
     // -----------------------------------------------------------------------
-    // Polymorphic intrinsics — surface name in IntrinsicSource,
-    // `_w_intrinsic_*` in ImplSource. TLC's INTRINSIC_RENAMES translates
-    // user calls to the internal name before backend dispatch.
+    // Polymorphic intrinsics — surface name (e.g. "magnitude") published
+    // for type-check-time resolution; `_w_intrinsic_*` form (e.g.
+    // "_w_intrinsic_magnitude") published for backend lowering. TLC's
+    // INTRINSIC_RENAMES translates user calls to the internal name
+    // before backend dispatch.
     // -----------------------------------------------------------------------
     BuiltinDefRaw {
         surface_name: "magnitude",
@@ -429,8 +431,8 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         }],
     },
     // ---- HOF intrinsics: replicate, reduce, filter, scan, map, map_into,
-    // scatter, hist_1d, rotr32. These have IntrinsicSource schemes but no
-    // ImplSource lowering — they're handled in TLC (SOACs) or specialized
+    // scatter, hist_1d, rotr32. These publish polymorphic schemes but no
+    // backend lowering — they're handled in TLC (SOACs) or specialized
     // earlier in the pipeline. ----
     BuiltinDefRaw {
         surface_name: "_w_intrinsic_replicate",

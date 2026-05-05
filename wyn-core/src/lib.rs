@@ -298,8 +298,6 @@ pub struct FrontEnd {
     pub context: Context<TypeName>,
     /// Maps AST nodes to their inferred type schemes
     pub type_table: TypeTable,
-    /// Polymorphic intrinsic function types
-    pub intrinsics: intrinsics::IntrinsicSource,
     /// Top-level function type schemes (includes prelude and user-defined functions)
     pub schemes: HashMap<String, TypeScheme<TypeName>>,
     /// Per-module function type schemes cache (populated on first use)
@@ -330,14 +328,12 @@ impl FrontEnd {
 
         // Type-related state is populated during type_check()
         let context = Context::default();
-        let intrinsics = intrinsics::IntrinsicSource::new(&mut Context::default());
 
         FrontEnd {
             node_counter,
             module_manager,
             context,
             type_table: HashMap::new(),
-            intrinsics,
             schemes: HashMap::new(),
             module_schemes: HashMap::new(),
         }
@@ -351,14 +347,12 @@ impl FrontEnd {
     ) -> Self {
         let module_manager = module_manager::ModuleManager::from_prelude(prelude);
         let context = Context::default();
-        let intrinsics = intrinsics::IntrinsicSource::new(&mut Context::default());
 
         FrontEnd {
             node_counter,
             module_manager,
             context,
             type_table: HashMap::new(),
-            intrinsics,
             schemes: HashMap::new(),
             module_schemes: HashMap::new(),
         }
@@ -557,6 +551,10 @@ impl AstConstFoldedEarly {
 
         let mut checker =
             type_checker::TypeChecker::with_context_and_schemes(module_manager, context, spec_schemes);
+        checker.set_name_resolution(crate::name_resolution::build_name_resolution(
+            &self.0.ast,
+            crate::builtins::catalog(),
+        ));
         checker.load_builtins()?;
         let type_table = checker.check_program(&self.0.ast)?;
         // Populate schemes with function type schemes from type checking

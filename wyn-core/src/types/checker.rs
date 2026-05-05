@@ -75,7 +75,6 @@ pub struct TypeChecker<'a> {
     context: Context<TypeName>, // Polytype unification context
     record_field_map: HashMap<(String, String), Type>, // Map (type_name, field_name) -> field_type
     impl_source: crate::impl_source::ImplSource, // Implementation source for code generation
-    intrinsics: crate::intrinsics::IntrinsicSource, // Type registry for polymorphic builtins
     module_manager: &'a crate::module_manager::ModuleManager, // Lazy module loading
     type_table: HashMap<crate::ast::NodeId, TypeScheme>, // Maps NodeId to type scheme
     warnings: Vec<TypeWarning>, // Collected warnings
@@ -89,6 +88,10 @@ pub struct TypeChecker<'a> {
     /// Cached module function schemes (key: "module.function", e.g., "rand.init").
     /// Populated during check_module_functions to avoid rebuilding schemes on each lookup.
     module_schemes: HashMap<String, TypeScheme>,
+    /// Side table: maps `Identifier` NodeIds to their builtin classification.
+    /// Built once before type-check by `name_resolution::build_name_resolution`.
+    /// Identifiers absent from this table are resolved via scope/module lookup.
+    name_resolution: crate::name_resolution::NameResolution,
 }
 
 /// Compute free type variables in a Type
@@ -195,8 +198,8 @@ struct ResolvedValue {
     overloads: Option<Vec<TypeScheme>>,
 }
 
-/// Unified scheme lookup result, matching the pattern from IntrinsicLookup.
-/// All scheme providers (scope, intrinsics, modules) feed into this.
+/// Unified scheme lookup result. All scheme providers (scope, catalog,
+/// modules) feed into this.
 enum SchemeLookup {
     Single(TypeScheme),
     Overloaded(Vec<TypeScheme>),
@@ -554,17 +557,36 @@ impl<'a> TypeChecker<'a> {
 
     /// Unified name resolution for identifiers and qualified names.
     ///
-    /// Precedence (enforced consistently across all call sites):
-    /// - Unqualified names: scope > intrinsics (locals shadow builtins)
-    /// - Qualified names: intrinsics > modules (explicit qualification)
+    /// Precedence: locals/top-level shadow builtins (`def length = ...`
+    /// wins over the catalog entry). The pre-typecheck pass that builds
+    /// `name_resolution` already enforces this by skipping shadowed
+    /// names; entries present in the side table are guaranteed to refer
+    /// to a catalog builtin. Identifiers absent from the side table fall
+    /// through to scope/module lookup.
     ///
-    /// Returns `None` if the name is not found (caller should produce error with span).
-    fn resolve_value_name(&mut self, full_name: &str, is_qualified: bool) -> Option<ResolvedValue> {
+    /// `node_id` is the AST id of the Identifier expression being
+    /// resolved; pass `None` for synthetic lookups (e.g. recovered
+    /// qualified names from FieldAccess chains).
+    fn resolve_value_name(
+        &mut self,
+        full_name: &str,
+        is_qualified: bool,
+        node_id: Option<NodeId>,
+    ) -> Option<ResolvedValue> {
+        if let Some(id) = node_id {
+            if let Some(crate::name_resolution::ResolvedValueRef::Builtin(builtin_id)) =
+                self.name_resolution.get(id)
+            {
+                let bid = *builtin_id;
+                let lookup = self.scheme_lookup_for_builtin(bid);
+                let def_name = crate::builtins::catalog().get(bid).raw.surface_name;
+                return Some(self.resolve_scheme_lookup(def_name, lookup));
+            }
+        }
+
         let lookup = if is_qualified {
-            // Qualified: intrinsics > modules (cache, then on-demand)
             self.lookup_intrinsic(full_name).or_else(|| self.lookup_module_scheme(full_name))
         } else {
-            // Unqualified: scope > intrinsics
             self.scope_stack
                 .lookup(full_name)
                 .map(|e| SchemeLookup::Single(e.value.clone()))
@@ -579,13 +601,29 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn lookup_intrinsic(&mut self, name: &str) -> Option<SchemeLookup> {
-        use crate::intrinsics::IntrinsicLookup;
-        self.intrinsics.get(name).map(|lookup| match lookup {
-            IntrinsicLookup::Single(entry) => SchemeLookup::Single(entry.scheme.clone()),
-            IntrinsicLookup::Overloaded(set) => {
-                SchemeLookup::Overloaded(set.entries().iter().map(|e| e.scheme.clone()).collect())
-            }
-        })
+        let def = crate::builtins::catalog().lookup_by_surface_name(name)?;
+        // Per-type ops (`f32.+`, `f32.i32`, etc.) get their schemes from
+        // prelude module signatures, not the catalog. They're recorded
+        // here for ImplSource lowering only — `intrinsic_source_names`
+        // is empty.
+        if def.intrinsic_source_names().is_empty() {
+            return None;
+        }
+        Some(self.scheme_lookup_for_builtin(def.id))
+    }
+
+    /// Build a `SchemeLookup` from a `BuiltinId` by invoking each
+    /// overload's `SchemeBuilder` against the current context.
+    fn scheme_lookup_for_builtin(&mut self, id: crate::builtins::BuiltinId) -> SchemeLookup {
+        let catalog = crate::builtins::catalog();
+        let schemes: Vec<TypeScheme> = (0..catalog.get(id).overloads().len())
+            .map(|i| catalog.build_scheme(id, i, &mut self.context))
+            .collect();
+        if schemes.len() == 1 {
+            SchemeLookup::Single(schemes.into_iter().next().unwrap())
+        } else {
+            SchemeLookup::Overloaded(schemes)
+        }
     }
 
     fn resolve_scheme_lookup(&mut self, name: &str, lookup: SchemeLookup) -> ResolvedValue {
@@ -641,19 +679,17 @@ impl<'a> TypeChecker<'a> {
     /// Create a TypeChecker with both an existing Context and type table.
     fn with_context_and_type_table(
         module_manager: &'a crate::module_manager::ModuleManager,
-        mut context: Context<TypeName>,
+        context: Context<TypeName>,
         type_table: HashMap<NodeId, TypeScheme>,
         spec_schemes: HashMap<String, TypeScheme>,
     ) -> Self {
         let impl_source = crate::impl_source::ImplSource::new();
-        let poly_builtins = crate::intrinsics::IntrinsicSource::new(&mut context);
 
         TypeChecker {
             scope_stack: ScopeStack::new(),
             context,
             record_field_map: HashMap::new(),
             impl_source,
-            intrinsics: poly_builtins,
             module_manager,
             type_table,
             warnings: Vec::new(),
@@ -662,7 +698,15 @@ impl<'a> TypeChecker<'a> {
             skolem_ids: crate::IdSource::new(),
             current_module: None,
             module_schemes: spec_schemes,
+            name_resolution: crate::name_resolution::NameResolution::default(),
         }
+    }
+
+    /// Inject the side table populated by `build_name_resolution`. Must
+    /// be called between construction and `check_program` for any
+    /// program that uses builtin identifiers.
+    pub fn set_name_resolution(&mut self, nr: crate::name_resolution::NameResolution) {
+        self.name_resolution = nr;
     }
 
     /// Get all warnings collected during type checking
@@ -1301,10 +1345,9 @@ impl<'a> TypeChecker<'a> {
             self.define_builtin(name, math_unary.clone());
         }
         // sin/cos/tan/asin/acos/atan/sqrt/exp/log/radians/degrees and the
-        // binary `pow`/`atan2`/`mod` no longer have top-level bindings —
-        // bare names only resolve via `open f32` (scalar) or `open vec`
-        // (vector). The schemes for `f32.cos`/`vec.cos`/etc. come from
-        // prelude module sigs and `IntrinsicSource::register_vec_module_ops`.
+        // binary `pow`/`atan2`/`mod` resolve via `open f32` (scalar) or
+        // `open vec` (vector). The schemes for `f32.cos`/`vec.cos`/etc.
+        // come from prelude module sigs and the catalog's vec.* entries.
 
         // Register vector field mappings
         self.register_vector_fields();
@@ -1564,24 +1607,6 @@ impl<'a> TypeChecker<'a> {
         self.module_schemes.get(qualified_name)
     }
 
-    /// Consume the type checker and return all parts needed by FrontEnd.
-    /// Returns (context, type_table, intrinsics, schemes).
-    pub fn into_parts(
-        self,
-    ) -> (
-        Context<TypeName>,
-        std::collections::HashMap<crate::ast::NodeId, TypeScheme>,
-        crate::intrinsics::IntrinsicSource,
-        std::collections::HashMap<String, TypeScheme>,
-    ) {
-        // Extract schemes from scope_stack before consuming self
-        let mut schemes = std::collections::HashMap::new();
-        self.scope_stack.for_each_binding(|name, entry| {
-            schemes.insert(name.to_string(), entry.value.clone());
-        });
-        (self.context, self.type_table, self.intrinsics, schemes)
-    }
-
     fn check_declaration(&mut self, decl: &Declaration) -> Result<()> {
         match decl {
             Declaration::Decl(decl_node) => {
@@ -1824,7 +1849,7 @@ impl<'a> TypeChecker<'a> {
 
                 debug!("Looking up identifier '{}'", full_name);
 
-                if let Some(resolved) = self.resolve_value_name(&full_name, is_qualified) {
+                if let Some(resolved) = self.resolve_value_name(&full_name, is_qualified, Some(expr.h.id)) {
                     // Store instantiated type with substitutions applied
                     let applied = resolved.instantiated.apply(&self.context);
                     self.type_table
@@ -2245,7 +2270,7 @@ impl<'a> TypeChecker<'a> {
                 if let Some(qual_name) = Self::try_extract_qual_name(inner_expr, field) {
                     let dotted = qual_name.to_dotted();
 
-                    if let Some(resolved) = self.resolve_value_name(&dotted, true) {
+                    if let Some(resolved) = self.resolve_value_name(&dotted, true, None) {
                         self.type_table.insert(expr.h.id, resolved.scheme_for_table);
                         return Ok(resolved.instantiated);
                     }
@@ -2659,7 +2684,7 @@ impl<'a> TypeChecker<'a> {
                     if quals.is_empty() { name.clone() } else { format!("{}.{}", quals.join("."), name) };
                 let is_qualified = !quals.is_empty();
 
-                if let Some(resolved) = self.resolve_value_name(&full_name, is_qualified) {
+                if let Some(resolved) = self.resolve_value_name(&full_name, is_qualified, Some(func.h.id)) {
                     // For overloaded intrinsics, expand into multiple candidates
                     let candidates = if let Some(overloads) = resolved.overloads {
                         overloads

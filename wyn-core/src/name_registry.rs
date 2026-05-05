@@ -16,9 +16,9 @@ pub enum NameKind {
     SoacBuiltin,
     /// Math builtins: sin, cos, tan, sqrt, abs, floor, ceil, fract, exp, log
     MathBuiltin,
-    /// Type-specific operations from ImplSource: f32.add, i32.mul, u32.&
+    /// Type-specific operations: f32.add, i32.mul, u32.&
     ImplOp,
-    /// Polymorphic intrinsics from IntrinsicSource: _w_intrinsic_map, abs, sign
+    /// Polymorphic intrinsics: _w_intrinsic_map, abs, sign
     PolymorphicIntrinsic,
     /// Module-qualified items: f32.sin, f32.pi, trig.sinpi
     ModuleItem,
@@ -50,15 +50,17 @@ impl NameRegistry {
     ) -> Self {
         let mut names = BTreeMap::new();
 
-        // 1. ImplSource ops (f32.add, i32.mul, etc.)
-        for name in crate::impl_source::ImplSource::default().all_names() {
-            names.insert(name, NameKind::ImplOp);
-        }
-
-        // 2. IntrinsicSource polymorphic intrinsics
-        let mut ctx = polytype::Context::<ast::TypeName>::default();
-        for name in crate::intrinsics::IntrinsicSource::new(&mut ctx).all_names() {
-            names.insert(name, NameKind::PolymorphicIntrinsic);
+        // 1+2. All catalog entries: per-source-name, classify into
+        // ImplOp (entries with `impl_source_names`) and
+        // PolymorphicIntrinsic (entries with `intrinsic_source_names`).
+        let catalog = crate::builtins::catalog();
+        for def in catalog.defs() {
+            for &name in def.impl_source_names() {
+                names.insert(name.to_string(), NameKind::ImplOp);
+            }
+            for &name in def.intrinsic_source_names() {
+                names.insert(name.to_string(), NameKind::PolymorphicIntrinsic);
+            }
         }
 
         // 3. Type-checker builtins (map, reduce, sin, cos, etc.)

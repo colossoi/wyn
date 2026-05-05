@@ -5,9 +5,9 @@ use std::collections::HashMap;
 pub enum IdentifierKind {
     /// Type-checker builtins: map, reduce, scan, filter, scatter, zip, length, dot, sin, cos, ...
     Builtin,
-    /// Type-specific operations from ImplSource: f32.add, i32.mul, u32.&
+    /// Type-specific operations: f32.add, i32.mul, u32.&
     ImplOp,
-    /// Polymorphic intrinsics from IntrinsicSource: _w_intrinsic_map, abs, sign
+    /// Polymorphic intrinsics: _w_intrinsic_map, abs, sign
     PolymorphicIntrinsic,
     /// Module-qualified items: f32.sin, f32.pi, trig.sinpi
     ModuleItem,

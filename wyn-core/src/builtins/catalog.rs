@@ -46,18 +46,19 @@ pub struct BuiltinOverload {
     pub lowering: BuiltinLowering,
 }
 
-/// The static, declarative description of one builtin. Entries live in
-/// `defs::ALL_BUILTINS` as a `&'static [BuiltinDefRaw]`; the catalog
-/// wraps each with its assigned `BuiltinId`.
+/// The static, declarative description of one builtin. Entries are
+/// produced by `defs::all_builtins()`; the catalog wraps each with its
+/// assigned `BuiltinId`.
 ///
 /// Names: `surface_name` is the canonical user-facing label (shown in
 /// errors, used by namespace_hint). `intrinsic_source_names` is the set
-/// of keys this entry is registered under in `IntrinsicSource` — often
-/// just `[surface_name]`, but polymorphic intrinsics like `magnitude`
-/// are registered under their user-facing name only. `impl_source_names`
-/// is the set of keys in `ImplSource` — for `magnitude` that's
-/// `["_w_intrinsic_magnitude"]`; for per-type ops like `f32.+` it's
-/// both the surface form and `_w_intrinsic_+_f32`.
+/// of keys this entry publishes a polymorphic scheme under (consumed by
+/// the type checker's name resolution). `impl_source_names` is the set
+/// of keys this entry publishes a backend lowering under (consumed by
+/// the backends). Per-type ops like `f32.+` have empty
+/// `intrinsic_source_names` (their schemes come from prelude module
+/// signatures) and two entries in `impl_source_names`: `f32.+` and
+/// `_w_intrinsic_+_f32`.
 #[derive(Debug, Clone)]
 pub struct BuiltinDefRaw {
     pub surface_name: &'static str,
@@ -143,5 +144,18 @@ impl BuiltinCatalog {
 
     pub fn get(&self, id: BuiltinId) -> &BuiltinDef {
         &self.defs[id.as_index()]
+    }
+
+    /// Invoke an overload's `SchemeBuilder` to produce a fresh
+    /// quantified `TypeScheme` against the supplied generator.
+    pub fn build_scheme(
+        &self,
+        id: BuiltinId,
+        overload_idx: usize,
+        ctx: &mut dyn crate::type_checker::TypeVarGenerator,
+    ) -> crate::ast::TypeScheme {
+        let def = self.get(id);
+        let ovld = &def.raw.overloads[overload_idx];
+        (ovld.scheme)(ctx)
     }
 }

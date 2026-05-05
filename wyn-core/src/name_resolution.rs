@@ -281,11 +281,11 @@ fn resolve_declaration(decl: &mut Declaration, module_manager: &ModuleManager) -
 
 #[derive(Debug, Clone)]
 pub enum ResolvedValueRef {
-    /// Single catalog entry matching this identifier's surface name.
+    /// Catalog entry matching this identifier's surface name. The
+    /// entry's `overloads` slice may contain one or many overloads;
+    /// overload selection happens later (Phase 3) once arg types are
+    /// known.
     Builtin(BuiltinId),
-    /// Multiple catalog entries with the same surface name. Overload
-    /// resolution happens later (Phase 3) once arg types are known.
-    OverloadedBuiltin(Vec<BuiltinId>),
 }
 
 /// Side table populated by `build_name_resolution`. Maps Identifier
@@ -367,19 +367,14 @@ fn walk_resolution(
             }
             let full_name =
                 if quals.is_empty() { name.clone() } else { format!("{}.{}", quals.join("."), name) };
-            // Catalog lookup may return one or multiple entries with the
-            // same surface name (overloads). Currently lookup_by_surface_name
-            // returns just the first; for overload-aware classification
-            // we walk all defs.
-            let matches: Vec<BuiltinId> =
-                catalog.defs().iter().filter(|d| d.raw.surface_name == full_name).map(|d| d.id).collect();
-            match matches.len() {
-                0 => {}
-                1 => {
-                    nr.values.insert(expr.h.id, ResolvedValueRef::Builtin(matches[0]));
-                }
-                _ => {
-                    nr.values.insert(expr.h.id, ResolvedValueRef::OverloadedBuiltin(matches));
+            if let Some(def) = catalog.lookup_by_surface_name(&full_name) {
+                // Only classify entries that publish a scheme. Per-type
+                // ops (`f32.+`, `f32.i32`, …) have empty
+                // `intrinsic_source_names` because their schemes come
+                // from prelude module signatures; the type checker
+                // resolves them via module lookup.
+                if !def.intrinsic_source_names().is_empty() {
+                    nr.values.insert(expr.h.id, ResolvedValueRef::Builtin(def.id));
                 }
             }
         }
