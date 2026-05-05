@@ -260,11 +260,28 @@ impl IntrinsicSource {
 
         registry.register_scalar_math_functions(ctx);
         registry.register_vector_operations(ctx);
-        registry.register_vec_module_ops(ctx);
+        registry.populate_from_catalog_module_builtins(crate::builtins::catalog(), ctx);
         registry.register_matrix_operations(ctx);
         registry.register_higher_order_functions(ctx);
 
         registry
+    }
+
+    /// Register schemes for every `ModuleBuiltin` entry in the catalog
+    /// under its surface name. Each overload's `SchemeBuilder` is
+    /// invoked to produce a fresh `TypeScheme` from the supplied
+    /// context.
+    fn populate_from_catalog_module_builtins(
+        &mut self,
+        catalog: &crate::builtins::BuiltinCatalog,
+        ctx: &mut impl TypeVarGenerator,
+    ) {
+        for def in catalog.iter_by_kind(crate::builtins::BuiltinKind::ModuleBuiltin) {
+            for ovld in def.overloads() {
+                let scheme = (ovld.scheme)(ctx);
+                self.add_overload(def.surface_name().to_string(), IntrinsicEntry { scheme });
+            }
+        }
     }
 
     /// Add an overload for a intrinsic.
@@ -429,88 +446,6 @@ impl IntrinsicSource {
         let a = ctx.new_variable();
         let vec_n_a = Type::Constructed(TypeName::Vec, vec![a.clone(), n]);
         self.register_poly("smoothstep", vec![a.clone(), a, vec_n_a.clone()], vec_n_a);
-    }
-
-    /// Register `vec.*` module ops — vector-only counterparts to the
-    /// per-type scalar `f32.*` / `f64.*` ops. Each is typed `∀n a. vec<n,a> -> ...`,
-    /// so passing a scalar fails type-checking. Codegen routes through
-    /// the same GLSL.std.450 / WGSL builtins as the scalar form (the
-    /// SPIR-V op handles both shapes natively).
-    fn register_vec_module_ops(&mut self, ctx: &mut impl TypeVarGenerator) {
-        // Unary: vec.f : ∀n a. vec<n,a> -> vec<n,a>
-        for name in [
-            "vec.sin",
-            "vec.cos",
-            "vec.tan",
-            "vec.asin",
-            "vec.acos",
-            "vec.atan",
-            "vec.sinh",
-            "vec.cosh",
-            "vec.tanh",
-            "vec.asinh",
-            "vec.acosh",
-            "vec.atanh",
-            "vec.sqrt",
-            "vec.rsqrt",
-            "vec.exp",
-            "vec.exp2",
-            "vec.log",
-            "vec.log2",
-            "vec.floor",
-            "vec.ceil",
-            "vec.round",
-            "vec.trunc",
-            "vec.fract",
-            "vec.abs",
-            "vec.sign",
-            "vec.radians",
-            "vec.degrees",
-        ] {
-            let n = ctx.new_variable();
-            let a = ctx.new_variable();
-            let vec_n_a = Type::Constructed(TypeName::Vec, vec![a, n]);
-            self.register_poly(name, vec![vec_n_a.clone()], vec_n_a);
-        }
-
-        // Binary: vec.f : ∀n a. vec<n,a> -> vec<n,a> -> vec<n,a>
-        for name in ["vec.pow", "vec.atan2", "vec.mod", "vec.min", "vec.max"] {
-            let n = ctx.new_variable();
-            let a = ctx.new_variable();
-            let vec_n_a = Type::Constructed(TypeName::Vec, vec![a, n]);
-            self.register_poly(name, vec![vec_n_a.clone(), vec_n_a.clone()], vec_n_a);
-        }
-
-        // Ternary: vec.clamp : ∀n a. vec<n,a> -> vec<n,a> -> vec<n,a> -> vec<n,a>
-        // (vector x, vector lo, vector hi)
-        let n = ctx.new_variable();
-        let a = ctx.new_variable();
-        let vec_n_a = Type::Constructed(TypeName::Vec, vec![a, n]);
-        self.register_poly(
-            "vec.clamp",
-            vec![vec_n_a.clone(), vec_n_a.clone(), vec_n_a.clone()],
-            vec_n_a,
-        );
-
-        // vec.mix : ∀n a. vec<n,a> -> vec<n,a> -> vec<n,a> -> vec<n,a>
-        let n = ctx.new_variable();
-        let a = ctx.new_variable();
-        let vec_n_a = Type::Constructed(TypeName::Vec, vec![a, n]);
-        self.register_poly(
-            "vec.mix",
-            vec![vec_n_a.clone(), vec_n_a.clone(), vec_n_a.clone()],
-            vec_n_a,
-        );
-
-        // vec.smoothstep : ∀n a. vec<n,a> -> vec<n,a> -> vec<n,a> -> vec<n,a>
-        let n = ctx.new_variable();
-        let a = ctx.new_variable();
-        let vec_n_a = Type::Constructed(TypeName::Vec, vec![a, n]);
-        self.register_poly(
-            "vec.smoothstep",
-            vec![vec_n_a.clone(), vec_n_a.clone(), vec_n_a.clone()],
-            vec_n_a,
-        );
     }
 
     /// Register matrix operations
