@@ -40,9 +40,6 @@ pub enum StaticVal {
         lifted_name: SymbolId,
         captures: Vec<Term>,
     },
-
-    /// Tuple/record of static values (for destructuring)
-    Record(Vec<StaticVal>),
 }
 
 // =============================================================================
