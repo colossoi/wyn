@@ -762,7 +762,13 @@ impl<'a> Defunctionalizer<'a> {
         match &base_func.kind {
             TermKind::BinOp(_) | TermKind::UnOp(_) => {
                 // Operators are preserved as-is - just rebuild the application
-                let result_term = self.build_app_with_term(base_func, arg_terms, ty.clone(), span);
+                let result_term = super::closure_convert::build_app_with_term(
+                    base_func,
+                    arg_terms,
+                    ty.clone(),
+                    span,
+                    &mut self.term_ids,
+                );
                 DefuncResult {
                     term: result_term,
                     sv: StaticVal::Dynamic,
@@ -839,30 +845,6 @@ impl<'a> Defunctionalizer<'a> {
         }
     }
 
-    /// Build App(term, [a1, a2, a3, ...]).
-    fn build_app_with_term(
-        &mut self,
-        func_term: Term,
-        args: Vec<Term>,
-        result_ty: Type<TypeName>,
-        span: Span,
-    ) -> Term {
-        if args.is_empty() {
-            return func_term;
-        }
-
-        // Build a single flat App node
-        Term {
-            id: self.term_ids.next_id(),
-            ty: result_ty,
-            span,
-            kind: TermKind::App {
-                func: Box::new(func_term),
-                args,
-            },
-        }
-    }
-
     /// Unified function call handler.
     ///
     /// If callee_sv is Lambda with captures: emit call to lifted_name with args + capture_terms
@@ -882,59 +864,25 @@ impl<'a> Defunctionalizer<'a> {
             } if !captures.is_empty() => {
                 // Function has captures - call lifted_name with args + captures
                 let mut all_args = args;
-                // Captures are already Terms - just clone them
                 all_args.extend(captures.iter().cloned());
-                self.build_app_call(*lifted_name, all_args, result_ty, span)
+                super::closure_convert::build_app_call(
+                    *lifted_name,
+                    all_args,
+                    result_ty,
+                    span,
+                    &mut self.term_ids,
+                )
             }
             _ => {
                 // No captures - call callee_term directly with args
-                self.build_app_with_term(callee_term, args, result_ty, span)
+                super::closure_convert::build_app_with_term(
+                    callee_term,
+                    args,
+                    result_ty,
+                    span,
+                    &mut self.term_ids,
+                )
             }
-        }
-    }
-
-    /// Build App(Var(sym), [a1, a2, a3, ...]).
-    ///
-    /// The constructed `func` sub-term carries a real curried-arrow type
-    /// (`a1_ty -> a2_ty -> ... -> result_ty`). Earlier this used a
-    /// `TypeName::Ignored` sentinel under the assumption "intermediate
-    /// values' types don't matter," but downstream passes — most
-    /// notably SPIR-V lowering — *do* inspect the type and panicked on
-    /// the sentinel.
-    fn build_app_call(
-        &mut self,
-        func_sym: SymbolId,
-        args: Vec<Term>,
-        result_ty: Type<TypeName>,
-        span: Span,
-    ) -> Term {
-        let mut fn_ty = result_ty.clone();
-        for arg in args.iter().rev() {
-            fn_ty = Type::arrow(arg.ty.clone(), fn_ty);
-        }
-        let func_term = Term {
-            id: self.term_ids.next_id(),
-            ty: fn_ty,
-            span,
-            kind: TermKind::Var(func_sym),
-        };
-
-        if args.is_empty() {
-            return Term {
-                ty: result_ty,
-                ..func_term
-            };
-        }
-
-        // Build a single flat App node
-        Term {
-            id: self.term_ids.next_id(),
-            ty: result_ty,
-            span,
-            kind: TermKind::App {
-                func: Box::new(func_term),
-                args,
-            },
         }
     }
 
@@ -1003,14 +951,20 @@ impl<'a> Defunctionalizer<'a> {
             arg_results.iter().map(|ar| format_type_for_key(&ar.term.ty)).collect();
         let cache_key = (hof_sym, lambda_sym, arg_type_keys);
         if let Some(specialized_sym) = self.specialization_cache.get(&cache_key).cloned() {
-            return self.build_specialized_call(
+            let arg_terms: Vec<Term> = arg_results.iter().map(|ar| ar.term.clone()).collect();
+            let call_term = super::hof_specialize::build_specialized_call(
                 specialized_sym,
                 func_param_idx,
-                arg_results,
+                &arg_terms,
                 captures,
                 ty,
                 span,
+                &mut self.term_ids,
             );
+            return DefuncResult {
+                term: call_term,
+                sv: StaticVal::Dynamic,
+            };
         }
 
         // Build type substitution from polymorphic params to concrete types
@@ -1032,7 +986,7 @@ impl<'a> Defunctionalizer<'a> {
         self.specialization_cache.insert(cache_key, specialized_sym);
 
         // Get the function parameter symbol from the HOF definition
-        let func_param_sym = self.get_func_param_sym(hof_def, func_param_idx);
+        let func_param_sym = super::hof_specialize::get_func_param_sym(hof_def, func_param_idx);
 
         // Extract params FIRST, then substitute in the inner body
         // (Substitution must happen AFTER unwrapping lambdas because the func param
@@ -1041,7 +995,12 @@ impl<'a> Defunctionalizer<'a> {
         let (params, inner_body) = self.extract_lambda_params(hof_def.body.clone());
 
         // Simple substitution in inner body: replace func_param_sym with lambda_sym
-        let substituted_inner = self.substitute_var(&inner_body, func_param_sym, lambda_sym);
+        let substituted_inner = super::hof_specialize::substitute_var(
+            &inner_body,
+            func_param_sym,
+            lambda_sym,
+            &mut self.term_ids,
+        );
 
         // Build new param list: remove function param at func_param_idx, add captures at end.
         //
@@ -1096,7 +1055,12 @@ impl<'a> Defunctionalizer<'a> {
         // binder-aware (Lambda / Let / Loop), so any inner shadowing
         // is respected.
         for (outer_sym, fresh_sym) in &capture_subst {
-            defunced_body = self.substitute_var(&defunced_body, *outer_sym, *fresh_sym);
+            defunced_body = super::hof_specialize::substitute_var(
+                &defunced_body,
+                *outer_sym,
+                *fresh_sym,
+                &mut self.term_ids,
+            );
         }
 
         // Restore env
@@ -1131,368 +1095,16 @@ impl<'a> Defunctionalizer<'a> {
         self.lifted_defs.push(specialized_def);
 
         // Build call to specialized function
-        self.build_specialized_call(specialized_sym, func_param_idx, arg_results, captures, ty, span)
-    }
-
-    /// Simple variable substitution: replace all occurrences of old_sym with new_sym.
-    fn substitute_var(&mut self, term: &Term, old_sym: SymbolId, new_sym: SymbolId) -> Term {
-        match &term.kind {
-            TermKind::Var(sym) if *sym == old_sym => Term {
-                id: self.term_ids.next_id(),
-                ty: term.ty.clone(),
-                span: term.span,
-                kind: TermKind::Var(new_sym),
-            },
-
-            TermKind::Var(_)
-            | TermKind::IntLit(_)
-            | TermKind::FloatLit(_)
-            | TermKind::BoolLit(_)
-            | TermKind::BinOp(_)
-            | TermKind::UnOp(_)
-            | TermKind::Extern(_) => term.clone(),
-
-            TermKind::App { func, args } => Term {
-                id: self.term_ids.next_id(),
-                ty: term.ty.clone(),
-                span: term.span,
-                kind: TermKind::App {
-                    func: Box::new(self.substitute_var(func, old_sym, new_sym)),
-                    args: args.iter().map(|a| self.substitute_var(a, old_sym, new_sym)).collect(),
-                },
-            },
-
-            TermKind::Lambda(Lambda {
-                params,
-                body,
-                ret_ty,
-                captures,
-            }) => {
-                // Don't substitute if any param shadows old_sym
-                if params.iter().any(|(p, _)| *p == old_sym) {
-                    term.clone()
-                } else {
-                    Term {
-                        id: self.term_ids.next_id(),
-                        ty: term.ty.clone(),
-                        span: term.span,
-                        kind: TermKind::Lambda(Lambda {
-                            params: params.clone(),
-                            body: Box::new(self.substitute_var(body, old_sym, new_sym)),
-                            ret_ty: ret_ty.clone(),
-                            captures: captures.clone(),
-                        }),
-                    }
-                }
-            }
-
-            TermKind::Let {
-                name,
-                name_ty,
-                rhs,
-                body,
-            } => {
-                let new_rhs = self.substitute_var(rhs, old_sym, new_sym);
-                // Don't substitute in body if name shadows old_sym
-                let new_body = if *name == old_sym {
-                    (**body).clone()
-                } else {
-                    self.substitute_var(body, old_sym, new_sym)
-                };
-                Term {
-                    id: self.term_ids.next_id(),
-                    ty: term.ty.clone(),
-                    span: term.span,
-                    kind: TermKind::Let {
-                        name: *name,
-                        name_ty: name_ty.clone(),
-                        rhs: Box::new(new_rhs),
-                        body: Box::new(new_body),
-                    },
-                }
-            }
-
-            TermKind::If {
-                cond,
-                then_branch,
-                else_branch,
-            } => Term {
-                id: self.term_ids.next_id(),
-                ty: term.ty.clone(),
-                span: term.span,
-                kind: TermKind::If {
-                    cond: Box::new(self.substitute_var(cond, old_sym, new_sym)),
-                    then_branch: Box::new(self.substitute_var(then_branch, old_sym, new_sym)),
-                    else_branch: Box::new(self.substitute_var(else_branch, old_sym, new_sym)),
-                },
-            },
-
-            TermKind::Loop {
-                loop_var,
-                loop_var_ty,
-                init,
-                init_bindings,
-                kind,
-                body,
-            } => {
-                // Check shadowing FIRST - loop_var and init_bindings are in scope for
-                // init_bindings exprs, While cond, and body
-                let shadows = *loop_var == old_sym || init_bindings.iter().any(|(n, _, _)| *n == old_sym);
-
-                // init is evaluated outside the loop scope
-                let new_init = self.substitute_var(init, old_sym, new_sym);
-
-                // init_bindings exprs reference loop_var (inside loop scope)
-                let new_init_bindings: Vec<_> = init_bindings
-                    .iter()
-                    .map(|(n, ty, e)| {
-                        let new_e =
-                            if shadows { e.clone() } else { self.substitute_var(e, old_sym, new_sym) };
-                        (*n, ty.clone(), new_e)
-                    })
-                    .collect();
-
-                // iter/bound are outside loop scope, cond is inside
-                let new_kind = match kind {
-                    LoopKind::For { var, var_ty, iter } => LoopKind::For {
-                        var: *var,
-                        var_ty: var_ty.clone(),
-                        iter: Box::new(self.substitute_var(iter, old_sym, new_sym)),
-                    },
-                    LoopKind::ForRange { var, var_ty, bound } => LoopKind::ForRange {
-                        var: *var,
-                        var_ty: var_ty.clone(),
-                        bound: Box::new(self.substitute_var(bound, old_sym, new_sym)),
-                    },
-                    LoopKind::While { cond } => {
-                        let new_cond = if shadows {
-                            (**cond).clone()
-                        } else {
-                            self.substitute_var(cond, old_sym, new_sym)
-                        };
-                        LoopKind::While {
-                            cond: Box::new(new_cond),
-                        }
-                    }
-                };
-
-                let new_body =
-                    if shadows { (**body).clone() } else { self.substitute_var(body, old_sym, new_sym) };
-
-                Term {
-                    id: self.term_ids.next_id(),
-                    ty: term.ty.clone(),
-                    span: term.span,
-                    kind: TermKind::Loop {
-                        loop_var: *loop_var,
-                        loop_var_ty: loop_var_ty.clone(),
-                        init: Box::new(new_init),
-                        init_bindings: new_init_bindings,
-                        kind: new_kind,
-                        body: Box::new(new_body),
-                    },
-                }
-            }
-
-            TermKind::Soac(ref soac) => {
-                let new_soac = self.substitute_var_soac(soac, old_sym, new_sym);
-                Term {
-                    id: self.term_ids.next_id(),
-                    ty: term.ty.clone(),
-                    span: term.span,
-                    kind: TermKind::Soac(new_soac),
-                }
-            }
-
-            TermKind::ArrayExpr(ref ae) => {
-                let new_ae = self.substitute_var_array_expr(ae, old_sym, new_sym);
-                Term {
-                    id: self.term_ids.next_id(),
-                    ty: term.ty.clone(),
-                    span: term.span,
-                    kind: TermKind::ArrayExpr(new_ae),
-                }
-            }
-
-            TermKind::Force(ref inner) => Term {
-                id: self.term_ids.next_id(),
-                ty: term.ty.clone(),
-                span: term.span,
-                kind: TermKind::Force(Box::new(self.substitute_var(inner, old_sym, new_sym))),
-            },
-        }
-    }
-
-    fn substitute_var_lambda(&mut self, lam: &Lambda, old_sym: SymbolId, new_sym: SymbolId) -> Lambda {
-        if lam.params.iter().any(|(p, _)| *p == old_sym) {
-            lam.clone()
-        } else {
-            Lambda {
-                params: lam.params.clone(),
-                body: Box::new(self.substitute_var(&lam.body, old_sym, new_sym)),
-                ret_ty: lam.ret_ty.clone(),
-                captures: lam
-                    .captures
-                    .iter()
-                    .map(|(s, ty, t)| (*s, ty.clone(), self.substitute_var(t, old_sym, new_sym)))
-                    .collect(),
-            }
-        }
-    }
-
-    fn substitute_var_soac(&mut self, soac: &SoacOp, old_sym: SymbolId, new_sym: SymbolId) -> SoacOp {
-        match soac {
-            SoacOp::Map {
-                lam,
-                inputs,
-                consumes_input,
-            } => SoacOp::Map {
-                lam: self.substitute_var_lambda(lam, old_sym, new_sym),
-                inputs: inputs
-                    .iter()
-                    .map(|ae| self.substitute_var_array_expr(ae, old_sym, new_sym))
-                    .collect(),
-                consumes_input: *consumes_input,
-            },
-            SoacOp::Reduce { op, ne, input, props } => SoacOp::Reduce {
-                op: self.substitute_var_lambda(op, old_sym, new_sym),
-                ne: Box::new(self.substitute_var(ne, old_sym, new_sym)),
-                input: self.substitute_var_array_expr(input, old_sym, new_sym),
-                props: props.clone(),
-            },
-            SoacOp::Scan { op, ne, input } => SoacOp::Scan {
-                op: self.substitute_var_lambda(op, old_sym, new_sym),
-                ne: Box::new(self.substitute_var(ne, old_sym, new_sym)),
-                input: self.substitute_var_array_expr(input, old_sym, new_sym),
-            },
-            SoacOp::Filter { pred, input } => SoacOp::Filter {
-                pred: self.substitute_var_lambda(pred, old_sym, new_sym),
-                input: self.substitute_var_array_expr(input, old_sym, new_sym),
-            },
-            SoacOp::Scatter {
-                dest,
-                indices,
-                values,
-            } => SoacOp::Scatter {
-                dest: dest.clone(),
-                indices: self.substitute_var_array_expr(indices, old_sym, new_sym),
-                values: self.substitute_var_array_expr(values, old_sym, new_sym),
-            },
-            SoacOp::ReduceByIndex {
-                dest,
-                op,
-                ne,
-                indices,
-                values,
-                props,
-            } => SoacOp::ReduceByIndex {
-                dest: dest.clone(),
-                op: self.substitute_var_lambda(op, old_sym, new_sym),
-                ne: Box::new(self.substitute_var(ne, old_sym, new_sym)),
-                indices: self.substitute_var_array_expr(indices, old_sym, new_sym),
-                values: self.substitute_var_array_expr(values, old_sym, new_sym),
-                props: props.clone(),
-            },
-            SoacOp::Redomap {
-                op,
-                reduce_op,
-                ne,
-                inputs,
-                props,
-            } => SoacOp::Redomap {
-                op: self.substitute_var_lambda(op, old_sym, new_sym),
-                reduce_op: self.substitute_var_lambda(reduce_op, old_sym, new_sym),
-                ne: Box::new(self.substitute_var(ne, old_sym, new_sym)),
-                inputs: inputs
-                    .iter()
-                    .map(|ae| self.substitute_var_array_expr(ae, old_sym, new_sym))
-                    .collect(),
-                props: props.clone(),
-            },
-        }
-    }
-
-    fn substitute_var_array_expr(
-        &mut self,
-        ae: &ArrayExpr,
-        old_sym: SymbolId,
-        new_sym: SymbolId,
-    ) -> ArrayExpr {
-        match ae {
-            ArrayExpr::Ref(t) => ArrayExpr::Ref(Box::new(self.substitute_var(t, old_sym, new_sym))),
-            ArrayExpr::Zip(exprs) => ArrayExpr::Zip(
-                exprs.iter().map(|e| self.substitute_var_array_expr(e, old_sym, new_sym)).collect(),
-            ),
-            ArrayExpr::Soac(op) => {
-                ArrayExpr::Soac(Box::new(self.substitute_var_soac(op, old_sym, new_sym)))
-            }
-            ArrayExpr::Generate {
-                shape,
-                index_fn,
-                elem_ty,
-            } => ArrayExpr::Generate {
-                shape: shape.clone(),
-                index_fn: self.substitute_var_lambda(index_fn, old_sym, new_sym),
-                elem_ty: elem_ty.clone(),
-            },
-            ArrayExpr::Literal(terms) => {
-                ArrayExpr::Literal(terms.iter().map(|t| self.substitute_var(t, old_sym, new_sym)).collect())
-            }
-            ArrayExpr::Range { start, len } => ArrayExpr::Range {
-                start: Box::new(self.substitute_var(start, old_sym, new_sym)),
-                len: Box::new(self.substitute_var(len, old_sym, new_sym)),
-            },
-            ArrayExpr::StorageBuffer { .. } => {
-                unreachable!("StorageBuffer introduced after defunctionalization")
-            }
-        }
-    }
-
-    /// Get the parameter symbol at a given index from a function definition.
-    fn get_func_param_sym(&self, def: &Def, param_idx: usize) -> SymbolId {
-        let mut body = &def.body;
-        let mut idx = 0;
-        while let TermKind::Lambda(Lambda {
-            params, body: inner, ..
-        }) = &body.kind
-        {
-            for (param, _) in params {
-                if idx == param_idx {
-                    return *param;
-                }
-                idx += 1;
-            }
-            body = inner;
-        }
-        panic!(
-            "BUG: param index {} out of bounds for function definition",
-            param_idx
-        )
-    }
-
-    /// Build a call to a specialized HOF.
-    fn build_specialized_call(
-        &mut self,
-        specialized_sym: SymbolId,
-        func_param_idx: usize,
-        arg_results: &[DefuncResult],
-        captures: &[Term],
-        ty: Type<TypeName>,
-        span: Span,
-    ) -> DefuncResult {
-        let mut call_args = Vec::new();
-
-        // Add non-function arguments
-        for (i, ar) in arg_results.iter().enumerate() {
-            if i != func_param_idx {
-                call_args.push(ar.term.clone());
-            }
-        }
-
-        // Add captures at the end (they're already Terms)
-        call_args.extend(captures.iter().cloned());
-
-        let call_term = self.build_app_call(specialized_sym, call_args, ty, span);
+        let arg_terms: Vec<Term> = arg_results.iter().map(|ar| ar.term.clone()).collect();
+        let call_term = super::hof_specialize::build_specialized_call(
+            specialized_sym,
+            func_param_idx,
+            &arg_terms,
+            captures,
+            ty,
+            span,
+            &mut self.term_ids,
+        );
         DefuncResult {
             term: call_term,
             sv: StaticVal::Dynamic,

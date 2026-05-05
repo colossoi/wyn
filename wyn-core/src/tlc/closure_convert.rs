@@ -56,6 +56,68 @@ pub fn rebuild_nested_lam(
     }
 }
 
+/// Build `App(Var(func_sym), args)` with a fresh ID and a curried-arrow
+/// function-position type. Returns just the Var-with-arrow-type if
+/// `args` is empty.
+pub fn build_app_call(
+    func_sym: SymbolId,
+    args: Vec<Term>,
+    result_ty: Type<TypeName>,
+    span: Span,
+    term_ids: &mut TermIdSource,
+) -> Term {
+    let mut fn_ty = result_ty.clone();
+    for arg in args.iter().rev() {
+        fn_ty = Type::Constructed(TypeName::Arrow, vec![arg.ty.clone(), fn_ty]);
+    }
+    let func_term = Term {
+        id: term_ids.next_id(),
+        ty: fn_ty,
+        span,
+        kind: TermKind::Var(func_sym),
+    };
+
+    if args.is_empty() {
+        return Term {
+            ty: result_ty,
+            ..func_term
+        };
+    }
+
+    Term {
+        id: term_ids.next_id(),
+        ty: result_ty,
+        span,
+        kind: TermKind::App {
+            func: Box::new(func_term),
+            args,
+        },
+    }
+}
+
+/// Build `App(func_term, args)` with a fresh ID. Returns `func_term`
+/// unchanged if `args` is empty.
+pub fn build_app_with_term(
+    func_term: Term,
+    args: Vec<Term>,
+    result_ty: Type<TypeName>,
+    span: Span,
+    term_ids: &mut TermIdSource,
+) -> Term {
+    if args.is_empty() {
+        return func_term;
+    }
+    Term {
+        id: term_ids.next_id(),
+        ty: result_ty,
+        span,
+        kind: TermKind::App {
+            func: Box::new(func_term),
+            args,
+        },
+    }
+}
+
 /// Append capture parameters to a (possibly nested-Lambda) term and
 /// re-flatten into a single Lambda. Each capture term must be a
 /// `TermKind::Var`; the symbol/type pair is used as the new
