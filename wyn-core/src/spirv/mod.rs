@@ -1299,9 +1299,8 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 let arg_ids: Vec<_> = args.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
 
                 // Check if it's a builtin function first
-                if let Some(builtin_impl) = self.constructor.impl_source.get(func) {
-                    if func.contains("array_with") {}
-                    self.lower_builtin_call(builtin_impl.clone(), args, &arg_ids, result_ty)?
+                if let Some(builtin_impl) = crate::builtins::catalog().lookup_impl(func) {
+                    self.lower_builtin_call(builtin_impl, args, &arg_ids, result_ty)?
                 } else if let Some(&func_id) = self.constructor.functions.get(func) {
                     // User-defined function
                     self.constructor.builder.function_call(result_ty, None, func_id, arg_ids)?

@@ -543,7 +543,9 @@ impl<'a> LowerCtx<'a> {
             for &inst_id in &block.insts {
                 let inst = body.get_inst(inst_id);
                 if let InstKind::Call { func, .. } = &inst.data {
-                    if self.func_index.contains_key(func) && self.impl_source.get(func).is_none() {
+                    if self.func_index.contains_key(func)
+                        && crate::builtins::catalog().lookup_impl(func).is_none()
+                    {
                         self.collect_deps_recursive(func, deps, visited)?;
                     }
                 }
@@ -1192,7 +1194,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 let arg_strs = arg_strs?;
 
                 // Check if it's a builtin
-                if let Some(impl_) = self.ctx.impl_source.get(func).cloned() {
+                if let Some(impl_) = crate::builtins::catalog().lookup_impl(func) {
                     self.lower_builtin_call(&impl_, &arg_strs, result_ty.expect("Call must have result"))
                 } else {
                     let mangled = self.ctx.glsl_mangle_tracked(func)?;
@@ -1521,8 +1523,8 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         _arg_ids: &[ValueId],
         ret_ty: &PolyType<TypeName>,
     ) -> Result<String> {
-        // Check ImplSource first (handles _w_intrinsic_* builtins)
-        if let Some(impl_) = self.ctx.impl_source.get(name).cloned() {
+        // Catalog-driven dispatch for `_w_intrinsic_*` builtins.
+        if let Some(impl_) = crate::builtins::catalog().lookup_impl(name) {
             return self.lower_builtin_call(&impl_, args, ret_ty);
         }
         bail_glsl_at!(self.blame_span(), "Unknown intrinsic: {}", name)

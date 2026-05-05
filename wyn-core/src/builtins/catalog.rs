@@ -161,6 +161,16 @@ impl BuiltinCatalog {
         &self.defs[id.as_index()]
     }
 
+    /// Resolve a name to a `BuiltinImpl` shape consumable by the
+    /// backend code-gen tables. Returns `None` if the name isn't in
+    /// the catalog. Uses the first overload's lowering — adequate for
+    /// per-type ops where overloads share lowering, and for
+    /// polymorphic intrinsics that have a single overload.
+    pub fn lookup_impl(&self, name: &str) -> Option<crate::impl_source::BuiltinImpl> {
+        let def = self.lookup_by_any_name(name)?;
+        Some(def.overloads()[0].lowering.to_builtin_impl())
+    }
+
     /// Invoke an overload's `SchemeBuilder` to produce a fresh
     /// quantified `TypeScheme` against the supplied generator.
     pub fn build_scheme(

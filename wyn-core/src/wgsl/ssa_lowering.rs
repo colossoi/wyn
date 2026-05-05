@@ -2307,11 +2307,11 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         args: &[String],
         result_ty: Option<&PolyType<TypeName>>,
     ) -> Result<Option<String>> {
-        let Some(builtin) = self.ctx.impl_source.get(name) else {
+        let Some(builtin) = crate::builtins::catalog().lookup_impl(name) else {
             return Ok(None);
         };
         let prim_op = match builtin {
-            BuiltinImpl::PrimOp(p) => p.clone(),
+            BuiltinImpl::PrimOp(p) => p,
             BuiltinImpl::LinkedSpirv(_) | BuiltinImpl::Intrinsic(_) => return Ok(None),
         };
         let result_ty_str = match result_ty {
