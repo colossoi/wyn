@@ -49,10 +49,20 @@ pub struct BuiltinOverload {
 /// The static, declarative description of one builtin. Entries live in
 /// `defs::ALL_BUILTINS` as a `&'static [BuiltinDefRaw]`; the catalog
 /// wraps each with its assigned `BuiltinId`.
+///
+/// Names: `surface_name` is the canonical user-facing label (shown in
+/// errors, used by namespace_hint). `intrinsic_source_names` is the set
+/// of keys this entry is registered under in `IntrinsicSource` — often
+/// just `[surface_name]`, but polymorphic intrinsics like `magnitude`
+/// are registered under their user-facing name only. `impl_source_names`
+/// is the set of keys in `ImplSource` — for `magnitude` that's
+/// `["_w_intrinsic_magnitude"]`; for per-type ops like `f32.+` it's
+/// both the surface form and `_w_intrinsic_+_f32`.
 #[derive(Debug, Clone)]
 pub struct BuiltinDefRaw {
     pub surface_name: &'static str,
-    pub internal_name: Option<&'static str>,
+    pub intrinsic_source_names: &'static [&'static str],
+    pub impl_source_names: &'static [&'static str],
     pub kind: BuiltinKind,
     pub purity: Purity,
     pub overloads: &'static [BuiltinOverload],
@@ -69,8 +79,12 @@ impl BuiltinDef {
         self.raw.surface_name
     }
 
-    pub fn internal_name(&self) -> Option<&'static str> {
-        self.raw.internal_name
+    pub fn intrinsic_source_names(&self) -> &'static [&'static str] {
+        self.raw.intrinsic_source_names
+    }
+
+    pub fn impl_source_names(&self) -> &'static [&'static str] {
+        self.raw.impl_source_names
     }
 
     pub fn kind(&self) -> BuiltinKind {
@@ -104,9 +118,9 @@ impl BuiltinCatalog {
             if by_surface_name.insert(raw.surface_name, id).is_some() {
                 panic!("duplicate surface_name in builtin catalog: {}", raw.surface_name);
             }
-            if let Some(internal) = raw.internal_name {
-                if by_internal_name.insert(internal, id).is_some() {
-                    panic!("duplicate internal_name in builtin catalog: {}", internal);
+            for &impl_name in raw.impl_source_names {
+                if impl_name != raw.surface_name && by_internal_name.insert(impl_name, id).is_some() {
+                    panic!("duplicate impl_source_name in builtin catalog: {}", impl_name);
                 }
             }
         }
@@ -125,6 +139,10 @@ impl BuiltinCatalog {
         self.by_surface_name.get(name).map(|id| &self.defs[id.as_index()])
     }
 
+    /// Look up by an internal `_w_intrinsic_*` name registered in
+    /// `impl_source_names`. Returns the entry whose `impl_source_names`
+    /// contains this name (excluding cases where it matches
+    /// `surface_name`, which is reachable via `lookup_by_surface_name`).
     pub fn lookup_by_internal_name(&self, name: &str) -> Option<&BuiltinDef> {
         self.by_internal_name.get(name).map(|id| &self.defs[id.as_index()])
     }

@@ -258,28 +258,25 @@ impl IntrinsicSource {
             intrinsics: HashMap::new(),
         };
 
-        registry.register_scalar_math_functions(ctx);
-        registry.register_vector_operations(ctx);
-        registry.populate_from_catalog_module_builtins(crate::builtins::catalog(), ctx);
-        registry.register_matrix_operations(ctx);
+        registry.populate_from_catalog(crate::builtins::catalog(), ctx);
         registry.register_higher_order_functions(ctx);
 
         registry
     }
 
-    /// Register schemes for every `ModuleBuiltin` entry in the catalog
-    /// under its surface name. Each overload's `SchemeBuilder` is
-    /// invoked to produce a fresh `TypeScheme` from the supplied
-    /// context.
-    fn populate_from_catalog_module_builtins(
+    /// Walk every catalog entry and register each overload under each
+    /// of the entry's `intrinsic_source_names`.
+    fn populate_from_catalog(
         &mut self,
         catalog: &crate::builtins::BuiltinCatalog,
         ctx: &mut impl TypeVarGenerator,
     ) {
-        for def in catalog.iter_by_kind(crate::builtins::BuiltinKind::ModuleBuiltin) {
-            for ovld in def.overloads() {
-                let scheme = (ovld.scheme)(ctx);
-                self.add_overload(def.surface_name().to_string(), IntrinsicEntry { scheme });
+        for def in catalog.defs() {
+            for &name in def.intrinsic_source_names() {
+                for ovld in def.overloads() {
+                    let scheme = (ovld.scheme)(ctx);
+                    self.add_overload(name.to_string(), IntrinsicEntry { scheme });
+                }
             }
         }
     }
@@ -351,156 +348,6 @@ impl IntrinsicSource {
         self.intrinsics.iter().map(|(name, entries)| (name.clone(), entries[0].arity())).collect()
     }
 
-    /// Register scalar math functions (abs, sign, floor, ceil, fract, min, max, clamp, mix, smoothstep)
-    fn register_scalar_math_functions(&mut self, ctx: &mut impl TypeVarGenerator) {
-        // Unary: abs, sign, floor, ceil, fract
-        for name in ["abs", "sign", "floor", "ceil", "fract"] {
-            let a = ctx.new_variable();
-            self.register_poly(name, vec![a.clone()], a);
-        }
-
-        // Binary: min, max
-        for name in ["min", "max"] {
-            let a = ctx.new_variable();
-            self.register_poly(name, vec![a.clone(), a.clone()], a);
-        }
-    }
-
-    /// Register vector operations (magnitude, normalize, dot, cross, etc.)
-    fn register_vector_operations(&mut self, ctx: &mut impl TypeVarGenerator) {
-        // magnitude : ∀n a. vec<n,a> -> a
-        let n = ctx.new_variable();
-        let a = ctx.new_variable();
-        let vec_n_a = Type::Constructed(TypeName::Vec, vec![a.clone(), n]);
-        self.register_poly("magnitude", vec![vec_n_a], a);
-
-        // normalize : ∀n a. vec<n,a> -> vec<n,a>
-        let n = ctx.new_variable();
-        let a = ctx.new_variable();
-        let vec_n_a = Type::Constructed(TypeName::Vec, vec![a, n]);
-        self.register_poly("normalize", vec![vec_n_a.clone()], vec_n_a);
-
-        // dot : ∀n a. vec<n,a> -> vec<n,a> -> a
-        let n = ctx.new_variable();
-        let a = ctx.new_variable();
-        let vec_n_a = Type::Constructed(TypeName::Vec, vec![a.clone(), n]);
-        self.register_poly("dot", vec![vec_n_a.clone(), vec_n_a], a);
-
-        // cross : vec<3,f32> -> vec<3,f32> -> vec<3,f32>
-        let vec3f32 = Type::Constructed(
-            TypeName::Vec,
-            vec![
-                Type::Constructed(TypeName::Float(32), vec![]),
-                Type::Constructed(TypeName::Size(3), vec![]),
-            ],
-        );
-        self.register_poly("cross", vec![vec3f32.clone(), vec3f32.clone()], vec3f32);
-
-        // distance : ∀n a. vec<n,a> -> vec<n,a> -> a
-        let n = ctx.new_variable();
-        let a = ctx.new_variable();
-        let vec_n_a = Type::Constructed(TypeName::Vec, vec![a.clone(), n]);
-        self.register_poly("distance", vec![vec_n_a.clone(), vec_n_a], a);
-
-        // reflect : ∀n a. vec<n,a> -> vec<n,a> -> vec<n,a>
-        let n = ctx.new_variable();
-        let a = ctx.new_variable();
-        let vec_n_a = Type::Constructed(TypeName::Vec, vec![a, n]);
-        self.register_poly("reflect", vec![vec_n_a.clone(), vec_n_a.clone()], vec_n_a);
-
-        // refract : ∀n a. vec<n,a> -> vec<n,a> -> a -> vec<n,a>
-        let n = ctx.new_variable();
-        let a = ctx.new_variable();
-        let vec_n_a = Type::Constructed(TypeName::Vec, vec![a.clone(), n]);
-        self.register_poly("refract", vec![vec_n_a.clone(), vec_n_a.clone(), a], vec_n_a);
-
-        // floor, ceil, fract : a -> a (scalar)
-        for name in ["floor", "ceil", "fract"] {
-            let a = ctx.new_variable();
-            self.register_poly(name, vec![a.clone()], a);
-        }
-
-        // clamp : a -> a -> a -> a (scalar)
-        let a = ctx.new_variable();
-        self.register_poly("clamp", vec![a.clone(), a.clone(), a.clone()], a.clone());
-        // clamp : ∀n a. a -> a -> vec<n,a> -> vec<n,a> (scalar lo/hi, vector x)
-        let n = ctx.new_variable();
-        let a = ctx.new_variable();
-        let vec_n_a = Type::Constructed(TypeName::Vec, vec![a.clone(), n]);
-        self.register_poly("clamp", vec![a.clone(), a, vec_n_a.clone()], vec_n_a);
-
-        // mix : a -> a -> a -> a (scalar)
-        let a = ctx.new_variable();
-        self.register_poly("mix", vec![a.clone(), a.clone(), a.clone()], a);
-        // mix : ∀n a. vec<n,a> -> vec<n,a> -> a -> vec<n,a> (vector x/y, scalar interpolant)
-        let n = ctx.new_variable();
-        let a = ctx.new_variable();
-        let vec_n_a = Type::Constructed(TypeName::Vec, vec![a.clone(), n]);
-        self.register_poly("mix", vec![vec_n_a.clone(), vec_n_a.clone(), a], vec_n_a);
-
-        // smoothstep : a -> a -> a -> a (scalar)
-        let a = ctx.new_variable();
-        self.register_poly("smoothstep", vec![a.clone(), a.clone(), a.clone()], a);
-        // smoothstep : ∀n a. a -> a -> vec<n,a> -> vec<n,a> (scalar edges, vector x)
-        let n = ctx.new_variable();
-        let a = ctx.new_variable();
-        let vec_n_a = Type::Constructed(TypeName::Vec, vec![a.clone(), n]);
-        self.register_poly("smoothstep", vec![a.clone(), a, vec_n_a.clone()], vec_n_a);
-    }
-
-    /// Register matrix operations
-    fn register_matrix_operations(&mut self, ctx: &mut impl TypeVarGenerator) {
-        // determinant : ∀n a. mat<n,n,a> -> a (square matrix only)
-        let n = ctx.new_variable();
-        let a = ctx.new_variable();
-        let mat_n_n_a = Type::Constructed(TypeName::Mat, vec![a.clone(), n.clone(), n]);
-        self.register_poly("determinant", vec![mat_n_n_a], a);
-
-        // inverse : ∀n a. mat<n,n,a> -> mat<n,n,a> (square matrix only)
-        let n = ctx.new_variable();
-        let a = ctx.new_variable();
-        let mat_n_n_a = Type::Constructed(TypeName::Mat, vec![a, n.clone(), n]);
-        self.register_poly("inverse", vec![mat_n_n_a.clone()], mat_n_n_a);
-
-        // outer : ∀n m a. vec<n,a> -> vec<m,a> -> mat<n,m,a>
-        let n = ctx.new_variable();
-        let m = ctx.new_variable();
-        let a = ctx.new_variable();
-        let vec_n_a = Type::Constructed(TypeName::Vec, vec![a.clone(), n.clone()]);
-        let vec_m_a = Type::Constructed(TypeName::Vec, vec![a.clone(), m.clone()]);
-        let mat_n_m_a = Type::Constructed(TypeName::Mat, vec![a, n, m]);
-        self.register_poly("outer", vec![vec_n_a, vec_m_a], mat_n_m_a);
-
-        // mul overloads - dispatch based on argument types in lowering
-        // mul : ∀n m p a. mat<n,m,a> -> mat<m,p,a> -> mat<n,p,a>
-        let n = ctx.new_variable();
-        let m = ctx.new_variable();
-        let p = ctx.new_variable();
-        let a = ctx.new_variable();
-        let mat_n_m_a = Type::Constructed(TypeName::Mat, vec![a.clone(), n.clone(), m.clone()]);
-        let mat_m_p_a = Type::Constructed(TypeName::Mat, vec![a.clone(), m, p.clone()]);
-        let mat_n_p_a = Type::Constructed(TypeName::Mat, vec![a, n, p]);
-        self.register_poly("mul", vec![mat_n_m_a, mat_m_p_a], mat_n_p_a);
-
-        // mul : ∀n m a. mat<n,m,a> -> vec<m,a> -> vec<n,a>
-        let n = ctx.new_variable();
-        let m = ctx.new_variable();
-        let a = ctx.new_variable();
-        let vec_m_a = Type::Constructed(TypeName::Vec, vec![a.clone(), m.clone()]);
-        let vec_n_a = Type::Constructed(TypeName::Vec, vec![a.clone(), n.clone()]);
-        let mat_n_m = Type::Constructed(TypeName::Mat, vec![a, n, m]);
-        self.register_poly("mul", vec![mat_n_m, vec_m_a], vec_n_a);
-
-        // mul : ∀n m a. vec<n,a> -> mat<n,m,a> -> vec<m,a>
-        let n = ctx.new_variable();
-        let m = ctx.new_variable();
-        let a = ctx.new_variable();
-        let vec_n_a = Type::Constructed(TypeName::Vec, vec![a.clone(), n.clone()]);
-        let vec_m_a = Type::Constructed(TypeName::Vec, vec![a.clone(), m.clone()]);
-        let mat_n_m = Type::Constructed(TypeName::Mat, vec![a, n, m]);
-        self.register_poly("mul", vec![vec_n_a, mat_n_m], vec_m_a);
-    }
-
     /// Helper to construct an array type: Array[elem, size, variant]
     fn array_type(elem: Type, addrspace: Type, size: Type) -> Type {
         Type::Constructed(TypeName::Array, vec![elem, size, addrspace])
@@ -508,15 +355,6 @@ impl IntrinsicSource {
 
     /// Register higher-order functions like map
     fn register_higher_order_functions(&mut self, ctx: &mut impl TypeVarGenerator) {
-        // map is desugared to map1 earlier in the pipeline
-        // length : ∀a n s. Array[a, s, n] -> i32
-        let a = ctx.new_variable();
-        let n = ctx.new_variable();
-        let s = ctx.new_variable();
-        let array_a = Self::array_type(a, s, n);
-        let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
-        self.register_poly("_w_intrinsic_length", vec![array_a], i32_ty);
-
         // replicate : ∀a n s. i32 -> a -> Array[a, s, n]
         let a = ctx.new_variable();
         let n = ctx.new_variable();
@@ -524,19 +362,6 @@ impl IntrinsicSource {
         let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
         let array_a = Self::array_type(a.clone(), s, n);
         self.register_poly("_w_intrinsic_replicate", vec![i32_ty, a], array_a);
-
-        // _w_intrinsic_uninit : ∀a. () -> a
-        let a = ctx.new_variable();
-        let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
-        self.register_poly("_w_intrinsic_uninit", vec![unit_ty], a);
-
-        // _w_intrinsic_array_with : ∀a n s. Array[a, s, n] -> i32 -> a -> Array[a, s, n]
-        let a = ctx.new_variable();
-        let n = ctx.new_variable();
-        let s = ctx.new_variable();
-        let array_a = Self::array_type(a.clone(), s, n);
-        let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
-        self.register_poly(INTRINSIC_ARRAY_WITH, vec![array_a.clone(), i32_ty, a], array_a);
 
         // reduce : ∀a n s. (a -> a -> a) -> a -> Array[a, s, n] -> a
         let a = ctx.new_variable();

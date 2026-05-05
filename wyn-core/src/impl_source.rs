@@ -3,13 +3,6 @@
 // Types for functions are provided by modules or PolymorphicBuiltins
 
 use crate::ast::{Type, TypeName};
-use crate::intrinsics::{
-    INTRINSIC_ABS, INTRINSIC_ARRAY_WITH, INTRINSIC_ARRAY_WITH_INPLACE, INTRINSIC_CEIL, INTRINSIC_CLAMP,
-    INTRINSIC_CROSS, INTRINSIC_DETERMINANT, INTRINSIC_DISTANCE, INTRINSIC_DOT, INTRINSIC_FLOOR,
-    INTRINSIC_FRACT, INTRINSIC_INVERSE, INTRINSIC_LENGTH, INTRINSIC_MAGNITUDE, INTRINSIC_MIX,
-    INTRINSIC_NORMALIZE, INTRINSIC_OUTER, INTRINSIC_REFLECT, INTRINSIC_REFRACT, INTRINSIC_SMOOTHSTEP,
-    INTRINSIC_UNINIT,
-};
 use std::collections::HashMap;
 
 /// Implementation strategy for a builtin function
@@ -152,19 +145,21 @@ impl ImplSource {
         source.register_integral_modules();
         source.register_real_modules();
         source.register_float_modules();
-        source.register_vector_operations();
-        source.populate_from_catalog_module_builtins(crate::builtins::catalog());
-        source.register_polymorphic_intrinsics();
+        source.populate_from_catalog(crate::builtins::catalog());
 
         source
     }
 
-    /// Register lowerings for every `ModuleBuiltin` entry in the
-    /// catalog under its surface name.
-    fn populate_from_catalog_module_builtins(&mut self, catalog: &crate::builtins::BuiltinCatalog) {
-        for def in catalog.iter_by_kind(crate::builtins::BuiltinKind::ModuleBuiltin) {
-            let lowering = &def.overloads()[0].lowering;
-            self.register(def.surface_name(), lowering.to_builtin_impl());
+    /// Walk every catalog entry and register its lowering under each
+    /// of the entry's `impl_source_names`.
+    fn populate_from_catalog(&mut self, catalog: &crate::builtins::BuiltinCatalog) {
+        for def in catalog.defs() {
+            for ovld in def.overloads() {
+                let impl_kind = ovld.lowering.to_builtin_impl();
+                for &name in def.impl_source_names() {
+                    self.register(name, impl_kind.clone());
+                }
+            }
         }
     }
 
@@ -749,51 +744,6 @@ impl ImplSource {
         // Bit manipulation: reinterpret bits without conversion
         self.register("_w_intrinsic_f64_from_bits", BuiltinImpl::PrimOp(PrimOp::Bitcast));
         self.register("_w_intrinsic_f64_to_bits", BuiltinImpl::PrimOp(PrimOp::Bitcast));
-    }
-
-    fn register_vector_operations(&mut self) {
-        self.register(INTRINSIC_UNINIT, BuiltinImpl::Intrinsic(Intrinsic::Uninit));
-        self.register(INTRINSIC_ARRAY_WITH, BuiltinImpl::Intrinsic(Intrinsic::ArrayWith));
-        self.register(
-            INTRINSIC_ARRAY_WITH_INPLACE,
-            BuiltinImpl::Intrinsic(Intrinsic::ArrayWithInPlace),
-        );
-        self.register(INTRINSIC_LENGTH, BuiltinImpl::Intrinsic(Intrinsic::Length));
-    }
-
-    /// Register polymorphic intrinsics (no type suffix) that come from
-    /// INTRINSIC_RENAMES in TLC. These are the suffix-less versions like
-    /// `_w_intrinsic_floor` (vs the typed `_w_intrinsic_floor_f32`).
-    fn register_polymorphic_intrinsics(&mut self) {
-        use PrimOp::*;
-        // Only names still listed in TLC's `INTRINSIC_RENAMES` need a
-        // polymorphic shim here — the per-type-or-vector ops
-        // (sin/cos/tan/.../pow/mod/radians/degrees) have moved into the
-        // `f32.*` and `vec.*` modules and are reached via `open`.
-        let intrinsics: &[(&str, BuiltinImpl)] = &[
-            (INTRINSIC_ABS, BuiltinImpl::PrimOp(GlslExt(4))),
-            (INTRINSIC_FLOOR, BuiltinImpl::PrimOp(GlslExt(8))),
-            (INTRINSIC_CEIL, BuiltinImpl::PrimOp(GlslExt(9))),
-            (INTRINSIC_FRACT, BuiltinImpl::PrimOp(GlslExt(10))),
-            ("_w_intrinsic_min", BuiltinImpl::PrimOp(GlslExt(37))),
-            ("_w_intrinsic_max", BuiltinImpl::PrimOp(GlslExt(40))),
-            (INTRINSIC_CLAMP, BuiltinImpl::PrimOp(GlslExt(43))),
-            (INTRINSIC_MIX, BuiltinImpl::PrimOp(GlslExt(46))),
-            (INTRINSIC_SMOOTHSTEP, BuiltinImpl::PrimOp(GlslExt(49))),
-            (INTRINSIC_NORMALIZE, BuiltinImpl::PrimOp(GlslExt(69))),
-            (INTRINSIC_CROSS, BuiltinImpl::PrimOp(GlslExt(68))),
-            (INTRINSIC_DISTANCE, BuiltinImpl::PrimOp(GlslExt(67))),
-            (INTRINSIC_REFLECT, BuiltinImpl::PrimOp(GlslExt(71))),
-            (INTRINSIC_REFRACT, BuiltinImpl::PrimOp(GlslExt(72))),
-            (INTRINSIC_DETERMINANT, BuiltinImpl::PrimOp(GlslExt(33))),
-            (INTRINSIC_INVERSE, BuiltinImpl::PrimOp(GlslExt(34))),
-            (INTRINSIC_DOT, BuiltinImpl::PrimOp(Dot)),
-            (INTRINSIC_OUTER, BuiltinImpl::PrimOp(OuterProduct)),
-            (INTRINSIC_MAGNITUDE, BuiltinImpl::PrimOp(GlslExt(66))),
-        ];
-        for (name, impl_) in intrinsics {
-            self.register(name, impl_.clone());
-        }
     }
 }
 
