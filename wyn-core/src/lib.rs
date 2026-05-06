@@ -678,6 +678,13 @@ impl TypeChecked {
         merged_defs.extend(parts.defs);
         parts.defs = merged_defs;
 
+        // Schemes the type checker recorded for non-top-level bindings
+        // have no SymbolId in `top_level_symbols`; filter them out.
+        let schemes_by_sym: HashMap<SymbolId, types::TypeScheme> = schemes
+            .iter()
+            .filter_map(|(name, scheme)| top_level_symbols.get(name).map(|&sym| (sym, scheme.clone())))
+            .collect();
+
         // Combine parts with the symbol table to create the final Program
         let tlc_program = parts.with_symbols(symbols, top_level_symbols);
 
@@ -685,7 +692,7 @@ impl TypeChecked {
             tlc: tlc_program,
             type_table: self.type_table,
             known_defs: registry.name_set(),
-            schemes: schemes.clone(),
+            schemes: schemes_by_sym,
             fill_hole_errors,
         })
     }
@@ -705,7 +712,7 @@ pub struct TlcEarlyInner {
     /// Built-in names that should not be captured as free variables
     pub(crate) known_defs: std::collections::HashSet<String>,
     /// Type schemes for functions (for monomorphization)
-    pub(crate) schemes: HashMap<String, types::TypeScheme>,
+    pub(crate) schemes: HashMap<SymbolId, types::TypeScheme>,
     /// Errors surfaced while default-filling `???` type holes with
     /// `--fill-holes`. Empty unless `to_tlc` was called with
     /// `fill_holes = true` and some hole had a type that couldn't
@@ -854,7 +861,7 @@ pub struct TlcDefunctionalized {
     pub tlc: tlc::Program,
     pub type_table: TypeTable,
     /// Type schemes for functions (for monomorphization)
-    schemes: HashMap<String, types::TypeScheme>,
+    schemes: HashMap<SymbolId, types::TypeScheme>,
 }
 
 impl TlcDefunctionalized {
