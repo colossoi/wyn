@@ -349,6 +349,46 @@ entry main() #[builtin(position)] vec4f32 =
 }
 
 #[test]
+#[should_panic(expected = "is not Map/Scan")]
+fn rewrite_map_scan_to_into_panics_on_reduce() {
+    use super::rewrite_map_scan_to_into;
+    use crate::egir::types::{EGraph, PendingSoac, SideEffect, SideEffectKind};
+    use smallvec::SmallVec;
+
+    let mut graph = EGraph::new();
+    let target = graph.alloc_side_effect_result(i32_ty());
+    let output_view = graph.alloc_side_effect_result(i32_ty());
+
+    let entry = graph.skeleton.entry;
+    graph.skeleton.blocks[entry].side_effects.push(SideEffect {
+        kind: SideEffectKind::Pending(PendingSoac::Reduce {
+            func: "f".to_string(),
+            input_array_type: i32_ty(),
+            input_elem_type: i32_ty(),
+        }),
+        operand_nodes: SmallVec::new(),
+        result: Some(target),
+        effects: None,
+        span: None,
+    });
+
+    rewrite_map_scan_to_into(&mut graph, target, output_view);
+}
+
+#[test]
+#[should_panic(expected = "no side effect produced")]
+fn rewrite_map_scan_to_into_panics_when_target_missing() {
+    use super::rewrite_map_scan_to_into;
+    use crate::egir::types::EGraph;
+
+    let mut graph = EGraph::new();
+    let target = graph.alloc_side_effect_result(i32_ty());
+    let output_view = graph.alloc_side_effect_result(i32_ty());
+
+    rewrite_map_scan_to_into(&mut graph, target, output_view);
+}
+
+#[test]
 fn test_full_pipeline_loop() {
     let program = compile_via_egir(
         r#"

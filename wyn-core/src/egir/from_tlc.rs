@@ -556,11 +556,20 @@ fn rewrite_map_scan_to_into(graph: &mut EGraph, target_result: NodeId, output_vi
                     });
                     se.operand_nodes.push(output_view);
                 }
-                _ => {}
+                other => panic!(
+                    "rewrite_map_scan_to_into: side effect for target_result={:?} \
+                     is not Map/Scan: {:?} — caller must screen with \
+                     result_soac_is_map_or_scan first",
+                    target_result, other
+                ),
             }
             return;
         }
     }
+    panic!(
+        "rewrite_map_scan_to_into: no side effect produced target_result={:?}",
+        target_result
+    );
 }
 
 /// Compute entry with a non-view result: store the result (or its tuple
