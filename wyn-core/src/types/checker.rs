@@ -91,6 +91,11 @@ pub struct TypeChecker<'a> {
     /// Built once before type-check by `name_resolution::build_name_resolution`.
     /// Identifiers absent from this table are resolved via scope/module lookup.
     name_resolution: crate::name_resolution::NameResolution,
+    /// First type-alias cycle error encountered during alias resolution.
+    /// Recorded under `&self` via interior mutability; surfaced as a fatal
+    /// error at the next public entry point (check_program /
+    /// check_module_functions / check_prelude_functions).
+    pending_cycle_error: std::cell::RefCell<Option<CompilerError>>,
 }
 
 /// Compute free type variables in a Type
@@ -373,11 +378,23 @@ impl<'a> TypeChecker<'a> {
     fn resolve_type_aliases_scoped(&self, ty: &Type, current_module: Option<&str>) -> Type {
         let mut visited = Vec::new();
         self.resolve_type_aliases_impl(ty, current_module, &mut visited).unwrap_or_else(|cycle_err| {
-            // Return the original type on cycle - error will be caught elsewhere
-            // or we could log it. For now, just return unresolved.
-            log::error!("{}", cycle_err);
+            // Stash the first cycle error; the next public entry point
+            // (check_program / check_module_functions /
+            // check_prelude_functions) drains it and bails. Returning the
+            // unresolved type lets local checking continue without
+            // cascading panics.
+            let mut slot = self.pending_cycle_error.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(cycle_err);
+            }
             ty.clone()
         })
+    }
+
+    /// Drain the pending type-alias-cycle error, if any. Public entry
+    /// points must call this and surface the error before returning Ok.
+    fn take_pending_cycle_error(&self) -> Option<CompilerError> {
+        self.pending_cycle_error.borrow_mut().take()
     }
 
     fn resolve_type_aliases_impl(
@@ -695,6 +712,7 @@ impl<'a> TypeChecker<'a> {
             current_module: None,
             module_schemes: spec_schemes,
             name_resolution: crate::name_resolution::NameResolution::default(),
+            pending_cycle_error: std::cell::RefCell::new(None),
         }
     }
 
@@ -1349,6 +1367,10 @@ impl<'a> TypeChecker<'a> {
             self.check_declaration(decl)?;
         }
 
+        if let Some(err) = self.take_pending_cycle_error() {
+            return Err(err);
+        }
+
         // Emit warnings for all type holes now that types are fully inferred
         self.emit_hole_warnings();
 
@@ -1495,6 +1517,9 @@ impl<'a> TypeChecker<'a> {
             }
         }
 
+        if let Some(err) = self.take_pending_cycle_error() {
+            return Err(err);
+        }
         Ok(())
     }
 
@@ -1511,6 +1536,9 @@ impl<'a> TypeChecker<'a> {
             self.check_decl(&decl)?;
         }
 
+        if let Some(err) = self.take_pending_cycle_error() {
+            return Err(err);
+        }
         Ok(())
     }
 

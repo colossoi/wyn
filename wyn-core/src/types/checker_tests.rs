@@ -1509,6 +1509,32 @@ def test: [5]i32 =
 // =========================================================================
 
 #[test]
+fn test_type_alias_cycle_is_fatal() {
+    // Two modules whose type aliases refer to each other → cycle.
+    // Previously the checker silently logged this and returned the
+    // unresolved type; now it must surface as a fatal type error.
+    let result = try_typecheck_program(
+        r#"
+module a = {
+  type t = b.t
+}
+module b = {
+  type t = a.t
+}
+
+def use_a(x: a.t) i32 = 0
+        "#,
+    );
+    let err = result.expect_err("type alias cycle should be a fatal error");
+    let rendered = format!("{:?}", err);
+    assert!(
+        rendered.contains("type alias cycle detected"),
+        "expected cycle error, got: {}",
+        rendered
+    );
+}
+
+#[test]
 fn test_qualified_type_alias_resolves() {
     // rand.state is a type alias for f32 - qualified names should resolve
     typecheck_program(
