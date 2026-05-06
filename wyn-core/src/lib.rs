@@ -541,112 +541,32 @@ impl TypeChecked {
         Err(err_type_hole!("{}", msg.trim_end()))
     }
 
-    /// Transform AST to TLC. `schemes` contains type schemes for all
-    /// functions (populated during type_check). `module_manager`
-    /// provides access to prelude declarations. `fill_holes` makes
-    /// `???` type-hole expressions lower to a default value of the
-    /// inferred type rather than panicking. The driver should call
-    /// `reject_type_holes` first when `fill_holes = false`;
-    /// unfillable hole types under `fill_holes = true` land in the
-    /// returned program's `fill_hole_errors`.
+    /// Transform AST to TLC. `module_manager` provides access to prelude
+    /// declarations. `fill_holes` makes `???` type-hole expressions lower
+    /// to a default value of the inferred type rather than panicking. The
+    /// driver should call `reject_type_holes` first when
+    /// `fill_holes = false`; unfillable hole types under
+    /// `fill_holes = true` land in the returned program's
+    /// `fill_hole_errors`.
     pub fn to_tlc(
-        mut self,
+        self,
         module_manager: &module_manager::ModuleManager,
         fill_holes: bool,
     ) -> TlcTransformed {
-        // Under `--fill-holes`, rewrite any free type variable in the
-        // node-level type table to `i32` so holes whose type stayed
-        // unconstrained (no call-site or annotation pinned them) get a
-        // ground type instead of surfacing as a fill-hole error.
-        if fill_holes {
-            tlc::defaults::default_free_vars_in_table(self.type_table.values_mut());
-        }
-
-        // Build unified name registry — single source of truth for all top-level names.
-        let registry =
-            name_registry::NameRegistry::build(&self.ast, module_manager, &self.checker_builtins);
-
-        // Pre-register ALL names with deterministic SymbolId assignment (BTreeMap order).
-        let mut symbols = SymbolTable::new();
-        let mut top_level_symbols = std::collections::HashMap::new();
-        for (name, _kind) in registry.iter() {
-            let sym = symbols.alloc(name.to_string());
-            top_level_symbols.insert(name.to_string(), sym);
-        }
-
-        // Shared accumulator for `--fill-holes` default-fill failures.
-        // Errors from every Transformer that runs below land here.
-        let mut fill_hole_errors: Vec<error::CompilerError> = Vec::new();
-
-        // Transform prelude module declarations (f32.pi, rand.init, etc.)
-        // All names already registered — no separate first pass needed.
-        let mut prelude_tlc_defs = Vec::new();
-        for (module_name, elaborated) in module_manager.get_elaborated_modules() {
-            let mut transformer = tlc::Transformer::with_namespace(
-                &self.type_table,
-                &mut symbols,
-                &mut top_level_symbols,
-                module_name,
-                fill_holes,
-                &mut fill_hole_errors,
-            );
-            for item in &elaborated.items {
-                if let module_manager::ElaboratedItem::Decl(decl) = item {
-                    if let Some(def) = transformer.transform_decl(decl) {
-                        prelude_tlc_defs.push(def);
-                    }
-                }
-            }
-        }
-
-        // Transform top-level prelude functions (unzip, all, any, etc.)
-        {
-            let mut transformer = tlc::Transformer::new(
-                &self.type_table,
-                &mut symbols,
-                &mut top_level_symbols,
-                fill_holes,
-                &mut fill_hole_errors,
-            );
-            for decl in module_manager.get_prelude_function_declarations() {
-                if let Some(def) = transformer.transform_decl(decl) {
-                    prelude_tlc_defs.push(def);
-                }
-            }
-        }
-
-        // Transform user program to TLC
-        let mut transformer = tlc::Transformer::new(
-            &self.type_table,
-            &mut symbols,
-            &mut top_level_symbols,
+        let out = tlc::run::run(
+            &self.ast,
+            self.type_table,
+            &self.schemes,
+            &self.checker_builtins,
+            module_manager,
             fill_holes,
-            &mut fill_hole_errors,
         );
-        let mut parts = transformer.transform_program(&self.ast);
-
-        // Prepend prelude TLC defs
-        let mut merged_defs = prelude_tlc_defs;
-        merged_defs.extend(parts.defs);
-        parts.defs = merged_defs;
-
-        // Schemes the type checker recorded for non-top-level bindings
-        // have no SymbolId in `top_level_symbols`; filter them out.
-        let schemes_by_sym: HashMap<SymbolId, types::TypeScheme> = self
-            .schemes
-            .iter()
-            .filter_map(|(name, scheme)| top_level_symbols.get(name).map(|&sym| (sym, scheme.clone())))
-            .collect();
-
-        // Combine parts with the symbol table to create the final Program
-        let tlc_program = parts.with_symbols(symbols, top_level_symbols);
-
         TlcTransformed(TlcEarlyInner {
-            tlc: tlc_program,
-            type_table: self.type_table,
-            known_defs: registry.name_set(),
-            schemes: schemes_by_sym,
-            fill_hole_errors,
+            tlc: out.program,
+            type_table: out.type_table,
+            known_defs: out.known_defs,
+            schemes: out.schemes,
+            fill_hole_errors: out.fill_hole_errors,
         })
     }
 }

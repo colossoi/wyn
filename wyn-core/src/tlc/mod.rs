@@ -18,6 +18,7 @@ pub mod ownership;
 pub mod parallelize;
 pub mod partial_eval;
 pub mod producer_graph;
+pub mod run;
 pub mod soa;
 pub mod specialize;
 
