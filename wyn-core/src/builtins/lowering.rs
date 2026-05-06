@@ -21,6 +21,11 @@ pub enum BuiltinLowering {
     /// Function imported from a pre-compiled SPIR-V module — the string
     /// is the linkage name in `OpDecorate LinkageAttributes`.
     LinkedSpirv(&'static str),
+    /// Builtin has no backend lowering through this enum. Used for
+    /// HOFs (handled by the SOAC infrastructure) and compiler-internal
+    /// builtins (emitted/consumed before backend dispatch). Backend
+    /// dispatch reaching this is a bug.
+    NotLowered,
 }
 
 /// Core primitive operations that map fairly directly to SPIR-V/backend ops.
@@ -103,8 +108,6 @@ pub enum PrimOp {
 /// These cannot be written in the language itself.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Intrinsic {
-    /// Placeholder for future implementations (will be desugared or moved)
-    Placeholder,
     /// Uninitialized/poison value for allocation bootstrapping.
     /// SAFETY: Must be fully overwritten before being read.
     Uninit,

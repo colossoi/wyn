@@ -73,7 +73,7 @@ macro_rules! hof_intrinsic {
             purity: $purity,
             overloads: &[BuiltinOverload {
                 scheme: $scheme,
-                lowering: BuiltinLowering::Intrinsic(crate::builtins::lowering::Intrinsic::Placeholder),
+                lowering: BuiltinLowering::NotLowered,
             }],
         }
     };
@@ -93,7 +93,7 @@ macro_rules! compiler_internal {
             purity: $purity,
             overloads: &[BuiltinOverload {
                 scheme: dummy_scheme,
-                lowering: BuiltinLowering::Intrinsic(crate::builtins::lowering::Intrinsic::Placeholder),
+                lowering: BuiltinLowering::NotLowered,
             }],
         }
     };

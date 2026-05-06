@@ -2305,13 +2305,15 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         };
         let prim_op = match builtin {
             BuiltinLowering::PrimOp(p) => p,
-            BuiltinLowering::LinkedSpirv(_) | BuiltinLowering::Intrinsic(_) => return Ok(None),
+            BuiltinLowering::LinkedSpirv(_)
+            | BuiltinLowering::Intrinsic(_)
+            | BuiltinLowering::NotLowered => return Ok(None),
         };
         let result_ty_str = match result_ty {
             Some(ty) => Some(self.ctx.type_emitter.type_to_wgsl(ty)?),
             None => None,
         };
-        Ok(lower_primop_wgsl(&prim_op, args, result_ty_str.as_deref()))
+        Ok(lower_primop_wgsl(prim_op, args, result_ty_str.as_deref()))
     }
 }
 

@@ -1435,13 +1435,18 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         intr
                     )
                 }
-                _ => bail_glsl_at!(self.blame_span(), "Intrinsic {:?} not supported in GLSL", intr),
             },
             BuiltinLowering::LinkedSpirv(name) => {
                 bail_glsl_at!(
                     self.blame_span(),
                     "Linked SPIR-V function '{}' not supported in GLSL",
                     name
+                )
+            }
+            BuiltinLowering::NotLowered => {
+                bail_glsl_at!(
+                    self.blame_span(),
+                    "NotLowered builtin should not reach backend dispatch"
                 )
             }
         }

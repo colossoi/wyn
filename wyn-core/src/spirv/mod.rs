@@ -2555,12 +2555,12 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     .ok_or_else(|| err_spirv!("Unknown linked function: {}", linkage_name))?;
                 Ok(self.constructor.builder.function_call(result_ty, None, func_id, arg_ids.to_vec())?)
             }
+            BuiltinLowering::NotLowered => {
+                bail_spirv!("NotLowered builtin should not reach backend dispatch")
+            }
             BuiltinLowering::Intrinsic(intrinsic) => {
                 use crate::builtins::lowering::Intrinsic;
                 match intrinsic {
-                    Intrinsic::Placeholder => {
-                        bail_spirv!("Placeholder intrinsic should not reach lowering")
-                    }
                     Intrinsic::Uninit => {
                         // Zero-initialized value (OpConstantNull), cached by type.
                         if let Some(&cached) = self.constructor.null_const_cache.get(&result_ty) {
