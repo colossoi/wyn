@@ -910,20 +910,8 @@ pub struct TlcDefunctionalized {
 impl TlcDefunctionalized {
     /// Specialize polymorphic intrinsics and monomorphize user functions.
     pub fn monomorphize(self) -> TlcMonomorphized {
-        // Specialize polymorphic intrinsics (sign → f32.sign, etc.)
         let specialized = tlc::specialize::run(self.tlc);
-
-        // Convert string-keyed schemes to SymbolId-keyed for monomorphization
-        let name_to_sym: HashMap<&str, SymbolId> =
-            specialized.symbols.iter().map(|(&id, name)| (name.as_str(), id)).collect();
-        let schemes_by_sym: HashMap<SymbolId, types::TypeScheme> = self
-            .schemes
-            .iter()
-            .filter_map(|(name, scheme)| name_to_sym.get(name.as_str()).map(|&sym| (sym, scheme.clone())))
-            .collect();
-
-        // Monomorphize polymorphic user functions
-        let monomorphized = tlc::monomorphize::run(specialized, &schemes_by_sym);
+        let monomorphized = tlc::monomorphize::run(specialized, &self.schemes);
         TlcMonomorphized(TlcLateInner {
             tlc: monomorphized,
             type_table: self.type_table,

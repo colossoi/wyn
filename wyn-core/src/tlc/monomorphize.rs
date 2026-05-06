@@ -28,8 +28,18 @@ pub(crate) type Substitution = HashMap<usize, Type<TypeName>>;
 ///
 /// This walks through all definitions starting from entry points, finds calls
 /// to polymorphic functions, and creates specialized versions with concrete types.
-pub fn run(program: Program, schemes: &HashMap<SymbolId, TypeScheme>) -> Program {
-    let mono = Monomorphizer::new(program, schemes);
+///
+/// `schemes` is keyed by canonical function name. The pass resolves names to
+/// `SymbolId`s against `program.symbols` internally — caller doesn't need to
+/// rebuild a SymbolId-keyed map.
+pub fn run(program: Program, schemes: &HashMap<String, TypeScheme>) -> Program {
+    let name_to_sym: HashMap<&str, SymbolId> =
+        program.symbols.iter().map(|(&id, name)| (name.as_str(), id)).collect();
+    let schemes_by_sym: HashMap<SymbolId, TypeScheme> = schemes
+        .iter()
+        .filter_map(|(name, scheme)| name_to_sym.get(name.as_str()).map(|&sym| (sym, scheme.clone())))
+        .collect();
+    let mono = Monomorphizer::new(program, &schemes_by_sym);
     let result = mono.run();
     result.assert_flat_apps();
     result
