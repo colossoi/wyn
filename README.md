@@ -1,6 +1,6 @@
 # Wyn
 
-A minimal compiler for a Futhark-like programming language that generates SPIR-V and GLSL code for GPU shaders.
+A minimal compiler for a Futhark-like programming language that generates SPIR-V, GLSL, and WGSL code for GPU shaders.
 
 ## Features
 
@@ -8,7 +8,7 @@ A minimal compiler for a Futhark-like programming language that generates SPIR-V
 - Higher-order functions (map, reduce, zip, etc.)
 - Vector and matrix types optimized for GPU operations
 - Pattern matching
-- SPIR-V and GLSL code generation for Vulkan/WebGPU shaders
+- SPIR-V, GLSL, and WGSL code generation for Vulkan/WebGPU shaders
 - Vertex, fragment, and compute shader support
 - Array operations with size tracking
 - Loop constructs
@@ -18,7 +18,7 @@ A minimal compiler for a Futhark-like programming language that generates SPIR-V
 
 The project is organized as a Rust workspace:
 
-- **`wyn-core/`** - Compiler library (lexer, parser, type checker, TLC, EGIR mid-end, SSA, SPIR-V/GLSL backends). Includes an in-crate generic SSA framework at `ssa::framework` (blocks, values, instructions, terminators) used only for codegen.
+- **`wyn-core/`** - Compiler library (lexer, parser, type checker, TLC, EGIR mid-end, SSA, SPIR-V/GLSL/WGSL backends). Includes an in-crate generic SSA framework at `ssa::framework` (blocks, values, instructions, terminators) used only for codegen.
 - **`wyn/`** - Command-line executable
 - **`wyn-analyzer/`** - Language server (in development)
 - **`viz/`** - Visualization tool for rendering SPIR-V shaders
@@ -59,12 +59,12 @@ What you get "for free":
 ### TLC (Typed Lambda Calculus)
 | Stage | Module | Description |
 |-------|--------|-------------|
-| **TlcTransformed** | `tlc::transform` | AST converted to minimal typed lambda calculus |
+| **TlcTransformed** | `tlc` (`TypeChecked::to_tlc`) | AST converted to minimal typed lambda calculus |
 | **TlcPartialEvaled** | `tlc::partial_eval` | Constant folding and algebraic simplifications |
 | **TlcSoaNormalized** | `tlc::soa` | SoA transform (`[n](A,B)` → `([n]A, [n]B)`) + Map+Zip flattening + standalone Zip elimination |
-| **TlcPromoted** | `tlc::ownership` | Backward ownership-liveness analysis with fixed-point over loops/SOAC bodies. Reports use-after-move; rewrites `_w_intrinsic_array_with` → `_w_intrinsic_array_with_inplace` where the source's owner is mutable and dead-after the call |
 | **TlcFused** | `tlc::fusion` | SOAC fusion: map-map, interprocedural producer-consumer |
-| **TlcDefunctionalized** | `tlc::defunctionalize` | Lambda lifting + SOAC capture flattening |
+| **TlcOwnershipApplied** | `tlc::ownership` | Backward ownership-liveness analysis with fixed-point over loops/SOAC bodies. Reports use-after-move; rewrites `_w_intrinsic_array_with` → `_w_intrinsic_array_with_inplace` where the source's owner is mutable and dead-after the call |
+| **TlcDefunctionalized** | `tlc::defunctionalize` (orchestration) + `tlc::closure_convert` + `tlc::hof_specialize` | Lambda lifting + HOF specialization. Captures for SOAC-position lambdas land on a `SoacBody { lam, captures }` wrapper, not on the `Lambda` struct. Three verifiers (`verify_closure_converted`, `verify_hof_specialized`, `verify_closure_calls_lowered` from `tlc::closure_calls_lower`) guard the architectural seams |
 | **TlcMonomorphized** | `tlc::specialize`, `tlc::monomorphize` | Polymorphic intrinsics specialized; user functions monomorphized |
 | **TlcBufferSpecialized** | `tlc::buffer_specialize` | Storage buffer parameter specialization |
 | **TlcGeneratedLambdasFolded** | `tlc::inline` | Fold compiler-generated `_w_lambda_*` defs (from defunctionalization) back at call sites + DCE |
@@ -84,8 +84,7 @@ What you get "for free":
 | Stage | Source | Description |
 |-------|--------|-------------|
 | **SsaConverted** | `EgirSkelOptimized::elaborate` | EGIR chain elaborated into SSA `Program` |
-| **SsaMaterialized** | (optional, SPIR-V only) | Via `egir::materialize` inside the EGIR chain |
-| **Lowered** | `spirv` / `glsl` | SSA to SPIR-V or GLSL |
+| **Lowered** | `spirv` / `glsl` / `wgsl` | SSA to SPIR-V, GLSL, or WGSL |
 
 SSA is intentionally minimal: all mid-end machinery (effect tokens, canonicalization, verification, generic transform passes) lives in EGIR. The `ssa::framework` module provides a generic CFG-with-block-params representation; `ssa::types` is the concrete instantiation (`InstKind` instructions, `Type<TypeName>` values).
 
@@ -103,10 +102,15 @@ Key properties:
 
 ### Defunctionalization
 
-The `tlc::defunctionalize` pass implements Futhark-style defunctionalization:
-1. **Lambda lifting**: All lambdas become top-level definitions with captures as extra parameters
-2. **StaticVal tracking**: Tracks which values are known function closures with captured variables
-3. **SOAC capture flattening**: When a closure is passed to a SOAC (map, reduce, etc.), its captures are flattened as trailing arguments
+The defunctionalization stage spans four sibling modules under `tlc::`:
+`closure_convert` (lambda lifting + free-variable analysis),
+`hof_specialize` (HOF specialization runtime), `closure_calls_lower`
+(post-pass verifier), and `defunctionalize` (orchestration).
+
+What each step does:
+1. **Lambda lifting** (`closure_convert`): Every standalone `TermKind::Lambda` is hoisted to a top-level `Def`, replacing the lambda site with a `Var` referring to the lifted symbol. Free variables of the lifted lambda become extra trailing parameters on the lifted def, threaded as args at every call site. The `Lambda` struct is `{ params, body, ret_ty }` — a clean function abstraction with no closure baggage.
+2. **HOF specialization** (`hof_specialize`): User-defined higher-order functions get specialized per-callsite — every reachable top-level def ends with no function-typed parameters.
+3. **SOAC envelope captures**: Lambdas embedded in `SoacOp` envelopes (`Map`, `Reduce`, `Scan`, …) are also lifted, but the SOAC keeps a `SoacBody { lam: Lambda, captures: Vec<(SymbolId, Type, Term)> }` payload so the loop body and its closed-over values stay together for later expansion. The same shape is used for `ArrayExpr::Generate`.
 
 Example transformation:
 ```
@@ -114,9 +118,16 @@ Example transformation:
 map(|x| x + y, arr)
 
 -- After defunctionalization:
-_lambda_0 = λ(y, x). x + y
-map(_lambda_0, arr, y)  -- capture y flattened as trailing arg
+_lambda_0 = λ(x, y). x + y       -- y is a regular param of the lifted def
+map(SoacBody { lam: _lambda_0, captures: [(y_sym, ty, Var(y))] }, arr)
 ```
+
+Three verifier-checked invariants run between phases:
+`verify_closure_converted` (no `TermKind::Lambda` outside SOAC envelopes),
+`verify_hof_specialized` (no reachable top-level def has a function-typed
+parameter), and `verify_closure_calls_lowered` (every `App.func` is a `Var`
+or operator, every call is fully arity-matched — including intrinsic
+arities derived from `builtins::intrinsic_arity`).
 
 ## Example Program
 
