@@ -595,13 +595,10 @@ pub struct TypeChecked {
 impl TypeChecked {
     /// Print warnings to stderr (convenience method)
     pub fn print_warnings(&self) {
-        let mut nc = NodeCounter::new();
-        let mm = module_manager::ModuleManager::new(&mut nc);
-        let checker = type_checker::TypeChecker::new(&mm);
         for warning in &self.warnings {
             eprintln!(
                 "Warning: {} at {:?}",
-                warning.message(&|t| checker.format_type(t)),
+                warning.message(&|t| types::format_type(t)),
                 warning.span()
             );
         }
@@ -616,9 +613,6 @@ impl TypeChecked {
     /// right place to bail.
     pub fn reject_type_holes(self) -> Result<Self> {
         use std::fmt::Write;
-        let mut nc = NodeCounter::new();
-        let mm = module_manager::ModuleManager::new(&mut nc);
-        let checker = type_checker::TypeChecker::new(&mm);
         let holes: Vec<_> = self
             .warnings
             .iter()
@@ -638,7 +632,7 @@ impl TypeChecked {
                 "  at {}:{} — inferred `{}`",
                 span.start_line,
                 span.start_col,
-                checker.format_type(ty),
+                types::format_type(ty),
             );
         }
         Err(err_type_hole!("{}", msg.trim_end()))
