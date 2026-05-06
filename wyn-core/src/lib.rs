@@ -1203,79 +1203,9 @@ impl EgirSkelOptimized {
     /// Terminal step: lower each per-body e-graph to SSA and assemble the
     /// final `SsaConverted`.
     pub fn elaborate(self) -> SsaConverted {
-        use egir::domtree::{DomTree, SkeletonCfgView};
-        use ssa::types::{BlockId, EntryPoint, Function};
-        use std::collections::HashMap as Map;
-
         let EgirSkelOptimized(inner) = self;
-
-        let functions: Vec<Function> = inner
-            .functions
-            .into_iter()
-            .map(|f| {
-                let body =
-                    elaborate_one_body(f.graph, &f.control_headers, &f.aliases, &f.params, f.return_ty);
-                Function {
-                    name: f.name,
-                    body,
-                    span: f.span,
-                    linkage_name: f.linkage_name,
-                }
-            })
-            .chain(inner.externs.into_iter())
-            .collect();
-
-        let entry_points: Vec<EntryPoint> = inner
-            .entry_points
-            .into_iter()
-            .map(|e| {
-                let body =
-                    elaborate_one_body(e.graph, &e.control_headers, &e.aliases, &e.params, e.return_ty);
-                EntryPoint {
-                    name: e.name,
-                    body,
-                    execution_model: e.execution_model,
-                    inputs: e.inputs,
-                    outputs: e.outputs,
-                    storage_bindings: e.storage_bindings,
-                    span: e.span,
-                }
-            })
-            .collect();
-
-        fn elaborate_one_body(
-            graph: egir::types::EGraph,
-            control_headers: &Map<BlockId, ssa::types::ControlHeader>,
-            aliases: &Map<egir::types::NodeId, egir::types::NodeId>,
-            params: &[(polytype::Type<ast::TypeName>, String)],
-            return_ty: polytype::Type<ast::TypeName>,
-        ) -> ssa::types::FuncBody {
-            let skel_domtree = DomTree::build(&SkeletonCfgView {
-                skeleton: &graph.skeleton,
-            });
-            let identity_map: Map<BlockId, BlockId> =
-                graph.skeleton.blocks.keys().map(|b| (b, b)).collect();
-            egir::elaborate::run(
-                &graph,
-                &skel_domtree,
-                params,
-                return_ty,
-                control_headers,
-                &identity_map,
-                aliases,
-            )
-        }
-
-        SsaConverted {
-            ssa: ssa::types::Program {
-                functions,
-                entry_points,
-                constants: inner.constants,
-                uniforms: inner.uniforms,
-                storage: inner.storage,
-            },
-            pipeline: inner.pipeline,
-        }
+        let (ssa, pipeline) = egir::elaborate::run_program(inner);
+        SsaConverted { ssa, pipeline }
     }
 }
 

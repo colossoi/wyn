@@ -11,18 +11,91 @@
 //!   unrelated CFG paths.
 
 use crate::ast::TypeName;
+use crate::pipeline_descriptor::PipelineDescriptor;
 use crate::ssa::builder::FuncBuilder;
 use crate::ssa::framework::BlockId as SkelBlockId;
-use crate::ssa::types::{BlockId, ControlHeader, FuncBody, InstKind, PlaceId, ValueId, ValueRef};
+use crate::ssa::types::{
+    BlockId, ControlHeader, EntryPoint, FuncBody, Function, InstKind, PlaceId, Program, ValueId, ValueRef,
+};
 use polytype::Type;
 use smallvec::SmallVec;
 use std::collections::HashMap;
 
-use super::domtree::DomTree;
+use super::domtree::{DomTree, SkeletonCfgView};
 use super::extract;
 use super::loop_analysis::LoopAnalysis;
+use super::program::EgirInner;
 use super::scoped_map::ScopedMap;
 use super::types::*;
+
+/// Lower the whole EGIR program to SSA. Each per-body EGraph is
+/// elaborated to a `FuncBody`, externs pass through, and the result is
+/// assembled into a single `ssa::types::Program`. The pipeline
+/// descriptor passes through unchanged.
+pub fn run_program(inner: EgirInner) -> (Program, PipelineDescriptor) {
+    let functions: Vec<Function> = inner
+        .functions
+        .into_iter()
+        .map(|f| {
+            let body = elaborate_one_body(f.graph, &f.control_headers, &f.aliases, &f.params, f.return_ty);
+            Function {
+                name: f.name,
+                body,
+                span: f.span,
+                linkage_name: f.linkage_name,
+            }
+        })
+        .chain(inner.externs.into_iter())
+        .collect();
+
+    let entry_points: Vec<EntryPoint> = inner
+        .entry_points
+        .into_iter()
+        .map(|e| {
+            let body = elaborate_one_body(e.graph, &e.control_headers, &e.aliases, &e.params, e.return_ty);
+            EntryPoint {
+                name: e.name,
+                body,
+                execution_model: e.execution_model,
+                inputs: e.inputs,
+                outputs: e.outputs,
+                storage_bindings: e.storage_bindings,
+                span: e.span,
+            }
+        })
+        .collect();
+
+    let program = Program {
+        functions,
+        entry_points,
+        constants: inner.constants,
+        uniforms: inner.uniforms,
+        storage: inner.storage,
+    };
+    (program, inner.pipeline)
+}
+
+fn elaborate_one_body(
+    graph: EGraph,
+    control_headers: &HashMap<BlockId, ControlHeader>,
+    aliases: &HashMap<NodeId, NodeId>,
+    params: &[(Type<TypeName>, String)],
+    return_ty: Type<TypeName>,
+) -> FuncBody {
+    let skel_domtree = DomTree::build(&SkeletonCfgView {
+        skeleton: &graph.skeleton,
+    });
+    let identity_map: HashMap<BlockId, BlockId> = graph.skeleton.blocks.keys().map(|b| (b, b)).collect();
+    run(
+        &graph,
+        &skel_domtree,
+        params,
+        return_ty,
+        control_headers,
+        &identity_map,
+        aliases,
+    )
+}
 
 /// Elaborate an EGraph back into a FuncBody.
 ///
