@@ -42,7 +42,12 @@ pub enum Purity {
 /// type-check time via unification.
 #[derive(Debug, Clone)]
 pub struct BuiltinOverload {
-    pub scheme: SchemeBuilder,
+    /// Optional scheme builder. `None` for overloads whose real
+    /// scheme comes from prelude module signatures (per-type ops
+    /// like `f32.add`) or for compiler-internal builtins that aren't
+    /// directly callable from user code (storage_index, etc.). The
+    /// type checker routes `None` to `module_schemes` by surface name.
+    pub scheme: Option<SchemeBuilder>,
     pub lowering: BuiltinLowering,
 }
 
@@ -178,16 +183,18 @@ impl BuiltinCatalog {
         Some(&def.overloads()[0].lowering)
     }
 
-    /// Invoke an overload's `SchemeBuilder` to produce a fresh
+    /// Invoke an overload's scheme builder to produce a fresh
     /// quantified `TypeScheme` against the supplied generator.
+    /// Returns `None` if the overload doesn't have an embedded scheme
+    /// builder — caller routes through prelude module signatures.
     pub fn build_scheme(
         &self,
         id: BuiltinId,
         overload_idx: usize,
         ctx: &mut dyn crate::type_checker::TypeVarGenerator,
-    ) -> crate::ast::TypeScheme {
+    ) -> Option<crate::ast::TypeScheme> {
         let def = self.get(id);
         let ovld = &def.raw.overloads[overload_idx];
-        (ovld.scheme)(ctx)
+        ovld.scheme.map(|f| f(ctx))
     }
 }

@@ -42,7 +42,7 @@ pub fn intrinsic_arity(name: &str) -> Option<usize> {
     let def = catalog().lookup_by_any_name(name)?;
     let overload = def.raw.overloads.first()?;
     let mut ctx = polytype::Context::<crate::ast::TypeName>::default();
-    let scheme = (overload.scheme)(&mut ctx);
+    let scheme = (overload.scheme?)(&mut ctx);
     let mut ty = &scheme;
     let monotype = loop {
         match ty {

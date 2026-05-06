@@ -368,14 +368,7 @@ fn walk_resolution(
             let full_name =
                 if quals.is_empty() { name.clone() } else { format!("{}.{}", quals.join("."), name) };
             if let Some(def) = catalog.lookup_by_surface_name(&full_name) {
-                // Only classify entries that publish a scheme. Per-type
-                // ops (`f32.+`, `f32.i32`, …) have empty
-                // `intrinsic_source_names` because their schemes come
-                // from prelude module signatures; the type checker
-                // resolves them via module lookup.
-                if !def.intrinsic_source_names().is_empty() {
-                    nr.values.insert(expr.h.id, ResolvedValueRef::Builtin(def.id));
-                }
+                nr.values.insert(expr.h.id, ResolvedValueRef::Builtin(def.id));
             }
         }
         ExprKind::Application(func, args) => {

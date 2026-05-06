@@ -629,11 +629,26 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Build a `SchemeLookup` from a `BuiltinId` by invoking each
-    /// overload's `SchemeBuilder` against the current context.
+    /// overload's scheme builder against the current context.
+    ///
+    /// Overloads whose scheme is `None` (per-type ops `f32.add`,
+    /// `f32.i32`, …) get their schemes from prelude module signatures;
+    /// route through `module_schemes` keyed by the catalog's surface
+    /// name.
     fn scheme_lookup_for_builtin(&mut self, id: crate::builtins::BuiltinId) -> SchemeLookup {
         let catalog = crate::builtins::catalog();
-        let schemes: Vec<TypeScheme> = (0..catalog.get(id).overloads().len())
-            .map(|i| catalog.build_scheme(id, i, &mut self.context))
+        let def = catalog.get(id);
+        let schemes: Vec<TypeScheme> = (0..def.overloads().len())
+            .map(|i| {
+                catalog.build_scheme(id, i, &mut self.context).unwrap_or_else(|| {
+                    self.module_schemes.get(def.raw.surface_name).cloned().unwrap_or_else(|| {
+                        panic!(
+                            "BUG: builtin {:?} (`{}`) has no scheme builder and no module_schemes entry",
+                            id, def.raw.surface_name
+                        )
+                    })
+                })
+            })
             .collect();
         if schemes.len() == 1 {
             SchemeLookup::Single(schemes.into_iter().next().unwrap())

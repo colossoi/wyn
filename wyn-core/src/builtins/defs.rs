@@ -34,7 +34,7 @@ macro_rules! vec_module_op {
             kind: BuiltinKind::ModuleBuiltin,
             purity: Purity::Pure,
             overloads: &[BuiltinOverload {
-                scheme: $scheme,
+                scheme: Some($scheme),
                 lowering: $lowering,
             }],
         }
@@ -52,7 +52,7 @@ macro_rules! polymorphic_intrinsic {
             kind: BuiltinKind::UserVisible,
             purity: Purity::Pure,
             overloads: &[BuiltinOverload {
-                scheme: $scheme,
+                scheme: Some($scheme),
                 lowering: $lowering,
             }],
         }
@@ -72,7 +72,7 @@ macro_rules! hof_intrinsic {
             kind: BuiltinKind::InternalIntrinsic,
             purity: $purity,
             overloads: &[BuiltinOverload {
-                scheme: $scheme,
+                scheme: Some($scheme),
                 lowering: BuiltinLowering::NotLowered,
             }],
         }
@@ -92,7 +92,7 @@ macro_rules! compiler_internal {
             kind: BuiltinKind::InternalIntrinsic,
             purity: $purity,
             overloads: &[BuiltinOverload {
-                scheme: dummy_scheme,
+                scheme: None,
                 lowering: BuiltinLowering::NotLowered,
             }],
         }
@@ -359,15 +359,15 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         purity: Purity::Pure,
         overloads: &[
             BuiltinOverload {
-                scheme: mat_x_mat,
+                scheme: Some(mat_x_mat),
                 lowering: BuiltinLowering::PrimOp(PrimOp::MatrixTimesMatrix),
             },
             BuiltinOverload {
-                scheme: mat_x_vec,
+                scheme: Some(mat_x_vec),
                 lowering: BuiltinLowering::PrimOp(PrimOp::MatrixTimesVector),
             },
             BuiltinOverload {
-                scheme: vec_x_mat,
+                scheme: Some(vec_x_mat),
                 lowering: BuiltinLowering::PrimOp(PrimOp::VectorTimesMatrix),
             },
         ],
@@ -388,7 +388,7 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         kind: BuiltinKind::UserVisible,
         purity: Purity::Pure,
         overloads: &[BuiltinOverload {
-            scheme: scalar_unary,
+            scheme: Some(scalar_unary),
             lowering: BuiltinLowering::PrimOp(PrimOp::GlslExt(6)),
         }],
     },
@@ -430,11 +430,11 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         purity: Purity::Pure,
         overloads: &[
             BuiltinOverload {
-                scheme: crate::builtins::scheme::scalar_ternary,
+                scheme: Some(crate::builtins::scheme::scalar_ternary),
                 lowering: BuiltinLowering::PrimOp(PrimOp::GlslExt(43)),
             },
             BuiltinOverload {
-                scheme: vec_clamp_scalar_lohi,
+                scheme: Some(vec_clamp_scalar_lohi),
                 lowering: BuiltinLowering::PrimOp(PrimOp::GlslExt(43)),
             },
         ],
@@ -447,11 +447,11 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         purity: Purity::Pure,
         overloads: &[
             BuiltinOverload {
-                scheme: crate::builtins::scheme::scalar_ternary,
+                scheme: Some(crate::builtins::scheme::scalar_ternary),
                 lowering: BuiltinLowering::PrimOp(PrimOp::GlslExt(46)),
             },
             BuiltinOverload {
-                scheme: vec_mix_scalar_interp,
+                scheme: Some(vec_mix_scalar_interp),
                 lowering: BuiltinLowering::PrimOp(PrimOp::GlslExt(46)),
             },
         ],
@@ -464,11 +464,11 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         purity: Purity::Pure,
         overloads: &[
             BuiltinOverload {
-                scheme: crate::builtins::scheme::scalar_ternary,
+                scheme: Some(crate::builtins::scheme::scalar_ternary),
                 lowering: BuiltinLowering::PrimOp(PrimOp::GlslExt(49)),
             },
             BuiltinOverload {
-                scheme: vec_smoothstep_scalar_edges,
+                scheme: Some(vec_smoothstep_scalar_edges),
                 lowering: BuiltinLowering::PrimOp(PrimOp::GlslExt(49)),
             },
         ],
@@ -481,7 +481,7 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         kind: BuiltinKind::InternalIntrinsic,
         purity: Purity::Pure,
         overloads: &[BuiltinOverload {
-            scheme: array_to_i32,
+            scheme: Some(array_to_i32),
             lowering: BuiltinLowering::Intrinsic(crate::builtins::lowering::Intrinsic::Length),
         }],
     },
@@ -492,7 +492,7 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         kind: BuiltinKind::InternalIntrinsic,
         purity: Purity::Pure,
         overloads: &[BuiltinOverload {
-            scheme: unit_to_t,
+            scheme: Some(unit_to_t),
             lowering: BuiltinLowering::Intrinsic(crate::builtins::lowering::Intrinsic::Uninit),
         }],
     },
@@ -503,7 +503,7 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         kind: BuiltinKind::InternalIntrinsic,
         purity: Purity::Pure,
         overloads: &[BuiltinOverload {
-            scheme: crate::builtins::scheme::array_index_value_to_array,
+            scheme: Some(crate::builtins::scheme::array_index_value_to_array),
             lowering: BuiltinLowering::Intrinsic(crate::builtins::lowering::Intrinsic::ArrayWith),
         }],
     },
@@ -514,7 +514,7 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         kind: BuiltinKind::InternalIntrinsic,
         purity: Purity::Effectful,
         overloads: &[BuiltinOverload {
-            scheme: crate::builtins::scheme::array_index_value_to_array,
+            scheme: Some(crate::builtins::scheme::array_index_value_to_array),
             lowering: BuiltinLowering::Intrinsic(crate::builtins::lowering::Intrinsic::ArrayWithInPlace),
         }],
     },
@@ -601,10 +601,6 @@ fn leak_one(a: &'static str) -> &'static [&'static str] {
     Box::leak(Box::new([a]))
 }
 
-fn dummy_scheme(_: &mut dyn crate::type_checker::TypeVarGenerator) -> crate::ast::TypeScheme {
-    crate::ast::TypeScheme::Monotype(crate::ast::Type::Constructed(crate::ast::TypeName::Unit, vec![]))
-}
-
 fn per_type_op(ty: &str, op: &str, internal_op: &str, lowering: BuiltinLowering) -> BuiltinDefRaw {
     let surface = leak_str(format!("{}.{}", ty, op));
     let internal = leak_str(format!("_w_intrinsic_{}_{}", internal_op, ty));
@@ -615,7 +611,7 @@ fn per_type_op(ty: &str, op: &str, internal_op: &str, lowering: BuiltinLowering)
         kind: BuiltinKind::Operator,
         purity: Purity::Pure,
         overloads: Box::leak(Box::new([BuiltinOverload {
-            scheme: dummy_scheme,
+            scheme: None,
             lowering,
         }])),
     }
@@ -631,7 +627,7 @@ fn per_type_conv(ty: &str, source_ty: &str, lowering: BuiltinLowering) -> Builti
         kind: BuiltinKind::ModuleBuiltin,
         purity: Purity::Pure,
         overloads: Box::leak(Box::new([BuiltinOverload {
-            scheme: dummy_scheme,
+            scheme: None,
             lowering,
         }])),
     }
@@ -647,7 +643,7 @@ fn intrinsic_only(name: &'static str, lowering: BuiltinLowering) -> BuiltinDefRa
         kind: BuiltinKind::InternalIntrinsic,
         purity: Purity::Pure,
         overloads: Box::leak(Box::new([BuiltinOverload {
-            scheme: dummy_scheme,
+            scheme: None,
             lowering,
         }])),
     }
