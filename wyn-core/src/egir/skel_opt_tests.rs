@@ -339,7 +339,7 @@ fn optimize_skeleton_cascades_fold_into_phi_elim() {
         args: vec![x],
     };
 
-    let aliases = run(&mut graph);
+    let aliases = run_one_body(&mut graph);
 
     assert!(matches!(
         &graph.skeleton.blocks[entry].term,
@@ -375,7 +375,7 @@ fn optimize_skeleton_alias_closure_invariant() {
     };
     graph.skeleton.blocks[b].term = SkeletonTerminator::Return(Some(p2));
 
-    let aliases = run(&mut graph);
+    let aliases = run_one_body(&mut graph);
 
     assert!(graph.skeleton.blocks[a].params.is_empty());
     assert!(graph.skeleton.blocks[b].params.is_empty());
@@ -422,7 +422,7 @@ fn phi_elim_leaves_block_alone_when_unreachable_post_fold() {
         else_args: vec![lit],
     };
 
-    let aliases = run(&mut graph);
+    let aliases = run_one_body(&mut graph);
 
     // Fold fires: entry is now Branch(a).
     assert!(matches!(
@@ -474,7 +474,7 @@ fn phi_elim_preserves_loop_header_param() {
     };
     graph.skeleton.blocks[exit].term = SkeletonTerminator::Return(Some(acc));
 
-    let aliases = run(&mut graph);
+    let aliases = run_one_body(&mut graph);
 
     assert!(
         aliases.is_empty(),

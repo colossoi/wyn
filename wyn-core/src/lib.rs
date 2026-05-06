@@ -1185,28 +1185,18 @@ impl EgirSoacExpanded {
     }
 
     pub fn optimize_skeleton(self) -> EgirSkelOptimized {
-        let EgirSoacExpanded(inner) = self;
-        EgirSkelOptimized(egir_optimize_skeleton(inner))
+        let EgirSoacExpanded(mut inner) = self;
+        egir::skel_opt::run(&mut inner);
+        EgirSkelOptimized(inner)
     }
 }
 
 impl EgirMaterialized {
     pub fn optimize_skeleton(self) -> EgirSkelOptimized {
-        let EgirMaterialized(inner) = self;
-        EgirSkelOptimized(egir_optimize_skeleton(inner))
+        let EgirMaterialized(mut inner) = self;
+        egir::skel_opt::run(&mut inner);
+        EgirSkelOptimized(inner)
     }
-}
-
-fn egir_optimize_skeleton(mut inner: EgirInner) -> EgirInner {
-    for f in &mut inner.functions {
-        let new_aliases = egir::skel_opt::run(&mut f.graph);
-        f.aliases.extend(new_aliases);
-    }
-    for e in &mut inner.entry_points {
-        let new_aliases = egir::skel_opt::run(&mut e.graph);
-        e.aliases.extend(new_aliases);
-    }
-    inner
 }
 
 impl EgirSkelOptimized {

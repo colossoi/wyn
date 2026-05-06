@@ -25,11 +25,25 @@ use std::collections::HashMap;
 
 use crate::ssa::types::ConstantValue;
 
+use super::program::EgirInner;
 use super::types::{EGraph, ENode, NodeId, PureOp, SkeletonTerminator};
+
+/// Run skeleton rewrites on every function and entry point in the program,
+/// extending each body's alias map with the freshly stripped block params.
+pub fn run(inner: &mut EgirInner) {
+    for f in &mut inner.functions {
+        let new_aliases = run_one_body(&mut f.graph);
+        f.aliases.extend(new_aliases);
+    }
+    for e in &mut inner.entry_points {
+        let new_aliases = run_one_body(&mut e.graph);
+        e.aliases.extend(new_aliases);
+    }
+}
 
 /// Run all enabled skeleton rewrites to fixpoint. Returns an alias map
 /// mapping stripped block-param NodeIds to their replacement NodeIds.
-pub fn run(graph: &mut EGraph) -> HashMap<NodeId, NodeId> {
+pub fn run_one_body(graph: &mut EGraph) -> HashMap<NodeId, NodeId> {
     let mut aliases: HashMap<NodeId, NodeId> = HashMap::new();
     loop {
         // Phase order: fold first, phi-elim second. Folding can shrink a

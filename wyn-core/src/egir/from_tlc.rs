@@ -822,7 +822,7 @@ impl<'a> Converter<'a> {
     ) -> Option<FuncBody> {
         let (mut graph, mut control_headers) = self.into_graph_parts();
         super::soac_expand::run_one_body(&mut graph, &mut control_headers, true);
-        let aliases = super::skel_opt::run(&mut graph);
+        let aliases = super::skel_opt::run_one_body(&mut graph);
         let skel_domtree = super::domtree::DomTree::build(&super::domtree::SkeletonCfgView {
             skeleton: &graph.skeleton,
         });
