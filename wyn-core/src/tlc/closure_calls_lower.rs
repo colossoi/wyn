@@ -18,7 +18,7 @@
 //! This module owns the architectural seam.
 
 use super::{Program, Term, TermKind};
-use crate::SymbolId;
+use crate::{SymbolId, SymbolTable};
 use std::collections::HashMap;
 
 #[derive(Debug)]
@@ -42,12 +42,14 @@ pub enum ClosureCallsLowerError {
 }
 
 pub fn verify_closure_calls_lowered(program: &Program) -> Result<(), ClosureCallsLowerError> {
-    // Build an arity map for direct-call targets. Intrinsics and
-    // anything not in `program.defs` are skipped — backends own their
-    // own arity expectations for those.
+    // Build an arity map for direct-call targets. Intrinsics not in
+    // `program.defs` fall back to `builtins::intrinsic_arity` (the
+    // catalog-derived arity for each builtin). Targets the catalog
+    // doesn't know about are skipped — those are operator dispatch
+    // helpers whose arity is enforced by the backend.
     let arities: HashMap<SymbolId, usize> = program.defs.iter().map(|d| (d.name, d.arity)).collect();
     for def in &program.defs {
-        walk(&def.body, def.name, &arities)?;
+        walk(&def.body, def.name, &arities, &program.symbols)?;
     }
     Ok(())
 }
@@ -56,6 +58,7 @@ fn walk(
     term: &Term,
     def: SymbolId,
     arities: &HashMap<SymbolId, usize>,
+    symbols: &SymbolTable,
 ) -> Result<(), ClosureCallsLowerError> {
     if let TermKind::App { func, args } = &term.kind {
         if !is_static_func(&func.kind) {
@@ -65,7 +68,11 @@ fn walk(
             });
         }
         if let TermKind::Var(target) = &func.kind {
-            if let Some(&expected) = arities.get(target) {
+            let expected = arities
+                .get(target)
+                .copied()
+                .or_else(|| symbols.get(*target).and_then(|name| crate::builtins::intrinsic_arity(name)));
+            if let Some(expected) = expected {
                 if expected != args.len() {
                     return Err(ClosureCallsLowerError::ArityMismatch {
                         def,
@@ -80,7 +87,7 @@ fn walk(
     let mut result = Ok(());
     term.for_each_child(&mut |child| {
         if result.is_ok() {
-            result = walk(child, def, arities);
+            result = walk(child, def, arities, symbols);
         }
     });
     result
