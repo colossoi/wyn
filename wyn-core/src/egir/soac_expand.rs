@@ -12,6 +12,7 @@ use crate::ssa::framework::BlockId;
 use polytype::Type;
 use smallvec::{SmallVec, smallvec};
 
+use super::program::EgirInner;
 use super::types::EffectToken;
 use crate::ast::TypeName;
 use crate::intrinsics::{INTRINSIC_ARRAY_WITH_INPLACE, INTRINSIC_LENGTH, INTRINSIC_UNINIT};
@@ -24,13 +25,29 @@ use super::types::{
     SoacDestination,
 };
 
+/// Run `run_one_body` on every function and entry point in the program.
+///
+/// `unroll_maps`: see `run_one_body`.
+pub fn run(inner: &mut EgirInner, unroll_maps: bool) {
+    for f in &mut inner.functions {
+        run_one_body(&mut f.graph, &mut f.control_headers, unroll_maps);
+    }
+    for e in &mut inner.entry_points {
+        run_one_body(&mut e.graph, &mut e.control_headers, unroll_maps);
+    }
+}
+
 /// Expand every `SideEffectKind::Pending(PendingSoac::...)` in the skeleton.
 ///
 /// `unroll_maps`: when true, Map over statically-sized arrays up to 16
 /// elements is unrolled into straight-line code. GLSL targets pass `false`
 /// (the GLSL structurizer prefers explicit loops; GLSL drivers unroll on
 /// their own).
-pub fn run(graph: &mut EGraph, control_headers: &mut HashMap<BlockId, ControlHeader>, unroll_maps: bool) {
+pub fn run_one_body(
+    graph: &mut EGraph,
+    control_headers: &mut HashMap<BlockId, ControlHeader>,
+    unroll_maps: bool,
+) {
     // Collect (block, index) of every handleable Soac in a stable order.
     // Process back-to-front within each block so earlier indices stay valid.
     let mut targets: Vec<(BlockId, usize)> = Vec::new();

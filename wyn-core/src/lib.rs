@@ -1172,12 +1172,7 @@ impl EgirRaw {
     /// (where drivers unroll themselves and the structurizer prefers loops).
     pub fn expand_soacs(self, unroll_maps: bool) -> EgirSoacExpanded {
         let EgirRaw(mut inner) = self;
-        for f in &mut inner.functions {
-            egir::soac_expand::run(&mut f.graph, &mut f.control_headers, unroll_maps);
-        }
-        for e in &mut inner.entry_points {
-            egir::soac_expand::run(&mut e.graph, &mut e.control_headers, unroll_maps);
-        }
+        egir::soac_expand::run(&mut inner, unroll_maps);
         EgirSoacExpanded(inner)
     }
 }
