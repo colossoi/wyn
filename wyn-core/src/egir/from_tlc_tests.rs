@@ -376,6 +376,32 @@ fn rewrite_map_scan_to_into_panics_on_reduce() {
 }
 
 #[test]
+#[should_panic(expected = "runtime-sized array")]
+fn emit_compute_output_stores_panics_on_unsized_array() {
+    use super::emit_compute_output_stores;
+    use crate::ssa::types::EntryOutput;
+
+    // Build a runtime-sized array type: [n]f32 where n is a free variable.
+    let f32_ty = Type::Constructed(TypeName::Float(32), vec![]);
+    let unsized_arr_ty = Type::Constructed(TypeName::Array, vec![f32_ty.clone(), Type::Variable(99)]);
+
+    let symbols = crate::SymbolTable::new();
+    let top_level = HashMap::new();
+    let constants_by_name = HashMap::new();
+    let mut converter = Converter::new(&top_level, &constants_by_name, &symbols, HashSet::new());
+
+    let result_nid = converter.graph.alloc_side_effect_result(unsized_arr_ty.clone());
+
+    let outputs = vec![EntryOutput {
+        ty: unsized_arr_ty,
+        decoration: None,
+        storage_binding: Some((0, 1)),
+    }];
+
+    emit_compute_output_stores(&mut converter, result_nid, &outputs);
+}
+
+#[test]
 #[should_panic(expected = "no side effect produced")]
 fn rewrite_map_scan_to_into_panics_when_target_missing() {
     use super::rewrite_map_scan_to_into;

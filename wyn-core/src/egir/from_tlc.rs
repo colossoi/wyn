@@ -599,6 +599,17 @@ fn emit_compute_output_stores(
                 let idx_nid = converter.intern_u32(j as u32);
                 converter.emit_storage_store(view_nid, idx_nid, elem_nid, et.clone());
             }
+        } else if is_unsized_array(&output.ty) {
+            // A runtime-sized array reached the explicit-store fallback —
+            // this means a SOAC rewrite (Map/Scan→OutputView) was expected
+            // upstream but didn't happen. Storing the whole view at idx=0
+            // would emit nonsense; surface the contract violation instead.
+            panic!(
+                "compute output #{} is a runtime-sized array ({:?}) but \
+                 reached emit_compute_output_stores: the producing SOAC \
+                 must rewrite to OutputView upstream",
+                i, output.ty
+            );
         } else {
             let view_nid = converter.emit_storage_view(set, binding, output.ty.clone());
             let idx_zero = converter.intern_u32(0);
