@@ -1138,6 +1138,18 @@ impl<'a> Defunctionalizer<'a> {
 pub fn run(program: Program, known_defs: &HashSet<String>) -> Program {
     let result = Defunctionalizer::run(program, known_defs);
     result.assert_flat_apps();
+    super::closure_convert::verify_closure_converted(&result).unwrap_or_else(|e| {
+        panic!(
+            "closure-conversion verifier failed after defunctionalize: {:?}",
+            e
+        )
+    });
+    super::closure_calls_lower::verify_closure_calls_lowered(&result).unwrap_or_else(|e| {
+        panic!(
+            "closure-calls-lowered verifier failed after defunctionalize: {:?}",
+            e
+        )
+    });
     result
 }
 
