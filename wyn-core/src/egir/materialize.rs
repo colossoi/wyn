@@ -19,12 +19,22 @@ use smallvec::smallvec;
 
 use crate::ssa::types::ConstantValue;
 
+use super::program::EgirInner;
 use super::types::{EGraph, ENode, NodeId, PureOp};
 
+/// Run `run_one_body` on every function and entry point in the program.
+pub(crate) fn run(inner: &mut EgirInner) {
+    for f in &mut inner.functions {
+        run_one_body(&mut f.graph);
+    }
+    for e in &mut inner.entry_points {
+        run_one_body(&mut e.graph);
+    }
+}
+
 /// Rewrite all dynamic Index nodes in the e-graph to Materialize +
-/// DynamicExtract. Called by the typestate transition
-/// `EGraphSoacExpanded::materialize`.
-pub(crate) fn run(graph: &mut EGraph) {
+/// DynamicExtract.
+pub(crate) fn run_one_body(graph: &mut EGraph) {
     // Snapshot first; we'll mutate node entries and add new Materialize nodes.
     let targets: Vec<(NodeId, NodeId, NodeId)> = graph
         .nodes

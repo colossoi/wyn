@@ -1180,12 +1180,7 @@ impl EgirRaw {
 impl EgirSoacExpanded {
     pub fn materialize(self) -> EgirMaterialized {
         let EgirSoacExpanded(mut inner) = self;
-        for f in &mut inner.functions {
-            egir::materialize::run(&mut f.graph);
-        }
-        for e in &mut inner.entry_points {
-            egir::materialize::run(&mut e.graph);
-        }
+        egir::materialize::run(&mut inner);
         EgirMaterialized(inner)
     }
 
