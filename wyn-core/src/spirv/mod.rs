@@ -8,8 +8,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::Span;
 use crate::ast::TypeName;
+use crate::builtins::lowering::{BuiltinLowering, PrimOp};
 use crate::error::Result;
-use crate::impl_source::{BuiltinImpl, PrimOp};
 use crate::ssa::layout::{buffer_array_strides, type_byte_size};
 use crate::ssa::types::{
     BlockId, ConstantValue, ControlHeader, FuncBody, InstKind, Terminator, ValueId, ValueRef, ViewSource,
@@ -1295,7 +1295,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 let arg_ids: Vec<_> = args.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
 
                 // Check if it's a builtin function first
-                if let Some(builtin_impl) = crate::builtins::catalog().lookup_impl(func) {
+                if let Some(builtin_impl) = crate::builtins::catalog().lookup_lowering(func) {
                     self.lower_builtin_call(builtin_impl, args, &arg_ids, result_ty)?
                 } else if let Some(&func_id) = self.constructor.functions.get(func) {
                     // User-defined function
@@ -2539,24 +2539,24 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
 
     fn lower_builtin_call(
         &mut self,
-        builtin: BuiltinImpl,
+        builtin: &BuiltinLowering,
         value_refs: &[ValueRef],
         arg_ids: &[spirv::Word],
         result_ty: spirv::Word,
     ) -> Result<spirv::Word> {
         match builtin {
-            BuiltinImpl::PrimOp(prim_op) => self.lower_primop(prim_op, arg_ids, result_ty),
-            BuiltinImpl::LinkedSpirv(linkage_name) => {
+            BuiltinLowering::PrimOp(prim_op) => self.lower_primop(prim_op, arg_ids, result_ty),
+            BuiltinLowering::LinkedSpirv(linkage_name) => {
                 let func_id = self
                     .constructor
                     .linked_functions
-                    .get(&linkage_name)
+                    .get(*linkage_name)
                     .copied()
                     .ok_or_else(|| err_spirv!("Unknown linked function: {}", linkage_name))?;
                 Ok(self.constructor.builder.function_call(result_ty, None, func_id, arg_ids.to_vec())?)
             }
-            BuiltinImpl::Intrinsic(intrinsic) => {
-                use crate::impl_source::Intrinsic;
+            BuiltinLowering::Intrinsic(intrinsic) => {
+                use crate::builtins::lowering::Intrinsic;
                 match intrinsic {
                     Intrinsic::Placeholder => {
                         bail_spirv!("Placeholder intrinsic should not reach lowering")
@@ -2646,7 +2646,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
 
     fn lower_primop(
         &mut self,
-        prim_op: PrimOp,
+        prim_op: &PrimOp,
         arg_ids: &[spirv::Word],
         result_ty: spirv::Word,
     ) -> Result<spirv::Word> {
@@ -2655,7 +2655,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
 
         match prim_op {
             PrimOp::GlslExt(ext_op) => {
-                Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, ext_op, operands)?)
+                Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, *ext_op, operands)?)
             }
             PrimOp::Dot => {
                 if arg_ids.len() != 2 {

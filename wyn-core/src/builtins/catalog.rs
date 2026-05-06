@@ -161,14 +161,21 @@ impl BuiltinCatalog {
         &self.defs[id.as_index()]
     }
 
-    /// Resolve a name to a `BuiltinImpl` shape consumable by the
-    /// backend code-gen tables. Returns `None` if the name isn't in
-    /// the catalog. Uses the first overload's lowering — adequate for
-    /// per-type ops where overloads share lowering, and for
-    /// polymorphic intrinsics that have a single overload.
-    pub fn lookup_impl(&self, name: &str) -> Option<crate::impl_source::BuiltinImpl> {
+    /// Resolve a name to its backend lowering. Uses the first overload's
+    /// lowering — adequate for per-type ops where overloads share
+    /// lowering, and for polymorphic intrinsics that have a single
+    /// overload.
+    ///
+    /// TODO: this silently picks overload 0 with no diagnostic. Today
+    /// every multi-overload entry has matching lowerings (or has only
+    /// one overload), so this is correct in practice — but the
+    /// invariant isn't enforced. Fix by either (a) asserting at catalog
+    /// construction that all overloads of an entry share lowering, or
+    /// (b) threading the overload index from the type checker through
+    /// the IR so backends look up `overloads[idx]` directly.
+    pub fn lookup_lowering(&self, name: &str) -> Option<&crate::builtins::lowering::BuiltinLowering> {
         let def = self.lookup_by_any_name(name)?;
-        Some(def.overloads()[0].lowering.to_builtin_impl())
+        Some(&def.overloads()[0].lowering)
     }
 
     /// Invoke an overload's `SchemeBuilder` to produce a fresh

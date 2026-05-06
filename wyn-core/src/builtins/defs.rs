@@ -1,12 +1,12 @@
 use crate::builtins::catalog::{BuiltinDefRaw, BuiltinKind, BuiltinOverload, Purity};
 use crate::builtins::lowering::BuiltinLowering;
+use crate::builtins::lowering::PrimOp;
 use crate::builtins::scheme::{
     array_to_i32, mat_square_to_mat, mat_square_to_scalar, mat_x_mat, mat_x_vec, scalar_unary, unit_to_t,
     vec_binary_same, vec_binary_to_scalar, vec_clamp_scalar_lohi, vec_mix_scalar_interp,
     vec_smoothstep_scalar_edges, vec_ternary_same, vec_to_scalar, vec_unary_same, vec_vec_outer,
     vec_vec_scalar_to_vec, vec_x_mat, vec3f32_binary,
 };
-use crate::impl_source::PrimOp;
 use crate::intrinsics::{
     INTRINSIC_ABS, INTRINSIC_ARRAY_WITH, INTRINSIC_ARRAY_WITH_INPLACE, INTRINSIC_CEIL, INTRINSIC_CLAMP,
     INTRINSIC_COS, INTRINSIC_CROSS, INTRINSIC_DETERMINANT, INTRINSIC_DISTANCE, INTRINSIC_DOT,
@@ -73,7 +73,7 @@ macro_rules! hof_intrinsic {
             purity: $purity,
             overloads: &[BuiltinOverload {
                 scheme: $scheme,
-                lowering: BuiltinLowering::Intrinsic(crate::impl_source::Intrinsic::Placeholder),
+                lowering: BuiltinLowering::Intrinsic(crate::builtins::lowering::Intrinsic::Placeholder),
             }],
         }
     };
@@ -93,7 +93,7 @@ macro_rules! compiler_internal {
             purity: $purity,
             overloads: &[BuiltinOverload {
                 scheme: dummy_scheme,
-                lowering: BuiltinLowering::Intrinsic(crate::impl_source::Intrinsic::Placeholder),
+                lowering: BuiltinLowering::Intrinsic(crate::builtins::lowering::Intrinsic::Placeholder),
             }],
         }
     };
@@ -482,7 +482,7 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         purity: Purity::Pure,
         overloads: &[BuiltinOverload {
             scheme: array_to_i32,
-            lowering: BuiltinLowering::Intrinsic(crate::impl_source::Intrinsic::Length),
+            lowering: BuiltinLowering::Intrinsic(crate::builtins::lowering::Intrinsic::Length),
         }],
     },
     BuiltinDefRaw {
@@ -493,7 +493,7 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         purity: Purity::Pure,
         overloads: &[BuiltinOverload {
             scheme: unit_to_t,
-            lowering: BuiltinLowering::Intrinsic(crate::impl_source::Intrinsic::Uninit),
+            lowering: BuiltinLowering::Intrinsic(crate::builtins::lowering::Intrinsic::Uninit),
         }],
     },
     BuiltinDefRaw {
@@ -504,7 +504,7 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         purity: Purity::Pure,
         overloads: &[BuiltinOverload {
             scheme: crate::builtins::scheme::array_index_value_to_array,
-            lowering: BuiltinLowering::Intrinsic(crate::impl_source::Intrinsic::ArrayWith),
+            lowering: BuiltinLowering::Intrinsic(crate::builtins::lowering::Intrinsic::ArrayWith),
         }],
     },
     BuiltinDefRaw {
@@ -515,7 +515,7 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         purity: Purity::Effectful,
         overloads: &[BuiltinOverload {
             scheme: crate::builtins::scheme::array_index_value_to_array,
-            lowering: BuiltinLowering::Intrinsic(crate::impl_source::Intrinsic::ArrayWithInPlace),
+            lowering: BuiltinLowering::Intrinsic(crate::builtins::lowering::Intrinsic::ArrayWithInPlace),
         }],
     },
     // ---- HOF / SOAC intrinsics: scheme only, lowered earlier in the pipeline ----

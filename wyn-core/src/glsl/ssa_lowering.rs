@@ -8,8 +8,8 @@
 mod ssa_lowering_tests;
 
 use crate::ast::{Span, TypeName};
+use crate::builtins::lowering::{BuiltinLowering, Intrinsic, PrimOp};
 use crate::error::Result;
-use crate::impl_source::{BuiltinImpl, Intrinsic, PrimOp};
 use crate::intrinsics::{INTRINSIC_ARRAY_WITH, INTRINSIC_ARRAY_WITH_INPLACE, INTRINSIC_UNINIT};
 use crate::lowering_common::ShaderStage;
 use crate::ssa::types::{ConstantValue, FuncBody, InstKind, ValueId, ValueRef, WynInstNode};
@@ -541,7 +541,7 @@ impl<'a> LowerCtx<'a> {
                 let inst = body.get_inst(inst_id);
                 if let InstKind::Call { func, .. } = &inst.data {
                     if self.func_index.contains_key(func)
-                        && crate::builtins::catalog().lookup_impl(func).is_none()
+                        && crate::builtins::catalog().lookup_lowering(func).is_none()
                     {
                         self.collect_deps_recursive(func, deps, visited)?;
                     }
@@ -1191,7 +1191,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 let arg_strs = arg_strs?;
 
                 // Check if it's a builtin
-                if let Some(impl_) = crate::builtins::catalog().lookup_impl(func) {
+                if let Some(impl_) = crate::builtins::catalog().lookup_lowering(func) {
                     self.lower_builtin_call(&impl_, &arg_strs, result_ty.expect("Call must have result"))
                 } else {
                     let mangled = self.ctx.glsl_mangle_tracked(func)?;
@@ -1420,13 +1420,13 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
 
     fn lower_builtin_call(
         &mut self,
-        impl_: &BuiltinImpl,
+        impl_: &BuiltinLowering,
         args: &[String],
         ret_ty: &PolyType<TypeName>,
     ) -> Result<String> {
         match impl_ {
-            BuiltinImpl::PrimOp(op) => self.lower_primop(op, args, ret_ty),
-            BuiltinImpl::Intrinsic(intr) => match intr {
+            BuiltinLowering::PrimOp(op) => self.lower_primop(op, args, ret_ty),
+            BuiltinLowering::Intrinsic(intr) => match intr {
                 Intrinsic::Length => Ok(format!("int({}.length())", args[0])),
                 Intrinsic::Uninit | Intrinsic::ArrayWith | Intrinsic::ArrayWithInPlace => {
                     bail_glsl_at!(
@@ -1437,7 +1437,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 }
                 _ => bail_glsl_at!(self.blame_span(), "Intrinsic {:?} not supported in GLSL", intr),
             },
-            BuiltinImpl::LinkedSpirv(name) => {
+            BuiltinLowering::LinkedSpirv(name) => {
                 bail_glsl_at!(
                     self.blame_span(),
                     "Linked SPIR-V function '{}' not supported in GLSL",
@@ -1521,7 +1521,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         ret_ty: &PolyType<TypeName>,
     ) -> Result<String> {
         // Catalog-driven dispatch for `_w_intrinsic_*` builtins.
-        if let Some(impl_) = crate::builtins::catalog().lookup_impl(name) {
+        if let Some(impl_) = crate::builtins::catalog().lookup_lowering(name) {
             return self.lower_builtin_call(&impl_, args, ret_ty);
         }
         bail_glsl_at!(self.blame_span(), "Unknown intrinsic: {}", name)

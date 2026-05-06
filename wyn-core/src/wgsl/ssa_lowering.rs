@@ -16,8 +16,8 @@ use std::fmt::Write as _;
 use polytype::Type as PolyType;
 
 use crate::ast::{Span, TypeName};
+use crate::builtins::lowering::{BuiltinLowering, PrimOp};
 use crate::error::Result;
-use crate::impl_source::{BuiltinImpl, PrimOp};
 use crate::intrinsics::{
     INTRINSIC_ARRAY_WITH, INTRINSIC_ARRAY_WITH_INPLACE, INTRINSIC_LENGTH, INTRINSIC_SLICE,
     INTRINSIC_STORAGE_LEN, INTRINSIC_THREAD_ID, INTRINSIC_UNINIT,
@@ -1951,7 +1951,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 let raw_strs: Result<Vec<_>> = args.iter().map(|a| self.get_value(*a)).collect();
                 let raw_strs = raw_strs?;
                 // Structural dispatch first: if this name is registered
-                // in `impl_source`, route through the `BuiltinImpl` so
+                // in `impl_source`, route through the `BuiltinLowering` so
                 // the qualifier prefix doesn't matter (`f32.cos`,
                 // `vec.cos`, `_w_intrinsic_cos` all share a `PrimOp`).
                 if let Some(lowered) =
@@ -2300,12 +2300,12 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         args: &[String],
         result_ty: Option<&PolyType<TypeName>>,
     ) -> Result<Option<String>> {
-        let Some(builtin) = crate::builtins::catalog().lookup_impl(name) else {
+        let Some(builtin) = crate::builtins::catalog().lookup_lowering(name) else {
             return Ok(None);
         };
         let prim_op = match builtin {
-            BuiltinImpl::PrimOp(p) => p,
-            BuiltinImpl::LinkedSpirv(_) | BuiltinImpl::Intrinsic(_) => return Ok(None),
+            BuiltinLowering::PrimOp(p) => p,
+            BuiltinLowering::LinkedSpirv(_) | BuiltinLowering::Intrinsic(_) => return Ok(None),
         };
         let result_ty_str = match result_ty {
             Some(ty) => Some(self.ctx.type_emitter.type_to_wgsl(ty)?),
@@ -2315,9 +2315,9 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
     }
 }
 
-/// Lower a `BuiltinImpl::PrimOp` to its WGSL expression. Mirrors the
+/// Lower a `BuiltinLowering::PrimOp` to its WGSL expression. Mirrors the
 /// SPIR-V backend's `lower_primop` — both backends consume the same
-/// `BuiltinImpl` map from `impl_source`, so the qualifier prefix on the
+/// `BuiltinLowering` map from `impl_source`, so the qualifier prefix on the
 /// surface name (`f32.cos`, `vec.cos`, `_w_intrinsic_cos`) is invisible
 /// here: only the structural `PrimOp` matters.
 ///
