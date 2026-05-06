@@ -160,7 +160,7 @@ impl<'a> GraphBuilder<'a> {
 
         // For App nodes, check if the callee has a known summary
         if let TermKind::App { func, args } = &term.kind {
-            if let TermKind::Var(callee_sym) = &func.kind {
+            if let TermKind::Var(crate::tlc::VarRef::Symbol(callee_sym)) = &func.kind {
                 // Resolve call-site symbol to canonical def symbol
                 let def_sym = self.sym_to_def.get(callee_sym).unwrap_or(callee_sym);
                 if let Some(summary) = self.summaries.get(def_sym) {
@@ -189,7 +189,11 @@ impl<'a> GraphBuilder<'a> {
             .iter()
             .zip(call_args)
             .filter_map(|((param_sym, _), arg)| {
-                if let TermKind::Var(arg_sym) = &arg.kind { Some((*param_sym, *arg_sym)) } else { None }
+                if let TermKind::Var(crate::tlc::VarRef::Symbol(arg_sym)) = &arg.kind {
+                    Some((*param_sym, *arg_sym))
+                } else {
+                    None
+                }
             })
             .collect();
 
@@ -249,7 +253,7 @@ impl<'a> GraphBuilder<'a> {
             .enumerate()
             .filter_map(|(i, ae)| {
                 if let super::ArrayExpr::Ref(t) = ae {
-                    if let TermKind::Var(sym) = &t.kind {
+                    if let TermKind::Var(crate::tlc::VarRef::Symbol(sym)) = &t.kind {
                         return Some((i, *sym));
                     }
                 }

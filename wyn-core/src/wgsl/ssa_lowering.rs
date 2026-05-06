@@ -1983,7 +1983,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             }
 
             InstKind::Intrinsic { id, args } => {
-                let name = crate::builtins::catalog().get(*id).dispatch_name();
+                let name = crate::builtins::by_id(*id).dispatch_name();
                 let arg_strs: Result<Vec<_>> = args.iter().map(|a| self.get_value(*a)).collect();
                 let arg_strs = arg_strs?;
                 // `_w_intrinsic_storage_len(set, binding)` → runtime

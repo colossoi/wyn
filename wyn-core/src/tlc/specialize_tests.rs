@@ -52,14 +52,14 @@ fn test_specialize_sign_f32() {
         id: b.next_id(),
         ty: f32_ty.clone(),
         span: b.span(),
-        kind: TermKind::Var(x_sym),
+        kind: TermKind::Var(crate::tlc::VarRef::Symbol(x_sym)),
     };
 
     let sign_var = Term {
         id: b.next_id(),
         ty: Type::Constructed(TypeName::Arrow, vec![f32_ty.clone(), f32_ty.clone()]),
         span: b.span(),
-        kind: TermKind::Var(sign_sym),
+        kind: TermKind::Var(crate::tlc::VarRef::Symbol(sign_sym)),
     };
 
     let sign_call = Term {
@@ -93,7 +93,7 @@ fn test_specialize_sign_f32() {
     // Check that sign became f32.sign
     match &specialized.defs[0].body.kind {
         TermKind::App { func, .. } => match &func.kind {
-            TermKind::Var(sym) => {
+            TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
                 let name = specialized.symbols.get(*sym).expect("BUG: symbol not in table");
                 assert_eq!(name, "f32.sign");
             }
@@ -118,14 +118,14 @@ fn test_specialize_min_i32() {
         id: b.next_id(),
         ty: i32_ty.clone(),
         span: b.span(),
-        kind: TermKind::Var(a_sym),
+        kind: TermKind::Var(crate::tlc::VarRef::Symbol(a_sym)),
     };
 
     let b_var = Term {
         id: b.next_id(),
         ty: i32_ty.clone(),
         span: b.span(),
-        kind: TermKind::Var(b_sym),
+        kind: TermKind::Var(crate::tlc::VarRef::Symbol(b_sym)),
     };
 
     let partial_ty = Type::Constructed(TypeName::Arrow, vec![i32_ty.clone(), i32_ty.clone()]);
@@ -135,7 +135,7 @@ fn test_specialize_min_i32() {
         id: b.next_id(),
         ty: func_ty,
         span: b.span(),
-        kind: TermKind::Var(min_sym),
+        kind: TermKind::Var(crate::tlc::VarRef::Symbol(min_sym)),
     };
 
     let min_a_b = Term {
@@ -170,7 +170,7 @@ fn test_specialize_min_i32() {
     match &specialized.defs[0].body.kind {
         TermKind::App { func, args } => {
             match &func.kind {
-                TermKind::Var(sym) => {
+                TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
                     let name = specialized.symbols.get(*sym).expect("BUG: symbol not in table");
                     assert_eq!(name, "i32.min");
                 }

@@ -60,7 +60,7 @@ fn normalize_term(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdSo
                         id: term_ids.next_id(),
                         ty: arg_ty,
                         span,
-                        kind: TermKind::Var(fresh),
+                        kind: TermKind::Var(crate::tlc::VarRef::Symbol(fresh)),
                     });
                 } else {
                     new_args.push(arg);

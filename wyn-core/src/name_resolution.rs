@@ -291,7 +291,7 @@ pub enum ResolvedValueRef {
 /// Side table populated by `build_name_resolution`. Maps Identifier
 /// NodeIds to their catalog classification. Identifiers not in the
 /// catalog (locals, top-level defs, module values) are absent.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct NameResolution {
     pub values: HashMap<NodeId, ResolvedValueRef>,
 }

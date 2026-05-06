@@ -14,6 +14,7 @@ use crate::ast;
 use crate::error::CompilerError;
 use crate::module_manager::{self, ModuleManager};
 use crate::name_registry::NameRegistry;
+use crate::name_resolution::NameResolution;
 use crate::types::TypeName;
 use crate::{SymbolId, SymbolTable, TypeTable};
 
@@ -32,6 +33,7 @@ pub fn run(
     mut type_table: TypeTable,
     schemes: &HashMap<String, TypeScheme<TypeName>>,
     checker_builtins: &[String],
+    name_resolution: &NameResolution,
     module_manager: &ModuleManager,
     fill_holes: bool,
 ) -> TlcOutput {
@@ -56,6 +58,7 @@ pub fn run(
             &type_table,
             &mut symbols,
             &mut top_level_symbols,
+            name_resolution,
             module_name,
             fill_holes,
             &mut fill_hole_errors,
@@ -74,6 +77,7 @@ pub fn run(
             &type_table,
             &mut symbols,
             &mut top_level_symbols,
+            name_resolution,
             fill_holes,
             &mut fill_hole_errors,
         );
@@ -88,6 +92,7 @@ pub fn run(
         &type_table,
         &mut symbols,
         &mut top_level_symbols,
+        name_resolution,
         fill_holes,
         &mut fill_hole_errors,
     );

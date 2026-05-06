@@ -587,13 +587,13 @@ fn compose_map_reduce(
 /// respecting shadowing by Let names, Lambda params, and Loop vars.
 pub fn substitute_sym(term: Term, old: SymbolId, new: SymbolId, term_ids: &mut TermIdSource) -> Term {
     match term.kind {
-        TermKind::Var(s) if s == old => Term {
+        TermKind::Var(crate::tlc::VarRef::Symbol(s)) if s == old => Term {
             id: term_ids.next_id(),
-            kind: TermKind::Var(new),
+            kind: TermKind::Var(crate::tlc::VarRef::Symbol(new)),
             ..term
         },
 
-        TermKind::Var(_)
+        TermKind::Var(crate::tlc::VarRef::Symbol(_))
         | TermKind::BinOp(_)
         | TermKind::UnOp(_)
         | TermKind::IntLit(_)

@@ -67,7 +67,7 @@ fn walk(
                 func_kind: discriminant_name(&func.kind),
             });
         }
-        if let TermKind::Var(target) = &func.kind {
+        if let TermKind::Var(crate::tlc::VarRef::Symbol(target)) = &func.kind {
             let expected = arities
                 .get(target)
                 .copied()

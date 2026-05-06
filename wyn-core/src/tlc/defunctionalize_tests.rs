@@ -59,7 +59,7 @@ fn print_term(term: &Term, symbols: &SymbolTable, indent: usize) -> String {
     let unknown = "<unknown>".to_string();
     let pad = "  ".repeat(indent);
     match &term.kind {
-        TermKind::Var(sym) => {
+        TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
             let name = symbols.get(*sym).unwrap_or(&unknown);
             format!("{}Var({})", pad, name)
         }
@@ -181,7 +181,7 @@ fn test_defunc_simple_lambda_no_capture() {
                 id: b.next_id(),
                 ty: i32_ty(),
                 span: b.span(),
-                kind: TermKind::Var(x_sym),
+                kind: TermKind::Var(crate::tlc::VarRef::Symbol(x_sym)),
             }),
             ret_ty: i32_ty(),
         }),
@@ -242,7 +242,7 @@ fn test_defunc_lambda_with_capture() {
                         id: b.next_id(),
                         ty: i32_ty(),
                         span: b.span(),
-                        kind: TermKind::Var(y_sym),
+                        kind: TermKind::Var(crate::tlc::VarRef::Symbol(y_sym)),
                     }],
                 },
             }),
@@ -263,7 +263,7 @@ fn test_defunc_lambda_with_capture() {
                 id: b.next_id(),
                 ty: arrow(i32_ty(), i32_ty()),
                 span: b.span(),
-                kind: TermKind::Var(g_sym),
+                kind: TermKind::Var(crate::tlc::VarRef::Symbol(g_sym)),
             }),
         },
     };
@@ -350,13 +350,13 @@ fn test_nested_hof_passthrough() {
                 id: b.next_id(),
                 ty: arrow(i32_ty(), i32_ty()),
                 span,
-                kind: TermKind::Var(f_sym),
+                kind: TermKind::Var(crate::tlc::VarRef::Symbol(f_sym)),
             }),
             args: vec![Term {
                 id: b.next_id(),
                 ty: i32_ty(),
                 span,
-                kind: TermKind::Var(x_sym),
+                kind: TermKind::Var(crate::tlc::VarRef::Symbol(x_sym)),
             }],
         },
     };
@@ -383,20 +383,20 @@ fn test_nested_hof_passthrough() {
                 id: b.next_id(),
                 ty: arrow(arrow(i32_ty(), i32_ty()), arrow(i32_ty(), i32_ty())),
                 span,
-                kind: TermKind::Var(hof_inner_sym),
+                kind: TermKind::Var(crate::tlc::VarRef::Symbol(hof_inner_sym)),
             }),
             args: vec![
                 Term {
                     id: b.next_id(),
                     ty: arrow(i32_ty(), i32_ty()),
                     span,
-                    kind: TermKind::Var(g_sym), // <-- Just passes g, no lambda
+                    kind: TermKind::Var(crate::tlc::VarRef::Symbol(g_sym)), // <-- Just passes g, no lambda
                 },
                 Term {
                     id: b.next_id(),
                     ty: i32_ty(),
                     span,
-                    kind: TermKind::Var(y_sym),
+                    kind: TermKind::Var(crate::tlc::VarRef::Symbol(y_sym)),
                 },
             ],
         },
@@ -430,13 +430,13 @@ fn test_nested_hof_passthrough() {
                     id: b.next_id(),
                     ty: i32_ty(),
                     span,
-                    kind: TermKind::Var(a_sym),
+                    kind: TermKind::Var(crate::tlc::VarRef::Symbol(a_sym)),
                 },
                 Term {
                     id: b.next_id(),
                     ty: i32_ty(),
                     span,
-                    kind: TermKind::Var(cap_sym),
+                    kind: TermKind::Var(crate::tlc::VarRef::Symbol(cap_sym)),
                 },
             ],
         },
@@ -462,7 +462,7 @@ fn test_nested_hof_passthrough() {
                 id: b.next_id(),
                 ty: arrow(arrow(i32_ty(), i32_ty()), arrow(i32_ty(), i32_ty())),
                 span,
-                kind: TermKind::Var(hof_outer_sym),
+                kind: TermKind::Var(crate::tlc::VarRef::Symbol(hof_outer_sym)),
             }),
             args: vec![
                 capturing_lambda,

@@ -73,7 +73,7 @@ pub fn build_app_call(
         id: term_ids.next_id(),
         ty: fn_ty,
         span,
-        kind: TermKind::Var(func_sym),
+        kind: TermKind::Var(crate::tlc::VarRef::Symbol(func_sym)),
     };
 
     if args.is_empty() {
@@ -187,7 +187,7 @@ pub fn collect_free_vars(
     seen: &mut HashSet<SymbolId>,
 ) {
     match &term.kind {
-        TermKind::Var(sym) => {
+        TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
             let name = symbols.get(*sym).expect("BUG: symbol not in table");
             if !bound.contains(sym)
                 && !top_level.contains(sym)
@@ -263,7 +263,8 @@ pub fn collect_free_vars(
             }
             collect_free_vars(body, &inner_bound, top_level, known_defs, symbols, free, seen);
         }
-        TermKind::IntLit(_)
+        TermKind::Var(crate::tlc::VarRef::Builtin(_))
+        | TermKind::IntLit(_)
         | TermKind::FloatLit(_)
         | TermKind::BoolLit(_)
         | TermKind::BinOp(_)
@@ -522,7 +523,7 @@ fn check_array_expr_envelopes(
 }
 
 fn is_lifted_body(body: &Term, top_level: &HashSet<SymbolId>) -> bool {
-    matches!(&body.kind, TermKind::Var(sym) if top_level.contains(sym))
+    matches!(&body.kind, TermKind::Var(crate::tlc::VarRef::Symbol(sym)) if top_level.contains(sym))
 }
 
 // =============================================================================

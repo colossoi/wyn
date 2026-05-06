@@ -1345,8 +1345,22 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
 
             InstKind::Intrinsic { id, args } => {
                 let arg_ids: Vec<_> = args.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
-                let name = crate::builtins::catalog().get(*id).dispatch_name();
-                self.lower_intrinsic(name, args, &arg_ids, result_ty, inst)?
+                let def = crate::builtins::by_id(*id);
+                let lowering = &def.overloads()[0].lowering;
+                // PrimOp / LinkedSpirv: route through `lower_builtin_call`.
+                // Genuine `Intrinsic(_)` entries with non-trivial lowering
+                // logic (Length, ArrayWith, Uninit, …) still fall through
+                // to the name-keyed `lower_intrinsic` to preserve
+                // intrinsic-specific patterns.
+                match lowering {
+                    BuiltinLowering::PrimOp(_) | BuiltinLowering::LinkedSpirv(_) => {
+                        self.lower_builtin_call(lowering, args, &arg_ids, result_ty)?
+                    }
+                    BuiltinLowering::Intrinsic(_) | BuiltinLowering::NotLowered => {
+                        let name = def.dispatch_name();
+                        self.lower_intrinsic(name, args, &arg_ids, result_ty, inst)?
+                    }
+                }
             }
 
             InstKind::Alloca { elem_ty, result } => {

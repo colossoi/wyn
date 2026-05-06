@@ -81,7 +81,7 @@ mod tlc_tree {
     fn term_to_tree(term: &Term) -> TreeNode {
         let ty = fmt_ty(&term.ty);
         match &term.kind {
-            TermKind::Var(name) => TreeNode::leaf(format!("Var({}) : {}", name, ty)),
+            TermKind::Var(crate::tlc::VarRef::Symbol(name)) => TreeNode::leaf(format!("Var({}) : {}", name, ty)),
             TermKind::BinOp(op) => TreeNode::leaf(format!("BinOp({:?}) : {}", op, ty)),
             TermKind::UnOp(op) => TreeNode::leaf(format!("UnOp({:?}) : {}", op, ty)),
             TermKind::Lambda(ref lam) => {

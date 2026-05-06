@@ -231,7 +231,7 @@ impl<'p> Builder<'p> {
     fn visit_term(&mut self, term: &Term) {
         self.model.term_spans.insert(term.id, term.span);
         match &term.kind {
-            TermKind::Var(sym) => {
+            TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
                 if let Some(owner) = self.model.owner_of(*sym) {
                     self.model.uses.entry(term.id).or_default().insert(owner);
                 }
@@ -647,9 +647,9 @@ impl<'p> Builder<'p> {
 /// indexing expression rather than a plain `Var`).
 pub(super) fn alias_target_of(term: &Term, model: &OwnershipModel, program: &Program) -> Option<OwnerId> {
     match &term.kind {
-        TermKind::Var(sym) => model.owner_of(*sym),
+        TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => model.owner_of(*sym),
         TermKind::App { func, args } => {
-            let TermKind::Var(s) = &func.kind else {
+            let TermKind::Var(crate::tlc::VarRef::Symbol(s)) = &func.kind else {
                 return None;
             };
             let name = program.symbols.get(*s)?;
@@ -681,7 +681,7 @@ fn rhs_is_fresh_producer(term: &Term, program: &Program) -> bool {
     match &term.kind {
         TermKind::ArrayExpr(_) => true,
         TermKind::App { func, .. } => {
-            let TermKind::Var(s) = &func.kind else {
+            let TermKind::Var(crate::tlc::VarRef::Symbol(s)) = &func.kind else {
                 return false;
             };
             program.symbols.get(*s).map(|name| is_fresh_producer_intrinsic(name)).unwrap_or(false)
@@ -1160,13 +1160,13 @@ impl<'m> Rewriter<'m> {
         // var.
         if let (Some(functional_sym), Some(inplace_sym)) = (self.functional_sym, self.inplace_sym) {
             if let TermKind::App { func, args } = &term.kind {
-                let calls_functional = matches!(&func.kind, TermKind::Var(s) if *s == functional_sym);
+                let calls_functional = matches!(&func.kind, TermKind::Var(crate::tlc::VarRef::Symbol(s)) if *s == functional_sym);
                 if calls_functional && args.len() == 3 && self.is_promotable(term.id, &args[0]) {
                     let TermKind::App { func, args } = term.kind else {
                         unreachable!()
                     };
                     let new_func = Term {
-                        kind: TermKind::Var(inplace_sym),
+                        kind: TermKind::Var(crate::tlc::VarRef::Symbol(inplace_sym)),
                         ..*func
                     };
                     let new_args: Vec<Term> = args.into_iter().map(|a| self.rewrite(a)).collect();
@@ -1327,7 +1327,7 @@ fn map_is_eligible(
         _ => return false,
     };
     let input_sym = match &input_term.kind {
-        TermKind::Var(s) => *s,
+        TermKind::Var(crate::tlc::VarRef::Symbol(s)) => *s,
         _ => return false,
     };
     let owner = match model.owner_of(input_sym) {
@@ -1366,7 +1366,7 @@ fn map_is_eligible(
 }
 
 fn body_references_sym(term: &Term, sym: SymbolId) -> bool {
-    if let TermKind::Var(s) = &term.kind {
+    if let TermKind::Var(crate::tlc::VarRef::Symbol(s)) = &term.kind {
         if *s == sym {
             return true;
         }

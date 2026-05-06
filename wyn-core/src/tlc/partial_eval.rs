@@ -125,7 +125,7 @@ impl PartialEvaluator {
             TermKind::BoolLit(b) => Value::Bool(*b),
 
             // Variable lookup
-            TermKind::Var(sym) => {
+            TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
                 let sym = *sym;
                 if let Some(val) = self.env.get(&sym) {
                     val.clone()
@@ -146,6 +146,9 @@ impl PartialEvaluator {
                     Value::Unknown(term.clone())
                 }
             }
+
+            // Builtin reference: not constant-foldable on its own.
+            TermKind::Var(crate::tlc::VarRef::Builtin(_)) => Value::Unknown(term.clone()),
 
             // Let binding
             TermKind::Let { name, rhs, body, .. } => {
@@ -226,13 +229,50 @@ impl PartialEvaluator {
                 }
             }
 
-            TermKind::Var(sym) => self.apply_var(*sym, args, original),
+            TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => self.apply_var(*sym, args, original),
+
+            TermKind::Var(crate::tlc::VarRef::Builtin(_)) => {
+                // Catalog builtin — opaque to partial_eval, but we
+                // still residualize via the args so let-binding
+                // substitutions performed by the inner `eval(arg)`
+                // calls survive into the residual term.
+                self.residualize_call(base.clone(), args, original)
+            }
 
             _ => {
-                // Higher-order or computed function - can't evaluate
-                Value::Unknown(original.clone())
+                // Higher-order or computed function - can't evaluate.
+                // Residualize through the eval'd args, not the original
+                // term, so substitutions in args don't get clobbered.
+                self.residualize_call(base.clone(), args, original)
             }
         }
+    }
+
+    /// Rebuild an App from the (already-evaluated) `func` and `args`,
+    /// reifying each arg back to a Term. Used when partial_eval can't
+    /// reduce the call further but the args may have been substituted
+    /// (e.g. a let-bound `Var` resolved to its rhs term). Cloning the
+    /// original term in this position would discard those substitutions.
+    fn residualize_call(&mut self, func: Term, args: Vec<Value>, original: &Term) -> Value {
+        let spine_types = extract_arg_types_from_app(original);
+        let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
+        let arg_terms: Vec<Term> = args
+            .into_iter()
+            .enumerate()
+            .map(|(i, arg)| {
+                let arg_ty = spine_types.get(i).unwrap_or(&unit_ty);
+                self.reify(arg, arg_ty, original.span)
+            })
+            .collect();
+        let result = self.mk_term(
+            original.ty.clone(),
+            original.span,
+            TermKind::App {
+                func: Box::new(func),
+                args: arg_terms,
+            },
+        );
+        Value::Unknown(result)
     }
 
     /// Apply a named function to arguments.
@@ -261,7 +301,7 @@ impl PartialEvaluator {
         // Check if this is a let-bound variable aliasing a function name
         // (intrinsic, builtin, or top-level def). Handles `let f = f32.sin in f x`.
         if let Some(Value::Unknown(Term {
-            kind: TermKind::Var(real_sym),
+            kind: TermKind::Var(crate::tlc::VarRef::Symbol(real_sym)),
             ..
         })) = self.env.get(&sym)
         {
@@ -554,7 +594,11 @@ impl PartialEvaluator {
         };
         let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
         let tuple_sym = self.symbols.alloc("_w_tuple".to_string());
-        let func_term = self.mk_term(ty.clone(), span, TermKind::Var(tuple_sym));
+        let func_term = self.mk_term(
+            ty.clone(),
+            span,
+            TermKind::Var(crate::tlc::VarRef::Symbol(tuple_sym)),
+        );
         let arg_terms: Vec<Term> = elems
             .into_iter()
             .enumerate()
@@ -580,7 +624,11 @@ impl PartialEvaluator {
             .cloned()
             .unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![]));
         let array_sym = self.symbols.alloc("_w_array_lit".to_string());
-        let func_term = self.mk_term(ty.clone(), span, TermKind::Var(array_sym));
+        let func_term = self.mk_term(
+            ty.clone(),
+            span,
+            TermKind::Var(crate::tlc::VarRef::Symbol(array_sym)),
+        );
         let arg_terms: Vec<Term> = elems.into_iter().map(|elem| self.reify(elem, &elem_ty, span)).collect();
         self.mk_term(
             ty.clone(),
@@ -595,7 +643,11 @@ impl PartialEvaluator {
     fn reify_vector(&mut self, elems: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
         let elem_ty = ty.elem_type().cloned().unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![]));
         let vec_sym = self.symbols.alloc("_w_vec_lit".to_string());
-        let func_term = self.mk_term(ty.clone(), span, TermKind::Var(vec_sym));
+        let func_term = self.mk_term(
+            ty.clone(),
+            span,
+            TermKind::Var(crate::tlc::VarRef::Symbol(vec_sym)),
+        );
         let arg_terms: Vec<Term> = elems.into_iter().map(|elem| self.reify(elem, &elem_ty, span)).collect();
         self.mk_term(
             ty.clone(),
@@ -610,7 +662,7 @@ impl PartialEvaluator {
     fn reify_partial(&mut self, sym: SymbolId, args: Vec<Value>, ty: &Type<TypeName>, span: Span) -> Term {
         let param_types = self.defs.get(&sym).map(|d| extract_param_types(&d.ty));
         let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
-        let func_term = self.mk_term(ty.clone(), span, TermKind::Var(sym));
+        let func_term = self.mk_term(ty.clone(), span, TermKind::Var(crate::tlc::VarRef::Symbol(sym)));
         let arg_terms: Vec<Term> = args
             .into_iter()
             .enumerate()
@@ -633,7 +685,11 @@ impl PartialEvaluator {
         let spine_types = extract_arg_types_from_app(original);
         let def_param_types = self.defs.get(&sym).map(|d| extract_param_types(&d.ty));
         let unit_ty = Type::Constructed(TypeName::Unit, vec![]);
-        let func_term = self.mk_term(original.ty.clone(), original.span, TermKind::Var(sym));
+        let func_term = self.mk_term(
+            original.ty.clone(),
+            original.span,
+            TermKind::Var(crate::tlc::VarRef::Symbol(sym)),
+        );
         let arg_terms: Vec<Term> = args
             .into_iter()
             .enumerate()

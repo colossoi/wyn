@@ -28,6 +28,12 @@ pub fn catalog() -> &'static BuiltinCatalog {
     CATALOG.get_or_init(|| BuiltinCatalog::build(defs::all_builtins()))
 }
 
+/// Direct catalog lookup by id. Equivalent to `catalog().get(id)`,
+/// kept short for the common access pattern.
+pub fn by_id(id: BuiltinId) -> &'static BuiltinDef {
+    catalog().get(id)
+}
+
 /// Arity of the catalog-defined builtin or intrinsic with this name,
 /// counted from its first overload's scheme. Returns `None` if the
 /// name isn't in the catalog (most operators with empty

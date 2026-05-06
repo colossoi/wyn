@@ -377,15 +377,13 @@ impl<'a> OpenResolver<'a> {
     }
 }
 
-/// Top-level public entry point. Builds the open index from the union
-/// of `spec_schemes`'s keys (qualified `M.name` names from elaborated
-/// module specs) and the builtins catalog (`f32.cos`, `_w_intrinsic_*`,
-/// etc.), then rewrites the program.
-pub fn run(
-    program: &mut Program,
+/// Build the open index from the union of `spec_schemes`'s keys
+/// (qualified `M.name` names from elaborated module specs) and the
+/// builtins catalog (`f32.cos`, `_w_intrinsic_*`, etc.).
+fn build_index(
     spec_schemes: &HashMap<String, TypeScheme<TypeName>>,
     catalog: &BuiltinCatalog,
-) -> Result<()> {
+) -> OpenIndex {
     let scheme_keys = spec_schemes.keys().cloned();
     let catalog_keys: Vec<String> = catalog
         .defs()
@@ -398,9 +396,44 @@ pub fn run(
                 .map(|s| s.to_string())
         })
         .collect();
-    let index = OpenIndex::from_qualified_names(scheme_keys.chain(catalog_keys));
+    OpenIndex::from_qualified_names(scheme_keys.chain(catalog_keys))
+}
+
+/// Top-level public entry point. Builds the open index from the union
+/// of `spec_schemes`'s keys and the builtins catalog, then rewrites
+/// every declaration body in `program`.
+pub fn run(
+    program: &mut Program,
+    spec_schemes: &HashMap<String, TypeScheme<TypeName>>,
+    catalog: &BuiltinCatalog,
+) -> Result<()> {
+    let index = build_index(spec_schemes, catalog);
     let mut r = OpenResolver::new(&index);
     r.resolve_program(program)
+}
+
+/// Rewrite identifiers in a single expression as if it were inside
+/// `module_name`'s body — i.e. with an implicit `open <module_name>`
+/// so a sibling reference like `log` (inside `f32`'s body) qualifies
+/// to `f32.log`. Used for prelude module decl bodies, which never go
+/// through `resolve_program` (they're stored as elaborated decls in
+/// the module manager, not in the user `Program`).
+pub fn run_in_module(
+    expr: &mut crate::ast::Expression,
+    module_name: &str,
+    spec_schemes: &HashMap<String, TypeScheme<TypeName>>,
+    catalog: &BuiltinCatalog,
+) -> Result<()> {
+    let index = build_index(spec_schemes, catalog);
+    if !index.has_module(module_name) {
+        // Not a known module — nothing to qualify. Still walk the
+        // expression so any top-level `open M` it contains validates.
+        let mut r = OpenResolver::new(&index);
+        return r.resolve_expression(expr);
+    }
+    let mut r = OpenResolver::new(&index);
+    r.opens.push(module_name.to_string());
+    r.resolve_expression(expr)
 }
 
 fn top_level_name(decl: &Declaration) -> Option<String> {

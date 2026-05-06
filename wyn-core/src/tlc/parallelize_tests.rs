@@ -77,7 +77,7 @@ impl B {
     }
 
     fn var(&mut self, sym: SymbolId, ty: Type<TypeName>) -> Term {
-        self.term(TermKind::Var(sym), ty)
+        self.term(TermKind::Var(crate::tlc::VarRef::Symbol(sym)), ty)
     }
 
     fn let_(&mut self, name: SymbolId, name_ty: Type<TypeName>, rhs: Term, body: Term) -> Term {

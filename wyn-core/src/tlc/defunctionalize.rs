@@ -184,7 +184,7 @@ impl<'a> Defunctionalizer<'a> {
         let span = term.span;
 
         match term.kind {
-            TermKind::Var(sym) => {
+            TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
                 // Look up static value from environment
                 let sv = if let Some(sv) = self.env.get(&sym) {
                     sv.clone()
@@ -206,6 +206,13 @@ impl<'a> Defunctionalizer<'a> {
                 };
                 DefuncResult { term, sv }
             }
+
+            // Catalog builtin reference: not a static lambda for defunc
+            // purposes; flows through as `Dynamic`.
+            TermKind::Var(crate::tlc::VarRef::Builtin(_)) => DefuncResult {
+                term,
+                sv: StaticVal::Dynamic,
+            },
 
             TermKind::Lambda(..) => self.defunc_lambda(term),
 
@@ -441,7 +448,7 @@ impl<'a> Defunctionalizer<'a> {
                     id: self.term_ids.next_id(),
                     ty,
                     span,
-                    kind: TermKind::Var(lifted_sym),
+                    kind: TermKind::Var(crate::tlc::VarRef::Symbol(lifted_sym)),
                 },
                 sv: StaticVal::Lambda {
                     lifted_name: lifted_sym,
@@ -454,7 +461,7 @@ impl<'a> Defunctionalizer<'a> {
             let cap_params: Vec<(SymbolId, Type<TypeName>)> = captures
                 .iter()
                 .map(|cap_term| match &cap_term.kind {
-                    TermKind::Var(sym) => (*sym, cap_term.ty.clone()),
+                    TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => (*sym, cap_term.ty.clone()),
                     other => panic!(
                         "compute_free_vars contract violated: capture is not a Var: {:?}",
                         other
@@ -484,7 +491,7 @@ impl<'a> Defunctionalizer<'a> {
                     id: self.term_ids.next_id(),
                     ty,
                     span,
-                    kind: TermKind::Var(lifted_sym),
+                    kind: TermKind::Var(crate::tlc::VarRef::Symbol(lifted_sym)),
                 },
                 sv: StaticVal::Lambda {
                     lifted_name: lifted_sym,
@@ -631,7 +638,7 @@ impl<'a> Defunctionalizer<'a> {
             _ => {
                 // This shouldn't happen for a lambda, but be safe
                 match &result.term.kind {
-                    TermKind::Var(sym) => (*sym, vec![]),
+                    TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => (*sym, vec![]),
                     _ => panic!("BUG: defunc_lambda didn't produce a Var or Lambda StaticVal"),
                 }
             }
@@ -642,7 +649,7 @@ impl<'a> Defunctionalizer<'a> {
             .into_iter()
             .map(|t| {
                 let sym = match &t.kind {
-                    TermKind::Var(s) => *s,
+                    TermKind::Var(crate::tlc::VarRef::Symbol(s)) => *s,
                     _ => panic!("BUG: capture is not a Var: {:?}", t.kind),
                 };
                 let ty = t.ty.clone();
@@ -656,7 +663,7 @@ impl<'a> Defunctionalizer<'a> {
             id: self.term_ids.next_id(),
             ty: result.term.ty.clone(),
             span,
-            kind: TermKind::Var(lifted_name),
+            kind: TermKind::Var(crate::tlc::VarRef::Symbol(lifted_name)),
         };
 
         // Get the params from the lifted def
@@ -782,7 +789,7 @@ impl<'a> Defunctionalizer<'a> {
                 }
             }
 
-            TermKind::Var(sym) => {
+            TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
                 let sym = *sym; // Copy out of the match to avoid borrow issues
                 // Get static value for the callee. Lookup mirrors
                 // `defunc_term`'s Var arm: env wins (binding-scoped),
@@ -1033,7 +1040,7 @@ impl<'a> Defunctionalizer<'a> {
         let mut capture_subst: Vec<(SymbolId, SymbolId)> = Vec::with_capacity(captures.len());
         for cap_term in captures {
             let outer_sym = match &cap_term.kind {
-                TermKind::Var(sym) => *sym,
+                TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => *sym,
                 _ => panic!("BUG: capture term is not a Var: {:?}", cap_term.kind),
             };
             let outer_name =

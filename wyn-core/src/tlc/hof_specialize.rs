@@ -180,7 +180,7 @@ pub(super) fn apply_type_subst_to_term(
 ) -> Term {
     let new_ty = apply_type_subst(&term.ty, subst);
     let new_kind = match &term.kind {
-        TermKind::Var(name) => TermKind::Var(*name),
+        TermKind::Var(v) => TermKind::Var(*v),
         TermKind::BinOp(op) => TermKind::BinOp(op.clone()),
         TermKind::UnOp(op) => TermKind::UnOp(op.clone()),
         TermKind::IntLit(s) => TermKind::IntLit(s.clone()),
@@ -496,11 +496,11 @@ pub(super) fn substitute_var(
     term_ids: &mut TermIdSource,
 ) -> Term {
     match &term.kind {
-        TermKind::Var(sym) if *sym == old_sym => Term {
+        TermKind::Var(crate::tlc::VarRef::Symbol(sym)) if *sym == old_sym => Term {
             id: term_ids.next_id(),
             ty: term.ty.clone(),
             span: term.span,
-            kind: TermKind::Var(new_sym),
+            kind: TermKind::Var(crate::tlc::VarRef::Symbol(new_sym)),
         },
 
         TermKind::Var(_)

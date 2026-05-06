@@ -571,7 +571,7 @@ fn analyze_body(body: &Term, params: &[SymbolId]) -> ResultSemantics {
         TermKind::Let { body, .. } => analyze_body(body, params),
 
         // Variable — might be a parameter passthrough
-        TermKind::Var(sym) => {
+        TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
             if let Some(idx) = params.iter().position(|p| p == sym) {
                 ResultSemantics::PassesThrough(idx)
             } else {
@@ -601,7 +601,7 @@ fn analyze_body_with_summaries(
 
         TermKind::Let { body, .. } => analyze_body_with_summaries(body, params, summaries),
 
-        TermKind::Var(sym) => {
+        TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
             if let Some(idx) = params.iter().position(|p| p == sym) {
                 ResultSemantics::PassesThrough(idx)
             } else {
@@ -611,7 +611,7 @@ fn analyze_body_with_summaries(
 
         // Function call: look up callee summary
         TermKind::App { func, args } => {
-            if let TermKind::Var(callee_sym) = &func.kind {
+            if let TermKind::Var(crate::tlc::VarRef::Symbol(callee_sym)) = &func.kind {
                 if let Some(callee_summary) = summaries.get(callee_sym) {
                     match &callee_summary.result {
                         ResultSemantics::Produces(semantics) => {
@@ -624,7 +624,8 @@ fn analyze_body_with_summaries(
                             // Callee passes through one of its params — check if the
                             // corresponding call arg is one of OUR params.
                             if *idx < args.len() {
-                                if let TermKind::Var(arg_sym) = &args[*idx].kind {
+                                if let TermKind::Var(crate::tlc::VarRef::Symbol(arg_sym)) = &args[*idx].kind
+                                {
                                     if let Some(our_idx) = params.iter().position(|p| p == arg_sym) {
                                         return ResultSemantics::PassesThrough(our_idx);
                                     }

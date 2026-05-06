@@ -108,8 +108,8 @@ fn test_add_roundtrip() {
     let b_sym = symbols.alloc("b".into());
 
     // Build: a + b
-    let a_var = mk_term(i32_ty(), TermKind::Var(a_sym));
-    let b_var = mk_term(i32_ty(), TermKind::Var(b_sym));
+    let a_var = mk_term(i32_ty(), TermKind::Var(crate::tlc::VarRef::Symbol(a_sym)));
+    let b_var = mk_term(i32_ty(), TermKind::Var(crate::tlc::VarRef::Symbol(b_sym)));
     let add_op = mk_term(
         i32_ty(), // simplified — real type would be arrow
         TermKind::BinOp(crate::ast::BinaryOp { op: "+".into() }),
@@ -172,10 +172,10 @@ fn test_gvn_via_let() {
                 Type::Constructed(TypeName::Arrow, vec![i32_ty(), pair_ty.clone()]),
             ],
         ),
-        TermKind::Var(tuple_sym),
+        TermKind::Var(crate::tlc::VarRef::Symbol(tuple_sym)),
     );
-    let x_ref = mk_term(i32_ty(), TermKind::Var(x_sym));
-    let y_ref = mk_term(i32_ty(), TermKind::Var(y_sym));
+    let x_ref = mk_term(i32_ty(), TermKind::Var(crate::tlc::VarRef::Symbol(x_sym)));
+    let y_ref = mk_term(i32_ty(), TermKind::Var(crate::tlc::VarRef::Symbol(y_sym)));
     let pair_app = mk_term(
         pair_ty.clone(),
         TermKind::App {
@@ -274,7 +274,7 @@ fn test_if_else_roundtrip() {
     let c_sym = symbols.alloc("c".into());
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
 
-    let cond = mk_term(bool_ty.clone(), TermKind::Var(c_sym));
+    let cond = mk_term(bool_ty.clone(), TermKind::Var(crate::tlc::VarRef::Symbol(c_sym)));
     let then_br = mk_term(i32_ty(), TermKind::IntLit("1".into()));
     let else_br = mk_term(i32_ty(), TermKind::IntLit("0".into()));
     let if_term = mk_term(

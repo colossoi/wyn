@@ -236,7 +236,7 @@ fn has_control_flow(term: &Term) -> bool {
 fn inline_constants(term: Term, constants: &HashMap<SymbolId, Term>) -> Term {
     let term = term.map_children(&mut |child| inline_constants(child, constants));
 
-    if let TermKind::Var(sym) = &term.kind {
+    if let TermKind::Var(crate::tlc::VarRef::Symbol(sym)) = &term.kind {
         if let Some(body) = constants.get(sym) {
             return body.clone();
         }
@@ -297,7 +297,7 @@ fn inline_term(term: Term, candidates: &HashMap<SymbolId, InlineBody>, ids: &mut
     };
 
     // If the head is a Var referencing an inline candidate, inline it.
-    if let TermKind::Var(sym) = &func.kind {
+    if let TermKind::Var(crate::tlc::VarRef::Symbol(sym)) = &func.kind {
         if let Some(ib) = candidates.get(sym) {
             if args.len() == ib.params.len() {
                 let span = term.span;

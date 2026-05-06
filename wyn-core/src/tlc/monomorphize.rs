@@ -384,7 +384,7 @@ impl<'a> Monomorphizer<'a> {
         let kind = match &term.kind {
             TermKind::App { func, args } => {
                 // Check if func is a variable referencing a known function
-                if let TermKind::Var(sym) = &func.kind {
+                if let TermKind::Var(crate::tlc::VarRef::Symbol(sym)) = &func.kind {
                     let sym = *sym;
                     if let Some(poly_def) = self.poly_functions.get(&sym).cloned() {
                         // Infer substitution from argument types
@@ -400,7 +400,7 @@ impl<'a> Monomorphizer<'a> {
                                 id: self.term_ids.next_id(),
                                 ty: func.ty.clone(),
                                 span: func.span,
-                                kind: TermKind::Var(specialized_sym),
+                                kind: TermKind::Var(crate::tlc::VarRef::Symbol(specialized_sym)),
                             };
                             let processed_args: Vec<_> =
                                 args.iter().map(|a| self.process_term(a)).collect();
@@ -429,7 +429,7 @@ impl<'a> Monomorphizer<'a> {
                 }
             }
 
-            TermKind::Var(sym) => {
+            TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
                 let sym = *sym;
                 // Check if this is a reference to a polymorphic function
                 // This handles cases like `let f = some_poly_fn in ...`
@@ -444,7 +444,7 @@ impl<'a> Monomorphizer<'a> {
                                 id: self.term_ids.next_id(),
                                 ty: term.ty.clone(),
                                 span: term.span,
-                                kind: TermKind::Var(specialized_sym),
+                                kind: TermKind::Var(crate::tlc::VarRef::Symbol(specialized_sym)),
                             };
                         } else {
                             self.ensure_in_worklist(sym, poly_def);
@@ -453,8 +453,11 @@ impl<'a> Monomorphizer<'a> {
                         self.ensure_in_worklist(sym, poly_def);
                     }
                 }
-                TermKind::Var(sym)
+                TermKind::Var(crate::tlc::VarRef::Symbol(sym))
             }
+
+            // Catalog builtin reference: passes through unchanged.
+            TermKind::Var(v @ crate::tlc::VarRef::Builtin(_)) => TermKind::Var(*v),
 
             TermKind::Lambda(Lambda { params, body, ret_ty }) => TermKind::Lambda(Lambda {
                 params: params.clone(),
@@ -783,7 +786,7 @@ impl<'a> Monomorphizer<'a> {
     fn apply_subst_term(&mut self, term: &Term, subst: &Substitution) -> Term {
         let new_ty = apply_subst(&term.ty, subst);
         let new_kind = match &term.kind {
-            TermKind::Var(sym) => TermKind::Var(*sym),
+            TermKind::Var(v) => TermKind::Var(*v),
             TermKind::IntLit(s) => TermKind::IntLit(s.clone()),
             TermKind::FloatLit(f) => TermKind::FloatLit(*f),
             TermKind::BoolLit(b) => TermKind::BoolLit(*b),

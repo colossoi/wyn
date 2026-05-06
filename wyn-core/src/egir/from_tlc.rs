@@ -871,7 +871,12 @@ impl<'a> Converter<'a> {
             TermKind::BoolLit(b) => Ok(self.intern_pure(PureOp::Bool(*b), smallvec![], ty)),
 
             // --- Variables ---
-            TermKind::Var(sym) => self.convert_var(*sym, ty),
+            TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => self.convert_var(*sym, ty),
+            // Catalog builtin reference: emit PureOp::Intrinsic directly,
+            // bypassing the string-keyed lookup path in `convert_var`.
+            TermKind::Var(crate::tlc::VarRef::Builtin(id)) => {
+                Ok(self.intern_pure(PureOp::Intrinsic(*id), smallvec![], ty))
+            }
 
             // --- Let bindings (scope only, no instruction) ---
             TermKind::Let {
@@ -990,9 +995,19 @@ impl<'a> Converter<'a> {
                 let operand = self.convert_term(&args[0])?;
                 Ok(self.intern_pure(PureOp::UnaryOp(op.op.clone()), smallvec![operand], ty))
             }
-            TermKind::Var(sym) => {
+            TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
                 let name = self.symbols.get(*sym).expect("BUG").clone();
                 self.convert_named_app(&name, *sym, args, ty)
+            }
+            TermKind::Var(crate::tlc::VarRef::Builtin(id)) => {
+                // Catalog-resolved builtin call. Emit
+                // `PureOp::Intrinsic(id)` directly — the BuiltinId is
+                // already the canonical identifier; no string lookup
+                // needed. Backends dispatch on the id via
+                // `catalog.get(id).overloads()[0].lowering`.
+                let arg_nids: SmallVec<[NodeId; 4]> =
+                    args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
+                Ok(self.intern_pure(PureOp::Intrinsic(*id), arg_nids, ty))
             }
             _ => {
                 // General application: convert func, then call
@@ -1579,7 +1594,9 @@ impl<'a> Converter<'a> {
 
     fn lambda_fn_name(&self, lam: &Lambda) -> Result<String, ConvertError> {
         match &lam.body.kind {
-            TermKind::Var(sym) => Ok(self.symbols.get(*sym).expect("BUG: symbol not in table").clone()),
+            TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
+                Ok(self.symbols.get(*sym).expect("BUG: symbol not in table").clone())
+            }
             _ => Err(ConvertError::GraphError(
                 "SOAC lambda body should be a function reference post-defunc".into(),
             )),

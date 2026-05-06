@@ -146,7 +146,7 @@ fn test_algebraic_add_zero() {
         id: b.next_id(),
         ty: Type::Constructed(TypeName::Int(32), vec![]),
         span: b.span(),
-        kind: TermKind::Var(x_sym),
+        kind: TermKind::Var(crate::tlc::VarRef::Symbol(x_sym)),
     };
     let zero = make_int(&mut b.ids, 0);
     let term = make_binop(&mut b.ids, "+", x, zero);
@@ -157,7 +157,7 @@ fn test_algebraic_add_zero() {
 
     // x + 0 should simplify to just x
     match &result.defs[0].body.kind {
-        TermKind::Var(sym) => {
+        TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
             let name = result.symbols.get(*sym).expect("BUG: symbol not in table");
             assert_eq!(name, "x");
         }
@@ -176,7 +176,7 @@ fn test_algebraic_mul_one() {
         id: b.next_id(),
         ty: Type::Constructed(TypeName::Int(32), vec![]),
         span: b.span(),
-        kind: TermKind::Var(x_sym),
+        kind: TermKind::Var(crate::tlc::VarRef::Symbol(x_sym)),
     };
     let term = make_binop(&mut b.ids, "*", one, x);
 
@@ -186,7 +186,7 @@ fn test_algebraic_mul_one() {
 
     // 1 * x should simplify to just x
     match &result.defs[0].body.kind {
-        TermKind::Var(sym) => {
+        TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
             let name = result.symbols.get(*sym).expect("BUG: symbol not in table");
             assert_eq!(name, "x");
         }
@@ -204,7 +204,7 @@ fn test_algebraic_mul_zero() {
         id: b.next_id(),
         ty: Type::Constructed(TypeName::Int(32), vec![]),
         span: b.span(),
-        kind: TermKind::Var(x_sym),
+        kind: TermKind::Var(crate::tlc::VarRef::Symbol(x_sym)),
     };
     let zero = make_int(&mut b.ids, 0);
     let term = make_binop(&mut b.ids, "*", x, zero);
@@ -292,7 +292,7 @@ fn test_let_constant_propagation() {
         id: b.next_id(),
         ty: Type::Constructed(TypeName::Int(32), vec![]),
         span: b.span(),
-        kind: TermKind::Var(x_sym),
+        kind: TermKind::Var(crate::tlc::VarRef::Symbol(x_sym)),
     };
     let three = make_int(&mut b.ids, 3);
     let body_expr = make_binop(&mut b.ids, "+", x_var, three);
@@ -337,13 +337,13 @@ fn test_function_inlining() {
         id: b.next_id(),
         ty: int_ty.clone(),
         span: b.span(),
-        kind: TermKind::Var(a_sym),
+        kind: TermKind::Var(crate::tlc::VarRef::Symbol(a_sym)),
     };
     let b_var = Term {
         id: b.next_id(),
         ty: int_ty.clone(),
         span: b.span(),
-        kind: TermKind::Var(b_sym),
+        kind: TermKind::Var(crate::tlc::VarRef::Symbol(b_sym)),
     };
     let a_plus_b = make_binop(&mut b.ids, "+", a_var, b_var);
 
@@ -372,7 +372,7 @@ fn test_function_inlining() {
         id: b.next_id(),
         ty: foo_body.ty.clone(),
         span: b.span(),
-        kind: TermKind::Var(foo_sym),
+        kind: TermKind::Var(crate::tlc::VarRef::Symbol(foo_sym)),
     };
 
     let bar_body = Term {
@@ -455,7 +455,7 @@ fn test_function_alias_inlining() {
                 id: b.next_id(),
                 ty: int_ty(),
                 span,
-                kind: TermKind::Var(y_sym),
+                kind: TermKind::Var(crate::tlc::VarRef::Symbol(y_sym)),
             }),
             ret_ty: int_ty(),
         }),
@@ -474,7 +474,7 @@ fn test_function_alias_inlining() {
                 id: b.next_id(),
                 ty: arrow_ty(int_ty(), int_ty()),
                 span,
-                kind: TermKind::Var(g_sym),
+                kind: TermKind::Var(crate::tlc::VarRef::Symbol(g_sym)),
             }),
             body: Box::new(Term {
                 id: b.next_id(),
@@ -485,7 +485,7 @@ fn test_function_alias_inlining() {
                         id: b.next_id(),
                         ty: arrow_ty(int_ty(), int_ty()),
                         span,
-                        kind: TermKind::Var(f_sym),
+                        kind: TermKind::Var(crate::tlc::VarRef::Symbol(f_sym)),
                     }),
                     args: vec![Term {
                         id: b.next_id(),
@@ -564,7 +564,7 @@ fn test_function_alias_partial_application() {
                 id: b.next_id(),
                 ty: int_ty(),
                 span,
-                kind: TermKind::Var(x_sym),
+                kind: TermKind::Var(crate::tlc::VarRef::Symbol(x_sym)),
             }),
             ret_ty: int_ty(),
         }),
@@ -583,7 +583,7 @@ fn test_function_alias_partial_application() {
                 id: b.next_id(),
                 ty: arrow_ty(int_ty(), arrow_ty(int_ty(), int_ty())),
                 span,
-                kind: TermKind::Var(g_sym),
+                kind: TermKind::Var(crate::tlc::VarRef::Symbol(g_sym)),
             }),
             body: Box::new(Term {
                 id: b.next_id(),
@@ -594,7 +594,7 @@ fn test_function_alias_partial_application() {
                         id: b.next_id(),
                         ty: arrow_ty(int_ty(), arrow_ty(int_ty(), int_ty())),
                         span,
-                        kind: TermKind::Var(f_sym),
+                        kind: TermKind::Var(crate::tlc::VarRef::Symbol(f_sym)),
                     }),
                     args: vec![
                         Term {
@@ -681,7 +681,7 @@ fn test_intrinsic_alias_inlining() {
                 id: b.next_id(),
                 ty: arrow_ty(float_ty.clone(), float_ty.clone()),
                 span,
-                kind: TermKind::Var(f32_sin_sym),
+                kind: TermKind::Var(crate::tlc::VarRef::Symbol(f32_sin_sym)),
             }),
             body: Box::new(Term {
                 id: b.next_id(),
@@ -692,7 +692,7 @@ fn test_intrinsic_alias_inlining() {
                         id: b.next_id(),
                         ty: arrow_ty(float_ty.clone(), float_ty.clone()),
                         span,
-                        kind: TermKind::Var(f_sym),
+                        kind: TermKind::Var(crate::tlc::VarRef::Symbol(f_sym)),
                     }),
                     args: vec![Term {
                         id: b.next_id(),
@@ -733,7 +733,7 @@ fn test_intrinsic_alias_inlining() {
         TermKind::App { func, args } => {
             // Check that the function is now f32.sin (not f)
             match &func.kind {
-                TermKind::Var(sym) => {
+                TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
                     let name = result.symbols.get(*sym).expect("BUG: symbol not in table");
                     assert_eq!(name, "f32.sin");
                 }

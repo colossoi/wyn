@@ -23,49 +23,12 @@ pub mod soa;
 pub mod specialize;
 
 use crate::ast::{self, NodeId, Span, TypeName};
-use crate::builtins::names::{
-    INTRINSIC_ABS, INTRINSIC_ARRAY_WITH, INTRINSIC_CEIL, INTRINSIC_CLAMP, INTRINSIC_CROSS,
-    INTRINSIC_DETERMINANT, INTRINSIC_DISTANCE, INTRINSIC_DOT, INTRINSIC_FLOOR, INTRINSIC_FRACT,
-    INTRINSIC_INVERSE, INTRINSIC_LENGTH, INTRINSIC_MAGNITUDE, INTRINSIC_MIX, INTRINSIC_NORMALIZE,
-    INTRINSIC_OUTER, INTRINSIC_REFLECT, INTRINSIC_REFRACT, INTRINSIC_REPLICATE, INTRINSIC_SLICE,
-    INTRINSIC_SMOOTHSTEP,
-};
+use crate::builtins::names::{INTRINSIC_ARRAY_WITH, INTRINSIC_LENGTH, INTRINSIC_SLICE};
 use crate::interface;
 use crate::types::TypeExt;
 use crate::{SymbolId, SymbolTable, TypeTable};
 use polytype::Type;
 use std::collections::HashMap;
-
-/// Non-SOAC builtins that still need intrinsic renaming.
-///
-/// Every entry here is a name that's polymorphic over scalar AND vector
-/// shape with no per-type module home — `magnitude`, `dot`, `cross`,
-/// `mix`, `clamp`, `floor`, `fract`, etc. The per-type scalar ops
-/// (`sin` → `f32.sin`, `pow` → `f32.pow`, …) and the vector-shaped ops
-/// (`sin` → `vec.sin`, `pow` → `vec.pow`, …) live in their own modules
-/// now and are reached via `open f32` / `open vec`, so they no longer
-/// need a top-level shortcut here.
-const INTRINSIC_RENAMES: &[(&str, &str)] = &[
-    ("length", INTRINSIC_LENGTH),
-    ("replicate", INTRINSIC_REPLICATE),
-    ("magnitude", INTRINSIC_MAGNITUDE),
-    ("normalize", INTRINSIC_NORMALIZE),
-    ("dot", INTRINSIC_DOT),
-    ("cross", INTRINSIC_CROSS),
-    ("distance", INTRINSIC_DISTANCE),
-    ("reflect", INTRINSIC_REFLECT),
-    ("refract", INTRINSIC_REFRACT),
-    ("floor", INTRINSIC_FLOOR),
-    ("ceil", INTRINSIC_CEIL),
-    ("fract", INTRINSIC_FRACT),
-    ("mix", INTRINSIC_MIX),
-    ("smoothstep", INTRINSIC_SMOOTHSTEP),
-    ("clamp", INTRINSIC_CLAMP),
-    ("determinant", INTRINSIC_DETERMINANT),
-    ("inverse", INTRINSIC_INVERSE),
-    ("outer", INTRINSIC_OUTER),
-    ("abs", INTRINSIC_ABS),
-];
 
 /// SOAC names that are intercepted in transform_application and turned into
 /// first-class SOAC nodes rather than intrinsic calls.
@@ -114,7 +77,7 @@ pub fn term_size(term: &Term) -> usize {
     count
 }
 
-/// Collect all `TermKind::Var(sym)` SymbolIds referenced anywhere in a term tree.
+/// Collect all `TermKind::Var(crate::tlc::VarRef::Symbol(sym))` SymbolIds referenced anywhere in a term tree.
 /// This is a raw collection with no scope tracking — used for DCE reachability.
 pub fn collect_var_refs(term: &Term) -> Vec<SymbolId> {
     let mut refs = Vec::new();
@@ -124,7 +87,7 @@ pub fn collect_var_refs(term: &Term) -> Vec<SymbolId> {
 
 fn collect_var_refs_inner(term: &Term, refs: &mut Vec<SymbolId>) {
     // Var leaf: the only TermKind that directly contributes a ref.
-    if let TermKind::Var(sym) = &term.kind {
+    if let TermKind::Var(crate::tlc::VarRef::Symbol(sym)) = &term.kind {
         refs.push(*sym);
     }
 
@@ -185,11 +148,27 @@ pub struct Term {
     pub kind: TermKind,
 }
 
+/// Reference target for a `Var` term.
+///
+/// Catalog builtins are identified by `BuiltinId` from type-check
+/// onward; everything else (locals, user-defined functions, prelude
+/// functions, top-level constants) is a `Symbol(SymbolId)`. The
+/// distinction lets TLC → EGIR dispatch structurally without
+/// re-deriving builtin identity by string-matching `_w_intrinsic_*`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VarRef {
+    /// Catalog builtin — identified by `BuiltinId`.
+    Builtin(crate::builtins::BuiltinId),
+    /// Symbol-table reference — locals, user-defined functions,
+    /// prelude functions, top-level constants.
+    Symbol(SymbolId),
+}
+
 /// The kind of term.
 #[derive(Debug, Clone)]
 pub enum TermKind {
     /// Variable reference.
-    Var(SymbolId),
+    Var(VarRef),
 
     /// Binary operator as a value: +, -, *, /, ==, etc.
     BinOp(ast::BinaryOp),
@@ -566,7 +545,7 @@ impl Term {
     pub fn as_direct_call(&self) -> Option<(SymbolId, &[Term])> {
         match &self.kind {
             TermKind::App { func, args } => match &func.kind {
-                TermKind::Var(sym) => Some((*sym, args.as_slice())),
+                TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => Some((*sym, args.as_slice())),
                 _ => None,
             },
             _ => None,
@@ -1078,6 +1057,11 @@ pub struct Transformer<'a> {
     /// This ensures function references use the same SymbolId as the Def.
     /// Shared across all transformers via mutable reference.
     top_level_symbols: &'a mut HashMap<String, SymbolId>,
+    /// Side table from name resolution: AST NodeId → BuiltinId for
+    /// catalog-resolved identifiers. Lets `Var`-position idents be
+    /// classified as `VarRef::Builtin(id)` directly without round-
+    /// tripping through name strings.
+    name_resolution: &'a crate::name_resolution::NameResolution,
     /// Optional namespace prefix for definition names (e.g., "f32" -> "f32.pi")
     namespace: Option<String>,
     /// Shared placeholder symbol for pattern matching scrutinees.
@@ -1103,6 +1087,7 @@ impl<'a> Transformer<'a> {
         type_table: &'a TypeTable,
         symbols: &'a mut SymbolTable,
         top_level_symbols: &'a mut HashMap<String, SymbolId>,
+        name_resolution: &'a crate::name_resolution::NameResolution,
         fill_holes: bool,
         fill_hole_errors: &'a mut Vec<crate::error::CompilerError>,
     ) -> Self {
@@ -1113,6 +1098,7 @@ impl<'a> Transformer<'a> {
             symbols,
             scope: HashMap::new(),
             top_level_symbols,
+            name_resolution,
             namespace: None,
             placeholder_sym,
             fill_holes,
@@ -1125,6 +1111,7 @@ impl<'a> Transformer<'a> {
         type_table: &'a TypeTable,
         symbols: &'a mut SymbolTable,
         top_level_symbols: &'a mut HashMap<String, SymbolId>,
+        name_resolution: &'a crate::name_resolution::NameResolution,
         namespace: &str,
         fill_holes: bool,
         fill_hole_errors: &'a mut Vec<crate::error::CompilerError>,
@@ -1136,6 +1123,7 @@ impl<'a> Transformer<'a> {
             symbols,
             scope: HashMap::new(),
             top_level_symbols,
+            name_resolution,
             namespace: Some(namespace.to_string()),
             placeholder_sym,
             fill_holes,
@@ -1376,7 +1364,11 @@ impl<'a> Transformer<'a> {
             // Use a placeholder scrutinee - we need to call compute_pattern_bindings to get
             // the param name and projection bindings, but the actual lambda param value
             // won't exist until runtime
-            let placeholder = self.mk_term(param_ty.clone(), span, TermKind::Var(placeholder_sym));
+            let placeholder = self.mk_term(
+                param_ty.clone(),
+                span,
+                TermKind::Var(crate::tlc::VarRef::Symbol(placeholder_sym)),
+            );
             let (param_sym, mut bindings) = self.compute_pattern_bindings(param, placeholder, span);
 
             // For complex patterns (Tuple/Record), compute_pattern_bindings returns bindings that
@@ -1607,7 +1599,11 @@ impl<'a> Transformer<'a> {
         result_ty: Type<TypeName>,
         span: Span,
     ) -> Term {
-        let var_term = self.mk_term(var_ty.clone(), span, TermKind::Var(var_sym));
+        let var_term = self.mk_term(
+            var_ty.clone(),
+            span,
+            TermKind::Var(crate::tlc::VarRef::Symbol(var_sym)),
+        );
         let index_lit = self.mk_term(
             Type::Constructed(TypeName::Int(32), vec![]),
             span,
@@ -1706,23 +1702,23 @@ impl<'a> Transformer<'a> {
             }
 
             ast::ExprKind::Identifier(qualifiers, name) => {
+                // First consult the NameResolution side table built at
+                // type-check time. If this NodeId was classified as a
+                // catalog builtin, emit `Var(Builtin(id))` directly —
+                // no SymbolId allocation, no surface→internal name
+                // rename, no later string-matching at the EGIR boundary.
+                if let Some(crate::name_resolution::ResolvedValueRef::Builtin(id)) =
+                    self.name_resolution.get(expr.h.id)
+                {
+                    return self.mk_term(ty, span, TermKind::Var(crate::tlc::VarRef::Builtin(*id)));
+                }
                 let resolved_name = if qualifiers.is_empty() {
-                    // Check if this is an intrinsic rename not shadowed by a local binding
-                    // (SOAC names like map/reduce are now handled in transform_application)
-                    if !self.is_locally_bound(name) {
-                        if let Some((_, intrinsic)) = INTRINSIC_RENAMES.iter().find(|(s, _)| *s == name) {
-                            intrinsic.to_string()
-                        } else {
-                            name.clone()
-                        }
-                    } else {
-                        name.clone()
-                    }
+                    name.clone()
                 } else {
                     format!("{}.{}", qualifiers.join("."), name)
                 };
                 let sym = self.resolve_or_define(&resolved_name);
-                self.mk_term(ty, span, TermKind::Var(sym))
+                self.mk_term(ty, span, TermKind::Var(crate::tlc::VarRef::Symbol(sym)))
             }
 
             ast::ExprKind::ArrayLiteral(elements) => {
@@ -2237,7 +2233,7 @@ impl<'a> Transformer<'a> {
         let dest_elem_ty = self.get_array_element_type(&dest_term.ty);
         let dest = Place::LocalArray {
             id: match &dest_term.kind {
-                TermKind::Var(sym) => *sym,
+                TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => *sym,
                 _ => {
                     // Bind dest to a fresh name
                     let fresh = self.define("_w_rbi_dest");
@@ -2305,7 +2301,9 @@ impl<'a> Transformer<'a> {
                 let span = term.span;
                 let arg_terms: Vec<Term> = params
                     .iter()
-                    .map(|(sym, ty)| self.mk_term(ty.clone(), span, TermKind::Var(*sym)))
+                    .map(|(sym, ty)| {
+                        self.mk_term(ty.clone(), span, TermKind::Var(crate::tlc::VarRef::Symbol(*sym)))
+                    })
                     .collect();
                 let body = self.mk_term(
                     ret_ty.clone(),
@@ -2490,7 +2488,11 @@ impl<'a> Transformer<'a> {
         span: Span,
     ) -> Term {
         let mut current_ty = var_ty.clone();
-        let mut current = self.mk_term(current_ty.clone(), span, TermKind::Var(var_sym));
+        let mut current = self.mk_term(
+            current_ty.clone(),
+            span,
+            TermKind::Var(crate::tlc::VarRef::Symbol(var_sym)),
+        );
 
         for &idx in path {
             let elem_ty = self.type_at_path(&current_ty, &[idx]);
@@ -2542,7 +2544,11 @@ impl<'a> Transformer<'a> {
         // same evaluated value.
         let t_id = self.term_ids.next_id().0;
         let t_sym = self.define(&format!("_w_vw_t_{}", t_id));
-        let t_var = self.mk_term(target_ty.clone(), span, TermKind::Var(t_sym));
+        let t_var = self.mk_term(
+            target_ty.clone(),
+            span,
+            TermKind::Var(crate::tlc::VarRef::Symbol(t_sym)),
+        );
 
         // Compute the RHS term. For plain `=`, that's just `value`.
         // For compound `op=`, build `_t.swizzle <op> value` so the
@@ -2570,7 +2576,11 @@ impl<'a> Transformer<'a> {
         // Bind `_r = <rhs>` so per-slot reads share one evaluation.
         let r_id = self.term_ids.next_id().0;
         let r_sym = self.define(&format!("_w_vw_r_{}", r_id));
-        let r_var = self.mk_term(rhs_term.ty.clone(), span, TermKind::Var(r_sym));
+        let r_var = self.mk_term(
+            rhs_term.ty.clone(),
+            span,
+            TermKind::Var(crate::tlc::VarRef::Symbol(r_sym)),
+        );
 
         // Locate each component's position in `components` so we know
         // which RHS slot supplies each target slot.
@@ -2640,7 +2650,11 @@ impl<'a> Transformer<'a> {
 
         let r_id = self.term_ids.next_id().0;
         let r_sym = self.define(&format!("_w_rw_r_{}", r_id));
-        let r_var = self.mk_term(record_ty.clone(), span, TermKind::Var(r_sym));
+        let r_var = self.mk_term(
+            record_ty.clone(),
+            span,
+            TermKind::Var(crate::tlc::VarRef::Symbol(r_sym)),
+        );
 
         let body = self.build_record_with_body(&r_var, &record_ty, path, new_value, span);
 
@@ -2680,7 +2694,11 @@ impl<'a> Transformer<'a> {
             let inner_proj = self.build_proj(target, idx, &inner_ty, span);
             let inner_id = self.term_ids.next_id().0;
             let inner_sym = self.define(&format!("_w_rw_inner_{}", inner_id));
-            let inner_var = self.mk_term(inner_ty.clone(), span, TermKind::Var(inner_sym));
+            let inner_var = self.mk_term(
+                inner_ty.clone(),
+                span,
+                TermKind::Var(crate::tlc::VarRef::Symbol(inner_sym)),
+            );
             let inner_body =
                 self.build_record_with_body(&inner_var, &inner_ty, &path[1..], new_value, span);
             self.mk_term(
@@ -2789,7 +2807,11 @@ impl<'a> Transformer<'a> {
         // it without re-evaluating the input expression.
         let scrut_name = format!("_w_match_scrut_{}", self.term_ids.next_id().0);
         let scrut_sym = self.define(&scrut_name);
-        let scrut_var = self.mk_term(scrutinee_ty.clone(), span, TermKind::Var(scrut_sym));
+        let scrut_var = self.mk_term(
+            scrutinee_ty.clone(),
+            span,
+            TermKind::Var(crate::tlc::VarRef::Symbol(scrut_sym)),
+        );
 
         let body = self.build_sum_match_chain(&scrut_var, &layout, variants, cases, ty.clone(), span);
 
@@ -2928,7 +2950,7 @@ impl<'a> Transformer<'a> {
             func_ty = Type::Constructed(TypeName::Arrow, vec![arg.ty.clone(), func_ty]);
         }
         let name_sym = self.resolve_or_define(name);
-        let func_term = self.mk_term(func_ty, span, TermKind::Var(name_sym));
+        let func_term = self.mk_term(func_ty, span, TermKind::Var(crate::tlc::VarRef::Symbol(name_sym)));
         self.mk_term(
             result_ty,
             span,
@@ -2993,7 +3015,11 @@ impl<'a> Transformer<'a> {
     ) -> Term {
         let func_sym = self.resolve_or_define(func_name);
         if args.is_empty() {
-            return self.mk_term(result_ty, span, TermKind::Var(func_sym));
+            return self.mk_term(
+                result_ty,
+                span,
+                TermKind::Var(crate::tlc::VarRef::Symbol(func_sym)),
+            );
         }
 
         // Build the function type: arg1_ty -> arg2_ty -> ... -> result_ty (right-associative)
@@ -3001,7 +3027,7 @@ impl<'a> Transformer<'a> {
         for arg in args.iter().rev() {
             func_ty = Type::Constructed(TypeName::Arrow, vec![arg.ty.clone(), func_ty]);
         }
-        let func_term = self.mk_term(func_ty, span, TermKind::Var(func_sym));
+        let func_term = self.mk_term(func_ty, span, TermKind::Var(crate::tlc::VarRef::Symbol(func_sym)));
         self.mk_term(
             result_ty,
             span,
@@ -3115,32 +3141,4 @@ impl<'a> Transformer<'a> {
     fn build_vec_lit_from_terms(&mut self, terms: &[Term], result_ty: Type<TypeName>, span: Span) -> Term {
         self.build_call("_w_vec_lit", terms, result_ty, span)
     }
-}
-
-// =============================================================================
-// Public API
-// =============================================================================
-
-/// Transform an AST program to TLC. `fill_hole_errors` is populated
-/// if the program contains `???` type holes and the caller passed
-/// `fill_holes = true`; otherwise `fill_holes = false` and any hole
-/// reaching this path is a bug (panics via the `unreachable!` in
-/// `ExprKind::TypeHole`).
-pub fn transform(
-    program: &ast::Program,
-    type_table: &TypeTable,
-    fill_holes: bool,
-    fill_hole_errors: &mut Vec<crate::error::CompilerError>,
-) -> Program {
-    let mut symbols = SymbolTable::new();
-    let mut top_level_symbols = HashMap::new();
-    let mut transformer = Transformer::new(
-        type_table,
-        &mut symbols,
-        &mut top_level_symbols,
-        fill_holes,
-        fill_hole_errors,
-    );
-    let parts = transformer.transform_program(program);
-    parts.with_symbols(symbols, top_level_symbols)
 }

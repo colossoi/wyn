@@ -122,7 +122,7 @@ fn synth_program_with_alias_let() -> (Program, crate::SymbolId, crate::SymbolId)
         id: ids.next_id(),
         ty: unique_arr_ty.clone(),
         span: Span::dummy(),
-        kind: TermKind::Var(a_sym),
+        kind: TermKind::Var(crate::tlc::VarRef::Symbol(a_sym)),
     };
     let body_zero = Term {
         id: ids.next_id(),
@@ -294,7 +294,11 @@ def f(a: *[4]i32) i32 = a[0]
 /// helper works whether or not promotion has fired.
 fn find_app_call_to<'a>(body: &'a Term, names: &[&str], program: &Program) -> Option<&'a Term> {
     fn name_of_var<'a>(t: &Term, program: &'a Program) -> Option<&'a str> {
-        if let TermKind::Var(sym) = &t.kind { program.symbols.get(*sym).map(|s| s.as_str()) } else { None }
+        if let TermKind::Var(crate::tlc::VarRef::Symbol(sym)) = &t.kind {
+            program.symbols.get(*sym).map(|s| s.as_str())
+        } else {
+            None
+        }
     }
     fn walk<'a>(t: &'a Term, names: &[&str], program: &Program) -> Option<&'a Term> {
         if let TermKind::App { func, args } = &t.kind {
@@ -1171,13 +1175,13 @@ fn synth_program_with_with_through_index() -> Program {
         id: ids.next_id(),
         ty: index_fn_ty.clone(),
         span: Span::dummy(),
-        kind: TermKind::Var(index_sym),
+        kind: TermKind::Var(crate::tlc::VarRef::Symbol(index_sym)),
     };
     let var_grid = Term {
         id: ids.next_id(),
         ty: unique_outer_ty.clone(),
         span: Span::dummy(),
-        kind: TermKind::Var(grid_sym),
+        kind: TermKind::Var(crate::tlc::VarRef::Symbol(grid_sym)),
     };
     let zero_idx = Term {
         id: ids.next_id(),
@@ -1200,7 +1204,7 @@ fn synth_program_with_with_through_index() -> Program {
         id: ids.next_id(),
         ty: with_fn_ty.clone(),
         span: Span::dummy(),
-        kind: TermKind::Var(with_sym),
+        kind: TermKind::Var(crate::tlc::VarRef::Symbol(with_sym)),
     };
     let zero_with_idx = Term {
         id: ids.next_id(),
@@ -1275,7 +1279,7 @@ fn array_with_promotes_when_source_is_aliasing_intrinsic() {
         let TermKind::App { func, .. } = &lam.body.kind else {
             panic!("expected lambda body to be an App");
         };
-        let TermKind::Var(s) = &func.kind else {
+        let TermKind::Var(crate::tlc::VarRef::Symbol(s)) = &func.kind else {
             panic!("expected App's func to be a Var");
         };
         program.symbols.get(*s).cloned().unwrap_or_default()
@@ -1295,7 +1299,7 @@ fn array_with_promotes_when_source_is_aliasing_intrinsic() {
     let TermKind::App { func, .. } = &lam.body.kind else {
         panic!("expected lambda body to be an App after rewrite");
     };
-    let TermKind::Var(s) = &func.kind else {
+    let TermKind::Var(crate::tlc::VarRef::Symbol(s)) = &func.kind else {
         panic!("expected rewritten App's func to be a Var");
     };
     let post_func_name = rewritten.symbols.get(*s).cloned().unwrap_or_default();
@@ -1374,13 +1378,13 @@ fn synth_program_with_populated_soac_captures() -> Program {
         id: ids.next_id(),
         ty: consume_ty.clone(),
         span: Span::dummy(),
-        kind: TermKind::Var(consume_sym),
+        kind: TermKind::Var(crate::tlc::VarRef::Symbol(consume_sym)),
     };
     let var_cap = Term {
         id: ids.next_id(),
         ty: unique_arr_ty.clone(),
         span: Span::dummy(),
-        kind: TermKind::Var(cap_sym),
+        kind: TermKind::Var(crate::tlc::VarRef::Symbol(cap_sym)),
     };
     let consume_call = Term {
         id: ids.next_id(),
@@ -1396,7 +1400,7 @@ fn synth_program_with_populated_soac_captures() -> Program {
         id: ids.next_id(),
         ty: unique_arr_ty.clone(),
         span: Span::dummy(),
-        kind: TermKind::Var(outer_sym),
+        kind: TermKind::Var(crate::tlc::VarRef::Symbol(outer_sym)),
     };
 
     let lambda = Lambda {
@@ -1547,7 +1551,7 @@ fn soac_capture_term_is_analyzed_for_liveness() {
         id: ids.next_id(),
         ty: arr_ty.clone(),
         span: Span::dummy(),
-        kind: TermKind::Var(outer_sym),
+        kind: TermKind::Var(crate::tlc::VarRef::Symbol(outer_sym)),
     };
     let capture_term_id = var_outer.id;
 

@@ -44,7 +44,7 @@ fn specialize_term(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdS
     match &func.kind {
         // Simple application: Var("sign")(x, ...) → Var("f32.sign")(x, ...)
         // Specialize based on the first argument's type.
-        TermKind::Var(sym) => {
+        TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
             if args.is_empty() {
                 return term;
             }
@@ -77,7 +77,7 @@ fn specialize_term(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdS
                     id: term_ids.next_id(),
                     ty: func.ty.clone(),
                     span: func.span,
-                    kind: TermKind::Var(specialized_sym),
+                    kind: TermKind::Var(crate::tlc::VarRef::Symbol(specialized_sym)),
                 };
                 let TermKind::App { func: _, args } = term.kind else {
                     unreachable!()

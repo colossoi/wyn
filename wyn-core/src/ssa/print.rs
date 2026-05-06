@@ -246,7 +246,7 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
             let _ = write!(out, "extern @{name}");
         }
         InstKind::Intrinsic { id, args } => {
-            let name = crate::builtins::catalog().get(*id).dispatch_name();
+            let name = crate::builtins::by_id(*id).dispatch_name();
             let _ = write!(out, "intrinsic @{name}({})", format_refs(args));
         }
         InstKind::Alloca { elem_ty, result } => {

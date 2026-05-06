@@ -14,6 +14,7 @@ use polytype::TypeScheme;
 use crate::ast::{self, NodeId, TypeName};
 use crate::error::Result;
 use crate::module_manager::ModuleManager;
+use crate::name_resolution::NameResolution;
 use crate::resolve_opens;
 use crate::resolve_placeholders;
 use crate::types::checker::{TypeChecker, TypeWarning};
@@ -23,6 +24,7 @@ pub struct TypeCheckOutput {
     pub schemes: HashMap<String, TypeScheme<TypeName>>,
     pub warnings: Vec<TypeWarning>,
     pub builtin_names: Vec<String>,
+    pub name_resolution: NameResolution,
 }
 
 pub fn run(ast: &mut ast::Program, module_manager: &mut ModuleManager) -> Result<TypeCheckOutput> {
@@ -32,11 +34,27 @@ pub fn run(ast: &mut ast::Program, module_manager: &mut ModuleManager) -> Result
 
     resolve_opens::run(ast, &spec_schemes, crate::builtins::catalog())?;
 
+    // Prelude module decl bodies don't go through `resolve_opens::run`
+    // (they aren't in the user `Program`), but their bodies reference
+    // sibling defs by unqualified name (e.g. `log10`'s body calls `log`,
+    // which is `f32.log` from outside). Qualify them here as if each
+    // body were inside an implicit `open <module_name>`.
+    let catalog = crate::builtins::catalog();
+    let module_names: Vec<String> = module_manager.elaborated_modules_mut().keys().cloned().collect();
+    for module_name in module_names {
+        let elaborated =
+            module_manager.elaborated_modules_mut().get_mut(&module_name).expect("module exists");
+        for item in &mut elaborated.items {
+            if let crate::module_manager::ElaboratedItem::Decl(decl) = item {
+                resolve_opens::run_in_module(&mut decl.body, &module_name, &spec_schemes, catalog)?;
+            }
+        }
+    }
+
+    let name_resolution = crate::name_resolution::build_name_resolution(ast, crate::builtins::catalog());
+
     let mut checker = TypeChecker::with_context_and_schemes(module_manager, context, spec_schemes);
-    checker.set_name_resolution(crate::name_resolution::build_name_resolution(
-        ast,
-        crate::builtins::catalog(),
-    ));
+    checker.set_name_resolution(name_resolution.clone());
     checker.load_builtins()?;
     let type_table = checker.check_program(ast)?;
     let schemes = checker.get_function_schemes();
@@ -48,5 +66,6 @@ pub fn run(ast: &mut ast::Program, module_manager: &mut ModuleManager) -> Result
         schemes,
         warnings,
         builtin_names,
+        name_resolution,
     })
 }

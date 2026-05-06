@@ -44,6 +44,255 @@ fn compile_to_fused_tlc(input: &str) -> crate::tlc::Program {
 }
 
 // =============================================================================
+// Phase 2 regression: unbound `Var(Symbol(sym))` references through TLC passes
+// =============================================================================
+
+/// Walk a term and assert that every `TermKind::Var(VarRef::Symbol(sym))`
+/// references a sym that is either:
+/// - bound by an enclosing Let / Lambda param / Loop var / SOAC element
+///   parameter, or
+/// - a top-level def name in `top_level`.
+///
+/// On violation, panics with the offending sym, its symbol-table name,
+/// and the pipeline stage name.
+fn assert_no_unbound_var_refs(program: &crate::tlc::Program, stage: &str) {
+    use crate::SymbolId;
+    use crate::tlc::{ArrayExpr, Lambda, LoopKind, SoacOp, Term, TermKind};
+    use std::collections::HashSet;
+
+    fn walk(
+        term: &Term,
+        bound: &HashSet<SymbolId>,
+        symbols: &crate::SymbolTable,
+        stage: &str,
+        def_name: &str,
+    ) {
+        match &term.kind {
+            TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
+                assert!(
+                    bound.contains(sym),
+                    "[{stage}] def `{def_name}`: unbound Var(sym{:?}) name={:?}",
+                    sym.0,
+                    symbols.get(*sym)
+                );
+            }
+            TermKind::Var(crate::tlc::VarRef::Builtin(_))
+            | TermKind::BinOp(_)
+            | TermKind::UnOp(_)
+            | TermKind::IntLit(_)
+            | TermKind::FloatLit(_)
+            | TermKind::BoolLit(_)
+            | TermKind::Extern(_) => {}
+            TermKind::App { func, args } => {
+                walk(func, bound, symbols, stage, def_name);
+                for a in args {
+                    walk(a, bound, symbols, stage, def_name);
+                }
+            }
+            TermKind::Lambda(Lambda { params, body, .. }) => {
+                let mut inner = bound.clone();
+                for (p, _) in params {
+                    inner.insert(*p);
+                }
+                walk(body, &inner, symbols, stage, def_name);
+            }
+            TermKind::Let { name, rhs, body, .. } => {
+                walk(rhs, bound, symbols, stage, def_name);
+                let mut inner = bound.clone();
+                inner.insert(*name);
+                walk(body, &inner, symbols, stage, def_name);
+            }
+            TermKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                walk(cond, bound, symbols, stage, def_name);
+                walk(then_branch, bound, symbols, stage, def_name);
+                walk(else_branch, bound, symbols, stage, def_name);
+            }
+            TermKind::Loop {
+                loop_var,
+                init,
+                init_bindings,
+                kind,
+                body,
+                ..
+            } => {
+                walk(init, bound, symbols, stage, def_name);
+                for (_, _, e) in init_bindings {
+                    walk(e, bound, symbols, stage, def_name);
+                }
+                match kind {
+                    LoopKind::For { iter, .. } => walk(iter, bound, symbols, stage, def_name),
+                    LoopKind::ForRange { bound: bnd, .. } => {
+                        walk(bnd, bound, symbols, stage, def_name);
+                    }
+                    LoopKind::While { cond } => walk(cond, bound, symbols, stage, def_name),
+                }
+                let mut inner = bound.clone();
+                inner.insert(*loop_var);
+                if let LoopKind::For { var, .. } | LoopKind::ForRange { var, .. } = kind {
+                    inner.insert(*var);
+                }
+                for (n, _, _) in init_bindings {
+                    inner.insert(*n);
+                }
+                walk(body, &inner, symbols, stage, def_name);
+            }
+            TermKind::Soac(soac) => walk_soac(soac, bound, symbols, stage, def_name),
+            TermKind::ArrayExpr(ae) => walk_array_expr(ae, bound, symbols, stage, def_name),
+            TermKind::Force(inner) => walk(inner, bound, symbols, stage, def_name),
+        }
+    }
+
+    fn walk_lambda(
+        lam: &crate::tlc::Lambda,
+        bound: &HashSet<SymbolId>,
+        symbols: &crate::SymbolTable,
+        stage: &str,
+        def_name: &str,
+    ) {
+        let mut inner = bound.clone();
+        for (p, _) in &lam.params {
+            inner.insert(*p);
+        }
+        walk(&lam.body, &inner, symbols, stage, def_name);
+    }
+
+    fn walk_soac(
+        soac: &SoacOp,
+        bound: &HashSet<SymbolId>,
+        symbols: &crate::SymbolTable,
+        stage: &str,
+        def_name: &str,
+    ) {
+        match soac {
+            SoacOp::Map { lam, inputs, .. } => {
+                for i in inputs {
+                    walk_array_expr(i, bound, symbols, stage, def_name);
+                }
+                walk_lambda(&lam.lam, bound, symbols, stage, def_name);
+            }
+            SoacOp::Reduce { op, ne, input, .. } => {
+                walk(ne, bound, symbols, stage, def_name);
+                walk_array_expr(input, bound, symbols, stage, def_name);
+                walk_lambda(&op.lam, bound, symbols, stage, def_name);
+            }
+            SoacOp::Scan { op, ne, input } => {
+                walk(ne, bound, symbols, stage, def_name);
+                walk_array_expr(input, bound, symbols, stage, def_name);
+                walk_lambda(&op.lam, bound, symbols, stage, def_name);
+            }
+            SoacOp::Redomap {
+                op,
+                reduce_op,
+                ne,
+                inputs,
+                ..
+            } => {
+                walk(ne, bound, symbols, stage, def_name);
+                for i in inputs {
+                    walk_array_expr(i, bound, symbols, stage, def_name);
+                }
+                walk_lambda(&op.lam, bound, symbols, stage, def_name);
+                walk_lambda(&reduce_op.lam, bound, symbols, stage, def_name);
+            }
+            SoacOp::Filter { pred, input } => {
+                walk_array_expr(input, bound, symbols, stage, def_name);
+                walk_lambda(&pred.lam, bound, symbols, stage, def_name);
+            }
+            SoacOp::Scatter { indices, values, .. } => {
+                walk_array_expr(indices, bound, symbols, stage, def_name);
+                walk_array_expr(values, bound, symbols, stage, def_name);
+            }
+            SoacOp::ReduceByIndex {
+                op,
+                ne,
+                indices,
+                values,
+                ..
+            } => {
+                walk(ne, bound, symbols, stage, def_name);
+                walk_array_expr(indices, bound, symbols, stage, def_name);
+                walk_array_expr(values, bound, symbols, stage, def_name);
+                walk_lambda(&op.lam, bound, symbols, stage, def_name);
+            }
+        }
+    }
+
+    fn walk_array_expr(
+        ae: &ArrayExpr,
+        bound: &HashSet<SymbolId>,
+        symbols: &crate::SymbolTable,
+        stage: &str,
+        def_name: &str,
+    ) {
+        match ae {
+            ArrayExpr::Ref(t) => walk(t, bound, symbols, stage, def_name),
+            ArrayExpr::Zip(arrs) => {
+                for a in arrs {
+                    walk_array_expr(a, bound, symbols, stage, def_name);
+                }
+            }
+            ArrayExpr::Soac(soac) => walk_soac(soac, bound, symbols, stage, def_name),
+            ArrayExpr::Generate { index_fn, .. } => {
+                walk_lambda(&index_fn.lam, bound, symbols, stage, def_name)
+            }
+            ArrayExpr::Literal(elems) => {
+                for e in elems {
+                    walk(e, bound, symbols, stage, def_name);
+                }
+            }
+            ArrayExpr::Range { start, len } => {
+                walk(start, bound, symbols, stage, def_name);
+                walk(len, bound, symbols, stage, def_name);
+            }
+            ArrayExpr::StorageBuffer { offset, len, .. } => {
+                walk(offset, bound, symbols, stage, def_name);
+                walk(len, bound, symbols, stage, def_name);
+            }
+        }
+    }
+
+    // `bound` = everything the TLC name-resolver considers a top-level
+    // symbol, not just things with bodies. `def_syms` holds the
+    // pre-allocated SymbolId for every prelude/user/sig top-level name.
+    let mut top_level: std::collections::HashSet<SymbolId> = std::collections::HashSet::new();
+    for sym in program.def_syms.values() {
+        top_level.insert(*sym);
+    }
+    // Catch any defs whose own SymbolId isn't already in `def_syms` —
+    // shouldn't happen by construction, but assert via union.
+    for d in &program.defs {
+        top_level.insert(d.name);
+    }
+    for def in &program.defs {
+        let def_name = program.symbols.get(def.name).cloned().unwrap_or_default();
+        walk(&def.body, &top_level, &program.symbols, stage, &def_name);
+    }
+}
+
+/// Regression: under Phase 2, `let x = arr in body[x]` was leaving a
+/// free `Var(Symbol)` in the post-`partial_eval` TLC because `apply`'s
+/// `Var(Builtin)` and catch-all arms cloned the original term instead
+/// of residualizing through the eval'd args. The fix lives in
+/// `tlc::partial_eval::residualize_call`. This test compiles the
+/// minimal repro through the full canonical TLC pipeline and asserts
+/// no `Var(Symbol(sym))` references an unbound symbol.
+#[test]
+fn let_binding_substitution_survives_partial_eval() {
+    let source = r#"
+#[fragment]
+entry frag() #[location(0)] vec4f32 =
+    let range = [1, 2, 3, 4] in
+    @[f32.i32(range[0]), 0.0, 0.0, 1.0]
+"#;
+    let tlc = crate::compile_thru_tlc(source).expect("compile_thru_tlc");
+    assert_no_unbound_var_refs(&tlc.tlc, "compile_thru_tlc");
+}
+
+// =============================================================================
 // SOAC Fusion Integration Tests
 // =============================================================================
 
@@ -82,7 +331,7 @@ fn count_uninit_in_program(ssa: &Program) -> usize {
                     }
                 }
                 crate::ssa::types::InstKind::Intrinsic { id, .. } => {
-                    let name = crate::builtins::catalog().get(*id).raw.surface_name;
+                    let name = crate::builtins::by_id(*id).raw.surface_name;
                     if name == "_w_intrinsic_uninit" {
                         count += 1;
                     }
@@ -209,7 +458,7 @@ entry fragment_main() #[location(0)] vec4f32 =
                     print_term(a, syms, depth + 1);
                 }
             }
-            crate::tlc::TermKind::Var(s) => {
+            crate::tlc::TermKind::Var(crate::tlc::VarRef::Symbol(s)) => {
                 let n = syms.get(*s).cloned().unwrap_or_else(|| format!("{:?}", s));
                 eprintln!("{indent}Var({n})");
             }

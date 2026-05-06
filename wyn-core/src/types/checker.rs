@@ -595,7 +595,7 @@ impl<'a> TypeChecker<'a> {
             {
                 let bid = *builtin_id;
                 let lookup = self.scheme_lookup_for_builtin(bid);
-                let def_name = crate::builtins::catalog().get(bid).raw.surface_name;
+                let def_name = crate::builtins::by_id(bid).raw.surface_name;
                 return Some(self.resolve_scheme_lookup(def_name, lookup));
             }
         }

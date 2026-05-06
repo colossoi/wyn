@@ -319,7 +319,7 @@ impl SoaTransformer {
         let base = func;
 
         match &base.kind {
-            TermKind::Var(sym) => {
+            TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
                 let name = self.symbols.get(*sym).cloned().unwrap_or_default();
                 match name.as_str() {
                     // _w_index(arr, i) where arr was [n](A,B)
@@ -525,12 +525,20 @@ impl SoaTransformer {
                     .iter()
                     .map(|ct| {
                         // Each component is a call to _w_intrinsic_uninit with the component type
-                        self.mk_term(ct.clone(), span, TermKind::Var(uninit_sym))
+                        self.mk_term(
+                            ct.clone(),
+                            span,
+                            TermKind::Var(crate::tlc::VarRef::Symbol(uninit_sym)),
+                        )
                     })
                     .collect();
                 self.mk_tuple(components, soa_ty.clone(), span)
             }
-            _ => self.mk_term(soa_ty.clone(), span, TermKind::Var(uninit_sym)),
+            _ => self.mk_term(
+                soa_ty.clone(),
+                span,
+                TermKind::Var(crate::tlc::VarRef::Symbol(uninit_sym)),
+            ),
         }
     }
 
@@ -551,7 +559,11 @@ impl SoaTransformer {
         let first_arr = self.mk_tuple_proj(arr.clone(), 0, first_comp_ty, span);
 
         let func_ty = Type::Constructed(TypeName::Arrow, vec![first_arr.ty.clone(), result_ty.clone()]);
-        let func = self.mk_term(func_ty, span, TermKind::Var(length_sym));
+        let func = self.mk_term(
+            func_ty,
+            span,
+            TermKind::Var(crate::tlc::VarRef::Symbol(length_sym)),
+        );
         self.mk_term(
             result_ty,
             span,
@@ -900,7 +912,7 @@ impl SoaTransformer {
         tuple_ty: &Type<TypeName>,
         span: Span,
     ) -> Term {
-        if let TermKind::Var(sym) = &term.kind {
+        if let TermKind::Var(crate::tlc::VarRef::Symbol(sym)) = &term.kind {
             if *sym == old_sym {
                 return self.build_tuple_reconstruction(new_params, tuple_ty, span);
             }
@@ -943,7 +955,7 @@ impl SoaTransformer {
                 // Leaf -- single param.
                 assert_eq!(new_params.len(), 1);
                 let (sym, ty) = &new_params[0];
-                self.mk_term(ty.clone(), span, TermKind::Var(*sym))
+                self.mk_term(ty.clone(), span, TermKind::Var(crate::tlc::VarRef::Symbol(*sym)))
             }
         }
     }
@@ -965,7 +977,11 @@ impl SoaTransformer {
     fn mk_tuple(&mut self, components: Vec<Term>, result_ty: Type<TypeName>, span: Span) -> Term {
         let tuple_sym = self.resolve_or_alloc("_w_tuple");
         if components.is_empty() {
-            return self.mk_term(result_ty, span, TermKind::Var(tuple_sym));
+            return self.mk_term(
+                result_ty,
+                span,
+                TermKind::Var(crate::tlc::VarRef::Symbol(tuple_sym)),
+            );
         }
 
         // Build flat application: _w_tuple(c0, c1, ...)
@@ -973,7 +989,11 @@ impl SoaTransformer {
         for comp in components.iter().rev() {
             func_ty = Type::Constructed(TypeName::Arrow, vec![comp.ty.clone(), func_ty]);
         }
-        let func = self.mk_term(func_ty, span, TermKind::Var(tuple_sym));
+        let func = self.mk_term(
+            func_ty,
+            span,
+            TermKind::Var(crate::tlc::VarRef::Symbol(tuple_sym)),
+        );
 
         self.mk_term(
             result_ty,
@@ -994,7 +1014,7 @@ impl SoaTransformer {
         // _w_tuple_proj : term.ty -> i32 -> result_ty
         let inner_ty = Type::Constructed(TypeName::Arrow, vec![idx_ty, result_ty.clone()]);
         let func_ty = Type::Constructed(TypeName::Arrow, vec![term.ty.clone(), inner_ty.clone()]);
-        let func = self.mk_term(func_ty, span, TermKind::Var(proj_sym));
+        let func = self.mk_term(func_ty, span, TermKind::Var(crate::tlc::VarRef::Symbol(proj_sym)));
 
         self.mk_term(
             result_ty,
@@ -1011,7 +1031,11 @@ impl SoaTransformer {
         let index_sym = self.resolve_or_alloc("_w_index");
         let inner_ty = Type::Constructed(TypeName::Arrow, vec![idx.ty.clone(), result_ty.clone()]);
         let func_ty = Type::Constructed(TypeName::Arrow, vec![arr.ty.clone(), inner_ty.clone()]);
-        let func = self.mk_term(func_ty, span, TermKind::Var(index_sym));
+        let func = self.mk_term(
+            func_ty,
+            span,
+            TermKind::Var(crate::tlc::VarRef::Symbol(index_sym)),
+        );
 
         self.mk_term(
             result_ty,
@@ -1036,7 +1060,7 @@ impl SoaTransformer {
         let t3 = Type::Constructed(TypeName::Arrow, vec![val.ty.clone(), result_ty.clone()]);
         let t2 = Type::Constructed(TypeName::Arrow, vec![idx.ty.clone(), t3.clone()]);
         let t1 = Type::Constructed(TypeName::Arrow, vec![arr.ty.clone(), t2.clone()]);
-        let func = self.mk_term(t1, span, TermKind::Var(aw_sym));
+        let func = self.mk_term(t1, span, TermKind::Var(crate::tlc::VarRef::Symbol(aw_sym)));
 
         self.mk_term(
             result_ty,
@@ -1052,11 +1076,11 @@ impl SoaTransformer {
     fn mk_array_lit(&mut self, elems: Vec<Term>, result_ty: Type<TypeName>, span: Span) -> Term {
         let al_sym = self.resolve_or_alloc("_w_array_lit");
         if elems.is_empty() {
-            return self.mk_term(result_ty, span, TermKind::Var(al_sym));
+            return self.mk_term(result_ty, span, TermKind::Var(crate::tlc::VarRef::Symbol(al_sym)));
         }
 
         let func_ty = Type::Constructed(TypeName::Arrow, vec![elems[0].ty.clone(), result_ty.clone()]);
-        let func = self.mk_term(func_ty, span, TermKind::Var(al_sym));
+        let func = self.mk_term(func_ty, span, TermKind::Var(crate::tlc::VarRef::Symbol(al_sym)));
 
         self.mk_term(
             result_ty,

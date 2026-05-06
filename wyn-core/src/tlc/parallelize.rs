@@ -255,7 +255,7 @@ fn analyze_entry(def: &Def, symbols: &SymbolTable) -> Option<EntryAnalysis> {
                     required_params,
                 });
             }
-            TermKind::Var(sym) => {
+            TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
                 // Var-follow: the tail is an alias. If `sym` is an entry
                 // param, the entry returns a param — not a SOAC, reject.
                 if scope.is_lambda_param(sym) {
@@ -324,8 +324,12 @@ fn compute_required_params(
         &mut seen,
     );
 
-    let free_syms: HashSet<SymbolId> =
-        free.iter().filter_map(|t| if let TermKind::Var(s) = &t.kind { Some(*s) } else { None }).collect();
+    let free_syms: HashSet<SymbolId> = free
+        .iter()
+        .filter_map(|t| {
+            if let TermKind::Var(crate::tlc::VarRef::Symbol(s)) = &t.kind { Some(*s) } else { None }
+        })
+        .collect();
     captured_params.iter().filter(|(s, _)| free_syms.contains(s)).cloned().collect()
 }
 
@@ -441,7 +445,7 @@ fn normalize_range_ref(input: &ArrayExpr, symbols: &SymbolTable) -> Option<Array
         _ => return None,
     };
     let sym = match &func.kind {
-        TermKind::Var(s) => *s,
+        TermKind::Var(crate::tlc::VarRef::Symbol(s)) => *s,
         _ => return None,
     };
     let name = symbols.get(sym)?;
@@ -796,7 +800,9 @@ fn rhs_references_entry_param(
         &mut free,
         &mut seen,
     );
-    free.iter().any(|t| matches!(&t.kind, TermKind::Var(s) if entry_params.contains(s)))
+    free.iter().any(
+        |t| matches!(&t.kind, TermKind::Var(crate::tlc::VarRef::Symbol(s)) if entry_params.contains(s)),
+    )
 }
 
 /// Panic if any free variable of `term` has a type that carries an
@@ -824,7 +830,7 @@ fn assert_hoist_free_vars_are_grounded(
         &mut seen,
     );
     for t in &free {
-        if let TermKind::Var(sym) = &t.kind {
+        if let TermKind::Var(crate::tlc::VarRef::Symbol(sym)) = &t.kind {
             if entry_params.contains(sym) {
                 continue;
             }
@@ -2224,7 +2230,7 @@ fn var_term(sym: SymbolId, ty: Type<TypeName>, span: ast::Span) -> Term {
         id: TermId(0),
         ty,
         span,
-        kind: TermKind::Var(sym),
+        kind: TermKind::Var(crate::tlc::VarRef::Symbol(sym)),
     }
 }
 

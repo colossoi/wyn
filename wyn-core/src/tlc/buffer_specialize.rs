@@ -321,7 +321,7 @@ impl BufferSpecializer {
                 // If the let-binding aliases a buffer-backed variable, propagate.
                 // Consult the module-scope storage map too — a `let local = board
                 // in ...` where `board` is a `#[storage]` def should propagate.
-                let was_buffer = if let TermKind::Var(sym) = &rhs.kind {
+                let was_buffer = if let TermKind::Var(crate::tlc::VarRef::Symbol(sym)) = &rhs.kind {
                     if let Some(binding) = self.resolve_buffer(sym) {
                         let b = binding.clone();
                         self.buffer_map.insert(*name, b);
@@ -352,7 +352,7 @@ impl BufferSpecializer {
 
             TermKind::App { func, args } => {
                 match &func.kind {
-                    TermKind::Var(sym) => {
+                    TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
                         let name = self.symbols.get(*sym).cloned().unwrap_or_default();
 
                         // `_w_index(data, i)` where `data` is a buffer-backed
@@ -364,7 +364,7 @@ impl BufferSpecializer {
                         // buffer (which is invalid — runtime-sized storage
                         // arrays aren't copyable into a local composite).
                         if name == "_w_index" && args.len() == 2 {
-                            if let TermKind::Var(data_sym) = &args[0].kind {
+                            if let TermKind::Var(crate::tlc::VarRef::Symbol(data_sym)) = &args[0].kind {
                                 if let Some(binding) = self.resolve_buffer(data_sym).cloned() {
                                     let span = term.span;
                                     let u32_ty: Type<TypeName> =
@@ -392,7 +392,7 @@ impl BufferSpecializer {
                         // binding)`, matching how the specialized-function
                         // path handles view lengths.
                         if name == INTRINSIC_LENGTH && args.len() == 1 {
-                            if let TermKind::Var(data_sym) = &args[0].kind {
+                            if let TermKind::Var(crate::tlc::VarRef::Symbol(data_sym)) = &args[0].kind {
                                 if let Some(binding) = self.resolve_buffer(data_sym).cloned() {
                                     let span = term.span;
                                     let u32_ty: Type<TypeName> =
@@ -431,7 +431,7 @@ impl BufferSpecializer {
                         let buffer_args: Vec<Option<BufferBinding>> = args
                             .iter()
                             .map(|a| {
-                                if let TermKind::Var(s) = &a.kind {
+                                if let TermKind::Var(crate::tlc::VarRef::Symbol(s)) = &a.kind {
                                     self.resolve_buffer(s).cloned()
                                 } else {
                                     None
@@ -769,7 +769,7 @@ impl BufferSpecializer {
             id: self.term_ids.next_id(),
             ty: target_def.ty.clone(), // approximate — not critical
             span,
-            kind: TermKind::Var(spec_sym),
+            kind: TermKind::Var(crate::tlc::VarRef::Symbol(spec_sym)),
         };
 
         if new_args.is_empty() {
@@ -869,7 +869,7 @@ impl BufferSpecializer {
         match &term.kind {
             TermKind::App { func, args } => {
                 match &func.kind {
-                    TermKind::Var(sym) => {
+                    TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
                         let name = self.symbols.get(*sym).cloned().unwrap_or_default();
 
                         // _w_index(arr_expr, i) where arr_expr resolves to a view
@@ -934,7 +934,7 @@ impl BufferSpecializer {
                         let inner_buffer_args: Vec<Option<BufferBinding>> = args
                             .iter()
                             .map(|a| {
-                                if let TermKind::Var(s) = &a.kind {
+                                if let TermKind::Var(crate::tlc::VarRef::Symbol(s)) = &a.kind {
                                     if view_params.contains_key(s) {
                                         // This is a view param — build a BufferBinding for it
                                         let (_, _, set, binding, elem_ty) = &view_params[s];
@@ -1154,14 +1154,15 @@ impl BufferSpecializer {
             }
 
             // Leaves
-            TermKind::Var(_) => {
+            TermKind::Var(crate::tlc::VarRef::Symbol(_)) => {
                 // If this var refers to a view param that was replaced,
                 // this is a bare reference (not in _w_index or _w_intrinsic_length).
                 // This shouldn't happen in well-formed code since view arrays
                 // are only used via index/length, but return it as-is.
                 term.clone()
             }
-            TermKind::BinOp(_)
+            TermKind::Var(crate::tlc::VarRef::Builtin(_))
+            | TermKind::BinOp(_)
             | TermKind::UnOp(_)
             | TermKind::IntLit(_)
             | TermKind::FloatLit(_)
@@ -1303,7 +1304,7 @@ impl BufferSpecializer {
         match ae {
             ArrayExpr::Ref(t) => {
                 // If the ref is a bare Var pointing to a view param, emit StorageBuffer
-                if let TermKind::Var(sym) = &t.kind {
+                if let TermKind::Var(crate::tlc::VarRef::Symbol(sym)) = &t.kind {
                     if let Some((offset_sym, len_sym, set, binding, elem_ty)) = view_params.get(sym) {
                         let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
                         return ArrayExpr::StorageBuffer {
@@ -1313,13 +1314,13 @@ impl BufferSpecializer {
                                 id: self.term_ids.next_id(),
                                 ty: u32_ty.clone(),
                                 span: t.span,
-                                kind: TermKind::Var(*offset_sym),
+                                kind: TermKind::Var(crate::tlc::VarRef::Symbol(*offset_sym)),
                             }),
                             len: Box::new(Term {
                                 id: self.term_ids.next_id(),
                                 ty: u32_ty,
                                 span: t.span,
-                                kind: TermKind::Var(*len_sym),
+                                kind: TermKind::Var(crate::tlc::VarRef::Symbol(*len_sym)),
                             }),
                             elem_ty: elem_ty.clone(),
                         };
@@ -1406,7 +1407,7 @@ impl BufferSpecializer {
         view_params: &HashMap<SymbolId, (SymbolId, SymbolId, u32, u32, Type<TypeName>)>,
     ) -> Option<ViewInfo> {
         match &term.kind {
-            TermKind::Var(sym) => {
+            TermKind::Var(crate::tlc::VarRef::Symbol(sym)) => {
                 let (offset_sym, len_sym, set, binding, elem_ty) = view_params.get(sym)?;
                 let u32_ty: Type<TypeName> = Type::Constructed(TypeName::UInt(32), vec![]);
                 Some(ViewInfo {
@@ -1414,13 +1415,13 @@ impl BufferSpecializer {
                         id: self.term_ids.next_id(),
                         ty: u32_ty.clone(),
                         span: term.span,
-                        kind: TermKind::Var(*offset_sym),
+                        kind: TermKind::Var(crate::tlc::VarRef::Symbol(*offset_sym)),
                     },
                     len: Term {
                         id: self.term_ids.next_id(),
                         ty: u32_ty,
                         span: term.span,
-                        kind: TermKind::Var(*len_sym),
+                        kind: TermKind::Var(crate::tlc::VarRef::Symbol(*len_sym)),
                     },
                     set: *set,
                     binding: *binding,
@@ -1429,7 +1430,7 @@ impl BufferSpecializer {
             }
             TermKind::App { func, args } => {
                 // Check for _w_intrinsic_slice(expr, start, end)
-                if let TermKind::Var(sym) = &func.kind {
+                if let TermKind::Var(crate::tlc::VarRef::Symbol(sym)) = &func.kind {
                     let name = self.symbols.get(*sym).cloned().unwrap_or_default();
                     if name == INTRINSIC_SLICE && args.len() == 3 {
                         let parent = self.try_resolve_view_expr(&args[0], view_params)?;
@@ -1498,7 +1499,7 @@ impl BufferSpecializer {
             id: self.term_ids.next_id(),
             ty: ret_ty.clone(), // approximate
             span,
-            kind: TermKind::Var(func_sym),
+            kind: TermKind::Var(crate::tlc::VarRef::Symbol(func_sym)),
         };
 
         if args.is_empty() {

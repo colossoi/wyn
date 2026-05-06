@@ -434,6 +434,7 @@ impl AstConstFoldedEarly {
             warnings: out.warnings,
             checker_builtins: out.builtin_names,
             schemes: out.schemes,
+            name_resolution: out.name_resolution,
         })
     }
 }
@@ -446,6 +447,7 @@ pub struct TypeChecked {
     pub warnings: Vec<type_checker::TypeWarning>,
     pub checker_builtins: Vec<String>,
     pub schemes: HashMap<String, TypeScheme<TypeName>>,
+    pub name_resolution: name_resolution::NameResolution,
 }
 
 impl TypeChecked {
@@ -511,6 +513,7 @@ impl TypeChecked {
             self.type_table,
             &self.schemes,
             &self.checker_builtins,
+            &self.name_resolution,
             module_manager,
             fill_holes,
         );
